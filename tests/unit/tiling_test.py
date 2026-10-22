@@ -134,6 +134,7 @@ class VocabTilingNNXTest(unittest.TestCase):
       z_loss_multiplier=1e-4,
       ici_context_parallelism=1,
       vocab_tiling_ag_once=False,
+      vocab_tiling_seq_major=False,
   ):
     """Build a pyconfig + matching NNX `Transformer` for the test."""
     cfg = pyconfig.initialize(
@@ -151,6 +152,7 @@ class VocabTilingNNXTest(unittest.TestCase):
         z_loss_multiplier=z_loss_multiplier,
         ici_context_parallelism=ici_context_parallelism,
         vocab_tiling_ag_once=vocab_tiling_ag_once,
+        vocab_tiling_seq_major=vocab_tiling_seq_major,
     )
     mesh = maxtext_utils.get_mesh_from_config(cfg)
     rngs = maxtext_utils_nnx.create_nnx_rngs(cfg)
@@ -348,6 +350,24 @@ class VocabTilingNNXTest(unittest.TestCase):
     assert ref_grad_h.dtype == hidden_states.dtype
     assert tile_grad_h.dtype == hidden_states.dtype
     assert jnp.allclose(ref_grad_h, tile_grad_h, rtol=self.rtol, atol=self.atol), "grad_hidden_states diverged"
+
+  @pytest.mark.cpu_only
+  def test_nnx_vocab_tiling_seq_major_matches_full_vocab(self):
+    """Tiles cut along the sequence give the full-vocab loss and gradients, padded positions included."""
+    cfg, model = self._build_cfg_and_model(num_vocab_tiling=4, vocab_tiling_seq_major=True)
+    hidden_states, labels, segmentation = self._make_inputs(cfg, pad_half=True)
+    graphdef, params, rest = self._split_and_axes(cfg, model)
+    ref_loss_fn = self._reference_loss_fn(cfg, graphdef, rest, hidden_states, labels, segmentation)
+    tile_loss_fn = self._tiled_loss_fn(cfg, graphdef, rest, hidden_states, labels, segmentation)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      ref_loss, (ref_grads, ref_grad_h) = self._vg(ref_loss_fn, argnums=(0, 1))(params, hidden_states)
+      tile_loss, (tile_grads, tile_grad_h) = self._vg(tile_loss_fn, argnums=(0, 1))(params, hidden_states)
+
+    assert jnp.allclose(ref_loss, tile_loss, rtol=1e-5), f"Losses differ: ref={ref_loss} tiled={tile_loss}"
+    self._assert_pytrees_close(ref_grads, tile_grads, "Param gradients differ", rtol=1e-4, atol=1e-5)
+    assert jnp.allclose(ref_grad_h, tile_grad_h, rtol=1e-4, atol=1e-5), "grad_hidden_states diverged"
+    assert jnp.all(tile_grad_h[:, self.seq_len // 2 :] == 0), "padded positions got a gradient"
 
   @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_hidden_gradient_respects_outer_loss_scale(self):

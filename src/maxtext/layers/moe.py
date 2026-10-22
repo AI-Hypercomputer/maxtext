@@ -13,8 +13,10 @@
 # limitations under the License.
 
 
+
 """MoE related Layers."""
 
+import contextvars
 import dataclasses
 import enum
 import functools
@@ -69,6 +71,12 @@ import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
 import tokamax
+
+# Mesh axes that shard the tokens inside the sparse routed MoE's shard_map, set around that call. A model's
+# load_balance_loss reads it to reduce over the token-sharding axes only (shard_map rejects axes an enclosing vmap
+# mapped away, such as "stage" or "diloco"); None outside the shard_map.
+LB_REDUCE_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_lb_reduce_axes", default=None)
+
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -4840,21 +4848,25 @@ class RoutedMoE(nnx.Module):
       # `in_specs`, and the scale is declared "exp" -> the expert axis.
       per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
 
-    route_and_compute_outputs = sparse_matmul_route_and_compute(
-        inputs,
-        gate_logits,
-        pre_bias_logits,
-        w0_kernel,
-        w1_kernel,
-        wo_kernel,
-        w0_bias,
-        w1_bias,
-        wo_bias,
-        input_ids,
-        self.rngs,
-        forced_routed_experts,
-        per_expert_scale,
-    )
+    lb_axes_token = LB_REDUCE_AXES.set(overflow_mesh_axes)
+    try:
+      route_and_compute_outputs = sparse_matmul_route_and_compute(
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          input_ids,
+          self.rngs,
+          forced_routed_experts,
+          per_expert_scale,
+      )
+    finally:
+      LB_REDUCE_AXES.reset(lb_axes_token)
     output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = route_and_compute_outputs[:6]
     max_load_ratio = route_and_compute_outputs[6] if log_max_load_ratio else None
     if use_megatron_seq_aux_loss:

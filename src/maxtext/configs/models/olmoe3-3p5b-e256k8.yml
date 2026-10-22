@@ -56,3 +56,8 @@ emo_enabled: true
 emo_min_document_expert_pool: 8
 emo_max_document_expert_pool: 256
 emo_eval_document_expert_pool: 256
+
+# As OLMo-core: the load-balancing loss over the whole batch (expert counts averaged across the devices that shard
+# the tokens), and vocab tiles cut along the sequence (no all-gather of the hidden states at one sequence per device).
+moe_global_load_balancing: true
+vocab_tiling_seq_major: true

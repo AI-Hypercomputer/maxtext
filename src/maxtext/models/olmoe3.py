@@ -1307,19 +1307,37 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     return above | (at & (jnp.cumsum(at, axis=-1) <= slots))
 
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:  # pylint: disable=arguments-differ
-    """OLMo-core's batch-level load-balancing loss (``global_load_balancing``).
+    """OLMo-core's batch-level load-balancing loss.
 
     ``lb = (E / K) * sum_e mean_{b,s}(probs_e) * counts_e / (B * S)``, scaled by
-    ``load_balance_loss_weight``. Counts are summed over the whole batch rather
-    than per sequence; under jit the batch axis here is the global batch, so
-    the reduction spans all data-parallel replicas, which is exactly the
-    reference's all-reduced global balancing.
+    ``load_balance_loss_weight``, with counts summed over the batch rather than
+    per sequence.
+
+    On the dense path the arrays here span the global batch. On the sparse path
+    this runs inside the routed MoE's ``shard_map``, where they are one device's
+    tokens, so without ``moe_global_load_balancing`` each device balances its
+    own tokens and the value returned through ``out_specs=P()`` is device 0's.
+    With it, the counts are averaged over the axes that shard the tokens first
+    (OLMo-core's ``global_load_balancing``: all-reduced counts, local
+    probabilities, no gradient through the counts), and the loss is then
+    averaged too, so every device holds the global-batch value. The loss is
+    linear in the probabilities, so the mean of the per-device terms is exactly
+    the global-batch loss; the gradient through ``P()`` is already the mean of
+    the per-device gradients, and the final ``pmean`` leaves it unchanged. The
+    sparse path sets those axes in ``moe.LB_REDUCE_AXES`` around its
+    ``shard_map`` (the same axes it uses for the overflow flag); outside it the
+    variable is unset and nothing is reduced.
     """
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.float32)
     counts = expert_mask.sum(axis=(0, 1, 2))
+    reduce_axes = moe.LB_REDUCE_AXES.get() if getattr(self.config, "moe_global_load_balancing", False) else None
+    if reduce_axes:
+      counts = jax.lax.pmean(jax.lax.stop_gradient(counts), reduce_axes)
     tokens = top_k_indices.shape[0] * top_k_indices.shape[1]
     mean_probs = logits.astype(jnp.float32).mean(axis=(0, 1))
     lb = (mean_probs * counts).sum() * self.num_experts / (self.num_experts_per_tok * tokens)
+    if reduce_axes:
+      lb = jax.lax.pmean(lb, reduce_axes)
     return lb * self.config.load_balance_loss_weight
 
   def __init__(self, *args, gate_in_features: int, **kwargs):

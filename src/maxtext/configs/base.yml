@@ -313,6 +313,7 @@ emo_eval_document_expert_pool: 512
 emo_threshold_by_bisection: false
 # OLMoE3: attention/KDA mixers ignore segment ids (whole-instance, as OLMo-core); only EMo uses them.
 olmoe3_segments_for_emo_only: false
+moe_global_load_balancing: false # OLMo-core global_load_balancing: LB counts averaged over the whole batch, not per device
 moe_use_megatron_seq_aux_loss: false # when true, sigmoid routers (routed_score_func="sigmoid") use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
@@ -940,6 +941,9 @@ fused_lm_head_ce_block_v_dx: 512
 fused_lm_head_ce_block_t_dw: 256
 fused_lm_head_ce_block_v_dw: 512
 fused_lm_head_ce_vmem_limit_mib: 0
+# If set to true then cut the vocab tiles along the sequence instead of the flattened batch, so each device keeps
+# its own tokens; the batch-major cut reshards the hidden states through a full all-gather at small per-device batches.
+vocab_tiling_seq_major: false
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
@@ -1234,6 +1238,7 @@ gradient_clipping_threshold: 1.0
 # Instead of updating the weights every step, you may effectively use a larger
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
+ga_params_loop_barrier: false # stop XLA hoisting loop-invariant work on the params (all-gathers, casts) out of the GA loop
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 

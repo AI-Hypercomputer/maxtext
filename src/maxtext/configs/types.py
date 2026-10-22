@@ -843,6 +843,12 @@ class LogitsAndLoss(BaseModel):
   fused_lm_head_ce_vmem_limit_mib: int = Field(
       0, description="Fused LM-head CE: Mosaic scoped VMEM limit in MiB (0 = compiler default)."
   )
+  vocab_tiling_seq_major: bool = Field(
+      False,
+      description="Cut the vocab tiles along the sequence, so every tile holds a slice of each sequence and each"
+      " device keeps its own tokens. The default cuts the flattened batch, which puts a whole sequence in one tile"
+      " and, at one sequence per device, makes XLA reshard the hidden states through a full all-gather.",
+  )
 
 
 class Attention(BaseModel):
@@ -1386,6 +1392,15 @@ class MoEGeneral(BaseModel):
           "OLMoE3: the attention and KDA mixers see every instance as one segment (no document masking, no state"
           " resets), as OLMo-core trains without document lengths; only the EMo router's document pools use the"
           " segment ids."
+      ),
+  )
+  moe_global_load_balancing: bool = Field(
+      False,
+      description=(
+          "OLMo-core's global_load_balancing: the load-balancing loss multiplies each device's mean router"
+          " probabilities by expert counts averaged over the whole batch (all-reduced across the batch-sharding"
+          " mesh axes) instead of the device's own counts. The counts carry no gradient. The loss value is then"
+          " the global-batch one on every device."
       ),
   )
   moe_use_megatron_seq_aux_loss: bool = Field(
@@ -3292,6 +3307,11 @@ class Optimizer(BaseModel):
   use_tunix_gradient_accumulation: bool = Field(
       False,
       description="Whether to use the Tunix implementation for gradient accumulation.",
+  )
+  ga_params_loop_barrier: bool = Field(
+      False,
+      description="Tie the params to each micro-batch inside the gradient accumulation scan, so XLA can't hoist"
+      " loop-invariant work on them (FSDP all-gathers, casts) out of the loop and keep it live across micro-batches.",
   )
   gradient_clipping_threshold: NonNegativeFloat = Field(
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
@@ -6156,6 +6176,12 @@ class MaxTextConfig(
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
     ):
       raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
+    if getattr(self, "vocab_tiling_seq_major", False) and self.num_vocab_tiling > 1:
+      if self.max_target_length % self.num_vocab_tiling != 0:
+        raise ValueError(
+            f"vocab_tiling_seq_major cuts the vocab tiles along the sequence, so num_vocab_tiling"
+            f" ({self.num_vocab_tiling}) must divide max_target_length ({self.max_target_length})."
+        )
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
