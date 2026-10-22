@@ -1771,7 +1771,7 @@ class NNXDecoder(nnx.Module):
           raise ValueError(f"Unsupported model_name for video: {cfg.model_name}")
 
       if audio_embeddings is not None and cfg.use_audio:
-        if cfg.model_name in {"qwen3-omni-30b-a3b"}:
+        if cfg.model_name in {"qwen3-omni-30b-a3b", "ming-3.0-audio-tiny"}:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=audio_embeddings,
