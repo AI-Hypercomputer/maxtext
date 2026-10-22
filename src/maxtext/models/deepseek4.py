@@ -51,7 +51,8 @@ def _run_deepseek4_layer_remat(
   through xs/ys and is written back. `policy` is the decoder's resolved remat
   policy (None means full remat).
   """
-  graphdef, params, other = nnx.split(layer, nnx.Param, ...)
+  params_filter = nnx.All(nnx.Param, nnx.Not(nnx.LoRAParam))
+  graphdef, params, other = nnx.split(layer, params_filter, ...)
   params_xs = jax.tree.map(lambda x: x[None], params)
   other_xs = jax.tree.map(lambda x: x[None], other)
 
@@ -59,7 +60,7 @@ def _run_deepseek4_layer_remat(
     params_slice, other_slice = xs_slice
     merged_layer = nnx.merge(graphdef, params_slice, other_slice)
     out_y, _ = merged_layer(carry, **layer_kwargs)
-    _, _, new_other = nnx.split(merged_layer, nnx.Param, ...)
+    _, _, new_other = nnx.split(merged_layer, params_filter, ...)
     return out_y, new_other
 
   if prevent_cse is None:
