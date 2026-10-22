@@ -28,12 +28,14 @@ Key operations:
 3. Step size beta:
    beta = sigmoid(W_b x)  (hidden_size -> num_heads)
 4. L2-norm on Q, K along head dimension D, scaled by 1/sqrt(D) on Q.
-5. Chunked WY scan (jax_chunk_kimi_delta_rule) for parallel chunked solve and inter-chunk scan.
+5. Chunked WY scan (jax_chunk_kimi_delta_rule) for parallel chunked solve and inter-chunk scan, or
+   the tokamax KDA kernel (tokamax_kimi_delta_rule; `kda_kernel='tokamax'`), which fuses steps 2 and 4.
 6. Autoregressive recurrent step (jax_ar_kimi_delta_rule) for single-token decode.
 7. Output gated RMSNorm:
    y = W_o(RMSNorm(o) * sigmoid(W_g x))
 """
 
+import functools
 import math
 from typing import Optional, Tuple
 
@@ -42,6 +44,7 @@ import flax.linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
 from maxtext.common.common_types import (
     Array,
@@ -54,6 +57,11 @@ from maxtext.common.common_types import (
 from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm, l2norm
+from maxtext.utils.sharding import (
+    get_logical_axis_rules,
+    logical_to_mesh_axes,
+    remove_incompatible_mesh_axes_from_partition_spec,
+)
 
 
 # ==============================================================================
@@ -346,6 +354,109 @@ def jax_chunk_kimi_delta_rule(
 
 
 # ==============================================================================
+# tokamax KDA kernel
+# ==============================================================================
+TOKAMAX_KDA_CHUNK_SIZE = 64  # The only chunk size the tokamax KDA backends support.
+
+
+def _tokamax_kda_ops():
+  """Returns `(kimi_delta_attention, available_implementations)` from tokamax, or raises."""
+  try:
+    from tokamax._src.ops.kda import api as tokamax_kda_api  # pylint: disable=import-outside-toplevel
+  except ImportError as e:
+    raise ImportError(
+        "kda_kernel='tokamax' needs a tokamax build with `tokamax.ops.kimi_delta_attention` " "(tokamax>=0.0.17)."
+    ) from e
+  return tokamax_kda_api.kimi_delta_attention, tokamax_kda_api.IMPLEMENTATIONS
+
+
+def tokamax_kimi_delta_rule(
+    query: Array,
+    key: Array,
+    value: Array,
+    g_raw: Array,
+    beta: Array,
+    a_log: Array,
+    dt_bias: Array,
+    *,
+    lower_bound: float,
+    implementation: str = "auto",
+    segment_ids: Optional[Array] = None,
+    max_num_segments: Optional[int] = None,
+    initial_state: Optional[Array] = None,
+    output_final_state: bool = False,
+) -> Tuple[Array, Optional[Array]]:
+  """KDA chunked core via `tokamax.ops.kimi_delta_attention`, in MaxText's `[B, T, H, D]` layout.
+
+  Unlike `jax_chunk_kimi_delta_rule`, the gate activation and the q/k L2-norm (with the default
+  1/sqrt(D) query scale) run inside the kernel, which also provides the custom VJP for them.
+
+  Args:
+    query: Raw (pre-L2-norm, unscaled) query `[B, T, H, K]`.
+    key: Raw (pre-L2-norm) key `[B, T, H, K]`.
+    value: Value `[B, T, H, V]`.
+    g_raw: Raw gate projection `[B, T, H, K]` (activated in-kernel, see `kda_gate`).
+    beta: Post-sigmoid step size `[B, T, H]`.
+    a_log: Per-head log rate `[H]`.
+    dt_bias: Per-channel gate bias `[H * K]`.
+    lower_bound: Gate lower bound (required: the tokamax chunked kernels need the bounded gate).
+    implementation: tokamax backend: "mosaic", "xla_chunked", "xla", or "auto" (Mosaic when
+      available and supported on the device, else "xla_chunked").
+    segment_ids: Optional 1-indexed packed-document ids `[B, T]` (0 = padding); the recurrent
+      state resets at every document boundary.
+    max_num_segments: Static upper bound on documents per row; required with `segment_ids`.
+    initial_state: Optional recurrent state `[B, H, K, V]` (not supported with `segment_ids`).
+    output_final_state: Whether to return the final state `[B, H, K, V]` (not supported with
+      `segment_ids`).
+
+  Returns:
+    Tuple of (output `[B, T, H, V]` in `value.dtype`, final state or None).
+  """
+  kimi_delta_attention, implementations = _tokamax_kda_ops()
+  if lower_bound is None:
+    raise ValueError("kda_kernel='tokamax' requires gate_lower_bound (the tokamax chunked kernels need it).")
+  if implementation == "auto":
+    implementation = ("mosaic", "xla_chunked") if "mosaic_tpu" in implementations else ("xla_chunked",)
+  if segment_ids is not None and (initial_state is not None or output_final_state):
+    raise NotImplementedError("tokamax KDA with segment_ids does not support initial/final recurrent state.")
+
+  seq_len = query.shape[1]
+  if segment_ids is None and seq_len % TOKAMAX_KDA_CHUNK_SIZE:
+    # Fixed-length inputs must be chunk-aligned. Mark the whole row as one document instead: the
+    # kernel pads it internally and padding never reaches the outputs or the final state.
+    segment_ids = jnp.ones(query.shape[:2], dtype=jnp.int32)
+    max_num_segments = 1
+    if initial_state is not None or output_final_state:
+      raise NotImplementedError(
+          f"tokamax KDA with recurrent state needs seq_len % {TOKAMAX_KDA_CHUNK_SIZE} == 0, got {seq_len}."
+      )
+
+  def head_first(x):  # [B, T, H, ...] -> [H, B, T, ...]
+    return jnp.moveaxis(x, 2, 0)
+
+  state = None if initial_state is None else initial_state[:, None]  # [B, 1, H, K, V]
+  out, final_state = kimi_delta_attention(
+      head_first(query),
+      head_first(key),
+      head_first(value),
+      head_first(g_raw),
+      head_first(beta),
+      a_log=a_log,
+      delta_time_bias=dt_bias,
+      initial_state=state,
+      output_final_state=output_final_state,
+      use_qk_l2norm=True,
+      use_gate_in_kernel=True,
+      segment_ids=segment_ids,
+      lower_bound=lower_bound,
+      max_num_segments=max_num_segments,
+      implementation=implementation,
+  )
+  out = jnp.moveaxis(out, 0, 2).astype(value.dtype)  # [H, B, T, V] -> [B, T, H, V]
+  return out, (None if final_state is None else final_state[:, 0])
+
+
+# ==============================================================================
 # Autoregressive Single-Step Decoding for KDA
 # ==============================================================================
 def jax_ar_kimi_delta_rule(
@@ -449,6 +560,7 @@ class KimiDeltaAttention(nnx.Module):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
+      mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -475,9 +587,16 @@ class KimiDeltaAttention(nnx.Module):
       kernel_init: Initializer for linear projection weights.
       shard_mode: Sharding mode (AUTO or EXPLICIT).
       matmul_precision: Matrix multiplication precision string.
+      mesh: Device mesh; with `kda_kernel='tokamax'` the kernel runs under a `shard_map` over the
+        batch and head axes of this mesh (None runs it unsharded).
       rngs: Flax NNX random number generators.
     """
     self.config = config
+    self.mesh = mesh
+    # tokamax KDA kernel options (config-only; see `kda_kernel` in configs/types.py).
+    self.kda_kernel = getattr(config, "kda_kernel", "jax")
+    self.kda_tokamax_implementation = getattr(config, "kda_tokamax_implementation", "auto")
+    self.kda_max_num_segments = getattr(config, "kda_max_num_segments", 0)
     if config is not None:
       self.hidden_size = config.emb_dim
       self.num_heads = config.num_query_heads
@@ -662,6 +781,85 @@ class KimiDeltaAttention(nnx.Module):
         rngs=rngs,
     )
 
+  def _tokamax_core(
+      self,
+      q: Array,
+      k: Array,
+      v: Array,
+      g_raw: Array,
+      beta: Array,
+      *,
+      segment_ids: Optional[Array],
+      initial_state: Optional[Array],
+      output_final_state: bool,
+  ) -> Tuple[Array, Optional[Array]]:
+    """Runs `tokamax_kimi_delta_rule`, under a batch x head `shard_map` when a mesh is set.
+
+    The Mosaic backend is a Pallas kernel, which GSPMD cannot partition, and the varlen path
+    loops over the (local) batch, so the kernel always sees per-device shards. KDA heads are
+    independent, so no collectives are needed; the sequence axis must not be sharded.
+    """
+    a_log = self.A_log.get_value()
+    dt_bias = self.dt_bias.get_value().reshape(self.num_heads, self.head_dim)
+    max_num_segments = self.kda_max_num_segments if segment_ids is not None else None
+
+    def core(q, k, v, g_raw, beta, a_log, dt_bias, segment_ids, initial_state):
+      return tokamax_kimi_delta_rule(
+          q,
+          k,
+          v,
+          g_raw,
+          beta,
+          a_log,
+          dt_bias.reshape(-1),
+          lower_bound=self.gate_lower_bound,
+          implementation=self.kda_tokamax_implementation,
+          segment_ids=segment_ids,
+          max_num_segments=max_num_segments,
+          initial_state=initial_state,
+          output_final_state=output_final_state,
+      )
+
+    if self.mesh is None:
+      return core(q, k, v, g_raw, beta, a_log, dt_bias, segment_ids, initial_state)
+
+    rules = get_logical_axis_rules()
+
+    def spec(names, shape, dims):
+      pspec = logical_to_mesh_axes(names, mesh=self.mesh, rules=rules)
+      return remove_incompatible_mesh_axes_from_partition_spec(pspec, shape, self.mesh, dims=dims, allow_remove_axes=True)
+
+    act_spec = spec(("activation_batch", None, "activation_heads", None), q.shape, (0, 2))
+    batch_ax, head_ax = act_spec[0], act_spec[2]
+    beta_spec = jax.sharding.PartitionSpec(batch_ax, None, head_ax)
+    head_spec = jax.sharding.PartitionSpec(head_ax)
+    head_ch_spec = jax.sharding.PartitionSpec(head_ax, None)
+    seg_spec = jax.sharding.PartitionSpec(batch_ax, None)
+    state_spec = jax.sharding.PartitionSpec(batch_ax, head_ax, None, None)
+
+    operands = (q, k, v, g_raw, beta, a_log, dt_bias, segment_ids, initial_state)
+    in_specs = (act_spec, act_spec, act_spec, act_spec, beta_spec, head_spec, head_ch_spec, seg_spec, state_spec)
+    # shard_map takes no specs for absent (None) operands.
+    present = [x is not None for x in operands]
+    out_specs = (act_spec, state_spec if output_final_state else None)
+
+    if self.shard_mode == ShardMode.EXPLICIT:
+      operands = tuple(jax.sharding.reshard(x, s) if x is not None else None for x, s in zip(operands, in_specs))
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=tuple(s for s, p in zip(in_specs, present) if p),
+        out_specs=out_specs,
+        check_vma=False,
+    )
+    def sharded_core(*args):
+      it = iter(args)
+      full = [next(it) if p else None for p in present]
+      return core(*full)
+
+    return sharded_core(*(x for x in operands if x is not None))
+
   def __call__(
       self,
       hidden_states: Array,
@@ -669,6 +867,7 @@ class KimiDeltaAttention(nnx.Module):
       recurrent_state: Optional[Array] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       output_final_state: bool = False,
+      decoder_segment_ids: Optional[Array] = None,
   ) -> Tuple[Array, Optional[Tuple[Array, Array, Array]], Optional[Array]]:
     """Forward pass for KDA Linear Attention.
 
@@ -680,6 +879,8 @@ class KimiDeltaAttention(nnx.Module):
       model_mode: Operational mode ('train', 'prefill', or 'autoregressive').
       output_final_state: Whether to return updated cache and recurrent state. Every input
         position (including right padding) is folded into the returned states.
+      decoder_segment_ids: Optional packed-document ids [batch_size, seq_len] (0 = padding). Only
+        the tokamax kernel uses them, in training and with `kda_max_num_segments > 0`.
 
     Returns:
       Tuple of (layer_output, next_conv_state, next_recurrent_state).
@@ -707,50 +908,66 @@ class KimiDeltaAttention(nnx.Module):
     # 3. Data-dependent Channel Decay Calculation
     g_raw = self.f_b_proj(self.f_a_proj(hidden_states))
     g_raw = g_raw.reshape(b, seq_len, self.num_heads, self.head_dim)
-    g = kda_gate(g_raw, self.A_log.get_value(), self.dt_bias.get_value(), self.gate_lower_bound)
 
     # 4. Step Size Beta (fp32 sigmoid, as fla computes it in-kernel)
     beta = jax.nn.sigmoid(self.b_proj(hidden_states).astype(jnp.float32))
 
-    # 5. Reshape Q, K, V to Head Layout and Apply QK L2-Norm
-    # Like fla's in-kernel l2norm + scale, q/k are normalized and scaled in the core precision.
+    # 5. Reshape Q, K, V to Head Layout
     q = q_conv.reshape(b, seq_len, self.num_heads, self.head_dim).astype(self.compute_dtype)
     k = k_conv.reshape(b, seq_len, self.num_heads, self.head_dim).astype(self.compute_dtype)
     v = v_conv.reshape(b, seq_len, self.num_heads, self.head_dim)
 
-    # L2-Norm along head_dim, scaled by 1/sqrt(head_dim) on Q
-    scale = 1.0 / math.sqrt(self.head_dim)
-    q = l2norm(q, dim=-1, eps=1e-6) * scale
-    k = l2norm(k, dim=-1, eps=1e-6)
-
-    # 6. Core KDA Execution (Chunked vs Autoregressive Recurrent)
-    # q/k/v enter the core in `compute_dtype`; the decay cumsum, WY solve and recurrent state are
-    # always fp32 (as in fla's kernels). The output is returned in the activation dtype.
     is_ar_decode = model_mode == MODEL_MODE_AUTOREGRESSIVE and seq_len == 1
-
-    if is_ar_decode:
-      if recurrent_state is None:
-        recurrent_state = jnp.zeros((b, self.num_heads, self.head_dim, self.head_dim), dtype=jnp.float32)
-      o, next_rec_state = jax_ar_kimi_delta_rule(
-          query=q,
-          key=k,
-          value=v,
-          g=g,
-          beta=beta,
+    if self.kda_kernel == "tokamax" and not is_ar_decode:
+      # 6a. tokamax KDA kernel: the gate activation and the q/k L2-norm (+ 1/sqrt(D) query scale)
+      # run in-kernel, matching the explicit steps of the JAX path below.
+      segment_ids = None
+      if model_mode == MODEL_MODE_TRAIN and self.kda_max_num_segments > 0 and decoder_segment_ids is not None:
+        segment_ids = decoder_segment_ids.astype(jnp.int32)
+      o, next_rec_state = self._tokamax_core(
+          q,
+          k,
+          v.astype(self.compute_dtype),
+          g_raw.astype(jnp.float32),
+          beta,
+          segment_ids=segment_ids,
           initial_state=recurrent_state,
-          compute_dtype=self.compute_dtype,
+          output_final_state=output_final_state,
       )
     else:
-      o, next_rec_state = jax_chunk_kimi_delta_rule(
-          query=q,
-          key=k,
-          value=v,
-          g=g,
-          beta=beta,
-          chunk_size=self.chunk_size,
-          initial_state=recurrent_state,
-          compute_dtype=self.compute_dtype,
-      )
+      g = kda_gate(g_raw, self.A_log.get_value(), self.dt_bias.get_value(), self.gate_lower_bound)
+
+      # Like fla's in-kernel l2norm + scale, q/k are normalized and scaled in the core precision.
+      scale = 1.0 / math.sqrt(self.head_dim)
+      q = l2norm(q, dim=-1, eps=1e-6) * scale
+      k = l2norm(k, dim=-1, eps=1e-6)
+
+      # 6b. Core KDA Execution (Chunked vs Autoregressive Recurrent)
+      # q/k/v enter the core in `compute_dtype`; the decay cumsum, WY solve and recurrent state are
+      # always fp32 (as in fla's kernels). The output is returned in the activation dtype.
+      if is_ar_decode:
+        if recurrent_state is None:
+          recurrent_state = jnp.zeros((b, self.num_heads, self.head_dim, self.head_dim), dtype=jnp.float32)
+        o, next_rec_state = jax_ar_kimi_delta_rule(
+            query=q,
+            key=k,
+            value=v,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state,
+            compute_dtype=self.compute_dtype,
+        )
+      else:
+        o, next_rec_state = jax_chunk_kimi_delta_rule(
+            query=q,
+            key=k,
+            value=v,
+            g=g,
+            beta=beta,
+            chunk_size=self.chunk_size,
+            initial_state=recurrent_state,
+            compute_dtype=self.compute_dtype,
+        )
     o = o.astype(v.dtype)
 
     # 7. Output Gated RMSNorm & Projection

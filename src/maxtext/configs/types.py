@@ -1889,6 +1889,29 @@ class KimiK3(BaseModel):
           "is cast back to `dtype`."
       ),
   )
+  kda_kernel: Literal["jax", "tokamax"] = Field(
+      "jax",
+      description=(
+          "KDA chunked core for train/prefill. 'jax' is the in-tree chunked WY scan; 'tokamax' calls "
+          "`tokamax.ops.kimi_delta_attention` (fused gate + q/k L2-norm, custom VJP, varlen segments)."
+      ),
+  )
+  kda_tokamax_implementation: Literal["auto", "mosaic", "xla_chunked", "xla"] = Field(
+      "auto",
+      description=(
+          "tokamax KDA backend when kda_kernel='tokamax'. 'auto' tries the Pallas Mosaic kernel (TPU v6+) "
+          "and falls back to the pure-JAX chunked kernel ('xla_chunked'); 'xla' is the recurrent reference."
+      ),
+  )
+  kda_max_num_segments: int = Field(
+      0,
+      description=(
+          "With kda_kernel='tokamax' in training, a positive value passes `decoder_segment_ids` to the "
+          "kernel so the recurrent state resets at packed-document boundaries; it is the static upper "
+          "bound on documents per sequence (each costs up to chunk_size-1 padded tokens). 0 ignores "
+          "segment ids (state carries across packed documents, like kda_kernel='jax')."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_kimi_k3_alias_pairs(self):
@@ -5575,13 +5598,35 @@ class MaxTextConfig(
       raise ValueError("`grain_use_elastic_iterator=True` requires `packing=False`.")
     if self.use_dpo and self.packing:
       raise ValueError("DPO does not support packing. Set `packing=False`.")
-    if self.decoder_block == DecoderBlockType.KIMI_LINEAR and self.packing:
-      # KDA's recurrence and short conv ignore `decoder_segment_ids`, so packed documents would
-      # leak state into each other in 69 of the 93 layers.
+    if (
+        self.decoder_block == DecoderBlockType.KIMI_LINEAR
+        and self.packing
+        and not (self.kda_kernel == "tokamax" and self.kda_max_num_segments > 0)
+    ):
+      # The JAX KDA core ignores `decoder_segment_ids`, so packed documents would leak recurrent
+      # state into each other in 69 of the 93 layers. The tokamax kernel resets state per segment.
       raise ValueError(
-          "decoder_block=kimi_linear (Kimi-K3) does not support packed sequences yet: KDA layers ignore "
-          "segment ids. Set `packing=False`."
+          "decoder_block=kimi_linear (Kimi-K3) packs sequences only with the tokamax KDA kernel: set "
+          "`packing=False`, or `kda_kernel=tokamax` with `kda_max_num_segments > 0`."
       )
+    elif self.decoder_block == DecoderBlockType.KIMI_LINEAR and self.packing:
+      # Segments past `kda_max_num_segments` are silently zeroed by `_segment_ids_to_cu_seqlens`, so
+      # the input packer must bound segments per sequence to `<= kda_max_num_segments`. TFDS / C4MLPERF
+      # `pack_dataset` has no segment cap.
+      if self.dataset_type in (DatasetType.TFDS, DatasetType.C4MLPERF):
+        dataset_type_str = getattr(self.dataset_type, "value", self.dataset_type)
+        raise ValueError(
+            "decoder_block=kimi_linear (Kimi-K3) with packing=True and kda_kernel=tokamax does not support "
+            f"dataset_type={dataset_type_str!r} because TFDS packing does not bound segments per sequence "
+            f"(`kda_max_num_segments={self.kda_max_num_segments}`). Use dataset_type='grain' or 'hf' with "
+            "`0 < max_segments_per_seq <= kda_max_num_segments`, or set `packing=False`."
+        )
+      if self.max_segments_per_seq is None or not 0 < self.max_segments_per_seq <= self.kda_max_num_segments:
+        raise ValueError(
+            "decoder_block=kimi_linear (Kimi-K3) with packing=True and kda_kernel=tokamax requires "
+            "`0 < max_segments_per_seq <= kda_max_num_segments` (got "
+            f"max_segments_per_seq={self.max_segments_per_seq}, kda_max_num_segments={self.kda_max_num_segments})."
+        )
     if self.grain_use_elastic_iterator and not self.use_truncation:
       raise ValueError(
           "`grain_use_elastic_iterator=True` requires `use_truncation=True`. "

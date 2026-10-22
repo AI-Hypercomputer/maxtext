@@ -160,7 +160,7 @@ class KimiK3DecoderLayer(nnx.Module):
     )
 
     if is_linear_attn:
-      self.self_attention = attention_kda.KimiDeltaAttention(config=config, rngs=rngs)
+      self.self_attention = attention_kda.KimiDeltaAttention(config=config, mesh=mesh, rngs=rngs)
     else:
       self.self_attention = attention_mla.MLA(
           config=self.config,
@@ -300,9 +300,9 @@ class KimiK3DecoderLayer(nnx.Module):
             "Kimi-K3 autoregressive decode is not supported yet: KDA recurrent/conv state is not "
             "cached between steps, so each decode step would silently restart from zero state."
         )
-      # KDA does not take segment ids: packed inputs would leak state across documents, which
-      # the config validator rejects (packing=True with decoder_block=kimi_linear).
-      attn_out, _, _ = self.self_attention(normed_attn_in, model_mode=model_mode)
+      # Only the tokamax KDA kernel honors segment ids (kda_max_num_segments > 0); otherwise packed
+      # inputs would leak state across documents, which the config validator rejects.
+      attn_out, _, _ = self.self_attention(normed_attn_in, model_mode=model_mode, decoder_segment_ids=decoder_segment_ids)
     else:
       attn_out, kv_cache = self.self_attention(
           normed_attn_in,
