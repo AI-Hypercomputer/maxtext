@@ -294,6 +294,13 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       types.MaxTextConfig(**common_config, moe_dropless_fallback="both")
 
+    # The ragged all-to-all path (no ring of experts) supports the in-layer fallback, not the step replay.
+    a2a_config = {**common_config, "use_ring_of_experts": False}
+    self.assertEqual(types.MaxTextConfig(**a2a_config, moe_dropless_fallback="layer").moe_dropless_fallback, "layer")
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**a2a_config, moe_dropless_fallback="step")
+    self.assertIn("only supported with use_ring_of_experts=True", str(context.exception))
+
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
         "",
