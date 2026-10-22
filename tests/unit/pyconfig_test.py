@@ -953,9 +953,8 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
     self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
 
-  def test_shard_embed_moe_on_fsdp_requires_quantization(self):
-    """Verifies that a ValueError is raised when shard_embed_moe_on_fsdp
-    is used without fixed weight quantization calibration."""
+  def test_moe_fsdp_qwag_sharding_validation(self):
+    """Tests validation of the QWAG flags."""
     with self.assertRaises(ValueError):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
@@ -970,17 +969,64 @@ assert train._TF_AVAILABLE is False
           skip_jax_distributed_system=True,
           shard_embed_moe_on_fsdp=True,
           quantization="int8",
+          weight_quantization_calibration_method="rms,2.0",
+      )
+
+    # These should not raise: fixed (static) and absmax (dynamic QWAG) weight calibration.
+    for method in ("fixed,-1,1", "absmax"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="int8",
+          weight_quantization_calibration_method=method,
+      )
+
+    # shard_exp_on_fsdp: unquantized (XLA all-gather fallback) and dynamic QWAG should not raise.
+    for quantization in ("", "fp8_full"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_exp_on_fsdp=True,
+          quantization=quantization,
+          use_qwix_quantization=True,
+          use_tokamax_gmm=True,
           weight_quantization_calibration_method="absmax",
       )
 
-    # This should not raise
-    pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
-        skip_jax_distributed_system=True,
-        shard_embed_moe_on_fsdp=True,
-        quantization="int8",
-        weight_quantization_calibration_method="fixed,-1,1",
-    )
+    with self.assertRaisesRegex(ValueError, "shard_exp_on_fsdp QWAG .*requires use_tokamax_gmm"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_exp_on_fsdp=True,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          use_tokamax_gmm=False,
+          weight_quantization_calibration_method="absmax",
+      )
+
+    # One config hitting every dynamic-QWAG rejection.
+    with self.assertRaisesRegex(
+        ValueError,
+        "shard_exp_on_fsdp with absmax weight calibration does not support use_batch_split_schedule, "
+        "num_moe_emb_chunks > 0, per_expert_channel with moe_flat_fsdp_weights, per_expert_channel with "
+        "use_gmm_v2=False, per_expert_channel with use_ring_of_experts and use_ragged_sort",
+    ):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_exp_on_fsdp=True,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          use_tokamax_gmm=True,
+          weight_quantization_calibration_method="absmax",
+          moe_qwag_weight_scale_granularity="per_expert_channel",
+          use_batch_split_schedule=True,
+          num_moe_emb_chunks=1,
+          moe_flat_fsdp_weights=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+      )
 
   def test_base_yml_types_parity(self):
     """Verifies that types.MaxTextConfig() defaults match MaxTextConfig(**base_yaml)."""

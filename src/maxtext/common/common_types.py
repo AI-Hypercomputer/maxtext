@@ -65,6 +65,27 @@ def get_quant(config: Config, module_name: str, quant: Any) -> Any:
   return quant
 
 
+def moe_qwag_flag(config: Config, require_tokamax: bool = True) -> str | None:
+  """Returns the flag whose routed-expert weights get the fp8 weight all-gather (QWAG), or None.
+
+  QWAG runs in the tokamax sparse-matmul gmm (not on CPU) under the Qwix fp8_full rule, the only one that covers the
+  gmm, with fixed or exactly absmax weight calibration.
+  """
+  if not (config.shard_embed_moe_on_fsdp or config.shard_exp_on_fsdp):
+    return None
+  method = config.weight_quantization_calibration_method.lower()
+  if not (
+      config.quantization == "fp8_full"
+      and config.use_qwix_quantization
+      and config.sparse_matmul
+      and config.hardware != "cpu"
+      and (config.use_tokamax_gmm or not require_tokamax)
+      and (method.startswith("fixed") or method == "absmax")
+  ):
+    return None
+  return "shard_embed_moe_on_fsdp" if config.shard_embed_moe_on_fsdp else "shard_exp_on_fsdp"
+
+
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
