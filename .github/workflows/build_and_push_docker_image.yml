@@ -370,6 +370,45 @@ jobs:
             fi
           done
 
+      - name: Attach SBOM and provenance to platform manifest
+        # The AR Exit Gate validates the platform manifest inside the image index on its own, so attach the SBOM
+        # reference and BuildKit's SLSA provenance to it directly (otherwise they only cover the index).
+        continue-on-error: true
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          SBOM_BUCKET: ${{ vars.SBOM_BUCKET }}
+          BUILD_REPO: ${{ env.BUILD_REPO }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest || steps.build_push_fast.outputs.digest }}
+        run: |
+          set -euo pipefail
+          REGISTRY="https://us-docker.pkg.dev/v2/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}"
+          AUTH="Authorization: Bearer $(gcloud auth print-access-token)"
+          get() {
+            curl -fsSL -H "${AUTH}" -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json" "${REGISTRY}/$1"
+          }
+
+          # Find the platform manifest and its SLSA provenance via the BuildKit attestation manifest.
+          read -r PLATFORM_DIGEST ATTESTATION_DIGEST < <(get "manifests/${IMAGE_DIGEST}" | python3 -c '
+          import json, sys
+          att = next(m for m in json.load(sys.stdin)["manifests"]
+                     if m.get("annotations", {}).get("vnd.docker.reference.type") == "attestation-manifest")
+          print(att["annotations"]["vnd.docker.reference.digest"], att["digest"])')
+          PROVENANCE_LAYER=$(get "manifests/${ATTESTATION_DIGEST}" | python3 -c '
+          import json, sys
+          print(next(l["digest"] for l in json.load(sys.stdin)["layers"]
+                     if l["annotations"]["in-toto.io/predicate-type"].startswith("https://slsa.dev/provenance/")))')
+          get "blobs/${PROVENANCE_LAYER}" > /tmp/provenance.json
+
+          gcloud artifacts sbom load --project="${PROJECT_NAME}" --source=/tmp/sbom.spdx.json \
+            --uri="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}@${PLATFORM_DIGEST}" \
+            --destination="${SBOM_BUCKET}" --quiet
+          gcloud artifacts attachments create "slsa-provenance-${PLATFORM_DIGEST:7:16}" \
+            --project="${PROJECT_NAME}" --location=us --repository="${BUILD_REPO}" \
+            --target="projects/${PROJECT_NAME}/locations/us/repositories/${BUILD_REPO}/packages/${INPUTS_IMAGE_NAME}/versions/${PLATFORM_DIGEST}" \
+            --attachment-type=application/vnd.in-toto+json --files=/tmp/provenance.json --quiet
+
   promote_and_tag:
     name: Promote and Tag Docker Image
     needs: [pre_build_check, build_and_push]
