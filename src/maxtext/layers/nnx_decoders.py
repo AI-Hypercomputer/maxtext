@@ -61,6 +61,7 @@ from maxtext.models import (
     gpt_oss,
     llama2,
     llama4,
+    ming,
     mistral,
     mixtral,
     olmo3,
@@ -612,6 +613,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+    self.is_ming = self.config.decoder_block == DecoderBlockType.MING
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -724,6 +726,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
     elif self.is_qwen3_hybrid:
       self._init_scanned_qwen3_hybrid(rngs, mesh)
+    elif self.is_ming:
+      self._init_scanned_ming(rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -950,6 +954,20 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
 
+  def _init_scanned_ming(self, rngs):
+    """Initializes Ming scanned layers: unrolls the dense-MLP prefix cycle and scans the homogeneous cycles."""
+    config = self.config
+    num_prefix_layers, num_blocks, remainder_start = ming.scan_layout(config)
+    for layer_idx in list(range(num_prefix_layers)) + list(range(remainder_start, config.num_decoder_layers)):
+      self._create_and_register_layer(ming.MingDecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx)
+    if num_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          ming.MingScannableBlock,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
+
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
     config = self.config
@@ -1024,6 +1042,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.MING,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1422,6 +1441,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
+        DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1584,6 +1604,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.MING,
     }:
       return functools.partial(
           RMSNorm,
@@ -1707,7 +1728,7 @@ class NNXDecoder(nnx.Module):
           raise ValueError(f"Unsupported model_name for video: {cfg.model_name}")
 
       if audio_embeddings is not None and cfg.use_audio:
-        if cfg.model_name in {"qwen3-omni-30b-a3b"}:
+        if cfg.model_name in {"qwen3-omni-30b-a3b", "ming-3.0-audio-tiny"}:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=audio_embeddings,
@@ -2280,6 +2301,8 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_ming:
+          y = self._apply_ming_scanned_blocks(y, layer_args, layer_kwargs)
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -2615,6 +2638,32 @@ class NNXDecoder(nnx.Module):
           skip_block_remat=True,
           **layer_call_kwargs,
       )
+
+    return y
+
+  def _apply_ming_scanned_blocks(self, y, layer_args, layer_kwargs):
+    """Applies Ming scanned decoder blocks: unrolled prefix layers, scanned full cycles, unrolled remainder."""
+    cfg = self.config
+    num_prefix_layers, num_blocks, remainder_start = ming.scan_layout(cfg)
+
+    # 1. Unrolled prefix layers (the cycle(s) containing the dense-MLP layers)
+    for layer_idx in range(num_prefix_layers):
+      y, _ = getattr(self, f"layers_{layer_idx}")(y, *layer_args, **layer_kwargs)
+
+    # 2. Scanned blocks
+    if num_blocks > 0 and hasattr(self, "scanned_blocks"):
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          **layer_kwargs,
+      )
+
+    # 3. Unrolled remainder layers
+    for layer_idx in range(remainder_start, cfg.num_decoder_layers):
+      y, _ = getattr(self, f"layers_{layer_idx}")(y, *layer_args, **layer_kwargs)
 
     return y
 

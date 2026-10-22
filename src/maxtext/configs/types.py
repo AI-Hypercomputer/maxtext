@@ -322,6 +322,7 @@ ModelName = Literal[
     "envy-switch-large",
     "envy-switch-xxl",
     "glm5.3-flash",
+    "ming-3.0-audio-tiny",
 ]
 
 
@@ -1750,6 +1751,21 @@ class DeepSeekMoE(BaseModel):
   lineage_dq_reduction_steps: int = Field(
       1,
       description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
+  )
+
+
+class Ming(BaseModel):
+  """Configuration specific to inclusionAI Ming (BailingMoeV3) models with Kimi Delta Attention."""
+
+  kda_lower_bound: float = Field(
+      -5.0,
+      description="Lower bound of the KDA forget gate in log space: g = lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).",
+  )
+  ming_audio_chunk_size: int = Field(
+      3000, description="Number of mel frames per independent whisper audio-encoder chunk (30 s at 100 frames/s)."
+  )
+  ming_norm_audio_embeds: bool = Field(
+      True, description="L2-normalize the projected audio embeddings (norm_query_embeds)."
   )
 
 
@@ -4215,6 +4231,7 @@ class MaxTextConfig(
     DeepSeekMoE,
     Qwen3Next,
     Qwen3_8FlashNext,
+    Ming,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -5770,6 +5787,7 @@ class MaxTextConfig(
           "weaver-mini",
           "weaver-max",
           "weaver-mini-diffuser",
+          "ming-3.0-audio-tiny",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -6565,6 +6583,7 @@ class RLConfig(
     SplashAttention,
     Qwen3Next,
     Qwen3_8FlashNext,
+    Ming,
     MultimodalGeneral,
     Muon,
     FineTuning,
