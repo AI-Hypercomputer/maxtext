@@ -40,7 +40,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import fsdp_prefetch, nnx_scan
+from maxtext.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -1364,18 +1364,26 @@ class NNXDecoder(nnx.Module):
   def _apply_layers_sequentially_prefetch(
       self, layers, x_in, *args, length: int, skip_block_remat: bool = False, **kwargs
   ):
-    """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`)."""
+    """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`).
+
+    Inhomogeneous blocks (e.g. Qwen3.5) are prefetched one sub-layer at a time (see
+    `fsdp_prefetch_inhomogeneous`), each sub-layer under its own remat, so `skip_block_remat`
+    only applies to whole-module prefetching.
+    """
+    prefetch_kwargs = {
+        "length": length,
+        "mesh": self.mesh,
+        "config": self.config,
+        "remat_policy": self.get_remat_policy(),
+        "prevent_cse": maxtext_utils.should_prevent_cse_in_remat(self.config),
+    }
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+    if stages is not None:
+      return fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+          layers, stages, x_in, *args, **prefetch_kwargs, **kwargs
+      )
     return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
-        layers,
-        x_in,
-        *args,
-        length=length,
-        mesh=self.mesh,
-        config=self.config,
-        remat_policy=self.get_remat_policy(),
-        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
-        skip_block_remat=skip_block_remat,
-        **kwargs,
+        layers, x_in, *args, skip_block_remat=skip_block_remat, **prefetch_kwargs, **kwargs
     )
 
   def get_decoder_layers(self):
