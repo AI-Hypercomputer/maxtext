@@ -223,10 +223,12 @@ UNMATCHED_FILES=()
 
 # Pre-populated list of excluded patterns/files that shouldn't trigger tests
 EXCLUDED_FILES=(
+  '^\.agents/'
   '^\.gemini/'
   '\.github/workflows/update_changelog.yml$'
   '^\.github/scripts/'
   '^tools/'
+  '^tests/dev/'
   '\.md$'
   'src/maxtext/version.py$'
 )

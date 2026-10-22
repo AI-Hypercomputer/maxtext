@@ -119,14 +119,43 @@ jobs:
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
+  dev_tests:
+    name: Development Tests
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.maxtext_sha || github.sha }}
+          persist-credentials: false
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Run development tests
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python pytest
+          PYTHONPATH=. .venv/bin/python -m pytest -v --noconftest -o addopts="--import-mode=importlib --strict-markers" tests/dev
+
   build_and_upload_maxtext_package:
     name: Build MaxText Package
-    needs: [analyze_code_changes, code_quality_check, docs_build_check]
-    # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
+    needs: [analyze_code_changes, code_quality_check, docs_build_check, dev_tests]
+    # Run if either tests or notebooks need to run; on PRs, gate on code quality, docs, and dev tests passing
     if: |
       !cancelled() &&
       (needs.analyze_code_changes.outputs.run_tests == 'true' || needs.analyze_code_changes.outputs.run_notebooks == 'true') &&
-      (github.event_name != 'pull_request' || (needs.code_quality_check.result == 'success' && needs.docs_build_check.result == 'success'))
+      (github.event_name != 'pull_request' || (
+        needs.code_quality_check.result == 'success' &&
+        needs.docs_build_check.result == 'success' &&
+        needs.dev_tests.result == 'success'
+      ))
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
@@ -339,7 +368,7 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -350,6 +379,7 @@ jobs:
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
+          echo "Dev Tests result: ${NEEDS_DEV_TESTS_RESULT}"
           echo "Gate result: ${NEEDS_GATE_TEST_RUN_RESULT}"
           echo "TPU Pretrain Tests result: ${NEEDS_TPU_PRETRAIN_TESTS_RESULT}"
           echo "TPU Posttrain Tests result: ${NEEDS_TPU_POSTTRAIN_TESTS_RESULT}"
@@ -371,6 +401,7 @@ jobs:
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
+          NEEDS_DEV_TESTS_RESULT: ${{ needs.dev_tests.result }}
           NEEDS_GATE_TEST_RUN_RESULT: ${{ needs.gate_test_run.result }}
           NEEDS_CPU_PRETRAIN_TESTS_RESULT: ${{ needs.cpu-pretrain-tests.result }}
           NEEDS_CPU_POSTTRAIN_TESTS_RESULT: ${{ needs.cpu-posttrain-tests.result }}
@@ -413,8 +444,8 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
-    if: ${{ !cancelled() }}
+    needs: [all_tests_passed, all_notebooks_passed]
+    if: ${{ !cancelled() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -424,15 +455,14 @@ jobs:
     steps:
       - name: Check whether one of the jobs failed
         id: create_issue
-        if: ${{ contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
         with:
           github-token: ${{ github.token }}
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
-    if: ${{ !cancelled() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+    needs: [notify_failure]
+    if: ${{ !cancelled() && (needs.notify_failure.result == 'success' || needs.notify_failure.result == 'failure') }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
       contents: 'read'

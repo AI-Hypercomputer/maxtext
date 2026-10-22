@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for process_test_results.py."""
+"""Unit tests for tools/dev/process_test_results.py."""
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -23,11 +22,7 @@ import tempfile
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
-import pytest
-
-spec = importlib.util.spec_from_file_location("process_test_results", "tests/utils/process_test_results.py")
-process_test_results = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(process_test_results)
+from tools.dev import process_test_results
 
 extract_job_name = process_test_results.extract_job_name
 process_testcase = process_test_results.process_testcase
@@ -35,7 +30,6 @@ extract_shard_layout = process_test_results.extract_shard_layout
 find_missing_shards = process_test_results.find_missing_shards
 
 
-@pytest.mark.cpu_only
 class ProcessTestResultsTest(unittest.TestCase):
 
   def test_extract_job_name(self):

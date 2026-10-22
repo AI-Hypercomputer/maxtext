@@ -14,12 +14,23 @@
 
 """Unit tests for the line-range test-change detector in ``newly_added_detection``."""
 
+import importlib.util
+import pathlib
 import textwrap
 
-from tests.utils.newly_added_detection import _build_diff_commands
-from tests.utils.newly_added_detection import _is_test_file
-from tests.utils.newly_added_detection import parse_changed_line_map
-from tests.utils.newly_added_detection import touched_test_names
+# The repository root: tests/dev/<this file>.
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+spec = importlib.util.spec_from_file_location("newly_added_detection", REPO_ROOT / "tests/utils/newly_added_detection.py")
+newly_added_detection = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(newly_added_detection)
+
+# pylint: disable=protected-access
+_build_diff_commands = newly_added_detection._build_diff_commands
+_is_test_file = newly_added_detection._is_test_file
+# pylint: enable=protected-access
+parse_changed_line_map = newly_added_detection.parse_changed_line_map
+touched_test_names = newly_added_detection.touched_test_names
 
 
 # --- _is_test_file -----------------------------------------------------------
