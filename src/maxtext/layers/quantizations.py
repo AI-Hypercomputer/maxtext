@@ -166,6 +166,8 @@ class JaxBlockScaledDotGeneral(nnx.Module):
   """Stateless OCP MX dot_general: `jax.nn.scaled_dot_general` with one config for both operands and the gradient."""
 
   def __init__(self, mode: str):
+    # Reject a mode this JAX lacks here, not at trace time.
+    jax.nn.get_scaled_dot_general_config(mode)
     self.mode = mode
 
   def __call__(
@@ -188,6 +190,9 @@ class JaxBlockScaledDotGeneral(nnx.Module):
 @dataclass
 class JaxBlockScaledQuantization(Quantization):
   """Configures OCP MX quantization through `jax.nn.scaled_dot_general`."""
+
+  # MX scales are the per-block amax of the data; no RNG is used at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
 
   quant_mode = "train"
   mode: str

@@ -4666,7 +4666,7 @@ class MaxTextConfig(
 
   def _validate_jax_mx_quantization(self) -> None:
     """Rejects jax_mxfp8 and jax_mxfp4 settings that would silently leave GEMMs unquantized or fail obscurely in JAX."""
-    name = self.quantization.value
+    name = QuantizationType(self.quantization).value
     if self.use_qwix_quantization:
       raise ValueError(f"quantization='{name}' does not support use_qwix_quantization=True.")
     if self.shard_mode == ShardMode.EXPLICIT:

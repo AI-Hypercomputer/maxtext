@@ -28,16 +28,20 @@ from maxtext.layers import quantizations
 from tests.utils.test_helpers import get_test_config_path
 
 
+MODES = ("mxfp8", "mxfp4")
+
+
 def _supports(mode: str) -> bool:
+  """Whether the installed JAX knows the MX mode (mxfp4 needs jax-ml/jax#41341)."""
   try:
     jax.nn.get_scaled_dot_general_config(mode)
-  except ValueError:
+  except (AttributeError, ValueError):
     return False
   return True
 
 
 def _modes() -> list[str]:
-  return [mode for mode in ("mxfp8", "mxfp4") if _supports(mode)]
+  return [mode for mode in MODES if _supports(mode)]
 
 
 def _config(**kwargs):
@@ -67,13 +71,20 @@ class JaxMxQuantizationTest(unittest.TestCase):
   """The quantization object and the layer it builds."""
 
   def test_configure_quantization(self):
-    for mode in _modes():
+    # Configuration does not touch JAX, so both modes are tested whatever JAX is installed.
+    for mode in MODES:
       with self.subTest(mode=mode):
         quant = quantizations.configure_quantization(_config(quantization=f"jax_{mode}"))
         self.assertIsInstance(quant, quantizations.JaxBlockScaledQuantization)
         self.assertEqual(quant.mode, mode)
 
+  def test_unsupported_mode_fails_at_construction(self):
+    with self.assertRaises(ValueError):
+      quantizations.JaxBlockScaledDotGeneral(mode="not_a_mode")
+
   def test_layer_matches_scaled_dot_general(self):
+    if not _modes():
+      self.skipTest("the installed JAX supports no MX mode")
     x = jax.random.normal(jax.random.key(1), (2, 32, 64), jnp.float32).astype(jnp.bfloat16)
     for mode in _modes():
       with self.subTest(mode=mode):
