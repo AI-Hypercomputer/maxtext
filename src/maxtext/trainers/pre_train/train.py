@@ -328,13 +328,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
   manual_gradient_accumulation = config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
-  if manual_gradient_accumulation and getattr(config, "olmo_loss_denominator_counts_masked_instances", False):
-    raise ValueError("olmo_loss_denominator_counts_masked_instances needs gradient_accumulation_steps == 1")
+  olmo_divisor = getattr(config, "olmo_loss_denominator_counts_masked_instances", False) and not is_block_diffusion
+  if olmo_divisor and config.use_tunix_gradient_accumulation:
+    raise ValueError("olmo_loss_denominator_counts_masked_instances doesn't support use_tunix_gradient_accumulation")
+  # The count the gradient is normalized by: OLMo-core's (filtered instances counted) or the trained tokens. Under
+  # manual GA, gradient_accumulation divides the accumulated gradient by its sum over micro-batches.
+  grad_weights = olmo_core_loss_denominator(data["targets_segmentation"], total_weights) if olmo_divisor else total_weights
   if manual_gradient_accumulation:
     loss = xent_sum
-  elif getattr(config, "olmo_loss_denominator_counts_masked_instances", False) and not is_block_diffusion:
+  elif olmo_divisor:
     # OLMo-core's divisor: filtered instances still count as tokens (see olmo_core_loss_denominator).
-    loss = xent_sum / (olmo_core_loss_denominator(data["targets_segmentation"], total_weights) + EPS)
+    loss = xent_sum / (grad_weights + EPS)
   else:
     # When using Tunix gradient accumulation, we revert to standard normalization.
     # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
@@ -355,7 +359,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # as before.
   def _add_aux_loss(total, aux_loss):
     if manual_gradient_accumulation and is_train:
-      return total + aux_loss * jnp.asarray(total_weights, jnp.float32)
+      return total + aux_loss * jnp.asarray(grad_weights, jnp.float32)
     return total + aux_loss
 
   # Calculate and Add MTP Loss
@@ -426,6 +430,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "xent_sum": xent_sum,
       "z_loss": total_z_loss,
       "total_weights": total_weights,
+      "grad_weights": grad_weights,
       "moe_lb_loss": moe_lb_loss,
       "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,

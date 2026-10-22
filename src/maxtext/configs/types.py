@@ -1408,7 +1408,8 @@ class MoEGeneral(BaseModel):
       description=(
           "Divide the training loss by every instance's label tokens, filtered (all-masked) instances included"
           " (max_target_length - 1 each), as OLMo-core's OLMoDDP train module does, instead of by the trained"
-          " tokens. Logged losses stay per trained token. Only with gradient_accumulation_steps == 1."
+          " tokens. Logged losses stay per trained token. Under manual gradient accumulation the accumulated gradient"
+          " and the micro-batch aux-loss weights use the same count. Not supported with Tunix GA."
       ),
   )
   olmo_ppl_eval_interval: int = Field(

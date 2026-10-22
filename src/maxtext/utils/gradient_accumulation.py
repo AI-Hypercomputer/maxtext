@@ -162,6 +162,8 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
     acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
+    # The gradient's normalizer: the trained tokens, or OLMo-core's count (olmo_loss_denominator_counts_masked_instances).
+    acc_grad_and_loss["grad_weights"] += aux.get("grad_weights", aux["total_weights"])
     return acc_grad_and_loss, aux
 
   def reshape_to_microbatch_accumulations(batch_arr):
@@ -178,6 +180,7 @@ def gradient_accumulation_loss_and_grad(
       "loss": 0.0,  # accumulates xent_sum across microbatches
       "grad": init_grad,
       "total_weights": 0,
+      "grad_weights": 0,
       "moe_lb_loss": 0.0,
       "indexer_loss": 0.0,
       "mtp_loss": 0.0,
@@ -206,7 +209,8 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  divisor = config.gradient_accumulation_steps if use_tunix_ga else denominator * loss_scale
+  grad_denominator = jnp.maximum(grad_and_loss["grad_weights"], 1)
+  divisor = config.gradient_accumulation_steps if use_tunix_ga else grad_denominator * loss_scale
   raw_grads = jax.tree_util.tree_map(
       lambda arr: jnp.where(has_weights, (arr / divisor).astype(arr.dtype), jnp.zeros_like(arr)),
       raw_grads,

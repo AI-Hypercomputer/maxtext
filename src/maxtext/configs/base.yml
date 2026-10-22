@@ -330,7 +330,8 @@ olmo_ppl_eval_pad_token_id: 100277
 # Divide the training loss by every instance's label tokens, filtered (all-masked) instances included, as
 # OLMo-core's OLMoDDP train module does (each masked instance counts max_target_length - 1), instead of by the
 # trained tokens. Matches the hero's gradient scale; also keeps the divisor at 2048 * 8191, just under 2^24, so the
-# bf16 rounding of the logit gradients stays unbiased. Logged losses stay per trained token. GA 1 only.
+# bf16 rounding of the logit gradients stays unbiased. Logged losses stay per trained token. Under manual gradient
+# accumulation the accumulated gradient (and the micro-batch aux-loss weights) use the same count.
 olmo_loss_denominator_counts_masked_instances: false
 # Peak bf16 TFLOP/s per device for perf/mfu; 0 infers it from the device kind (v4 275, v5e 197, v5p 459, v6e 918).
 peak_device_tflops: 0.0
