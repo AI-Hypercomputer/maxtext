@@ -141,6 +141,18 @@ def _collect_olmoe3_router_metrics(intermediate_outputs):
   return jnp.concatenate([v for _, v in found], axis=0)
 
 
+def olmo_core_loss_denominator(targets_segmentation, total_weights):
+  """OLMo-core's loss divisor: the trained tokens plus `seq_len - 1` for every filtered instance.
+
+  The instance filter zeroes a whole row's `targets_segmentation`. OLMo-core's OLMoDDP train module keeps those
+  instances' tokens in its divisor ("each rank contributes fairly"), so its loss reads slightly low and its gradient
+  is scaled by the kept fraction; the divisor also stays at batch * (seq_len - 1) every step.
+  """
+  seq_len = targets_segmentation.shape[-1]
+  masked_instances = jnp.sum(jnp.all(targets_segmentation == 0, axis=-1))
+  return total_weights + masked_instances * (seq_len - 1)
+
+
 def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
   """loss_fn for both train and eval.
 
@@ -316,8 +328,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
   manual_gradient_accumulation = config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
+  if manual_gradient_accumulation and getattr(config, "olmo_loss_denominator_counts_masked_instances", False):
+    raise ValueError("olmo_loss_denominator_counts_masked_instances needs gradient_accumulation_steps == 1")
   if manual_gradient_accumulation:
     loss = xent_sum
+  elif getattr(config, "olmo_loss_denominator_counts_masked_instances", False) and not is_block_diffusion:
+    # OLMo-core's divisor: filtered instances still count as tokens (see olmo_core_loss_denominator).
+    loss = xent_sum / (olmo_core_loss_denominator(data["targets_segmentation"], total_weights) + EPS)
   else:
     # When using Tunix gradient accumulation, we revert to standard normalization.
     # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
