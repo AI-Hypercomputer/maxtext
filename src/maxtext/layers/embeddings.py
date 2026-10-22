@@ -873,10 +873,14 @@ class YarnRotaryEmbedding(nnx.Module):
           rotated_pairs = pairs * cos + swapped * sin * sign
           output = rotated_pairs.reshape(b, s, n, h)
     else:
-      if self.direct_position_freqs:
-        freqs = _cis(self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
-      else:
-        freqs = self._gather_freqs_cis(position)  # shape: [B, S, 1, half_dim]
+      # Compute the rotary angles directly for the requested positions instead of materializing the full
+      # [max_position_embeddings, half_dim] `freqs_cis` table and gathering rows from it. Row `p` of that
+      # table is exp(1j * float(p) * inv_freqs), so this is numerically identical while avoiding a large,
+      # lane-sparse (half_dim-minor) HBM table and the gather on it.
+      angles = jnp.einsum(
+          "bs,d->bsd", position.astype(jnp.float32), self.inv_freqs, out_sharding=self.freqs_sharding
+      )  # shape: [B, S, half_dim]
+      freqs = _cis(angles)[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
       if self.interleave:
         # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
         # Convert the last dimension into a complex representation.
@@ -891,6 +895,12 @@ class YarnRotaryEmbedding(nnx.Module):
 
       inputs_complex = first_half + 1j * second_half  # shape: [b, s, n, half_dim]
       # Apply the rotary transformation via complex multiplication.
+      rotated_sharding = (
+          create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
+          if self.shard_mode == ShardMode.EXPLICIT
+          else None
+      )
+      freqs = jnp.broadcast_to(freqs, inputs_complex.shape, out_sharding=rotated_sharding)
       rotated = jnp.multiply(inputs_complex, freqs)  # shape: [b, s, n, half_dim]
 
       # Convert the complex result back to a real tensor.
