@@ -46,7 +46,7 @@ permissions:
 jobs:
   e2e_airflow_tests:
     name: E2E Airflow Tests
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Get Airflow URI

@@ -75,7 +75,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
+      cloud_runner: linux-x86-n4-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   run_ci_tests:
@@ -208,7 +208,7 @@ jobs:
     if: |
       !cancelled() &&
       needs.run_ci_tests.result == 'success' && needs.run_e2e_tests.result == 'success'
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker

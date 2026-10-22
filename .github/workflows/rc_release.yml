@@ -76,7 +76,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
+      cloud_runner: linux-x86-n4-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   build_release_candidate_images:
