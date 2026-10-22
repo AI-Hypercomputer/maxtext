@@ -4050,7 +4050,9 @@ class RoutedMoE(nnx.Module):
       self.sow(nnx.Intermediate, "moe_max_load_ratio", max_load_ratio)
     return output, lb_loss, bias_updates
 
-  def reshape_and_update_weights(self, weights, indices, safe_updates=False):
+  def reshape_and_update_weights(
+      self, weights, indices, safe_updates=False, expert_mask=None
+  ):
     """Reshape and update weights.
 
     safe_updates (forced routing): padding is masked to (index 0, weight 0) and
@@ -4058,39 +4060,22 @@ class RoutedMoE(nnx.Module):
     """
     # input of weights and indices: (batch_size, seq_len, num_experts_per_tok)
     # output of updated weights: (batch_size, seq_len, num_experts)
-    update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
-    if safe_updates:
-      valid_mask = indices >= 0
-      safe_indices = jnp.where(valid_mask, indices, 0)
-      safe_weights = jnp.where(valid_mask, weights, 0.0)
-    else:
-      safe_indices = indices
-      safe_weights = weights
-
-    index_update = (
-        self._maybe_shard_with_logical(
-            jnp.arange(weights.shape[0])[:, None, None],
-            ("activation_batch", None, None),
+    del safe_updates
+    if expert_mask is None:
+      expert_ids = jnp.asarray(np.arange(self.num_experts, dtype=np.int32))
+      expert_mask = indices[..., None] == expert_ids
+    update_weights = jnp.sum(
+        jnp.where(
+            expert_mask,
+            weights.astype(self.dtype)[..., None],
+            jnp.zeros((), dtype=self.dtype),
         ),
-        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length", None)),
-        safe_indices,
+        axis=-2,
     )
-    weight_sharding = (
-        create_sharding(self.mesh, ("activation_batch", "activation_length", None))
-        if self.config.shard_mode == ShardMode.EXPLICIT
-        else None
+    return self._maybe_shard_with_logical(
+        update_weights,
+        ("activation_batch", "activation_length", None),
     )
-    if safe_updates:
-      # Forced routing may replay duplicate expert indices for the same token
-      # (e.g. multiple padding slots mapped to index 0). `.set()` with
-      # duplicate indices has undefined ordering in the underlying scatter,
-      # so accumulate with `.add()` instead: padding slots always carry a
-      # zero weight, so summing duplicates is safe and avoids silently
-      # dropping a real weight update.
-      update_weights = update_weights.at[index_update].add(safe_weights, out_sharding=weight_sharding)
-    else:
-      update_weights = update_weights.at[index_update].set(safe_weights, out_sharding=weight_sharding)
-    return update_weights
 
   def get_context_partition_and_sub_seq(self, seq_len):
     cp = self.get_context_autoregressive_parallelism_size()
@@ -4266,7 +4251,9 @@ class RoutedMoE(nnx.Module):
     return dispatch_mask, combine_mask
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
-  def load_balance_loss(self, top_k_indices, logits, density_prob=None) -> jax.Array:
+  def load_balance_loss(
+      self, top_k_indices, logits, density_prob=None, expert_mask=None
+  ) -> jax.Array:
     """Compute the sequence-wise load balance loss.
 
     For DeepSeek V4 like models, standard load balancing across an entire batch can
@@ -4282,8 +4269,10 @@ class RoutedMoE(nnx.Module):
 
     `density_prob` optionally passes the precomputed per-sequence mean of `logits` (batch, num_experts).
     """
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    summed_expert_mask = jnp.sum(expert_mask, axis=2)
+    if expert_mask is None:
+      expert_ids = jnp.asarray(np.arange(self.num_experts, dtype=np.int32))
+      expert_mask = top_k_indices[..., None] == expert_ids
+    summed_expert_mask = jnp.sum(expert_mask.astype(jnp.int32), axis=2)
     # Get fraction of tokens dispatched to each expert
     # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
     # divide by top_k so that sum(density) == 1 across experts (Switch Transformer topk=1)
@@ -4398,14 +4387,18 @@ class RoutedMoE(nnx.Module):
         forced_routed_experts=forced_routed_experts,
     )
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
+    expert_mask = None
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
       inputs = inputs * router_scores
     else:
+      expert_ids = jnp.asarray(np.arange(self.num_experts, dtype=np.int32))
+      expert_mask = top_k_indices[..., None] == expert_ids
       weights = self.reshape_and_update_weights(
           top_k_weights,
           top_k_indices,
           safe_updates=(forced_routed_experts is not None),
+          expert_mask=expert_mask,
       )
     matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
@@ -4419,7 +4412,11 @@ class RoutedMoE(nnx.Module):
       else:
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         lb_loss = (
-            self.load_balance_loss(top_k_indices, softmax_probs) if self.config.load_balance_loss_weight > 0.0 else None
+            self.load_balance_loss(
+                top_k_indices, softmax_probs, expert_mask=expert_mask
+            )
+            if self.config.load_balance_loss_weight > 0.0
+            else None
         )
     else:
       lb_loss = None
