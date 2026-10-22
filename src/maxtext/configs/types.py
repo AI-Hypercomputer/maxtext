@@ -1223,6 +1223,10 @@ class MoEGeneral(BaseModel):
           "still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off."
       ),
   )
+  moe_log_a2a_drops: bool = Field(
+      False,
+      description="Debug probe: print A2A_DROPS lines (rows the expert-major all-to-all drops) per MoE call from one device.",
+  )
   log_required_ragged_buffer_factor: bool = Field(
       False,
       description=(

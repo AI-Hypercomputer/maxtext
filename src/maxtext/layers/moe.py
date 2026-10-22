@@ -813,6 +813,30 @@ def megatron_aux_loss_inputs(scores, num_experts_per_tok):
   return aux_probs, aux_top_k_indices
 
 
+def _log_a2a_drops(global_group_sizes, buffer_size, expert_axis, mesh):
+  """moe_log_a2a_drops probe: rows the expert-major all-to-all drops for want of receive buffer.
+
+  ``global_group_sizes`` is ``[source shard, expert]``; each destination shard receives its local experts' rows from
+  every source into ``buffer_size`` rows and drops the rest. Every shard of the EP group holds the same matrix, so
+  one device (expert index 0 of data index 0) prints ``A2A_DROPS`` for its group, once per call (layer and chunk).
+  """
+  num_shards = global_group_sizes.shape[0]
+  loads = global_group_sizes.reshape(num_shards, num_shards, -1).sum(axis=(0, 2))  # rows per destination shard
+  total = loads.sum()
+  dropped = jnp.maximum(loads - buffer_size, 0).sum()
+  max_ratio = loads.max().astype(jnp.float32) / jnp.maximum(total.astype(jnp.float32) / num_shards, 1.0)
+  first = jax.lax.axis_index(expert_axis) == 0
+  if mesh is not None and "data" in mesh.axis_names and mesh.shape["data"] > 1:
+    first = jnp.logical_and(first, jax.lax.axis_index("data") == 0)
+
+  def _print(is_first, d, t, r, b):
+    if bool(is_first):
+      print(f"A2A_DROPS dropped={int(d)} total={int(t)} frac={float(d) / max(float(t), 1.0):.6f} "
+            f"max_load_ratio={float(r):.4f} buffer={int(b)}", flush=True)
+
+  jax.debug.callback(_print, first, dropped, total, max_ratio, jnp.int32(buffer_size))
+
+
 def max_expert_shard_load_ratio(group_sizes, num_expert_shards, balanced_load):
   """Largest per-expert-shard load divided by the perfectly balanced load.
 
@@ -3433,6 +3457,8 @@ class RoutedMoE(nnx.Module):
             # so the padded buffer keeps every row the unpadded one would.
             buffer_size += (row_align - 1) * self.config.num_experts
             buffer_size = -(-buffer_size // row_align) * row_align
+          if getattr(self.config, "moe_log_a2a_drops", False) and buffer_size is not None:
+            _log_a2a_drops(all_shards_group_sizes, buffer_size, self._expert_parallelism_name, self.mesh)
           *dispatch_params, group_sizes = RoutedMoE.get_expert_major_all_to_all_params(
               all_shards_group_sizes, expert_shard_id, local_expert_size, buffer_size
           )
