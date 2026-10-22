@@ -167,7 +167,10 @@ class JaxBlockScaledDotGeneral(nnx.Module):
 
   def __init__(self, mode: str):
     # Reject a mode this JAX lacks here, not at trace time.
-    jax.nn.get_scaled_dot_general_config(mode)
+    try:
+      jax.nn.get_scaled_dot_general_config(mode)
+    except AttributeError as e:
+      raise ValueError(f"quantization=jax_{mode} needs a JAX with jax.nn.get_scaled_dot_general_config") from e
     self.mode = mode
 
   def __call__(

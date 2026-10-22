@@ -103,9 +103,9 @@ class JaxMxQuantizationTest(unittest.TestCase):
     kernel = layer.kernel[...].astype(jnp.bfloat16)
     config = jax.nn.get_scaled_dot_general_config(mode)
 
-    def reference(lhs):
+    def reference(lhs, rhs=kernel):
       return jax.nn.scaled_dot_general(
-          lhs, kernel, (((2,), (0,)), ((), ())), preferred_element_type=jnp.bfloat16, configs=[config, config, config]
+          lhs, rhs, (((2,), (0,)), ((), ())), preferred_element_type=jnp.bfloat16, configs=[config, config, config]
       )
 
     def loss(fn, lhs):
@@ -117,6 +117,9 @@ class JaxMxQuantizationTest(unittest.TestCase):
     dx = jax.grad(loss, argnums=1)(layer, x)
     dx_ref = jax.grad(loss, argnums=1)(reference, x)
     np.testing.assert_array_equal(np.asarray(dx, np.float32), np.asarray(dx_ref, np.float32))
+    dk = nnx.grad(lambda m: loss(m, x))(layer)["kernel"][...]
+    dk_ref = jax.grad(lambda w: loss(lambda lhs: reference(lhs, w), x))(kernel)
+    np.testing.assert_array_equal(np.asarray(dk, np.float32), np.asarray(dk_ref, np.float32))
 
 
 class JaxMxConfigValidationTest(unittest.TestCase):
