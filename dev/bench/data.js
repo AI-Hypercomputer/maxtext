@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792601040330,
+  "lastUpdate": 1792642673700,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -54530,6 +54530,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4102.761999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 306,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Fenghui Zhang",
+            "username": "fenghuizhang",
+            "email": "fhzhang@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "de64a4ae588653abc661e36987d70e0a832fa9d0",
+          "message": "Implements the GLM-5.3-Flash full-attention sub-block (`Glm5DsaMlaAttention`) and k-pooled lightning indexer (`Glm5Indexer`) in `src/maxtext/m3/models/glm5_3_flash/glm5_dsa_mla.py`:\n- `Glm5Indexer`: k-pool=4 softmax-gated key pooling (`index_kpool_compress_gate` + `index_kpool_compress_ape`), analytical causal partial-pool masking (`p_end <= s_idx`) without $O(S^2)$ intermediate mask allocation, linear-ReLU head scoring (`jnp.maximum(raw_scores, 0.0) * weights`), configurable `index_kpool_always_select_tail` tail tokens (`S - S % kpool .. S - 1`), and `jax.lax.stop_gradient` isolation on inputs (`hidden_states`, `q_resid`) (discrete output indices are non-differentiable `int32`).\n- `Glm5DsaMlaAttention`: NoPE Multi-head Latent Attention (`q_lora_rank=1536`, `kv_lora_rank=512`, `qk_nope_head_dim=256`, `qk_rope_head_dim=0`, `v_head_dim=256`, `num_attention_heads=64`), boolean scatter top-k mask expansion, static causal-padding bypass when `not use_indexer` or `s <= index_topk`, `Glm5Config(packing=False)` check, and logical-axis parameter sharding (`q_lora`/`kv_lora` on FSDP, replicated latent projections before LayerNorm under TP).\n- Adds unit and HuggingFace `Glm5NextTextAttention` forward/backward numerical parity tests covering unpadded, right-padded, and left-padded sequences, `index_kpool_always_select_tail=False`, `use_indexer=False`, and bitwise equality of the static bypass against the indexer path when `s <= index_topk` (`tests/unit/m3/glm5_3_flash_dsa_mla_test.py`).\n\n- [x] Tested with unit tests\n\nPiperOrigin-RevId: 1004451989",
+          "timestamp": "2026-10-22T03:53:02Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/de64a4ae588653abc661e36987d70e0a832fa9d0"
+        },
+        "date": 1792642673069,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 285.724,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 104.058,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2002.281,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.29100000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.54,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4377.682000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 306,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1440.6480000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 196.314,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4057.9539999999997,
             "unit": "sec"
           },
           {
