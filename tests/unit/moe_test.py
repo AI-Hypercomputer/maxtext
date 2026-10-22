@@ -379,6 +379,24 @@ class SharedExpertSwiGLUClampTest(parameterized.TestCase):
     self.assertEqual(block.shared_experts.activations_limit, expected)
 
 
+class Tid2EidInitTest(unittest.TestCase):
+
+  def test_rows_are_distinct_valid_experts(self):
+    vocab_size, num_experts, num_experts_per_tok = 4096, 16, 4
+    table = np.asarray(moe.init_tid2eid(jax.random.PRNGKey(0), vocab_size, num_experts, num_experts_per_tok))
+    self.assertEqual(table.shape, (vocab_size, num_experts_per_tok))
+    self.assertEqual(table.dtype, np.float32)
+    ids = table.astype(np.int32)
+    self.assertTrue(np.all((ids >= 0) & (ids < num_experts)))
+    self.assertTrue(np.all(np.sort(ids, axis=-1)[:, 1:] != np.sort(ids, axis=-1)[:, :-1]))
+    # Every expert is used, so the initial routing is not collapsed onto a few experts.
+    self.assertEqual(len(np.unique(ids)), num_experts)
+
+  def test_rejects_top_k_above_num_experts(self):
+    with self.assertRaises(ValueError):
+      moe.init_tid2eid(jax.random.PRNGKey(0), 8, 4, 5)
+
+
 class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):

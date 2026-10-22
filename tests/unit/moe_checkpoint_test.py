@@ -83,3 +83,17 @@ def test_te_moe_cudnn_gmm_fusion_default_is_omitted():
 
 def test_te_moe_cudnn_gmm_fusion_can_be_disabled():
   assert moe._get_te_moe_cudnn_gmm_fusion_kwargs(True) == {"use_cudnn_fusion": False}
+
+
+def test_te_moe_weight_layout_is_standard_when_supported():
+  def te_moe(*, cudnn_native_weight_layout=None):
+    del cudnn_native_weight_layout
+
+  assert moe._get_te_moe_weight_layout_kwargs(te_moe) == {"cudnn_native_weight_layout": False}
+
+
+def test_te_moe_weight_layout_is_omitted_for_older_signature():
+  def te_moe():
+    pass
+
+  assert not moe._get_te_moe_weight_layout_kwargs(te_moe)
