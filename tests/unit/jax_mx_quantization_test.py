@@ -139,6 +139,9 @@ class JaxMxConfigValidationTest(unittest.TestCase):
   def test_moe(self):
     self.assert_rejected("does not support MoE models", num_experts=8, num_experts_per_tok=2, base_moe_mlp_dim=128)
 
+  def test_contracting_dims_must_be_multiples_of_32(self):
+    self.assert_rejected("mlp_dim to be a multiple of 32, got 100", base_mlp_dim=100)
+
 
 if __name__ == "__main__":
   unittest.main()
