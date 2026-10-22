@@ -322,6 +322,7 @@ ModelName = Literal[
     "envy-switch-large",
     "envy-switch-xxl",
     "glm5.3-flash",
+    "glm5.3-flash-mini",
 ]
 
 
@@ -6532,7 +6533,7 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
-    if self.model_name == "glm5.3-flash" and not self.use_m3_model:
+    if self.model_name in ("glm5.3-flash", "glm5.3-flash-mini") and not self.use_m3_model:
       raise ValueError(
           "glm5.3-flash requires use_m3_model=True; legacy decoder_block is not" " supported for GLM-5.3-Flash."
       )

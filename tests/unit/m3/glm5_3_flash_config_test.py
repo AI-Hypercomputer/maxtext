@@ -14,6 +14,7 @@
 
 """Unit tests for GLM-5.3-Flash configuration, sharding, and validation guards."""
 
+import dataclasses
 import importlib
 import json
 import pathlib
@@ -333,6 +334,20 @@ class Glm5ConfigTest(absltest.TestCase):
     mesh_bad.shape = {"x": 1, "y": 1}
     with self.assertRaisesRegex(ValueError, "Unsupported mesh axis_names"):
       Glm5Sharding.from_mesh(mesh_bad)
+
+  def test_mini_yml_is_full_width_twin(self):
+    base = ["", "src/maxtext/configs/base.yml"]
+    full = Glm5Config.from_maxtext_config(pyconfig.initialize(base + ["model_name=glm5.3-flash"]))
+    raw_mini = pyconfig.initialize(base + ["model_name=glm5.3-flash-mini"])
+    self.assertEqual(raw_mini.tokenizer_path, "zai-org/GLM-5.3-Flash")
+    mini = Glm5Config.from_maxtext_config(raw_mini)
+    self.assertEqual(mini, Glm5Config.mini_config(remat_policy=mini.remat_policy))
+    assert full.layer_types is not None
+    self.assertEqual(mini.layer_types, full.layer_types[:5])
+    diff = {f.name for f in dataclasses.fields(Glm5Config) if getattr(full, f.name) != getattr(mini, f.name)}
+    self.assertEqual(diff, {"num_hidden_layers", "layer_types", "indexer_types"})
+    with self.assertRaisesRegex(ValueError, "requires use_m3_model=True"):
+      pyconfig.initialize(base + ["model_name=glm5.3-flash-mini", "override_model_config=true", "use_m3_model=false"])
 
   def test_pyconfig_integration(self):
     argv = ["", "src/maxtext/configs/base.yml", "model_name=glm5.3-flash"]
