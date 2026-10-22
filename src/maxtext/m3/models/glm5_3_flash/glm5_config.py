@@ -67,6 +67,7 @@ class Glm5Config:
   """
 
   vocab_size: int = 154880
+  model_name: str = "glm5.3-flash"
   hidden_size: int = 4096
   num_hidden_layers: int = 45
   first_k_dense_replace: int = 3
