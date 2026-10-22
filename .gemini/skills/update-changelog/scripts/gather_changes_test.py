@@ -19,8 +19,7 @@ import pathlib
 import unittest
 from unittest import mock
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / ".gemini" / "skills" / "update-changelog" / "scripts" / "gather_changes.py"
+SCRIPT_PATH = pathlib.Path(__file__).resolve().with_name("gather_changes.py")
 
 
 def _load_script():
@@ -36,8 +35,6 @@ def _log_entry(gc, short_hash, full_hash, subject, body="", files="src/maxtext/f
   return f"{gc.COMMIT_DELIMITER}{gc.FIELD_SEP.join(fields)}{gc.FILES_SEP}\n{files}\n\n"
 
 
-# The scheduled CI image only ships `src/`, `tests/`, and `benchmarks/`, so skip (rather than fail) without the skill.
-@unittest.skipUnless(SCRIPT_PATH.exists(), f"{SCRIPT_PATH} is not available")
 class GatherChangesTest(unittest.TestCase):
   """Covers the generator defects behind PR #5887: heading spacing, revert pairs, and pre-commit-only noise."""
 
