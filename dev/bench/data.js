@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792672903555,
+  "lastUpdate": 1792693073955,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -54963,6 +54963,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
             "value": 74,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Shraer CA",
+            "username": "shralex",
+            "email": "shralex@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "f0f597009165c8ff5362c7c776e35e8751c0e0f8",
+          "message": "Run the MaxText Gemini review automatically on pull requests and share the\npath-specific review checks between GitHub and internal code review.\n\n- gemini_dispatch.yml: also run the review automatically when a non-draft PR\n  opened by a human (not a bot) is opened or marked ready for review:\n  - PRs from branches of this repository, via pull_request.\n  - PRs from forks, via pull_request_target, only if the PR author is a\n    CONTRIBUTOR, MEMBER, COLLABORATOR, or OWNER. pull_request_target runs with\n    secrets, so gemini_review.yml always checks out the base commit for it and\n    the review reads the PR only through the GitHub API; PR code is never\n    checked out or executed.\n  The gemini-review label and @gemini-cli /review comment triggers keep\n  working as before (first-time contributors' fork PRs can be reviewed by a\n  maintainer comment).\n- Move the workflow-security, config/checkpoint-compatibility, and TPU kernel\n  review checks into .gemini/commands/maxtext-review-*.md and include them in\n  maxtext-review.toml, applied only when the PR touches the matching paths.\n- Add .gemini/config.yaml so Gemini Code Assist posts only a PR summary on\n  open (its review stays available on demand via /gemini review), and\n  un-ignore it in .gitignore.\n\nPiperOrigin-RevId: 1004829540",
+          "timestamp": "2026-10-22T16:21:41Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/f0f597009165c8ff5362c7c776e35e8751c0e0f8"
+        },
+        "date": 1792693073250,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 286.096,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 103.99600000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1944.571,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.017,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.551,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4388.213000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 306,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1429.5369999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.19899999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4066.8279999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 306,
             "unit": "count"
           }
         ]
