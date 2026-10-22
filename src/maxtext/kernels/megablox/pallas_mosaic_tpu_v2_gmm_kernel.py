@@ -595,6 +595,9 @@ def inner_kernel(
       if not cfgs.lhs_is_3d:
         mask_lhs = lax.broadcasted_iota(jnp.int32, tiled_lhs.shape, 1) < valid_k
         tiled_lhs = jnp.where(mask_lhs, tiled_lhs, 0)
+    # K blocks of a partial last tile that start past size_k add only zeros, but their rhs scale rows lie past the
+    # scale array, in VMEM the pipeline never fills (0 * NaN = NaN), so the matmul loops stop at tile_k_end.
+    tile_k_end = valid_k if is_last_k_step and valid_k != 0 else cfgs.tiles.tile_k
 
     def rhs_block(start_k: int, end_k: int, start_n: int, end_n: int):
       if cfgs.transpose_rhs:
@@ -638,7 +641,7 @@ def inner_kernel(
         col_size = end_n - start_n
 
         acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
-        for b_id in range(cfgs.num_quant_blocks_per_tile_k):
+        for b_id in range(pl.cdiv(tile_k_end, rhs_qbs)):  # pyrefly: ignore[no-matching-overload]
           start_k = b_id * rhs_qbs  # pyrefly: ignore[unsupported-operation]
           end_k = start_k + rhs_qbs  # pyrefly: ignore[unsupported-operation]
 
@@ -695,7 +698,7 @@ def inner_kernel(
         col_size = end_n - start_n
 
         acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
-        for start_k in range(0, cfgs.tiles.tile_k, q_block_size):  # pyrefly: ignore[bad-argument-type]
+        for start_k in range(0, tile_k_end, q_block_size):  # pyrefly: ignore[bad-argument-type]
           end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)  # pyrefly: ignore[unsupported-operation]
 
           block_lhs = tiled_lhs[:, start_k:end_k]

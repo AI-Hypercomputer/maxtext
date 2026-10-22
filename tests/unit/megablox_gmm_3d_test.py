@@ -20,6 +20,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import numpy as np
 import qwix
@@ -382,6 +383,30 @@ def _poison_hbm():
   del xs
 
 
+def _poison_vmem():
+  """Fills 3/4 of VMEM with NaN. VMEM is not cleared between kernels, so VMEM a later kernel reads unfilled is NaN."""
+  vmem_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
+  chunk = 512
+  rows = vmem_bytes * 3 // 4 // (128 * 4) // chunk * chunk
+
+  def kernel(out_ref, scratch_ref):
+    def fill(i, carry):
+      scratch_ref[pl.ds(pl.multiple_of(i * chunk, chunk), chunk), :] = jnp.full((chunk, 128), jnp.nan, jnp.float32)
+      return carry
+
+    jax.lax.fori_loop(0, rows // chunk, fill, 0)
+    out_ref[...] = scratch_ref[:8, :]
+
+  jax.block_until_ready(
+      pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          scratch_shapes=[pltpu.VMEM((rows, 128), jnp.float32)],
+          compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_bytes * 7 // 8),
+      )()
+  )
+
+
 def _k_tail_reference(lhs, rhs, transpose_rhs):
   lhs, rhs = np.asarray(lhs, np.float32), np.asarray(rhs, np.float32)
   if transpose_rhs:
@@ -417,6 +442,45 @@ class GmmV2KTailTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.asarray(out)[:num_valid], _k_tail_reference(lhs, rhs, transpose_rhs)[:num_valid], rtol=1e-5, atol=1e-5
     )
+
+  @parameterized.parameters(True, False)
+  def test_partial_k_tile_with_rhs_scale(self, maybe_quantize_lhs):
+    """A per-channel fp8 rhs on K=256 with MoE's default tile_k=1024, as in FlatFsdpWeightsParityTest.
+
+    The rhs scale has one K block, but the kernel's scale block spans tile_k / size_k = 4 of them, so scale rows 1-3
+    are VMEM the pipeline never fills. The K blocks past size_k must not read them, even to scale a zero product.
+    """
+    size_k, tile_k = 256, 1024
+    lhs = jax.random.normal(jax.random.PRNGKey(0), (K_TAIL_M, size_k), jnp.float32).astype(jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.PRNGKey(1), (K_TAIL_G, size_k, K_TAIL_N), jnp.float32) * 0.05
+    rhs_scale = jnp.max(jnp.abs(rhs), axis=1, keepdims=True) / float(jnp.finfo(FP8).max)
+    rhs_q = (rhs / rhs_scale).astype(FP8)
+    rhs_scale = rhs_scale[:, :, None, :]  # [G, 1 K block, 1, N]
+    group_sizes = jnp.asarray(K_TAIL_GROUP_SIZES)
+
+    def run(tile_k):
+      tiles = gmm_v2.TileSizes(tile_m=128, tile_k=tile_k, tile_n=K_TAIL_N)
+      return jax.jit(
+          lambda lhs, rhs_q, rhs_scale: gmm_v2.gmm_v2(
+              lhs,
+              rhs_q,
+              group_sizes,
+              rhs_scale=rhs_scale,
+              tile_info=tiles,
+              preferred_element_type=jnp.float32,
+              maybe_quantize_lhs=maybe_quantize_lhs,
+          )
+      )(lhs, rhs_q, rhs_scale)
+
+    want = run(size_k)  # A single full K tile: no K blocks past size_k.
+    _poison_vmem()
+    got = run(tile_k)
+
+    num_valid = int(K_TAIL_GROUP_SIZES.sum())
+    got, want = np.asarray(got)[:num_valid], np.asarray(want)[:num_valid]
+    self.assertTrue(np.isfinite(got).all(), f"{np.isnan(got).any(axis=1).sum()} of {num_valid} valid rows have NaN")
+    # The quantized-lhs path accumulates in bf16.
+    np.testing.assert_allclose(got, want, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
