@@ -5,7 +5,7 @@
 # This file runs Step 2 on v5p-128 / tpu7x-128 on a daily basis.
 # 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16):
 #    Scanned format is better for training; unscanned format is better for decoding.
-# 2. Run logit checks (unscanned and scanned), pre-training, and decoding.
+# 2. Run logit checks (unscanned and scanned), pre-training, SFT, and decoding.
 
 set -ex
 set -o pipefail
@@ -190,6 +190,90 @@ if [ "${RUN_PRETRAIN:-true}" = "true" ]; then
       echo "ERROR: lm_loss is not strictly positive: ${lm_loss}"
       exit 1
     fi
+  fi
+fi
+
+if [ "${RUN_SFT:-true}" = "true" ]; then
+  echo "=== STAGE: sft ==="
+  SFT_CONFIG="${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/post_train/sft.yml"
+  # Pinned GCS copy of HuggingFaceH4/ultrachat_200k (train_sft split).
+  SFT_DATA_FLAGS=(
+    hf_path=parquet
+    "hf_train_files=${SFT_HF_TRAIN_FILES:-gs://maxtext-dataset/hf/ultrachat_200k/train_sft-*.parquet}"
+    train_split=train
+  )
+
+  # Fail fast if the SFT input pipeline masks completion EOS tokens out of the loss.
+  JAX_PLATFORMS=cpu python3 "${MAXTEXT_REPO_ROOT:-$PWD}/tests/end_to_end/tpu/deepseek/sft_eos_probe.py" \
+    "${SFT_CONFIG}" \
+    base_output_directory="${BASE_OUTPUT_PATH}" \
+    run_name=sft_eos_probe \
+    model_name="${MODEL_NAME}" \
+    tokenizer_type=huggingface \
+    tokenizer_path="${TOKENIZER_PATH}" \
+    max_target_length=1024 \
+    "${SFT_DATA_FLAGS[@]}"
+
+  # load_parameters_path restores the converted weights. Checkpointing stays enabled (the base.yml
+  # default); these flags only turn off saving, which would dominate a 5-step run on 1.6T params.
+  # shellcheck disable=SC2086
+  python3 -m maxtext.trainers.post_train.sft.train_sft_native \
+    "${SFT_CONFIG}" \
+    base_output_directory="${BASE_OUTPUT_PATH}" \
+    run_name=sft \
+    model_name="${MODEL_NAME}" \
+    tokenizer_type=huggingface \
+    tokenizer_path="${TOKENIZER_PATH}" \
+    "${SFT_DATA_FLAGS[@]}" \
+    load_parameters_path="${SCANNED_CKPT_PATH}" \
+    scan_layers=True \
+    attention=dot_product \
+    sparse_matmul=True \
+    use_tokamax_gmm=False \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    per_device_batch_size=1 \
+    steps="${SFT_STEPS:-5}" \
+    max_target_length=1024 \
+    override_model_config=True \
+    ici_fsdp_parallelism=-1 \
+    dcn_fsdp_parallelism="${DCN_FSDP_PARALLELISM:--1}" \
+    ici_expert_parallelism="${ICI_EXPERT_PARALLELISM:-16}" \
+    dcn_data_parallelism=1 \
+    opt_type=sgd \
+    learning_rate=1e-6 \
+    save_checkpoint_on_start=false \
+    save_checkpoint_on_completion=false \
+    checkpoint_period=100000 \
+    async_checkpointing=false \
+    ${SFT_EXTRA_FLAGS:-} 2>&1 | tee /tmp/sft_output.log
+
+  # Every logged step must have a finite, strictly positive loss.
+  if ! awk -F"loss: " '
+    BEGIN { found = 0; failed = 0 }
+    /completed step:.*loss:/ {
+      split($2, a, ",");
+      loss = a[1];
+      gsub(/[ \t\r\n]/, "", loss);
+      loss_lower = tolower(loss);
+      if (loss_lower == "nan" || loss_lower == "inf" || loss_lower == "-inf" || !(loss + 0 > 0)) {
+        print "ERROR: SFT loss is not finite and strictly positive: " loss;
+        failed = 1;
+        exit 1;
+      }
+      found = 1;
+    }
+    END {
+      if (failed) {
+        exit 1;
+      }
+      if (!found) {
+        print "ERROR: No SFT step losses found";
+        exit 1;
+      }
+    }
+  ' /tmp/sft_output.log; then
+    exit 1
   fi
 fi
 
