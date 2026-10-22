@@ -260,8 +260,10 @@ class QKClipMLATest(unittest.TestCase):
   def setUp(self):
     """Initializes the configuration for each test using pyconfig."""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
     args = [sys.argv[0], get_test_config_path()]
     self.cfg = pyconfig.initialize(args, **self.config_arguments)

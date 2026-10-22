@@ -2250,8 +2250,10 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
@@ -6323,8 +6325,10 @@ class CompressedAttentionTest(parameterized.TestCase):
   def setUp(self):
     """Setup test dependencies and configuration."""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
   @parameterized.named_parameters(
       {"testcase_name": "csa_ratio4_dot_product", "compress_ratio": 4, "attention_kernel": "dot_product"},
