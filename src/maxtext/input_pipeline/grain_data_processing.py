@@ -1014,5 +1014,6 @@ def make_grain_eval_iterator(
         global_mesh,
         global_shape,
         checkpoint_path=config.checkpoint_dir,
-        elastic=config.grain_use_elastic_iterator,
+        # The eval pipeline is not wrapped in an ElasticIterator.
+        elastic=False,
     )
