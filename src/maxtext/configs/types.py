@@ -1279,10 +1279,11 @@ class MoEGeneral(BaseModel):
   moe_use_megatron_seq_aux_loss: bool = Field(
       False,
       description=(
-          "When True, sigmoid routers (routed_score_func='sigmoid', with te_moe_block=False) use"
-          " Megatron-LM's sequence-wise auxiliary load-balancing loss (fp32 per-token normalized sigmoid scores,"
+          "When True, sigmoid and Sqrt(Softplus) routers (routed_score_func='sigmoid' or 'sqrtsoftplus', with"
+          " te_moe_block=False) use Megatron-LM's sequence-wise auxiliary load-balancing loss (fp32 per-token"
+          " normalized affinity scores,"
           " token fractions from an unbiased, ungrouped top-k over the full sequence, summed over MoE layers)."
-          " When False (default), sigmoid routers use the Switch Transformer-style loss averaged over MoE layers."
+          " When False (default), these routers use the Switch Transformer-style loss averaged over MoE layers."
       ),
   )
   use_custom_sort_vjp: bool = Field(

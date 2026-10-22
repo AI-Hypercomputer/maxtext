@@ -76,7 +76,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
+      cloud_runner: linux-x86-n4-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   build_release_candidate_images:
@@ -139,16 +139,13 @@ jobs:
       device: ${{ matrix.device }}
       workflow: ${{ matrix.workflow }}
 
-  # TODO(b/573710066): Pass custom Docker image names (tpu_pre_training and
-  # tpu_post_training) once run_e2e_tests.yml, promote_docker_image.yml, and
-  # the maxtext_e2e_tests Airflow DAG support configurable Docker images.
   run_e2e_tests:
     name: Run E2E tests
     needs: [get_maxtext_sha, build_release_candidate_images]
     if: github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images'
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
-      mode: stable
+      mode: release_candidate
       run_id: ${{ github.run_id }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.short_sha }}
     secrets:

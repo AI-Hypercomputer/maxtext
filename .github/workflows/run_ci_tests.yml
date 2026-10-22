@@ -40,7 +40,7 @@ permissions:
 jobs:
   check_image:
     name: Check Docker Image Existence
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     outputs:
       image_exists: ${{ steps.check.outputs.exists }}
@@ -85,7 +85,7 @@ jobs:
     name: Tag Docker Image
     needs: test
     if: needs.test.result == 'success'
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker

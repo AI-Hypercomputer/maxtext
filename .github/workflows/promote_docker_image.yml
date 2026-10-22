@@ -15,16 +15,17 @@
 # This workflow acts as the final gate in the CI/CD pipeline for MaxText Docker images.
 # Triggered by:
 # 1. Airflow DAG completion (repository_dispatch):
-#    - Validates the result of the Airflow DAG (E2E tests).
-#    - Validates the result of the nightly build pipeline that produced the Docker images.
-#    - If both succeed, it promotes the Docker images by tagging the artifact with the latest tag.
+#    - Tags the tested Docker image with the result of the Airflow DAG (E2E tests):
+#      verified-e2e-<tag>, failed-e2e-<tag>, or unknown-e2e-<tag>.
+#    - If E2E passed on an image from the daily build that also passed CI (verified-ci-<tag>),
+#      it promotes the image (and its nightly counterpart) by tagging it with the latest tag.
 # 2. Manual workflow dispatch (workflow_dispatch):
-#    - Forcefully promotes the Docker images when Airflow E2E tests could not run (e.g. due to capacity).
+#    - Forcefully promotes a Docker image when Airflow E2E tests could not run (e.g. due to capacity).
 
 name: Promote MaxText Docker Image
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' &&
-      format('Forceful promote: {0} ({1})', inputs.caller_run_id, inputs.test_type) ||
+      format('Forceful promote: {0}', inputs.docker_image) ||
       format('Triggered by Airflow {0} Tests DAG', github.event.client_payload.test_type) }}
 
 on:
@@ -32,33 +33,25 @@ on:
     types: [airflow-dag-complete]
   workflow_dispatch:
     inputs:
-      caller_run_id:
-        description: 'GitHub workflow run ID of the build pipeline that produced the Docker images'
+      docker_image:
+        description: 'Full Docker image URI to promote, e.g. us-docker.pkg.dev/<project>/maxtext-images/tpu_pre_training:<tag> (7-char SHA for RC images, or GitHub run ID for daily images)'
         required: true
         type: string
-      test_type:
-        description: 'Workflow to promote (pre_training, post_training, or all)'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - pre_training
-          - post_training
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   handle_result:
     name: Handle Airflow DAG Result
     runs-on: ubuntu-latest
+    outputs:
+      e2e_state: ${{ steps.report.outputs.e2e_state }}
     steps:
       - name: Report DAG result
+        id: report
         if: github.event_name == 'repository_dispatch'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATE: ${{ github.event.client_payload.state }}
           DAG_ID: ${{ github.event.client_payload.dag_id }}
           DAG_RUN_ID: ${{ github.event.client_payload.dag_run_id }}
@@ -76,148 +69,93 @@ jobs:
           echo "================================"
 
           case "$STATE" in
-            success) echo "E2E tests PASSED." ;;
-            failed|upstream_failed) echo "E2E tests FAILED."; exit 1 ;;
-            *) echo "DAG ended with unexpected state: ${STATE}"; exit 1 ;;
+            success)
+              echo "E2E tests PASSED."
+              echo "e2e_state=success" >> "$GITHUB_OUTPUT"
+              ;;
+            failed|upstream_failed)
+              echo "E2E tests FAILED."
+              echo "e2e_state=failed" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "DAG ended with unexpected state: ${STATE}"
+              echo "e2e_state=unknown" >> "$GITHUB_OUTPUT"
+              ;;
           esac
-
-          if [ -n "$CALLER_RUN_ID" ]; then
-            echo "Checking nightly build status for run: $CALLER_RUN_ID"
-            gh run watch "$CALLER_RUN_ID" --exit-status --interval 60 --repo "$GITHUB_REPOSITORY"
-          else
-            echo "Error: No Github Run ID provided. Cannot verify nightly build status."
-            exit 1
-          fi
 
       - name: Report manual trigger
         if: github.event_name == 'workflow_dispatch'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CALLER_RUN_ID: ${{ inputs.caller_run_id }}
-          TEST_TYPE: ${{ inputs.test_type }}
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
         run: |
           echo "================================"
           echo "Manual Promotion"
-          echo "Github Run ID: ${CALLER_RUN_ID}"
-          echo "Test Type:     ${TEST_TYPE}"
+          echo "Docker Image:  ${DOCKER_IMAGE}"
           echo "================================"
 
-          if [ -z "$CALLER_RUN_ID" ]; then
-            echo "Error: No Github Run ID provided. Cannot promote Docker images without run ID."
-            exit 1
-          fi
-
   tag_docker_image:
-    name: Promote ${{ matrix.test_type }} Docker Image
+    name: Promote Docker Image
     needs: handle_result
     if: needs.handle_result.result == 'success'
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - test_type: pre_training
-            stable_image_name: maxtext_jax_stable
-            nightly_image_name: maxtext_jax_nightly
-          - test_type: post_training
-            stable_image_name: maxtext_post_training_stable
-            nightly_image_name: maxtext_post_training_nightly
     steps:
-      - name: Checkout MaxText
-        if: >-
-          ${{
-            (github.event_name == 'workflow_dispatch' &&
-              (inputs.test_type == 'all' || inputs.test_type == '' || inputs.test_type == matrix.test_type)) ||
-            (github.event_name == 'repository_dispatch' &&
-              (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type))
-          }}
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
       - name: Configure Docker
-        if: >-
-          ${{
-            (github.event_name == 'workflow_dispatch' &&
-              (inputs.test_type == 'all' || inputs.test_type == '' || inputs.test_type == matrix.test_type)) ||
-            (github.event_name == 'repository_dispatch' &&
-              (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type))
-          }}
         run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Add tags to Docker image
-        if: >-
-          ${{
-            (github.event_name == 'workflow_dispatch' &&
-              (inputs.test_type == 'all' || inputs.test_type == '' || inputs.test_type == matrix.test_type)) ||
-            (github.event_name == 'repository_dispatch' &&
-              (github.event.client_payload.test_type == '' || github.event.client_payload.test_type == matrix.test_type))
-          }}
         shell: bash
         env:
-          CALLER_RUN_ID: ${{ github.event.client_payload.github_run_id || inputs.caller_run_id }}
-          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
-          SBOM_BUCKET: ${{ vars.SBOM_BUCKET }}
-          STABLE_IMAGE_NAME: ${{ matrix.stable_image_name }}
-          NIGHTLY_IMAGE_NAME: ${{ matrix.nightly_image_name }}
+          E2E_STATE: ${{ needs.handle_result.outputs.e2e_state || 'success' }}
+          PAYLOAD_IMAGE: ${{ github.event.client_payload.docker_image || inputs.docker_image }}
         run: |
           tag_image() {
             local img="$1"
             local tag="$2"
-            echo "Tagging ${img}:${CALLER_RUN_ID} as ${tag}..."
-            gcloud container images add-tag "${img}:${CALLER_RUN_ID}" "${img}:${tag}" --quiet
+            echo "Tagging ${img}:${IMAGE_TAG} as ${tag}..."
+            gcloud container images add-tag "${img}:${IMAGE_TAG}" "${img}:${tag}" --quiet
           }
 
-          promote_from_staging() {
-            local img_name="$1"
-            local staging_img="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images-staging/${img_name}"
-            local prod_img="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${img_name}"
-
-            local digest
-            digest=$(gcloud container images describe "${staging_img}:${CALLER_RUN_ID}" \
-              --format="value(image_summary.digest)" 2>/dev/null || true)
-
-            if [ -n "$digest" ]; then
-              bash .github/scripts/promote_artifacts.sh \
-                "${PROJECT_NAME}" "maxtext-images-staging" "maxtext-images" "${img_name}" "${digest}" "${SBOM_BUCKET}"
-              gcloud container images add-tag "${prod_img}@${digest}" "${prod_img}:${CALLER_RUN_ID}" --quiet
+          # Promotes a daily stable image to latest once it has also passed CI. Nightly images are
+          # built alongside stable ones but are not E2E tested, so they are promoted together with
+          # their stable counterpart.
+          promote_to_latest() {
+            if gcloud container images describe "${IMAGE}:verified-ci-${IMAGE_TAG}" >/dev/null 2>&1; then
+              tag_image "${IMAGE}" "latest"
+              local nightly_image="${IMAGE%_stable}_nightly"
+              if gcloud container images describe "${nightly_image}:${IMAGE_TAG}" >/dev/null 2>&1; then
+                tag_image "${nightly_image}" "latest"
+              else
+                echo "Nightly image ${nightly_image}:${IMAGE_TAG} does not exist. Skipping nightly image tagging."
+              fi
+            else
+              echo "${IMAGE}:verified-ci-${IMAGE_TAG} does not exist. Skipping latest tag."
             fi
           }
 
-          if [ -z "$CALLER_RUN_ID" ]; then
-            echo "Error: CALLER_RUN_ID is empty. Cannot promote Docker image without image tag."
+          # Both Airflow and manual runs pass the full image URI (<image>:<tag>).
+          IMAGE="${PAYLOAD_IMAGE%:*}"
+          IMAGE_TAG="${PAYLOAD_IMAGE##*:}"
+
+          if ! gcloud container images describe "${IMAGE}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "Error: Image ${IMAGE}:${IMAGE_TAG} was not found."
             exit 1
           fi
 
-          tagged_any=false
-
-          # 1. Check if stable image exists (or can be promoted from staging) and tag it
-          STABLE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${STABLE_IMAGE_NAME}"
-          if ! gcloud container images describe "${STABLE_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
-            promote_from_staging "${STABLE_IMAGE_NAME}"
-          fi
-          if gcloud container images describe "${STABLE_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
-            echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} exists. Tagging stable image..."
-            tag_image "${STABLE_IMAGE}" "verified-e2e-${CALLER_RUN_ID}"
-            tag_image "${STABLE_IMAGE}" "latest"
-            tagged_any=true
-          else
-            echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping stable image tagging."
-          fi
-
-          # 2. Check if nightly image exists (or can be promoted from staging) and tag it
-          NIGHTLY_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${NIGHTLY_IMAGE_NAME}"
-          if ! gcloud container images describe "${NIGHTLY_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
-            promote_from_staging "${NIGHTLY_IMAGE_NAME}"
-          fi
-          if gcloud container images describe "${NIGHTLY_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
-            echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} exists. Tagging nightly image..."
-            tag_image "${NIGHTLY_IMAGE}" "latest"
-            tagged_any=true
-          else
-            echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping nightly image tagging."
-          fi
-
-          if [ "$tagged_any" = false ]; then
-            echo "Error: Neither stable image (${STABLE_IMAGE}:${CALLER_RUN_ID}) nor nightly image (${NIGHTLY_IMAGE}:${CALLER_RUN_ID}) was found."
-            exit 1
-          fi
+          echo "Image ${IMAGE}:${IMAGE_TAG} exists. E2E state: ${E2E_STATE}."
+          case "$E2E_STATE" in
+            success)
+              tag_image "${IMAGE}" "verified-e2e-${IMAGE_TAG}"
+              gcloud container images untag "${IMAGE}:failed-e2e-${IMAGE_TAG}" --quiet 2>/dev/null || true
+              # Only daily-build images are promoted to latest. RC images already get latest-rc
+              # when they are built.
+              if [[ "$IMAGE" == *_stable ]]; then
+                promote_to_latest
+              fi
+              ;;
+            failed)
+              tag_image "${IMAGE}" "failed-e2e-${IMAGE_TAG}"
+              ;;
+            *)
+              tag_image "${IMAGE}" "unknown-e2e-${IMAGE_TAG}"
+              ;;
+          esac

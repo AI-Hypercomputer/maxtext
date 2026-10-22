@@ -53,6 +53,8 @@ routed_score_func: "sqrtsoftplus"
 routed_bias: true
 routed_bias_update_rate: 0.001
 load_balance_loss_weight: 0.0001
+# DeepSeek-V3 sequence-wise balance loss (V3 Eqs 17-20) on the Sqrt(Softplus) affinities.
+moe_use_megatron_seq_aux_loss: true
 log_moe_bias_norms: false
 
 # --- Attention configuration ---

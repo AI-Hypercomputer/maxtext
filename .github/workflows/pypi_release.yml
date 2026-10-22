@@ -77,7 +77,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
+      cloud_runner: linux-x86-n4-16-buildkit
       # Build package from a particular commit to ensure we are publishing the same code that was tested
       maxtext_sha: ${{ inputs.maxtext_sha }}
 
@@ -251,7 +251,7 @@ jobs:
   promote_docker_images:
     name: Promote ${{ matrix.name }} Docker Image
     needs: [get_latest_maxtext_pypi_version]
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     if: ${{ !cancelled() && needs.get_latest_maxtext_pypi_version.result == 'success' }}
     container: google/cloud-sdk:524.0.0
     strategy:

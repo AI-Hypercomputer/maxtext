@@ -37,7 +37,8 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from flax import traverse_util
+from jax.sharding import AbstractMesh, AxisType, Mesh, NamedSharding, PartitionSpec
 
 from maxtext.common.common_types import (
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
@@ -50,9 +51,12 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.layers import fsdp_prefetch
+from maxtext.layers import fsdp_prefetch_inhomogeneous
 from maxtext.layers import linears
 from maxtext.layers import nnx_decoders
+from maxtext.layers import nnx_scan
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
@@ -61,7 +65,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
-from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, sharding
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -995,26 +999,29 @@ _QWEN3_NEXT_CONFIG = {
 }
 
 
-def _build_qwen3_next_block(layer_idx_offset=0, **overrides):
-  """Builds one Qwen3-Next scannable block; overrides go to the config."""
-  cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
-  block = qwen3.Qwen3NextScannableBlock(
-      config=cfg,
-      mesh=_make_mesh(cfg),
-      model_mode=MODEL_MODE_TRAIN,
-      layer_idx_offset=layer_idx_offset,
-      rngs=nnx.Rngs(0),
-  )
-  return cfg, block
-
-
 class TestQwen3NextScannableBlock(unittest.TestCase):
   """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+  BLOCK_CLS = qwen3.Qwen3NextScannableBlock
+
+  @classmethod
+  def _build(cls, layer_idx_offset=0, **overrides):
+    """Builds one scannable block; overrides go to the config."""
+    cfg = _make_config(**{**cls.MODEL_CONFIG, **overrides})
+    block = cls.BLOCK_CLS(
+        config=cfg,
+        mesh=_make_mesh(cfg),
+        model_mode=MODEL_MODE_TRAIN,
+        layer_idx_offset=layer_idx_offset,
+        rngs=nnx.Rngs(0),
+    )
+    return cfg, block
 
   @classmethod
   def setUpClass(cls):
     """Builds the block once; it costs several seconds and no test here mutates it."""
-    cls.cfg, cls.block = _build_qwen3_next_block()
+    cls.cfg, cls.block = cls._build()
 
   def _inputs(self, cfg):
     inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
@@ -1065,6 +1072,22 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
 
     np.testing.assert_allclose(np.asarray(scanned), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
+  def test_params_created_inside_the_global_layer_are_kept(self):
+    """A param materialized while the global layer runs (e.g. a Qwix LoRA adapter) must reach the block."""
+    cfg, block = self._build()
+    inputs, segment_ids, positions = self._inputs(cfg)
+    run_layer = block._run_layer  # pylint: disable=protected-access
+
+    def run_layer_creating_a_param(layer, *args, **kwargs):
+      if layer.is_full_attention_layer and not hasattr(layer, "created"):
+        layer.created = nnx.Param(jnp.full((2,), 3.0, dtype=jnp.float32))
+      return run_layer(layer, *args, **kwargs)
+
+    with mock.patch.object(block, "_run_layer", side_effect=run_layer_creating_a_param):
+      block(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
+    self.assertTrue(hasattr(block.global_layer, "created"))
+    np.testing.assert_array_equal(np.asarray(block.global_layer.created.value), np.full((2,), 3.0))
+
   def test_rejects_block_whose_global_layer_is_not_last(self):
     """The local scan runs before the global layer, so any other ordering must be refused.
 
@@ -1073,16 +1096,35 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     local-scan-then-global would silently reorder the model, so it is rejected.
     """
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
-      _build_qwen3_next_block(layer_idx_offset=1)
+      self._build(layer_idx_offset=1)
+
+  def test_rejects_forced_routing_that_does_not_cover_every_sub_layer(self):
+    """Router replay is sliced per sub-layer, so a mismatched leading axis must not be broadcast."""
+    cfg, block = self.cfg, self.block
+    inputs, segment_ids, positions = self._inputs(cfg)
+    forced_routed_experts = jnp.zeros(
+        (block.num_of_layers + 1, 1, cfg.max_target_length, cfg.num_experts_per_tok), dtype=jnp.int32
+    )
+    with self.assertRaisesRegex(ValueError, "one slice per sub-layer"):
+      block(
+          inputs,
+          segment_ids,
+          positions,
+          True,
+          MODEL_MODE_TRAIN,
+          forced_routed_experts=forced_routed_experts,
+      )
 
 
 class TestNNXDecoderQwen3Next(unittest.TestCase):
   """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
 
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+
   def _build(self, num_decoder_layers, **overrides):
     """Builds a scanned Qwen3-Next decoder and its shared embedding."""
     cfg = _make_config(
-        **{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
+        **{**self.MODEL_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
     )
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
@@ -1119,7 +1161,7 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
 
     The scan runs over blocks, not layers, so passing the flat list straight
     through would hand block i only ``kv_caches[i]``. Guards
-    ``_apply_qwen3_next_scanned_blocks``, which must also keep
+    ``_apply_qwen3_hybrid_scanned_blocks``, which must also keep
     ``skip_block_remat=True`` on this path rather than falling back to the
     generic (block-rematerialized) branch.
 
@@ -1164,6 +1206,82 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
     self.assertFalse(
         np.allclose(np.asarray(before), np.asarray(after)),
         "the remainder block's weights did not affect the output, so it was not applied",
+    )
+
+
+_QWEN3_5_CONFIG = {
+    **_QWEN3_NEXT_CONFIG,
+    "run_name": "qwen3_5_scannable_block_test",
+    "model_name": "qwen3.5-35b-a3b",
+    # MRoPE sections must cover rotary_dim / 2, which is 4 here, not the shipped [11, 11, 10].
+    "mrope_section": [2, 1, 1],
+}
+
+
+class TestQwen3_5ScannableBlock(TestQwen3NextScannableBlock):
+  """Runs the Qwen3-Next scannable-block tests against Qwen3.5's block."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
+  BLOCK_CLS = qwen3_5.Qwen3_5ScannableBlock
+
+  def test_block_uses_qwen3_5_layers(self):
+    """The block must build Qwen3.5 decoder layers, not Qwen3-Next ones."""
+    self.assertIsInstance(self.block.global_layer, qwen3_5.Qwen3_5DecoderLayer)
+
+
+class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
+  """Runs the NNXDecoder wiring tests against Qwen3.5."""
+
+  MODEL_CONFIG = _QWEN3_5_CONFIG
+
+  def test_raiden_unscan_reproduces_the_unscanned_decoder(self):
+    """Raiden's unscan of the nested block state must load into an unscanned decoder unchanged.
+
+    Raiden binds trainer and sampler tensors by name, and the sampler runs
+    ``scan_layers=False``, so every name and shape has to match and the loaded
+    decoder has to give the scanned decoder's logits. A cycle of 3 over 6 layers
+    puts two slots in ``local_layers`` and two repeats on the scan axis, so a
+    swapped slot or repeat index changes the output.
+    """
+    cfg, decoder, shared_embedding = self._build(6, inhomogeneous_layer_cycle_interval=3)
+    unscanned_cfg, unscanned_decoder, _ = self._build(6, inhomogeneous_layer_cycle_interval=3, scan_layers=False)
+
+    unscanned = raiden_unscan.unscan_layers(
+        nnx.state(decoder, nnx.Param),
+        num_layers=cfg.num_decoder_layers,
+        scan_axis=cfg.param_scan_axis,
+        cycle_interval=cfg.inhomogeneous_layer_cycle_interval,
+    )
+
+    def shapes(tree):
+      return {jax.tree_util.keystr(path): leaf.shape for path, leaf in jax.tree_util.tree_leaves_with_path(tree)}
+
+    self.assertEqual(shapes(unscanned), shapes(nnx.state(unscanned_decoder, nnx.Param)))
+    nnx.update(unscanned_decoder, unscanned)
+
+    # Every loaded leaf must be exactly its block/slot slice of the scanned state:
+    # slot j of repeat i is layer i * cycle + j, and the last slot is the global layer.
+    axis, cycle = cfg.param_scan_axis, cfg.inhomogeneous_layer_cycle_interval
+    scanned = traverse_util.flatten_dict(nnx.state(decoder, nnx.Param).to_pure_dict())
+    loaded = traverse_util.flatten_dict(nnx.state(unscanned_decoder, nnx.Param).to_pure_dict())
+    for key, value in loaded.items():
+      idx = next((i for i, k in enumerate(key) if isinstance(k, str) and re.fullmatch(r"layers_\d+", k)), None)
+      if idx is None:
+        expected = scanned[key]
+      else:
+        repeat, slot = divmod(int(key[idx].split("_")[1]), cycle)
+        sub = "global_layer" if slot == cycle - 1 else "local_layers"
+        expected = np.take(np.asarray(scanned[key[:idx] + ("layers", sub) + key[idx + 1 :]]), repeat, axis=axis)
+        if sub == "local_layers":
+          expected = np.take(expected, slot, axis=axis)
+      np.testing.assert_array_equal(np.asarray(value), expected, err_msg=str(key))
+
+    # Scanned and unscanned forwards differ by float rounding that grows with the device count.
+    np.testing.assert_allclose(
+        np.asarray(self._run(unscanned_cfg, unscanned_decoder, shared_embedding)),
+        np.asarray(self._run(cfg, decoder, shared_embedding)),
+        rtol=1e-3,
+        atol=1e-3,
     )
 
 
@@ -1743,105 +1861,126 @@ class TestNNXDecoderFP8WeightOnly(unittest.TestCase):
     self.assertTrue(jnp.all(jnp.isfinite(logits)))
 
 
-# Unbound forward of the Qwen3.5 scannable block. It is invoked below against a
-# stand-in `self` rather than a real instance, so it is bound here once instead
-# of being called as a dunder at each call site.
-_QWEN3_5_BLOCK_FORWARD = qwen3_5.Qwen3_5ScannableBlock.__call__
+class _StatefulQwen3_5DecoderLayer(nnx.Module):
+  """Stand-in Qwen3.5 sub-layer that exposes the cache and metadata it receives."""
+
+  def __init__(self, *, is_full_attention_layer, **unused_kwargs):
+    self.increment = 10 if is_full_attention_layer else 1
+    self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
+    self.received_kv_cache = nnx.Intermediate(jnp.array(False))
+    self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
+
+  def __call__(self, inputs, *unused_args, kv_cache=None, attention_metadata=None, **unused_kwargs):
+    self.call_count.value += 1
+    self.received_kv_cache.value = jnp.array(kv_cache is not None)
+    self.received_attention_metadata.value = jnp.array(attention_metadata is not None)
+    output = inputs + self.increment
+    if kv_cache is None:
+      return output
+    return output, kv_cache + self.increment
 
 
 class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
   """Qwen3.5 must thread vLLM's externally-managed KV caches through its block.
 
-  `Qwen3_5ScannableBlock.__call__` only touches `self.config` and its
-  `layer_{i}` attributes, so it is exercised here against a stand-in `self`.
-  That keeps the test on CPU and focused on the cache plumbing rather than on
-  building a real MoE block.
+  Qwen3_5ScannableBlock reuses Qwen3NextScannableBlock, whose external-cache path
+  unrolls the stacked local layers and then runs the global layer. The sub-layers
+  are swapped for stand-ins, which keeps the test on CPU and focused on the cache
+  plumbing rather than on building a real MoE block.
   """
 
   CYCLE = 4
 
-  def _fake_block(self):
-    """Builds a stand-in block whose sub-layers record the kwargs they receive."""
-    calls = []
+  def setUp(self):
+    super().setUp()
+    self.config = SimpleNamespace(
+        inhomogeneous_layer_cycle_interval=self.CYCLE,
+        param_scan_axis=1,
+        remat_policy="none",
+        scan_layers=True,
+        shard_mode=ShardMode.AUTO,
+    )
 
-    def make_layer(idx):
-      def layer(x, *args, **kwargs):
-        calls.append({"idx": idx, "args": args, "kwargs": kwargs})
-        return x + 1, f"updated_kv_{idx}"
-
-      return layer
-
-    block = SimpleNamespace(config=SimpleNamespace(inhomogeneous_layer_cycle_interval=self.CYCLE))
-    for i in range(self.CYCLE):
-      setattr(block, f"layer_{i}", make_layer(i))
-    return block, calls
+  def _make_block(self):
+    with mock.patch.object(qwen3_5, "Qwen3_5DecoderLayer", _StatefulQwen3_5DecoderLayer):
+      return qwen3_5.Qwen3_5ScannableBlock(
+          config=self.config,
+          mesh=None,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          rngs=nnx.Rngs(0),
+      )
 
   def _call(self, block, **kwargs):
-    return _QWEN3_5_BLOCK_FORWARD(
-        block,
-        0,  # carry
-        None,  # decoder_segment_ids
-        None,  # decoder_positions
-        True,  # deterministic
-        MODEL_MODE_AUTOREGRESSIVE,
+    return block(
+        jnp.zeros((1, 1, 1)),
+        decoder_segment_ids=None,
+        decoder_positions=None,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
         **kwargs,
     )
 
   @pytest.mark.cpu_only
   def test_each_sublayer_gets_its_own_cache_and_updates_are_returned(self):
-    block, calls = self._fake_block()
-    kv_cache = tuple(f"kv_{i}" for i in range(self.CYCLE))
+    block = self._make_block()
+    kv_cache = tuple(jnp.array(i) for i in range(self.CYCLE))
 
-    carry, updated = self._call(block, kv_cache=kv_cache, attention_metadata={"meta": 1})
+    output, updated = self._call(block, kv_cache=kv_cache, attention_metadata=object())
 
-    self.assertEqual(carry, self.CYCLE)  # every sub-layer ran exactly once
-    self.assertEqual(updated, tuple(f"updated_kv_{i}" for i in range(self.CYCLE)))
-    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], list(kv_cache))
+    # Every sub-layer ran exactly once: three local layers (+1 each), then the global one (+10).
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
+    np.testing.assert_array_equal(jnp.stack(updated), jnp.array([1, 2, 3, 13]))
+    np.testing.assert_array_equal(block.local_layers.call_count.value, jnp.ones(self.CYCLE - 1, dtype=jnp.int32))
+    np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
     # attention_metadata must reach the sub-layers; without it the attention
     # kernel cannot address vLLM's paged cache.
-    self.assertTrue(all(c["kwargs"]["attention_metadata"] == {"meta": 1} for c in calls))
+    np.testing.assert_array_equal(
+        block.local_layers.received_attention_metadata.value, jnp.ones(self.CYCLE - 1, dtype=jnp.bool_)
+    )
+    np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
 
   @pytest.mark.cpu_only
   def test_training_path_returns_none_and_passes_no_cache(self):
-    block, calls = self._fake_block()
+    block = self._make_block()
 
-    carry, updated = self._call(block)
+    output, updated = self._call(block)
 
-    self.assertEqual(carry, self.CYCLE)
+    np.testing.assert_array_equal(output, jnp.full((1, 1, 1), 13))
     self.assertIsNone(updated)
-    self.assertTrue(all(c["kwargs"]["kv_cache"] is None for c in calls))
+    np.testing.assert_array_equal(block.local_layers.received_kv_cache.value, jnp.zeros(self.CYCLE - 1, dtype=jnp.bool_))
+    np.testing.assert_array_equal(block.global_layer.received_kv_cache.value, False)
 
   @pytest.mark.cpu_only
   def test_shorter_cache_does_not_index_out_of_range(self):
-    block, calls = self._fake_block()
+    block = self._make_block()
 
-    _, updated = self._call(block, kv_cache=("kv_0",))
+    _, updated = self._call(block, kv_cache=(jnp.array(0),))
 
-    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], ["kv_0", None, None, None])
     self.assertEqual(len(updated), self.CYCLE)
+    np.testing.assert_array_equal(updated[0], 1)
+    self.assertEqual(updated[1:], (None,) * (self.CYCLE - 1))
 
   @pytest.mark.cpu_only
   def test_flat_per_layer_caches_survive_the_per_block_round_trip(self):
     """vLLM hands over one cache per layer; the scan runs over 4-layer blocks."""
     num_layers = 8
     scan_length = num_layers // self.CYCLE
-    kv_caches = [f"kv_{i}" for i in range(num_layers)]
+    kv_caches = [jnp.array(i) for i in range(num_layers)]
 
     grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, self.CYCLE, stack=False)
-    self.assertEqual(grouped, [("kv_0", "kv_1", "kv_2", "kv_3"), ("kv_4", "kv_5", "kv_6", "kv_7")])
+    self.assertEqual([[int(kv) for kv in group] for group in grouped], [[0, 1, 2, 3], [4, 5, 6, 7]])
 
     # Mimic _apply_layers_sequentially replacing each block entry with the
     # tuple the block returned.
+    block = self._make_block()
     for block_idx in range(scan_length):
-      fake_block, _ = self._fake_block()
-      _, updated = self._call(fake_block, kv_cache=grouped[block_idx])
-      grouped[block_idx] = tuple(f"{kv}_b{block_idx}" for kv in updated)
+      _, grouped[block_idx] = self._call(block, kv_cache=grouped[block_idx])
 
     maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped, scan_length, self.CYCLE, stacked=False)
 
     self.assertEqual(
-        kv_caches,
-        [f"updated_kv_{i % self.CYCLE}_b{i // self.CYCLE}" for i in range(num_layers)],
+        [int(kv) for kv in kv_caches],
+        [i + (10 if i % self.CYCLE == self.CYCLE - 1 else 1) for i in range(num_layers)],
     )
 
 
@@ -2306,8 +2445,11 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
     patcher.start()
     self.addCleanup(patcher.stop)
 
-  def _loss_and_grads(self, num_layers, prefetch, **overrides):
-    """Returns (loss, grads w.r.t. the decoder params) of a small float32 decoder, jitted."""
+  def _loss_and_grads(self, num_layers, prefetch, with_grads=True, **overrides):
+    """Returns (loss, grads w.r.t. the decoder params) of a small float32 decoder, jitted.
+
+    With `with_grads=False` the loss is computed without differentiation and grads is None.
+    """
     cfg_kwargs = {
         "scan_layers": True,
         "prefetch_fsdp_weights": prefetch,
@@ -2350,6 +2492,8 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
       )
       return jnp.mean(logits.astype(jnp.float32) ** 2)
 
+    if not with_grads:
+      return jax.jit(loss_fn)(params), None
     return jax.jit(jax.value_and_grad(loss_fn))(params)
 
   def _assert_parity(self, num_layers, **overrides):
@@ -2433,6 +2577,332 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
       self.skipTest("backend has no pinned_host memory")
     saved = self._assert_parity_saved_residuals(num_layers=5, remat_policy="custom", mlpwo="offload", query_proj="device")
     self.assertGreater(saved, 0)
+
+  def test_blocks_with_internal_remat_save_their_sub_layer_inputs(self):
+    """A block that remats its own sub-layers is not recomputed whole before that remat runs.
+
+    Under full remat the pipeline would otherwise keep only each block's input, so the backward
+    pass would recompute the block and then, inside the block's own remat, every sub-layer again.
+    Saving each sub-layer's input instead takes two residuals per Qwen3.5 block -- the local
+    scan's stacked inputs and the global layer's -- and none of them may be a gathered weight.
+    Qwen3.5 blocks normally prefetch one sub-layer at a time, so whole-block prefetching is forced.
+    """
+    model_config = {k: v for k, v in _QWEN3_5_CONFIG.items() if k != "base_num_decoder_layers"}
+    with (
+        unittest.mock.patch.object(fsdp_prefetch_inhomogeneous, "sublayer_stages", return_value=None),
+        unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info,
+    ):
+      self._assert_parity(num_layers=8, remat_policy="full", **model_config)
+    logs = [str(c) for c in log_info.call_args_list]
+    self.assertTrue(any("remat policy saves 2 residual(s) per layer" in log for log in logs), logs)
+    self.assertFalse(any("shaped like gathered weights" in log for log in logs), logs)
+
+
+# A tiny Qwen3.5 decoder: every scan step is a block of `inhomogeneous_layer_cycle_interval` (4)
+# sub-layers mixing Gated DeltaNet and global attention, so the stack is inhomogeneous inside a block.
+_QWEN3_5_TINY = {
+    "model_name": "qwen3.5-35b-a3b",
+    "base_emb_dim": 64,
+    "base_num_query_heads": 2,
+    "base_num_kv_heads": 1,
+    "head_dim": 32,
+    "base_mlp_dim": 64,
+    "base_moe_mlp_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "shared_experts": 1,
+    "gdn_key_head_dim": 16,
+    "gdn_value_head_dim": 16,
+    "gdn_num_key_heads": 2,
+    "gdn_num_value_heads": 2,
+    "gdn_chunk_size": 8,
+    "vocab_size": 128,
+    "use_mrope": False,
+    "sparse_matmul": False,
+    "capacity_factor": -1,
+}
+
+
+class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
+  """Per-sub-layer prefetching of inhomogeneous blocks must match the plain scanned stack."""
+
+  # Reuse the parity helper without inheriting (and re-running) TestNNXDecoderPrefetchGradParity's tests.
+  _loss_and_grads = TestNNXDecoderPrefetchGradParity._loss_and_grads  # pylint: disable=protected-access
+
+  def _assert_parity(self, num_layers, **overrides):
+    """Like TestNNXDecoderPrefetchGradParity._assert_parity, with a looser gradient tolerance.
+
+    Rematerializing the Gated DeltaNet sub-layers is not bitwise identical to the plain scan: from
+    three blocks on, a few elements of the GDN `in_proj_qkvz` kernel gradient differ by up to ~4e-4
+    (relative ~0.5%) in float32, by the same amount with whole-block prefetching.
+    """
+    ref_loss, ref_grads = self._loss_and_grads(num_layers, prefetch=False, **overrides)
+    loss, grads = self._loss_and_grads(num_layers, prefetch=True, **overrides)
+    np.testing.assert_allclose(loss, ref_loss, rtol=1e-5, atol=1e-6)
+    ref_leaves, ref_def = jax.tree_util.tree_flatten(ref_grads)
+    leaves, tree_def = jax.tree_util.tree_flatten(grads)
+    self.assertEqual(ref_def, tree_def)
+    for ref, got in zip(ref_leaves, leaves):
+      self.assertEqual(ref.shape, got.shape)
+      np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-2, atol=1e-3)
+
+  def setUp(self):
+    super().setUp()
+    # Force the prefetch path on the single-device CPU test mesh (see TestNNXDecoderPrefetching).
+    patcher = mock.patch.object(fsdp_prefetch, "mesh_uses_fsdp", return_value=True)
+    patcher.start()
+    self.addCleanup(patcher.stop)
+
+  def _patch_pipelines(self):
+    """Wraps the per-sub-layer and whole-block prefetch pipelines to count their calls."""
+    # pylint: disable=protected-access
+    return (
+        mock.patch.object(
+            fsdp_prefetch_inhomogeneous,
+            "_custom_vjp_nested_prefetch_pipeline",
+            wraps=fsdp_prefetch_inhomogeneous._custom_vjp_nested_prefetch_pipeline,
+        ),
+        mock.patch.object(
+            fsdp_prefetch,
+            "_custom_vjp_prefetch_pipeline",
+            wraps=fsdp_prefetch._custom_vjp_prefetch_pipeline,
+        ),
+    )
+
+  def _assert_qwen3_5_parity(self, num_blocks, cycle=4, **overrides):
+    """Asserts parity for `num_blocks` Qwen3.5 blocks and that sub-layers were prefetched one at a time.
+
+    Each block has `cycle - 1` Gated DeltaNet sub-layers and one global attention sub-layer.
+    """
+    nested_patch, whole_patch = self._patch_pipelines()
+    config = {**_QWEN3_5_TINY, "inhomogeneous_layer_cycle_interval": cycle, **overrides}
+    with nested_patch as nested, whole_patch as whole_blocks:
+      self._assert_parity(num_layers=num_blocks * cycle, **config)
+    self.assertEqual(nested.call_count, 1)
+    self.assertEqual(whole_blocks.call_count, 0)
+    graphdefs, length, sizes = nested.call_args.args[0], nested.call_args.args[6], nested.call_args.args[8]
+    # The Gated DeltaNet sub-layers form one scanned group, followed by the global attention sub-layer.
+    self.assertEqual(len(graphdefs), 2)
+    self.assertEqual(sizes, (cycle - 1, 1))
+    self.assertEqual(length, num_blocks)
+
+  def test_qwen3_5_one_block(self):
+    self._assert_qwen3_5_parity(num_blocks=1)
+
+  def test_qwen3_5_two_blocks(self):
+    self._assert_qwen3_5_parity(num_blocks=2)
+
+  def test_qwen3_5_three_blocks(self):
+    self._assert_qwen3_5_parity(num_blocks=3)
+
+  def test_qwen3_5_four_blocks(self):
+    # Two or more scanned blocks, so the scan body orders the sub-layers' prefetches.
+    self._assert_qwen3_5_parity(num_blocks=4)
+
+  def test_qwen3_5_expert_parallelism(self):
+    """Per-sub-layer prefetching matches the plain scanned stack on an fsdp=2 x expert=2 mesh."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices for an fsdp=2 x expert=2 mesh.")
+    self._assert_qwen3_5_parity(num_blocks=2, ici_fsdp_parallelism=2, ici_expert_parallelism=2)
+
+  def test_qwen3_5_sub_layer_gathers_under_expert_parallelism(self):
+    """Under EP, each sub-layer weight is gathered over the FSDP axes `sharding.fsdp_axes_for_dim` picks.
+
+    Non-routed weights (Gated DeltaNet, attention, router and shared expert) are sharded over
+    ('fsdp', 'expert') on their embed dimension and get one tagged all-gather over both axes; routed
+    experts keep `expert` on their expert dimension and gather only `fsdp`. The gathers are lowered on an
+    abstract explicit-sharding mesh, so no devices are needed.
+    """
+    cfg = _make_config(
+        **{
+            **_QWEN3_5_TINY,
+            "scan_layers": True,
+            "num_decoder_layers": 8,
+            "base_num_decoder_layers": 8,
+            "inhomogeneous_layer_cycle_interval": 4,
+        }
+    )
+    decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(decoder.layers)
+    self.assertEqual(len(stages), 4)
+    axis_sizes = {axis: 1 for axis in cfg.mesh_axes} | {"fsdp": 4, "expert": 2}
+    mesh = AbstractMesh(tuple(axis_sizes.values()), tuple(axis_sizes), axis_types=(AxisType.Explicit,) * len(axis_sizes))
+
+    def logical_axes(var):
+      meta = var.get_metadata()
+      for key in ("sharding", "out_sharding", "sharding_names"):
+        axes = meta.get(key)
+        if isinstance(axes, (PartitionSpec, tuple, list)) and axes:
+          return tuple(a for a in axes if a != "layers")  # Drop the block scan axis.
+      return None
+
+    def lower_gather(spec, shape):
+      w = jax.ShapeDtypeStruct(shape, jnp.float32, sharding=NamedSharding(mesh, spec))
+
+      def gather(x):
+        return fsdp_prefetch._apply_sharding_hint(x, mesh, ShardMode.EXPLICIT)  # pylint: disable=protected-access
+
+      with jax.sharding.use_abstract_mesh(mesh):
+        out = jax.eval_shape(gather, w)
+        hlo = jax.jit(gather).trace(w).lower(lowering_platforms=("tpu",)).as_text()
+      return out, [line for line in hlo.splitlines() if "stablehlo.all_gather" in line]
+
+    checked = {"routed": 0, "co_sharded": 0}
+    # The first Gated DeltaNet sub-layer and the global attention sub-layer.
+    for _, params, _ in (stages[0], stages[-1]):
+      for path, var in nnx.to_flat_state(params):
+        axes = logical_axes(var)
+        if not axes:
+          continue  # Replicated (e.g. A_log, dt_bias): nothing to gather.
+        spec = nn.logical_to_mesh_axes(axes, cfg.logical_axis_rules)
+        shape = list(var.get_value().shape)
+        del shape[cfg.param_scan_axis]  # One block's slice, as the pipeline gathers it.
+        out, gathers = lower_gather(spec, tuple(shape))
+        name = "/".join(map(str, path))
+        if not any(sharding.fsdp_axes_for_dim(entry) for entry in spec):
+          self.assertEqual(gathers, [], name)
+          continue
+        self.assertEqual(len(gathers), 1, name)
+        self.assertIn('xla_explicit_fsdp = "yes"', gathers[0], name)
+        self.assertIn('name = "fsdp"', gathers[0], name)
+        if axes[0] == "exp":
+          checked["routed"] += 1
+          self.assertNotIn('name = "expert"', gathers[0], name)
+          self.assertEqual(tuple(out.sharding.spec)[0], "expert", name)
+        else:
+          checked["co_sharded"] += 1
+          self.assertIn('name = "expert"', gathers[0], name)
+          self.assertNotIn("expert", str(out.sharding.spec), name)
+    # wi_0/wi_1/wo of both sub-layers; the GDN, attention, router and shared-expert kernels.
+    self.assertEqual(checked["routed"], 6)
+    self.assertGreaterEqual(checked["co_sharded"], 14)
+
+  def test_qwen3_5_remat_minimal(self):
+    with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
+      self._assert_qwen3_5_parity(num_blocks=4, remat_policy="minimal")
+    self.assertTrue(any("remat policy saves" in str(c) for c in log_info.call_args_list))
+
+  def test_qwen3_5_param_scan_axis_zero(self):
+    self._assert_qwen3_5_parity(num_blocks=3, param_scan_axis=0)
+
+  def test_qwen3_5_one_local_layer_per_block(self):
+    # A single Gated DeltaNet sub-layer per block: no same-group scan, two trip-count-one loops.
+    self._assert_qwen3_5_parity(num_blocks=2, cycle=2)
+
+  def test_qwen3_5_two_local_layers_per_block(self):
+    # The same-group scan of the Gated DeltaNet sub-layers has a single trip.
+    self._assert_qwen3_5_parity(num_blocks=2, cycle=3)
+
+  def test_qwen3_5_five_local_layers_per_block(self):
+    self._assert_qwen3_5_parity(num_blocks=2, cycle=6)
+
+  def test_qwen3_5_forward_only(self):
+    # Without differentiation, jax.custom_vjp runs the pipeline's primal function instead of its fwd rule.
+    config = {**_QWEN3_5_TINY, "inhomogeneous_layer_cycle_interval": 4}
+    ref_loss, _ = self._loss_and_grads(8, prefetch=False, with_grads=False, **config)
+    nested_patch, _ = self._patch_pipelines()
+    with nested_patch as nested:
+      loss, _ = self._loss_and_grads(8, prefetch=True, with_grads=False, **config)
+    self.assertEqual(nested.call_count, 1)
+    np.testing.assert_allclose(loss, ref_loss, rtol=1e-5, atol=1e-6)
+
+  def test_qwen3_5_global_only_blocks_prefetch_whole_blocks(self):
+    # With a cycle of 1 every block is a single global attention layer: nothing to split, so the
+    # stack keeps prefetching whole scan steps.
+    nested_patch, whole_patch = self._patch_pipelines()
+    with nested_patch as nested, whole_patch as whole_blocks:
+      self._assert_parity(num_layers=3, **{**_QWEN3_5_TINY, "inhomogeneous_layer_cycle_interval": 1})
+    self.assertEqual(nested.call_count, 0)
+    self.assertEqual(whole_blocks.call_count, 1)
+
+  def test_homogeneous_decoder_prefetches_whole_layers(self):
+    # A homogeneous decoder (no `prefetch_sublayer_names()`) must keep using `fsdp_prefetch`.
+    nested_patch, whole_patch = self._patch_pipelines()
+    with nested_patch as nested, whole_patch as whole_layers:
+      self._loss_and_grads(3, prefetch=True)
+    self.assertEqual(nested.call_count, 0)
+    self.assertEqual(whole_layers.call_count, 1)
+
+  def test_sublayer_stages_require_all_params_in_sublayers(self):
+    class Block(nnx.Module):
+
+      def __init__(self, extra):
+        self.layer_0 = nnx.Linear(2, 2, rngs=nnx.Rngs(0))
+        self.layer_1 = nnx.Linear(2, 3, rngs=nnx.Rngs(1))
+        if extra:
+          self.extra = nnx.Param(jnp.ones((2,)))
+
+      def prefetch_sublayer_names(self):
+        return ("layer_0", "layer_1")
+
+    # pylint: disable=protected-access
+    block = Block(extra=False)
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(block)
+    self.assertEqual(len(stages), 2)
+    self.assertEqual(stages[1][1]["kernel"].shape, (2, 3))
+    block = Block(extra=True)
+    with unittest.mock.patch.object(fsdp_prefetch_inhomogeneous.max_logging, "info") as log_info:
+      self.assertIsNone(fsdp_prefetch_inhomogeneous.sublayer_stages(block))
+    self.assertTrue(any("params outside its sub-layers" in str(c) for c in log_info.call_args_list))
+
+  def test_single_sublayer_block_prefetches_whole_blocks(self):
+    block = SimpleNamespace(prefetch_sublayer_names=lambda: ("layer_0",))
+    # pylint: disable=protected-access
+    self.assertIsNone(fsdp_prefetch_inhomogeneous._prefetch_sublayer_names(block))
+    self.assertIsNone(fsdp_prefetch_inhomogeneous._prefetch_sublayer_names(SimpleNamespace()))
+
+  def test_sublayer_stages_local_layers_without_global_layer(self):
+    class Block(nnx.Module):
+
+      def __init__(self):
+        self.num_local, self.num_global, self.global_layer = 2, 0, None
+        self.config = SimpleNamespace(param_scan_axis=1)
+        self.local_layers = nnx_scan.create_scanned_layers(
+            lambda r: nnx.Linear(2, 3, rngs=r),
+            length=2,
+            param_scan_axis=1,
+            metadata_axis_name="local_layers",
+            rngs=nnx.Rngs(0),
+        )
+
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(Block())
+    self.assertEqual(len(stages), 2)
+    self.assertEqual(stages[0][1]["kernel"].shape, (2, 3))
+
+  def test_sublayer_stages_with_fewer_than_two_sublayers_prefetch_whole_blocks(self):
+    class Block(nnx.Module):
+
+      def __init__(self):
+        # Claims two local layers but has none: only the global layer can be split off.
+        self.num_local, self.num_global, self.local_layers = 2, 1, None
+        self.global_layer = nnx.Linear(2, 2, rngs=nnx.Rngs(0))
+
+    self.assertIsNone(fsdp_prefetch_inhomogeneous.sublayer_stages(Block()))
+
+  def test_unstack_inner_scanned_sublayers(self):
+    # pylint: disable=protected-access
+    for scan_axis in (0, 1):
+      local_layers = nnx_scan.create_scanned_layers(
+          lambda r: nnx.Linear(2, 3, rngs=r),
+          length=3,
+          param_scan_axis=scan_axis,
+          metadata_axis_name="local_layers",
+          rngs=nnx.Rngs(0),
+      )
+      stacked = nnx.state(local_layers, nnx.Param)["kernel"].get_value()
+      stages = fsdp_prefetch_inhomogeneous._unstack_scanned_sublayers(local_layers, 3, scan_axis)
+      self.assertEqual(len(stages), 3)
+      for i, (_, params, _) in enumerate(stages):
+        kernel = params["kernel"]
+        np.testing.assert_array_equal(kernel.get_value(), jnp.take(stacked, i, axis=scan_axis))
+        self.assertNotIn("local_layers", tuple(kernel.get_metadata().get("sharding_names") or ()))
+
+  def test_unstack_variable_passes_unstacked_leaves_to_every_sublayer(self):
+    # pylint: disable=protected-access
+    raw = jnp.ones((3, 4))
+    self.assertEqual(fsdp_prefetch_inhomogeneous._unstack_variable(raw, 3, 0), (raw, raw, raw))
+    shared = nnx.Variable(jnp.zeros(()))
+    self.assertEqual(fsdp_prefetch_inhomogeneous._unstack_variable(shared, 3, 0), (shared, shared, shared))
 
 
 if __name__ == "__main__":

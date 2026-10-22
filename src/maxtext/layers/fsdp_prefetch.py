@@ -35,6 +35,7 @@ import inspect
 
 from flax import nnx
 import jax
+from jax import ad_checkpoint
 from jax.experimental import xla_metadata
 from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
@@ -493,6 +494,23 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
 _custom_vjp_prefetch_pipeline.defvjp(_custom_vjp_prefetch_pipeline_fwd, _custom_vjp_prefetch_pipeline_bwd)
 
 
+_SAVE_SUBLAYER_INPUTS = jax.checkpoint_policies.save_only_these_names("decoder_layer_input")
+
+
+def _also_save_sublayer_inputs(remat_policy):
+  """Returns `remat_policy` (None for full remat), extended to also save every `decoder_layer_input` it recomputes."""
+  if remat_policy is None:
+    return _SAVE_SUBLAYER_INPUTS
+
+  def policy(prim, *args, **params):
+    decision = remat_policy(prim, *args, **params)
+    if decision is False or decision is ad_checkpoint.Recompute:
+      return _SAVE_SUBLAYER_INPUTS(prim, *args, **params)
+    return decision
+
+  return policy
+
+
 def mesh_uses_fsdp(mesh) -> bool:
   """Whether any FSDP mesh axis of `mesh` spans more than one device.
 
@@ -501,39 +519,23 @@ def mesh_uses_fsdp(mesh) -> bool:
   return any(mesh.shape.get(axis, 1) > 1 for axis in sharding.FSDP_MESH_AXES)
 
 
-def apply_layers_with_fsdp_prefetch(
-    layers, x_in, *args, length: int, mesh, config, remat_policy=None, prevent_cse: bool = False, **kwargs
-):
-  """Runs a scanned NNX layer stack with FSDP weight prefetching in the forward and backward pass.
-
-  Args:
-    layers: The scanned (layer-stacked) NNX module.
-    x_in: The input activation of the first layer.
-    *args: Positional arguments passed to every layer call.
-    length: Number of layers in the stack.
-    mesh: The device mesh.
-    config: The MaxText config.
-    remat_policy: The `jax.checkpoint` policy of each layer (None for full remat). The forward pass
-      saves the activations this policy saves (in addition to each layer's input) and the backward
-      pass recomputes the rest; gathered weights are never saved.
-    prevent_cse: `prevent_cse` of the per-layer `jax.checkpoint` (only used with a remat policy).
-    **kwargs: Keyword arguments passed to every layer call (those not accepted by the layer are dropped).
-
-  Returns:
-    (final activation, layers, None). Non-parameter layer state is read-only in this path: state
-    mutated inside a layer call (e.g. sown intermediates) is not propagated back to `layers`.
-
-  See `_custom_vjp_prefetch_pipeline`.
-  """
-  if length == 0:
-    return x_in, layers, None
-  graphdef, params, state = nnx.split(layers, nnx.Param, ...)
-
-  scan_axis = config.param_scan_axis
+def _layer_major(params, state, scan_axis, length):
+  """Moves the scan axis of `params` to the front and gives `params`/`state` a leading layer axis."""
   if scan_axis != 0:
     params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
   params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
   state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
+  return params, state
+
+
+def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_policy, prevent_cse):
+  """Splits a scanned layer stack and its call arguments for `jax.custom_vjp`.
+
+  Returns (graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx), with
+  params/state layer-major (see `_layer_major`).
+  """
+  graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+  params, state = _layer_major(params, state, config.param_scan_axis, length)
 
   sig = inspect.signature(layers.__class__.__call__)
   valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
@@ -572,8 +574,56 @@ def apply_layers_with_fsdp_prefetch(
       remat_policy=remat_policy,
       prevent_cse=prevent_cse,
   )
+  return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 
+
+def apply_layers_with_fsdp_prefetch(
+    layers,
+    x_in,
+    *args,
+    length: int,
+    mesh,
+    config,
+    remat_policy=None,
+    prevent_cse: bool = False,
+    skip_block_remat: bool = False,
+    **kwargs,
+):
+  """Runs a scanned NNX layer stack with FSDP weight prefetching in the forward and backward pass.
+
+  Args:
+    layers: The scanned (layer-stacked) NNX module.
+    x_in: The input activation of the first layer.
+    *args: Positional arguments passed to every layer call.
+    length: Number of layers in the stack.
+    mesh: The device mesh.
+    config: The MaxText config.
+    remat_policy: The `jax.checkpoint` policy of each layer (None for full remat). The forward pass
+      saves the activations this policy saves (in addition to each layer's input) and the backward
+      pass recomputes the rest; gathered weights are never saved.
+    prevent_cse: `prevent_cse` of the per-layer `jax.checkpoint` (only used with a remat policy).
+    skip_block_remat: Whether each scanned module is a block that rematerializes its own sub-layers
+      (as for `NNXDecoder._apply_layers_sequentially`). The pipeline keeps its per-module remat, since
+      without it the forward pass would save the weights the block's inner scans read, but the policy
+      then also saves each sub-layer's `decoder_layer_input`: the backward pass rebuilds every
+      sub-layer from its input once, instead of first recomputing the whole block.
+    **kwargs: Keyword arguments passed to every layer call (those not accepted by the layer are dropped).
+
+  Returns:
+    (final activation, layers, None). Non-parameter layer state is read-only in this path: state
+    mutated inside a layer call (e.g. sown intermediates) is not propagated back to `layers`.
+
+  See `_custom_vjp_prefetch_pipeline`. Inhomogeneous blocks (e.g. Qwen3.5) can instead prefetch one
+  sub-layer at a time with `fsdp_prefetch_inhomogeneous`.
+  """
+  if length == 0:
+    return x_in, layers, None
+  if skip_block_remat:
+    remat_policy = _also_save_sublayer_inputs(remat_policy)
+  graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx = _prepare_prefetch_call(
+      layers, args, kwargs, length=length, mesh=mesh, config=config, remat_policy=remat_policy, prevent_cse=prevent_cse
+  )
   final_y, _ = _custom_vjp_prefetch_pipeline(
-      graphdef, x_in, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, length, ctx
+      graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
   )
   return final_y, layers, None

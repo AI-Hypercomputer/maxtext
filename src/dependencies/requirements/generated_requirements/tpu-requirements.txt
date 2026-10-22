@@ -36,17 +36,18 @@ cycler>=0.12.1
 datasets>=5.1.0
 decorator>=5.3.1
 defusedxml>=0.7.1
+diffusers>=0.41.0
 dill>=0.4.1
 distlib>=0.4.4
 distro>=1.9.0
 docstring-parser>=0.18.0
 drjax>=0.2.1
-duckdb>=1.5.6
+duckdb>=2.0.0
 einshape>=1.0
 etils>=1.14.0
 evaluate>=0.4.6
 execnet>=2.1.2
-fastapi>=0.156.5
+fastapi>=0.159.1
 filelock>=3.32.3
 fire>=0.7.1
 flatbuffers>=25.12.19
@@ -84,20 +85,18 @@ grpcio-status>=1.83.0
 gviz-api>=1.10.0
 h11>=0.16.0
 h5py>=3.14.0
-hf-xet>=1.7.0 ; platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+hf-xet>=1.7.0 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
 httpcore>=1.0.9
-httpcore2>=2.16.0 ; sys_platform != 'emscripten'
 httplib2>=0.32.0
 httpx>=0.28.1
-httpx2>=2.16.0
-httpx2-jsfetch>=1.0 ; sys_platform == 'emscripten'
-huggingface-hub>=2.2.0
+huggingface-hub>=1.33.0
 humanize>=4.16.0
 hypothesis>=6.165.10
 identify>=2.6.20
 idna>=3.18
 immutabledict>=4.3.1
 importlab>=0.8.1
+importlib-metadata>=9.0.1
 iniconfig>=2.3.0
 isort>=9.0.2
 jaraco-functools>=4.6.0
@@ -135,7 +134,7 @@ namex>=0.1.0
 nest-asyncio>=1.6.0 ; sys_platform == 'win32'
 networkx>=3.7
 ninja>=1.13.2
-nltk>=3.10.3
+nltk>=3.10.4
 nodeenv>=1.11.0
 numpy>=2.1.3
 numpy-typing-compat>=20260602.2.1
@@ -220,7 +219,6 @@ toolz>=1.2.0
 tqdm>=4.70.1
 transformers>=5.20.2
 treescope>=0.1.10
-truststore>=0.10.5 ; sys_platform != 'emscripten'
 typer>=0.27.3
 typing-extensions>=4.16.0
 typing-inspection>=0.4.4

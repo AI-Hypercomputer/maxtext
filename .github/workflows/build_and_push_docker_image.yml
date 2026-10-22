@@ -151,7 +151,7 @@ jobs:
   build_and_push:
     name: Build and Push Docker Image
     needs: [pre_build_check, drift_guard]
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
     # drift_guard is skipped in build-all mode, so !cancelled() keeps this job eligible;
     # in fast-rebuild mode the guard must have passed.
@@ -374,7 +374,7 @@ jobs:
     name: Promote and Tag Docker Image
     needs: [pre_build_check, build_and_push]
     if: ${{ !cancelled() && needs.build_and_push.result == 'success' }}
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
     # Runs promotion and tagging in a separate job from the workflow's own checkout
     # (not from inputs.maxtext_sha and without caching enabled) so we can invoke

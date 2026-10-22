@@ -15,6 +15,7 @@
 """Unit tests for input_pipeline_utils."""
 
 import dataclasses
+import types
 import unittest
 from types import SimpleNamespace
 
@@ -549,6 +550,116 @@ class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
     # None pixel_values raises ValueError
     with self.assertRaisesRegex(ValueError, "must have pixel_values"):
       unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
+
+
+class FixPadTokenIfNeededTest(unittest.TestCase):
+  """Tests for fix_pad_token_if_needed and SFT completion EOS loss masking."""
+
+  def test_remaps_ds4_pad_token_via_get_vocab(self):
+    vocab = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+    class _DummyTokenizer:
+      """Dummy tokenizer with get_vocab."""
+
+      def __init__(self):
+        self._pad_token = "<｜end▁of▁sentence｜>"
+        self.pad_token_id = 1
+        self.eos_token_id = 1
+
+      @property
+      def pad_token(self):
+        return self._pad_token
+
+      @pad_token.setter
+      def pad_token(self, value):
+        self._pad_token = value
+        self.pad_token_id = vocab[value]
+
+      def get_vocab(self):
+        return vocab
+
+    tok = _DummyTokenizer()
+    self.assertTrue(input_pipeline_utils.fix_pad_token_if_needed(tok))
+    self.assertEqual(tok.pad_token, "<｜▁pad▁｜>")
+    self.assertEqual(tok.pad_token_id, 2)
+    self.assertEqual(tok.eos_token_id, 1)
+
+  def test_remaps_ds4_pad_token_via_convert_tokens_to_ids(self):
+    vocab = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+    class _DummyTokenizerNoGetVocab:
+      """Dummy tokenizer with convert_tokens_to_ids only."""
+
+      def __init__(self):
+        self._pad_token = "<｜end▁of▁sentence｜>"
+        self.pad_token_id = 1
+        self.eos_token_id = 1
+
+      @property
+      def pad_token(self):
+        return self._pad_token
+
+      @pad_token.setter
+      def pad_token(self, value):
+        self._pad_token = value
+        self.pad_token_id = vocab[value]
+
+      def convert_tokens_to_ids(self, token):
+        return vocab.get(token)
+
+    tok = _DummyTokenizerNoGetVocab()
+    self.assertTrue(input_pipeline_utils.fix_pad_token_if_needed(tok))
+    self.assertEqual(tok.pad_token, "<｜▁pad▁｜>")
+    self.assertEqual(tok.pad_token_id, 2)
+
+  def test_tokenizer_without_ds4_pad_token_is_unchanged(self):
+    tok_pad_equals_eos = types.SimpleNamespace(
+        pad_token="<eos>",
+        pad_token_id=1,
+        eos_token="<eos>",
+        eos_token_id=1,
+        get_vocab=lambda: {"<bos>": 0, "<eos>": 1, "hello": 2},
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_pad_equals_eos))
+    self.assertEqual(tok_pad_equals_eos.pad_token, "<eos>")
+    self.assertEqual(tok_pad_equals_eos.pad_token_id, 1)
+
+    tok_standard = types.SimpleNamespace(
+        pad_token="<pad>",
+        pad_token_id=0,
+        eos_token="<eos>",
+        eos_token_id=1,
+        get_vocab=lambda: {"<pad>": 0, "<eos>": 1, "<｜▁pad▁｜>": 2},
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_standard))
+    self.assertEqual(tok_standard.pad_token, "<pad>")
+    self.assertEqual(tok_standard.pad_token_id, 0)
+
+    tok_unk_fallback = types.SimpleNamespace(
+        pad_token="<eos>",
+        pad_token_id=1,
+        eos_token="<eos>",
+        eos_token_id=1,
+        unk_token_id=0,
+        convert_tokens_to_ids=lambda _tok: 0,
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_unk_fallback))
+    self.assertEqual(tok_unk_fallback.pad_token, "<eos>")
+    self.assertEqual(tok_unk_fallback.pad_token_id, 1)
+
+  def test_completion_eos_is_weighted_only_when_pad_differs_from_eos(self):
+    # Prompt [BOS=0, 10, 11], completion [20, 21, EOS=1].
+    example = {"text": [[0, 10, 11], [20, 21, 1]], "is_prompt": [True, False]}
+    weighted_eos = {}
+    for pad_id in (1, 2):
+      masked = input_pipeline_utils.SFTPromptMasking(
+          text_column_name="text", completion_only=True, max_target_length=8, unk_id=pad_id
+      ).map(dict(example))
+      masked["targets_segmentation"] = np.ones_like(masked["targets"])
+      shifted = input_pipeline_utils.ShiftData(ignored_ids=[pad_id, 0], axis=0).map(masked)
+      weighted_eos[pad_id] = int(((shifted["targets"] == 1) & (shifted["targets_segmentation"] != 0)).sum())
+    # pad_id == eos_id drops the completion EOS from the loss; the remapped pad id keeps it.
+    self.assertEqual(weighted_eos, {1: 0, 2: 1})
 
 
 if __name__ == "__main__":

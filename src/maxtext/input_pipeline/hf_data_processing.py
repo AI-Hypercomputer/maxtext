@@ -366,6 +366,7 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
 
   if use_sft:
+    input_pipeline_utils.fix_pad_token_if_needed(tokenizer)
     if not chat_template:
       chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
 
