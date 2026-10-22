@@ -60,10 +60,22 @@ MERGE_WATCH_DAYS = 14
 
 # The tick stops cleanly while this many requests are still left. GITHUB_TOKEN inside Actions allows
 # 1000 an hour per repository, shared by every workflow in it, so the others keep some.
+# `--rate-floor` overrides it, for a tick that runs with no token and so has 60 requests an hour.
 RATE_LIMIT_FLOOR = 300
 
 # The merge checks cost a request per waiting pull request, so they re-check the budget this often.
 MERGE_BUDGET_CHECK_EVERY = 25
+
+# How the merge checks ask GitHub. "each" reads every waiting pull request on its own, one request
+# apiece. "list" reads the recently closed pull requests a page at a time instead, newest update
+# first, and stops at the oldest run still waiting; a merge always updates its pull request, so a
+# merge of a waiting pull request cannot be further back than that.
+MERGE_CHECKS_EACH = "each"
+MERGE_CHECKS_LIST = "list"
+MERGE_CHECK_MODES = (MERGE_CHECKS_EACH, MERGE_CHECKS_LIST)
+# The most pages of closed pull requests one "list" check reads (100 a page). Fourteen days of
+# maxtext pull requests fit in two or three.
+MERGE_LIST_MAX_PAGES = 5
 
 DEFAULT_BACKFILL_DAYS = 30
 
@@ -143,6 +155,12 @@ class Options:
   backfill_days: int = DEFAULT_BACKFILL_DAYS
   dry_run: bool = False
   max_runs: int | None = None
+  rate_floor: int = RATE_LIMIT_FLOOR
+  skip_tests: bool = False
+  max_wait: float | None = None
+  merge_checks: str = MERGE_CHECKS_EACH
+  defer_running: bool = False
+  rebuild_views: bool = False
 
 
 @dataclass
@@ -156,6 +174,7 @@ class TickReport:
   runs_collected: int = 0
   runs_already_stored: int = 0
   runs_failed: int = 0
+  runs_deferred: int = 0
   attempts_written: int = 0
   attempts_pending: int = 0
   attempts_incomplete: int = 0
@@ -169,8 +188,10 @@ class TickReport:
   runs_tests_expired: int = 0
   runs_tests_superseded: int = 0
   runs_tests_failed: int = 0
+  runs_tests_skipped: int = 0
   prs_watched: int = 0
   merges_learned: int = 0
+  merge_pages_read: int = 0
   views_written: int = 0
   views_unchanged: int = 0
   pr_files_written: int = 0
@@ -183,6 +204,8 @@ class TickReport:
   partial_suites: list[str] = field(default_factory=list)
   api_requests: int = 0
   download_requests: int = 0
+  budget_first: str | None = None
+  budget_last: str | None = None
   stopped_because: str | None = None
   problems: list[str] = field(default_factory=list)
 
@@ -215,7 +238,7 @@ class TickReport:
 class Tick:
   """Collects one window of runs into the store."""
 
-  def __init__(
+  def __init__(  # pylint: disable=too-many-positional-arguments
       self,
       options: Options,
       client: github.GitHubClient,
@@ -243,6 +266,9 @@ class Tick:
     self._known_names_cache: set[tuple[str, str, str]] | None = None
     self._snapshot_days_cache: dict[str, int] | None = None
     self._runs_processed = 0
+    # The superseded mark each stored run of a waiting pull request was written with, by run id. A
+    # merge re-reads the run with `get_run`, which answers no such mark (only a listing does).
+    self._stored_superseded: dict[int, bool] = {}
 
   # ---------------------------------------------------------------- the window
 
@@ -282,7 +308,10 @@ class Tick:
           return
     self._collect_pending()
     if self._budget_allows():
-      self._refresh_merges()
+      if self.options.merge_checks == MERGE_CHECKS_LIST:
+        self._refresh_merges_from_list()
+      else:
+        self._refresh_merges()
 
   def _budget_allows(self) -> bool:
     """Checks the API budget before more requests are spent; False means stop cleanly."""
@@ -300,11 +329,18 @@ class Tick:
     else:
       remaining = status["remaining"] if seen is None else min(seen, status["remaining"])
       limit = status["limit"]
-    if remaining >= RATE_LIMIT_FLOOR:
+    # The first and the latest reading go in the report: with no token the budget is per IP
+    # address, so they are the only record of what this tick's connection had to spend.
+    reading = f"{remaining} of {limit}"
+    if self.report.budget_first is None:
+      self.report.budget_first = reading
+    self.report.budget_last = reading
+    floor = self.options.rate_floor
+    if remaining >= floor:
       return True
     self.report.stopped_because = (
         f"the API budget ran low: {remaining} of {limit} requests left, "
-        f"floor is {RATE_LIMIT_FLOOR}. The next tick resumes from the watermark."
+        f"floor is {floor}. The next tick resumes from the watermark."
     )
     return False
 
@@ -340,6 +376,9 @@ class Tick:
       self.report.runs_already_stored += 1
       return True
 
+    if self.options.defer_running and self._defer_while_running(listed, run_id):
+      return True
+
     # A run already stored costs no request, so only a run that will be read checks the budget.
     if not self._budget_allows():
       return False
@@ -350,6 +389,23 @@ class Tick:
       self._collect_run(listed, run_id)
     except (github.GitHubError, runs.RunsError, rows.RowError, store_module.StoreError, junit.JUnitError) as error:
       self._failed(run_id, listed, error)
+    return True
+
+  def _defer_while_running(self, listed: dict[str, Any], run_id: int) -> bool:
+    """Leaves a run the listing shows as unfinished on the in-flight list, with no request; False to read it."""
+    # Reading such a run again (the run, then its pull request) costs two or three requests only to
+    # hear that it is still running, which the listing already says. With no token a backed-up CI
+    # holds enough queued runs to spend the whole hour that way. An attempt that has waited past
+    # PENDING_MAX_AGE_HOURS is read as usual, so that it is stored as it stands.
+    if listed.get("status") == store_module.COMPLETED_STATUS:
+      return False
+    attempt = int(listed.get("run_attempt") or 1)
+    if (run_id, attempt) in self._expired:
+      return False
+    if self.state.mark_pending(run_id, attempt, created_at=listed.get("created_at"), status=listed.get("status")):
+      self.report.attempts_pending += 1
+    self._read_this_tick.add(run_id)
+    self.report.runs_deferred += 1
     return True
 
   def _failed(self, run_id: int, listed: dict[str, Any], error: Exception) -> None:
@@ -453,7 +509,7 @@ class Tick:
     self.report.runs_collected += 1
     self.report.months_touched.add(month)
 
-  def _note_unfinished(
+  def _note_unfinished(  # pylint: disable=too-many-positional-arguments
       self,
       payload: dict[str, Any],
       run_id: int,
@@ -512,8 +568,11 @@ class Tick:
     """Asks the pull requests that were open when their run was read whether they merged."""
     waiting = self._open_pull_requests()
     self.report.prs_watched = len(waiting)
+    # A floor below the check interval could be overshot between two checks, so a low floor is
+    # checked before every pull request.
+    every = MERGE_BUDGET_CHECK_EVERY if self.options.rate_floor >= MERGE_BUDGET_CHECK_EVERY else 1
     for index, number in enumerate(sorted(waiting)):
-      if index and index % MERGE_BUDGET_CHECK_EVERY == 0 and not self._budget_allows():
+      if index and index % every == 0 and not self._budget_allows():
         return
       try:
         pull = runs.get_pull_request(self.client, number)
@@ -525,6 +584,60 @@ class Tick:
         # them, and a closed one simply ages out of the window.
         continue
       if self._store_merge(waiting[number], pull):
+        self.report.merges_learned += 1
+
+  def _refresh_merges_from_list(self) -> None:
+    """Learns merges from the recently closed pull requests, a page at a time, not one request each."""
+    waiting = self._open_pull_requests()
+    self.report.prs_watched = len(waiting)
+    if not waiting:
+      return
+    # `_open_pull_requests` keeps runs from the last MERGE_WATCH_DAYS only. Each of those pull
+    # requests was open when its run was read, so a merge came later, and a merge updates the
+    # pull request. Nothing updated before this moment can be the merge of a waiting one.
+    cutoff = iso_utc(self.now - timedelta(days=MERGE_WATCH_DAYS))
+    merged: dict[int, dict[str, Any]] = {}
+    for page in range(1, MERGE_LIST_MAX_PAGES + 1):
+      if page > 1 and not self._budget_allows():
+        return
+      try:
+        pulls = self.client.paginate(
+            runs.PULLS_ENDPOINT,
+            "pulls",
+            max_items=github.PER_PAGE,
+            state="closed",
+            sort="updated",
+            direction="desc",
+            page=page,
+        )
+      except github.GitHubError as error:
+        self.report.note_problem(f"the closed pull requests could not be listed ({error}); their runs still wait.")
+        return
+      self.report.merge_pages_read += 1
+      for pull in pulls:
+        if not isinstance(pull, dict):
+          continue
+        try:
+          number = int(pull.get("number") or 0)
+        except (TypeError, ValueError):
+          continue
+        if number in waiting and pull.get("merged_at") and number not in merged:
+          merged[number] = pull
+      if len(pulls) < github.PER_PAGE or len(merged) == len(waiting):
+        break
+      oldest_update = pulls[-1].get("updated_at") if isinstance(pulls[-1], dict) else None
+      if not oldest_update or str(oldest_update) < cutoff:
+        break
+    else:
+      _warn(
+          f"WARNING: {MERGE_LIST_MAX_PAGES} pages of closed pull requests did not reach back to {cutoff}; "
+          "a merge older than that is learned on a later tick."
+      )
+
+    for number in sorted(merged):
+      if not self._budget_allows():
+        return
+      if self._store_merge(waiting[number], merged[number]):
         self.report.merges_learned += 1
 
   def _open_pull_requests(self) -> dict[int, int]:
@@ -547,6 +660,9 @@ class Tick:
       run_id = int(payload.get("run_id") or 0)
       if run_id > waiting.get(int(number), 0):
         waiting[int(number)] = run_id
+      flag = payload.get(runs.SUPERSEDED_FIELD)
+      if flag is not None:
+        self._stored_superseded[run_id] = self._stored_superseded.get(run_id, False) or bool(flag)
     return waiting
 
   def _store_merge(self, run_id: int, pull: dict[str, Any]) -> bool:
@@ -558,6 +674,11 @@ class Tick:
     except github.GitHubError as error:
       self.report.note_problem(f"run {run_id} could not be re-read for its merge time ({error}).")
       return False
+    # `get_run` answers no superseded mark, so the corrected row would lose the one the run was stored with
+    # and a superseded run would come back into the views as soon as its pull request merged.
+    stored_flag = self._stored_superseded.get(run_id)
+    if listed.get(runs.SUPERSEDED_FIELD) is None and stored_flag is not None:
+      listed = dict(listed, **{runs.SUPERSEDED_FIELD: stored_flag})
 
     attempt = int(listed.get("run_attempt") or 1)
     if not self.state.has_attempt(run_id, attempt):
@@ -599,6 +720,12 @@ class Tick:
     flavors = derive.test_flavors(jobs)
     if not flavors:
       return None
+
+    if self.options.skip_tests:
+      # Asked not to read artifacts (with no token GitHub answers 401). Each suite still gets a row,
+      # with no counts and the reason, so the views can give it its wall-clock time from the jobs.
+      self.report.runs_tests_skipped += 1
+      return junit.unread_run_tests(run_id, flavors)
 
     try:
       found = junit.read_run_tests(self.client, run_id, flavors=flavors)
@@ -676,6 +803,9 @@ class Tick:
 
   def _kept_test_rows(self, run_payload: dict[str, Any], run_tests: junit.RunTests) -> list[rows.TestRow]:
     """Builds this run's test rows and keeps the two tiers the store is allowed to hold."""
+    if self.options.skip_tests:
+      # No artifact was read, so there is no test row to keep and no daily snapshot to claim.
+      return []
     built: list[rows.TestRow] = []
     for suite_id, entry in sorted(run_tests.suites.items()):
       for worker, result in sorted(entry.per_worker.items()):
@@ -757,7 +887,8 @@ def rebuild_views(
 ) -> None:
   """Rewrites the view files for every month that needs them, then meta.json."""
   today = now.date()
-  wanted = sorted(report.months_touched | months_missing_views(row_store, today))
+  extra = set(views.months_in_window(today)) if options.rebuild_views else set()
+  wanted = sorted(report.months_touched | months_missing_views(row_store, today) | extra)
   try:
     if options.dry_run:
       with tempfile.TemporaryDirectory(prefix="ci-metrics-dry-run-") as throwaway:
@@ -817,6 +948,8 @@ def print_report(report: TickReport, options: Options) -> None:
       f"({format_count(report.attempts_pending)} still running, "
       f"{format_count(report.attempts_incomplete)} stored unfinished)",
   )
+  if options.defer_running:
+    line("Runs left running", f"{format_count(report.runs_deferred)}, kept in flight without a request (--defer-running)")
   line("Jobs written", format_count(report.jobs_written))
   line("Suites written", format_count(report.suites_written))
   line(
@@ -830,12 +963,18 @@ def print_report(report: TickReport, options: Options) -> None:
       f"{format_count(report.runs_tests_harvested)} run(s) harvested, "
       f"{format_count(report.runs_tests_expired)} too old to have any, "
       f"{format_count(report.runs_tests_superseded)} superseded, "
-      f"{format_count(report.runs_tests_failed)} unreadable",
+      f"{format_count(report.runs_tests_failed)} unreadable"
+      + (f", {format_count(report.runs_tests_skipped)} not read (--skip-tests)" if options.skip_tests else ""),
   )
   line(
       "Pull requests waiting",
       f"{format_count(report.prs_watched)} still open when their run was read, "
-      f"{format_count(report.merges_learned)} merged since the last tick",
+      f"{format_count(report.merges_learned)} merged since the last tick"
+      + (
+          f" ({format_count(report.merge_pages_read)} page(s) of closed pull requests read)"
+          if options.merge_checks == MERGE_CHECKS_LIST
+          else ""
+      ),
   )
 
   if report.suite_reasons:
@@ -858,6 +997,8 @@ def print_report(report: TickReport, options: Options) -> None:
       f"older than the {views.VIEW_WINDOW_DAYS}-day window" + (" [dry run: would delete]" if options.dry_run else ""),
   )
   line("API requests spent", f"{format_count(report.api_requests)} (+{format_count(report.download_requests)} downloads)")
+  if report.budget_first is not None:
+    line("API budget", f"{report.budget_first} left at the first check, {report.budget_last} at the last")
   if report.stopped_because:
     line("Stopped early", report.stopped_because)
   for problem in report.problems:
@@ -915,6 +1056,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
       default=None,
       help="Stop after this many runs and leave the rest for the next tick.",
   )
+  parser.add_argument(
+      "--rate-floor",
+      type=int,
+      default=RATE_LIMIT_FLOOR,
+      help=f"Stop cleanly when fewer API requests than this are left this hour (default {RATE_LIMIT_FLOOR}).",
+  )
+  parser.add_argument(
+      "--skip-tests",
+      action="store_true",
+      help="Do not read test artifacts; store each suite with no counts. Needed with no token (GitHub answers 401).",
+  )
+  parser.add_argument(
+      "--max-wait",
+      type=float,
+      default=None,
+      help="Most seconds one request may sleep across its retries; a longer wait fails at once (default 3600).",
+  )
+  parser.add_argument(
+      "--merge-checks",
+      choices=MERGE_CHECK_MODES,
+      default=MERGE_CHECKS_EACH,
+      help="How merges are learned: one request per waiting pull request, or pages of closed ones (default each).",
+  )
+  parser.add_argument(
+      "--defer-running",
+      action="store_true",
+      help="Keep runs the listing shows as unfinished in flight without reading them again (2-3 requests each).",
+  )
+  parser.add_argument(
+      "--rebuild-views",
+      action="store_true",
+      help="Rewrite every month in the view window, not only the months this tick touched.",
+  )
   return parser.parse_args(argv)
 
 
@@ -933,6 +1107,12 @@ def build_options(args: argparse.Namespace) -> Options:
     raise UsageError(f"--backfill-days must be at least 1, got {args.backfill_days}")
   if args.max_runs is not None and args.max_runs < 1:
     raise UsageError(f"--max-runs must be at least 1, got {args.max_runs}")
+  if args.rate_floor < 0:
+    raise UsageError(f"--rate-floor must be 0 or more, got {args.rate_floor}")
+  if args.max_wait is not None and not 0 <= args.max_wait <= github.MAX_TOTAL_RETRY_SLEEP_SECONDS:
+    raise UsageError(
+        f"--max-wait must be between 0 and {github.MAX_TOTAL_RETRY_SLEEP_SECONDS:.0f} seconds, got {args.max_wait}"
+    )
   return Options(
       out=Path(args.out).expanduser(),
       repo=args.repo,
@@ -941,6 +1121,12 @@ def build_options(args: argparse.Namespace) -> Options:
       backfill_days=args.backfill_days,
       dry_run=bool(args.dry_run),
       max_runs=args.max_runs,
+      rate_floor=args.rate_floor,
+      skip_tests=bool(args.skip_tests),
+      max_wait=args.max_wait,
+      merge_checks=args.merge_checks,
+      defer_running=bool(args.defer_running),
+      rebuild_views=bool(args.rebuild_views),
   )
 
 
@@ -956,7 +1142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return EXIT_USAGE
 
   session = CountingSession()
-  client = github.GitHubClient(owner, name, session=session)
+  client = github.GitHubClient(owner, name, session=session, max_wait=options.max_wait)
   report = TickReport()
   try:
     if not options.dry_run:

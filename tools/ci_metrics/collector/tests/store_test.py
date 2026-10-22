@@ -1878,5 +1878,18 @@ class PruneMonthsTest(StoreTestCase):
     self.assertEqual(self.ndjson_snapshot(), before)
 
 
+class RunnerLabelLaneTest(unittest.TestCase):
+  """Both the n2 and n4 CPU and buildkit runner labels map to their lanes."""
+
+  def test_n2_and_n4_runner_labels_map_to_cpu_and_build(self) -> None:
+    """The n4 runner labels introduced on 2026-10-22 map to CPU and Build, like the n2 ones."""
+    from collector import derive  # pylint: disable=import-outside-toplevel
+
+    self.assertEqual(derive.device_lane({"labels": ["linux-x86-n2-32"]}), derive.LANE_CPU)
+    self.assertEqual(derive.device_lane({"labels": ["linux-x86-n4-32"]}), derive.LANE_CPU)
+    self.assertEqual(derive.device_lane({"labels": ["linux-x86-n2-16-buildkit"]}), derive.LANE_BUILD)
+    self.assertEqual(derive.device_lane({"labels": ["linux-x86-n4-16-buildkit"]}), derive.LANE_BUILD)
+
+
 if __name__ == "__main__":
   unittest.main(verbosity=2)

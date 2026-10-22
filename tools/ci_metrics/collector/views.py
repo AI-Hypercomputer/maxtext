@@ -21,7 +21,7 @@ import dataclasses
 import json
 import os
 import statistics
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -674,6 +674,7 @@ def load_month(store: RowStore, month: str) -> MonthData:
       data.kept_run_ids.add(run_id)
     if last.run.is_merged_pr and last.run.pr_number is not None and _is_kept(last.run):
       _claim_pull_request(data, last.run)
+  _prefer_runs_that_tested(data)
 
   wanted = set(data.merged_pr_runs.values())
   if wanted:
@@ -731,6 +732,90 @@ def _claim_pull_request(data: MonthData, run: rows.RunRow) -> None:
     return
   if (run.created_at or "") > (incumbent.run.created_at or ""):
     data.merged_pr_runs[number] = run.run_id
+
+
+# The author GitHub shows on the pull requests that Copybara exports from Google's internal code base.
+COPYBARA_AUTHOR = "copybara-service[bot]"
+# The lanes whose jobs run tests; the hosted checks and the package build do not.
+TEST_LANES = (derive.LANE_TPU, derive.LANE_GPU, derive.LANE_CPU)
+# The final conclusions of a run whose result could reach review; a cancelled or skipped run has none.
+RESULT_CONCLUSIONS = ("success", "failure")
+# How long before GitHub marks a Copybara pull request merged the run on its submit push can be created. The
+# push and the merge are seconds apart; a minute leaves room without reaching back to an earlier push.
+SUBMIT_PUSH_SECONDS = 60
+
+
+def _ran_tests(entry: RunAttempt | None) -> bool:
+  """True when at least one TPU, GPU or CPU job of this attempt held a runner."""
+  if entry is None:
+    return False
+  return any(derive.device_lane(job) in TEST_LANES and derive.held_a_runner(job) for job in entry.jobs)
+
+
+def _tested_with_result(data: MonthData, run_id: int) -> bool:
+  """True when a run's first attempt ran tests and the run ended in success or failure."""
+  last = data.last_attempt(run_id)
+  if last is None or last.run.conclusion not in RESULT_CONCLUSIONS:
+    return False
+  # The charts draw a run from its first attempt, so that is the one that must have run tests.
+  return _ran_tests(data.first_attempt(run_id))
+
+
+def _is_submit_push_run(run: rows.RunRow, final_head: str, merged_at: str | None) -> bool:
+  """True when a run is on the pull request's final head and was created at the merge, not before it."""
+  if run.head_sha != final_head:
+    return False
+  created = parse_timestamp(run.created_at)
+  merged = parse_timestamp(merged_at)
+  if created is None or merged is None:
+    return False
+  return created >= merged - timedelta(seconds=SUBMIT_PUSH_SECONDS)
+
+
+def _newest_run(candidates: Sequence[rows.RunRow]) -> rows.RunRow:
+  """The most recently created run, by run id when two share a creation time."""
+  return max(candidates, key=lambda run: (run.created_at or "", run.run_id))
+
+
+def _prefer_runs_that_tested(data: MonthData) -> None:
+  """Draws each merged pull request from a run that tested it, in place of the run `_claim_pull_request` chose.
+
+  1. Any pull request: when the chosen run, the newest on the final head, ran no tests in its first attempt (no
+     TPU, GPU or CPU job held a runner, for example a run whose test jobs were all skipped), the newest run on
+     the final head that ran tests and ended in success or failure is drawn instead.
+  2. A Copybara pull request (author copybara-service[bot]): when a change is submitted inside Google, Copybara
+     pushes the submitted commit to the pull request and GitHub marks it merged a few seconds later. The run on
+     that push queues its tests after the merge, so it cannot gate it, and once the workflow skips tests on
+     merged pull requests it has none at all. When the run left after step 1 is that run (on the final head,
+     created at most SUBMIT_PUSH_SECONDS before the merge), the pull request is drawn from its newest run on an
+     earlier head that ran tests and ended in success or failure: the one whose result reached review. A run on
+     the final head created before that gated the merge and stays.
+
+  Without such a run the earlier choice stays. Each month is built from its own rows, so a Copybara pull request
+  whose runs before the submit push were created in the month before it keeps the run on the submit push in the
+  later month, which holds no other run of it.
+  """
+  runs_by_pr: dict[int, list[rows.RunRow]] = {}
+  for run_id in data.kept_run_ids:
+    last = data.last_attempt(run_id)
+    if last is not None and last.run.is_merged_pr and last.run.pr_number is not None:
+      runs_by_pr.setdefault(last.run.pr_number, []).append(last.run)
+  for number, held_id in sorted(data.merged_pr_runs.items()):
+    held = data.last_attempt(held_id)
+    if held is None or not held.run.pr_head_sha:
+      continue
+    final_head = held.run.pr_head_sha
+    siblings = runs_by_pr.get(number, [])
+    chosen = held.run
+    if chosen.head_sha == final_head and not _ran_tests(data.first_attempt(chosen.run_id)):
+      tested = [run for run in siblings if run.head_sha == final_head and _tested_with_result(data, run.run_id)]
+      if tested:
+        chosen = _newest_run(tested)
+    if held.run.pr_user == COPYBARA_AUTHOR and _is_submit_push_run(chosen, final_head, held.run.pr_merged_at):
+      earlier = [run for run in siblings if run.head_sha != final_head and _tested_with_result(data, run.run_id)]
+      if earlier:
+        chosen = _newest_run(earlier)
+    data.merged_pr_runs[number] = chosen.run_id
 
 
 # ----------------------------------------------------------------------------------------
@@ -1474,10 +1559,11 @@ def build_views(
       (written if outcome == "written" else unchanged).append(_relative(out, path))
       counts[group][month] = {name: table_row_count(table) for name, table in view["tables"].items()}
 
+    month_run_ids = {key[0] for key in data.attempts}
     for number in sorted(data.merged_pr_runs):
       view = build_pr_view(number, data)
       path = pr_view_path(out, number)
-      kept = _kept_pr_file(path, view)
+      kept = _kept_pr_file(path, view, month_run_ids)
       if kept is not None:
         pr_unchanged.append(_relative(out, path))
         pull_requests[number] = kept
@@ -1534,12 +1620,18 @@ def build_views(
   }
 
 
-def _kept_pr_file(path: Path, candidate: Mapping[str, Any]) -> str | None:
-  """Says whether the pull request file already on disk describes a newer run than this one."""
+def _kept_pr_file(path: Path, candidate: Mapping[str, Any], month_run_ids: Container[int] = ()) -> str | None:
+  """Says whether the pull request file already on disk describes a newer run than this one.
+
+  A newer stored run wins only when it comes from another month: a month that holds both runs has already
+  chosen between them (for example a Copybara pull request's run before submit over the run on its submit push).
+  """
   stored = read_view(path)
   if not isinstance(stored, Mapping):
     return None
   if stored.get("run_id") == candidate.get("run_id"):
+    return None
+  if stored.get("run_id") in month_run_ids:
     return None
   theirs = parse_timestamp(stored.get("created_at"))
   mine = parse_timestamp(candidate.get("created_at"))

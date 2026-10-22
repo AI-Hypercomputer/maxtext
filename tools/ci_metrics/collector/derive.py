@@ -49,7 +49,8 @@ LANE_NO_RUNNER = "No runner"
 # announcing it, so an unknown label is reported as unknown rather than guessed into a lane.
 LANE_UNKNOWN = "Unknown"
 
-# Complete label inventory, counted over 196 runs and about 9,800 jobs on 2026-09-01.
+# Complete label inventory, counted over 196 runs and about 9,800 jobs on 2026-09-01, plus the n4
+# runner labels main switched to on 2026-10-22.
 RUNNER_LABEL_LANES = {
     "linux-x86-ct6e-180-4tpu": LANE_TPU,
     "linux-x86-ct6e-180-8tpu": LANE_TPU,
@@ -57,6 +58,8 @@ RUNNER_LABEL_LANES = {
     "linux-x86-a2-48-a100-4gpu": LANE_GPU,
     "linux-x86-n2-32": LANE_CPU,
     "linux-x86-n2-16-buildkit": LANE_BUILD,
+    "linux-x86-n4-32": LANE_CPU,
+    "linux-x86-n4-16-buildkit": LANE_BUILD,
     "ubuntu-latest": LANE_HOSTED,
 }
 

@@ -169,14 +169,21 @@ class GitHubClient:
       repo: str,
       token: str | None = None,
       session: requests.Session | None = None,
+      max_wait: float | None = None,
   ) -> None:
     """Builds a client for `owner/repo`."""
     global _TOKEN_WARNING_EMITTED
 
+    # `max_wait` caps the seconds one request may sleep across its retries. A wait longer than
+    # what is left of it is not started at all, so the request fails at once instead of sleeping
+    # part of the way to a reset it cannot reach. None keeps the one-hour default.
+    if max_wait is not None and max_wait < 0:
+      raise ValueError(f"max_wait must be 0 or more seconds, got {max_wait}")
     self.owner = owner
     self.repo = repo
     self.token = token or os.environ.get("GITHUB_TOKEN") or None
     self.session = session if session is not None else requests.Session()
+    self.max_wait = None if max_wait is None else float(max_wait)
     self._owns_session = session is None
     self._remaining_hint: int | None = None
     self._reset_hint: int | None = None
@@ -461,9 +468,14 @@ class GitHubClient:
 
     raise GitHubError(f"{method} {safe} failed after {MAX_ATTEMPTS} attempts.", url=safe)
 
-  @staticmethod
-  def _affordable_delay(wanted: float, already_slept: float) -> float | None:
+  def _affordable_delay(self, wanted: float, already_slept: float) -> float | None:
     """Trims a retry delay to what is left of this request's sleeping budget."""
+    if self.max_wait is not None:
+      # A hard cap: a wait that does not fit in full is not started. Sleeping part of the way to a
+      # rate-limit reset only burns the time, because the retry would be refused all the same.
+      if wanted > self.max_wait - already_slept:
+        return None
+      return wanted
     left = MAX_TOTAL_RETRY_SLEEP_SECONDS - already_slept
     if left <= 0:
       return None
