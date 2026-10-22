@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792661182659,
+  "lastUpdate": 1792669201054,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -54754,6 +54754,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4110.563999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 306,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Fenghui Zhang",
+            "username": "fenghuizhang",
+            "email": "fhzhang@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "652ffc2d27fe53e3dbe57c919a15a91deb427d06",
+          "message": "Implement the full 45-layer `Glm5Model` (`Glm5Embedding`, `Glm5Output`, `Glm5Model`, `create_glm5_3_flash_model`) in `src/maxtext/m3/models/glm5_3_flash/modeling_glm5_3_flash.py` and register `glm5.3-flash` in `src/maxtext/m3/models/__init__.py` via a lazy factory (`create_glm5_3_flash_model`) so importing `maxtext.m3.models` does not eagerly import `tokamax` KDA (closing F14).\n\nKey details:\n- Assemble 3 dense prefix layers (`prefix_layers` as `nnx.List`), 10 stacked 4-layer super-blocks (`super_block`), and 2 MoE suffix layers (`suffix_layers` as `nnx.List`), followed by `Glm5HyperHead`, `Glm5RMSNorm`, and untied `lm_head`.\n- Make `rngs: nnx.Rngs` required in `Glm5Model.from_maxtext_config` and `create_glm5_3_flash_model`, reject unsupported `quant_mode_str` with `ValueError`, reject unknown keyword arguments with `TypeError`, and enforce that `create_glm5_3_flash_model` unconditionally passes `place_on_devices=False` to defer device placement to abstract model sharding.\n- Keep `apply_glm5_remat(model, *, policy)` as the single owner of rematerialization policy (closing F20).\n- Gate `moe_lb_loss` computation explicitly on `num_moe_layers = max(0, num_hidden_layers - first_k_dense_replace)` and verify `len(router_logits_list) == num_moe_layers`.\n- Enforce periodic `layer_types` and `indexer_types` schedule validation in `create_stacked_super_block` (closing F19).\n- Add Tier 1 forward/backward parity across 5, 7, and 13 layers at seq_len 32 and 20 (closing F21 and T4/E8: fp32 `atol=1e-5*max(1, ||ref||_inf)`, `rtol=1e-5`, `||a-b||_2 <= 1e-5*max(1, ||ref||_2)`, `cos > 0.99999` on logits and every non-indexer grad leaf, plus mandatory fp64 `frob_rel <= 1e-10` gate on logits and every non-indexer grad leaf), scanned/unscanned/remat equivalence on 13 layers, right-padded `decoder_segment_ids` parity with batch size 2 and ragged valid lengths, `bfloat16` precision check, `jax.jit` compilation of `forward_with_aux`, and registry/invariant tests.\n- Parameterize `test_scanned_unscanned_and_remat_parity` (`unscanned`, `remat`) and `test_hf_parity_and_backward` (`layers{5,7,13}_fp{64,32}`) across `shard_count = 20` on `glm5_3_flash_model_test` so all 20 shards finish under the 900s `large` timeout in unoptimized `fastbuild` (watch item: the `remat` variant of `test_scanned_unscanned_and_remat_parity` runs at ~649.2s in `fastbuild` with ~250.8s margin under 900s).\n\n- [x] Tested with unit tests\n\nPiperOrigin-RevId: 1004563736",
+          "timestamp": "2026-10-22T07:56:54Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/652ffc2d27fe53e3dbe57c919a15a91deb427d06"
+        },
+        "date": 1792669200217,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 286.64300000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 104.69200000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.28000000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.43899999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4365.008000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 306,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1410.7020000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.383,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4106.355,
             "unit": "sec"
           },
           {
