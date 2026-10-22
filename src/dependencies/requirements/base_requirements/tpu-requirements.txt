@@ -1,2 +1,3 @@
 -r requirements.txt
+diffusers>=0.40.0
 flax>=0.12.10
