@@ -108,12 +108,24 @@ def _per_layer_sharding(stacked, mesh):
   return NamedSharding(mesh, jax.sharding.PartitionSpec(*tuple(s.spec)[1:]))
 
 
+def _needs_minor_dim_layout_pin(stacked, layer_sharding, mesh):
+  """Whether a per-layer weight is 3D+ and FSDP-sharded on its minor-most dimension."""
+  ndim = getattr(stacked, "ndim", 0) - 1
+  if ndim < 3 or layer_sharding is None or layer_sharding.spec is None or len(layer_sharding.spec) < ndim:
+    return False
+  entry = layer_sharding.spec[ndim - 1]
+  axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+  axes = tuple(a for a in axes if mesh.shape.get(a, 1) > 1)
+  return bool(sharding.fsdp_axes_for_dim(axes))
+
+
 _PrefetchCtx = collections.namedtuple(
     "_PrefetchCtx",
     [
         "mesh",
         "shard_mode",
         "debug_sharding",
+        "scan_axis",
         "static_args_leaves",
         "static_kwargs_leaves",
         "params_treedef",
@@ -265,23 +277,31 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   layer_state, g, saved, layout) -> (dy, dw)` differentiates one layer in the backward pass from
   those activations and the gathered weights `w`, recomputing everything else.
   """
+  if ctx.scan_axis != 0:
+    params_leaves = [
+        jnp.moveaxis(p, ctx.scan_axis, 0) if getattr(p, "ndim", 0) > ctx.scan_axis else p for p in params_leaves
+    ]
   params = jax.tree_util.tree_unflatten(ctx.params_treedef, params_leaves)
   state = jax.tree_util.tree_unflatten(ctx.state_treedef, state_leaves)
   layer_shardings = [_per_layer_sharding(p, ctx.mesh) for p in params_leaves]
   consts = (tuple(diff_args_leaves), tuple(diff_kwargs_leaves))
 
-  def gather_one(x):
-    x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding)
-    if getattr(x, "ndim", 0) >= 2:
-      # Pin the gathered weight to the default layout. Otherwise XLA may pick a different layout for
-      # the gathered buffer that rides in the loop carry and then relayout it with a full-size copy
-      # on the TensorCore before its consumer; pinned, any relayout happens on the gather output.
-      x = with_layout_constraint(x, Layout(tuple(range(x.ndim))))
-    return x
+  pin_layout_flags = [_needs_minor_dim_layout_pin(p, s, ctx.mesh) for p, s in zip(params_leaves, layer_shardings)]
 
   def gather_fn(layer_params):
     """All-gathers one layer's FSDP-sharded params (bf16[E, D/fsdp, F] -> bf16[E, D, F])."""
-    return jax.tree.map(gather_one, layer_params)
+    leaves, treedef = jax.tree_util.tree_flatten(layer_params)
+    out = []
+    for x, pin in zip(leaves, pin_layout_flags):
+      x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding)
+      if pin:
+        # 3D+ weights gathered on their minor-most dimension (e.g. [E, F, D/fsdp] where D/fsdp is not a
+        # multiple of 128) exit all-gather in layout {1, 0, 2}. Pinning only those weights to default
+        # major-to-minor layout keeps their relayout on the gather output (offloaded to SparseCore)
+        # without forcing unnecessary SparseCore data-format copies on weights gathered on major dims.
+        x = with_layout_constraint(x, Layout(tuple(range(x.ndim))))
+      out.append(x)
+    return jax.tree_util.tree_unflatten(treedef, out)
 
   def layer_pure(y, layer_weights, layer_state, layer_consts):
     """One layer call with every array input explicit (the layer arguments come from `layer_consts`)."""
@@ -397,20 +417,21 @@ def _custom_vjp_prefetch_pipeline_fwd(
 
     def body(carry, xs):
       y_k, w_k = carry
-      state_k, params_next = xs
+      state_k, next_idx = xs
+      params_next = _slice_at(params, next_idx)
       if ordered:
         # In the 2nd unrolled step of each iteration, waits for the 1st step's layer_fn(y_k, w_k)
         # so W(k) is dead before AG(k+2) starts and AG(k+2) can reuse W(k)'s buffer.
-        y_k, w_k, params_next = jax.lax.optimization_barrier((y_k, w_k, params_next))
+        y_k, params_next = jax.lax.optimization_barrier((y_k, params_next))
       w_next = gather_fn(params_next)  # AG(k+1) || layer k.
       y_out, saved_k = fwd_layer(y_k, w_k, state_k, layout)
       return (y_out, w_next), (y_k, saved_k)
 
-    # Iterates k = 1 .. length-2; element j of xs has state[j+1] and params[j+2].
+    # Iterates k = 1 .. length-2; element j of xs has state[j+1] and next_idx = j + 2.
     (y, w_curr), (ys_mid, saved_mid) = jax.lax.scan(
         body,
         (y, w_curr),
-        (_slice_range(state, 1, length - 1), _slice_range(params, 2, length)),
+        (_slice_range(state, 1, length - 1), jnp.arange(2, length, dtype=jnp.int32)),
         unroll=2,
     )
   y_last_in = y if length > 1 else x_in
@@ -439,50 +460,71 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
   params, state, gather_fn, rs_fn, layout_fn, _, layer_vjp_fn = _prefetch_setup(
       graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx
   )
-  # Tie `params` to `g` so XLA cannot CSE the backward all-gathers with peeled forward slices or
-  # hoist backward weight slices before the forward pass.
-  g, params = jax.lax.optimization_barrier((g, params))
 
   last = length - 1
-  w_last = gather_fn(_slice_at(params, last))
+  # Tie peeled backward slices to `g` so XLA cannot CSE backward all-gathers with peeled forward
+  # slices or hoist backward weight slices before the forward pass, without placing an
+  # optimization_barrier on the full 12-layer parameter stack.
+  params_last = _slice_at(params, last)
+  params_prev_init = _slice_at(params, last - 1) if length > 1 else None
+  if length > 1:
+    g, params_last, params_prev_init = jax.lax.optimization_barrier((g, params_last, params_prev_init))
+  else:
+    g, params_last = jax.lax.optimization_barrier((g, params_last))
+  w_last = gather_fn(params_last)
   layout = layout_fn(y_last_in, w_last, _slice_at(state, last))
-  w_prev = gather_fn(_slice_at(params, last - 1)) if length > 1 else None  # AG(L-2) || bwd(L-1).
+  w_prev = gather_fn(params_prev_init) if length > 1 else None  # AG(L-2) || bwd(L-1).
   g, dw = layer_vjp_fn(y_last_in, w_last, _slice_at(state, last), g, saved_last, layout)
-  parts = [_expand0(rs_fn(dw))]
+  d_params = jax.tree.map(
+      lambda p, d: jax.lax.dynamic_update_index_in_dim(jnp.zeros_like(p), d, last, axis=0),
+      params,
+      rs_fn(dw),
+  )
   if length > 1:
     if length > 2:
       ordered = (length - 2) // 2 >= 2
 
       def body(carry, xs):
-        g_k, w_k = carry
-        y_k, saved_k, state_k, params_prev = xs
+        g_k, w_k, d_acc = carry
+        y_k, saved_k, state_k, k_idx = xs
+        params_prev = _slice_at(params, k_idx - 1)
         if ordered:
-          # In the 2nd unrolled step of each iteration, waits for the 1st step's g_k and w_km1 so
-          # W(k) is dead before AG(k-2) starts and XLA does not interleave the two unrolled layers'
-          # recomputes and dW buffers.
-          g_k, w_k, y_k, saved_k, params_prev = jax.lax.optimization_barrier((g_k, w_k, y_k, saved_k, params_prev))
+          # In the 2nd unrolled step of each iteration, waits for the 1st step's g_k (which is
+          # barrier-tied to dw_k) so W(k) and dW(k) are dead before AG(k-2) and recompute(k-1) start.
+          g_k, y_k, saved_k, params_prev = jax.lax.optimization_barrier((g_k, y_k, saved_k, params_prev))
         w_km1 = gather_fn(params_prev)  # AG(k-1) || bwd(k).
         g_km1, dw_k = layer_vjp_fn(y_k, w_k, state_k, g_k, saved_k, layout)
         dw_k = rs_fn(dw_k)
         if ordered:
           g_km1, dw_k = jax.lax.optimization_barrier((g_km1, dw_k))
-        return (g_km1, w_km1), dw_k
+        d_acc = jax.tree.map(
+            lambda acc, d: jax.lax.dynamic_update_index_in_dim(acc, d, k_idx, axis=0),
+            d_acc,
+            dw_k,
+        )
+        return (g_km1, w_km1, d_acc), None
 
-      # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1, and outputs are stacked in j order.
-      (g, w_prev), d_mid = jax.lax.scan(
+      # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1.
+      (g, w_prev, d_params), _ = jax.lax.scan(
           body,
-          (g, w_prev),
-          (ys_mid, saved_mid, _slice_range(state, 1, length - 1), _slice_range(params, 0, length - 2)),
+          (g, w_prev, d_params),
+          (ys_mid, saved_mid, _slice_range(state, 1, length - 1), jnp.arange(1, length - 1, dtype=jnp.int32)),
           reverse=True,
           unroll=2,
       )
-      parts.insert(0, d_mid)
     g, dw0 = layer_vjp_fn(x_in, w_prev, _slice_at(state, 0), g, saved_0, layout)
-    parts.insert(0, _expand0(rs_fn(dw0)))
+    d_params = jax.tree.map(
+        lambda acc, d: jax.lax.dynamic_update_index_in_dim(acc, d, 0, axis=0),
+        d_params,
+        rs_fn(dw0),
+    )
 
-  # Per-layer grads stacked in layer order: [dW0, dW1 .. dW(L-2), dW(L-1)].
-  d_params = parts[0] if len(parts) == 1 else jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *parts)
-  params_bar_leaves = tuple(jax.tree_util.tree_leaves(d_params))
+  params_bar_leaves = jax.tree_util.tree_leaves(d_params)
+  if ctx.scan_axis != 0:
+    params_bar_leaves = [
+        jnp.moveaxis(p, 0, ctx.scan_axis) if getattr(p, "ndim", 0) > ctx.scan_axis else p for p in params_bar_leaves
+    ]
+  params_bar_leaves = tuple(params_bar_leaves)
 
   # diff_*_leaves hold only arrays (non-array leaves were replaced by a dummy array), and the layer
   # arguments are treated as non-differentiable, so their cotangents are zeros.
@@ -519,9 +561,13 @@ def mesh_uses_fsdp(mesh) -> bool:
   return any(mesh.shape.get(axis, 1) > 1 for axis in sharding.FSDP_MESH_AXES)
 
 
-def _layer_major(params, state, scan_axis, length):
-  """Moves the scan axis of `params` to the front and gives `params`/`state` a leading layer axis."""
-  if scan_axis != 0:
+def _layer_major(params, state, scan_axis, length, move_scan_axis=True):
+  """Gives `params`/`state` a leading layer axis, moving the scan axis of `params` to the front.
+
+  With `move_scan_axis=False` the scan axis stays in place; `_prefetch_setup` then moves it inside
+  the custom vjp (`ctx.scan_axis`), so the transposed stack is not materialized around the pipeline.
+  """
+  if move_scan_axis and scan_axis != 0:
     params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
   params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
   state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
@@ -532,10 +578,11 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
   """Splits a scanned layer stack and its call arguments for `jax.custom_vjp`.
 
   Returns (graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx), with
-  params/state layer-major (see `_layer_major`).
+  the scan axis of params still at `ctx.scan_axis` (`_prefetch_setup` moves it to the front).
   """
   graphdef, params, state = nnx.split(layers, nnx.Param, ...)
-  params, state = _layer_major(params, state, config.param_scan_axis, length)
+  scan_axis = config.param_scan_axis
+  params, state = _layer_major(params, state, scan_axis, length, move_scan_axis=False)
 
   sig = inspect.signature(layers.__class__.__call__)
   valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
@@ -565,6 +612,7 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       mesh=mesh,
       shard_mode=config.shard_mode,
       debug_sharding=config.debug_sharding,
+      scan_axis=scan_axis,
       static_args_leaves=static_args_leaves,
       static_kwargs_leaves=static_kwargs_leaves,
       params_treedef=params_treedef,

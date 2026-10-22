@@ -2623,9 +2623,14 @@ class RoutedMoE(nnx.Module):
           wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
         # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
-        w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
-        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+        if self.config.moe_flat_fsdp_weights:
+          w0_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), None))
+        else:
+          w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
         # Update kernel pspec for FSDP AG
         w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
         w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
@@ -2646,11 +2651,6 @@ class RoutedMoE(nnx.Module):
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
     weight_gather = explicitly_weight_ag()
-    if self.config.moe_flat_fsdp_weights and not weight_gather:
-      raise NotImplementedError(
-          "moe_flat_fsdp_weights needs the explicit fp8 weight all-gather"
-          " (shard_embed_moe_on_fsdp + fixed weight calibration)."
-      )
     (
         batch_logical_axis,
         input_partition_pspec,

@@ -2777,6 +2777,73 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     self.assertEqual(checked["routed"], 6)
     self.assertGreaterEqual(checked["co_sharded"], 14)
 
+  def test_qwen3_5_flat_routed_expert_gathers_under_expert_parallelism(self):
+    """With `moe_flat_fsdp_weights`, each sub-layer's flat routed-expert weight is gathered over `fsdp` only.
+
+    The flat [E * rows, cols] weights are sharded over the compound ('expert', 'fsdp') on dim 0. The
+    per-sub-layer gather strips only `fsdp`, as one tagged all-gather on that major-most dim, and keeps
+    `expert`; the gathered weight is then the [E_local * rows, cols] block the gmm reshapes for free.
+    """
+    cfg = _make_config(
+        **{
+            **_QWEN3_5_TINY,
+            "scan_layers": True,
+            "num_decoder_layers": 8,
+            "base_num_decoder_layers": 8,
+            "inhomogeneous_layer_cycle_interval": 4,
+            "sparse_matmul": True,
+            "prefetch_fsdp_weights": True,
+            "moe_flat_fsdp_weights": True,
+        }
+    )
+    decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(decoder.layers)
+    self.assertEqual(len(stages), 4)
+    axis_sizes = {axis: 1 for axis in cfg.mesh_axes} | {"fsdp": 4, "expert": 2}
+    mesh = AbstractMesh(tuple(axis_sizes.values()), tuple(axis_sizes), axis_types=(AxisType.Explicit,) * len(axis_sizes))
+
+    checked = 0
+    for _, params, _ in stages:
+      for path, var in nnx.to_flat_state(params):
+        axes = None
+        for key in ("sharding", "out_sharding", "sharding_names"):
+          meta_axes = var.get_metadata().get(key)
+          if isinstance(meta_axes, (PartitionSpec, tuple, list)) and meta_axes:
+            axes = tuple(a for a in meta_axes if a != "layers")
+            break
+        if not axes or not isinstance(axes[0], sharding.CompoundLogicalAxis):
+          continue
+        name = "/".join(map(str, path))
+        spec = sharding.logical_to_mesh_axes(axes, mesh, rules=cfg.logical_axis_rules)
+        self.assertEqual(spec[0], ("expert", "fsdp"), name)
+        shape = list(var.get_value().shape)
+        del shape[cfg.param_scan_axis]  # One block's slice, as the pipeline gathers it.
+        self.assertEqual(len(shape), 2, name)
+        w = jax.ShapeDtypeStruct(tuple(shape), jnp.float32, sharding=NamedSharding(mesh, spec))
+
+        def gather(x):
+          return fsdp_prefetch._apply_sharding_hint(x, mesh, ShardMode.EXPLICIT)  # pylint: disable=protected-access
+
+        with jax.sharding.use_abstract_mesh(mesh):
+          out = jax.eval_shape(gather, w)
+          hlo = jax.jit(gather).trace(w).lower(lowering_platforms=("tpu",)).as_text()
+        gathers = [line for line in hlo.splitlines() if "stablehlo.all_gather" in line]
+        self.assertEqual(len(gathers), 1, name)
+        self.assertIn('xla_explicit_fsdp = "yes"', gathers[0], name)
+        self.assertIn("all_gather_dim = 0", gathers[0], name)
+        self.assertNotIn('name = "expert"', gathers[0], name)
+        self.assertEqual(tuple(out.sharding.spec)[0], "expert", name)
+        # The flat weight must not get the minor-dim layout pin that 3D `wo` needs.
+        self.assertFalse(
+            fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+                jnp.zeros((1, *shape)), NamedSharding(mesh, spec), mesh
+            ),
+            name,
+        )
+        checked += 1
+    # wi_0, wi_1 and wo of each of the 4 sub-layers.
+    self.assertEqual(checked, 12)
+
   def test_qwen3_5_remat_minimal(self):
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
       self._assert_qwen3_5_parity(num_blocks=4, remat_policy="minimal")
@@ -2784,6 +2851,45 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
 
   def test_qwen3_5_param_scan_axis_zero(self):
     self._assert_qwen3_5_parity(num_blocks=3, param_scan_axis=0)
+
+  def test_qwen3_5_moe_flat_fsdp_weights(self):
+    """Flat 2D routed-expert weights ([E * rows, cols]) prefetch one sub-layer at a time like 3D ones."""
+    self._assert_qwen3_5_flat_weights_parity(num_blocks=2)
+
+  def test_qwen3_5_moe_flat_fsdp_weights_param_scan_axis_zero(self):
+    self._assert_qwen3_5_flat_weights_parity(num_blocks=2, param_scan_axis=0)
+
+  def _assert_qwen3_5_flat_weights_parity(self, num_blocks, cycle=4, **overrides):
+    """Like `_assert_qwen3_5_parity`, with `moe_flat_fsdp_weights=True`.
+
+    Without `gmm_v2`, `moe_flat_fsdp_weights` needs `prefetch_fsdp_weights=True`, so the reference keeps
+    the flag and instead takes the plain scanned stack by reporting a mesh without FSDP.
+    """
+    config = {
+        **_QWEN3_5_TINY,
+        "inhomogeneous_layer_cycle_interval": cycle,
+        "sparse_matmul": True,
+        "moe_flat_fsdp_weights": True,
+        **overrides,
+    }
+    num_layers = num_blocks * cycle
+    with mock.patch.object(fsdp_prefetch, "mesh_uses_fsdp", return_value=False):
+      ref_loss, ref_grads = self._loss_and_grads(num_layers, prefetch=True, **config)
+    nested_patch, whole_patch = self._patch_pipelines()
+    with nested_patch as nested, whole_patch as whole_blocks:
+      loss, grads = self._loss_and_grads(num_layers, prefetch=True, **config)
+    self.assertEqual(nested.call_count, 1)
+    self.assertEqual(whole_blocks.call_count, 0)
+    np.testing.assert_allclose(loss, ref_loss, rtol=1e-5, atol=1e-6)
+    ref_leaves, ref_def = jax.tree_util.tree_flatten(ref_grads)
+    leaves, tree_def = jax.tree_util.tree_flatten(grads)
+    self.assertEqual(ref_def, tree_def)
+    # The routed-expert weights really are flat: some gradient leaf has an [E * embed] dimension.
+    flat_rows = _QWEN3_5_TINY["num_experts"] * _QWEN3_5_TINY["base_emb_dim"]
+    self.assertTrue(any(flat_rows in g.shape for g in leaves))
+    for ref, got in zip(ref_leaves, leaves):
+      self.assertEqual(ref.shape, got.shape)
+      np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-2, atol=1e-3)
 
   def test_qwen3_5_one_local_layer_per_block(self):
     # A single Gated DeltaNet sub-layer per block: no same-group scan, two trip-count-one loops.

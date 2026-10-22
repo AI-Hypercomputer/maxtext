@@ -47,6 +47,34 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     np.testing.assert_array_equal(sub["w"], np.arange(4.0, 12.0).reshape(2, 4))
     self.assertEqual(fsdp_prefetch._expand0(layer)["w"].shape, (1, 4))  # pylint: disable=protected-access
 
+  def test_needs_minor_dim_layout_pin(self):
+    mesh = _abstract_mesh((4, 2, 2), ("fsdp", "expert", "tensor"))
+    w_3d = jnp.ones((2, 4, 8, 16))  # [layers, E, F, D] -> 3D per layer
+    w_2d = jnp.ones((2, 32, 16))  # [layers, E*F, D] -> 2D per layer
+    # 3D weight FSDP-sharded on minor-most dim (dim 2) needs layout pinning.
+    self.assertTrue(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_3d, NamedSharding(mesh, PartitionSpec("expert", "tensor", "fsdp")), mesh
+        )
+    )
+    # 3D weight FSDP-sharded on a non-minor dim (dim 1) does not need layout pinning.
+    self.assertFalse(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_3d, NamedSharding(mesh, PartitionSpec("expert", "fsdp", "tensor")), mesh
+        )
+    )
+    # 2D flat weight FSDP-sharded on dim 0 or dim 1 does not need layout pinning.
+    self.assertFalse(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_2d, NamedSharding(mesh, PartitionSpec(("expert", "fsdp"), "tensor")), mesh
+        )
+    )
+    self.assertFalse(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_2d, NamedSharding(mesh, PartitionSpec("tensor", "fsdp")), mesh
+        )
+    )
+
   def test_explicit_all_gather_without_fsdp_sharding_returns_none(self):
     mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tensor"))
     w = jnp.ones((4, 8))
