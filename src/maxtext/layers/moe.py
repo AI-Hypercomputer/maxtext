@@ -95,6 +95,16 @@ def _get_te_moe_cudnn_gmm_fusion_kwargs(disable_cudnn_gmm_fusion: bool) -> dict[
   return {"use_cudnn_fusion": False} if disable_cudnn_gmm_fusion else {}
 
 
+def _get_te_moe_weight_layout_kwargs(moe_fn) -> dict[str, bool]:
+  """Declare MaxText's standard [E, K, 2N] FC1 storage when TE accepts the layout flag.
+
+  TE infers the layout from the FC1 shape, which is ambiguous when K == 2N (e.g. DeepSeek V4).
+  """
+  if "cudnn_native_weight_layout" in inspect.signature(moe_fn).parameters:
+    return {"cudnn_native_weight_layout": False}
+  return {}
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -401,8 +411,7 @@ def load_balance_updates_from_counts(expert_counts, num_experts, rate):
   total_tokens = jnp.sum(expert_counts, axis=-1, keepdims=True)
   average_load = total_tokens / num_experts
   direction = jnp.sign(average_load - expert_counts)
-  output = direction * rate
-  return output
+  return direction * rate
 
 
 def finalize_deferred_bias_signal(partial_counts, config):
@@ -581,6 +590,19 @@ def fused_moe_lhs_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
 
 class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
+
+
+def init_tid2eid(key, vocab_size, num_experts, num_experts_per_tok):
+  """Random hash-routing table: each token ID maps to num_experts_per_tok distinct experts.
+
+  The top-k of i.i.d. uniform scores is a uniformly random k-subset of the experts per row. Stored as float32 to
+  match Tid2EidVar.
+  """
+  if num_experts_per_tok > num_experts:
+    raise ValueError(f"num_experts_per_tok ({num_experts_per_tok}) must be <= num_experts ({num_experts}).")
+  scores = jax.random.uniform(key, (vocab_size, num_experts))
+  _, expert_ids = jax.lax.top_k(scores, num_experts_per_tok)
+  return expert_ids.astype(jnp.float32)
 
 
 class MoEBiasVar(nnx.Variable):
@@ -947,10 +969,7 @@ class RoutedMoE(nnx.Module):
       # through jax.value_and_grad, which strictly requires all leaves to be inexact types
       # (even if they receive no gradients). We cast to int32 dynamically during routing.
       self.tid2eid = Tid2EidVar(
-          jnp.zeros(
-              (self.config.vocab_size, self.num_experts_per_tok),
-              dtype=jnp.float32,
-          ),
+          init_tid2eid(self.rngs.params(), self.config.vocab_size, self.num_experts, self.num_experts_per_tok),
           out_sharding=None,  # Replicated across shards for local lookup
       )
     else:
@@ -1022,6 +1041,7 @@ class RoutedMoE(nnx.Module):
       self.quant_einsums = None
 
     gate_weight_dtype = ctypes.get_weight_dtype(self.config, "gate")
+    self.use_gate_bias = self.config.routed_bias and not self.is_hash_routing
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
         out_features_shape=self.num_experts,
@@ -1032,7 +1052,7 @@ class RoutedMoE(nnx.Module):
         quant=ctypes.get_quant(self.config, "gate", self.quant),
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
-        use_bias=self.config.routed_bias and not self.is_hash_routing,
+        use_bias=self.use_gate_bias,
         bias_dtype=jnp.float32 if self.config.float32_gate_logits else gate_weight_dtype,
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
@@ -4867,6 +4887,8 @@ class RoutedMoE(nnx.Module):
       w0_bias: jax.Array | None,
       w1_bias: jax.Array | None,
       wo_bias: jax.Array | None,
+      routing_indices: jax.Array | None = None,
+      routing_weights: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Run TransformerEngine's fused EP MoEBlock using MaxText-owned params."""
@@ -4881,10 +4903,10 @@ class RoutedMoE(nnx.Module):
 
     if self.quant is None or not hasattr(self.quant, "get_moe_block_quantizer_sets"):
       raise ValueError("te_moe_block=True requires TransformerEngine quantization or te_gmm_quantization=te_no_quant.")
+    if self.is_hash_routing and (routing_indices is None or routing_weights is None):
+      raise ValueError("TE MoE hash routing requires precomputed routing indices and weights.")
 
-    expert_bias = None
-    if self.config.routed_bias:
-      expert_bias = jnp.asarray(self.gate.bias[...], jnp.float32)
+    expert_bias = jnp.asarray(self.gate.bias[...], jnp.float32) if self.use_gate_bias else None
 
     fsdp_size = self.mesh.shape.get("fsdp", 1)
     ep_size = self.mesh.shape.get(self._expert_parallelism_name, 1)
@@ -4907,45 +4929,107 @@ class RoutedMoE(nnx.Module):
 
     checkpoint_kwargs = _get_te_moe_checkpoint_kwargs(te_moe.moe)
     cudnn_gmm_fusion_kwargs = _get_te_moe_cudnn_gmm_fusion_kwargs(self.config.te_moe_disable_cudnn_gmm_fusion)
+    weight_layout_kwargs = _get_te_moe_weight_layout_kwargs(te_moe.moe)
 
-    output, lb_loss, total_recv_tokens = te_moe.moe(
+    # Older TE versions take the router arguments directly and do not return expert counts.
+    supports_router_info = hasattr(te_moe, "RouterComputationInfo")
+    if not supports_router_info:
+      if self.is_hash_routing:
+        raise ImportError(
+            "te_moe_block=True with hash routing requires TransformerEngine with "
+            "moe.RoutingMapInfo support. Please upgrade TransformerEngine."
+        )
+      if self.should_update_load_balance():
+        raise ImportError(
+            "te_moe_block=True with routed_bias_update_rate > 0 requires TransformerEngine with "
+            "MoE expert-count support. Please upgrade TransformerEngine."
+        )
+      router_kwargs = {
+          "gate_kernel": gate_kernel,
+          "num_experts_per_tok": self.num_experts_per_tok,
+          "expert_bias": expert_bias,
+          "score_function": self.config.routed_score_func or "softmax",
+          "use_pre_softmax": False,
+          "num_groups": None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
+          "group_topk": None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
+          "scaling_factor": self.config.routed_scaling_factor,
+          "aux_loss_coeff": self.config.load_balance_loss_weight,
+          "gate_kernel_axes": self.kernel_axes,
+      }
+    elif self.is_hash_routing:
+      router_kwargs = {
+          "router_info": te_moe.RoutingMapInfo(
+              routing_indices=routing_indices,
+              routing_weights=routing_weights,
+          ),
+          "collect_expert_counts": False,
+      }
+    else:
+      router_kwargs = {
+          "router_info": te_moe.RouterComputationInfo(
+              gate_kernel=gate_kernel,
+              num_experts_per_tok=self.num_experts_per_tok,
+              expert_bias=expert_bias,
+              score_function=self.config.routed_score_func or "softmax",
+              use_pre_softmax=False,
+              num_groups=None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
+              group_topk=None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
+              scaling_factor=self.config.routed_scaling_factor,
+              aux_loss_coeff=self.config.load_balance_loss_weight,
+              gate_kernel_axes=self.kernel_axes,
+          ),
+          "collect_expert_counts": self.should_update_load_balance(),
+      }
+
+    # Pass the weights by keyword: the older interface has gate_kernel in the second positional slot.
+    te_moe_outputs = te_moe.moe(
         inputs,
-        gate_kernel,
-        wi_kernel,
-        wo_kernel,
-        w0_bias,
-        w1_bias,
-        wo_bias,
-        expert_bias,
+        wi=wi_kernel,
+        wo=wo_kernel,
+        wi_0_bias=w0_bias,
+        wi_1_bias=w1_bias,
+        wo_bias=wo_bias,
         num_experts=self.num_experts,
-        num_experts_per_tok=self.num_experts_per_tok,
         activation_type=self.config.mlp_activations[0],
-        score_function=self.config.routed_score_func or "softmax",
-        use_pre_softmax=False,
-        num_groups=None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
-        group_topk=None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
-        scaling_factor=self.config.routed_scaling_factor,
-        aux_loss_coeff=self.config.load_balance_loss_weight,
         apply_topk_weights_early=True,
         quantizer_sets=(fc1_quantizer_set, fc2_quantizer_set),
         mesh_resource=MeshResource(dp_resource="data", fsdp_resource="fsdp", ep_resource=self._expert_parallelism_name),
         input_axes=("activation_batch", "activation_norm_length", None),
-        gate_kernel_axes=self.kernel_axes,
         wi_kernel_axes=self.wi_kernel_axes,
         wo_kernel_axes=self.wo_kernel_axes,
         dtype=self.dtype,
         recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
         quant_before_fsdp_ag=self.config.te_moe_quantize_before_fsdp_all_gather,
+        **router_kwargs,
         **cudnn_gmm_fusion_kwargs,
+        **weight_layout_kwargs,
         **checkpoint_kwargs,
     )
+    if supports_router_info:
+      output, lb_loss, total_recv_tokens, expert_counts = te_moe_outputs
+    else:
+      output, lb_loss, total_recv_tokens = te_moe_outputs
+      expert_counts = None
     recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()
     output = output.astype(self.dtype)
     if lb_loss is not None:
       lb_loss = lb_loss.astype(self.dtype)
     if out_sharding is not None:
       output = jax.lax.with_sharding_constraint(output, out_sharding)
-    return output, lb_loss, (total_recv_tokens, jnp.asarray(recv_capacity_per_rank, dtype=jnp.int32))
+    bias_updates = None
+    if self.should_update_load_balance():
+      bias_updates = load_balance_updates_from_counts(
+          expert_counts, self.num_experts, self.config.routed_bias_update_rate
+      )
+    return (
+        output,
+        lb_loss,
+        (
+            total_recv_tokens,
+            jnp.asarray(recv_capacity_per_rank, dtype=jnp.int32),
+            bias_updates,
+        ),
+    )
 
   def __call__(
       self,
@@ -4980,6 +5064,16 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
 
     if cfg.te_moe_block:
+      routing_indices = None
+      routing_weights = None
+      if self.is_hash_routing:
+        gate_logits, pre_bias_logits = self.gate(routing_inputs)
+        routing_weights, routing_indices = self.get_topk(
+            gate_logits,
+            pre_bias_logits,
+            self.rngs,
+            input_ids=input_ids,
+        )
       gate_kernel = jnp.asarray(self.gate.kernel[...], self.dtype)
       wi_kernel = jnp.asarray(self.wi[...], self.dtype)
       wo_kernel = jnp.asarray(self.wo[...], self.dtype)
@@ -4999,7 +5093,9 @@ class RoutedMoE(nnx.Module):
           w0_bias,
           w1_bias,
           wo_bias,
-          out_sharding,
+          routing_indices=routing_indices,
+          routing_weights=routing_weights,
+          out_sharding=out_sharding,
       )
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
