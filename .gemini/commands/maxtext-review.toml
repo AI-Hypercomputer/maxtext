@@ -52,9 +52,21 @@ If `additional_context` in the context JSON above is non-empty, give those focus
 
 ## Execution Workflow
 
-Follow this three-step process sequentially: Step 1 (analysis) and Step 2 (selection) from the review guidelines below, then Step 3 (submission on GitHub) at the end of this prompt.
+Follow this three-step process sequentially: Step 1 (analysis) and Step 2 (selection) from the review guidelines below, then Step 3 (submission on GitHub) at the end of this prompt. In Step 1, also apply every Path-Specific Focus Area (listed after the guidelines) whose paths the pull request touches; in Step 2, rank their findings together with all other findings under the same Output Budget.
 
 !{cat .gemini/commands/maxtext-review-criteria.md}
+
+-----
+
+## Path-Specific Focus Areas
+
+Each focus area below states which paths it applies to. Apply a focus area only if the pull request changes files under those paths (check with `pull_request_read.get_files`); otherwise ignore it. Findings from focus areas are part of the same review: rank them together with all other findings and keep within the same Output Budget.
+
+!{cat .gemini/commands/maxtext-review-workflows.md}
+
+!{cat .gemini/commands/maxtext-review-config-checkpoint.md}
+
+!{cat .gemini/commands/maxtext-review-kernels.md}
 
 -----
 

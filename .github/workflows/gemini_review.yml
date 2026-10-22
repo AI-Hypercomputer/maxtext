@@ -63,10 +63,15 @@ jobs:
           permission-pull-requests: 'write'
 
       - name: 'Checkout repository'
-        # downloads the code to be analyzed
+        # Downloads the repository for the review prompt and context.
+        # SECURITY: for `pull_request_target` runs (automatic review of fork
+        # PRs, which run with secrets), always check out the base commit, never
+        # the PR head: the prompt and tools must come from the base branch, and
+        # the PR is read only through the GitHub API.
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: 'false'
+          ref: '${{ github.event_name == ''pull_request_target'' && github.event.pull_request.base.sha || '''' }}'
 
       - name: 'Prepare prompt context'
         shell: 'bash'
