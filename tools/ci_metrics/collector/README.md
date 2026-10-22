@@ -412,7 +412,22 @@ itself is the median, the overlapping-run count and the nearest scheduled probe.
 python3 -m collector.tick --out DIR [--repo owner/name] [--since YYYY-MM-DD]
                           [--until YYYY-MM-DD] [--backfill-days 30]
                           [--dry-run] [--max-runs N]
+                          [--rate-floor 300] [--skip-tests] [--max-wait SECONDS]
+                          [--merge-checks each|list] [--defer-running]
 ```
+
+The last five options are for a tick with **no GitHub token**, which is how the Cloud Run job in
+`../cloudrun/` runs until a GitHub App exists. With no token GitHub allows 60 requests an hour
+per IP address, answers 401 to every artifact download, and can ask a rate-limited caller to wait
+up to an hour. Their defaults keep the behavior above unchanged.
+
+| Option | What it does |
+| --- | --- |
+| `--rate-floor N` | Stop cleanly when fewer than N requests are left (default 300, more than 60). Below 25, the merge checks read the budget before every pull request. |
+| `--skip-tests` | Never list or download artifacts. Each suite of a run younger than a day is still stored, with no counts and the reason `not_read_no_token`, so the suites view keeps its wall-clock time and workers from the jobs. No test row is kept. |
+| `--max-wait S` | One request may sleep at most S seconds across its retries. A wait that does not fit (a rate-limit reset, say) is not started: the request fails at once. |
+| `--merge-checks list` | Learn merges from the closed pull requests, newest update first, 100 a page, back to the 14-day watch window (at most 5 pages), instead of one request per waiting pull request. |
+| `--defer-running` | A run the listing shows as queued or in progress goes on the in-flight list straight from the listing, with no request. Without it, the tick reads the run and its pull request again (2-3 requests) only to learn it is still running; on a backed-up CI that used up the whole hour. An attempt in flight for over 24 hours is read as usual, and stored as it stands. |
 
 | Exit | Meaning |
 | --- | --- |
@@ -463,10 +478,11 @@ The workflow that runs this on a schedule is `.github/workflows/ci_metrics_colle
 `store_test.py` checks the store. `junit_limits_test.py` checks that test-result zips and XML
 files which are too big or broken are refused with a `JUnitError`. `github_download_test.py`
 checks the capped download in `get_bytes`. `tick_budget_test.py` checks that a tick stops
-before it spends the last 300 requests of the hourly budget. The tests never touch the
+before it spends the last 300 requests of the hourly budget. `tick_no_token_test.py` checks the
+options for a tick with no token. The tests never touch the
 network. They need nothing beyond the Python standard library, except
-`github_download_test.py` and `tick_budget_test.py`, which need `requests` like the client
-itself (the workflow installs it before the tests run).
+`github_download_test.py`, `tick_budget_test.py` and `tick_no_token_test.py`, which need
+`requests` like the client itself (the workflow installs it before the tests run).
 
     # From the repository root, every test file:
     python3 -B -m unittest discover -s tools/ci_metrics/collector/tests -p '*_test.py' -t tools/ci_metrics/collector/tests

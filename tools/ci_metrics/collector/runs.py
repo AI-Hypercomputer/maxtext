@@ -43,6 +43,10 @@ RUNS_ENDPOINT = "actions/runs"
 WORKFLOWS_ENDPOINT = "actions/workflows"
 PULLS_ENDPOINT = "pulls"
 
+# The smaller page sizes an attempt's job list is asked for again, in this order, when GitHub answers a
+# server error (5xx) to the full-size pages. See `_paginate_jobs`.
+JOBS_FALLBACK_PAGE_SIZES = (50, 30)
+
 # GitHub stops serving a run listing after 1000 items, whatever the window asks for.
 RUNS_API_RESULT_CAP = 1000
 # How wide a slice of history one listing may safely cover, given the cap above.
@@ -502,7 +506,7 @@ def get_jobs(client: GitHubClientLike, run_id: int, attempt: int) -> list[dict[s
 
   path = f"{RUNS_ENDPOINT}/{int(run_id)}/attempts/{int(attempt)}/jobs"
   try:
-    payloads = client.paginate(path, "jobs")
+    payloads = _paginate_jobs(client, path, run_id, attempt)
   except github.GitHubError as error:
     if error.status != 404:
       raise
@@ -515,6 +519,38 @@ def get_jobs(client: GitHubClientLike, run_id: int, attempt: int) -> list[dict[s
       raise RunsError(f"{path}: the jobs listing held a {type(payload).__name__}, expected an object")
     jobs.append(payload)
   return jobs
+
+
+def _is_server_error(error: github.GitHubError) -> bool:
+  """Says whether GitHub answered with a server error (5xx), as opposed to refusing the request."""
+  return error.status is not None and 500 <= error.status < 600
+
+
+def _paginate_jobs(client: GitHubClientLike, path: str, run_id: int, attempt: int) -> list:
+  """Lists one attempt's jobs, asking for smaller pages when GitHub fails on the full-size ones."""
+  # GitHub can fail on one attempt's job list in pages of 100 while it serves the same list in smaller
+  # pages: on 2026-10-27, run 39983861967 attempt 3 (68 jobs) answered 502 to every request for pages of
+  # 100, and 200 to pages of 50 and of 30. Without this, such a run is "lost data" on every tick, forever.
+  try:
+    return client.paginate(path, "jobs")
+  except github.GitHubError as error:
+    if not _is_server_error(error):
+      raise
+    last_error = error
+  for page_size in JOBS_FALLBACK_PAGE_SIZES:
+    try:
+      payloads = client.paginate(path, "jobs", per_page=page_size)
+    except github.GitHubError as error:
+      if not _is_server_error(error):
+        raise
+      last_error = error
+      continue
+    _warn(
+        f"WARNING: run {run_id} attempt {attempt}: GitHub answered {last_error.status} for its jobs in pages of "
+        f"{github.PER_PAGE}; read them in pages of {page_size} instead."
+    )
+    return payloads
+  raise last_error
 
 
 def head_owner(run: dict[str, Any]) -> str | None:

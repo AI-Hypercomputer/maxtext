@@ -50,6 +50,9 @@ NESTED_SUITES = {"decoupled": "cpu-unit"}
 REASON_NO_FILE = "no_file_published"
 REASON_UPLOAD_EMPTY = "upload_empty"
 REASON_ARTIFACT_EXPIRED = "artifact_expired"
+# The tick ran with `--skip-tests`, so the artifacts were never asked for. GitHub answers 401 to an
+# artifact download without a token, so a tick with no token has to run this way.
+REASON_NOT_READ = "not_read_no_token"
 
 # Per-test outcome labels.
 STATUS_PASSED = "passed"
@@ -664,3 +667,15 @@ def read_run_tests(client: GitHubClientLike, run_id: int, flavors: Iterable[str]
     _finish_entry(entry, missing, published)
 
   return RunTests(run_id=run_id, suites=suites, artifacts=refs)
+
+
+def unread_run_tests(run_id: int, flavors: Iterable[str] | None = None, reason: str = REASON_NOT_READ) -> RunTests:
+  """Lists a run's suites with no result and one reason, for a run whose artifacts were not asked for."""
+  # The same suites `read_run_tests` would report on, nested ones included, so the suite rows keep
+  # their shape and the views can still give each suite its wall-clock time from the jobs.
+  suites: dict[str, SuiteEntry] = {}
+  for suite_id in _suites_asked_about(flavors):
+    _ensure_entry(suites, suite_id)
+  for entry in suites.values():
+    entry.reason = reason
+  return RunTests(run_id=run_id, suites=suites)

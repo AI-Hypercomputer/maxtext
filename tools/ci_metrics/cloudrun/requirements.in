@@ -1,0 +1,4 @@
+requests==2.34.2
+google-cloud-storage==3.17.1
+# The newest certifi the corp pip mirror (Airlock) serves; it does not mirror 2026.10.19 yet.
+certifi==2026.7.22
