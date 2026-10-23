@@ -302,6 +302,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Parse and validate configuration
   config = pyconfig.initialize(argv)
+  jax.config.update("jax_default_prng_impl", config.prng_impl)
   validate_config(config)
 
   # Create target mesh
@@ -402,7 +403,12 @@ def main(argv: Sequence[str]) -> None:
     print("Successfully saved compiled object as" f" {config.compiled_trainstep_file}")
   print("Finished train_compile.py successfully!", flush=True)
   print(f"Cost analysis: {compiled.cost_analysis()}")
-  print(f"Memory analysis: {compiled.memory_analysis()}")
+  memory_analysis = compiled.memory_analysis()
+  print(f"Memory analysis: {memory_analysis}")
+  # arg + out + temp - alias overstates HBM use; the compiler's peak is the number to compare against HBM capacity.
+  peak_bytes = getattr(memory_analysis, "peak_memory_in_bytes", None)
+  if peak_bytes:
+    print(f"Peak memory: {peak_bytes / 2**30:.2f} GiB")
 
   # Dump HLO if requested
   if config.dump_hlo:
