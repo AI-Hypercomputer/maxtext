@@ -1,0 +1,194 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 490" width="100%" height="100%" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="red-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0.5 1.5 L 9 5 L 0.5 8.5 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1520" height="490" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="10" y="16" width="1500" height="44" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="24" y="43" font-size="13" font-weight="700" fill="#334155">TPU Timeline (Forward Pass)</text>
+  <rect x="10" y="68" width="1500" height="120" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="68" width="200" height="120" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="68" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="90" font-size="13.5" font-weight="700" fill="#0f172a">▾ TensorCore</text>
+  <text x="34" y="108" font-size="11" font-weight="500" fill="#475569">/device:TPU:0</text>
+  <text x="34" y="144" font-size="11.5" font-weight="600" fill="#334155">▸ XLA Ops</text>
+  <rect x="10" y="216" width="1500" height="128" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="216" width="200" height="128" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="216" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="238" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 0</text>
+  <text x="34" y="256" font-size="11" font-weight="500" fill="#475569">Dedicated FSDP Core (id=0)</text>
+  <text x="34" y="292" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <rect x="10" y="358" width="1500" height="114" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="358" width="200" height="114" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="358" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="380" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 1</text>
+  <text x="34" y="398" font-size="11" font-weight="500" fill="#475569">MoE Offload Core</text>
+  <text x="34" y="434" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <text x="34" y="328" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="34" y="457" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="370.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i</text>
+  <rect x="216" y="93" width="308" height="15" rx="2" fill="#fbcfe8" opacity="0.85"/>
+  <text x="370.0" y="104" font-size="9.5" font-weight="600" fill="#831843" text-anchor="middle">scanned_layers (compute layer i)</text>
+  <rect x="216" y="132" width="12" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="230" y="132" width="15" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="247" y="132" width="96" height="34" rx="3" fill="#93c5fd" stroke="#60a5fa" stroke-width="1"/>
+  <text x="295.0" y="153" font-size="10.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">splash_attention</text>
+  <rect x="346" y="132" width="34" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="363.0" y="153" font-size="10" font-weight="600" fill="#14532d" text-anchor="middle">route</text>
+  <rect x="385.0" y="132" width="44.7" height="34" rx="2" fill="#d8b4fe" stroke="#a855f7" stroke-width="1"/>
+  <text x="407.3" y="153" font-size="9.5" font-weight="700" fill="#3b0764" text-anchor="middle">gmm_wi0</text>
+  <rect x="431.7" y="132" width="44.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="454.0" y="153" font-size="9.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wi1</text>
+  <rect x="478.3" y="132" width="44.7" height="34" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="1"/>
+  <text x="500.7" y="153" font-size="9.5" font-weight="700" fill="#064e3b" text-anchor="middle">gmm_wo</text>
+  <rect x="382" y="129" width="144" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="454.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i</text>
+  <rect x="226" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="350.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+1)</text>
+  <rect x="226.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="266.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
+  <rect x="309.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="350.0" y="295" font-size="10.5" font-weight="700" fill="#713f12" text-anchor="middle">all-gather wi1</text>
+  <rect x="392.7" y="274" width="81.3" height="34" rx="2" fill="#c4b5fd" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="433.3" y="295" font-size="10.5" font-weight="700" fill="#2e1065" text-anchor="middle">all-gather wo</text>
+  <rect x="223" y="271" width="254" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="350.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i+1</text>
+  <rect x="226" y="316" width="248" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="350.0" y="329" font-size="10" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="220" y="384" width="300" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="370.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_main_step (layer i offload)</text>
+  <rect x="344" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="401" y="406" width="22" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="503" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="220" y="444" width="162" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="301.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="388" y="444" width="132" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="454.0" y="457" font-size="9.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <text x="690.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i+1</text>
+  <rect x="536" y="93" width="308" height="15" rx="2" fill="#fbcfe8" opacity="0.85"/>
+  <text x="690.0" y="104" font-size="9.5" font-weight="600" fill="#831843" text-anchor="middle">scanned_layers (compute layer i+1)</text>
+  <rect x="536" y="132" width="12" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="550" y="132" width="15" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="567" y="132" width="96" height="34" rx="3" fill="#93c5fd" stroke="#60a5fa" stroke-width="1"/>
+  <text x="615.0" y="153" font-size="10.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">splash_attention</text>
+  <rect x="666" y="132" width="34" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="683.0" y="153" font-size="10" font-weight="600" fill="#14532d" text-anchor="middle">route</text>
+  <rect x="705.0" y="132" width="44.7" height="34" rx="2" fill="#d8b4fe" stroke="#a855f7" stroke-width="1"/>
+  <text x="727.3" y="153" font-size="9.5" font-weight="700" fill="#3b0764" text-anchor="middle">gmm_wi0</text>
+  <rect x="751.7" y="132" width="44.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="774.0" y="153" font-size="9.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wi1</text>
+  <rect x="798.3" y="132" width="44.7" height="34" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="1"/>
+  <text x="820.7" y="153" font-size="9.5" font-weight="700" fill="#064e3b" text-anchor="middle">gmm_wo</text>
+  <rect x="702" y="129" width="144" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="774.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i+1</text>
+  <rect x="546" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="670.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+2)</text>
+  <rect x="546.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="586.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
+  <rect x="629.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="670.0" y="295" font-size="10.5" font-weight="700" fill="#713f12" text-anchor="middle">all-gather wi1</text>
+  <rect x="712.7" y="274" width="81.3" height="34" rx="2" fill="#c4b5fd" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="753.3" y="295" font-size="10.5" font-weight="700" fill="#2e1065" text-anchor="middle">all-gather wo</text>
+  <rect x="543" y="271" width="254" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="670.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i+2</text>
+  <rect x="546" y="316" width="248" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="670.0" y="329" font-size="10" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="540" y="384" width="300" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="690.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_main_step (layer i+1 offload)</text>
+  <rect x="664" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="721" y="406" width="22" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="823" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="540" y="444" width="162" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="621.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="708" y="444" width="132" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="774.0" y="457" font-size="9.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <text x="1010.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i+2</text>
+  <rect x="856" y="93" width="308" height="15" rx="2" fill="#fbcfe8" opacity="0.85"/>
+  <text x="1010.0" y="104" font-size="9.5" font-weight="600" fill="#831843" text-anchor="middle">scanned_layers (compute layer i+2)</text>
+  <rect x="856" y="132" width="12" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="870" y="132" width="15" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="887" y="132" width="96" height="34" rx="3" fill="#93c5fd" stroke="#60a5fa" stroke-width="1"/>
+  <text x="935.0" y="153" font-size="10.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">splash_attention</text>
+  <rect x="986" y="132" width="34" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="1003.0" y="153" font-size="10" font-weight="600" fill="#14532d" text-anchor="middle">route</text>
+  <rect x="1025.0" y="132" width="44.7" height="34" rx="2" fill="#d8b4fe" stroke="#a855f7" stroke-width="1"/>
+  <text x="1047.3" y="153" font-size="9.5" font-weight="700" fill="#3b0764" text-anchor="middle">gmm_wi0</text>
+  <rect x="1071.7" y="132" width="44.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1094.0" y="153" font-size="9.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wi1</text>
+  <rect x="1118.3" y="132" width="44.7" height="34" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="1"/>
+  <text x="1140.7" y="153" font-size="9.5" font-weight="700" fill="#064e3b" text-anchor="middle">gmm_wo</text>
+  <rect x="1022" y="129" width="144" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1094.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i+2</text>
+  <rect x="866" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="990.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+3)</text>
+  <rect x="866.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="906.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
+  <rect x="949.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="990.0" y="295" font-size="10.5" font-weight="700" fill="#713f12" text-anchor="middle">all-gather wi1</text>
+  <rect x="1032.7" y="274" width="81.3" height="34" rx="2" fill="#c4b5fd" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="1073.3" y="295" font-size="10.5" font-weight="700" fill="#2e1065" text-anchor="middle">all-gather wo</text>
+  <rect x="863" y="271" width="254" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="990.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i+3</text>
+  <rect x="866" y="316" width="248" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="990.0" y="329" font-size="10" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="860" y="384" width="300" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1010.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_main_step (layer i+2 offload)</text>
+  <rect x="984" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="1041" y="406" width="22" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1143" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="860" y="444" width="162" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="941.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="1028" y="444" width="132" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="1094.0" y="457" font-size="9.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <text x="1330.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i+3</text>
+  <rect x="1176" y="93" width="308" height="15" rx="2" fill="#fbcfe8" opacity="0.85"/>
+  <text x="1330.0" y="104" font-size="9.5" font-weight="600" fill="#831843" text-anchor="middle">scanned_layers (compute layer i+3)</text>
+  <rect x="1176" y="132" width="12" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="1190" y="132" width="15" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="1207" y="132" width="96" height="34" rx="3" fill="#93c5fd" stroke="#60a5fa" stroke-width="1"/>
+  <text x="1255.0" y="153" font-size="10.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">splash_attention</text>
+  <rect x="1306" y="132" width="34" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="1323.0" y="153" font-size="10" font-weight="600" fill="#14532d" text-anchor="middle">route</text>
+  <rect x="1345.0" y="132" width="44.7" height="34" rx="2" fill="#d8b4fe" stroke="#a855f7" stroke-width="1"/>
+  <text x="1367.3" y="153" font-size="9.5" font-weight="700" fill="#3b0764" text-anchor="middle">gmm_wi0</text>
+  <rect x="1391.7" y="132" width="44.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1414.0" y="153" font-size="9.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wi1</text>
+  <rect x="1438.3" y="132" width="44.7" height="34" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="1"/>
+  <text x="1460.7" y="153" font-size="9.5" font-weight="700" fill="#064e3b" text-anchor="middle">gmm_wo</text>
+  <rect x="1342" y="129" width="144" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1414.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i+3</text>
+  <rect x="1186" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1310.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+4)</text>
+  <rect x="1186.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="1226.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
+  <rect x="1269.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="1310.0" y="295" font-size="10.5" font-weight="700" fill="#713f12" text-anchor="middle">all-gather wi1</text>
+  <rect x="1352.7" y="274" width="81.3" height="34" rx="2" fill="#c4b5fd" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="1393.3" y="295" font-size="10.5" font-weight="700" fill="#2e1065" text-anchor="middle">all-gather wo</text>
+  <rect x="1183" y="271" width="254" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1310.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i+4</text>
+  <rect x="1186" y="316" width="248" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="1310.0" y="329" font-size="10" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="1180" y="384" width="300" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1330.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_main_step (layer i+3 offload)</text>
+  <rect x="1304" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="1361" y="406" width="22" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1463" y="406" width="18" height="26" rx="2" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="1180" y="444" width="162" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1261.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="1348" y="444" width="132" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="1414.0" y="457" font-size="9.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <line x1="210" y1="16" x2="210" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="530" y1="16" x2="530" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="850" y1="16" x2="850" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1170" y1="16" x2="1170" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1490" y1="16" x2="1490" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="192" y1="271" x2="396" y2="173" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="481" y1="287.0" x2="718" y2="173" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="801" y1="287.0" x2="1038" y2="173" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="1121" y1="287.0" x2="1358" y2="173" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="1441" y1="287.0" x2="1512" y2="206" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+</svg>
