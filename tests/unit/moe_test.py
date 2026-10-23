@@ -4817,25 +4817,27 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
 
 def _flat_fsdp_config(**overrides):
   """Tiny DeepSeek config on the tokamax gmm_v2 fp8 path with the explicit weight all-gather over FSDP."""
-  return _tiny_deepseek_config(
-      "flat_fsdp_" + "_".join(f"{k}{v}" for k, v in sorted(overrides.items())),
-      ici_expert_parallelism=2,
-      ici_fsdp_parallelism=jax.device_count() // 2,
-      shard_embed_moe_on_fsdp=True,
-      use_tokamax_gmm=True,
-      use_gmm_v2=True,
-      quantization="fp8_full",
-      use_qwix_quantization=True,
-      weight_quantization_calibration_method="fixed,-224,224",
-      act_quantization_calibration_method="fixed,-224,224",
-      bwd_quantization_calibration_method="fixed,-1,1",
+  defaults = {
+      "ici_expert_parallelism": 2,
+      "ici_fsdp_parallelism": jax.device_count() // 2,
+      "shard_embed_moe_on_fsdp": True,
+      "use_tokamax_gmm": True,
+      "use_gmm_v2": True,
+      "quantization": "fp8_full",
+      "use_qwix_quantization": True,
+      "weight_quantization_calibration_method": "fixed,-224,224",
+      "act_quantization_calibration_method": "fixed,-224,224",
+      "bwd_quantization_calibration_method": "fixed,-1,1",
       # The tiny config sets float32_gate_logits=True, which is rejected with a quantized router projection.
-      quantize_router_proj=False,
+      "quantize_router_proj": False,
       # gmm_v2 only quantizes the lhs (which the fixed act scale requires) when the contraction dim is at least the
       # MXU width; with smaller K it dequantizes the rhs instead and rejects the lhs scale.
-      base_emb_dim=256,
-      base_moe_mlp_dim=256,
-      **overrides,
+      "base_emb_dim": 256,
+      "base_moe_mlp_dim": 256,
+  }
+  # Overrides replace the defaults above (e.g. quantization="" for an unquantized config).
+  return _tiny_deepseek_config(
+      "flat_fsdp_" + "_".join(f"{k}{v}" for k, v in sorted(overrides.items())), **{**defaults, **overrides}
   )
 
 
@@ -4865,6 +4867,45 @@ class FlatFsdpWeightsGraphTest(unittest.TestCase):
       )
       # The qwix fix-up in Linen-wrapped init walks the NNX graph, which descends into the kernel axes.
       self.assertIn(("wi_kernel_axes", 0, 0), [path for path, _ in nnx.iter_graph(model)])
+      _, abs_state, _ = nnx.split(model, nnx.Param, ...)
+      shardings = sharding.nnx_construct_named_sharding(abs_state, mesh)
+
+    num_experts, emb, mlp = cfg.num_experts, cfg.base_emb_dim, cfg.moe_mlp_dim
+    for name, shape in (
+        ("wi_0", (num_experts * emb, mlp)),
+        ("wi_1", (num_experts * emb, mlp)),
+        ("wo", (num_experts * mlp, emb)),
+    ):
+      self.assertEqual(abs_state[name].shape, shape, name)
+      self.assertEqual(shardings[name].get_value().spec[0], ("expert", "fsdp"), name)
+
+  def test_unquantized_prefetch_abstract_model_and_shardings(self):
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for expert parallelism 2 and FSDP >= 2.")
+    cfg = _flat_fsdp_config(
+        moe_flat_fsdp_weights=True,
+        prefetch_fsdp_weights=True,
+        quantization="",
+        use_qwix_quantization=False,
+        shard_embed_moe_on_fsdp=False,
+        use_tokamax_gmm=False,
+        use_gmm_v2=False,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      model = nnx.eval_shape(
+          lambda: moe.RoutedMoE(
+              config=cfg,
+              num_experts=cfg.num_experts,
+              num_experts_per_tok=cfg.num_experts_per_tok,
+              mesh=mesh,
+              kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+              kernel_axes=("embed", "mlp"),
+              intermediate_dim=cfg.moe_mlp_dim,
+              dtype=cfg.dtype,
+              rngs=nnx.Rngs(0),
+          )
+      )
       _, abs_state, _ = nnx.split(model, nnx.Param, ...)
       shardings = sharding.nnx_construct_named_sharding(abs_state, mesh)
 

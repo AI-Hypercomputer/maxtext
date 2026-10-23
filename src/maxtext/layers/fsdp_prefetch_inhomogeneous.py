@@ -410,7 +410,8 @@ def apply_layers_with_fsdp_prefetch(
       diff_args_leaves,
       diff_kwargs_leaves,
       length,
-      tuple(ctx._replace(params_treedef=g[1], state_treedef=g[2]) for g in groups),
+      # The stage params are already layer-major (`_layer_major` above), so the setup must not move the scan axis again.
+      tuple(ctx._replace(params_treedef=g[1], state_treedef=g[2], scan_axis=0) for g in groups),
       tuple(len(g[3]) for g in groups),
   )
   return final_y, layers, None

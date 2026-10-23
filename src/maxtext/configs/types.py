@@ -6362,14 +6362,13 @@ class MaxTextConfig(
     if self.moe_flat_fsdp_weights:
       if not (
           self.sparse_matmul
-          and self.shard_embed_moe_on_fsdp
-          and self.use_tokamax_gmm
-          and self.use_gmm_v2
+          and (self.shard_embed_moe_on_fsdp or not self.quantization)
+          and ((self.use_tokamax_gmm and self.use_gmm_v2) or self.prefetch_fsdp_weights)
           and not self.prefuse_moe_weights
       ):
         raise ValueError(
-            "moe_flat_fsdp_weights=True requires sparse_matmul=True, shard_embed_moe_on_fsdp=True,"
-            " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+            "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True or unquantized),"
+            " ((use_tokamax_gmm=True and use_gmm_v2=True) or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
         )
       # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
       if (
