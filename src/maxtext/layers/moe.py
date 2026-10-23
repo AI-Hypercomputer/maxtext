@@ -3701,7 +3701,9 @@ class RoutedMoE(nnx.Module):
               buffer_size=buffer_size,
           )
 
-          output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
+          # Zero-filled (not jax.lax.empty): with ragged_buffer_factor > 0 the rows past the received
+          # tokens are never written, and stale HBM there can be NaN/Inf that leaks through 0 * NaN.
+          output_shape = jnp.zeros((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           x = jax.lax.ragged_all_to_all(
               x,
@@ -4859,7 +4861,10 @@ class RoutedMoE(nnx.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-        output_shape = jax.lax.empty(
+        # Zero-filled (not jax.lax.empty): slots of tokens dropped by ragged_buffer_factor > 0 are
+        # never written by the return ragged_all_to_all; stale HBM there (possibly NaN/Inf) would
+        # otherwise reach unpermute's weighted sum and the backward pass (0 * NaN = NaN).
+        output_shape = jnp.zeros(
             (
                 original_inputs_first_dim,
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
