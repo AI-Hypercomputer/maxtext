@@ -22,8 +22,8 @@ parallelism needs ragged_dot shapes the CPU backend rejects; without it, the rou
 
 The sparse path sets the token-sharding axes in ``moe.LB_REDUCE_AXES`` around its ``shard_map``; the tests do the same.
 
-Needs 4 devices (CPU CI forces 4): on CPU, run this file in its own process (it sets the host device count before importing JAX);
-it skips if JAX already started with fewer.
+Needs 4 devices (CPU CI forces 4): on CPU, run this file in its own process (it sets the host device count before
+importing JAX); it skips if JAX already started with fewer.
 
     JAX_PLATFORMS=cpu pytest tests/unit/olmoe3_global_lb_test.py
 """
