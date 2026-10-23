@@ -293,7 +293,9 @@ jobs:
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true' &&
+      (github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -330,7 +332,12 @@ jobs:
       base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test and not post_training'
-      pytest_addopts: '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'
+      pytest_addopts: >-
+        ${{
+          (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
+          && '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'
+          || 'tests/integration/train_tests.py::TrainTests::test_tpu_base tests/integration/train_tests.py::TrainTests::test_tpu_synthetic'
+        }}
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
