@@ -515,7 +515,9 @@ class DeepSeekRoutingTest(unittest.TestCase):
     # pylint: disable=protected-access
     self.assertIsNone(moe._batch_axis_names(None))
     self.assertEqual(moe._batch_axis_names(P("data", "context")), ("data", "context"))
-    self.assertEqual(moe._batch_axis_names(P("stage", "data")), ("data",))
+    # 'stage' shards the batch where it acts as data parallelism (layers outside the pipeline).
+    self.assertEqual(moe._batch_axis_names(P("stage", "data")), ("stage", "data"))
+    self.assertEqual(moe._batch_axis_names(P("tensor", "data")), ("data",))
     self.assertEqual(
         moe._batch_axis_names(P(("data", "fsdp", "context_usp_ulysses", "expert"), "context")),
         ("data", "fsdp", "context_usp_ulysses", "expert", "context"),
