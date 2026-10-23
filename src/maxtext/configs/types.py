@@ -3666,6 +3666,15 @@ class VLLM(BaseModel):
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
+  record_moe_metrics: bool = Field(
+      False,
+      description=(
+          "Record actor router entropy and expert-load diagnostics in standard GRPO/GSPO. "
+          "Uses valid prompt and completion tokens; adds routing observation but no second model forward. "
+          "Random, hash and fused routers are reported as unsupported."
+      ),
+  )
+
   # Targeted profiling of the Tunix RL roles (tunix `RLProfileConfig`). Active
   # only with `profiler=xplane`.
   profiler_start_invocation: int = Field(

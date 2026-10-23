@@ -938,6 +938,8 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
+    # Enabled only on the RL actor by the opt-in Tunix metrics adapter.
+    self.record_rl_metrics = False
     self.weight_quant = weight_quant
 
     # DeepSeek V4 Hash Routing
@@ -5003,6 +5005,24 @@ class RoutedMoE(nnx.Module):
       )
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
+
+    if self.record_rl_metrics:
+      # Observe the full routing decision outside sparse kernel shard_maps and
+      # token chunks. No extra gate projection or model forward is needed.
+      # The adapter excludes random/hash/fused routers before enabling this.
+      scores = pre_bias_logits if pre_bias_logits is not None else gate_logits
+      scores = jax.lax.stop_gradient(scores.astype(jnp.float32))
+      if self.gate.score_func in ("sigmoid", "sqrtsoftplus", "softmax"):
+        probs = scores / jnp.maximum(scores.sum(axis=-1, keepdims=True), 1e-30)
+      elif cfg.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+        probs = jax.nn.sigmoid(scores)
+        probs /= jnp.maximum(probs.sum(axis=-1, keepdims=True), 1e-30)
+      else:
+        probs = jax.nn.softmax(scores, axis=-1)
+      entropy = -jnp.sum(probs * jnp.log(jnp.maximum(probs, 1e-30)), axis=-1)
+      _, indices = self.get_topk(gate_logits, pre_bias_logits, forced_routed_experts=forced_routed_experts)
+      self.rl_router_entropy = nnx.Intermediate(entropy)
+      self.rl_expert_indices = nnx.Intermediate(jax.lax.stop_gradient(indices))
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
 
