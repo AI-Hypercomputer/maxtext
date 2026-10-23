@@ -28,11 +28,11 @@ Exactly one workflow builds images: `.github/workflows/build_and_push_docker_ima
 It is a reusable workflow (`workflow_call`), so it never starts on its own. Three
 workflows call it, and these are the only events that build an image:
 
-| Caller                                                        | Trigger                                              | Images                                                                                                       |
-| ------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| TPU Docker Images Pipeline (`tpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**     | `maxtext_jax_stable`, `maxtext_jax_nightly`, `maxtext_post_training_stable`, `maxtext_post_training_nightly` |
-| GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**     | `maxtext_gpu_jax_stable`, `maxtext_gpu_jax_nightly`                                                          |
-| Release Pipeline (`release_pipeline.yml`)                     | GitHub release published, or manual **Run workflow** | Release images. Always a full build.                                                                         |
+| Caller                                                        | Trigger                                              | Images                                                                                                                           |
+| ------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| TPU Docker Images Pipeline (`tpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**     | `maxtext_jax_stable`, `maxtext_jax_nightly`, `maxtext_post_training_stable`, `maxtext_post_training_nightly`                     |
+| GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**     | `maxtext_gpu_jax_stable_amd64`, `maxtext_gpu_jax_nightly_amd64`, `maxtext_gpu_jax_stable_arm64`, `maxtext_gpu_jax_nightly_arm64` |
+| Release Pipeline (`release_pipeline.yml`)                     | GitHub release published, or manual **Run workflow** | Release images. Always a full build.                                                                                             |
 
 Nothing else builds an image:
 

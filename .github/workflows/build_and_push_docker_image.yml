@@ -68,6 +68,11 @@ on:
         required: false
         type: boolean
         default: false
+      platform:
+        description: 'Target platform for the Docker image build (e.g., linux/amd64, linux/arm64)'
+        required: false
+        type: string
+        default: 'linux/amd64'
     secrets:
       HF_TOKEN:
         required: true
@@ -168,12 +173,14 @@ jobs:
           BUILD_MODE: ${{ inputs.build_mode }}
           IMAGE_NAME: ${{ inputs.image_name }}
           DOCKERFILE: ${{ inputs.dockerfile }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
           echo "device: $DEVICE"
           echo "workflow: $WORKFLOW"
           echo "build_mode: $BUILD_MODE"
           echo "image_name: $IMAGE_NAME"
           echo "dockerfile: $DOCKERFILE"
+          echo "platform: $PLATFORM"
 
       - name: Set up Syft
         id: download_syft
@@ -291,6 +298,7 @@ jobs:
         with:
           push: true
           context: .
+          platforms: ${{ inputs.platform }}
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
           tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
@@ -315,6 +323,7 @@ jobs:
         with:
           push: true
           context: .
+          platforms: ${{ inputs.platform }}
           # The drift guard picks the COPY-only fast variant unless code files were removed
           # (or, for post-training, the vLLM adapter changed), see the guard script.
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ needs.drift_guard.outputs.overlay_variant == 'clean' && 'maxtext_code_overlay.Dockerfile' || 'maxtext_code_overlay_fast.Dockerfile' }}
@@ -339,11 +348,16 @@ jobs:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
           IMAGE_DIGEST: ${{ steps.build_push.outputs.digest || steps.build_push_fast.outputs.digest }}
           SYFT_CMD: ${{ steps.download_syft.outputs.cmd }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            echo "::error::Image digest is empty; the Docker build step did not complete or push an image."
+            exit 1
+          fi
           IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST}"
-          echo "Generating SPDX JSON SBOM for ${IMAGE_URI}..."
+          echo "Generating SPDX JSON SBOM for ${IMAGE_URI} (${PLATFORM})..."
 
-          if "${SYFT_CMD}" "registry:${IMAGE_URI}" -o spdx-json=/tmp/sbom.spdx.json; then
+          if "${SYFT_CMD}" "registry:${IMAGE_URI}" --platform "${PLATFORM}" -o spdx-json=/tmp/sbom.spdx.json; then
             echo "Uploading SPDX SBOM reference to Container Analysis / SCILo..."
             gcloud artifacts sbom load \
               --project="${PROJECT_NAME}" \
