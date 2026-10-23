@@ -238,12 +238,15 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
 
 
 def validate_direct_sync_layer_coverage(source, target) -> int:
-  """Fail if an unrolled source would leave MaxText target layers untouched.
+  """Fail if a direct-sync source would leave MaxText target layers untouched.
 
   Tunix intentionally intersects direct-sync trees. For heterogeneous Qwen
   scans, a schema error can therefore skip every transformer layer without an
   exception. This check runs on the initial full-parameter load and requires
-  every unscanned target-layer parameter path to exist in the source.
+  every unscanned target-layer parameter path to be reachable from the source:
+  either directly (sources MaxText already unrolled, e.g. Gemma and Qwen) or
+  through the scanned-layer lookup of Tunix's `transfer_state_directly`, which
+  unrolls the homogeneous scans MaxText leaves stacked (e.g. Llama).
   """
 
   def to_pure_params(state):
@@ -268,21 +271,31 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   source_flat = flatten_dict(source)
   target_flat = flatten_dict(target)
 
-  def is_unscanned_layer_path(path):
-    return any(isinstance(part, str) and re.fullmatch(r"layers_\d+", part) for part in path)
+  def unscanned_layer_index(path):
+    """Position of the first `layers_N` component of `path`, or -1."""
+    for i, part in enumerate(path):
+      if isinstance(part, str) and re.fullmatch(r"layers_\d+", part):
+        return i
+    return -1
 
-  source_layer_keys = {key for key in source_flat if is_unscanned_layer_path(key)}
-  target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
+  source_keys = set(source_flat)
+  target_layer_keys = {key for key in target_flat if unscanned_layer_index(key) != -1}
 
-  def source_covers(target_key):
-    if target_key in source_layer_keys:
-      return True
+  def has_split_wi(key):
     # Tunix fuses split training weights into the inference-only prefused
     # parameter before transfer. Treat the pair as coverage for target `wi`.
-    if target_key and target_key[-1] == "wi":
-      prefix = target_key[:-1]
-      return prefix + ("wi_0",) in source_layer_keys and prefix + ("wi_1",) in source_layer_keys
-    return False
+    return key[-1] == "wi" and key[:-1] + ("wi_0",) in source_keys and key[:-1] + ("wi_1",) in source_keys
+
+  def source_covers(target_key):
+    if target_key in source_keys or has_split_wi(target_key):
+      return True
+    # Mirror the fallback of Tunix's `transfer_state_directly`: a target
+    # `layers_N` is slice N of a scanned `layers` container (standard MaxText)
+    # or of an implicit stack without one. Only the former fuses split MoE.
+    idx = unscanned_layer_index(target_key)
+    scanned_key = target_key[:idx] + ("layers",) + target_key[idx + 1 :]
+    implicit_key = target_key[:idx] + target_key[idx + 1 :]
+    return scanned_key in source_keys or implicit_key in source_keys or has_split_wi(scanned_key)
 
   missing = {key for key in target_layer_keys if not source_covers(key)}
   if not target_layer_keys or missing:
