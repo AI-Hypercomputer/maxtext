@@ -105,12 +105,17 @@ jobs:
         env:
           FLAVOR: ${{ inputs.flavor }}
           BASELINE_DOWNLOADED: ${{ steps.download-baseline.outputs.downloaded }}
+          IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
         run: |
+          SCHEDULED_FLAG=""
+          if [ "${IS_SCHEDULED_RUN}" = "true" ]; then
+            SCHEDULED_FLAG="--is-scheduled-run"
+          fi
           if [ "${BASELINE_DOWNLOADED}" = "true" ]; then
-            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" --baseline per_test_baseline.json)
+            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" --baseline per_test_baseline.json ${SCHEDULED_FLAG})
             python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor "$FLAVOR"
           else
-            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR")
+            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" ${SCHEDULED_FLAG})
           fi
 
           echo "${CALC_OUTPUT}"
@@ -205,7 +210,7 @@ jobs:
             "gpu-integration": "not cpu_only and not tpu_only and integration_test and not post_training",
             "cpu-unit": "cpu_only and not post_training and not integration_test",
             "cpu-integration": "cpu_only and not post_training and integration_test",
-            "cpu-post-training-unit": "cpu_only and post_training",
+            "cpu-post-training-unit": "cpu_only and post_training and not integration_test",
             "cpu-post-training-integration": "cpu_only and post_training and integration_test"
           }')[inputs.flavor] }}
 

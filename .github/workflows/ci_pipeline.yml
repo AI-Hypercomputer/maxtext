@@ -181,35 +181,14 @@ jobs:
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-  gate_test_run:
-    name: Gate and Formalize Parameters
+  tpu-pretrain-tests:
+    name: TPU Pretrain Tests
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
       needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      total_workers: ${{ steps.set-params.outputs.total_workers }}
-      worker_groups: ${{ steps.set-params.outputs.worker_groups }}
-      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
-    steps:
-      - id: set-params
-        name: Formalize Test Suite Parameters
-        run: |
-          TPU_UNIT_TOTAL_WORKERS=2
-          TPU_UNIT_WORKER_GROUPS='[1, 2]'
-          echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
-          echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
-
-  tpu-pretrain-tests:
-    name: TPU Pretrain Tests
-    needs: [gate_test_run, analyze_code_changes]
-    if: |
-      !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -219,15 +198,16 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
     name: TPU Posttrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -237,15 +217,16 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
 
   tpu7x-tests:
     name: TPU7X Tests
-    needs: [gate_test_run]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success' &&
       (github.event_name != 'pull_request' ||
         contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -257,15 +238,16 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   gpu-tests:
     name: GPU Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_gpu_tests == 'true'
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_gpu_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -275,15 +257,16 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-cuda12:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
     name: CPU Pretrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -293,15 +276,16 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
     name: CPU Posttrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -311,20 +295,21 @@ jobs:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
     name: TPU Pathways Unit Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
         matrix:
-          group: ${{ fromJSON(needs.gate_test_run.outputs.worker_groups || '[1, 2]') }}
+          group: [1, 2]
     with:
       device_type: tpu
       device_name: v6e-4
@@ -336,17 +321,18 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
-      total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      total_workers: '2'
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
     name: TPU Pathways Integration Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
       !cancelled() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
+      needs.analyze_code_changes.outputs.run_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true' &&
+      needs.build_and_upload_maxtext_package.result == 'success'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -361,11 +347,11 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [analyze_code_changes, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, dev_tests, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -377,7 +363,6 @@ jobs:
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
           echo "Dev Tests result: ${NEEDS_DEV_TESTS_RESULT}"
-          echo "Gate result: ${NEEDS_GATE_TEST_RUN_RESULT}"
           echo "TPU Pretrain Tests result: ${NEEDS_TPU_PRETRAIN_TESTS_RESULT}"
           echo "TPU Posttrain Tests result: ${NEEDS_TPU_POSTTRAIN_TESTS_RESULT}"
           echo "TPU7X Tests (Matrix) result: ${NEEDS_TPU7X_TESTS_RESULT}"
@@ -399,7 +384,6 @@ jobs:
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
           NEEDS_DEV_TESTS_RESULT: ${{ needs.dev_tests.result }}
-          NEEDS_GATE_TEST_RUN_RESULT: ${{ needs.gate_test_run.result }}
           NEEDS_CPU_PRETRAIN_TESTS_RESULT: ${{ needs.cpu-pretrain-tests.result }}
           NEEDS_CPU_POSTTRAIN_TESTS_RESULT: ${{ needs.cpu-posttrain-tests.result }}
           NEEDS_TPU_PRETRAIN_TESTS_RESULT: ${{ needs.tpu-pretrain-tests.result }}
@@ -475,8 +459,8 @@ jobs:
 
   track_performance:
     name: Track Test Performance
-    needs: [tpu-pretrain-tests, tpu-posttrain-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
-    if: ${{ !cancelled() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
+    needs: [tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
+    if: ${{ !cancelled() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success' || needs.tpu7x-tests.result == 'success') }}
     uses: ./.github/workflows/track_performance.yml
     permissions:
       contents: write
