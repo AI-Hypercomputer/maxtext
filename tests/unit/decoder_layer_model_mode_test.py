@@ -56,7 +56,7 @@ from flax.linen import partitioning as nn_partitioning
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.configs import pyconfig
 from maxtext.layers import attention_mla, attentions
-from maxtext.models import deepseek, gemma, gemma2, gemma3, gpt3, gpt_oss, llama2, mistral, qwen2, qwen3
+from maxtext.models import deepseek, gemma3, gpt_oss, llama2, qwen3
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -83,7 +83,7 @@ _COMMON = {
 }
 
 _DEEPSEEK = {
-    "model_name": "deepseek2-16b",
+    "model_name": "deepseek3-test",
     "override_model_config": True,
     "mla_naive_kvcache": False,
     "first_num_dense_layers": 1,
@@ -97,10 +97,6 @@ _LAYERS = [
     ("deepseek_dense", deepseek.DeepSeekDenseLayer, _DEEPSEEK, {}),
     ("deepseek_moe", deepseek.DeepSeekMoELayer, _DEEPSEEK, {}),
     ("llama2", llama2.LlamaDecoderLayer, {}, {}),
-    ("mistral", mistral.MistralDecoderLayer, {"decoder_block": "mistral"}, {}),
-    ("gemma", gemma.GemmaDecoderLayer, {"decoder_block": "gemma"}, {}),
-    ("gemma2", gemma2.Gemma2DecoderLayer, {"decoder_block": "gemma2"}, {}),
-    ("qwen2", qwen2.Qwen2DecoderLayer, {"decoder_block": "qwen2"}, {"quant": None}),
     ("qwen3", qwen3.Qwen3DecoderLayer, {"decoder_block": "qwen3"}, {"quant": None}),
 ]
 
@@ -127,12 +123,8 @@ _GPT_OSS = {
 
 # Layers onboarded to explicit sharding, as (name, layer class, config, ctor kwargs).
 _SHARD_MODE_LAYERS = [
-    ("gemma", gemma.GemmaDecoderLayer, {"decoder_block": "gemma"}, {}),
-    ("gemma2", gemma2.Gemma2DecoderLayer, {"decoder_block": "gemma2"}, {}),
     ("gemma3", gemma3.Gemma3DecoderLayer, _GEMMA3, {}),
     ("gemma3_scannable_block", gemma3.Gemma3ScannableBlock, _GEMMA3, {}),
-    ("gpt3", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": False}, {}),
-    ("gpt3_fused_qkv", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": True}, {}),
     ("gpt_oss", gpt_oss.GptOssDecoderLayer, _GPT_OSS, {"attention_type": attentions.AttentionType.GLOBAL}),
     ("gpt_oss_scannable_block", gpt_oss.GptOssScannableBlock, _GPT_OSS, {}),
 ]

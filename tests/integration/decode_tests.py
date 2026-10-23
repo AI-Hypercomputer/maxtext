@@ -95,7 +95,7 @@ class DecodeTests(unittest.TestCase):
           "dataset_type=synthetic",
           "steps=10",
           "async_checkpointing=False",
-          "model_name=gemma-2b",
+          "model_name=qwen3-0.6b",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.gemma')}",
           "attention=dot_product",
           "prompt=I love to",

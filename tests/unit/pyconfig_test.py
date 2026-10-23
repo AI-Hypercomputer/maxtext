@@ -55,7 +55,7 @@ class PyconfigTest(unittest.TestCase):
       return pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
-          model_name="mixtral-8x7b",
+          model_name="qwen3-30b-a3b",
           megablox=True,
           sparse_matmul=True,
           use_ring_of_experts=True,
@@ -292,13 +292,13 @@ class PyconfigTest(unittest.TestCase):
     config = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         skip_jax_distributed_system=True,
-        model_name="gemma-7b",
+        model_name="gemma3-4b",
         override_model_config=True,
-        base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+        base_emb_dim=1024,  # Defined as 2560 in gemma3-4b
     )
 
     self.assertEqual(config.base_emb_dim, 1024)  # override
-    self.assertEqual(config.base_mlp_dim, 24576)  # unchanged
+    self.assertEqual(config.base_mlp_dim, 10240)  # unchanged
 
   def test_overriding_model_raises_error(self):
     """Test that overriding a model config with override_model_config=False raises an error."""
@@ -306,9 +306,9 @@ class PyconfigTest(unittest.TestCase):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
-          model_name="gemma-7b",
+          model_name="gemma3-4b",
           override_model_config=False,
-          base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+          base_emb_dim=1024,  # Defined as 2560 in gemma3-4b
       )
 
   def test_overriding_model_in_sft(self):
@@ -440,7 +440,8 @@ class PyconfigTest(unittest.TestCase):
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
           shard_mode="explicit",
-          model_name="llama4-17b-16e",
+          model_name="gemma3-4b",
+          decoder_block="llama4",
           override_model_config=True,
           use_multimodal=True,
       )

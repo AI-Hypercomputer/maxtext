@@ -839,7 +839,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
         override_model_config=True,
         base_num_decoder_layers=num_layers,
         num_decoder_layers=num_layers,
-        model_name="mixtral-8x7b",
+        model_name="qwen3-30b-a3b",
+        decoder_block="mixtral",
+        norm_topk_prob=False,
         num_experts=num_experts,
         num_experts_per_tok=top_k,
         base_emb_dim=256,
@@ -1030,7 +1032,7 @@ class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
       decoder_block=ctypes.DecoderBlockType.MIXTRAL,
   ):
     """Computes top-k routing weights with forced routed experts."""
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=decoder_block)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=decoder_block)
     config.norm_topk_prob = norm_topk_prob
     config.routed_scaling_factor = 1.0
     # Expert 2 has a large logit; it is the one -1 wraps onto.
@@ -1072,7 +1074,7 @@ class ForcedRoutingGradientTest(unittest.TestCase):
   """
 
   def test_gate_logits_receive_gradient_under_forced_routing(self):
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
     forced = jnp.array([[[1, -1], [0, 2]]])
@@ -1086,7 +1088,7 @@ class ForcedRoutingGradientTest(unittest.TestCase):
     self.assertGreater(float(jnp.max(jnp.abs(grads))), 0.0)
 
   def test_fully_padded_token_has_zero_gradient(self):
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
 
@@ -1112,7 +1114,7 @@ class OutOfRangeExpertIdTest(unittest.TestCase):
   """
 
   def _model(self):
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
     model.num_experts = 4
@@ -1302,7 +1304,7 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
         enable_checkpointing=False,
         log_config=False,
         skip_jax_distributed_system=True,
-        model_name="mixtral-8x7b",
+        model_name="qwen3-30b-a3b",
         override_model_config=True,
         base_emb_dim=7168,  # multiple of 1024 so the kernel is fully used
         base_mlp_dim=256,

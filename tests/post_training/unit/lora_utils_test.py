@@ -54,7 +54,7 @@ _BASE_CONFIG = {
     "base_num_kv_heads": 2,
     "base_mlp_dim": 256,
     "max_prefill_predict_length": 4,
-    "model_name": "llama2-7b",
+    "model_name": "llama3.1-8b",
     "override_model_config": True,
     "weight_dtype": "bfloat16",
 }
