@@ -1435,6 +1435,8 @@ sa_use_base2_exp: true # defaults to true in Tokamax
 sa_qk_diag_skip: false # skip strictly causal-masked sub-tiles in diagonal QK blocks
 sa_sv_diag_skip: false # skip zeroed strictly causal-masked sub-tiles in diagonal SV blocks
 sa_qk_diag_grid: 2 # sub-grid split factor for diagonal skip (power of 2 >= 2)
+sa_dkv_diag_skip: false # with sa_qk_diag_skip: also skip masked diagonal sub-tiles of the dv/dp/dk matmuls in the fused dkv kernel
+sa_dkv_diag_skip_dq: false # with sa_dkv_diag_skip: also skip them in the dq matmul
 # local_sa_* variants apply to local (sliding window) attention layers;
 # if None, each inherits from the corresponding global sa_* flag.
 local_sa_block_q: None  # inherits from sa_block_q if None
