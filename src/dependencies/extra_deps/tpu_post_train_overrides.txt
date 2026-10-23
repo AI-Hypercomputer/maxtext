@@ -20,6 +20,12 @@ qwix==0.1.8
 setuptools==80.9.0
 torch==2.12.0
 torchvision==0.27.0
+# triton>=3.7 segfaults when libtriton.so is loaded after TensorFlow (LLVM symbol
+# clash), which crashes train_sft_native in the multimodal SFT E2E tests. torch's
+# PyPI (CUDA) wheel pins triton==3.7.0, but TPU images use the CPU torch wheel.
+# generate_requirements.sh rewrites == into >= floors, so this pin relies on
+# `uv pip install --resolution=lowest` (used by setup.sh).
+triton==3.6.0 ; sys_platform == 'linux'
 urllib3>=2.8.0
 werkzeug>=3.1.9
 wheel>=0.48.0
