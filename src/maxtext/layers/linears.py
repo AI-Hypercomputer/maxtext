@@ -521,6 +521,7 @@ class MlpBlock(nnx.Module):
       quant: None | Quant = None,
       model_mode: None | str = None,
       activations_limit: float = 0.0,
+      act_quant_fn: Callable[[Array], Array] | None = None,
       *,
       rngs: nnx.Rngs,
   ) -> None:
@@ -544,9 +545,12 @@ class MlpBlock(nnx.Module):
       out_sharding: Named sharding of outputs
       activations_limit: If > 0, clamps a gated (two-activation) MLP's pre-activations SwiGLU-style: the
         gate branch from above at `activations_limit`, the up branch to [-activations_limit, activations_limit].
+      act_quant_fn: If set, applied to the inputs of the up projections and of the down projection (activation
+        quantize -> dequantize round trip of a quantized-GEMM model).
     """
     self.config = config
     self.activations_limit = activations_limit
+    self.act_quant_fn = act_quant_fn
     self.mesh = mesh
     self.in_features = in_features
     self.intermediate_dim = intermediate_dim
@@ -694,6 +698,8 @@ class MlpBlock(nnx.Module):
 
     if self.mlp_layer_norm is not None:
       inputs = self.mlp_layer_norm(inputs)
+    if self.act_quant_fn is not None:
+      inputs = self.act_quant_fn(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -725,6 +731,8 @@ class MlpBlock(nnx.Module):
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    if self.act_quant_fn is not None:
+      x = self.act_quant_fn(x)
     output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")

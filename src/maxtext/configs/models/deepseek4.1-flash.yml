@@ -35,6 +35,8 @@ decoder_block: "deepseek41"
 mhc_expansion_rate: 4
 ds41_hc_sinkhorn_iters: 20
 ds41_hc_eps: 1.0e-6
+# Activation FP8 / FP4 round trips of the reference inference kernels.
+ds41_activation_quant: true
 
 # --- Attention: sliding window on every layer, plus shared compressed KV on compress_ratio > 0 layers ---
 q_lora_rank: 1280
@@ -74,6 +76,8 @@ routed_bias_update_rate: 0.001
 load_balance_loss_weight: 0.0001
 log_moe_bias_norms: false
 routed_scaling_factor: 1.5
+sparse_matmul: false
+capacity_factor: -1
 
 # --- RoPE ---
 rope_type: "default"

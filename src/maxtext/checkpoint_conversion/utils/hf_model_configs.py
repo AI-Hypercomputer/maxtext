@@ -1235,6 +1235,8 @@ class DeepseekV41Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
   model_type = "deepseek_v41_text"
 
   def __init__(self, **kwargs):
+    if kwargs.get("quantization_config") is None:
+      kwargs.pop("quantization_config", None)
     self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
     super().__init__(**kwargs)
 
