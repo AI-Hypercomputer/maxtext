@@ -2009,6 +2009,9 @@ class HardwareAndMesh(BaseModel):
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
+  prng_impl: Literal["unsafe_rbg", "rbg", "threefry2x32"] = Field(
+      "unsafe_rbg", description="JAX default PRNG implementation used for training."
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -2154,6 +2157,30 @@ class PipelineParallelism(BaseModel):
   pipeline_fsdp_ag_per_repeat: bool = Field(
       False,
       description="Enable weight prefetching for circular pipeline parallelism.",
+  )
+  pipeline_bsw_no_carry: bool = Field(
+      True,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: re-gather the previous repeat's weights in every repeat instead of"
+          " carrying the gathered buffer across repeats (saves num_repeats x one repeat of gathered weights in HBM,"
+          " costs one extra FSDP all-gather / reduce-scatter per repeat). Numerically identical. False carries the"
+          " buffer."
+      ),
+  )
+  pipeline_bsw_phase_split: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: run the iterations in which all stages read the current repeat's weights"
+          " without the per-iteration buffer-slot select (no weight copy, one gradient accumulator). Helps when"
+          " num_pipeline_microbatches >> num_stages. Numerically identical up to summation order."
+      ),
+  )
+  pipeline_bsw_in_compute_dtype: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: hold the prefetched weights and their per-repeat gradient accumulation in"
+          " `dtype` instead of `weight_dtype`. Changes numerics; halves the prefetch all-gather bytes and memory."
+      ),
   )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
   num_pipeline_repeats: int = Field(
@@ -5214,8 +5241,22 @@ class MaxTextConfig(
         assert (
             not self.pipeline_delay_activation_forwarding
         ), "Pipeline weight prefetching does not support pipeline delay."
-        assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
+        # Qwix quantized training (qwix.QtProvider) keeps no per-layer quantization state: weights are staged through
+        # the BSW in their original dtype and quantized inside every matmul/GMM, exactly as without pipelining (verified
+        # for fp8_full). AQT and the fp8_gpu/fp8_nanoo delayed-scaling providers instead carry amax-history
+        # `_overwrite_with_gradient` variables whose "gradient" is the new history, and the BSW scan would sum it over
+        # all microbatches of a repeat, so they stay unsupported.
+        qwix_qt_types = ("int4", "int8", "fp4", "fp4_e2m1", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_full")
+        assert not self.quantization or (self.use_qwix_quantization and self.quantization in qwix_qt_types), (
+            "Pipeline weight prefetching (pipeline_fsdp_ag_per_repeat) only supports Qwix quantized training: "
+            f"use_qwix_quantization=True and quantization in {qwix_qt_types}."
+        )
+      else:
+        # pipeline_bsw_no_carry is on by default and has nothing to do without weight prefetching.
+        bsw_options = ("pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype")
+        enabled = [name for name in bsw_options if getattr(self, name)]
+        assert not enabled, f"{enabled} only apply to pipeline weight prefetching: set pipeline_fsdp_ag_per_repeat=True."
 
       assert (num_stages * self.num_pipeline_repeats * self.num_layers_per_pipeline_stage) == (
           self.pipeline_parallel_layers

@@ -484,6 +484,28 @@ pipeline_fsdp_ag_once: false # If set to true then all gather all of the weights
 pipeline_fsdp_ag_per_repeat: false
 # Pipeline weight prefetching per repeat is an advanced SPMD pipeline parallelism improvement technique
 # When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
+# Options of the weight prefetching buffer (BSW: two slots holding the FSDP-gathered weights of the previous and the
+# current repeat). They only apply with pipeline_fsdp_ag_per_repeat=true.
+# pipeline_bsw_no_carry (on by default): re-gather the previous repeat's weights at the start of every repeat instead of
+#   carrying the gathered slot across the repeat scan (which saves it for the backward pass once per repeat).
+#   Numerically identical; saves num_pipeline_repeats x one repeat of gathered stage weights (~19 GiB/device for
+#   DeepSeek-V3 PP=8 EP=8 FSDP=128) for one extra FSDP all-gather per repeat (+ a reduce-scatter in the backward pass).
+#   Set it to false to carry the slot instead when that memory is available.
+pipeline_bsw_no_carry: true
+# pipeline_bsw_phase_split: run the microbatch iterations in which every stage already reads the current repeat's slot
+#   (the last num_pipeline_microbatches - (num_stages - 1) of each repeat, and the drain bubble) without the
+#   per-iteration slot select, which materializes a copy of the weights and needs a second gradient accumulator.
+#   Numerically identical up to float summation order. Pays off when num_pipeline_microbatches is well above num_stages
+#   (DeepSeek-V3 PP=8 AOT estimate: -4.5% step time at 16 microbatches, but +2.6% at 8, where only 1 of 8 iterations
+#   per repeat is single-slot and the extra per-repeat gradient reduction dominates; together with
+#   pipeline_bsw_in_compute_dtype that reduction is bf16 and it pays off at 8 too); costs some memory (+7 GiB there).
+pipeline_bsw_phase_split: false
+# pipeline_bsw_in_compute_dtype: hold the gathered weights (and so their gradient accumulation over the microbatches
+#   of a repeat) in `dtype` instead of `weight_dtype`. CHANGES NUMERICS (gradients accumulated in e.g. bf16); halves the
+#   BSW all-gather bytes and memory (DeepSeek-V3 PP=8, 8 microbatches: -8 GiB, -1.2% step time; with
+#   pipeline_bsw_no_carry the re-gather becomes cheap: -27 GiB at the same step time). Routing biases / quantization
+#   state are not cast.
+pipeline_bsw_in_compute_dtype: false
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -1394,6 +1416,11 @@ allow_split_physical_axes: false
 optimize_mesh_for_tpu_v6e: false
 
 shardy: true # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
+
+# JAX PRNG implementation for training ("unsafe_rbg", "rbg" or "threefry2x32"). unsafe_rbg is fast, but with pipeline
+# parallelism its key ops (fold_in/random bits via RngBitGenerator) inside the circular pipeline's rematerialized
+# iterations produced NaN gradients for random routing (use_random_routing=true); threefry2x32 does not.
+prng_impl: "unsafe_rbg"
 
 remove_size_one_mesh_axis_from_type: true # Whether to remove size one mesh axis from type through jax.config.
 

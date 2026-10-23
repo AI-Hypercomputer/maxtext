@@ -14,7 +14,10 @@
 
 """Pipeline layer wrapping a decoder layer(s). Supports circular pipelining"""
 
+import functools
+
 import jax
+import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from flax import nnx
 
@@ -239,12 +242,14 @@ def create_gradient_accumulation_scan(
 
 
 def is_static_param(path, v):
-  """Predicate matching nnx.Param and FP8 _overwrite_with_gradient variables.
+  """Predicate matching nnx.Param, FP8 _overwrite_with_gradient and MoEBiasVar variables.
 
-  Used throughout the pipeline to split state into trainable params vs other state.
+  Used throughout the pipeline to split state into loop-invariant weights vs other state.
+  MoEBiasVar (DeepSeek's aux-loss-free routing bias) is not differentiated, but it is
+  read-only inside the forward pass, so it is staged per layer like a weight.
   Must be consistent everywhere to prevent tree structure mismatches.
   """
-  return isinstance(v, nnx.Param) or type(v).__name__ == "_overwrite_with_gradient"
+  return isinstance(v, nnx.Param) or type(v).__name__ in ("_overwrite_with_gradient", "MoEBiasVar")
 
 
 def advance_rng_state(state, iteration):
@@ -335,6 +340,76 @@ def unflatten_nnx_state(arrays, treedef, is_var_flags, var_types, var_metadata):
     else:
       new_leaves.append(arr)
   return treedef.unflatten(new_leaves)
+
+
+# How a metric sown inside a pipelined layer is reduced over the microbatches that layer processed. Names without an
+# entry use the dtype rule (bool: any, float: mean, int: sum), which suits the per-layer logging statistics
+# (activation_mean / activation_stdev / activation_fraction_zero).
+SOWN_MICROBATCH_REDUCTIONS = {
+    "moe_has_overflow": jnp.any,
+    "moe_lb_loss": jnp.mean,
+    "moe_bias_updates": jnp.sum,  # per-expert token counts under PP (decoded in train.py)
+    "max_logits": jnp.max,
+    "te_moe_total_recv_tokens": jnp.max,
+    "te_moe_recv_capacity_per_rank": jnp.min,
+}
+# Sown values that have no meaningful per-layer reduction over microbatches.
+UNSUPPORTED_SOWN_METRICS = ("out_projection_activations",)
+
+
+def _sown_leaf_names(treedef):
+  """Name (last string key of the path) of each leaf of a flattened sown-metrics state."""
+  template = jax.tree_util.tree_unflatten(treedef, list(range(treedef.num_leaves)))
+  names = []
+  for path, _ in jax.tree_util.tree_flatten_with_path(template)[0]:
+    keys = [str(getattr(p, "key", getattr(p, "name", ""))) for p in path]
+    keys = [k for k in keys if k and not k.isdigit()]
+    names.append(keys[-1] if keys else "")
+  return names
+
+
+def reduce_sown_metrics_per_layer(
+    stacked_arrays, treedef, num_repeats, num_microbatches, num_stages, forwarding_delay, squeeze_repeats=False
+):
+  """Maps sown metrics stacked over pipeline iterations back to the layers that produced them.
+
+  Args:
+    stacked_arrays: flattened sown state (see flatten_nnx_state); each leaf is [iterations, num_stages, ...].
+    treedef: its treedef, used to recover the metric names.
+    num_repeats, num_microbatches, num_stages, forwarding_delay: pipeline schedule.
+    squeeze_repeats: drop the repeat dim (non-circular pipeline, whose layers are stacked [num_stages, ...]).
+
+  Stage s runs microbatch m of repeat r at iteration r * num_microbatches + m + forwarding_delay * s (see
+  get_microbatch_and_repeat_ids); every other (iteration, stage) pair is bubble compute on garbage inputs and must
+  not leak into losses or bias updates. Returns leaves of shape [num_repeats, num_stages, ...], reduced over
+  microbatches with SOWN_MICROBATCH_REDUCTIONS, i.e. the same layout as the stacked layer weights.
+  """
+  valid_iteration = (
+      jnp.arange(num_repeats)[:, None, None] * num_microbatches
+      + jnp.arange(num_microbatches)[None, :, None]
+      + forwarding_delay * jnp.arange(num_stages)[None, None, :]
+  )
+  stage_index = jnp.arange(num_stages)[None, None, :]
+
+  def _reduce(name, stacked_leaf):
+    if name in UNSUPPORTED_SOWN_METRICS:
+      raise ValueError(f"Sown value '{name}' cannot be reduced over pipeline microbatches; unsupported with PP.")
+    per_microbatch = stacked_leaf[valid_iteration, stage_index]  # (num_repeats, num_microbatches, num_stages, ...)
+    reduction = SOWN_MICROBATCH_REDUCTIONS.get(name)
+    if reduction is None:
+      if per_microbatch.dtype == jnp.bool_:
+        reduction = jnp.any
+      elif jnp.issubdtype(per_microbatch.dtype, jnp.inexact):
+        reduction = jnp.mean
+      else:
+        reduction = jnp.sum
+    per_layer = reduction(per_microbatch, axis=1)
+    return per_layer[0] if squeeze_repeats else per_layer
+
+  return [
+      jax.tree.map(functools.partial(_reduce, name), leaf)
+      for name, leaf in zip(_sown_leaf_names(treedef), stacked_arrays)
+  ]
 
 
 def arrays_to_linen_collection(arrays, keys):
