@@ -14,11 +14,13 @@
 
 """m3's own training stack, built on `nnx.Optimizer`.
 
+Modules:
+  * `loss.py` -- cross entropy plus the model's auxiliary loss, folded into one scalar.
+  * `loop.py` -- training loop and infrastructure composition site.
+
 Planned modules:
-  * `state.py` — optimizer construction.
-  * `loss.py` — cross entropy plus auxiliary losses.
-  * `step.py` — train/eval step functions.
-  * `loop.py` — training loop and infrastructure composition site.
+  * `state.py` -- optimizer construction beyond `optimizers.get_optimizer`.
+  * `step.py` -- train/eval step functions with gradient accumulation.
 
 m3 models are drivable by two things: this loop, and the existing
 `maxtext.training_engine.maxtext_engine` (which the RL stack targets). Anything

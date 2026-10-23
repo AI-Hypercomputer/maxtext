@@ -21,23 +21,79 @@ defines its own attention, MLP and decoder blocks instead of routing through a s
 class and a central `Decoder`, so a model can be read top to bottom in one place. Scalability
 concerns are applied as post-construction transforms rather than branched on inside model code.
 
-> **Status: scaffolding.** Opt in with `use_m3_model=true`. `qwen3-0.6b` has been tested
-> for correctness here, but performance features are not yet available.
-> Legacy `src/maxtext/layers/` remains the production path
-> until the migration milestones complete.
+> **Status: draft of the full shape.** Opt in with `use_m3_model=true`. Qwen3 (`qwen3-0.6b`),
+> Qwen3-MoE (`qwen3-30b-a3b`, `qwen3-235b-a22b`) and DeepSeek-V3 (`deepseek3-671b`,
+> `deepseek3-tiny`) have legacy parity tests; Qwen3-VL has path parity. Remat, scan, qwix
+> quantization and optimizer host offload exist as transforms and compose in `train/loop.py`.
+> Fused kernels -- splash / tokamax attention, megablox / tokamax grouped matmul -- are selected
+> from the legacy config fields and sharded inside `core/kernels.py`.
+> Not yet: capacity-factor token dropping, expert parallelism for the Pallas MoE executors,
+> context parallelism, DeepSeek's loss-free bias updates, MTP, KV caches, checkpointing, real data.
+> Legacy `src/maxtext/layers/` remains the production path.
 
 ## Layout
 
 ```text
 m3/
-  core/      # RoPE, sharding, interfaces, checkpoint, data — only what NNX lacks
+  core/      # RoPE, attention fn, kernel adapters, sharding, Layers container, MoE runtime, CausalLMOutput
   infra/     # remat, scan, quantization, offload — applied after construction
-  configs/   # slim Pydantic config types + base.yml
+  configs/   # slim Pydantic config types + base.yml (planned; legacy pyconfig is used today)
   models/    # one directory per model family + create_model dispatch
-  train/     # m3's own training loop (one of two supported drivers)
+  train/     # loss and m3's own training loop (one of two supported drivers)
 ```
 
 There is no `layers/` directory: NNX *is* the layer library.
+
+## How a model is put together
+
+```python
+with jax.set_mesh(create_mesh()):
+  model = models.create_model(config, mesh, rngs=nnx.Rngs(0))   # Sharding resolves logical axes
+  model = remat.maybe_apply_remat(model, config)                # sets Layers.remat; no wrapper
+  model = scan.maybe_apply_scan(model, config)                  # Layers -> ScannedLayers
+  remat.check_tags(model, config, *batch)                       # a policy that would save nothing is an error
+  model = quantization.maybe_quantize(model, config, *batch)    # qwix, by interception
+  optimizer = offload.make_optimizer(model, tx, config)         # state on pinned_host if asked
+loss, parts = train.loss.loss_fn(model, batch)                  # cross entropy + model.aux_loss
+```
+
+Every m3 model's `__call__` returns a `CausalLMOutput(logits, aux_loss)`. MoE models carry their
+load-balance loss through the decoder stack as part of the layer carry and return it there; nothing
+is `sow`n.
+
+Remat policies go by the `checkpoint_name` tags a model puts on its activations (`query_proj`,
+`mlpwo`, ...). JAX does not check that a policy's names exist, so `check_tags` does: it traces one
+forward pass and refuses a policy that matches nothing, which would otherwise run as full
+rematerialization with no error. `tests/unit/m3/infra_test.py` runs the same check over every
+registered model.
+
+### Kernels
+
+Fused kernels are not a transform and not a model concern. A model resolves a kernel object once,
+at construction, from the config and its `Sharding`, and passes it to the one arithmetic function it
+already calls:
+
+```python
+self.attention_kernel = kernels.attention_from_config(config, sharding)   # in __init__
+out = dot_product_attention(q, k, v, positions=..., segment_ids=..., kernel=self.attention_kernel)
+
+self.executor = moe.executor_from_config(config, sharding)                # MoE blocks
+out = moe.routed_experts(x, weights, indices, wi_0, wi_1, wo, executor=self.executor)
+```
+
+Both `kernel` and `executor` are required arguments. A model that omitted them would otherwise run
+the reference arithmetic whatever the config asks for, with nothing but a slower step to show for
+it; code that wants the reference says so (`kernels.XLA_ATTENTION`, `moe.DENSE`).
+
+The kernel object is a frozen dataclass holding the backend name and the mesh axes the kernel's
+inputs are sharded over (looked up through the `Sharding`, so model code still names logical axes
+only). Everything a Pallas kernel needs that XLA cannot do for it -- the `shard_map`, block sizes,
+the FSDP all-gather of expert weights, the reduction over a tensor-sharded MLP dimension -- lives in
+`core/kernels.py` and `core/moe.py`. Backends come from upstream JAX and `tokamax`, not from the
+forked copies under `src/maxtext/kernels/`. Legacy config names are translated in one place each:
+`attention=dot_product|flash|autoselected` (+ `use_tokamax_splash`, `sa_block_*`) and
+`sparse_matmul` / `megablox` / `use_tokamax_gmm`.
+
 
 ## Architecture rules
 

@@ -26,16 +26,16 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLModel,
     create_qwen3_vl_model,
 )
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-import numpy as np
 import pytest
+from tests.utils.m3_test_utils import legacy_to_m3_path
 
 BASE_CONFIG_PATH = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
 
@@ -73,28 +73,27 @@ class Qwen3VLComparisonTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    devices = jax.devices()[:1]
-    self.mesh = Mesh(np.array(devices), ("data",))
+    self.mesh = create_mesh(devices=jax.devices()[:1])
+    self.enter_context(jax.set_mesh(self.mesh))
 
   def test_model_creation_utils_routing(self):
     """Verifies that model_creation_utils routes to Qwen3VLModel when use_m3_model=True."""
     cfg = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=True, reduced=True))
-    with jax.set_mesh(self.mesh):
-      model = model_creation_utils.create_model(cfg, self.mesh)
-      self.assertIsInstance(model, Qwen3VLModel)
+    model = model_creation_utils.create_model(cfg, self.mesh)
+    self.assertIsInstance(model, Qwen3VLModel)
 
   def test_parameter_shapes_and_paths_match(self):
     """Verifies that all parameter paths and shapes match 100% between legacy and m3 Qwen3-VL."""
     cfg_old = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=False, reduced=False))
     cfg_new = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=True, reduced=False))
 
-    _, abs_old = model_creation_utils.create_nnx_abstract_model(cfg_old, self.mesh)
-    _, abs_new = model_creation_utils.create_nnx_abstract_model(cfg_new, self.mesh)
+    model_old = model_creation_utils.create_model(cfg_old, self.mesh, rngs=nnx.Rngs(0))
+    model_new = model_creation_utils.create_model(cfg_new, self.mesh, rngs=nnx.Rngs(0))
 
-    p_old = nnx.state(abs_old, nnx.Param)
-    p_new = nnx.state(abs_new, nnx.Param)
+    p_old = nnx.state(model_old, nnx.Param)
+    p_new = nnx.state(model_new, nnx.Param)
 
-    flat_old = dict(p_old.flat_state())
+    flat_old = {legacy_to_m3_path(path): value for path, value in p_old.flat_state()}
     flat_new = dict(p_new.flat_state())
 
     self.assertEqual(
@@ -110,22 +109,22 @@ class Qwen3VLComparisonTest(absltest.TestCase):
   def test_forward_pass_multimodal(self):
     """Verifies end-to-end forward pass produces correct logits shape."""
     cfg = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=True, reduced=True))
-    with jax.set_mesh(self.mesh):
+    with nnx.use_eager_sharding(True):
       model = create_qwen3_vl_model(cfg, self.mesh)
-      batch_size, num_frames, height, width = 1, 2, 32, 32
-      channels = 3
-      images = jnp.zeros((batch_size, channels, num_frames, height, width), dtype=jnp.float32)
-      grid_thw = jnp.array([[1, 2, 2]], dtype=jnp.int32)
-      tokens = jnp.array(
-          [[151644, 872, 198, 151652, 151655, 151653, 151645]],
-          dtype=jnp.int32,
-      )
-      logits = model(
-          decoder_input_tokens=tokens,
-          encoder_images=images,
-          encoder_video_grid_thw=grid_thw,
-      )
-      self.assertEqual(logits.shape, (1, tokens.shape[1], cfg.vocab_size))
+    batch_size, num_frames, height, width = 1, 2, 32, 32
+    channels = 3
+    images = jnp.zeros((batch_size, channels, num_frames, height, width), dtype=jnp.float32)
+    grid_thw = jnp.array([[1, 2, 2]], dtype=jnp.int32)
+    tokens = jnp.array(
+        [[151644, 872, 198, 151652, 151655, 151653, 151645]],
+        dtype=jnp.int32,
+    )
+    output = model(
+        decoder_input_tokens=tokens,
+        encoder_images=images,
+        encoder_video_grid_thw=grid_thw,
+    )
+    self.assertEqual(output.logits.shape, (1, tokens.shape[1], cfg.vocab_size))
 
 
 if __name__ == "__main__":
