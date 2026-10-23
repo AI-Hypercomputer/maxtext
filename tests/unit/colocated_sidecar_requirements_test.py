@@ -77,12 +77,8 @@ class ColocatedSidecarRequirementsTest(unittest.TestCase):
     )
 
   def test_missing_must_include_raises_value_error(self):
-    without_gcsfs = [
-        line for line in SAMPLE_TRAINER_FREEZE if not line.startswith("gcsfs")
-    ]
-    with self.assertRaisesRegex(
-        ValueError, r"Missing mandatory sidecar package\(s\).*gcsfs"
-    ):
+    without_gcsfs = [line for line in SAMPLE_TRAINER_FREEZE if not line.startswith("gcsfs")]
+    with self.assertRaisesRegex(ValueError, r"Missing mandatory sidecar package\(s\).*gcsfs"):
       derive_sidecar_requirements(without_gcsfs)
 
   def test_canonical_name_normalization(self):

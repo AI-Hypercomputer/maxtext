@@ -124,8 +124,11 @@ def main():
   def rel(a):
     return float(np.max(np.abs(a - ref))) / max(float(np.max(np.abs(ref))), 1e-30)
 
-  print(f"expected: dropped={expected} ratio={expected_ratio} (tokens/chunk {tokens}, balanced {balanced}, "
-        f"buffer {buffer}, hot shard load {hot_load} x {hot_shards} shards x {n_chunks} chunks)", flush=True)
+  print(
+      f"expected: dropped={expected} ratio={expected_ratio} (tokens/chunk {tokens}, balanced {balanced}, "
+      f"buffer {buffer}, hot shard load {hot_load} x {hot_shards} shards x {n_chunks} chunks)",
+      flush=True,
+  )
   print(f"audit off: overflow={off_overflow} audit={off_audit}", flush=True)
   print(f"capped rbf {_RBF}: overflow={capped_overflow} audit={capped_audit} rel diff {rel(capped):.1e}", flush=True)
   print(f"final dropless: overflow={final_overflow} audit={final_audit} rel diff {rel(final):.1e}", flush=True)

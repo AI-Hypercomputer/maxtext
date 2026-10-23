@@ -37,6 +37,8 @@ def _config(use_ocdbt: bool = False):
       checkpoint_period=1,
       max_num_checkpoints_to_keep=5,
       async_checkpointing=False,
+      async_checkpointing_timeout_secs=1200,
+      abandon_failed_checkpoint_saves=False,
       checkpoint_storage_use_ocdbt=use_ocdbt,
       checkpoint_storage_use_zarr3=False,
       checkpoint_storage_device_host_concurrent_gb=None,
@@ -48,9 +50,7 @@ class _Model(nnx.Module):
   """Simple NNX module with kernel and bias in specified dtype."""
 
   def __init__(self, dtype: jnp.dtype, factor: float = 1.0):
-    self.kernel = nnx.Param(
-        (jnp.array([[1.0, -0.5, 0.25, 2.0], [-1.0, 0.5, -0.25, -2.0]]) * factor).astype(dtype)
-    )
+    self.kernel = nnx.Param((jnp.array([[1.0, -0.5, 0.25, 2.0], [-1.0, 0.5, -0.25, -2.0]]) * factor).astype(dtype))
     self.bias = nnx.Param((jnp.array([0.125, -0.25, 0.5, -0.5]) * factor).astype(dtype))
 
 
@@ -123,6 +123,7 @@ class TrainingEngineCheckpointFormatTest(unittest.TestCase):
     return save_model, save_opt
 
   def _run_format_matrix(self, *, use_ocdbt: bool, check_layout_fn):
+    """Run save/restore matrix across dtypes and host offload settings."""
     dtypes = (jnp.bfloat16, jnp.float32, jnp.float8_e4m3fn, jnp.float8_e5m2)
     prefix = "ocdbt_" if use_ocdbt else ""
     for dtype in dtypes:
@@ -131,9 +132,7 @@ class TrainingEngineCheckpointFormatTest(unittest.TestCase):
         with self.subTest(dtype=dtype_name, host_offload=host_offload):
           case_dir = os.path.join(self.ckpt_dir, f"{prefix}{dtype_name}_{host_offload}")
           os.makedirs(case_dir, exist_ok=True)
-          save_model, save_opt = self._save_step_one(
-              case_dir, dtype, host_offload=host_offload, use_ocdbt=use_ocdbt
-          )
+          save_model, save_opt = self._save_step_one(case_dir, dtype, host_offload=host_offload, use_ocdbt=use_ocdbt)
           check_layout_fn(case_dir, os.path.join(case_dir, "1"))
 
           fresh_model, fresh_opt = _build_model_and_optimizer(dtype, factor=0.0)
@@ -195,6 +194,7 @@ class TrainingEngineCheckpointFormatTest(unittest.TestCase):
 
   def test_ocdbt_format_matrix_save_and_restore(self):
     """OCDBT packfile layout: no loose .zarray objects, manifest present, bit-exact restore across the dtype matrix."""
+
     def _check_ocdbt(case_dir, step_dir):
       zarrays = glob.glob(os.path.join(step_dir, "**", ".zarray"), recursive=True)
       self.assertEqual(len(zarrays), 0, msg=f"OCDBT wrote loose .zarray files: {zarrays}")
@@ -224,7 +224,7 @@ class TrainingEngineCheckpointFormatTest(unittest.TestCase):
     self._assert_state_matches(save_model, save_opt, fresh_model, fresh_opt)
 
   def test_fp8_restore_into_bfloat16_target_fails_or_mismatches(self):
-    """Verifies Slice F mutation check: restoring FP8 checkpoint into bfloat16 target fails bit-exactness against saved FP8."""
+    """Verifies restoring FP8 checkpoint into bfloat16 target fails bit-exactness against saved FP8."""
     save_model, save_opt = _build_model_and_optimizer(jnp.float8_e4m3fn, factor=1.0)
     want_params = _leaves(nnx.state(save_model))
     save_mgr = checkpointing.CheckpointManager(self.ckpt_dir, _config())

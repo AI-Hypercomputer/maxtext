@@ -26,25 +26,31 @@ _PKG_NAME_RE = re.compile(r"^([A-Za-z0-9_.\-]+)")
 
 @dataclass(frozen=True)
 class SidecarRequirementsSpec:
-  drop: frozenset[str] = frozenset({
-      "jax",
-      "jaxlib",
-      "libtpu",
-      "libtpu-nightly",
-      "pytest",
-      "pylint",
-      "pyink",
-      "pre-commit",
-      "pytype",
-      "tokamax",
-      "qwix",
-  })
-  must_include: frozenset[str] = frozenset({
-      "orbax-checkpoint",
-      "tensorstore",
-      "gcsfs",
-      "google-cloud-storage",
-  })
+  """Specification for deriving colocated sidecar requirements."""
+
+  drop: frozenset[str] = frozenset(
+      {
+          "jax",
+          "jaxlib",
+          "libtpu",
+          "libtpu-nightly",
+          "pytest",
+          "pylint",
+          "pyink",
+          "pre-commit",
+          "pytype",
+          "tokamax",
+          "qwix",
+      }
+  )
+  must_include: frozenset[str] = frozenset(
+      {
+          "orbax-checkpoint",
+          "tensorstore",
+          "gcsfs",
+          "google-cloud-storage",
+      }
+  )
   unpin: frozenset[str] = frozenset({"protobuf"})
   allowlist: frozenset[str] | None = None
 
@@ -74,9 +80,7 @@ def derive_sidecar_requirements(
   must_include_set = {_canonical_name(p) for p in spec.must_include}
   unpin_set = {_canonical_name(p) for p in spec.unpin}
   allow_set = (
-      {_canonical_name(p) for p in spec.allowlist}
-      | must_include_set
-      | {"cloudpickle", "etils", "jinja2", "jaxtyping"}
+      {_canonical_name(p) for p in spec.allowlist} | must_include_set | {"cloudpickle", "etils", "jinja2", "jaxtyping"}
       if spec.allowlist is not None
       else None
   )
@@ -96,9 +100,7 @@ def derive_sidecar_requirements(
 
   missing = sorted(must_include_set - surviving.keys())
   if missing:
-    raise ValueError(
-        f"Missing mandatory sidecar package(s) in trainer freeze: {', '.join(missing)}"
-    )
+    raise ValueError(f"Missing mandatory sidecar package(s) in trainer freeze: {', '.join(missing)}")
 
   return sorted(surviving.values())
 
@@ -113,13 +115,9 @@ if __name__ == "__main__":
   )
   args = parser.parse_args()
   allow = (
-      parse_package_names(
-          args.base_requirements.read_text(encoding="utf-8").splitlines()
-      )
+      parse_package_names(args.base_requirements.read_text(encoding="utf-8").splitlines())
       if args.base_requirements
       else None
   )
-  for req_line in derive_sidecar_requirements(
-      sys.stdin.read().splitlines(), SidecarRequirementsSpec(allowlist=allow)
-  ):
+  for req_line in derive_sidecar_requirements(sys.stdin.read().splitlines(), SidecarRequirementsSpec(allowlist=allow)):
     print(req_line)

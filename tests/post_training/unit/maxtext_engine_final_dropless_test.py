@@ -208,7 +208,9 @@ class FinalDroplessEngineTest(unittest.TestCase):
     self.assertIn("micro=2 program=dropless replayed=False dropped_assignments_used=0 ", audit[2])
     discarded = [l for l in lines if l.startswith("MOE_DROP_AUDIT_DISCARDED")]
     self.assertEqual(len(discarded), 1)
-    self.assertIn(f"micro=1 program=rbf2.5 dropped_assignments_discarded={_DROPPED_PER_LAYER * num_layers} ", discarded[0])
+    self.assertIn(
+        f"micro=1 program=rbf2.5 dropped_assignments_discarded={_DROPPED_PER_LAYER * num_layers} ", discarded[0]
+    )
     self.assertIn("max_ratio=4.0000", discarded[0])
     step_lines = [l for l in lines if l.startswith("MOE_DROP_AUDIT_STEP")]
     self.assertEqual(len(step_lines), 1)
@@ -227,7 +229,9 @@ class FinalDroplessEngineTest(unittest.TestCase):
     with self.assertLogs("absl", level="INFO") as logs:
       _, _, _, recorded = self._step(engine, [10, _MARKED], [False, True])
     audit = [r.getMessage() for r in logs.records if r.getMessage().startswith("MOE_DROP_AUDIT step=")]
-    self.assertIn(f"micro=1 program=rbf2.5 replayed=False dropped_assignments_used={_DROPPED_PER_LAYER * num_layers} ", audit[1])
+    self.assertIn(
+        f"micro=1 program=rbf2.5 replayed=False dropped_assignments_used={_DROPPED_PER_LAYER * num_layers} ", audit[1]
+    )
     self.assertEqual(recorded["moe_dropped_assignments"], _DROPPED_PER_LAYER * num_layers)
 
 

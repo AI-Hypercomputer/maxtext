@@ -1032,6 +1032,7 @@ class AttentionOp(nnx.Module):
         axis_name=self.config.context_sharding,
         batch_axes=self._logical_to_mesh_axes((BATCH_ATTN,))[0],
         to_natural=to_natural,
+        order=self.config.context_parallel_attention_load_balance_order,
     )
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:

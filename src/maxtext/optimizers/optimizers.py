@@ -296,16 +296,13 @@ def apply_trainable_parameters_mask(base_opt, config):
     once so the intent is checkable against the run log.
     """
     nonlocal has_logged
-    labels = jax.tree_util.tree_map(
-        lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)
-    )
+    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
     if not has_logged:
       has_logged = True
       leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
       frozen = [p for p, v in leaves if v == "frozen"]
       max_logging.log(
-          f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}"
-          f" of {len(leaves)} parameter arrays"
+          f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}" f" of {len(leaves)} parameter arrays"
       )
       if not frozen:
         max_logging.log("  WARNING: mask froze nothing -- did the pattern match everything?")
