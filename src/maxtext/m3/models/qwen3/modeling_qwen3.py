@@ -32,6 +32,7 @@ from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
 from maxtext.m3.core.rope import apply_rope
+from maxtext.m3.infra import scan
 
 
 class Qwen3MLP(nnx.Module):
@@ -336,13 +337,16 @@ class Qwen3Decoder(nnx.Module):
     self.config = config
     self.num_layers = config.num_decoder_layers
 
-    # Flat attribute names: layers_0, layers_1, ...
-    for lyr in range(self.num_layers):
-      layer = layer_cls(
-          config=config,
+    if config.scan_layers:
+      self.layers = scan.init_scan(
+          lambda layer_rngs: layer_cls(config=config, rngs=layer_rngs),
+          num_layers=self.num_layers,
           rngs=rngs,
+          param_scan_axis=config.param_scan_axis,
       )
-      setattr(self, f"layers_{lyr}", layer)
+    else:
+      for lyr in range(self.num_layers):
+        setattr(self, f"layers_{lyr}", layer_cls(config=config, rngs=rngs))
 
     self.decoder_norm = nnx.RMSNorm(
         num_features=config.emb_dim,
@@ -399,14 +403,22 @@ class Qwen3Decoder(nnx.Module):
     """Iterates through all decoder layers and projects to logits via tied embeddings."""
     y = shared_embedding(decoder_input_tokens)
 
-    for lyr in range(self.num_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      y = layer(
+    if self.config.scan_layers:
+      y = self.layers(
           y,
           decoder_segment_ids=decoder_segment_ids,
           decoder_positions=decoder_positions,
           deterministic=deterministic,
       )
+    else:
+      for lyr in range(self.num_layers):
+        layer = getattr(self, f"layers_{lyr}")
+        y = layer(
+            y,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+        )
 
     logits = self.apply_output_head(shared_embedding, y, deterministic=deterministic)
     return logits, y
