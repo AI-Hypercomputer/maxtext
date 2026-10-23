@@ -1158,7 +1158,21 @@ class NNXCircularPipeline(PipelineBase):
       leaves = jax.tree.leaves(bsw[0])
       return treedef.unflatten(leaves)
 
-    bsw_partition_specs = jax.tree.map(self._remove_fsdp_from_physical_partition_spec, physical_partition_spec)
+    # Must match the BSW layout produced by `from_repeat_weights_to_bsw` (same axes removed; `physical_partition_spec`
+    # here already lacks the repeat dim), otherwise the select reshards every iteration (e.g. re-gathers non-MoE
+    # weights over 'expert' and collective-permutes cp-as-ep expert weights).
+    bsw_partition_specs = (
+        jax.tree_util.tree_map_with_path(
+            lambda path, pps: pipeline_utils.remove_gathered_mesh_axes(
+                pps,
+                "MoeBlock_0" in [getattr(p, "key", str(p)) for p in path],
+                axes_to_remove=["fsdp", "fsdp_transpose", "context"],
+            ),
+            physical_partition_spec,
+        )
+        if physical_partition_spec is not None
+        else None
+    )
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     stage0_repeat_id = jnp.maximum(loop_iteration, 0) // self.config.num_pipeline_microbatches
 
