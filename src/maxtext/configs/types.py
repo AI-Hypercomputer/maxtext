@@ -988,6 +988,15 @@ class SplashAttention(BaseModel):
   eval_sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention during evaluation.")
   eval_sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention during evaluation.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  fused_qk_norm_rope: bool = Field(
+      False,
+      description=(
+          "Fuse the per-head q/k RMSNorm, the rotary embedding and the [B, S, N, H] -> [B, N, S, H] relayout that"
+          " splash attention needs into one TensorCore Pallas kernel (kernels/qk_norm_rope_tc.py) with a custom VJP."
+          " Applies to 4-D q/k with use_qk_norm and RoPE from a RotaryEmbedding / PartialRotaryEmbedding /"
+          " Gemma4PartialRotaryEmbedding; other paths are unchanged."
+      ),
+  )
   ring_scan_unroll: NonNegativeInt = Field(
       1,
       description=(
