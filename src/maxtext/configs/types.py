@@ -3515,6 +3515,98 @@ class AudioEncoder(BaseModel):
   max_sample_len_for_audio: int = Field(10000, description="Maximum sample length for audio input.")
 
 
+class AudioOutput(BaseModel):
+  """Shared audio-output controls, independent of a model's speech architecture."""
+
+  enable_audio_output: bool = Field(False, description="Build/load audio-output components and emit audio in decode.")
+  audio_output_type: str = Field("auto", description="Audio implementation; auto selects the model's default.")
+  audio_output_path: str = Field("audio_output.wav", description="Where decode writes the generated waveform.")
+
+
+class Qwen3OmniTalker(BaseModel):
+  """Qwen3-Omni speech output: talker MoE decoder + code predictor + Code2Wav vocoder.
+
+  Field names follow the HuggingFace `Qwen3OmniMoeConfig` (`talker_config.text_config.*` -> `talker_*`,
+  `talker_config.code_predictor_config.*` -> `code_predictor_*`, `code2wav_config.*` -> `code2wav_*`; talker-level and
+  top-level ids keep their HF names). The speech stack is only built when `enable_audio_output` is true.
+  """
+
+  # --- Talker text decoder (HF talker_config.text_config) ---
+  talker_hidden_size: int = Field(1024, description="Talker hidden size.")
+  talker_intermediate_size: int = Field(
+      2048, description="Talker dense MLP size (also the thinker->talker projection MLP)."
+  )
+  talker_num_hidden_layers: int = Field(20, description="Talker decoder layers.")
+  talker_num_attention_heads: int = Field(16, description="Talker query heads.")
+  talker_num_key_value_heads: int = Field(2, description="Talker KV heads.")
+  talker_head_dim: int = Field(128, description="Talker head dim.")
+  talker_num_experts: int = Field(128, description="Talker routed experts.")
+  talker_num_experts_per_tok: int = Field(6, description="Talker experts per token.")
+  talker_moe_intermediate_size: int = Field(384, description="Talker routed-expert MLP size.")
+  talker_shared_expert_intermediate_size: int = Field(768, description="Talker shared-expert MLP size.")
+  talker_norm_topk_prob: bool = Field(True, description="Renormalize talker top-k routing weights.")
+  talker_vocab_size: int = Field(3072, description="Talker codec vocabulary (codebook 0 + control ids).")
+  talker_rope_theta: float = Field(
+      1_000_000.0, description="Talker RoPE theta (interleaved MRoPE, thinker mrope_section)."
+  )
+  talker_rms_norm_eps: float = Field(1e-6, description="Talker RMSNorm epsilon.")
+  # --- Talker-level (HF talker_config) ---
+  num_code_groups: int = Field(
+      16, description="Codec code groups per frame (1 from the talker, rest from the code predictor)."
+  )
+  thinker_hidden_size: int = Field(2048, description="Thinker hidden size fed to the talker projections.")
+  accept_hidden_layer: int = Field(24, description="Thinker layer whose output feeds the talker at multimodal positions.")
+  codec_pad_id: int = Field(2148, description="Codec pad id.")
+  codec_bos_id: int = Field(2149, description="Codec bos id.")
+  codec_eos_token_id: int = Field(2150, description="Codec eos id (ends speech generation).")
+  codec_nothink_id: int = Field(2155, description="Codec no-think id.")
+  codec_think_bos_id: int = Field(2156, description="Codec think-bos id.")
+  codec_think_eos_id: int = Field(2157, description="Codec think-eos id.")
+  speaker_id: dict[str, int] = Field(
+      {"chelsie": 2301, "ethan": 2302, "aiden": 2303}, description="Speaker name -> codec speaker id."
+  )
+  # --- Thinker-vocabulary control ids (HF top-level config) ---
+  tts_pad_token_id: int = Field(151671, description="TTS pad token id (thinker vocab).")
+  tts_bos_token_id: int = Field(151672, description="TTS bos token id (thinker vocab).")
+  tts_eos_token_id: int = Field(151673, description="TTS eos token id (thinker vocab).")
+  im_start_token_id: int = Field(151644, description="`<|im_start|>` id.")
+  user_token_id: int = Field(872, description="`user` role token id.")
+  assistant_token_id: int = Field(77091, description="`assistant` role token id.")
+  # --- Code predictor (HF talker_config.code_predictor_config) ---
+  code_predictor_hidden_size: int = Field(1024, description="Code predictor hidden size.")
+  code_predictor_intermediate_size: int = Field(3072, description="Code predictor MLP size.")
+  code_predictor_num_hidden_layers: int = Field(5, description="Code predictor layers.")
+  code_predictor_num_attention_heads: int = Field(16, description="Code predictor query heads.")
+  code_predictor_num_key_value_heads: int = Field(8, description="Code predictor KV heads.")
+  code_predictor_head_dim: int = Field(128, description="Code predictor head dim.")
+  code_predictor_vocab_size: int = Field(2048, description="Residual codebook size.")
+  code_predictor_rope_theta: float = Field(1_000_000.0, description="Code predictor RoPE theta.")
+  # --- Code2Wav (HF code2wav_config) ---
+  code2wav_dtype: str = Field("float32", description="Compute/param dtype of the code2wav vocoder.")
+  code2wav_codebook_size: int = Field(2048, description="Code2wav codebook size per quantizer.")
+  code2wav_hidden_size: int = Field(1024, description="Code2wav transformer hidden size.")
+  code2wav_intermediate_size: int = Field(3072, description="Code2wav MLP size.")
+  code2wav_num_hidden_layers: int = Field(8, description="Code2wav transformer layers.")
+  code2wav_num_attention_heads: int = Field(16, description="Code2wav attention heads.")
+  code2wav_num_key_value_heads: int = Field(16, description="Code2wav KV heads.")
+  code2wav_sliding_window: int = Field(72, description="Code2wav sliding attention window.")
+  code2wav_rope_theta: float = Field(10000.0, description="Code2wav RoPE theta.")
+  code2wav_rms_norm_eps: float = Field(1e-5, description="Code2wav RMSNorm epsilon.")
+  code2wav_layer_scale_initial_scale: float = Field(0.01, description="Code2wav layer-scale init.")
+  code2wav_num_quantizers: int = Field(16, description="Code2wav number of quantizers.")
+  code2wav_upsample_rates: list[int] = Field([8, 5, 4, 3], description="Code2wav decoder upsample rates.")
+  code2wav_upsampling_ratios: list[int] = Field([2, 2], description="Code2wav pre-decoder upsampling ratios.")
+  code2wav_decoder_dim: int = Field(1536, description="Code2wav decoder channel dim.")
+  # --- Generation options (HF `Qwen3OmniMoeForConditionalGeneration.generate` kwargs) ---
+  speaker: str = Field("ethan", description="Speaker voice for audio generation.")
+  talker_max_new_tokens: int = Field(2048, description="Maximum codec frames (12.5 per second of audio).")
+  talker_do_sample: bool = Field(False, description="Sample talker codes instead of greedy decoding.")
+  talker_top_k: int = Field(50, description="Top-k for talker sampling.")
+  talker_top_p: float = Field(1.0, description="Top-p for talker sampling.")
+  talker_temperature: float = Field(0.9, description="Temperature for talker sampling.")
+  talker_repetition_penalty: float = Field(1.05, description="Repetition penalty on generated talker codes.")
+
+
 class Multimodal(MultimodalGeneral, VisionTower, VisionProjector, AudioEncoder):
   """Configurations for multimodal"""
 
@@ -4267,6 +4359,8 @@ class MaxTextConfig(
     VisionTower,
     VisionProjector,
     AudioEncoder,
+    AudioOutput,
+    Qwen3OmniTalker,
     # Derived
     DerivedValues,
 ):
