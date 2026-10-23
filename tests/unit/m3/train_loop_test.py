@@ -17,8 +17,10 @@
 import glob
 import math
 import os
+from unittest import mock
 
 from absl.testing import absltest
+from flax import nnx
 import jax
 import numpy as np
 
@@ -86,6 +88,22 @@ class TrainLoopTest(absltest.TestCase):
     loop.train_loop(config)
     traces = glob.glob(os.path.join(config.tensorboard_dir, "**", "*.xplane.pb"), recursive=True)
     self.assertNotEmpty(traces, f"no .xplane.pb under {config.tensorboard_dir}")
+
+  def test_train_loop_avoids_per_step_graph_traversal(self):
+    with (
+        mock.patch.object(nnx, "state", wraps=nnx.state) as state_spy,
+        mock.patch.object(nnx.graphlib, "flatten", wraps=nnx.graphlib.flatten) as flatten_spy,
+    ):
+      loop.train_loop(_tiny_config(self.output_dir, steps=2))
+      state_calls_2, flatten_calls_2 = state_spy.call_count, flatten_spy.call_count
+
+      state_spy.reset_mock()
+      flatten_spy.reset_mock()
+      loop.train_loop(_tiny_config(self.output_dir, steps=5))
+      state_calls_5, flatten_calls_5 = state_spy.call_count, flatten_spy.call_count
+
+    self.assertEqual(state_calls_2, state_calls_5)
+    self.assertEqual(flatten_calls_2, flatten_calls_5)
 
   def test_rejects_gradient_accumulation(self):
     with self.assertRaisesRegex(ValueError, "gradient_accumulation_steps=2"):
