@@ -355,19 +355,20 @@ def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
   return _ReorderedDataIterator(reorder_fn, data_iterator)
 
 
-def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
+def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, mesh=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
   Args:
-    config:
-    recorder:
-    devices:
+    config: The training config.
+    recorder: Goodput recorder.
+    devices: Devices to build the mesh from; defaults to all devices.
     elastic_retry_cache: Optional `elastic_utils.RetryCache`. An elastic retry on the same slices reuses the mesh and
       abstract model cached in it instead of building them again. In snapshot mode its `snapshotter` holds the
       in-memory snapshot of the previous attempt, which the train state is restored from.
+    mesh: A prebuilt mesh to train on instead of the one derived from `config` (e.g. a submesh of the devices).
 
   Returns:
     init_rng:
@@ -386,11 +387,12 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    # Build the mesh, or take the one from the previous elastic attempt if it ran on the same slices.
-    # `elastic_retry_cache` is None outside elastic training, in which case the mesh is simply built.
-    mesh = elastic_utils.get_or_build(
-        elastic_retry_cache, "mesh", functools.partial(maxtext_utils.get_mesh_from_config, config, devices)
-    )
+    if mesh is None:
+      # Build the mesh, or take the one from the previous elastic attempt if it ran on the same slices.
+      # `elastic_retry_cache` is None outside elastic training, in which case the mesh is simply built.
+      mesh = elastic_utils.get_or_build(
+          elastic_retry_cache, "mesh", functools.partial(maxtext_utils.get_mesh_from_config, config, devices)
+      )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model. Like the mesh, it is reused across elastic attempts on the same slices: it holds
     # only shapes and the graphdef, no device arrays, so it survives the cleanup after an elastic event.
@@ -492,7 +494,7 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
           else getattr(state, "model", state)
       )
       # pyrefly: ignore[bad-argument-type]
-      lora_utils.restore_lora_from_path(target_model_state, config)
+      lora_utils.restore_lora_from_path(target_model_state, config, mesh=mesh)
       _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
     with logical_axis_rules(config.logical_axis_rules):
       # We only need the graphdef here; it's merged with state below. Avoid
