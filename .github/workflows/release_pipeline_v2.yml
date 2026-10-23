@@ -1,0 +1,186 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow validates that the Release Candidate commit (HEAD~1)
+# has passed CI tests (:verified-ci-<SHA_RC>), Airflow E2E tests (:verified-e2e-<SHA_RC>),
+# and performance tests (:verified-perf-<SHA_RC>), builds the MaxText wheel at the release tag commit (HEAD),
+# publishes it to PyPI, updates Read the Docs, and promotes the certified RC images to the release version (:X.Y.Z).
+
+name: MaxText Release Pipeline v2
+
+on:
+  # TODO(b/574143434): Uncomment 'release' trigger when replacing release_pipeline.yml.
+  # Keeping it commented until cutover prevents triggering both pipelines simultaneously when publishing a release.
+  # release:
+  #   types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'MaxText Release tag to publish (e.g., maxtext-v0.2.6).'
+        required: true
+        type: string
+      publish:
+        description: 'Set to true to publish to PyPI (false for dry-run).'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  get_maxtext_sha:
+    name: Resolve Release Candidate SHA
+    runs-on: ubuntu-latest
+    outputs:
+      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      rc_sha: ${{ steps.vars.outputs.rc_sha }}
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Resolve SHA
+        id: vars
+        shell: bash
+        run: |
+          MAXTEXT_SHA=$(git rev-parse HEAD)
+          RC_SHA=$(git rev-parse --short=7 HEAD~1)
+
+          echo "Release Commit: ${MAXTEXT_SHA}"
+          echo "Verified Release Candidate Commit: ${RC_SHA}"
+
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          for required_file in "src/maxtext/version.py" "docs/release_notes.md"; do
+            if ! echo "$CHANGED_FILES" | grep -Fxq "$required_file"; then
+              echo "Error: Expected release-prep commit to update ${required_file}."
+              exit 1
+            fi
+          done
+
+          UNEXPECTED_FILES=$(echo "$CHANGED_FILES" | grep -v -E '^(src/maxtext/version\.py|docs/release_notes\.md)$' || true)
+          if [ -n "$UNEXPECTED_FILES" ]; then
+            echo "Release commit modifies files other than src/maxtext/version.py and docs/release_notes.md"
+            echo "$UNEXPECTED_FILES"
+            exit 1
+          fi
+
+          {
+            echo "maxtext_sha=${MAXTEXT_SHA}"
+            echo "rc_sha=${RC_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+  tag_verification_gate:
+    name: Verify Release Candidate Docker Images
+    needs: get_maxtext_sha
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'TPU Pre-Training'
+            image_name: tpu_pre_training
+            check_perf: true
+          - name: 'TPU Post-Training'
+            image_name: tpu_post_training
+            check_perf: false
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+      - name: Verify Certification Tags
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          REPOSITORY_NAME: 'maxtext-images'
+          DOCKER_IMAGE_NAME: ${{ matrix.image_name }}
+          MAXTEXT_SHA: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+          RC_SHA: ${{ needs.get_maxtext_sha.outputs.rc_sha }}
+          CHECK_PERF: ${{ matrix.check_perf }}
+        run: |
+          SOURCE_IMAGE=us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${DOCKER_IMAGE_NAME}
+
+          check_tag() {
+            gcloud container images describe "${SOURCE_IMAGE}:$1" >/dev/null 2>&1
+          }
+
+          # 1. Verify that the image with the tested SHA exists
+          if ! check_tag "${RC_SHA}"; then
+            echo "Error: Docker image ${SOURCE_IMAGE}:${RC_SHA} does not exist."
+            exit 1
+          fi
+
+          # 2. Fail fast if failure tags are present
+          if check_tag "failed-e2e-${RC_SHA}"; then
+            echo "Error: Functional E2E tests failed for image ${SOURCE_IMAGE}:${RC_SHA}."
+            exit 1
+          fi
+          if [[ "${CHECK_PERF}" == "true" ]] && check_tag "failed-perf-${RC_SHA}"; then
+            echo "Error: Performance tests failed for image ${SOURCE_IMAGE}:${RC_SHA}."
+            exit 1
+          fi
+
+          # 3. Verify certification tags are present
+          MISSING_TAGS=()
+          if ! check_tag "verified-ci-${RC_SHA}"; then
+            MISSING_TAGS+=("verified-ci-${RC_SHA}")
+          fi
+          if ! check_tag "verified-e2e-${RC_SHA}"; then
+            MISSING_TAGS+=("verified-e2e-${RC_SHA}")
+          fi
+          if [[ "${CHECK_PERF}" == "true" ]] && ! check_tag "verified-perf-${RC_SHA}"; then
+            MISSING_TAGS+=("verified-perf-${RC_SHA}")
+          fi
+
+          if [ ${#MISSING_TAGS[@]} -ne 0 ]; then
+            echo "Error: ${SOURCE_IMAGE}:${RC_SHA} is missing required certification tag(s): ${MISSING_TAGS[*]}"
+            exit 1
+          fi
+
+          echo "All required certification tags are present for ${SOURCE_IMAGE}:${RC_SHA}."
+
+  build_docs:
+    name: Build Documentation
+    needs: get_maxtext_sha
+    uses: ./.github/workflows/check_docs_build.yml
+    with:
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+
+  check_links:
+    name: Check Links in Documentation
+    needs: get_maxtext_sha
+    permissions:
+      issues: write
+      contents: read
+    uses: ./.github/workflows/docs_link_check.yml
+    with:
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+
+  publish_to_pypi:
+    name: Publish MaxText to PyPI
+    needs: [tag_verification_gate, build_docs, get_maxtext_sha]
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    uses: ./.github/workflows/pypi_release.yml
+    with:
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      run_id: ${{ needs.get_maxtext_sha.outputs.rc_sha }}
+      publish: ${{ github.event_name == 'release' || inputs.publish }}
+    secrets:
+      READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
