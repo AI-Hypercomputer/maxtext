@@ -221,15 +221,12 @@ class GmmDispatchTest(parameterized.TestCase):
       rhs_dtype=(jnp.int4, jnp.int8, jnp.bfloat16, jnp.float8_e4m3fn),
       use_gmm_v2_heuristic_tiling=(False, True),
       use_dlhs_transpose_rhs=(None, False, True),
-      transpose_rhs=(False, True),
   )
-  def test_dlhs_rhs_transpose_dispatch_by_dtype(
-      self, rhs_dtype, use_gmm_v2_heuristic_tiling, use_dlhs_transpose_rhs, transpose_rhs
-  ):
+  def test_dlhs_rhs_transpose_dispatch_by_dtype(self, rhs_dtype, use_gmm_v2_heuristic_tiling, use_dlhs_transpose_rhs):
     """DLHS materializes sub-byte RHS transposes before calling GMM v2."""
     num_groups, out_size, in_size, batch_size = 2, 16, 32, 8
     dlhs_dout = jnp.ones((batch_size, in_size), dtype=jnp.bfloat16)
-    rhs_shape = (num_groups, in_size, out_size) if transpose_rhs else (num_groups, out_size, in_size)
+    rhs_shape = (num_groups, out_size, in_size)
     rhs = (jnp.arange(num_groups * out_size * in_size).reshape(rhs_shape) % 8).astype(rhs_dtype)
     group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
     expected = jnp.zeros((batch_size, out_size), dtype=jnp.bfloat16)
@@ -246,15 +243,12 @@ class GmmDispatchTest(parameterized.TestCase):
           lhs_dtype=jnp.bfloat16,
           tiling=tiling,
           use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
-          transpose_rhs=transpose_rhs,
           **kwargs,
       )
 
     call_kwargs = gmm_v2_mock.call_args.kwargs
-    expected_transpose_rhs = (
-        bool(use_dlhs_transpose_rhs) and not transpose_rhs and jax.dtypes.itemsize_bits(rhs_dtype) >= 8
-    )
-    expected_rhs = rhs if transpose_rhs or expected_transpose_rhs else rhs.swapaxes(1, 2)
+    expected_transpose_rhs = bool(use_dlhs_transpose_rhs) and jax.dtypes.itemsize_bits(rhs_dtype) >= 8
+    expected_rhs = rhs if expected_transpose_rhs else rhs.swapaxes(1, 2)
     self.assertIs(actual, expected)
     self.assertFalse(lhs_scale_applied)
     self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
@@ -267,19 +261,16 @@ class GmmDispatchTest(parameterized.TestCase):
 
   @parameterized.product(
       use_dlhs_transpose_rhs=(None, False, True),
-      transpose_rhs=(False, True),
       use_gmm_v2_heuristic_tiling=(False, True),
       has_partial_sum=(False, True),
   )
   def test_dlhs_transpose_flag_through_custom_vjp(
-      self, use_dlhs_transpose_rhs, transpose_rhs, use_gmm_v2_heuristic_tiling, has_partial_sum
+      self, use_dlhs_transpose_rhs, use_gmm_v2_heuristic_tiling, has_partial_sum
   ):
     """Check flag routing and cotangents through JIT with reference backends."""
     num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
     lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
     rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
-    if transpose_rhs:
-      rhs = rhs.swapaxes(1, 2)
     partial_sum = jnp.ones((batch_size, out_size)) if has_partial_sum else None
     group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
 
@@ -305,7 +296,6 @@ class GmmDispatchTest(parameterized.TestCase):
           lhs,
           rhs,
           group_sizes,
-          transpose_rhs=transpose_rhs,
           use_tokamax_backend=True,
           use_gmm_v2=True,
           use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
@@ -315,14 +305,14 @@ class GmmDispatchTest(parameterized.TestCase):
       return jnp.sum(out**2)
 
     def reference_loss(lhs, rhs, partial_sum):
-      return jnp.sum(mock_gmm(lhs, rhs, transpose_rhs=transpose_rhs, partial_sum=partial_sum) ** 2)
+      return jnp.sum(mock_gmm(lhs, rhs, partial_sum=partial_sum) ** 2)
 
     with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm) as gmm_mock:
       with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm):
         actual = jax.jit(jax.value_and_grad(loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
     expected = jax.jit(jax.value_and_grad(reference_loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
     chex.assert_trees_all_close(actual, expected, atol=1e-4, rtol=1e-5)
-    self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs) and not transpose_rhs)
+    self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs))
 
 
 class GmmTest(parameterized.TestCase):
