@@ -18,13 +18,7 @@
 import jax
 import jax.numpy as jnp
 
-try:
-  from maxtext.models.kernels.gdn import config
-except (ImportError, ModuleNotFoundError):
-  try:
-    from maxtext.src.maxtext.models.kernels.gdn import config
-  except (ImportError, ModuleNotFoundError):
-    from . import config
+from . import config
 
 
 def l2_norm(x: jax.Array, eps: float = 1e-6) -> jax.Array:
