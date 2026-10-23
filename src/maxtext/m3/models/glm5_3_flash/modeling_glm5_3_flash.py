@@ -128,6 +128,7 @@ class Glm5Model(nnx.Module):
         kernel_metadata=lm_meta,
         rngs=rngs,
     )
+    self.mtp: Any = None
 
   def forward_with_aux(
       self,

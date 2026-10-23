@@ -16,10 +16,12 @@
 
 from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Config
 from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Sharding
+from maxtext.m3.models.glm5_3_flash.glm5_config import MTP_LAYER_INDEX
 from maxtext.m3.models.glm5_3_flash.glm5_config import validate_no_packing
 
 __all__ = [
     "Glm5Config",
     "Glm5Sharding",
+    "MTP_LAYER_INDEX",
     "validate_no_packing",
 ]
