@@ -77,9 +77,17 @@ class TrainLoopTest(absltest.TestCase):
     self.assertEqual(inputs.shape, (config.global_batch_size_to_train_on, config.max_target_length))
     np.testing.assert_array_equal(inputs[:, 1:], targets[:, :-1])
 
-  def test_train_loop_returns_finite_loss(self):
-    loss = loop.train_loop(_tiny_config(self.output_dir))
-    self.assertTrue(math.isfinite(loss), f"loss={loss}")
+  def test_train_loop_losses_match_with_and_without_scan(self):
+    losses = []
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        config = _tiny_config(
+            self.output_dir, scan_layers=str(scan_layers).lower(), dtype="float32", weight_dtype="float32"
+        )
+        loss = loop.train_loop(config)
+        self.assertTrue(math.isfinite(loss), f"loss={loss}")
+        losses.append(loss)
+    np.testing.assert_allclose(losses[0], losses[1], rtol=1e-4, atol=1e-5)
 
   def test_train_loop_writes_xplane_profile(self):
     config = _tiny_config(self.output_dir, profiler="xplane", skip_first_n_steps_for_profiler=1, profiler_steps=1)

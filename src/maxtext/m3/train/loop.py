@@ -23,6 +23,7 @@ Configuration reuses the legacy `pyconfig` surface, because that is what m3
 model constructors take today. The fields read here are `steps`,
 `per_device_batch_size`, `max_target_length`, `learning_rate`, the optimizer
 fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
+`scan_layers` and `param_scan_axis` consumed by the scan transform,
 `gradient_clipping_threshold`, `init_weights_seed`, and the profiler fields
 consumed by `maxtext.common.profiler.Profiler` (`profiler`,
 `skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The trace is
@@ -56,6 +57,7 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 
@@ -148,6 +150,8 @@ def train_loop(config) -> float:
 
   with jax.set_mesh(mesh):
     model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+    # TODO: Apply remat_policy to the scan body.
+    model = m3_scan.maybe_apply_scan(model, config, mesh=mesh)
     optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
@@ -160,6 +164,7 @@ def train_loop(config) -> float:
     prof = profiler.Profiler(config, offset_step=0)
     data_key = jax.random.key(config.init_weights_seed)
     loss = float("nan")
+    step_fn = nnx.cached_partial(train_step, model, optimizer)
     # Steps are logged one iteration late. Reading a loss blocks until its step
     # finishes, so doing it right after dispatch would leave the device idle
     # while the host prepares the next step. Reading step N-1's loss after
@@ -169,13 +174,13 @@ def train_loop(config) -> float:
     last_done = time.perf_counter()
     for step in range(config.steps):
       batch = make_synthetic_batch(config, mesh, jax.random.fold_in(data_key, step))
-      prof.maybe_activate_profiler(step, nnx.state(model))
+      prof.maybe_activate_profiler(step, pending)
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        step_loss = train_step(model, optimizer, batch)
+        step_loss = step_fn(batch)
       if pending is not None:
         loss, last_done = _log_step(*pending, last_done, tokens_per_step)
       pending = (step, step_loss)
-      prof.maybe_deactivate_profiler(step, nnx.state(model))
+      prof.maybe_deactivate_profiler(step, pending)
     if pending is not None:
       loss, last_done = _log_step(*pending, last_done, tokens_per_step)
 

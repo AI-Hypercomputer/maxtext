@@ -897,6 +897,8 @@ class Qwen3VLDecoder(Qwen3Decoder):
       rngs: nnx.Rngs,
   ):
     super().__init__(config, mesh, rngs=rngs, layer_cls=Qwen3VLDecoderLayer)
+    # Scan does not yet support inter-layer DeepStack injections.
+    self.layer_names = None
 
   def __call__(
       self,
