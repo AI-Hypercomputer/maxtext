@@ -14,6 +14,7 @@
 
 """Test for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
+import contextlib
 import dataclasses
 import itertools
 import math
@@ -93,6 +94,40 @@ class TestSinkhorn(unittest.TestCase):
     np.testing.assert_allclose(col_sums, jnp.ones_like(col_sums), atol=1e-3)
 
 
+@contextlib.contextmanager
+def _interpreted_mhc_kernel(interpret: bool = True):
+  """Forces the mHC Pallas kernel into interpret mode so it executes off-TPU.
+
+  Interpret mode traces the kernel body as plain JAX and emulates the grid in
+  Python, so it validates the algorithm but never exercises Mosaic lowering,
+  the real VMEM budget, or MXU accumulation. Pass ``interpret=False`` to leave
+  the kernel entry points untouched, that path needs TPU hardware.
+
+  Yields the patched ``(pre, post)`` when interpret=True
+  or ``(None, None)`` when interpret=False.
+  """
+  if not interpret:
+    yield None, None
+    return
+
+  real_pre = mhc.mhc_kernel.pre
+  real_post = mhc.mhc_kernel.post
+
+  def force_interpret(fn):
+    def wrapped(*args, **kwargs):
+      config = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
+      kwargs["config"] = dataclasses.replace(config, interpret=True)
+      return fn(*args, **kwargs)
+
+    return wrapped
+
+  with (
+      mock.patch.object(mhc.mhc_kernel, "pre", side_effect=force_interpret(real_pre)) as mock_pre,
+      mock.patch.object(mhc.mhc_kernel, "post", side_effect=force_interpret(real_post)) as mock_post,
+  ):
+    yield mock_pre, mock_post
+
+
 class TestMHC(parameterized.TestCase):
   """Test for MHC module"""
 
@@ -112,7 +147,9 @@ class TestMHC(parameterized.TestCase):
     """Sets up the common configurations and modules for MHC testing."""
     self.dim = dim
     if per_device_batch_size is None:
-      per_device_batch_size = jax.device_count()
+      per_device_batch_size = 1
+    # Global batch, so it divides the fsdp axis MlpBlock shards activations on.
+    self.batch_size = per_device_batch_size * jax.device_count()
     kwargs = {
         "run_name": f"test_mhc_k{rate}",
         "enable_checkpointing": False,
@@ -158,7 +195,7 @@ class TestMHC(parameterized.TestCase):
     self.x = jax.random.normal(
         jax.random.PRNGKey(0),
         (
-            self.config.per_device_batch_size,
+            self.batch_size,
             self.config.max_target_length,
             self.config.mhc_expansion_rate,
             self.config.emb_dim,
@@ -174,6 +211,23 @@ class TestMHC(parameterized.TestCase):
         epsilon=self.config.normalization_layer_epsilon,
         rngs=self.rngs,
     )
+
+  def _build_mhc_and_mlp(self):
+    """Builds the mHC module and the MLP branch it wraps, for the active config."""
+    module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+    layer = linears.MlpBlock(
+        config=self.config,
+        mesh=self.mesh,
+        in_features=self.config.emb_dim,
+        intermediate_dim=self.config.moe_mlp_dim,
+        activations=self.config.mlp_activations,
+        intermediate_dropout_rate=self.config.dropout_rate,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        model_mode=self.config.model_call_mode,
+        rngs=self.rngs,
+    )
+    return module, layer
 
   # Skip GPU due to NotImplementedError: dynamic grid bounds not supported in the Triton backend
   @pytest.mark.tpu_only
@@ -208,19 +262,7 @@ class TestMHC(parameterized.TestCase):
   def test_dense_layer_output_shape(self, rate):
     self._setup_mhc(rate)
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
-      layer = linears.MlpBlock(
-          config=self.config,
-          mesh=self.mesh,
-          in_features=self.config.emb_dim,
-          intermediate_dim=self.config.moe_mlp_dim,
-          activations=self.config.mlp_activations,
-          intermediate_dropout_rate=self.config.dropout_rate,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          model_mode=self.config.model_call_mode,
-          rngs=self.rngs,
-      )
+      module, layer = self._build_mhc_and_mlp()
 
       b, s, k, d = self.x.shape
       output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_DENSE)
@@ -231,7 +273,7 @@ class TestMHC(parameterized.TestCase):
   def test_attention_layer_output_shape(self, rate):
     self._setup_mhc(rate)
     inputs_shape = (
-        self.config.per_device_batch_size,
+        self.batch_size,
         self.config.max_target_length,
         self.config.emb_dim,
     )
@@ -358,7 +400,6 @@ class TestMHC(parameterized.TestCase):
         run_name="test_mhc_lite_gated",
         enable_checkpointing=False,
         model_name="deepseek-custom",
-        per_device_batch_size=4,
         max_target_length=7,
         max_prefill_predict_length=7,
         attention="dot_product",
@@ -407,39 +448,9 @@ class TestMHC(parameterized.TestCase):
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
-      layer = linears.MlpBlock(
-          config=self.config,
-          mesh=self.mesh,
-          in_features=self.config.emb_dim,
-          intermediate_dim=self.config.moe_mlp_dim,
-          activations=self.config.mlp_activations,
-          intermediate_dropout_rate=self.config.dropout_rate,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          model_mode=self.config.model_call_mode,
-          rngs=self.rngs,
-      )
+      module, layer = self._build_mhc_and_mlp()
 
-      real_pre = mhc.mhc_kernel.pre
-      real_post = mhc.mhc_kernel.post
-
-      def fake_pre(*args, **kwargs):
-        config = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
-        config = dataclasses.replace(config, interpret=True)
-        kwargs["config"] = config
-        return real_pre(*args, **kwargs)
-
-      def fake_post(*args, **kwargs):
-        config = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
-        config = dataclasses.replace(config, interpret=True)
-        kwargs["config"] = config
-        return real_post(*args, **kwargs)
-
-      with (
-          mock.patch.object(mhc.mhc_kernel, "pre", side_effect=fake_pre) as mock_pre,
-          mock.patch.object(mhc.mhc_kernel, "post", side_effect=fake_post) as mock_post,
-      ):
+      with _interpreted_mhc_kernel() as (mock_pre, mock_post):
         output, _ = module(
             self.pre_norm,
             layer,
@@ -469,6 +480,84 @@ class TestMHC(parameterized.TestCase):
 
         self.assertEqual(output.shape, self.x.shape)
 
+  def _assert_pallas_matches_reference(self, *, interpret):
+    """Asserts the kernel path matches the reference path, in interpret mode or on hardware."""
+    setup_kwargs = {
+        "enable_mhc_lite": True,
+        "dim": 128,
+        "sequence_length": 256,
+        "dtype": "bfloat16",
+    }
+
+    self._setup_mhc(4, use_mhc_pallas_kernel=False, **setup_kwargs)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      module, layer = self._build_mhc_and_mlp()
+      shared_state = jax.tree.map(
+          jnp.copy,
+          (nnx.state(module), nnx.state(layer), nnx.state(self.pre_norm)),
+      )
+      reference_output, _ = module(
+          self.pre_norm,
+          layer,
+          x=self.x,
+          mhc_type=HyperConnectionType.MLP_DENSE,
+      )
+
+    self._setup_mhc(4, use_mhc_pallas_kernel=True, **setup_kwargs)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      module, layer = self._build_mhc_and_mlp()
+      module_state, layer_state, norm_state = shared_state
+      nnx.update(module, module_state)
+      nnx.update(layer, layer_state)
+      nnx.update(self.pre_norm, norm_state)
+      with _interpreted_mhc_kernel(interpret):
+        kernel_output, _ = module(
+            self.pre_norm,
+            layer,
+            x=self.x,
+            mhc_type=HyperConnectionType.MLP_DENSE,
+        )
+
+    self.assertEqual(kernel_output.dtype, reference_output.dtype)
+    # Both branches emit bfloat16, whose spacing at this output magnitude is
+    # ~0.03. The tolerance is that noise floor: this test guards against
+    # structural divergence (wrong constant, epsilon, or slice) between the two
+    # branches, not against sub-ULP differences in accumulation order.
+    np.testing.assert_allclose(
+        kernel_output.astype(jnp.float32),
+        reference_output.astype(jnp.float32),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+
+  def test_pallas_kernel_matches_reference_path(self):
+    """Toggling use_mhc_pallas_kernel must not change the layer's output values."""
+    self._assert_pallas_matches_reference(interpret=True)
+
+  @pytest.mark.tpu_only
+  def test_pallas_kernel_matches_reference_path_tpu(self):
+    """As above, but against the real Mosaic-compiled kernel instead of interpret mode."""
+    self._assert_pallas_matches_reference(interpret=False)
+
+  def test_sigmoid_gate_computes_in_float32(self):
+    """The shared gate must not round its scale/bias down to the activation dtype.
+
+    Both the layer and the kernel call `compute_sigmoid_gate`, so a bfloat16
+    regression here would silently re-introduce a numerical difference between
+    the two branches that the end-to-end comparison above cannot resolve.
+    """
+    key = jax.random.PRNGKey(0)
+    logits = jax.random.normal(key, (8, 4), dtype=jnp.bfloat16)
+    # Values that are not representable in bfloat16 so rounding is observable.
+    scale = jnp.asarray([1.0001, 0.9999, 1.0002, 0.9998], dtype=jnp.float32)
+    bias = jnp.asarray([0.0001, -0.0001, 0.0002, -0.0002], dtype=jnp.float32)
+
+    gate = mhc_kernel.compute_sigmoid_gate(logits, scale, bias, multiplier=2.0, epsilon=1e-6)
+
+    expected = 2.0 * jax.nn.sigmoid(scale * logits.astype(jnp.float32) + bias) + 1e-6
+    self.assertEqual(gate.dtype, jnp.float32)
+    np.testing.assert_allclose(gate, expected, rtol=1e-6, atol=1e-6)
+
   def test_use_mhc_pallas_kernel_custom_block_size(self):
     """Verify that custom block sizes are passed to the kernel."""
     self._setup_mhc(
@@ -483,39 +572,9 @@ class TestMHC(parameterized.TestCase):
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
-      layer = linears.MlpBlock(
-          config=self.config,
-          mesh=self.mesh,
-          in_features=self.config.emb_dim,
-          intermediate_dim=self.config.moe_mlp_dim,
-          activations=self.config.mlp_activations,
-          intermediate_dropout_rate=self.config.dropout_rate,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          model_mode=self.config.model_call_mode,
-          rngs=self.rngs,
-      )
+      module, layer = self._build_mhc_and_mlp()
 
-      real_pre = mhc.mhc_kernel.pre
-      real_post = mhc.mhc_kernel.post
-
-      def fake_pre(*args, **kwargs):
-        config = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
-        config = dataclasses.replace(config, interpret=True)
-        kwargs["config"] = config
-        return real_pre(*args, **kwargs)
-
-      def fake_post(*args, **kwargs):
-        config = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
-        config = dataclasses.replace(config, interpret=True)
-        kwargs["config"] = config
-        return real_post(*args, **kwargs)
-
-      with (
-          mock.patch.object(mhc.mhc_kernel, "pre", side_effect=fake_pre) as mock_pre,
-          mock.patch.object(mhc.mhc_kernel, "post", side_effect=fake_post) as mock_post,
-      ):
+      with _interpreted_mhc_kernel() as (mock_pre, mock_post):
         output, _ = module(
             self.pre_norm,
             layer,
@@ -571,7 +630,6 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=False,
         dim=128,
         sequence_length=128,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -597,30 +655,11 @@ class TestMHC(parameterized.TestCase):
           mhc_pallas_kernel_bwd_feature_block_size=256,
           dim=128,
           sequence_length=128,
-          per_device_batch_size=1,
           dtype="bfloat16",
       )
       module_kernel = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
 
-      real_pre = mhc.mhc_kernel.pre
-      real_post = mhc.mhc_kernel.post
-
-      def fake_pre(*args, **kwargs):
-        cfg = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
-        cfg = dataclasses.replace(cfg, interpret=True)
-        kwargs["config"] = cfg
-        return real_pre(*args, **kwargs)
-
-      def fake_post(*args, **kwargs):
-        cfg = kwargs.get("config", mhc.mhc_kernel.MhcKernelConfig())
-        cfg = dataclasses.replace(cfg, interpret=True)
-        kwargs["config"] = cfg
-        return real_post(*args, **kwargs)
-
-      with (
-          mock.patch.object(mhc.mhc_kernel, "pre", side_effect=fake_pre),
-          mock.patch.object(mhc.mhc_kernel, "post", side_effect=fake_post),
-      ):
+      with _interpreted_mhc_kernel():
 
         def forward_kernel(x):
           out, _ = module_kernel(self.pre_norm, layer_fn, x=x, mhc_type=HyperConnectionType.MLP_DENSE)
@@ -745,7 +784,6 @@ def _run_pipeline_reference(x, weights: mhc_kernel_common.MhcWeights, permutatio
 def _run_pipeline_api(
     x,
     weights: mhc_kernel_common.MhcWeights,
-    permutations,
     implementation=None,
     config: mhc_kernel_common.MhcKernelConfig | None = None,
     interpret=True,
@@ -758,7 +796,6 @@ def _run_pipeline_api(
   layer_input, context = mhc_kernel.pre(
       x,
       weights,
-      permutations,
       config=config,
       implementation=implementation,
   )
@@ -769,12 +806,11 @@ class TestMhcKernelsFwd(parameterized.TestCase):
   """Unit tests for MaxText mHC-lite Pallas forward kernel."""
 
   def test_doubly_stochastic(self):
-    x, weights, permutations, _ = _make_kernel_inputs(batch=1, sequence=128, streams=4, embedding=128)
+    x, weights, _, _ = _make_kernel_inputs(batch=1, sequence=128, streams=4, embedding=128)
     config = mhc_kernel.MhcKernelConfig(interpret=True)
     _, context = mhc_kernel.pre(
         x,
         weights,
-        permutations,
         config=config,
     )
     row_sums = jnp.sum(context.residual, axis=-1)
@@ -792,20 +828,18 @@ class TestMhcKernelsFwd(parameterized.TestCase):
     actual = _run_pipeline_api(
         x,
         weights,
-        permutations,
         implementation=implementation,
         interpret=True,
     )
     np.testing.assert_allclose(actual, expected, rtol=5e-2, atol=5e-2)
 
   def test_unsupported_shape_raises_error(self):
-    x, weights, permutations, _ = _make_kernel_inputs(batch=1, sequence=16, streams=2, embedding=128)
+    x, weights, _, _ = _make_kernel_inputs(batch=1, sequence=16, streams=2, embedding=128)
     config = mhc_kernel.MhcKernelConfig(interpret=True)
     with self.assertRaises(mhc_kernel_common.UnsupportedInputError):
       mhc_kernel.pre(
           x,
           weights,
-          permutations,
           config=config,
       )
 
@@ -823,7 +857,7 @@ class TestMhcKernelsBwd(parameterized.TestCase):
     expected_dx, expected_dw = expected_vjp_fn(cotangent)
 
     actual_out, actual_vjp_fn = jax.vjp(
-        lambda x_, w_: _run_pipeline_api(x_, w_, permutations, implementation=None, interpret=True),
+        lambda x_, w_: _run_pipeline_api(x_, w_, implementation=None, interpret=True),
         x,
         weights,
     )
@@ -856,7 +890,7 @@ class TestMhcKernelsBwd(parameterized.TestCase):
     expected_dx, expected_dw = expected_vjp_fn(cotangent)
 
     actual_out, actual_vjp_fn = jax.vjp(
-        lambda x_, w_: _run_pipeline_api(x_, w_, permutations, config=config, interpret=True),
+        lambda x_, w_: _run_pipeline_api(x_, w_, config=config, interpret=True),
         x,
         weights,
     )
@@ -876,6 +910,73 @@ class TestMhcKernelsBwd(parameterized.TestCase):
           rtol=0.0,
           atol=tol * scale,
           err_msg=f"Feature-tiled gradient leaf {i} mismatch",
+      )
+
+  @pytest.mark.tpu_only
+  def test_token_sharded_backward_matches_unsharded_tpu(self):
+    """Gradients under a token-sharded shard_map (check_vma=True) match a single-device run.
+
+    Mirrors `ManifoldConstrainedHyperConnections._sharded_kernel_call`: `pre`
+    and `post` each run in their own shard_map with tokens sharded over two mesh
+    axes and weights replicated, so the weight gradients must be psummed by the
+    kernels' custom VJP. Interpret mode cannot run this on a multi-device CPU
+    mesh, hence TPU only.
+    """
+    num_devices = jax.device_count()
+    if num_devices < 2 or num_devices % 2:
+      self.skipTest(f"Needs an even number of devices >= 2, got {num_devices}.")
+    x, weights, _, cotangent = _make_kernel_inputs(batch=num_devices, sequence=128, streams=4, embedding=256)
+    config = mhc_kernel.MhcKernelConfig()
+
+    def pre_fn(x_, w_):
+      layer_input, context = mhc_kernel.pre(x_, w_, config=config)
+      return layer_input, context.x, context.h_post, context.residual
+
+    def post_fn(layer_output, context_x, h_post, residual):
+      context = mhc_kernel.MhcContext(x=context_x, h_post=h_post, residual=residual, implementation="mosaic")
+      return (mhc_kernel.post(layer_output, context, config=config),)
+
+    def loss(pre, post, x_, w_):
+      layer_input, context_x, h_post, residual = pre(x_, w_)
+      (output,) = post(jnp.tanh(layer_input), context_x, h_post, residual)
+      return jnp.sum(output.astype(jnp.float32) * cotangent.astype(jnp.float32))
+
+    def grad_fn(pre, post):
+      return jax.jit(jax.grad(lambda x_, w_: loss(pre, post, x_, w_), argnums=(0, 1)))
+
+    expected_dx, expected_dw = grad_fn(pre_fn, post_fn)(x, weights)
+
+    mesh = jax.make_mesh((2, num_devices // 2), ("data", "fsdp"))
+
+    def spec(rank):
+      return jax.sharding.PartitionSpec() if rank is None else jax.sharding.PartitionSpec(("data", "fsdp"))
+
+    def token_sharded(fn, in_ranks, out_ranks):
+      return jax.shard_map(
+          fn,
+          mesh=mesh,
+          in_specs=tuple(spec(rank) for rank in in_ranks),
+          out_specs=tuple(spec(rank) for rank in out_ranks),
+      )
+
+    actual_dx, actual_dw = grad_fn(
+        token_sharded(pre_fn, (4, None), (3, 4, 3, 4)),
+        token_sharded(post_fn, (3, 4, 3, 4), (4,)),
+    )(
+        jax.device_put(x, jax.sharding.NamedSharding(mesh, spec(4))),
+        jax.device_put(weights, jax.sharding.NamedSharding(mesh, spec(None))),
+    )
+
+    actual_grads = (actual_dx,) + tuple(jax.tree_util.tree_leaves(actual_dw))
+    expected_grads = (expected_dx,) + tuple(jax.tree_util.tree_leaves(expected_dw))
+    for i, (actual_g, expected_g) in enumerate(zip(actual_grads, expected_grads)):
+      scale = max(float(np.max(np.abs(np.asarray(expected_g, np.float32)))), 1e-7)
+      np.testing.assert_allclose(
+          np.asarray(actual_g, np.float32),
+          np.asarray(expected_g, np.float32),
+          rtol=0.0,
+          atol=0.02 * scale,
+          err_msg=f"Token-sharded gradient leaf {i} mismatch",
       )
 
 
