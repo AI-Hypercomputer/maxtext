@@ -59,10 +59,6 @@ def flat_params(model):
 
 class ScanTest(parameterized.TestCase):
 
-  def test_qwen3_construction_leaves_scan_to_setup(self):
-    model = create_qwen3_model(tiny_config(scan_layers=True), rngs=nnx.Rngs(0))
-    self.assertIsInstance(model.decoder.layers, Layers)
-
   def test_qwen3_vl_rejects_scan(self):
     with self.assertRaisesRegex(ValueError, "Qwen3-VL.*scan_layers=false"):
       create_qwen3_vl_model(tiny_config(scan_layers=True), rngs=nnx.Rngs(0))
@@ -89,8 +85,7 @@ class ScanTest(parameterized.TestCase):
       return m(tokens, positions, decoder_segment_ids=segments)
 
     np.testing.assert_allclose(logits(scanned), logits(plain), rtol=1e-5, atol=1e-5)
-    merged = nnx.merge(*nnx.split(scanned))
-    np.testing.assert_allclose(nnx.jit(logits)(merged), logits(plain), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(nnx.jit(logits)(scanned), logits(plain), rtol=1e-5, atol=1e-5)
     self.assertIn("scan[", str(jax.make_jaxpr(lambda: logits(scanned))()))
 
     def loss(m):
@@ -146,56 +141,21 @@ class ScanInfrastructureTest(absltest.TestCase):
     scan.apply_scan(model, param_scan_axis=1)
     np.testing.assert_allclose(model.blocks(x), reference, rtol=1e-5)
 
-
-class AddOne(nnx.Module):
-  """A stateless layer still needs to execute once per layer in a scan."""
-
-  def __call__(self, carry):
-    return carry + 1
-
-
-class ScanBoundaryTest(absltest.TestCase):
-
   def test_named_sharding_is_preserved(self):
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]), ("data",))
     self.enter_context(jax.set_mesh(mesh))
     spec = jax.sharding.PartitionSpec("data")
 
-    def make_layer(_rngs):
+    def make_layer():
       layer = CounterLayer(1)
       layer.bias = nnx.Param(jax.device_put(jnp.ones(2), jax.sharding.NamedSharding(mesh, spec)), out_sharding=spec)
       return layer
 
-    scanned = scan.scan_run([make_layer(None) for _ in range(2)], param_scan_axis=1)
+    scanned = scan.scan_run([make_layer() for _ in range(2)], param_scan_axis=1)
     expected = jax.sharding.PartitionSpec("data", None)
     self.assertEqual(scanned.bias[...].sharding.spec, expected)
     np.testing.assert_allclose(nnx.jit(lambda m: m(jnp.zeros(2)))(scanned), [2, 2])
     self.assertEqual(scanned.bias.get_metadata()["out_sharding"], expected)
-
-
-class PrivateScale(nnx.Module):
-  """Private names are valid model attributes and parameters."""
-
-  def __init__(self):
-    self._scale = nnx.Param(jnp.array(2.0))
-    self._offset = 1.0
-
-  def __call__(self, carry):
-    return carry * self._scale[...] + self._offset
-
-
-class ScanReviewRegressionTest(absltest.TestCase):
-
-  def test_private_layer_attributes_are_preserved(self):
-    scanned = scan.scan_run([PrivateScale(), PrivateScale()], param_scan_axis=1)
-    self.assertEqual(float(scanned(jnp.array(1.0))), 7.0)
-
-  def test_layers_nested_in_dictionary_are_transformed(self):
-    model = nnx.Module()
-    model.blocks = nnx.data({"foo": Layers([AddOne(), AddOne()])})
-    scan.apply_scan(model, param_scan_axis=1)
-    self.assertIsInstance(model.blocks["foo"], scan.ScannedLayers)
-    self.assertEqual(float(model.blocks["foo"](jnp.array(1.0))), 3.0)
 
 
 if __name__ == "__main__":

@@ -31,8 +31,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
-from maxtext.m3.core.rope import apply_rope
 from maxtext.m3.core.layers import Layers
+from maxtext.m3.core.rope import apply_rope
 
 
 class Qwen3MLP(nnx.Module):

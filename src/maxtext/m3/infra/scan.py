@@ -18,9 +18,6 @@ Replaces `Layers` containers with `ScannedLayers`, stacking parameters at
 `config.param_scan_axis` and executing each run of structurally identical
 layers with `jax.lax.scan`. Parameter paths retain one layer's submodule
 layout for compatibility with legacy scanned checkpoints.
-
-This module must contain no model-specific branches. Models define their
-layers and carry; this transform groups layers by graph structure alone.
 """
 
 import functools
@@ -40,30 +37,8 @@ def _is_variable(x: Any) -> bool:
   return isinstance(x, nnx.Variable)
 
 
-def _with_layer_axis(spec: Any, axis: int) -> Any:
-  """Inserts a replicated entry for the layer axis into a `PartitionSpec`."""
-  if not isinstance(spec, P):
-    return spec
-  entries = list(spec)
-  entries.extend([None] * max(0, axis - len(entries)))
-  entries.insert(axis, None)
-  return P(*entries)
-
-
-def _without_layer_axis(spec: Any, axis: int) -> Any:
-  if not isinstance(spec, P) or len(spec) <= axis:
-    return spec
-  entries = list(spec)
-  del entries[axis]
-  return P(*entries)
-
-
 def _stack_axis(variable: nnx.Variable, param_scan_axis: int, *, stacked: bool = False) -> int:
-  """Parameters stack at `param_scan_axis` (clamped to their rank), everything else at 0.
-
-  `stacked` says whether `variable` already carries the layer axis, in which
-  case the clamp is against the original rank, one less than the current.
-  """
+  """Parameters use the configured axis; other state stacks at axis zero."""
   if not isinstance(variable, nnx.Param):
     return 0
   rank = variable.ndim - (1 if stacked else 0)
@@ -83,7 +58,10 @@ def _stack_variables(variables: Sequence[nnx.Variable], param_scan_axis: int) ->
   spec = first.get_metadata().get("out_sharding")
   changes = {}
   if isinstance(spec, P):
-    spec = _with_layer_axis(spec, axis)
+    entries = list(spec)
+    entries.extend([None] * max(0, axis - len(entries)))
+    entries.insert(axis, None)
+    spec = P(*entries)
     changes["out_sharding"] = spec
     sharding = getattr(first.get_value(), "sharding", None)
     if isinstance(sharding, NamedSharding):
@@ -99,7 +77,9 @@ def _strip_layer_axis(state: Any, param_scan_axis: int) -> Any:
     if not isinstance(spec, P):
       return variable
     axis = _stack_axis(variable, param_scan_axis, stacked=True)
-    return variable.replace(variable[...], out_sharding=_without_layer_axis(spec, axis))
+    entries = list(spec)
+    del entries[axis]
+    return variable.replace(variable[...], out_sharding=P(*entries))
 
   return jax.tree.map(strip, state, is_leaf=_is_variable)
 
@@ -164,11 +144,7 @@ class ScannedLayers(nnx.Module):
 
 @functools.cache
 def _scanned_class(layer_cls: type[nnx.Module]) -> type[ScannedLayers]:
-  """`Scanned<Layer>`: `ScannedLayers` first (its `__init__` / `__call__` win), the layer class second.
-
-  Cached so every scanned run of one layer class shares a type; graphdefs
-  compare equal across instances and `jit` caches are not fragmented.
-  """
+  """Cache the path-transparent wrapper type so runs share graphdefs and JIT caches."""
   return type(f"Scanned{layer_cls.__name__}", (ScannedLayers, layer_cls), {})
 
 
