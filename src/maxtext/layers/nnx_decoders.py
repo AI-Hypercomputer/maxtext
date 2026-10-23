@@ -636,12 +636,23 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
 
+  def _get_deepseek4_remat_policy_and_cse(self):
+    """Returns the scan-safe per-layer remat policy and prevent_cse flag for DeepSeek-V4."""
+    # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
+    save_names, offload_names = maxtext_utils.get_save_and_offload_names(self.config)
+    if save_names or offload_names:
+      policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
+    else:
+      policy = self.get_remat_policy()
+    return policy, maxtext_utils.should_prevent_cse_in_remat(self.config)
+
   def _init_deepseek41_layers(self, rngs):
     """DeepSeek-V4.1: `layers_{i}` when unscanned; otherwise one stack `segments_{k}` per segment of structurally
     identical layer groups (see `deepseek41.build_segments`), each scan step being one group."""
     config = self.config
     specs = deepseek41.build_layer_specs(config)
     if config.scan_layers:
+      remat_policy_fn, prevent_cse_in_remat = self._get_deepseek4_remat_policy_and_cse()
       for k, segment in enumerate(deepseek41.build_segments(config)):
         stack = self._create_scanned_layers(
             deepseek41.DeepSeek41Block,
@@ -649,13 +660,15 @@ class NNXDecoder(nnx.Module):
             metadata_axis_name="layers",
             rngs=rngs,
             specs=tuple(specs[i] for i in segment.groups[0]),
+            remat_policy_fn=remat_policy_fn,
+            prevent_cse_in_remat=prevent_cse_in_remat,
         )
         setattr(self, f"segments_{k}", stack)
     else:
       for i, spec in enumerate(specs):
         self._create_and_register_layer(deepseek41.DeepSeek41DecoderLayer, rngs, "layers", i, spec=spec)
 
-  def _apply_deepseek41_layers(self, y, decoder_positions, decoder_input_tokens):
+  def _apply_deepseek41_layers(self, y, decoder_positions, decoder_input_tokens, decoder_segment_ids=None):
     """Runs the DeepSeek-V4.1 layers on the embeddings and collapses the hyper-connection copies."""
     cfg = self.config
     carry = deepseek41.initial_carry(y, cfg.mhc_expansion_rate)
@@ -670,14 +683,31 @@ class NNXDecoder(nnx.Module):
             carry,
             decoder_positions,
             decoder_input_tokens,
+            decoder_segment_ids,
             length=segment.repeats,
             metadata_axis_name="layers",
+            skip_block_remat=True,
         )
         setattr(self, f"segments_{k}", stack)
         carry = {key: carry[key] for key in ("h", "pre_mix") + plan.keep_after}
     else:
+      use_remat = self.model_mode == MODEL_MODE_TRAIN and cfg.remat_policy is not None and cfg.remat_policy != "none"
+      remat_policy_fn, prevent_cse = self._get_deepseek4_remat_policy_and_cse() if use_remat else (None, None)
       for i in range(cfg.num_decoder_layers):
-        carry = getattr(self, f"layers_{i}")(carry, decoder_positions, decoder_input_tokens)
+        layer = getattr(self, f"layers_{i}")
+        if use_remat:
+          carry = deepseek41._run_deepseek41_layer_remat(  # pylint: disable=protected-access
+              layer,
+              carry,
+              decoder_positions=decoder_positions,
+              decoder_input_tokens=decoder_input_tokens,
+              decoder_segment_ids=decoder_segment_ids,
+              config=cfg,
+              policy=remat_policy_fn,
+              prevent_cse=prevent_cse,
+          )
+        else:
+          carry = layer(carry, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
     return deepseek41.DeepSeek41DecoderLayer.hc_pre(carry["h"], carry["pre_mix"])
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
@@ -2000,7 +2030,7 @@ class NNXDecoder(nnx.Module):
 
     else:
       if self.is_deepseek41:
-        y = self._apply_deepseek41_layers(y, decoder_positions, decoder_input_tokens)
+        y = self._apply_deepseek41_layers(y, decoder_positions, decoder_input_tokens, decoder_segment_ids)
       elif self.is_gemma4_small:
         y, kv_caches = self._apply_gemma4_small_layers(
             y,

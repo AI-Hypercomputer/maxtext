@@ -44,7 +44,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
+from maxtext.layers import attentions, deepseek41_quant, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -4577,6 +4577,11 @@ class RoutedMoE(nnx.Module):
               "activation_embed_moe",
           ),
       )
+      # DeepSeek-V4.1 reference: FP8 activation round trips into both expert GEMMs, and the routing weight is
+      # applied before the down projection (so before its input is quantized).
+      ds41_quant = deepseek41_quant.enabled(self.config)
+      if ds41_quant:
+        inputs = deepseek41_quant.fp8_qdq(inputs)
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_0)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
@@ -4596,6 +4601,10 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
+      if ds41_quant:
+        layer_multiply = layer_multiply.astype(jnp.float32) * weights.astype(jnp.float32)[..., None]
+        layer_multiply = deepseek41_quant.fp8_qdq(layer_multiply).astype(self.dtype)
+        weights = (weights != 0).astype(weights.dtype)
 
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes, einsum_name=WO)(
@@ -5136,6 +5145,7 @@ class RoutedAndSharedMoE(nnx.Module):
         config=self.config,
         quant=self.quant,
         # DeepSeek-V4.1 clamps the shared expert's SwiGLU like the routed experts'.
+        act_quant_fn=deepseek41_quant.fp8_qdq if deepseek41_quant.enabled(self.config) else None,
         activations_limit=(
             self.config.mlp_activations_limit if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK41 else 0.0
         ),

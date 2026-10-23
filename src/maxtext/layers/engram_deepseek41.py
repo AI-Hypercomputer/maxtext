@@ -37,6 +37,7 @@ import sympy
 from flax import nnx
 
 from maxtext.common.common_types import Array, Config
+from maxtext.layers import deepseek41_quant
 from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral
 
@@ -154,10 +155,12 @@ class DeepSeek41NgramHasher:
     self.pow32_mod_p = (np.int64(2**32) % flat_primes).astype(np.uint32)
     self.offsets = np.concatenate([[0], np.cumsum(flat_primes)[:-1]]).astype(np.int32)
 
-  def __call__(self, input_ids: Array) -> Array:
+  def __call__(self, input_ids: Array, decoder_segment_ids: Array | None = None) -> Array:
     """[B, S] token ids (positions contiguous from 0) -> [B, S, (max_ngram_size - 1) * n_heads] row ids."""
     compressed = jnp.asarray(self.token_map)[input_ids]
     b, s = compressed.shape
+    if decoder_segment_ids is not None:
+      compressed = jnp.where(decoder_segment_ids != 0, compressed, self.pad_id)
     prod_hi, prod_lo = jnp.asarray(self.prod_hi), jnp.asarray(self.prod_lo)
     rolling_hi = rolling_lo = None
     hashes = []
@@ -167,6 +170,10 @@ class DeepSeek41NgramHasher:
       else:
         pad = jnp.full((b, min(shift, s)), self.pad_id, dtype=compressed.dtype)
         tokens = jnp.concatenate([pad, compressed[:, : s - shift]], axis=1)[:, :s]
+        if decoder_segment_ids is not None:
+          seg_pad = jnp.zeros((b, min(shift, s)), dtype=decoder_segment_ids.dtype)
+          prev_seg = jnp.concatenate([seg_pad, decoder_segment_ids[:, : s - shift]], axis=1)[:, :s]
+          tokens = jnp.where((prev_seg == decoder_segment_ids) & (decoder_segment_ids != 0), tokens, self.pad_id)
       hi, lo = prod_hi[shift][tokens], prod_lo[shift][tokens]
       if shift == 0:
         rolling_hi, rolling_lo = hi, lo
@@ -232,11 +239,14 @@ class DeepSeek41Engram(nnx.Module):
     self.q_weight = nnx.Param(jnp.ones((self.hc_mult, self.dim), dtype=config.weight_dtype), out_sharding=(None, "embed"))
     self.k_weight = nnx.Param(jnp.ones((self.hc_mult, self.dim), dtype=config.weight_dtype), out_sharding=(None, "embed"))
 
-  def __call__(self, h: Array, hash_ids: Array) -> Array:
+  def __call__(self, h: Array, hash_ids: Array, decoder_segment_ids: Array | None = None) -> Array:
     """h: [B, S, hc, D] residual stream; hash_ids: [B, S, n_hash_cols] -> [B, S, hc, D]."""
     b, s = hash_ids.shape[:2]
     rows = jnp.take(self.embed[...], hash_ids, axis=0).astype(self.config.dtype)  # [B, S, cols, hd]
-    kv = self.wkv(rows.reshape(b, s, self.n_hash_cols * self.head_dim))
+    rows = rows.reshape(b, s, self.n_hash_cols * self.head_dim)
+    if deepseek41_quant.enabled(self.config):  # the reference's FP8 `wkv` quantizes its input
+      rows = deepseek41_quant.fp8_qdq(rows)
+    kv = self.wkv(rows)
     key = kv[..., : self.hc_mult * self.dim].astype(jnp.float32).reshape(b, s, self.hc_mult, self.dim)
     value = kv[..., self.hc_mult * self.dim :].astype(jnp.float32)
     weight = self.q_weight[...].astype(jnp.float32) * self.k_weight[...].astype(jnp.float32)
@@ -247,6 +257,8 @@ class DeepSeek41Engram(nnx.Module):
     # Signed square root before the sigmoid.
     root = jnp.sqrt(jnp.maximum(jnp.abs(dot), 1e-6))
     gate = jax.nn.sigmoid(jnp.where(dot < 0, -root, root))
+    if decoder_segment_ids is not None:
+      gate = jnp.where((decoder_segment_ids != 0)[..., None], gate, 0.0)
     return (hf + gate[..., None] * value[:, :, None, :]).astype(h.dtype)
 
 

@@ -893,6 +893,11 @@ class DeepSeek41(BaseModel):
   )
   ds41_hc_sinkhorn_iters: PositiveInt = Field(20, description="Sinkhorn iterations of the hyper-connection mixes.")
   ds41_hc_eps: float = Field(1e-6, description="Epsilon of the hyper-connection mixes.")
+  ds41_activation_quant: bool = Field(
+      False,
+      description="Reproduce the reference's activation FP8 / FP4 quantize-dequantize round trips (straight-through"
+      " gradients); only the non-dropping dense MoE path implements them.",
+  )
   ds41_engram_layers: list[int] = Field(default_factory=list, description="Layers with an engram n-gram lookup.")
   ds41_engram_vocab_size: NonNegativeInt = Field(0, description="Base bucket size for the engram hash primes.")
   ds41_engram_max_ngram_size: PositiveInt = Field(1, description="Largest n-gram hashed by the engram.")
@@ -5837,6 +5842,11 @@ class MaxTextConfig(
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
+    if getattr(self, "ds41_activation_quant", False) and (self.sparse_matmul or self.capacity_factor > 0):
+      raise ValueError(
+          "ds41_activation_quant is only implemented in the dense, non-dropping MoE path: set sparse_matmul=false and"
+          " capacity_factor=-1 (or ds41_activation_quant=false)."
+      )
     for val in self.compress_ratios:
       # DeepSeek-V4.1 compresses 2-to-1 and 1-to-1 (a per-token projection selected by its indexer).
       if self.decoder_block != DecoderBlockType.DEEPSEEK41 and val != 0 and val < 4:
