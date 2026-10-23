@@ -404,6 +404,28 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_pipeline_ag_per_repeat_jax_state_core(self):
     self._assert_circular_pipeline_ag_per_repeat_core("jax_state")
 
+  def test_circular_pipeline_ag_per_repeat_bsw_phase_split(self):
+    # 2 stages, 8 microbatches, shifted BSW schedule (prologue before the repeat scan, single-slot phase first), with
+    # the carried w_curr bound to the params by custom_vjp and with the per-repeat re-gather.
+    for bsw_no_carry in (False, True):
+      with self.subTest(pipeline_bsw_no_carry=bsw_no_carry):
+        config = pyconfig.initialize(
+            [sys.argv[0], get_test_config_path()],
+            enable_checkpointing=False,
+            enable_goodput_recording=False,
+            run_name=f"circular_bsw_phase_split_no_carry_{bsw_no_carry}",
+            max_target_length=128,
+            base_emb_dim=28,
+            ici_pipeline_parallelism=2,
+            base_num_decoder_layers=8,
+            num_pipeline_microbatches=8,
+            per_device_batch_size=4,
+            pipeline_fsdp_ag_per_repeat=True,
+            pipeline_bsw_phase_split=True,
+            pipeline_bsw_no_carry=bsw_no_carry,
+        )
+        self.assert_pipeline_matches_sequential_output_and_grad(config)
+
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
