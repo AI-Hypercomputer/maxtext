@@ -2159,11 +2159,12 @@ class PipelineParallelism(BaseModel):
       description="Enable weight prefetching for circular pipeline parallelism.",
   )
   pipeline_bsw_no_carry: bool = Field(
-      False,
+      True,
       description=(
           "With pipeline_fsdp_ag_per_repeat: re-gather the previous repeat's weights in every repeat instead of"
           " carrying the gathered buffer across repeats (saves num_repeats x one repeat of gathered weights in HBM,"
-          " costs one extra FSDP all-gather / reduce-scatter per repeat). Numerically identical."
+          " costs one extra FSDP all-gather / reduce-scatter per repeat). Numerically identical. False carries the"
+          " buffer."
       ),
   )
   pipeline_bsw_phase_split: bool = Field(
@@ -5252,7 +5253,8 @@ class MaxTextConfig(
             f"use_qwix_quantization=True and quantization in {qwix_qt_types}."
         )
       else:
-        bsw_options = ("pipeline_bsw_no_carry", "pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype")
+        # pipeline_bsw_no_carry is on by default and has nothing to do without weight prefetching.
+        bsw_options = ("pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype")
         enabled = [name for name in bsw_options if getattr(self, name)]
         assert not enabled, f"{enabled} only apply to pipeline weight prefetching: set pipeline_fsdp_ag_per_repeat=True."
 

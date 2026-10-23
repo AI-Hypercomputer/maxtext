@@ -486,11 +486,12 @@ pipeline_fsdp_ag_per_repeat: false
 # When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
 # Options of the weight prefetching buffer (BSW: two slots holding the FSDP-gathered weights of the previous and the
 # current repeat). They only apply with pipeline_fsdp_ag_per_repeat=true.
-# pipeline_bsw_no_carry: re-gather the previous repeat's weights at the start of every repeat instead of carrying the
-#   gathered slot across the repeat scan (which saves it for the backward pass once per repeat). Numerically identical;
-#   saves num_pipeline_repeats x one repeat of gathered stage weights (~19 GiB/device for DeepSeek-V3 PP=8 EP=8
-#   FSDP=128) for one extra FSDP all-gather per repeat (+ a reduce-scatter in the backward pass).
-pipeline_bsw_no_carry: false
+# pipeline_bsw_no_carry (on by default): re-gather the previous repeat's weights at the start of every repeat instead of
+#   carrying the gathered slot across the repeat scan (which saves it for the backward pass once per repeat).
+#   Numerically identical; saves num_pipeline_repeats x one repeat of gathered stage weights (~19 GiB/device for
+#   DeepSeek-V3 PP=8 EP=8 FSDP=128) for one extra FSDP all-gather per repeat (+ a reduce-scatter in the backward pass).
+#   Set it to false to carry the slot instead when that memory is available.
+pipeline_bsw_no_carry: true
 # pipeline_bsw_phase_split: run the microbatch iterations in which every stage already reads the current repeat's slot
 #   (the last num_pipeline_microbatches - (num_stages - 1) of each repeat, and the drain bubble) without the
 #   per-iteration slot select, which materializes a copy of the weights and needs a second gradient accumulator.
