@@ -909,6 +909,7 @@ num_slices: -1
 # reducing peak memory usage. This is highly recommended for models with large
 # vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
 num_vocab_tiling: 1
+vocab_tiling_seq_major: false # with num_vocab_tiling > 1: tile along the sequence (no resharding of the hidden states)
 # If set to true then all gather the output head weight once before the tiled loss so the backward
 # reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
 # the gathers; holds the gathered head in memory for the backward.
