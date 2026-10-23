@@ -534,9 +534,22 @@ class MetricLogger:
           scalar["evaluation/moe_dropless_fallback_layers"]
       )
 
+  def _peak_device_tflops(self):
+    """Peak bf16 TFLOP/s per device for perf/mfu: peak_device_tflops, else from the device kind, else None."""
+    peak = float(getattr(self.config, "peak_device_tflops", 0.0) or 0.0)
+    if peak > 0:
+      return peak
+    kind = jax.devices()[0].device_kind.lower()
+    for name, value in (("v4", 275.0), ("v5 lite", 197.0), ("v5e", 197.0), ("v5p", 459.0), ("v6", 918.0)):
+      if name in kind:
+        return value
+    return None
+
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
+    if step_time > 0:
+      metrics["scalar"].update({"perf/steps_per_sec": 1.0 / step_time})
     metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
     if step >= self.config.rampup_end_step:
       metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
@@ -547,6 +560,19 @@ class MetricLogger:
       metrics["scalar"].update(
           {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
       )
+      peak = self._peak_device_tflops()
+      if peak:
+        metrics["scalar"].update({"perf/mfu": self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time / peak})
+    # Cumulative totals over the run (OLMo-core's throughput/total tokens and total petaflops), counted from step 0
+    # assuming every earlier step had this step's size.
+    devices = jax.device_count()
+    steps_done = step + 1
+    metrics["scalar"].update(
+        {
+            "perf/total_tokens": float(self.metadata[MetadataKey.PER_DEVICE_TOKENS]) * devices * steps_done,
+            "perf/total_petaflops": float(self.metadata[MetadataKey.PER_DEVICE_TFLOPS]) * devices * steps_done / 1e3,
+        }
+    )
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time)
 

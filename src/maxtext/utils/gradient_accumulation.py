@@ -162,6 +162,8 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
     acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
+    # The gradient's normalizer: the trained tokens, or OLMo-core's count (olmo_loss_denominator_counts_masked_instances).
+    acc_grad_and_loss["grad_weights"] += aux.get("grad_weights", aux["total_weights"])
     return acc_grad_and_loss, aux
 
   def reshape_to_microbatch_accumulations(batch_arr):
@@ -178,6 +180,7 @@ def gradient_accumulation_loss_and_grad(
       "loss": 0.0,  # accumulates xent_sum across microbatches
       "grad": init_grad,
       "total_weights": 0,
+      "grad_weights": 0,
       "moe_lb_loss": 0.0,
       "indexer_loss": 0.0,
       "mtp_loss": 0.0,
@@ -206,7 +209,8 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  divisor = config.gradient_accumulation_steps if use_tunix_ga else denominator * loss_scale
+  grad_denominator = jnp.maximum(grad_and_loss["grad_weights"], 1)
+  divisor = config.gradient_accumulation_steps if use_tunix_ga else grad_denominator * loss_scale
   raw_grads = jax.tree_util.tree_map(
       lambda arr: jnp.where(has_weights, (arr / divisor).astype(arr.dtype), jnp.zeros_like(arr)),
       raw_grads,
@@ -215,9 +219,16 @@ def gradient_accumulation_loss_and_grad(
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   # The auxiliary losses are per-microbatch means; the step's value is their mean over microbatches (as in `loss`
   # above), not their sum, so the logged learning/{moe_lb,indexer,mtp}_loss match GA=1.
-  for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
-    if key in aux:
+  for key in ("moe_lb_loss", "indexer_loss", "mtp_loss", "router_metrics", "masked_instance_fraction"):
+    if key in aux and aux[key] is not None:
       aux[key] = aux[key] / config.gradient_accumulation_steps
+  # loss_fn's z_loss is each micro-batch's per-token mean; the step's value is the per-token mean over the whole batch
+  # (as GA=1 logs it), i.e. the micro-batch means weighted by their token counts, not their sum.
+  if "z_loss" in scanned_aux and "total_weights" in scanned_aux:
+    weights = jnp.asarray(scanned_aux["total_weights"], jnp.float32)
+    aux["z_loss"] = jnp.sum(jnp.asarray(scanned_aux["z_loss"], jnp.float32) * weights) / jnp.maximum(
+        jnp.sum(weights), 1.0
+    )
   if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
     # convert the counts summed across microbatches into a single full-batch sign() update.

@@ -1394,6 +1394,60 @@ class MoEGeneral(BaseModel):
           " segment ids."
       ),
   )
+  olmoe3_router_metrics: bool = Field(
+      False,
+      description=(
+          "OLMoE3: log OLMo-core's router metrics per MoE layer (learning/block_NN/...) and in total (learning/...):"
+          " load_balancing_loss and router_z_loss, scaled and unscaled, load_imbalance and global_load_imbalance."
+          " Totals follow OLMo-core: imbalance is the max over layers for load_imbalance and the sum over layers for"
+          " global_load_imbalance; losses are sums over layers."
+      ),
+  )
+  olmo_loss_denominator_counts_masked_instances: bool = Field(
+      False,
+      description=(
+          "Divide the training loss by every instance's label tokens, filtered (all-masked) instances included"
+          " (max_target_length - 1 each), as OLMo-core's OLMoDDP train module does, instead of by the trained"
+          " tokens. Logged losses stay per trained token. Under manual gradient accumulation the accumulated gradient"
+          " and the micro-batch aux-loss weights use the same count. Not supported with Tunix GA."
+      ),
+  )
+  olmo_ppl_eval_interval: int = Field(
+      0,
+      description=(
+          "Run OLMo-core's in-loop perplexity evals (eval/lm/<set>-validation/CE loss and PPL) after every step that"
+          " completes a multiple of this many steps; 0 disables them."
+      ),
+  )
+  olmo_ppl_eval_dir: str = Field(
+      "", description="olmo_ppl_eval: base dir holding <set>/val/part-0-00000.npy (local mount or gs://)."
+  )
+  olmo_ppl_eval_sets: list[str] = Field(
+      default_factory=lambda: [
+          "c4_en",
+          "dolma_books",
+          "dolma_common-crawl",
+          "dolma_pes2o",
+          "dolma_reddit",
+          "dolma_stack",
+          "dolma_wiki",
+          "ice",
+          "m2d2_s2orc",
+          "pile",
+          "wikitext_103",
+      ],
+      description="olmo_ppl_eval: the sets, as named in OLMo-core's v3-small-ppl-validation mix.",
+  )
+  olmo_ppl_eval_eos_token_id: int = Field(100257, description="olmo_ppl_eval: EOS ending each document.")
+  olmo_ppl_eval_pad_token_id: int = Field(100277, description="olmo_ppl_eval: padding token.")
+  router_metrics_group_seqs: int = Field(
+      16,
+      description=(
+          "olmoe3_router_metrics: sequences per group for the local load imbalance. OLMo-core reports it per GPU"
+          " (16 sequences for the hero, 2048 on 128 GPUs); 0 or a size that doesn't divide the batch uses the whole"
+          " batch."
+      ),
+  )
   moe_global_load_balancing: bool = Field(
       False,
       description=(
@@ -1969,6 +2023,10 @@ class Qwen3Next(BaseModel):
       description="With kda_pallas_fused, the kernel reads q, k, v and the per-step log-decay in the [B, T, H, d]"
       " layout and writes its output in it, and takes the in-chunk cumulative decay itself: no transposes into"
       " and out of chunks, and no XLA cumulative-sum matmul.",
+  )
+  peak_device_tflops: float = Field(
+      0.0,
+      description="Peak bf16 TFLOP/s per device for perf/mfu; 0 infers it from the device kind when known.",
   )
   kda_flat_head_layout: bool = Field(
       False,
