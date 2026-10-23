@@ -1261,7 +1261,8 @@ class Attention(nnx.Module):
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding)
-    if getattr(self.config, "distill_beta", 0.0) > 0.0:
+    # With unscanned layers, distillation features are the decoder's block-boundary activations instead.
+    if getattr(self.config, "distill_beta", 0.0) > 0.0 and getattr(self.config, "scan_layers", True):
       self.sow(nnx.Intermediate, "out_projection_activations", out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
