@@ -28,6 +28,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
+from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
     get_hf_loading_function,
@@ -154,6 +155,58 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
   @parameterized.named_parameters(
+      # Single axis: one reshard of the stack. Multi-axis: one per inner stack, then one of the whole.
+      ("single_axis_on_device", ["w0", "w1"], True, 1),
+      ("single_axis_on_host", ["w0", "w1"], False, 3),
+      ("multi_axis_on_device", [["w0", "w1"], ["w2", "w3"]], True, 3),
+      ("multi_axis_on_host", [["w0", "w1"], ["w2", "w3"]], False, 7),
+  )
+  def test_tensors_split_over_all_devices_are_resharded_per_stack(self, hf_keys, on_device, num_device_puts):
+    # A tensor split over all devices is stacked as read, and only the stacks are resharded. A host
+    # tensor is still placed one by one.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    devices = jax.devices()
+    tensors = {f"w{i}": np.full((len(devices), 4), i, dtype=np.float32) for i in range(4)}
+    expected = np.array([[tensors[k] for k in row] if isinstance(row, list) else tensors[row] for row in hf_keys])
+    if on_device:
+      read_sharding = NamedSharding(Mesh(np.array(devices), ("d",)), PartitionSpec("d"))
+      tensors = {k: jax.device_put(v, read_sharding) for k, v in tensors.items()}
+    target_sharding = NamedSharding(self.mesh, PartitionSpec(*[None] * expected.ndim))
+    target_leaf = jax.ShapeDtypeStruct(expected.shape, np.float32, sharding=target_sharding)
+
+    with mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put:
+      result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(device_put.call_count, num_device_puts)
+
+  @parameterized.named_parameters(
+      # (8, 4) float32 is 128 bytes: with a 64-byte limit it moves in 2 slices along the axis the target leaves whole.
+      ("split_axis_0", PartitionSpec("x", None), 64, 2),
+      ("replicated", PartitionSpec(None, None), 64, 2),
+      ("small", PartitionSpec("x", None), 1 << 30, 1),
+  )
+  def test_large_array_is_resharded_in_slices(self, spec, limit, num_device_puts):
+    # Between two device orders, XLA can reshard by gathering the whole array on every device; slices bound that copy.
+    array = jax.device_put(np.arange(32, dtype=np.float32).reshape(8, 4))
+    sharding = NamedSharding(self.mesh, spec)
+
+    with (
+        mock.patch.object(tensor_handling, "_MAX_RESHARD_BYTES", limit),
+        mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._reshard(array, sharding)  # pylint: disable=protected-access
+
+    np.testing.assert_array_equal(result, np.arange(32, dtype=np.float32).reshape(8, 4))
+    self.assertEqual(result.sharding, sharding)
+    self.assertEqual(device_put.call_count, num_device_puts)
+
+  @parameterized.named_parameters(
       ("single_key", "w0", (4, 4)),
       ("single_axis_stack", ["w0", "w1"], (2, 4, 4)),
       ("multi_axis_stack", [["w0", "w1"], ["w2", "w3"]], (2, 2, 4, 4)),
@@ -274,6 +327,23 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
 
+  @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
+  @mock.patch.object(load_dynamic, "load_sharded_hf_state", return_value={})
+  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state", return_value={"params": {}})
+  @mock.patch("jax.process_index", return_value=1)
+  @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
+  def test_load_from_hf_hub_on_other_hosts_skips_hf_api(
+      self, mock_sync, mock_process_index, mock_transform, mock_load_sharded, mock_hf_fs
+  ):
+    # Only host 0 lists and downloads the repo; the other hosts wait for it and read the GCS cache.
+    config = mock.Mock(model_name="llama3.1-8b", hf_access_token=None, base_output_directory="gs://dummy-bucket")
+
+    load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
+
+    mock_hf_fs.assert_not_called()
+    mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+    mock_load_sharded.assert_called_once_with("gs://dummy-bucket/hf_cache/repo_meta-llama")
+
   @parameterized.named_parameters(
       ("base", "llama3.1-8b"),
       ("instruct_8b", "llama3.1-8b-Instruct"),
@@ -363,6 +433,59 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     # Assert values match
     loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
     np.testing.assert_allclose(loaded_weight, dummy_weight)
+
+
+class LeadingAxisShardingTest(parameterized.TestCase):
+  """On several processes, each HF tensor is split along its leading axis only and loads unchanged."""
+
+  def test_leading_axis_read_matches_values(self):
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for two device groups.")
+    ckpt_dir = epath.Path(self.create_tempdir().full_path)
+    rng = np.random.RandomState(0)
+    n = jax.device_count()
+    # Leading axes divisible by all devices, by the number of groups only, and by neither.
+    tensors = {
+        "model.embed_tokens.weight": rng.randn(2 * n, 6).astype(np.float32),
+        "model.layers.0.mlp.gate.weight": rng.randn(2, 5).astype(np.float16),
+        "model.norm.weight": np.array([-0.0, 0.0, 1.5], dtype=np.float32),
+        "model.position_ids": np.arange(7, dtype=np.int32),
+    }
+    safetensors.numpy.save_file(tensors, str(ckpt_dir / "model.safetensors"))
+
+    loaded = load_dynamic.load_sharded_hf_state(str(ckpt_dir), num_groups=2)
+
+    self.assertEqual(set(loaded), set(tensors))
+    for name, value in tensors.items():
+      spec = loaded[name].sharding.spec
+      self.assertTrue(all(axis is None for axis in spec[1:]), f"{name} is split along an inner axis: {spec}")
+      self.assertEqual(loaded[name].dtype, value.dtype)
+      np.testing.assert_array_equal(np.asarray(loaded[name]).view(np.uint8), value.view(np.uint8), err_msg=name)
+    self.assertEqual(loaded["model.embed_tokens.weight"].sharding.spec, PartitionSpec(("process", "local")))
+    self.assertEqual(loaded["model.layers.0.mlp.gate.weight"].sharding.spec, PartitionSpec("process"))
+    self.assertEqual(loaded["model.norm.weight"].sharding.spec, PartitionSpec())
+
+  def test_read_without_gcs_read_ahead(self):
+    # gcsfs reads 5 MiB past each byte range by default, while each host reads one small range per tensor.
+    gcsfs = pytest.importorskip("gcsfs")
+    ckpt_dir = epath.Path(self.create_tempdir().full_path)
+    safetensors.numpy.save_file({"w": np.ones((4, 2), dtype=np.float32)}, str(ckpt_dir / "model.safetensors"))
+    block_size = gcsfs.GCSFileSystem.default_block_size
+    block_sizes_in_read = []
+
+    def load_pytree(*args, **kwargs):
+      block_sizes_in_read.append(gcsfs.GCSFileSystem.default_block_size)
+      return load_pytree.original(*args, **kwargs)
+
+    load_pytree.original = load_dynamic.ocp_v1.load_pytree
+    with mock.patch.object(load_dynamic.ocp_v1, "load_pytree", side_effect=load_pytree):
+      loaded = load_dynamic.load_sharded_hf_state(str(ckpt_dir))
+
+    self.assertEqual(block_sizes_in_read, [0])
+    self.assertEqual(gcsfs.GCSFileSystem.default_block_size, block_size)
+    np.testing.assert_array_equal(loaded["w"], np.ones((4, 2), dtype=np.float32))
 
 
 class CheckpointMetadataTest(parameterized.TestCase):
