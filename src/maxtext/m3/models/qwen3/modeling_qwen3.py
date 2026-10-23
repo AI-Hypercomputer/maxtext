@@ -32,6 +32,7 @@ from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
 from maxtext.m3.core.rope import apply_rope
+from maxtext.m3.core.layers import Layers
 
 
 class Qwen3MLP(nnx.Module):
@@ -315,7 +316,7 @@ class Qwen3DecoderLayer(nnx.Module):
 
 
 class Qwen3Decoder(nnx.Module):
-  """Qwen3 Decoder stack composing decoder layers with flat attribute naming."""
+  """Qwen3 decoder stack with a callable Layers container."""
 
   def __init__(
       self,
@@ -334,15 +335,8 @@ class Qwen3Decoder(nnx.Module):
       layer_cls: Decoder layer constructor for model-family subclasses.
     """
     self.config = config
-    self.num_layers = config.num_decoder_layers
 
-    # Flat attribute names: layers_0, layers_1, ...
-    for lyr in range(self.num_layers):
-      layer = layer_cls(
-          config=config,
-          rngs=rngs,
-      )
-      setattr(self, f"layers_{lyr}", layer)
+    self.layers = Layers([layer_cls(config=config, rngs=rngs) for _ in range(config.num_decoder_layers)])
 
     self.decoder_norm = nnx.RMSNorm(
         num_features=config.emb_dim,
@@ -399,14 +393,12 @@ class Qwen3Decoder(nnx.Module):
     """Iterates through all decoder layers and projects to logits via tied embeddings."""
     y = shared_embedding(decoder_input_tokens)
 
-    for lyr in range(self.num_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      y = layer(
-          y,
-          decoder_segment_ids=decoder_segment_ids,
-          decoder_positions=decoder_positions,
-          deterministic=deterministic,
-      )
+    y = self.layers(
+        y,
+        decoder_segment_ids=decoder_segment_ids,
+        decoder_positions=decoder_positions,
+        deterministic=deterministic,
+    )
 
     logits = self.apply_output_head(shared_embedding, y, deterministic=deterministic)
     return logits, y

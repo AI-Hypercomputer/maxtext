@@ -35,6 +35,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
 )
 from maxtext.configs import pyconfig
+from maxtext.m3.core import checkpoint as m3_checkpoint
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model, create_qwen3_model
 from maxtext.utils import max_utils, model_creation_utils
 
@@ -135,7 +136,7 @@ class Qwen3ComparisonTest(unittest.TestCase):
     p_new = nnx.state(abs_new, nnx.Param)
 
     flat_old = dict(p_old.flat_state())
-    flat_new = dict(p_new.flat_state())
+    flat_new = dict(nnx.to_flat_state(nnx.State(m3_checkpoint.to_legacy_layer_names(p_new))))
 
     self.assertEqual(
         len(flat_old), len(flat_new), f"Parameter counts differ: old has {len(flat_old)}, new has {len(flat_new)}"
@@ -161,7 +162,7 @@ class Qwen3ComparisonTest(unittest.TestCase):
       model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
 
       p_old = nnx.state(model_old, nnx.Param)
-      nnx.update(model_new, p_old)
+      nnx.update(model_new, m3_checkpoint.from_legacy_layer_names(p_old))
 
       batch_size, seq_len = 2, 8
       tokens = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, cfg_old.vocab_size)
@@ -185,7 +186,7 @@ class Qwen3ComparisonTest(unittest.TestCase):
       model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
 
       p_old = nnx.state(model_old, nnx.Param)
-      nnx.update(model_new, p_old)
+      nnx.update(model_new, m3_checkpoint.from_legacy_layer_names(p_old))
 
       batch_size, seq_len = 2, 8
       tokens = jax.random.randint(jax.random.PRNGKey(1), (batch_size, seq_len), 0, cfg_old.vocab_size)
@@ -215,7 +216,9 @@ class Qwen3ComparisonTest(unittest.TestCase):
       self.assertLess(rel_loss_diff, 0.01, f"Relative loss diff in value_and_grad too high: {rel_loss_diff}")
 
       flat_g_old = dict(nnx.state(grads_old, nnx.Param).flat_state())
-      flat_g_new = dict(nnx.state(grads_new, nnx.Param).flat_state())
+      flat_g_new = dict(
+          nnx.to_flat_state(nnx.State(m3_checkpoint.to_legacy_layer_names(nnx.state(grads_new, nnx.Param))))
+      )
 
       for key in sorted(flat_g_old.keys()):
         g_old = flat_g_old[key][...]

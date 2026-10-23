@@ -41,6 +41,7 @@ from maxtext.common import train_state_nnx
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline import synthetic_data_processing
 from maxtext.layers import quantizations
+from maxtext.m3.core.checkpoint import from_legacy_layer_names, to_legacy_layer_names
 from maxtext.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
@@ -395,6 +396,7 @@ def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   Returns:
     The NNX state. Leaves the checkpoint doesn't hold, e.g. caches, stay `jax.ShapeDtypeStruct`s.
   """
+  restored_linen = from_legacy_layer_names(restored_linen, model_state=abstract_nnx_state)
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
 
@@ -794,7 +796,10 @@ def load_state_if_possible(
     # Weights-only for both paths, so the loader gets the weights rather than the whole state:
     # the HF param mappings name weights, and an NNX state hides them under `model`.
     params = _abstract_params(abstract_unboxed_pre_state)
-    restored, restored_params = load_safetensors_dynamic_state(path, params, maxtext_config)
+    loader_params = to_legacy_layer_names(params.to_pure_dict()) if is_nnx else params
+    restored, restored_params = load_safetensors_dynamic_state(path, loader_params, maxtext_config)
+    if is_nnx:
+      restored_params = from_legacy_layer_names(restored_params, model_state=params)
     # A weight no HF mapping covered comes back unmaterialized and would reach the model as an
     # untrained init value. Same check the Orbax weights-only load makes.
     _raise_on_weight_mismatch(_bare_weights(params.to_pure_dict() if is_nnx else params), _bare_weights(restored_params))
@@ -1113,7 +1118,7 @@ def load_params_from_path(
   # `params` collection inside it. A Linen TrainState.params is that collection; an NNX params
   # state sits one level below it (bare weights), so wrap it going in and unwrap it coming out.
   is_nnx = isinstance(abstract_unboxed_params, nnx.State)
-  want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
+  want = to_legacy_layer_names(abstract_unboxed_params.to_pure_dict()) if is_nnx else abstract_unboxed_params
 
   # Determine the restore key based on the leaf directory name to support native and custom SFT
   restore_key = os.path.basename(str(load_parameters_from_path).rstrip("/"))
@@ -1180,7 +1185,9 @@ def load_params_from_path(
         val = leaf
       collection_leaves[col][tuple(path_tuple)] = val
 
-    params_collection = {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
+    params_collection = to_legacy_layer_names(
+        {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
+    )
     if "params" not in params_collection:
       params_collection["params"] = want
     for wpath, (_, stored_sds) in flat_moe_plan.items():
@@ -1311,6 +1318,7 @@ def load_params_from_path(
   # differ, because the restore only ever returns what was requested.
   _log_unconsumed_checkpoint_weights(want, audit_stored)
   if is_nnx:
+    restored_weights = from_legacy_layer_names(restored_weights, model_state=abstract_unboxed_params)
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
     return abstract_unboxed_params
   return restored_weights
