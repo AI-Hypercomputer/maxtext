@@ -16,9 +16,11 @@
 
 import contextlib
 import functools
+import json
 import os
 import os.path
 import sys
+import tempfile
 import unittest
 
 from flax import linen as nn
@@ -28,6 +30,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+import numpy as np
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
@@ -580,6 +583,112 @@ class PipelineParallelismTest(unittest.TestCase):
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
+
+  def _train_losses(self, run_name, extra_args):
+    """Trains a tiny model for three steps and returns its per-step losses."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      metrics_file = os.path.join(tmp_dir, "metrics.txt")
+      train_main(
+          [
+              None,
+              get_test_config_path(),
+              f"base_output_directory={self.base_output_directory}",
+              f"run_name={run_name}",
+              f"dataset_path={self.dataset_path}",
+              f"metrics_file={metrics_file}",
+              "dataset_type=synthetic",
+              "steps=3",
+              "max_target_length=128",
+              "enable_checkpointing=False",
+              "enable_goodput_recording=False",
+              rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+          ]
+          + list(extra_args)
+      )
+      with open(metrics_file, "rt", encoding="utf8") as f:
+        return [json.loads(line)["learning/loss"] for line in f if line.strip()]
+
+  def _explicit_and_auto_losses(self, name, args):
+    auto_losses = self._train_losses(f"pp_{name}_auto", args + ["shard_mode=auto"])
+    explicit_losses = self._train_losses(f"pp_{name}_explicit", args + ["shard_mode=explicit"])
+    print(f"[{name}] auto losses: {auto_losses}", flush=True)
+    print(f"[{name}] explicit losses: {explicit_losses}", flush=True)
+    self.assertTrue(auto_losses, "auto run produced no metrics")
+    return explicit_losses, auto_losses
+
+  def test_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how the pipeline expresses its layouts, so the losses must not move.
+
+    Covers NNXPipeline circular (the FSDP-sharded weights of each repeat gathered inside the stages) and non-circular
+    with the FSDP all-gather hoisted out of the loop, and NNXCircularPipeline (weight prefetching) with the gathered
+    slot carried across repeats and on the shifted schedule with the default re-gather. Every case shards the batch over
+    FSDP besides the stages.
+    """
+    tiny_model = [
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "head_dim=128",
+        "vocab_size=32",
+        "ici_pipeline_parallelism=2",
+    ]
+    cases = {
+        "circular": ["base_num_decoder_layers=8", "per_device_batch_size=2", "num_pipeline_microbatches=4"],
+        "non_circular_ag_once": [
+            "base_num_decoder_layers=4",
+            "num_layers_per_pipeline_stage=2",
+            "per_device_batch_size=2",
+            "num_pipeline_microbatches=4",
+            "pipeline_fsdp_ag_once=True",
+        ],
+        "bsw_carry": [
+            "base_num_decoder_layers=8",
+            "per_device_batch_size=2",
+            "num_pipeline_microbatches=4",
+            "pipeline_fsdp_ag_per_repeat=True",
+            "pipeline_bsw_no_carry=False",
+        ],
+        "bsw_phase_split": [
+            "base_num_decoder_layers=8",
+            "per_device_batch_size=4",
+            "num_pipeline_microbatches=8",
+            "pipeline_fsdp_ag_per_repeat=True",
+            "pipeline_bsw_phase_split=True",
+        ],
+    }
+    for name, case_args in cases.items():
+      with self.subTest(case=name):
+        explicit_losses, auto_losses = self._explicit_and_auto_losses(name, tiny_model + case_args)
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-5, atol=0.0)
+
+  def test_deepseek_explicit_sharding_matches_auto(self):
+    """DeepSeek under explicit sharding with pipeline and expert parallelism.
+
+    The sparse-matmul MoE runs a shard_map inside the stage vmap; the dense layer before the pipeline and the MTP
+    block run under the PP-as-DP rules; the routing biases are updated from the per-layer sown counts. The first loss
+    is pure forward pass and matches to rounding. After an update the two modes' reassociated gradient reductions can
+    move near-tied tokens to other experts, so the later losses drift by ~1e-4 and the bound is loose.
+    """
+    args = [
+        "model_name=deepseek3-tiny",
+        "override_model_config=True",
+        "base_num_decoder_layers=5",
+        "first_num_dense_layers=1",
+        "vocab_size=256",
+        "num_experts=4",
+        "num_experts_per_tok=2",
+        "mtp_num_layers=1",
+        "mtp_loss_scaling_factor=0.1",
+        "per_device_batch_size=2",
+        "ici_pipeline_parallelism=2",
+        "ici_expert_parallelism=2",
+        "ici_fsdp_parallelism=1",
+        "num_pipeline_microbatches=4",
+    ]
+    explicit_losses, auto_losses = self._explicit_and_auto_losses("deepseek", args)
+    np.testing.assert_allclose(explicit_losses[0], auto_losses[0], rtol=1e-6, atol=0.0)
+    np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-3, atol=0.0)
 
   @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
   def test_full_train_fp8(self):
