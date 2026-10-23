@@ -95,11 +95,25 @@ jobs:
             image_name: tpu_pre_training
             workflow: pre-training
             dockerfile: maxtext_tpu_dependencies.Dockerfile
+            platform: linux/amd64
           - name: 'TPU Post-Training'
             device: tpu
             image_name: tpu_post_training
             workflow: post-training
             dockerfile: maxtext_tpu_dependencies.Dockerfile
+            platform: linux/amd64
+          - name: 'GPU Pre-Training (amd64)'
+            device: gpu
+            image_name: gpu_pre_training_amd64
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
+            platform: linux/amd64
+          - name: 'GPU Pre-Training (arm64)'
+            device: gpu
+            image_name: gpu_pre_training_arm64
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
+            platform: linux/arm64
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
@@ -112,6 +126,7 @@ jobs:
       image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
       include_test_assets: true
       is_rc: true
+      platform: ${{ matrix.platform }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -131,6 +146,10 @@ jobs:
             device: tpu
             image_name: tpu_post_training
             workflow: post-training
+          - name: "GPU Pre-Training (amd64)"
+            device: gpu
+            image_name: gpu_pre_training_amd64
+            workflow: pre-training
     uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ matrix.image_name }}
