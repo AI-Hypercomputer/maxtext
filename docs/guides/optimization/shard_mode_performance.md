@@ -2362,14 +2362,16 @@ ______________________________________________________________________
 | `check_vma=True`                                 | **rejected by MaxText** (`types.py:3601-3602`) although JAX 0.11.1 accepts it on an Explicit mesh               | `base.yml:783` calls it "recommended for improved performance" |
 | `fused_qkv=True`                                 | **trace-time `ShardingTypeError`** — `attentions.py:1254` is the one projection that forwards no `out_sharding` | no validator catches it; you get a raw JAX error               |
 | context parallelism on `dot_product` / GPU flash | **trace-time error** — `qk_product` puts the same `context` axis on both `t` and `s` (`attention_op.py:2749`)   | TPU splash escapes via `shard_map` manual axes                 |
-| `P.UNCONSTRAINED`                                | **illegal** when no axis is Auto; the pipeline substitutes `None`, which means *replicate*, the opposite        | `pipeline.py` placeholder swap                                 |
+| `P.UNCONSTRAINED`                                | **illegal** when no axis is Auto; the pipeline keeps an array's current sharding on the dims it does not set    | `pipeline.py` `shard_dim_by_stages`                            |
 | partial adoption                                 | **impossible** — mesh axis types are all-or-nothing (`maxtext_utils.py:2263-2268`)                              |                                                                |
 
 `check_vma` is the most consequential: it gates the varying-manual-axes fast path in megablox
 (`ops.py:860`, `ops.py:1008`, `backend.py:528`, `backend.py:789`) on exactly the MoE models that are
-on the explicit whitelist. Note the validator is also incomplete — `pipeline.py:385`, `:392`, `:1186`
-hardcode `check_vma=True` regardless of config, and nothing forbids
-`ici_pipeline_parallelism > 1` with explicit.
+on the explicit whitelist. Note the validator is also incomplete — the pipeline's `shard_map`s
+hardcode `check_vma=True` regardless of config. Pipeline parallelism itself runs under explicit: the
+stage `vmap` runs with `stage` an Auto mesh axis (`pipeline_utils.pipeline_stage_mesh`), because a
+`vmap` over an Explicit axis replicates the stage dimension into any `shard_map` in the layers (the
+MoE's) instead of partitioning it.
 
 ### 7.2 Silent losses
 

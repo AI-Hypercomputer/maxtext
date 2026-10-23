@@ -17,11 +17,13 @@
 
 import collections
 from collections.abc import Iterable
+import contextlib
 import inspect  # for debugging only
 from pathlib import Path
 
 from flax import nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 import jax
 from jax.core import Tracer
 import jax.numpy as jnp
@@ -1054,6 +1056,18 @@ def logical_axis_rules_pp_act_as_dp(logical_rules):
       new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
     new_rules.append((key, new_physical_axes))
   return tuple(new_rules)
+
+
+def pp_act_as_dp_construction_rules(config):
+  """Context to construct the modules that run outside the pipeline, under the PP-as-DP rules they run with.
+
+  Under explicit sharding modules resolve some activation shardings once, at construction (e.g. the RoPE frequency
+  sharding), so a module called under `logical_axis_rules_pp_act_as_dp` must be built under it too. Auto mode leaves
+  those shardings unset (None): no-op.
+  """
+  if config.shard_mode != ShardMode.EXPLICIT or not getattr(config, "using_pipeline_parallelism", False):
+    return contextlib.nullcontext()
+  return flax_logical_axis_rules(logical_axis_rules_pp_act_as_dp(config.logical_axis_rules))
 
 
 def get_formatted_sharding_annotations(params, mesh=None):

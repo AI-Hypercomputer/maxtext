@@ -153,13 +153,15 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config,
-          mesh=self.mesh,
-          transformer_layer_module=mtp_layer,
-          decoder=self.decoder,
-          rngs=rngs,
-      )
+      # Under pipeline parallelism the MTP block runs under the PP-as-DP rules (see __call__); build it under them too.
+      with sharding.pp_act_as_dp_construction_rules(self.config):
+        self.mtp_block = MultiTokenPredictionBlock(
+            config=self.config,
+            mesh=self.mesh,
+            transformer_layer_module=mtp_layer,
+            decoder=self.decoder,
+            rngs=rngs,
+        )
 
   def no_op(self, *args, **kwargs):
     """A no-op method to allow the model to be used in a lazy context."""
