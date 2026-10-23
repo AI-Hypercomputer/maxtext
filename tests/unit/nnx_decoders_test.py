@@ -1138,7 +1138,7 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
     )
     return cfg, decoder, shared_embedding
 
-  def _run(self, cfg, decoder, shared_embedding, kv_caches=None):
+  def _run(self, cfg, decoder, shared_embedding, kv_caches=None, attention_metadata=None):
     """Runs one TRAIN-mode forward pass and returns the logits."""
     batch = cfg.global_batch_size_to_train_on
     seq = cfg.max_target_length
@@ -1153,6 +1153,7 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
         kv_caches=kv_caches,
+        attention_metadata=attention_metadata,
     )
     return logits
 
@@ -1183,6 +1184,50 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
     self.assertEqual(len(kv_caches), cfg.num_decoder_layers)
     for i, cache in enumerate(kv_caches):
       np.testing.assert_array_equal(np.asarray(cache), np.full((batch, seq), float(i)))
+
+  def test_decoder_routes_per_layer_attention_metadata_by_global_layer(self):
+    """Every layer must get its own entry of vLLM's per-layer metadata, keyed by global layer index.
+
+    vLLM hands hybrid models a dict from ``layer.{i}`` to that layer's KV-cache
+    group metadata. The sub-layers of a scanned block do not know their global
+    index (the local ones are all built with layer_idx=0), so the decoder has to
+    resolve the dict for each block. Two blocks of a cycle-2 model plus a
+    one-layer remainder cover the scanned blocks and the remainder block alike:
+    a lookup by position in the block would hand layers 2..4 the entries of
+    layers 0..1.
+    """
+    cfg, decoder, shared_embedding = self._build(5, inhomogeneous_layer_cycle_interval=2)
+    self.assertEqual(decoder.layers_remainder.num_local, 1)
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    kv_caches = [jnp.full((batch, seq), float(i)) for i in range(cfg.num_decoder_layers)]
+    attention_metadata = {f"layer.{i}": object() for i in range(cfg.num_decoder_layers)}
+
+    received = []
+    original_call = qwen3.Qwen3NextDecoderLayer.__call__
+
+    def recording_call(layer, *args, attention_metadata=None, **kwargs):
+      received.append(attention_metadata)
+      # The sentinels are not real metadata, so run the layer as it runs without any.
+      return original_call(layer, *args, attention_metadata=None, **kwargs)
+
+    with mock.patch.object(qwen3.Qwen3NextDecoderLayer, "__call__", recording_call):
+      self._run(cfg, decoder, shared_embedding, kv_caches=kv_caches, attention_metadata=attention_metadata)
+
+    self.assertEqual(len(received), cfg.num_decoder_layers)
+    for lyr, metadata in enumerate(received):
+      self.assertIs(metadata, attention_metadata[f"layer.{lyr}"], f"layer {lyr} got another layer's metadata")
+    # The caches still land back on their own layers.
+    for i, cache in enumerate(kv_caches):
+      np.testing.assert_array_equal(np.asarray(cache), np.full((batch, seq), float(i)))
+
+  def test_decoder_rejects_per_layer_attention_metadata_without_kv_caches(self):
+    """Without external caches the blocks scan their sub-layers, which cannot vary the metadata per layer."""
+    cfg, decoder, shared_embedding = self._build(4, inhomogeneous_layer_cycle_interval=2)
+    attention_metadata = {f"layer.{i}": object() for i in range(cfg.num_decoder_layers)}
+
+    with self.assertRaisesRegex(NotImplementedError, "cannot be resolved inside a scanned block"):
+      self._run(cfg, decoder, shared_embedding, attention_metadata=attention_metadata)
 
   def test_decoder_keeps_layers_past_the_last_whole_block(self):
     """Layers left over by the block scan must still be built and applied.
@@ -1869,11 +1914,15 @@ class _StatefulQwen3_5DecoderLayer(nnx.Module):
     self.call_count = nnx.Intermediate(jnp.array(0, dtype=jnp.int32))
     self.received_kv_cache = nnx.Intermediate(jnp.array(False))
     self.received_attention_metadata = nnx.Intermediate(jnp.array(False))
+    # The metadata itself when a test passes an array (to tell the sub-layers' entries apart), else -1.
+    self.received_attention_metadata_value = nnx.Intermediate(jnp.array(-1, dtype=jnp.int32))
 
   def __call__(self, inputs, *unused_args, kv_cache=None, attention_metadata=None, **unused_kwargs):
     self.call_count.value += 1
     self.received_kv_cache.value = jnp.array(kv_cache is not None)
     self.received_attention_metadata.value = jnp.array(attention_metadata is not None)
+    if isinstance(attention_metadata, jax.Array):
+      self.received_attention_metadata_value.value = attention_metadata.astype(jnp.int32)
     output = inputs + self.increment
     if kv_cache is None:
       return output
@@ -1959,6 +2008,54 @@ class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
     self.assertEqual(len(updated), self.CYCLE)
     np.testing.assert_array_equal(updated[0], 1)
     self.assertEqual(updated[1:], (None,) * (self.CYCLE - 1))
+
+  @pytest.mark.cpu_only
+  def test_each_sublayer_gets_its_own_attention_metadata(self):
+    """A per-sub-layer metadata tuple must reach the sub-layers in block order, like the caches.
+
+    vLLM's hybrid metadata is per KV-cache group, so sub-layers of one block can
+    need different entries; handing every sub-layer the same one would point
+    some of them at another group's block tables.
+    """
+    block = self._make_block()
+    kv_cache = tuple(jnp.array(i) for i in range(self.CYCLE))
+    attention_metadata = tuple(jnp.array(100 + i) for i in range(self.CYCLE))
+
+    self._call(block, kv_cache=kv_cache, attention_metadata=attention_metadata)
+
+    np.testing.assert_array_equal(
+        block.local_layers.received_attention_metadata_value.value, jnp.arange(100, 100 + self.CYCLE - 1)
+    )
+    np.testing.assert_array_equal(block.global_layer.received_attention_metadata_value.value, 100 + self.CYCLE - 1)
+
+  @pytest.mark.cpu_only
+  def test_rejects_per_layer_attention_metadata_dict(self):
+    """A dict keyed by global layer cannot be resolved by sub-layers that do not know their global index."""
+    block = self._make_block()
+    kv_cache = tuple(jnp.array(i) for i in range(self.CYCLE))
+    attention_metadata = {f"layer.{i}": jnp.array(i) for i in range(self.CYCLE)}
+
+    with self.assertRaisesRegex(NotImplementedError, "cannot be resolved inside a scanned block"):
+      self._call(block, kv_cache=kv_cache, attention_metadata=attention_metadata)
+
+  @pytest.mark.cpu_only
+  def test_rejects_per_sub_layer_attention_metadata_without_external_caches(self):
+    """Only the external-cache path unrolls the sub-layers; the scans cannot vary metadata per sub-layer."""
+    block = self._make_block()
+    attention_metadata = tuple(jnp.array(i) for i in range(self.CYCLE))
+
+    with self.assertRaisesRegex(NotImplementedError, "externally-managed kv caches"):
+      self._call(block, attention_metadata=attention_metadata)
+
+  @pytest.mark.cpu_only
+  def test_rejects_per_sub_layer_attention_metadata_of_the_wrong_length(self):
+    """A tuple not covering every sub-layer would leave some sub-layer without its entry."""
+    block = self._make_block()
+    kv_cache = tuple(jnp.array(i) for i in range(self.CYCLE))
+    attention_metadata = tuple(jnp.array(i) for i in range(self.CYCLE - 1))
+
+    with self.assertRaisesRegex(ValueError, "one entry per sub-layer"):
+      self._call(block, kv_cache=kv_cache, attention_metadata=attention_metadata)
 
   @pytest.mark.cpu_only
   def test_flat_per_layer_caches_survive_the_per_block_round_trip(self):
