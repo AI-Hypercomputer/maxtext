@@ -104,6 +104,8 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
     A new `PartitionSpec` with the gathered axes removed, or the original object if it
     was not a PartitionSpec.
   """
+  # Copy: the caller shares one list across all leaves; appending in place would leak "expert" into later leaves.
+  axes_to_remove = list(axes_to_remove)
   if not is_moe_block_0:
     axes_to_remove.append("expert")
 
