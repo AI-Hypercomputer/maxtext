@@ -313,10 +313,10 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
-  def test_llama2_7b_flops(self):
-    """Test Llama2 7b Flops calculation with default parameters"""
+  def test_llama3_3_70b_flops(self):
+    """Test Llama3.3 70b Flops calculation with default parameters"""
     cfg = self._initialize_model_config(
-        "llama2-7b",
+        "llama3.3-70b",
         max_target_length=2048,
         per_device_batch_size=12,
     )
@@ -324,17 +324,16 @@ class FlopCalculation(parameterized.TestCase):
     B = cfg.per_device_batch_size
     S = cfg.max_target_length
     attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
-    # Llama2-7b has ~6.74B parameters
-    # https://adithyask.medium.com/from-7b-to-8b-parameters-understanding-weight-matrix-changes-in-llama-transformer-models-31ea7ed5fd88
-    golden_param_size = 6.74e9
+    # Llama3.3-70b has ~69.5B non-embedding + unembedding active parameters
+    golden_param_size = 69.5e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
-  def test_llama3_8b_flops(self):
-    """Test Llama3 8b Flops calculation with default parameters"""
+  def test_llama3_1_8b_flops(self):
+    """Test Llama3.1 8b Flops calculation with default parameters"""
     cfg = self._initialize_model_config(
-        "llama3-8b",
+        "llama3.1-8b",
         max_target_length=2048,
         per_device_batch_size=4,
     )
@@ -342,19 +341,16 @@ class FlopCalculation(parameterized.TestCase):
     B = cfg.per_device_batch_size
     S = cfg.max_target_length
     attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
-    # LLaMA3-8b has ~8.03B parameters
-    # https://adithyask.medium.com/from-7b-to-8b-parameters-understanding-weight-matrix-changes-in-llama-transformer-models-31ea7ed5fd88
-    # Note: The commonly cited 8.03B parameter count for Llama 3 8B corresponds to a version with UNTIED embeddings.
-    # Here we consider TIED embedding table, which reduces param count to 7.50B
+    # LLaMA3.1-8b has ~8.03B parameters (7.50B excluding input embedding lookup)
     golden_param_size = 7.50e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
-  def test_mixtral_8x7b_flops(self):
-    """Test Mixtral 8x7b Flops calculation"""
+  def test_qwen3_30b_a3b_flops(self):
+    """Test Qwen3 30B-A3B Flops calculation"""
     cfg = self._initialize_model_config(
-        "mixtral-8x7b",
+        "qwen3-30b-a3b",
         max_target_length=8192,
         per_device_batch_size=4,
     )
@@ -362,17 +358,16 @@ class FlopCalculation(parameterized.TestCase):
     B = cfg.per_device_batch_size
     S = cfg.max_target_length
     attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
-    # mixtral-8x7b has ~12.9B active parameters
-    # https://mistral.ai/news/mixtral-of-experts
-    golden_param_size = 12.9e9
+    # qwen3-30b-a3b has ~3.05B active parameters
+    golden_param_size = 3.05e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
-  def test_deepseek2_16b_flops(self):
-    """Test DeepSeek2-16b FLops calculation"""
+  def test_deepseek3_test_flops(self):
+    """Test DeepSeek3-test FLops calculation"""
     cfg = self._initialize_model_config(
-        "deepseek2-16b",
+        "deepseek3-test",
         max_target_length=8192,
         per_device_batch_size=4,
     )
@@ -380,9 +375,8 @@ class FlopCalculation(parameterized.TestCase):
     B = cfg.per_device_batch_size
     S = cfg.max_target_length
     attention_flops = self.compute_deepseek_attention_flops_per_device(kwargs)
-    # deepseek2-16b has ~2.4B active parameters
-    # https://arxiv.org/pdf/2405.04434
-    golden_param_size = 2.4e9
+    # deepseek3-test has ~4.47B active parameters
+    golden_param_size = 4.47e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
@@ -540,7 +534,7 @@ class FlopCalculation(parameterized.TestCase):
   def test_custom_engram_flops(self):
     """Test model with Engram Flops calculation"""
     cfg = self._initialize_model_config(
-        "deepseek2-16b",
+        "deepseek3-test",
         max_target_length=8192,
         per_device_batch_size=4,
     )
@@ -556,9 +550,8 @@ class FlopCalculation(parameterized.TestCase):
     N = cfg.engram_max_ngram_size
 
     attention_flops = self.compute_deepseek_attention_flops_per_device(kwargs)
-    # deepseek2-16b has ~2.4B active parameters
-    # https://arxiv.org/pdf/2405.04434
-    golden_param_size = 2.4e9
+    # deepseek3-test has ~4.47B active parameters
+    golden_param_size = 4.47e9
 
     # calculate Engram active params
     engram_dim = H * H_D * (N - 1)
@@ -1000,10 +993,10 @@ class FlopCalculation(parameterized.TestCase):
     self.assertAlmostEqual(ffn_tflops, expected_total, places=5)
 
   def test_mtp_dense_flops(self):
-    """Test model with MTP modules on a Dense architecture (Llama3)."""
+    """Test model with MTP modules on a Dense architecture (Llama3.1)."""
     # Inject MTP modules during initialization
     cfg = self._initialize_model_config(
-        "llama3-8b",
+        "llama3.1-8b",
         max_target_length=2048,
         per_device_batch_size=4,
         mtp_num_layers=2,
@@ -1013,9 +1006,9 @@ class FlopCalculation(parameterized.TestCase):
     B = cfg.per_device_batch_size
     S = cfg.max_target_length
 
-    # 1. Base Llama3-8b FLOPs
+    # 1. Base Llama3.1-8b FLOPs
     base_attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
-    # LLaMA3-8b has ~7.50B active parameters with tied embeddings
+    # LLaMA3.1-8b has ~7.50B active parameters with tied embeddings
     golden_base_param_size = 7.50e9
     golden_base_tflops = 6 * B * S * golden_base_param_size / 1e12 + base_attention_flops
 
@@ -1053,7 +1046,7 @@ class FlopCalculation(parameterized.TestCase):
     """Test model with MTP modules on an MoE architecture (DeepSeek)."""
     # Inject MTP modules during initialization
     cfg = self._initialize_model_config(
-        "deepseek2-16b",
+        "deepseek3-test",
         max_target_length=8192,
         per_device_batch_size=4,
         mtp_num_layers=2,
@@ -1065,8 +1058,8 @@ class FlopCalculation(parameterized.TestCase):
 
     # 1. Base DeepSeek FLOPs
     base_attention_flops = self.compute_deepseek_attention_flops_per_device(kwargs)
-    # deepseek2-16b has ~2.4B active parameters
-    golden_base_param_size = 2.4e9
+    # deepseek3-test has ~4.47B active parameters
+    golden_base_param_size = 4.47e9
     golden_base_tflops = 6 * B * S * golden_base_param_size / 1e12 + base_attention_flops
 
     # 2. MTP Module Active Params for MoE (DeepSeek style)
@@ -1292,8 +1285,8 @@ class FlopCalculation(parameterized.TestCase):
     self._verify_flops(model_name, max_target_length=8192)
 
   @parameterized.parameters(
-      ("llama3-8b",),
-      ("llama4-17b-16e",),
+      ("llama3.1-8b",),
+      ("llama3.3-70b",),
       ("gemma3-4b",),
       ("gemma3-12b",),
       ("gemma3-27b",),
@@ -1313,8 +1306,8 @@ class FlopCalculation(parameterized.TestCase):
     self._verify_short_sequence_flops(model_name)
 
   @parameterized.parameters(
-      ("llama3-8b",),
-      ("llama4-17b-16e",),
+      ("llama3.1-8b",),
+      ("llama3.3-70b",),
       ("gemma3-4b",),
       ("gemma3-12b",),
       ("gemma3-27b",),

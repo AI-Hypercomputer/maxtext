@@ -38,39 +38,39 @@ Transformer = models.Transformer
 
 TEST_CASES = [
     # (model_name, topology, num_slice, custom_mesh_and_rule, sharding_strategy_overrides)
-    ("deepseek2-16b", "tpu7x-16", 1, "", ()),
-    ("deepseek2-16b", "tpu7x-16", 1, "pure-fsdp", ()),
-    ("deepseek2-16b", "v6e-16", 1, "", ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=4")),
+    ("deepseek3-test", "tpu7x-16", 1, "", ()),
+    ("deepseek3-test", "tpu7x-16", 1, "pure-fsdp", ()),
+    ("deepseek3-test", "v6e-16", 1, "", ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=4")),
     (
-        "deepseek2-16b",
+        "deepseek3-test",
         "v6e-16",
         1,
         "pipeline-large-moe",
         ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=4", "use_ring_of_experts=true"),
     ),
     (
-        "deepseek2-16b",
+        "deepseek3-test",
         "tpu7x-8",
         1,
         "ep-as-cp",
         ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2"),
     ),
     (
-        "deepseek2-16b",
+        "deepseek3-test",
         "tpu7x-8",
         1,
         "cp-as-ep",
         ("ici_fsdp_parallelism=-1", "ici_context_parallelism=2", "ici_expert_parallelism=2"),
     ),
     (
-        "deepseek2-16b",
+        "deepseek3-test",
         "tpu7x-16",
         1,
         "ep-as-dp",
         ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2", "use_ring_of_experts=true"),
     ),
     (
-        "deepseek2-16b",
+        "deepseek3-test",
         "tpu7x-8",
         1,
         "shard-exp-on-fsdp",
