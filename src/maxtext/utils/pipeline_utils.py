@@ -118,7 +118,12 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
         else:
           new_spec.append(None)  # None signifies replication across the removed mesh axis
       elif isinstance(axis, (list, tuple)):
-        new_axis = [a for a in axis if a not in axes_to_remove]
+        # cp-as-ep: when 'context' is co-sharded with 'expert' on a routed-MoE dim (e.g. exp -> ['context', 'expert']),
+        # it is part of expert parallelism, not a gathered axis. Stripping it would all-gather the expert weights over
+        # context (2x BSW bytes) and force a collective-permute back to the ('context', 'expert') layout the MoE
+        # shard_map expects.
+        keep_context = is_moe_block_0 and "expert" in axis
+        new_axis = [a for a in axis if a not in axes_to_remove or (keep_context and a == "context")]
         new_spec.append(tuple(new_axis))
       else:
         raise ValueError(f"Unsupported_axis_type: {type(axis)}")
