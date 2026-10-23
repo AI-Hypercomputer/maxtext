@@ -1529,6 +1529,28 @@ class NNXCircularPipeline(PipelineBase):
     # ---- BSW mutable ref (closure, NOT carry -- carry would OOM) ----
     bsw_ref = [None]
 
+    # The carried w_curr is stop_gradient(w_next) of the previous repeat. Binding it back to the params applies the
+    # VJP of its weight_prefetching where it is consumed (in place, as a reduce-scatter into d_params) instead of
+    # propagating d_w_curr through the repeat-scan carry. Also used for the drain, which reads the final carry.
+    @jax.custom_vjp
+    def _bind_carried_w_curr(w_c, p, curr_iter_arg):
+      del p, curr_iter_arg
+      return w_c
+
+    def _bind_carried_w_curr_fwd(w_c, p, curr_iter_arg):
+      return w_c, (p, curr_iter_arg)
+
+    def _bind_carried_w_curr_bwd(res, g):
+      p, curr_iter_arg = res
+      _, vjp_fn = jax.vjp(
+          lambda p_in: ctx.weight_prefetching(p_in, physical_partition_spec_full, curr_iter_arg),
+          p,
+      )
+      (d_p,) = vjp_fn(g)
+      return None, d_p, None
+
+    _bind_carried_w_curr.defvjp(_bind_carried_w_curr_fwd, _bind_carried_w_curr_bwd)
+
     def _stage_fn_for_scope(scope, carry):
       """One repeat: prefetch w_next, run microbatch scan, return updated carry.
 
@@ -1769,25 +1791,6 @@ class NNXCircularPipeline(PipelineBase):
         # vjp over the FULL stage: weight_prefetching + microbatch scan.
         # Auto-diff handles weight_prefetching backward (reduce-scatter)
         # correctly — jax.linear_transpose is NOT needed.
-        @jax.custom_vjp
-        def _bind_carried_w_curr(w_c, p, curr_iter_arg):
-          del p, curr_iter_arg
-          return w_c
-
-        def _bind_carried_w_curr_fwd(w_c, p, curr_iter_arg):
-          return w_c, (p, curr_iter_arg)
-
-        def _bind_carried_w_curr_bwd(res, g):
-          p, curr_iter_arg = res
-          _, vjp_fn = jax.vjp(
-              lambda p_in: ctx.weight_prefetching(p_in, physical_partition_spec_full, curr_iter_arg),
-              p,
-          )
-          (d_p,) = vjp_fn(g)
-          return None, d_p, None
-
-        _bind_carried_w_curr.defvjp(_bind_carried_w_curr_fwd, _bind_carried_w_curr_bwd)
-
         def _full_stage(loop_state, w_curr, params):
           iteration = loop_state["loop_iteration"]
           if use_shifted_bsw:
@@ -1874,9 +1877,12 @@ class NNXCircularPipeline(PipelineBase):
 
     # ---- Build lift.scan(lift.checkpoint(stage_fn)) over REPEATS ----
     if self.config.set_remat_policy_on_pipeline_iterations:
+      # Matches the w_next tagged "__ residual" in _full_stage. The public policy, since jax.ad_checkpoint does not
+      # export name_p.
+      _save_w_next = jax.checkpoint_policies.save_only_these_names("__ residual")
 
       def _stage_remat_policy(prim, *args, **params):
-        if prim is jax.ad_checkpoint.name_p and params.get("name") == "__ residual":
+        if _save_w_next(prim, *args, **params):
           return True
         if remat_policy is not None:
           return remat_policy(prim, *args, **params)
@@ -2069,11 +2075,17 @@ class NNXCircularPipeline(PipelineBase):
           repeat_metrics_arrays,
       )
     elif bubble_iterations > 0:
+      last_repeat_iteration = (num_repeats - 1) * num_microbatches
       if bsw_no_carry:
         final_w_curr = self.weight_prefetching(
             layers_params,
             physical_partition_spec_full,
-            (num_repeats - 1) * num_microbatches,
+            last_repeat_iteration,
+        )
+      else:
+        # The final carry is stop_gradient'ed: bind it so the drain's weight gradient reaches the params.
+        final_w_curr = _bind_carried_w_curr(
+            final_w_curr, layers_params, jnp.asarray(last_repeat_iteration, dtype=jnp.int32)
         )
       (loop_state, final_layer_mutables), bubble_metrics_raw = _run_bubble_phase(
           loop_state, final_layer_mutables, final_w_curr, bubble_iterations
