@@ -983,6 +983,9 @@ class Qwen3VLModel(nnx.Module):
       rngs: nnx.Rngs,
       **kwargs,
   ):
+    # DeepStack injects visual features between individual decoder layers.
+    if config.scan_layers:
+      raise ValueError("m3 Qwen3-VL does not support layer scanning. Set scan_layers=false.")
     self.config = config
 
     # 1. Vision Tower matching checkpoint parameter hierarchy

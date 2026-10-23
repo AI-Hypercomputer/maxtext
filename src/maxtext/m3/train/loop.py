@@ -160,6 +160,7 @@ def train_loop(config) -> float:
     prof = profiler.Profiler(config, offset_step=0)
     data_key = jax.random.key(config.init_weights_seed)
     loss = float("nan")
+    step_fn = nnx.cached_partial(train_step, model, optimizer)
     # Steps are logged one iteration late. Reading a loss blocks until its step
     # finishes, so doing it right after dispatch would leave the device idle
     # while the host prepares the next step. Reading step N-1's loss after
@@ -169,13 +170,13 @@ def train_loop(config) -> float:
     last_done = time.perf_counter()
     for step in range(config.steps):
       batch = make_synthetic_batch(config, mesh, jax.random.fold_in(data_key, step))
-      prof.maybe_activate_profiler(step, nnx.state(model))
+      prof.maybe_activate_profiler(step, pending)
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        step_loss = train_step(model, optimizer, batch)
+        step_loss = step_fn(batch)
       if pending is not None:
         loss, last_done = _log_step(*pending, last_done, tokens_per_step)
       pending = (step, step_loss)
-      prof.maybe_deactivate_profiler(step, nnx.state(model))
+      prof.maybe_deactivate_profiler(step, pending)
     if pending is not None:
       loss, last_done = _log_step(*pending, last_done, tokens_per_step)
 
