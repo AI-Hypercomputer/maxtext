@@ -2902,6 +2902,27 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
   def test_qwen3_5_five_local_layers_per_block(self):
     self._assert_qwen3_5_parity(num_blocks=2, cycle=6)
 
+  def test_qwen3_5_four_local_layers_per_block(self):
+    # Three same-group steps: the scan unrolled by 2 runs one 2-step trip plus a 1-step remainder.
+    self._assert_qwen3_5_parity(num_blocks=2, cycle=5)
+
+  def test_qwen3_5_same_group_scans_unroll_by_two(self):
+    """Same-group scans with >= 2 steps unroll by 2, so gathered weights alternate between two buffers.
+
+    In each unrolled body AG(j+2) can then reuse W(j)'s loop-carry buffer, instead of XLA copying a
+    freshly gathered weight into the carry at the end of every step. Single-step loops do not unroll.
+    """
+    # pylint: disable=protected-access
+    with mock.patch.object(
+        fsdp_prefetch_inhomogeneous, "_sublayer_scan", wraps=fsdp_prefetch_inhomogeneous._sublayer_scan
+    ) as scan:
+      self._assert_qwen3_5_parity(num_blocks=2, cycle=4)
+    # Per pass: one same-group scan of the 3 Gated DeltaNet sub-layers (2 steps) and two single-step loops.
+    unrolls = sorted(
+        (jax.tree_util.tree_leaves(c.args[2])[0].shape[0], c.kwargs.get("unroll", 1)) for c in scan.call_args_list
+    )
+    self.assertEqual(unrolls, [(1, 1)] * 4 + [(2, 2)] * 2)
+
   def test_qwen3_5_forward_only(self):
     # Without differentiation, jax.custom_vjp runs the pipeline's primal function instead of its fwd rule.
     config = {**_QWEN3_5_TINY, "inhomogeneous_layer_cycle_interval": 4}
