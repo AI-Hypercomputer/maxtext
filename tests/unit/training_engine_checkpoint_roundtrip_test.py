@@ -268,6 +268,17 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
         ):
           checkpointing._maybe_register_pathways_persistence("colocated_python", d2h_concurrent_gb=16)
 
+  def test_local_checkpoint_dir_requires_colocated_python_under_pathways_persistence(self):
+    os.environ["ENABLE_PATHWAYS_PERSISTENCE"] = "1"
+    with self.assertRaisesRegex(ValueError, "checkpoint_dir must be a gs:// URI"):
+      checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    config = _config()
+    config.pathways_checkpointing_impl = "colocated_python"
+    with mock.patch.object(checkpointing, "_maybe_register_pathways_persistence") as mock_register:
+      manager = checkpointing.CheckpointManager(self.ckpt_dir, config)
+      manager.close()
+    mock_register.assert_called_once_with("colocated_python", d2h_concurrent_gb=None)
+
   def test_maybe_register_colocated_python_passes_deprioritized_callback(self):
     self.addCleanup(os.environ.pop, "ENABLE_PATHWAYS_PERSISTENCE", None)
     os.environ["ENABLE_PATHWAYS_PERSISTENCE"] = "1"

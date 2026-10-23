@@ -418,12 +418,18 @@ class CheckpointManager:
     # Orbax; the one failure a wait with no save in flight may drop again (see `_drain_in_flight_save`).
     self._abandoned_failure: BaseException | None = None
     if checkpoint_dir:
-      if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") == "1" and not str(checkpoint_dir).startswith("gs://"):
+      impl = getattr(config, "pathways_checkpointing_impl", _PERSISTENCE)
+      # The colocated-python sidecars write through Orbax/TensorStore, so a local path works there
+      # as long as it is the same shared mount (e.g. GCSFuse) on the controller and every sidecar.
+      if (
+          os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") == "1"
+          and impl != _COLOCATED_PYTHON
+          and not str(checkpoint_dir).startswith("gs://")
+      ):
         raise ValueError(
             "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
             f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
         )
-      impl = getattr(config, "pathways_checkpointing_impl", _PERSISTENCE)
       if impl == _COLOCATED_PYTHON:
         _maybe_register_pathways_persistence(
             impl, d2h_concurrent_gb=getattr(config, "checkpoint_storage_device_host_concurrent_gb", None)
