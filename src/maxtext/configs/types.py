@@ -1928,7 +1928,10 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["activation_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
     ["activation_length", ["context", "context_usp_ulysses"]],
     ["activation_norm_length", ["tensor_sequence", "context", "context_usp_ulysses"]],
+    # `*_routed` rules lay out the routed MoE's shard_map inputs/output and mirror the rule above them.
+    ["activation_norm_length_routed", ["tensor_sequence", "context", "context_usp_ulysses"]],
     ["activation_embed", ["tensor"]],
+    ["activation_embed_routed", ["tensor"]],
     ["activation_stage", "stage"],
     # General Weights
     ["mlp", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
@@ -4770,6 +4773,26 @@ class MaxTextConfig(
       cp_axes = infer_cp_axes(self.logical_axis_rules)
       if cp_axes:
         self.context_sharding = cp_axes[0]
+
+    if self.custom_mesh_and_rule is CustomRule.TP_AS_EP:
+      # tp-as-ep only rewires the sparse routed-MoE path; reject paths that ignore or override its shardings.
+      if not self.sparse_matmul:
+        raise ValueError("custom_mesh_and_rule=tp-as-ep requires sparse_matmul=True.")
+      if self.attention in ("vllm_rpa", "vllm_batched_rpa"):
+        raise ValueError("custom_mesh_and_rule=tp-as-ep is not supported with vLLM attention.")
+      for flag_name in ("shard_exp_on_fsdp", "use_2d_fsdp_sharding", "use_batch_split_schedule", "mlp_bias"):
+        if getattr(self, flag_name):
+          raise ValueError(f"custom_mesh_and_rule=tp-as-ep is not compatible with {flag_name}=True.")
+      tp_size = self.ici_tensor_parallelism * self.dcn_tensor_parallelism
+      if tp_size == 1:
+        raise ValueError("custom_mesh_and_rule=tp-as-ep requires tensor parallelism > 1.")
+      ep_size = self.ici_expert_parallelism * self.dcn_expert_parallelism
+      # Routed experts are sharded over expert x tensor. Sizes of -1 are resolved at mesh creation, so skip them here.
+      if ep_size > 0 and tp_size > 0 and self.num_experts % (ep_size * tp_size) != 0:
+        raise ValueError(
+            f"custom_mesh_and_rule=tp-as-ep needs num_experts ({self.num_experts}) divisible by "
+            f"expert*tensor parallelism ({ep_size * tp_size})."
+        )
 
     # Skip EP check if logical rule is overridden by user. Otherwise, ensure that EP rank is 1 when EP is disabled.
     if not self.override_logical_axis_rules:
