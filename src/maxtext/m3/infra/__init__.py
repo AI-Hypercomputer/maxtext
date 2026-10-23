@@ -23,6 +23,9 @@ Planned modules:
 Composition order is fixed:
 `construct -> remat -> scan -> quantize -> optimizer -> host offload`.
 
+Execution helpers:
+  * `aot_cache.py` — per-shape AOT compiled-executable cache (`cached_jit`), used by the inference pipelines.
+
 Model files contain only zero-cost annotations (`checkpoint_name` tags and
 sharding specs); they must never import from this package.
 """
