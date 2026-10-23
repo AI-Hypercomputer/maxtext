@@ -1,0 +1,209 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 490" width="100%" height="100%" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="red-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0.5 1.5 L 9 5 L 0.5 8.5 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1520" height="490" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="10" y="16" width="1500" height="44" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="20" y="43" font-size="12.5" font-weight="700" fill="#334155">TPU Timeline (No Prefetch)</text>
+  <rect x="10" y="68" width="1500" height="120" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="68" width="200" height="120" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="68" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="90" font-size="13.5" font-weight="700" fill="#0f172a">▾ TensorCore</text>
+  <text x="34" y="108" font-size="11" font-weight="500" fill="#475569">/device:TPU:0</text>
+  <text x="34" y="144" font-size="11.5" font-weight="600" fill="#334155">▸ XLA Ops</text>
+  <rect x="10" y="216" width="1500" height="128" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="216" width="200" height="128" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="216" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="238" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 0</text>
+  <text x="34" y="256" font-size="11" font-weight="500" fill="#475569">/device:TPU:0 SparseCore 0</text>
+  <text x="34" y="292" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <rect x="10" y="358" width="1500" height="114" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="358" width="200" height="114" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="358" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="380" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 1</text>
+  <text x="34" y="398" font-size="11" font-weight="500" fill="#475569">/device:TPU:0 SparseCore 1</text>
+  <text x="34" y="434" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <text x="34" y="328" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="34" y="457" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="420.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i</text>
+  <rect x="216" y="93" width="408" height="15" rx="2" fill="#fed7aa" opacity="0.9"/>
+  <text x="420.0" y="104" font-size="9.5" font-weight="600" fill="#7c2d12" text-anchor="middle">while.body (layer i: gather W_i then compute)</text>
+  <rect x="216" y="132" width="8" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="228.0" y="132" width="50.7" height="34" rx="2" fill="#fbcfe8" stroke="#f472b6" stroke-width="1"/>
+  <text x="253.3" y="153" font-size="7.2" font-weight="700" fill="#831843" text-anchor="middle">all-gather-done</text>
+  <rect x="280.7" y="132" width="50.7" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="306.0" y="153" font-size="7.2" font-weight="700" fill="#14532d" text-anchor="middle">all-gather-done</text>
+  <rect x="333.3" y="132" width="50.7" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="358.7" y="153" font-size="7.2" font-weight="700" fill="#713f12" text-anchor="middle">all-gather-done</text>
+  <rect x="225" y="129" width="162" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="306.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="390" y="132" width="10" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="403" y="132" width="66" height="34" rx="3" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="436.0" y="153" font-size="9.5" font-weight="600" fill="#881337" text-anchor="middle">splash_mha</text>
+  <rect x="472" y="132" width="24" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="484.0" y="153" font-size="8.5" font-weight="600" fill="#14532d" text-anchor="middle">rt</text>
+  <rect x="500.0" y="132" width="38.7" height="34" rx="2" fill="#fed7aa" stroke="#f97316" stroke-width="1"/>
+  <text x="519.3" y="153" font-size="8.5" font-weight="700" fill="#7c2d12" text-anchor="middle">gmm_wi0</text>
+  <rect x="540.7" y="132" width="38.7" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="1"/>
+  <text x="560.0" y="153" font-size="8.5" font-weight="700" fill="#134e4a" text-anchor="middle">gmm_wi1</text>
+  <rect x="581.3" y="132" width="38.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="600.7" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wo</text>
+  <rect x="497" y="129" width="126" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="560.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i</text>
+  <rect x="218" y="240" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="515" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (same-layer AG + offload)</text>
+  <rect x="222.0" y="274" width="54.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="249.3" y="295" font-size="8.2" font-weight="700" fill="#831843" text-anchor="middle">all-gather wi0</text>
+  <rect x="278.7" y="274" width="54.7" height="34" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="1"/>
+  <text x="306.0" y="295" font-size="8.2" font-weight="700" fill="#581c87" text-anchor="middle">all-gather wi1</text>
+  <rect x="335.3" y="274" width="54.7" height="34" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="1"/>
+  <text x="362.7" y="295" font-size="8.2" font-weight="700" fill="#365314" text-anchor="middle">all-gather wo</text>
+  <rect x="219" y="271" width="174" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="306.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i</text>
+  <rect x="400" y="274" width="34" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="417" y="295" font-size="8" font-weight="600" fill="#1e3a8a" text-anchor="middle">copy</text>
+  <rect x="506" y="274" width="14" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="602" y="274" width="14" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="222" y="316" width="168" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="306.0" y="329" font-size="9.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="396" y="316" width="108" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="450.0" y="329" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="508" y="316" width="112" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="564.0" y="329" font-size="8.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="218" y="384" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="420.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i offload)</text>
+  <rect x="400" y="406" width="34" height="26" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="417" y="423" font-size="8" font-weight="600" fill="#1e3a8a" text-anchor="middle">copy</text>
+  <rect x="506" y="406" width="14" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="602" y="406" width="14" height="26" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="222" y="444" width="280" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="362.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="506" y="444" width="112" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="562.0" y="457" font-size="8.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <text x="840.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i+1</text>
+  <rect x="636" y="93" width="408" height="15" rx="2" fill="#fed7aa" opacity="0.9"/>
+  <text x="840.0" y="104" font-size="9.5" font-weight="600" fill="#7c2d12" text-anchor="middle">while.body (layer i+1: gather W_i+1 then compute)</text>
+  <rect x="636" y="132" width="8" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="648.0" y="132" width="50.7" height="34" rx="2" fill="#fbcfe8" stroke="#f472b6" stroke-width="1"/>
+  <text x="673.3" y="153" font-size="7.2" font-weight="700" fill="#831843" text-anchor="middle">all-gather-done</text>
+  <rect x="700.7" y="132" width="50.7" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="726.0" y="153" font-size="7.2" font-weight="700" fill="#14532d" text-anchor="middle">all-gather-done</text>
+  <rect x="753.3" y="132" width="50.7" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="778.7" y="153" font-size="7.2" font-weight="700" fill="#713f12" text-anchor="middle">all-gather-done</text>
+  <rect x="645" y="129" width="162" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="726.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="810" y="132" width="10" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="823" y="132" width="66" height="34" rx="3" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="856.0" y="153" font-size="9.5" font-weight="600" fill="#881337" text-anchor="middle">splash_mha</text>
+  <rect x="892" y="132" width="24" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="904.0" y="153" font-size="8.5" font-weight="600" fill="#14532d" text-anchor="middle">rt</text>
+  <rect x="920.0" y="132" width="38.7" height="34" rx="2" fill="#fed7aa" stroke="#f97316" stroke-width="1"/>
+  <text x="939.3" y="153" font-size="8.5" font-weight="700" fill="#7c2d12" text-anchor="middle">gmm_wi0</text>
+  <rect x="960.7" y="132" width="38.7" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="1"/>
+  <text x="980.0" y="153" font-size="8.5" font-weight="700" fill="#134e4a" text-anchor="middle">gmm_wi1</text>
+  <rect x="1001.3" y="132" width="38.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1020.7" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wo</text>
+  <rect x="917" y="129" width="126" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="980.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i+1</text>
+  <rect x="638" y="240" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="935" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (same-layer AG + offload)</text>
+  <rect x="642.0" y="274" width="54.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="669.3" y="295" font-size="8.2" font-weight="700" fill="#831843" text-anchor="middle">all-gather wi0</text>
+  <rect x="698.7" y="274" width="54.7" height="34" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="1"/>
+  <text x="726.0" y="295" font-size="8.2" font-weight="700" fill="#581c87" text-anchor="middle">all-gather wi1</text>
+  <rect x="755.3" y="274" width="54.7" height="34" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="1"/>
+  <text x="782.7" y="295" font-size="8.2" font-weight="700" fill="#365314" text-anchor="middle">all-gather wo</text>
+  <rect x="639" y="271" width="174" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="726.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i+1</text>
+  <rect x="820" y="274" width="34" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="837" y="295" font-size="8" font-weight="600" fill="#1e3a8a" text-anchor="middle">copy</text>
+  <rect x="926" y="274" width="14" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1022" y="274" width="14" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="642" y="316" width="168" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="726.0" y="329" font-size="9.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="816" y="316" width="108" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="870.0" y="329" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="928" y="316" width="112" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="984.0" y="329" font-size="8.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="638" y="384" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="840.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i+1 offload)</text>
+  <rect x="820" y="406" width="34" height="26" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="837" y="423" font-size="8" font-weight="600" fill="#1e3a8a" text-anchor="middle">copy</text>
+  <rect x="926" y="406" width="14" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1022" y="406" width="14" height="26" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="642" y="444" width="280" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="782.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="926" y="444" width="112" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="982.0" y="457" font-size="8.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <text x="1260.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i+2</text>
+  <rect x="1056" y="93" width="408" height="15" rx="2" fill="#fed7aa" opacity="0.9"/>
+  <text x="1260.0" y="104" font-size="9.5" font-weight="600" fill="#7c2d12" text-anchor="middle">while.body (layer i+2: gather W_i+2 then compute)</text>
+  <rect x="1056" y="132" width="8" height="34" rx="2" fill="#86efac" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="1068.0" y="132" width="50.7" height="34" rx="2" fill="#fbcfe8" stroke="#f472b6" stroke-width="1"/>
+  <text x="1093.3" y="153" font-size="7.2" font-weight="700" fill="#831843" text-anchor="middle">all-gather-done</text>
+  <rect x="1120.7" y="132" width="50.7" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="1146.0" y="153" font-size="7.2" font-weight="700" fill="#14532d" text-anchor="middle">all-gather-done</text>
+  <rect x="1173.3" y="132" width="50.7" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="1198.7" y="153" font-size="7.2" font-weight="700" fill="#713f12" text-anchor="middle">all-gather-done</text>
+  <rect x="1065" y="129" width="162" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1146.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="1230" y="132" width="10" height="34" rx="2" fill="#f9a8d4" stroke="#f472b6" stroke-width="0.8"/>
+  <rect x="1243" y="132" width="66" height="34" rx="3" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="1276.0" y="153" font-size="9.5" font-weight="600" fill="#881337" text-anchor="middle">splash_mha</text>
+  <rect x="1312" y="132" width="24" height="34" rx="3" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="1324.0" y="153" font-size="8.5" font-weight="600" fill="#14532d" text-anchor="middle">rt</text>
+  <rect x="1340.0" y="132" width="38.7" height="34" rx="2" fill="#fed7aa" stroke="#f97316" stroke-width="1"/>
+  <text x="1359.3" y="153" font-size="8.5" font-weight="700" fill="#7c2d12" text-anchor="middle">gmm_wi0</text>
+  <rect x="1380.7" y="132" width="38.7" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="1"/>
+  <text x="1400.0" y="153" font-size="8.5" font-weight="700" fill="#134e4a" text-anchor="middle">gmm_wi1</text>
+  <rect x="1421.3" y="132" width="38.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1440.7" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">gmm_wo</text>
+  <rect x="1337" y="129" width="126" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1400.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">gmm_i+2</text>
+  <rect x="1058" y="240" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1355" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (same-layer AG + offload)</text>
+  <rect x="1062.0" y="274" width="54.7" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1089.3" y="295" font-size="8.2" font-weight="700" fill="#831843" text-anchor="middle">all-gather wi0</text>
+  <rect x="1118.7" y="274" width="54.7" height="34" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="1"/>
+  <text x="1146.0" y="295" font-size="8.2" font-weight="700" fill="#581c87" text-anchor="middle">all-gather wi1</text>
+  <rect x="1175.3" y="274" width="54.7" height="34" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="1"/>
+  <text x="1202.7" y="295" font-size="8.2" font-weight="700" fill="#365314" text-anchor="middle">all-gather wo</text>
+  <rect x="1059" y="271" width="174" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1146.0" y="266" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i+2</text>
+  <rect x="1240" y="274" width="34" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="1257" y="295" font-size="8" font-weight="600" fill="#1e3a8a" text-anchor="middle">copy</text>
+  <rect x="1346" y="274" width="14" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1442" y="274" width="14" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="1062" y="316" width="168" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="1146.0" y="329" font-size="9.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="1236" y="316" width="108" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1290.0" y="329" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="1348" y="316" width="112" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="1404.0" y="329" font-size="8.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="1058" y="384" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1260.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i+2 offload)</text>
+  <rect x="1240" y="406" width="34" height="26" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <text x="1257" y="423" font-size="8" font-weight="600" fill="#1e3a8a" text-anchor="middle">copy</text>
+  <rect x="1346" y="406" width="14" height="26" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1442" y="406" width="14" height="26" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="1062" y="444" width="280" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1202.0" y="457" font-size="9.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <rect x="1346" y="444" width="112" height="18" rx="2" fill="#e9d5ff" stroke="#a855f7" stroke-width="0.8"/>
+  <text x="1402.0" y="457" font-size="8.5" font-weight="700" fill="#581c87" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="1476" y="271" width="40" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.2"/>
+  <rect x="1478" y="274" width="36" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <line x1="210" y1="16" x2="210" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="630" y1="16" x2="630" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1050" y1="16" x2="1050" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1470" y1="16" x2="1470" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="306.0" y1="251.0" x2="306.0" y2="174.0" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="391.0" y1="267.0" x2="550.0" y2="174.0" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="726.0" y1="251.0" x2="726.0" y2="174.0" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="811.0" y1="267.0" x2="970.0" y2="174.0" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="1146.0" y1="251.0" x2="1146.0" y2="174.0" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="1231.0" y1="267.0" x2="1390.0" y2="174.0" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+</svg>
