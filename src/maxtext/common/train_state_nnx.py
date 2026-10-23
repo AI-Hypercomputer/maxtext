@@ -20,6 +20,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 
+from maxtext.m3.core.checkpoint import to_legacy_layer_names
 from maxtext.utils import max_logging
 
 
@@ -153,7 +154,7 @@ def to_linen_checkpoint_dict(nnx_pure_dict):
       result["step"] = _cast_step(optimizer["step"], jnp.int32)
     if "opt_state" in optimizer:
       result["opt_state"] = _opt_state_to_linen(optimizer["opt_state"])
-  return result
+  return to_legacy_layer_names(result)
 
 
 def _strip_mu_nu_params(state):
@@ -180,8 +181,9 @@ def _opt_state_from_linen(opt_state):
 
 
 def from_linen_checkpoint_dict(linen_pure_dict):
-  """Inverse of `to_linen_checkpoint_dict`: Linen on-disk layout -> NNX layout.
+  """Reshapes Linen on-disk collections into the NNX state layout.
 
+  Restore boundaries translate container layer names before calling this helper.
   Doesn't restore NNX-only rngs/dropout (absent from Linen); callers fill those.
   """
   if not isinstance(linen_pure_dict, dict):
@@ -245,7 +247,7 @@ def to_checkpoint_dict(state: nnx.State | nnx.Module):
   linen_dict = to_linen_checkpoint_dict({"model": pure.get("model", {}), "optimizer": pure.get("optimizer", {})})
   aux = aux_state.to_pure_dict()
   if aux:
-    linen_dict["nnx_aux"] = aux
+    linen_dict["nnx_aux"] = to_legacy_layer_names(aux)
   return linen_dict
 
 

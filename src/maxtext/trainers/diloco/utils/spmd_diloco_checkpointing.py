@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.common import checkpoint_context
 from maxtext.common import train_state_nnx
+from maxtext.m3.core.checkpoint import from_legacy_layer_names, to_legacy_layer_names
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco.utils.nnx_state_utils import replace_nnx_model_params
 import optax
@@ -164,12 +165,14 @@ def to_diloco_checkpoint_dict(state: Any, config: Any = None) -> dict[str, Any]:
   else:
     outer_params_dict = params_dict
 
-  return {
-      "inner_state": inner_state_dict,
-      "params": outer_params_dict,
-      "outer_opt_state": outer_opt_state,
-      "step": step_val,
-  }
+  return to_legacy_layer_names(
+      {
+          "inner_state": inner_state_dict,
+          "params": outer_params_dict,
+          "outer_opt_state": outer_opt_state,
+          "step": step_val,
+      }
+  )
 
 
 def from_diloco_checkpoint_dict(
@@ -213,17 +216,18 @@ def from_diloco_checkpoint_dict(
       return jnp.broadcast_to(leaf, new_shape)
     return leaf
 
+  if isinstance(abstract_diloco_state, diloco.DiLoCoTrainState):
+    abstract_inner = abstract_diloco_state.inner_state
+  else:
+    abstract_inner = jax.tree_util.tree_map(_add_diloco_dim, abstract_diloco_state)
+  if isinstance(abstract_inner, nnx.Module):
+    abstract_inner = nnx.state(abstract_inner)
+  if isinstance(abstract_inner, nnx.State):
+    restored_dict = from_legacy_layer_names(restored_dict, model_state=abstract_inner)
+
   if is_diloco_checkpoint(restored_dict):
     # Full multi-replica DiLoCo checkpoint restoration
     inner_dict = restored_dict["inner_state"]
-    if isinstance(abstract_diloco_state, diloco.DiLoCoTrainState):
-      abstract_inner = abstract_diloco_state.inner_state
-    else:
-      abstract_inner = jax.tree_util.tree_map(_add_diloco_dim, abstract_diloco_state)
-
-    if isinstance(abstract_inner, nnx.Module):
-      abstract_inner = nnx.state(abstract_inner)
-
     if isinstance(abstract_inner, (nnx.State, train_state_nnx.TrainStateNNX)):
       linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(abstract_inner)
       weights = train_state_nnx.from_linen_checkpoint_dict(inner_dict)
@@ -265,11 +269,6 @@ def from_diloco_checkpoint_dict(
   step = restored_dict.get("step", jnp.array(0, dtype=jnp.int32))
 
   broadcasted_model_params = jax.tree_util.tree_map(_add_diloco_dim, raw_params)
-
-  if isinstance(abstract_diloco_state, diloco.DiLoCoTrainState):
-    abstract_inner = abstract_diloco_state.inner_state
-  else:
-    abstract_inner = jax.tree_util.tree_map(_add_diloco_dim, abstract_diloco_state)
 
   inner_state = replace_nnx_model_params(abstract_inner, broadcasted_model_params)
 

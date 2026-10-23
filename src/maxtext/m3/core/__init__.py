@@ -16,11 +16,12 @@
 
 Modules:
   * `rope.py` — rotary positional embedding (base implementation).
+  * `layers.py` — callable container for repeated model blocks.
+  * `checkpoint.py` — legacy decoder layer-name translation.
   * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
 
 Planned modules:
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.
-  * `checkpoint.py` — Orbax wrapper.
   * `data.py` — data loading helpers on top of the MaxText input pipeline.
 
 Leaf layers (`nnx.Linear`, `nnx.Einsum`, `nnx.Embed`, `nnx.RMSNorm`, ...) are

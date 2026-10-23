@@ -36,7 +36,6 @@ from maxtext.m3.models.qwen3.modeling_qwen3 import (
     Qwen3Decoder,
 )
 
-
 # ---------------------------------------------------------------------------
 # Core Pure Linear Layer
 # ---------------------------------------------------------------------------
@@ -923,8 +922,7 @@ class Qwen3VLDecoder(Qwen3Decoder):
           feature_mask=multimodal_input.image_masks,
       )
 
-    for lyr in range(self.num_layers):
-      layer = getattr(self, f"layers_{lyr}")
+    for lyr, layer in enumerate(self.layers):
       y = layer(
           y,
           decoder_segment_ids=decoder_segment_ids,
@@ -983,6 +981,9 @@ class Qwen3VLModel(nnx.Module):
       rngs: nnx.Rngs,
       **kwargs,
   ):
+    # DeepStack injects visual features between individual decoder layers.
+    if config.scan_layers:
+      raise ValueError("m3 Qwen3-VL does not support layer scanning. Set scan_layers=false.")
     self.config = config
 
     # 1. Vision Tower matching checkpoint parameter hierarchy
