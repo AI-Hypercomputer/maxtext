@@ -386,7 +386,8 @@ def main(config, test_args):  # pylint: disable=W0621
   if tokenizer is None:
     raise last_exception
 
-  if config.model_name.startswith(("llama3.1", "mixtral")):
+  # padding=True requires a pad token. No padding is added since prompts are tokenized one at a time.
+  if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
   max_logging.log("Initializing MaxText model")
