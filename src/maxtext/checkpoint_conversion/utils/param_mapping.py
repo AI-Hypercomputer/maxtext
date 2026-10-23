@@ -4552,6 +4552,202 @@ DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
 
+# -----------------------------------------------------------------------------
+# Wan 2.1 (Hugging Face diffusers): HF -> MaxText parameter mapping.
+# -----------------------------------------------------------------------------
+
+
+class WAN2_1_HF_TO_MAXTEXT:
+  """Parameter mapping and hooks for converting Wan 2.1 diffusers checkpoints to MaxText.
+
+  A diffusers checkpoint is split into component sub-folders (`transformer/`, `vae/`, ...). Each component
+  in `COMPONENTS` is converted into its own MaxText (Flax NNX) state. As for the LLM mappings above:
+
+  - `param_mapping(component, hf_config, scan_layers)` returns `{maxtext_key: hf_key}`. For scanned
+    transformer blocks the value is a list of HF keys, one per layer, stacked along axis 0.
+  - `hook_fns(component, hf_config, scan_layers)` returns `{maxtext_key: hook(weight, target_shape)}`;
+    params without a hook are copied as is.
+
+  MaxText keys are NNX param paths joined by "-", e.g. "blocks-0-attn1-query-kernel". The mappings list
+  every optional sub-module (I2V image conditioning, resnet shortcuts, temporal convs); entries absent
+  from the model are dropped by `validate_and_filter_param_map_keys`, and model params that no entry
+  covers raise an error.
+  """
+
+  # diffusers sub-folder -> MaxText model class (imported lazily by the converter).
+  COMPONENTS = {
+      "transformer": "maxtext.m3.models.wan.transformer_wan.WanModel",
+      "vae": "maxtext.m3.models.wan.autoencoder_kl_wan.AutoencoderKLWan",
+      "text_encoder": "maxtext.m3.models.wan.text_encoder_wan.UMT5EncoderModel",
+  }
+  # Transformer params kept in float32 when the rest is cast to `weights_dtype`.
+  FP32_PARAM_KEYWORDS = ("norm", "condition_embedder", "scale_shift_table")
+
+  @staticmethod
+  def param_mapping(component, hf_config, scan_layers=False):
+    """Returns `{maxtext_key: hf_key | [hf_key per layer]}` for one component."""
+    return WAN2_1_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)[0]
+
+  @staticmethod
+  def hook_fns(component, hf_config, scan_layers=False):
+    """Returns `{maxtext_key: hook(weight, target_shape)}` for one component."""
+    return WAN2_1_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)[1]
+
+  @staticmethod
+  def param_dtype(component, maxtext_key, weights_dtype):
+    """Storage dtype of a converted param: transformer -> `weights_dtype` except FP32_PARAM_KEYWORDS.
+
+    The VAE and the text encoder keep their source (safetensors) dtype; the inference pipeline casts them to
+    `vae_weights_dtype` / `text_encoder_dtype` when loading.
+    """
+    if component != "transformer":
+      return None  # Keep the source dtype.
+    keep_fp32 = any(k in maxtext_key.lower() for k in WAN2_1_HF_TO_MAXTEXT.FP32_PARAM_KEYWORDS)
+    return np.dtype(np.float32) if keep_fp32 else np.dtype(weights_dtype)
+
+  @staticmethod
+  def _build(component, hf_config, scan_layers):
+    """Builds (param_mapping, hook_fns) for `component`."""
+    mapping, hooks = {}, {}
+
+    def transpose(x, target_shape):
+      """PyTorch linear weight (out, in) -> Flax kernel (in, out)."""
+      return x.T
+
+    def conv(x, target_shape):
+      """PyTorch conv weight (out, in, *spatial) -> Flax kernel (*spatial, in, out)."""
+      return np.transpose(x, (*range(2, x.ndim), 1, 0))
+
+    def reshape(x, target_shape):
+      """E.g. VAE RMS-norm gamma (C, 1, 1, 1) -> (C,)."""
+      return x.reshape(target_shape)
+
+    def add(maxtext_key, hf_key, hook=None):
+      mapping[maxtext_key] = hf_key
+      if hook is not None:
+        hooks[maxtext_key] = hook
+
+    if component == "transformer":
+      # (MaxText suffix, HF suffix, hook) of one transformer block.
+      block = []
+      for attn in ("attn1", "attn2"):
+        for mt, hf in (
+            ("query", "to_q"),
+            ("key", "to_k"),
+            ("value", "to_v"),
+            ("proj_attn", "to_out.0"),
+            ("add_k_proj", "add_k_proj"),  # I2V
+            ("add_v_proj", "add_v_proj"),  # I2V
+        ):
+          block += [
+              (f"{attn}-{mt}-kernel", f"{attn}.{hf}.weight", transpose),
+              (f"{attn}-{mt}-bias", f"{attn}.{hf}.bias", None),
+          ]
+        for norm in ("norm_q", "norm_k", "norm_added_k"):  # norm_added_k: I2V
+          block.append((f"{attn}-{norm}-scale", f"{attn}.{norm}.weight", None))
+      for mt, hf in (("ffn-act_fn-proj", "ffn.net.0.proj"), ("ffn-proj_out", "ffn.net.2")):
+        block += [(f"{mt}-kernel", f"{hf}.weight", transpose), (f"{mt}-bias", f"{hf}.bias", None)]
+      block += [
+          ("norm2-layer_norm-scale", "norm2.weight", None),
+          ("norm2-layer_norm-bias", "norm2.bias", None),
+          ("adaln_scale_shift_table", "scale_shift_table", None),
+      ]
+      num_layers = hf_config["num_layers"]
+      for mt, hf, hook in block:
+        if scan_layers:
+          add(f"blocks-{mt}", [f"blocks.{i}.{hf}" for i in range(num_layers)], hook)
+        else:
+          for i in range(num_layers):
+            add(f"blocks-{i}-{mt}", f"blocks.{i}.{hf}", hook)
+
+      linears = [
+          ("condition_embedder-time_embedder-linear_1", "condition_embedder.time_embedder.linear_1"),
+          ("condition_embedder-time_embedder-linear_2", "condition_embedder.time_embedder.linear_2"),
+          ("condition_embedder-time_proj", "condition_embedder.time_proj"),
+          ("condition_embedder-text_embedder-linear_1", "condition_embedder.text_embedder.linear_1"),
+          ("condition_embedder-text_embedder-linear_2", "condition_embedder.text_embedder.linear_2"),
+          ("condition_embedder-image_embedder-ff-net_0", "condition_embedder.image_embedder.ff.net.0.proj"),  # I2V
+          ("condition_embedder-image_embedder-ff-net_2", "condition_embedder.image_embedder.ff.net.2"),  # I2V
+          ("proj_out", "proj_out"),
+      ]
+      for mt, hf in linears:
+        add(f"{mt}-kernel", f"{hf}.weight", transpose)
+        add(f"{mt}-bias", f"{hf}.bias")
+      for norm in ("norm1", "norm2"):  # I2V
+        add(
+            f"condition_embedder-image_embedder-{norm}-layer_norm-scale",
+            f"condition_embedder.image_embedder.{norm}.weight",
+        )
+        add(f"condition_embedder-image_embedder-{norm}-layer_norm-bias", f"condition_embedder.image_embedder.{norm}.bias")
+      add("patch_embedding-kernel", "patch_embedding.weight", conv)
+      add("patch_embedding-bias", "patch_embedding.bias")
+      add("scale_shift_table", "scale_shift_table")
+
+    elif component == "vae":
+
+      def conv_layer(mt, hf):
+        add(f"{mt}-kernel", f"{hf}.weight", conv)
+        add(f"{mt}-bias", f"{hf}.bias")
+
+      def resnet(mt, hf):
+        for name in ("conv1", "conv2", "conv_shortcut"):  # conv_shortcut: only when channels change
+          conv_layer(f"{mt}-{name}-conv", f"{hf}.{name}")
+        for name in ("norm1", "norm2"):
+          add(f"{mt}-{name}-gamma", f"{hf}.{name}.gamma", reshape)
+
+      levels, num_res_blocks = len(hf_config["dim_mult"]), hf_config["num_res_blocks"]
+      # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
+      idx = 0
+      for level in range(levels):
+        for _ in range(num_res_blocks):
+          resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
+          idx += 1
+        if level < levels - 1:
+          conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
+          conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
+          idx += 1
+      # Decoder: `num_res_blocks + 1` resnets per level, each level but the last ends in an upsampler.
+      for level in range(levels):
+        for j in range(num_res_blocks + 1):
+          resnet(f"decoder-up_blocks-{level}-resnets-{j}", f"decoder.up_blocks.{level}.resnets.{j}")
+        if level < levels - 1:
+          up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
+          conv_layer(f"{up_mt}-resample-layers-1", f"{up_hf}.resample.1")
+          conv_layer(f"{up_mt}-time_conv-conv", f"{up_hf}.time_conv")
+      for coder in ("encoder", "decoder"):
+        for j in range(2):
+          resnet(f"{coder}-mid_block-resnets-{j}", f"{coder}.mid_block.resnets.{j}")
+        attn_mt, attn_hf = f"{coder}-mid_block-attentions-0", f"{coder}.mid_block.attentions.0"
+        add(f"{attn_mt}-norm-gamma", f"{attn_hf}.norm.gamma", reshape)
+        conv_layer(f"{attn_mt}-to_qkv", f"{attn_hf}.to_qkv")
+        conv_layer(f"{attn_mt}-proj", f"{attn_hf}.proj")
+        conv_layer(f"{coder}-conv_in-conv", f"{coder}.conv_in")
+        conv_layer(f"{coder}-conv_out-conv", f"{coder}.conv_out")
+        add(f"{coder}-norm_out-gamma", f"{coder}.norm_out.gamma", reshape)
+      conv_layer("quant_conv-conv", "quant_conv")
+      conv_layer("post_quant_conv-conv", "post_quant_conv")
+
+    elif component == "text_encoder":
+      # HF `UMT5EncoderModel`: `encoder.embed_tokens.weight` is tied to `shared.weight` (only the latter is
+      # saved), torch Embedding (vocab, d_model) == nnx.Embed layout. The relative position bias is per layer.
+      # The text encoder is never scanned: `scan_layers` is ignored.
+      add("token_embedding-embedding", "shared.weight")
+      for i in range(hf_config["num_layers"]):
+        mt, hf = f"blocks-{i}", f"encoder.block.{i}.layer"
+        for name, hf_name in (("query", "q"), ("key", "k"), ("value", "v"), ("proj_attn", "o")):
+          add(f"{mt}-attn-{name}-kernel", f"{hf}.0.SelfAttention.{hf_name}.weight", transpose)
+        add(f"{mt}-attn-relative_attention_bias-embedding", f"{hf}.0.SelfAttention.relative_attention_bias.weight")
+        add(f"{mt}-attn_norm-scale", f"{hf}.0.layer_norm.weight")
+        for name in ("wi", "wi_0", "wi_1", "wo"):  # wi: non-gated FFN only
+          add(f"{mt}-ffn-{name}-kernel", f"{hf}.1.DenseReluDense.{name}.weight", transpose)
+        add(f"{mt}-ffn_norm-scale", f"{hf}.1.layer_norm.weight")
+      add("final_norm-scale", "encoder.final_layer_norm.weight")
+
+    else:
+      raise ValueError(f"Unknown Wan component: {component}")
+    return mapping, hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4680,4 +4876,10 @@ VLLM_HOOK_FNS = {
     "qwen3": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
     "llama3.1": LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN,
     "deepseek3": DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN,
+}
+
+
+# Diffusers models (multi-component checkpoints), keyed by `model_name`; used by to_maxtext_diffusers.py.
+DIFFUSERS_PARAM_MAPPING = {
+    "wan2.1": WAN2_1_HF_TO_MAXTEXT,
 }
