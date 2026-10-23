@@ -45,7 +45,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maxtext.trainers.post_train.distillation import distillation_utils
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -77,10 +76,10 @@ def _make_strategy(
   )
 
 
-def _one_hot_labels(targets: jnp.ndarray, vocab_size: int, pad_id: int = 0) -> jnp.ndarray:
-  one_hot = jax.nn.one_hot(targets, vocab_size)
-  mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
-  return one_hot * mask
+def _make_labels(targets: jnp.ndarray, vocab_size: int, pad_id: int = 0) -> distillation_utils.Labels:
+  del vocab_size  # Integer labels do not depend on the vocabulary size.
+  mask = jnp.not_equal(targets, pad_id).astype(jnp.float32)
+  return distillation_utils.Labels(targets=jnp.where(mask > 0, targets, 0).astype(jnp.int32), mask=mask)
 
 
 def _mean(pair):
@@ -135,7 +134,7 @@ class DistillationMetricsTest(unittest.TestCase):
     logits = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
     out = distillation_utils.DistillationForwardOutput(logits=logits, out_projection_activations=None)
     targets = jnp.array([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size)
+    labels = _make_labels(targets, vocab_size)
 
     for temperature in [0.5, 1.0, 2.0, 8.0]:
       strategy = _make_strategy(vocab_size, temperature=temperature, alpha=1.0)  # alpha=1 -> total = soft only
@@ -154,7 +153,7 @@ class DistillationMetricsTest(unittest.TestCase):
     s_logits = jnp.array([[[2.0, 1.0, 0.5, 0.1], [0.0, 3.0, 1.0, 0.5]]], dtype=jnp.float32)
     # Target token 0 is the pad_id so it would be masked. Use non-zero targets.
     targets = jnp.array([[3, 1]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
     out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
 
     strategy = _make_strategy(vocab_size, pad_id=0, alpha=0.0)  # alpha=0 -> total = hard only
@@ -184,8 +183,9 @@ class DistillationMetricsTest(unittest.TestCase):
     # second token is padding
     targets = jnp.array([[1, pad_id]], dtype=jnp.int32)
     labels = strategy.create_labels(targets)
-    # the padded row must be all zeros
-    np.testing.assert_array_equal(np.asarray(labels[0, 1]), np.zeros(vocab_size))
+    # the padded position must be masked out (and its target replaced by 0)
+    np.testing.assert_array_equal(np.asarray(labels.mask), np.array([[1.0, 0.0]]))
+    np.testing.assert_array_equal(np.asarray(labels.targets), np.array([[1, 0]]))
 
     s_logits = jnp.array([[[5.0, -5.0, 0, 0, 0, 0, 0, 0], [-5.0, 5.0, 0, 0, 0, 0, 0, 0]]], dtype=jnp.float32)
     out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
@@ -209,10 +209,11 @@ class DistillationMetricsTest(unittest.TestCase):
     labels_packed = strategy.create_labels(targets, targets_segmentation=targets_segmentation)
     labels_unpacked = strategy.create_labels(targets)
 
-    np.testing.assert_array_equal(np.asarray(labels_packed[0, 3]), np.zeros(vocab_size))
-    self.assertGreater(float(np.sum(labels_unpacked[0, 3])), 0.0)
+    self.assertEqual(float(labels_packed.mask[0, 3]), 0.0)
+    self.assertEqual(float(labels_unpacked.mask[0, 3]), 1.0)
     for pos in (0, 1, 2):
-      np.testing.assert_array_equal(np.asarray(labels_packed[0, pos]), np.asarray(labels_unpacked[0, pos]))
+      self.assertEqual(float(labels_packed.mask[0, pos]), float(labels_unpacked.mask[0, pos]))
+      self.assertEqual(int(labels_packed.targets[0, pos]), int(labels_unpacked.targets[0, pos]))
 
   # --- 4. Temperature^2 scaling of soft loss ----------------------------
 
@@ -226,7 +227,7 @@ class DistillationMetricsTest(unittest.TestCase):
     s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
     t_out = distillation_utils.DistillationForwardOutput(logits=t_logits, out_projection_activations=None)
     targets = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size)
+    labels = _make_labels(targets, vocab_size)
 
     losses = []
     for temperature in [1.0, 4.0, 16.0]:
@@ -250,7 +251,7 @@ class DistillationMetricsTest(unittest.TestCase):
     s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
     t_out = distillation_utils.DistillationForwardOutput(logits=t_logits, out_projection_activations=None)
     targets = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size)
+    labels = _make_labels(targets, vocab_size)
 
     values = []
     for temperature in [1.0, 4.0, 16.0]:
@@ -349,7 +350,7 @@ class DistillationMetricsTest(unittest.TestCase):
         ],
         dtype=jnp.int32,
     )
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
 
     strategy = _make_strategy(vocab_size, alpha=0.0)  # hard-loss only for clarity
     s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
@@ -395,7 +396,7 @@ class DistillationMetricsTest(unittest.TestCase):
     t_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=features)
 
     targets = jnp.array([[3, 1]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
 
     strategy = _make_strategy(vocab_size, alpha=0.0, beta_feature=1.0, layer_indices=[0, 2])
     total_loss, metrics = strategy.compute_loss(s_out, t_out, labels, step=None)
@@ -420,7 +421,7 @@ class DistillationMetricsTest(unittest.TestCase):
     t_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=t_features)
 
     targets = jnp.array([[3, 1]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
 
     # Case A: include only layers where features match -> feature loss == 0.
     strategy_match = _make_strategy(vocab_size, alpha=0.0, beta_feature=1.0, layer_indices=[0, 2])
@@ -457,7 +458,7 @@ class DistillationMetricsTest(unittest.TestCase):
     s_logits = jnp.zeros((batch_size, seq_len, vocab_size), dtype=jnp.float32)
     # Targets: last position is pad (pad_id=0); others are valid tokens 1..3.
     targets = jnp.array([[1, 2, 3, 0], [3, 2, 1, 0]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
 
     s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=s_features)
     t_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=t_features)
@@ -481,7 +482,7 @@ class DistillationMetricsTest(unittest.TestCase):
 
     # Mark the last position as padding in labels.
     targets = jnp.array([[1, 2, 0]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
     s_logits = jnp.zeros((batch_size, seq_len, vocab_size), dtype=jnp.float32)
 
     def run(pad_filler):
@@ -510,7 +511,7 @@ class DistillationMetricsTest(unittest.TestCase):
     t_features = jnp.zeros((num_layers, batch_size, seq_len, hidden_dim), dtype=jnp.float32)
 
     targets = jnp.array([[1, 2]], dtype=jnp.int32)  # both valid
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
     s_logits = jnp.zeros((batch_size, seq_len, vocab_size), dtype=jnp.float32)
 
     s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=s_features)
@@ -552,7 +553,7 @@ class DistillationMetricsTest(unittest.TestCase):
     t_features = jnp.asarray(rng.normal(size=(num_layers, batch_size, seq_len, hidden_dim)).astype(np.float32))
 
     targets = jnp.array([[1, 2, 0]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size, pad_id=0)
+    labels = _make_labels(targets, vocab_size, pad_id=0)
     s_logits = jnp.zeros((batch_size, seq_len, vocab_size), dtype=jnp.float32)
 
     def run(pad_filler):
@@ -586,12 +587,261 @@ class DistillationMetricsTest(unittest.TestCase):
     vocab_size = 4
     s_logits = jnp.array([[[3.0, 0.0, 0.0, 0.0], [0.0, 3.0, 0.0, 0.0]]], dtype=jnp.float32)
     targets = jnp.array([[0, 1]], dtype=jnp.int32)
-    labels = _one_hot_labels(targets, vocab_size)
+    labels = _make_labels(targets, vocab_size)
     s_out = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
     strategy = _make_strategy(vocab_size)
     task_loss, metrics = strategy.compute_eval_loss(s_out, labels)
     self.assertIn("eval/hard_loss", metrics)
     np.testing.assert_allclose(_mean(metrics["eval/hard_loss"]), float(task_loss), rtol=1e-6)
+
+  # --- 9. Integer labels, chunked losses and the offline top-K path -------
+
+  def test_integer_label_losses_match_one_hot_reference(self):
+    """Losses from integer labels equal the dense one-hot reference formulas."""
+    vocab_size, batch_size, seq_len, temperature, alpha = 16, 2, 6, 2.0, 0.3
+    rng = np.random.default_rng(10)
+    s_logits = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
+    t_logits = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
+    targets = jnp.asarray(rng.integers(1, vocab_size, size=(batch_size, seq_len)).astype(np.int32))
+    targets = targets.at[0, -2:].set(0)  # padding
+    strategy = _make_strategy(vocab_size, temperature=temperature, alpha=alpha)
+    labels = strategy.create_labels(targets)
+    s_out = distillation_utils.DistillationForwardOutput(logits=s_logits)
+    t_out = distillation_utils.DistillationForwardOutput(logits=t_logits)
+    total_loss, metrics = strategy.compute_loss(s_out, t_out, labels, step=None)
+
+    one_hot = jax.nn.one_hot(targets, vocab_size) * (targets != 0)[..., None]
+    mask = (targets != 0).astype(jnp.float32)
+    count = float(jnp.sum(mask))
+    ce_s = float(jnp.sum(optax.softmax_cross_entropy(s_logits, one_hot) * mask))
+    ce_t = float(jnp.sum(optax.softmax_cross_entropy(t_logits, one_hot) * mask))
+    kl_t = optax.kl_divergence(jax.nn.log_softmax(s_logits / temperature), jax.nn.softmax(t_logits / temperature))
+    kl_t = float(jnp.sum(kl_t * mask))
+    kl_1 = float(jnp.sum(optax.kl_divergence(jax.nn.log_softmax(s_logits), jax.nn.softmax(t_logits)) * mask))
+    np.testing.assert_allclose(_mean(metrics["distill/hard_loss"]), ce_s / count, rtol=1e-5)
+    np.testing.assert_allclose(_mean(metrics["distill/teacher_loss"]), ce_t / count, rtol=1e-5)
+    np.testing.assert_allclose(_mean(metrics["distill/kl_div_at_T"]), kl_t / count, rtol=1e-5)
+    np.testing.assert_allclose(_mean(metrics["distill/kl_div_T1"]), kl_1 / count, rtol=1e-5)
+    expected_total = alpha * kl_t * temperature**2 / count + (1 - alpha) * ce_s / count
+    np.testing.assert_allclose(float(total_loss), expected_total, rtol=1e-5)
+
+  def test_chunked_logit_losses_match_single_chunk(self):
+    """Sequence-chunked loss computation matches the unchunked one (value and gradient)."""
+    vocab_size, batch_size, seq_len = 32, 2, 16
+    rng = np.random.default_rng(11)
+    s_logits = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
+    t_logits = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
+    targets = jnp.asarray(rng.integers(0, vocab_size, size=(batch_size, seq_len)).astype(np.int32))
+
+    def loss_and_grad(num_chunks, temperature, alpha):
+      strategy = distillation_utils.CombinedDistillationStrategy(
+          student_forward_fn=None,
+          teacher_forward_fn=None,
+          temperature=temperature,
+          alpha=alpha,
+          vocab_size=vocab_size,
+          logit_loss_chunks=num_chunks,
+      )
+      labels = strategy.create_labels(targets)
+      t_out = distillation_utils.DistillationForwardOutput(logits=t_logits)
+
+      def f(s):
+        loss, metrics = strategy.compute_loss(distillation_utils.DistillationForwardOutput(logits=s), t_out, labels)
+        return loss, metrics
+
+      (loss, metrics), grad = jax.jit(jax.value_and_grad(f, has_aux=True))(s_logits)
+      return loss, metrics, grad
+
+    for temperature, alpha in [(1.0, 1.0), (2.0, 0.5)]:
+      ref_loss, ref_metrics, ref_grad = loss_and_grad(1, temperature, alpha)
+      for num_chunks in (2, 4):
+        loss, metrics, grad = loss_and_grad(num_chunks, temperature, alpha)
+        np.testing.assert_allclose(float(loss), float(ref_loss), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(grad), np.asarray(ref_grad), rtol=1e-4, atol=1e-7)
+        for key in ("distill/hard_loss", "distill/teacher_loss", "distill/kl_div_T1"):
+          np.testing.assert_allclose(_mean(metrics[key]), _mean(ref_metrics[key]), rtol=1e-5)
+
+  def test_chunked_logit_losses_reject_non_divisible_chunks(self):
+    vocab_size = 8
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=None, teacher_forward_fn=None, vocab_size=vocab_size, logit_loss_chunks=4
+    )
+    logits = jnp.zeros((1, 6, vocab_size))
+    out = distillation_utils.DistillationForwardOutput(logits=logits)
+    with self.assertRaisesRegex(ValueError, "divisible"):
+      strategy.compute_loss(out, out, strategy.create_labels(jnp.ones((1, 6), jnp.int32)))
+
+  def test_top_k_offline_losses(self):
+    """With teacher top-K logits, KL is computed over the teacher's top-K subset and teacher metrics are 0."""
+    vocab_size, batch_size, seq_len, k, temperature = 16, 1, 3, 4, 2.0
+    rng = np.random.default_rng(12)
+    s_logits = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
+    full_t = jnp.asarray(rng.normal(size=(batch_size, seq_len, vocab_size)).astype(np.float32))
+    t_top_k, top_k_idx = jax.lax.top_k(full_t, k)
+    targets = jnp.array([[3, 5, 0]], dtype=jnp.int32)
+    strategy = _make_strategy(vocab_size, temperature=temperature, alpha=0.5)
+    labels = strategy.create_labels(targets)
+    s_out = distillation_utils.DistillationForwardOutput(logits=s_logits)
+    t_out = distillation_utils.DistillationForwardOutput(logits=t_top_k, top_k_indices=top_k_idx)
+    _, metrics = strategy.compute_loss(s_out, t_out, labels, step=None)
+
+    mask = np.array([[1.0, 1.0, 0.0]])
+    s_sub = jnp.take_along_axis(s_logits, top_k_idx, axis=-1)
+    t_p = jax.nn.softmax(t_top_k / temperature)
+    kl = jnp.sum(t_p * (jax.nn.log_softmax(t_top_k / temperature) - jax.nn.log_softmax(s_sub / temperature)), -1)
+    ce_s = optax.softmax_cross_entropy_with_integer_labels(s_logits, targets)
+    np.testing.assert_allclose(_mean(metrics["distill/kl_div_at_T"]), float(jnp.sum(kl * mask)) / 2.0, rtol=1e-5)
+    np.testing.assert_allclose(_mean(metrics["distill/hard_loss"]), float(jnp.sum(ce_s * mask)) / 2.0, rtol=1e-5)
+    self.assertEqual(_mean(metrics["distill/teacher_loss"]), 0.0)
+    self.assertEqual(_mean(metrics["distill/kl_div_T1"]), 0.0)
+
+  # --- 10. Fused LM head ---------------------------------------------------
+
+  @staticmethod
+  def _reference_logits(hidden, embedding, head):
+    """Mirrors the tied-embedding branch of the decoder's apply_output_head."""
+    dot_dtype = jnp.float32 if head.logits_dot_in_fp32 else hidden.dtype
+    logits = jnp.einsum("...e,ve->...v", hidden, embedding.astype(jnp.bfloat16), preferred_element_type=dot_dtype)
+    if head.normalize_embedding_logits:
+      logits = logits / jnp.sqrt(hidden.shape[-1])
+    if head.final_logits_soft_cap:
+      logits = jnp.tanh(logits / head.final_logits_soft_cap) * head.final_logits_soft_cap
+    return logits
+
+  def _fused_inputs(self, seq_len=8):
+    rng = np.random.default_rng(13)
+    batch_size, emb, vocab_size = 2, 16, 32
+    s_hidden = jnp.asarray(rng.normal(size=(batch_size, seq_len, emb)).astype(np.float32))
+    t_hidden = jnp.asarray(rng.normal(size=(batch_size, seq_len, emb)).astype(np.float32))
+    s_emb = jnp.asarray(rng.normal(size=(vocab_size, emb)).astype(np.float32))
+    t_emb = jnp.asarray(rng.normal(size=(vocab_size, emb)).astype(np.float32))
+    targets = jnp.asarray(rng.integers(0, vocab_size, size=(batch_size, seq_len)).astype(np.int32))
+    return s_hidden, t_hidden, s_emb, t_emb, targets, vocab_size
+
+  def test_fused_lm_head_matches_unfused(self):
+    """Fused (chunked) LM-head losses and gradients match losses on precomputed logits."""
+    s_hidden, t_hidden, s_emb, t_emb, targets, vocab_size = self._fused_inputs()
+    for normalize in (True, False):
+      for soft_cap in (None, 3.0):
+        student_head = distillation_utils.LMHeadSpec(normalize, soft_cap, logits_dot_in_fp32=True)
+        # The teacher keeps its own settings (different soft cap) instead of reusing the student's.
+        teacher_head = distillation_utils.LMHeadSpec(normalize, 5.0, logits_dot_in_fp32=True)
+        kwargs = {"student_forward_fn": None, "teacher_forward_fn": None, "temperature": 2.0, "alpha": 0.5}
+        fused = distillation_utils.CombinedDistillationStrategy(
+            vocab_size=vocab_size,
+            fused_lm_head_chunks=4,
+            student_lm_head=student_head,
+            teacher_lm_head=teacher_head,
+            **kwargs,
+        )
+        unfused = distillation_utils.CombinedDistillationStrategy(vocab_size=vocab_size, **kwargs)
+        labels = fused.create_labels(targets)
+        t_logits = self._reference_logits(t_hidden, t_emb, teacher_head)
+
+        def fused_loss(s_h, s_e, strategy=fused, labels=labels):
+          s_out = distillation_utils.DistillationForwardOutput(logits=(s_h, s_e))
+          t_out = distillation_utils.DistillationForwardOutput(logits=(t_hidden, t_emb))
+          return strategy.compute_loss(s_out, t_out, labels)
+
+        def unfused_loss(s_h, s_e, strategy=unfused, head=student_head, t_logits=t_logits, labels=labels):
+          s_out = distillation_utils.DistillationForwardOutput(logits=self._reference_logits(s_h, s_e, head))
+          t_out = distillation_utils.DistillationForwardOutput(logits=t_logits)
+          return strategy.compute_loss(s_out, t_out, labels)
+
+        def grad_fn(f):
+          return jax.jit(jax.value_and_grad(f, argnums=(0, 1), has_aux=True))
+
+        (loss_f, metrics_f), (gh_f, ge_f) = grad_fn(fused_loss)(s_hidden, s_emb)
+        (loss_u, metrics_u), (gh_u, ge_u) = grad_fn(unfused_loss)(s_hidden, s_emb)
+        msg = f"normalize={normalize}, soft_cap={soft_cap}"
+        np.testing.assert_allclose(float(loss_f), float(loss_u), rtol=1e-5, err_msg=msg)
+        for key in ("distill/hard_loss", "distill/teacher_loss", "distill/kl_div_T1"):
+          np.testing.assert_allclose(_mean(metrics_f[key]), _mean(metrics_u[key]), rtol=1e-5, err_msg=msg)
+        np.testing.assert_allclose(np.asarray(gh_f), np.asarray(gh_u), rtol=1e-4, atol=1e-6, err_msg=msg)
+        # The student's (tied) embedding receives the LM-head gradient.
+        self.assertGreater(float(jnp.max(jnp.abs(ge_f))), 0.0)
+        # The embedding cotangent passes through the same bfloat16 cast as the decoder's LM head, so per-chunk
+        # accumulation differs from the single-matmul gradient by bfloat16 rounding.
+        np.testing.assert_allclose(np.asarray(ge_f), np.asarray(ge_u), rtol=2e-2, atol=1e-4, err_msg=msg)
+
+  def test_fused_lm_head_eval_loss_matches_unfused(self):
+    s_hidden, _, s_emb, _, targets, vocab_size = self._fused_inputs()
+    head = distillation_utils.LMHeadSpec(True, 3.0, logits_dot_in_fp32=True)
+    fused = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=None,
+        teacher_forward_fn=None,
+        vocab_size=vocab_size,
+        fused_lm_head_chunks=2,
+        student_lm_head=head,
+        teacher_lm_head=head,
+    )
+    labels = fused.create_labels(targets)
+    loss_f, _ = fused.compute_eval_loss(distillation_utils.DistillationForwardOutput(logits=(s_hidden, s_emb)), labels)
+    s_logits = self._reference_logits(s_hidden, s_emb, head)
+    loss_u, _ = fused.compute_eval_loss(distillation_utils.DistillationForwardOutput(logits=s_logits), labels)
+    np.testing.assert_allclose(float(loss_f), float(loss_u), rtol=1e-5)
+
+  def test_fused_lm_head_rejects_non_divisible_chunks(self):
+    s_hidden, t_hidden, s_emb, t_emb, targets, vocab_size = self._fused_inputs(seq_len=6)
+    head = distillation_utils.LMHeadSpec(True, None, logits_dot_in_fp32=True)
+    fused = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=None,
+        teacher_forward_fn=None,
+        vocab_size=vocab_size,
+        fused_lm_head_chunks=4,
+        student_lm_head=head,
+        teacher_lm_head=head,
+    )
+    s_out = distillation_utils.DistillationForwardOutput(logits=(s_hidden, s_emb))
+    t_out = distillation_utils.DistillationForwardOutput(logits=(t_hidden, t_emb))
+    with self.assertRaisesRegex(ValueError, "divisible"):
+      fused.compute_loss(s_out, t_out, fused.create_labels(targets))
+
+  def test_fused_lm_head_requires_both_models_fused(self):
+    s_hidden, _, s_emb, _, targets, vocab_size = self._fused_inputs()
+    head = distillation_utils.LMHeadSpec(True, None, logits_dot_in_fp32=True)
+    fused = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=None,
+        teacher_forward_fn=None,
+        vocab_size=vocab_size,
+        fused_lm_head_chunks=4,
+        student_lm_head=head,
+        teacher_lm_head=head,
+    )
+    s_out = distillation_utils.DistillationForwardOutput(logits=(s_hidden, s_emb))
+    t_out = distillation_utils.DistillationForwardOutput(logits=jnp.zeros(targets.shape + (vocab_size,)))
+    with self.assertRaisesRegex(ValueError, "both the student and the teacher"):
+      fused.compute_loss(s_out, t_out, fused.create_labels(targets))
+
+  # --- 11. Preselected (block-boundary) features ---------------------------
+
+  def test_preselected_features_are_not_sliced_again(self):
+    """Features already restricted to layer_indices are used as-is; full per-layer features are sliced."""
+    vocab_size, batch_size, seq_len, dim, num_layers = 8, 1, 3, 4, 5
+    layer_indices = [3, 1]
+    rng = np.random.default_rng(14)
+    full_s = jnp.asarray(rng.normal(size=(num_layers, batch_size, seq_len, dim)).astype(np.float32))
+    full_t = jnp.asarray(rng.normal(size=(num_layers, batch_size, seq_len, dim)).astype(np.float32))
+    logits = jnp.zeros((batch_size, seq_len, vocab_size))
+    labels = _make_labels(jnp.ones((batch_size, seq_len), jnp.int32), vocab_size)
+    strategy = _make_strategy(vocab_size, beta_feature=1.0, layer_indices=layer_indices)
+
+    def feature_loss(s_feat, s_pre, t_feat, t_pre):
+      s_out = distillation_utils.DistillationForwardOutput(
+          logits=logits, out_projection_activations=s_feat, features_preselected=s_pre
+      )
+      t_out = distillation_utils.DistillationForwardOutput(
+          logits=logits, out_projection_activations=t_feat, features_preselected=t_pre
+      )
+      _, metrics = strategy.compute_loss(s_out, t_out, labels, step=None)
+      return _mean(metrics["distill/out_proj_feature_loss"])
+
+    reference = feature_loss(full_s, False, full_t, False)
+    s_sel, t_sel = full_s[jnp.array(layer_indices)], full_t[jnp.array(layer_indices)]
+    np.testing.assert_allclose(feature_loss(s_sel, True, t_sel, True), reference, rtol=1e-6)
+    # Each side is selected independently, e.g. when the number of layers in the full features equals
+    # len(layer_indices).
+    np.testing.assert_allclose(feature_loss(s_sel, True, full_t, False), reference, rtol=1e-6)
 
 
 if __name__ == "__main__":
