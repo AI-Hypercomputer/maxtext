@@ -13,12 +13,22 @@
 # limitations under the License.
 # ==============================================================================
 
-# pylint: disable=missing-module-docstring
+"""Metadata references for sequence mapping and grid distribution."""
+
 import jax
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import config
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import memory_ref
+
+try:
+  from maxtext.models.kernels.gdn import config
+  from maxtext.models.kernels.gdn import memory_ref
+except (ImportError, ModuleNotFoundError):
+  try:
+    from maxtext.src.maxtext.models.kernels.gdn import config
+    from maxtext.src.maxtext.models.kernels.gdn import memory_ref
+  except (ImportError, ModuleNotFoundError):
+    from . import config
+    from . import memory_ref
 
 
 def compute_batched_seq_metadata(
@@ -35,7 +45,7 @@ def compute_batched_seq_metadata(
 
   # NOTE: Only supports use case where query_lens[i] = 1 where i < end_seq.
   # This must be guaranteed by the function caller.
-  # TODO: Add error handling when above condition is not met.
+  # TODO(b/534541682): Add error handling when above condition is not met.
   query_lens = query_start_loc[1:] - query_start_loc[:-1]
   is_valid_seqs = jnp.where(all_seqs < end_seq, True, False)
   has_initial_state = (seq_lens - query_lens) > 0
