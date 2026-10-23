@@ -20,15 +20,6 @@ name: Build and Upload MaxText Package
 on:
   workflow_call:
     inputs:
-      device_type:
-        required: true
-        type: string
-      device_name:
-        required: true
-        type: string
-      cloud_runner:
-        required: false
-        type: string
       maxtext_sha:
         required: false
         type: string
@@ -45,7 +36,7 @@ permissions:
 jobs:
   build_and_upload:
     name: Build Wheel
-    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    runs-on: linux-x86-n4-16-buildkit
     timeout-minutes: 15
     container: python:3.12-slim-trixie
     outputs:
