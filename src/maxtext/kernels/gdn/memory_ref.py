@@ -586,7 +586,7 @@ def create_allocs(
 
   large_fp32_buffer_count = (
       1
-      if (cfg.chunk_size > 64 and cfg.num_v_heads >= 64 and jnp.dtype(cfg.dtypes.act_in) == jnp.float32)
+      if (cfg.num_v_heads >= 128 or (cfg.chunk_size > 64 and cfg.num_v_heads >= 64 and jnp.dtype(cfg.dtypes.act_in) == jnp.float32))
       else pipeline_mode.buffer_count
   )
   large_fp32_spec_partial = functools.partial(
