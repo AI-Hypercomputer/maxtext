@@ -51,10 +51,10 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 
 from maxtext.common.common_types import Config, BATCH, LENGTH, EMBED
-from maxtext.kernels import head_norm
-from maxtext.kernels import kda
-from maxtext.kernels.kda import intra as kda_intra
-from maxtext.kernels.kda import scan as kda_scan
+from maxtext.kernels import head_norm  # pylint: disable=no-name-in-module
+from maxtext.kernels import kda  # pylint: disable=no-name-in-module
+from maxtext.kernels.kda import intra as kda_intra  # pylint: disable=no-name-in-module
+from maxtext.kernels.kda import scan as kda_scan  # pylint: disable=no-name-in-module
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -591,7 +591,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         gate_kwargs = {"use_gate_in_kernel": True, "a_log": a_log_, "delta_time_bias": dt_bias_}
       if l2norm_outside:
         q_, k_ = _kernel_l2norm(q_), _kernel_l2norm(k_)
-      out, _ = kda_api.kimi_delta_attention(
+      out, _ = kda_api.kimi_delta_attention(  # pylint: disable=assignment-from-no-return
           head_first(q_),
           head_first(k_),
           head_first(v_),
@@ -1030,7 +1030,7 @@ def _delta_rule_chunked_subblock(
         functools.partial(_kda_intra_chunk, sub_block=sub_block, compute_dtype=compute_dtype),
         policy=jax.checkpoint_policies.nothing_saveable,
     )
-    scores, kk = intra(q_c, k_c, g)
+    scores, kk = intra(q_c, k_c, g)  # pylint: disable=too-many-function-args
   scores = jnp.where(causal & same_doc, scores, 0.0)
   m = jnp.where(strict & same_doc, kk, 0.0) * beta_c
   x = _invert_unit_lower(m, inverse_precision)
@@ -1496,6 +1496,14 @@ class OLMoE3DecoderLayer(nnx.Module):
     hidden = nn.with_logical_constraint(hidden, self.activation_axis_names)
 
     ffn_in = self.ffn_in_norm(hidden)
+    precomputed_gate = None
+    if self.moe_block is not None:
+      # Compute the router logits once and share them between routing and the router z-loss below, instead of
+      # relying on XLA to fold a second `gate(ffn_in)` call.
+      gate_dtype = jnp.float32 if self.config.float32_gate_logits else self.config.dtype
+      router_logits, pre_bias_logits = self.moe_block.gate(ffn_in.astype(gate_dtype))
+      router_logits = checkpoint_name(router_logits, "moe_router_logits")
+      precomputed_gate = (router_logits, pre_bias_logits)
     if self._can_fuse_ffn_in():
       ffn_out, latent_in = self._fused_ffn_in_and_shared_ffn(ffn_in, deterministic=deterministic)
     else:
@@ -1507,12 +1515,10 @@ class OLMoE3DecoderLayer(nnx.Module):
           latent_in,
           gate_inputs=ffn_in,
           input_ids=decoder_segment_ids,
+          precomputed_gate_logits=precomputed_gate,
       )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-        # Reference auxiliary loss adds a router z-loss:
-        # 1e-5 * mean(logsumexp(router logits)^2). This gate call is identical
-        # to the one inside moe_block, so XLA folds the two into one.
-        router_logits, _ = self.moe_block.gate(ffn_in)
+        # Reference auxiliary loss adds a router z-loss: 1e-5 * mean(logsumexp(router logits)^2).
         z_loss = jnp.mean(jax.scipy.special.logsumexp(router_logits.astype(jnp.float32), axis=-1) ** 2)
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss + _ROUTER_Z_LOSS_WEIGHT * z_loss)
       ffn_out = ffn_out + self.latent_up(routed)
@@ -1666,6 +1672,7 @@ class OLMoE3ScannableBlock(nnx.Module):
 
       # The layers are unrolled here, so CSE must be blocked or XLA merges the
       # recompute back into the forward and saves everything.
+      # pylint: disable-next=too-many-function-args
       x, new_state = jax.checkpoint(run_layer, policy=self.remat_policy_fn, prevent_cse=True)(state, x)
       nnx.update(layer, new_state)
     return x, None
