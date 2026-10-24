@@ -133,8 +133,10 @@ def wait_for_snapshot(snapshotter: Snapshotter, step: int) -> bool:
   return latest_snapshot_step(snapshotter) == step
 
 
-def _elastic_iterator(data_iterator) -> grain_experimental.ElasticIterator | None:
-  """Returns the `ElasticIterator` inside `data_iterator`, or None for synthetic data.
+def _elastic_iterator(
+    data_iterator,
+) -> grain_experimental.ElasticIterator | multihost_dataloading.RemoteIteratorWrapper | None:
+  """Returns the `ElasticIterator` or elastic `RemoteIteratorWrapper` inside `data_iterator`, or None for synthetic data.
 
   Raises:
     ValueError: If `data_iterator` is a non-synthetic iterator that does not wrap `grain.experimental.ElasticIterator`.
@@ -144,13 +146,15 @@ def _elastic_iterator(data_iterator) -> grain_experimental.ElasticIterator | Non
       (synthetic_data_processing.SyntheticDataIterator, synthetic_data_processing.PlaceHolderDataIterator),
   ):
     return None
+  if isinstance(data_iterator, multihost_dataloading.RemoteIteratorWrapper) and data_iterator.elastic:
+    return data_iterator
   if isinstance(data_iterator, multihost_dataloading.MultiHostDataLoadIterator):
     for candidate in (data_iterator.local_iterator, getattr(data_iterator, "dataloader", None)):
       if isinstance(candidate, grain_experimental.ElasticIterator):
         return candidate
   raise ValueError(
-      "Snapshot mode requires a MultiHostDataLoadIterator wrapping grain's ElasticIterator (or synthetic data),"
-      f" got {type(data_iterator).__name__}."
+      "Snapshot mode requires a MultiHostDataLoadIterator or RemoteIteratorWrapper wrapping grain's ElasticIterator"
+      f" (or synthetic data), got {type(data_iterator).__name__}."
   )
 
 

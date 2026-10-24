@@ -1249,18 +1249,17 @@ class ConfigTest(absltest.TestCase):
       pyconfig.initialize(snapshot_argv + ["dataset_type=tfds"])
     with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
       pyconfig.initialize(snapshot_argv + ["dataset_type=grain", "grain_train_files=/x/*"])
-    with self.assertRaisesRegex(pydantic.ValidationError, "colocated_python_data_input"):
-      pyconfig.initialize(
-          snapshot_argv
-          + [
-              "dataset_type=grain",
-              "grain_train_files=/x/*",
-              "grain_use_elastic_iterator=true",
-              "grain_file_type=arrayrecord",
-              "packing=false",
-              "colocated_python_data_input=true",
-          ]
-      )
+    pyconfig.initialize(
+        snapshot_argv
+        + [
+            "dataset_type=grain",
+            "grain_train_files=/x/*",
+            "grain_use_elastic_iterator=true",
+            "grain_file_type=arrayrecord",
+            "packing=false",
+            "colocated_python_data_input=true",
+        ]
+    )
 
   def test_te_moe_dispatch_remat_location(self):
     """Dispatch outputs participate in the custom remat policy."""

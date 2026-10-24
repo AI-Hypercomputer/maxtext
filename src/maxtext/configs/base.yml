@@ -1720,8 +1720,8 @@ elastic_enabled: false
 # How an attempt after an elastic event gets its train state back: "snapshot" keeps a copy of the state in pinned
 # host memory every elastic_snapshot_interval steps and restores that when it is at least as recent as the latest
 # checkpoint; "checkpoint" only restores the latest persistent checkpoint. Snapshot mode needs
-# grain_use_elastic_iterator (or synthetic data); elastic runs with other data iterators, DiLoCo, rampup batch size
-# or colocated python data input must set "checkpoint".
+# grain_use_elastic_iterator (or synthetic data); elastic runs with other data iterators, DiLoCo or rampup batch size
+# must set "checkpoint".
 elastic_backup_kind: "snapshot"
 elastic_snapshot_interval: 10
 elastic_timeout_seconds: 300

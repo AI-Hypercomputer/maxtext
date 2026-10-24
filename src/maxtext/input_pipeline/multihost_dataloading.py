@@ -473,11 +473,26 @@ class RemoteIterator:
     self.iterator.set_state(state)  # pyrefly: ignore[missing-attribute]
     return step_array
 
+  def get_state(self, dummy_array):
+    # Reinterpret int64 as two int32 words since JAX truncates int64 to int32 when x64 is disabled.
+    words = np.array([self.iterator.get_state()["global_next_index"]], dtype=np.int64).view(
+        np.int32
+    )  # pyrefly: ignore[missing-attribute]
+    devices = list(dummy_array.sharding.addressable_devices)
+    shards = jax.device_put([words[None, :] for _ in devices], devices)
+    return jax.make_array_from_single_device_arrays((*dummy_array.shape, 2), dummy_array.sharding, shards)
+
+  def set_state(self, index_array):
+    index = int(np.asarray(index_array.addressable_data(0)).view(np.int64).item())
+    self.iterator.set_state({"global_next_index": index})  # pyrefly: ignore[missing-attribute]
+    return index_array
+
 
 class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
+    self.elastic = elastic
     self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
@@ -529,3 +544,16 @@ class RemoteIteratorWrapper:
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
     self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]
+
+  def get_state(self) -> dict[str, int]:
+    if not self.elastic:
+      raise ValueError("RemoteIteratorWrapper.get_state requires elastic=True.")
+    index_array = self.local_iterator.get_state(self.dummy_array)  # pyrefly: ignore[missing-attribute]
+    return {"global_next_index": int(np.asarray(index_array[0]).view(np.int64).item())}
+
+  def set_state(self, state: dict[str, int]) -> None:
+    if not self.elastic:
+      raise ValueError("RemoteIteratorWrapper.set_state requires elastic=True.")
+    words = np.array([state["global_next_index"]], dtype=np.int64).view(np.int32)
+    index_array = jax.device_put(words, NamedSharding(self.cpu_mesh, PartitionSpec()))
+    self.local_iterator.set_state(index_array)  # pyrefly: ignore[missing-attribute]
