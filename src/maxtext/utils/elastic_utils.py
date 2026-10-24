@@ -502,10 +502,7 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
     max_logging.log("maybe_elastic_scale_up: Elastic training is not enabled.")
     return
   if is_scale_up_event(config):
-    max_logging.log(
-        "Started a checkpoint and a new slice is available. Waiting for current"
-        " checkpoint to finish before interrupting."
-    )
+    max_logging.log("New slices are available. Waiting for any checkpoint save in progress before interrupting.")
     if checkpoint_manager is not None:
       # The v1 Checkpointer exposes `.wait()`, the v0 emergency/replicator
       # managers expose `.wait_until_finished()`; this module cannot import
@@ -514,7 +511,7 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
         checkpoint_manager.wait()
       else:
         checkpoint_manager.wait_until_finished()
-    max_logging.log("Checkpoint save completed. Interrupting")
+    max_logging.log("Interrupting the attempt to scale up.")
     # pylint: disable=import-outside-toplevel, broad-exception-caught
     try:
       from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
