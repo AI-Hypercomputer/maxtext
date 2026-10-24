@@ -109,6 +109,25 @@ class MockElasticDataloader:
     return MockElasticIterator(self.global_batch_size)
 
 
+class _FakeDevice:
+  """A device of a colocated host, for the data shard logic."""
+
+  def __init__(self, process_index):
+    self.process_index = process_index
+
+
+def _fake_mesh_array(mesh_processes, local_process, value=0):
+  """Returns a stand-in for an array on a CPU mesh of 4 devices per process, as one colocated process sees it."""
+  devices = []
+  for process in mesh_processes:
+    devices.extend(_FakeDevice(process) for _ in range(4))
+  sharding = mock.Mock(
+      device_set=set(devices),
+      addressable_devices={d for d in devices if d.process_index == local_process},
+  )
+  return mock.Mock(sharding=sharding, addressable_data=lambda unused_index: np.array(value))
+
+
 def _get_test_mesh_shapes_named():
   return [
       ("1_device", (1, 1)),
@@ -251,7 +270,7 @@ class MultihostDataloadingTest(parameterized.TestCase):
     mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape, jax.devices()[:mesh_size]), ("x", "y"))
     wrapper = multihost_dataloading.RemoteIteratorWrapper(
         get_ds_fn=lambda dataloading_host_index, dataloading_host_count: MockElasticDataloader(mesh_size),
-        preprocessing_fn=lambda dataset: dataset,
+        preprocessing_fn=lambda dataset, shard_index, shard_count: dataset,
         global_mesh=mesh,
         global_shape=(mesh_size, 1),
         elastic=True,
@@ -275,6 +294,49 @@ class MultihostDataloadingTest(parameterized.TestCase):
       wrapper.get_state()
     with self.assertRaisesRegex(ValueError, "elastic=True"):
       wrapper.set_state({"global_next_index": 0})
+
+  @parameterized.named_parameters(
+      dict(testcase_name="elastic", elastic=True),
+      dict(testcase_name="not_elastic", elastic=False),
+  )
+  def test_remote_iterator_reads_its_shard_of_the_mesh(self, elastic):
+    """After a slice-down, the remaining hosts shard the data among themselves, not among all processes."""
+    get_ds_fn = mock.Mock(return_value="dataset")
+    preprocessing_fn = mock.Mock(return_value=MockElasticDataloader(4))
+    remote_iterator = multihost_dataloading.RemoteIterator(
+        get_ds_fn=get_ds_fn,
+        preprocessing_fn=preprocessing_fn,
+        global_shape=(32, 1),
+        checkpoint_path="",
+        elastic=elastic,
+    )
+
+    # Only the second slice (processes 8-15) is left; this is process 12.
+    remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=12))
+
+    get_ds_fn.assert_called_once_with(dataloading_host_index=4, dataloading_host_count=8)
+    if elastic:
+      preprocessing_fn.assert_called_once_with(dataset="dataset", shard_index=4, shard_count=8)
+    else:
+      preprocessing_fn.assert_called_once_with(dataset="dataset")
+
+  def test_elastic_save_state_is_written_by_the_first_host_of_the_mesh(self):
+    """After a slice-down process 0 may be gone; the first host of the mesh writes the shared state file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for local_process in (8, 9):
+        remote_iterator = multihost_dataloading.RemoteIterator(
+            get_ds_fn=lambda dataloading_host_index, dataloading_host_count: None,
+            preprocessing_fn=lambda dataset, shard_index, shard_count: MockElasticDataloader(8),
+            global_shape=(8, 1),
+            checkpoint_path=tmpdir,
+            elastic=True,
+        )
+        mesh_array = _fake_mesh_array(range(8, 16), local_process=local_process, value=local_process)
+        remote_iterator.build(mesh_array)
+        remote_iterator.save_state(mesh_array)
+
+      self.assertTrue((pathlib.Path(tmpdir) / "8" / "iter" / "process_0.json").exists())
+      self.assertFalse((pathlib.Path(tmpdir) / "9").exists())
 
   def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
     """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""
