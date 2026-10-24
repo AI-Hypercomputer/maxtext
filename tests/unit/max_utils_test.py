@@ -113,6 +113,19 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     # Compare total loss aggregation
     self.assertTrue(jnp.allclose(total_loss_with_z, total_loss_no_z + z_loss_only, rtol=1e-5, atol=1e-8))
 
+  def test_cross_entropy_gradient(self):
+    """The custom gradient matches optax's and keeps the logits' dtype."""
+    logits = random.normal(random.PRNGKey(0), (2, 3, 50))
+    targets = random.randint(random.PRNGKey(1), (2, 3), 0, 50)
+    one_hot_targets = jax.nn.one_hot(targets, 50)
+
+    def loss(logits):
+      return jnp.sum(max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)[0])
+
+    expected = jax.grad(lambda l: jnp.sum(optax.softmax_cross_entropy_with_integer_labels(l, targets)))(logits)
+    np.testing.assert_allclose(jax.grad(loss)(logits), expected, rtol=1e-5, atol=1e-7)
+    self.assertEqual(jax.grad(loss)(logits.astype(jnp.bfloat16)).dtype, jnp.bfloat16)
+
 
 class MaxUtilsCustomMesh(unittest.TestCase):
   """Tests for the is_valid_custom_mesh function in max_utils.py"""
