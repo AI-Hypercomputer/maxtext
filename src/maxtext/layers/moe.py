@@ -350,7 +350,7 @@ def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
   return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
 
 
-def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
+def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None, return_counts=False):
   """Computes a bias adjustment update based on expert load.
 
   Used in DeepSeek V3: https://arxiv.org/html/2412.19437v1.
@@ -364,11 +364,16 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=
         Defaults to None for backward compatibility. When provided, expert token
         counts are collectively reduced (psum) across these axes before
         computing the load balance updates.
+      return_counts: If True, return the (reduced) per-expert token counts instead of the update, so a caller that
+        splits the batch into microbatches (pipeline parallelism) can sum them and take the sign of the whole-batch
+        load, as the reference does. Convert with `rate * sign(mean(counts) - counts)`.
 
   Returns:
-      update: The value to add to the expert bias. Shape (num_experts,).
+      update: The value to add to the expert bias (or the expert counts). Shape (num_experts,).
   """
   expert_counts = calculate_expert_counts(top_k_indices, num_experts, axis_names=axis_names)
+  if return_counts:
+    return expert_counts
   return load_balance_updates_from_counts(expert_counts, num_experts, rate)
 
 
@@ -517,9 +522,12 @@ def _batch_axis_names(pspec) -> tuple[str, ...] | None:
   """Returns the mesh axes the (batch, sequence) dims are partitioned over."""
   if not pspec:
     return None
+  # 'stage' shards the batch only where it acts as data parallelism (the layers outside the pipeline); inside
+  # the pipeline it is the vmapped stage axis and never appears in these per-stage partition specs.
   allowed_batch_axes = frozenset(
       {
           "data",
+          "stage",
           "fsdp",
           "fsdp_transpose",
           "expert",
@@ -1596,7 +1604,7 @@ class RoutedMoE(nnx.Module):
     if self.should_update_load_balance():
       if defer_reductions:
         bias_updates = calculate_expert_counts(selected_experts, self.config.num_experts)
-      elif return_expert_counts:
+      elif return_expert_counts or getattr(self.config, "using_pipeline_parallelism", False):
         bias_updates = calculate_expert_counts(
             selected_experts,
             self.config.num_experts,
@@ -4433,7 +4441,9 @@ class RoutedMoE(nnx.Module):
     if self.should_update_load_balance():
       # Under plain JIT (dense_matmul), GSPMD automatically inserts the all-reduce
       # across partitioned batch/sequence axes on global arrays, so axis_names=None.
-      if getattr(self.config, "gradient_accumulation_steps", 1) > 1:
+      if getattr(self.config, "gradient_accumulation_steps", 1) > 1 or getattr(
+          self.config, "using_pipeline_parallelism", False
+      ):
         bias_updates = calculate_expert_counts(
             top_k_indices,
             self.config.num_experts,
