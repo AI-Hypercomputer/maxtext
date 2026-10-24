@@ -1507,8 +1507,11 @@ class RoutedMoE(nnx.Module):
         self.wo_kernel_axes = (CompoundLogicalAxis(("exp", "embed_moe")), None)
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
-      # vLLM uses 'model' as the tensor parallelism axis name
-      self._tensor_parallelism_name = ("model", "attn_dp")
+      # vLLM uses 'model' as the tensor parallelism axis name; include 'dcp' if present in mesh
+      if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
+        self._tensor_parallelism_name = ("model", "attn_dp", "dcp")
+      else:
+        self._tensor_parallelism_name = ("model", "attn_dp")
     else:
       self._tensor_parallelism_name = "tensor"
 
