@@ -626,11 +626,12 @@ def unbox_logicallypartioned(boxed_pytree):
 
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
-@jax.custom_vjp
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
 def cross_entropy_with_logits(
     logits: jnp.ndarray,
     targets: jnp.ndarray,
     z_loss: float = 0.0,
+    recompute_softmax: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
@@ -646,12 +647,15 @@ def cross_entropy_with_logits(
     targets: categorical one-hot targets [batch, length, num_classes] float
       array.
     z_loss: coefficient for auxiliary z-loss loss term.
+    recompute_softmax: recompute the softmax in the backward pass instead of
+      saving it from the forward pass (config.cross_entropy_recompute_softmax).
   Returns:
     tuple with the total loss and the z_loss, both
     float arrays with shape [batch, length].
   """
   logits_sum = jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
   log_softmax = logits - logits_sum
+  del recompute_softmax  # Only changes what the backward pass saves.
   loss = -jnp.sum(targets * log_softmax, axis=-1)
   # Add auxiliary z-loss term.
   log_z = jnp.squeeze(logits_sum, axis=-1)
@@ -660,7 +664,9 @@ def cross_entropy_with_logits(
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
+def _cross_entropy_with_logits_fwd(
+    logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0, recompute_softmax: bool = False
+) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray],
     tuple[
         jnp.ndarray,
@@ -682,6 +688,10 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
   log_z = jnp.squeeze(jnp.log(sum_exp) + max_logit, axis=-1)
   total_z_loss = z_loss * jax.lax.square(log_z)
   loss += total_z_loss
+  if recompute_softmax:
+    # Save only the logits and the [..., 1] log-normalizer; the backward recomputes the softmax
+    # instead of keeping exp_shifted (a full [batch, length, vocab] array, usually f32) alive.
+    return (loss, total_z_loss), (logits, targets, z_loss, None, max_logit + jnp.log(sum_exp), log_z)
   return (loss, total_z_loss), (  # pyrefly: ignore[bad-return]
       logits,
       targets,
@@ -693,6 +703,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
 
 
 def _cross_entropy_with_logits_bwd(
+    recompute_softmax: bool,
     res: tuple[
         jnp.ndarray,
         jnp.ndarray,
@@ -706,8 +717,13 @@ def _cross_entropy_with_logits_bwd(
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.  # pyrefly: ignore[bad-assignment]
   logits, targets, z_loss, exp_shifted, sum_exp, log_z = res
+  if recompute_softmax:
+    # sum_exp holds the log-normalizer: recompute the softmax from the logits.
+    softmax = jnp.exp(logits.astype(sum_exp.dtype) - sum_exp)
+  else:
+    softmax = exp_shifted / sum_exp
   # z-loss term adds the (2 * z_loss * log_z) factor.
-  deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp - targets
+  deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * softmax - targets
   g_logits = jnp.expand_dims(g, axis=-1) * deriv  # pyrefly: ignore[bad-argument-type]
 
   return (

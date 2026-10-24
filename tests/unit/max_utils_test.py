@@ -113,6 +113,23 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     # Compare total loss aggregation
     self.assertTrue(jnp.allclose(total_loss_with_z, total_loss_no_z + z_loss_only, rtol=1e-5, atol=1e-8))
 
+  def test_recompute_softmax_matches_saved_softmax(self):
+    """Recomputing the softmax in the backward pass gives the same loss and gradients."""
+    logits = random.normal(random.PRNGKey(0), (2, 3, 50))
+    one_hot_targets = jax.nn.one_hot(random.randint(random.PRNGKey(1), (2, 3), 0, 50), 50)
+
+    def loss(logits, recompute_softmax):
+      xent, z_loss = max_utils.cross_entropy_with_logits(
+          logits, one_hot_targets, z_loss=1e-4, recompute_softmax=recompute_softmax
+      )
+      return jnp.sum(xent), z_loss
+
+    (saved_loss, saved_z), saved_grad = jax.value_and_grad(loss, has_aux=True)(logits, False)
+    (recomputed_loss, recomputed_z), recomputed_grad = jax.value_and_grad(loss, has_aux=True)(logits, True)
+    np.testing.assert_allclose(recomputed_loss, saved_loss, rtol=1e-6)
+    np.testing.assert_allclose(recomputed_z, saved_z, rtol=1e-6)
+    np.testing.assert_allclose(recomputed_grad, saved_grad, rtol=1e-5, atol=1e-7)
+
 
 class MaxUtilsCustomMesh(unittest.TestCase):
   """Tests for the is_valid_custom_mesh function in max_utils.py"""

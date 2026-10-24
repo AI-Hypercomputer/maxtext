@@ -260,7 +260,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           data["targets_segmentation"] != 0,
       )
     one_hot_targets = _one_hot_targets(data["targets"], config, model.mesh)
-    xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
+    xent, z_loss = max_utils.cross_entropy_with_logits(
+        logits,
+        one_hot_targets,
+        z_loss=config.z_loss_multiplier,
+        recompute_softmax=config.cross_entropy_recompute_softmax,
+    )
 
     xent = sharding.maybe_shard_with_logical(
         xent,
