@@ -102,7 +102,7 @@ def _unroute_impl(
 ) -> jax.Array:
   """Reverse the routing operation, restoring tokens to their original order."""
   assert tokens.shape[0] == selected_experts.shape[0] * selected_experts.shape[1] and selected_experts.ndim == 2
-  inds = jnp.argsort(jnp.argsort(jnp.ravel(selected_experts)))
+  inds = invert_permutation(jnp.argsort(jnp.ravel(selected_experts)))
   if use_gather_mosaic_kernel:
     # The kernel currently only supports 8 experts per token.
     assert selected_experts.shape[1] == 8
@@ -119,6 +119,16 @@ def _unroute_impl(
       ),
       axis=1,
   )
+
+
+def invert_permutation(perm: jax.Array) -> jax.Array:
+  """Inverts a permutation with an O(N) scatter.
+
+  Matches `jnp.argsort(perm)` when `perm` is a permutation of `0..N-1`, without
+  the O(N log N) sort.
+  """
+  assert perm.ndim == 1, f"perm must be 1D, got {perm.ndim}D"
+  return jnp.empty_like(perm).at[perm].set(jnp.arange(perm.shape[0], dtype=perm.dtype), unique_indices=True)
 
 
 def _sort_impl(tokens: jax.Array, inds: jax.Array, use_gather_mosaic_kernel: bool) -> jax.Array:
