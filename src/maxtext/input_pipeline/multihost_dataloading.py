@@ -206,6 +206,8 @@ def _build_global_shape_and_sharding(
 def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   """Put local sharded array into local devices"""
   global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  if jax.process_count() == 1 and __import__("os").environ.get("OLMOE3_FAST_SC_DEVICE_PUT", "1") == "1":
+    return jax.device_put(array, sharding)
 
   try:
     local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
@@ -324,7 +326,11 @@ class MultiHostDataLoadIterator:
         raise TimeoutError(f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts.")
 
       self.last_local_data = local_data
-    input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
+    if jax.process_count() == 1:
+      sharding = NamedSharding(self.global_mesh, PartitionSpec(self.global_mesh.axis_names))
+      input_gdas = jax.device_put(local_data, sharding)
+    else:
+      input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
 
     return input_gdas
 

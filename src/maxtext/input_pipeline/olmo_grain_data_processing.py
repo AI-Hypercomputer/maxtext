@@ -81,7 +81,9 @@ def _detect_resumed_step(config) -> int:
   if not path.exists() or not path.is_dir():
     return 0
   steps = [int(p.name) for p in path.iterdir() if p.name.isdigit()]
-  return max(steps) if steps else 0
+  # MaxText names checkpoint directories by 0-indexed completed step (actual_step = optimizer.step - 1),
+  # so directory S means S + 1 batches (0..S) were already consumed and resume starts at step S + 1.
+  return max(steps) + 1 if steps else 0
 
 
 def _make_loader_for_host(
@@ -89,6 +91,7 @@ def _make_loader_for_host(
     *,
     process_indices: List[int],
     seed: int,
+    global_indices_path: str = "",
 ):
   """Construct an OLMo grain DataLoader for the current data-loading host."""
   index = load_index(config.olmo_index_path)
@@ -117,6 +120,7 @@ def _make_loader_for_host(
 
   max_logging.log(
       f"OLMo grain loader: index={config.olmo_index_path} "
+      f"order={global_indices_path or f'seed {seed}'} "
       f"total_instances={index.total_instances:,} "
       f"shard={shard_index}/{shard_count} per_host_batch={per_host_batch} "
       f"seq={index.sequence_length} resumed_step={resumed_step} "
@@ -137,25 +141,67 @@ def _make_loader_for_host(
       shard_index=shard_index,
       shard_count=shard_count,
       apply_ngram_filter=getattr(config, "olmo_apply_ngram_filter", True),
+      segment_eos_token_id=int(getattr(config, "olmo_segment_eos_token_id", -1)),
       shift_to_inputs_targets=True,
       path_remap=_build_path_remap(config),
       grain_worker_count=worker_count,
       grain_worker_buffer_size=worker_buffer,
       initial_step=initial_step,
+      global_indices_path=global_indices_path,
   )
 
 
 def make_olmo_grain_train_iterator(config, global_mesh, process_indices):
-  """Train iterator for ``dataset_type=olmo_grain``."""
+  """Train iterator for ``dataset_type=olmo_grain`` (supports both Driver/McJAX and Pathways Colocated Python)."""
   if not getattr(config, "olmo_index_path", ""):
     raise ValueError(
         "When dataset_type=olmo_grain, please set config.olmo_index_path to "
         "the JSON produced by tools/data_generation/build_olmo_npy_index.py."
     )
+  if getattr(config, "colocated_python_data_input", False):
+    seed_val = int(getattr(config, "data_shuffle_seed", 0))
+    global_idx_path = getattr(config, "olmo_global_indices_path", "") or ""
+    resumed_step = _detect_resumed_step(config)
+
+    def _cp_get_ds_fn(dataloading_host_index: int, dataloading_host_count: int):
+      return (int(dataloading_host_index), int(dataloading_host_count))
+
+    def _cp_preprocessing_fn(dataset):
+      shard_index, shard_count = dataset
+      idx = load_index(config.olmo_index_path)
+      per_host_batch = config.global_batch_size_to_load // shard_count
+      worker_count = max(int(getattr(config, "grain_worker_count", 0) or 0), 0)
+      worker_buffer = int(getattr(config, "grain_per_worker_buffer_size", 1) or 1)
+      return make_olmo_grain_data_loader(
+          idx,
+          seed=seed_val,
+          batch_size=per_host_batch,
+          shard_index=shard_index,
+          shard_count=shard_count,
+          apply_ngram_filter=getattr(config, "olmo_apply_ngram_filter", True),
+          segment_eos_token_id=int(getattr(config, "olmo_segment_eos_token_id", -1)),
+          shift_to_inputs_targets=True,
+          path_remap=_build_path_remap(config),
+          grain_worker_count=worker_count,
+          grain_worker_buffer_size=worker_buffer,
+          initial_step=resumed_step * per_host_batch,
+          global_indices_path=global_idx_path,
+      )
+
+    return multihost_dataloading.RemoteIteratorWrapper(
+        _cp_get_ds_fn,
+        _cp_preprocessing_fn,
+        global_mesh,
+        (config.global_batch_size_to_load, config.max_target_length),
+        checkpoint_path=config.checkpoint_dir,
+        elastic=False,
+    )
+
   loader = _make_loader_for_host(
       config,
       process_indices=process_indices,
       seed=int(getattr(config, "data_shuffle_seed", 0)),
+      global_indices_path=getattr(config, "olmo_global_indices_path", "") or "",
   )
   return multihost_dataloading.MultiHostDataLoadIterator(
       loader,
@@ -180,7 +226,8 @@ def make_olmo_grain_eval_iterator(config, global_mesh, process_indices):
   loader = _make_loader_for_host(
       config,
       process_indices=process_indices,
-      # Distinct seed so eval doesn't overlap train batch order.
+      # Distinct seed so eval doesn't overlap train batch order. Eval always shuffles with the seed, even
+      # when training follows olmo_global_indices_path.
       seed=int(getattr(config, "data_shuffle_seed", 0)) ^ 0x1F1F1F1F,
   )
   return multihost_dataloading.MultiHostDataLoadIterator(

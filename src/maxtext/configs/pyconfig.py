@@ -271,7 +271,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
       raise ValueError(f"{key!r} not in {', '.join(map(repr, valid_fields))}.")
 
     new_value = value
-    if isinstance(new_value, str) and new_value.lower() == "none":
+    if isinstance(new_value, str) and new_value.lower() == "none" and key not in ("norm_metrics", "lineage_quantization"):
       new_value = None
 
     # Pydantic validates enums from their values, so string is fine.
@@ -343,14 +343,14 @@ class HyperParameters:
     final_dict["dtype"] = jnp.dtype(final_dict["dtype"])
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
-    final_dict["rollout_weight_dtype"] = (
-        final_dict["weight_dtype"]
-        if not final_dict["rollout_weight_dtype"]
-        else jnp.dtype(final_dict["rollout_weight_dtype"])
-    )
     final_dict["mu_dtype"] = (
         final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
     )
+    if os.environ.get("OLMOE3_FSDP_MOE_ONLY") == "1":
+      final_dict["logical_axis_rules"] = [
+          [r[0], ["expert"]] if r[0] in ("embed", "embed_attn", "embed_vocab") else r
+          for r in final_dict["logical_axis_rules"]
+      ]
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
     final_dict["logical_axis_rules_for_eval"] = _lists_to_tuples(final_dict["logical_axis_rules_for_eval"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])
