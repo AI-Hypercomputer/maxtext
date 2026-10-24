@@ -147,6 +147,9 @@ case "${TOPOLOGY}" in
     BF16_KDA_STATE=false
     NORM_METRICS=none
     LIBTPU_OVERRIDE="${V4_8X8X48_LIBTPU}"
+    # The measured runs used XLA's reduce-scatter fusion (the flags above), not the manual 2-stage reduce-scatter in
+    # linears.dot_general_with_gathered_kernel, which is otherwise automatic at DP >= 8.
+    export OLMOE3_ENABLE_2STAGE_RS="${OLMOE3_ENABLE_2STAGE_RS:-0}"
     TPU_MEGACORE="${TPU_MEGACORE:-megacore_dense}"
     PRESET_ARGS+=(
       "float32_gate_logits=true"

@@ -251,12 +251,14 @@ def dot_general_with_gathered_kernel(
        which `TpuAllReduceScatterFusion` fuses into a 2D `%scatter_custom_fusion` (`reduce-scatter`).
     2. A 2D `psum` (`all-reduce`) over `'fsdp'` / `'data'` on the `1 / EP`-sized weight shard.
 
-  The 2-stage path is opt-in (`OLMOE3_ENABLE_2STAGE_RS=1`). With the XLA flags
+  `OLMOE3_ENABLE_2STAGE_RS` picks the rule: unset keeps the original automatic one (DP >= 8 on `'data'`,
+  rows padded to 8), `1` uses the extended one (DP >= 2 over `'data'` and `'fsdp'`), and `0` turns the path off.
+  The TPU v4 8x8x48 recipe sets `0`: with the XLA flags
   `--xla_tpu_enable_all_reduce_scatter_fusion=true --xla_tpu_assign_all_reduce_scatter_layout=true
   --xla_tpu_use_minor_sharding_for_major_trivial_input=true
   --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1`, XLA's own reduce-scatter fusion was
   faster on TPU v4 at DP >= 3 (+340 ms/step for this path on 3x v4-2048 and +901 ms/step on a
-  12x16x16 v4-6144), so by default only the `gathered_weights` residual is applied.
+  12x16x16 v4-6144), so only the `gathered_weights` residual is applied there.
   """
   if out_sharding is not None:
     out_ndim = (inputs.ndim - len(norm_axis)) + (kernel.ndim - len(contract_ind))
@@ -268,6 +270,8 @@ def dot_general_with_gathered_kernel(
   total_dp = dp_size * fsdp_size
   ep_size = mesh.shape.get("expert", 1)
   n_in = len(norm_axis)
+  rs_mode = os.environ.get("OLMOE3_ENABLE_2STAGE_RS")
+  legacy_rs = rs_mode is None
   use_two_stage = False
   shard_on_in = False
   ep_axes: tuple[str, ...] = ()
@@ -285,7 +289,8 @@ def dot_general_with_gathered_kernel(
     k_pspec = tuple(kernel_sharding.spec) + (None,) * (kernel.ndim - len(kernel_sharding.spec))
     in_axes = _ep_axes_from_spec_entry(k_pspec[0])
     out_axes = _ep_axes_from_spec_entry(k_pspec[-1])
-    dp_axes = ("data", "fsdp")
+    # The original rule only treats "data" as data parallel; the extended one also treats "fsdp" that way.
+    dp_axes = ("data",) if legacy_rs else ("data", "fsdp")
     if "expert" in in_axes and not set(dp_axes) & set(in_axes) and all(s is None for s in k_pspec[1:]):
       ep_axes = in_axes
       shard_on_in = True
@@ -298,9 +303,21 @@ def dot_general_with_gathered_kernel(
       d_out = int(np.prod(kernel.shape[n_in:]))
       sharded_dim = d_in if shard_on_in else d_out
       d_other = d_out if shard_on_in else d_in
-      if (
+      if legacy_rs:
+        use_two_stage = (
+            dp_size >= 8
+            and 1 < ep_total <= min(d_in, d_out)
+            and inputs.shape[0] % (dp_size * ep_total) == 0
+            and sharded_dim % ep_total == 0
+            and (
+                shard_on_in
+                or (d_in == 1792 and d_out == 768)
+                or (len(kernel.shape) == 2 and d_other >= 256 and d_other % 256 == 0)
+            )
+        )
+      elif (
           total_dp >= 2
-          and os.environ.get("OLMOE3_ENABLE_2STAGE_RS") == "1"
+          and rs_mode == "1"
           and 1 < ep_total <= min(d_in, d_out)
           and inputs.shape[0] % (total_dp * ep_total) == 0
           and sharded_dim % ep_total == 0
@@ -366,7 +383,10 @@ def dot_general_with_gathered_kernel(
         dk_loc = lax.dot_general(dy_2d, x_2d, (((0,), (0,)), ((), ())), precision=prec)
         shard_rows, d_other = d_out // ep_total, d_in
 
-      row_mult = 48 if (total_dp > 1 and total_dp % 3 == 0) else 16
+      if legacy_rs:
+        row_mult = 8
+      else:
+        row_mult = 48 if (total_dp > 1 and total_dp % 3 == 0) else 16
       pad_rows = ((shard_rows + row_mult - 1) // row_mult) * row_mult
       if pad_rows != shard_rows:
         dk_loc = jnp.pad(
@@ -381,7 +401,8 @@ def dot_general_with_gathered_kernel(
         if dp_size > 1:
           sh = lax.psum(sh, "data")
         if pad_rows != shard_rows:
-          sh = sh[:shard_rows, :]
+          # The original rule fences the padded reduce-scatter so XLA can't fold the slice back into it.
+          sh = (lax.optimization_barrier(sh) if legacy_rs else sh)[:shard_rows, :]
         return sh
 
       split_col = (d_other // 256) * 256
