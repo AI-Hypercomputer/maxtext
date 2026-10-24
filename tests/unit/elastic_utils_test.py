@@ -43,6 +43,8 @@ class FakeConfig:
   def __init__(self):
     self.elastic_enabled = True
     self.checkpoint_dir = "gs://test_bucket/checkpoints"
+    self.enable_checkpointing = True
+    self.enable_emergency_checkpoint = False
     self.elastic_max_retries = 3
     self.elastic_timeout_seconds = 100
     self.global_batch_size_to_load = 64
@@ -168,6 +170,14 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_gcs_utils.gcs_list_directories.return_value = ["1", "2", "10"]
     self.fake_gcs_utils.gcs_glob_pattern.return_value = [f"{checkpoint_dir}/10/commit_success_0"]
     elastic_utils.clean_up_incomplete_checkpoints(checkpoint_dir)
+    self.fake_gcs_utils.gcs_delete_directory.assert_not_called()
+
+  @parameterized.named_parameters(("absolute", "/tmp/run/checkpoints/"), ("relative", "maxtext_output/checkpoints/"))
+  def test_clean_up_checkpoints_skips_non_gcs_path(self, checkpoint_dir):
+    """Outside GCS a step directory only appears once its save is complete, so nothing is checked or deleted."""
+    elastic_utils.clean_up_incomplete_checkpoints(checkpoint_dir)
+    self.fake_gcs_utils.gcs_list_directories.assert_not_called()
+    self.fake_gcs_utils.gcs_glob_pattern.assert_not_called()
     self.fake_gcs_utils.gcs_delete_directory.assert_not_called()
 
   def test_live_devices_no_pathways(self):
@@ -477,6 +487,34 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     callback_fn.assert_called_once_with(scale_up=expected_scale_up)
     self.assertLen(attempts, 2)
+
+  @parameterized.named_parameters(
+      ("checkpointing", True, False, True),
+      ("emergency_checkpointing", False, True, True),
+      ("no_checkpointing", False, False, False),
+  )
+  def test_elastic_retry_cleans_up_checkpoints_only_when_saving_them(
+      self, enable_checkpointing, enable_emergency_checkpoint, expect_cleanup
+  ):
+    """The elastic event callback only looks for incomplete checkpoints if the run saves them to checkpoint_dir."""
+    config = FakeConfig()
+    config.enable_checkpointing = enable_checkpointing
+    config.enable_emergency_checkpoint = enable_emergency_checkpoint
+    elastic_utils.elastic_manager = self.fake_manager
+    callback_fn = Mock()
+    errors = [MockJaxRuntimeError(), None]
+
+    def train():
+      error = errors.pop(0)
+      if error is not None:
+        raise error
+
+    self._fake_pathways_retry_with_one_retry()
+
+    elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)()
+
+    self.assertEqual(self.fake_gcs_utils.gcs_list_directories.called, expect_cleanup)
+    callback_fn.assert_called_once_with(scale_up=False)
 
   def test_elastic_retry_scale_up_does_not_leak_into_next_run(self):
     """A scale-up that ended one run (retries exhausted) doesn't label the first event of the next run."""
