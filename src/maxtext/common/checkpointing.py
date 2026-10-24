@@ -32,7 +32,6 @@ from flax.training import train_state
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
-from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
 from maxtext.common import grain_utility
@@ -52,10 +51,22 @@ from orbax.checkpoint import logging as ocp_logging
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
-load_safetensors_dynamic_state = load_dynamic.load_safetensors_dynamic_state
 PlaceHolderDataIterator = synthetic_data_processing.PlaceHolderDataIterator
 MultiHostDataLoadIterator = multihost_dataloading.MultiHostDataLoadIterator
 DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = maxtext_globals.DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+
+
+def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
+  """Loads HF safetensors into MaxText weights; see `load_dynamic.load_safetensors_dynamic_state`.
+
+  `load_dynamic` builds Hugging Face model configs at import time, which imports `transformers`, `torch` and
+  (with transformers>=5) `torchvision`. Import it only when a `safetensors_dynamic` checkpoint is loaded, so
+  regular training startup doesn't pay for those imports or crash on unrelated torch/triton native libraries.
+  """
+  from maxtext.checkpoint_conversion.utils import load_dynamic  # pylint: disable=import-outside-toplevel
+
+  return load_dynamic.load_safetensors_dynamic_state(path, abstract_params, maxtext_config)
+
 
 # Backward compatibility aliases for v0 emergency managers.
 EmergencyCheckpointManager = emergency_checkpointing.CheckpointManager
