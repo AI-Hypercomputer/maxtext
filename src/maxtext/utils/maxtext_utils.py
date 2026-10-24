@@ -2154,22 +2154,76 @@ def create_device_mesh(config, devices=None):
   elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+    ep_size = getattr(config, "ici_expert_parallelism", 1)
+    used_multislice_cuboid = False
+    if (
+        devices[0].platform == "tpu"
+        and num_devices_per_slice in (64, 128, 256, 512, 1024, 2048, 3072)
+        and ep_size in (64, 128, 256)
+        and "expert" in config.mesh_axes
+        and ici_parallelism[config.mesh_axes.index("expert")] == ep_size
+        and all(x == 1 for x in ici_parallelism[config.mesh_axes.index("expert") + 1 :])
+        and "data" in config.mesh_axes
+        and dcn_parallelism[config.mesh_axes.index("data")] == num_slices
+        and sum(1 for x in dcn_parallelism if x != 1) == 1
+    ):
+      # pylint: disable-next=g-import-not-at-top,import-outside-toplevel
+      from jax._src import mesh_utils as _src_mesh_utils
 
-    if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
-      mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
-    else:
-      mesh = mesh_utils.create_hybrid_device_mesh(
-          ici_parallelism,
-          dcn_parallelism,
-          devices,
-          allow_split_physical_axes=allow_split_physical_axes,
-      )
+      by_slice = {}
+      for d in devices:
+        by_slice.setdefault(getattr(d, "slice_index", 0), []).append(d)
+      if len(by_slice) == num_slices:
+        slice_meshes = []
+        for s_idx in sorted(by_slice):
+          pm = _src_mesh_utils._get_physical_tpu_mesh(by_slice[s_idx])  # pylint: disable=protected-access
+          if pm.shape in ((8, 8, 8), (8, 8, 16)) and ep_size in (128, 256):
+            ep_z = ep_size // 64
+            z_dim = pm.shape[2]
+            sm = np.transpose(pm.reshape(8, 8, z_dim // ep_z, ep_z), (2, 0, 1, 3)).reshape(ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape in ((8, 8, 8), (8, 8, 16)) and ep_size == 64:
+            z_dim = pm.shape[2]
+            sm = np.transpose(pm.reshape(2, 4, 2, 4, z_dim // 4, 4), (0, 2, 4, 1, 3, 5)).reshape(ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 8) and ep_size == 128:
+            sm = pm.reshape(ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 8) and ep_size == 64:
+            sm = np.transpose(pm.reshape(4, 4, 2, 4), (2, 0, 1, 3)).reshape(ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 4, 2) and ep_size == 128:
+            sm = pm.reshape(ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 4, 2) and ep_size == 64:
+            sm = np.transpose(pm, (3, 0, 1, 2)).reshape(ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 4) and ep_size == 64:
+            sm = pm.reshape(ici_parallelism)
+            slice_meshes.append(sm)
+        if len(slice_meshes) == num_slices:
+          data_idx = config.mesh_axes.index("data")
+          stacked = np.stack(slice_meshes, axis=data_idx)
+          final_shape = [i * d for i, d in zip(ici_parallelism, dcn_parallelism)]
+          mesh = stacked.reshape(final_shape)
+          used_multislice_cuboid = True
+
+    if not used_multislice_cuboid:
+      if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+      else:
+        mesh = mesh_utils.create_hybrid_device_mesh(
+            ici_parallelism,
+            dcn_parallelism,
+            devices,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
   else:
     ep_size = getattr(config, "ici_expert_parallelism", 1)
     used_cuboid_ep = False
     if (
         devices[0].platform == "tpu"
-        and num_devices in (128, 512, 1024)
+        and num_devices in (64, 128, 256, 512, 1024, 2048, 3072)
         and ep_size in (64, 128, 256)
         and "expert" in config.mesh_axes
         and ici_parallelism[config.mesh_axes.index("expert")] == ep_size
@@ -2208,6 +2262,19 @@ def create_device_mesh(config, devices=None):
         used_cuboid_ep = True
       elif physical_mesh.shape == (4, 4, 4, 2) and ep_size == 128:
         mesh = physical_mesh.reshape(ici_parallelism)
+        used_cuboid_ep = True
+      elif physical_mesh.shape == (12, 16, 16) and ep_size in (64, 128, 256):
+        # Partition v4-6144 (12x16x16 = 3072 chips) into contiguous 3D cuboids:
+        #   EP=64  -> 48 x (4, 4, 4) cubes (3 x 4 x 4 grid of cubes)
+        #   EP=128 -> 24 x (4, 8, 4) cuboids (3 x 2 x 4 grid of cuboids)
+        #   EP=256 -> 12 x (4, 8, 8) cuboids (3 x 2 x 2 grid of cuboids)
+        bx = 4
+        by = 4 if ep_size == 64 else 8
+        bz = 8 if ep_size == 256 else 4
+        mesh = np.transpose(
+            physical_mesh.reshape(12 // bx, bx, 16 // by, by, 16 // bz, bz),
+            (0, 2, 4, 1, 3, 5),
+        ).reshape(ici_parallelism)
         used_cuboid_ep = True
     if not used_cuboid_ep:
       if allow_split_physical_axes:

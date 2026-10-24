@@ -206,6 +206,8 @@ def _build_global_shape_and_sharding(
 def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   """Put local sharded array into local devices"""
   global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  if jax.process_count() == 1 and __import__("os").environ.get("OLMOE3_FAST_SC_DEVICE_PUT", "1") == "1":
+    return jax.device_put(array, sharding)
 
   try:
     local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)

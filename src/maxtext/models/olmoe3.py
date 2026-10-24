@@ -276,8 +276,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     gate = jax.nn.sigmoid(self.g_proj_2(g_in).reshape(batch, seq_len, heads, dv))
     out = self.o_norm(out.astype(x.dtype)) * gate
     out = self.w_out(out.reshape(batch, seq_len, heads * dv))
-    if self.mesh.shape.get("data", 1) == 1 and self.config.moe_a2a_token_chunks <= 2:
-      out = checkpoint_name(out, "out_proj")
+    out = checkpoint_name(out, "out_proj")
     return out
 
   def _use_flat_head_layout(self, seq_len: int) -> bool:
@@ -341,8 +340,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     gate = jax.nn.sigmoid(self.g_proj_2(g_in))  # [B, T, H * dv]
     out = self._o_norm_flat(out.astype(q_in.dtype)) * gate
     out = self.w_out(out)
-    if self.mesh.shape.get("data", 1) == 1 and cfg.moe_a2a_token_chunks <= 2:
-      out = checkpoint_name(out, "out_proj")
+    out = checkpoint_name(out, "out_proj")
     return out
 
   def _head_norm(self, x, *, mean, eps, scale=1.0, out_dtype=None):
@@ -376,7 +374,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     h = self.num_heads
     save = cfg.remat_policy == "custom" and cfg.kda_fused != "remat"
     res_name = (kda.RESIDUAL_NAME + ":wy" if cfg.kda_fused_residuals == "wy" else kda.RESIDUAL_NAME) if save else None
-    stride = cfg.kda_fused_state_stride if save else 1
+    stride = cfg.kda_fused_state_stride
 
     @functools.partial(jax.shard_map, mesh=self.mesh, in_specs=(spec,) * 7, out_specs=spec, check_vma=False)
     def run(q_, k_, v_, ld_, beta_, seg_, dl_):
@@ -442,7 +440,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         inverse_precision=getattr(jax.lax.Precision, cfg.kda_inverse_precision.upper()),
         output_dtype=out_dtype,
         save_residuals=cfg.kda_fused_residuals if save else False,
-        state_stride=cfg.kda_fused_state_stride if save else 1,
+        state_stride=cfg.kda_fused_state_stride,
     )
 
     @functools.partial(jax.shard_map, mesh=self.mesh, in_specs=(spec,) * 6, out_specs=spec, check_vma=False)
@@ -511,7 +509,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
               self.config.gathered_weights != "remat"
               and (
                   self.config.kda_proj == "remat"
-                  or self.mesh.shape.get("data", 1) > 1
+                  or (self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)) > 1
                   or self.config.kda_fused != "remat"
               )
           ),
@@ -1328,8 +1326,8 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     ``shard_map`` (the same axes it uses for the overflow flag); outside it the
     variable is unset and nothing is reduced.
     """
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.float32)
-    counts = expert_mask.sum(axis=(0, 1, 2))
+    flat_indices = jax.lax.stop_gradient(top_k_indices).reshape(-1)
+    counts = jnp.bincount(flat_indices, length=self.num_experts).astype(jnp.float32)
     reduce_axes = moe.LB_REDUCE_AXES.get() if getattr(self.config, "moe_global_load_balancing", False) else None
     if reduce_axes:
       counts = jax.lax.pmean(jax.lax.stop_gradient(counts), reduce_axes)
@@ -1528,12 +1526,7 @@ class OLMoE3DecoderLayer(nnx.Module):
 
   def _can_fuse_ffn_in(self) -> bool:
     """Whether `shared_ffn.wi_0`, `shared_ffn.wi_1`, and `latent_down` can share one matmul over `ffn_in`."""
-    if (
-        not self.config.kda_fused_input_proj
-        or self.moe_block is None
-        or self.mesh.shape.get("data", 1) > 1
-        or self.config.moe_a2a_token_chunks > 2
-    ):
+    if not self.config.kda_fused_input_proj or self.moe_block is None:
       return False
     if self.shared_ffn.quant is not None or self.shared_ffn.mlp_layer_norm is not None:
       return False
@@ -1543,7 +1536,7 @@ class OLMoE3DecoderLayer(nnx.Module):
       return False
     if self.latent_down is not None and (self.latent_down.quant_dot_general is not None or self.latent_down.use_bias):
       return False
-    if int(self.shared_ffn.wi_0.kernel[...].shape[-1]) > 1792:
+    if int(self.shared_ffn.wi_0.kernel[...].shape[-1]) > 7168:
       return False
     mlp_axes = nn.logical_to_mesh_axes(("mlp",), self.config.logical_axis_rules)[0]
     if mlp_axes is not None:
@@ -1570,7 +1563,21 @@ class OLMoE3DecoderLayer(nnx.Module):
         save_gathered_kernel=(self.config.gathered_weights != "remat"),
     )
     mlp_dim = int(kernels[0].shape[-1])
-    wi_0_out, wi_1_out, latent_in = jnp.split(out, [mlp_dim, 2 * mlp_dim], axis=-1)
+
+    @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+    def _split_3_last_axis(arr: jnp.ndarray, n: int):
+      return arr[..., :n], arr[..., n : 2 * n], arr[..., 2 * n :]
+
+    def _split_3_fwd(arr: jnp.ndarray, n: int):
+      return _split_3_last_axis(arr, n), ()
+
+    def _split_3_bwd(n: int, res, grads):
+      del n, res
+      g0, g1, g2 = grads
+      return (jnp.concatenate([g0, g1, g2], axis=-1),)
+
+    _split_3_last_axis.defvjp(_split_3_fwd, _split_3_bwd)
+    wi_0_out, wi_1_out, latent_in = _split_3_last_axis(out, mlp_dim)
     wi_0_out = checkpoint_name(wi_0_out, "mlpwi_0")
     wi_1_out = checkpoint_name(wi_1_out, "mlpwi_1")
     if self.config.activations_in_float32:
