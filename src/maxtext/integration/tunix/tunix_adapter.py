@@ -45,23 +45,66 @@ def _compat_wsc(x, shardings):
     return jax.sharding.reshard(x, shardings)
 
 
+def _is_named_sharding(sharding):
+  return sharding is not None and hasattr(sharding, "spec") and hasattr(sharding, "mesh")
+
+
+def _named_sharding(operand):
+  """Named sharding from the value, or from its abstract value when traced.
+
+  Under jit the operand is a tracer. Its `.sharding` is not a NamedSharding;
+  the layout JAX checks in `top_k` lives on `jax.typeof(operand).sharding`.
+  """
+  try:
+    candidate = getattr(operand, "sharding", None)
+  except Exception:  # pylint: disable=broad-exception-caught
+    candidate = None
+  if _is_named_sharding(candidate):
+    return candidate
+  try:
+    candidate = jax.typeof(operand).sharding
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  if _is_named_sharding(candidate):
+    return candidate
+  return None
+
+
+def _replicate_reduction_axis(operand, axis):
+  """Replicate `axis` when a named sharding partitions it, else None."""
+  sharding = _named_sharding(operand)
+  if sharding is None or sharding.spec is None:
+    return None
+  spec = list(sharding.spec)
+  idx = axis if axis >= 0 else len(spec) + axis
+  if not 0 <= idx < len(spec) or spec[idx] is None:
+    return None
+  spec[idx] = None
+  target = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*spec))
+  try:
+    return _orig_wsc(operand, target)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return jax.sharding.reshard(operand, target)
+
+
 def _compat_top_k(operand, k, axis=-1):
-  """Compat shim around jax.lax.top_k to reshard sharded reduction operands."""
+  """Compat shim around jax.lax.top_k to reshard sharded reduction operands.
+
+  JAX 0.11 rejects a sharded reduction axis. Replicate that axis before the
+  first call when it is visible, including on tracers, so the reshard is part
+  of the trace. If the pre-check saw no sharded axis and the op still raises,
+  run the same lookup once more. A second failure propagates unchanged.
+  """
+  replicated = _replicate_reduction_axis(operand, axis)
+  if replicated is not None:
+    return _orig_top_k(replicated, k, axis=axis)
   try:
     return _orig_top_k(operand, k, axis=axis)
   except Exception:  # pylint: disable=broad-exception-caught
-    sharding = getattr(operand, "sharding", None)
-    if sharding is not None and hasattr(sharding, "spec") and hasattr(sharding, "mesh"):  # pylint: disable=line-too-long
-      spec = list(sharding.spec)
-      idx = axis if axis >= 0 else len(spec) + axis
-      if 0 <= idx < len(spec):
-        spec[idx] = None
-        target_sharding = jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*spec))  # pylint: disable=line-too-long
-        try:
-          operand = _orig_wsc(operand, target_sharding)
-        except Exception:  # pylint: disable=broad-exception-caught
-          operand = jax.sharding.reshard(operand, target_sharding)
-    return _orig_top_k(operand, k, axis=axis)
+    replicated = _replicate_reduction_axis(operand, axis)
+    if replicated is None:
+      raise
+    return _orig_top_k(replicated, k, axis=axis)
 
 
 jax.lax.with_sharding_constraint = _compat_wsc
