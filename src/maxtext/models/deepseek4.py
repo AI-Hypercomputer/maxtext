@@ -32,6 +32,29 @@ import jax
 from jax.experimental import xla_metadata
 
 
+def _has_state_under_new_nodes(layer: nnx.Module, old_paths: set, new_state: nnx.State) -> bool:
+  """Returns True if `new_state` has state under a node that `layer` does not have.
+
+  `nnx.update` can add new variables to the existing nodes of `layer`, such as
+  sown intermediates, but it cannot create new nodes. The first call under
+  `qwix.quantize_model` creates such nodes, e.g. the fp8 stats module
+  `GateLogit._qwix_fp8_gpu_dot_general0`.
+  """
+  for path, _ in new_state.flat_state():
+    if path in old_paths:
+      continue
+    node = layer
+    for key in path[:-1]:
+      if isinstance(key, str) and hasattr(node, key):
+        node = getattr(node, key)
+        continue
+      try:
+        node = node[key]
+      except (IndexError, KeyError, TypeError):
+        return True
+  return False
+
+
 def _run_deepseek4_layer_remat(
     layer: nnx.Module,
     y: jax.Array,
@@ -54,11 +77,14 @@ def _run_deepseek4_layer_remat(
   graphdef, params, other = nnx.split(layer, nnx.Param, ...)
   params_xs = jax.tree.map(lambda x: x[None], params)
   other_xs = jax.tree.map(lambda x: x[None], other)
+  old_paths = {path for path, _ in nnx.state(layer).flat_state()}
+  created_new_nodes = []
 
   def run_single_layer(carry, xs_slice):
     params_slice, other_slice = xs_slice
     merged_layer = nnx.merge(graphdef, params_slice, other_slice)
     out_y, _ = merged_layer(carry, **layer_kwargs)
+    created_new_nodes.append(_has_state_under_new_nodes(layer, old_paths, nnx.state(merged_layer)))
     _, _, new_other = nnx.split(merged_layer, nnx.Param, ...)
     return out_y, new_other
 
@@ -69,6 +95,13 @@ def _run_deepseek4_layer_remat(
   run_single_layer = jax.checkpoint(run_single_layer, policy=policy, prevent_cse=prevent_cse)
   with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
     y_out, stacked_other = jax.lax.scan(run_single_layer, y, (params_xs, other_xs), length=1)
+  if any(created_new_nodes):
+    # The call created new submodules on the merged copy, e.g. the fp8 stats of
+    # the first call under qwix.quantize_model. nnx.update cannot add them to
+    # `layer`, so drop the scan result and create them with a plain call. Later
+    # calls find the submodules and take the remat path above.
+    y_out, _ = layer(y, **layer_kwargs)
+    return y_out
   nnx.update(layer, jax.tree.map(lambda x: x[0], stacked_other))
   return y_out
 
