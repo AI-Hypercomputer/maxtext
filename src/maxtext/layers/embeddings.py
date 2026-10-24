@@ -677,7 +677,7 @@ class YarnRotaryEmbedding(nnx.Module):
       truncate=True,
       attention_scaling=False,
       pairwise=False,
-      direct_position_freqs=False,
+      direct_position_freqs=True,
       dot_pairwise=False,
       # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
@@ -794,14 +794,23 @@ class YarnRotaryEmbedding(nnx.Module):
 
   def _position_angles(self, position: Array, inv_freqs: Array) -> Array:
     """Computes float32 RoPE angles position * inv_freqs of shape [B, S, 1, len(inv_freqs)]."""
-    return (
-        position.astype(jnp.float32)[:, :, jnp.newaxis, jnp.newaxis] * inv_freqs[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    angles = (
+        position.astype(jnp.float32)[:, :, jnp.newaxis]
+        * inv_freqs[jnp.newaxis, jnp.newaxis, :]
     )
+    if self.freqs_sharding is not None:
+      angles = jax.lax.with_sharding_constraint(angles, self.freqs_sharding)
+    return angles[:, :, jnp.newaxis, :]
 
   def _gather_freqs_cis(self, position: Array) -> Array:
     """Looks up precomputed complex frequencies, returning shape [B, S, 1, half_dim]."""
-    freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
-    return freqs[:, :, jnp.newaxis, :]
+    wrapped_position = jnp.where(
+        position < 0, position + self.max_position_embeddings, position
+    )
+    clamped_position = jnp.clip(
+        wrapped_position, 0, self.max_position_embeddings - 1
+    )
+    return jnp.exp(1j * self._position_angles(clamped_position, self.inv_freqs))
 
   def _cos_sin(self, position: Array, repeat_interleave: bool = False) -> tuple[Array, Array]:
     """Returns float32 (cos, sin) of the RoPE angles, each of shape [B, S, 1, half_dim].
