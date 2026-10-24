@@ -47,16 +47,28 @@ def _elastic_iter():
 class _FakeRemote(grain_utility.RemoteIteratorWrapper):
   """Stands in for RemoteIteratorWrapper (colocated-python save/restore by step)."""
 
-  def __init__(self):
+  def __init__(self, events=None):
     # pylint: disable=super-init-not-called
     self.saved_step = None
     self.restored_step = None
+    self.events = [] if events is None else events
 
   def save_state(self, step):
     self.saved_step = step
+    self.events.append("saved")
 
   def restore_state(self, step):
     self.restored_step = step
+
+
+class _FakeDirectory:
+  """Stands in for the directory Orbax hands to `save`, which Orbax may not have created yet."""
+
+  def __init__(self, events):
+    self.events = events
+
+  async def await_creation(self):
+    self.events.append("created")
 
 
 async def _drive(stateful_coro):
@@ -130,10 +142,27 @@ class TestGrainCheckpointable(unittest.TestCase):
 
   def test_remote_forwards_step(self):
     wrapper = _FakeRemote()
-    asyncio.run(_drive(GrainCheckpointable(wrapper, step=7).save(None)))
+    asyncio.run(_drive(GrainCheckpointable(wrapper, step=7).save(_FakeDirectory(wrapper.events))))
     asyncio.run(_drive(GrainCheckpointable(wrapper, step=9).load(None)))
     self.assertEqual(wrapper.saved_step, 7)
     self.assertEqual(wrapper.restored_step, 9)
+
+  def test_remote_saves_into_the_created_directory_in_the_blocking_phase(self):
+    """The colocated hosts write into the directory, so Orbax must create it first (it fails on existing ones).
+
+    The write still happens before `save` returns, while training waits, so the saved position matches the step.
+    """
+    events = []
+    wrapper = _FakeRemote(events)
+
+    async def save():
+      background = await GrainCheckpointable(wrapper, step=7).save(_FakeDirectory(events))
+      events.append("returned")
+      await background
+
+    asyncio.run(save())
+
+    self.assertEqual(events, ["created", "saved", "returned"])
 
 
 # pylint: disable=protected-access

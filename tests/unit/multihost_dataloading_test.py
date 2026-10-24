@@ -276,6 +276,18 @@ class MultihostDataloadingTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "elastic=True"):
       wrapper.set_state({"global_next_index": 0})
 
+  def test_remote_iterator_wrapper_save_state_waits_for_the_colocated_write(self):
+    """Colocated calls run asynchronously; the state must be written before Orbax commits the checkpoint."""
+    wrapper = multihost_dataloading.RemoteIteratorWrapper.__new__(multihost_dataloading.RemoteIteratorWrapper)
+    wrapper.cpu_mesh = Mesh(np.array(jax.devices()[:1]), ("x",))
+    wrapper.local_iterator = mock.Mock()
+    pending_write = wrapper.local_iterator.save_state.return_value
+
+    wrapper.save_state(step=5)
+
+    wrapper.local_iterator.save_state.assert_called_once()
+    pending_write.block_until_ready.assert_called_once()
+
   def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
     """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""
     from jax.experimental.colocated_python.obj_backend import SINGLETON_OBJECT_STORE, _ObjectState

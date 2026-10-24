@@ -537,7 +537,8 @@ class RemoteIteratorWrapper:
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
     step_array = jnp.array(step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
+    # Colocated calls run asynchronously: wait for the write, so that it is done before Orbax commits the checkpoint.
+    jax.block_until_ready(self.local_iterator.save_state(step_array))  # pyrefly: ignore[missing-attribute]
 
   def restore_state(self, step):
     replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
