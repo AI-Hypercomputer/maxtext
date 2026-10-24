@@ -692,6 +692,42 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic(self, mock_load):
+    """source_checkpoint_layout=safetensors_dynamic loads through the training loader, not Orbax."""
+
+    def fake_load(*args, **kwargs):
+      abstract_state = args[5]
+      return None, jax.tree.map(lambda x: jax.device_put(jnp.full(x.shape, 0.5, x.dtype), x.sharding), abstract_state)
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic")
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+
+    self.assertEqual(mock_load.call_args.kwargs["source_checkpoint_layout"], "safetensors_dynamic")
+    self.assertEqual(mock_load.call_args.args[2], "/fake/hf_repo")
+    for leaf in jax.tree.leaves(nnx.state(model, nnx.Param)):
+      np.testing.assert_array_equal(leaf, np.full(leaf.shape, 0.5, leaf.dtype))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic_frees_initial_weights(self, mock_load):
+    """The model's initial weights are deleted before the loader places its copy."""
+    model = model_creation_utils.from_pretrained(_make_config(), self.mesh)
+    initial = jax.tree.leaves(nnx.state(model, nnx.Param))
+    deleted_before_load = []
+
+    def fake_load(*args, **kwargs):
+      deleted_before_load.extend(leaf.is_deleted() for leaf in initial)
+      abstract_state = args[5]
+      return None, jax.tree.map(lambda x: jax.device_put(jnp.zeros(x.shape, x.dtype), x.sharding), abstract_state)
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic")
+    model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), cfg)  # pylint: disable=protected-access
+
+    self.assertTrue(initial)
+    self.assertTrue(all(deleted_before_load))
+
   # ---- checkpoint loading: mocked paths ----
 
   def _make_linen_metadata_mock(self):
@@ -996,6 +1032,20 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
       model_creation_utils.verify_and_sync_scan_layers(cfg)
 
     self.assertIn("Configuration mismatch", str(context.exception))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_safetensors_dynamic_skips_metadata(self, mock_load_meta):
+    """A safetensors_dynamic source has no Orbax metadata to read."""
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="hf://org/repo",
+        source_checkpoint_layout="safetensors_dynamic",
+    )
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    mock_load_meta.assert_not_called()
+    self.assertIs(synced_cfg, cfg)
 
   @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
   @patch("maxtext.utils.model_creation_utils.max_logging.log")
