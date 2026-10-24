@@ -111,6 +111,10 @@ class GrainCheckpointable(ocp.StatefulCheckpointable):
 
     # RemoteIteratorWrapper handles checkpointing via colocated python
     if isinstance(item, RemoteIteratorWrapper):
+      # The colocated hosts write their state into `directory`, so let Orbax create it first: Orbax creates each
+      # checkpointable directory with `exist_ok=False` and deletes a step directory it finds, so a directory the
+      # colocated hosts created first fails the save with `FileExistsError` or loses their file.
+      await directory.await_creation()
       item.save_state(self._step)
       return no_op()
 
