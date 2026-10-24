@@ -40,6 +40,7 @@ from maxtext.utils.sharding import (
     logical_to_mesh,
     get_logical_axis_rules,
 )
+from maxtext.utils import jax_reduced_compat
 from maxtext.utils import pipeline_utils
 
 
@@ -96,6 +97,13 @@ class PipelineBase(nnx.Module):
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
     )
+    # pipeline_unreduced_weight_grads: the token axes the gathered stage weights are tagged `reduced` over, so their
+    # per-microbatch gradients stay partial sums until the transpose of the weight prefetch (see
+    # pipeline_utils.tag_weight_grad_reduced).
+    self.weight_grad_reduced_axes = frozenset()
+    if self.config.shard_mode == ShardMode.EXPLICIT and self.config.pipeline_unreduced_weight_grads:
+      jax_reduced_compat.apply()
+      self.weight_grad_reduced_axes = pipeline_utils.weight_grad_reduced_axes(self.mesh, get_logical_axis_rules())
 
   def need_circ_storage(self):
     return (
@@ -1201,6 +1209,7 @@ class NNXCircularPipeline(PipelineBase):
         )
 
       spec_leaves = jax.tree_util.tree_leaves(bsw_partition_specs, is_leaf=pipeline_utils.is_spec_leaf)
+      spec_leaves = self._tag_bsw_specs(spec_leaves, repeat_weights)
       spec_iter = iter(spec_leaves)
       return jax.tree.map(lambda w: _apply_sharding_hint(w, next(spec_iter)), repeat_weights)
 
@@ -1210,6 +1219,23 @@ class NNXCircularPipeline(PipelineBase):
     if use_shardmap:
       return _from_repeat_weights_to_bsw_shardmap(repeat_weights, physical_partition_spec, axes_to_gather=axes_to_gather)
     return _from_repeat_weights_to_bsw_hint(repeat_weights)
+
+  def _tag_bsw_specs(self, spec_leaves, repeat_weights):
+    """With pipeline_unreduced_weight_grads, tags the BSW specs of the differentiable weights `reduced`.
+
+    Only float nnx.Param leaves are tagged: the non-differentiated state staged alongside them (MoEBiasVar routing
+    bias, FP8 amax history) mixes with activations in ways a reduced operand may not.
+    """
+    if not self.weight_grad_reduced_axes:
+      return spec_leaves
+    variables = jax.tree.leaves(repeat_weights, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    assert len(variables) == len(spec_leaves), (len(variables), len(spec_leaves))
+    return [
+        pipeline_utils.tag_weight_grad_reduced(pspec, self.weight_grad_reduced_axes)
+        if isinstance(v, nnx.Param) and jnp.issubdtype(v.get_value().dtype, jnp.floating)
+        else pspec
+        for pspec, v in zip(spec_leaves, variables)
+    ]
 
   def cast_bsw_params(self, weights):
     """With `pipeline_bsw_in_compute_dtype`, returns `weights` with float nnx.Param leaves cast to `config.dtype`.
@@ -1276,7 +1302,11 @@ class NNXCircularPipeline(PipelineBase):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     stage0_repeat_id = jnp.maximum(loop_iteration, 0) // self.config.num_pipeline_microbatches
 
-    if bsw_partition_specs is not None:
+    # With pipeline_unreduced_weight_grads the slots are tagged `reduced`, and the transpose of a select inside a
+    # check_vma shard_map pairs the `unreduced` cotangent with untagged zeros, which JAX rejects; the plain vmapped
+    # select below differentiates cleanly. Under explicit sharding it is just as local: both slots and the output
+    # share one explicit sharding.
+    if bsw_partition_specs is not None and not self.weight_grad_reduced_axes:
       bsw_treedef = jax.tree.structure(bsw[0])
 
       partition_spec_treedef = jax.tree.structure(bsw_partition_specs, is_leaf=pipeline_utils.is_spec_leaf)

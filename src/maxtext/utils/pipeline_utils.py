@@ -174,6 +174,38 @@ def remove_mesh_axis_from_spec(spec, axis_name):
   return P(*(remove_mesh_axis(p, axis_name) for p in spec.partitions), unreduced=spec.unreduced, reduced=spec.reduced)
 
 
+def weight_grad_reduced_axes(mesh, rules):
+  """Mesh axes (of size > 1, other than 'stage') that a stage's activation tokens are sharded over.
+
+  A stage weight's gradient sums over the tokens, so on each device it is a partial sum over exactly these axes.
+  """
+  from maxtext.utils.sharding import logical_to_mesh_axes, mesh_axes_for_dim  # pylint: disable=import-outside-toplevel
+
+  axes = set()
+  for logical_axis in ("activation_batch", "activation_length"):
+    spec = logical_to_mesh_axes((logical_axis,), mesh, rules=rules)
+    if spec is not None and spec.partitions:
+      axes.update(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+  axes.discard("stage")
+  return frozenset(axes)
+
+
+def tag_weight_grad_reduced(spec, reduced_axes):
+  """Tags a gathered stage weight's spec `reduced` over the token axes it is not itself sharded on.
+
+  The weight's cotangent then comes out `unreduced` over them (each device's partial sum over the tokens it saw),
+  so accumulating it over microbatches needs no communication; the reduction runs where the tag was applied.
+  """
+  if not isinstance(spec, P) or not reduced_axes:
+    return spec
+  used = set()
+  for dim_axes in spec.partitions:
+    if dim_axes is not None and dim_axes is not P.UNCONSTRAINED:
+      used.update(dim_axes if isinstance(dim_axes, tuple) else (dim_axes,))
+  reduced = frozenset(reduced_axes) - used
+  return spec.update(reduced=spec.reduced | reduced) if reduced else spec
+
+
 def spec_partitions(x):
   """Returns the per-dimension mesh axes of `x`'s (explicit) sharding, padded with None to `x.ndim`."""
   partitions = list(jax.typeof(x).sharding.spec.partitions)

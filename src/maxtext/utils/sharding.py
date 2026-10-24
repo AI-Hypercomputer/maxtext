@@ -258,7 +258,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   if spec is None:
     return None
   new_spec = []  # type: ignore
-  for s in spec:
+  for s in spec.partitions:  # a spec carrying reduced/unreduced axes refuses iteration
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
@@ -317,7 +317,7 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   if spec is None or mesh is None or not shape:
     return spec
   new_spec = []
-  for i, s in enumerate(spec):
+  for i, s in enumerate(spec.partitions):  # a tagged spec refuses iteration
     if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)
     else:
@@ -612,7 +612,10 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
     A set of strings, where each string is a mesh axis name used by the
     tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
-  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
+  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')). Read `.partitions`: a spec
+  # carrying reduced/unreduced axes refuses iteration.
+  if isinstance(tensor_sharding_spec, P):
+    tensor_sharding_spec = tensor_sharding_spec.partitions
   tensor_sharding_spec = sum(
       [
           [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
