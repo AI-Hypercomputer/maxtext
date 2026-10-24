@@ -103,6 +103,8 @@ class QuantizationType(str, Enum):
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
+  JAX_MXFP8 = "jax_mxfp8"
+  JAX_MXFP4 = "jax_mxfp4"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
   SERVE_FP8_WEIGHT = "serve_fp8_weight"
@@ -4736,6 +4738,37 @@ class MaxTextConfig(
       )
     return self
 
+  def _validate_jax_mx_quantization(self) -> None:
+    """Rejects jax_mxfp8 and jax_mxfp4 settings that would silently leave GEMMs unquantized or fail obscurely in JAX."""
+    name = QuantizationType(self.quantization).value
+    if self.use_qwix_quantization:
+      raise ValueError(f"quantization='{name}' does not support use_qwix_quantization=True.")
+    if self.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(f"quantization='{name}' does not support shard_mode='explicit'.")
+    if self.num_experts > 1:
+      raise ValueError(f"quantization='{name}' does not support MoE models (num_experts > 1).")
+    # jax.nn's MX quantizer asserts at trace time, without a message, that every
+    # contracting dim is a multiple of its 32-element block. The weight gradients
+    # contract over the tokens, hence max_target_length.
+    block = 32
+    multiples = {
+        "emb_dim": self.emb_dim,
+        "mlp_dim": self.mlp_dim,
+        "num_query_heads * head_dim": self.num_query_heads * self.head_dim,
+        "num_kv_heads * head_dim": self.num_kv_heads * self.head_dim,
+        "max_target_length": self.max_target_length,
+    }
+    for label, value in multiples.items():
+      if value % block != 0:
+        raise ValueError(f"quantization='{name}' needs {label} to be a multiple of {block}, got {value}.")
+    if self.hardware not in ("gpu", "gpu_multiprocess"):
+      logger.warning(
+          "quantization='%s' has native MX kernels on GPU only; on hardware='%s' JAX dequantizes before "
+          "each GEMM, so steps are slower than bf16.",
+          name,
+          self.hardware,
+      )
+
   @model_validator(mode="after")
   def resolve_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
     """Resolve the tri-state flag, and reject it where it cannot be honored.
@@ -5090,6 +5123,8 @@ class MaxTextConfig(
       if self.quantization not in (
           "fp8",
           "nanoo_fp8",
+          "jax_mxfp8",
+          "jax_mxfp4",
       ) and not self.quantization.startswith("te_"):
         logger.warning(
             "WARNING: AQT quantization is deprecated and will be removed in a future release. "
@@ -6512,6 +6547,9 @@ class MaxTextConfig(
             "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
             "counterparts) to 1, or turn off `shard_optimizer_over_data`."
         )
+
+    if self.quantization in ("jax_mxfp8", "jax_mxfp4"):
+      self._validate_jax_mx_quantization()
 
     # Diloco params
     # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
