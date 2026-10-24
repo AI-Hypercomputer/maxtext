@@ -224,6 +224,67 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+def _repeat_major_positions(
+    sort_indices: jax.Array, num_experts_per_tok: int
+) -> jax.Array:
+  """Maps token-major `(tokens * topk,)` indices to repeat-major `(topk, tokens)` flat positions."""
+  num_tokens = sort_indices.shape[0] // num_experts_per_tok
+  return (sort_indices % num_experts_per_tok) * num_tokens + (
+      sort_indices // num_experts_per_tok
+  )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _repeat_and_sort_activations(
+    inputs_2d: jax.Array, sort_indices: jax.Array, num_experts_per_tok: int
+) -> jax.Array:
+  """Gathers token activations per expert without materializing a token-major repeat buffer."""
+  with jax.named_scope("sort_activations"):
+    return inputs_2d[sort_indices // num_experts_per_tok, ...]
+
+
+def _repeat_and_sort_activations_fwd(
+    inputs_2d: jax.Array, sort_indices: jax.Array, num_experts_per_tok: int
+) -> tuple[jax.Array, tuple[jax.Array, int]]:
+  """Forward pass of `_repeat_and_sort_activations`."""
+  return (
+      _repeat_and_sort_activations(
+          inputs_2d, sort_indices, num_experts_per_tok
+      ),
+      (sort_indices, inputs_2d.shape[0]),
+  )
+
+
+def _repeat_and_sort_activations_bwd(
+    num_experts_per_tok: int,
+    residuals: tuple[jax.Array, int],
+    grads: jax.Array,
+) -> tuple[jax.Array, None]:
+  """Backward pass of `_repeat_and_sort_activations` using repeat-major `(topk, tokens)` layout."""
+  sort_indices, num_tokens = residuals
+  repeat_major_sort_indices = _repeat_major_positions(
+      sort_indices, num_experts_per_tok
+  )
+  unsorted_grads = _sort_activations(
+      grads, jnp.argsort(repeat_major_sort_indices), use_custom_vjp=True
+  )
+  reshaped_grads = unsorted_grads.reshape(
+      (num_experts_per_tok, num_tokens, *grads.shape[1:])
+  )
+  grad_inputs = jax.lax.reduce(
+      reshaped_grads,
+      jnp.asarray(0, dtype=grads.dtype),
+      jax.lax.add,
+      (0,),
+  )
+  return grad_inputs, None
+
+
+_repeat_and_sort_activations.defvjp(
+    _repeat_and_sort_activations_fwd, _repeat_and_sort_activations_bwd
+)
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
 def take_along_last_axis_dense_vjp(x: jax.Array, indices: jax.Array, num_classes: int) -> jax.Array:
   """`jnp.take_along_axis(x, indices, axis=-1)` whose backward is dense rather than a scatter-add.
@@ -1740,6 +1801,10 @@ class RoutedMoE(nnx.Module):
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+      elif use_custom_sort_vjp and self.num_experts_per_tok > 1:
+        sorted_inputs = _repeat_and_sort_activations(
+            inputs_2d, sorted_selected_experts, self.num_experts_per_tok
+        )
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1871,16 +1936,24 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
       )
     else:
+      use_repeat_major = use_custom_sort_vjp and self.num_experts_per_tok > 1
+      if use_repeat_major:
+        unsort_target_indices = _repeat_major_positions(
+            sorted_selected_experts, self.num_experts_per_tok
+        )
+      else:
+        unsort_target_indices = sorted_selected_experts
       unsort_intermediate = _sort_activations(
           intermediate,
-          jnp.argsort(sorted_selected_experts),
+          jnp.argsort(unsort_target_indices),
           use_custom_sort_vjp,
       )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
-      reshaped_intermediate = jnp.reshape(
-          unsort_intermediate,
-          (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
-      )
+      if use_repeat_major:
+        target_shape = (self.num_experts_per_tok, reshaped_weights.shape[0], -1)
+      else:
+        target_shape = (reshaped_weights.shape[0], self.num_experts_per_tok, -1)
+      reshaped_intermediate = jnp.reshape(unsort_intermediate, target_shape)
       with jax.named_scope("weight_sum"):
         matmul_precision = jax.lax.Precision(self.config.matmul_precision)
         if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
@@ -1889,12 +1962,20 @@ class RoutedMoE(nnx.Module):
         if self.config.float32_weight_sum:
           reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
           reshaped_weights = reshaped_weights.astype(jnp.float32)
-        output = jnp.einsum(
-            "BKE,BK -> BE",
-            reshaped_intermediate,
-            reshaped_weights,
-            precision=matmul_precision,
-        )
+        if use_repeat_major:
+          weights_kb = jax.lax.broadcast_in_dim(
+              reshaped_weights.T,
+              reshaped_intermediate.shape,
+              (0, 1),
+          )
+          output = jnp.sum(reshaped_intermediate * weights_kb, axis=0)
+        else:
+          output = jnp.einsum(
+              "BKE,BK -> BE",
+              reshaped_intermediate,
+              reshaped_weights,
+              precision=matmul_precision,
+          )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   @staticmethod
