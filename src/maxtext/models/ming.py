@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""inclusionAI Ming (BailingMoeV3 audio) model: hybrid KDA/MLA MoE decoder.
+"""inclusionAI Ming (BailingMoeV3 audio) model: hybrid KDA/MLA MoE decoder + whisper audio encoder.
 
 Reference: https://huggingface.co/inclusionAI/Ming-3.0-audio-tiny (`modeling_bailing_moe_v3.py`,
 `modeling_bailing_moe_v3_audio.py`).
@@ -21,6 +21,8 @@ Text decoder layer `i` (cycle length `inhomogeneous_layer_cycle_interval`, 4 for
   * attention: gated MLA when `(i + 1) % cycle == 0`, Kimi Delta Attention (KDA) otherwise.
   * MLP: dense SwiGLU for `i < first_num_dense_layers`, DeepSeek-style sigmoid-routed MoE otherwise.
 
+Audio encoder: OpenAI-whisper encoder (no 30 s padding) followed by a 3x strided Conv1d + linear
+projector whose outputs are L2-normalized and scattered into `<|audio_pad|>` token positions.
 """
 
 # pylint: disable=arguments-differ
@@ -678,3 +680,222 @@ class MingScannableBlock(nnx.Module):
           y, decoder_segment_ids, decoder_positions, deterministic, model_mode, previous_chunk=previous_chunk, slot=slot
       )
     return y, kv_cache
+
+
+# -----------------------------------------
+# Whisper audio encoder + projector
+# -----------------------------------------
+
+
+def exact_gelu(x: Array) -> Array:
+  """torch.nn.GELU() (erf form)."""
+  return jax.nn.gelu(x, approximate=False)
+
+
+class MingWhisperAttention(nnx.Module):
+  """whisper.model.MultiHeadAttention (key projection has no bias), bidirectional, no mask."""
+
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+    self.config = config
+    d = config.d_model_for_audio
+    self.num_heads = config.encoder_attention_heads_for_audio
+    self.head_dim = d // self.num_heads
+
+    def proj(use_bias):
+      return DenseGeneral(
+          in_features_shape=d,
+          out_features_shape=d,
+          use_bias=use_bias,
+          dtype=config.dtype_mm,
+          weight_dtype=config.weight_dtype,
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
+
+    self.query = proj(True)
+    self.key = proj(False)
+    self.value = proj(True)
+    self.out = proj(True)
+
+  def __call__(self, x: Array) -> Array:
+    b, t, d = x.shape
+    q = self.query(x).reshape(b, t, self.num_heads, self.head_dim)
+    k = self.key(x).reshape(b, t, self.num_heads, self.head_dim)
+    v = self.value(x).reshape(b, t, self.num_heads, self.head_dim)
+    hp = lax.Precision.HIGHEST
+    logits = jnp.einsum("bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32), precision=hp)
+    probs = jax.nn.softmax(logits * (self.head_dim**-0.5), axis=-1)
+    o = jnp.einsum("bhqk,bkhd->bqhd", probs, v.astype(jnp.float32), precision=hp)
+    return self.out(o.reshape(b, t, d).astype(x.dtype))
+
+
+class MingWhisperBlock(nnx.Module):
+  """whisper.model.ResidualAttentionBlock (encoder, no cross-attention)."""
+
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+    d = config.d_model_for_audio
+
+    def ln():
+      return nnx.LayerNorm(
+          num_features=d, epsilon=1e-5, dtype=config.dtype_mm, param_dtype=config.weight_dtype, rngs=rngs
+      )
+
+    def dense(i, o):
+      return DenseGeneral(
+          in_features_shape=i,
+          out_features_shape=o,
+          use_bias=True,
+          dtype=config.dtype_mm,
+          weight_dtype=config.weight_dtype,
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
+
+    self.attn_ln = ln()
+    self.attn = MingWhisperAttention(config, rngs=rngs)
+    self.mlp_ln = ln()
+    self.mlp_fc1 = dense(d, config.encoder_ffn_dim_for_audio)
+    self.mlp_fc2 = dense(config.encoder_ffn_dim_for_audio, d)
+
+  def __call__(self, x: Array) -> Array:
+    x = x + self.attn(self.attn_ln(x))
+    x = x + self.mlp_fc2(exact_gelu(self.mlp_fc1(self.mlp_ln(x))))
+    return x
+
+
+def whisper_conv_out_length(length: int) -> int:
+  """Length after conv1 (k3, s1, p1) and conv2 (k3, s2, p1)."""
+  length = (length + 2 * 1 - 3) // 1 + 1
+  return (length + 2 * 1 - 3) // 2 + 1
+
+
+def projector_out_length(length: int, num_convs: int) -> int:
+  """Length after `num_convs` Conv1d(k3, s2, p1) downsamplers."""
+  for _ in range(num_convs):
+    length = (length + 2 * 1 - 3) // 2 + 1
+  return length
+
+
+def audio_chunk_lengths(mel_length: int, chunk_size: int) -> list[int]:
+  """Static mel lengths of the independent whisper chunks (HF `_get_audio_features`)."""
+  return [min(chunk_size, mel_length - start) for start in range(0, mel_length, chunk_size)]
+
+
+class MingWhisperEncoder(nnx.Module):
+  """WhisperEncoderForBailing: whisper encoder without 30 s padding, applied per <=30 s chunk.
+
+  Input: log-mel features `[1, T_mel, n_mels]`. Output: per-chunk features `[num_chunks, L, d_model]`
+  where chunks are zero-padded to the longest chunk like `torch.nn.utils.rnn.pad_sequence` (no mask).
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    d = config.d_model_for_audio
+    self.conv1 = nnx.Conv(
+        in_features=config.num_mel_bins_for_audio,
+        out_features=d,
+        kernel_size=(3,),
+        padding=((1, 1),),
+        use_bias=True,
+        dtype=config.dtype_mm,
+        param_dtype=config.weight_dtype,
+        precision=config.matmul_precision,
+        rngs=rngs,
+    )
+    self.conv2 = nnx.Conv(
+        in_features=d,
+        out_features=d,
+        kernel_size=(3,),
+        strides=(2,),
+        padding=((1, 1),),
+        use_bias=True,
+        dtype=config.dtype_mm,
+        param_dtype=config.weight_dtype,
+        precision=config.matmul_precision,
+        rngs=rngs,
+    )
+    self.positional_embedding = nnx.Param(
+        jnp.zeros((config.max_source_positions_for_audio, d), dtype=config.weight_dtype)
+    )
+    for i in range(config.encoder_layers_for_audio):
+      setattr(self, f"blocks_{i}", MingWhisperBlock(config, rngs=rngs))
+    self.ln_post = nnx.LayerNorm(
+        num_features=d, epsilon=1e-5, dtype=config.dtype_mm, param_dtype=config.weight_dtype, rngs=rngs
+    )
+
+  def __call__(self, audio_features: Array, deterministic: bool = False) -> Array:
+    del deterministic
+    assert audio_features.ndim == 3 and audio_features.shape[0] == 1, "expected mel features [1, T_mel, n_mels]"
+    mel_length = audio_features.shape[1]
+    lengths = audio_chunk_lengths(mel_length, self.config.ming_audio_chunk_size)
+    max_len = max(lengths)
+    chunks = []
+    for i, n in enumerate(lengths):
+      start = i * self.config.ming_audio_chunk_size
+      c = audio_features[0, start : start + n]
+      chunks.append(jnp.pad(c, ((0, max_len - n), (0, 0))))
+    x = jnp.stack(chunks).astype(self.config.dtype_mm)  # [num_chunks, max_len, n_mels]
+
+    x = exact_gelu(self.conv1(x))
+    x = exact_gelu(self.conv2(x))
+    x = x + self.positional_embedding[...][: x.shape[1]].astype(x.dtype)
+    for i in range(self.config.encoder_layers_for_audio):
+      x = getattr(self, f"blocks_{i}")(x)
+    return self.ln_post(x)
+
+
+class MingAudioProjector(nnx.Module):
+  """`linear_proj_audio`: [Conv1d(k3, s2, p1) + GELU] x num_convs -> Linear, then L2-normalize."""
+
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+    self.config = config
+    in_dim = config.d_model_for_audio
+    out_dim = config.output_dim_for_audio
+    for i in range(config.num_conv_layers_for_audio):
+      setattr(
+          self,
+          f"conv_{i}",
+          nnx.Conv(
+              in_features=in_dim if i == 0 else out_dim,
+              out_features=out_dim,
+              kernel_size=(3,),
+              strides=(2,),
+              padding=((1, 1),),
+              use_bias=True,
+              dtype=config.dtype_mm,
+              param_dtype=config.weight_dtype,
+              precision=config.matmul_precision,
+              rngs=rngs,
+          ),
+      )
+    self.linear = DenseGeneral(
+        in_features_shape=out_dim,
+        out_features_shape=out_dim,
+        use_bias=True,
+        dtype=config.dtype_mm,
+        weight_dtype=config.weight_dtype,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+
+  def __call__(self, encoded: Array, mel_length: int | None = None) -> Array:
+    """Projects `[num_chunks, L, d_audio]` encoder outputs to `[1, num_audio_tokens, emb_dim]`."""
+    x = encoded
+    for i in range(self.config.num_conv_layers_for_audio):
+      x = exact_gelu(getattr(self, f"conv_{i}")(x))
+    x = self.linear(x)
+
+    if mel_length is None:
+      valid = [x.shape[1]] * x.shape[0]
+    else:
+      valid = [
+          projector_out_length(whisper_conv_out_length(n), self.config.num_conv_layers_for_audio)
+          for n in audio_chunk_lengths(mel_length, self.config.ming_audio_chunk_size)
+      ]
+    x = jnp.concatenate([x[i, :n] for i, n in enumerate(valid)], axis=0)[None]
+    if self.config.ming_norm_audio_embeds:
+      xf = x.astype(jnp.float32)
+      norm = jnp.sqrt(jnp.sum(xf * xf, axis=-1, keepdims=True))
+      x = (xf / jnp.maximum(norm, 1e-12)).astype(x.dtype)
+    return x
