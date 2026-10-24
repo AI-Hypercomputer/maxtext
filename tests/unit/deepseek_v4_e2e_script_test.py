@@ -65,6 +65,15 @@ class DeepSeekV4E2EScriptTest(unittest.TestCase):
       )
 
   def test_indexer_topk_defaults(self):
+    content_284b = SCRIPT_PATHS["v4_284b_2"].read_text()
+    match_284b = re.search(r"INDEXER_TOPK[:=].*?(\d+)", content_284b)
+    self.assertIsNotNone(match_284b, "INDEXER_TOPK default not found in v4-284b/2_test_deepseek.sh")
+    self.assertEqual(
+        match_284b.group(1),
+        "512",
+        f"v4-284b INDEXER_TOPK should default to 512, got {match_284b.group(1)}",
+    )
+
     content_1600b = SCRIPT_PATHS["v4_1600b_2"].read_text()
     match_1600b = re.search(r"INDEXER_TOPK[:=].*?(\d+)", content_1600b)
     self.assertIsNotNone(match_1600b, "INDEXER_TOPK default not found in v4-1600b/2_test_deepseek.sh")
@@ -73,6 +82,19 @@ class DeepSeekV4E2EScriptTest(unittest.TestCase):
         "1024",
         f"v4-1600b INDEXER_TOPK should default to 1024, got {match_1600b.group(1)}",
     )
+
+  def test_v4_e2e_no_legacy_transformers_pin_and_284b_golden(self):
+    for key in ("v4_284b_2", "v4_1600b_2"):
+      content = SCRIPT_PATHS[key].read_text()
+      self.assertNotIn(
+          "transformers==4.57.3",
+          content,
+          f"Obsolete transformers==4.57.3 pin found in {key}; downgrades huggingface_hub and breaks datasets",
+      )
+    c2_284b = SCRIPT_PATHS["v4_284b_2"].read_text()
+    self.assertIn("gs://maxtext-test-assets/golden_data_${MODEL_NAME}-topk512.jsonl", c2_284b)
+    self.assertIn("Effective --golden_logits_path=", c2_284b)
+    self.assertIn('--max_kl_div="${MAX_KL_DIV:-0.42}"', c2_284b)
 
   def test_no_comments_in_backslash_continuations(self):
     for key, path in SCRIPT_PATHS.items():
