@@ -85,6 +85,8 @@ class Glm5Model(nnx.Module):
     self.remat_policy: Any = None
 
     cfg = self.config
+    if cfg.first_k_dense_replace == 0:
+      raise ValueError("first_k_dense_replace must be greater than 0.")
     dt, p_dt = getattr(jnp, cfg.dtype), getattr(jnp, cfg.weight_dtype)
     self.embed_tokens = Glm5Embedding(cfg, rngs=rngs, sharding=sharding)
 
@@ -144,12 +146,33 @@ class Glm5Model(nnx.Module):
     if self.sharding is not None:
       hidden_streams = self.sharding.constrain(hidden_streams, "hidden_streams", ("batch", "length", None, "embed"))
     cfg = self.config
+
+    # Synchronize enable_debug_stats to child layers and super_block so
+    # model.config is single source of truth at call time (T40).
+    def _sync_cfg(m):
+      if m.config.enable_debug_stats != cfg.enable_debug_stats:
+        m.config = dataclasses.replace(m.config, enable_debug_stats=cfg.enable_debug_stats)
+
+    for l in self.prefix_layers:
+      _sync_cfg(l)
+    if self.super_block is not None:
+      _sync_cfg(self.super_block)
+      for s in range(4):
+        _sync_cfg(getattr(self.super_block, f"slot_{s}"))
+    for l in self.suffix_layers:
+      _sync_cfg(l)
+
     attention_mask = (decoder_segment_ids != 0) if decoder_segment_ids is not None else None
     keep_router_logits = bool(cfg.enable_debug_stats)
     router_logits_list: list[jax.Array] = []
+    router_topk_list: list[jax.Array] = []
     lb_stats = glm5_moe.init_moe_lb_stats(cfg.n_routed_experts)
 
+    layer_0_act: jax.Array | None = None
+    dsa_topk_indices_list: list[jax.Array] = []
+
     def _run_layers(layers, streams, cur_lb):
+      nonlocal layer_0_act
       for layer in layers:
         if self.remat_policy is not None:
           fn = jax.checkpoint(
@@ -157,9 +180,13 @@ class Glm5Model(nnx.Module):
               policy=self.remat_policy,
               prevent_cse=True,
           )
-          streams, r_logits, _, _ = fn(streams)
+          streams, r_logits, r_topk, idx_topk = fn(streams)
         else:
-          streams, r_logits, _, _ = layer(streams, decoder_segment_ids=decoder_segment_ids)
+          streams, r_logits, r_topk, idx_topk = layer(streams, decoder_segment_ids=decoder_segment_ids)
+        if idx_topk is not None:
+          dsa_topk_indices_list.append(idx_topk)
+        if layer_0_act is None:
+          layer_0_act = streams
         if r_logits is not None:
           cur_lb = glm5_moe.accumulate_moe_lb_stats(
               cur_lb,
@@ -170,11 +197,13 @@ class Glm5Model(nnx.Module):
           )
           if keep_router_logits:
             router_logits_list.append(r_logits)
+            router_topk_list.append(r_topk)
       return streams, cur_lb
 
-    hidden_streams, lb_stats = _run_layers(self.prefix_layers, hidden_streams, lb_stats)
+    if self.prefix_layers:
+      hidden_streams, lb_stats = _run_layers(self.prefix_layers, hidden_streams, lb_stats)
     if self.super_block is not None:
-      hidden_streams, sb_r, lb_stats, _, _ = glm5_scan.scan_super_blocks(
+      hidden_streams, sb_r, lb_stats, sb_rt, sb_idx = glm5_scan.scan_super_blocks(
           self.super_block,
           hidden_streams,
           decoder_segment_ids=decoder_segment_ids,
@@ -183,9 +212,16 @@ class Glm5Model(nnx.Module):
           return_router_logits=keep_router_logits,
           lb_stats=lb_stats,
       )
+      if sb_idx is not None:
+        for idx_item in sb_idx:
+          if idx_item is not None:
+            dsa_topk_indices_list.append(idx_item)
       if keep_router_logits:
         router_logits_list.extend(sb_r)
-    hidden_streams, lb_stats = _run_layers(self.suffix_layers, hidden_streams, lb_stats)
+        router_topk_list.extend(sb_rt)
+    if self.suffix_layers:
+      hidden_streams, lb_stats = _run_layers(self.suffix_layers, hidden_streams, lb_stats)
+    last_block_act = hidden_streams
     collapsed = self.hc_head(hidden_streams)
     normed = self.norm(collapsed)
     logits = self.lm_head(normed)
@@ -196,20 +232,31 @@ class Glm5Model(nnx.Module):
       moe_lb_loss = jnp.zeros((), dtype=jnp.float32)
     else:
       moe_lb_loss = glm5_moe.finalize_moe_lb_loss(lb_stats, cfg.n_routed_experts)
-    debug_stats = (
-        {
-            "hidden_norm_mean": jnp.mean(jnp.linalg.norm(normed, axis=-1)),
-            "logits_max": jnp.max(logits),
-            "logits_min": jnp.min(logits),
-        }
-        if cfg.enable_debug_stats
-        else {}
-    )
-    aux = {
+
+    router_topk_indices_list: list[jax.Array] = router_topk_list if cfg.enable_debug_stats else []
+
+    aux: dict[str, Any] = {
         "router_logits": (tuple(router_logits_list) if cfg.enable_debug_stats else ()),
         "moe_lb_loss": moe_lb_loss,
-        "debug_stats": debug_stats,
     }
+    if cfg.enable_debug_stats:
+      if layer_0_act is None:
+        raise RuntimeError("enable_debug_stats=True requires layer 0 activation, but" " layer_0_act was not captured.")
+      l0_f32 = layer_0_act.astype(jnp.float32)
+      last_f32 = last_block_act.astype(jnp.float32)
+      aux["debug_stats"] = {
+          "first_block_mean": jnp.mean(l0_f32),
+          "first_block_var": jnp.var(l0_f32),
+          "last_block_mean": jnp.mean(last_f32),
+          "last_block_var": jnp.var(last_f32),
+          "hidden_norm_mean": jnp.mean(jnp.linalg.norm(normed, axis=-1)),
+          "logits_max": jnp.max(logits),
+          "logits_min": jnp.min(logits),
+          "router_topk_indices": tuple(router_topk_indices_list),
+          "dsa_topk_indices": tuple(dsa_topk_indices_list),
+      }
+      aux["router_topk_indices"] = tuple(router_topk_indices_list)
+      aux["dsa_topk_indices"] = tuple(dsa_topk_indices_list)
     return Glm5Output(logits=logits, hidden_states=normed, mtp_logits=None, aux=aux)
 
   def __call__(
