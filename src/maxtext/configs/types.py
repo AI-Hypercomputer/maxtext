@@ -2821,11 +2821,23 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       1024,
       description=("Feature block size for backward pass of MHC Pallas kernel."),
   )
+  te_mhc: bool = Field(
+      False,
+      description=(
+          "Use Transformer Engine's fused Triton kernels for Sinkhorn mHC on NVIDIA GPUs."
+          " Requires mhc_expansion_rate=4 and enable_mhc_lite=False."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
     if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
       raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
+    if self.te_mhc:
+      if self.mhc_expansion_rate != 4:
+        raise ValueError(f"`te_mhc=True` requires `mhc_expansion_rate=4`, got {self.mhc_expansion_rate}.")
+      if self.enable_mhc_lite or self.use_mhc_pallas_kernel:
+        raise ValueError("`te_mhc=True` requires `enable_mhc_lite=False` and `use_mhc_pallas_kernel=False`.")
     return self
 
 
@@ -5483,6 +5495,8 @@ class MaxTextConfig(
               "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
               "with `use_tokamax_splash=True`."
           )
+    if self.te_mhc and self.hardware not in ("gpu", "gpu_multiprocess"):
+      raise ValueError("`te_mhc=True` requires NVIDIA GPU hardware.")
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
