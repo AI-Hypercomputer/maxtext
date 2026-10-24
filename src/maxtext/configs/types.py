@@ -771,6 +771,16 @@ class LogitsAndLoss(BaseModel):
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
+  cross_entropy_recompute_softmax: bool = Field(
+      False,
+      description=(
+          "Recompute the softmax over the vocabulary in the cross-entropy backward pass instead of saving it from "
+          "the forward pass. The forward pass then keeps only the logits and a per-token log-normalizer for the "
+          "backward pass, saving one [batch, length, vocab] array (float32 unless the logits are lower precision) "
+          "at the cost of one extra exp over the logits in the backward pass. The gradients are the same up to "
+          "floating-point rounding."
+      ),
+  )
   num_vocab_tiling: int = Field(
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",

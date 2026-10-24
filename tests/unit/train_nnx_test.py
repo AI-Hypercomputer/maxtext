@@ -53,6 +53,7 @@ class _Cfg:
   micro_batch_size_to_eval_on: int = 2
   vocab_size: int = 8
   z_loss_multiplier: float = 0.0
+  cross_entropy_recompute_softmax: bool = False
   enable_dropout: bool = False
   use_multimodal: bool = False
   use_indexer: bool = False
