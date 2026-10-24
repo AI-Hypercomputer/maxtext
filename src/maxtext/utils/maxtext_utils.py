@@ -2156,8 +2156,10 @@ def create_device_mesh(config, devices=None):
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
     ep_size = getattr(config, "ici_expert_parallelism", 1)
     used_multislice_cuboid = False
+    # Per-slice EP cuboids for OLMoE3 only, so other models' multi-slice meshes are unchanged.
     if (
-        devices[0].platform == "tpu"
+        config.decoder_block == DecoderBlockType.OLMOE3
+        and devices[0].platform == "tpu"
         and num_devices_per_slice in (64, 128, 256, 512, 1024, 2048, 3072)
         and ep_size in (64, 128, 256)
         and "expert" in config.mesh_axes

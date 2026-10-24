@@ -79,10 +79,17 @@ def gradient_accumulation_loss_and_grad(
   # FSDP already consumes every device — in which case data parallelism is not active.
   param_mesh = jax.tree.leaves(params_shardings)[0].mesh
   data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
+  cast_params_to_compute_dtype = getattr(config, "cast_params_to_compute_dtype", False)
   if data_parallel_active:
+    # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
+    # traces its body against an AbstractMesh whose axis types are all Auto, and the
+    # annotations require Explicit axes. Keep plain params_shardings in the carry and
+    # apply the data-parallel all-reduce to the gradients after the scan instead.
     ga_params_shardings = params_shardings
     grad_shardings = params_shardings
-  elif config.shard_optimizer_over_data and param_mesh.shape.get("data", 1) > 1:
+  elif config.shard_optimizer_over_data and cast_params_to_compute_dtype and param_mesh.shape.get("data", 1) > 1:
+    # Opt-in (cast_params_to_compute_dtype): gather the ZeRO-1 params over "data" once, in the compute dtype,
+    # before the loop instead of inside every micro-batch.
 
     def _strip_data_axis(s):
       if not isinstance(s, NamedSharding):
@@ -111,7 +118,9 @@ def gradient_accumulation_loss_and_grad(
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
-  if config.shard_optimizer_over_data or getattr(config, "cast_params_to_compute_dtype", False):
+  if cast_params_to_compute_dtype:
+    # Same rule as train.py's GA=1 cast: large fp32 weights go to the compute dtype; router kernels (`gate`) and
+    # small tensors (norms, convs, decay parameters) stay fp32.
 
     def _cast_large_non_gate_to_compute_dtype(path, x):
       if not hasattr(x, "dtype") or x.dtype != jnp.float32 or x.size < (1 << 22):
@@ -121,6 +130,14 @@ def gradient_accumulation_loss_and_grad(
       return x.astype(getattr(config, "dtype", jnp.bfloat16))
 
     ga_params = jax.tree_util.tree_map_with_path(_cast_large_non_gate_to_compute_dtype, params)
+  elif config.shard_optimizer_over_data:
+
+    def convert_to_bf16(param):
+      if param.dtype == jnp.float32:
+        return param.astype(jnp.bfloat16)
+      return param
+
+    ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
   else:
     ga_params = params
 

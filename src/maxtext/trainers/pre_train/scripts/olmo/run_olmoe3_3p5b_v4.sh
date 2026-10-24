@@ -32,6 +32,11 @@
 #   - 1 x v4-256 (128 chips, 1.05M tok/step, DCN_DATA=1, ICI_DATA=1, ICI_EP=128):
 #       * Option A (olmoe3-3p5b-e256k8-sh2x): 1,860.0 ms steady mean (39.00% MFU, 4,404 tok/s/chip)
 #       * Baseline (olmoe3-3p5b): 2,371.0 ms steady mean (28.33% MFU, 3,455 tok/s/chip)
+#
+# The 3 x v4-2048 Option A run above, under Pathways:
+#   MODEL_NAME=olmoe3-3p5b-e256k8-sh2x ENABLE_SINGLE_CONTROLLER=true NUM_SLICES=3 DCN_DATA_PARALLELISM=3 \
+#   ICI_DATA_PARALLELISM=8 ICI_EXPERT_PARALLELISM=128 NORM_METRICS=none \
+#   bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmoe3_3p5b_v4.sh
 
 set -euo pipefail
 
@@ -54,7 +59,7 @@ export OLMOE3_FAST_HOST_LOOP="${OLMOE3_FAST_HOST_LOOP:-1}"
 #   - olmoe3-3p5b            : Baseline (E=512, K=16, F=1792, F_shared=1792; 62.9B total / 3.48B active)
 #   - olmoe3-3p5b-e256k8     : 2x wider routed experts (E=256, K=8, F=3584, F_shared=1792; 62.9B total / 3.46B active)
 #   - olmoe3-3p5b-e256k8-sh4x: Option B (E=256, K=8, F=3584, F_shared=7168; 63.7B total / 4.30B active)
-MODEL_NAME="${MODEL_NAME:-olmoe3-3p5b-e256k8-sh2x}"
+MODEL_NAME="${MODEL_NAME:-olmoe3-3p5b}"
 SEQ_LEN="${SEQ_LEN:-8192}"
 RUN_NAME="${RUN_NAME:-${MODEL_NAME//-/_}_v4_L${SEQ_LEN}}"
 OUTPUT_DIR="${OUTPUT_DIR:-gs://cloud-tpu-multipod-dev-maxtext-output/olmoe3_3p5b}"
@@ -65,18 +70,20 @@ STEPS="${STEPS:-20}"
 LOG_PERIOD="${LOG_PERIOD:-5}"
 
 # Pathways single-controller mode (set ENABLE_SINGLE_CONTROLLER=true when running under Pathways proxy):
-ENABLE_SINGLE_CONTROLLER="${ENABLE_SINGLE_CONTROLLER:-true}"
-NUM_SLICES="${NUM_SLICES:-3}"
+ENABLE_SINGLE_CONTROLLER="${ENABLE_SINGLE_CONTROLLER:-false}"
+# -1 detects the slice count.
+NUM_SLICES="${NUM_SLICES:--1}"
 
-# Parallelism defaults by topology:
+# Parallelism (the defaults are the single-slice v4-128 setup; set these per topology):
 #   - 3 x v4-2048 (3,072 chips, 3 slices of 8x8x16): NUM_SLICES=3, DCN_DATA=3, ICI_DATA=8, ICI_FSDP=1, ICI_EP=128
 #   - 1 x v4-6144 (3,072 chips, 1 slice of 12x16x16): NUM_SLICES=1, DCN_DATA=1, ICI_DATA=24, ICI_FSDP=1, ICI_EP=128
 #   - 1 x v4-2048 (1,024 chips, 1 slice of 8x8x16)  : NUM_SLICES=1, DCN_DATA=1, ICI_DATA=8, ICI_FSDP=1, ICI_EP=128
 #   - 1 x v4-256  (128 chips, 1 slice of 4x4x8)     : NUM_SLICES=1, DCN_DATA=1, ICI_DATA=1, ICI_FSDP=1, ICI_EP=128
-DCN_DATA_PARALLELISM="${DCN_DATA_PARALLELISM:-${NUM_SLICES}}"
-ICI_DATA_PARALLELISM="${ICI_DATA_PARALLELISM:-8}"
+#   - 1 x v4-128  (64 chips, 1 slice of 4x4x4)      : NUM_SLICES=1, DCN_DATA=1, ICI_DATA=1, ICI_FSDP=1, ICI_EP=64
+DCN_DATA_PARALLELISM="${DCN_DATA_PARALLELISM:-1}"
+ICI_DATA_PARALLELISM="${ICI_DATA_PARALLELISM:-1}"
 ICI_FSDP_PARALLELISM="${ICI_FSDP_PARALLELISM:-1}"
-ICI_EXPERT_PARALLELISM="${ICI_EXPERT_PARALLELISM:-128}"
+ICI_EXPERT_PARALLELISM="${ICI_EXPERT_PARALLELISM:-64}"
 
 # Precision mode:
 #   Default (BF16_KDA_STATE=false): 100% quality-neutral strict FP32 KDA state & conv (30.95%-31.13% MFU on 3x v4-2048)
@@ -113,7 +120,8 @@ fi
 RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-1.125}"
 
 EMO_ENABLED="${EMO_ENABLED:-true}"
-NORM_METRICS="${NORM_METRICS:-none}"
+# norm_metrics=none skips the grad/param norm reductions (faster under Pathways).
+NORM_METRICS="${NORM_METRICS:-grad}"
 
 # Profiler (set PROFILER=xplane to capture .xplane.pb hardware trace):
 PROFILER="${PROFILER:-}"
