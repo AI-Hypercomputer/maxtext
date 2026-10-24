@@ -138,9 +138,11 @@ class TunixMaxTextAdapter(nnx.Module):
       output_hidden_states: bool = False,  # ignored
       forced_routed_experts: Optional[Array] = None,
       segment_ids: Optional[Array] = None,
+      skip_lm_head: bool = False,
   ) -> Tuple[Array, None]:
     """Forward compatible with Tunix Trainers default loss.
-    Returns logits, None.
+
+    Returns logits (or hidden_states when skip_lm_head=True), None.
 
     `segment_ids` is the name Tunix uses for packed-sequence segment ids: it
     forwards them only to models whose call signature has a parameter of that
@@ -156,13 +158,22 @@ class TunixMaxTextAdapter(nnx.Module):
       decoder_segment_ids = _segment_ids_from_attention_mask(attention_mask, input_tokens)
     if decoder_segment_ids is None and self._pad_id is not None:
       decoder_segment_ids = (input_tokens != self._pad_id).astype(jnp.int32)
-    logits = self.base(
+    outputs = self.base(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
         decoder_segment_ids=decoder_segment_ids,
         forced_routed_experts=forced_routed_experts,
+        skip_lm_head=skip_lm_head,
     )
-    return logits, None
+    return outputs, None
+
+  def compute_final_logits(self, hidden_states: Array) -> Array:
+    """Projects a chunk of pre-norm hidden states [B, Chunk, Emb] to logits [B, Chunk, Vocab]."""
+    return self.base.logits_from_hidden_states_for_vocab_tiling(
+        hidden_states,
+        deterministic=True,
+        model_mode=getattr(self.base, "model_mode", "train"),
+    )
 
   def to_hf_mappings(self):
     if self.use_no_op_mappings:
