@@ -56,6 +56,8 @@ Follow this three-step process sequentially: Step 1 (analysis) and Step 2 (selec
 
 !{cat .gemini/commands/maxtext-review-criteria.md}
 
+!{cat .agents/skills/performance_reviewer/SKILL.md}
+
 -----
 
 ## Path-Specific Focus Areas
