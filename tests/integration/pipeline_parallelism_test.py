@@ -18,6 +18,7 @@ import functools
 import json
 import os
 import os.path
+import re
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import nnx_wrappers
 from maxtext.models import simple_layer
+from maxtext.utils import jax_reduced_compat
 from maxtext.utils import maxtext_utils
 from maxtext.utils import pipeline_utils
 from maxtext.trainers.pre_train.train import main as train_main
@@ -86,6 +88,27 @@ def assert_same_output_and_grad(f1, f2, *inputs):
       f"grad_size={f1_grad.size}, "
       f"tolerance=rtol=1e-1+atol=1.0"
   )
+
+
+def _num_all_reduces_in_loops(hlo_text):
+  """Counts all-reduce ops in the bodies of the while loops of an optimized HLO module."""
+  bodies = set(re.findall(r"body=%([\w.\-]+)", hlo_text))
+  count, current = 0, None
+  for line in hlo_text.splitlines():
+    header = re.match(r"^(?:ENTRY )?%(\S+) .*\{\s*$", line)
+    if header:
+      current = header.group(1)
+    elif re.match(r'^\}(, execution_thread="[^"]*")?\s*$', line):
+      current = None
+    elif current in bodies and re.search(r" all-reduce(-start)?\(", line):
+      count += 1
+  return count
+
+
+_NEEDS_REDUCED_STAGE_WEIGHTS = unittest.skipUnless(
+    jax_reduced_compat.jax_supports_reduced_stage_weights(),
+    f"pipeline_unreduced_weight_grads needs jax>={jax_reduced_compat.MIN_JAX_VERSION}",
+)
 
 
 class PipelineParallelismTest(unittest.TestCase):
@@ -652,6 +675,100 @@ class PipelineParallelismTest(unittest.TestCase):
     explicit_losses, auto_losses = self._explicit_and_auto_losses("deepseek", args)
     np.testing.assert_allclose(explicit_losses[0], auto_losses[0], rtol=1e-6, atol=0.0)
     np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-3, atol=0.0)
+
+  @_NEEDS_REDUCED_STAGE_WEIGHTS
+  def test_unreduced_stage_weights_defer_grad_reduction(self):
+    """Gathered stage weights tagged `reduced` (pipeline_unreduced_weight_grads) defer their gradient reduction.
+
+    The weights are gathered once and used by every microbatch of a scan, through the stage vmap and a shard_map (as
+    in the MoE). Untagged, JAX reduces each iteration's weight cotangent inside the loop and relies on XLA's
+    while-loop-all-reduce-code-motion pass to move it out. Tagged, the cotangent accumulates as an `unreduced` partial
+    sum and is reduced once, by the transpose of the gather. Compiled with that pass disabled, only the untagged
+    program keeps a reduction in the loop.
+    """
+    if jax.device_count() < 4:
+      self.skipTest("needs 4 devices")
+    jax_reduced_compat.apply()
+    mesh = Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2), ("stage", "fsdp"), axis_types=(AxisType.Explicit,) * 2)
+    stage_mesh = pipeline_utils.pipeline_stage_mesh(mesh, ShardMode.EXPLICIT)
+
+    def stage_fn(x, w_dense, w_moe, tag):
+      y = jnp.tanh(jnp.einsum("bd,df->bf", x, w_dense, out_sharding=P("fsdp", None)))
+      w_spec = P(None, None, reduced=frozenset({"fsdp"}) if tag else frozenset())
+
+      @jax.shard_map(mesh=stage_mesh, in_specs=(P("fsdp", None), w_spec), out_specs=P("fsdp", None), check_vma=False)
+      def moe(y_local, w_local):
+        return y_local @ w_local
+
+      return moe(y, w_moe)
+
+    def loss(w_dense_s, w_moe_s, xs, tag):
+      reduced = frozenset({"fsdp"}) if tag else frozenset()
+      w_dense = reshard(w_dense_s, P("stage", None, None, reduced=reduced))
+      w_moe = reshard(w_moe_s, P("stage", None, None, reduced=reduced))
+
+      def body(acc, x):
+        run = jax.vmap(lambda *a: stage_fn(*a, tag), spmd_axis_name="stage")
+        y = pipeline_utils.call_with_stage_axis_auto(run, stage_mesh, x, w_dense, w_moe)
+        return acc + (y**2).sum(), None
+
+      return jax.lax.scan(body, jnp.zeros((), jnp.float32), xs)[0]
+
+    rng = np.random.default_rng(0)
+    no_code_motion = {"xla_disable_hlo_passes": "while-loop-all-reduce-code-motion"}
+    results = {}
+    with jax.set_mesh(mesh), jax.default_matmul_precision("highest"):
+      w_dense = reshard(jnp.asarray(rng.normal(size=(2, 8, 16)), jnp.float32) * 0.1, P("stage", "fsdp", None))
+      w_moe = reshard(jnp.asarray(rng.normal(size=(2, 16, 8)), jnp.float32) * 0.1, P("stage", "fsdp", None))
+      xs = reshard(jnp.asarray(rng.normal(size=(3, 2, 16, 8)), jnp.float32), P(None, "stage", "fsdp", None))
+      for tag in (False, True):
+        compiled = (
+            jax.jit(jax.grad(loss, argnums=(0, 1)), static_argnums=3)
+            .lower(w_dense, w_moe, xs, tag)
+            .compile(compiler_options=no_code_motion)
+        )
+        results[tag] = (compiled(w_dense, w_moe, xs), _num_all_reduces_in_loops(compiled.as_text()))
+    for untagged, tagged in zip(results[False][0], results[True][0]):
+      self.assertEqual(tagged.sharding.spec, untagged.sharding.spec)
+      np.testing.assert_allclose(np.asarray(tagged), np.asarray(untagged), rtol=1e-5, atol=1e-6)
+    self.assertGreater(results[False][1], 0)  # the check below can see an in-loop reduction
+    self.assertEqual(results[True][1], 0)
+
+  @_NEEDS_REDUCED_STAGE_WEIGHTS
+  def test_deepseek_unreduced_weight_grads_matches(self):
+    """pipeline_unreduced_weight_grads only reorders the sum of each repeat's weight gradient: the losses must not move.
+
+    DeepSeek on PP2 x FSDP2 with weight prefetching (BSW) on the phase-split schedule: the dense weights and the
+    routed experts (through the MoE shard_map) are both tagged. float32 at the highest matmul precision.
+    """
+    args = [
+        "model_name=deepseek3-tiny",
+        "override_model_config=True",
+        "base_num_decoder_layers=5",
+        "first_num_dense_layers=1",
+        "vocab_size=256",
+        "num_experts=4",
+        "num_experts_per_tok=2",
+        "mtp_num_layers=1",
+        "mtp_loss_scaling_factor=0.1",
+        "per_device_batch_size=2",
+        "dtype=float32",
+        "matmul_precision=highest",
+        "shard_mode=explicit",
+        "ici_pipeline_parallelism=2",
+        "ici_fsdp_parallelism=2",
+        "num_pipeline_microbatches=4",
+        "pipeline_fsdp_ag_per_repeat=True",
+        "pipeline_bsw_phase_split=True",
+    ]
+    baseline = self._train_losses("pp_deepseek_unreduced_off", args + ["pipeline_unreduced_weight_grads=False"])
+    unreduced = self._train_losses("pp_deepseek_unreduced_on", args + ["pipeline_unreduced_weight_grads=True"])
+    print(f"[deepseek unreduced] off: {baseline} on: {unreduced}", flush=True)
+    self.assertTrue(baseline, "baseline run produced no metrics")
+    # The first loss is forward-only. After that, the reassociated per-repeat gradient sum moves the float32 losses by
+    # a few 1e-6 relative.
+    np.testing.assert_allclose(unreduced[0], baseline[0], rtol=1e-6, atol=0.0)
+    np.testing.assert_allclose(unreduced, baseline, rtol=5e-5, atol=0.0)
 
   @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
   def test_full_train_fp8(self):

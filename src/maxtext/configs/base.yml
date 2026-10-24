@@ -506,6 +506,12 @@ pipeline_bsw_phase_split: false
 #   pipeline_bsw_no_carry the re-gather becomes cheap: -27 GiB at the same step time). Routing biases / quantization
 #   state are not cast.
 pipeline_bsw_in_compute_dtype: false
+# pipeline_unreduced_weight_grads (shard_mode=explicit only): tag the gathered weights `reduced` over the activation batch
+#   axes. Each microbatch's weight gradient is then an `unreduced` partial sum, accumulated over the repeat and reduced
+#   once, at the transpose of the weight prefetch (a reduce-scatter back onto the FSDP-sharded parameters). Without the
+#   tag JAX reduces the gradient in every microbatch iteration and relies on XLA's while-loop all-reduce code motion to
+#   sink it out of the loop. Numerically identical.
+pipeline_unreduced_weight_grads: false
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)

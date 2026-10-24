@@ -124,5 +124,26 @@ class PipelineStageMeshTest(unittest.TestCase):
     self.assertEqual(pipeline_utils.remove_mesh_axis_from_spec(spec, "stage"), P(None, ("fsdp",), None, reduced={"data"}))
 
 
+class TagWeightGradReducedTest(unittest.TestCase):
+  """tag_weight_grad_reduced, which pipeline_unreduced_weight_grads applies to the gathered BSW stage weights."""
+
+  def test_skips_axes_the_weight_is_sharded_on(self):
+    token_axes = frozenset({"fsdp", "expert"})
+    self.assertEqual(
+        pipeline_utils.tag_weight_grad_reduced(P("stage", None, None), token_axes),
+        P("stage", None, None, reduced={"fsdp", "expert"}),
+    )
+    # An expert weight is sharded over 'expert'; its gradient is only partial over the remaining token axes.
+    self.assertEqual(
+        pipeline_utils.tag_weight_grad_reduced(P("stage", "expert", None), token_axes),
+        P("stage", "expert", None, reduced={"fsdp"}),
+    )
+    self.assertEqual(
+        pipeline_utils.tag_weight_grad_reduced(P("stage", ("fsdp", "expert")), token_axes), P("stage", ("fsdp", "expert"))
+    )
+    self.assertIsNone(pipeline_utils.tag_weight_grad_reduced(None, token_axes))
+    self.assertEqual(pipeline_utils.tag_weight_grad_reduced(P("stage"), frozenset()), P("stage"))
+
+
 if __name__ == "__main__":
   unittest.main()
