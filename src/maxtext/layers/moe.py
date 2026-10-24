@@ -224,6 +224,33 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _with_cotangent_dtype(inputs: jax.Array, dtype) -> jax.Array:
+  """Identity that forces the incoming cotangent to `dtype`.
+
+  Some custom VJPs in the MoE stack return a cotangent wider than their primal:
+  `ring_ragged_unsort` multiplies by float32 routing weights, so a bfloat16
+  activation gets a float32 gradient. `jax.lax.ragged_dot` accepts that mix,
+  but TransformerEngine's grouped GEMM asserts both operands share a dtype.
+  """
+  del dtype
+  return inputs
+
+
+def _with_cotangent_dtype_fwd(inputs: jax.Array, dtype) -> tuple[jax.Array, None]:
+  """Forward pass of the custom vjp for `_with_cotangent_dtype()`."""
+  return _with_cotangent_dtype(inputs, dtype), None
+
+
+def _with_cotangent_dtype_bwd(dtype, residuals, grads) -> tuple[jax.Array]:
+  """Backward pass of the custom vjp for `_with_cotangent_dtype()`."""
+  del residuals
+  return (jax.lax.convert_element_type(grads, dtype),)
+
+
+_with_cotangent_dtype.defvjp(_with_cotangent_dtype_fwd, _with_cotangent_dtype_bwd)
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
 def take_along_last_axis_dense_vjp(x: jax.Array, indices: jax.Array, num_classes: int) -> jax.Array:
   """`jnp.take_along_axis(x, indices, axis=-1)` whose backward is dense rather than a scatter-add.
@@ -1018,6 +1045,14 @@ class RoutedMoE(nnx.Module):
       self._expert_parallelism_name = ("context", "expert")
     else:
       self._expert_parallelism_name = "expert"
+
+    # TE v1 grouped GEMM stream-syncs a D2H copy inside shard_map, which deadlocks with several local devices.
+    if self.config.use_te_grouped_gemm and self.mesh is not None and len(self.mesh.local_devices) > 1:
+      raise ValueError(
+          "use_te_grouped_gemm=True requires one local device per process "
+          f"(got {len(self.mesh.local_devices)} local devices in the mesh). "
+          "Launch with one GPU per rank (e.g. tools/orchestration/gpu_per_device_run.sh)."
+      )
 
     if isinstance(self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)):
       einsum_names = [WI_0, WI_1, WO]
@@ -2375,6 +2410,52 @@ class RoutedMoE(nnx.Module):
         return quantize_dtype, quantize_dtype
       return None, None
 
+    def te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias=None):
+      """Grouped GEMM via TransformerEngine `grouped_dense` (custom VJP).
+
+      Group sizes are passed as routed, so TE walks only the rows that actually
+      hold tokens and skips the ragged-buffer padding. Output rows past that
+      point are zeroed by the TE kernel (not GEMMed) so GLU / dgrad / dbias
+      cannot observe uninitialized leftover.
+
+      Note: v1 copies group_sizes D2H inside the FFI. That is safe with one
+      local device (including multi-process EP, one GPU per rank) but can
+      deadlock in single-process multi-device shard_map on ROCm.
+      """
+      # pylint: disable=import-outside-toplevel
+      from transformer_engine.jax.dense import grouped_dense
+
+      num_local_experts = kernel.shape[0]
+      start = 0 if group_offset is None else group_offset
+      te_group_sizes = jax.lax.dynamic_slice_in_dim(group_sizes, start, num_local_experts)
+      # TE asserts lhs.dtype == rhs.dtype and reuses that dtype in its custom VJP,
+      # so a wider `preferred_element_type` also fails in the backward pass. The
+      # GPT-OSS GLU can hand `wo` f32 activations while the experts stay bf16;
+      # jax.lax.ragged_dot tolerates that mix, TE does not, so narrow everything
+      # to one dtype and restore self.dtype on the output.
+      out_dtype = jnp.dtype(self.dtype)
+      compute_dtype = min(
+          (jnp.dtype(kernel.dtype), jnp.dtype(inputs.dtype), out_dtype),
+          key=lambda dt: dt.itemsize,
+      )
+      inputs = jax.lax.convert_element_type(inputs, compute_dtype)
+      kernel = jax.lax.convert_element_type(kernel, compute_dtype)
+      if bias is not None:
+        bias = jax.lax.convert_element_type(bias, compute_dtype)
+      output = grouped_dense(
+          inputs,
+          kernel,
+          te_group_sizes.astype(jnp.int32),
+          contracting_dims=((1,), (1,)),
+          bias=bias,
+          preferred_element_type=compute_dtype,
+      )
+      output = jax.lax.convert_element_type(output, out_dtype)
+      # TE reuses the operand dtype in its custom VJP, so a wider cotangent from
+      # downstream (see `_with_cotangent_dtype`) would fail the same assert in
+      # the backward pass.
+      return _with_cotangent_dtype(output, out_dtype)
+
     def gmm(
         inputs,
         kernel,
@@ -2389,6 +2470,7 @@ class RoutedMoE(nnx.Module):
         out_is_3d=False,
         tc_routing=None,
         tc_unsort_cfg=None,
+        bias=None,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2415,6 +2497,20 @@ class RoutedMoE(nnx.Module):
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
+      if self.config.use_te_grouped_gemm:
+        if return_lhs or return_rhs or out_is_3d or tc_unsort_cfg is not None:
+          raise NotImplementedError(
+              "use_te_grouped_gemm does not support return_lhs, return_rhs, out_is_3d or a fused TC unsort "
+              f"(got {return_lhs=}, {return_rhs=}, {out_is_3d=}, tc_unsort={tc_unsort_cfg is not None})."
+          )
+        # Highest priority when the flag is on. Skip megablox/tokamax tile padding:
+        # TE v1 walks only sum(group_sizes) rows and zeros the leftover.
+        # Dtype unification (f32 acts vs bf16 weights) happens inside te_grouped_dense_gmm.
+        output = te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias)
+        if partial_sum is not None:
+          output = output + partial_sum
+        return output
+
       tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
       # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
@@ -2437,7 +2533,8 @@ class RoutedMoE(nnx.Module):
       # mode on a TPU target breaks check_vma and bloats HBM temporaries.
       megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
 
-      # We support various implementations for gmm - tokamax gmm (v1, v2), older forked megablox, or jax.lax.ragged_dot
+      # We support various implementations for gmm - TE grouped_dense, tokamax gmm (v1, v2),
+      # older forked megablox, or jax.lax.ragged_dot.
       # Determine whether we can use: tokamax gmm v1 (quantized)
       # Pre-quantized QArray inputs must route through gmm_v2 custom VJP.
       is_tokamax_v1_unquantized = (
@@ -3179,13 +3276,41 @@ class RoutedMoE(nnx.Module):
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if not gather_weights:
         wi_gather_axes = []
+      use_te_bias = self.config.use_te_grouped_gemm and self.config.mlp_bias
+
+      def _gmm_maybe_bias(x_, w_, bias_, partial_sum=None, *, return_lhs=False, return_rhs=False):
+        # With return_lhs / return_rhs, gmm returns (out, [lhs], [rhs]); bias and mask apply to `out` only.
+        te_bias = use_te_bias and bias_ is not None
+        res = gmm_fn(
+            x_,
+            w_,
+            tiling=wi_tile_size,
+            weight_gather_axes=wi_gather_axes,
+            partial_sum=partial_sum,
+            return_lhs=return_lhs,
+            return_rhs=return_rhs,
+            bias=bias_ if te_bias else None,
+        )
+        layer, extras = (res[0], tuple(res[1:])) if return_lhs or return_rhs else (res, ())
+        if te_bias:
+          if mask is not None:
+            layer = jnp.where(mask[:, None], layer, 0)
+        elif self.config.mlp_bias and bias_ is not None:
+          layer = layer + bias_
+          if mask is not None:
+            layer = jnp.where(mask[:, None], layer, 0)
+        return (layer, *extras) if extras else layer
+
       if self.config.prefuse_moe_weights:
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
-        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        fused_bias = None
+        if use_te_bias and w0_bias is not None and w1_bias is not None:
+          fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)
+        out = _gmm_maybe_bias(x, w_fused, fused_bias)
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
-        if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
+        if self.config.mlp_bias and not use_te_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
           if mask is not None:
@@ -3199,15 +3324,7 @@ class RoutedMoE(nnx.Module):
         # backward pass the wi_1 DLHS arrives as the cotangent of the returned input and the wi_0 DLHS GMM
         # accumulates onto it in place (gmm_v2 partial_sum) instead of a separate add of the two DLHS.
         accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs
-        layer_w0 = gmm_fn(
-            x,
-            w0,
-            tiling=wi_tile_size,
-            weight_gather_axes=wi_gather_axes,
-            partial_sum=partial_accum0,
-            return_lhs=accum_wi_dlhs,
-            return_rhs=return_weights,
-        )
+        layer_w0 = _gmm_maybe_bias(x, w0, w0_bias, partial_accum0, return_lhs=accum_wi_dlhs, return_rhs=return_weights)
         x_for_w1 = x
         if accum_wi_dlhs and return_weights:
           layer_w0, x_for_w1, w0 = layer_w0
@@ -3215,26 +3332,11 @@ class RoutedMoE(nnx.Module):
           layer_w0, x_for_w1 = layer_w0
         elif return_weights:
           layer_w0, w0 = layer_w0
-        if self.config.mlp_bias and w0_bias is not None:
-          layer_w0 = layer_w0 + w0_bias
-          if mask is not None:
-            layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
-        layer_w1 = gmm_fn(
-            x_for_w1,
-            w1,
-            tiling=wi_tile_size,
-            weight_gather_axes=wi_gather_axes,
-            partial_sum=partial_accum1,
-            return_rhs=return_weights,
-        )
+        layer_w1 = _gmm_maybe_bias(x_for_w1, w1, w1_bias, partial_accum1, return_rhs=return_weights)
         if return_weights:
           layer_w1, w1 = layer_w1
-        if self.config.mlp_bias and w1_bias is not None:
-          layer_w1 = layer_w1 + w1_bias
-          if mask is not None:
-            layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
         if return_weights:
           return layer_w0, layer_w1, w0, w1
@@ -3379,7 +3481,12 @@ class RoutedMoE(nnx.Module):
       )
 
       if self.config.mlp_bias:
-        w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+        if not self.config.use_te_grouped_gemm:
+          w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+        elif self.get_tensor_parallelism_size() > 1:
+          # TE fuses per-expert wi bias in the GEMM. wo bias is added after
+          # psum_scatter, so index it per token like the non-TE path.
+          (wo_bias,) = self.transform_bias(routing.selected_experts, wo_bias)
 
       partial_sum0 = jnp.zeros((cur_x_chunk.shape[0], w0.shape[-1]), dtype=cur_x_chunk.dtype)
       partial_sum1 = jnp.zeros((cur_x_chunk.shape[0], w1.shape[-1]), dtype=cur_x_chunk.dtype)
@@ -3508,7 +3615,12 @@ class RoutedMoE(nnx.Module):
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
         if self.config.mlp_bias:
-          w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+          if not self.config.use_te_grouped_gemm:
+            w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+          elif self.get_tensor_parallelism_size() > 1:
+            # TE fuses per-expert wi bias in the GEMM. wo bias is added after
+            # psum_scatter, so index it per token like the non-TE path.
+            (wo_bias,) = self.transform_bias(routing.selected_experts, wo_bias)
 
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
         up_res = gmm_up(
@@ -3543,6 +3655,17 @@ class RoutedMoE(nnx.Module):
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+      # Native TE bias is baked into the GEMM, which runs *before* the TP
+      # psum_scatter. wo_bias is sharded on activation_embed → tensor, so its
+      # local shape is [G, embed/TP] while the GEMM output is still embed-wide.
+      # Fuse bias into TE only when TP=1; otherwise keep the post-scatter add
+      # of the per-token wo_bias from transform_bias.
+      use_te_wo_bias = (
+          self.config.use_te_grouped_gemm
+          and self.config.mlp_bias
+          and wo_bias is not None
+          and self.get_tensor_parallelism_size() == 1
+      )
       if not gather_weights:
         wo_gather_axes = []
       # moe_tc_ragged_3d_gmm: the TC sort left the token buffer in the (buffer, emb // 128, 128) layout;
@@ -3580,6 +3703,7 @@ class RoutedMoE(nnx.Module):
           wo,
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
+          bias=wo_bias if use_te_wo_bias else None,
           return_rhs=return_weights,
           **({"out_is_3d": True} if x_is_3d else {}),
           **tc_unsort_kwargs,
@@ -3595,10 +3719,11 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
-        if tc_prescaled:
-          # The unsort skips the routing weights, so weight the bias too: w * (h @ wo + b) = (w * h) @ wo + w * b.
-          wo_bias = (wo_bias * w_rows[:, None]).astype(wo_bias.dtype)
-        intermediate_output = intermediate_output + wo_bias
+        if not use_te_wo_bias:
+          if tc_prescaled:
+            # The unsort skips the routing weights, so weight the bias too: w * (h @ wo + b) = (w * h) @ wo + w * b.
+            wo_bias = (wo_bias * w_rows[:, None]).astype(wo_bias.dtype)
+          intermediate_output = intermediate_output + wo_bias
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
