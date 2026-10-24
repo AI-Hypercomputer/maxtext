@@ -58,6 +58,11 @@ on:
         required: false
         type: boolean
         default: false
+      venv_artifact_name:
+        description: 'Optional pre-built venv artifact name to reuse'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -125,9 +130,58 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
+  prepare-environment:
+    name: Prepare Environment
+    needs: setup-parameters
+    if: |
+      !inputs.maxtext_installed &&
+      inputs.venv_artifact_name == '' &&
+      contains(inputs.flavor, 'gpu') &&
+      needs.setup-parameters.outputs.worker_groups != '[]'
+    runs-on: linux-x86-n2-16-buildkit
+    timeout-minutes: 25
+    container:
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      options: --init --privileged
+    env:
+      VLLM_TARGET_DEVICE: "tpu"
+      UV_TORCH_BACKEND: "cpu"
+      MAXTEXT_PACKAGE_EXTRA: >-
+        ${{
+          contains(inputs.flavor, 'post-training') && 'tpu-post-train'
+          || (contains(inputs.flavor, 'gpu') && 'cuda12' || 'tpu')
+        }}
+    steps:
+      - name: Download the maxtext wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel
+      - name: Build and package venv
+        shell: bash
+        run: |
+          python3 -m uv venv --seed .venv
+          source .venv/bin/activate
+          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+          echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
+          uv pip install "${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}]" --resolution=lowest
+          install_tpu_pre_train_extra_deps
+          uv pip install pytest-cov pytest-split pytest-xdist
+          GZIP=-1 tar -czf - .venv | split -b 1000m - venv.tar.gz.
+          rm -rf .venv
+      - name: Upload venv artifact
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+          name: maxtext-venv-${{ github.run_id }}-${{ inputs.flavor }}
+          path: venv.tar.gz.*
+          retention-days: 1
+
   execute-test-package:
     name: Execute Tests
-    needs: setup-parameters
+    needs: [setup-parameters, prepare-environment]
+    if: |
+      always() &&
+      needs.setup-parameters.result == 'success' &&
+      (needs.prepare-environment.result == 'success' || needs.prepare-environment.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -264,3 +318,4 @@ jobs:
       maxtext_sha: ${{ inputs.maxtext_sha }}
       is_update_hlo: ${{ inputs.is_update_hlo }}
       install_torch_cpu: ${{ inputs.flavor == 'cpu-unit' && inputs.is_scheduled_run }}
+      venv_artifact_name: ${{ inputs.venv_artifact_name != '' && inputs.venv_artifact_name || (needs.prepare-environment.result == 'success' && format('maxtext-venv-{0}-{1}', github.run_id, inputs.flavor) || '') }}
