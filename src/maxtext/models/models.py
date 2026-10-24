@@ -153,7 +153,8 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      # Under pipeline parallelism the MTP block runs under the PP-as-DP rules (see __call__); build it under them too.
+      # With pipeline parallelism the MTP block runs under the PP-as-DP rules (see __call__), so under explicit sharding
+      # it is built under them too. Without pipeline parallelism, or under auto, this context is a no-op.
       with sharding.pp_act_as_dp_construction_rules(self.config):
         self.mtp_block = MultiTokenPredictionBlock(
             config=self.config,
