@@ -118,7 +118,15 @@ class RMSNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale_fp32 = jnp.asarray(scale, jnp.float32)
-    effective_scale = scale_fp32 + self.scale_offset
+    effective_scale = scale_fp32
+    if self.scale_offset != 0.0:
+      # The offset constant must carry the scale's `reduced` axes (e.g. a pipeline stage weight under
+      # pipeline_unreduced_weight_grads): JAX rejects mixing a reduced operand with a replicated one.
+      offset = jnp.asarray(self.scale_offset, jnp.float32)
+      scale_reduced = jax.typeof(scale_fp32).sharding.spec.reduced
+      if scale_reduced:
+        offset = jax.sharding.reshard(offset, jax.sharding.PartitionSpec(reduced=scale_reduced))
+      effective_scale = scale_fp32 + offset
     if self.shard_mode == ShardMode.EXPLICIT:
       effective_scale = align_scale_with_normalized_axis(effective_scale, y)
 

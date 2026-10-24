@@ -74,7 +74,7 @@ from maxtext.models import (
 )
 
 from maxtext.multimodal import utils as mm_utils
-from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
+from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, pipeline_utils, sharding
 from maxtext.utils.sharding import create_sharding
 
 # ------------------------------------------------------------------------------
@@ -677,10 +677,12 @@ class NNXDecoder(nnx.Module):
         rngs=rngs,
     )
 
-    if self.is_deepseek:
-      self._init_pipeline_deepseek(decoder_block_classes, rngs)
-    else:
-      self._init_pipeline_generic(decoder_block_classes, rngs)
+    # The layers outside the pipeline run under the PP-as-DP rules (see __call__), so build them under those rules too.
+    with sharding.pp_act_as_dp_construction_rules(config):
+      if self.is_deepseek:
+        self._init_pipeline_deepseek(decoder_block_classes, rngs)
+      else:
+        self._init_pipeline_generic(decoder_block_classes, rngs)
 
   def _init_pipeline_deepseek(self, decoder_block_classes, rngs):
     """Initializes DeepSeek dense and MoE layers outside pipeline."""
@@ -1102,15 +1104,16 @@ class NNXDecoder(nnx.Module):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
     cfg = self.config
     base_stage_cls = decoder_blocks[1] if self.is_deepseek else decoder_blocks[0]
+    stage_mesh = pipeline_utils.pipeline_stage_mesh(self.mesh, cfg.shard_mode)
 
     if cfg.num_layers_per_pipeline_stage == 1:
-      return self._create_single_layer(base_stage_cls, rngs)
+      return self._create_single_layer(base_stage_cls, rngs, mesh=stage_mesh)
     elif cfg.scan_layers_per_stage:
       return NNXScannedPipelineStage(
           base_stage_cls,
           cfg.num_layers_per_pipeline_stage,
           cfg,
-          self.mesh,
+          stage_mesh,
           self.quant,
           self.model_mode,
           rngs=rngs,
@@ -1119,7 +1122,7 @@ class NNXDecoder(nnx.Module):
         base_stage_cls,
         cfg.num_layers_per_pipeline_stage,
         cfg,
-        self.mesh,
+        stage_mesh,
         self.quant,
         self.model_mode,
         rngs=rngs,
@@ -1131,11 +1134,11 @@ class NNXDecoder(nnx.Module):
     layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
     setattr(self, attr_name, layer)
 
-  def _create_single_layer(self, decoder_layer_class, rngs, **kwargs):
+  def _create_single_layer(self, decoder_layer_class, rngs, mesh=None, **kwargs):
     """Helper to create a single layer."""
     return decoder_layer_class(
         config=self.config,
-        mesh=self.mesh,
+        mesh=self.mesh if mesh is None else mesh,
         quant=self.quant,
         model_mode=self.model_mode,
         rngs=rngs,
@@ -1819,6 +1822,22 @@ class NNXDecoder(nnx.Module):
     _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
     return mhc_reduce_fn(y)
 
+  def _reshard_activations_to_rules(self, y):
+    """Under EXPLICIT sharding, reshards the [batch, length, embed] activations to the logical axis rules in context.
+
+    The PP-as-DP rules add 'stage' to the batch sharding of the decoder layers outside the pipeline, and the carry of a
+    scanned layer stack must keep its type, sharding included, so the activations enter those layers in that layout.
+    """
+    if self.config.shard_mode != ShardMode.EXPLICIT:
+      return y
+    return sharding.maybe_shard_with_logical(
+        y,
+        ("activation_batch", "activation_length", "activation_embed"),
+        self.mesh,
+        self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+    )
+
   def apply_decoder_norm(self, y, reduce_mhc=True):
     """Applies the decoder's final normalization (`decoder_norm`) to a hidden state.
 
@@ -1833,9 +1852,15 @@ class NNXDecoder(nnx.Module):
     if reduce_mhc:
       y = self._reduce_mhc_streams(y)
     if self.config.shard_mode == ShardMode.EXPLICIT:
+      # Under pipeline parallelism the hidden state stays split over 'stage' like the logits (stage acts as data).
+      batch_axis = (
+          "activation_embed_and_logits_batch"
+          if getattr(self.config, "using_pipeline_parallelism", False)
+          else "activation_batch"
+      )
       norm_out_sharding = create_sharding(
           self.mesh,
-          ("activation_batch", "activation_length", "activation_embed"),
+          (batch_axis, "activation_length", "activation_embed"),
       )
     else:
       norm_out_sharding = None
@@ -2127,6 +2152,7 @@ class NNXDecoder(nnx.Module):
         # Pre-pipeline: dense layers + outside-pipeline MoE layers under PP-as-DP axis rules.
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
         with self.mesh, logical_axis_rules(logical_axis_rules_pp_as_dp):
+          y = self._reshard_activations_to_rules(y)
           if cfg.scan_layers:
             if getattr(self, "dense_layers", None) is not None and cfg.first_num_dense_layers > 0:
               y, self.dense_layers, _ = self._apply_layers_sequentially(
@@ -2203,6 +2229,7 @@ class NNXDecoder(nnx.Module):
               self.mesh,
               logical_axis_rules(logical_axis_rules_pp_as_dp),
           ):
+            y = self._reshard_activations_to_rules(y)
             if cfg.scan_layers and hasattr(self, "layers_outside_pipeline"):
               remaining = cfg.num_decoder_layers - cfg.pipeline_parallel_layers
               y, self.layers_outside_pipeline, _ = self._apply_layers_sequentially(
