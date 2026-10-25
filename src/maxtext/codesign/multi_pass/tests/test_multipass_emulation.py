@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 
 try:
@@ -48,6 +49,13 @@ for _p in (_MP_DIR, _CODESIGN_DIR, _PKG_MP_DIR, _PKG_CODESIGN_DIR, _REPO_SRC):
   if os.path.isdir(_p) and _p not in sys.path:
     sys.path.insert(0, _p)
 
+from checkpoint_utils import (  # type: ignore  # noqa: E402
+    apply_multipass_to_pytree,
+    evaluate_multipass_error,
+    inspect_model_or_pytree_multipass,
+    load_multipass_metadata,
+    save_multipass_metadata,
+)
 from emulation_base import (  # type: ignore  # noqa: E402
     EmulationFeature,
     get_registered_emulation_features,
@@ -65,6 +73,8 @@ from multipass_config import (  # type: ignore  # noqa: E402
 from multipass_kernel import (  # type: ignore  # noqa: E402
     decompose_tensor_into_passes,
     multipass_dot_general,
+    multipass_einsum,
+    multipass_gmm_operands,
     quantize_to_dtype_spec,
     reconstruct_multipass_tensor,
 )
@@ -465,6 +475,101 @@ class MultipassEmulationTest(unittest.TestCase):
     np.testing.assert_allclose(
         np.asarray(da_bwd), np.asarray(da_ste), rtol=5e-2, atol=1e-1
     )
+
+  # ---------------------------------------------------------------------------
+  # 10. Modular Unit Tests for Per-Pass Error/SNR & Checkpoint Utilities
+  # ---------------------------------------------------------------------------
+
+  @unittest.skipIf(np is None, "NumPy is required for array tests")
+  def test_monotonic_error_reduction_homogeneous_and_heterogeneous(self):
+    """Tests strict monotonic error decrease across passes for homogeneous and heterogeneous schedules."""
+    rng = np.random.default_rng(123)
+    x = jnp.asarray(rng.standard_normal((32, 64), dtype=np.float32))
+
+    # 1. Homogeneous 3-pass FP32 decomposition: fp32 -> [fp8_e4m3] * 3
+    spec_3 = OperandMultipassSpec.from_any(
+        "fp32->[fp8_e4m3,fp8_e4m3,fp8_e4m3]@scale=per_tensor_pow2"
+    )
+    report = evaluate_multipass_error(x, spec_3, contracting_axes=(1,))
+    errs = report["per_pass_relative_l2_error"]
+    self.assertEqual(len(errs), 3)
+    self.assertLess(errs[1], errs[0] * 0.15)
+    self.assertLess(errs[2], errs[1] * 0.15)
+
+    # 1b. BF16 -> [fp8_e4m3, fp8_e4m3] (2 passes of 4-bit significand recover 8-bit BF16 significand)
+    spec_bf16_to_fp8 = OperandMultipassSpec.from_any(
+        "bf16->[fp8_e4m3,fp8_e4m3]@scale=per_tensor_pow2"
+    )
+    rep_bf16_to_fp8 = evaluate_multipass_error(
+        x, spec_bf16_to_fp8, contracting_axes=(1,)
+    )
+    self.assertGreater(rep_bf16_to_fp8["per_pass_relative_l2_error"][0], 1e-2)
+    self.assertLessEqual(rep_bf16_to_fp8["per_pass_relative_l2_error"][1], 1e-6)
+
+    # 2. Heterogeneous passes: fp32 -> [fp8_e5m2, fp8_e4m3, fp4_e2m1]
+    spec_het = OperandMultipassSpec.from_any(
+        "fp32->[fp8_e5m2,fp8_e4m3,fp4_e2m1]@scale=per_block_pow2:block=16"
+    )
+    rep_het = evaluate_multipass_error(x, spec_het, contracting_axes=(1,))
+    het_errs = rep_het["per_pass_relative_l2_error"]
+    self.assertLess(het_errs[1], het_errs[0])
+    self.assertLess(het_errs[2], het_errs[1])
+
+    # 3. Henry et al. FP32 -> [bf16, bf16] with scale=unit
+    spec_bf16 = OperandMultipassSpec.from_any("fp32->[bf16,bf16]@scale=unit")
+    rep_bf16 = evaluate_multipass_error(x, spec_bf16, contracting_axes=(1,))
+    self.assertLess(rep_bf16["per_pass_relative_l2_error"][0], 5e-3)
+    self.assertLess(rep_bf16["per_pass_relative_l2_error"][1], 5e-5)
+
+  @unittest.skipIf(np is None, "NumPy is required for array tests")
+  def test_multipass_einsum_gmm_and_checkpoint_utils(self):
+    """Tests `multipass_einsum`, `multipass_gmm_operands`, and checkpoint PyTree utilities."""
+    rng = np.random.default_rng(21)
+    q = jnp.asarray(rng.standard_normal((2, 4, 8, 16), dtype=np.float32))
+    k = jnp.asarray(rng.standard_normal((2, 4, 8, 16), dtype=np.float32))
+    cfg = MultipassEmulationConfig.from_dict({
+        "enabled": True,
+        "preset": "F8E4M3_F8E4M3_F32_X3",
+        "op_names": ["einsum", "dot_general", "gmm"],
+    })
+    out = multipass_einsum("bthd,bshd->bhts", q, k, cfg.rules[0])
+    ref = jnp.einsum("bthd,bshd->bhts", q, k)
+    self.assertEqual(out.shape, ref.shape)
+    np.testing.assert_allclose(
+        np.asarray(out), np.asarray(ref), rtol=3e-2, atol=3e-2
+    )
+
+    moe_x = jnp.asarray(rng.standard_normal((8, 16), dtype=np.float32))
+    moe_w = jnp.asarray(rng.standard_normal((4, 16, 32), dtype=np.float32))
+    q_moe_x, q_moe_w = multipass_gmm_operands(moe_x, moe_w, cfg.rules[0])
+    self.assertEqual(q_moe_x.shape, moe_x.shape)
+    self.assertEqual(q_moe_w.shape, moe_w.shape)
+
+    pytree = {
+        "layers_0": {
+            "mlp": {
+                "wi": rng.standard_normal((16, 32), dtype=np.float32),
+            }
+        }
+    }
+    recon_tree, n_mod = apply_multipass_to_pytree(pytree, cfg)
+    self.assertEqual(n_mod, 1)
+    self.assertEqual(recon_tree["layers_0"]["mlp"]["wi"].shape, (16, 32))
+
+    insp = inspect_model_or_pytree_multipass(pytree, cfg)
+    self.assertEqual(insp["targeted_parameters"], 16 * 32)
+    self.assertGreaterEqual(insp["mean_targeted_relative_l2_error"], 0.0)
+    self.assertLess(insp["mean_targeted_relative_l2_error"], 1e-2)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      save_multipass_metadata(tmpdir, cfg)
+      loaded = load_multipass_metadata(tmpdir)
+      self.assertIsNotNone(loaded)
+      self.assertTrue(loaded.enabled)
+      self.assertEqual(loaded.rules[0].cross_term_mode, "triangular")
+
+    self.assertGreaterEqual(len(MULTIPASS_PRESETS), 11)
+    self.assertGreaterEqual(len(MULTIPASS_FLAG_DOCUMENTATION), 35)
 
 
 if __name__ == "__main__":
