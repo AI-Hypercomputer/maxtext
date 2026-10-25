@@ -14,6 +14,7 @@
 
 """Tests for pyconfig."""
 
+import json
 import os.path
 import subprocess
 import sys
@@ -970,6 +971,36 @@ assert train._TF_AVAILABLE is False
           val_default,
           val_yaml,
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
+      )
+
+  def test_dump_dir_defaults_do_not_depend_on_host_tempdir(self):
+    """Verifies the HLO/jaxpr dump directory defaults match base.yml on any host.
+
+    Field defaults are evaluated when ``types`` is imported, so this imports it in a
+    subprocess whose temp directory is not /tmp, as on macOS, Windows, or a Linux job
+    that sets TMPDIR.
+    """
+    base_yml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    with open(base_yml_path, "r", encoding="utf-8") as f:
+      base_yaml = yaml.safe_load(f)
+
+    script = """
+import json
+from maxtext.configs import types
+
+fields = types.MaxTextConfig.model_fields
+print(json.dumps({name: fields[name].default for name in ("dump_hlo_local_dir", "dump_jaxpr_local_dir")}))
+"""
+    with tempfile.TemporaryDirectory() as host_tmpdir:
+      env = {**os.environ, "TMPDIR": host_tmpdir, "TEMP": host_tmpdir, "TMP": host_tmpdir}
+      result = subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True, env=env)
+    defaults = json.loads(result.stdout.strip().splitlines()[-1])
+
+    for field_name, default in defaults.items():
+      self.assertEqual(
+          default,
+          base_yaml[field_name],
+          f"Default for '{field_name}' depends on the host temp directory: {default} vs base.yml",
       )
 
   def test_rollout_weight_dtype_defaults_to_weight_dtype_and_accepts_override(self):
