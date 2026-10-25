@@ -22,10 +22,6 @@
 [**Documentation**](https://maxtext.readthedocs.io/en)
 | [**Release Notes**](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/release_notes.md)
 
-> **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
->
-> We recommend running MaxText with Python 3.12, as it is our primary supported version. Other Python versions may encounter compatibility issues.
-
 MaxText is a high performance, highly scalable, open-source LLM library and reference implementation written in pure Python/[JAX](https://docs.jax.dev/en/latest/jax-101.html) and targeting Google Cloud TPUs and GPUs for training.
 
 MaxText provides a library of high performance models to choose from, including Gemma, Llama, DeepSeek, Qwen, and Mistral. For each of these models, MaxText supports pre-training (up to tens of thousands of chips) and scalable post-training, with popular techniques like Supervised Fine-Tuning (SFT) and Group Relative Policy Optimization (GRPO, a type of Reinforcement Learning) and Group Sequence Policy Optimization (GSPO, a type of Reinforcement Learning).
@@ -40,6 +36,10 @@ Check out our [Read The Docs site](https://maxtext.readthedocs.io/en) or directl
 
 See our installation guide to [install MaxText with pip from PyPI](https://maxtext.readthedocs.io/page/install_maxtext.html#from-pypi-recommended).
 
+> **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
+>
+> We recommend running MaxText with Python 3.12, as it is our primary supported version. Other Python versions may encounter compatibility issues.
+
 ## Decoupled mode
 
 See our guide on running MaxText in decoupled mode, without any GCP dependencies in [Decoupled Mode Guide](https://maxtext.readthedocs.io/page/run_maxtext/decoupled_mode.html).
@@ -48,6 +48,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+- [October 23, 2026] DeepSeek V4 Pro (1600B) is now supported. See the [user guide](tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for checkpoint conversion, pre-training, and evaluation details.
 - [October 15, 2026] Qwen3.8 2.4T is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
 - [October 8, 2026] MaxText now supports JEV-style decision scoring on TPU via vLLM; see the [Decision Models tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/decision_models.html) for a Qwen3.5-9B example with Bespoke-Nimble LoRA weights.
 - [August 19, 2026] Distributed low-communication training with **Streaming DiLoCo** is now supported in MaxText! Scale LLMs and MoEs across multi-slice TPU clusters and low-bandwidth DCN/WAN networks. See the [DiLoCo training tutorial](https://maxtext.readthedocs.io/en/maxtext-v0.2.5/tutorials/diloco_pretraining.html) and [DiLoCo theory reference](https://maxtext.readthedocs.io/en/maxtext-v0.2.5/reference/core_concepts/diloco.html) for details.

@@ -14,11 +14,17 @@
 
 """Dispatch to the chosen profiler."""
 
+import contextlib
+import contextvars
 from ctypes import cdll
+import functools
 import os
-import subprocess
 import shutil
+import subprocess
+from typing import Any
+import weakref
 
+from flax import nnx
 import jax
 
 from maxtext.common.gcloud_stub import mldiagnostics_modules
@@ -172,3 +178,83 @@ class Profiler:
 
   def post_process(self):
     pass
+
+
+_NNX_NAMED_SCOPE_INSTALLED = False
+_NNX_NAMED_SCOPE_ENABLED: contextvars.ContextVar[bool] = contextvars.ContextVar("nnx_named_scope_enabled", default=False)
+# Keyed by id() rather than the module itself: dataclass modules (e.g. attentions.L2Norm) set
+# __hash__ = None, so a WeakKeyDictionary cannot hold them. Entries are evicted via weakref.finalize.
+_MODULE_SCOPE_NAMES: dict[int, str] = {}
+_WRAPPED_CALL_FUNCS: set[Any] = set()
+_ACTIVE_SCOPED_MODULES: contextvars.ContextVar[tuple[int, ...]] = contextvars.ContextVar(
+    "active_scoped_modules", default=()
+)
+
+
+def _make_scoped_call(cls, orig_call):
+  """Wraps an nnx.Module.__call__ implementation in a jax.named_scope."""
+
+  @functools.wraps(orig_call)
+  def _wrapped_call(self, *args, **kwargs):
+    active = _ACTIVE_SCOPED_MODULES.get()
+    if not _NNX_NAMED_SCOPE_ENABLED.get() or (active and active[-1] == id(self)):
+      return orig_call(self, *args, **kwargs)
+    scope = _MODULE_SCOPE_NAMES.get(id(self)) or cls.__name__
+    token = _ACTIVE_SCOPED_MODULES.set(active + (id(self),))
+    try:
+      with jax.named_scope(scope):
+        return orig_call(self, *args, **kwargs)
+    finally:
+      _ACTIVE_SCOPED_MODULES.reset(token)
+
+  _WRAPPED_CALL_FUNCS.add(_wrapped_call)
+  return _wrapped_call
+
+
+def _wrap_nnx_cls(cls):
+  """Recursively wraps __call__ on cls and its existing nnx.Module subclasses."""
+  call_fn = cls.__dict__.get("__call__")
+  if call_fn is not None and call_fn not in _WRAPPED_CALL_FUNCS:
+    setattr(cls, "__call__", _make_scoped_call(cls, call_fn))
+  for sub in cls.__subclasses__():
+    _wrap_nnx_cls(sub)
+
+
+@contextlib.contextmanager
+def nnx_named_scope_context(enabled: bool = True):
+  """Wraps NNX module calls in hierarchical jax.named_scope blocks for XProf traces."""
+  global _NNX_NAMED_SCOPE_INSTALLED  # pylint: disable=global-statement
+  if enabled and not _NNX_NAMED_SCOPE_INSTALLED:
+    orig_getattribute = nnx.Module.__getattribute__
+
+    def _scoped_getattribute(self, name):
+      val = orig_getattribute(self, name)
+      if _NNX_NAMED_SCOPE_ENABLED.get() and not name.startswith("_") and isinstance(val, nnx.Module):
+        key = id(val)
+        if key not in _MODULE_SCOPE_NAMES:
+          try:
+            weakref.finalize(val, _MODULE_SCOPE_NAMES.pop, key, None)
+          except TypeError:  # Not weak-referenceable; skip rather than risk a stale id entry.
+            return val
+        _MODULE_SCOPE_NAMES[key] = name
+      return val
+
+    nnx.Module.__getattribute__ = _scoped_getattribute  # type: ignore[method-assign]
+
+    orig_init_subclass = nnx.Module.__init_subclass__.__func__
+
+    def _patched_init_subclass(cls, **kwargs):
+      orig_init_subclass(cls, **kwargs)
+      _wrap_nnx_cls(cls)
+
+    nnx.Module.__init_subclass__ = classmethod(_patched_init_subclass)  # type: ignore[method-assign,assignment]
+    _wrap_nnx_cls(nnx.Module)
+    _NNX_NAMED_SCOPE_INSTALLED = True
+  elif enabled:
+    _wrap_nnx_cls(nnx.Module)
+
+  token = _NNX_NAMED_SCOPE_ENABLED.set(enabled)
+  try:
+    yield
+  finally:
+    _NNX_NAMED_SCOPE_ENABLED.reset(token)

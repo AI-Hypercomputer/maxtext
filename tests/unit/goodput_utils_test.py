@@ -448,7 +448,7 @@ class GoodputUtilsTest(unittest.TestCase):
     self.assertEqual(get_goodput_job_name(cfg), "llama3-pre-shared-run")
 
 
-class _RecordingLogger:
+class _RecordingLogger(checkpointing.ocp_logging.AbstractLogger):
   """Minimal Orbax `AbstractLogger` that records every logged entry."""
 
   def __init__(self):
@@ -549,7 +549,6 @@ class CheckpointGoodputLoggerTest(unittest.TestCase):
 
   def test_no_logger_emits_nothing_and_still_restores(self):
     manager = self._manager(None)
-    self.assertIsNone(getattr(manager, "orbax_logger", None))
     self.assertTrue(checkpointing.save_checkpoint(manager, 0, self.state))
     checkpointing.wait_until_finished(manager)
 

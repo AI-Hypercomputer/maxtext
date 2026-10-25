@@ -45,15 +45,44 @@ def _index_at(tree, idx):
 _SKIP_TRIP_COUNT_ONE = {"skip-simplify-while-loops_trip-count-one": "true"}
 
 
-def _sublayer_scan(body, carry, xs, reverse=False):
+def _sublayer_scan(body, carry, xs, reverse=False, unroll=1):
   """`jax.lax.scan` over sub-layers that XLA keeps as a while-loop, even with a single trip.
 
   Each sub-layer run is its own while-loop nested in the block scan, as in the regular nested scan
   of the block (see `Qwen3NextScannableBlock`). The loop boundary keeps a prefetched all-gather
   inside the sub-layer that issues it: XLA cannot finish it early, ahead of that sub-layer's compute.
+
+  With `unroll=2`, each loop trip runs two consecutive steps; an odd remaining step runs in its own
+  single-trip loop after them. Unlike `jax.lax.scan(..., unroll=2)`, this keeps a while-loop when
+  there is a single 2-step trip, which `jax.lax.scan` would unroll into the parent computation.
   """
   with xla_metadata.set_xla_metadata(**_SKIP_TRIP_COUNT_ONE):
-    return jax.lax.scan(body, carry, xs, reverse=reverse)
+    if unroll == 1:
+      return jax.lax.scan(body, carry, xs, reverse=reverse)
+    if unroll != 2:
+      raise ValueError(f"unroll must be 1 or 2, got {unroll}.")
+    length = jax.tree_util.tree_leaves(xs)[0].shape[0]
+    trips, rem = divmod(length, 2)
+    # Steps run in index order, or in reverse index order with `reverse`; the odd step runs last.
+    split = rem if reverse else 2 * trips
+    head = jax.tree.map(lambda x: x[:split], xs)
+    rest = jax.tree.map(lambda x: x[split:], xs)
+    xs_paired, xs_odd = (rest, head) if reverse else (head, rest)
+
+    def two_steps(carry, xs2):
+      first, second = (1, 0) if reverse else (0, 1)
+      carry, y_a = body(carry, jax.tree.map(lambda x: x[first], xs2))
+      carry, y_b = body(carry, jax.tree.map(lambda x: x[second], xs2))
+      ys2 = (y_b, y_a) if reverse else (y_a, y_b)
+      return carry, jax.tree.map(lambda a, b: jnp.stack((a, b)), *ys2)
+
+    xs_paired = jax.tree.map(lambda x: x.reshape(trips, 2, *x.shape[1:]), xs_paired)
+    carry, ys = jax.lax.scan(two_steps, carry, xs_paired, reverse=reverse)
+    ys = jax.tree.map(lambda y: y.reshape(2 * trips, *y.shape[2:]), ys)
+    if rem:
+      carry, ys_odd = jax.lax.scan(body, carry, xs_odd, reverse=reverse)
+      ys = _concat0(ys_odd, ys) if reverse else _concat0(ys, ys_odd)
+    return carry, ys
 
 
 def _concat0(*trees):
@@ -142,14 +171,24 @@ def _custom_vjp_nested_prefetch_pipeline_fwd(
         gather_nxt = gather[0]
       parts_y, parts_saved = [], []
       if n >= 2:
+        # With >= 2 same-group steps, unroll by 2 so the loop body alternates between two
+        # gathered-weight buffers, as in `fsdp_prefetch._custom_vjp_prefetch_pipeline`: AG(j+2)
+        # then reuses W(j)'s buffer, which is the loop-carry buffer, instead of a fresh buffer
+        # that XLA copies into the carry at the end of every step.
+        ordered = n - 1 >= 2
 
-        def same_group(carry, k, i=i, p=b_params[i], s=b_state[i]):
+        def same_group(carry, k, i=i, p=b_params[i], s=b_state[i], ordered=ordered):
           y, w = carry
-          w_next = gather[i](_index_at(p, k + 1))  # AG(j+1) || sub-layer j.
+          p_next = _index_at(p, k + 1)
+          if ordered:
+            # In the 2nd unrolled step, waits for the 1st step's sub-layer so W(j-1) is dead
+            # before AG(j+1) starts and AG(j+1) can reuse W(j-1)'s buffer.
+            y, p_next = jax.lax.optimization_barrier((y, p_next))
+          w_next = gather[i](p_next)  # AG(j+1) || sub-layer j.
           y_out, saved_k = fwd(i, y, w, _index_at(s, k))
           return (y_out, w_next), (y, saved_k)
 
-        (y, w), (ys_k, saved_k) = _sublayer_scan(same_group, (y, w), jnp.arange(n - 1))
+        (y, w), (ys_k, saved_k) = _sublayer_scan(same_group, (y, w), jnp.arange(n - 1), unroll=2 if ordered else 1)
         parts_y.append(ys_k)
         parts_saved.append(saved_k)
 
@@ -211,15 +250,25 @@ def _custom_vjp_nested_prefetch_pipeline_bwd(graphdefs, length, ctxs, sizes, res
         gather_prv = gather[-1]
       d_rest = None
       if n >= 2:
+        # Unrolled by 2 with >= 2 same-group steps so AG(j-1) reuses the loop-carry buffer (see
+        # the forward pass).
+        ordered = n - 1 >= 2
 
-        def same_group(carry, k, i=i, p=b_params[i], s=b_state[i], y_=b_ys[i], sv=b_saved[i]):
+        def same_group(carry, k, i=i, p=b_params[i], s=b_state[i], y_=b_ys[i], sv=b_saved[i], ordered=ordered):
           g, w = carry
-          w_prev = gather[i](_index_at(p, k - 1))  # AG(j-1) || bwd(j).
-          g, dw = bwd(i, _index_at(y_, k), w, _index_at(s, k), g, _index_at(sv, k))
+          p_prev, y_k, saved_k = _index_at(p, k - 1), _index_at(y_, k), _index_at(sv, k)
+          if ordered:
+            # In the 2nd unrolled step, waits for the 1st step's g (barrier-tied to its dW) so
+            # W(j+1) and dW(j+1) are dead before AG(j-1) and recompute(j) start.
+            g, y_k, saved_k, p_prev = jax.lax.optimization_barrier((g, y_k, saved_k, p_prev))
+          w_prev = gather[i](p_prev)  # AG(j-1) || bwd(j).
+          g, dw = bwd(i, y_k, w, _index_at(s, k), g, saved_k)
+          if ordered:
+            g, dw = jax.lax.optimization_barrier((g, dw))
           return (g, w_prev), dw
 
         # Iterates k = n-1 .. 1; outputs are stacked in k order.
-        (g, w), d_rest = _sublayer_scan(same_group, (g, w), jnp.arange(1, n), reverse=True)
+        (g, w), d_rest = _sublayer_scan(same_group, (g, w), jnp.arange(1, n), reverse=True, unroll=2 if ordered else 1)
 
       def first(carry, xs_first, i=i, gather_prv=gather_prv):
         g, w = carry
@@ -410,7 +459,8 @@ def apply_layers_with_fsdp_prefetch(
       diff_args_leaves,
       diff_kwargs_leaves,
       length,
-      tuple(ctx._replace(params_treedef=g[1], state_treedef=g[2]) for g in groups),
+      # The stage params are already layer-major (`_layer_major` above), so the setup must not move the scan axis again.
+      tuple(ctx._replace(params_treedef=g[1], state_treedef=g[2], scan_axis=0) for g in groups),
       tuple(len(g[3]) for g in groups),
   )
   return final_y, layers, None

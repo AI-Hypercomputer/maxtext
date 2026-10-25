@@ -350,7 +350,7 @@ def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
   return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
 
 
-def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
+def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None, return_counts=False):
   """Computes a bias adjustment update based on expert load.
 
   Used in DeepSeek V3: https://arxiv.org/html/2412.19437v1.
@@ -364,11 +364,16 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=
         Defaults to None for backward compatibility. When provided, expert token
         counts are collectively reduced (psum) across these axes before
         computing the load balance updates.
+      return_counts: If True, return the (reduced) per-expert token counts instead of the update, so a caller that
+        splits the batch into microbatches (pipeline parallelism) can sum them and take the sign of the whole-batch
+        load, as the reference does. Convert with `rate * sign(mean(counts) - counts)`.
 
   Returns:
-      update: The value to add to the expert bias. Shape (num_experts,).
+      update: The value to add to the expert bias (or the expert counts). Shape (num_experts,).
   """
   expert_counts = calculate_expert_counts(top_k_indices, num_experts, axis_names=axis_names)
+  if return_counts:
+    return expert_counts
   return load_balance_updates_from_counts(expert_counts, num_experts, rate)
 
 
@@ -517,9 +522,12 @@ def _batch_axis_names(pspec) -> tuple[str, ...] | None:
   """Returns the mesh axes the (batch, sequence) dims are partitioned over."""
   if not pspec:
     return None
+  # 'stage' shards the batch only where it acts as data parallelism (the layers outside the pipeline); inside
+  # the pipeline it is the vmapped stage axis and never appears in these per-stage partition specs.
   allowed_batch_axes = frozenset(
       {
           "data",
+          "stage",
           "fsdp",
           "fsdp_transpose",
           "expert",
@@ -667,7 +675,7 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
@@ -733,7 +741,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -1375,7 +1383,7 @@ class RoutedMoE(nnx.Module):
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
         top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -1384,7 +1392,11 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    if self.config.decoder_block in (
+        ctypes.DecoderBlockType.DEEPSEEK,
+        ctypes.DecoderBlockType.DEEPSEEK4,
+        ctypes.DecoderBlockType.MING,
+    ):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1592,7 +1604,7 @@ class RoutedMoE(nnx.Module):
     if self.should_update_load_balance():
       if defer_reductions:
         bias_updates = calculate_expert_counts(selected_experts, self.config.num_experts)
-      elif return_expert_counts:
+      elif return_expert_counts or getattr(self.config, "using_pipeline_parallelism", False):
         bias_updates = calculate_expert_counts(
             selected_experts,
             self.config.num_experts,
@@ -2582,7 +2594,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -2623,9 +2635,14 @@ class RoutedMoE(nnx.Module):
           wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
         # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
-        w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
-        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+        if self.config.moe_flat_fsdp_weights:
+          w0_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), None))
+        else:
+          w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
         # Update kernel pspec for FSDP AG
         w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
         w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
@@ -2646,11 +2663,6 @@ class RoutedMoE(nnx.Module):
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
     weight_gather = explicitly_weight_ag()
-    if self.config.moe_flat_fsdp_weights and not weight_gather:
-      raise NotImplementedError(
-          "moe_flat_fsdp_weights needs the explicit fp8 weight all-gather"
-          " (shard_embed_moe_on_fsdp + fixed weight calibration)."
-      )
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -3936,7 +3948,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
+        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming"))
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -4380,7 +4392,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
@@ -4429,7 +4441,9 @@ class RoutedMoE(nnx.Module):
     if self.should_update_load_balance():
       # Under plain JIT (dense_matmul), GSPMD automatically inserts the all-reduce
       # across partitioned batch/sequence axes on global arrays, so axis_names=None.
-      if getattr(self.config, "gradient_accumulation_steps", 1) > 1:
+      if getattr(self.config, "gradient_accumulation_steps", 1) > 1 or getattr(
+          self.config, "using_pipeline_parallelism", False
+      ):
         bias_updates = calculate_expert_counts(
             top_k_indices,
             self.config.num_experts,

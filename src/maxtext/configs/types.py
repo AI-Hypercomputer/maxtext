@@ -322,6 +322,7 @@ ModelName = Literal[
     "envy-switch-large",
     "envy-switch-xxl",
     "glm5.3-flash",
+    "ming-3.0-audio-tiny",
 ]
 
 
@@ -1753,6 +1754,15 @@ class DeepSeekMoE(BaseModel):
   )
 
 
+class Ming(BaseModel):
+  """Configuration specific to inclusionAI Ming (BailingMoeV3) models with Kimi Delta Attention."""
+
+  kda_lower_bound: float = Field(
+      -5.0,
+      description="Lower bound of the KDA forget gate in log space: g = lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).",
+  )
+
+
 class Qwen3Next(BaseModel):
   """Configuration specific to Qwen3-Next models with Gated Delta Net."""
 
@@ -2009,6 +2019,9 @@ class HardwareAndMesh(BaseModel):
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
+  prng_impl: Literal["unsafe_rbg", "rbg", "threefry2x32"] = Field(
+      "unsafe_rbg", description="JAX default PRNG implementation used for training."
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -2154,6 +2167,30 @@ class PipelineParallelism(BaseModel):
   pipeline_fsdp_ag_per_repeat: bool = Field(
       False,
       description="Enable weight prefetching for circular pipeline parallelism.",
+  )
+  pipeline_bsw_no_carry: bool = Field(
+      True,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: re-gather the previous repeat's weights in every repeat instead of"
+          " carrying the gathered buffer across repeats (saves num_repeats x one repeat of gathered weights in HBM,"
+          " costs one extra FSDP all-gather / reduce-scatter per repeat). Numerically identical. False carries the"
+          " buffer."
+      ),
+  )
+  pipeline_bsw_phase_split: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: run the iterations in which all stages read the current repeat's weights"
+          " without the per-iteration buffer-slot select (no weight copy, one gradient accumulator). Helps when"
+          " num_pipeline_microbatches >> num_stages. Numerically identical up to summation order."
+      ),
+  )
+  pipeline_bsw_in_compute_dtype: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: hold the prefetched weights and their per-repeat gradient accumulation in"
+          " `dtype` instead of `weight_dtype`. Changes numerics; halves the prefetch all-gather bytes and memory."
+      ),
   )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
   num_pipeline_repeats: int = Field(
@@ -3339,8 +3376,8 @@ class ElasticTraining(BaseModel):
           "How an attempt after an elastic event gets its train state back. 'snapshot' keeps a copy of the train"
           " state and the data iterator position in pinned host memory every `elastic_snapshot_interval` steps, and"
           " restores that copy when it is at least as recent as the latest checkpoint; it needs grain's"
-          " ElasticIterator (or synthetic data) and is not supported with DiLoCo, rampup batch size or colocated"
-          " python data input, which must set 'checkpoint'. 'checkpoint' only restores the latest persistent"
+          " ElasticIterator (or synthetic data) and is not supported with DiLoCo or rampup batch size,"
+          " which must set 'checkpoint'. 'checkpoint' only restores the latest persistent"
           " checkpoint. The snapshot only survives the loss of a slice for state that is replicated across slices, so"
           " with `shard_optimizer_over_data` it falls back to the checkpoint."
       ),
@@ -4215,6 +4252,7 @@ class MaxTextConfig(
     DeepSeekMoE,
     Qwen3Next,
     Qwen3_8FlashNext,
+    Ming,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -5214,8 +5252,22 @@ class MaxTextConfig(
         assert (
             not self.pipeline_delay_activation_forwarding
         ), "Pipeline weight prefetching does not support pipeline delay."
-        assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
+        # Qwix quantized training (qwix.QtProvider) keeps no per-layer quantization state: weights are staged through
+        # the BSW in their original dtype and quantized inside every matmul/GMM, exactly as without pipelining (verified
+        # for fp8_full). AQT and the fp8_gpu/fp8_nanoo delayed-scaling providers instead carry amax-history
+        # `_overwrite_with_gradient` variables whose "gradient" is the new history, and the BSW scan would sum it over
+        # all microbatches of a repeat, so they stay unsupported.
+        qwix_qt_types = ("int4", "int8", "fp4", "fp4_e2m1", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_full")
+        assert not self.quantization or (self.use_qwix_quantization and self.quantization in qwix_qt_types), (
+            "Pipeline weight prefetching (pipeline_fsdp_ag_per_repeat) only supports Qwix quantized training: "
+            f"use_qwix_quantization=True and quantization in {qwix_qt_types}."
+        )
+      else:
+        # pipeline_bsw_no_carry is on by default and has nothing to do without weight prefetching.
+        bsw_options = ("pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype")
+        enabled = [name for name in bsw_options if getattr(self, name)]
+        assert not enabled, f"{enabled} only apply to pipeline weight prefetching: set pipeline_fsdp_ag_per_repeat=True."
 
       assert (num_stages * self.num_pipeline_repeats * self.num_layers_per_pipeline_stage) == (
           self.pipeline_parallel_layers
@@ -5352,11 +5404,6 @@ class MaxTextConfig(
           raise ValueError(
               "elastic_backup_kind='snapshot' requires `dataset_type=grain` with `grain_use_elastic_iterator=True`"
               " (or synthetic data), so that the data iterator position can be snapshotted with the train state."
-          )
-        if self.colocated_python_data_input:
-          raise ValueError(
-              "elastic_backup_kind='snapshot' does not support `colocated_python_data_input=True` yet: the data"
-              " iterator position lives in the colocated process and is not part of the snapshot."
           )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
@@ -6362,14 +6409,13 @@ class MaxTextConfig(
     if self.moe_flat_fsdp_weights:
       if not (
           self.sparse_matmul
-          and self.shard_embed_moe_on_fsdp
-          and self.use_tokamax_gmm
-          and self.use_gmm_v2
+          and (self.shard_embed_moe_on_fsdp or not self.quantization)
+          and ((self.use_tokamax_gmm and self.use_gmm_v2) or self.prefetch_fsdp_weights)
           and not self.prefuse_moe_weights
       ):
         raise ValueError(
-            "moe_flat_fsdp_weights=True requires sparse_matmul=True, shard_embed_moe_on_fsdp=True,"
-            " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+            "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True or unquantized),"
+            " ((use_tokamax_gmm=True and use_gmm_v2=True) or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
         )
       # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
       if (
@@ -6565,6 +6611,7 @@ class RLConfig(
     SplashAttention,
     Qwen3Next,
     Qwen3_8FlashNext,
+    Ming,
     MultimodalGeneral,
     Muon,
     FineTuning,

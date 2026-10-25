@@ -1690,12 +1690,30 @@ class Qwen3NextScannableBlock(nnx.Module):
     nnx.update(self.global_layer, final_other, intermediate_state, created_params)
     return y
 
-  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
+  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs, sub_layer_attention_metadata=None):
     """Runs the block with externally-supplied per-layer kv caches.
 
     Inference KV caches are a Python list of per-layer entries, so this path
     unrolls the local layers statically rather than scanning them.
+
+    Args:
+      y: The block input.
+      kv_cache: Per-sub-layer caches, the local layers first and the
+        full-attention layer last.
+      layer_kwargs: Keyword arguments for every sub-layer call.
+      sub_layer_attention_metadata: Optional per-sub-layer attention metadata,
+        ordered like `kv_cache`; entry i replaces `layer_kwargs`'s
+        `attention_metadata` for sub-layer i.
+
+    Returns:
+      The block output and the tuple of updated per-sub-layer caches.
     """
+
+    def sub_layer_kwargs(position):
+      if sub_layer_attention_metadata is None:
+        return layer_kwargs
+      return {**layer_kwargs, "attention_metadata": sub_layer_attention_metadata[position]}
+
     updated_kvs = []
     if self.local_layers is not None:
       graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
@@ -1708,7 +1726,7 @@ class Qwen3NextScannableBlock(nnx.Module):
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
         layer = nnx.merge(graphdef, current_params, current_state)
         current_kv = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
-        y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv)
+        y, new_kv = self._run_layer(layer, y, sub_layer_kwargs(i), current_kv)
         updated_kvs.append(new_kv)
         # Collect only non-Param state: parameters are read-only here, so stacking
         # them back would allocate a second copy of every layer weight. Non-Param
@@ -1720,7 +1738,7 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     if self.global_layer is not None:
       global_kv = kv_cache[self.num_local] if (kv_cache is not None and self.num_local < len(kv_cache)) else None
-      y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv)
+      y, new_kv = self._run_layer(self.global_layer, y, sub_layer_kwargs(self.num_local), global_kv)
       updated_kvs.append(new_kv)
 
     return y, tuple(updated_kvs)
@@ -1742,6 +1760,14 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     Args:
       carry: The input tensor from the previous scan iteration.
+      kv_cache: Optional externally-managed (vLLM) caches, one per sub-layer,
+        in block order (the local layers first, the full-attention layer last).
+      attention_metadata: Optional attention metadata: either one object shared
+        by every sub-layer or, together with `kv_cache`, a tuple holding one
+        entry per sub-layer in block order. vLLM's per-layer dict (keyed by
+        global layer) has to be resolved into that tuple by the caller, as
+        NNXDecoder._apply_qwen3_hybrid_scanned_blocks does, because the
+        sub-layers of a scanned block do not know their global layer index.
       forced_routed_experts: Optional router replay indices for this block,
         shaped `[num_of_layers, batch, seq, top_k]` -- one slice per sub-layer,
         in block order (the local layers first, the full-attention layer last).
@@ -1772,13 +1798,29 @@ class Qwen3NextScannableBlock(nnx.Module):
       )
     if isinstance(attention_metadata, dict):
       # Such metadata is keyed by global layer index, which the sub-layers of a scanned block do not have (every local
-      # layer is built with layer_idx=0). The vLLM path that sends it runs unscanned (configs/inference/vllm.yml).
-      raise NotImplementedError("Per-layer attention_metadata (a dict keyed by layer) requires scan_layers=False.")
+      # layer is built with layer_idx=0), so a `layer.{i}` lookup here would read another layer's entry. With external
+      # kv caches the decoder resolves it and hands the block a per-sub-layer tuple instead.
+      raise NotImplementedError(
+          "Per-layer attention_metadata (a dict keyed by layer) cannot be resolved inside a scanned block; pass a "
+          "tuple with one entry per sub-layer together with externally-managed kv caches, or use scan_layers=False."
+      )
+    sub_layer_attention_metadata = None
+    if isinstance(attention_metadata, tuple):
+      if kv_cache is None:
+        raise NotImplementedError(
+            "Per-sub-layer attention_metadata is only supported together with externally-managed kv caches."
+        )
+      if len(attention_metadata) != self.num_of_layers:
+        raise ValueError(
+            f"attention_metadata must carry one entry per sub-layer of the block: expected {self.num_of_layers}, "
+            f"got {len(attention_metadata)}."
+        )
+      sub_layer_attention_metadata = attention_metadata
 
     if kv_cache is not None:
       if forced_routed_experts is not None:
         raise NotImplementedError("Forced routing is not supported together with externally-managed kv caches.")
-      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs)
+      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs, sub_layer_attention_metadata)
 
     y = inputs
     if self.local_layers is not None:

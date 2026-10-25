@@ -295,7 +295,7 @@ jobs:
           tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
           provenance: mode=max
-          sbom: true
+          sbom: false
           outputs: type=image,push=true,compression=zstd,force-compression=true
           secret-files: |
             credentials=/tmp/airlock/credentials.json
@@ -320,7 +320,7 @@ jobs:
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ needs.drift_guard.outputs.overlay_variant == 'clean' && 'maxtext_code_overlay.Dockerfile' || 'maxtext_code_overlay_fast.Dockerfile' }}
           tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ github.run_id }}
           provenance: mode=max
-          sbom: true
+          sbom: false
           # No force-compression: the source image's layers pass through untouched, only
           # the new code layers are compressed and uploaded.
           outputs: type=image,push=true,compression=zstd

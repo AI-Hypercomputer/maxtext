@@ -1,0 +1,591 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Layer-wise tests: MaxText Ming (BailingMoeV3 audio) vs the publisher's HuggingFace remote code.
+
+The HF reference is the `inclusionAI/Ming-3.0-audio-tiny` remote code. Its KDA kernels are rebound to
+fla's naive PyTorch references, and gated RMSNorm and short convolution use test-local PyTorch
+implementations (`_load_remote_modules`). This avoids relying on version-specific CPU fallbacks in
+fla. All tests run on CPU in float32 with small layer dimensions and explicit weight copies.
+
+No checkpoints, logits or data files are needed: weights are random.
+Only the HF remote code is fetched (`MING_HF_PATH` may point at a local HF directory).
+
+Explicit runs require PyTorch, Transformers, fla, and the HF remote code's dependencies
+(including `openai-whisper` and `torchaudio`). Missing dependencies or unavailable reference code
+raise setup errors rather than skipping the comparisons. Set `HF_HUB_OFFLINE=1` to use cached code.
+
+Run:
+  JAX_PLATFORMS=cpu python3 -m pytest tests/unit/ming_layers_test.py
+"""
+
+import os
+import sys
+import unittest
+
+import numpy as np
+import pytest
+
+import torch
+from torch import nn
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+MING_HF_MODEL_ID = "inclusionAI/Ming-3.0-audio-tiny"
+HF_PATH = os.environ.get("MING_HF_PATH", MING_HF_MODEL_ID)
+
+
+class TorchShortConvolution(nn.Conv1d):
+  """CPU depthwise causal convolution for the HF KDA reference (fixed-length batches)."""
+
+  def __init__(self, hidden_size, kernel_size, bias=False, activation="silu"):
+    super().__init__(hidden_size, hidden_size, kernel_size, groups=hidden_size, bias=bias)
+    if activation not in (None, "silu", "swish"):
+      raise ValueError(f"Unsupported activation: {activation}")
+    self.activation = activation
+
+  def forward(self, x, cache=None, output_final_state=False, cu_seqlens=None):  # pylint: disable=arguments-renamed
+    """Returns output and optional last W inputs, updating a supplied cache in place."""
+    if cu_seqlens is not None:
+      raise NotImplementedError("Variable-length batches are not supported by the CPU reference")
+    width = self.kernel_size[0]
+    inputs = x.transpose(1, 2)
+    if cache is None:
+      history = inputs.new_zeros(inputs.shape[0], inputs.shape[1], width)
+    else:
+      history = cache
+    combined = torch.cat((history, inputs), dim=-1)
+    # Drop the oldest history token so each output sees exactly W causal inputs.
+    out = super().forward(combined[..., 1:]).transpose(1, 2)
+    if self.activation is not None:
+      out = torch.nn.functional.silu(out)
+    final_state = combined[..., -width:].clone()
+    if cache is not None:
+      cache.copy_(final_state)
+      final_state = cache
+    return out, final_state if output_final_state else None
+
+
+class TorchRMSNormGated(nn.Module):
+  """`fla.modules.FusedRMSNormGated` reference: rmsnorm(x) * weight * act(g), float32 math."""
+
+  def __init__(self, hidden_size, elementwise_affine=True, eps=1e-5, activation="swish", **kwargs):
+    del kwargs
+    super().__init__()
+    self.eps = eps
+    self.activation = activation
+    self.weight = nn.Parameter(torch.ones(hidden_size)) if elementwise_affine else None
+
+  def forward(self, x, g, residual=None, prenorm=False, residual_in_fp32=False):
+    """Returns rmsnorm(x) * weight * act(g)."""
+    del residual, prenorm, residual_in_fp32
+    xf, gf = x.float(), g.float()
+    y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
+    if self.weight is not None:
+      y = y * self.weight.float()
+    y = y * torch.sigmoid(gf) if self.activation == "sigmoid" else y * gf * torch.sigmoid(gf)
+    return y.to(x.dtype)
+
+
+def _torch_kda(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A_log=None,  # pylint: disable=invalid-name
+    dt_bias=None,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    use_gate_in_kernel=False,
+    lower_bound=None,
+    cu_seqlens=None,
+    scale=None,
+    **kwargs,
+):
+  """CPU replacement for `fla.ops.kda.chunk_kda` / `fused_recurrent_kda` built from fla's naive references."""
+  from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate  # pylint: disable=import-outside-toplevel
+  from fla.ops.kda.naive import naive_recurrent_kda  # pylint: disable=import-outside-toplevel
+
+  del kwargs  # e.g. safe_gate: only selects a kernel variant, same math.
+  assert cu_seqlens is None, "varlen is not supported by the CPU reference"
+  if use_gate_in_kernel:
+    if lower_bound is not None:
+      g = naive_kda_lowerbound_gate(g, A_log, dt_bias, lower_bound=lower_bound)
+    else:
+      g = naive_kda_gate(g, A_log, dt_bias)
+  if use_qk_l2norm_in_kernel:  # fla l2norm: x / sqrt(sum(x^2) + 1e-6)
+    q, k = (x.float() * torch.rsqrt(x.float().pow(2).sum(-1, keepdim=True) + 1e-6) for x in (q, k))
+  return naive_recurrent_kda(
+      q, k, v, g, beta, scale=scale, initial_state=initial_state, output_final_state=output_final_state
+  )
+
+
+def _load_remote_modules(model_path):
+  """Returns the publisher's `(text_module, audio_module)` remote-code modules with CPU kernels rebound."""
+  text_cls = get_class_from_dynamic_module("modeling_bailing_moe_v3.BailingMoeV3Model", model_path)
+  text_mod = sys.modules[text_cls.__module__]
+  text_mod.ShortConvolution = TorchShortConvolution
+  text_mod.FusedRMSNormGated = TorchRMSNormGated
+  text_mod.chunk_kda = _torch_kda
+  text_mod.fused_recurrent_kda = _torch_kda
+  return text_mod, None
+
+
+TEXT_MOD, AUDIO_MOD = None, None
+
+pytestmark = [
+    pytest.mark.cpu_only,
+]
+
+from flax import nnx  # pylint: disable=wrong-import-position
+import jax.numpy as jnp  # pylint: disable=wrong-import-position
+from jax.sharding import Mesh  # pylint: disable=wrong-import-position
+
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN  # pylint: disable=wrong-import-position
+from maxtext.configs import pyconfig  # pylint: disable=wrong-import-position
+from maxtext.models import ming  # pylint: disable=wrong-import-position
+from maxtext.utils import maxtext_utils  # pylint: disable=wrong-import-position
+from maxtext.utils.globals import MAXTEXT_REPO_ROOT  # pylint: disable=wrong-import-position
+
+BASE_CONFIG = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+
+# Small but structurally faithful dimensions.
+EMB, HEADS, HEAD_DIM = 128, 4, 32
+Q_LORA, KV_LORA, NOPE, ROPE, V_DIM = 64, 32, 32, 16, 32
+MLP, MOE_MLP, EXPERTS, TOPK, GROUPS, TOPK_GROUPS = 256, 64, 16, 4, 4, 2
+VOCAB = 1000
+A_D, A_HEADS, A_FFN, A_LAYERS = 64, 4, 256, 2
+ATOL, RTOL = 2e-4, 2e-4
+
+
+def make_config(model_mode_overrides=None, **kwargs):
+  """Small, structurally faithful Ming config (CPU, float32)."""
+  overrides = dict(  # pylint: disable=use-dict-literal
+      model_name="ming-3.0-audio-tiny",
+      override_model_config=True,
+      base_emb_dim=EMB,
+      base_num_query_heads=HEADS,
+      base_num_kv_heads=HEADS,
+      head_dim=HEAD_DIM,
+      q_lora_rank=Q_LORA,
+      kv_lora_rank=KV_LORA,
+      qk_nope_head_dim=NOPE,
+      qk_rope_head_dim=ROPE,
+      v_head_dim=V_DIM,
+      base_mlp_dim=MLP,
+      base_moe_mlp_dim=MOE_MLP,
+      num_experts=EXPERTS,
+      num_experts_per_tok=TOPK,
+      n_routing_groups=GROUPS,
+      topk_routing_group=TOPK_GROUPS,
+      vocab_size=VOCAB,
+      base_num_decoder_layers=4,
+      per_device_batch_size=1,
+      max_target_length=32,
+      max_prefill_predict_length=16,
+      scan_layers=False,
+      attention="dot_product",
+      sparse_matmul=False,
+      capacity_factor=-1,
+      matmul_precision="highest",
+      dtype="float32",
+      dtype_mm="float32",
+      weight_dtype="float32",
+      float32_logits=True,
+      float32_qk_product=True,
+      dropout_rate=0.0,
+      skip_jax_distributed_system=True,
+      hardware="cpu",
+  )
+  overrides.update(model_mode_overrides or {})
+  overrides.update(kwargs)
+  return pyconfig.initialize(["", BASE_CONFIG], **overrides)
+
+
+def make_hf_text_config():
+  """HF BailingMoeV3Config with the same small dimensions as `make_config`."""
+  cfg = TEXT_MOD.BailingMoeV3Config(
+      vocab_size=VOCAB,
+      hidden_size=EMB,
+      intermediate_size=MLP,
+      num_hidden_layers=4,
+      num_attention_heads=HEADS,
+      num_key_value_heads=HEADS,
+      head_dim=HEAD_DIM,
+      rms_norm_eps=1e-6,
+      num_experts=EXPERTS,
+      num_shared_experts=1,
+      num_experts_per_tok=TOPK,
+      n_group=GROUPS,
+      topk_group=TOPK_GROUPS,
+      moe_intermediate_size=MOE_MLP,
+      moe_shared_expert_intermediate_size=MOE_MLP,
+      first_k_dense_replace=1,
+      routed_scaling_factor=2.5,
+      layer_group_size=4,
+      kv_lora_rank=KV_LORA,
+      q_lora_rank=Q_LORA,
+      qk_rope_head_dim=ROPE,
+      v_head_dim=V_DIM,
+      qk_nope_head_dim=NOPE,
+      rope_interleave=True,
+      rope_theta=6_000_000,
+      max_position_embeddings=131072,
+      gated_attention_proj_granularity_type="head_wise",
+      no_kda_lora=True,
+      kda_safe_gate=True,
+      kda_lower_bound=-5,
+      short_conv_kernel_size=4,
+      num_nextn_predict_layers=0,
+      pad_token_id=0,
+      eos_token_id=1,
+  )
+  cfg._attn_implementation = "eager"  # pylint: disable=protected-access
+  return cfg
+
+
+def make_mesh(config):
+  return Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+
+
+def t2j(t):
+  return jnp.asarray(t.detach().float().cpu().numpy())
+
+
+def randomize_(module, seed=0, std=0.1):
+  """Fills every HF parameter/buffer with random values so no weight copy can silently be skipped."""
+  g = torch.Generator().manual_seed(seed)
+  with torch.no_grad():
+    for name, p in list(module.named_parameters()) + list(module.named_buffers()):
+      if "inv_freq" in name:
+        continue
+      if name.endswith("A_log"):
+        p.copy_(torch.log(torch.empty_like(p).uniform_(1, 16, generator=g)))
+      elif "norm" in name or "_ln" in name or name.endswith("ln_post.weight"):
+        p.copy_(1.0 + std * torch.randn(p.shape, generator=g))
+      else:
+        p.copy_(std * torch.randn(p.shape, generator=g))
+
+
+def assert_close(jax_out, torch_out, atol=ATOL, rtol=RTOL, msg=""):
+  np.testing.assert_allclose(
+      np.asarray(jax_out, dtype=np.float32), torch_out.detach().float().numpy(), atol=atol, rtol=rtol, err_msg=msg
+  )
+
+
+# -----------------------------------------------------------------------------
+# Weight copy helpers (the same rules are used by checkpoint conversion)
+# -----------------------------------------------------------------------------
+
+
+def set_dense(jax_dense, torch_linear, out_shape=None, in_shape=None):
+  w = t2j(torch_linear.weight).T  # [in, out]
+  if in_shape is not None or out_shape is not None:
+    w = w.reshape(tuple(in_shape or (w.shape[0],)) + tuple(out_shape or (w.shape[-1],)))
+  jax_dense.kernel.value = w
+  if getattr(torch_linear, "bias", None) is not None and getattr(jax_dense, "bias", None) is not None:
+    jax_dense.bias.value = t2j(torch_linear.bias)
+
+
+def set_conv1d(jax_conv, torch_conv):
+  jax_conv.kernel.value = jnp.transpose(t2j(torch_conv.weight), (2, 1, 0))  # [out, in, k] -> [k, in, out]
+  if torch_conv.bias is not None:
+    jax_conv.bias.value = t2j(torch_conv.bias)
+
+
+def copy_kda(hf, mt):
+  for n in ("q_proj", "k_proj", "v_proj", "f_proj", "b_proj", "g_proj", "o_proj"):
+    set_dense(getattr(mt, n), getattr(hf, n))
+  for n in ("q_conv1d", "k_conv1d", "v_conv1d"):
+    set_conv1d(getattr(mt, n), getattr(hf, n))
+  mt.A_log.value = t2j(hf.A_log)
+  mt.dt_bias.value = t2j(hf.dt_bias)
+  mt.o_norm.scale.value = t2j(hf.o_norm.weight)
+
+
+def copy_mla(hf, mt):
+  set_dense(mt.wq_a, hf.q_a_proj)
+  mt.q_norm.scale.value = t2j(hf.q_a_layernorm.weight)
+  set_dense(mt.wq_b, hf.q_b_proj, out_shape=(HEADS, NOPE + ROPE))
+  set_dense(mt.wkv_a, hf.kv_a_proj_with_mqa)
+  mt.kv_norm.scale.value = t2j(hf.kv_a_layernorm.weight)
+  set_dense(mt.wkv_b, hf.kv_b_proj, out_shape=(HEADS, NOPE + V_DIM))
+  mt.out.kernel.value = t2j(hf.dense.weight).T.reshape(HEADS, V_DIM, EMB)
+  set_dense(mt.g_proj, hf.g_proj)
+
+
+def copy_mlp(hf, mt):
+  set_dense(mt.wi_0, hf.gate_proj)
+  set_dense(mt.wi_1, hf.up_proj)
+  set_dense(mt.wo, hf.down_proj)
+
+
+def copy_moe(hf, mt):
+  routed = mt.MoeBlock_0
+  routed.gate.kernel.value = t2j(hf.gate.weight).T
+  routed.gate.bias.value = t2j(hf.gate.expert_bias)
+  routed.wi_0.value = jnp.stack([t2j(e.gate_proj.weight).T for e in hf.experts])
+  routed.wi_1.value = jnp.stack([t2j(e.up_proj.weight).T for e in hf.experts])
+  routed.wo.value = jnp.stack([t2j(e.down_proj.weight).T for e in hf.experts])
+  copy_mlp(hf.shared_experts, mt.shared_experts)
+
+
+def copy_decoder_layer(hf, mt):
+  """Copies one HF BailingMoeV3DecoderLayer into a MingDecoderLayer."""
+  mt.pre_self_attention_layer_norm.scale.value = t2j(hf.input_layernorm.weight)
+  mt.post_self_attention_layer_norm.scale.value = t2j(hf.post_attention_layernorm.weight)
+  if mt.is_mla:
+    copy_mla(hf.attention, mt.self_attention)
+  else:
+    copy_kda(hf.attention, mt.kda)
+  if mt.is_moe:
+    copy_moe(hf.mlp, mt.moe_block)
+  else:
+    copy_mlp(hf.mlp, mt.mlp)
+
+
+def causal_mask(batch, seq):
+  m = torch.full((seq, seq), float("-inf")).triu(1)
+  return m[None, None].expand(batch, 1, seq, seq)
+
+
+class MingTextLayersTest(unittest.TestCase):
+  """KDA, gated MLA, MoE, MLP and full decoder layers vs HF."""
+
+  @classmethod
+  def setUpClass(cls):
+    global TEXT_MOD, AUDIO_MOD
+    try:
+      TEXT_MOD, AUDIO_MOD = _load_remote_modules(HF_PATH)
+    except (ImportError, OSError) as exc:
+      raise RuntimeError(
+          f"Cannot load Ming HF reference from {HF_PATH!r}: {exc}. "
+          "Install the missing reference dependencies or set MING_HF_PATH to a local HF model directory."
+      ) from exc
+    torch.set_grad_enabled(False)
+    cls.hf_cfg = make_hf_text_config()
+    cls.config = make_config()
+    cls.mesh = make_mesh(cls.config)
+    cls.rope = TEXT_MOD.BailingMoeV3RotaryEmbedding(cls.hf_cfg)
+
+  def setUp(self):
+    np.random.seed(0)
+    torch.manual_seed(0)
+
+  def _inputs(self, batch=2, seq=12, seed=0):
+    x = np.random.RandomState(seed).randn(batch, seq, EMB).astype(np.float32)
+    return torch.tensor(x), jnp.asarray(x)
+
+  def _layer(self, idx, model_mode=MODEL_MODE_TRAIN, config=None):
+    config = config or self.config
+    return ming.MingDecoderLayer(
+        config=config, model_mode=model_mode, mesh=self.mesh, rngs=nnx.Rngs(params=0, dropout=1), layer_idx=idx
+    )
+
+  def test_layer_pattern_matches_hf(self):
+    full = make_config(base_num_decoder_layers=24)
+    for i in range(24):
+      hf_layer_type = "attention" if ((i + 1) % 4 == 0 or i >= 24 // 4 * 4) else "linear_attention"
+      self.assertEqual(ming.is_mla_layer(i, full), hf_layer_type == "attention", i)
+      self.assertEqual(ming.is_moe_layer(i, full), i >= 1, i)
+
+  def test_kda_matches_hf(self):
+    hf = TEXT_MOD.BailingMoeV3KimiDeltaAttention(self.hf_cfg, layer_idx=0).eval()
+    randomize_(hf, seed=1)
+    mt = ming.MingKimiDeltaAttention(self.config, self.mesh, MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+    copy_kda(hf, mt)
+    xt, xj = self._inputs(seq=80)  # > 64 exercises HF's chunk mode
+    ref, _, _ = hf(xt)
+    out = mt(xj, model_mode=MODEL_MODE_TRAIN)
+    assert_close(out, ref, msg="KDA (chunk mode)")
+    xt, xj = self._inputs(seq=9, seed=3)  # <= 64 exercises HF's fused_recurrent mode
+    ref, _, _ = hf(xt)
+    assert_close(mt(xj, model_mode=MODEL_MODE_TRAIN), ref, msg="KDA (recurrent mode)")
+
+  def test_mla_matches_hf(self):
+    hf = TEXT_MOD.BailingMoeV3MultiLatentAttention(self.hf_cfg, layer_idx=3).eval()
+    randomize_(hf, seed=2)
+    layer = self._layer(3)
+    mt = layer.self_attention
+    copy_mla(hf, mt)
+    batch, seq = 2, 12
+    xt, xj = self._inputs(batch, seq)
+    pos = torch.arange(seq)[None].expand(batch, seq)
+    ref, _, _ = hf(xt, position_embeddings=self.rope(xt, pos), attention_mask=causal_mask(batch, seq))
+    out, _ = mt(
+        xj,
+        xj,
+        jnp.asarray(pos.numpy()),
+        decoder_segment_ids=jnp.ones((batch, seq), jnp.int32),
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+    assert_close(out, ref, msg="gated MLA")
+
+  def test_dense_mlp_matches_hf(self):
+    hf = TEXT_MOD.BailingMoeV3MLP(self.hf_cfg, intermediate_size=MLP).eval()
+    randomize_(hf, seed=3)
+    layer = self._layer(0)
+    copy_mlp(hf, layer.mlp)
+    xt, xj = self._inputs()
+    assert_close(layer.mlp(xj, deterministic=True), hf(xt), msg="dense MLP")
+
+  def test_moe_matches_hf(self):
+    hf = TEXT_MOD.BailingMoeV3SparseMoeBlock(self.hf_cfg, layer_idx=1).eval()
+    randomize_(hf, seed=4, std=0.5)
+    layer = self._layer(1)
+    copy_moe(hf, layer.moe_block)
+    xt, xj = self._inputs()
+    ref, _ = hf(xt)
+    out, _, _ = layer.moe_block(xj)
+    assert_close(out, ref, msg="MoE")
+
+  def _check_decoder_layer(self, idx, seed):
+    """Compares HF and MaxText decoder layer `idx` with random weights."""
+    hf = TEXT_MOD.BailingMoeV3DecoderLayer(self.hf_cfg, layer_idx=idx).eval()
+    randomize_(hf, seed=seed)
+    mt = self._layer(idx)
+    copy_decoder_layer(hf, mt)
+    batch, seq = 2, 12
+    xt, xj = self._inputs(batch, seq, seed=seed)
+    pos = torch.arange(seq)[None].expand(batch, seq)
+    ref = hf(xt, attention_mask=causal_mask(batch, seq), position_ids=pos, position_embeddings=self.rope(xt, pos))[0]
+    out, _ = mt(xj, jnp.ones((batch, seq), jnp.int32), jnp.asarray(pos.numpy()), True, MODEL_MODE_TRAIN)
+    assert_close(out, ref, msg=f"decoder layer {idx}")
+
+  def test_decoder_layer_kda_dense(self):
+    self._check_decoder_layer(0, seed=5)
+
+  def test_decoder_layer_kda_moe(self):
+    self._check_decoder_layer(1, seed=6)
+
+  def test_decoder_layer_mla_moe(self):
+    self._check_decoder_layer(3, seed=7)
+
+  def test_kda_cached_decode_matches_full_forward(self):
+    """Right-padded prefill + token-by-token AR decode reproduces the full (train-mode) KDA output."""
+    hf = TEXT_MOD.BailingMoeV3KimiDeltaAttention(self.hf_cfg, layer_idx=0).eval()
+    randomize_(hf, seed=8)
+    total, prompt = 10, 6
+    cfg = self.config
+    full = ming.MingKimiDeltaAttention(cfg, self.mesh, MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+    pre = ming.MingKimiDeltaAttention(cfg, self.mesh, MODEL_MODE_PREFILL, rngs=nnx.Rngs(0))
+    copy_kda(hf, full)
+    copy_kda(hf, pre)
+    _, xj = self._inputs(1, total, seed=9)
+    ref = full(xj, model_mode=MODEL_MODE_TRAIN)
+
+    # Prefill padded to max_prefill_predict_length with garbage after `prompt` tokens.
+    pad = cfg.max_prefill_predict_length
+    xp = jnp.concatenate([xj[:, :prompt], 3.0 * jnp.ones((1, pad - prompt, EMB))], axis=1)
+    seg = (jnp.arange(pad) < prompt).astype(jnp.int32)[None]
+    out_p = pre(xp, model_mode=MODEL_MODE_PREFILL, decoder_segment_ids=seg)
+    np.testing.assert_allclose(out_p[:, :prompt], ref[:, :prompt], atol=ATOL, rtol=RTOL)
+
+    ar = ming.MingKimiDeltaAttention(cfg, self.mesh, MODEL_MODE_AUTOREGRESSIVE, rngs=nnx.Rngs(0))
+    copy_kda(hf, ar)
+    rec, conv = pre.cache.get_gdn_states()
+    ar.cache.update_gdn_states(rec, conv)
+    for t in range(prompt, total):
+      o = ar(xj[:, t : t + 1], model_mode=MODEL_MODE_AUTOREGRESSIVE)
+      np.testing.assert_allclose(o[:, 0], ref[:, t], atol=ATOL, rtol=RTOL, err_msg=f"AR step {t}")
+
+
+class TorchShortConvolutionTest(unittest.TestCase):
+  """Checks causal alignment and channel isolation in the CPU reference."""
+
+  def test_causal_depthwise_convolution(self):
+    conv = TorchShortConvolution(2, 3, bias=True, activation=None)
+    with torch.no_grad():
+      conv.weight.copy_(torch.tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]]))
+      conv.bias.copy_(torch.tensor([0.5, -0.5]))
+    x = torch.tensor([[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]])
+    out, state = conv(x)
+    torch.testing.assert_close(out, torch.tensor([[[3.5, 59.5], [8.5, 169.5], [14.5, 319.5], [20.5, 469.5]]]))
+    self.assertIsNone(state)
+
+  def test_cached_chunks_match_full_sequence(self):
+    for width in (1, 4):
+      with self.subTest(width=width):
+        conv = TorchShortConvolution(2, width, activation="silu")
+        x = torch.arange(12, dtype=torch.float32).reshape(1, 6, 2) / 10
+        full, _ = conv(x)
+        prefix, cache = conv(x[:, :2], output_final_state=True)
+        outputs = [prefix]
+        for t in range(2, 6):
+          out, updated = conv(x[:, t : t + 1], cache=cache, output_final_state=True)
+          self.assertIs(updated, cache)
+          outputs.append(out)
+        torch.testing.assert_close(torch.cat(outputs, dim=1), full)
+        torch.testing.assert_close(cache, x[:, -width:].transpose(1, 2))
+
+
+class MingScanTest(unittest.TestCase):
+  """`scan_layers=True` (unrolled prefix + scanned MingScannableBlocks) matches the unscanned stack."""
+
+  def test_scan_layout(self):
+    self.assertEqual(ming.scan_layout(make_config(base_num_decoder_layers=24)), (4, 5, 24))
+    self.assertEqual(ming.scan_layout(make_config(base_num_decoder_layers=14)), (4, 2, 12))
+    self.assertEqual(ming.scan_layout(make_config(base_num_decoder_layers=4)), (4, 0, 4))
+
+  def test_scanned_matches_unscanned(self):
+    from flax.linen import partitioning as nn_partitioning  # pylint: disable=import-outside-toplevel
+    from maxtext.layers import moe  # pylint: disable=import-outside-toplevel
+    from maxtext.utils import model_creation_utils  # pylint: disable=import-outside-toplevel
+
+    # 4 unrolled, 2 scanned blocks, 2 unrolled.
+    common = {"base_num_decoder_layers": 14, "use_multimodal": False, "use_audio": False}
+    cfg_u = make_config(scan_layers=False, **common)
+    cfg_s = make_config(scan_layers=True, **common)
+    mesh = make_mesh(cfg_u)
+    mu = model_creation_utils.from_config(cfg_u, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1))
+    ms = model_creation_utils.from_config(cfg_s, mesh=mesh, rngs=nnx.Rngs(params=1, dropout=1))
+    num_prefix, num_blocks, _ = ming.scan_layout(cfg_s)
+    cycle = cfg_s.inhomogeneous_layer_cycle_interval
+
+    var_filter = nnx.Any(nnx.Param, moe.MoEBiasVar)
+    src = {tuple(map(str, k)): v for k, v in nnx.to_flat_state(nnx.state(mu, var_filter))}
+    dst_state = nnx.state(ms, var_filter)
+    new_flat = []
+    for path, var in nnx.to_flat_state(dst_state):
+      key = tuple(map(str, path))
+      if "scanned_blocks" in key:
+        i = key.index("scanned_blocks")
+        j = int(key[i + 1].split("_")[1])
+        slices = [
+            src[key[:i] + (f"layers_{num_prefix + b * cycle + j}",) + key[i + 2 :]].get_value() for b in range(num_blocks)
+        ]
+        value = jnp.stack(slices, axis=0)
+        if isinstance(var, nnx.Param) and value.ndim > cfg_s.param_scan_axis:
+          value = jnp.moveaxis(value, 0, cfg_s.param_scan_axis)
+      else:
+        value = src[key].get_value()
+      self.assertEqual(value.shape, var.get_value().shape, key)
+      new_flat.append((path, var.replace(value)))
+    nnx.update(ms, nnx.from_flat_state(new_flat))
+
+    batch, seq = 1, 12
+    ids = jnp.asarray(np.random.RandomState(0).randint(0, VOCAB, (batch, seq)), jnp.int32)
+    pos = jnp.arange(seq, dtype=jnp.int32)[None]
+    seg = jnp.ones((batch, seq), jnp.int32)
+    outs = []
+    for m, c in ((mu, cfg_u), (ms, cfg_s)):
+      with mesh, nn_partitioning.axis_rules(c.logical_axis_rules):
+        outs.append(m(decoder_input_tokens=ids, decoder_positions=pos, decoder_segment_ids=seg, enable_dropout=False))
+    np.testing.assert_allclose(np.asarray(outs[1]), np.asarray(outs[0]), atol=1e-4, rtol=1e-4)
+
+
+if __name__ == "__main__":
+  unittest.main()

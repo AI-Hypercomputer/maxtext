@@ -14,10 +14,15 @@
 
 """Static verification tests for DeepSeek-V4 E2E test scripts."""
 
+import importlib.util
 import pathlib
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
+
+import numpy as np
 import pytest
 
 pytestmark = pytest.mark.cpu_only
@@ -96,7 +101,7 @@ class DeepSeekV4E2EScriptTest(unittest.TestCase):
     self.assertIn("RUN_SCANNED_LOGIT_CHECK", c2)
     # At most one DCN axis may be -1.
     self.assertIn('dcn_data_parallelism="${PRETRAIN_DCN_DP:-1}"', c2)
-    self.assertEqual(c2.count('ici_expert_parallelism="${ICI_EXPERT_PARALLELISM:-16}"'), 4)
+    self.assertEqual(c2.count('ici_expert_parallelism="${ICI_EXPERT_PARALLELISM:-16}"'), 5)
     self.assertEqual(c2.count('activations_in_float32="${LOGIT_ACTIVATIONS_IN_FLOAT32:-false}"'), 2)
     self.assertNotIn("activations_in_float32=true", c2)
     self.assertIn("gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl", c2)
@@ -135,6 +140,49 @@ class DeepSeekV4E2EScriptTest(unittest.TestCase):
     for name in ("v4_284b_2", "v4_1600b_2"):
       cmd = SCRIPT_PATHS[name].read_text().split("maxtext.trainers.pre_train.train", 1)[1].split("tee /tmp/", 1)[0]
       self.assertGreater(cmd.index("${PRETRAIN_EXTRA_FLAGS:-}"), cmd.index("per_device_batch_size=1"), name)
+
+  def test_v4_1600b_sft_stage(self):
+    c2 = SCRIPT_PATHS["v4_1600b_2"].read_text()
+    sft = c2.split("=== STAGE: sft ===", 1)[1].split("=== STAGE: decode ===", 1)[0]
+    self.assertIn("maxtext.trainers.post_train.sft.train_sft_native", sft)
+    self.assertIn("/post_train/sft.yml", sft)
+    self.assertIn('model_name="${MODEL_NAME}"', sft)
+    self.assertIn('load_parameters_path="${SCANNED_CKPT_PATH}"', sft)
+    self.assertIn('ici_expert_parallelism="${ICI_EXPERT_PARALLELISM:-16}"', sft)
+    self.assertIn("opt_type=sgd", sft)
+    self.assertIn("learning_rate=1e-6", sft)
+    self.assertIn("gs://maxtext-dataset/hf/ultrachat_200k/train_sft-*.parquet", sft)
+    self.assertIn("tests/end_to_end/tpu/deepseek/sft_eos_probe.py", sft)
+    self.assertLess(sft.index("sft_eos_probe.py"), sft.index("train_sft_native"))
+
+  def test_v4_1600b_sft_loss_check_runs_under_awk(self):
+    """Runs the SFT stage's loss check on sample logs, catching quoting or regex errors in the script."""
+    if shutil.which("awk") is None:
+      self.skipTest("awk not installed")
+    stage = SCRIPT_PATHS["v4_1600b_2"].read_text().split("=== STAGE: sft ===", 1)[1]
+    program = stage.split('if ! awk -F"loss: " \'', 1)[1].split("' /tmp/sft_output.log", 1)[0]
+    cases = {
+        "completed step: 0, seconds: 1.0, loss: 1.062, lm_loss: 1.0\ncompleted step: 1, loss: 1.061\n": 0,
+        "completed step: 0, loss: nan\n": 1,
+        "completed step: 0, loss: 0.000\n": 1,
+        "completed step: 0, loss: -inf\n": 1,
+        "no step lines\n": 1,
+    }
+    for log, expected_rc in cases.items():
+      with self.subTest(log=log), tempfile.NamedTemporaryFile("w", suffix=".log") as f:
+        f.write(log)
+        f.flush()
+        result = subprocess.run(["awk", "-F", "loss: ", program, f.name], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, expected_rc, result.stdout + result.stderr)
+
+  def test_sft_eos_probe_counts_masked_eos(self):
+    spec = importlib.util.spec_from_file_location(
+        "sft_eos_probe", REPO_ROOT / "tests/end_to_end/tpu/deepseek/sft_eos_probe.py"
+    )
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    batch = {"targets": np.array([[5, 1, 2, 1]]), "targets_segmentation": np.array([[1, 1, 0, 0]])}
+    self.assertEqual(probe.count_eos_targets(batch, eos_id=1), (2, 1))
 
 
 if __name__ == "__main__":

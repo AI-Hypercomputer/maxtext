@@ -124,7 +124,19 @@ def should_use_elastic(config) -> bool:
 
 
 def clean_up_incomplete_checkpoints(checkpoint_dir: str):
-  """Cleans up incomplete checkpoints after an elastic event."""
+  """Deletes the latest checkpoint in `checkpoint_dir` if an elastic event interrupted its save.
+
+  Only GCS needs this. There, Orbax writes a checkpoint in place and marks it complete with a `commit_success` file,
+  so an interrupted save leaves a step directory without that file behind. On other file systems Orbax writes to a
+  temporary directory and renames it once the save is complete, so every step directory holds a complete checkpoint
+  and has no `commit_success` file: the check below would delete it.
+
+  Args:
+    checkpoint_dir: The checkpoint directory of the run.
+  """
+  if not checkpoint_dir.startswith("gs://"):
+    max_logging.log(f"Elastic utils: Not checking {checkpoint_dir} for incomplete checkpoints: it is not on GCS.")
+    return
   max_logging.log("Elastic utils: Checking for incomplete checkpoint after an elastic event...")
   checkpoint_dir = gcs_utils.add_trailing_slash(checkpoint_dir)
 
@@ -339,9 +351,9 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
 
   If an elastic event occurs, the decorator will retry the decorated function
   up to `config.elastic_max_retries` times.
-  Before each retry, it cleans up partial checkpoints by calling
-  `clean_up_incomplete_checkpoints`. If `callback_fn` is provided, it is
-  called after `clean_up_incomplete_checkpoints`.
+  Before each retry, if the run saves checkpoints to `config.checkpoint_dir`, it
+  cleans up partial checkpoints by calling `clean_up_incomplete_checkpoints`. If
+  `callback_fn` is provided, it is called after that.
 
   The decorator covers both ways of coming back from an elastic event:
 
@@ -357,7 +369,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
 
   Args:
     config: Config object.
-    callback_fn: Optional callback called after `clean_up_incomplete_checkpoints` on an elastic event, as
+    callback_fn: Optional callback called on an elastic event, after the checkpoint cleanup, as
       `callback_fn(scale_up=...)`: True if the attempt was interrupted by `maybe_elastic_scale_up` because new slices
       are available, False if a slice went down.
     pre_callback_fn: Optional callback function to be called before each attempt, once the slices are ready.
@@ -390,7 +402,10 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
       cleanup_all_iterators()
     except Exception as e:
       max_logging.log(f"Failed to cleanup iterators during elastic scale up: {e}")
-    clean_up_incomplete_checkpoints(config.checkpoint_dir)
+    # MaxText only saves checkpoints to `checkpoint_dir` with `enable_checkpointing`, or as the persistent tier of the
+    # emergency checkpoint manager. Without either there is nothing to clean up, e.g. in snapshot-only runs.
+    if config.enable_checkpointing or config.enable_emergency_checkpoint:
+      clean_up_incomplete_checkpoints(config.checkpoint_dir)
 
   outcome = _AttemptOutcome()
 

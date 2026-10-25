@@ -588,7 +588,8 @@ Automated checkpoint conversion is handled via [`v4-1600b/1_test_deepseek.sh`](v
 
 1. **Logit check**: `forward_pass_logit_checker` on the unscanned checkpoint with `indexer_topk=1024`, compared against `gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl`. Fails if max per-token KL divergence exceeds `MAX_KL_DIV` (default `0.42`). The same check runs on the scanned checkpoint (`RUN_SCANNED_LOGIT_CHECK`, default `true`).
 2. **Pre-train**: `STEPS` (default 20) steps of sparse pre-training (`indexer_sparse_training=true`, `indexer_loss_scaling_factor=1.0`, `indexer_topk=64`, `max_target_length=1024`) from `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/scanned/0/items`. Fails unless final `loss` and `lm_loss` are finite and strictly positive.
-3. **Decode**: `maxtext.inference.decode` on `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/unscanned/0/items`. Fails unless output text satisfies `DECODE_ASSERT`.
+3. **SFT**: `SFT_STEPS` (default 5) steps of `train_sft_native` (`post_train/sft.yml`, `max_target_length=1024`, `opt_type=sgd`) from the scanned checkpoint. Fails unless every step's `loss` is finite and strictly positive.
+4. **Decode**: `maxtext.inference.decode` on `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/unscanned/0/items`. Fails unless output text satisfies `DECODE_ASSERT`.
 
 ## MLA Optimization
 

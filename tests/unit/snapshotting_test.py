@@ -62,6 +62,14 @@ def fake_data_iterator(local_iterator):
   return data_iterator
 
 
+class FakeRemoteIteratorWrapper(FakeElasticIterator, multihost_dataloading.RemoteIteratorWrapper):
+  """A `RemoteIteratorWrapper` with just the state API, without colocated Python behind it."""
+
+  def __init__(self, index=0, elastic=True):
+    super().__init__(index)
+    self.elastic = elastic
+
+
 def fake_checkpointer(latest_step=None, saving=False):
   checkpointer = mock.Mock(spec=checkpointing.ocp.training.Checkpointer)
   if latest_step is None:
@@ -208,6 +216,19 @@ class SnapshottingTest(absltest.TestCase):
 
     self.assertEqual(snapshotter.save.call_args.args[1]["data_iterator"], {"global_next_index": 42})
 
+  def test_colocated_iterator_save_and_load_snapshot(self):
+    self._patch_checkpoint_dict()
+    snapshotter = FakeSnapshotter(latest_snapshot=("pinned", 30))
+    snapshotting.save_snapshot(snapshotter, "state", 7, FakeRemoteIteratorWrapper(42))
+    self.assertEqual(snapshotter.save.call_args.args[1]["data_iterator"], {"global_next_index": 42})
+
+    self.enter_context(
+        mock.patch.object(snapshotting, "_load_snapshot", return_value=("restored", {"global_next_index": 42}))
+    )
+    iterator = FakeRemoteIteratorWrapper(0)
+    self.assertEqual(snapshotting.load_snapshot(snapshotter, "abstract", self.config, iterator), "restored")
+    self.assertEqual(iterator.state, {"global_next_index": 42})
+
   def test_save_snapshot_rejects_non_elastic_iterator(self):
     self._patch_checkpoint_dict()
 
@@ -216,6 +237,9 @@ class SnapshottingTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "ElasticIterator"):
       snapshotting.save_snapshot(FakeSnapshotter(), "state", 7, [fake_data_iterator(FakeElasticIterator())])
+
+    with self.assertRaisesRegex(ValueError, "ElasticIterator"):
+      snapshotting.save_snapshot(FakeSnapshotter(), "state", 7, FakeRemoteIteratorWrapper(elastic=False))
 
   def test_should_save_snapshot_on_interval_unless_checkpoint_saving(self):
     self.assertFalse(snapshotting.should_save_snapshot(self.config, 11, None))

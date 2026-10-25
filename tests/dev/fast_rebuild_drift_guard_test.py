@@ -20,8 +20,6 @@ import subprocess
 import tempfile
 import unittest
 
-import pytest
-
 _SCRIPT_PATH = os.path.abspath(
     os.path.join(
         os.path.dirname(__file__),
@@ -125,17 +123,8 @@ def _commit_file(repo_dir, rel_path, content, message):
   return result.stdout.strip()
 
 
-@pytest.mark.cpu_only
-@pytest.mark.skipif(
-    not os.path.isfile(_SCRIPT_PATH),
-    reason="drift guard script is not shipped in the MaxText image; run these tests from a source checkout",
-)
 class FastRebuildDriftGuardTest(unittest.TestCase):
-  """Tests for .github/scripts/fast_rebuild_drift_guard.sh.
-
-  The script lives under .github/, which is not copied into the Docker image, so the
-  class is skipped when the tests run from inside the image (maxtext_installed=true).
-  """
+  """Tests for .github/scripts/fast_rebuild_drift_guard.sh."""
 
   def test_no_drift_code_only_changes(self):
     """Fast-rebuild should succeed when only code files changed."""

@@ -81,7 +81,9 @@ REASONING_EFFORT_MAX = (
 )
 
 TOOLS_TEMPLATE = """## Tools
+
 You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<{dsml_token}tool_calls>" block like the following:
+
 <{dsml_token}tool_calls>
 <{dsml_token}invoke name="$TOOL_NAME">
 <{dsml_token}parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</{dsml_token}parameter>
@@ -91,11 +93,17 @@ You have access to a set of tools to help answer the user's question. You can in
 ...
 </{dsml_token}invoke>
 </{dsml_token}tool_calls>
+
 String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
+
 If thinking_mode is enabled (triggered by {thinking_start_token}), you MUST output your complete reasoning inside {thinking_start_token}...{thinking_end_token} BEFORE any tool calls or final response.
+
 Otherwise, output directly after {thinking_end_token} with tool calls or final response.
+
 ### Available Tool Schemas
+
 {tool_schemas}
+
 You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
 """
 
@@ -145,8 +153,10 @@ def tool_calls_to_openai_format(tool_calls):
 def encode_arguments_to_dsml(tool_call: Dict[str, str]) -> str:
   """
   Encode tool call arguments into DSML parameter format.
+
   Args:
       tool_call: Dict with "name" and "arguments" (JSON string) keys.
+
   Returns:
       DSML-formatted parameter string.
   """
@@ -173,9 +183,11 @@ def encode_arguments_to_dsml(tool_call: Dict[str, str]) -> str:
 def decode_dsml_to_arguments(tool_name: str, tool_args: Dict[str, Tuple[str, str]]) -> Dict[str, str]:
   """
   Decode DSML parameters back to a tool call dict.
+
   Args:
       tool_name: Name of the tool.
       tool_args: Dict mapping param_name -> (value, is_string_flag).
+
   Returns:
       Dict with "name" and "arguments" (JSON string) keys.
   """
@@ -192,8 +204,10 @@ def decode_dsml_to_arguments(tool_name: str, tool_args: Dict[str, Tuple[str, str
 def render_tools(tools: List[Dict[str, Union[str, Dict[str, Any]]]]) -> str:
   """
   Render tool schemas into the system prompt format.
+
   Args:
       tools: List of tool schema dicts (each with name, description, parameters).
+
   Returns:
       Formatted tools section string.
   """
@@ -244,14 +258,17 @@ def render_message(
 ) -> str:
   """
   Render a single message at the given index into its encoded string form.
+
   This is the core function that converts each message in the conversation
   into the DeepSeek-V4 format.
+
   Args:
       index: Index of the message to render.
       messages: Full list of messages in the conversation.
       thinking_mode: Either "chat" or "thinking".
       drop_thinking: Whether to drop reasoning content from earlier turns.
       reasoning_effort: Optional reasoning effort level ("max", "high", or None).
+
   Returns:
       Encoded string for this message.
   """
@@ -408,13 +425,17 @@ def render_message(
 def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
   """
   Merge tool messages into the preceding user message using content_blocks format.
+
   DeepSeek-V4 does not have a standalone "tool" role; instead, tool results
   are encoded as <tool_result> blocks within user messages.
+
   This function converts a standard OpenAI-format conversation (with separate
   "tool" role messages) into V4 format where tool results are merged into
   user messages.
+
   Args:
       messages: List of message dicts in OpenAI format.
+
   Returns:
       Processed message list with tool messages merged into user messages.
   """
@@ -471,8 +492,10 @@ def sort_tool_results_by_call_order(messages: List[Dict[str, Any]]) -> List[Dict
   """
   Sort tool_result blocks within user messages by the order of tool_calls
   in the preceding assistant message.
+
   Args:
       messages: Preprocessed message list (after merge_tool_messages).
+
   Returns:
       Message list with sorted tool result blocks.
   """
@@ -519,11 +542,13 @@ def encode_messages(
 ) -> str:
   """
   Encode a list of messages into the DeepSeek-V4 prompt format.
+
   This is the main entry point for encoding conversations. It handles:
   - BOS token insertion
   - Thinking mode with optional reasoning content dropping
   - Tool message merging into user messages
   - Multi-turn conversation context
+
   Args:
       messages: List of message dicts to encode.
       thinking_mode: Either "chat" or "thinking".
@@ -532,6 +557,7 @@ def encode_messages(
                     (only keep reasoning for messages after the last user message).
       add_default_bos_token: Whether to prepend BOS token at conversation start.
       reasoning_effort: Optional reasoning effort level ("max", "high", or None).
+
   Returns:
       The encoded prompt string.
   """
@@ -578,6 +604,7 @@ def encode_messages(
 def _drop_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
   """
   Drop reasoning_content and non-essential messages before the last user message.
+
   Behavior:
   - Messages with role in ["user", "system", "tool", "latest_reminder"] are always kept.
   - Messages at or after the last user index are always kept.
@@ -609,6 +636,7 @@ def _drop_thinking_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, An
 def _read_until_stop(index: int, text: str, stop: List[str]) -> Tuple[int, str, Optional[str]]:
   """
   Read text from index until one of the stop strings is found.
+
   Returns:
       Tuple of (new_index, content_before_stop, matched_stop_string_or_None).
   """
@@ -632,9 +660,11 @@ def _read_until_stop(index: int, text: str, stop: List[str]) -> Tuple[int, str, 
 def parse_tool_calls(index: int, text: str) -> Tuple[int, Optional[str], List[Dict[str, str]]]:
   """
   Parse DSML tool calls from text starting at the given index.
+
   Args:
       index: Starting position in text.
       text: The full text to parse.
+
   Returns:
       Tuple of (new_index, last_stop_token, list_of_tool_call_dicts).
       Each tool call dict has "name" and "arguments" keys.
@@ -689,16 +719,20 @@ def parse_tool_calls(index: int, text: str) -> Tuple[int, Optional[str], List[Di
 def parse_message_from_completion_text(text: str, thinking_mode: str) -> Dict[str, Any]:
   """
   Parse a model completion text into a structured assistant message.
+
   This function takes the raw text output from the model (a single assistant turn)
   and extracts:
   - reasoning_content (thinking block)
   - content (summary/response)
   - tool_calls (if any)
+
   NOTE: This function is designed to parse only correctly formatted strings and
   will raise ValueError for malformed output.
+
   Args:
       text: The raw completion text (including EOS token).
       thinking_mode: Either "chat" or "thinking".
+
   Returns:
       Dict with keys: "role", "content", "reasoning_content", "tool_calls".
       tool_calls are in OpenAI format.

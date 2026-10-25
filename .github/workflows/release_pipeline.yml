@@ -73,9 +73,6 @@ jobs:
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/build_package.yml
     with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n4-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   run_ci_tests:

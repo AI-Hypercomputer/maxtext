@@ -74,9 +74,6 @@ jobs:
       needs.get_maxtext_sha.result == 'success'
     uses: ./.github/workflows/build_package.yml
     with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n4-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   build_release_candidate_images:

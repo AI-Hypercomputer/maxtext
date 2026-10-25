@@ -20,14 +20,17 @@ import io
 import json
 import os
 import pathlib
-import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 import pytest
 
-spec = importlib.util.spec_from_file_location("class_split", "tests/utils/class_split.py")
+# The repository root: tests/dev/<this file>.
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+spec = importlib.util.spec_from_file_location("class_split", REPO_ROOT / "tests/utils/class_split.py")
 class_split = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(class_split)
 
@@ -37,7 +40,6 @@ deal_groups = class_split.deal_groups
 ClassSplitPlugin = class_split.ClassSplitPlugin
 
 
-@pytest.mark.cpu_only
 class GroupKeyTest(unittest.TestCase):
 
   def test_method_with_parameters_maps_to_its_class(self):
@@ -68,7 +70,6 @@ class GroupKeyTest(unittest.TestCase):
     self.assertEqual(group_key("tests/unit/a_test.py"), "tests/unit/a_test.py")
 
 
-@pytest.mark.cpu_only
 class LoadDurationsTest(unittest.TestCase):
 
   def test_missing_file_gives_empty_durations_and_a_warning(self):
@@ -104,7 +105,6 @@ class LoadDurationsTest(unittest.TestCase):
     self.assertIn("not a JSON object", warning)
 
 
-@pytest.mark.cpu_only
 class DealGroupsTest(unittest.TestCase):
 
   def test_keeps_classes_together_and_deals_heaviest_class_first(self):
@@ -186,7 +186,6 @@ def _fake_item(nodeid):
   return types.SimpleNamespace(nodeid=nodeid)
 
 
-@pytest.mark.cpu_only
 class ClassSplitPluginTest(unittest.TestCase):
 
   def test_requires_both_options(self):
@@ -261,9 +260,6 @@ class ClassSplitPluginTest(unittest.TestCase):
     self.assertIn("2 tests in 2 classes, 0 with a recorded duration", out.getvalue())
 
 
-# The repository root: tests/utils/<this file>.
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-
 # With no .test_durations file every test weighs 1. Once `-m "not integration_test"` has removed TestHeavy, TestA
 # and TestB weigh 2 each and get one group each. Dealt before `-m`, TestHeavy would take group 1 and leave it empty.
 SAMPLE_MODULE = """
@@ -285,44 +281,46 @@ class TestB:
 """
 
 
-@pytest.mark.cpu_only
 class ClassSplitEndToEndTest(unittest.TestCase):
-  """Runs `pytest --collect-only` through the real tests/conftest.py on a sample module in a temporary directory.
+  """Runs `pytest --collect-only` through the class_split plugin on a sample module in a temporary directory.
 
-  `-p tests.conftest` loads the conftest (discovery would not find it from there), and `-c pytest.ini` brings the
-  repo's markers and --strict-markers, as in CI.
+  `plugins=[class_split]` loads the plugin hooks directly (without importing JAX/absl from tests/conftest.py),
+  and `-c pytest.ini` brings the repo's markers and --strict-markers, as in CI.
   """
 
   def _collect(self, workdir, *args):
     """Returns the nodeids that `pytest --collect-only` keeps from the sample module."""
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO_ROOT), env.get("PYTHONPATH")]))
-    process = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--collect-only",
-            "-q",
-            "-p",
-            "tests.conftest",
-            "-c",
-            str(REPO_ROOT / "pytest.ini"),
-            f"--rootdir={workdir}",
-            "-m",
-            "not integration_test",
-            *args,
-            "sample_test.py",
-        ],
-        cwd=workdir,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-    return [line for line in process.stdout.splitlines() if line.startswith("sample_test.py::")]
+    out = io.StringIO()
+    err = io.StringIO()
+    sys.modules.pop("sample_test", None)
+    try:
+      with (
+          mock.patch.dict(os.environ, {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""}),
+          contextlib.chdir(workdir),
+          contextlib.redirect_stdout(out),
+          contextlib.redirect_stderr(err),
+      ):
+        returncode = pytest.main(
+            [
+                "--collect-only",
+                "-q",
+                "-s",
+                "-p",
+                "no:cacheprovider",
+                "-c",
+                str(REPO_ROOT / "pytest.ini"),
+                f"--rootdir={workdir}",
+                "-m",
+                "not integration_test",
+                *args,
+                "sample_test.py",
+            ],
+            plugins=[class_split],
+        )
+    finally:
+      sys.modules.pop("sample_test", None)
+    self.assertEqual(int(returncode), 0, out.getvalue() + err.getvalue())
+    return [line for line in out.getvalue().splitlines() if line.startswith("sample_test.py::")]
 
   def test_options_register_and_the_split_runs_after_marker_deselection(self):
     with tempfile.TemporaryDirectory() as tmpdir:

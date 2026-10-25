@@ -166,3 +166,28 @@ class ClassSplitPlugin:
         f"[class-split] Running group {self.group}/{self.splits}: {len(kept)} tests in {classes} classes, "
         f"{recorded} with a recorded duration",
     )
+
+
+def pytest_addoption(parser):
+  """Registers the class-level shard split options; pass them as --opt=value."""
+  group = parser.getgroup("class-split", "deal whole test classes to CI shards")
+  group.addoption(
+      "--class-splits",
+      type=int,
+      default=None,
+      help="Number of shards the collected tests are dealt into, whole classes only.",
+  )
+  group.addoption(
+      "--class-group",
+      type=int,
+      default=None,
+      help="1-based index of the shard to run; requires --class-splits.",
+  )
+
+
+def pytest_configure(config):
+  """Registers ClassSplitPlugin when --class-splits or --class-group is set."""
+  if (
+      config.getoption("class_splits") is not None or config.getoption("class_group") is not None
+  ) and not config.pluginmanager.has_plugin("classsplitplugin"):
+    config.pluginmanager.register(ClassSplitPlugin(config), "classsplitplugin")

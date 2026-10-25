@@ -75,9 +75,6 @@ jobs:
       !cancelled() &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n4-16-buildkit
       # Build package from a particular commit to ensure we are publishing the same code that was tested
       maxtext_sha: ${{ inputs.maxtext_sha }}
 

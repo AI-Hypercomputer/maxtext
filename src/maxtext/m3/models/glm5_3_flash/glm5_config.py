@@ -53,6 +53,9 @@ _GLM_ONLY_FIELDS = frozenset(
 )
 
 
+MTP_LAYER_INDEX = 45  # Hub safetensors layer index of the NextN MTP layer.
+
+
 @dataclasses.dataclass(frozen=True)
 class Glm5Config:
   """GLM-5.3-Flash config.

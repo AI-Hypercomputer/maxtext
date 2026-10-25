@@ -116,8 +116,8 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
   import maxtext  # pylint: disable=unused-import
 
 from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils import class_split
 from tests.utils.newly_added_detection import get_changed_tests
-from tests.utils.class_split import ClassSplitPlugin
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
 if is_decoupled():
@@ -210,19 +210,7 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_addoption(parser):
   """Registers the class-level shard split options; pass them as --opt=value (see tests/utils/class_split.py)."""
-  group = parser.getgroup("class-split", "deal whole test classes to CI shards")
-  group.addoption(
-      "--class-splits",
-      type=int,
-      default=None,
-      help="Number of shards the collected tests are dealt into, whole classes only.",
-  )
-  group.addoption(
-      "--class-group",
-      type=int,
-      default=None,
-      help="1-based index of the shard to run; requires --class-splits.",
-  )
+  class_split.pytest_addoption(parser)
 
 
 def pytest_configure(config):
@@ -239,8 +227,7 @@ def pytest_configure(config):
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
-  if config.getoption("class_splits") is not None or config.getoption("class_group") is not None:
-    config.pluginmanager.register(ClassSplitPlugin(config), "classsplitplugin")
+  class_split.pytest_configure(config)
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -258,6 +245,15 @@ def clear_jax_compilation_cache():
       gc.collect()
   except Exception:  # pylint: disable=broad-exception-caught
     pass
+
+
+@pytest.fixture(autouse=True)
+def restore_jax_remove_size_one_mesh_axis_from_type():
+  """Saves and restores jax_remove_size_one_mesh_axis_from_type around each test item."""
+  previous_flag = getattr(jax.config, "jax_remove_size_one_mesh_axis_from_type", None)
+  yield
+  if previous_flag is not None:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
 
 @pytest.fixture(autouse=True)

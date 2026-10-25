@@ -47,6 +47,34 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     np.testing.assert_array_equal(sub["w"], np.arange(4.0, 12.0).reshape(2, 4))
     self.assertEqual(fsdp_prefetch._expand0(layer)["w"].shape, (1, 4))  # pylint: disable=protected-access
 
+  def test_needs_minor_dim_layout_pin(self):
+    mesh = _abstract_mesh((4, 2, 2), ("fsdp", "expert", "tensor"))
+    w_3d = jnp.ones((2, 4, 8, 16))  # [layers, E, F, D] -> 3D per layer
+    w_2d = jnp.ones((2, 32, 16))  # [layers, E*F, D] -> 2D per layer
+    # 3D weight FSDP-sharded on minor-most dim (dim 2) needs layout pinning.
+    self.assertTrue(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_3d, NamedSharding(mesh, PartitionSpec("expert", "tensor", "fsdp")), mesh
+        )
+    )
+    # 3D weight FSDP-sharded on a non-minor dim (dim 1) does not need layout pinning.
+    self.assertFalse(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_3d, NamedSharding(mesh, PartitionSpec("expert", "fsdp", "tensor")), mesh
+        )
+    )
+    # 2D flat weight FSDP-sharded on dim 0 or dim 1 does not need layout pinning.
+    self.assertFalse(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_2d, NamedSharding(mesh, PartitionSpec(("expert", "fsdp"), "tensor")), mesh
+        )
+    )
+    self.assertFalse(
+        fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access
+            w_2d, NamedSharding(mesh, PartitionSpec("tensor", "fsdp")), mesh
+        )
+    )
+
   def test_explicit_all_gather_without_fsdp_sharding_returns_none(self):
     mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tensor"))
     w = jnp.ones((4, 8))
@@ -63,11 +91,23 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     self.assertFalse(fsdp_prefetch.mesh_uses_fsdp(_abstract_mesh((8,), ("data",))))
 
   def test_per_layer_sharding_drops_layer_axis(self):
-    # Explicit mesh axes, so that the sharding spec is part of the array's type (jax.typeof).
+    # Multi-device abstract mesh (matches the mesh_uses_fsdp=True regime; independent of size-one axis removal).
+    abstract_mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
+    abstract_stacked = jax.ShapeDtypeStruct(
+        (2, 4, 8), jnp.float32, sharding=NamedSharding(abstract_mesh, PartitionSpec(None, "fsdp", "tensor"))
+    )
+    abstract_sharding = fsdp_prefetch._per_layer_sharding(abstract_stacked, abstract_mesh)  # pylint: disable=protected-access
+    self.assertEqual(tuple(abstract_sharding.spec), ("fsdp", "tensor"))
+
+    # Concrete 1-device (1, 1) mesh with explicit axes requires keeping size-1 axes in jax.typeof.
+    if hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", False)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
     mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tensor"), axis_types=(AxisType.Explicit,) * 2)
     stacked = jax.device_put(jnp.ones((2, 4, 8)), NamedSharding(mesh, PartitionSpec(None, "fsdp", "tensor")))
-    s = fsdp_prefetch._per_layer_sharding(stacked, mesh)  # pylint: disable=protected-access
-    self.assertEqual(tuple(s.spec), ("fsdp", "tensor"))
+    layer_sharding = fsdp_prefetch._per_layer_sharding(stacked, mesh)  # pylint: disable=protected-access
+    self.assertEqual(tuple(layer_sharding.spec), ("fsdp", "tensor"))
 
   def test_remove_fsdp_from_sharding(self):
     mesh = _abstract_mesh((4, 2, 2), ("fsdp", "expert", "tensor"))

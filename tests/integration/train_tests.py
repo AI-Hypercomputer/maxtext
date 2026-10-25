@@ -976,6 +976,11 @@ class TrainTests(unittest.TestCase):
               f"metrics_file={metrics_file}",
               "dataset_type=synthetic",
               "steps=3",
+              # Pin the base.yml training defaults that decoupled_base_test.yml overrides
+              # so explicit-vs-auto loss parity runs identically under DECOUPLE_GCLOUD=TRUE.
+              "per_device_batch_size=12.0",
+              "learning_rate_schedule_steps=-1",
+              "attention=autoselected",
               "enable_checkpointing=False",
               "enable_goodput_recording=False",
           ]

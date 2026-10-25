@@ -496,6 +496,45 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
   return None
 
 
+def _decode_moe_bias_update(update, config):
+  """Returns the value to add to a routed gate bias from a sown `moe_bias_updates`.
+
+  Under pipeline parallelism the MoE layers sow per-expert token counts instead of the +-rate step (see
+  `calculate_load_balance_updates(return_counts=True)`): the pipeline sums them over microbatches, so the step
+  below is taken on the load of the whole global batch, exactly like the non-pipelined model.
+  """
+  update = jnp.asarray(update[0] if isinstance(update, (tuple, list)) else update)
+  if not getattr(config, "using_pipeline_parallelism", False):
+    return update
+  counts = update.astype(jnp.float32)
+  return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * config.routed_bias_update_rate
+
+
+def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config) -> None:
+  """Adds every sown `moe_bias_updates` to the gate bias of the module that sowed it.
+
+  Needed under pipeline parallelism, where the decoder's MoE layers live in two stacks with different
+  gate-bias layouts: `moe_layers_outside_pipeline` ([layers, experts]) and the pipeline stage module
+  `pipeline_module.layers` ([repeats, stages, experts]). Each stack sows an update shaped like its bias.
+  """
+  for path, update in traverse_util.flatten_dict(intermediates).items():
+    if path[-1] != "moe_bias_updates":
+      continue
+    target = root
+    for key in path[:-1]:
+      target = getattr(target, key)
+    bias = _find_gate_bias(target)
+    if bias is None:
+      continue
+    update = _decode_moe_bias_update(update, config)
+    if update.shape != bias.value.shape:
+      raise ValueError(
+          f"moe_bias_updates at {'/'.join(map(str, path))} has shape {update.shape}, "
+          f"but the gate bias it updates has shape {bias.value.shape}."
+      )
+    bias.value = bias.value + update.astype(bias.value.dtype)
+
+
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
   """Training step for the NNX model.
 
@@ -669,7 +708,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           continue
         for _, node in nnx.iter_graph(target):
           if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
-            update_val = update[0] if isinstance(update, (tuple, list)) else update
+            update_val = _decode_moe_bias_update(update, config)
             name_prefix = "-".join(map(str, prefix))
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
@@ -679,15 +718,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
     else:
-      # 1. Update main decoder scanned MoE layers.
-      # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
-      decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
-      decoder_bias = _find_gate_bias(decoder_layer)
-      if decoder_bias is not None and moe_bias_updates is not None:
-        decoder_update = jnp.array(moe_bias_updates[0])
-        decoder_bias.value = decoder_bias.value + decoder_update
-        diag_bias_values.append(decoder_bias.value)
-        diag_bias_updates.append(decoder_update)
+      if getattr(config, "using_pipeline_parallelism", False):
+        # 1. Update the decoder MoE layers outside and inside the pipeline (two stacks, two bias layouts).
+        _apply_moe_bias_updates_by_path(new_state.model.decoder, intermediate_outputs.get("decoder", {}), config)
+      else:
+        # 1. Update main decoder scanned MoE layers.
+        # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
+        decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
+        decoder_bias = _find_gate_bias(decoder_layer)
+        if decoder_bias is not None and moe_bias_updates is not None:
+          decoder_update = jnp.array(moe_bias_updates[0])
+          decoder_bias.value = decoder_bias.value + decoder_update
+          diag_bias_values.append(decoder_bias.value)
+          diag_bias_updates.append(decoder_update)
 
       # 2. Update auxiliary MTP MoE layers (if enabled).
       # Unlike the main decoder, each MTP layer is an individual un-scanned layer
@@ -697,7 +740,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           mtp_layer = getattr(new_state.model.mtp_block, f"mtp_layer_{i + 1}", None)
           mtp_bias = _find_gate_bias(mtp_layer)
           if mtp_bias is not None:
-            mtp_update = jnp.array(update)
+            mtp_update = _decode_moe_bias_update(update, config)
             mtp_bias.value = mtp_bias.value + mtp_update
             diag_bias_values.append(mtp_bias.value)
             diag_bias_updates.append(mtp_update)
@@ -1579,6 +1622,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
   gpu_collective_overlap_pass.register()
+  jax.config.update("jax_default_prng_impl", config.prng_impl)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
@@ -1598,7 +1642,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
 
 def run(config, recorder, elastic_retry_cache=None):
   """Run the job given hyperparameters and utilities."""
-  with (max_utils.maybe_get_transformer_engine_context(config),):
+  with (
+      max_utils.maybe_get_transformer_engine_context(config),
+      profiler.nnx_named_scope_context(),
+  ):
     train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
 

@@ -80,6 +80,35 @@ class MockDataloader:
     return MockIterator(self.mesh_size)
 
 
+class MockElasticIterator:
+  """Mock of grain's ElasticIterator: batch `i` is filled with `i`, and the state is the index of the next example."""
+
+  def __init__(self, global_batch_size):
+    self.global_batch_size = global_batch_size
+    self.global_next_index = 0
+
+  def __next__(self):
+    batch = np.full((self.global_batch_size, 1), self.global_next_index // self.global_batch_size, dtype=np.int32)
+    self.global_next_index += self.global_batch_size
+    return batch
+
+  def get_state(self) -> dict[str, int]:
+    return {"global_next_index": self.global_next_index}
+
+  def set_state(self, state: dict[str, int]):
+    self.global_next_index = state["global_next_index"]
+
+
+class MockElasticDataloader:
+  """Mock dataloader that yields a MockElasticIterator."""
+
+  def __init__(self, global_batch_size):
+    self.global_batch_size = global_batch_size
+
+  def __iter__(self) -> MockElasticIterator:
+    return MockElasticIterator(self.global_batch_size)
+
+
 def _get_test_mesh_shapes_named():
   return [
       ("1_device", (1, 1)),
@@ -211,6 +240,41 @@ class MultihostDataloadingTest(parameterized.TestCase):
 
       # Next value should be 11 (state 10 + 1)
       self.assertEqual(val.addressable_data(0)[0], 11)
+
+  @parameterized.named_parameters(*_get_test_mesh_shapes_named())
+  def test_remote_iterator_wrapper_get_and_set_state(self, mesh_shape):
+    if jax.default_backend() == "gpu":
+      self.skipTest("Skipping colocated python tests on GPU")
+    mesh_size = mesh_shape[0] * mesh_shape[1]
+    if mesh_size > len(jax.devices()):
+      self.skipTest(f"Needs {mesh_size} devices for mesh shape {mesh_shape}, got {len(jax.devices())}.")
+    mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape, jax.devices()[:mesh_size]), ("x", "y"))
+    wrapper = multihost_dataloading.RemoteIteratorWrapper(
+        get_ds_fn=lambda dataloading_host_index, dataloading_host_count: MockElasticDataloader(mesh_size),
+        preprocessing_fn=lambda dataset: dataset,
+        global_mesh=mesh,
+        global_shape=(mesh_size, 1),
+        elastic=True,
+    )
+
+    self.assertEqual(wrapper.get_state(), {"global_next_index": 0})
+    next(wrapper)
+    self.assertEqual(wrapper.get_state(), {"global_next_index": mesh_size})
+
+    wrapper.set_state({"global_next_index": 3 * mesh_size})
+    self.assertEqual(wrapper.get_state(), {"global_next_index": 3 * mesh_size})
+    np.testing.assert_array_equal(np.asarray(next(wrapper)), np.full((mesh_size, 1), 3, dtype=np.int32))
+
+    # Position above 2^31 - 1 survives round-trip even with jax_enable_x64=False.
+    large_index = (3 << 32) + 5 * mesh_size
+    wrapper.set_state({"global_next_index": large_index})
+    self.assertEqual(wrapper.get_state(), {"global_next_index": large_index})
+
+    wrapper.elastic = False
+    with self.assertRaisesRegex(ValueError, "elastic=True"):
+      wrapper.get_state()
+    with self.assertRaisesRegex(ValueError, "elastic=True"):
+      wrapper.set_state({"global_next_index": 0})
 
   def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
     """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""

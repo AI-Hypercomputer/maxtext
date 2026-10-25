@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from flax.core import FrozenDict
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
@@ -35,6 +36,7 @@ from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_logging
+from maxtext.utils import sharding
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
@@ -341,18 +343,24 @@ class Transformer(nnx.Module):
     #      logit projection.
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
-      self.mtp_block(
-          shared_embedding=self.token_embedder,
-          main_hidden_state=hidden_state,
-          input_ids=decoder_input_tokens,
-          target_ids=decoder_target_tokens,
-          target_mask=decoder_target_mask,
-          position_ids=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=not enable_dropout,
-          model_mode=model_mode,
-          main_token_embeddings=mtp_token_embeddings,
-      )
+      mtp_axis_rules = sharding.get_logical_axis_rules() or self.config.logical_axis_rules
+      if getattr(self.config, "using_pipeline_parallelism", False):
+        # The MTP block runs outside the pipeline. Like the non-pipelined decoder layers, let 'stage' act as
+        # data parallelism; otherwise every stage redundantly computes (and holds) the whole MTP layer.
+        mtp_axis_rules = sharding.logical_axis_rules_pp_act_as_dp(mtp_axis_rules)
+      with flax_logical_axis_rules(mtp_axis_rules):
+        self.mtp_block(
+            shared_embedding=self.token_embedder,
+            main_hidden_state=hidden_state,
+            input_ids=decoder_input_tokens,
+            target_ids=decoder_target_tokens,
+            target_mask=decoder_target_mask,
+            position_ids=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=not enable_dropout,
+            model_mode=model_mode,
+            main_token_embeddings=mtp_token_embeddings,
+        )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.

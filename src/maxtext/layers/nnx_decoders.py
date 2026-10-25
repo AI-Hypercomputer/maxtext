@@ -61,6 +61,7 @@ from maxtext.models import (
     gpt_oss,
     llama2,
     llama4,
+    ming,
     mistral,
     mixtral,
     olmo3,
@@ -395,6 +396,23 @@ def _qwen3_hybrid_block_class(config):
   return qwen3.Qwen3NextScannableBlock
 
 
+def layer_attention_metadata(attention_metadata: dict[Any, Any], layer_idx: int) -> Any:
+  """Returns decoder layer `layer_idx`'s entry of per-layer attention metadata.
+
+  vLLM hands hybrid models (e.g. Qwen3-Next / Qwen3.5) a mapping from layer
+  name (`layer.{i}`) to the metadata of that layer's KV-cache group; integer
+  keys are accepted too. A layer with no entry gets None.
+
+  Args:
+    attention_metadata: The per-layer metadata mapping.
+    layer_idx: Global index of the decoder layer.
+
+  Returns:
+    The layer's metadata, or None when the mapping has no entry for it.
+  """
+  return attention_metadata.get(f"layer.{layer_idx}", attention_metadata.get(layer_idx))
+
+
 def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   """Process deepstack visual embeddings by adding them to hidden states at visual token positions.
 
@@ -612,6 +630,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+    self.is_ming = self.config.decoder_block == DecoderBlockType.MING
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -724,6 +743,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
     elif self.is_qwen3_hybrid:
       self._init_scanned_qwen3_hybrid(rngs, mesh)
+    elif self.is_ming:
+      self._init_scanned_ming(rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -950,6 +971,20 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
 
+  def _init_scanned_ming(self, rngs):
+    """Initializes Ming scanned layers: unrolls the dense-MLP prefix cycle and scans the homogeneous cycles."""
+    config = self.config
+    num_prefix_layers, num_blocks, remainder_start = ming.scan_layout(config)
+    for layer_idx in list(range(num_prefix_layers)) + list(range(remainder_start, config.num_decoder_layers)):
+      self._create_and_register_layer(ming.MingDecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx)
+    if num_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          ming.MingScannableBlock,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
+
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
     config = self.config
@@ -1024,6 +1059,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.MING,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1157,6 +1193,7 @@ class NNXDecoder(nnx.Module):
       unroll: int = 1,
       metadata_axis_name: str = "layers",
       forced_routed_experts_scanned=None,
+      per_iteration_kwargs=None,
       **kwargs,
   ):
     """Runs the layer stack using nnx.scan.
@@ -1189,13 +1226,33 @@ class NNXDecoder(nnx.Module):
       forced_routed_experts_scanned: Optional `[length, ...]` array, one slice
         per scan iteration, threaded through jax.lax.scan's xs alongside
         params/state and passed to each layer as `forced_routed_experts=`.
+      per_iteration_kwargs: Optional sequence of `length` dicts, the i-th
+        holding extra keyword arguments for iteration i only (e.g. the attention
+        metadata of one block's sub-layers). Requires `kv_caches_stacked`: only
+        its static unroll calls each iteration separately. The values are passed
+        as call arguments rather than closed over, so they stay correct when the
+        body is wrapped in jax.checkpoint.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer
         signature).
 
     Returns:
       (final_carry, updated_layers) when kv_caches_stacked is None.
       (final_carry, updated_layers, returned_kv_stacked) otherwise.
+
+    Raises:
+      ValueError: If `per_iteration_kwargs` is given without
+        `kv_caches_stacked`, or does not hold one entry per iteration.
     """
+    if per_iteration_kwargs is not None:
+      if kv_caches_stacked is None:
+        raise ValueError(
+            "per_iteration_kwargs requires kv_caches_stacked: only the statically unrolled external-cache path calls "
+            "each iteration separately."
+        )
+      if len(per_iteration_kwargs) != length:
+        raise ValueError(
+            f"per_iteration_kwargs must hold one entry per scan iteration ({length}); got {len(per_iteration_kwargs)}."
+        )
     if self.config.prefetch_fsdp_weights and not fsdp_prefetch.mesh_uses_fsdp(self.mesh):
       max_logging.info("prefetch_fsdp_weights: no FSDP mesh axis spans more than one device; using the regular scan.")
     elif (
@@ -1247,15 +1304,17 @@ class NNXDecoder(nnx.Module):
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
-        current_params, current_state, kv_cache_layer = scanned_vars
+        current_params, current_state, kv_cache_layer, iteration_kwargs = scanned_vars
         forced_routed_experts_layer = None
       elif use_forced_routing:
         current_params, current_state, forced_routed_experts_layer = scanned_vars
         kv_cache_layer = None
+        iteration_kwargs = None
       else:
         current_params, current_state = scanned_vars
         kv_cache_layer = None
         forced_routed_experts_layer = None
+        iteration_kwargs = None
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(
@@ -1267,12 +1326,14 @@ class NNXDecoder(nnx.Module):
 
       layer = nnx.merge(graphdef, current_params, current_state)
 
-      # Build call kwargs, injecting per-layer kv_cache / forced routing when available
+      # Build call kwargs, injecting per-layer kv_cache / forced routing / per-iteration kwargs when available
       call_kwargs = dict(valid_kwargs)
       if kv_cache_layer is not None:
         call_kwargs["kv_cache"] = kv_cache_layer
       if use_forced_routing:
         call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
+      if iteration_kwargs:
+        call_kwargs.update(iteration_kwargs)
 
       layer_out = layer(carry, *args, **call_kwargs)
 
@@ -1320,10 +1381,11 @@ class NNXDecoder(nnx.Module):
         # Statically slice the parameters and state for this layer
         current_params = jax.tree.map(lambda x, i=i: x[i], params)
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
+        iteration_kwargs = per_iteration_kwargs[i] if per_iteration_kwargs is not None else {}
 
         # Call the layer
         current_carry, (_, updated_kv) = layer_fn_wrapped(
-            current_carry, (current_params, current_state, kv_caches_list[i])
+            current_carry, (current_params, current_state, kv_caches_list[i], iteration_kwargs)
         )
 
         # Update the list in-place (mutates the list passed by reference)
@@ -1422,6 +1484,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
+        DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1584,6 +1647,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.MING,
     }:
       return functools.partial(
           RMSNorm,
@@ -2280,6 +2344,8 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
+        elif self.is_ming:
+          y = self._apply_ming_scanned_blocks(y, layer_args, layer_kwargs)
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -2402,7 +2468,7 @@ class NNXDecoder(nnx.Module):
 
           current_kwargs = dict(layer_kwargs)
           if isinstance(attention_metadata, dict):
-            current_kwargs["attention_metadata"] = attention_metadata.get(f"layer.{lyr}", attention_metadata.get(lyr))
+            current_kwargs["attention_metadata"] = layer_attention_metadata(attention_metadata, lyr)
 
           routed_experts = current_kwargs.pop("forced_routed_experts", None)
           if routed_experts is not None:
@@ -2618,6 +2684,51 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def _apply_ming_scanned_blocks(self, y, layer_args, layer_kwargs):
+    """Applies Ming scanned decoder blocks: unrolled prefix layers, scanned full cycles, unrolled remainder."""
+    cfg = self.config
+    num_prefix_layers, num_blocks, remainder_start = ming.scan_layout(cfg)
+    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    policy = self.get_remat_policy() if use_remat else None
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
+
+    def apply_unrolled_layer(layer, inputs):
+      if use_remat:
+        decoder_segment_ids, decoder_positions, deterministic, model_mode = layer_args
+        return self._apply_layer_with_remat(
+            layer,
+            inputs,
+            policy,
+            prevent_cse,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            **layer_kwargs,
+        )
+      return layer(inputs, *layer_args, **layer_kwargs)
+
+    # 1. Unrolled prefix layers (the cycle(s) containing the dense-MLP layers)
+    for layer_idx in range(num_prefix_layers):
+      y, _ = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y)
+
+    # 2. Scanned blocks
+    if num_blocks > 0 and hasattr(self, "scanned_blocks"):
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          **layer_kwargs,
+      )
+
+    # 3. Unrolled remainder layers
+    for layer_idx in range(remainder_start, cfg.num_decoder_layers):
+      y, _ = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y)
+
+    return y
+
   def _apply_gemma3_scanned_blocks(
       self,
       y,
@@ -2695,7 +2806,10 @@ class NNXDecoder(nnx.Module):
     External (vLLM) caches arrive as a flat list with one entry per decoder
     layer, but the scan runs over blocks, so they are grouped into per-block
     tuples before the scan and written back to the flat list afterwards, as in
-    _apply_gemma4_scanned_blocks.
+    _apply_gemma4_scanned_blocks. vLLM's per-layer attention metadata (a dict
+    keyed by global layer) is regrouped the same way: a block's sub-layers do
+    not know their global layer index, so each block is handed a tuple with
+    its own sub-layers' entries, in the order of its caches.
 
     Layers past the last whole block are applied afterwards, in a short
     remainder block, so a layer count that is not a multiple of the cycle keeps
@@ -2723,6 +2837,23 @@ class NNXDecoder(nnx.Module):
         )
       remainder_forced_routed_experts = per_layer[num_scanned_layers:]
 
+    per_block_kwargs = None
+    remainder_attention_metadata = None
+    attention_metadata = layer_kwargs.get("attention_metadata")
+    if kv_caches is not None and isinstance(attention_metadata, dict):
+      # Only the external-cache path can take per-block values: it unrolls the blocks statically. Without kv caches
+      # the dict is left in place and the block rejects it.
+      del layer_kwargs["attention_metadata"]
+      per_layer_metadata = [layer_attention_metadata(attention_metadata, lyr) for lyr in range(cfg.num_decoder_layers)]
+      # Grouped with the same helper as the caches below, so each block's tuple lines up with its caches.
+      per_block_kwargs = [
+          {"attention_metadata": block_metadata}
+          for block_metadata in maxtext_utils.prepare_kv_caches_for_scan(
+              per_layer_metadata, scan_length, block_length, stack=False
+          )
+      ]
+      remainder_attention_metadata = tuple(per_layer_metadata[num_scanned_layers:])
+
     if scan_length > 0:
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
       y, self.layers, _ = self._apply_layers_sequentially(
@@ -2733,6 +2864,7 @@ class NNXDecoder(nnx.Module):
           kv_caches_stacked=grouped_kv_caches,
           skip_block_remat=True,
           forced_routed_experts_scanned=forced_routed_experts_scanned,
+          per_iteration_kwargs=per_block_kwargs,
           **layer_kwargs,
       )
       maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
@@ -2741,6 +2873,8 @@ class NNXDecoder(nnx.Module):
     if num_remaining_layers > 0:
       if remainder_forced_routed_experts is not None:
         layer_kwargs["forced_routed_experts"] = remainder_forced_routed_experts
+      if remainder_attention_metadata is not None:
+        layer_kwargs["attention_metadata"] = remainder_attention_metadata
       y = self._apply_remainder_block(
           self.layers_remainder,
           y,
