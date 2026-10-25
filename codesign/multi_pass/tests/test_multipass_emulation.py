@@ -61,6 +61,15 @@ from emulation_base import (  # type: ignore  # noqa: E402
     get_registered_emulation_features,
     register_emulation_feature,
 )
+from hooks import install_emulation_hooks  # type: ignore  # noqa: E402
+from interception import (  # type: ignore  # noqa: E402
+    _compute_active_cond,
+    compose_emulated_dot_general,
+    compose_emulated_einsum,
+    emulation_jax_layer_context,
+    emulation_jax_step_context,
+    emulation_step_context,
+)
 from multipass_config import (  # type: ignore  # noqa: E402
     DEFAULT_MULTIPASS_CONFIG_KEYS,
     DtypeSpec,
@@ -71,6 +80,7 @@ from multipass_config import (  # type: ignore  # noqa: E402
     resolve_cross_term_pairs,
 )
 from multipass_kernel import (  # type: ignore  # noqa: E402
+    _numpy_dot_general,
     decompose_tensor_into_passes,
     multipass_dot_general,
     multipass_einsum,
@@ -570,6 +580,54 @@ class MultipassEmulationTest(unittest.TestCase):
 
     self.assertGreaterEqual(len(MULTIPASS_PRESETS), 11)
     self.assertGreaterEqual(len(MULTIPASS_FLAG_DOCUMENTATION), 35)
+    install_emulation_hooks()
+
+  # ---------------------------------------------------------------------------
+  # 11. Modular Unit Tests for Dynamic Step & Layer Gating (`interception.py`)
+  # ---------------------------------------------------------------------------
+
+  @unittest.skipIf(np is None, "NumPy is required for array tests")
+  def test_dynamic_step_and_layer_gating(self):
+    """Tests dynamic `active_cond` step and layer gating inside JIT-compiled functions."""
+    rng = np.random.default_rng(11)
+    a = jnp.asarray(rng.standard_normal((8, 16), dtype=np.float32))
+    b = jnp.asarray(rng.standard_normal((16, 8), dtype=np.float32))
+    dnums = (((1,), (0,)), ((), ()))
+
+    cfg = MultipassEmulationConfig.from_dict({
+        "enabled": True,
+        "preset": "F8E4M3_F8E4M3_F32_X1",
+        "layers": "2",
+        "start_step": 5,
+        "end_step": 10,
+    })
+    rule = cfg.rules[0]
+    dense_ref = _numpy_dot_general(a, b, dnums)
+    mp_ref = multipass_dot_general(a, b, dnums, rule)
+
+    def step_and_layer_fn(x, w, step_idx, layer_idx):
+      with emulation_jax_step_context(step_idx):
+        with emulation_jax_layer_context(layer_idx):
+          cond = _compute_active_cond(cfg, rule)
+          return multipass_dot_general(x, w, dnums, rule, active_cond=cond)
+
+    if HAS_JAX:
+      step_and_layer_fn = jax.jit(step_and_layer_fn)
+
+    out_step2 = step_and_layer_fn(a, b, jnp.int32(2), jnp.int32(2))
+    np.testing.assert_allclose(
+        np.asarray(out_step2), np.asarray(dense_ref), rtol=1e-5, atol=1e-5
+    )
+
+    out_layer1 = step_and_layer_fn(a, b, jnp.int32(6), jnp.int32(1))
+    np.testing.assert_allclose(
+        np.asarray(out_layer1), np.asarray(dense_ref), rtol=1e-5, atol=1e-5
+    )
+
+    out_active = step_and_layer_fn(a, b, jnp.int32(6), jnp.int32(2))
+    np.testing.assert_allclose(
+        np.asarray(out_active), np.asarray(mp_ref), rtol=1e-5, atol=1e-5
+    )
 
 
 if __name__ == "__main__":
