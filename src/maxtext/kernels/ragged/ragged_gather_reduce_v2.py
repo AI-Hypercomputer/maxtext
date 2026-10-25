@@ -440,8 +440,8 @@ def main_kernel(
     # constants, whereas signed vector division triggers an unsupported
     # vector MULHS split in LLVM SelectionDAG.
     dst_indices_list = [
-        plsc.bitcast(
-            plsc.bitcast(
+        jax.lax.bitcast_convert_type(
+            jax.lax.bitcast_convert_type(
                 scratch.sorted_by_validity_vmem[
                     pl.ds(
                         row_block_id * row_chunk_size + s * num_simd_lanes,
