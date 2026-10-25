@@ -63,6 +63,19 @@ TEST_CASES = [
         ("ici_fsdp_parallelism=-1", "ici_context_parallelism=2", "ici_expert_parallelism=2"),
     ),
     (
+        "deepseek3-671b",
+        "tpu7x-8",
+        1,
+        "fsdp-as-dp-for-attn-cp-as-ep-for-moe",
+        (
+            "ici_fsdp_parallelism=-1",
+            "ici_context_parallelism=2",
+            "ici_expert_parallelism=2",
+            "use_ring_of_experts=true",
+            "per_device_batch_size=0.5",
+        ),
+    ),
+    (
         "deepseek2-16b",
         "tpu7x-16",
         1,
