@@ -804,6 +804,151 @@ class TrainableParametersMaskTest(parameterized.TestCase):
     self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
 
 
+_ADAPTER = "adapter/kernel"
+_BACKBONE = "backbone/kernel"
+_VIT_QUERY = "vision_encoder/layer_0/attention/query/kernel"
+_VIT_WI_0 = "vision_encoder/layer_0/mlp/wi_0/kernel"
+_CLIP_BOUND_NAMES = ("input_min", "input_max", "output_min", "output_max")
+_CLIP_BOUNDS = frozenset(
+    f"vision_encoder/layer_0/{block}/{name}"
+    for block in ("attention/q_clip", "mlp/gate_clip")
+    for name in _CLIP_BOUND_NAMES
+)
+_NON_CLIP = frozenset({_ADAPTER, _BACKBONE, _VIT_QUERY, _VIT_WI_0})
+
+
+def _adapter_backbone_vit_params():
+  """Small params tree: an adapter, a backbone and two Gemma-4 ViT projections carrying scalar clip bounds."""
+
+  def clip():
+    return {n: jnp.asarray(v, jnp.float32) for n, v in zip(_CLIP_BOUND_NAMES, (-2.0, 2.0, -3.0, 3.0))}
+
+  return {
+      "adapter": {"kernel": jnp.ones((2, 2))},
+      "backbone": {"kernel": jnp.ones((2, 2))},
+      "vision_encoder": {
+          "layer_0": {
+              "attention": {"query": {"kernel": jnp.ones((2, 2))}, "q_clip": clip()},
+              "mlp": {"wi_0": {"kernel": jnp.ones((2, 2))}, "gate_clip": clip()},
+          }
+      },
+  }
+
+
+def _leaf_paths(tree):
+  return {jax.tree_util.keystr(p, simple=True, separator="/"): v for p, v in jax.tree_util.tree_leaves_with_path(tree)}
+
+
+def _run_jitted_steps(opt, params, num_steps=2):
+  """Applies `num_steps` jitted optimizer steps with a constant non-zero gradient; returns (params, opt_state)."""
+  grads = jax.tree_util.tree_map(lambda x: jnp.full_like(x, 0.5), params)
+  opt_state = opt.init(params)
+
+  @jax.jit
+  def step(p, s):
+    updates, s = opt.update(grads, s, p)
+    return optax.apply_updates(p, updates), s
+
+  for _ in range(num_steps):
+    params, opt_state = step(params, opt_state)
+  return params, opt_state
+
+
+def _adam_mu_slots(opt_state):
+  """Returns (allocated, masked): param paths with an allocated AdamW `mu` slot vs. an optax.MaskedNode slot."""
+  allocated, masked = set(), set()
+  flat = jax.tree_util.tree_flatten_with_path(opt_state, is_leaf=lambda x: isinstance(x, optax.MaskedNode))[0]
+  for path, leaf in flat:
+    names = [getattr(k, "name", getattr(k, "key", None)) for k in path]
+    if "mu" not in names:
+      continue
+    param_path = "/".join(str(n) for n in names[names.index("mu") + 1 :])
+    (masked if isinstance(leaf, optax.MaskedNode) else allocated).add(param_path)
+  return allocated, masked
+
+
+class TrainableMaskAndClipBoundFreezeTest(parameterized.TestCase):
+  """trainable_parameters_mask (a whitelist) composed with the Gemma-4 ViT clip-bound freeze in get_optimizer.
+
+  Checks the parameters actually updated by jitted AdamW steps (weight decay > 0, so any leaf that is not frozen
+  moves) and the optimizer-state allocation: frozen leaves are routed to optax.set_to_zero() through
+  optax.multi_transform, so they get zero updates and no AdamW moment slots (optax.MaskedNode), while trainable
+  leaves get allocated slots.
+  """
+
+  def _get_optimizer(self, trainable_mask, use_clipped_linears_for_vit):
+    """Builds (config, get_optimizer(config)) for AdamW with weight decay and a constant learning rate of 1.0."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_trainable_mask_clip_freeze",
+        "opt_type=adamw",
+        "adam_weight_decay=0.1",
+        f"trainable_parameters_mask={trainable_mask}",
+        f"use_clipped_linears_for_vit={use_clipped_linears_for_vit}",
+    ]
+    config = pyconfig.initialize(argv)
+    return config, optimizers.get_optimizer(config, lambda step: 1.0)
+
+  def _assert_trained_exactly(self, opt, expected_trainable):
+    params = _adapter_backbone_vit_params()
+    new_params, opt_state = _run_jitted_steps(opt, params)
+    before, after = _leaf_paths(params), _leaf_paths(new_params)
+    self.assertEqual(set(before), _NON_CLIP | _CLIP_BOUNDS)
+    changed = {k for k in before if not jnp.array_equal(before[k], after[k])}
+    self.assertEqual(changed, set(expected_trainable))
+    allocated, masked = _adam_mu_slots(opt_state)
+    self.assertEqual(allocated, set(expected_trainable))
+    self.assertEqual(masked, set(before) - set(expected_trainable))
+
+  def test_whitelist_trains_only_matching_params(self):
+    """use_clipped_linears_for_vit=False: only whitelisted leaves train (the pre-existing whitelist contract)."""
+    _, opt = self._get_optimizer(["adapter"], False)
+    self._assert_trained_exactly(opt, {_ADAPTER})
+
+  @parameterized.named_parameters(
+      ("adapter_only", ["adapter"], {_ADAPTER}),
+      ("whitelist_covers_vit", ["adapter", "vision_encoder"], {_ADAPTER, _VIT_QUERY, _VIT_WI_0}),
+      ("whitelist_names_clip_bounds", ["adapter", "_clip"], {_ADAPTER}),
+  )
+  def test_whitelist_with_clip_freeze(self, trainable_mask, expected_trainable):
+    """Whitelisted leaves train, the rest stay frozen, and clip bounds stay frozen even when whitelisted."""
+    _, opt = self._get_optimizer(trainable_mask, True)
+    self._assert_trained_exactly(opt, expected_trainable)
+
+  def test_clip_freeze_without_whitelist(self):
+    """No whitelist: everything trains except the clip bounds."""
+    _, opt = self._get_optimizer([], True)
+    self._assert_trained_exactly(opt, _NON_CLIP)
+
+  def test_both_flags_off_returns_unwrapped_optimizer(self):
+    """No whitelist and no clip freeze: get_optimizer returns the base optimizer unwrapped; every leaf trains."""
+    _, opt = self._get_optimizer([], False)
+    params = _adapter_backbone_vit_params()
+    self.assertNotIsInstance(opt.init(params), optax.PartitionState)
+    new_params, _ = _run_jitted_steps(opt, params)
+    before, after = _leaf_paths(params), _leaf_paths(new_params)
+    self.assertTrue(all(not jnp.array_equal(before[k], after[k]) for k in before))
+
+  def test_whitelist_without_clip_freeze_matches_original_composition(self):
+    """use_clipped_linears_for_vit=False: the whitelist-only optimizer equals its definition prior to the clip freeze."""
+    patterns = ["adapter"]
+    config, opt = self._get_optimizer(patterns, False)
+    _, base_opt = self._get_optimizer([], False)
+    self.assertFalse(config.use_clipped_linears_for_vit)
+    freeze_mask_fn = optimizers._get_path_mask_fn(patterns, match_returns_true=False)  # pylint: disable=protected-access
+    reference = optax.multi_transform(
+        {"trainable": base_opt, "frozen": optax.set_to_zero()},
+        lambda p: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(p)),
+    )
+    params = _adapter_backbone_vit_params()
+    got = _run_jitted_steps(opt, params)
+    ref = _run_jitted_steps(reference, params)
+    self.assertEqual(jax.tree_util.tree_structure(got), jax.tree_util.tree_structure(ref))
+    for got_leaf, ref_leaf in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(ref)):
+      self.assertTrue(jnp.array_equal(got_leaf, ref_leaf))
+
+
 class SkipStepOnSpikesTest(parameterized.TestCase):
   """Tests for the skip_step_on_spikes optimizer wrapper."""
 

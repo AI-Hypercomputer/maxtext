@@ -236,9 +236,10 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     )
 
   # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  # When trainable_parameters_mask is empty, trainable_mask_fn is None and all parameters are trained.
+  # trainable_mask_fn returns True for leaves whose path matches the whitelist (trainable), False otherwise.
   trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  trainable_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=True)
 
   # Gemma-4 vision clipped-linears: the 448 clip bounds are checkpoint-resident, immutable state and must
   # NEVER receive optimizer updates, weight decay, or momentum/variance slots. Freeze them via a leaf-PATH
@@ -246,12 +247,12 @@ def get_optimizer(config, learning_rate_schedule, model=None):
   # a parameter is "trainable" only if it is trainable under the whitelist AND is not a clip bound.
   freeze_clip_bounds = bool(getattr(config, "use_clipped_linears_for_vit", False))
 
-  if freeze_mask_fn is not None or freeze_clip_bounds:
+  if trainable_mask_fn is not None or freeze_clip_bounds:
 
     def _partition(params):
       # trainable_mask: True where trainable under the whitelist (all-True if no whitelist).
-      if freeze_mask_fn is not None:
-        trainable_mask = freeze_mask_fn(params)
+      if trainable_mask_fn is not None:
+        trainable_mask = trainable_mask_fn(params)
       else:
         trainable_mask = jax.tree_util.tree_map(lambda _: True, params)
       if freeze_clip_bounds:
