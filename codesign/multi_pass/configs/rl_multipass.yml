@@ -1,0 +1,35 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# RL (GRPO / GSPO) Post-Training with Multi-Pass Precision Emulation
+base_config: "../../../src/maxtext/configs/post_train/rl.yml"
+
+emulate_multipass_enabled: True
+emulate_multipass_preset: "F8E4M3_F8E4M3_F32_X3"
+emulate_src_dtype: "bf16"
+emulate_num_passes: 2
+emulate_pass_dtypes: "fp8_e4m3,fp8_e4m3"
+emulate_scale_mode: "per_tensor_pow2"
+emulate_block_size: 128
+emulate_rounding_mode: "rne"
+emulate_cross_term_mode: "triangular"
+emulate_acc_dtype: "fp32"
+emulate_bwd_mode: "multipass_bwd"
+emulate_fwd: True
+emulate_dlhs: False
+emulate_drhs: False
+emulate_target_preset: "all_linears"
+emulate_reference_model: False         # Keep Reference policy un-emulated by default
+emulate_start_step: 0
+emulate_end_step: -1

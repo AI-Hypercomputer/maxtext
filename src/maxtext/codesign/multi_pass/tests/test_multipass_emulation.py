@@ -629,6 +629,32 @@ class MultipassEmulationTest(unittest.TestCase):
         np.asarray(out_active), np.asarray(mp_ref), rtol=1e-5, atol=1e-5
     )
 
+  # ---------------------------------------------------------------------------
+  # 12. Scheduled Nightly TPU E2E SFT Smoke Test Hook
+  # ---------------------------------------------------------------------------
+
+  def test_tpu_tiny_sft_smoke_custom_multipass(self):
+    """End-to-end TPU smoke test: 4-layer tiny debug model SFT (baseline vs custom 3-pass heterogeneous)."""
+    if not HAS_JAX:
+      self.skipTest("JAX is not installed in this environment")
+    if not any(d.platform == "tpu" for d in jax.devices()):
+      self.skipTest(
+          "Requires TPU hardware (scheduled nightly via sft_multipass_emulation_smoke_test.py)"
+      )
+
+    from tests.post_training.unit.sft_multipass_emulation_smoke_test import (  # pylint: disable=g-import-not-at-top
+        SftMultipassEmulationSmokeTest,
+    )
+
+    smoke = SftMultipassEmulationSmokeTest(
+        "test_tiny_sft_baseline_vs_custom_heterogeneous_multipass_at_step_k"
+    )
+    smoke.setUp()
+    try:
+      smoke.test_tiny_sft_baseline_vs_custom_heterogeneous_multipass_at_step_k()
+    finally:
+      smoke.tearDown()
+
 
 if __name__ == "__main__":
   unittest.main()
