@@ -53,8 +53,7 @@ python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --apply-chat-template --output-format=json
 
 # Step 3: MaxText vs HF golden-logit parity on the image path.
-# Gate mirrors the PR's post_image parity (max_KL << 0.03 observed at 4.29e-05); we use the
-# conservative repo default multimodal gate here.
+# Gated on the conservative repo default multimodal KL threshold.
 python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${MAXTEXT_CKPT_PATH} \

@@ -2285,7 +2285,7 @@ class NNXDecoder(nnx.Module):
         # leaving the context/projection path reading the merged image features — this matches HF
         # Transformers 5.9.0 (get_per_layer_inputs ignores inputs_embeds when input_ids is given). The
         # 'both' mode additionally overwrites the context path with the pad embedding; this is HF-DIVERGENT
-        # and provided only for ablation (see M9 ablation matrix). Enum-validated in configs/types.py.
+        # and provided only for ablation. Enum-validated in configs/types.py.
         if str(getattr(cfg, "ple_pad_mode", "identity")) == "both":
           if shared_embedding is None:
             raise ValueError(

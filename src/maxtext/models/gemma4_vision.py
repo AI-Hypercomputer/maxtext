@@ -33,7 +33,7 @@ from maxtext.layers import normalizations
 
 
 # =============================================================================
-# Gemma-4 vision clipped-linears (Navi upstream contribution)
+# Gemma-4 vision clipped-linears
 # -----------------------------------------------------------------------------
 # The Gemma-4 E2B/E4B vision tower ships per-projection activation clip bounds in
 # the reference (HF) checkpoint: for each of the 7 vision projections
@@ -41,9 +41,8 @@ from maxtext.layers import normalizations
 # blocks, a scalar {input_min,input_max,output_min,output_max} = 16*7*4 = 448
 # checkpoint tensors. The reference forward clamps each projection's input by
 # [input_min,input_max] and its output by [output_min,output_max]. Omitting the
-# clamps produces large activation drift in the image span (empirically KL 4-17
-# on a 340-token teacher-forced parity harness), because a handful of vision
-# activations blow up without the trained saturation. Upstream MaxText marks
+# clamps produces large activation drift in the image span, because a handful of
+# vision activations blow up without the trained saturation. Upstream MaxText marks
 # E2B/E4B multimodal "not yet supported" and does not model these bounds.
 #
 # This module adds them as OPT-IN, checkpoint-resident, NON-TRAINABLE scalars,

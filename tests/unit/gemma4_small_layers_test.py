@@ -535,7 +535,7 @@ class SymbolsTest(unittest.TestCase):
 
 
 class OptionSInvariantsTest(unittest.TestCase):
-  """M7: Option-S sentinel integrity + placeholder==pooled count invariants (pure validators)."""
+  """Option-S sentinel integrity + placeholder==pooled count invariants (pure validators)."""
 
   def test_valid_positions_pass(self):
     pos = np.array([[[0, 0], [1, 0], [-1, -1], [-1, -1]]], dtype=np.int32)  # 2 valid + 2 full-sentinel
