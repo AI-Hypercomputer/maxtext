@@ -390,13 +390,45 @@ class RemoteIterator:
     self.global_shape = global_shape
     self.checkpoint_path = checkpoint_path
     self.elastic = elastic
-    self.reset()
     _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIterator initiated")
 
+  def build(self, dummy_array):
+    """Builds the iterator over this host's shard of the data, sharded across the hosts of `dummy_array`'s mesh.
+
+    After an elastic slice-down, the hosts that left still count in `jax.process_count()`, so the shard comes from
+    the processes of the mesh's devices, which only a method that receives an array on the mesh can see.
+
+    Args:
+      dummy_array: An array on the wrapper's CPU mesh.
+
+    Returns:
+      `dummy_array`, for the caller to wait on.
+
+    Raises:
+      ValueError: If this process doesn't address the devices of exactly one host of the mesh.
+    """
+    processes = sorted({device.process_index for device in dummy_array.sharding.device_set})
+    local_processes = {device.process_index for device in dummy_array.sharding.addressable_devices}
+    if len(local_processes) != 1:
+      raise ValueError(
+          "RemoteIterator.build expects this colocated process to address the devices of exactly one host of the"
+          f" mesh, whose processes are {processes}; it addresses devices of processes {sorted(local_processes)}."
+      )
+    (process,) = local_processes
+    self.shard_index, self.shard_count = processes.index(process), len(processes)
+    max_logging.log(f"RemoteIterator reads data shard {self.shard_index} of {self.shard_count}")
+    self.reset()
+    return dummy_array
+
   def reset(self):
-    ds = self.get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
-    self.dataloader = self.preprocessing_fn(dataset=ds)
+    """Rebuilds the iterator for this host's data shard, from the start of the data."""
+    ds = self.get_ds_fn(dataloading_host_index=self.shard_index, dataloading_host_count=self.shard_count)
+    if self.elastic:
+      # The ElasticIterator built by `preprocessing_fn` shards the data itself.
+      self.dataloader = self.preprocessing_fn(dataset=ds, shard_index=self.shard_index, shard_count=self.shard_count)
+    else:
+      self.dataloader = self.preprocessing_fn(dataset=ds)
     if hasattr(self.dataloader, "as_numpy_iterator"):
       self.iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
@@ -448,10 +480,10 @@ class RemoteIterator:
     directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
     if self.elastic:
       # ElasticIterator state is a single global scalar shared by all shards,
-      # so we write one fixed file (from process 0 only) and every process
-      # reads the same file on restore — this survives elastic resizes that
-      # change `jax.process_count()`.
-      if jax.process_index() == 0:
+      # so we write one fixed file (from the first host of the mesh only) and
+      # every process reads the same file on restore — this survives elastic
+      # resizes that change `jax.process_count()`.
+      if self.shard_index == 0:
         directory.mkdir(parents=True, exist_ok=True)
         filename = directory / "process_0.json"
         filename.write_text(json.dumps(self.iterator.get_state(), indent=4))  # pyrefly: ignore[missing-attribute]
@@ -489,7 +521,11 @@ class RemoteIterator:
 
 
 class RemoteIteratorWrapper:
-  """Wrapper for RemoteIterator that handles device placement."""
+  """Wrapper for RemoteIterator that handles device placement.
+
+  Each colocated host reads one shard of the data, among the hosts of `global_mesh`. With `elastic=True`,
+  `preprocessing_fn` builds grain's `ElasticIterator` and takes the host's `shard_index` and `shard_count`.
+  """
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
     self.elastic = elastic
@@ -509,6 +545,8 @@ class RemoteIteratorWrapper:
         checkpoint_path,
         elastic=elastic,  # pyrefly: ignore[unexpected-keyword]
     )
+    # Each colocated process needs an array on the mesh to know its data shard.
+    jax.block_until_ready(self.local_iterator.build(self.dummy_array))  # pyrefly: ignore[missing-attribute]
     _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIteratorWrapper initiated")
 
