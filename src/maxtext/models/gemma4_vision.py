@@ -1036,14 +1036,12 @@ class Gemma4VisionEncoderLayer(nnx.Module):
     is_pad = (positions_xy == -1).all(axis=-1)  # [B*N, L]
     decoder_segment_ids = jnp.where(is_pad, 2, 1).astype(jnp.int32)
 
-    # Sanitize padded-patch rows to zero BEFORE attention. Segment masking already prevents pad patches
-    # from influencing valid patches' attention outputs, and pooling excludes pad positions — so for FINITE
-    # pad content the valid outputs are provably invariant (verified byte-identical under 1e6 garbage pad).
-    # However, attention computes q/k/v on ALL rows before masking, so a NON-FINITE (NaN/Inf) pad patch would
-    # produce NaN q/k/v and leak through the softmax normalization into valid rows (NaN*0=NaN). Zeroing pad
-    # rows here makes the isolation hold for arbitrary (incl. non-finite) pad content without changing any
-    # valid output. This is defense-in-depth for malformed processor output; the frozen processor emits finite
-    # pad, which was already invariant.
+    # Sanitize padded-patch rows to zero BEFORE attention. By design, segment masking keeps pad patches out
+    # of the valid patches' attention outputs and pooling excludes pad positions, so the valid outputs are
+    # not meant to depend on finite pad content. Attention still computes q/k/v on ALL rows before masking,
+    # though, so a NON-FINITE (NaN/Inf) pad patch would produce NaN q/k/v that can leak through the softmax
+    # normalization into valid rows (NaN*0=NaN). Zeroing pad rows here extends that isolation to arbitrary
+    # pad content, including non-finite values. This is a defensive guard against malformed processor output.
     x = jnp.where(is_pad[..., None], jnp.zeros_like(x), x)
 
     for i in range(self.config.num_hidden_layers_for_vit):

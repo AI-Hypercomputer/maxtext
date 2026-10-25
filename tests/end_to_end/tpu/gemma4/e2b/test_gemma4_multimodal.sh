@@ -53,7 +53,7 @@ python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --apply-chat-template --output-format=json
 
 # Step 3: MaxText vs HF golden-logit parity on the image path.
-# Gated on the conservative repo default multimodal KL threshold.
+# Uses the same --max_kl_div threshold as the Gemma-4 convert_gemma4.sh checks.
 python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${MAXTEXT_CKPT_PATH} \
