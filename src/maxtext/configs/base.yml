@@ -565,6 +565,10 @@ param_scan_axis: 1
 # never saved and are re-gathered for the backward pass. See docs/guides/optimization/fsdp_prefetch.md for the
 # recommended XLA flags.
 prefetch_fsdp_weights: false
+# With prefetch_fsdp_weights, defer each layer's weight-gradient reduce-scatters to the next layer's backward step
+# and run them on the SparseCore dedicated to FSDP collectives. Hides them at the cost of extra HBM. Homogeneous
+# blocks only for now (ignored for inhomogeneous blocks prefetched per sub-layer).
+prefetch_fsdp_defer_grad_reduce_scatter: false
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
