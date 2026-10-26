@@ -171,11 +171,12 @@ class CountSlicesTest(parameterized.TestCase):
   def test_devices_without_the_attribute_count_as_one_slice(self):
     """The `getattr` default is load bearing, not defensive.
 
-    Verified on both testbeds used here: CPU devices and single-slice v6e
-    devices have no `slice_index` attribute at all, so reading it directly
-    would raise on every single-slice run.
+    CPU devices and single-slice v6e devices have no `slice_index` attribute at
+    all, so reading it directly would raise on every single-slice run. GPU
+    devices do carry one, so the attribute-free case is built explicitly.
     """
-    self.assertFalse(hasattr(jax.devices()[0], "slice_index"))
+    devices = [SimpleNamespace() for _ in range(4)]
+    self.assertEqual(_count_slices(devices), 1)
     self.assertEqual(_count_slices(jax.devices()), 1)
 
   def test_counts_distinct_indices(self):
