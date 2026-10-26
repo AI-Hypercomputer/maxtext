@@ -155,15 +155,16 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
   @parameterized.named_parameters(
-      # Single axis: one reshard of the stack. Multi-axis: one per inner stack, then one of the whole.
+      # Tensors split over all devices: one reshard of the whole stack. Host tensors: one per tensor, per inner
+      # stack and of the whole.
       ("single_axis_on_device", ["w0", "w1"], True, 1),
       ("single_axis_on_host", ["w0", "w1"], False, 3),
-      ("multi_axis_on_device", [["w0", "w1"], ["w2", "w3"]], True, 3),
+      ("multi_axis_on_device", [["w0", "w1"], ["w2", "w3"]], True, 1),
       ("multi_axis_on_host", [["w0", "w1"], ["w2", "w3"]], False, 7),
   )
-  def test_tensors_split_over_all_devices_are_resharded_per_stack(self, hf_keys, on_device, num_device_puts):
-    # A tensor split over all devices is stacked as read, and only the stacks are resharded. A host
-    # tensor is still placed one by one.
+  def test_tensors_split_over_all_devices_are_resharded_once(self, hf_keys, on_device, num_device_puts):
+    # A tensor split over all devices is stacked as read, inner stacks included, and only the whole stack is
+    # resharded. A host tensor is still placed one by one.
     class MockConfig:
 
       def __init__(self):
@@ -184,6 +185,44 @@ class TensorHandlingTest(parameterized.TestCase):
 
     np.testing.assert_array_equal(result, expected)
     self.assertEqual(device_put.call_count, num_device_puts)
+
+  def test_expert_stacks_are_not_copied_across_the_expert_axis(self):
+    # MoE weights stack (experts, layers, ...) from tensors split over all devices. The inner stack of each expert
+    # stays as read: placed with the target's sharding of its own axes only, it would be copied on every device of
+    # the expert axis (16 times its final size per device with ici_expert_parallelism=16).
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for an fsdp x expert mesh.")
+
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    n = jax.device_count()
+    devices = np.array(jax.devices())
+    read_sharding = NamedSharding(Mesh(devices, ("d",)), PartitionSpec("d"))
+    num_experts, num_layers, embed = n // 2, 2, 4
+    rng = np.random.RandomState(0)
+    host = {f"e{e}.l{l}": rng.randn(n, embed).astype(np.float32) for e in range(num_experts) for l in range(num_layers)}
+    hf_keys = [[f"e{e}.l{l}" for l in range(num_layers)] for e in range(num_experts)]
+    expected = np.stack([np.stack([host[k].T for k in row]) for row in hf_keys])
+    tensors = {k: jax.device_put(v, read_sharding) for k, v in host.items()}
+    mesh = Mesh(devices.reshape(2, n // 2), ("fsdp", "expert"))
+    target_leaf = jax.ShapeDtypeStruct(
+        expected.shape, np.float32, sharding=NamedSharding(mesh, PartitionSpec("expert", None, "fsdp", None))
+    )
+
+    def transpose(weight, target_shape):
+      del target_shape
+      return weight.T
+
+    with mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put:
+      result = get_hf_loading_function(hf_keys, tensors.__getitem__, transpose, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, target_leaf.sharding)
+    self.assertEqual(device_put.call_count, 1)
 
   @parameterized.named_parameters(
       # (8, 4) float32 is 128 bytes: with a 64-byte limit it moves in 2 slices along the axis the target leaves whole.

@@ -193,19 +193,27 @@ def _build_multi_axis_stacked_tensor(
     return jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*stacked_spec, *slice_spec))
 
   def gather(keys, level):
+    """Returns the tensor for `keys`, and whether it is still in the read layout (split over all devices)."""
     if level == depth:
       # A tuple of keys is a composite HF source that the hook fuses into one leaf.
       raw = tuple(tensor_getter_fn(k) for k in keys) if isinstance(keys, tuple) else tensor_getter_fn(keys)
       tensor = apply_hook_fns(raw, mt_slice_shape, hook_fns)
-      if _split_over_all_devices(tensor):
-        return tensor
+      as_read = _split_over_all_devices(tensor)
     else:
-      tensor = _binary_chunked_stack([gather(sub, level + 1) for sub in keys], axis=0)
+      parts = [gather(sub, level + 1) for sub in keys]
+      tensor = _binary_chunked_stack([part for part, _ in parts], axis=0)
+      as_read = all(part_as_read for _, part_as_read in parts)
+    # A stack of tensors split over all devices stays as read until the final reshard. `sharding_at` leaves out
+    # the target's sharding of the axes not stacked yet, so placing an inner stack with it copies the stack across
+    # those mesh axes: with ici_expert_parallelism=16, the DeepSeek-V3 experts took 16 times their final size on
+    # each device.
+    if as_read:
+      return tensor, True
     if target_sharding is not None and level > 0:
       tensor = _reshard(tensor, sharding_at(level))
-    return tensor
+    return tensor, False
 
-  stacked_array = gather(hf_source_keys, 0).astype(target_dtype)
+  stacked_array = gather(hf_source_keys, 0)[0].astype(target_dtype)
   if axes != tuple(range(depth)):
     stacked_array = np.moveaxis(stacked_array, tuple(range(depth)), axes)
   if target_sharding is not None:
