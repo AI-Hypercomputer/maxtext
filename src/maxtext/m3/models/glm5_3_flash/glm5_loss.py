@@ -145,6 +145,10 @@ def compute_glm5_loss(
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
   """Computes cross-entropy and load-balancing loss for GLM-5.3-Flash.
 
+  Layer-45 MTP consumes post-final-norm backbone hidden states
+  out.hidden_states (norm(hc_head(hidden_streams))), matching
+  Megatron and DeepSeek-V3 NextN specifications.
+
   Contract:
     `decoder_target_tokens` and `decoder_target_mask` are next-token shifted
     targets (`tokens[:, 1:]` aligned with `tokens[:, :-1]`), matching
@@ -160,13 +164,14 @@ def compute_glm5_loss(
     decoder_target_mask: Next-token shifted loss mask [batch_size, seq_len].
     decoder_segment_ids: Optional input segmentation [batch_size, seq_len].
     decoder_positions: Optional input positions [batch_size, seq_len].
-    is_train: Required boolean flag gating training-specific loss components.
+    is_train: Required boolean flag gating training-specific loss components
+      (including MTP).
 
   Returns:
     (total_loss, aux_metrics) tuple strictly in float32.
   """
   if not isinstance(is_train, bool):
-    raise TypeError(f"is_train must be a bool, got {type(is_train)}")
+    raise TypeError(f"is_train must be a bool, got {type(is_train).__name__}.")
   if tokens is None:
     raise ValueError("tokens must be provided as a non-None array.")
   if decoder_target_tokens is None:
@@ -213,11 +218,79 @@ def compute_glm5_loss(
     ce_loss, xent_sum, total_weights = compute_glm5_cross_entropy_loss(out.logits, target_tokens_arr, target_mask_arr)
 
   moe_lb_loss = out.aux["moe_lb_loss"].astype(jnp.float32)
-  total_loss = (ce_loss + jnp.float32(model.config.moe_lb_loss_weight) * moe_lb_loss).astype(jnp.float32)
+  mtp_loss = jnp.zeros((), dtype=jnp.float32)
+  mtp_moe_lb_loss = jnp.zeros((), dtype=jnp.float32)
+
+  if is_train and model.config.num_nextn_predict_layers > 0:
+    if model.mtp is None:
+      raise ValueError("model.mtp is None but model.config.num_nextn_predict_layers > 0")
+    # MTP consumes post-final-norm backbone hidden states out.hidden_states
+    # (norm(hc_head(hidden_streams))), matching Megatron/DeepSeek-V3 NextN spec.
+    mtp_targets = jnp.roll(target_tokens_arr, -1, axis=-1)
+    valid_mask = target_mask_arr != 0
+    mtp_valid_mask = valid_mask & jnp.concatenate(
+        [
+            valid_mask[:, 1:],
+            jnp.zeros((valid_mask.shape[0], 1), dtype=jnp.bool_),
+        ],
+        axis=-1,
+    )
+    if num_vocab_tiling > 1:
+      mtp_normed, mtp_router_logits, _ = model.mtp(
+          out.hidden_states,
+          target_tokens_arr,
+          embed_tokens=model.embed_tokens,
+          lm_head=None,
+          decoder_segment_ids=seg_ids,
+      )
+      mtp_loss, _, _ = _compute_tiled_cross_entropy(
+          model=model,
+          hidden_states=mtp_normed,
+          decoder_target_tokens=mtp_targets,
+          decoder_target_mask=mtp_valid_mask,
+          num_vocab_tiling=num_vocab_tiling,
+      )
+    else:
+      mtp_logits, mtp_router_logits, _ = model.mtp(
+          out.hidden_states,
+          target_tokens_arr,
+          embed_tokens=model.embed_tokens,
+          lm_head=model.lm_head,
+          decoder_segment_ids=seg_ids,
+      )
+      mtp_loss, _, _ = compute_glm5_cross_entropy_loss(mtp_logits, mtp_targets, mtp_valid_mask)
+
+    mtp_lb_stats = glm5_moe.accumulate_moe_lb_stats(
+        glm5_moe.init_moe_lb_stats(model.config.n_routed_experts),
+        mtp_router_logits,
+        model.config.n_routed_experts,
+        model.config.num_experts_per_tok,
+        attention_mask=(seg_ids != 0) if seg_ids is not None else None,
+    )
+    mtp_moe_lb_loss = glm5_moe.finalize_moe_lb_loss(mtp_lb_stats, model.config.n_routed_experts).astype(jnp.float32)
+
+    # Pool MTP MoE router stats with backbone MoE router stats for equal balance pressure
+    bb_stats = out.aux["lb_stats"]
+    pooled_lb_stats = (
+        bb_stats[0] + mtp_lb_stats[0],
+        bb_stats[1] + mtp_lb_stats[1],
+        bb_stats[2] + mtp_lb_stats[2],
+    )
+    moe_lb_loss = glm5_moe.finalize_moe_lb_loss(pooled_lb_stats, model.config.n_routed_experts).astype(jnp.float32)
+
+    total_loss = (
+        ce_loss
+        + jnp.float32(model.config.moe_lb_loss_weight) * moe_lb_loss
+        + jnp.float32(model.config.mtp_loss_scaling_factor) * mtp_loss
+    ).astype(jnp.float32)
+  else:
+    total_loss = (ce_loss + jnp.float32(model.config.moe_lb_loss_weight) * moe_lb_loss).astype(jnp.float32)
 
   aux_metrics = {
       "ce_loss": ce_loss,
       "moe_lb_loss": moe_lb_loss,
+      "mtp_loss": mtp_loss,
+      "mtp_moe_lb_loss": mtp_moe_lb_loss,
       "xent_sum": xent_sum,
       "total_weights": total_weights,
   }
@@ -259,7 +332,7 @@ def glm5_loss_fn(
     (total_loss, aux_metrics) tuple.
   """
   if not isinstance(is_train, bool):
-    raise TypeError(f"is_train must be a bool, got {type(is_train)}")
+    raise TypeError(f"is_train must be a bool, got {type(is_train).__name__}.")
   del targets_position
   return compute_glm5_loss(
       model=model,

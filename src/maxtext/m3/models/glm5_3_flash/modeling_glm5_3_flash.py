@@ -25,6 +25,7 @@ from maxtext.m3.models.glm5_3_flash import glm5_config
 from maxtext.m3.models.glm5_3_flash import glm5_dsa_mla
 from maxtext.m3.models.glm5_3_flash import glm5_mhc
 from maxtext.m3.models.glm5_3_flash import glm5_moe
+from maxtext.m3.models.glm5_3_flash import glm5_mtp
 from maxtext.m3.models.glm5_3_flash import glm5_scan
 
 
@@ -35,7 +36,6 @@ class Glm5Output:
 
   logits: jax.Array | None
   hidden_states: jax.Array
-  mtp_logits: jax.Array | None
   aux: dict[str, Any]
 
 
@@ -130,7 +130,7 @@ class Glm5Model(nnx.Module):
         kernel_metadata=lm_meta,
         rngs=rngs,
     )
-    self.mtp: Any = None
+    self.mtp = glm5_mtp.Glm5Mtp(cfg, sharding=sharding, rngs=rngs) if cfg.num_nextn_predict_layers > 0 else None
 
   def forward_with_aux(
       self,
@@ -239,6 +239,7 @@ class Glm5Model(nnx.Module):
     aux: dict[str, Any] = {
         "router_logits": (tuple(router_logits_list) if cfg.enable_debug_stats else ()),
         "moe_lb_loss": moe_lb_loss,
+        "lb_stats": lb_stats,
     }
     if cfg.enable_debug_stats:
       if layer_0_act is None:
@@ -258,7 +259,7 @@ class Glm5Model(nnx.Module):
       }
       aux["router_topk_indices"] = tuple(router_topk_indices_list)
       aux["dsa_topk_indices"] = tuple(dsa_topk_indices_list)
-    return Glm5Output(logits=logits, hidden_states=normed, mtp_logits=None, aux=aux)
+    return Glm5Output(logits=logits, hidden_states=normed, aux=aux)
 
   def __call__(
       self,

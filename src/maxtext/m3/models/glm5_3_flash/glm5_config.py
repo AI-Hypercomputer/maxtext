@@ -44,10 +44,10 @@ def validate_no_packing(decoder_segment_ids: Any) -> None:
 
 _GLM_ONLY_FIELDS = frozenset(
     (
-        "layer_types indexer_types linear_num_key_heads linear_num_value_heads"
-        " linear_key_head_dim linear_value_head_dim linear_conv_kernel_dim"
-        " kda_implementation rope_parameters index_kpool"
-        " index_kpool_always_select_tail linear_lower_bound"
+        "layer_types indexer_types mtp_indexer_type linear_num_key_heads"
+        " linear_num_value_heads linear_key_head_dim linear_value_head_dim"
+        " linear_conv_kernel_dim kda_implementation rope_parameters"
+        " index_kpool index_kpool_always_select_tail linear_lower_bound"
         " mhc_eps enable_debug_stats"
     ).split()
 )
@@ -61,12 +61,12 @@ class Glm5Config:
   """GLM-5.3-Flash config.
 
   All fields map from MaxTextConfig via from_maxtext_config except GLM-only
-  fields owned here: layer_types, indexer_types, linear_num_key_heads,
-  linear_num_value_heads, linear_key_head_dim, linear_value_head_dim,
-  linear_conv_kernel_dim, kda_implementation, qk_head_dim (derived from
-  qk_nope_head_dim + qk_rope_head_dim), rope_parameters, index_kpool,
-  index_kpool_always_select_tail, linear_lower_bound, mhc_eps,
-  enable_debug_stats.
+  fields owned here: layer_types, indexer_types, mtp_indexer_type,
+  linear_num_key_heads, linear_num_value_heads, linear_key_head_dim,
+  linear_value_head_dim, linear_conv_kernel_dim, kda_implementation,
+  qk_head_dim (derived from qk_nope_head_dim + qk_rope_head_dim),
+  rope_parameters, index_kpool, index_kpool_always_select_tail,
+  linear_lower_bound, mhc_eps, enable_debug_stats.
   """
 
   vocab_size: int = 154880
@@ -76,6 +76,7 @@ class Glm5Config:
   first_k_dense_replace: int = 3
   layer_types: tuple[str, ...] | None = None
   indexer_types: tuple[str, ...] | None = None
+  mtp_indexer_type: str = "full"
   linear_num_key_heads: int = 64
   linear_num_value_heads: int = 64
   linear_key_head_dim: int = 128
@@ -159,6 +160,8 @@ class Glm5Config:
     for i, it in enumerate(i_types):
       if it != "full":
         raise ValueError(f"Shared indexer unsupported: {it!r}.")
+    if self.mtp_indexer_type != "full":
+      raise ValueError(f"Shared indexer unsupported: {self.mtp_indexer_type!r}.")
     rbur = self.routed_bias_update_rate
     if rbur != 0.0:
       raise ValueError(f"routed_bias_update_rate must be 0 (FU-D4): {rbur}.")
@@ -176,6 +179,8 @@ class Glm5Config:
       raise ValueError(f"index_topk ({self.index_topk}) must be divisible by index_kpool" f" ({self.index_kpool}).")
     if self.mlp_clamp_limit <= 0.0:
       raise ValueError(f"mlp_clamp_limit must be > 0.0; got {self.mlp_clamp_limit}.")
+    if self.num_nextn_predict_layers not in (0, 1):
+      raise ValueError("num_nextn_predict_layers must be 0 or 1, got" f" {self.num_nextn_predict_layers}.")
     if self.qk_rope_head_dim != 0 or self.rope_parameters is not None:
       raise ValueError(f"NoPE violation: {self.qk_rope_head_dim=}, {self.rope_parameters=}.")
     if self.num_key_value_heads != self.num_attention_heads:
@@ -208,11 +213,13 @@ class Glm5Config:
     n = overrides.pop("num_hidden_layers", 5)
     lt = overrides.pop("layer_types", default_layer_types(n))
     it = overrides.pop("indexer_types", default_indexer_types(n))
+    mtp_layers = overrides.pop("num_nextn_predict_layers", 0)
     remat_policy = overrides.pop("remat_policy", "none")
     return cls(
         num_hidden_layers=n,
         layer_types=lt,
         indexer_types=it,
+        num_nextn_predict_layers=mtp_layers,
         remat_policy=remat_policy,
         **overrides,
     )
