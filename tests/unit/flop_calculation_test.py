@@ -1351,6 +1351,19 @@ class DeepSeekV4ProConfigSmokeTest(unittest.TestCase):
     self.assertTrue(cfg.float32_gate_logits)
     self.assertTrue(cfg.indexer_sparse_training)
 
+  def test_deepseek4_284b_config(self):
+    cfg = pyconfig.initialize_pydantic(
+        ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-284b", "enable_checkpointing=false"]
+    )
+    self.assertEqual(cfg.model_name, "deepseek4-284b")
+    self.assertEqual(cfg.emb_dim, 4096)
+    self.assertEqual(cfg.num_decoder_layers, 43)
+    self.assertEqual(cfg.num_experts, 256)
+    self.assertEqual(cfg.num_experts_per_tok, 6)
+    self.assertEqual(cfg.indexer_topk, 512)
+    self.assertEqual(cfg.mhc_expansion_rate, 4)
+    self.assertTrue(cfg.float32_gate_logits)
+
 
 if __name__ == "__main__":
   unittest.main()
