@@ -314,6 +314,7 @@ class InputConfigs:
   # row) instead of [size_m, size]. The kernel DMAs 4D blocks and relayouts them
   # to 2D tiles inside VMEM (see relayout.py).
   is_3d: bool = False
+  dequant_in_vmem: bool = False
 
   @property
   def should_use_external_scale(self) -> bool:
@@ -331,7 +332,7 @@ class InputConfigs:
 
   @property
   def should_dequantize_before_matmul(self) -> bool:
-    if not self.has_scale:
+    if not self.has_scale or self.dequant_in_vmem:
       return False
     assert self.quant_block_size is not None
     mxu_size = pltpu.get_tpu_info().mxu_column_size
@@ -339,7 +340,7 @@ class InputConfigs:
 
   @property
   def should_dequantize_after_matmul(self) -> bool:
-    return self.has_scale and not self.should_dequantize_before_matmul
+    return self.has_scale and not self.should_dequantize_before_matmul and not self.dequant_in_vmem
 
 
 @dataclasses.dataclass(frozen=True)
@@ -386,6 +387,7 @@ class GmmConfigs:
   # starts one grid step before its first use instead of two, and one weight tile
   # of VMEM is freed (with fuse_act, a gate and an up tile). Values are unchanged.
   rhs_buffer_count: int | None = None
+  dequant_rhs_in_vmem: bool = False
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -509,6 +511,8 @@ class IndexMaps:
 
   def rhs_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array):
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+    if self.cfgs.dequant_rhs_in_vmem and self.cfgs.transpose_rhs:
+      return (group_id, 0, 0, k_id)
     # Simply multiplying k_id by num_quant_blocks_per_tile_k will not work
     # since a single quant block could be shared along multiple k tile.
     k_row = k_id * self.cfgs.tiles.tile_k
@@ -605,8 +609,9 @@ def generate_block_specs(
         _ordered(index_map.rhs_bias_index_map),
     )
   if cfgs.rhs_cfgs.has_scale:
+    scale_cols = cfgs.tiles.tile_k if (cfgs.dequant_rhs_in_vmem and cfgs.transpose_rhs) else cfgs.tiles.tile_n
     rhs_scale_block_spec = pl.BlockSpec(
-        (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
+        (None, cfgs.num_quant_blocks_per_tile_k, 1, scale_cols),
         _ordered(index_map.rhs_scale_index_map),
     )
 
@@ -734,6 +739,9 @@ def inner_kernel(
     # axis. This expands the K dimension back to tile_k.
     if cfgs.rhs_cfgs.should_bitcast:
       tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.dtype)
+    if cfgs.dequant_rhs_in_vmem:
+      tiled_rhs_scale = tiled_rhs_ref.get_scale().reshape(1, -1)
+      tiled_rhs = (tiled_rhs.astype(jnp.float32) * tiled_rhs_scale).astype(cfgs.lhs_cfgs.dtype)
     rhs_tile_n = tiled_rhs.shape[0 if cfgs.transpose_rhs else 1]
 
     # This should only be taken in the case where we don't requantize
@@ -1672,6 +1680,7 @@ def validate_inputs(
     maybe_quantize_lhs: bool = True,
     lhs_scale: jax.Array | None = None,
     transpose_rhs: bool = False,
+    dequant_rhs_in_vmem: bool = False,
 ) -> Dimensions:
   """Validates the inputs for the GMM kernel."""
 
@@ -1705,8 +1714,9 @@ def validate_inputs(
     assert partial_sum.shape[0] <= size_m
   if rhs_scale is not None:
     num_quant_blocks = rhs_scale.shape[1]
-    assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n), (
-        f"rhs_scale shape {rhs_scale.shape}. Expecting ({size_group}," f" {num_quant_blocks}, 1, {size_n})"
+    expected_scale_cols = size_k if (dequant_rhs_in_vmem and transpose_rhs) else size_n
+    assert rhs_scale.shape == (size_group, num_quant_blocks, 1, expected_scale_cols), (
+        f"rhs_scale shape {rhs_scale.shape}. Expecting ({size_group}," f" {num_quant_blocks}, 1, {expected_scale_cols})"
     )
     assert size_k % num_quant_blocks == 0
 
@@ -1826,6 +1836,7 @@ def make_gmm_configs(
     return_dact_dot: bool = False,
     dact_pre_act_tile_n: int | None = None,
     rhs_buffer_count: int | None = None,
+    dequant_rhs_in_vmem: bool = False,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1841,6 +1852,7 @@ def make_gmm_configs(
       maybe_quantize_lhs=maybe_quantize_lhs,
       lhs_scale=lhs_scale,
       transpose_rhs=transpose_rhs,
+      dequant_rhs_in_vmem=dequant_rhs_in_vmem,
   )
 
   if rhs_scale is not None:
@@ -1859,6 +1871,7 @@ def make_gmm_configs(
       dtype=rhs.dtype,
       has_bias=rhs_bias is not None,
       has_scale=has_scale,
+      dequant_in_vmem=dequant_rhs_in_vmem,
   )
 
   lhs_q_dtype = None
@@ -1967,7 +1980,7 @@ def make_gmm_configs(
       raise NotImplementedError(f'fuse_dact supports "swiglu" only; got {fuse_dact!r}.')
     if fuse_act is not None or out_is_3d or partial_sum is not None:
       raise NotImplementedError("fuse_dact does not support fuse_act, out_is_3d, or partial_sum.")
-    if rhs_scale is not None or rhs_bias is not None or lhs_scale is not None:
+    if (rhs_scale is not None and not dequant_rhs_in_vmem) or rhs_bias is not None or lhs_scale is not None:
       # The epilogue reads the float32 accumulator of a plain (unscaled, unquantized) matmul.
       raise NotImplementedError("fuse_dact does not support rhs_scale, rhs_bias or lhs_scale.")
     if dact_gate_up is None or dact_gate_up.shape != (dims.size_m, dims.size_n * 2):
@@ -2021,6 +2034,7 @@ def make_gmm_configs(
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
       rhs_buffer_count=rhs_buffer_count,
+      dequant_rhs_in_vmem=dequant_rhs_in_vmem,
   )
 
 
@@ -2037,6 +2051,8 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     del cfgs_dict["dact_pre_act_tile_n"]  # the contiguous [gate | up] reader keeps its metadata too
   if cfgs.rhs_buffer_count is None:
     del cfgs_dict["rhs_buffer_count"]  # the default rhs buffering keeps its metadata too
+  if not cfgs.dequant_rhs_in_vmem:
+    del cfgs_dict["dequant_rhs_in_vmem"]
   ret = {}
   for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
     key = jax.tree_util.keystr(path, simple=True, separator=".")
@@ -2063,6 +2079,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "return_dact_dot",
         "dact_pre_act_tile_n",
         "rhs_buffer_count",
+        "dequant_rhs_in_vmem",
     ]
 )
 def gmm_v2(
@@ -2092,6 +2109,7 @@ def gmm_v2(
     return_dact_dot: bool = False,
     dact_pre_act_tile_n: int | None = None,
     rhs_buffer_count: int | None = None,
+    dequant_rhs_in_vmem: bool = False,
 ) -> jax.Array | tuple[jax.Array, ...]:
   """GMM kernel implemented with emit_pipeline.
 
@@ -2208,6 +2226,7 @@ def gmm_v2(
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
       rhs_buffer_count=rhs_buffer_count,
+      dequant_rhs_in_vmem=dequant_rhs_in_vmem,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles

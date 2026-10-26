@@ -551,7 +551,11 @@ def _fwd_run_tokamax_v2(
   rhs_operand = rhs if not transpose_rhs else rhs.swapaxes(1, 2)
   rhs_scale = None
 
-  if isinstance(rhs, qpl.QArray):
+  is_ste_rhs = isinstance(rhs, quantizations.Fp8SteWeight)
+  if is_ste_rhs:
+    rhs_operand = rhs.codes if not transpose_rhs else rhs.codes.swapaxes(1, 2)
+    rhs_scale = jnp.expand_dims(rhs.scale, axis=1)
+  elif isinstance(rhs, qpl.QArray):
     # pyrefly: ignore[missing-attribute]
     rhs_operand = rhs_operand.qvalue
     rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
@@ -589,6 +593,7 @@ def _fwd_run_tokamax_v2(
       lhs_scale=lhs_scale,
       maybe_quantize_lhs=maybe_quantize_lhs,
       out_is_3d=out_is_3d,
+      dequant_rhs_in_vmem=is_ste_rhs,
   )
 
   # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
@@ -835,6 +840,12 @@ def _gmm_bwd(
         scale=jnp.zeros_like(residual_rhs.scale),
         zero_point=jnp.zeros_like(residual_rhs.zero_point) if residual_rhs.zero_point is not None else None,
         qtype=residual_rhs.qtype,
+    )
+  elif isinstance(residual_rhs, quantizations.Fp8SteWeight):
+    drhs = quantizations.Fp8SteWeight(
+        w_ste=drhs,
+        codes=jnp.zeros_like(residual_rhs.codes),
+        scale=jnp.zeros_like(residual_rhs.scale),
     )
 
   return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None
@@ -1141,15 +1152,17 @@ def _dlhs_run_tokamax_v2(
   else:
     dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
 
+  is_ste_rhs = isinstance(rhs, quantizations.Fp8SteWeight)
+  rhs_arr = rhs.codes if is_ste_rhs else rhs
   if use_dlhs_transpose_rhs:
     kernel_transpose_rhs = not transpose_rhs
-    dlhs_rhs = rhs
+    dlhs_rhs = rhs_arr
   else:
     kernel_transpose_rhs = False
-    dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+    dlhs_rhs = rhs_arr if transpose_rhs else rhs_arr.swapaxes(1, 2)
   # Sub-byte packing only supports the standard [group, k, n] RHS layout.
-  if kernel_transpose_rhs and jax.dtypes.itemsize_bits(rhs.dtype) < 8:
-    dlhs_rhs = rhs.swapaxes(1, 2)
+  if kernel_transpose_rhs and jax.dtypes.itemsize_bits(rhs_arr.dtype) < 8:
+    dlhs_rhs = rhs_arr.swapaxes(1, 2)
     kernel_transpose_rhs = False
 
   # The kernel adds partial_sum after applying its lhs_scale, so partial_sum can only go into the kernel
@@ -1171,8 +1184,7 @@ def _dlhs_run_tokamax_v2(
       lhs=dlhs_lhs,
       rhs=dlhs_rhs,
       group_sizes=group_sizes,
-      # rhs scale is already applied to dlhs_lhs
-      rhs_scale=None,
+      rhs_scale=jnp.expand_dims(rhs.scale, axis=1) if is_ste_rhs else None,
       partial_sum=kernel_partial_sum,
       tile_info=dlhs_tiling,
       preferred_element_type=lhs_dtype,
@@ -1184,6 +1196,7 @@ def _dlhs_run_tokamax_v2(
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
       zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
+      dequant_rhs_in_vmem=is_ste_rhs,
   )
 
   if not can_fuse_scale:
@@ -1491,9 +1504,13 @@ def _gmm_silu_kernel(
     tile_info = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tile_n)
   # Passed only when set, so that the default call (and its kernel) is exactly the one without the option.
   buffering = {} if rhs_buffer_count is None else {"rhs_buffer_count": rhs_buffer_count}
+  is_ste_rhs = isinstance(rhs, quantizations.Fp8SteWeight)
+  if is_ste_rhs:
+    buffering["rhs_scale"] = jnp.expand_dims(rhs.scale, axis=1)
+    buffering["dequant_rhs_in_vmem"] = True
   return gmm_v2.gmm_v2(
       lhs=lhs,
-      rhs=rhs,
+      rhs=rhs.codes if is_ste_rhs else rhs,
       group_sizes=group_sizes,
       tile_info=tile_info,
       preferred_element_type=preferred_element_type,
@@ -1642,7 +1659,8 @@ def _gmm_silu_dswiglu_fwd(
   act, gate_up = _gmm_silu_kernel(
       lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, "concat", fwd_rhs_buffer_count
   )
-  return (act, gate_up), (lhs, rhs, group_sizes, group_offset)
+  rhs_res = dataclasses.replace(rhs, w_ste=None) if isinstance(rhs, quantizations.Fp8SteWeight) else rhs
+  return (act, gate_up), (lhs, rhs_res, group_sizes, group_offset)
 
 
 def _gmm_silu_dswiglu_bwd(
@@ -1738,17 +1756,19 @@ def gmm_dswiglu_bwd(
   else:
     dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
   # As _dlhs_run_tokamax_v2 with transpose_rhs=False.
+  is_ste_rhs = isinstance(rhs, quantizations.Fp8SteWeight)
+  rhs_arr = rhs.codes if is_ste_rhs else rhs
   if use_dlhs_transpose_rhs:
     kernel_transpose_rhs = True
-    dlhs_rhs = rhs
+    dlhs_rhs = rhs_arr
   else:
     kernel_transpose_rhs = False
-    dlhs_rhs = rhs.swapaxes(1, 2)
+    dlhs_rhs = rhs_arr.swapaxes(1, 2)
   dlhs_out = gmm_v2.gmm_v2(
       lhs=dout,
       rhs=dlhs_rhs,
       group_sizes=group_sizes,
-      rhs_scale=None,
+      rhs_scale=jnp.expand_dims(rhs.scale, axis=1) if is_ste_rhs else None,
       partial_sum=None,
       tile_info=dlhs_tiling,
       preferred_element_type=preferred_element_type,
@@ -1763,6 +1783,7 @@ def gmm_dswiglu_bwd(
       dact_row_scale=dact_row_scale,
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
+      dequant_rhs_in_vmem=is_ste_rhs,
   )
   drhs = _drhs_run_tokamax_v2(
       dout,
@@ -1775,6 +1796,12 @@ def gmm_dswiglu_bwd(
       use_gmm_v2_heuristic_tiling,
       partial_sum=None,
   )
+  if is_ste_rhs:
+    drhs = quantizations.Fp8SteWeight(
+        w_ste=drhs,
+        codes=jnp.zeros_like(rhs.codes),
+        scale=jnp.zeros_like(rhs.scale),
+    )
   d_gate_up, dot = dlhs_out if return_dact_dot else (dlhs_out, None)
   return d_gate_up, dot, drhs
 

@@ -14,6 +14,7 @@
 
 """Ragged token sorting operations with custom VJP."""
 
+import dataclasses
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
@@ -859,7 +860,8 @@ def ring_ragged_unsort_down_projection(
       start, end = _ring_unsort_window(group_sizes, local_num_experts, ep_name)
       out = _ring_unsort_combine(y, revert, weights, start, end, topk, gather_reduce_kwargs)
       # y is not a residual: the backward below never reads it.
-      res = (h, gate_up, wo, operands, revert, weights, start, end, argsort_indices)
+      wo_res = dataclasses.replace(wo, w_ste=None) if hasattr(wo, "codes") else wo
+      res = (h, gate_up, wo_res, operands, revert, weights, start, end, argsort_indices)
       return (out if tie is None else (out, tie)), res
 
     @jax.named_scope("ragged-unsort-down-projection-bwd")

@@ -14,6 +14,7 @@
 
 """Quantization library."""
 
+import os
 import functools
 import json
 import math
@@ -244,12 +245,53 @@ def quantize_weight_codes_per_channel(
   return q, scale
 
 
+@jax.tree_util.register_dataclass
+@dataclass
+class Fp8SteWeight:
+  w_ste: Any
+  codes: Any
+  scale: Any
+
+  @property
+  def shape(self):
+    return self.codes.shape
+
+  @property
+  def dtype(self):
+    return jnp.bfloat16 if self.w_ste is None else self.w_ste.dtype
+
+  @property
+  def ndim(self):
+    return self.codes.ndim
+
+  def astype(self, dtype):
+    del dtype
+    return self
+
+
 def dequantize_weight_codes_ste(
     w: Array,
     codes: Array,
     scale: Array,
     grad_transform: Callable[[Array], Array] | None = None,
-) -> Array:
+) -> Any:
+  if os.environ.get("MAXTEXT_GMM_V2_IN_KERNEL_FP8_DEQUANT", "") == "1":
+    dtype = w.dtype
+
+    @jax.custom_vjp
+    def _ste_carrier(w, codes, scale):
+      del w
+      w_ste = jax.lax.broadcast(jnp.zeros((), dtype=dtype), codes.shape)
+      return Fp8SteWeight(w_ste=w_ste, codes=codes, scale=scale)
+
+    def _ste_carrier_fwd(w, codes, scale):
+      return _ste_carrier(w, codes, scale), None
+
+    def _ste_carrier_bwd(_, g):
+      return (g.w_ste if grad_transform is None else grad_transform(g.w_ste)), None, None
+
+    _ste_carrier.defvjp(_ste_carrier_fwd, _ste_carrier_bwd)
+    return _ste_carrier(w, codes, scale)
   """Dequantizes `quantize_weight_codes_per_channel` codes, with a straight-through gradient into `w`.
 
   Forward: `(codes.astype(float32) * scale).astype(w.dtype)`, the expression `fake_quantize_weight_per_channel`
