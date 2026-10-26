@@ -33,7 +33,7 @@ logits_via_embedding: false
 normalization_layer_epsilon: 1.0e-20
 
 decoder_block: "deepseek41"
-# One sequence per row: the attention masks, compressed KV and engram n-grams do not handle packed segments yet.
+# Default off; packed segments are supported via decoder_segment_ids.
 packing: false
 
 # --- Hyper-connections ---
