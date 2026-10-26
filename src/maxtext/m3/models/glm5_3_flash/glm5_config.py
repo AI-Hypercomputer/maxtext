@@ -128,6 +128,7 @@ class Glm5Config:
   weight_dtype: str = "float32"
   remat_policy: str = "full"
   enable_debug_stats: bool = False
+  num_vocab_tiling: int = 1
 
   def __post_init__(self) -> None:
     if isinstance(self.dtype, (np.dtype, type)):

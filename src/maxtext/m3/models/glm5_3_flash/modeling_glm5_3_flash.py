@@ -33,7 +33,7 @@ from maxtext.m3.models.glm5_3_flash import glm5_scan
 class Glm5Output:
   """Output of GLM-5.3-Flash forward pass with auxiliary data."""
 
-  logits: jax.Array
+  logits: jax.Array | None
   hidden_states: jax.Array
   mtp_logits: jax.Array | None
   aux: dict[str, Any]
@@ -137,6 +137,7 @@ class Glm5Model(nnx.Module):
       decoder_input_tokens: jax.Array,
       decoder_positions: jax.Array | None = None,
       decoder_segment_ids: jax.Array | None = None,
+      compute_logits: bool = True,
       **kwargs: Any,
   ) -> Glm5Output:
     """Executes full forward pass returning logits, hidden states, and auxiliary loss."""
@@ -151,9 +152,7 @@ class Glm5Model(nnx.Module):
     # model.config is single source of truth at call time (T40).
     def _sync_cfg(m):
       if m.config.enable_debug_stats != cfg.enable_debug_stats:
-        m.config = dataclasses.replace(
-            m.config, enable_debug_stats=cfg.enable_debug_stats
-        )
+        m.config = dataclasses.replace(m.config, enable_debug_stats=cfg.enable_debug_stats)
 
     for l in self.prefix_layers:
       _sync_cfg(l)
@@ -184,9 +183,7 @@ class Glm5Model(nnx.Module):
           )
           streams, r_logits, r_topk, idx_topk = fn(streams)
         else:
-          streams, r_logits, r_topk, idx_topk = layer(
-              streams, decoder_segment_ids=decoder_segment_ids
-          )
+          streams, r_logits, r_topk, idx_topk = layer(streams, decoder_segment_ids=decoder_segment_ids)
         if idx_topk is not None:
           dsa_topk_indices_list.append(idx_topk)
         if layer_0_act is None:
@@ -205,20 +202,16 @@ class Glm5Model(nnx.Module):
       return streams, cur_lb
 
     if self.prefix_layers:
-      hidden_streams, lb_stats = _run_layers(
-          self.prefix_layers, hidden_streams, lb_stats
-      )
+      hidden_streams, lb_stats = _run_layers(self.prefix_layers, hidden_streams, lb_stats)
     if self.super_block is not None:
-      hidden_streams, sb_r, lb_stats, sb_rt, sb_idx = (
-          glm5_scan.scan_super_blocks(
-              self.super_block,
-              hidden_streams,
-              decoder_segment_ids=decoder_segment_ids,
-              scan_layers=cfg.scan_layers,
-              remat_policy=self.remat_policy,
-              return_router_logits=keep_router_logits,
-              lb_stats=lb_stats,
-          )
+      hidden_streams, sb_r, lb_stats, sb_rt, sb_idx = glm5_scan.scan_super_blocks(
+          self.super_block,
+          hidden_streams,
+          decoder_segment_ids=decoder_segment_ids,
+          scan_layers=cfg.scan_layers,
+          remat_policy=self.remat_policy,
+          return_router_logits=keep_router_logits,
+          lb_stats=lb_stats,
       )
       if sb_idx is not None:
         for idx_item in sb_idx:
@@ -228,13 +221,11 @@ class Glm5Model(nnx.Module):
         router_logits_list.extend(sb_r)
         router_topk_list.extend(sb_rt)
     if self.suffix_layers:
-      hidden_streams, lb_stats = _run_layers(
-          self.suffix_layers, hidden_streams, lb_stats
-      )
+      hidden_streams, lb_stats = _run_layers(self.suffix_layers, hidden_streams, lb_stats)
     last_block_act = hidden_streams
     collapsed = self.hc_head(hidden_streams)
     normed = self.norm(collapsed)
-    logits = self.lm_head(normed)
+    logits = self.lm_head(normed) if compute_logits else None
     num_moe_layers = max(0, cfg.num_hidden_layers - cfg.first_k_dense_replace)
     if keep_router_logits and len(router_logits_list) != num_moe_layers:
       raise ValueError(f"Expected {num_moe_layers} MoE router_logits entries, got" f" {len(router_logits_list)}.")
@@ -243,22 +234,15 @@ class Glm5Model(nnx.Module):
     else:
       moe_lb_loss = glm5_moe.finalize_moe_lb_loss(lb_stats, cfg.n_routed_experts)
 
-    router_topk_indices_list: list[jax.Array] = (
-        router_topk_list if cfg.enable_debug_stats else []
-    )
+    router_topk_indices_list: list[jax.Array] = router_topk_list if cfg.enable_debug_stats else []
 
     aux: dict[str, Any] = {
-        "router_logits": (
-            tuple(router_logits_list) if cfg.enable_debug_stats else ()
-        ),
+        "router_logits": (tuple(router_logits_list) if cfg.enable_debug_stats else ()),
         "moe_lb_loss": moe_lb_loss,
     }
     if cfg.enable_debug_stats:
       if layer_0_act is None:
-        raise RuntimeError(
-            "enable_debug_stats=True requires layer 0 activation, but"
-            " layer_0_act was not captured."
-        )
+        raise RuntimeError("enable_debug_stats=True requires layer 0 activation, but" " layer_0_act was not captured.")
       l0_f32 = layer_0_act.astype(jnp.float32)
       last_f32 = last_block_act.astype(jnp.float32)
       aux["debug_stats"] = {
@@ -267,8 +251,8 @@ class Glm5Model(nnx.Module):
           "last_block_mean": jnp.mean(last_f32),
           "last_block_var": jnp.var(last_f32),
           "hidden_norm_mean": jnp.mean(jnp.linalg.norm(normed, axis=-1)),
-          "logits_max": jnp.max(logits),
-          "logits_min": jnp.min(logits),
+          "logits_max": (jnp.max(logits) if logits is not None else jnp.zeros((), dtype=normed.dtype)),
+          "logits_min": (jnp.min(logits) if logits is not None else jnp.zeros((), dtype=normed.dtype)),
           "router_topk_indices": tuple(router_topk_indices_list),
           "dsa_topk_indices": tuple(dsa_topk_indices_list),
       }
@@ -283,8 +267,10 @@ class Glm5Model(nnx.Module):
       decoder_segment_ids: jax.Array | None = None,
       **kwargs: Any,
   ) -> jax.Array:
-    """Executes full forward pass returning output logits."""
-    return self.forward_with_aux(decoder_input_tokens, decoder_positions, decoder_segment_ids, **kwargs).logits
+    out = self.forward_with_aux(decoder_input_tokens, decoder_positions, decoder_segment_ids, **kwargs)
+    if out.logits is None:
+      raise RuntimeError("out.logits is None in Glm5Model.__call__.")
+    return out.logits
 
   def logits_from_hidden_states_for_vocab_tiling(
       self,
@@ -332,12 +318,34 @@ class Glm5Model(nnx.Module):
     return cls(config=config, mesh=mesh, rngs=rngs, place_on_devices=place_on_devices)
 
 
-def create_glm5_3_flash_model(config: Any, mesh: Mesh | None = None, *, rngs: nnx.Rngs, **kwargs: Any) -> Glm5Model:
-  """Creates a Glm5Model instance from config and mesh."""
+def create_glm5_3_flash_model(
+    config: Any,
+    mesh: Mesh | None = None,
+    *,
+    rngs: nnx.Rngs,
+    **kwargs: Any,
+) -> Glm5Model:
+  """Creates a Glm5Model instance from MaxText config and mesh."""
   if "place_on_devices" in kwargs:
     raise TypeError(
         "place_on_devices is fixed to False in create_glm5_3_flash_model;"
         " pass place_on_devices to Glm5Model or Glm5Model.from_maxtext_config"
         " directly instead."
     )
-  return Glm5Model.from_maxtext_config(config, mesh, rngs=rngs, place_on_devices=False, **kwargs)
+  if "remat_policy" in kwargs:
+    raise TypeError("remat_policy must be configured via config.remat_policy, not as a" " keyword argument.")
+  if not hasattr(config, "remat_policy"):
+    raise AttributeError("config must define 'remat_policy'.")
+  remat_policy = config.remat_policy
+  if not isinstance(remat_policy, str):
+    raise TypeError(f"remat_policy must be a str, got {type(remat_policy).__name__}.")
+  if remat_policy == "none":
+    policy = None
+  elif remat_policy == "full":
+    policy = jax.checkpoint_policies.nothing_saveable
+  else:
+    raise ValueError(
+        f"Unsupported remat_policy for GLM-5.3-Flash: {remat_policy!r}." " Supported policies: ('none', 'full')."
+    )
+  model = Glm5Model.from_maxtext_config(config, mesh, rngs=rngs, place_on_devices=False, **kwargs)
+  return glm5_scan.apply_glm5_remat(model, policy=policy)

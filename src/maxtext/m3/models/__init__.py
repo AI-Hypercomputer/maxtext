@@ -55,3 +55,48 @@ def create_model(config, mesh, **kwargs):
         f"Registered models: {', '.join(sorted(MODEL_REGISTRY))}."
     )
   return MODEL_REGISTRY[config.model_name](config, mesh, **kwargs)
+
+
+def calculate_glm5_3_flash_tflops_per_device(config, log: bool = True):
+  """Lazy wrapper for GLM-5.3-Flash TFLOPs calculation."""
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.m3.models.glm5_3_flash import glm5_flops
+
+  return glm5_flops.calculate_glm5_3_flash_tflops_per_device(config, log=log)
+
+
+MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
+    "glm5.3-flash": calculate_glm5_3_flash_tflops_per_device,
+}
+
+
+def calculate_tflops_per_device(config, log: bool = True):
+  """Calculates per-device training TFLOPs for registered m3 models."""
+  if config.model_name not in MODEL_FLOPS_REGISTRY:
+    raise ValueError(
+        "TFLOPs calculation not implemented for m3 model"
+        f" {config.model_name!r}. Registered models:"
+        f" {', '.join(sorted(MODEL_FLOPS_REGISTRY))}."
+    )
+  return MODEL_FLOPS_REGISTRY[config.model_name](config, log=log)
+
+
+def configure_glm5_3_flash_engine(engine):
+  """Lazy wrapper for GLM-5.3-Flash training engine configuration."""
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.m3.models.glm5_3_flash import glm5_train
+
+  return glm5_train.configure_glm5_engine(engine)
+
+
+MODEL_ENGINE_CONFIG_REGISTRY: dict[str, Callable] = {
+    "glm5.3-flash": configure_glm5_3_flash_engine,
+}
+
+
+def configure_engine(engine):
+  """Applies model-specific MaxTextTrainingEngine configuration for registered m3 models."""
+  model_name = engine._config.model_name  # pylint: disable=protected-access
+  if model_name in MODEL_ENGINE_CONFIG_REGISTRY:
+    return MODEL_ENGINE_CONFIG_REGISTRY[model_name](engine)
+  return engine
