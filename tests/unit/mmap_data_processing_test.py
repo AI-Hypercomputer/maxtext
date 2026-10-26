@@ -1902,6 +1902,7 @@ class GrainMmapNpyEvalConfigTest(TestCase):
         grain_prefetch_buffer_size_eval=1,
         grain_per_worker_buffer_size_eval=1,
         grain_data_source_max_workers=1,
+        hf_access_token=None,
         eval_data_columns=("text",),
         tokenize_eval_data=False,
         use_sft=False,
