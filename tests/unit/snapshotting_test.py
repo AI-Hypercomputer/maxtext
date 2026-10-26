@@ -29,6 +29,7 @@ from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import elastic_utils
 import numpy as np
 import pathwaysutils
+from pathwaysutils.elastic.manager import ScaleUpSignalError
 
 
 class FakeConfig:
@@ -262,7 +263,26 @@ class SnapshottingTest(absltest.TestCase):
     save_snapshot.assert_called_once_with(snapshotter, "state", 20, "iterator")
     snapshotter.join.assert_not_called()  # Periodic saves never block the training loop.
 
-  def test_maybe_save_snapshot_snapshots_and_waits_before_scale_up(self):
+  def test_maybe_back_up_and_scale_up_noop(self):
+    """Nothing happens without new slices."""
+    log_first_n = self.enter_context(mock.patch.object(snapshotting.logging, "log_first_n"))
+    snapshotter = FakeSnapshotter(latest_snapshot=("pinned", 0))
+    snapshotting.maybe_back_up_and_scale_up(snapshotter, self.config, "state", 7, None, None)
+    snapshotting.maybe_back_up_and_scale_up(None, self.config, "state", 7, None, None)
+    snapshotter.join.assert_not_called()
+    log_first_n.assert_not_called()
+
+  def test_maybe_back_up_and_scale_up_warns_without_anything_to_resume_from(self):
+    """New slices without a snapshotter or a checkpoint manager: say why the job stays on fewer slices, once."""
+    log_first_n = self.enter_context(mock.patch.object(snapshotting.logging, "log_first_n"))
+    self.fake_manager.available_inactive_slices = frozenset({1})
+
+    snapshotting.maybe_back_up_and_scale_up(None, self.config, "state", 7, None, None)  # Doesn't raise.
+
+    log_first_n.assert_called_once_with(snapshotting.logging.WARNING, mock.ANY, 1)
+    self.assertIn("no snapshot or checkpoint to resume from", log_first_n.call_args.args[1])
+
+  def test_maybe_back_up_and_scale_up_snapshots_and_waits_before_interrupting(self):
     self.fake_manager.available_inactive_slices = frozenset({1})
     snapshotter = FakeSnapshotter(latest_snapshot=("pinned", 0))
     checkpointer = fake_checkpointer()
@@ -277,23 +297,49 @@ class SnapshottingTest(absltest.TestCase):
     self._patch_checkpoint_dict()
 
     # Step 7 is not on the interval; the scale-up still gets a snapshot, after the checkpoint and earlier saves.
-    snapshotting.maybe_save_snapshot(snapshotter, self.config, "state", 7, checkpointer, None)
+    with self.assertRaises(ScaleUpSignalError):
+      snapshotting.maybe_back_up_and_scale_up(snapshotter, self.config, "state", 7, checkpointer, None)
 
-    checkpointer.wait.assert_called_once()
+    checkpointer.wait.assert_called()
     # Waited for earlier saves, saved this step, then waited for it.
     self.assertEqual(calls, ["join", ("save", 7), "join"])
 
-  def test_maybe_save_snapshot_scale_up_proceeds_when_snapshot_does_not_complete(self):
+  def test_maybe_back_up_and_scale_up_reuses_completed_periodic_snapshot(self):
+    """The periodic snapshot of the same step already completed, so it isn't taken again."""
+    self.fake_manager.available_inactive_slices = frozenset({1})
+    snapshotter = FakeSnapshotter(latest_snapshot=("pinned", 20))
+
+    with self.assertRaises(ScaleUpSignalError):
+      snapshotting.maybe_back_up_and_scale_up(snapshotter, self.config, "state", 20, None, None)
+
+    snapshotter.join.assert_called_once()
+    snapshotter.save.assert_not_called()
+
+  def test_maybe_back_up_and_scale_up_interrupts_when_snapshot_does_not_complete(self):
     """A snapshot that fails must not stop the interrupt; the loss is logged, not fatal."""
     self.fake_manager.available_inactive_slices = frozenset({1})
     snapshotter = FakeSnapshotter(latest_snapshot=("pinned", 0))  # `save` is a Mock: nothing ever completes.
     self._patch_checkpoint_dict()
     log = self.enter_context(mock.patch.object(snapshotting.max_logging, "log"))
 
-    snapshotting.maybe_save_snapshot(snapshotter, self.config, "state", 7, None, None)
+    with self.assertRaises(ScaleUpSignalError):
+      snapshotting.maybe_back_up_and_scale_up(snapshotter, self.config, "state", 7, None, None)
 
     self.assertEqual(snapshotter.save.call_args.args[0], 7)
     self.assertTrue(any("did not complete before the scale-up" in str(c.args[0]) for c in log.call_args_list))
+
+  def test_maybe_back_up_and_scale_up_checkpoints_in_checkpoint_mode(self):
+    """Without a snapshotter, the step is checkpointed even off `checkpoint_period`, and the save is waited for."""
+    self.config.elastic_backup_kind = "checkpoint"
+    self.fake_manager.available_inactive_slices = frozenset({1})
+    checkpointer = fake_checkpointer()
+    maybe_save_checkpoint = self.enter_context(mock.patch.object(snapshotting.checkpointing, "maybe_save_checkpoint"))
+
+    with self.assertRaises(ScaleUpSignalError):
+      snapshotting.maybe_back_up_and_scale_up(None, self.config, "state", 7, checkpointer, "iterator")
+
+    maybe_save_checkpoint.assert_called_once_with(checkpointer, "state", self.config, "iterator")
+    checkpointer.wait.assert_called()
 
   def test_should_restore_snapshot(self):
     self.assertFalse(snapshotting.should_restore_snapshot(None, None))

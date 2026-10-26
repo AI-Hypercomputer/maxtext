@@ -33,6 +33,7 @@ replicas that are still reachable and reshards it onto the shardings it is given
 So the same snapshot serves pause/resume (same slices), a slice-down (fewer slices) and a scale-up (more slices).
 """
 
+from absl import logging
 from flax import nnx
 from grain import experimental as grain_experimental
 import jax
@@ -74,7 +75,7 @@ def create_snapshotter(config) -> Snapshotter | None:
 def reset_snapshotter(snapshotter: Snapshotter) -> Snapshotter:
   """Returns a new snapshotter that holds only the latest completed snapshot of `snapshotter`.
 
-  For the slice-down event callback (before a scale-up nothing is in flight: `maybe_save_snapshot` waited for the
+  For the slice-down event callback (before a scale-up nothing is in flight: `maybe_back_up_and_scale_up` waited for the
   last save). A save that was running when the slice died is in `block_until_ready` on buffers of that slice. If
   that call raises, Orbax logs it and frees the queue slot, and the old snapshotter would be fine to keep. If it
   hangs, or raises something the worker doesn't catch, the single queue slot stays taken for ever: every later save
@@ -271,14 +272,9 @@ def should_save_snapshot(config, step: int, checkpoint_manager) -> bool:
 
 
 def maybe_save_snapshot(snapshotter: Snapshotter | None, config, state, step: int, checkpoint_manager, data_iterator):
-  """Snapshots after `step` when it is due, and always before interrupting for a scale-up.
+  """Snapshots after `step` when it is due. Does nothing outside snapshot mode.
 
-  Call this at the end of each train step, after the checkpoint save. Does nothing outside snapshot mode.
-
-  When new slices are available, `maybe_elastic_scale_up` interrupts the attempt at the start of the next step.
-  Taking a snapshot right before that, and waiting for it to complete, means the attempt on the larger mesh resumes
-  from this very step instead of from the last periodic snapshot or checkpoint. The waits block until the snapshotter
-  is idle; a snapshot that failed is logged here, so that the steps the next attempt loses are explained.
+  Call this at the end of each train step, after the checkpoint save.
 
   Args:
     snapshotter: The snapshotter of the run, or None outside snapshot mode.
@@ -288,25 +284,59 @@ def maybe_save_snapshot(snapshotter: Snapshotter | None, config, state, step: in
     checkpoint_manager: The checkpoint manager, or None if checkpointing is disabled.
     data_iterator: The training data iterator.
   """
-  if snapshotter is None:
+  if snapshotter is not None and should_save_snapshot(config, step, checkpoint_manager):
+    save_snapshot(snapshotter, state, step, data_iterator)
+
+
+def maybe_back_up_and_scale_up(
+    snapshotter: Snapshotter | None, config, state, step: int, checkpoint_manager, data_iterator
+) -> None:
+  """Interrupts the attempt for a scale-up if new slices are available, once `step` is backed up.
+
+  Call this at the end of each train step. Snapshot mode snapshots `step`; checkpoint mode checkpoints it even if
+  `checkpoint_period` doesn't call for it. Whether new slices are available is read once, right before the backup, so
+  the attempt is never interrupted without one. Without a snapshotter or a checkpoint manager there is nothing to
+  resume from, so this only logs a warning, once.
+
+  Args:
+    snapshotter: The snapshotter of the run, or None outside snapshot mode.
+    config: MaxText config.
+    state: The train state after step `step`.
+    step: The index of the step that produced `state`.
+    checkpoint_manager: The checkpoint manager, or None if checkpointing is disabled.
+    data_iterator: The training data iterator.
+
+  Raises:
+    ScaleUpSignalError: If new slices are available, once `step` is backed up.
+  """
+  if not elastic_utils.is_scale_up_event(config):
     return
-  if elastic_utils.is_scale_up_event(config):
+  if snapshotter is None and checkpoint_manager is None:
+    # The new slices stay available, so this is reached after every step: log it once.
+    logging.log_first_n(
+        logging.WARNING,
+        "New slices are available, but there is no snapshot or checkpoint to resume from, so not scaling up.",
+        1,
+    )
+    return
+  if snapshotter is None:
+    max_logging.log(f"New slices are available. Checkpointing step {step} before scaling up.")
+    # Without `step`, this saves the last completed step even off `checkpoint_period`, as for the final checkpoint.
+    checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
+  else:
     max_logging.log(f"New slices are available. Snapshotting step {step} before scaling up.")
     if checkpoint_manager is not None:
       checkpointing.wait_until_finished(checkpoint_manager)
-    # Let an earlier snapshot finish first, so that this one isn't skipped as "busy". This blocks the main thread,
-    # by design: the attempt is interrupted at the top of the next step either way, and the wait is what lets the
-    # next attempt resume from this step rather than from the last periodic snapshot.
+    # Let an earlier snapshot finish first, so that this one isn't skipped as "busy"; it may be the snapshot of `step`.
     snapshotter.join()
-    save_snapshot(snapshotter, state, step, data_iterator)
-    if not wait_for_snapshot(snapshotter, step):
-      max_logging.log(
-          f"WARNING: the in-memory snapshot of step {step} did not complete before the scale-up. The next attempt"
-          f" resumes from the latest snapshot (step {latest_snapshot_step(snapshotter)}) or checkpoint."
-      )
-    return
-  if should_save_snapshot(config, step, checkpoint_manager):
-    save_snapshot(snapshotter, state, step, data_iterator)
+    if latest_snapshot_step(snapshotter) != step:
+      save_snapshot(snapshotter, state, step, data_iterator)
+      if not wait_for_snapshot(snapshotter, step):
+        max_logging.log(
+            f"WARNING: the in-memory snapshot of step {step} did not complete before the scale-up. The next attempt"
+            f" resumes from the latest snapshot (step {latest_snapshot_step(snapshotter)}) or checkpoint."
+        )
+  elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
 
 def should_restore_snapshot(snapshotter: Snapshotter | None, checkpoint_manager) -> bool:

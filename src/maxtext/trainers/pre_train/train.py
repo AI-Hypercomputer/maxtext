@@ -928,8 +928,6 @@ def training_loop_iteration(
   dump_hlo_upload_all = immutable_data["dump_hlo_upload_all"]
 
   prof.maybe_activate_profiler(step, state)
-  if config.elastic_enabled:
-    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
     example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
@@ -976,8 +974,7 @@ def training_loop_iteration(
   completed_step = step + 1
 
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
-  # Snapshot mode: copy the state and the data iterator position to host memory when due, and always before the
-  # scale-up interrupt at the top of the next step, so that the next attempt resumes from here.
+  # Snapshot mode: copy the state and the data iterator position to host memory when due.
   snapshotting.maybe_save_snapshot(snapshotter, config, state, step, checkpoint_manager, data_iterator)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
@@ -1053,6 +1050,10 @@ def training_loop_iteration(
   metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
   if not ran_eval:
     mllog_utils.step_end(config, completed_step)
+
+  if config.elastic_enabled and completed_step < immutable_data["steps"]:
+    # Scale up only right after backing up this step. After the last step there is nothing left to scale up for.
+    snapshotting.maybe_back_up_and_scale_up(snapshotter, config, state, step, checkpoint_manager, data_iterator)
 
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
@@ -1668,7 +1669,7 @@ def get_train_func(config, recorder, argv):
       elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
       if elastic_retry_cache.snapshotter is not None and not scale_up:
         # A save that was running when the slice went down may be stuck on it; start over with a new snapshotter
-        # that keeps the last completed snapshot. Before a scale-up nothing is in flight: `maybe_save_snapshot`
+        # that keeps the last completed snapshot. Before a scale-up nothing is in flight: `maybe_back_up_and_scale_up`
         # waited for the last save.
         elastic_retry_cache.snapshotter = snapshotting.reset_snapshotter(elastic_retry_cache.snapshotter)
 
