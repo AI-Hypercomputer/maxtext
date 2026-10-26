@@ -1883,8 +1883,9 @@ mixtral_8x22b_dict = {
 mixtral_8x22b_config = transformers.MixtralConfig(**mixtral_8x22b_dict)
 
 
-# shared by olmo3-7b and olmo3-7b-pt (only rope_scaling/max_position_embeddings differ)
-olmo3_7b_dict = {
+# from https://huggingface.co/allenai/Olmo-3-1025-7B/blob/stage1-step1413814/config.json
+# stage 1 / stage 2 pretraining revisions: default RoPE, 8k context
+olmo3_7b_pt_dict = {
     "architectures": ["Olmo3ForCausalLM"],
     "model_type": "olmo3",
     "hidden_size": 4096,
@@ -1899,11 +1900,28 @@ olmo3_7b_dict = {
     "rms_norm_eps": 1.0e-6,
     "torch_dtype": "bfloat16",
     "tie_word_embeddings": False,
+    "eos_token_id": 100257,
     "pad_token_id": 100277,
     "hidden_act": "silu",
     "attention_bias": False,
     "attention_dropout": 0.0,
     "use_cache": True,
+}
+olmo3_7b_pt_config = transformers.Olmo3Config(**olmo3_7b_pt_dict)
+
+# from https://huggingface.co/allenai/Olmo-3-7B-Instruct/blob/main/config.json
+# stage 3 and post-trained checkpoints: YaRN on the full-attention layers, 64k context
+olmo3_7b_dict = {
+    **olmo3_7b_pt_dict,
+    "max_position_embeddings": 65536,
+    "rope_scaling": {
+        "attention_factor": 1.2079441541679836,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 8.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "yarn",
+    },
 }
 olmo3_7b_config = transformers.Olmo3Config(**olmo3_7b_dict)
 
@@ -2304,6 +2322,6 @@ HF_MODEL_CONFIGS = {
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
     "olmo3-7b": olmo3_7b_config,
-    "olmo3-7b-pt": olmo3_7b_config,
+    "olmo3-7b-pt": olmo3_7b_pt_config,
     "olmo3-32b": olmo3_32b_config,
 }

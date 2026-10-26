@@ -1073,6 +1073,49 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def OLMO3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace weights path and weights shape for Olmo 3.
+
+  Olmo 3 has no input layernorm: each layer normalizes the attention and MLP outputs
+  (post_attention_layernorm, post_feedforward_layernorm), and QK norm spans all heads.
+
+  Args:
+      config (dict): Model configuration dictionary, defined in `model_configs.py`
+
+  Returns:
+      dict: A mapping where:
+          - Keys are HuggingFace model parameter paths
+          - Values are parameter shape as a List
+  """
+  hidden = config["hidden_size"]
+  head_dim = config.get("head_dim") or hidden // config["num_attention_heads"]
+  q_dim = config["num_attention_heads"] * head_dim
+  kv_dim = config["num_key_value_heads"] * head_dim
+  mapping = {
+      "model.embed_tokens.weight": [config["vocab_size"], hidden],
+      "model.norm.weight": [hidden],
+      "lm_head.weight": [config["vocab_size"], hidden],
+  }
+  for layer_idx in range(config["num_hidden_layers"]):
+    prefix = f"model.layers.{layer_idx}"
+    mapping.update(
+        {
+            f"{prefix}.mlp.down_proj.weight": [hidden, config["intermediate_size"]],
+            f"{prefix}.mlp.gate_proj.weight": [config["intermediate_size"], hidden],
+            f"{prefix}.mlp.up_proj.weight": [config["intermediate_size"], hidden],
+            f"{prefix}.post_attention_layernorm.weight": [hidden],
+            f"{prefix}.post_feedforward_layernorm.weight": [hidden],
+            f"{prefix}.self_attn.q_norm.weight": [q_dim],
+            f"{prefix}.self_attn.k_norm.weight": [kv_dim],
+            f"{prefix}.self_attn.q_proj.weight": [q_dim, hidden],
+            f"{prefix}.self_attn.k_proj.weight": [kv_dim, hidden],
+            f"{prefix}.self_attn.v_proj.weight": [kv_dim, hidden],
+            f"{prefix}.self_attn.o_proj.weight": [hidden, q_dim],
+        }
+    )
+  return mapping
+
+
 def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
   """
   Returns a mapping of Hugging Face parameter names to their tensor shapes.
@@ -1378,6 +1421,9 @@ HF_SHAPE = {
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-7b": OLMO3_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-7b-pt": OLMO3_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-32b": OLMO3_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-9b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
