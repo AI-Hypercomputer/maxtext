@@ -255,6 +255,8 @@ ModelName = Literal[
     "deepseek4-tiny",
     "deepseek4-284b",
     "deepseek4-1600b",
+    "deepseek4.1-flash",
+    "deepseek4.1-flash-mini",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -919,6 +921,40 @@ class CompressedAttention(BaseModel):
   use_csa_streamindex_kernel: bool = Field(
       False,
       description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
+  )
+
+
+class DeepSeek41(BaseModel):
+  """DeepSeek-V4.1 specific architecture settings (cross-layer KV / indexer sharing, engram, hyper-connections)."""
+
+  kv_source_layers: list[int] = Field(
+      default_factory=list,
+      description="Layers that compress their own KV; later layers with the same compress ratio reuse it.",
+  )
+  index_source_layers: list[int] = Field(
+      default_factory=list,
+      description="Layers that run the indexer; the layers after them reuse the selected top-k positions.",
+  )
+  candidate_source_layer: int = Field(
+      -1, description="Layer whose index scores pre-select candidate blocks for later index sources (-1: off)."
+  )
+  candidate_topk_blocks: NonNegativeInt = Field(0, description="Candidate blocks kept per query.")
+  candidate_block_size: NonNegativeInt = Field(0, description="Compressed positions per candidate block.")
+  ds41_compressed_rope_yarn: bool = Field(
+      False,
+      description="Apply YaRN (original_max_position_embeddings, rope_factor, beta_fast/slow) to the RoPE of"
+      " compressed layers.",
+  )
+  ds41_hc_sinkhorn_iters: PositiveInt = Field(20, description="Sinkhorn iterations of the hyper-connection mixes.")
+  ds41_hc_eps: float = Field(1e-6, description="Epsilon of the hyper-connection mixes.")
+  ds41_engram_layers: list[int] = Field(default_factory=list, description="Layers with an engram n-gram lookup.")
+  ds41_engram_vocab_size: NonNegativeInt = Field(0, description="Base bucket size for the engram hash primes.")
+  ds41_engram_max_ngram_size: PositiveInt = Field(1, description="Largest n-gram hashed by the engram.")
+  ds41_engram_n_heads: NonNegativeInt = Field(0, description="Engram hash heads per n-gram size.")
+  ds41_engram_head_dim: NonNegativeInt = Field(0, description="Engram table row size.")
+  ds41_engram_pad_id: int = Field(2, description="Token filling n-gram slots that have no history.")
+  ds41_engram_compressed_vocab_size: NonNegativeInt = Field(
+      0, description="Expected size of the compressed (normalized) tokenizer vocab (0: unchecked)."
   )
 
 
@@ -4242,6 +4278,7 @@ class MaxTextConfig(
     Attention,
     MlaAttention,
     CompressedAttention,
+    DeepSeek41,
     MoBa,
     AttentionIndexer,
     Llama4Attention,
@@ -4967,7 +5004,7 @@ class MaxTextConfig(
     if getattr(self, "eval_per_device_batch_size", 0.0) == 0.0:
       self.eval_per_device_batch_size = self.per_device_batch_size
     # The mu_dtype for the AdamW optimizer defaults to the weight_dtype if not specified.
-    if not self.mu_dtype:
+    if not self.mu_dtype:  # pylint: disable=access-member-before-definition
       self.mu_dtype = self.weight_dtype
     # A soft-cap value of 0.0 is treated as disabling the cap.
     if self.attn_logits_soft_cap == 0.0:
@@ -5730,7 +5767,8 @@ class MaxTextConfig(
       if (
           self.routed_bias
           and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+          and self.decoder_block
+          not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK41)
       ):
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       if self.te_moe_block and not self.sparse_matmul:
@@ -6344,7 +6382,8 @@ class MaxTextConfig(
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
-      if val != 0 and val < 4:
+      # DeepSeek-V4.1 compresses 2-to-1 and 1-to-1 (a per-token projection selected by its indexer).
+      if self.decoder_block != DecoderBlockType.DEEPSEEK41 and val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
 
     if self.num_kv_shared_layers > 0:
@@ -6607,6 +6646,7 @@ class RLConfig(
     MoBa,
     MlaAttention,
     CompressedAttention,
+    DeepSeek41,
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,

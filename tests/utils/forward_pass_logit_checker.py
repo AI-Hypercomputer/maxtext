@@ -265,6 +265,82 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsi
   assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.2e} exceed the threshold {atol}"
 
 
+# Reference implementations for models without a transformers implementation: model type -> loader module.
+_REFERENCE_MODELS = {
+    "deepseek_v41": "tests.utils.deepseek_v41_reference.runner",
+}
+
+
+def _local_checkpoint_dir(path):
+  """Returns a local directory with the checkpoint at `path`, copying a gs:// checkpoint to a temp dir first."""
+  if not path.startswith("gs://"):
+    return path
+  import atexit  # pylint: disable=import-outside-toplevel
+  import shutil  # pylint: disable=import-outside-toplevel
+  import subprocess  # pylint: disable=import-outside-toplevel
+  import tempfile  # pylint: disable=import-outside-toplevel
+
+  local = tempfile.mkdtemp(prefix="hf_reference_")
+  atexit.register(shutil.rmtree, local, ignore_errors=True)
+  max_logging.log(f"Copying {path} to {local} for the reference model.")
+  subprocess.run(["gcloud", "storage", "cp", "-r", path.rstrip("/") + "/*", local], check=True)
+  return local
+
+
+def _detect_reference_model(hf_model_path):
+  """Picks a reference implementation from the checkpoint's config.json `model_type`, if it needs one."""
+  if not hf_model_path:
+    return ""
+  import json  # pylint: disable=import-outside-toplevel
+
+  if hf_model_path.startswith("gs://"):
+    from maxtext.utils import gcs_utils  # pylint: disable=import-outside-toplevel
+
+    bucket_name, prefix = gcs_utils.parse_gcs_bucket_and_prefix(hf_model_path)
+    blob = storage.Client().bucket(bucket_name).blob(os.path.join(prefix, "config.json"))
+    if not blob.exists():
+      return ""
+    model_type = json.loads(blob.download_as_bytes()).get("model_type", "")
+  else:
+    config_path = os.path.join(hf_model_path, "config.json")
+    if not os.path.exists(config_path):
+      return ""
+    with open(config_path, encoding="utf-8") as f:
+      model_type = json.load(f).get("model_type", "")
+  return model_type if model_type in _REFERENCE_MODELS else ""
+
+
+class _ReferenceModelOutput:
+
+  def __init__(self, logits):
+    self.logits = logits
+
+
+class _ReferenceModel:
+  """Adapts a reference model to the `hf_model(**inputs).logits` interface used below."""
+
+  def __init__(self, model):
+    self.model = model
+
+  def __call__(self, input_ids, **unused_kwargs):
+    return _ReferenceModelOutput(self.model(input_ids, full_logits=True).float())
+
+
+def _load_reference_model(reference_model, hf_model_path, torch_dtype, config, tokenizer):
+  """Loads a plain-PyTorch reference model registered in `_REFERENCE_MODELS`."""
+  import importlib  # pylint: disable=import-outside-toplevel
+
+  if reference_model not in _REFERENCE_MODELS:
+    raise ValueError(f"Unknown reference model {reference_model}; choose from {sorted(_REFERENCE_MODELS)}")
+  runner = importlib.import_module(_REFERENCE_MODELS[reference_model])
+  dtype = "fp32" if torch_dtype == torch.float32 else "bf16"
+  max_logging.log(f"Loading the {reference_model} reference model ({dtype}) from {hf_model_path}")
+  model, _ = runner.load_reference_model(
+      _local_checkpoint_dir(hf_model_path), dtype=dtype, max_seq_len=config.max_target_length, tokenizer=tokenizer
+  )
+  return _ReferenceModel(model)
+
+
 def get_data(golden_data_point, config):
   """Get the golden data for the test indexed at golden_data_index"""
   model_prefix = config.model_name.split("-")[0]
@@ -624,16 +700,21 @@ def main(config, test_args):  # pylint: disable=W0621
     torch_dtype = dtype_mapping.get(config.dtype.name.lower(), torch.bfloat16)
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
 
-    if "qwen3-vl" in config.model_name.lower():
-      from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
-
-      model_class = Qwen3VLForConditionalGeneration
+    reference_model = test_args.reference_model or _detect_reference_model(test_args.hf_model_path)
+    if reference_model:
+      # Models not (yet) in transformers: run a plain-PyTorch port of the upstream reference code instead.
+      hf_model = _load_reference_model(reference_model, test_args.hf_model_path, torch_dtype, config, tokenizer)
     else:
-      model_class = AutoModelForCausalLM
+      if "qwen3-vl" in config.model_name.lower():
+        from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
-    hf_model = model_class.from_pretrained(
-        test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
-    )
+        model_class = Qwen3VLForConditionalGeneration
+      else:
+        model_class = AutoModelForCausalLM
+
+      hf_model = model_class.from_pretrained(
+          test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
+      )
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
@@ -754,6 +835,15 @@ if __name__ == "__main__":
   )
   parser.add_argument(
       "--trust_remote_code", type=bool, required=False, default=True, help="from_pretrained: trust_remote_code"
+  )
+  parser.add_argument(
+      "--reference_model",
+      type=str,
+      required=False,
+      default="",
+      choices=["", *_REFERENCE_MODELS],
+      help="With --run_hf_model, compare against this plain-PyTorch reference implementation instead of a"
+      " transformers model (auto-detected from a local checkpoint's config.json model_type).",
   )
 
   # Parse known args returns the namespace AND the list of remaining arguments

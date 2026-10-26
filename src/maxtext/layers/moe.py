@@ -95,6 +95,14 @@ def _get_te_moe_cudnn_gmm_fusion_kwargs(disable_cudnn_gmm_fusion: bool) -> dict[
   return {"use_cudnn_fusion": False} if disable_cudnn_gmm_fusion else {}
 
 
+# Decoder blocks using DeepSeek routing-weight scaling and the SwiGLU clamp.
+_DEEPSEEK_ROUTING_BLOCKS = (
+    ctypes.DecoderBlockType.DEEPSEEK,
+    ctypes.DecoderBlockType.DEEPSEEK4,
+    ctypes.DecoderBlockType.DEEPSEEK41,
+)
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -676,9 +684,12 @@ class GateLogit(nnx.Module):
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates. DeepSeek-V4.1 keeps it in
+        # float32 whatever weight_dtype is: the trained biases are large and close together (e.g. DeepSeek-V4.1-Flash
+        # layer 39 spans 57.17..57.65), so bf16 would collapse them to a handful of values and change the top-k.
+        bias_init_dtype = jnp.float32 if self.model_name.startswith("deepseek4.1") else self.bias_dtype
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
+            default_bias_init(rngs.params(), bias_shape, bias_init_dtype),
             out_sharding=bias_axes,
         )
       else:
@@ -745,8 +756,12 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      if isinstance(self.bias, MoEBiasVar) and self.model_name.startswith("deepseek4.1"):
+        # Selection-only bias: add in float32 so bf16 compute does not round it away (see __init__).
+        output = output.astype(jnp.float32) + jnp.asarray(self.bias[...], jnp.float32)
+      else:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
     return output, pre_bias_logits
 
 
@@ -1392,11 +1407,7 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (
-        ctypes.DecoderBlockType.DEEPSEEK,
-        ctypes.DecoderBlockType.DEEPSEEK4,
-        ctypes.DecoderBlockType.MING,
-    ):
+    if self.config.decoder_block in _DEEPSEEK_ROUTING_BLOCKS + (ctypes.DecoderBlockType.MING,):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1520,10 +1531,7 @@ class RoutedMoE(nnx.Module):
         layer_act = self.activation_fn(layer_w0 * 1.702)
         glu = jnp.multiply(layer_w0, layer_act)
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      elif (
-          self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
-          and self.config.mlp_activations_limit > 0.0
-      ):
+      elif self.config.decoder_block in _DEEPSEEK_ROUTING_BLOCKS and self.config.mlp_activations_limit > 0.0:
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
         layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
         layer_w1 = jnp.clip(
@@ -5227,8 +5235,10 @@ class RoutedAndSharedMoE(nnx.Module):
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
     # DeepSeek-V4 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
+    # DeepSeek-V4 / V4.1 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
     clamp_shared = (
-        self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK4 and self.config.mlp_activations_limit > 0.0
+        self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.DEEPSEEK41)
+        and self.config.mlp_activations_limit > 0.0
     )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
@@ -5241,6 +5251,7 @@ class RoutedAndSharedMoE(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         config=self.config,
         quant=self.quant,
+        # DeepSeek-V4.1 clamps the shared expert's SwiGLU like the routed experts'.
         rngs=self.rngs,
         activations_limit=self.config.mlp_activations_limit if clamp_shared else None,
     )
