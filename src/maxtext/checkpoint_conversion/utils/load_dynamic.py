@@ -15,9 +15,13 @@
 """Dynamic loading of HuggingFace checkpoints during training/eval workloads directly in the target format.
 
 This module allows loading HuggingFace checkpoints (in Safetensors format)
-directly during MaxText training or evaluation runs, performing on-the-fly sharded
-restore and CPU/TPU transformations. This avoids offline pre-conversion steps
-and prevents host OOM.
+directly during MaxText training or evaluation runs. The checkpoint is streamed
+a few decoder layers at a time (see `hf_streaming_load`): each read call's
+tensors are read straight into HBM, converted on the TPU chips, and written into
+the sharded MaxText weights. This avoids offline pre-conversion steps and holds
+at most two read calls of HF tensors (about 4 GiB per host each: the one being
+converted and the next one being read) in host RAM and HBM at a time, on top of
+the final weights.
 
 Usage:
   To load Hugging Face checkpoints directly, configure the following flags:
@@ -66,6 +70,7 @@ Note:
 """
 
 import concurrent.futures
+import json
 import multiprocessing
 import os
 import random
@@ -76,6 +81,7 @@ import flax.traverse_util
 import huggingface_hub
 import jax
 from maxtext.checkpoint_conversion.utils import hf_model_configs
+from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.common.gcloud_stub import gcs_storage
@@ -140,13 +146,36 @@ def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
         raise
 
 
-def get_hf_config_and_mappings(maxtext_config):
-  """Gets HF config and parameter mapping based on the MaxText config."""
+def _checkpoint_quantization_config(path):
+  """The `quantization_config` in the checkpoint's own config.json; `False` if it has none, None if unknown."""
+  if not path:
+    return None
+  try:
+    from etils import epath  # pylint: disable=import-outside-toplevel
+
+    config_path = epath.Path(path) / "config.json"
+    if not config_path.exists():
+      return None
+    config = json.loads(config_path.read_text())
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return config.get("quantization_config") or config.get("text_config", {}).get("quantization_config") or False
+
+
+def get_hf_config_and_mappings(maxtext_config, path=None):
+  """Gets HF config and parameter mapping based on the MaxText config.
+
+  If the checkpoint at `path` has a config.json, its `quantization_config` (or its absence) overrides the stock
+  config's, so mappings that dequantize on load follow the checkpoint actually being read.
+  """
   model_key = maxtext_config.model_name
   if "-Instruct" in model_key:
     model_key = model_key.replace("-Instruct", "")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
   hf_config_dict = hf_config_obj.to_dict()
+  quantization_config = _checkpoint_quantization_config(path)
+  if quantization_config is not None:
+    hf_config_dict["quantization_config"] = quantization_config or None
 
   param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](
       hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers
@@ -159,6 +188,9 @@ def get_hf_config_and_mappings(maxtext_config):
 
 def load_sharded_hf_state(path):
   """Loads HF state with maximal sharding across TPU mesh to avoid host OOM.
+
+  Reference implementation: it holds the whole HF checkpoint in HBM at once.
+  `load_safetensors_dynamic_state` streams it with `hf_streaming_load` instead.
 
   Args:
     path: A directory path (either local or GCS starting with gs://) containing
@@ -194,7 +226,11 @@ def load_sharded_hf_state(path):
 
 
 def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
-  """Transforms HF state into MaxText state by applying param mappings and mathematical hooks."""
+  """Transforms HF state into MaxText state by applying param mappings and mathematical hooks.
+
+  Reference implementation for `hf_streaming_load`, which must produce the same
+  weights (cast to the target dtype, which this function skips for unstacked weights).
+  """
   t0 = time.time()
 
   def tensor_getter(key):
@@ -259,8 +295,8 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   """Loads HF safetensors and converts them into MaxText weights on device.
 
-  Reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the tensors into
-  the target layout.
+  Streams the checkpoint a few decoder layers at a time: reading their tensors directly into HBM,
+  converting them on the TPU chips, and writing them into the sharded weights.
 
   Args:
     path: The safetensors source: a `gs://` or local directory, or an HF repo ID with or without the
@@ -300,7 +336,10 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
     fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
     repo_id = path
 
-    files = fs.glob(f"{repo_id}/*.safetensors")
+    files = list(fs.glob(f"{repo_id}/*.safetensors"))
+    config_file = f"{repo_id}/config.json"
+    if fs.exists(config_file):
+      files.append(config_file)
 
     host_id = jax.process_index()
 
@@ -368,22 +407,19 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
       raise ValueError("base_output_directory with gs:// prefix is required for " "huggingface downloads.")
 
   t_total = time.time()
-  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
-  max_logging.log(f"[1/3] Mappings derived in {time.time() - t_total:.2f}s")
+  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config, path)
+  max_logging.log(f"[1/2] Mappings derived in {time.time() - t_total:.2f}s")
 
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
   t1 = time.time()
-  hf_state = load_sharded_hf_state(path)
-  max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
-
-  t2 = time.time()
-  # Transform Hugging Face weight tensors on-the-fly into MaxText format
-  # in-memory. This is done in-memory on each host, sharded across the mesh.
-  restored_params = transform_hf_state_to_mt_state(
-      hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
+  # Read, convert, and place the weights a few decoder layers at a time. The next
+  # read call is fetched while the current one is converted, so at most two calls
+  # of HF tensors (about 4 GiB per host each) are in host RAM / HBM at once.
+  restored_params = hf_streaming_load.load_hf_params_streaming(
+      path, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
   )
-  max_logging.log(f"[3/3] CPU Transformations completed in {time.time() - t2:.2f}s")
+  max_logging.log(f"[2/2] Streamed and converted HF weights in {time.time() - t1:.2f}s")
   max_logging.log(f"Total safetensors_dynamic duration: {time.time() - t_total:.2f}s")
 
   return None, restored_params

@@ -231,29 +231,27 @@ class LoadDynamicTest(parameterized.TestCase):
 
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
-  @mock.patch.object(load_dynamic, "load_sharded_hf_state")
-  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming")
   @mock.patch("jax.process_index", return_value=0)
   @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
   def test_load_safetensors_dynamic_from_hf_hub(
       self,
       mock_sync,
       mock_process_index,
-      mock_transform,
-      mock_load_sharded,
+      mock_load_streaming,
       mock_storage_client,
       mock_hf_fs,
   ):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.glob.return_value = ["repo/meta-llama/model.safetensors"]
+    mock_fs_instance.exists.return_value = False
 
     mock_client_instance = mock_storage_client.return_value
     mock_blob = mock.MagicMock()
     mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
     mock_client_instance.list_blobs.return_value = [mock_blob]
 
-    mock_load_sharded.return_value = {}
-    mock_transform.return_value = {"params": {}}
+    mock_load_streaming.return_value = {"params": {}}
 
     class MockConfig:
 
@@ -273,6 +271,68 @@ class LoadDynamicTest(parameterized.TestCase):
     self.assertEqual(loaded_vars, {"params": {}})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+    # The weights are streamed from the GCS cache, not from the Hub.
+    self.assertEqual(mock_load_streaming.call_args.args[0], "gs://dummy-bucket/hf_cache/repo_meta-llama")
+
+  @mock.patch.object(load_dynamic, "build_gcs_cache_worker")
+  @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
+  @mock.patch.object(load_dynamic.storage, "Client")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
+  @mock.patch("jax.process_index", return_value=0)
+  @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
+  def test_load_safetensors_dynamic_from_hf_hub_caches_config_json(
+      self,
+      mock_sync,
+      mock_process_index,
+      mock_load_streaming,
+      mock_storage_client,
+      mock_hf_fs,
+      mock_cache_worker,
+  ):
+    del mock_sync, mock_process_index, mock_load_streaming
+    mock_fs_instance = mock_hf_fs.return_value
+    mock_fs_instance.glob.return_value = ["repo/meta-llama/model.safetensors"]
+    mock_fs_instance.exists.return_value = True
+
+    mock_blob = mock.MagicMock()
+    mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
+    mock_storage_client.return_value.list_blobs.return_value = [mock_blob]
+
+    class DummyExecutor:
+      """Synchronous executor stub for unit tests."""
+
+      def __init__(self, *args, **kwargs):
+        pass
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *args):
+        return False
+
+      def submit(self, fn, *args):
+        fn(*args)
+        fut = mock.MagicMock()
+        fut.result.return_value = None
+        return fut
+
+    config = mock.Mock(
+        model_name="llama3.1-8b",
+        base_output_directory="gs://dummy-bucket",
+        scan_layers=True,
+        param_scan_axis=0,
+        hf_access_token="dummy_token",
+    )
+    with (
+        mock.patch.object(load_dynamic.concurrent.futures, "ProcessPoolExecutor", DummyExecutor),
+        mock.patch.object(load_dynamic.concurrent.futures, "wait", side_effect=lambda futs, timeout=None: (futs, set())),
+    ):
+      load_dynamic.load_safetensors_dynamic_state("repo/meta-llama", {}, config)
+
+    mock_fs_instance.exists.assert_called_once_with("repo/meta-llama/config.json")
+    mock_cache_worker.assert_called_once_with(
+        "repo/meta-llama/config.json", "gs://dummy-bucket/hf_cache/repo_meta-llama", "dummy_token"
+    )
 
   @parameterized.named_parameters(
       ("base", "llama3.1-8b"),
