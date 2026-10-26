@@ -33,9 +33,10 @@ DeepSeek-V4.1-Flash: [0] [1+engram] [2-7, 8-13] [14-19 (+engram)] [20-23] [24-27
 """
 
 import dataclasses
-from typing import Optional
+from typing import Any, Optional
 
 import jax
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
@@ -251,27 +252,83 @@ class DeepSeek41DecoderLayer(nnx.Module):
   @staticmethod
   def hc_post(x: jax.Array, residual: jax.Array, post: jax.Array, comb: jax.Array) -> jax.Array:
     """Expands a sub-block output back to hc copies, mixing the residual in through `comb`."""
-    mixed = jnp.einsum("bsjk,bsjd->bskd", comb, residual.astype(jnp.float32))
+    mixed = jnp.einsum(
+        "bsjk,bsjd->bskd",
+        comb,
+        residual.astype(jnp.float32),
+        precision=jax.lax.Precision.HIGHEST,
+    )
     return (post[..., None] * x.astype(jnp.float32)[:, :, None, :] + mixed).astype(x.dtype)
 
-  def __call__(self, carry: dict, decoder_positions: jax.Array, decoder_input_tokens: jax.Array) -> dict:
+  def __call__(
+      self,
+      carry: dict,
+      decoder_positions: jax.Array,
+      decoder_input_tokens: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+  ) -> dict:
     h, pre_mix = carry["h"], carry["pre_mix"]
     shared = {k: v for k, v in carry.items() if k in SHARED_STATE_KEYS}
     if self.spec.has_engram:
-      h = self.engram(h, self.engram_hasher.val(decoder_input_tokens))
+      hash_ids = self.engram_hasher.val(decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
+      h = self.engram(h, hash_ids, decoder_segment_ids=decoder_segment_ids)
 
     residual = h
     attn_pre, attn_post, attn_comb = self.hc_mixes(h, "hc_attn")
     x = self.pre_self_attention_layer_norm(self.hc_pre(h, pre_mix))
-    x, updates = self.self_attention(x, decoder_positions, shared)
+    x, updates = self.self_attention(x, decoder_positions, shared, decoder_segment_ids=decoder_segment_ids)
     h = self.hc_post(x, residual, attn_post, attn_comb)
 
     residual = h
     ffn_pre, ffn_post, ffn_comb = self.hc_mixes(h, "hc_ffn")
     x = self.post_self_attention_layer_norm(self.hc_pre(h, attn_pre))
-    x, _, _ = self.mlp(x)
+    x, load_balance_loss, moe_bias_updates = self.mlp(x)
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+      self.sow(nnx.Intermediate, "moe_bias_updates", moe_bias_updates)
     h = self.hc_post(x, residual, ffn_post, ffn_comb)
     return {**carry, **updates, "h": h, "pre_mix": ffn_pre}
+
+
+def _run_deepseek41_layer_remat(
+    layer: nnx.Module,
+    carry: dict,
+    *,
+    decoder_positions: jax.Array,
+    decoder_input_tokens: jax.Array,
+    decoder_segment_ids: jax.Array | None = None,
+    config: Config,
+    policy: Any = None,
+    prevent_cse: Optional[bool] = None,
+) -> dict:
+  """Runs one DeepSeek41DecoderLayer under jax.checkpoint inside a length-1 scan."""
+  graphdef, params, other = nnx.split(layer, nnx.Param, ...)
+  params_xs = jax.tree.map(lambda x: x[None], params)
+  other_xs = jax.tree.map(lambda x: x[None], other)
+  carry_xs = jax.tree.map(lambda x: x[None], carry)
+
+  def run_single_layer(dummy_carry, xs_slice):
+    params_slice, other_slice, carry_slice = xs_slice
+    merged_layer = nnx.merge(graphdef, params_slice, other_slice)
+    out_carry = merged_layer(
+        carry_slice,
+        decoder_positions,
+        decoder_input_tokens,
+        decoder_segment_ids=decoder_segment_ids,
+    )
+    _, _, new_other = nnx.split(merged_layer, nnx.Param, ...)
+    return dummy_carry, (out_carry, new_other)
+
+  if prevent_cse is None:
+    prevent_cse = not config.scan_layers and not (
+        config.gradient_accumulation_steps > 1 and config.hardware in ("gpu", "gpu_multiprocess")
+    )
+  run_single_layer = jax.checkpoint(run_single_layer, policy=policy, prevent_cse=prevent_cse)
+  with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+    _, (stacked_out_carry, stacked_other) = jax.lax.scan(run_single_layer, (), (params_xs, other_xs, carry_xs), length=1)
+  nnx.update(layer, jax.tree.map(lambda x: x[0], stacked_other))
+  return jax.tree.map(lambda x: x[0], stacked_out_carry)
 
 
 class DeepSeek41Block(nnx.Module):
@@ -284,9 +341,15 @@ class DeepSeek41Block(nnx.Module):
       model_mode: str,
       specs: tuple[LayerSpec, ...],
       quant: Optional[quantizations.AqtQuantization] = None,
+      remat_policy_fn: Any = None,
+      prevent_cse_in_remat: Optional[bool] = None,
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
+    self.model_mode = model_mode
+    self.remat_policy_fn = remat_policy_fn
+    self.prevent_cse_in_remat = prevent_cse_in_remat
     self.num_layers = len(specs)
     for j, spec in enumerate(specs):
       setattr(
@@ -295,10 +358,30 @@ class DeepSeek41Block(nnx.Module):
           DeepSeek41DecoderLayer(config=config, mesh=mesh, model_mode=model_mode, spec=spec, quant=quant, rngs=rngs),
       )
 
-  def __call__(self, carry: dict, decoder_positions: jax.Array, decoder_input_tokens: jax.Array):
+  def __call__(
+      self,
+      carry: dict,
+      decoder_positions: jax.Array,
+      decoder_input_tokens: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+  ):
+    use_remat = self.model_mode == "train" and bool(self.config.remat_policy) and self.config.remat_policy != "none"
     out = carry
     for j in range(self.num_layers):
-      out = getattr(self, f"layers_{j}")(out, decoder_positions, decoder_input_tokens)
+      layer = getattr(self, f"layers_{j}")
+      if use_remat:
+        out = _run_deepseek41_layer_remat(
+            layer,
+            out,
+            decoder_positions=decoder_positions,
+            decoder_input_tokens=decoder_input_tokens,
+            decoder_segment_ids=decoder_segment_ids,
+            config=self.config,
+            policy=self.remat_policy_fn,
+            prevent_cse=self.prevent_cse_in_remat,
+        )
+      else:
+        out = layer(out, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
     # A scan carry keeps its structure: drop shared state that only lives inside this group. Every group starts
     # with its own sharing source, so nothing produced here is needed by a later repeat.
     return {k: out[k] for k in carry}, None

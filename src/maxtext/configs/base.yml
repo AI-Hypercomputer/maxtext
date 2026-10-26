@@ -1705,6 +1705,7 @@ candidate_block_size: 0
 ds41_compressed_rope_yarn: False
 ds41_hc_sinkhorn_iters: 20
 ds41_hc_eps: 1.e-6
+ds41_activation_quant: False
 ds41_engram_layers: []
 ds41_engram_vocab_size: 0
 ds41_engram_max_ngram_size: 1
