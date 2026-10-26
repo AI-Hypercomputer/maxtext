@@ -85,8 +85,8 @@ class Glm5Model(nnx.Module):
     self.remat_policy: Any = None
 
     cfg = self.config
-    if cfg.first_k_dense_replace == 0:
-      raise ValueError("first_k_dense_replace must be greater than 0.")
+    if cfg.first_k_dense_replace < 0 or (cfg.first_k_dense_replace == 0 and cfg.num_hidden_layers > 1):
+      raise ValueError("first_k_dense_replace must be >= 1 unless num_hidden_layers == 1.")
     dt, p_dt = getattr(jnp, cfg.dtype), getattr(jnp, cfg.weight_dtype)
     self.embed_tokens = Glm5Embedding(cfg, rngs=rngs, sharding=sharding)
 
