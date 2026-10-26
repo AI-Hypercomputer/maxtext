@@ -14,19 +14,24 @@
 # ==============================================================================
 """Pallas Mosaic TPU kernel implementation for Causal Conv1D Gated Delta Rule."""
 
-# pylint: disable=missing-function-docstring,unused-import
-
 import dataclasses
-from typing import Any, Optional, override
+from typing import Optional, override
 
 import jax
-from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from tokamax._src.ops import op
 from tokamax._src.ops.causal_conv1d_gated_delta_rule import base
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import config
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper
+
+try:
+  from maxtext.models.kernels.gdn import config
+  from maxtext.models.kernels.gdn import wrapper
+except (ImportError, ModuleNotFoundError):
+  try:
+    from maxtext.src.maxtext.models.kernels.gdn import config
+    from maxtext.src.maxtext.models.kernels.gdn import wrapper
+  except (ImportError, ModuleNotFoundError):
+    from . import config
+    from . import wrapper
 
 GDNConfig = config.GDNConfig
 
@@ -61,38 +66,37 @@ class PallasMosaicTpuCausalConv1dGatedDeltaRule(base.CausalConv1dGatedDeltaRule[
       compute_precision: jnp.dtype = jnp.float32.dtype,
       decode_tile_size: int = 4,
       mixed_tile_size: int = 64,
-      # TODO: Calculate tile size based on input dimensions.
       config: GDNConfig | None = None,
       return_residuals: bool = False,
   ) -> tuple[tuple[tuple[jax.Array, jax.Array], jax.Array], None]:
-    del return_residuals, config
-    return (
-        wrapper.fused_conv1d_gdn(
-            qkv=qkv,
-            b=b,
-            a=a,
-            conv_state=conv_state,
-            recurrent_state=recurrent_state,
-            conv_weight=conv_weight,
-            conv_bias=conv_bias,
-            a_log=a_log,
-            dt_bias=dt_bias,
-            query_start_loc=query_start_loc,
-            state_indices=state_indices,
-            distribution=distribution,
-            seq_lens=seq_lens,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-            kernel_size=kernel_size,
-            zero_initialize_out=zero_initialize_out,
-            compute_precision=compute_precision,
-            decode_tile_size=decode_tile_size,
-            mixed_tile_size=mixed_tile_size,
-        ),
-        None,
+    """Forward execution rule for Causal Conv1D Gated Delta Rule."""
+    del return_residuals
+    _ = config
+    out_act, states, *_ = wrapper.fused_conv1d_gdn(
+        qkv=qkv,
+        b=b,
+        a=a,
+        conv_state=conv_state,
+        recurrent_state=recurrent_state,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        query_start_loc=query_start_loc,
+        state_indices=state_indices,
+        distribution=distribution,
+        seq_lens=seq_lens,
+        n_kq=n_kq,
+        n_v=n_v,
+        d_k=d_k,
+        d_v=d_v,
+        kernel_size=kernel_size,
+        zero_initialize_out=zero_initialize_out,
+        compute_precision=compute_precision,
+        decode_tile_size=decode_tile_size,
+        mixed_tile_size=mixed_tile_size,
     )
+    return (states, out_act), None
 
   @override
   def supported_on(self, device: jax.Device) -> bool:
