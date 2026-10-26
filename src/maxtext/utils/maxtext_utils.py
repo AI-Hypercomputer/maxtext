@@ -1149,6 +1149,88 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
   )
 
 
+def calculate_olmoe3_tflops_training_per_device(config, embedding_flops):
+  """Calculate training TFLOPs for OLMoE3 (hybrid KDA + latent MoE).
+
+  The generic path is wrong for this architecture in three ways, all of which
+  inflate the number and therefore flatter MFU:
+
+  * it charges standard-attention FLOPs to every layer, but only
+    ``num_decoder_layers / inhomogeneous_layer_cycle_interval`` are attention —
+    the rest are Kimi Delta Attention, whose cost is different and is otherwise
+    never counted at all;
+  * it sizes the routed experts at ``emb_dim``, but OLMoE3's experts run in the
+    compressed ``moe_expert_input_dim`` latent (the router still scores at
+    ``emb_dim``), and the per-layer down/up projections are unaccounted;
+  * it applies the MoE cost to every layer, ignoring ``first_num_dense_layers``.
+
+  Returns:
+    (attention_tflops, learnable_weight_tflops), matching the other
+    ``calculate_*_tflops_training_per_device`` helpers.
+  """
+  batch_seq = config.per_device_batch_size * config.max_target_length
+  emb = config.emb_dim
+  interval = max(1, config.inhomogeneous_layer_cycle_interval)
+  num_full_attn = config.num_decoder_layers // interval
+  num_kda = config.num_decoder_layers - num_full_attn
+  num_dense = min(config.first_num_dense_layers, config.num_decoder_layers)
+  num_moe = config.num_decoder_layers - num_dense
+
+  # --- full attention: q projection is doubled (fused sigmoid gate) ---
+  qkv_flops = 2 * batch_seq * emb * (2 * config.num_query_heads + 2 * config.num_kv_heads) * config.head_dim
+  projection_flops = 2 * batch_seq * emb * config.num_query_heads * config.head_dim
+  noncausal_attention_flops = (
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  )
+  causal_attention_flops = noncausal_attention_flops / 2
+
+  # --- KDA: projections + low-rank decay/gate pairs + conv + recurrent state ---
+  heads, dk, dv = config.gdn_num_value_heads, config.gdn_key_head_dim, config.gdn_value_head_dim
+  kda_flops_per_layer = (
+      2
+      * batch_seq
+      * (
+          emb * heads * dk * 2  # w_q, w_k
+          + emb * heads * dv  # w_v
+          + emb * dv
+          + dv * heads * dk  # decay: f_proj_1, f_proj_2
+          + emb * dv
+          + dv * heads * dv  # gate: g_proj_1, g_proj_2
+          + emb * heads  # w_b
+          + heads * dv * emb  # w_out
+          + 3 * heads * dk * dv  # delta-rule state einsums
+      )
+  )
+
+  # --- MoE: router at emb_dim, experts at the latent, plus down/up ---
+  latent = config.moe_expert_input_dim if config.moe_expert_input_dim > 0 else emb
+  moe_flops_per_layer = (
+      2
+      * batch_seq
+      * (
+          emb * config.num_experts  # router
+          + emb * latent
+          + latent * emb  # latent down / up
+          + config.num_experts_per_tok * 3 * latent * config.moe_mlp_dim  # routed experts
+          # The shared SwiGLU runs on the full-width residual, and its width is
+          # decoupled from the routed experts by `shared_expert_mlp_dim`.
+          + 3 * emb * config.shared_expert_mlp_dim  # shared SwiGLU
+      )
+  )
+  dense_flops_per_layer = 2 * batch_seq * 3 * emb * config.mlp_dim
+
+  learnable = (
+      num_full_attn * (qkv_flops + projection_flops)
+      + num_kda * kda_flops_per_layer
+      + num_moe * moe_flops_per_layer
+      + num_dense * dense_flops_per_layer
+      + embedding_flops
+  )
+  attention_tflops = causal_attention_flops * num_full_attn * 3 / 10**12
+  learnable_weight_tflops = learnable * 3 / 10**12
+  return attention_tflops, learnable_weight_tflops
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -1246,6 +1328,8 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
     )
+  elif config.decoder_block == DecoderBlockType.OLMOE3:
+    attention_tflops, learnable_weight_tflops = calculate_olmoe3_tflops_training_per_device(config, embedding_flops)
   elif config.decoder_block == DecoderBlockType.GEMMA4_SMALL:
     # The small path derives its own attention pattern from
     # gemma4_small.get_attention_pattern(config.model_name) and accounts for
@@ -1660,7 +1744,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   return state, state_mesh_annotations
 
 
-def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=None):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
   is_training = True
   return setup_initial_state(
       data_iterator,
@@ -1669,7 +1753,6 @@ def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_s
       checkpoint_manager,
       init_state_fn,
       is_training,
-      snapshotter=snapshotter,
   )
 
 
@@ -1680,7 +1763,6 @@ def setup_initial_state(
     checkpoint_manager,
     init_state_fn,
     is_training=True,
-    snapshotter=None,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
@@ -1692,9 +1774,6 @@ def setup_initial_state(
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
     init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
-    snapshotter: Optional `snapshotting.Snapshotter` of an elastic run in snapshot mode. When it holds a snapshot
-      that is at least as recent as the latest checkpoint, the state and the data iterator position are restored
-      from it instead of from the checkpoint.
 
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
@@ -1727,7 +1806,6 @@ def setup_initial_state(
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
-        snapshotter=snapshotter,
     )
     if native and restored is None and raw_params is None and config.load_parameters_path:
       # The Lineage-native model restores MaxText-layout params against its own abstract target.
@@ -2025,6 +2103,51 @@ def add_config_to_summary_writer(config, summary_writer):
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 
+def tpu_8x8xz_expert_mesh(physical_mesh, ep_size, ici_parallelism):
+  """Maps a single-slice `(8, 8, Z)` TPU v4 torus onto contiguous expert groups, or returns None.
+
+  Every expert group is a closed `8 x 8` X-Y torus stacked `ep_size // 64` deep along Z, and data parallelism
+  runs along the remaining Z extent: EP=64 -> `(8, 8, 1)` planes, EP=128 -> `(8, 8, 2)`, EP=256 -> `(8, 8, 4)`.
+  This covers `8x8x8` (v4-1024), `8x8x16` (v4-2048), and `8x8x48` (v4-6144 re-sliced, 3,072 chips), where
+  EP=64 planes with DP=48 measured 2,117 ms/step for olmoe3-3p5b-e256k8-sh2x.
+
+  For EP=64, `OLMOE3_EP64_SUBMESH=4x4x4` selects `4 x 4 x 4` cubes instead of planes and `=8x8x1` selects planes.
+  The default keeps cubes on `8x8x8` / `8x8x16` (their previous layout) and uses planes elsewhere.
+
+  Args:
+    physical_mesh: Device array shaped like the physical torus (from `mesh_utils._get_physical_tpu_mesh`).
+    ep_size: ICI expert parallelism.
+    ici_parallelism: ICI mesh shape; the expert axis must be the minor-most non-trivial axis.
+
+  Returns:
+    The device array reshaped to `ici_parallelism`, or None if the torus is not `(8, 8, Z)` or Z does not split.
+  """
+  shape = tuple(physical_mesh.shape)
+  if len(shape) != 3 or shape[:2] != (8, 8) or ep_size not in (64, 128, 256):
+    return None
+  z_dim = shape[2]
+  ep_z = ep_size // 64
+  if z_dim % ep_z != 0:
+    return None
+  if ep_size == 64:
+    default_submesh = "4x4x4" if z_dim in (8, 16) else "8x8x1"
+    if os.environ.get("OLMOE3_EP64_SUBMESH", default_submesh) == "4x4x4" and z_dim % 4 == 0:
+      return np.reshape(
+          np.transpose(
+              physical_mesh.reshape(2, 4, 2, 4, z_dim // 4, 4),
+              (0, 2, 4, 1, 3, 5),
+          ),
+          ici_parallelism,
+      )
+  return np.reshape(
+      np.transpose(
+          physical_mesh.reshape(8, 8, z_dim // ep_z, ep_z),
+          (2, 0, 1, 3),
+      ),
+      ici_parallelism,
+  )
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
@@ -2076,41 +2199,150 @@ def create_device_mesh(config, devices=None):
   elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+    ep_size = getattr(config, "ici_expert_parallelism", 1)
+    used_multislice_cuboid = False
+    # Per-slice EP cuboids for OLMoE3 only, so other models' multi-slice meshes are unchanged.
+    if (
+        config.decoder_block == DecoderBlockType.OLMOE3
+        and devices[0].platform == "tpu"
+        and num_devices_per_slice in (64, 128, 256, 512, 1024, 2048, 3072)
+        and ep_size in (64, 128, 256)
+        and "expert" in config.mesh_axes
+        and ici_parallelism[config.mesh_axes.index("expert")] == ep_size
+        and all(x == 1 for x in ici_parallelism[config.mesh_axes.index("expert") + 1 :])
+        and "data" in config.mesh_axes
+        and dcn_parallelism[config.mesh_axes.index("data")] == num_slices
+        and sum(1 for x in dcn_parallelism if x != 1) == 1
+    ):
+      # pylint: disable-next=g-import-not-at-top,import-outside-toplevel,protected-access
+      from jax._src import mesh_utils as _src_mesh_utils
 
-    if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
-      mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
-    else:
-      mesh = mesh_utils.create_hybrid_device_mesh(
-          ici_parallelism,
-          dcn_parallelism,
-          devices,
-          allow_split_physical_axes=allow_split_physical_axes,
-      )
-  else:
-    if allow_split_physical_axes:
+      by_slice = {}
+      for d in devices:
+        by_slice.setdefault(getattr(d, "slice_index", 0), []).append(d)
+      if len(by_slice) == num_slices:
+        slice_meshes = []
+        for s_idx in sorted(by_slice):
+          pm = _src_mesh_utils._get_physical_tpu_mesh(by_slice[s_idx])  # pylint: disable=protected-access
+          if pm.shape in ((8, 8, 8), (8, 8, 16)) and ep_size in (128, 256):
+            ep_z = ep_size // 64
+            z_dim = pm.shape[2]
+            sm = np.reshape(np.transpose(np.reshape(pm, (8, 8, z_dim // ep_z, ep_z)), (2, 0, 1, 3)), ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape in ((8, 8, 8), (8, 8, 16)) and ep_size == 64:
+            z_dim = pm.shape[2]
+            sm = np.reshape(
+                np.transpose(np.reshape(pm, (2, 4, 2, 4, z_dim // 4, 4)), (0, 2, 4, 1, 3, 5)),
+                ici_parallelism,
+            )
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 8) and ep_size == 128:
+            sm = np.reshape(pm, ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 8) and ep_size == 64:
+            sm = np.reshape(np.transpose(np.reshape(pm, (4, 4, 2, 4)), (2, 0, 1, 3)), ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 4, 2) and ep_size == 128:
+            sm = np.reshape(pm, ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 4, 2) and ep_size == 64:
+            sm = np.reshape(np.transpose(pm, (3, 0, 1, 2)), ici_parallelism)
+            slice_meshes.append(sm)
+          elif pm.shape == (4, 4, 4) and ep_size == 64:
+            sm = np.reshape(pm, ici_parallelism)
+            slice_meshes.append(sm)
+        if len(slice_meshes) == num_slices:
+          data_idx = config.mesh_axes.index("data")
+          stacked = np.stack(slice_meshes, axis=data_idx)
+          final_shape = [i * d for i, d in zip(ici_parallelism, dcn_parallelism)]
+          mesh = np.reshape(stacked, final_shape)
+          used_multislice_cuboid = True
+
+    if not used_multislice_cuboid:
       if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
-        mesh = mesh_utils.create_device_mesh(
-            [16, 16],
+        mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+      else:
+        mesh = mesh_utils.create_hybrid_device_mesh(
+            ici_parallelism,
+            dcn_parallelism,
             devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
         )
-        mesh = max_utils.reshape_mesh_to_rings(mesh, config.custom_mesh)
-        mesh = np.reshape(mesh, ici_parallelism)
+  else:
+    ep_size = getattr(config, "ici_expert_parallelism", 1)
+    used_cuboid_ep = False
+    if (
+        devices[0].platform == "tpu"
+        and num_devices in (64, 128, 256, 512, 1024, 2048, 3072)
+        and ep_size in (64, 128, 256)
+        and "expert" in config.mesh_axes
+        and ici_parallelism[config.mesh_axes.index("expert")] == ep_size
+        and all(x == 1 for x in ici_parallelism[config.mesh_axes.index("expert") + 1 :])
+    ):
+      # pylint: disable-next=g-import-not-at-top,import-outside-toplevel,protected-access
+      from jax._src import mesh_utils as _src_mesh_utils
+
+      physical_mesh = _src_mesh_utils._get_physical_tpu_mesh(devices)  # pylint: disable=protected-access
+      mesh_8x8xz = tpu_8x8xz_expert_mesh(physical_mesh, ep_size, ici_parallelism)
+      if mesh_8x8xz is not None:
+        mesh = mesh_8x8xz
+        used_cuboid_ep = True
+      elif physical_mesh.shape == (4, 4, 8) and ep_size == 64:
+        mesh = np.reshape(
+            np.transpose(np.reshape(physical_mesh, (4, 4, 2, 4)), (2, 0, 1, 3)),
+            ici_parallelism,
+        )
+        used_cuboid_ep = True
+      elif physical_mesh.shape == (4, 4, 4, 2) and ep_size == 64:
+        mesh = np.reshape(
+            np.transpose(physical_mesh, (3, 0, 1, 2)),
+            ici_parallelism,
+        )
+        used_cuboid_ep = True
+      elif physical_mesh.shape == (4, 4, 4, 2) and ep_size == 128:
+        mesh = np.reshape(physical_mesh, ici_parallelism)
+        used_cuboid_ep = True
+      elif physical_mesh.shape == (12, 16, 16) and ep_size in (64, 128, 256):
+        # Partition v4-6144 (12x16x16 = 3072 chips) into contiguous 3D cuboids:
+        #   EP=64  -> 48 x (4, 4, 4) cubes (3 x 4 x 4 grid of cubes)
+        #   EP=128 -> 24 x (4, 8, 4) cuboids (3 x 2 x 4 grid of cuboids)
+        #   EP=256 -> 12 x (4, 8, 8) cuboids (3 x 2 x 2 grid of cuboids)
+        bx = 4
+        by = 4 if ep_size == 64 else 8
+        bz = 8 if ep_size == 256 else 4
+        mesh = np.reshape(
+            np.transpose(
+                np.reshape(physical_mesh, (12 // bx, bx, 16 // by, by, 16 // bz, bz)),
+                (0, 2, 4, 1, 3, 5),
+            ),
+            ici_parallelism,
+        )
+        used_cuboid_ep = True
+    if not used_cuboid_ep:
+      if allow_split_physical_axes:
+        if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+          mesh = mesh_utils.create_device_mesh(
+              [16, 16],
+              devices,
+              contiguous_submeshes=False,
+              allow_split_physical_axes=False,
+          )
+          mesh = max_utils.reshape_mesh_to_rings(mesh, config.custom_mesh)
+          mesh = np.reshape(mesh, ici_parallelism)
+        else:
+          mesh = mesh_utils.create_device_mesh(
+              ici_parallelism,
+              devices,
+              contiguous_submeshes=False,
+              allow_split_physical_axes=allow_split_physical_axes,
+          )
       else:
         mesh = mesh_utils.create_device_mesh(
             ici_parallelism,
             devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=allow_split_physical_axes,
         )
-    else:
-      mesh = mesh_utils.create_device_mesh(
-          ici_parallelism,
-          devices,
-      )
-      if config.optimize_mesh_for_tpu_v6e:
-        mesh = max_utils.optimize_mesh_for_tpu_v6e(mesh, devices)
+        if config.optimize_mesh_for_tpu_v6e:
+          mesh = max_utils.optimize_mesh_for_tpu_v6e(mesh, devices)
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
@@ -2119,6 +2351,19 @@ def create_device_mesh(config, devices=None):
 
 # Learning Rate Schedule
 # -----------------------------------------------------------------------------
+
+
+def reduce_moe_aux_losses(losses, reduction: str):
+  """Combines the per-layer MoE auxiliary losses (a list of arrays) into one scalar.
+
+  'mean' is MaxText's convention; 'sum' is OLMo-core's, where every router's weighted loss is attached to the
+  graph on its own, so a model with L MoE layers trains with L times the balancing gradient at the same weight.
+  """
+  if reduction == "sum":
+    return jnp.sum(jnp.concatenate(losses))
+  if reduction == "mean":
+    return jnp.mean(jnp.concatenate(losses))
+  raise ValueError(f"moe_aux_loss_reduction must be 'mean' or 'sum', got {reduction!r}")
 
 
 def create_learning_rate_schedule(config):
@@ -2155,8 +2400,14 @@ def create_learning_rate_schedule(config):
   pieces = []
   boundaries = []
 
+  # With an offset, step i trains at lr * (i + offset) / warmup_steps, so the first step is not wasted at zero and the
+  # schedule reaches lr at step warmup_steps - offset, as a trainer that counts steps from one does (OLMo-core).
+  offset = min(getattr(config, "warmup_step_offset", 0), warmup_steps)
+  warmup_steps -= offset
   if warmup_steps > 0:
-    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
+    warmup_schedule = optax.linear_schedule(
+        init_value=lr * offset / (warmup_steps + offset), end_value=lr, transition_steps=warmup_steps
+    )
     pieces.append(warmup_schedule)
     boundaries.append(warmup_steps)
 

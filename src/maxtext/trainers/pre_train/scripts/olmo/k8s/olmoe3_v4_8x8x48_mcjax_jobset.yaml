@@ -1,0 +1,157 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# McJAX (multi-controller JAX) JobSet: OLMo 3.5 Small (Option A, olmoe3-3p5b-e256k8-sh2x) on one Cloud TPU v4 8x8x48
+# slice (3,072 chips, 768 TPU VM hosts, one MaxText process per host).
+#
+# Measured (real Dolma 3.5): EP=64 + Zero-1 2,150 ms/step (33.74% MFU, 11.71M tok/s); EP=128 2,253 ms/step (32.20% MFU).
+# See README_v4_8x8x48.md for prerequisites and usage.
+#
+# Fill in the ${...} placeholders, e.g.:
+#   envsubst '${NAMESPACE} ${JOBSET_NAME} ${KUEUE_QUEUE} ${SERVICE_ACCOUNT} ${MAXTEXT_IMAGE} ${OUTPUT_DIR}
+#     ${INDEX_BUCKET} ${INDEX_DIR} ${DATA_BUCKET} ${DATA_DIR} ${MODE} ${DATA} ${EP} ${DECOUPLE_GCLOUD}' \
+#     < olmoe3_v4_8x8x48_mcjax_jobset.yaml | kubectl apply -f -
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ${JOBSET_NAME}
+  namespace: ${NAMESPACE}
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+  labels:
+    kueue.x-k8s.io/queue-name: ${KUEUE_QUEUE}
+spec:
+  failurePolicy:
+    maxRestarts: 0
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  startupPolicy:
+    startupPolicyOrder: AnyOrder
+  successPolicy:
+    operator: All
+  replicatedJobs:
+    - name: slice
+      replicas: 1
+      template:
+        metadata:
+          annotations:
+            alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+        spec:
+          backoffLimit: 0
+          completionMode: Indexed
+          completions: 768
+          parallelism: 768
+          template:
+            metadata:
+              annotations:
+                alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+                gke-gcsfuse/volumes: "true"
+                gke-gcsfuse/cpu-limit: "0"
+                gke-gcsfuse/memory-limit: "0"
+                gke-gcsfuse/ephemeral-storage-limit: "0"
+            spec:
+              dnsPolicy: ClusterFirstWithHostNet
+              hostNetwork: true
+              restartPolicy: Never
+              serviceAccountName: ${SERVICE_ACCOUNT}
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v4-podslice
+                cloud.google.com/gke-tpu-topology: 8x8x48
+              tolerations:
+                - key: google.com/tpu
+                  operator: Equal
+                  value: present
+                  effect: NoSchedule
+              containers:
+                - name: jax-tpu
+                  # MaxText TPU image built from this branch (MaxText lives in /deps); see README.
+                  image: ${MAXTEXT_IMAGE}
+                  command:
+                    - bash
+                    - /deps/src/maxtext/trainers/pre_train/scripts/olmo/run_olmoe3_3p5b_v4.sh
+                  securityContext:
+                    privileged: true
+                  ports:
+                    - containerPort: 8471
+                      protocol: TCP
+                    - containerPort: 8476
+                      protocol: TCP
+                  resources:
+                    limits:
+                      google.com/tpu: "4"
+                    requests:
+                      google.com/tpu: "4"
+                  env:
+                    - name: TOPOLOGY
+                      value: 8x8x48
+                    - name: RUNTIME
+                      value: mcjax
+                    - name: DATA
+                      value: "${DATA}"  # real | synthetic
+                    - name: MODE
+                      value: "${MODE}"  # bench | hero
+                    - name: EP
+                      value: "${EP}"  # 64 (Zero-1) | 128
+                    - name: RUN_NAME
+                      value: ${JOBSET_NAME}
+                    - name: OUTPUT_DIR
+                      value: ${OUTPUT_DIR}
+                    - name: PYTHONPATH
+                      value: /deps/src
+                    # TRUE stubs out optional google-cloud clients; use FALSE for checkpointing to GCS (MODE=hero).
+                    - name: DECOUPLE_GCLOUD
+                      value: "${DECOUPLE_GCLOUD}"
+                    - name: TPU_MEGACORE
+                      value: megacore_dense
+                    - name: JAX_PLATFORMS
+                      value: tpu,cpu
+                    - name: ENABLE_PJRT_COMPATIBILITY
+                      value: "true"
+                    - name: XCLOUD_ENVIRONMENT
+                      value: GCP
+                    - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                      value: "false"
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
+                    - name: olmo-indices
+                      mountPath: /mnt/olmo-3p5-maxtext
+                      readOnly: true
+                    - name: dolma3p5
+                      mountPath: /mnt/dolma3p5-14t
+                      readOnly: true
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+                - name: olmo-indices
+                  csi:
+                    driver: gcsfuse.csi.storage.gke.io
+                    readOnly: true
+                    volumeAttributes:
+                      bucketName: ${INDEX_BUCKET}
+                      gcsfuseMetadataPrefetchOnMount: "true"
+                      hostNetworkPodKSA: "true"
+                      mountOptions: only-dir=${INDEX_DIR},implicit-dirs,metadata-cache:ttl-secs:-1,metadata-cache:stat-cache-max-size-mb:-1,metadata-cache:type-cache-max-size-mb:-1,file-system:kernel-list-cache-ttl-secs:-1
+                - name: dolma3p5
+                  csi:
+                    driver: gcsfuse.csi.storage.gke.io
+                    readOnly: true
+                    volumeAttributes:
+                      bucketName: ${DATA_BUCKET}
+                      gcsfuseMetadataPrefetchOnMount: "true"
+                      hostNetworkPodKSA: "true"
+                      mountOptions: only-dir=${DATA_DIR},implicit-dirs,metadata-cache:ttl-secs:-1,metadata-cache:stat-cache-max-size-mb:-1,metadata-cache:type-cache-max-size-mb:-1,file-system:kernel-list-cache-ttl-secs:-1
