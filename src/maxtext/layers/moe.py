@@ -44,7 +44,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
+from maxtext.layers import attentions, deepseek41_quant, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -602,6 +602,7 @@ class GateLogit(nnx.Module):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       use_bias: bool = False,
+      bias_dtype: Optional[ctypes.DType] = None,
       score_func: str = "",
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
@@ -636,6 +637,7 @@ class GateLogit(nnx.Module):
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.use_bias = use_bias
+    self.bias_dtype = bias_dtype or self.weight_dtype
     self.score_func = score_func
     self.quant = quant
     self.shard_mode = shard_mode
@@ -661,12 +663,17 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates. Kept in float32 whatever the
-        # weight dtype (as upstream): the trained biases are large and close together (e.g. DeepSeek-V4.1-Flash
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates. DeepSeek-V4.1 keeps it in
+        # float32 whatever weight_dtype is: the trained biases are large and close together (e.g. DeepSeek-V4.1-Flash
         # layer 39 spans 57.17..57.65), so bf16 would collapse them to a handful of values and change the top-k.
+        bias_init_dtype = (
+            jnp.promote_types(jnp.float32, self.bias_dtype)
+            if self.model_name.startswith("deepseek4.1")
+            else self.bias_dtype
+        )
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, jnp.float32),
+            default_bias_init(rngs.params(), bias_shape, bias_init_dtype),
             out_sharding=bias_axes,
         )
       else:
@@ -733,7 +740,7 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
-      if isinstance(self.bias, MoEBiasVar):
+      if isinstance(self.bias, MoEBiasVar) and self.model_name.startswith("deepseek4.1"):
         # Selection-only bias: add in float32 so bf16 compute does not round it away (see __init__).
         output = output.astype(jnp.float32) + jnp.asarray(self.bias[...], jnp.float32)
       else:
@@ -1007,13 +1014,19 @@ class RoutedMoE(nnx.Module):
     else:
       self.quant_einsums = None
 
+    gate_weight_dtype = ctypes.get_weight_dtype(self.config, "gate")
+    is_ds41 = self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK41
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
-        dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=ctypes.get_weight_dtype(self.config, "gate"),
+        dtype=(
+            jnp.promote_types(self.dtype, jnp.float32)
+            if (self.config.float32_gate_logits and is_ds41)
+            else (jnp.float32 if self.config.float32_gate_logits else self.dtype)
+        ),
+        weight_dtype=gate_weight_dtype,
         quant=self.quant,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
@@ -1022,7 +1035,7 @@ class RoutedMoE(nnx.Module):
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
         score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision="highest" if (self.config.float32_gate_logits and is_ds41) else self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
@@ -4577,6 +4590,11 @@ class RoutedMoE(nnx.Module):
               "activation_embed_moe",
           ),
       )
+      # DeepSeek-V4.1 reference: FP8 activation round trips into both expert GEMMs, and the routing weight is
+      # applied before the down projection (so before its input is quantized).
+      ds41_quant = deepseek41_quant.enabled(self.config)
+      if ds41_quant:
+        inputs = deepseek41_quant.fp8_qdq(inputs)
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_0)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
@@ -4596,6 +4614,10 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
+      if ds41_quant:
+        layer_multiply = layer_multiply.astype(jnp.float32) * weights.astype(jnp.float32)[..., None]
+        layer_multiply = deepseek41_quant.fp8_qdq(layer_multiply).astype(self.dtype)
+        weights = (weights != 0).astype(weights.dtype)
 
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes, einsum_name=WO)(
@@ -5139,6 +5161,7 @@ class RoutedAndSharedMoE(nnx.Module):
         activations_limit=(
             self.config.mlp_activations_limit if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK41 else 0.0
         ),
+        act_quant_fn=deepseek41_quant.fp8_qdq if deepseek41_quant.enabled(self.config) else None,
         rngs=self.rngs,
     )
 
