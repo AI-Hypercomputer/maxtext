@@ -1806,11 +1806,25 @@ def setup_initial_state(
     # Always build the concrete init state, then overlay whatever we loaded. Anything the
     # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
     # value, so restore doesn't depend on knowing exactly what was saved.
+    # Initialize on device first, then move host-offloaded optimizer leaves to pinned_host in a separate
+    # jit; a single jit with mixed memory kinds let XLA CSE 512-way and 64-way zero broadcasts in pinned_host.
+    device_state_mesh_shardings = jax.tree_util.tree_map(
+        lambda x: x.with_memory_kind("device") if isinstance(x, jax.sharding.NamedSharding) else x,
+        state_mesh_shardings,
+        is_leaf=lambda x: isinstance(x, jax.sharding.NamedSharding),
+    )
     state = jax.jit(
         lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
         in_shardings=None,
-        out_shardings=state_mesh_shardings,
+        out_shardings=device_state_mesh_shardings,
     )()
+    if config.optimizer_memory_host_offload:
+      state = jax.jit(
+          lambda x: x,
+          in_shardings=(device_state_mesh_shardings,),
+          out_shardings=state_mesh_shardings,
+          donate_argnums=(0,),
+      )(state)
     if raw_params and native:
       # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
       assert lineage_adapter is not None
@@ -2169,6 +2183,40 @@ def create_device_mesh(config, devices=None):
       )
       if config.optimize_mesh_for_tpu_v6e:
         mesh = max_utils.optimize_mesh_for_tpu_v6e(mesh, devices)
+
+  # Optional explicit physical mapping of the logical mesh onto a tpu7x 4x8x8 (512 devices) or 4x8x16
+  # (1024 devices) slice. The device grid is indexed (x, y, z, core_on_chip); each mode transposes it so the
+  # logical axes (in ici_parallelism order) land on whole physical axes, e.g. for Qwen3.8:
+  #   x1e_yx_core:  FSDP on y*x*core, EP (or CP-as-EP) on z           (simple 4k config, B26/B27)
+  #   rl_a_xy_z_core: FSDP on x*y, CP on z, EP on core                 (RL cp-as-ep ep2, best 256c/512c)
+  #   rl_a_xycore_z:  FSDP on x*y*core, CP on z                        (RL cp-as-ep ep1)
+  #   rl_b_xcore_z_y / rl_b_x_z_ycore: RL without cp-as-ep (MAXTEXT_RL_B_NO_CP_AS_EP=1)
+  custom_4x8x8 = os.environ.get("MAXTEXT_CUSTOM_4X8X8_MESH", "")
+  if custom_4x8x8 and num_devices in (512, 1024):
+    z_dim = 8 if num_devices == 512 else 16
+    grid = np.empty((4, 8, z_dim, 2), dtype=object)
+    for d in devices:
+      x, y, z = d.coords
+      grid[x, y, z, d.core_on_chip] = d
+    if custom_4x8x8 == "x1e_yx_core":
+      mesh = grid.transpose(1, 0, 3, 2).reshape(ici_parallelism)
+    elif custom_4x8x8 == "rl_b_xcore_z_y":
+      # FSDP=8 on x(4)*core(2), CP=z(8 or 16), EP=8 on y(8)
+      mesh = grid.transpose(0, 3, 2, 1).reshape(ici_parallelism)
+    elif custom_4x8x8 == "rl_b_x_z_ycore":
+      # FSDP=4 on x(4), CP=z(8 or 16), EP=16 on y(8)*core(2)
+      mesh = grid.transpose(0, 2, 1, 3).reshape(ici_parallelism)
+    elif custom_4x8x8 == "rl_a_xycore_z":
+      # FSDP=64 on x(4)*y(8)*core(2), CP=z(8 or 16), EP=1
+      mesh = grid.transpose(0, 1, 3, 2).reshape(ici_parallelism)
+    elif custom_4x8x8 == "rl_a_xy_z_core":
+      # FSDP=32 on x(4)*y(8), CP=z(8 or 16), EP=2 on core(2)
+      mesh = grid.transpose(0, 1, 2, 3).reshape(ici_parallelism)
+    elif custom_4x8x8 == "ep4_x_fsdp128_yz_core":
+      mesh = grid.transpose(1, 2, 3, 0).reshape(ici_parallelism)
+    else:
+      raise ValueError(f"Unknown MAXTEXT_CUSTOM_4X8X8_MESH={custom_4x8x8}")
+    max_logging.log(f"Applied MAXTEXT_CUSTOM_4X8X8_MESH={custom_4x8x8} (z={z_dim}) -> shape {mesh.shape}")
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 

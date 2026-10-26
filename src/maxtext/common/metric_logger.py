@@ -537,7 +537,9 @@ class MetricLogger:
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
-    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    # Evaluate the LR schedule on CPU so it does not launch single-device TPU ops between steps.
+    with jax.default_device(jax.devices("cpu")[0]):
+      metrics["scalar"].update({"learning/current_learning_rate": float(self.learning_rate_schedule(step))})
     if step >= self.config.rampup_end_step:
       metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
       metrics["scalar"].update(

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Grain utility functions for checkpointing."""
+from __future__ import annotations
 
 import asyncio
 import json
@@ -30,7 +31,7 @@ PyGrainCheckpointHandler = python.PyGrainCheckpointHandler
 Composite = ocp_v0.args.Composite
 RemoteIteratorWrapper = multihost_dataloading.RemoteIteratorWrapper
 
-ElasticIterator = grain_experimental.ElasticIterator
+ElasticIterator = getattr(grain_experimental, "ElasticIterator", object)
 _PROCESS_0_FILENAME = "process_0.json"
 
 

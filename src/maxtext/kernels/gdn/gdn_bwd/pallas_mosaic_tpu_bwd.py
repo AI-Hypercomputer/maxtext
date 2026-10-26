@@ -841,7 +841,7 @@ def pallas_gdn_bwd_kernel(
   if segment_ids is not None:
     s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch_size, seq_len), init_seg=init_seg)
     s_enc_3d = s_enc.reshape(batch_size, num_chunks, chunk_size)
-    b_5d = b_5d.at[:, :, :, :, tile_v_heads].set(s_enc_3d[:, None, :, :].astype(b_5d.dtype))
+    b_5d = jnp.concatenate([b_5d[..., :tile_v_heads], jnp.pad(jnp.broadcast_to(s_enc_3d[:, None, :, :, None].astype(b_5d.dtype), b_5d.shape[:-1] + (1,)), ((0,0),(0,0),(0,0),(0,0),(0, b_5d.shape[-1] - tile_v_heads - 1)))], axis=-1)
     active_2d = jnp.abs(s_enc)
     active_3d = active_2d.reshape(batch_size, num_chunks, chunk_size)
     active_end = active_3d[:, :, -1]

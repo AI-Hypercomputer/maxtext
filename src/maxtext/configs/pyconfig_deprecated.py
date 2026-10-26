@@ -1310,9 +1310,9 @@ def calculate_global_batch_sizes(
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     if expansion_factor_real_data > 1:
-      micro_batch_size_to_load = num_devices * expansion_factor_real_data
+      micro_batch_size_to_load = max(int(num_devices * per_device_batch_size), 1) * expansion_factor_real_data
     else:
-      micro_batch_size_to_load = num_devices
+      micro_batch_size_to_load = max(int(num_devices * per_device_batch_size), 1)
   else:
     if expansion_factor_real_data > 1:
       micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)

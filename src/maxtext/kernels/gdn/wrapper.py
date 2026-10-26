@@ -626,8 +626,7 @@ def _fused_conv1d_gdn(
         chunk_size=mixed_tile_size,
         kernel_size=kernel_size,
     )
-    b = b.at[:batch_size, n_v].set(s_enc_flat)
-    b = b.at[:batch_size, n_v + 1].set(seg_aux_flat)
+    b = jnp.concatenate([b[:, :n_v], jnp.pad(jnp.stack([s_enc_flat, seg_aux_flat], axis=-1).astype(b.dtype), ((0, batch_padding_size), (0, num_v_padding_size - 2)))], axis=-1)
 
   b = b.reshape(padded_batch_size, 1, -1)
   a = a.reshape(padded_batch_size, 1, -1)

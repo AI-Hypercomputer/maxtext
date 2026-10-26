@@ -14,6 +14,7 @@
 
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
+from __future__ import annotations
 
 import collections
 import contextlib

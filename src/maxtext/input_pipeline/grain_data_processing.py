@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Input pipeline using Grain."""
+from __future__ import annotations
 
 import math
 import glob
@@ -26,7 +27,7 @@ import json
 import jax
 
 import grain.python as grain
-from grain.experimental import ElasticIterator
+ElasticIterator = getattr(__import__("grain.experimental", fromlist=["ElasticIterator"]), "ElasticIterator", object)
 
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils

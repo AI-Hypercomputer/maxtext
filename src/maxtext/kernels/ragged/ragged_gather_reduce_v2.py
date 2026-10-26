@@ -744,6 +744,12 @@ def ragged_gather_reduce(
   aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
   col_size = aligned_hidden_size // num_column_partitions
   col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes)
+  # Large ring-of-experts inputs (ep_eff >= 16 at 8k tokens/device) overflow the 512 KiB SparseCore
+  # tile_spmem with 1024-wide column chunks; shrink the chunk only for those sizes.
+  if input_size > 1310720 and col_chunk_size > 256:
+    col_chunk_size = 256
+  elif input_size > 655360 and col_chunk_size > 512:
+    col_chunk_size = 512
 
   # Step 3: Pre-process inputs (weights, padding, sort by validity).
   # The kernel gathers x through a uint32 reinterpretation; carry the weights

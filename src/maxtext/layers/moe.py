@@ -1521,7 +1521,7 @@ class RoutedMoE(nnx.Module):
         ctypes.CustomRule.CP_AS_EP,
         ctypes.CustomRule.CP_AS_EP_DENSE_NO_CP,
         ctypes.CustomRule.CP_AS_EP_DENSE_FSDP,
-    ):
+    ) and os.environ.get("MAXTEXT_RL_B_NO_CP_AS_EP", "") != "1":
       # when custom mesh and rule is cp-as-ep (or a variant of it), context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     else:
