@@ -36,3 +36,6 @@ docs/ @jacoguzo @bvandermoon @SurbhiJainUSC @shralex @gobbleturk @RissyRan @gagi
 
 # Benchmarking/Recipes
 benchmarks/ @SujeethJinesh @bvandermoon @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @darisoy @aireenmei @igorts-git @shuningjin
+
+# Co-Design Emulation
+src/maxtext/codesign/ @parsley9877 @RissyRan @gagika
