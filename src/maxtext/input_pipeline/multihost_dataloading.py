@@ -346,6 +346,17 @@ def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
   return colocated_python.colocated_cpu_devices(mesh)
 
 
+# Colocated calls only take arrays, so checkpoint directories are passed to them as UTF-8 bytes, zero-padded to one
+# size so that the calls keep the same input shape.
+_MAX_DIRECTORY_BYTES = 4096
+
+
+def _state_file(directory_array) -> epath.Path:
+  """Returns this colocated host's iterator state file in the directory encoded by `RemoteIteratorWrapper`."""
+  directory = np.asarray(directory_array.addressable_data(0)).tobytes().rstrip(b"\0").decode()
+  return epath.Path(directory) / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
+
+
 class RemoteIterator:
   "iterator class for using colocated python class"
 
@@ -474,36 +485,16 @@ class RemoteIterator:
         local_data,
     )
 
-  def save_state(self, step_array):
-    """Saves the iterator state to a file."""
-    step = step_array.addressable_data(0).item()
-    directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
-    if self.elastic:
-      # ElasticIterator state is a single global scalar shared by all shards,
-      # so we write one fixed file (from the first host of the mesh only) and
-      # every process reads the same file on restore — this survives elastic
-      # resizes that change `jax.process_count()`.
-      if self.shard_index == 0:
-        directory.mkdir(parents=True, exist_ok=True)
-        filename = directory / "process_0.json"
-        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))  # pyrefly: ignore[missing-attribute]
-      return step_array
-    directory.mkdir(parents=True, exist_ok=True)
-    filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
+  def save_state(self, directory_array):
+    """Writes this host's iterator state. The controller saves the state of an elastic iterator instead."""
     state = json.dumps(self.iterator.get_state(), indent=4)  # pyrefly: ignore[missing-attribute]
-    filename.write_text(state)
-    return step_array
+    _state_file(directory_array).write_text(state)
+    return directory_array
 
-  def restore_state(self, step_array):
-    step = step_array.addressable_data(0).item()
-    directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
-    if self.elastic:
-      filename = directory / "process_0.json"
-    else:
-      filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
-    state = json.loads(filename.read_text())
-    self.iterator.set_state(state)  # pyrefly: ignore[missing-attribute]
-    return step_array
+  def restore_state(self, directory_array):
+    """Restores this host's iterator state."""
+    self.iterator.set_state(json.loads(_state_file(directory_array).read_text()))  # pyrefly: ignore[missing-attribute]
+    return directory_array
 
   def get_state(self, dummy_array):
     # Reinterpret int64 as two int32 words since JAX truncates int64 to int32 when x64 is disabled.
@@ -571,17 +562,20 @@ class RemoteIteratorWrapper:
     # use tree_map is out is a dict
     return jax.device_put(out, self.tpu_sharding)
 
-  def save_state(self, step):
-    replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
-    step_array = jnp.array(step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
+  def _encode_directory(self, directory) -> jax.Array:
+    path = os.fspath(directory).encode().ljust(_MAX_DIRECTORY_BYTES, b"\0")
+    return jax.device_put(np.frombuffer(path, dtype=np.uint8), NamedSharding(self.cpu_mesh, PartitionSpec()))
 
-  def restore_state(self, step):
-    replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
-    step_array = jnp.array(step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]
+  def save_state(self, directory):
+    """Has each colocated host write its iterator state into the checkpoint directory `directory`."""
+    directory_array = self._encode_directory(directory)
+    # Colocated calls run asynchronously: wait for the writes, so they're done before Orbax commits the checkpoint.
+    jax.block_until_ready(self.local_iterator.save_state(directory_array))  # pyrefly: ignore[missing-attribute]
+
+  def restore_state(self, directory):
+    """Has each colocated host restore its iterator state from the checkpoint directory `directory`."""
+    directory_array = self._encode_directory(directory)
+    jax.block_until_ready(self.local_iterator.restore_state(directory_array))  # pyrefly: ignore[missing-attribute]
 
   def get_state(self) -> dict[str, int]:
     if not self.elastic:
@@ -594,4 +588,5 @@ class RemoteIteratorWrapper:
       raise ValueError("RemoteIteratorWrapper.set_state requires elastic=True.")
     words = np.array([state["global_next_index"]], dtype=np.int64).view(np.int32)
     index_array = jax.device_put(words, NamedSharding(self.cpu_mesh, PartitionSpec()))
-    self.local_iterator.set_state(index_array)  # pyrefly: ignore[missing-attribute]
+    # Wait for the colocated call, so that a failed restore raises here rather than going unnoticed.
+    jax.block_until_ready(self.local_iterator.set_state(index_array))  # pyrefly: ignore[missing-attribute]

@@ -26,6 +26,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from etils import epath
 import jax
 from jax.experimental import mesh_utils
 import jax.experimental.colocated_python
@@ -206,13 +207,14 @@ class MultihostDataloadingTest(parameterized.TestCase):
       # Advance state once so the value is 1
       next(wrapper)
 
-      wrapper.save_state(step=5)
+      directory = pathlib.Path(tmpdir) / "5" / "iter"
+      directory.mkdir(parents=True)  # Orbax creates the directory before the hosts write into it.
+      wrapper.save_state(directory)
 
-      # Verify that a file was written in the tempdir containing {"state": 1}
+      # Verify that the only file written is in that directory and contains {"state": 1}
       json_files = list(pathlib.Path(tmpdir).glob("**/*.json"))
-      self.assertEqual(len(json_files), 1, f"Expected 1 JSON file, found: {json_files}")
-      written_content = json_files[0].read_text()
-      self.assertEqual(json.loads(written_content), {"state": 1})
+      self.assertEqual(json_files, [directory / "process_0-of-1.json"])
+      self.assertEqual(json.loads(json_files[0].read_text()), {"state": 1})
 
   @parameterized.named_parameters(*_get_test_mesh_shapes_named())
   def test_remote_iterator_wrapper_restore_state(self, mesh_shape):
@@ -254,7 +256,7 @@ class MultihostDataloadingTest(parameterized.TestCase):
           elastic=False,
       )
 
-      wrapper.restore_state(step=5)
+      wrapper.restore_state(state_dir)
       val = next(wrapper)
 
       # Next value should be 11 (state 10 + 1)
@@ -333,23 +335,24 @@ class MultihostDataloadingTest(parameterized.TestCase):
       remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=3))
     get_ds_fn.assert_not_called()
 
-  def test_elastic_save_state_is_written_by_the_first_host_of_the_mesh(self):
-    """After a slice-down process 0 may be gone; the first host of the mesh writes the shared state file."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-      for local_process in (8, 9):
-        remote_iterator = multihost_dataloading.RemoteIterator(
-            get_ds_fn=lambda dataloading_host_index, dataloading_host_count: None,
-            preprocessing_fn=lambda dataset, shard_index, shard_count: MockElasticDataloader(8),
-            global_shape=(8, 1),
-            checkpoint_path=tmpdir,
-            elastic=True,
-        )
-        mesh_array = _fake_mesh_array(range(8, 16), local_process=local_process, value=local_process)
-        remote_iterator.build(mesh_array)
-        remote_iterator.save_state(mesh_array)
+  def test_remote_iterator_wrapper_passes_the_directory_and_waits_for_the_colocated_calls(self):
+    """Colocated calls run asynchronously: the state must be written before Orbax commits the checkpoint, and a
+    failed restore must raise."""
+    wrapper = multihost_dataloading.RemoteIteratorWrapper.__new__(multihost_dataloading.RemoteIteratorWrapper)
+    wrapper.cpu_mesh = Mesh(np.array(jax.devices()[:1]), ("x",))
+    wrapper.elastic = True
+    wrapper.local_iterator = mock.Mock()
+    directory = "gs://bucket/checkpoints/5/iter"
 
-      self.assertTrue((pathlib.Path(tmpdir) / "8" / "iter" / "process_0.json").exists())
-      self.assertFalse((pathlib.Path(tmpdir) / "9").exists())
+    wrapper.save_state(directory)
+    wrapper.restore_state(directory)
+    wrapper.set_state({"global_next_index": 7})
+
+    for colocated_call in (wrapper.local_iterator.save_state, wrapper.local_iterator.restore_state):
+      (directory_array,) = colocated_call.call_args.args
+      self.assertEqual(multihost_dataloading._state_file(directory_array), epath.Path(directory) / "process_0-of-1.json")
+      colocated_call.return_value.block_until_ready.assert_called_once()
+    wrapper.local_iterator.set_state.return_value.block_until_ready.assert_called_once()
 
   def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
     """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""

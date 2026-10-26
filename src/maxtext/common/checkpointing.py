@@ -1549,7 +1549,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       and getattr(config, "dataset_type", None) == "grain"
       and not isinstance(data_iterator, PlaceHolderDataIterator)
   ):
-    checkpointables["iter"] = grain_utility.for_save(step, data_iterator, config.expansion_factor_real_data)
+    checkpointables["iter"] = grain_utility.for_save(data_iterator, config.expansion_factor_real_data)
   # The v1 Checkpointer raises for an already-existing step BEFORE consulting the
   # save decision policy; v0 silently skipped such saves (should_save ran first).
   # Preserve v0 semantics: e.g. resuming from a non-latest step into a directory
