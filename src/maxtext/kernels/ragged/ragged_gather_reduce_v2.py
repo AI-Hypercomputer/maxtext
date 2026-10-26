@@ -240,14 +240,9 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
   The chunk is the largest divisor of ``col_size`` whose gather double-buffer
   still fits comfortably in SparseCore VMEM.
   """
-  generation = pltpu.get_tpu_info().generation
-  match generation:
-    case 6:
-      target_bytes = int(256 * 1024 * 0.95)
-    case 7:
-      target_bytes = int(512 * 1024 * 0.95)
-    case _:
-      target_bytes = int(128 * 1024 * 0.95)
+  sc_info = pltpu.get_tpu_info().sparse_core
+  assert sc_info is not None, "SparseCore info is missing."
+  target_bytes = int(sc_info.vmem_capacity_bytes * 0.95)
 
   # uint32 gather buffer, double-buffered by emit_pipeline.
   bytes_per_col = num_simd_lanes * 4 * 2
