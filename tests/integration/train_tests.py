@@ -1081,11 +1081,12 @@ class TrainTests(unittest.TestCase):
         "gpt_oss_tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
     }
     # gpt3's bias reshard reassociates the bias-gradient reductions (~5e-5 by step 2 on
-    # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism.
+    # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism,
+    # growing to ~1.8e-5 by step 2 once the axis places one expert per device (tpu7x-8).
     # Under tensor parallelism gpt-oss is bit-for-bit on a four-way axis, but once the
     # axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate and
     # it drifts ~5e-6 by step 2.
-    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-5, "gpt_oss_tensor": 1e-4}
+    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-4, "gpt_oss_tensor": 1e-4}
     for case, model_args in _GPT_MODELS.items():
       with self.subTest(case=case):
         args = model_args + parallelism[case]
@@ -1215,11 +1216,13 @@ class TrainTests(unittest.TestCase):
         "tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
         "expert": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
     }
-    # Under tensor parallelism the two modes are bit-for-bit. Under expert parallelism
-    # pinning the activations reassociates the reductions inside the MoE block, so the
-    # loss drifts by a few ULPs by the third step. The drift is ~5e-7 at this size but
-    # grows with the expert dimensions, so leave the bound loose.
-    rtol = {"tensor": 1e-6, "expert": 1e-4}
+    # Under tensor parallelism the two modes are bit-for-bit on a four-way axis, but once
+    # the axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate
+    # and the loss drifts ~4e-6 by step 2. Under expert parallelism pinning the
+    # activations reassociates the reductions inside the MoE block, so the loss drifts by
+    # a few ULPs by the third step. The drift is ~5e-7 at this size but grows with the
+    # expert dimensions, so leave the bound loose.
+    rtol = {"tensor": 1e-5, "expert": 1e-4}
     for name, parallelism_args in parallelism.items():
       with self.subTest(parallelism=name):
         auto_losses = self._losses(f"llama4_{name}_auto", self._llama4_overrides, parallelism_args + ["shard_mode=auto"])
