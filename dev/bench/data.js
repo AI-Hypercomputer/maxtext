@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793055048163,
+  "lastUpdate": 1793062018709,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -57906,6 +57906,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4127.604,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 309,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Fenghui Zhang",
+            "username": "fenghuizhang",
+            "email": "fhzhang@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "48e04ef1b0acfbd953d794a7961a1d42df686801",
+          "message": "Add `Glm5Config.dsa_attention_implementation` (`\"dense_mask\"`) and refactor `Glm5DsaMlaAttention` to dispatch through `_call_dense_mask` with unified zero-padding query semantics (`valid_q = (decoder_segment_ids != 0)[:, None, :, None]`).\n\nKey changes:\n- `src/maxtext/m3/models/glm5_3_flash/glm5_config.py`: Add `_VALID_DSA_ATTENTION_IMPLEMENTATIONS = frozenset({\"dense_mask\"})`, `dsa_attention_implementation: str = \"dense_mask\"` in `Glm5Config` and `_GLM_ONLY_FIELDS`, and loud `ValueError` validation in `Glm5Config.__post_init__`.\n- `src/maxtext/m3/models/glm5_3_flash/glm5_dsa_mla.py`: Validate `dsa_attention_implementation` in `Glm5DsaMlaAttention.__init__`, extract `_call_dense_mask` with explicit padded-query output zeroing before `o_proj`, and add kernel dispatch in `__call__`.\n- `tests/unit/m3/glm5_3_flash_config_test.py` & `tests/unit/m3/glm5_3_flash_dsa_mla_test.py`: Add unit tests for `dsa_attention_implementation` defaults, overrides, loud `ValueError` / `NotImplementedError` guards, and padded-query zero output invariance.\n\n- [x] Tested with unit tests\n\nPiperOrigin-RevId: 1007672507",
+          "timestamp": "2026-10-27T00:16:02Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/48e04ef1b0acfbd953d794a7961a1d42df686801"
+        },
+        "date": 1793062017805,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 295.968,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 105.144,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2037.953,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.087,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.074,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4335.708,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 309,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.574,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4131.676,
             "unit": "sec"
           },
           {
