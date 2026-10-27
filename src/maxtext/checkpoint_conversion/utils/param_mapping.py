@@ -4744,7 +4744,7 @@ def _deepseek41_layer_prefixes(maxtext_config, scan_layers):
 
 
 def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
-  """Maps MaxText parameter keys to DeepSeek-V4.1 checkpoint keys (upstream `inference/` names, text model).
+  """Maps MaxText parameter keys to DeepSeek-V4.1 checkpoint keys (upstream `inference/` names).
 
   The layer structure (compressor / indexer / engram placement, number of experts) comes from `maxtext_config`.
   Scanned stacks map to a list of HF keys (one per stacked layer); routed experts to a list per expert.
@@ -4824,7 +4824,41 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers
       mapping[f"{prefix}-engram-wkv-kernel"] = hf("engram.wkv.weight")
       mapping[f"{prefix}-engram-q_weight"] = hf("engram.q_weight")
       mapping[f"{prefix}-engram-k_weight"] = hf("engram.k_weight")
-  return {key: with_scales(source) for key, source in mapping.items()}
+
+  out = {key: with_scales(source) for key, source in mapping.items()}
+  if maxtext_config.use_multimodal:
+    # Multimodal release tensors (vision.*, aligner.*, image_*, bias_vl) are stored unquantized without .scale pairs.
+    enc = "params-vision_encoder-DeepSeek41VisionEncoder_0"
+    proj = "params-vision_encoder-DeepSeek41VisionProjector_0"
+    out[f"{enc}-patch_embed-kernel"] = "vision.patch_embed.proj.weight"
+    out[f"{enc}-patch_embed-bias"] = "vision.patch_embed.proj.bias"
+    for i in range(maxtext_config.num_hidden_layers_for_vit):
+      blk = f"{enc}-blocks_{i}"
+      vblk = f"vision.blocks.{i}"
+      out[f"{blk}-norm1-scale"] = f"{vblk}.norm1.weight"
+      out[f"{blk}-norm2-scale"] = f"{vblk}.norm2.weight"
+      out[f"{blk}-attn-wqkv-kernel"] = f"{vblk}.attn.wqkv.weight"
+      out[f"{blk}-attn-wqkv-bias"] = f"{vblk}.attn.wqkv.bias"
+      out[f"{blk}-attn-wo-kernel"] = f"{vblk}.attn.wo.weight"
+      out[f"{blk}-attn-wo-bias"] = f"{vblk}.attn.wo.bias"
+      out[f"{blk}-mlp-w1-kernel"] = f"{vblk}.mlp.w1.weight"
+      out[f"{blk}-mlp-w2-kernel"] = f"{vblk}.mlp.w2.weight"
+    out[f"{enc}-norm-scale"] = "vision.norm.weight"
+    out[f"{proj}-w1-kernel"] = "aligner.w1.weight"
+    out[f"{proj}-w1-bias"] = "aligner.w1.bias"
+    out[f"{proj}-w2-kernel"] = "aligner.w2.weight"
+    out[f"{proj}-w2-bias"] = "aligner.w2.bias"
+    out[f"{proj}-image_start"] = "image_start"
+    out[f"{proj}-image_end"] = "image_end"
+    out[f"{proj}-image_newline"] = "image_newline"
+    for prefix, layer_ids, _ in _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+      moe_prefix = prefix.replace("params-", "MoEBiasVar-")
+      out[f"{moe_prefix}-mlp-MoeBlock_0-gate-bias_vl"] = (
+          [f"layers.{i}.ffn.gate.bias_vl" for i in layer_ids]
+          if isinstance(layer_ids, list)
+          else f"layers.{layer_ids}.ffn.gate.bias_vl"
+      )
+  return out
 
 
 def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -4891,6 +4925,25 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
     mapping[f"{attn}-o_a_proj-kernel"] = o_a_proj
     if spec.has_engram:
       mapping[f"{prefix}-engram-embed"] = pad_rows_to_target
+
+  if maxtext_config.use_multimodal:
+    enc = "params-vision_encoder-DeepSeek41VisionEncoder_0"
+    proj = "params-vision_encoder-DeepSeek41VisionProjector_0"
+    mm_kernels = [
+        f"{enc}-patch_embed-kernel",
+        f"{proj}-w1-kernel",
+        f"{proj}-w2-kernel",
+    ]
+    for i in range(maxtext_config.num_hidden_layers_for_vit):
+      blk = f"{enc}-blocks_{i}"
+      mm_kernels += [
+          f"{blk}-attn-wqkv-kernel",
+          f"{blk}-attn-wo-kernel",
+          f"{blk}-mlp-w1-kernel",
+          f"{blk}-mlp-w2-kernel",
+      ]
+    for key in mm_kernels:
+      mapping[key] = to_mt_kernel
 
   if quantized and not saving_to_hf:
     # Dequantize first; the sources of these weights are (weight, scale) pairs (see the param mapping).

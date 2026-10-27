@@ -178,7 +178,7 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
-      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
+      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size, config=config)
       shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
@@ -1577,7 +1577,7 @@ def init_initial_state(model, tx, config, is_training, key):
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   image_shape = mm_processor.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
+      config.model_name, batch_size=config.micro_batch_size_to_train_on, config=config
   )
   audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   # Split the master key into independent keys for each RNG collection
@@ -1606,7 +1606,7 @@ def get_abstract_param(model, config):
   # Cleanly fetch the shapes from the processor using the correct micro_batch_size
   if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, batch_size=config.micro_batch_size_to_train_on, config=config
     )
   else:
     image_shape = None

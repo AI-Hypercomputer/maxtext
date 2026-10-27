@@ -14,6 +14,7 @@
 
 """Multimodal data preprocessor router."""
 
+from maxtext.common.common_types import VisionEncoderBlockType
 from maxtext.multimodal import utils as mm_utils
 
 # model_name -> (vision_encoder_block, decoder_block) mapping
@@ -46,6 +47,9 @@ _MODEL_TO_BLOCKS = {
     # Weaver
     "weaver-mini": ("qwen3_vl", "qwen3"),
     "weaver-max": ("qwen3_vl", "qwen3"),
+    # DeepSeek V4.1
+    "deepseek4.1-flash": ("deepseek41", "deepseek41"),
+    "deepseek4.1-flash-mini": ("deepseek41", "deepseek41"),
 }
 
 
@@ -266,10 +270,14 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) does not support multimodal inference.")
 
 
-def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1):
+def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1, config=None):
   """Return the shape of the dummy image for specific model's initialization."""
   image_shape = ()
   vision_block = _get_vision_block(model_name)
+  if vision_block is None and config is not None:
+    cand_block = _get_vision_block(config)
+    if cand_block in {b.value for b in VisionEncoderBlockType if b != VisionEncoderBlockType.NONE}:
+      vision_block = cand_block
   if vision_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import get_dummy_image_shape_for_init_gemma3  # pylint: disable=import-outside-toplevel
 
@@ -286,6 +294,15 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
+  elif vision_block in ["deepseek41"]:
+    if config is None:
+      raise ValueError(
+          f"get_dummy_image_shape_for_init for model_name={model_name!r} (vision_block='deepseek41') "
+          "requires config to read ds41_vision_grid and patch_size_for_vit."
+      )
+    n_vit_h, n_vit_w = config.ds41_vision_grid
+    patch_dim = config.num_channels_for_vit * (config.patch_size_for_vit**2)
+    image_shape = (batch_size, num_image_per_sequence, n_vit_h * n_vit_w, patch_dim)
   return image_shape
 
 
@@ -345,6 +362,16 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
       bidirectional_mask_vision = decoder_input_tokens == tokens.video_pad
     else:
       bidirectional_mask_vision = decoder_input_tokens == tokens.image_pad
+  elif vision_block == VisionEncoderBlockType.DEEPSEEK41.value:
+    if is_video:
+      raise ValueError("DeepSeek-V4.1 does not support video inputs.")
+    token_id = config.ds41_image_token_id
+    if token_id <= 0 or token_id >= config.vocab_size:
+      raise ValueError(
+          "get_bidirectional_mask_vision for DeepSeek-V4.1 requires 0 < ds41_image_token_id < vocab_size "
+          f"({config.vocab_size}), got {token_id!r}."
+      )
+    bidirectional_mask_vision = decoder_input_tokens == token_id
   return bidirectional_mask_vision
 
 
