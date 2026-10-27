@@ -1700,6 +1700,23 @@ engram_kernel_size: 4
 # The seed for Engram hash mapping.
 engram_seed: 0
 
+################################## DeepSeek-V4.1 ##################################
+kv_source_layers: []
+index_source_layers: []
+candidate_source_layer: -1
+candidate_topk_blocks: 0
+candidate_block_size: 0
+ds41_compressed_rope_yarn: False
+ds41_hc_sinkhorn_iters: 20
+ds41_hc_eps: 1.e-6
+ds41_engram_layers: []
+ds41_engram_vocab_size: 0
+ds41_engram_max_ngram_size: 1
+ds41_engram_n_heads: 0
+ds41_engram_head_dim: 0
+ds41_engram_pad_id: 2
+ds41_engram_compressed_vocab_size: 0
+
 ##### Distillation parameters
 distill_alpha: 0.5
 distill_temperature: 1.0
