@@ -92,19 +92,12 @@ def _compat_top_k(operand, k, axis=-1):
 
   JAX 0.11 rejects a sharded reduction axis. Replicate that axis before the
   first call when it is visible, including on tracers, so the reshard is part
-  of the trace. If the pre-check saw no sharded axis and the op still raises,
-  run the same lookup once more. A second failure propagates unchanged.
+  of the trace.
   """
   replicated = _replicate_reduction_axis(operand, axis)
   if replicated is not None:
     return _orig_top_k(replicated, k, axis=axis)
-  try:
-    return _orig_top_k(operand, k, axis=axis)
-  except Exception:  # pylint: disable=broad-exception-caught
-    replicated = _replicate_reduction_axis(operand, axis)
-    if replicated is None:
-      raise
-    return _orig_top_k(replicated, k, axis=axis)
+  return _orig_top_k(operand, k, axis=axis)
 
 
 jax.lax.with_sharding_constraint = _compat_wsc
