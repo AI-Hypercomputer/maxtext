@@ -16,6 +16,7 @@
 
 import os
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -26,6 +27,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.common import checkpointing
 from maxtext.common import train_state_nnx
+from maxtext.utils import model_creation_utils
 import optax
 import orbax.checkpoint as ocp
 
@@ -746,6 +748,41 @@ class TestWeightMismatch(unittest.TestCase):
     self.assertNotIn("dropout", want)
     self.assertEqual(have, restored["params"]["params"])
     checkpointing._raise_on_weight_mismatch(want, have)  # pylint: disable=protected-access
+
+
+class TestFromPretrainedSafetensorsDynamic(unittest.TestCase):
+  """`from_pretrained`'s safetensors_dynamic branch, which the forward-pass logit checker uses."""
+
+  def _load(self, model, restored):
+    config = types.SimpleNamespace(load_parameters_path=epath.Path("gs://does-not-exist/hf"), lora=None)
+    init = nnx.state(model).to_pure_dict()
+    with mock.patch.object(checkpointing, "load_safetensors_dynamic_state", return_value=(None, restored)) as m:
+      model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), config)  # pylint: disable=protected-access
+    return m, init
+
+  def test_streams_weights_into_the_model(self):
+    model = _ModelDropout(nnx.Rngs(0))
+    weights = {"linear": {"kernel": jnp.full((2, 1), 3.0), "bias": jnp.array([5.0])}}
+    m, init = self._load(model, {"params": weights})
+
+    path, target, _ = m.call_args[0]
+    self.assertEqual(path, "gs://does-not-exist/hf")
+    # The loader gets the weights as shape/dtype/sharding only, without the dropout rngs.
+    self.assertEqual(set(target), {"linear"})
+    kernel = target["linear"]["kernel"]
+    self.assertIsInstance(kernel, jax.ShapeDtypeStruct)
+    self.assertEqual((kernel.shape, kernel.sharding), ((2, 1), init["linear"]["kernel"].sharding))
+    # The initial weights were freed before the load; the rngs were kept.
+    self.assertTrue(init["linear"]["kernel"].is_deleted())
+    self.assertFalse(init["dropout"]["rngs"]["key"].is_deleted())
+    loaded = nnx.state(model).to_pure_dict()
+    self.assertTrue(jnp.array_equal(loaded["linear"]["kernel"], weights["linear"]["kernel"]))
+    self.assertTrue(jnp.array_equal(loaded["linear"]["bias"], weights["linear"]["bias"]))
+
+  def test_unmapped_weight_raises(self):
+    unmapped = {"linear": {"kernel": jnp.ones((2, 1)), "bias": jax.ShapeDtypeStruct((1,), jnp.float32)}}
+    with self.assertRaisesRegex(ValueError, "linear/bias"):
+      self._load(_ModelDropout(nnx.Rngs(0)), {"params": unmapped})
 
 
 if __name__ == "__main__":
