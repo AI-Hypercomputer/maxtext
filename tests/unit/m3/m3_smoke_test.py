@@ -22,6 +22,7 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model
+from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 from maxtext.utils import model_creation_utils
 import numpy as np
 
@@ -33,6 +34,25 @@ class M3SmokeTest(absltest.TestCase):
     super().setUp()
     devices = jax.devices()[:1]
     self.mesh = Mesh(np.array(devices), ("data",))
+
+  def test_unregistered_model_raises_value_error(self):
+    """Verifies model_name not in m3 registry raises ValueError."""
+    config_args = [
+        "",
+        "src/maxtext/configs/base.yml",
+        "model_name=default",
+        "use_m3_model=true",
+        "skip_jax_distributed_system=true",
+    ]
+    cfg = pyconfig.initialize_pydantic(config_args)
+    with self.assertRaisesRegex(
+        ValueError,
+        r"Model 'default' does not support the m3 backend"
+        r" \(use_m3_model=True\)\. Registered models: glm5\.3-flash,"
+        r" qwen3-0\.6b, qwen3-vl-2b, qwen3\.8-flash-next,"
+        r" qwen3\.8-flash-next-mini\.",
+    ):
+      model_creation_utils.create_model(cfg, self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
 
   def test_qwen3_routing_and_forward_pass(self):
     """Verifies use_m3_model=True constructs Qwen3Model and executes forward pass."""
@@ -65,6 +85,53 @@ class M3SmokeTest(absltest.TestCase):
       tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
       positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
       logits = model(tokens, positions, model_mode=MODEL_MODE_TRAIN)
+      self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
+
+  def test_qwen3_vl_routing_and_forward_pass(self):
+    """Verifies use_m3_model=True constructs Qwen3VLModel and executes forward pass."""
+    config_args = [
+        "",
+        "src/maxtext/configs/base.yml",
+        "model_name=qwen3-vl-2b",
+        "use_m3_model=true",
+        "use_multimodal=true",
+        "scan_layers=false",
+        "per_device_batch_size=1",
+        "dtype=float32",
+        "weight_dtype=float32",
+        "skip_jax_distributed_system=true",
+        "override_model_config=true",
+        "base_num_decoder_layers=2",
+        "base_emb_dim=64",
+        "base_mlp_dim=128",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=2",
+        "head_dim=16",
+        "vocab_size=256",
+        "num_hidden_layers_for_vit=2",
+        "deepstack_visual_indexes_for_vit=[1]",
+        "hidden_size_for_vit=16",
+        "spatial_merge_size_for_vit=2",
+        "out_hidden_size_for_vit=64",
+        "intermediate_size_for_vit=64",
+        "num_attention_heads_for_vit=4",
+        "num_position_embeddings_for_vit=64",
+    ]
+    cfg = pyconfig.initialize_pydantic(config_args)
+    with jax.set_mesh(self.mesh):
+      rngs = nnx.Rngs(0)
+      model = model_creation_utils.create_model(cfg, self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+      self.assertIsInstance(model, Qwen3VLModel)
+
+      batch_size, seq_len = 1, 4
+      tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+      images = jnp.zeros((batch_size, 3, 2, 32, 32), dtype=jnp.float32)
+      grid_thw = jnp.array([[1, 2, 2]], dtype=jnp.int32)
+      logits = model(
+          decoder_input_tokens=tokens,
+          encoder_images=images,
+          encoder_video_grid_thw=grid_thw,
+      )
       self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
 
 
