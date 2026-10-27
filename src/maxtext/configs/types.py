@@ -744,6 +744,13 @@ class LogitsAndLoss(BaseModel):
   )
   logits_dot_in_fp32: bool = Field(False, description="Use fp32 for the logits dot product for stability.")
   cast_logits_to_fp32: bool = Field(True, description="Whether to cast the final logits to fp32.")
+  tie_lm_head_cotangents: bool = Field(
+      False,
+      description=(
+          "Release the LM head's input and weight cotangents together in the backward pass (an optimization "
+          "barrier), so the [batch, length, vocab] dlogits is not kept alive until the weight-gradient matmul."
+      ),
+  )
   lm_head_weight_grad_in_kernel_order: bool | None = Field(
       None,
       description=(

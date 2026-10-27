@@ -227,6 +227,10 @@ logits_via_embedding: false
 normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+# Release the LM head's input and weight cotangents together in the backward pass (an optimization barrier), so the
+# [batch, length, vocab] dlogits is not kept alive until the weight-gradient matmul. Enabling it may increase
+# step time while potentially reducing peak memory.
+tie_lm_head_cotangents: false
 # Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the transpose back into
 # the gradient dot and the weight gradient comes out in the kernel's stored orientation. Without the region that
 # fold never happens under shard_mode: explicit, because the Sharding custom-call on every dot output is a barrier
