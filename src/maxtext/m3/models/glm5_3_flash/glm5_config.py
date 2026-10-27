@@ -51,7 +51,7 @@ _GLM_ONLY_FIELDS = frozenset(
         " linear_conv_kernel_dim kda_implementation"
         " dsa_attention_implementation rope_parameters index_kpool"
         " index_kpool_always_select_tail linear_lower_bound mhc_eps"
-        " enable_debug_stats"
+        " enable_debug_stats router_param_dtype"
     ).split()
 )
 
@@ -70,7 +70,7 @@ class Glm5Config:
   dsa_attention_implementation, qk_head_dim (derived from
   qk_nope_head_dim + qk_rope_head_dim), rope_parameters, index_kpool,
   index_kpool_always_select_tail, linear_lower_bound, mhc_eps,
-  enable_debug_stats.
+  enable_debug_stats, router_param_dtype.
   """
 
   vocab_size: int = 154880
@@ -132,6 +132,7 @@ class Glm5Config:
   scan_layers: bool = True
   dtype: str = "bfloat16"
   weight_dtype: str = "float32"
+  router_param_dtype: str = "float32"
   remat_policy: str = "full"
   enable_debug_stats: bool = False
   num_vocab_tiling: int = 1
@@ -152,6 +153,16 @@ class Glm5Config:
     if r_pol not in ("none", "full"):
       raise ValueError(f"Glm5Config.remat_policy must be 'none' or 'full'; got {r_pol!r}.")
 
+    r_dt = self.router_param_dtype
+    if not isinstance(r_dt, str) or r_dt != "float32":
+      raise ValueError(f"Glm5Config.router_param_dtype must be 'float32'; got {r_dt!r}.")
+    w_dt = self.weight_dtype
+    if not isinstance(w_dt, str) or w_dt not in {
+        "float32",
+        "bfloat16",
+        "float64",
+    }:
+      raise ValueError("Glm5Config.weight_dtype must be one of 'float32', 'bfloat16'," f" 'float64'; got {w_dt!r}.")
     if self.packing:
       raise ValueError("packing=True unsupported for GLM-5.3-Flash (FU-D5).")
     n = self.num_hidden_layers
@@ -285,6 +296,9 @@ class Glm5Config:
           kwargs[f.name] = getattr(c, f.name)
       else:
         kwargs[f.name] = getattr(c, renames.get(f.name, f.name))
+    for dt_field in ("dtype", "weight_dtype"):
+      if isinstance(kwargs[dt_field], np.dtype):
+        kwargs[dt_field] = kwargs[dt_field].name
     if "remat_policy" in kwargs and kwargs["remat_policy"] is None:
       kwargs["remat_policy"] = "none"
     kwargs.update(overrides)

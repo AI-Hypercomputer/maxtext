@@ -124,7 +124,7 @@ def iter_conversion_specs(
     raise ValueError("include_mtp=True requires config.num_nextn_predict_layers > 0.")
   specs: list[ConversionSpec] = []
   p_dt = getattr(jnp, config.weight_dtype)
-  r_dt = p_dt
+  r_dt = getattr(jnp, config.router_param_dtype)
 
   def _add(
       hf_keys: tuple[str, ...],
@@ -423,7 +423,6 @@ def load_hf_state_into_model(
     )
   if not ignore_mtp_layer and (model.mtp is None or model.config.num_nextn_predict_layers == 0):
     raise ValueError("ignore_mtp_layer=False requires model.mtp to be initialized" " (num_nextn_predict_layers > 0).")
-
   orig_key_map: dict[str, str] = {}
   for orig_k in hf_tensors.keys():
     if orig_k.startswith("model.visual.") or orig_k.startswith("visual."):

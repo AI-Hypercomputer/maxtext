@@ -91,13 +91,13 @@ class Glm5TopkRouter(nnx.Module):
     self.routed_scaling_factor = config.routed_scaling_factor
     self.norm_topk_prob = config.norm_topk_prob
 
-    p_dt = getattr(jnp, config.weight_dtype)
+    r_p_dt = getattr(jnp, config.router_param_dtype)
     w_spec = sharding("router_weight", ("embed", None)) if sharding else None
     b_spec = sharding("router_bias", (None,)) if sharding else None
-    w_init = nnx.initializers.normal(0.02)(rngs.params(), (h, e), p_dt)
+    w_init = nnx.initializers.normal(0.02)(rngs.params(), (h, e), r_p_dt)
     self.weight = nnx.Param(w_init, sharding=w_spec)
     self.e_score_correction_bias = Glm5RouterBias(
-        jnp.zeros((e,), dtype=jnp.float32),
+        jnp.zeros((e,), dtype=r_p_dt),
         sharding=b_spec,
     )
 

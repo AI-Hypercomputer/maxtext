@@ -58,6 +58,8 @@ class Glm5ConfigTest(absltest.TestCase):
     self.assertEqual((c.moe_lb_loss_weight, c.mlp_clamp_limit), (0.001, 10.0))
     self.assertEqual(c.remat_policy, "full")
     self.assertEqual(c.dsa_attention_implementation, "dense_mask")
+    self.assertEqual(c.router_param_dtype, "float32")
+    self.assertEqual(c.weight_dtype, "float32")
     assert c.layer_types is not None and c.indexer_types is not None
     self.assertEqual((len(c.layer_types), set(c.indexer_types)), (45, {"full"}))
     self.assertEqual(c.layer_types.count("linear_attention"), 34)
@@ -262,6 +264,20 @@ class Glm5ConfigTest(absltest.TestCase):
         ({"linear_num_value_heads": 32}, r"linear_num_key_heads.*must equal"),
         ({"linear_value_head_dim": 64}, r"linear_key_head_dim.*must equal"),
         ({"remat_policy": "bogus"}, "remat_policy must be 'none' or 'full'"),
+        (
+            {"router_param_dtype": "bfloat16"},
+            "router_param_dtype must be 'float32'",
+        ),
+        (
+            {"router_param_dtype": cast(Any, 123)},
+            "router_param_dtype must be 'float32'",
+        ),
+        (
+            {"router_param_dtype": cast(Any, None)},
+            "router_param_dtype must be 'float32'",
+        ),
+        ({"weight_dtype": "int8"}, "weight_dtype must be one of"),
+        ({"weight_dtype": cast(Any, 123)}, "weight_dtype must be one of"),
     ):
       with self.assertRaisesRegex(ValueError, pat):
         Glm5Config(**cast(dict[str, Any], kwargs))
