@@ -2202,6 +2202,15 @@ class PipelineParallelism(BaseModel):
           " `dtype` instead of `weight_dtype`. Changes numerics; halves the prefetch all-gather bytes and memory."
       ),
   )
+  pipeline_unreduced_weight_grads: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat and shard_mode=explicit: tag the gathered stage weights `reduced` over the"
+          " activation batch axes, so each microbatch's weight gradient is an `unreduced` partial sum and the"
+          " cross-device reduction runs once per repeat, at the transpose of the weight prefetch, instead of being"
+          " emitted in every microbatch iteration and left to XLA to move out of the loop. Numerically identical."
+      ),
+  )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
   num_pipeline_repeats: int = Field(
       -1,
@@ -5303,6 +5312,16 @@ class MaxTextConfig(
         self.num_pipeline_repeats = num_pipeline_repeats
 
       if self.pipeline_fsdp_ag_per_repeat:
+        if self.pipeline_unreduced_weight_grads:
+          # pylint: disable-next=import-outside-toplevel
+          from maxtext.utils import jax_reduced_compat
+
+          assert (
+              self.shard_mode == ShardMode.EXPLICIT
+          ), "pipeline_unreduced_weight_grads tags PartitionSpecs `reduced`, which needs shard_mode=explicit."
+          assert (
+              jax_reduced_compat.jax_supports_reduced_stage_weights()
+          ), f"pipeline_unreduced_weight_grads needs jax>={jax_reduced_compat.MIN_JAX_VERSION}, got {jax.__version__}."
         assert self.num_pipeline_repeats > 1, "Pipeline weight prefetching only supports circular pipeline."
         assert (
             self.num_layers_per_pipeline_stage == 1
@@ -5323,7 +5342,7 @@ class MaxTextConfig(
         )
       else:
         # pipeline_bsw_no_carry is on by default and has nothing to do without weight prefetching.
-        bsw_options = ("pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype")
+        bsw_options = ("pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype", "pipeline_unreduced_weight_grads")
         enabled = [name for name in bsw_options if getattr(self, name)]
         assert not enabled, f"{enabled} only apply to pipeline weight prefetching: set pipeline_fsdp_ag_per_repeat=True."
 

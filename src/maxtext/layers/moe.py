@@ -51,6 +51,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
     CompoundLogicalAxis,
+    carry_reduced_axes,
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
@@ -2751,6 +2752,16 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    # `shard_map` makes every mesh axis manual, so an expert weight that enters on an untagged spec has its cotangent
+    # reduced inside the body, once per call. A weight tagged `reduced` (the pipeline's BSW slot under
+    # `pipeline_unreduced_weight_grads`) keeps the tag on the spec, so its cotangent leaves the body as a partial sum
+    # and reduces where the tag was applied. Without a tag this is a no-op.
+    w0_pspec = carry_reduced_axes(w0_pspec, w0_kernel)
+    w1_pspec = carry_reduced_axes(w1_pspec, w1_kernel)
+    wo_pspec = carry_reduced_axes(wo_pspec, wo_kernel)
+    w0_bias_pspec = carry_reduced_axes(w0_bias_pspec, w0_bias)
+    w1_bias_pspec = carry_reduced_axes(w1_bias_pspec, w1_bias)
+    wo_bias_pspec = carry_reduced_axes(wo_bias_pspec, wo_bias)
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -3181,17 +3192,17 @@ class RoutedMoE(nnx.Module):
         # weight_gather implies either exp or embed_moe is sharded.
         if self.config.moe_flat_fsdp_weights:
           # Flat wi [E * In, Hidden]: gather the non-expert (FSDP) axes of dim 0, then Hidden(1).
-          wi_gather_axes.extend(get_active_sharding_axes(non_expert_axes(w0_pspec[0]), 0))
-          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
+          wi_gather_axes.extend(get_active_sharding_axes(non_expert_axes(w0_pspec.partitions[0]), 0))
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec.partitions[1], 1))
         else:
           if self.config.shard_exp_on_fsdp:
             # wi [Experts, In, Hidden] -> Gather Exp(0)
-            wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+            wi_gather_axes.extend(get_active_sharding_axes(w0_pspec.partitions[0], 0))
           else:
             # Gather In(1) where embed_moe is sharded.
-            wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
+            wi_gather_axes.extend(get_active_sharding_axes(w0_pspec.partitions[1], 1))
           # Gather Hidden(2)
-          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec.partitions[2], 2))
       wi_tile_size = (
           fwd_tile("wi_tile_fwd_batch_seq"),  # m (LHS batch)
           fwd_tile("wi_tile_fwd_embed_dim"),  # k  (contracting)
@@ -3211,17 +3222,17 @@ class RoutedMoE(nnx.Module):
         # weight_gather implies either exp or embed_moe is sharded.
         if self.config.moe_flat_fsdp_weights:
           # Flat wo [E * Hidden, Out]: gather the non-expert (FSDP) axes of dim 0, then Out(1).
-          wo_gather_axes.extend(get_active_sharding_axes(non_expert_axes(wo_pspec[0]), 0))
-          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
+          wo_gather_axes.extend(get_active_sharding_axes(non_expert_axes(wo_pspec.partitions[0]), 0))
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec.partitions[1], 1))
         else:
           if self.config.shard_exp_on_fsdp:
             # wo [Experts, Hidden, Out] -> Gather Exp(0)
-            wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+            wo_gather_axes.extend(get_active_sharding_axes(wo_pspec.partitions[0], 0))
           else:
             # Gather Out(2) where embed_moe is sharded.
-            wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[2], 2))
+            wo_gather_axes.extend(get_active_sharding_axes(wo_pspec.partitions[2], 2))
           # Gather Hidden(1)
-          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec.partitions[1], 1))
       wo_tile_size = (
           fwd_tile("wo_tile_fwd_batch_seq"),  # m (LHS batch)
           fwd_tile("wo_tile_fwd_mlp_dim"),  # k (contracting)
@@ -3836,7 +3847,9 @@ class RoutedMoE(nnx.Module):
         P() if per_expert_scale is not None else None,
     )
     # Not every mesh axis: shard_map rejects axes an enclosing vmap mapped away ("stage", "diloco").
-    input_mesh_axes = {axis for spec in in_specs if spec is not None for dim in spec for axis in mesh_axes_for_dim(dim)}
+    input_mesh_axes = {
+        axis for spec in in_specs if spec is not None for dim in spec.partitions for axis in mesh_axes_for_dim(dim)
+    }
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
 
     @functools.partial(
