@@ -914,7 +914,8 @@ class Glm5TopkRouter(nnx.Module):
   def __call__(
       self,
       hidden_states: jax.Array,
-  ) -> tuple[jax.Array, jax.Array, jax.Array]:
+  ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Forward pass computing router logits, top-k weights, top-k indices, and router probs."""
     h_flat = hidden_states.reshape(-1, self.hidden_dim).astype(jnp.float32)
     router_logits = jnp.matmul(
         h_flat,
@@ -944,7 +945,7 @@ class Glm5TopkRouter(nnx.Module):
       denom = jnp.sum(topk_weights, axis=-1, keepdims=True) + 1e-20
       topk_weights = topk_weights / denom
     topk_weights = topk_weights * self.routed_scaling_factor
-    return router_logits, topk_weights, topk_indices
+    return router_logits, topk_weights, topk_indices, scores
 
 
 class Glm5Experts(nnx.Module):
@@ -1102,15 +1103,22 @@ class Glm5MoE(nnx.Module):
         sharding=sharding,
     )
 
-  def __call__(self, hidden_states: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+  def __call__(self, hidden_states: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array]]:
     orig_shape = hidden_states.shape
     h_flat = hidden_states.reshape(-1, orig_shape[-1])
-    router_logits, topk_weights, topk_indices = self.gate(h_flat)
+    router_logits, topk_weights, topk_indices, router_probs = self.gate(h_flat)
     expert_out = self.experts(h_flat, topk_indices, topk_weights)
     expert_out = expert_out.reshape(orig_shape)
     shared_out = self.shared_experts(hidden_states)
     topk_reshaped = topk_indices.reshape(orig_shape[:-1] + (self.config.num_experts_per_tok,))
-    return expert_out + shared_out, (router_logits, topk_reshaped)
+    weights_reshaped = topk_weights.reshape(orig_shape[:-1] + (self.config.num_experts_per_tok,))
+    probs_reshaped = router_probs.reshape(orig_shape[:-1] + (self.config.n_routed_experts,))
+    return expert_out + shared_out, (
+        router_logits,
+        topk_reshaped,
+        weights_reshaped,
+        probs_reshaped,
+    )
 
 
 def init_moe_lb_stats(
@@ -1355,13 +1363,23 @@ class Glm5DecoderLayer(nnx.Module):
       self,
       hidden_streams: jax.Array,
       decoder_segment_ids: jax.Array | None = None,
-  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, jax.Array | None]:
+      *,
+      return_aux: bool,
+  ) -> tuple[
+      jax.Array,
+      jax.Array | None,
+      jax.Array | None,
+      jax.Array | None,
+      jax.Array | None,
+      jax.Array | None,
+  ]:
     p, c, col = self.attn_hc(hidden_streams)
+    need_indexer = return_aux or self.config.enable_debug_stats
     if isinstance(self.self_attn, Glm5DsaMlaAttention):
       a_out = self.self_attn(
           self.input_layernorm(col),
           decoder_segment_ids=decoder_segment_ids,
-          return_topk_indices=self.config.enable_debug_stats,
+          return_topk_indices=need_indexer,
       )
     else:
       a_out = self.self_attn(self.input_layernorm(col), decoder_segment_ids=decoder_segment_ids)
@@ -1373,16 +1391,20 @@ class Glm5DecoderLayer(nnx.Module):
     p, c, col = self.ffn_hc(hidden_streams)
     normed_mlp_in = self.post_attention_layernorm(col)
     if isinstance(self.mlp, Glm5MoE):
-      m_out, (router_logits, router_topk_indices) = self.mlp(normed_mlp_in)
+      m_out, (router_logits, router_topk_indices, r_weights, r_probs) = self.mlp(normed_mlp_in)
     else:
       m_out = self.mlp(normed_mlp_in)
       router_logits = None
       router_topk_indices = None
+      r_weights = None
+      r_probs = None
     return (
         self.ffn_hc.apply_residual(hidden_streams, m_out, p, c),
         router_logits,
         router_topk_indices,
         indexer_topk_indices,
+        r_weights if return_aux else None,
+        r_probs if return_aux else None,
     )
 
 
@@ -1438,12 +1460,16 @@ class Glm5SuperBlock(nnx.Module):
       remat_policy: Any = None,
       cur_lb: tuple[jax.Array, jax.Array, jax.Array] | None = None,
       return_router_logits: bool = True,
+      *,
+      return_aux: bool,
   ) -> tuple[
       jax.Array,
       jax.Array | None,
       jax.Array | None,
-      jax.Array | None,
+      tuple[jax.Array | None, ...],
       tuple[jax.Array, jax.Array, jax.Array] | None,
+      jax.Array | None,
+      jax.Array | None,
   ]:
     num_experts = self.config.n_routed_experts
     top_k = self.config.num_experts_per_tok
@@ -1453,10 +1479,22 @@ class Glm5SuperBlock(nnx.Module):
         slot: Glm5DecoderLayer,
         streams: jax.Array,
         lb: tuple[jax.Array, jax.Array, jax.Array] | None,
-    ):
-      streams, r, rt, idx = slot(streams, decoder_segment_ids=decoder_segment_ids)
+    ) -> tuple[
+        jax.Array,
+        tuple[jax.Array, jax.Array, jax.Array] | None,
+        jax.Array | None,
+        jax.Array | None,
+        jax.Array | None,
+        jax.Array | None,
+        jax.Array | None,
+    ]:
+      streams, r, rt, idx, rw, rp = slot(
+          streams,
+          decoder_segment_ids=decoder_segment_ids,
+          return_aux=return_aux,
+      )
       if r is None or rt is None:
-        raise ValueError("Super-block slots must all be MoE with non-None router logits and" " topk.")
+        raise ValueError("Super-block slots must all be MoE with non-None router logits and" " indices.")
       if lb is not None:
         lb = accumulate_moe_lb_stats(
             lb,
@@ -1465,14 +1503,23 @@ class Glm5SuperBlock(nnx.Module):
             top_k=top_k,
             attention_mask=attn_mask,
         )
-      if return_router_logits:
-        return streams, lb, r, rt, idx
-      return streams, lb, idx
+      return (
+          streams,
+          lb,
+          r if return_router_logits else None,
+          rt if (return_router_logits or return_aux) else None,
+          idx,
+          rw if return_aux else None,
+          rp if return_aux else None,
+      )
 
     slots = (self.slot_0, self.slot_1, self.slot_2, self.slot_3)
     router_logits = []
-    router_topks = []
+    router_indices = []
+    router_weights = []
+    router_probs = []
     indexer_topks = []
+
     for slot in slots:
       if remat_policy is not None:
         if not callable(remat_policy):
@@ -1489,25 +1536,28 @@ class Glm5SuperBlock(nnx.Module):
 
         exec_slot = _exec_slot_direct
 
+      hidden_streams, cur_lb, r_l, r_idx, idx, r_w, r_p = exec_slot(hidden_streams, cur_lb)
       if return_router_logits:
-        hidden_streams, cur_lb, r, rt, idx = exec_slot(hidden_streams, cur_lb)
-        router_logits.append(r)
-        router_topks.append(rt)
-      else:
-        hidden_streams, cur_lb, idx = exec_slot(hidden_streams, cur_lb)
+        router_logits.append(r_l)
+      if return_router_logits or return_aux:
+        router_indices.append(r_idx)
       indexer_topks.append(idx)
-    mla_idx = next(
-        (idx for slot, idx in zip(slots, indexer_topks) if slot.layer_type == "full_attention"),
-        None,
-    )
+      if return_aux:
+        router_weights.append(r_w)
+        router_probs.append(r_p)
+
     r_stack = jnp.stack(router_logits, axis=0) if return_router_logits else None
-    rt_stack = jnp.stack(router_topks, axis=0) if return_router_logits else None
+    rt_stack = jnp.stack(router_indices, axis=0) if (return_router_logits or return_aux) else None
+    stacked_weights = jnp.stack(router_weights, axis=0) if return_aux else None
+    stacked_probs = jnp.stack(router_probs, axis=0) if return_aux else None
     return (
         hidden_streams,
         r_stack,
         rt_stack,
-        mla_idx,
+        tuple(indexer_topks),
         cur_lb,
+        stacked_weights,
+        stacked_probs,
     )
 
 
@@ -1614,12 +1664,15 @@ def scan_super_blocks(
     remat_policy: Any = None,
     return_router_logits: bool,
     lb_stats: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+    return_aux: bool,
 ) -> tuple[
     jax.Array,
     list[jax.Array],
     tuple[jax.Array, jax.Array, jax.Array],
     list[jax.Array],
-    Any,
+    list[tuple[jax.Array | None, ...]] | None,
+    list[jax.Array],
+    list[jax.Array],
 ]:
   """Runs stacked Glm5SuperBlock via jax.lax.scan or unrolled loop."""
   if super_block.slot_0.attn_hc.base.ndim != 2:
@@ -1643,56 +1696,108 @@ def scan_super_blocks(
     p_i, np_i = xs_i
     carry, cur_lb = carry_in
     block = nnx.merge(graphdef, p_i, np_i)
-    carry, block_router_logits, block_router_topk, block_idx, cur_lb = block(
+    (
+        carry,
+        block_r_logits,
+        block_r_indices,
+        block_idx,
+        cur_lb,
+        block_r_weights,
+        block_r_probs,
+    ) = block(
         carry,
         decoder_segment_ids=decoder_segment_ids,
         remat_policy=remat_policy,
         cur_lb=cur_lb,
         return_router_logits=return_router_logits,
+        return_aux=return_aux,
     )
-    r_out = block_router_logits if return_router_logits else None
-    rt_out = block_router_topk if return_router_logits else None
+    r_out = block_r_logits if return_router_logits else None
+    rt_out = block_r_indices if (return_router_logits or return_aux) else None
+    idx_out = block_idx if (return_aux or cfg.enable_debug_stats) else None
+    rw_out = block_r_weights if return_aux else None
+    rp_out = block_r_probs if return_aux else None
     carry_out = (carry, cur_lb)
-    return carry_out, (r_out, rt_out, block_idx)
+    return carry_out, (r_out, rt_out, idx_out, rw_out, rp_out)
 
   if remat_policy is not None and not callable(remat_policy):
     raise ValueError(f"remat_policy must be None or callable: {remat_policy!r}.")
   step_exec = step_fn
-
   init_carry = (hidden_streams, cur_lb_init)
+
   if scan_layers:
-    (final_streams, final_lb), (scanned_r, scanned_rt, scanned_idx) = jax.lax.scan(
-        step_exec, init_carry, (params, non_params)
-    )
+    (final_streams, final_lb), (
+        scanned_r,
+        scanned_rt,
+        scanned_idx,
+        scanned_rw,
+        scanned_rp,
+    ) = jax.lax.scan(step_exec, init_carry, (params, non_params))
     all_router_logits = (
         [scanned_r[b, s] for b in range(num_super_blocks) for s in range(4)]
-        if return_router_logits and scanned_r is not None
+        if (return_router_logits and scanned_r is not None)
         else []
     )
     all_router_topk = (
         [scanned_rt[b, s] for b in range(num_super_blocks) for s in range(4)]
-        if return_router_logits and scanned_rt is not None
+        if ((return_router_logits or return_aux) and scanned_rt is not None)
         else []
     )
-    all_idx = [scanned_idx[b] for b in range(num_super_blocks)] if scanned_idx is not None else None
+    all_idx = (
+        [
+            tuple(scanned_idx[s][b] if scanned_idx[s] is not None else None for s in range(4))
+            for b in range(num_super_blocks)
+        ]
+        if scanned_idx is not None
+        else None
+    )
+    all_routing_weights = (
+        [scanned_rw[b, s] for b in range(num_super_blocks) for s in range(4)]
+        if (return_aux and scanned_rw is not None)
+        else []
+    )
+    all_router_probs = (
+        [scanned_rp[b, s] for b in range(num_super_blocks) for s in range(4)]
+        if (return_aux and scanned_rp is not None)
+        else []
+    )
   else:
     carry_state = init_carry
     all_router_logits = []
     all_router_topk = []
     all_idx_list = []
+    all_routing_weights = []
+    all_router_probs = []
     for i in range(num_super_blocks):
       p_i = _slice_state(params, i)
       np_i = _slice_state(non_params, i)
-      carry_state, (r_step, rt_step, idx_step) = step_exec(carry_state, (p_i, np_i))
+      carry_state, (r_step, rt_step, idx_step, rw_step, rp_step) = step_exec(carry_state, (p_i, np_i))
       if return_router_logits and r_step is not None:
         for s in range(4):
           all_router_logits.append(r_step[s])
+      if (return_router_logits or return_aux) and rt_step is not None:
+        for s in range(4):
           all_router_topk.append(rt_step[s])
-      all_idx_list.append(idx_step)
+      if (return_aux or cfg.enable_debug_stats) and idx_step is not None:
+        all_idx_list.append(idx_step)
+      if return_aux and rw_step is not None:
+        for s in range(4):
+          all_routing_weights.append(rw_step[s])
+      if return_aux and rp_step is not None:
+        for s in range(4):
+          all_router_probs.append(rp_step[s])
     final_streams, final_lb = carry_state
-    all_idx = all_idx_list if any(x is not None for x in all_idx_list) else None
+    all_idx = all_idx_list if all_idx_list else None
 
-  return final_streams, all_router_logits, final_lb, all_router_topk, all_idx
+  return (
+      final_streams,
+      all_router_logits,
+      final_lb,
+      all_router_topk,
+      all_idx,
+      all_routing_weights,
+      all_router_probs,
+  )
 
 
 def apply_glm5_remat(model: Any, *, policy: Any) -> Any:
@@ -1788,7 +1893,7 @@ class Glm5Mtp(nnx.Module):
     if isinstance(attn_out, tuple):
       attn_out = attn_out[0]
     y = x + attn_out
-    mlp_out, (router_logits, router_topk) = self.mlp(self.post_attention_layernorm(y))
+    mlp_out, (router_logits, router_topk, _, _) = self.mlp(self.post_attention_layernorm(y))
     z = y + mlp_out
     normed_z = self.shared_head_norm(z)
     if lm_head is None:
@@ -1833,6 +1938,28 @@ class Glm5Embedding(nnx.Embed):
         embedding_metadata={"sharding": sharding("embed", ("vocab", "embed"))} if sharding else {},
         rngs=rngs,
     )
+
+
+def _validate_generic_maxtext_kwargs(kwargs: dict[str, Any]) -> None:
+  """Validates generic MaxText caller keyword arguments.
+
+  Raises:
+    ValueError: If an unsupported active feature (e.g. dropout, target tokens,
+      encoder inputs) is requested.
+    TypeError: If an unrecognized keyword argument is passed.
+  """
+  for k, v in kwargs.items():
+    if k == "enable_dropout":
+      if v:
+        raise ValueError(f"Dropout is not supported in GLM-5.3-Flash, but enable_dropout={v!r}.")
+    elif k in ("decoder_target_tokens", "decoder_target_mask"):
+      if v is not None:
+        raise ValueError(f"{k} is not supported in GLM-5.3-Flash forward pass, got {v!r}.")
+    elif k.startswith("encoder_"):
+      if v is not None:
+        raise ValueError(f"Encoder inputs are not supported in decoder-only GLM-5.3-Flash: {k}={v!r}.")
+    else:
+      raise TypeError(f"Glm5Model received unexpected keyword argument: {k!r}")
 
 
 class Glm5Model(nnx.Module):
@@ -1909,19 +2036,38 @@ class Glm5Model(nnx.Module):
       decoder_input_tokens: jax.Array,
       decoder_positions: jax.Array | None = None,
       decoder_segment_ids: jax.Array | None = None,
+      *,
       compute_logits: bool = True,
+      return_aux: bool = False,
       **kwargs: Any,
   ) -> Glm5Output:
-    """Executes full forward pass returning logits, hidden states, and auxiliary loss."""
-    del decoder_positions, kwargs
+    """Executes full forward pass returning logits, hidden states, and auxiliary loss.
+
+    Args:
+      decoder_input_tokens: Token ID tensor of shape [batch_size, seq_len].
+      decoder_positions: Unused in GLM-5.3-Flash m3 block layout.
+      decoder_segment_ids: Optional segment IDs for attention masking.
+      compute_logits: Whether to compute final logits via lm_head.
+      return_aux: If True, populates and returns auxiliary dict (e.g. router
+        indices/weights). Defaults to False per m3 zero-gen harness contract to
+        keep engine callers unchanged. aux["selected_block_indices"] is None if
+        and only if num_mla_layers == 0 or not self.config.use_indexer.
+      **kwargs: Generic MaxText keyword arguments validated via
+        _validate_generic_maxtext_kwargs.
+
+    Returns:
+      Glm5Output with logits, hidden_states, and populated aux dictionary.
+    """
+    _validate_generic_maxtext_kwargs(kwargs)
+    del decoder_positions
     x = self.embed_tokens(decoder_input_tokens)
     hidden_streams = jnp.repeat(x[:, :, None, :], self.config.mhc_expansion_rate, axis=2)
     if self.sharding is not None:
       hidden_streams = self.sharding.constrain(hidden_streams, "hidden_streams", ("batch", "length", None, "embed"))
     cfg = self.config
 
-    # Synchronize enable_debug_stats to child layers and super_block so
-    # model.config is single source of truth at call time (T40).
+    # Synchronize enable_debug_stats to child layers and super_block so model.config
+    # is single source of truth at call time (T40).
     def _sync_cfg(m):
       if m.config.enable_debug_stats != cfg.enable_debug_stats:
         m.config = dataclasses.replace(m.config, enable_debug_stats=cfg.enable_debug_stats)
@@ -1936,26 +2082,44 @@ class Glm5Model(nnx.Module):
       _sync_cfg(l)
 
     attention_mask = (decoder_segment_ids != 0) if decoder_segment_ids is not None else None
-    keep_router_logits = bool(cfg.enable_debug_stats)
+
+    keep_debug = bool(cfg.enable_debug_stats)
+    keep_router_logits = keep_debug
+
     router_logits_list: list[jax.Array] = []
     router_topk_list: list[jax.Array] = []
-    lb_stats = init_moe_lb_stats(cfg.n_routed_experts)
-
-    layer_0_act: jax.Array | None = None
+    routing_weights_list: list[jax.Array] = []
+    router_probs_list: list[jax.Array] = []
     dsa_topk_indices_list: list[jax.Array] = []
+    layer_aux_list: list[dict[str, Any]] = []
 
-    def _run_layers(layers, streams, cur_lb):
+    lb_stats = init_moe_lb_stats(cfg.n_routed_experts)
+    layer_0_act: jax.Array | None = None
+
+    def _run_layers(
+        layers: Sequence[Glm5DecoderLayer],
+        streams: jax.Array,
+        cur_lb: tuple[jax.Array, jax.Array, jax.Array],
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
       nonlocal layer_0_act
       for layer in layers:
         if self.remat_policy is not None:
           fn = jax.checkpoint(
-              lambda s, lyr=layer: lyr(s, decoder_segment_ids=decoder_segment_ids),
+              lambda s, lyr=layer: lyr(
+                  s,
+                  decoder_segment_ids=decoder_segment_ids,
+                  return_aux=return_aux,
+              ),
               policy=self.remat_policy,
               prevent_cse=True,
           )
-          streams, r_logits, r_topk, idx_topk = fn(streams)
+          streams, r_logits, r_topk, idx_topk, r_weights, r_probs = fn(streams)
         else:
-          streams, r_logits, r_topk, idx_topk = layer(streams, decoder_segment_ids=decoder_segment_ids)
+          streams, r_logits, r_topk, idx_topk, r_weights, r_probs = layer(
+              streams,
+              decoder_segment_ids=decoder_segment_ids,
+              return_aux=return_aux,
+          )
         if idx_topk is not None:
           dsa_topk_indices_list.append(idx_topk)
         if layer_0_act is None:
@@ -1970,13 +2134,44 @@ class Glm5Model(nnx.Module):
           )
           if keep_router_logits:
             router_logits_list.append(r_logits)
+          if (keep_router_logits or return_aux) and r_topk is not None:
             router_topk_list.append(r_topk)
+          if return_aux and r_weights is not None:
+            routing_weights_list.append(r_weights)
+          if return_aux and r_probs is not None:
+            router_probs_list.append(r_probs)
+
+        if return_aux:
+          layer_dict: dict[str, Any] = {}
+          if r_topk is not None:
+            layer_dict["router_indices"] = r_topk
+            layer_dict["routing_weights"] = r_weights
+            layer_dict["router_probs"] = r_probs
+          if cfg.use_indexer and idx_topk is not None:
+            layer_dict["selected_block_indices"] = idx_topk
+          layer_aux_list.append(layer_dict)
+
       return streams, cur_lb
 
+    # 1. Prefix Layers
     if self.prefix_layers:
       hidden_streams, lb_stats = _run_layers(self.prefix_layers, hidden_streams, lb_stats)
+
+    # 2. Super-Blocks (F49 Heterogeneous Slot Alignment)
     if self.super_block is not None:
-      hidden_streams, sb_r, lb_stats, sb_rt, sb_idx = scan_super_blocks(
+      layer_types = cfg.layer_types
+      if layer_types is None:
+        raise ValueError("cfg.layer_types must not be None when super_block is present.")
+
+      (
+          hidden_streams,
+          sb_r,
+          lb_stats,
+          sb_rt,
+          sb_idx,
+          sb_rw,
+          sb_rp,
+      ) = scan_super_blocks(
           self.super_block,
           hidden_streams,
           decoder_segment_ids=decoder_segment_ids,
@@ -1984,20 +2179,47 @@ class Glm5Model(nnx.Module):
           remat_policy=self.remat_policy,
           return_router_logits=keep_router_logits,
           lb_stats=lb_stats,
+          return_aux=return_aux,
       )
+
       if sb_idx is not None:
-        for idx_item in sb_idx:
-          if idx_item is not None:
-            dsa_topk_indices_list.append(idx_item)
+        for block_idx in sb_idx:
+          if block_idx is None:
+            continue
+          for s_idx in block_idx:
+            if s_idx is not None:
+              dsa_topk_indices_list.append(s_idx)
       if keep_router_logits:
         router_logits_list.extend(sb_r)
+      if keep_router_logits or return_aux:
         router_topk_list.extend(sb_rt)
+      if return_aux:
+        routing_weights_list.extend(sb_rw)
+        router_probs_list.extend(sb_rp)
+
+        # F49: Explicit alignment of 4 slots per super-block without implicit padding
+        num_sb = len(sb_idx) if sb_idx is not None else (len(sb_rt) // 4)
+        for flat_slot_idx in range(4 * num_sb):
+          b, s = divmod(flat_slot_idx, 4)
+          slot_dict: dict[str, Any] = {
+              "router_indices": sb_rt[flat_slot_idx],
+              "routing_weights": sb_rw[flat_slot_idx],
+              "router_probs": sb_rp[flat_slot_idx],
+          }
+          if layer_types[cfg.first_k_dense_replace + s] == "full_attention" and cfg.use_indexer:
+            if sb_idx is None or sb_idx[b] is None or sb_idx[b][s] is None:
+              raise RuntimeError(f"Slot {s} has full_attention with use_indexer=True but sb_idx[{b}][{s}] is None.")
+            slot_dict["selected_block_indices"] = sb_idx[b][s]
+          layer_aux_list.append(slot_dict)
+
+    # 3. Suffix Layers
     if self.suffix_layers:
       hidden_streams, lb_stats = _run_layers(self.suffix_layers, hidden_streams, lb_stats)
     last_block_act = hidden_streams
     collapsed = self.hc_head(hidden_streams)
     normed = self.norm(collapsed)
     logits = self.lm_head(normed) if compute_logits else None
+
     num_moe_layers = max(0, cfg.num_hidden_layers - cfg.first_k_dense_replace)
     if keep_router_logits and len(router_logits_list) != num_moe_layers:
       raise ValueError(f"Expected {num_moe_layers} MoE router_logits entries, got" f" {len(router_logits_list)}.")
@@ -2006,14 +2228,26 @@ class Glm5Model(nnx.Module):
     else:
       moe_lb_loss = finalize_moe_lb_loss(lb_stats, cfg.n_routed_experts)
 
-    router_topk_indices_list: list[jax.Array] = router_topk_list if cfg.enable_debug_stats else []
-
     aux: dict[str, Any] = {
         "router_logits": (tuple(router_logits_list) if cfg.enable_debug_stats else ()),
         "moe_lb_loss": moe_lb_loss,
         "lb_stats": lb_stats,
     }
-    if cfg.enable_debug_stats:
+
+    if return_aux:
+      aux["layer_aux"] = tuple(layer_aux_list)
+      if router_topk_list:
+        aux["router_indices"] = jnp.stack(router_topk_list, axis=0)
+      if routing_weights_list:
+        aux["routing_weights"] = jnp.stack(routing_weights_list, axis=0)
+      if router_probs_list:
+        aux["router_probs"] = jnp.stack(router_probs_list, axis=0)
+      if cfg.use_indexer and dsa_topk_indices_list:
+        aux["selected_block_indices"] = jnp.stack(dsa_topk_indices_list, axis=0)
+      else:
+        aux["selected_block_indices"] = None
+
+    if keep_debug:
       if layer_0_act is None:
         raise RuntimeError("enable_debug_stats=True requires layer 0 activation, but" " layer_0_act was not captured.")
       l0_f32 = layer_0_act.astype(jnp.float32)
@@ -2026,11 +2260,13 @@ class Glm5Model(nnx.Module):
           "hidden_norm_mean": jnp.mean(jnp.linalg.norm(normed, axis=-1)),
           "logits_max": (jnp.max(logits) if logits is not None else jnp.zeros((), dtype=normed.dtype)),
           "logits_min": (jnp.min(logits) if logits is not None else jnp.zeros((), dtype=normed.dtype)),
-          "router_topk_indices": tuple(router_topk_indices_list),
+          "router_topk_indices": tuple(router_topk_list),
           "dsa_topk_indices": tuple(dsa_topk_indices_list),
       }
-      aux["router_topk_indices"] = tuple(router_topk_indices_list)
+      aux["router_logits"] = tuple(router_logits_list)
+      aux["router_topk_indices"] = tuple(router_topk_list)
       aux["dsa_topk_indices"] = tuple(dsa_topk_indices_list)
+
     return Glm5Output(logits=logits, hidden_states=normed, aux=aux)
 
   def __call__(
@@ -2038,11 +2274,38 @@ class Glm5Model(nnx.Module):
       decoder_input_tokens: jax.Array,
       decoder_positions: jax.Array | None = None,
       decoder_segment_ids: jax.Array | None = None,
+      *,
+      return_aux: bool = False,
       **kwargs: Any,
-  ) -> jax.Array:
-    out = self.forward_with_aux(decoder_input_tokens, decoder_positions, decoder_segment_ids, **kwargs)
+  ) -> jax.Array | tuple[jax.Array, dict[str, Any]]:
+    """Executes full forward pass.
+
+    Args:
+      decoder_input_tokens: Token ID tensor.
+      decoder_positions: Unused in GLM-5.3-Flash m3 block layout.
+      decoder_segment_ids: Optional segment IDs for attention masking.
+      return_aux: If True, populates and returns auxiliary dict (e.g. router
+        indices/weights). Defaults to False per m3 zero-gen harness contract to
+        keep engine callers unchanged. aux["selected_block_indices"] is None if
+        and only if num_mla_layers == 0 or not self.config.use_indexer.
+      **kwargs: Generic MaxText keyword arguments validated via
+        _validate_generic_maxtext_kwargs.
+
+    Returns:
+      If return_aux is False, returns logits array.
+      If return_aux is True, returns (logits, aux).
+    """
+    out = self.forward_with_aux(
+        decoder_input_tokens,
+        decoder_positions,
+        decoder_segment_ids,
+        return_aux=return_aux,
+        **kwargs,
+    )
     if out.logits is None:
       raise RuntimeError("out.logits is None in Glm5Model.__call__.")
+    if return_aux:
+      return out.logits, out.aux
     return out.logits
 
   def logits_from_hidden_states_for_vocab_tiling(
@@ -2089,6 +2352,9 @@ class Glm5Model(nnx.Module):
     if kwargs:
       raise TypeError("Unexpected keyword arguments in from_maxtext_config:" f" {sorted(kwargs)!r}.")
     return cls(config=config, mesh=mesh, rngs=rngs, place_on_devices=place_on_devices)
+
+
+Glm5ForCausalLM = Glm5Model
 
 
 def create_glm5_3_flash_model(
