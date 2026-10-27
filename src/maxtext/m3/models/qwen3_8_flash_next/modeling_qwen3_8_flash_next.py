@@ -25,6 +25,8 @@ Sections (in dependency order):
   * Qwen Sparse Attention (QSA), indexer, and partial interleaved mRoPE
   * Sparse MoE block (routed experts, top-k router, gated shared expert)
   * SplitMix64 n-gram hashing and per-layer embedding (PLE)
+  * Decoder layer, scannable 4-layer cycle, and scan helpers
+  * Decoder backbone, top-level model, and factory
 """
 
 from collections.abc import Callable
@@ -1291,3 +1293,333 @@ class Qwen3_8PLELayer(nnx.Module):
       # right-padded positions after the last real token would pick up its activations.
       out_flat = out_flat * m
     return out_flat.reshape(b, s, self.hc_count, self.emb_dim) if is_4d else out_flat
+
+
+# =================================================================================================
+# Decoder layer, scannable 4-layer cycle, and scan helpers
+# =================================================================================================
+
+
+def build_ple_layer(config: Any, layer_idx: int = 1, *, rngs: nnx.Rngs) -> Qwen3_8PLELayer | None:
+  """Instantiates a Qwen3_8PLELayer if configured at layer_idx, else None."""
+  if not (bool(config.use_ple_layer) and layer_idx == int(config.ple_layer_id)):
+    return None
+  c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
+  return Qwen3_8PLELayer(
+      eos_token_id=int(c.ple_eos_token_id),
+      emb_dim=int(c.emb_dim),
+      hc_count=int(c.hc_count),
+      vocab_size=int(c.vocab_size),
+      ple_embed_dim=int(c.ple_embed_dim),
+      ngram_size=int(c.ngram_size),
+      heads_per_ngram=int(c.heads_per_ngram),
+      ngram_vocab_size_base=int(c.ngram_vocab_size_base),
+      make_ngram_vocab_size_divisible_by=int(c.make_ngram_vocab_size_divisible_by),
+      seed=int(c.ple_seed),
+      ple_conv_kernel_size=int(c.ple_conv_kernel_size),
+      eps=float(c.normalization_layer_epsilon),
+      dtype=dt,
+      weight_dtype=wdt,
+      rngs=rngs,
+  )
+
+
+class Qwen3_8DecoderLayer(nnx.Module):
+  """Single decoder layer with Hyper-Connection residuals and MoE."""
+
+  def __init__(self, config: Any, layer_idx: int, *, include_ple: bool = True, rngs: nnx.Rngs):
+    c, emb, dt, wdt = config, int(config.emb_dim), jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
+    ckw = {"eps": float(c.normalization_layer_epsilon), "dtype": dt, "weight_dtype": wdt, "rngs": rngs}
+    hc_kw = {"emb_dim": emb, "hc_count": int(c.hc_count), "hc_lowrank": int(c.hc_lowrank), **ckw}
+    cyc = int(c.inhomogeneous_layer_cycle_interval)
+    self.layer_type = "linear_attention" if (layer_idx % cyc) != (cyc - 1) else "full_attention"
+    self.attn_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
+    if self.layer_type == "linear_attention":
+      self.linear_attn = Qwen3_8GatedDeltaNet(
+          emb_dim=emb,
+          num_k_heads=int(c.gdn_num_key_heads),
+          num_v_heads=int(c.gdn_num_value_heads),
+          **ckw,
+          head_k_dim=int(c.gdn_key_head_dim),
+          head_v_dim=int(c.gdn_value_head_dim),
+          chunk_size=int(c.gdn_chunk_size),
+          conv_kernel_size=int(c.gdn_conv_kernel_dim),
+          output_gate_activation=str(c.gdn_output_gate_activation),
+      )
+    else:
+      self.self_attn = Qwen3_8SparseAttention(
+          emb_dim=emb,
+          num_query_heads=int(c.num_query_heads),
+          num_kv_heads=int(c.num_kv_heads),
+          head_dim=int(c.head_dim),
+          partial_rotary_factor=float(c.partial_rotary_factor),
+          rope_theta=float(c.rope_max_timescale),
+          **ckw,
+          mrope_section=tuple(c.mrope_section),
+          index_n_heads=int(c.index_n_heads),
+          index_kv_heads=int(c.index_kv_heads),
+          index_head_dim=int(c.index_head_dim),
+          token_budget=int(c.index_select_budget),
+          compress_ratio=int(c.index_select_block_size),
+      )
+    self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
+    self.mlp = Qwen3_8SparseMoeBlock(
+        emb_dim=emb,
+        shared_expert_intermediate_size=int(c.mlp_dim),
+        moe_mlp_dim=int(c.moe_mlp_dim),
+        routed_scaling_factor=float(c.routed_scaling_factor),
+        num_experts=int(c.num_experts),
+        rngs=rngs,
+        num_experts_per_tok=int(c.num_experts_per_tok),
+        norm_topk_prob=bool(c.norm_topk_prob),
+        dtype=dt,
+        weight_dtype=wdt,
+    )
+    self.ple = build_ple_layer(c, layer_idx, rngs=rngs) if include_ple else None
+
+  def __call__(
+      self,
+      hidden_states: jax.Array,
+      *,
+      positions: jax.Array | None = None,
+      conv_mask: jax.Array | None = None,
+      ple_input_ids: jax.Array | None = None,
+      segment_ids: jax.Array | None = None,
+      return_aux: bool = False,
+  ) -> Any:
+    """Executes single decoder layer forward pass."""
+    if self.ple is not None and ple_input_ids is not None:
+      hidden_states = hidden_states + self.ple(hidden_states, ple_input_ids, conv_mask=conv_mask)
+    mixed, inject = self.attn_hyper_connection.before_block(hidden_states)
+    if self.layer_type == "linear_attention":
+      attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask), None
+    else:
+      attn_out, s_idx = self.self_attn(
+          mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
+      )
+    hidden_states = self.attn_hyper_connection.combine(hidden_states, attn_out, inject)
+    mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
+    mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
+    hidden_states = self.mlp_hyper_connection.combine(hidden_states, mlp_out, inject)
+    aux = {
+        "router_indices": r_idx,
+        "routing_weights": r_w,
+        "router_probs": r_probs,
+        **({"selected_block_indices": s_idx} if s_idx is not None else {}),
+    }
+    return (hidden_states, aux) if return_aux else hidden_states
+
+
+class Qwen3_8CycleBlock(nnx.Module):
+  """4-layer cycle block composed of 3 GDN layers and 1 QSA layer."""
+
+  def __init__(self, config: Any, *, rngs: nnx.Rngs):
+    self.gdn_0, self.gdn_1, self.gdn_2, self.qsa_3 = (
+        Qwen3_8DecoderLayer(config, i, include_ple=False, rngs=rngs) for i in range(4)
+    )
+
+
+def create_scanned_cycles(config: Any, num_cycles: int, *, rngs: nnx.Rngs) -> Qwen3_8CycleBlock:
+  """Creates scanned cycle block with stacked parameters along cycle axis."""
+  if int(config.inhomogeneous_layer_cycle_interval) != 4:
+    raise ValueError(
+        f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
+        f"{config.inhomogeneous_layer_cycle_interval}."
+    )
+  if int(config.num_decoder_layers) % 4 != 0:
+    raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {config.num_decoder_layers}.")
+  if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
+    raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+  sp = [nnx.split(Qwen3_8CycleBlock(config, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
+  return nnx.merge(sp[0][0], *(jax.tree.map(lambda *x: jnp.stack(x, 0), *(s[i] for s in sp)) for i in (1, 2)))
+
+
+def apply_scanned_cycles(
+    cycles: Qwen3_8CycleBlock,
+    ple_layer: Qwen3_8PLELayer | None,
+    hidden_states: jax.Array,
+    *,
+    num_cycles: int,
+    positions: jax.Array | None = None,
+    conv_mask: jax.Array | None = None,
+    ple_input_ids: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    return_aux: bool = False,
+) -> Any:
+  """Executes scan over stacked cycle weights with conditional PLE at cycle 0."""
+  c_def, c_params, c_rest = nnx.split(cycles, nnx.Param, ...)
+  p_def, p_state = nnx.split(ple_layer) if ple_layer is not None else (None, None)
+
+  def ple_step(h, cyc_idx):
+    if p_def is not None and ple_input_ids is not None:
+      return jax.lax.cond(
+          cyc_idx == 0, lambda x: x + nnx.merge(p_def, p_state)(x, ple_input_ids, conv_mask=conv_mask), lambda x: x, h
+      )
+    return h
+
+  def scan_fn(carry, xs):
+    blk, kw = nnx.merge(c_def, xs[0], xs[1]), {"positions": positions, "conv_mask": conv_mask, "segment_ids": segment_ids}
+    if return_aux:
+      h, a0 = blk.gdn_0(carry, return_aux=True, **kw)
+      h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
+      h, a2 = blk.gdn_2(h, return_aux=True, **kw)
+      h, a3 = blk.qsa_3(h, return_aux=True, **kw)
+      return h, (a0, a1, a2, a3)
+    h = ple_step(blk.gdn_0(carry, **kw), xs[2])
+    return blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw), None
+
+  res = jax.lax.scan(scan_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
+  if return_aux:
+    return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
+  return res[0]
+
+
+def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> None:
+  """Copies and stacks weights from unscanned decoder layers into scanned cycles."""
+  u, s = getattr(unscanned_decoder, "decoder", unscanned_decoder), getattr(scanned_decoder, "decoder", scanned_decoder)
+  if u.scan_layers or not s.scan_layers:
+    raise ValueError(f"Expected an unscanned and a scanned decoder, got scan_layers={u.scan_layers}, {s.scan_layers}.")
+  if u.num_layers != 4 * s.num_cycles:
+    raise ValueError(f"Layer count mismatch: unscanned={u.num_layers} layers, scanned={s.num_cycles} cycles of 4.")
+  if u.ple_layer_id != s.ple_layer_id:
+    raise ValueError(f"PLE layer mismatch: unscanned ple_layer_id={u.ple_layer_id}, scanned={s.ple_layer_id}.")
+  if hasattr(unscanned_decoder, "lm_head") and hasattr(scanned_decoder, "lm_head"):
+    nnx.update(scanned_decoder.lm_head, nnx.state(unscanned_decoder.lm_head))
+
+  def get_sub(l, a):
+    return (l.attn_hyper_connection, getattr(l, a), l.mlp_hyper_connection, l.mlp)
+
+  for k, name in enumerate(["gdn_0", "gdn_1", "gdn_2", "qsa_3"]):
+    a = "linear_attn" if k < 3 else "self_attn"
+    st = [nnx.state(get_sub(getattr(u, f"layers_{4 * c + k}"), a)) for c in range(s.num_cycles)]
+    nnx.update(get_sub(getattr(s.cycles, name), a), jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *st))
+  for m in ("token_embedder", "hyper_connection_mixer"):
+    nnx.update(getattr(s, m), nnx.state(getattr(u, m)))
+  if u.ple_layer_id is not None:
+    nnx.update(s.ple, nnx.state(getattr(u, f"layers_{u.ple_layer_id}").ple))
+
+
+# =================================================================================================
+# Decoder backbone, top-level model, and factory
+# =================================================================================================
+
+
+class Qwen3_8Decoder(nnx.Module):
+  """Decoder stack with token embedding, 4-stream residual, and final mixer."""
+
+  def __init__(self, config: Any, *, rngs: nnx.Rngs):
+    c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
+    self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
+    self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
+    self.dtype, self.weight_dtype = dt, wdt
+    self.token_embedder = nnx.Embed(self.vocab_size, self.emb_dim, dtype=dt, param_dtype=wdt, rngs=rngs)
+    self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
+    if self.scan_layers:
+      if int(config.inhomogeneous_layer_cycle_interval) != 4:
+        raise ValueError(
+            f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
+            f"{config.inhomogeneous_layer_cycle_interval}."
+        )
+      if self.num_layers % 4 != 0:
+        raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
+      if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
+        raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+      self.num_cycles = self.num_layers // 4
+      self.cycles = create_scanned_cycles(config, self.num_cycles, rngs=rngs)
+      self.ple = build_ple_layer(config, rngs=rngs)
+    else:
+      for i in range(self.num_layers):
+        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, rngs=rngs))
+    self.hyper_connection_mixer = Qwen3_8GatedResidual(
+        emb_dim=self.emb_dim,
+        hc_count=self.hc_count,
+        hc_lowrank=int(config.hc_lowrank),
+        use_combine=False,
+        eps=float(config.normalization_layer_epsilon),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      decoder_input_tokens: jax.Array,
+      decoder_positions: jax.Array | None = None,
+      decoder_segment_ids: jax.Array | None = None,
+      *,
+      return_aux: bool = False,
+      return_pre_mixer: bool = False,
+  ) -> Any:
+    """Forward pass computing full decoder representations."""
+    tok, (b, s) = decoder_input_tokens, decoder_input_tokens.shape
+    pos = jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s)) if decoder_positions is None else decoder_positions
+    cmask = (decoder_segment_ids != 0).astype(jnp.int32) if decoder_segment_ids is not None else None
+    pids = tok if cmask is None else jnp.where(cmask.astype(jnp.bool_), tok, self.eos_token_id)
+    h, aux_list = init_hyper_connection_streams(self.token_embedder(tok), hc_count=self.hc_count), []
+    if self.scan_layers:
+      res = apply_scanned_cycles(
+          self.cycles,
+          self.ple,
+          h,
+          num_cycles=self.num_cycles,
+          positions=pos,
+          conv_mask=cmask,
+          ple_input_ids=pids,
+          segment_ids=decoder_segment_ids,
+          return_aux=return_aux,
+      )
+      h, aux_list = res if return_aux else (res, [])
+    else:
+      for i in range(self.num_layers):
+        out = getattr(self, f"layers_{i}")(
+            h, positions=pos, conv_mask=cmask, ple_input_ids=pids, segment_ids=decoder_segment_ids, return_aux=return_aux
+        )
+        h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
+    h_4stream, h_mixed = h, self.hyper_connection_mixer.mix_input(h)
+    if return_pre_mixer:
+      return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
+    return (h_mixed, aux_list) if return_aux else h_mixed
+
+
+class Qwen3_8FlashNextModel(nnx.Module):
+  """Top-level Qwen3.8-Flash-Next model with decoder and lm_head."""
+
+  def __init__(self, config: Any, mesh: Any = None, *, quant_mode: str = "train", rngs: nnx.Rngs):
+    self.config, self.mesh, self.quant_mode, self.decoder = config, mesh, quant_mode, Qwen3_8Decoder(config, rngs=rngs)
+    self.lm_head = nnx.Linear(
+        self.decoder.emb_dim,
+        self.decoder.vocab_size,
+        use_bias=False,
+        dtype=self.decoder.dtype,
+        param_dtype=self.decoder.weight_dtype,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      decoder_input_tokens: jax.Array,
+      decoder_positions: jax.Array | None = None,
+      decoder_segment_ids: jax.Array | None = None,
+      *,
+      enable_dropout: bool = False,
+      return_hidden_states: bool = False,
+      return_aux: bool = False,
+      **kwargs: Any,
+  ) -> Any:
+    """Forward pass computing language model logits and optional aux outputs."""
+    del enable_dropout, kwargs
+    out = self.decoder(
+        decoder_input_tokens,
+        decoder_positions,
+        decoder_segment_ids,
+        return_aux=return_aux,
+        return_pre_mixer=return_hidden_states,
+    )
+    return (self.lm_head(out[0]), *out[1:]) if (return_hidden_states or return_aux) else self.lm_head(out)
+
+
+def create_qwen3_8_flash_next_model(
+    config: Any, mesh: Any = None, *, rngs: nnx.Rngs | None = None, quant_mode_str: str = "train", **_: Any
+) -> Qwen3_8FlashNextModel:
+  """Factory function creating a Qwen3_8FlashNextModel instance."""
+  return Qwen3_8FlashNextModel(config=config, mesh=mesh, quant_mode=quant_mode_str, rngs=rngs or nnx.Rngs(params=0))

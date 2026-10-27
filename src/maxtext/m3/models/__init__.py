@@ -26,8 +26,9 @@ model-name branching.
 """
 
 from collections.abc import Callable
-from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model
-from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model
+from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
 
 
 def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
@@ -44,6 +45,10 @@ MODEL_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": create_glm5_3_flash_model,
     "qwen3-0.6b": create_qwen3_model,
     "qwen3-vl-2b": create_qwen3_vl_model,
+    "qwen3.8-flash-next": create_qwen3_8_flash_next_model,
+    # Debug-only mini variant of qwen3.8-flash-next: same architecture and constructor, shrunk to
+    # 4 layers / 1 cycle (configs/models/qwen3.8-flash-next-mini.yml). Used only by CPU/CI unit tests.
+    "qwen3.8-flash-next-mini": create_qwen3_8_flash_next_model,
 }
 
 
