@@ -26,6 +26,8 @@ Sections (in dependency order):
   * Sparse MoE block (routed experts, top-k router, gated shared expert)
   * SplitMix64 n-gram hashing and per-layer embedding (PLE)
   * Decoder layer, scannable 4-layer cycle, and scan helpers
+  * Multi-token prediction (MTP) draft block
+  * Cross-entropy, router load-balancing, and total training loss
   * Decoder backbone, top-level model, and factory
 """
 
@@ -1485,6 +1487,11 @@ def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> N
     raise ValueError(f"PLE layer mismatch: unscanned ple_layer_id={u.ple_layer_id}, scanned={s.ple_layer_id}.")
   if hasattr(unscanned_decoder, "lm_head") and hasattr(scanned_decoder, "lm_head"):
     nnx.update(scanned_decoder.lm_head, nnx.state(unscanned_decoder.lm_head))
+  u_mtp, s_mtp = getattr(unscanned_decoder, "mtp", None), getattr(scanned_decoder, "mtp", None)
+  if (u_mtp is not None) != (s_mtp is not None):
+    raise ValueError(f"MTP presence mismatch: unscanned={u_mtp is not None}, scanned={s_mtp is not None}.")
+  if u_mtp is not None:
+    nnx.update(s_mtp, nnx.state(u_mtp))
 
   def get_sub(l, a):
     return (l.attn_hyper_connection, getattr(l, a), l.mlp_hyper_connection, l.mlp)
@@ -1500,8 +1507,232 @@ def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> N
 
 
 # =================================================================================================
+# Multi-token prediction (MTP) draft block
+# =================================================================================================
+
+
+class Qwen3_8MTPBlock(nnx.Module):
+  """Single-layer MTP draft block fusing next-token embeddings and HC streams."""
+
+  def __init__(self, config: Any, *, rngs: nnx.Rngs):
+    self.config, self.emb_dim = config, int(config.emb_dim)
+    self.hc_count, self.hc_lowrank = int(config.hc_count), int(config.hc_lowrank)
+    dt, wdt, eps = jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype), float(config.normalization_layer_epsilon)
+    self.pre_fc_norm_embedding = Qwen3_8RMSNorm(self.emb_dim, eps=eps, rngs=rngs)
+    self.pre_fc_norm_hidden = Qwen3_8RMSNorm(self.hc_count * self.emb_dim, eps=eps, rngs=rngs)
+    l_kw = {"use_bias": False, "dtype": dt, "param_dtype": wdt, "rngs": rngs}
+    self.fc_embedding = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
+    self.fc_hidden = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
+    cyc = int(config.inhomogeneous_layer_cycle_interval)
+    self.layers_0 = Qwen3_8DecoderLayer(config, layer_idx=cyc - 1, include_ple=False, rngs=rngs)
+    self.hyper_connection_mixer = Qwen3_8GatedResidual(
+        emb_dim=self.emb_dim,
+        hc_count=self.hc_count,
+        hc_lowrank=self.hc_lowrank,
+        use_combine=False,
+        eps=eps,
+        dtype=dt,
+        weight_dtype=wdt,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      hc_hidden_states: jax.Array,
+      next_token_embeds: jax.Array,
+      *,
+      positions: jax.Array | None = None,
+      conv_mask: jax.Array | None = None,
+      segment_ids: jax.Array | None = None,
+      return_aux: bool = False,
+  ) -> jax.Array | tuple[jax.Array, dict[str, Any]]:
+    """Forward pass fusing next-token embeddings with HC hidden states."""
+    expected_dim = self.hc_count * self.emb_dim
+    if hc_hidden_states.shape[-1] != expected_dim:
+      raise ValueError(
+          f"hc_hidden_states last dimension {hc_hidden_states.shape[-1]} "
+          f"must equal hc_count * emb_dim ({expected_dim})."
+      )
+    expected_embed_shape = (*hc_hidden_states.shape[:-1], self.emb_dim)
+    if next_token_embeds.shape != expected_embed_shape:
+      raise ValueError(f"next_token_embeds shape {next_token_embeds.shape} must match {expected_embed_shape}.")
+    e_proj = self.fc_embedding(self.pre_fc_norm_embedding(next_token_embeds))
+    h_norm = self.pre_fc_norm_hidden(hc_hidden_states).reshape(*hc_hidden_states.shape[:-1], self.hc_count, self.emb_dim)
+    h_proj = self.fc_hidden(h_norm)
+    h_mtp_in = (h_proj + jnp.expand_dims(e_proj, axis=-2)).reshape(hc_hidden_states.shape)
+    out = self.layers_0(
+        h_mtp_in, positions=positions, conv_mask=conv_mask, segment_ids=segment_ids, return_aux=return_aux
+    )
+    h_layer, aux = out if return_aux else (out, None)
+    h_out = self.hyper_connection_mixer.mix_input(h_layer)
+    return (h_out, aux) if return_aux else h_out
+
+
+# =================================================================================================
+# Cross-entropy, router load-balancing, and total training loss
+# =================================================================================================
+
+
+def cross_entropy_loss(
+    logits: jax.Array,
+    targets: jax.Array,
+    mask: jax.Array | None = None,
+) -> jax.Array:
+  """Computes cross-entropy loss between logits and target token IDs in float32."""
+  if logits.size == 0 or targets.size == 0:
+    raise ValueError("logits and targets must be non-empty.")
+  if logits.shape[:-1] != targets.shape:
+    raise ValueError(f"logits prefix shape {logits.shape[:-1]} must match targets shape {targets.shape}.")
+  if mask is not None and mask.shape != targets.shape:
+    raise ValueError(f"mask shape {mask.shape} must match targets shape {targets.shape}.")
+  log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+  loss = -jnp.take_along_axis(log_probs, jnp.expand_dims(targets, -1), axis=-1).squeeze(-1)
+  if mask is not None:
+    m = mask.astype(jnp.float32)
+    return jnp.sum(loss * m) / jnp.maximum(jnp.sum(m), 1.0)
+  return jnp.mean(loss)
+
+
+def router_load_balancing_loss(
+    aux_list: Any,
+    num_experts: int,
+    mask: jax.Array | None = None,
+    mtp_mask: jax.Array | None = None,
+) -> jax.Array:
+  """Computes MoE router load balancing auxiliary loss across decoder layers."""
+  if aux_list is None:
+    raise ValueError("aux_list cannot be None.")
+  if isinstance(aux_list, dict):
+    if "layer_aux" not in aux_list:
+      raise ValueError("aux_list dict must contain 'layer_aux'.")
+    layer_items = [(layer, mask) for layer in aux_list["layer_aux"]]
+    if aux_list.get("mtp_aux") is not None:
+      layer_items.append((aux_list["mtp_aux"], mtp_mask if mtp_mask is not None else mask))
+  elif isinstance(aux_list, (list, tuple)):
+    layer_items = [(layer, mask) for layer in aux_list]
+  else:
+    raise ValueError(f"Unsupported aux_list type: {type(aux_list)}.")
+  if not layer_items:
+    raise ValueError("aux_list contains no layers.")
+  for i, (layer_aux, _) in enumerate(layer_items):
+    if not isinstance(layer_aux, dict) or "router_probs" not in layer_aux or "router_indices" not in layer_aux:
+      raise ValueError(f"Layer {i} aux must be a dict with 'router_probs' and 'router_indices'.")
+
+  tokens_per_expert_sum = jnp.zeros(num_experts, dtype=jnp.float32)
+  router_prob_sum = jnp.zeros(num_experts, dtype=jnp.float32)
+  total_rows = jnp.array(0.0, dtype=jnp.float32)
+
+  for layer_aux, layer_mask in layer_items:
+    r_probs = layer_aux["router_probs"].astype(jnp.float32)
+    r_idx = layer_aux["router_indices"]
+    oh = jax.nn.one_hot(r_idx, num_experts, dtype=jnp.float32)
+    oh_reduce_axes = tuple(range(oh.ndim - 1))
+    prob_reduce_axes = tuple(range(r_probs.ndim - 1))
+    if layer_mask is not None:
+      m = layer_mask.astype(jnp.float32)
+      tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh * jnp.expand_dims(m, (-1, -2)), axis=oh_reduce_axes)
+      router_prob_sum = router_prob_sum + jnp.sum(r_probs * jnp.expand_dims(m, -1), axis=prob_reduce_axes)
+      total_rows = total_rows + jnp.sum(m)
+    else:
+      tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh, axis=oh_reduce_axes)
+      router_prob_sum = router_prob_sum + jnp.sum(r_probs, axis=prob_reduce_axes)
+      total_rows = total_rows + float(r_probs.size // num_experts)
+
+  denom = jnp.maximum(total_rows, 1.0)
+  tokens_per_expert = tokens_per_expert_sum / denom
+  router_prob_per_expert = router_prob_sum / denom
+  return (num_experts * jnp.sum(tokens_per_expert * router_prob_per_expert)).astype(jnp.float32)
+
+
+def compute_total_loss(
+    model: Any,
+    input_tokens: jax.Array,
+    target_tokens: jax.Array,
+    *,
+    target_mask: jax.Array | None = None,
+    positions: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    router_aux_coeff: float | None = None,
+    mtp_loss_coeff: float | None = None,
+    use_mtp: bool = True,
+    **kwargs: Any,
+) -> tuple[jax.Array, dict[str, jax.Array]]:
+  """Computes primary CE loss, router load balancing loss, and optional MTP loss."""
+  if router_aux_coeff is None:
+    router_aux_coeff = getattr(model.config, "load_balance_loss_weight", None)
+  if router_aux_coeff is None:
+    raise ValueError("router_aux_coeff must be specified or present in model.config.load_balance_loss_weight.")
+  router_aux_coeff = float(router_aux_coeff)
+
+  run_mtp, need_aux = use_mtp and (model.mtp is not None), router_aux_coeff > 0.0
+  out = model(input_tokens, positions, segment_ids, return_aux=need_aux, return_mtp=run_mtp, **kwargs)
+  logits = out[0] if (run_mtp or need_aux) else out
+  aux = out[1] if (run_mtp or need_aux) else None
+  mtp_logits = aux["mtp_logits"] if (run_mtp and need_aux) else (out[1] if run_mtp else None)
+
+  primary_loss = cross_entropy_loss(logits, target_tokens, mask=target_mask)
+
+  mtp_aux_mask = None
+  mtp_loss = None
+  if run_mtp and mtp_logits is not None:
+    if mtp_logits.shape[1] <= 1:
+      mtp_loss = jnp.array(0.0, dtype=jnp.float32)
+      mtp_aux_mask = jnp.zeros_like(target_tokens, dtype=jnp.float32)
+    else:
+      m = (
+          target_mask[:, 1:].astype(jnp.float32)
+          if target_mask is not None
+          else jnp.ones_like(target_tokens[:, 1:], dtype=jnp.float32)
+      )
+      if segment_ids is not None:
+        m = m * ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
+      mtp_loss = cross_entropy_loss(mtp_logits[:, :-1, :], target_tokens[:, 1:], mask=m)
+      mtp_aux_mask = jnp.pad(m, ((0, 0), (0, 1)))
+
+  router_loss = (
+      router_load_balancing_loss(
+          aux,
+          int(model.config.num_experts),
+          mask=target_mask,
+          mtp_mask=mtp_aux_mask,
+      )
+      if need_aux
+      else jnp.array(0.0, dtype=jnp.float32)
+  )
+  total_loss = primary_loss + router_aux_coeff * router_loss
+  metrics = {"total_loss": total_loss, "primary_loss": primary_loss, "router_loss": router_loss}
+
+  if mtp_loss is not None:
+    if mtp_loss_coeff is None:
+      mtp_loss_coeff_val = getattr(model.config, "mtp_loss_scaling_factor", None)
+    else:
+      mtp_loss_coeff_val = mtp_loss_coeff
+    if mtp_loss_coeff_val is None:
+      raise ValueError(
+          "mtp_loss_coeff must be specified or present in model.config.mtp_loss_scaling_factor when MTP is enabled."
+      )
+    alpha = float(mtp_loss_coeff_val)
+    total_loss = total_loss + alpha * mtp_loss
+    metrics["total_loss"], metrics["mtp_loss"] = total_loss, mtp_loss
+
+  return total_loss, metrics
+
+
+# =================================================================================================
 # Decoder backbone, top-level model, and factory
 # =================================================================================================
+
+
+def _positions_and_conv_mask(
+    tokens: jax.Array,
+    positions: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array | None]:
+  """Computes default positions and convolution mask if not provided."""
+  b, s = tokens.shape
+  pos = jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s)) if positions is None else positions
+  cmask = (segment_ids != 0).astype(jnp.int32) if segment_ids is not None else None
+  return pos, cmask
 
 
 class Qwen3_8Decoder(nnx.Module):
@@ -1551,9 +1782,8 @@ class Qwen3_8Decoder(nnx.Module):
       return_pre_mixer: bool = False,
   ) -> Any:
     """Forward pass computing full decoder representations."""
-    tok, (b, s) = decoder_input_tokens, decoder_input_tokens.shape
-    pos = jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s)) if decoder_positions is None else decoder_positions
-    cmask = (decoder_segment_ids != 0).astype(jnp.int32) if decoder_segment_ids is not None else None
+    tok = decoder_input_tokens
+    pos, cmask = _positions_and_conv_mask(tok, decoder_positions, decoder_segment_ids)
     pids = tok if cmask is None else jnp.where(cmask.astype(jnp.bool_), tok, self.eos_token_id)
     h, aux_list = init_hyper_connection_streams(self.token_embedder(tok), hc_count=self.hc_count), []
     if self.scan_layers:
@@ -1594,6 +1824,10 @@ class Qwen3_8FlashNextModel(nnx.Module):
         param_dtype=self.decoder.weight_dtype,
         rngs=rngs,
     )
+    mtp_layers = int(getattr(config, "mtp_num_layers", 0))
+    if mtp_layers not in (0, 1):
+      raise ValueError(f"mtp_num_layers must be 0 or 1, got {mtp_layers}.")
+    self.mtp = Qwen3_8MTPBlock(config, rngs=rngs) if mtp_layers > 0 else None
 
   def __call__(
       self,
@@ -1604,10 +1838,48 @@ class Qwen3_8FlashNextModel(nnx.Module):
       enable_dropout: bool = False,
       return_hidden_states: bool = False,
       return_aux: bool = False,
+      return_mtp: bool = False,
+      next_tokens: jax.Array | None = None,
       **kwargs: Any,
   ) -> Any:
     """Forward pass computing language model logits and optional aux outputs."""
     del enable_dropout, kwargs
+    if return_mtp and return_hidden_states:
+      raise ValueError("Simultaneous return_mtp=True and return_hidden_states=True is not supported.")
+    if return_mtp:
+      if self.mtp is None:
+        raise ValueError("MTP module not initialized.")
+      dec_out = self.decoder(
+          decoder_input_tokens, decoder_positions, decoder_segment_ids, return_aux=return_aux, return_pre_mixer=True
+      )
+      h_mixed, h_4stream = dec_out[0], dec_out[1]
+      aux_list = dec_out[2] if return_aux else []
+      if next_tokens is not None:
+        next_tok = next_tokens
+      else:
+        next_tok = jnp.pad(decoder_input_tokens[:, 1:], ((0, 0), (0, 1)))
+        if decoder_segment_ids is not None:
+          same_seg = (decoder_segment_ids != 0) & (
+              decoder_segment_ids == jnp.pad(decoder_segment_ids[:, 1:], ((0, 0), (0, 1)))
+          )
+          next_tok = jnp.where(same_seg, next_tok, 0)
+      pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
+      mtp_out = self.mtp(
+          h_4stream,
+          self.decoder.token_embedder(next_tok),
+          positions=pos,
+          conv_mask=cmask,
+          segment_ids=decoder_segment_ids,
+          return_aux=return_aux,
+      )
+      mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
+      mtp_logits = self.lm_head(mtp_h)
+      logits = self.lm_head(h_mixed)
+      if return_aux:
+        aux_dict = {"layer_aux": aux_list, "mtp_aux": mtp_aux, "mtp_logits": mtp_logits}
+        return (logits, aux_dict)
+      return (logits, mtp_logits)
+
     out = self.decoder(
         decoder_input_tokens,
         decoder_positions,
