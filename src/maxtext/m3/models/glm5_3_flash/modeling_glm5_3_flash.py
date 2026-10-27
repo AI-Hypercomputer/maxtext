@@ -354,20 +354,8 @@ class Glm5KdaAttention(nnx.Module):
           m3_sharding.TensorType.ACTIVATION,
       )
       param_spec = self.sharding("kda_head_param", ("heads",))
-      batch_axes = head_spec[1]
-      if isinstance(batch_axes, str):
-        batch_axes = (batch_axes,)
-      mesh_axes = set(jax.sharding.get_abstract_mesh().axis_names)
-      active_batch_axes = tuple(ax for ax in batch_axes or () if ax in mesh_axes)
-
-      def _sharded_kda(q_arg, k_arg, v_arg, f_arg, beta_arg, a_log_arg, dt_bias_arg):
-        if active_batch_axes:
-          a_log_arg = jax.lax.pcast(a_log_arg, active_batch_axes, to="varying")
-          dt_bias_arg = jax.lax.pcast(dt_bias_arg, active_batch_axes, to="varying")
-        return _run_kda(q_arg, k_arg, v_arg, f_arg, beta_arg, a_log_arg, dt_bias_arg)
-
       attn_out = jax.shard_map(
-          _sharded_kda,
+          _run_kda,
           in_specs=(
               head_spec,
               head_spec,
