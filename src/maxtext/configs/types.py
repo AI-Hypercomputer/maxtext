@@ -2135,8 +2135,8 @@ class LayoutAndSharding(BaseModel):
           " which runs them on the SparseCore dedicated to FSDP collectives"
           " (--xla_tpu_explicit_fsdp_dedicated_sparse_core_id) and overlaps them with that layer's backward."
           " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they run untagged"
-          " on the other SparseCore and complete within their own layer's backward step. Not yet supported"
-          " (ignored) for inhomogeneous blocks prefetched per sub-layer."
+          " on the other SparseCore and complete within their own layer's backward step. For inhomogeneous"
+          " blocks prefetched per sub-layer, the reduce-scatters are deferred to the next sub-layer's step."
       ),
   )
 

@@ -219,6 +219,8 @@ def _custom_vjp_nested_prefetch_pipeline_fwd(
 
 def _custom_vjp_nested_prefetch_pipeline_bwd(graphdefs, length, ctxs, sizes, res, g_out):
   """Backward pass of `_custom_vjp_nested_prefetch_pipeline`: one reverse scan step per block."""
+  if ctxs[0].defer_grad_reduce_scatter:
+    return _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, g_out)
   ys, saved, params_leaves, state_leaves, d_args, d_kwargs = res
   g, _ = g_out  # Non-parameter layer state is not differentiated.
   num_groups = len(graphdefs)
@@ -292,6 +294,174 @@ def _custom_vjp_nested_prefetch_pipeline_bwd(graphdefs, length, ctxs, sizes, res
 
   # `d_params[i]` holds group i's grads stacked `[length, sizes[i], ...]`.
   params_bar_leaves = tuple(tuple(jax.tree_util.tree_leaves(d)) for d in d_params)
+  diff_args_bar_leaves = tuple(jnp.zeros_like(x) for x in d_args)
+  diff_kwargs_bar_leaves = tuple(jnp.zeros_like(x) for x in d_kwargs)
+  return g, params_bar_leaves, None, diff_args_bar_leaves, diff_kwargs_bar_leaves
+
+
+def _update_at(a, d, b, k):
+  """Writes one sub-layer's array `d` into row (block `b`, sub-layer `k`) of a `[length, n, ...]` array."""
+  return jax.lax.dynamic_update_slice(a, d[None, None].astype(a.dtype), (b, k) + (0,) * d.ndim)
+
+
+def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, g_out):
+  """Backward pass with each sub-layer's tagged dW reduce-scatters deferred to the next backward step.
+
+  As in `fsdp_prefetch._custom_vjp_prefetch_pipeline_bwd` with `defer_grad_reduce_scatter`, the
+  weight gradients of sub-layer j that get a tagged (dedicated SparseCore) reduce-scatter are carried
+  unreduced into the step of sub-layer j-1, which issues it before its own all-gather, so it completes
+  with that all-gather and overlaps that sub-layer's recompute and vjp. A reduce-scatter must complete
+  within the while-loop that issues it, so it is issued in the loop that runs sub-layer j-1:
+
+    Group of n sub-layers (backward): [entry: n-1] -> [same group: n-2 .. 1] -> [exit: 0]
+
+  The entry step defers the reduce-scatter of the previous group's (or the next block's) exit step,
+  whose dW has another structure, so it runs in its own single-trip loop (unlike the plain backward
+  pass, where it shares the same-group scan). The unreduced dW rides in the loop carries (or in the xs
+  and ys of the single-trip loops, whose dW structures differ), and the reduced gradients accumulate
+  in the carry. The first block step defers a placeholder reduce-scatter of zeros, and the last
+  sub-layer's deferred reduce-scatter runs after the block loop.
+  """
+  ys, saved, params_leaves, state_leaves, d_args, d_kwargs = res
+  g, _ = g_out  # Non-parameter layer state is not differentiated.
+  num_groups = len(graphdefs)
+  params, state, gather, rs_fns, layout_fns, _, layer_vjp_fns = _setup_groups(
+      graphdefs, params_leaves, state_leaves, d_args, d_kwargs, ctxs
+  )
+  # Tie `params` to `g` so XLA cannot CSE the backward all-gathers with the forward ones or hoist
+  # backward weight slices before the forward pass.
+  g, params = jax.lax.optimization_barrier((g, tuple(params)))
+  layouts = {}
+
+  def bwd(i, y, w, layer_state, g, saved_k):
+    """Recompute + vjp of a group-i sub-layer; the untagged reduce-scatters run within the step."""
+    if i not in layouts:
+      layouts[i] = layout_fns[i](y, w, layer_state)
+    g, dw = layer_vjp_fns[i](y, w, layer_state, g, saved_k, layouts[i])
+    return g, rs_fns[i](dw, "untagged")
+
+  def deferred(i, dw):
+    """The unreduced tagged leaves of a group-i dW (placeholders for the others)."""
+    leaves, treedef = jax.tree_util.tree_flatten(dw)
+    flags = rs_fns[i].tag_flags(leaves)
+    return jax.tree_util.tree_unflatten(treedef, [x if f else jnp.zeros((0,), x.dtype) for x, f in zip(leaves, flags)])
+
+  def write(d_acc, i, dw, b, k, which):
+    """Writes the `which` ("tagged" / "untagged") leaves of a group-i reduced dW into row (b, k)."""
+    acc_leaves, treedef = jax.tree_util.tree_flatten(d_acc[i])
+    d_leaves = jax.tree_util.tree_leaves(dw)
+    flags = rs_fns[i].tag_flags(d_leaves)
+    out = [_update_at(a, d, b, k) if (which == "tagged") == f else a for a, d, f in zip(acc_leaves, d_leaves, flags)]
+    return d_acc[:i] + (jax.tree_util.tree_unflatten(treedef, out),) + d_acc[i + 1 :]
+
+  def flush(d_acc, owner, pend):
+    """Reduce-scatters the deferred dW `pend` of sub-layer `owner` = (group, block, sub-layer) into `d_acc`."""
+    i, b, k = owner
+    return write(d_acc, i, rs_fns[i](pend, "tagged"), b, k, "tagged")
+
+  def boundary_step(i, k, b, gather_fn, owner):
+    """A single-trip loop for sub-layer k of group i that defers a dW of another structure (or shape).
+
+    Unreduced arrays cannot be sliced, so both deferred dWs ride in the carry: the incoming one
+    (flushed here, passed through) and the outgoing one (a typed placeholder on entry).
+    """
+
+    def step(carry, xs_step):
+      g, w, d_acc, pend, _ = carry
+      y_k, saved_k, layer_state, p_prev = xs_step
+      d_acc = flush(d_acc, owner, pend)  # RS(j+1) || bwd(j).
+      w_prev = gather_fn(p_prev)  # AG(j-1) || bwd(j).
+      g, dw = bwd(i, y_k, w, layer_state, g, saved_k)
+      d_acc = write(d_acc, i, dw, b, k, "untagged")
+      return (g, w, d_acc, pend, deferred(i, dw)), w_prev
+
+    return step
+
+  pending_avals = {}
+
+  def pending_zeros(i):
+    """Zeros typed like a group-i deferred dW (traced once from block 0's first group-i sub-layer)."""
+    if i not in pending_avals:
+
+      def first_dw(g):
+        y0, saved0, state0 = (jax.tree.map(lambda x: x[0, 0], t) for t in (ys[i], saved[i], state[i]))
+        w0 = gather[i](jax.tree.map(lambda x: x[0, 0], params[i]))
+        _, dw = layer_vjp_fns[i](y0, w0, state0, g, saved0, layout_fns[i](y0, w0, state0))
+        return deferred(i, rs_fns[i](dw, "untagged"))
+
+      pending_avals[i] = jax.eval_shape(first_dw, g)
+    return jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype, out_sharding=s.sharding), pending_avals[i])
+
+  def body(carry, xs):
+    g, w, d_acc, pend = carry  # `w`: this block's gathered last sub-layer; `pend`: next block's sub-layer 0.
+    b, b_ys, b_saved, b_state, b_params = xs  # Group i's leaves are `[sizes[i], ...]`.
+    owner = (0, (b + 1) % length, 0)
+    for i in reversed(range(num_groups)):
+      n = sizes[i]
+      if i > 0:
+        prv_last, gather_prv = fsdp_prefetch._slice_at(b_params[i - 1], sizes[i - 1] - 1), gather[i - 1]
+      else:
+        # Block 0 prefetches the last block's last sub-layer, which is unused (see the forward pass).
+        prv_last = fsdp_prefetch._slice_at(_index_at(params[-1], (b - 1) % length), sizes[-1] - 1)
+        gather_prv = gather[-1]
+
+      def run_boundary(carry, k, p_prev, gather_fn, owner, pend, i=i):
+        # The sub-layer's inputs ride in xs, so XLA cannot hoist its recompute as a loop invariant.
+        xs_step = fsdp_prefetch._expand0(
+            tuple(fsdp_prefetch._slice_at(t, k) for t in (b_ys[i], b_saved[i], b_state[i])) + (p_prev,)
+        )
+        g, w, d_acc = carry
+        carry = (g, w, d_acc, pend, pending_zeros(i))
+        (g, _, d_acc, _, new_pend), w_prev = _sublayer_scan(boundary_step(i, k, b, gather_fn, owner), carry, xs_step)
+        return (g, fsdp_prefetch._slice_at(w_prev, 0), d_acc), new_pend
+
+      # Entry step (sub-layer n-1): prefetches sub-layer n-2, or the previous group's last one if n == 1.
+      if n >= 2:
+        entry_prev, entry_gather = fsdp_prefetch._slice_at(b_params[i], n - 2), gather[i]
+      else:
+        entry_prev, entry_gather = prv_last, gather_prv
+      (g, w, d_acc), pend = run_boundary((g, w, d_acc), n - 1, entry_prev, entry_gather, owner, pend)
+      owner = (i, b, n - 1)
+
+      if n >= 3:
+        # Same-group steps k = n-2 .. 1, unrolled by 2 with >= 2 of them (see the plain backward pass).
+        ordered = n - 2 >= 2
+
+        def same_group(carry, k, i=i, p=b_params[i], s=b_state[i], y_=b_ys[i], sv=b_saved[i], ordered=ordered):
+          g, w, d_acc, pend = carry
+          p_prev, y_k, saved_k = _index_at(p, k - 1), _index_at(y_, k), _index_at(sv, k)
+          if ordered:
+            # In the 2nd unrolled step, waits for the 1st step's g (barrier-tied to its dW) so
+            # W(j+1) and dW(j+1) are dead before AG(j-1) and recompute(j) start.
+            g, y_k, saved_k, p_prev = jax.lax.optimization_barrier((g, y_k, saved_k, p_prev))
+          d_acc = flush(d_acc, (i, b, k + 1), pend)  # RS(j+1) || bwd(j).
+          w_prev = gather[i](p_prev)  # AG(j-1) || bwd(j).
+          g, dw = bwd(i, y_k, w, _index_at(s, k), g, saved_k)
+          if ordered:
+            g, dw = jax.lax.optimization_barrier((g, dw))
+          d_acc = write(d_acc, i, dw, b, k, "untagged")
+          return (g, w_prev, d_acc, deferred(i, dw)), None
+
+        (g, w, d_acc, pend), _ = _sublayer_scan(
+            same_group, (g, w, d_acc, pend), jnp.arange(1, n - 1), reverse=True, unroll=2 if ordered else 1
+        )
+        owner = (i, b, 1)
+
+      if n >= 2:
+        # Exit step (sub-layer 0): prefetches the previous group's last sub-layer.
+        (g, w, d_acc), pend = run_boundary((g, w, d_acc), 0, prv_last, gather_prv, owner, pend)
+        owner = (i, b, 0)
+    return (g, w, d_acc, pend), None
+
+  w = gather[-1](fsdp_prefetch._slice_at(fsdp_prefetch._slice_at(params[-1], length - 1), sizes[-1] - 1))
+  d_acc = tuple(jax.tree.map(jnp.zeros_like, p) for p in params)
+  # The first block step flushes zeros into block 0's sub-layer 0, which the flush below overwrites.
+  pend = pending_zeros(0)
+  xs = (jnp.arange(length), ys, saved, tuple(state), tuple(params))
+  (g, _, d_acc, pend), _ = jax.lax.scan(body, (g, w, d_acc, pend), xs, reverse=True)
+  d_acc = flush(d_acc, (0, 0, 0), pend)  # Block 0's sub-layer 0, the last backward step.
+
+  params_bar_leaves = tuple(tuple(jax.tree_util.tree_leaves(d)) for d in d_acc)
   diff_args_bar_leaves = tuple(jnp.zeros_like(x) for x in d_args)
   diff_kwargs_bar_leaves = tuple(jnp.zeros_like(x) for x in d_kwargs)
   return g, params_bar_leaves, None, diff_args_bar_leaves, diff_kwargs_bar_leaves
@@ -427,11 +597,6 @@ def apply_layers_with_fsdp_prefetch(
   _, _, _, diff_args_leaves, diff_kwargs_leaves, ctx = fsdp_prefetch._prepare_prefetch_call(
       layers, args, kwargs, length=length, mesh=mesh, config=config, remat_policy=remat_policy, prevent_cse=prevent_cse
   )
-  if ctx.defer_grad_reduce_scatter:
-    # The per-sub-layer backward reduce-scatters each gradient within its own step; tagging them without
-    # deferring to the next sub-layer is slower than untagged, so deferral is only supported for homogeneous blocks.
-    max_logging.log("prefetch_fsdp_defer_grad_reduce_scatter is not supported for inhomogeneous blocks yet; ignoring it.")
-    ctx = ctx._replace(defer_grad_reduce_scatter=False)
   # Groups consecutive sub-layers of one structure (e.g. the unstacked `local_layers`), stacked
   # `[length, n, ...]`, so each group can be scanned by sub-layer.
   groups = []  # [graphdef, params_treedef, state_treedef, [params leaves per sub-layer], [state leaves ...]]
