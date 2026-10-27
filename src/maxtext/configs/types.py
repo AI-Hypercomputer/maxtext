@@ -1125,7 +1125,8 @@ class MoEGeneral(BaseModel):
           "What to do when the ragged buffer (ragged_buffer_factor > 0) would drop tokens. None: drop them."
           " 'step': roll the step's update back in-graph and replay the whole train step with a dropless buffer."
           " 'layer': per MoE layer, calculate the overflow from the router's top-k and take a chunked dropless"
-          " branch (lax.cond) for that layer only; no step replay."
+          " branch (lax.cond) for that layer only; no step replay. 'step' requires use_ring_of_experts=True;"
+          " 'layer' also supports the ragged all-to-all path."
       ),
   )
   retry_dropless_first_steps: int = Field(
@@ -4384,7 +4385,7 @@ class MaxTextConfig(
       raise ValueError(f"{prefix} requires num_experts > 1.")
     if self.ragged_buffer_factor <= 0:
       raise ValueError(f"{prefix} requires ragged_buffer_factor > 0.0.")
-    if not self.use_ring_of_experts:
+    if mode == "step" and not self.use_ring_of_experts:
       raise ValueError(f"{prefix} is currently only supported with use_ring_of_experts=True.")
     if not self.use_ragged_sort:
       raise ValueError(f"{prefix} requires use_ragged_sort=True.")
