@@ -25,10 +25,10 @@ from absl.testing import absltest
 import jax
 from jax.sharding import PartitionSpec as P
 from maxtext.configs import pyconfig
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Config
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Sharding
+from maxtext.m3.configs.glm5_3_flash_config import validate_no_packing
 from maxtext.m3.core import sharding as m3_sharding
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Config
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Sharding
-from maxtext.m3.models.glm5_3_flash.glm5_config import validate_no_packing
 import numpy as np
 
 
@@ -67,8 +67,9 @@ class Glm5ConfigTest(absltest.TestCase):
 
   def test_import_glm5_config_does_not_import_tokamax(self):
     cfg_mod = Glm5Config.__module__
-    pkg_mod = cfg_mod.rsplit(".", 1)[0]
-    saved_modules = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith((pkg_mod, "tokamax"))}
+    m3_root = cfg_mod.rsplit(".", 2)[0]
+    pkg_mod = f"{m3_root}.models.glm5_3_flash"
+    saved_modules = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith((cfg_mod, pkg_mod, "tokamax"))}
     try:
       importlib.import_module(cfg_mod)
       importlib.import_module(pkg_mod)

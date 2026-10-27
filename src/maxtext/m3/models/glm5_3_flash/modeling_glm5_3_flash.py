@@ -26,9 +26,9 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.typing import DTypeLike
 from maxtext.m3.core import sharding as m3_sharding
-from maxtext.m3.models.glm5_3_flash import glm5_config
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Config
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Sharding
+from maxtext.m3.configs import glm5_3_flash_config as glm5_config
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Config
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Sharding
 import optax
 from tokamax._src.ops.kda import api as tokamax_kda
 from tokamax._src.ops.kda import pallas_mosaic_tpu as _tokamax_kda_mosaic  # pylint: disable=unused-import  # buildcleaner: keep

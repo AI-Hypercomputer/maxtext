@@ -32,7 +32,7 @@ concerns are applied as post-construction transforms rather than branched on ins
 m3/
   core/      # RoPE, sharding, interfaces, checkpoint, data — only what NNX lacks
   infra/     # remat, scan, quantization, offload — applied after construction
-  configs/   # slim Pydantic config types + base.yml
+  configs/   # slim Pydantic config types, model configs (e.g. glm5_3_flash_config) + base.yml
   models/    # one directory per model family + create_model dispatch
   train/     # m3's own training loop (one of two supported drivers)
 ```

@@ -15,7 +15,7 @@
 """FLOPs calculation per device for GLM-5.3-Flash training."""
 
 from typing import Any
-from maxtext.m3.models.glm5_3_flash import glm5_config
+from maxtext.m3.configs import glm5_3_flash_config as glm5_config
 
 
 def calculate_glm5_3_flash_tflops_per_device(

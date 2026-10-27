@@ -25,8 +25,8 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.m3.configs import glm5_3_flash_config as glm5_config
 from maxtext.m3.models.glm5_3_flash import create_mini_slice
-from maxtext.m3.models.glm5_3_flash import glm5_config
 from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
 import ml_dtypes
 import numpy as np
