@@ -93,14 +93,22 @@ def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
   if not tensors:
     raise ValueError("Cannot stack empty list of tensors.")
   if len(tensors) == 1:
-    return np.expand_dims(tensors[0], axis=axis)
+    t = tensors.pop()
+    return np.expand_dims(t, axis=axis)
   if len(tensors) == 2:
-    return np.stack(tensors, axis=axis)
+    t0, t1 = tensors[0], tensors[1]
+    tensors.clear()
+    return np.stack([t0, t1], axis=axis)
 
   mid = len(tensors) // 2
-  left = _binary_chunked_stack(tensors[:mid], axis=axis)
-  right = _binary_chunked_stack(tensors[mid:], axis=axis)
-  return np.concatenate([left, right], axis=axis)
+  left_list = tensors[:mid]
+  right_list = tensors[mid:]
+  tensors.clear()
+  left = _binary_chunked_stack(left_list, axis=axis)
+  right = _binary_chunked_stack(right_list, axis=axis)
+  res = np.concatenate([left, right], axis=axis)
+  del left, right
+  return res
 
 
 def _build_multi_axis_stacked_tensor(

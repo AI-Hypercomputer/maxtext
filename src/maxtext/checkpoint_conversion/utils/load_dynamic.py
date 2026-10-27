@@ -207,19 +207,58 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   keys_missed = []
   max_logging.log("Starting fast in-memory Distributed Transformations...")
 
+  def _resolve_check_name(k):
+    mt_name = k.replace("params-", "").replace("-", ".")
+    if mt_name in flat_target:
+      return mt_name
+    if f"params.{mt_name}" in flat_target:
+      return f"params.{mt_name}"
+    alt = k.replace("-", ".")
+    if alt in flat_target:
+      return alt
+    return None
+
   for mt_key, hf_source in param_map_mt_to_hf.items():
-    mt_name = mt_key.replace("params-", "").replace("-", ".")
+    if isinstance(mt_key, tuple):
+      check_names = [_resolve_check_name(k) for k in mt_key]
+      if any(ck is None for ck in check_names):
+        keys_missed.extend(k for k, ck in zip(mt_key, check_names) if ck is None)
+        continue
+      base_leaf = flat_target[check_names[0]]
+      comp_shape = (*base_leaf.shape, len(check_names))
+      if hasattr(base_leaf, "sharding") and base_leaf.sharding is not None and hasattr(base_leaf.sharding, "spec"):
+        comp_sharding = jax.sharding.NamedSharding(
+            base_leaf.sharding.mesh,
+            jax.sharding.PartitionSpec(*base_leaf.sharding.spec, None),
+        )
+      else:
+        comp_sharding = getattr(base_leaf, "sharding", None)
+      target_leaf = jax.ShapeDtypeStruct(shape=comp_shape, dtype=base_leaf.dtype, sharding=comp_sharding)
+      hook_fn = hook_fn_map_mt.get(mt_key)
+      load_fn = get_hf_loading_function(
+          hf_source,
+          tensor_getter,
+          hook_fn,
+          target_leaf,
+          maxtext_config,
+          mt_key,
+      )
+      t_layer = time.time()
+      composite_val = load_fn()
+      for idx, ck in enumerate(check_names):
+        leaf_i = flat_target[ck]
+        val_i = composite_val[..., idx]
+        if hasattr(leaf_i, "sharding") and leaf_i.sharding is not None:
+          val_i = jax.device_put(val_i, leaf_i.sharding)
+        flat_restored[ck] = val_i
+      del composite_val
+      max_logging.log(f"Transformed {check_names} from {hf_source} in {time.time() - t_layer:.4f}s")
+      mapped_count += len(check_names)
+      continue
 
-    # Determine the correct key in flat_target
-    check_name = mt_name
-    if check_name not in flat_target:
-      if f"params.{mt_name}" in flat_target:
-        check_name = f"params.{mt_name}"
-      elif mt_key.replace("-", ".") in flat_target:
-        check_name = mt_key.replace("-", ".")
-
-    if check_name not in flat_target:
-      keys_missed.append(mt_name)
+    check_name = _resolve_check_name(mt_key)
+    if check_name is None:
+      keys_missed.append(mt_key.replace("params-", "").replace("-", "."))
       continue
 
     target_leaf = flat_target[check_name]

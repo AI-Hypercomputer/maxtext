@@ -503,8 +503,12 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
       target_tensor = target_tensor.astype(input_tensor.dtype)
       return target_tensor
     else:
-      target_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
-      target_tensor[: input_tensor.shape[0], : input_tensor.shape[1]] = input_tensor
+      pad_width = (
+          (0, max(0, target_shape[0] - input_tensor.shape[0])),
+          (0, max(0, target_shape[1] - input_tensor.shape[1])),
+      )
+      pad_fn = jnp.pad if isinstance(input_tensor, jax.Array) else np.pad
+      target_tensor = pad_fn(input_tensor[: target_shape[0], : target_shape[1]], pad_width)
       target_tensor = target_tensor * normalizer
       target_tensor = target_tensor.astype(input_tensor.dtype)
       return target_tensor
@@ -772,9 +776,9 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
     if saving_to_hf:  # MaxText to HF, truncate
       return input_tensor[:target_vocab_size, :]
     else:  # HF to MaxText, pad
-      padded_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
-      padded_tensor[:source_vocab_size, :] = input_tensor
-      return padded_tensor
+      pad_width = ((0, max(0, target_vocab_size - source_vocab_size)), (0, 0))
+      pad_fn = jnp.pad if isinstance(input_tensor, jax.Array) else np.pad
+      return pad_fn(input_tensor[:target_vocab_size, :], pad_width)
 
   def reshape_kernel(input_tensor, target_shape):
     """Reshapes and transposes kernel weights between MaxText and HF."""
@@ -1281,14 +1285,16 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # 2. HF -> MaxText (Splitting)
       # input_tensor is the massive HF gate_up_proj. Shape: (..., out, in)
       # Split into gate and up along the output dimension (axis=-2 for transposed shape logic)
-      gate, up = np.split(input_tensor, 2, axis=-2)
+      split_fn = jnp.split if isinstance(input_tensor, jax.Array) else np.split
+      stack_fn = jnp.stack if isinstance(input_tensor, jax.Array) else np.stack
+      gate, up = split_fn(input_tensor, 2, axis=-2)
 
       # Swap the last two dimensions
       gate = gate.swapaxes(-1, -2)
       up = up.swapaxes(-1, -2)
 
       # Stack them along a new final dimension so the base conversion script can iterate and split them
-      return np.stack([gate, up], axis=-1)
+      return stack_fn([gate, up], axis=-1)
 
   text_cfg = config.get("text_config", config)
   H_k = text_cfg["linear_num_key_heads"]
@@ -2175,7 +2181,8 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
       wi_0_1 = input_tensor
       wi_0 = wi_0_1[..., ::2]
       wi_1 = wi_0_1[..., 1::2]
-      return np.stack([wi_0, wi_1], axis=-1)
+      stack_fn = jnp.stack if isinstance(input_tensor, jax.Array) else np.stack
+      return stack_fn([wi_0, wi_1], axis=-1)
 
   n_layers = config["num_hidden_layers"]  # hf config
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
@@ -3463,8 +3470,12 @@ def GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
       target_tensor = input_tensor[: target_shape[0], : target_shape[1]]
       target_tensor = target_tensor / normalizer
       return target_tensor.astype(input_tensor.dtype)
-    target_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
-    target_tensor[: input_tensor.shape[0], : input_tensor.shape[1]] = input_tensor
+    pad_width = (
+        (0, max(0, target_shape[0] - input_tensor.shape[0])),
+        (0, max(0, target_shape[1] - input_tensor.shape[1])),
+    )
+    pad_fn = jnp.pad if isinstance(input_tensor, jax.Array) else np.pad
+    target_tensor = pad_fn(input_tensor[: target_shape[0], : target_shape[1]], pad_width)
     target_tensor = target_tensor * normalizer
     return target_tensor.astype(input_tensor.dtype)
 
@@ -3554,8 +3565,12 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
       target_tensor = target_tensor / normalizer
       return target_tensor.astype(input_tensor.dtype)
     else:
-      target_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
-      target_tensor[: input_tensor.shape[0], : input_tensor.shape[1]] = input_tensor
+      pad_width = (
+          (0, max(0, target_shape[0] - input_tensor.shape[0])),
+          (0, max(0, target_shape[1] - input_tensor.shape[1])),
+      )
+      pad_fn = jnp.pad if isinstance(input_tensor, jax.Array) else np.pad
+      target_tensor = pad_fn(input_tensor[: target_shape[0], : target_shape[1]], pad_width)
       target_tensor = target_tensor * normalizer
       return target_tensor.astype(input_tensor.dtype)
 
@@ -3862,9 +3877,9 @@ def OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
     if saving_to_hf:
       return input_tensor[:target_vocab_size, :]
     else:
-      padded_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
-      padded_tensor[:source_vocab_size, :] = input_tensor
-      return padded_tensor
+      pad_width = ((0, max(0, target_vocab_size - source_vocab_size)), (0, 0))
+      pad_fn = jnp.pad if isinstance(input_tensor, jax.Array) else np.pad
+      return pad_fn(input_tensor[:target_vocab_size, :], pad_width)
 
   hooks = {
       "params-token_embedder-embedding": pad_hf_embedding_layer,
