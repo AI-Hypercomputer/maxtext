@@ -1,0 +1,175 @@
+{
+  "repo_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "serializer": "canonical_ast_v2",
+  "vendored_files": {
+    "vision.py": {
+      "release_path": "inference/vision.py",
+      "vendored_path": "tests/utils/deepseek_v41_reference/vision.py",
+      "release_raw_sha256": "5d49edc196a4ef22384abe76d35a40098cbe1e74b586c8f66a2edff4f076b26c",
+      "canonical_ast_sha256": "4dd33456dd2829a692f5350f823eaec9b675a0c118d16d6faabad4267dff6770",
+      "symbols": {
+        "get_vision_cos_sin": "8f9ba8ba18b0da81",
+        "apply_rotary": "1413a28c1eceb621",
+        "RMSNorm": "df86288b8aa040d8",
+        "PatchEmbed": "bfaad4af6903dab5",
+        "Attention": "45fc298906f9a879",
+        "MLP": "989dd4bc46e15c5e",
+        "Block": "e07f3bd761255933",
+        "ViT": "6c2b9cadff1527fd",
+        "Aligner": "5bae249d8938991c"
+      }
+    },
+    "image_processor.py": {
+      "release_path": "inference/image_processor.py",
+      "vendored_path": "tests/utils/deepseek_v41_reference/image_processor.py",
+      "release_raw_sha256": "482759e3bcc4e9bb5ee582b244cc563f5d0e163d8b48dda91ebb7106e62f9272",
+      "canonical_ast_sha256": "4185bc292b08b3f0a18b52cb3ed24076c69e203b925c3dc4da205aa24fba2a67",
+      "symbols": {
+        "ImageInput": "a7ec91652dd7ce7f",
+        "num_image_tokens": "547cbe4d89c4f880",
+        "llm_grid": "e4d9b189485d7510",
+        "solve_resize_ratio": "7763ff0b23d411ac",
+        "safe_resize": "45c0feb9a38c149d",
+        "load_image_bytes": "81a87dc772b3365a",
+        "plan_image_grid": "07bac0b1705d7d29",
+        "load_image": "3afc3bd64807530f",
+        "image_token_types": "d34b009699db8265",
+        "prepare_vl_inputs": "4561ac69d6c56795"
+      }
+    }
+  },
+  "release_originals": {
+    "inference/vision.py": {
+      "raw_sha256": "5d49edc196a4ef22384abe76d35a40098cbe1e74b586c8f66a2edff4f076b26c",
+      "canonical_ast_sha256": "4dd33456dd2829a692f5350f823eaec9b675a0c118d16d6faabad4267dff6770"
+    },
+    "inference/image_processor.py": {
+      "raw_sha256": "482759e3bcc4e9bb5ee582b244cc563f5d0e163d8b48dda91ebb7106e62f9272",
+      "canonical_ast_sha256": "4185bc292b08b3f0a18b52cb3ed24076c69e203b925c3dc4da205aa24fba2a67"
+    },
+    "inference/model.py": {
+      "raw_sha256": "e5decd76fe70fd56ef2f10124d245c6f64fb6a0003cc9068a1d3182a168b8d2d",
+      "canonical_ast_sha256": "148d317cc35450bac5fb20851a483e47609c425ca865f535967c3fc2a9019bc1"
+    },
+    "inference/engram.py": {
+      "raw_sha256": "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897",
+      "canonical_ast_sha256": "087387e47bc6f7f520be0e9a6679a783c870f7f4e4fa67c3a0cacd66c33bf3bf"
+    },
+    "inference/kernel.py": {
+      "raw_sha256": "1236c3507019ed176f5dba5e04bcea58867cf654818c6cf138ed4845398c2455"
+    },
+    "config.json": {
+      "raw_sha256": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879"
+    },
+    "inference/config.json": {
+      "raw_sha256": "2e84f45cf1dac8c7fcbb200e96667d4b913275690668ed496f24c7747207a809"
+    },
+    "model.safetensors.index.json": {
+      "raw_sha256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8"
+    }
+  },
+  "pinned_symbols": {
+    "Gate": {
+      "file": "tests/utils/deepseek_v41_reference/model.py",
+      "release_path": "inference/model.py",
+      "canonical_ast_sha256_prefix16": "9a74299d9aff8263"
+    },
+    "MoE": {
+      "file": "tests/utils/deepseek_v41_reference/model.py",
+      "release_path": "inference/model.py",
+      "canonical_ast_sha256_prefix16": "0e0fa6813ecf42bc"
+    },
+    "Block": {
+      "file": "tests/utils/deepseek_v41_reference/model.py",
+      "release_path": "inference/model.py",
+      "canonical_ast_sha256_prefix16": "7c618afcba2c713f"
+    },
+    "Engram": {
+      "file": "tests/utils/deepseek_v41_reference/model.py",
+      "release_path": "inference/model.py",
+      "canonical_ast_sha256_prefix16": "3dd696780dc19fc2"
+    },
+    "Expert": {
+      "file": "tests/utils/deepseek_v41_reference/model.py",
+      "release_path": "inference/model.py",
+      "canonical_ast_sha256_prefix16": "bee8a4556ae107b2"
+    },
+    "RMSNorm": {
+      "file": "tests/utils/deepseek_v41_reference/model.py",
+      "release_path": "inference/model.py",
+      "canonical_ast_sha256_prefix16": "62d6d3e7abfe2087"
+    },
+    "NgramHashState": {
+      "file": "tests/utils/deepseek_v41_reference/engram.py",
+      "release_path": "inference/engram.py",
+      "canonical_ast_sha256_prefix16": "869586eae376a595"
+    }
+  },
+  "deviations": [
+    {
+      "id": "R1",
+      "summary": "Relative imports in tests/utils/deepseek_v41_reference/multimodal.py",
+      "release_lines": "inference/model.py:11, 21",
+      "reason": "Package layout inside tests/utils/deepseek_v41_reference",
+      "numerics": "none",
+      "how_checked": "Module import in provenance test"
+    },
+    {
+      "id": "R2",
+      "summary": "No @torch.inference_mode() decorator on encode_image or forward",
+      "release_lines": "inference/model.py:1227, 1244",
+      "reason": "Enable autograd parameter and input gradients for parity tests",
+      "numerics": "none",
+      "how_checked": "Forward output with images is bitwise equal to inference-mode run; backward grad=None census"
+    },
+    {
+      "id": "R3",
+      "summary": "full_logits=True support on MultimodalTransformer.forward",
+      "release_lines": "inference/model.py:1272-1275",
+      "reason": "Return full-sequence logits [B, S, vocab] matching text reference model.py:1206",
+      "numerics": "none",
+      "how_checked": "Output shape and bitwise forward equality check in provenance test"
+    },
+    {
+      "id": "R4",
+      "summary": "Base Transformer built with vision_n_layers=0, then per-layer gate.bias_vl and vision/aligner/delimiter parameters attached",
+      "release_lines": "inference/model.py:809, 1219-1225",
+      "reason": "Existing text reference asserts not args.vision_enabled while Gate.forward is AST-identical to release",
+      "numerics": "none",
+      "how_checked": "Parameter shapes/dtypes match release; bias_vl swap changes >=1 image-token top-k expert selection"
+    },
+    {
+      "id": "R5",
+      "summary": "Engram hash ids .clone()d outside inference mode before Engram.forward",
+      "release_lines": "inference/engram.py:159",
+      "reason": "PyTorch F.embedding cannot save inference-mode tensors for backward when engram.embed requires grad",
+      "numerics": "none",
+      "how_checked": "Full-logits backward census with engram layers active and bitwise forward check vs inference mode"
+    },
+    {
+      "id": "R6",
+      "summary": "Float32 and float64 compute modes for CPU parity (including uncast float32/float64 patches in image preprocessing)",
+      "release_lines": "inference/generate.py:118; inference/image_processor.py:127",
+      "reason": "CPU numerical parity in float32 and float64 without bfloat16 truncation",
+      "numerics": "intended",
+      "how_checked": "Component and model tolerance rows T1-T15"
+    },
+    {
+      "id": "R7",
+      "summary": "prepare_vl_inputs and load_image_bytes are not exercised directly",
+      "release_lines": "inference/image_processor.py:140-173",
+      "reason": "prepare_vl_inputs imports standalone encoding module; oracle builds synthetic PIL images through plan_image_grid, pad, normalise, and patchify",
+      "numerics": "none",
+      "how_checked": "Listed in provenance; image_processor AST hash pinned"
+    },
+    {
+      "id": "R8",
+      "summary": "fp64_reference_context() test-scoped mock.patch replacing float32 downcasts with torch.promote_types(x.dtype, torch.float32) and admitting float64 in model.linear",
+      "release_lines": "inference/vision.py:10, 13, 20, 28, 32; tests/utils/deepseek_v41_reference/model.py:202, 312, 339-349",
+      "reason": "Release vision and text reference downcast float64 activations/weights to float32",
+      "numerics": "fp32/bf16 bitwise identical by construction; fp64 upcast-only",
+      "how_checked": "Bitwise equality at fp32 for all 6 patched functions (vision RoPE table, rotary, RMSNorm, Gate, Engram, linear); fp64 RoPE/rotary vs float64 numpy formula <= 1e-12; cache_clear on entry and exit"
+    }
+  ]
+}
