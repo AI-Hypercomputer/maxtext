@@ -3338,6 +3338,14 @@ class Profiling(ProfilingCore):
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
   profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
+  profiler_sync_delay_ms: int = Field(
+      25,
+      description=(
+          "Device-side delay to queue in between starting the profiler and queueing a device-side barrier. "
+          "Set to 0 to disable the delay, and -1 to additionally disable the device-side barrier. "
+          "This makes the first profiled step more representative of steady-state operation."
+      ),
+  )
   profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
   enable_continuous_profiling: bool = Field(False, description="If true, it will support saving profile > 2GB.")

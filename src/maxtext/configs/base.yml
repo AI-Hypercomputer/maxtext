@@ -1152,6 +1152,11 @@ profiler_steps: 5
 hide_profiler_step_metric: false
 enable_continuous_profiling: false # [Experimental] Enables continuous profiling (Allows saving >2GB traces) Requires JAX >= 0.11.2.
 profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
+# Device-side delay to queue in between starting the profiler and queueing a device-side barrier.
+# Set to 0 to disable the delay, and -1 to additionally disable the device-side barrier.
+# This makes the first profiled step more representative of steady-state operation.
+# Needs jax.experimental.multihost_utils.wait_and_sync_devices_async.
+profiler_sync_delay_ms: 25
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
 enable_tpu_profiling_options: false
