@@ -71,7 +71,7 @@ _COMMON = {
 }
 
 _DEEPSEEK = {
-    "model_name": "deepseek2-16b",
+    "model_name": "deepseek3-test",
     "override_model_config": True,
     "num_experts": 4,
     "num_experts_per_tok": 2,

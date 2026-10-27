@@ -210,7 +210,7 @@ def test_param_ckpt_generation_with_cudnn_flash_jax_ar_decode(capsys):
 def test_param_ckpt_generation_with_pre_generated_ckpt(capsys):
   """Tests the parameter-only checkpoint generation and decode flow with a pre-generated Gemma-2b model checkpoint."""
   model_config = [
-      "model_name=gemma-2b",
+      "model_name=qwen3-0.6b",
       f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.gemma')}",
   ]
   run_e2e_test_flow(
