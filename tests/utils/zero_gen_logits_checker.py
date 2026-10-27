@@ -76,9 +76,7 @@ _MULTILINGUAL_TEXT = (
     " von der Konditionszahl der Hesse-Matrix ab. 🚀🔭🌌✨⚡📐🧮🪐"
 )
 
-GOLDEN_BATCH_TEXT: str = (
-    f"{_PROSE_TEXT}\n\n{_CODE_JSON_MATH_TEXT}\n\n{_MULTILINGUAL_TEXT}"
-)
+GOLDEN_BATCH_TEXT: str = f"{_PROSE_TEXT}\n\n{_CODE_JSON_MATH_TEXT}\n\n{_MULTILINGUAL_TEXT}"
 
 GOLDEN_BATCH_SECTIONS: dict[str, str] = {
     "prose": _PROSE_TEXT,
@@ -129,20 +127,14 @@ def _build_batch_arrays(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Builds padded token IDs, segment IDs, and target masks from per-row token lists."""
   if padding_side not in ("right", "left"):
-    raise ValueError(
-        f"padding_side must be 'right' or 'left', got {padding_side!r}."
-    )
+    raise ValueError(f"padding_side must be 'right' or 'left', got {padding_side!r}.")
 
   if valid_lengths is not None:
     if len(valid_lengths) != batch_size:
-      raise ValueError(
-          f"len(valid_lengths)={len(valid_lengths)} != batch_size={batch_size}."
-      )
+      raise ValueError(f"len(valid_lengths)={len(valid_lengths)} != batch_size={batch_size}.")
     for idx, v_len in enumerate(valid_lengths):
       if v_len <= 0 or v_len > seq_len:
-        raise ValueError(
-            f"valid_lengths[{idx}]={v_len} out of range (0, {seq_len}]."
-        )
+        raise ValueError(f"valid_lengths[{idx}]={v_len} out of range (0, {seq_len}].")
 
   tokens = np.full((batch_size, seq_len), pad_token_id, dtype=np.int32)
   decoder_segment_ids = np.zeros((batch_size, seq_len), dtype=np.int32)
@@ -199,10 +191,7 @@ def tokenize_golden_batch(
   if pad_token_id < 0:
     raise ValueError(f"pad_token_id must be non-negative, got {pad_token_id}.")
   if not 0.0 <= target_start_fraction < 1.0:
-    raise ValueError(
-        "target_start_fraction must be in [0.0, 1.0), got"
-        f" {target_start_fraction}."
-    )
+    raise ValueError(f"target_start_fraction must be in [0.0, 1.0), got {target_start_fraction}.")
 
   texts = _normalize_texts(text, batch_size)
   all_token_ids: list[list[int]] = []
@@ -211,9 +200,7 @@ def tokenize_golden_batch(
     enc = tokenizer(row_text, add_special_tokens=False)
     raw_ids = list(enc["input_ids"])
     if not raw_ids:
-      raise ValueError(
-          f"Tokenizer produced empty token list for batch row {b_idx}."
-      )
+      raise ValueError(f"Tokenizer produced empty token list for batch row {b_idx}.")
     all_token_ids.append(raw_ids)
 
   return _build_batch_arrays(
@@ -242,18 +229,13 @@ def synthetic_golden_batch(
   if vocab_size <= 1:
     raise ValueError(f"vocab_size must be greater than 1, got {vocab_size}.")
   if not 0 <= pad_token_id < vocab_size:
-    raise ValueError(
-        f"pad_token_id must be in [0, {vocab_size}), got {pad_token_id}."
-    )
+    raise ValueError(f"pad_token_id must be in [0, {vocab_size}), got {pad_token_id}.")
   if seq_len <= 0:
     raise ValueError(f"seq_len must be positive, got {seq_len}.")
   if batch_size <= 0:
     raise ValueError(f"batch_size must be positive, got {batch_size}.")
   if not 0.0 <= target_start_fraction < 1.0:
-    raise ValueError(
-        "target_start_fraction must be in [0.0, 1.0), got"
-        f" {target_start_fraction}."
-    )
+    raise ValueError(f"target_start_fraction must be in [0.0, 1.0), got {target_start_fraction}.")
 
   texts = _normalize_texts(text, batch_size)
   all_token_ids: list[list[int]] = []
@@ -265,9 +247,7 @@ def synthetic_golden_batch(
     seed = int.from_bytes(seed_bytes[:8], "little")
     rng = np.random.default_rng(seed=seed)
     raw_ids = rng.integers(1, mod + 1, size=needed).tolist()
-    raw_ids = [
-        tid if tid != pad_token_id else ((tid % mod) + 1) for tid in raw_ids
-    ]
+    raw_ids = [tid if tid != pad_token_id else ((tid % mod) + 1) for tid in raw_ids]
     all_token_ids.append(raw_ids)
 
   return _build_batch_arrays(
@@ -302,19 +282,13 @@ def compute_masked_prefill_metrics(
   mask = np.asarray(target_mask, dtype=bool)
 
   if jl.shape != rl.shape:
-    raise ValueError(
-        f"Logits shape mismatch: jax {jl.shape} != ref {rl.shape}."
-    )
+    raise ValueError(f"Logits shape mismatch: jax {jl.shape} != ref {rl.shape}.")
   if jl.shape[:2] != mask.shape:
-    raise ValueError(
-        f"Mask shape mismatch: logits {jl.shape[:2]} != mask {mask.shape}."
-    )
+    raise ValueError(f"Mask shape mismatch: logits {jl.shape[:2]} != mask {mask.shape}.")
 
   num_valid = int(np.sum(mask))
   if num_valid == 0:
-    raise ValueError(
-        "target_mask must contain at least one valid target token."
-    )
+    raise ValueError("target_mask must contain at least one valid target token.")
 
   j_masked = jl[mask]
   r_masked = rl[mask]
@@ -328,9 +302,7 @@ def compute_masked_prefill_metrics(
 
   dots = np.sum(j_masked * r_masked, axis=-1)
   denom = np.where(valid_norm, norm_j * norm_r, 1.0)
-  cos_per_token = np.where(
-      both_zero, 1.0, np.where(either_zero, 0.0, dots / denom)
-  )
+  cos_per_token = np.where(both_zero, 1.0, np.where(either_zero, 0.0, dots / denom))
   mean_cos_sim = float(np.mean(cos_per_token))
 
   max_abs_diff = float(np.max(np.abs(j_masked - r_masked)))
@@ -395,29 +367,19 @@ def evaluate_masked_prefill_parity(
   if ref_expert_indices is None or len(ref_expert_indices) == 0:
     raise ValueError("ref_expert_indices must be a non-empty sequence.")
   if len(jax_expert_indices) != len(ref_expert_indices):
-    raise ValueError(
-        f"Expert layers mismatch: jax {len(jax_expert_indices)} vs ref"
-        f" {len(ref_expert_indices)}."
-    )
+    raise ValueError(f"Expert layers mismatch: jax {len(jax_expert_indices)} vs ref {len(ref_expert_indices)}.")
 
   if jax_dsa_indices is None or len(jax_dsa_indices) == 0:
     raise ValueError("jax_dsa_indices must be a non-empty sequence.")
   if ref_dsa_indices is None or len(ref_dsa_indices) == 0:
     raise ValueError("ref_dsa_indices must be a non-empty sequence.")
   if len(jax_dsa_indices) != len(ref_dsa_indices):
-    raise ValueError(
-        f"DSA layers mismatch: jax {len(jax_dsa_indices)} vs ref"
-        f" {len(ref_dsa_indices)}."
-    )
+    raise ValueError(f"DSA layers mismatch: jax {len(jax_dsa_indices)} vs ref {len(ref_dsa_indices)}.")
 
   if single_row_logits is None:
-    raise ValueError(
-        "single_row_logits must be provided for batch determinism verification."
-    )
+    raise ValueError("single_row_logits must be provided for batch determinism verification.")
 
-  metrics = compute_masked_prefill_metrics(
-      jax_logits, ref_logits, target_mask, targets=targets
-  )
+  metrics = compute_masked_prefill_metrics(jax_logits, ref_logits, target_mask, targets=targets)
 
   def _to_np_arr(x: Any) -> np.ndarray:
     if hasattr(x, "detach"):
@@ -466,9 +428,7 @@ def evaluate_masked_prefill_parity(
       if decoder_segment_ids is not None:
         vis_tokens = np.cumsum(np.asarray(decoder_segment_ids) > 0, axis=-1)
       else:
-        vis_tokens = np.repeat(
-            np.arange(1, jd.shape[1] + 1)[None, :], jd.shape[0], axis=0
-        )
+        vis_tokens = np.repeat(np.arange(1, jd.shape[1] + 1)[None, :], jd.shape[0], axis=0)
       vis_pools = vis_tokens // index_kpool
       dsa_token_mask = (vis_pools > topk_pools).reshape(-1)
       if valid_token_mask is not None:
@@ -487,34 +447,22 @@ def evaluate_masked_prefill_parity(
       total_dsa_matched += int(np.sum(d_match))
       total_dsa_tokens += int(d_match.size)
 
-  dsa_match_rate = (
-      float(total_dsa_matched / total_dsa_tokens)
-      if total_dsa_tokens > 0
-      else float("nan")
-  )
+  dsa_match_rate = float(total_dsa_matched / total_dsa_tokens) if total_dsa_tokens > 0 else float("nan")
 
   j_batched = _to_np_arr(jax_logits)
   batch_size = j_batched.shape[0]
-  if isinstance(single_row_logits, Sequence) and not hasattr(
-      single_row_logits, "shape"
-  ):
+  if isinstance(single_row_logits, Sequence) and not hasattr(single_row_logits, "shape"):
     s_list = [_to_np_arr(x) for x in single_row_logits]
   else:
     s_arr = _to_np_arr(single_row_logits)
     if s_arr.shape[0] == 1 and batch_size > 1:
       s_list = [s_arr[0]]
     else:
-      s_list = [
-          s_arr[b] if s_arr.ndim == 3 else s_arr[b : b + 1]
-          for b in range(s_arr.shape[0])
-      ]
+      s_list = [s_arr[b] if s_arr.ndim == 3 else s_arr[b : b + 1] for b in range(s_arr.shape[0])]
 
   row_diffs: list[float] = []
   if len(s_list) != batch_size:
-    raise ValueError(
-        f"Single-row logits list length ({len(s_list)}) does not match batch"
-        f" size ({batch_size})."
-    )
+    raise ValueError(f"Single-row logits list length ({len(s_list)}) does not match batch size ({batch_size}).")
   for b_idx in range(batch_size):
     jb_row = j_batched[b_idx]
     s_row = s_list[b_idx]
@@ -540,12 +488,8 @@ def evaluate_masked_prefill_parity(
 
   mean_batch_diff = float(np.mean(row_diffs)) if row_diffs else 0.0
 
-  dsa_ok = (
-      (dsa_match_rate >= dsa_match_threshold) if total_dsa_tokens > 0 else True
-  )
-  tier_1a_passed = bool(
-      (expert_match_rate >= expert_match_threshold) and dsa_ok
-  )
+  dsa_ok = (dsa_match_rate >= dsa_match_threshold) if total_dsa_tokens > 0 else True
+  tier_1a_passed = bool((expert_match_rate >= expert_match_threshold) and dsa_ok)
   tier_1b_passed = bool(
       metrics.cos_sim > cos_sim_threshold
       and metrics.l_inf < l_inf_threshold
@@ -553,9 +497,7 @@ def evaluate_masked_prefill_parity(
       and metrics.logit_std > logit_std_min_threshold
   )
   batch_determinism_passed = bool(mean_batch_diff <= batch_diff_threshold)
-  all_passed = bool(
-      tier_1a_passed and tier_1b_passed and batch_determinism_passed
-  )
+  all_passed = bool(tier_1a_passed and tier_1b_passed and batch_determinism_passed)
 
   return {
       "metrics": metrics,

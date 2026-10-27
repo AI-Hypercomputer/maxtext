@@ -1038,6 +1038,29 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   return input_state
 
 
+def reshard_train_state(state, state_mesh_shardings, enable_single_controller: bool):
+  """Reshards a train state to `state_mesh_shardings`.
+
+  Under a single controller (Pathways), `jax.device_put` of a distributed state
+  to a new sharding can stage the data through the controller host (at 3,072 TPU
+  v4 chips the controller RSS grew past 187 GB before compilation). A jitted
+  identity with `out_shardings` performs the same reshard on the accelerators.
+  Multi-controller runs keep `jax.device_put`.
+
+  Args:
+    state: PyTree of train state arrays to reshard.
+    state_mesh_shardings: Target PyTree of `NamedSharding` specs matching
+      `state`.
+    enable_single_controller: Whether Pathways single-controller mode is active.
+
+  Returns:
+    The resharded train state PyTree matching `state_mesh_shardings`.
+  """
+  if enable_single_controller:
+    return jax.jit(lambda s: s, out_shardings=state_mesh_shardings)(state)
+  return jax.device_put(state, state_mesh_shardings)
+
+
 def logical_axis_rules_pp_act_as_dp(logical_rules):
   """Add stage as a physical axes before data for each rule, so stage acts just like data instead of PP.
   This is used when we want to pipeline only a subset of layers, and leave the rest like DP.

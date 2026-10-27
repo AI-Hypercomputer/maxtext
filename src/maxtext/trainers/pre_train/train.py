@@ -1356,7 +1356,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
-      state = jax.device_put(state, state_mesh_shardings)
+      state = sharding.reshard_train_state(state, state_mesh_shardings, config.enable_single_controller)
     if config.enable_diloco:
       # The DiLoCo train step takes (state, batch, rng), like the inner NNX step.
       lower_args = (state, shaped_batch, init_rng)
