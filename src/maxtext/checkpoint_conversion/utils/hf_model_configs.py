@@ -1335,6 +1335,16 @@ deepseek41_flash_dict = {
     "engram_pad_token_id": 2,
     "engram_compressed_vocab_size": 99092,
     "torch_dtype": "bfloat16",
+    "vision_config": {
+        "hidden_size": 1024,
+        "intermediate_size": 2816,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 16,
+        "patch_size": 14,
+        "num_channels": 3,
+        "downsample_ratio": 3,
+        "rope_theta": 10000,
+    },
     "quantization_config": {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
