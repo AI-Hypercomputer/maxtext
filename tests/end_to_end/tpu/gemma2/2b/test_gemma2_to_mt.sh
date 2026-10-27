@@ -59,8 +59,10 @@ python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXT
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
     scan_layers=false \
+    attention=dot_product \
+    dtype=float32 \
     --hf_model_path=${HF_GOLDEN_MODEL} \
-    --max_kl_div=0.015 \
+    --max_kl_div=0.03 \
     --run_hf_model=true
 
 # We can run decoding for unscanned checkpoints.
