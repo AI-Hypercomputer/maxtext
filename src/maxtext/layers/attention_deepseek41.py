@@ -39,6 +39,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from maxtext.common.common_types import Array, Config
+from maxtext.layers import deepseek41_quant
 from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
 from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
@@ -227,6 +228,7 @@ class DeepSeek41Indexer(nnx.Module):
     self.head_dim = config.indexer_head_dim
     self.index_topk = config.indexer_topk
     self.rotary_emb = rotary_embedding
+    self.act_quant = deepseek41_quant.enabled(config)
     common = {
         "dtype": config.dtype,
         "weight_dtype": config.weight_dtype,
@@ -269,16 +271,25 @@ class DeepSeek41Indexer(nnx.Module):
 
   def index_keys(self, latent: Array, block_positions: Array) -> Array:
     """Index keys from the (pre-RoPE) compressed latent: [B, C, head_dim] -> [B, C, index_head_dim]."""
-    k = self.k_norm(self.wk(latent))
-    return self.rotary_emb(k, block_positions, unsqueeze_dim=None)
+    k = self.rotary_emb(self.k_norm(self.wk(latent)), block_positions, unsqueeze_dim=None)
+    return deepseek41_quant.fp4_qdq(k) if self.act_quant else k
 
-  def __call__(self, x: Array, qr: Array, positions: Array, shared: dict) -> tuple[Array, dict]:
+  def __call__(
+      self,
+      x: Array,
+      qr: Array,
+      positions: Array,
+      shared: dict,
+      decoder_segment_ids: Array | None = None,
+  ) -> tuple[Array, dict]:
     """Returns the [B, S, C] bool mask of selected compressed positions, plus shared-state updates."""
     updates = {}
     index_k = shared["index_k"]  # [B, C, Di]
     num_compressed = index_k.shape[1]
-    q = self.wq_b(qr)  # [B, S, Hi, Di]
+    q = self.wq_b(deepseek41_quant.fp8_qdq(qr) if self.act_quant else qr)  # [B, S, Hi, Di]
     q = self.rotary_emb(q, positions, unsqueeze_dim=-2)
+    if self.act_quant:
+      q = deepseek41_quant.fp4_qdq(q)
     weights = self.weights_proj(x).astype(jnp.float32) * (self.head_dim**-0.5 * self.n_heads**-0.5)
     scores = jnp.einsum(
         "bshd,btd->bsht",
@@ -288,8 +299,24 @@ class DeepSeek41Indexer(nnx.Module):
     )
     scores = jnp.sum(jax.nn.relu(scores) * weights[..., None], axis=2)  # [B, S, C]
 
-    compress_lens = compressed_visible_len(positions, self.compress_ratio)  # [B, S]
-    reachable = jnp.arange(num_compressed)[None, None, :] < compress_lens[..., None]
+    ratio = self.compress_ratio
+    if decoder_segment_ids is None:
+      compress_lens = compressed_visible_len(positions, ratio)  # [B, S]
+      reachable = jnp.arange(num_compressed)[None, None, :] < compress_lens[..., None]
+    else:
+      block_start_seg = decoder_segment_ids[:, : num_compressed * ratio : ratio]
+      block_end_seg = decoder_segment_ids[:, ratio - 1 : num_compressed * ratio : ratio]
+      block_end_pos = positions[:, ratio - 1 : num_compressed * ratio : ratio]
+      reachable = (
+          (block_start_seg[:, None, :] == decoder_segment_ids[:, :, None])
+          & (block_end_seg[:, None, :] == decoder_segment_ids[:, :, None])
+          & (decoder_segment_ids[:, :, None] != 0)
+          & (block_end_pos[:, None, :] <= positions[:, :, None])
+      )
+      compress_lens = jnp.max(
+          jnp.where(reachable, jnp.arange(num_compressed)[None, None, :] + 1, 0),
+          axis=-1,
+      )
     scores = jnp.where(reachable, scores, -jnp.inf)
 
     if self.is_candidate_source:
@@ -302,7 +329,11 @@ class DeepSeek41Indexer(nnx.Module):
     k = min(self.index_topk, num_compressed)
     top_idx = jax.lax.top_k(scores, k)[1]
     # Like the reference, a pick is kept iff it is causally reachable.
-    keep = top_idx < compress_lens[..., None]
+    keep = (
+        top_idx < compress_lens[..., None]
+        if decoder_segment_ids is None
+        else jnp.take_along_axis(reachable, top_idx, axis=-1)
+    )
     return _scatter_bool(top_idx, keep, num_compressed), updates
 
 
@@ -337,6 +368,7 @@ class DeepSeek41Attention(nnx.Module):
     self.softmax_scale = self.head_dim**-0.5
     self.o_groups = config.o_groups
     self.o_lora_rank = config.o_lora_rank
+    self.act_quant = deepseek41_quant.enabled(config)
     common = {
         "dtype": config.dtype,
         "weight_dtype": config.weight_dtype,
@@ -431,7 +463,14 @@ class DeepSeek41Attention(nnx.Module):
           rngs=rngs,
       )
 
-  def _compressed_kv(self, x: Array, qr: Array, positions: Array, shared: dict) -> tuple[Array, Array, dict]:
+  def _compressed_kv(
+      self,
+      x: Array,
+      qr: Array,
+      positions: Array,
+      shared: dict,
+      decoder_segment_ids: Array | None = None,
+  ) -> tuple[Array, Array, dict]:
     """Returns (compress_kv [B, C, D], selected-position mask [B, S, C], shared-state updates)."""
     updates = {}
     ratio = self.compress_ratio
@@ -442,30 +481,49 @@ class DeepSeek41Attention(nnx.Module):
       block_positions = positions[:, : num_compressed * ratio : ratio]
       if self.is_index_source:
         updates["index_k"] = self.indexer.index_keys(latent, block_positions)
-      updates["compress_kv"] = self.rotary_embedding(latent, block_positions, unsqueeze_dim=None)
+      compress_kv = self.rotary_embedding(latent, block_positions, unsqueeze_dim=None)
+      if self.act_quant:
+        compress_kv = deepseek41_quant.fp4_qdq(compress_kv, block_size=16, e4m3_scale=True)
+      updates["compress_kv"] = compress_kv
     state = {**shared, **updates}
     if self.is_index_source:
-      topk_mask, index_updates = self.indexer(x, qr, positions, state)
+      topk_mask, index_updates = self.indexer(x, qr, positions, state, decoder_segment_ids=decoder_segment_ids)
       updates.update(index_updates)
       updates["topk_mask"] = topk_mask
       state = {**state, **updates}
     return state["compress_kv"], state["topk_mask"], updates
 
-  def __call__(self, x: Array, positions: Array, shared: dict) -> tuple[Array, dict]:
+  def __call__(
+      self,
+      x: Array,
+      positions: Array,
+      shared: dict,
+      decoder_segment_ids: Array | None = None,
+  ) -> tuple[Array, dict]:
     """x: [B, S, emb]; positions: [B, S] (contiguous from 0). Returns the [B, S, emb] output and the updates this
     layer makes to the shared cross-layer state."""
     b, s, _ = x.shape
-    qr = self.q_norm(self.wq_a(x))
-    q = self.rotary_embedding(self.wq_b(qr), positions, unsqueeze_dim=-2)  # [B, S, H, D]
-    kv = self.rotary_embedding(self.kv_norm(self.wkv(x)), positions, unsqueeze_dim=None)  # [B, S, D]
+    # The reference quantizes the input of every FP8 GEMM and round-trips the window KV through FP8.
+    qd = deepseek41_quant.fp8_qdq if self.act_quant else lambda t: t
+    xq = qd(x)
+    qr = self.q_norm(self.wq_a(xq))
+    q = self.rotary_embedding(self.wq_b(qd(qr)), positions, unsqueeze_dim=-2)  # [B, S, H, D]
+    kv = qd(self.rotary_embedding(self.kv_norm(self.wkv(xq)), positions, unsqueeze_dim=None))  # [B, S, D]
 
     # Sliding window over the raw KV: key j is visible to query i iff 0 <= pos_i - pos_j < window_size.
     delta = positions[:, :, None] - positions[:, None, :]
     mask = (delta >= 0) & (delta < self.window_size)  # [B, S, S]
+    if decoder_segment_ids is not None:
+      same_seg = (decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]) & (
+          decoder_segment_ids[:, :, None] != 0
+      )
+      mask = mask & same_seg
     keys = kv
     updates = {}
     if self.compress_ratio > 0:
-      compress_kv, topk_mask, updates = self._compressed_kv(x, qr, positions, shared)
+      compress_kv, topk_mask, updates = self._compressed_kv(
+          x, qr, positions, shared, decoder_segment_ids=decoder_segment_ids
+      )
       keys = jnp.concatenate([kv, compress_kv.astype(kv.dtype)], axis=1)
       mask = jnp.concatenate([mask, topk_mask], axis=-1)
 
@@ -480,6 +538,6 @@ class DeepSeek41Attention(nnx.Module):
 
     # Undo the query rotation so the output lives in the unrotated value space.
     out = self.rotary_embedding(out, positions, unsqueeze_dim=-2, reverse=True)
-    grouped = out.reshape(b, s, self.o_groups, (self.num_heads * self.head_dim) // self.o_groups)
-    out = self.o_b_proj(self.o_a_proj(grouped).reshape(b, s, -1))
+    grouped = qd(out.reshape(b, s, self.o_groups, (self.num_heads * self.head_dim) // self.o_groups))
+    out = self.o_b_proj(qd(self.o_a_proj(grouped).reshape(b, s, -1)))
     return out, updates

@@ -626,6 +626,7 @@ class MlpBlock(nnx.Module):
       *,
       rngs: nnx.Rngs,
       activations_limit: float | None = None,
+      act_quant_fn: Callable[[Array], Array] | None = None,
   ) -> None:
     """A MlpBlock module.
 
@@ -647,10 +648,13 @@ class MlpBlock(nnx.Module):
       out_sharding: Named sharding of outputs
       activations_limit: If set, DeepSeek SwiGLU clamp on the pre-activations of a 2-activation GLU:
         the gate (index 0) is clipped above at the limit, the linear branch (index 1) to [-limit, limit].
+      act_quant_fn: If set, applied to the inputs of the up projections and of the down projection (activation
+        quantize -> dequantize round trip of a quantized-GEMM model).
     """
     if activations_limit is not None and len(activations) != 2:
       raise ValueError(f"activations_limit requires a 2-activation GLU, got activations={activations}.")
     self.activations_limit = activations_limit
+    self.act_quant_fn = act_quant_fn
     if is_module_unquantized(config, "mlp"):
       weight_dtype = get_weight_dtype(config, "mlp")
       quant = get_quant(config, "mlp", quant)
@@ -805,6 +809,8 @@ class MlpBlock(nnx.Module):
 
     if self.mlp_layer_norm is not None:
       inputs = self.mlp_layer_norm(inputs)
+    if self.act_quant_fn is not None:
+      inputs = self.act_quant_fn(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
@@ -836,6 +842,8 @@ class MlpBlock(nnx.Module):
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    if self.act_quant_fn is not None:
+      x = self.act_quant_fn(x)
     output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")
