@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793062018709,
+  "lastUpdate": 1793076092636,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -58008,6 +58008,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4131.676,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 309,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "gagika",
+            "username": "gagika",
+            "email": "agagik@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "47e588ed5cfa85efd9e37aa9a61c89e25bcdedb9",
+          "message": "Reshard Zero-1 train state on device under Pathways single controller.\n\n# Description\n\nWith `shard_optimizer_over_data=true`, `train.py` reshards the NNX train state to the Zero-1 layout before compiling the train step with `jax.device_put(state, state_mesh_shardings)`. Under Pathways single-controller mode (`enable_single_controller=true`), `jax.device_put` of an already distributed state to a new sharding stages the data through the controller host.\n\nMeasured on Cloud TPU v4 (3,072 chips, `8x8x48`, Pathways single controller):\n\n| Reshard | jax-driver RSS | Outcome |\n| --- | --- | --- |\n| `jax.device_put` | 187 GB after 25 min, TPUs idle | Compile never started; OOM-killed on a 29 GB host |\n| Jitted identity with `out_shardings` | ~1 GB | Reshard runs on device, 2,117 ms/step (34.26% MFU) |\n\nAdd `sharding.reshard_train_state(state, state_mesh_shardings, enable_single_controller)`. Under a single controller it reshards with `jax.jit(lambda s: s, out_shardings=state_mesh_shardings)` so the transfer runs on the accelerators; multi-controller runs keep `jax.device_put` with no behavior change. Call `sharding.reshard_train_state` at the Zero-1 reshard site in `train.py`.\n\nAlso reformat `tests/utils/zero_gen_logits_checker.py` with `pyink` (formatting only, no logic change). It landed with 80-column wrapping, which fails the repo-wide `pre-commit run pyink --all-files` check on every PR.\n\n# Tests\n\n* `pytest tests/unit/sharding_reshard_train_state_test.py` on a 2x2 CPU mesh (4 forced host devices; on TPU the mesh uses the host-aligned 2x2 chips at the slice origin so it also runs under Pathways): verifies single-controller on-device reshard without `jax.device_put`, multi-controller `jax.device_put` preservation, nested PyTrees and `flax.nnx.State` across mixed dtypes, and idempotence.\n* End-to-end 3,072-chip Cloud TPU v4 (`8x8x48`) Pathways training with `shard_optimizer_over_data=true`: driver RSS stayed at ~1 GB and steps ran at 2,117 ms/step.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1007791894",
+          "timestamp": "2026-10-27T04:32:49Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/47e588ed5cfa85efd9e37aa9a61c89e25bcdedb9"
+        },
+        "date": 1793076091880,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 304.01300000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 104.803,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2026.353,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 97.903,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 154.87699999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4467.793,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 309,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 198.147,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4107.152999999999,
             "unit": "sec"
           },
           {
