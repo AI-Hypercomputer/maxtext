@@ -55,7 +55,12 @@ class CompressedTokenizer:
   def __init__(self, tokenizer: HFTokenizer):
     normalizer = self._build_normalizer()
     self.lookup_table_np, self.num_new_token = self._build_lookup_table(tokenizer, normalizer)
-    self.lookup_table = jnp.array(self.lookup_table_np, dtype=jnp.int32)
+
+  @property
+  def lookup_table(self) -> Array:
+    # Converted on use, not stored: the model can be constructed under a JAX trace (e.g. the jitted
+    # `initialize_state`), where a stored jax array would be a tracer that leaks into later traces.
+    return jnp.asarray(self.lookup_table_np, dtype=jnp.int32)
 
   def __len__(self) -> int:
     return self.num_new_token
@@ -187,9 +192,9 @@ class NgramHashMapping:
     self.pad_id = int(self.compressed_tokenizer.lookup_table_np[pad_id])
 
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
-    # Store as JAX arrays
+    # Store as numpy arrays, not JAX arrays (see `CompressedTokenizer.lookup_table`)
     self.layer_multipliers = {
-        k: jnp.array(v, dtype=jnp.int32) for k, v in self._calculate_multipliers_across_layers(seed).items()
+        k: np.asarray(v, dtype=np.int32) for k, v in self._calculate_multipliers_across_layers(seed).items()
     }
 
     # Pre-calculate unique prime vocab sizes for every head
