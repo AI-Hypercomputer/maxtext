@@ -16,8 +16,10 @@
 """
 RL Evaluation Module.
 """
+
 import collections
 import json
+import math
 import re
 from typing import Any, Callable, Optional
 
@@ -199,9 +201,10 @@ def _compute_row_reward(reward_fns, prompt, question, responses, answer, row_idx
   whole dataset row to each reward fn; we mirror the kwargs the trainer
   passes so eval-time and train-time reward calls are interchangeable.
 
-  Returns a tuple `(score_sum, n_responses)`. On any exception the
-  failure is logged and `(0.0, 0)` is returned so the caller's running
-  mean is not corrupted.
+  Each reward function must return exactly one finite score for the
+  single completion passed to it. Returns a tuple `(score_sum, n_responses)`.
+  On an invalid score or any exception, the failure is logged and the entire
+  row is excluded with `(0.0, 0)` so the caller's running mean is not corrupted.
   """
   if not responses:
     return 0.0, 0
@@ -210,8 +213,12 @@ def _compute_row_reward(reward_fns, prompt, question, responses, answer, row_idx
     for resp in responses:
       for fn in reward_fns:
         scores = fn(prompts=[prompt], completions=[resp], answer=[answer], question=question)
-        if scores:
-          score_sum += float(scores[0])
+        if len(scores) != 1:
+          raise ValueError(f"Expected one reward score for one completion, got {len(scores)}.")
+        score = float(scores[0])
+        if not math.isfinite(score):
+          raise ValueError(f"Expected a finite reward score, got {score}.")
+        score_sum += score
     return score_sum, len(responses)
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.log(f"[eval-reward] reward_fn failed on row {row_idx}: {e!r}")
@@ -226,6 +233,7 @@ def evaluate(
     corr_lst=False,
     make_lst=False,
     reward_fns: Optional[list[Callable[..., Any]]] = None,
+    metrics: Optional[dict[str, int]] = None,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -245,6 +253,8 @@ def evaluate(
           score is the SUM across all reward functions (matching tunix's GRPO
           aggregation), and the per-example mean is returned as `mean_reward`.
           When None or empty, `mean_reward` is 0.0.
+      metrics: Optional output dictionary for actual sample and reward-scoring
+          counts. The return value remains backward compatible.
 
   Returns:
       Tuple (corr, total, accuracy, partial_accuracy, format_accuracy,
@@ -258,6 +268,7 @@ def evaluate(
   reward_sum = 0.0
   reward_count = 0  # number of (prompt, sampled response) pairs scored
   use_reward = bool(reward_fns)
+  sample_count = 0
 
   for batch in tqdm(dataset):
     answers = batch["answer"]
@@ -274,6 +285,7 @@ def evaluate(
 
     # Score each question-answer pair
     for question, responses, answer, prompt in zip(questions, multiple_call_responses, answers, prompts):
+      sample_count += len(responses)
       # decode the json-encoded list of acceptable answers
       answer_list = list(dict.fromkeys(json.loads(answer)))
       is_correct, is_partially_correct, has_correct_format = score_responses(
@@ -326,4 +338,6 @@ def evaluate(
       reward_sum / reward_count if (use_reward and reward_count > 0) else 0.0,
   )
 
+  if metrics is not None:
+    metrics.update(num_samples=sample_count, num_reward_samples=reward_count)
   return to_return, response_lst
