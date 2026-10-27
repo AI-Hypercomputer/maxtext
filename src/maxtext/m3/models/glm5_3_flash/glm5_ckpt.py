@@ -27,8 +27,6 @@ import jax
 import jax.numpy as jnp
 from maxtext.m3.models.glm5_3_flash import create_mini_slice
 from maxtext.m3.models.glm5_3_flash import glm5_config
-from maxtext.m3.models.glm5_3_flash import glm5_moe
-from maxtext.m3.models.glm5_3_flash import glm5_scan
 from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
 import ml_dtypes
 import numpy as np
@@ -291,7 +289,9 @@ def iter_conversion_specs(
     raise ValueError("config.layer_types must not be None.")
 
   for l in range(config.num_hidden_layers):
-    sec, b_idx, s_idx = glm5_scan.layer_to_block_slot(l, config.first_k_dense_replace, config.num_hidden_layers)
+    sec, b_idx, s_idx = modeling_glm5_3_flash.layer_to_block_slot(
+        l, config.first_k_dense_replace, config.num_hidden_layers
+    )
     is_stacked = sec == "super_block"
     stack_idx = b_idx if is_stacked else None
     num_sbs = num_sb if is_stacked else None
@@ -516,7 +516,10 @@ def load_hf_state_into_model(
       sl = getattr(model.super_block, f"slot_{s}")
       for v in jax.tree.leaves(nnx.state(sl), is_leaf=_is_var):
         sb_leaves.add(id(v))
-  for p in jax.tree.leaves(nnx.state(model, (nnx.Param, glm5_moe.Glm5RouterBias)), is_leaf=_is_var):
+  for p in jax.tree.leaves(
+      nnx.state(model, (nnx.Param, modeling_glm5_3_flash.Glm5RouterBias)),
+      is_leaf=_is_var,
+  ):
     if isinstance(p, nnx.Variable):
       for b in range(num_sb) if id(p) in sb_leaves else (0,):
         if (id(p), b) not in assigned_slots:

@@ -35,7 +35,8 @@ def calculate_glm5_3_flash_tflops_per_device(
   Note on DSA Attention & Indexer FLOPs:
   - When use_indexer=True and seq_len > index_topk, glm5_flops models
     theoretical sparse DSA attention FLOPs (multiplier = ratio - 0.5 * ratio^2),
-    whereas the current dense_mask reference implementation in glm5_dsa_mla.py
+    whereas the current dense_mask reference implementation in
+    modeling_glm5_3_flash.py
     materializes dense S x S attention scores before applying the top-k mask.
   - The frozen DSA indexer (stop_gradient in JAX and @torch.no_grad() in HF)
     has no backward pass and is counted at 1.0x (forward-only) rather than 3.0x.

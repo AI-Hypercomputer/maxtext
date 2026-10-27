@@ -19,8 +19,6 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from maxtext.m3.models.glm5_3_flash import glm5_loss
-from maxtext.m3.models.glm5_3_flash import glm5_moe
 from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
 from maxtext.training_engine import abstract_engine
 import optax
@@ -37,7 +35,7 @@ _GLM5_LOSS_BATCH_KEYS = (
 
 def _is_router_bias(v: Any) -> bool:
   """Returns True if the variable is a Glm5RouterBias."""
-  return isinstance(v, glm5_moe.Glm5RouterBias)
+  return isinstance(v, modeling_glm5_3_flash.Glm5RouterBias)
 
 
 def _get_param_label(path: tuple[Any, ...], v: Any) -> str:
@@ -62,7 +60,7 @@ def glm5_engine_loss_fn(
   """Engine loss function adapter conforming to MaxTextTrainingEngine signature."""
   del config, dropout_rng, params
   filtered_batch = {k: data[k] for k in _GLM5_LOSS_BATCH_KEYS if k in data}
-  total_loss, aux = glm5_loss.glm5_loss_fn(model, is_train=is_train, **filtered_batch)
+  total_loss, aux = modeling_glm5_3_flash.glm5_loss_fn(model, is_train=is_train, **filtered_batch)
   return (
       abstract_engine.WeightedMetric(
           unreduced_sum=(total_loss * aux["total_weights"]).astype(jnp.float32),
@@ -74,7 +72,7 @@ def glm5_engine_loss_fn(
 
 def create_glm5_frozen_mask(params: Any) -> Any:
   """Returns a boolean PyTree where True marks frozen parameters (indexer and router bias)."""
-  return jax.tree_util.tree_map(lambda is_train: not is_train, glm5_loss.trainable_mask(params))
+  return jax.tree_util.tree_map(lambda is_train: not is_train, modeling_glm5_3_flash.trainable_mask(params))
 
 
 def create_glm5_optimizer(
@@ -183,7 +181,7 @@ def train_step(
   def loss_fn(
       mod: modeling_glm5_3_flash.Glm5Model,
   ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    return glm5_loss.compute_glm5_loss(
+    return modeling_glm5_3_flash.compute_glm5_loss(
         model=mod,
         tokens=tokens,
         decoder_target_tokens=decoder_target_tokens,
