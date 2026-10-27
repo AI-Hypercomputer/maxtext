@@ -84,6 +84,17 @@ _TE_MOE_CHECKPOINT_NAMES = {
 }
 
 
+def _reduced_axes(w) -> frozenset:
+  """Mesh axes a weight is typed `reduced` over (all-gathered by fsdp_prefetch); empty for non-JAX values.
+
+  Expert kernels may be quantized containers (e.g. qwix QArrays) rather than arrays, which have no such type.
+  """
+  if not isinstance(w, jax.Array):  # Includes tracers.
+    return frozenset()
+  spec = getattr(getattr(jax.typeof(w), "sharding", None), "spec", None)
+  return frozenset(spec.reduced) if spec is not None else frozenset()
+
+
 def _get_te_moe_checkpoint_kwargs(moe_fn) -> dict[str, str]:
   """Return supported TE MoE output remat names."""
   parameters = inspect.signature(moe_fn).parameters
@@ -2751,6 +2762,7 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -3816,13 +3828,22 @@ class RoutedMoE(nnx.Module):
     # mesh axes, so it is threaded down as an argument instead of read off the module.
     per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
 
+    def keep_reduced(pspec, w):
+      # Weights all-gathered by fsdp_prefetch arrive typed `reduced` over the FSDP axes; shard_map requires
+      # in_specs to match, and keeping the type makes their gradient leave the shard_map `unreduced`, so the
+      # FSDP reduce-scatter happens once outside it instead of an all-reduce here.
+      reduced = _reduced_axes(w)
+      if pspec is None or not reduced or not isinstance(pspec, P):
+        return pspec
+      return P(*pspec, unreduced=pspec.unreduced, reduced=reduced, unreduced_kind=pspec.unreduced_kind)
+
     in_specs = (
         input_partition_pspec,
         gate_logits_pspec,
         pre_bias_logits_pspec,
-        w0_pspec,
-        w1_pspec,
-        wo_pspec,
+        keep_reduced(w0_pspec, w0_kernel),
+        keep_reduced(w1_pspec, w1_kernel),
+        keep_reduced(wo_pspec, wo_kernel),
         w0_bias_pspec,
         w1_bias_pspec,
         wo_bias_pspec,
@@ -3836,7 +3857,13 @@ class RoutedMoE(nnx.Module):
         P() if per_expert_scale is not None else None,
     )
     # Not every mesh axis: shard_map rejects axes an enclosing vmap mapped away ("stage", "diloco").
-    input_mesh_axes = {axis for spec in in_specs if spec is not None for dim in spec for axis in mesh_axes_for_dim(dim)}
+    input_mesh_axes = {
+        axis
+        for spec in in_specs
+        if spec is not None
+        for dim in (spec.partitions if isinstance(spec, P) else spec)
+        for axis in mesh_axes_for_dim(dim)
+    }
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
 
     @functools.partial(
@@ -4113,13 +4140,21 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
-    if jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype) and self.config.scan_layers:
+    if (
+        jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype)
+        and self.config.scan_layers
+        and not getattr(self.config, "prefetch_fsdp_weights", False)
+    ):
       # Without this, XLA rewrites all_gather(dynamic_slice(w)) into dynamic_slice(all_gather(w)) and hoists the
       # gather out of the scanned decoder, keeping every layer's experts live; the dtype cast normally blocks that.
+      # Skipped with prefetch_fsdp_weights: the weights arrive already gathered, and the barrier's transpose would
+      # sit between the dW all-reduce and its FSDP dynamic-slice, blocking their fusion into a reduce-scatter.
       w0_kernel, w1_kernel, wo_kernel = jax.lax.optimization_barrier((w0_kernel, w1_kernel, wo_kernel))
-    w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
-    w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
-    wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
+
+    # Weights already all-gathered (typed `reduced`) by fsdp_prefetch skip the reshard, which would drop the type.
+    w0_kernel = w0_kernel if _reduced_axes(w0_kernel) else _fsdp_all_gather(w0_kernel, w0_pspec)
+    w1_kernel = w1_kernel if _reduced_axes(w1_kernel) else _fsdp_all_gather(w1_kernel, w1_pspec)
+    wo_kernel = wo_kernel if _reduced_axes(wo_kernel) else _fsdp_all_gather(wo_kernel, wo_pspec)
     if w0_bias is not None:
       w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:

@@ -2127,6 +2127,18 @@ class LayoutAndSharding(BaseModel):
           " FSDP mesh axis spans more than one device. See docs/guides/optimization/fsdp_prefetch.md."
       ),
   )
+  prefetch_fsdp_defer_grad_reduce_scatter: bool = Field(
+      False,
+      description=(
+          "With prefetch_fsdp_weights and shard_mode=explicit, issue each layer's weight-gradient"
+          " reduce-scatters at the start of the next layer's backward step, tagged for XLA's FSDP scheduler,"
+          " which runs them on the SparseCore dedicated to FSDP collectives"
+          " (--xla_tpu_explicit_fsdp_dedicated_sparse_core_id) and overlaps them with that layer's backward."
+          " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they run untagged"
+          " on the other SparseCore and complete within their own layer's backward step. Not yet supported"
+          " (ignored) for inhomogeneous blocks prefetched per sub-layer."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):

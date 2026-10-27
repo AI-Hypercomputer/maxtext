@@ -142,8 +142,9 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
     out, gathers = self._lower_gather(mesh, PartitionSpec("fsdp", "tensor"), (8, 6))
     self.assertEqual(out.shape, (8, 6))
-    self.assertNotIn("fsdp", str(out.sharding.spec))
-    self.assertIn("tensor", str(out.sharding.spec))  # Non-FSDP axes stay sharded.
+    self.assertEqual(tuple(out.sharding.spec.partitions), (None, "tensor"))  # Non-FSDP axes stay sharded.
+    # Typed `reduced` over the gathered axis, so its gradient is unreduced and reduced once by the tagged RS.
+    self.assertEqual(out.sharding.spec.reduced, frozenset({"fsdp"}))
     self.assertEqual(len(gathers), 1)
     # One all-gather over the 4-way 'fsdp' axis of dim 0; the 2-way 'tensor' shard of dim 1 is kept.
     self.assertIn("all_gather_dim = 0", gathers[0])
@@ -157,7 +158,8 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     mesh = _abstract_mesh((2, 2, 2), ("tensor", "fsdp", "fsdp_transpose"))
     out, gathers = self._lower_gather(mesh, PartitionSpec(None, ("tensor", "fsdp", "fsdp_transpose")), (3, 16))
     self.assertEqual(out.shape, (3, 16))
-    self.assertNotIn("fsdp", str(out.sharding.spec))
+    self.assertEqual(tuple(out.sharding.spec.partitions), (None, "tensor"))
+    self.assertEqual(out.sharding.spec.reduced, frozenset({"fsdp", "fsdp_transpose"}))
     self.assertEqual(len(gathers), 1)
     self.assertIn("all_gather_dim = 1", gathers[0])
     self.assertIn('name = "fsdp"', gathers[0])
@@ -170,7 +172,7 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     # Non-routed weights (attention, dense MLP, shared experts) are sharded over ('fsdp', 'expert').
     out, gathers = self._lower_gather(mesh, PartitionSpec(("fsdp", "expert"), None), (16, 6))
     self.assertEqual(out.shape, (16, 6))
-    self.assertEqual(tuple(out.sharding.spec), (None, None))
+    self.assertEqual(tuple(out.sharding.spec.partitions), (None, None))
     self.assertEqual(len(gathers), 1)
     self.assertIn("all_gather_dim = 0", gathers[0])
     self.assertIn('name = "fsdp"', gathers[0])
@@ -183,7 +185,7 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     # MoE routed expert weights have 'expert' on dim 0 and 'fsdp' on dim 1; only 'fsdp' is gathered.
     out, gathers = self._lower_gather(mesh, PartitionSpec("expert", "fsdp", None), (4, 16, 6))
     self.assertEqual(out.shape, (4, 16, 6))
-    self.assertEqual(tuple(out.sharding.spec), ("expert", None, None))
+    self.assertEqual(tuple(out.sharding.spec.partitions), ("expert", None, None))
     self.assertEqual(len(gathers), 1)
     self.assertIn("all_gather_dim = 1", gathers[0])
     self.assertIn('name = "fsdp"', gathers[0])
@@ -196,7 +198,7 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     # Compound ('expert', 'fsdp') on the expert dim (e.g. moe_flat_fsdp_weights) keeps 'expert' sharded.
     out, gathers = self._lower_gather(mesh, PartitionSpec(("expert", "fsdp"), None), (16, 6))
     self.assertEqual(out.shape, (16, 6))
-    self.assertEqual(tuple(out.sharding.spec), ("expert", None))
+    self.assertEqual(tuple(out.sharding.spec.partitions), ("expert", None))
     self.assertEqual(len(gathers), 1)
     self.assertIn("all_gather_dim = 0", gathers[0])
     self.assertIn('name = "fsdp"', gathers[0])
@@ -218,6 +220,132 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     with mock.patch.object(fsdp_prefetch.jax, "typeof", return_value=types.SimpleNamespace(sharding=None)):
       self.assertIs(fsdp_prefetch._apply_sharding_hint(leaf, mesh, ShardMode.EXPLICIT), leaf)  # pylint: disable=protected-access
       self.assertIsNone(fsdp_prefetch._per_layer_sharding(leaf, mesh))  # pylint: disable=protected-access
+
+
+class FsdpPrefetchReduceScatterTest(unittest.TestCase):
+  """Lowers the tagged dW reduce-scatter against abstract multi-device meshes (no devices needed)."""
+
+  def _lower_scatter(self, mesh, src_spec, shape, unreduced=True):
+    """Returns (output ShapeDtypeStruct, reduce_scatter StableHLO lines) for a gradient of a `src_spec` weight.
+
+    With `unreduced`, the gradient is typed as the partial sums of a `reduced` gathered weight.
+    """
+    gathered = sharding.remove_fsdp_from_sharding(NamedSharding(mesh, src_spec)).spec
+    fsdp_axes = frozenset(a for a in mesh.axis_names if a.startswith("fsdp") and mesh.shape[a] > 1)
+    g_spec = PartitionSpec(*gathered, unreduced=fsdp_axes) if unreduced else gathered
+    g = jax.ShapeDtypeStruct(shape, jnp.float32, sharding=NamedSharding(mesh, g_spec))
+
+    def scatter(x):
+      out = fsdp_prefetch._explicit_fsdp_reduce_scatter(x, mesh, src_spec, gathered)  # pylint: disable=protected-access
+      return x if out is None else out
+
+    with jax.sharding.use_abstract_mesh(mesh):
+      out = jax.eval_shape(scatter, g)
+      hlo = jax.jit(scatter).trace(g).lower(lowering_platforms=("tpu",)).as_text().splitlines()
+    # A reduce_scatter op spans its reduction region; its attributes are on the line closing it (`}) {...}`).
+    ops = []
+    for i, line in enumerate(hlo):
+      if "stablehlo.reduce_scatter" in line:
+        end = next(j for j in range(i, len(hlo)) if hlo[j].lstrip().startswith("})"))
+        ops.append(" ".join(hlo[i : end + 1]))
+    return out, ops
+
+  def test_scatters_fsdp_axis_with_tagged_reduce_scatter(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
+    out, scatters = self._lower_scatter(mesh, PartitionSpec("fsdp", "tensor"), (8, 6))
+    self.assertEqual(out.shape, (8, 6))
+    self.assertEqual(tuple(out.sharding.spec.partitions), ("fsdp", "tensor"))
+    self.assertEqual(out.sharding.spec.unreduced, frozenset())
+    self.assertEqual(len(scatters), 1)
+    self.assertIn("scatter_dimension = 0", scatters[0])
+    self.assertIn('xla_explicit_fsdp = "yes"', scatters[0])
+    self.assertIn("(tensor<8x3xf32>) -> tensor<2x3xf32>", scatters[0])
+
+  def test_flat_expert_weight_scatters_only_fsdp_of_compound_dim(self):
+    mesh = _abstract_mesh((2, 4), ("expert", "fsdp"))
+    # moe_flat_fsdp_weights: dim 0 is sharded over ('expert', 'fsdp'); only 'fsdp' is reduce-scattered.
+    out, scatters = self._lower_scatter(mesh, PartitionSpec(("expert", "fsdp"), None), (16, 6))
+    self.assertEqual(tuple(out.sharding.spec.partitions), (("expert", "fsdp"), None))
+    self.assertEqual(len(scatters), 1)
+    self.assertIn("scatter_dimension = 0", scatters[0])
+    self.assertIn("(tensor<8x6xf32>) -> tensor<2x6xf32>", scatters[0])
+    self.assertIn('xla_explicit_fsdp = "yes"', scatters[0])
+
+  def test_already_reduced_gradient_falls_back_to_resharding(self):
+    """A summed (not unreduced) gradient must not be reduce-scattered again: that would scale it by the FSDP size."""
+    mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
+    gathered = PartitionSpec(None, "tensor")
+    g = jax.ShapeDtypeStruct((8, 6), jnp.float32, sharding=NamedSharding(mesh, gathered))
+    with jax.sharding.use_abstract_mesh(mesh):
+      out = jax.eval_shape(
+          lambda x: fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+              x, mesh, PartitionSpec("fsdp", "tensor"), gathered
+          ),
+          g,
+      )
+    self.assertIsNone(out)
+
+  def test_two_scattered_dims_fall_back_to_resharding(self):
+    mesh = _abstract_mesh((2, 2), ("fsdp", "fsdp_transpose"))
+    out = fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+        jnp.ones((4, 4)), mesh, PartitionSpec("fsdp", "fsdp_transpose"), PartitionSpec(None, None)
+    )
+    self.assertIsNone(out)
+
+
+class FsdpPrefetchReducedGradTest(unittest.TestCase):
+  """Gather -> layer -> tagged reduce-scatter on CPU devices: the FSDP reduction happens exactly once."""
+
+  def test_gradient_matches_reference_with_single_tagged_reduce_scatter(self):
+    n = jax.device_count()
+    if n < 2:
+      self.skipTest("Needs at least 2 devices.")
+    mesh = jax.make_mesh((2,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:2])
+    src, gathered = PartitionSpec("fsdp", None), PartitionSpec(None, None)
+    rng = np.random.default_rng(0)
+    x_np, wd_np, wm_np = (rng.standard_normal(s).astype(np.float32) for s in ((4, 8), (8, 6), (8, 6)))
+
+    def layer_loss(x, wd, wm):
+      # A dense consumer and a nested shard_map consumer (like the MoE block) of the gathered weights.
+      wm_spec = PartitionSpec(None, None, reduced=jax.typeof(wm).sharding.spec.reduced)
+      m = jax.shard_map(
+          lambda xs, w: jnp.tanh(xs @ w),
+          mesh=mesh,
+          in_specs=(PartitionSpec("fsdp", None), wm_spec),
+          out_specs=PartitionSpec("fsdp", None),
+      )(x, wm)
+      return jnp.sin(jnp.einsum("bd,df->bf", x, wd, out_sharding=PartitionSpec("fsdp", None))).sum() + (m * m).sum()
+
+    def prefetch_grads(x, wd, wm):
+      gathered_w = [fsdp_prefetch._apply_sharding_hint(w, mesh, ShardMode.EXPLICIT) for w in (wd, wm)]  # pylint: disable=protected-access
+      for w in gathered_w:
+        self.assertEqual(jax.typeof(w).sharding.spec.reduced, frozenset({"fsdp"}))
+      _, vjp = jax.vjp(lambda a, b: layer_loss(x, a, b), *gathered_w)
+      grads = vjp(jnp.ones((), jnp.float32))
+      for g in grads:
+        self.assertEqual(jax.typeof(g).sharding.spec.unreduced, frozenset({"fsdp"}))
+      return tuple(fsdp_prefetch._explicit_fsdp_reduce_scatter(g, mesh, src, gathered) for g in grads)  # pylint: disable=protected-access
+
+    with jax.set_mesh(mesh):
+      args = (
+          jax.device_put(x_np, PartitionSpec("fsdp", None)),
+          jax.device_put(wd_np, src),
+          jax.device_put(wm_np, src),
+      )
+      f = jax.jit(prefetch_grads)
+      out = f(*args)
+      hlo = f.lower(*args).as_text()
+
+    def ref_loss(wd, wm):
+      m = jnp.tanh(x_np @ wm)
+      return jnp.sin(x_np @ wd).sum() + (m * m).sum()
+
+    for got, want in zip(out, jax.grad(ref_loss, argnums=(0, 1))(wd_np, wm_np)):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+      self.assertEqual(tuple(got.sharding.spec.partitions), ("fsdp", None))
+    # One tagged reduce-scatter per weight and no all-reduce: the gradient is reduced exactly once.
+    self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 2)
+    self.assertNotIn("stablehlo.all_reduce", hlo)
 
 
 if __name__ == "__main__":

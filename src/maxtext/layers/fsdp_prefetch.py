@@ -58,19 +58,26 @@ def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
     # stored parameter (which would materialize the whole gathered stack).
     w = jax.lax.with_sharding_constraint(w, src_sharding)
   gathered_sharding = sharding.remove_fsdp_from_sharding(src_sharding)
-  out = _explicit_fsdp_all_gather(w, mesh, src_sharding.spec, gathered_sharding.spec)
+  out = _explicit_fsdp_all_gather(
+      w, mesh, src_sharding.spec, gathered_sharding.spec, reduced=shard_mode == ShardMode.EXPLICIT
+  )
   if out is not None:
     return out
   return sharding.maybe_shard_with_name(w, gathered_sharding, shard_mode=shard_mode, debug_sharding=debug_sharding)
 
 
-def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec):
+def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False):
   """All-gathers `w` over its FSDP mesh axes with an explicit all_gather tagged `xla_explicit_fsdp`.
 
   On TPUs that offload all-gathers to the SparseCore, the tag lets XLA's FSDP scheduler
   (--xla_tpu_enable_fsdp_latency_hiding_scheduler with --xla_tpu_explicit_fsdp_dedicated_sparse_core_id)
   run these gathers on a dedicated SparseCore. Otherwise they share the SparseCore queue with the
   layer's own SparseCore work (e.g. MoE token gathers) and must finish before that work can.
+
+  With `reduced` (explicit sharding mode, one gathered dimension), the result is typed `reduced` over
+  the FSDP axes. The gradient of a reduced value is `unreduced` (per-device partial sums), so the
+  backward pass emits no all-reduce for it and `_explicit_fsdp_reduce_scatter` performs the only
+  reduction, tagged so XLA's FSDP scheduler can overlap it like the prefetch all-gathers.
 
   Returns None (the caller falls back to resharding) if the FSDP axes of a dimension are not its
   minor-most mesh axes, since a tiled gather would then not produce the target layout.
@@ -89,6 +96,33 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec):
   if not dims:
     return None
 
+  if reduced and len(dims) == 1:
+    (dim, ax) = dims[0]
+    gathered = tuple(gathered_spec) + (None,) * (w.ndim - len(tuple(gathered_spec)))
+    # Size-1 FSDP (co-)axes (e.g. `fsdp_transpose`, `context`), which `ax` skips but `gathered_spec`
+    # strips, are first resharded away (a no-op on the data); otherwise the output would be typed as
+    # varying over axes the out_specs replicate.
+    in_spec = []
+    for entry in spec:
+      entry_axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+      stripped = set(sharding.fsdp_axes_for_dim(entry_axes))
+      kept = tuple(a for a in entry_axes if a not in stripped or mesh.shape[a] > 1)
+      in_spec.append(kept if len(kept) > 1 else (kept[0] if kept else None))
+    in_spec = jax.sharding.PartitionSpec(*in_spec)
+    if tuple(in_spec) != spec:
+      w = jax.sharding.reshard(w, NamedSharding(mesh, in_spec))
+
+    def gather_reduced(x):
+      return jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
+
+    with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
+      return jax.shard_map(
+          gather_reduced,
+          mesh=mesh,
+          in_specs=in_spec,
+          out_specs=jax.sharding.PartitionSpec(*gathered, reduced=frozenset(ax)),
+      )(w)
+
   def gather(x):
     for i, ax in dims:
       x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=i, tiled=True)
@@ -98,6 +132,78 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec):
     return jax.shard_map(
         gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
     )(w)
+
+
+def _fsdp_scatter_dim(ndim, mesh, src_spec):
+  """Returns (dim, fsdp_axes) of the single dimension a gradient is reduce-scattered over, else None.
+
+  None if no dimension or more than one is FSDP-sharded (chained FSDP collectives must be independent
+  for XLA's FSDP scheduler), or if the FSDP axes of the dimension are not its minor-most mesh axes.
+  """
+  spec = tuple(src_spec) + (None,) * (ndim - len(tuple(src_spec)))
+  dims = []
+  for i, entry in enumerate(spec):
+    axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+    axes = tuple(a for a in axes if mesh.shape[a] > 1)
+    fsdp = sharding.fsdp_axes_for_dim(axes)
+    if not fsdp:
+      continue
+    if axes[len(axes) - len(fsdp) :] != fsdp:
+      return None
+    dims.append((i, fsdp))
+  if len(dims) != 1:
+    return None
+  dim, fsdp_axes = dims[0]
+  return dim, fsdp_axes
+
+
+def _is_unreduced_over(g, axes):
+  g_spec = getattr(getattr(jax.typeof(g), "sharding", None), "spec", None)
+  return g_spec is not None and frozenset(g_spec.unreduced) == frozenset(axes)
+
+
+def _pin_scatter_dim_major(g, dim):
+  """Lays `g` out with dimension `dim` major-most before it is reduce-scattered over `dim`.
+
+  XLA does not offload a reduce-scatter over a physically minor dimension to the SparseCore as one and
+  instead rewrites it into an all-reduce plus slice. That happens for kernels sharded on their last
+  dimension (e.g. a [F, D/fsdp] output projection) and for gradients of transposed matmuls (laid out
+  {0, 1}) unless their layout is pinned.
+  """
+  return with_layout_constraint(g, Layout((dim,) + tuple(i for i in range(g.ndim) if i != dim)))
+
+
+def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec):
+  """Reduce-scatters a gathered-weight gradient `g` over its FSDP mesh axes, tagged `xla_explicit_fsdp`.
+
+  The inverse of the `reduced` `_explicit_fsdp_all_gather`: `g` is `unreduced` over the FSDP axes
+  (each device holds a partial sum) with the gathered sharding `gathered_spec`, and the result is the
+  summed gradient with the parameter's FSDP sharding `src_spec`. The tag lets XLA's FSDP scheduler
+  run the reduce-scatter on the dedicated FSDP SparseCore (next to the prefetch all-gathers) and
+  complete it with the next FSDP all-gather, so it overlaps the following layer's backward.
+
+  Returns None (the caller falls back to resharding) if `g` is not unreduced over exactly the FSDP
+  axes of a single dimension: reduce-scattering an already-reduced gradient would sum it again.
+  """
+  scatter = _fsdp_scatter_dim(g.ndim, mesh, src_spec)
+  if scatter is None or not _is_unreduced_over(g, scatter[1]):
+    return None
+  dim, ax = scatter
+  spec = tuple(src_spec) + (None,) * (g.ndim - len(tuple(src_spec)))
+  gathered = tuple(gathered_spec) + (None,) * (g.ndim - len(tuple(gathered_spec)))
+  g_spec = jax.typeof(g).sharding.spec
+  g = _pin_scatter_dim_major(g, dim)
+
+  def psum_scatter(x):
+    return jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
+
+  with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
+    return jax.shard_map(
+        psum_scatter,
+        mesh=mesh,
+        in_specs=jax.sharding.PartitionSpec(*gathered, unreduced=frozenset(ax), unreduced_kind=g_spec.unreduced_kind),
+        out_specs=jax.sharding.PartitionSpec(*spec),
+    )(g)
 
 
 def _per_layer_sharding(stacked, mesh):
@@ -134,6 +240,7 @@ _PrefetchCtx = collections.namedtuple(
         "kwargs_treedef",
         "remat_policy",
         "prevent_cse",
+        "defer_grad_reduce_scatter",
     ],
 )
 
@@ -320,14 +427,46 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   def layer_fn(y, layer_weights, layer_state):
     return layer_pure(y, layer_weights, layer_state, consts)
 
-  def rs_fn(layer_grads):
-    """Reduce-scatters one layer's gathered-weight gradients back to the FSDP parameter sharding."""
+  def rs_one(g, s, tag):
+    """Reduce-scatters one gathered-weight gradient leaf back to its FSDP parameter sharding `s`."""
+    if s is None:
+      return g
+    if tag:
+      out = _explicit_fsdp_reduce_scatter(g, ctx.mesh, s.spec, sharding.remove_fsdp_from_sharding(s).spec)
+      if out is not None:
+        return out
+    scatter = _fsdp_scatter_dim(g.ndim, ctx.mesh, s.spec)
+    if scatter is not None and _is_unreduced_over(g, scatter[1]):
+      g = _pin_scatter_dim_major(g, scatter[0])
+    return sharding.maybe_shard_with_name(g, s, ctx.shard_mode, debug_sharding=ctx.debug_sharding)
+
+  tag_cache = {}
+
+  def tag_flags(leaves):
+    """Per-leaf choice of the tagged, deferred (dedicated SparseCore) reduce-scatter; the same for every layer."""
+    if "flags" not in tag_cache:
+      flags = []
+      for g, s in zip(leaves, layer_shardings):
+        scatter = None if s is None else _fsdp_scatter_dim(g.ndim, ctx.mesh, s.spec)
+        eligible = scatter is not None and _is_unreduced_over(g, scatter[1])
+        flags.append(bool(ctx.defer_grad_reduce_scatter and eligible))
+      tag_cache["flags"] = flags
+    return tag_cache["flags"]
+
+  def rs_fn(layer_grads, which="all"):
+    """Reduce-scatters one layer's gathered-weight gradients back to the FSDP parameter sharding.
+
+    `which` restricts it to the "tagged" or "untagged" reduce-scatters (the others are returned as is).
+    """
     leaves, treedef = jax.tree_util.tree_flatten(layer_grads)
+    flags = tag_flags(leaves)
     out = [
-        g if s is None else sharding.maybe_shard_with_name(g, s, ctx.shard_mode, debug_sharding=ctx.debug_sharding)
-        for g, s in zip(leaves, layer_shardings)
+        rs_one(g, s, tag) if which == "all" or (which == "tagged") == tag else g
+        for g, s, tag in zip(leaves, layer_shardings, flags)
     ]
     return jax.tree_util.tree_unflatten(treedef, out)
+
+  rs_fn.tag_flags = tag_flags
 
   # Full remat (no policy): save only each layer's input and recompute the whole layer in the backward pass.
   remat_layer = None
@@ -475,49 +614,66 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
   layout = layout_fn(y_last_in, w_last, _slice_at(state, last))
   w_prev = gather_fn(params_prev_init) if length > 1 else None  # AG(L-2) || bwd(L-1).
   g, dw = layer_vjp_fn(y_last_in, w_last, _slice_at(state, last), g, saved_last, layout)
-  d_params = jax.tree.map(
-      lambda p, d: jax.lax.dynamic_update_index_in_dim(jnp.zeros_like(p), d, last, axis=0),
-      params,
-      rs_fn(dw),
-  )
-  if length > 1:
+
+  def write(d_acc, dw_tree, idx, which):
+    """Writes the `which` ("tagged"/"untagged"/"all") leaves of one layer's reduced dW into row `idx`."""
+    acc_leaves, treedef = jax.tree_util.tree_flatten(d_acc)
+    d_leaves = jax.tree_util.tree_leaves(dw_tree)
+    flags = rs_fn.tag_flags(d_leaves) if which != "all" else [None] * len(d_leaves)
+    out = [
+        jax.lax.dynamic_update_index_in_dim(a, d, idx, axis=0) if which == "all" or (which == "tagged") == f else a
+        for a, d, f in zip(acc_leaves, d_leaves, flags)
+    ]
+    return jax.tree_util.tree_unflatten(treedef, out)
+
+  def deferred(dw_tree):
+    """The unreduced tagged leaves of dW, carried to the next step (placeholders for the others)."""
+    leaves, treedef = jax.tree_util.tree_flatten(dw_tree)
+    flags = rs_fn.tag_flags(leaves)
+    return jax.tree_util.tree_unflatten(treedef, [x if f else jnp.zeros((0,), x.dtype) for x, f in zip(leaves, flags)])
+
+  # Tagged (dedicated SparseCore) reduce-scatters of layer k's dW are issued at the start of the next
+  # backward step (layer k-1), so each completes with that step's FSDP all-gather and overlaps its whole
+  # backward. Issued at the end of their own step, XLA's FSDP scheduler would have to complete those of
+  # the last step of each loop iteration before the iteration ends, exposing them. Untagged ones complete
+  # within their own step.
+  d_params = jax.tree.map(jnp.zeros_like, params)
+  if length == 1:
+    d_params = write(d_params, rs_fn(dw), last, "all")
+  else:
+    d_params = write(d_params, rs_fn(dw, "untagged"), last, "untagged")
+    pending = deferred(dw)
     if length > 2:
       ordered = (length - 2) // 2 >= 2
 
       def body(carry, xs):
-        g_k, w_k, d_acc = carry
+        g_k, w_k, d_acc, pending = carry
         y_k, saved_k, state_k, k_idx = xs
         params_prev = _slice_at(params, k_idx - 1)
         if ordered:
           # In the 2nd unrolled step of each iteration, waits for the 1st step's g_k (which is
           # barrier-tied to dw_k) so W(k) and dW(k) are dead before AG(k-2) and recompute(k-1) start.
           g_k, y_k, saved_k, params_prev = jax.lax.optimization_barrier((g_k, y_k, saved_k, params_prev))
+        d_acc = write(d_acc, rs_fn(pending, "tagged"), k_idx + 1, "tagged")  # RS(k+1) || bwd(k).
         w_km1 = gather_fn(params_prev)  # AG(k-1) || bwd(k).
         g_km1, dw_k = layer_vjp_fn(y_k, w_k, state_k, g_k, saved_k, layout)
-        dw_k = rs_fn(dw_k)
+        dw_k = rs_fn(dw_k, "untagged")
         if ordered:
           g_km1, dw_k = jax.lax.optimization_barrier((g_km1, dw_k))
-        d_acc = jax.tree.map(
-            lambda acc, d: jax.lax.dynamic_update_index_in_dim(acc, d, k_idx, axis=0),
-            d_acc,
-            dw_k,
-        )
-        return (g_km1, w_km1, d_acc), None
+        d_acc = write(d_acc, dw_k, k_idx, "untagged")
+        return (g_km1, w_km1, d_acc, deferred(dw_k)), None
 
       # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1.
-      (g, w_prev, d_params), _ = jax.lax.scan(
+      (g, w_prev, d_params, pending), _ = jax.lax.scan(
           body,
-          (g, w_prev, d_params),
+          (g, w_prev, d_params, pending),
           (ys_mid, saved_mid, _slice_range(state, 1, length - 1), jnp.arange(1, length - 1, dtype=jnp.int32)),
           reverse=True,
           unroll=2,
       )
+    d_params = write(d_params, rs_fn(pending, "tagged"), 1, "tagged")  # RS(1) || bwd(0).
     g, dw0 = layer_vjp_fn(x_in, w_prev, _slice_at(state, 0), g, saved_0, layout)
-    d_params = jax.tree.map(
-        lambda acc, d: jax.lax.dynamic_update_index_in_dim(acc, d, 0, axis=0),
-        d_params,
-        rs_fn(dw0),
-    )
+    d_params = write(d_params, rs_fn(dw0), 0, "all")
 
   params_bar_leaves = jax.tree_util.tree_leaves(d_params)
   if ctx.scan_axis != 0:
@@ -621,6 +777,7 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       kwargs_treedef=kwargs_treedef,
       remat_policy=remat_policy,
       prevent_cse=prevent_cse,
+      defer_grad_reduce_scatter=bool(getattr(config, "prefetch_fsdp_defer_grad_reduce_scatter", False)),
   )
   return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 

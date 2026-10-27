@@ -427,6 +427,11 @@ def apply_layers_with_fsdp_prefetch(
   _, _, _, diff_args_leaves, diff_kwargs_leaves, ctx = fsdp_prefetch._prepare_prefetch_call(
       layers, args, kwargs, length=length, mesh=mesh, config=config, remat_policy=remat_policy, prevent_cse=prevent_cse
   )
+  if ctx.defer_grad_reduce_scatter:
+    # The per-sub-layer backward reduce-scatters each gradient within its own step; tagging them without
+    # deferring to the next sub-layer is slower than untagged, so deferral is only supported for homogeneous blocks.
+    max_logging.log("prefetch_fsdp_defer_grad_reduce_scatter is not supported for inhomogeneous blocks yet; ignoring it.")
+    ctx = ctx._replace(defer_grad_reduce_scatter=False)
   # Groups consecutive sub-layers of one structure (e.g. the unstacked `local_layers`), stacked
   # `[length, n, ...]`, so each group can be scanned by sub-layer.
   groups = []  # [graphdef, params_treedef, state_treedef, [params leaves per sub-layer], [state leaves ...]]

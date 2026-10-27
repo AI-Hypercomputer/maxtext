@@ -27,11 +27,31 @@ from jax.sharding import Mesh
 from jax.typing import DTypeLike
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.configs import glm5_3_flash_config as glm5_config
-from maxtext.m3.configs.glm5_3_flash_config import Glm5Config
-from maxtext.m3.configs.glm5_3_flash_config import Glm5Sharding
 import optax
 from tokamax._src.ops.kda import api as tokamax_kda
 from tokamax._src.ops.kda import pallas_mosaic_tpu as _tokamax_kda_mosaic  # pylint: disable=unused-import  # buildcleaner: keep
+
+
+def _make_lin(dt: DTypeLike, p_dt: DTypeLike, sharding, rngs: nnx.Rngs):
+  """Constructs a Linear layer factory closure with sharding metadata."""
+
+  def _lin(in_f: int, out_f: int, name: str, axes: tuple[str | None, ...]):
+    km = {"sharding": sharding(name, axes)} if sharding else {}
+    return nnx.Linear(
+        in_f,
+        out_f,
+        use_bias=False,
+        dtype=dt,
+        param_dtype=p_dt,
+        # Precision.HIGHEST is required on TPU so MXU matmuls match IEEE fp32
+        # accumulation and avoid discrete top_k tie-breaking drift vs PyTorch.
+        precision=jax.lax.Precision.HIGHEST,
+        kernel_metadata=km,
+        rngs=rngs,
+    )
+
+  return _lin
+
 
 # ============================================================================
 # Section 1: Linear Attention Primitives (KDA)
@@ -174,7 +194,7 @@ class Glm5KdaAttention(nnx.Module):
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       *,
       sharding: m3_sharding.Sharding | None = None,
       rngs: nnx.Rngs,
@@ -199,18 +219,7 @@ class Glm5KdaAttention(nnx.Module):
     self.dtype = getattr(jnp, config.dtype)
     self.param_dtype = getattr(jnp, config.weight_dtype)
 
-    def _lin(in_f, out_f, name, axes):
-      km = {"sharding": sharding(name, axes)} if sharding else {}
-      return nnx.Linear(
-          in_features=in_f,
-          out_features=out_f,
-          use_bias=False,
-          dtype=self.dtype,
-          param_dtype=self.param_dtype,
-          precision=jax.lax.Precision.HIGHEST,
-          kernel_metadata=km,
-          rngs=rngs,
-      )
+    _lin = _make_lin(self.dtype, self.param_dtype, sharding, rngs)
 
     def _cv(dim):
       return Glm5ShortConv1d(
@@ -408,7 +417,7 @@ class Glm5RMSNorm(nnx.Module):
   ):
     self.eps = eps
     spec = sharding("norm", ("norm",)) if sharding else None
-    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), sharding=spec)
+    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), out_sharding=spec)
 
   def __call__(self, x: jax.Array) -> jax.Array:
     in_dt, x32 = x.dtype, x.astype(jnp.float32)
@@ -430,8 +439,8 @@ class Glm5LayerNorm(nnx.Module):
   ):
     self.eps = eps
     spec = sharding("norm", ("norm",)) if sharding else None
-    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), sharding=spec)
-    self.bias = nnx.Param(jnp.zeros((d,), dtype=param_dtype), sharding=spec)
+    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), out_sharding=spec)
+    self.bias = nnx.Param(jnp.zeros((d,), dtype=param_dtype), out_sharding=spec)
 
   def __call__(self, x: jax.Array) -> jax.Array:
     in_dt, x32 = x.dtype, x.astype(jnp.float32)
@@ -443,33 +452,12 @@ class Glm5LayerNorm(nnx.Module):
     return (normed * w + b).astype(in_dt)
 
 
-def _make_lin(dt: DTypeLike, p_dt: DTypeLike, sharding, rngs: nnx.Rngs):
-  """Constructs a Linear layer factory closure with sharding metadata."""
-
-  def _lin(in_f: int, out_f: int, name: str, axes: tuple[str | None, ...]):
-    km = {"sharding": sharding(name, axes)} if sharding else {}
-    return nnx.Linear(
-        in_f,
-        out_f,
-        use_bias=False,
-        dtype=dt,
-        param_dtype=p_dt,
-        # Precision.HIGHEST is required on TPU so MXU matmuls match IEEE fp32
-        # accumulation and avoid discrete top_k tie-breaking drift vs PyTorch.
-        precision=jax.lax.Precision.HIGHEST,
-        kernel_metadata=km,
-        rngs=rngs,
-    )
-
-  return _lin
-
-
 class Glm5Indexer(nnx.Module):
   """DeepSeek Sparse Attention (DSA) indexer with k-pool compression."""
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       *,
       sharding: m3_sharding.Sharding | None = None,
       rngs: nnx.Rngs,
@@ -499,13 +487,13 @@ class Glm5Indexer(nnx.Module):
     s_ape = (None, None)
     ape_spec = sharding("index_kpool_compress_ape", s_ape) if sharding else None
     ape_init = jnp.zeros((self.index_kpool, d), dtype=p_dt)
-    self.index_kpool_compress_ape = nnx.Param(ape_init, sharding=ape_spec)
+    self.index_kpool_compress_ape = nnx.Param(ape_init, out_sharding=ape_spec)
 
     s_gate = (None, "embed")
     g_name = "index_kpool_compress_gate"
     gate_spec = sharding(g_name, s_gate) if sharding else None
     gate_init = jnp.ones((d, h), dtype=p_dt)
-    self.index_kpool_compress_gate = nnx.Param(gate_init, sharding=gate_spec)
+    self.index_kpool_compress_gate = nnx.Param(gate_init, out_sharding=gate_spec)
 
   def __call__(
       self,
@@ -615,7 +603,7 @@ class Glm5DsaMlaAttention(nnx.Module):
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       layer_idx: int,
       *,
       indexer_type: str,
@@ -802,7 +790,7 @@ class Glm5DsaMlaAttention(nnx.Module):
       mask = self._build_causal_padding_mask(attn_mask, b, s, q.dtype)
       topk_idx = (
           self.indexer(hidden_states, q_resid, attention_mask=attn_mask)
-          if (return_topk_indices and self.indexer is not None)
+          if (return_topk_indices and self.config.use_indexer and self.indexer is not None)
           else None
       )
     else:
@@ -842,7 +830,7 @@ class Glm5MLP(nnx.Module):
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       intermediate_size: int,
       *,
       rngs: nnx.Rngs,
@@ -855,18 +843,7 @@ class Glm5MLP(nnx.Module):
 
     dt, p_dt = getattr(jnp, config.dtype), getattr(jnp, config.weight_dtype)
 
-    def _lin(in_f, out_f, name, axes):
-      km = {"sharding": sharding(name, axes)} if sharding else {}
-      return nnx.Linear(
-          in_f,
-          out_f,
-          use_bias=False,
-          dtype=dt,
-          param_dtype=p_dt,
-          precision=jax.lax.Precision.HIGHEST,
-          kernel_metadata=km,
-          rngs=rngs,
-      )
+    _lin = _make_lin(dt, p_dt, sharding, rngs)
 
     self.gate_proj = _lin(h, inter, "gate_proj", ("embed", "mlp"))
     self.up_proj = _lin(h, inter, "up_proj", ("embed", "mlp"))
@@ -883,7 +860,7 @@ class Glm5TopkRouter(nnx.Module):
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       *,
       rngs: nnx.Rngs,
       sharding: m3_sharding.Sharding | None = None,
@@ -905,7 +882,7 @@ class Glm5TopkRouter(nnx.Module):
     w_spec = sharding("router_weight", ("embed", None)) if sharding else None
     b_spec = sharding("router_bias", (None,)) if sharding else None
     w_init = nnx.initializers.normal(0.02)(rngs.params(), (h, e), r_p_dt)
-    self.weight = nnx.Param(w_init, sharding=w_spec)
+    self.weight = nnx.Param(w_init, out_sharding=w_spec)
     self.e_score_correction_bias = Glm5RouterBias(
         jnp.zeros((e,), dtype=r_p_dt),
         sharding=b_spec,
@@ -959,7 +936,7 @@ class Glm5Experts(nnx.Module):
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       *,
       rngs: nnx.Rngs,
       sharding: m3_sharding.Sharding | None = None,
@@ -974,8 +951,8 @@ class Glm5Experts(nnx.Module):
     self.num_experts, self.top_k = e, config.num_experts_per_tok
     self.swiglu_limit = config.mlp_clamp_limit
     self.sharding = sharding
-    self.ep_axis = sharding.ep_axis if isinstance(sharding, Glm5Sharding) else "expert"
-    if isinstance(sharding, Glm5Sharding) and sharding.ep_size > 1:
+    self.ep_axis = sharding.ep_axis if isinstance(sharding, glm5_config.Glm5Sharding) else "expert"
+    if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
       raise NotImplementedError(
           f"Glm5Experts expert parallelism ({self.ep_axis}={sharding.ep_size} >"
           " 1) requires shard_map EP dispatch (follow-up F34)."
@@ -998,7 +975,7 @@ class Glm5Experts(nnx.Module):
     self.gate_up_proj = nnx.Param(gu_init, sharding=gu_spec)
 
     d_init = nnx.initializers.normal(0.02)(rngs.params(), (e, inter, h), p_dt)
-    self.down_proj = nnx.Param(d_init, sharding=d_spec)
+    self.down_proj = nnx.Param(d_init, out_sharding=d_spec)
 
   def __call__(
       self,
@@ -1006,7 +983,7 @@ class Glm5Experts(nnx.Module):
       topk_indices: jax.Array,
       topk_weights: jax.Array,
   ) -> jax.Array:
-    if isinstance(self.sharding, Glm5Sharding) and self.sharding.ep_size > 1:
+    if isinstance(self.sharding, glm5_config.Glm5Sharding) and self.sharding.ep_size > 1:
       raise NotImplementedError(
           f"Glm5Experts.__call__ with {self.ep_axis} > 1 requires shard_map EP"
           f" dispatch (follow-up F34); got ep_size={self.sharding.ep_size}."
@@ -1073,14 +1050,14 @@ class Glm5MoE(nnx.Module):
 
   def __init__(
       self,
-      config: Glm5Config,
+      config: glm5_config.Glm5Config,
       *,
       rngs: nnx.Rngs,
       sharding: m3_sharding.Sharding | None = None,
   ):
     self.config = config
-    self.ep_axis = sharding.ep_axis if isinstance(sharding, Glm5Sharding) else "expert"
-    if isinstance(sharding, Glm5Sharding) and sharding.ep_size > 1:
+    self.ep_axis = sharding.ep_axis if isinstance(sharding, glm5_config.Glm5Sharding) else "expert"
+    if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
       raise NotImplementedError(
           f"Glm5MoE expert parallelism ({self.ep_axis}={sharding.ep_size} > 1)"
           " requires all-to-all dispatch (planned for G8); single-host bringup"
@@ -1250,15 +1227,15 @@ class Glm5HyperConnection(nnx.Module):
     fn_init = nnx.initializers.normal(0.02)(rngs.params(), (self.hc_mult * config.hidden_size, mix), p_dt)
     self.fn = nnx.Param(
         fn_init,
-        sharding=sharding("mhc_fn", ("embed", None)) if sharding else None,
+        out_sharding=sharding("mhc_fn", ("embed", None)) if sharding else None,
     )
     self.base = nnx.Param(
         jnp.zeros((mix,), dtype=p_dt),
-        sharding=sharding("mhc_base", (None,)) if sharding else None,
+        out_sharding=sharding("mhc_base", (None,)) if sharding else None,
     )
     self.scale = nnx.Param(
         jnp.ones((3,), dtype=p_dt),
-        sharding=sharding("mhc_scale", (None,)) if sharding else None,
+        out_sharding=sharding("mhc_scale", (None,)) if sharding else None,
     )
 
   def __call__(self, hidden_streams: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -2120,7 +2097,7 @@ class Glm5Model(nnx.Module):
               decoder_segment_ids=decoder_segment_ids,
               return_aux=return_aux,
           )
-        if idx_topk is not None:
+        if idx_topk is not None and cfg.use_indexer:
           dsa_topk_indices_list.append(idx_topk)
         if layer_0_act is None:
           layer_0_act = streams
@@ -2147,7 +2124,9 @@ class Glm5Model(nnx.Module):
             layer_dict["router_indices"] = r_topk
             layer_dict["routing_weights"] = r_weights
             layer_dict["router_probs"] = r_probs
-          if cfg.use_indexer and idx_topk is not None:
+          if layer.layer_type == "full_attention" and cfg.use_indexer:
+            if idx_topk is None:
+              raise RuntimeError(f"Layer {layer.layer_idx} has full_attention but idx is None.")
             layer_dict["selected_block_indices"] = idx_topk
           layer_aux_list.append(layer_dict)
 
@@ -2182,7 +2161,7 @@ class Glm5Model(nnx.Module):
           return_aux=return_aux,
       )
 
-      if sb_idx is not None:
+      if sb_idx is not None and cfg.use_indexer:
         for block_idx in sb_idx:
           if block_idx is None:
             continue

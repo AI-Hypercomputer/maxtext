@@ -18,6 +18,7 @@ import inspect
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from flax.traverse_util import unflatten_dict
 import numpy as np
 import pytest
 
@@ -34,7 +35,7 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import (
 )
 from maxtext.integration.vllm.weight_converter import WeightConverter
 
-from tunix.generate.vllm_sampler import VllmConfig
+from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout
 
 pytestmark = pytest.mark.post_training
@@ -444,6 +445,81 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     target = {"model": {"decoder": {"layers_0": {"mlp": {"routed_experts": {"wi": np.zeros((2, 3, 8))}}}}}}
 
     self.assertEqual(validate_direct_sync_layer_coverage(source, target), 1)
+
+
+class ScannedSourceLayerCoverageTest(unittest.TestCase):
+  """Verify the coverage check accepts scanned sources that Tunix unrolls itself.
+
+  Only Gemma and Qwen are unrolled by MaxText before the direct sync; other
+  scanned models (e.g. Llama) keep `decoder.layers.*` stacked on the scan axis
+  and Tunix's `transfer_state_directly` slices layer N out for `layers_N`.
+  """
+
+  _PER_LAYER_PARAMS = (
+      ("mlp", "wi_0", "kernel"),
+      ("mlp", "wo", "kernel"),
+      ("pre_self_attention_layer_norm", "scale"),
+      ("self_attention", "query", "kernel"),
+  )
+
+  def _scanned_llama_trees(self, num_layers, drop_from_source=()):
+    """Builds a Llama-style scanned source and the matching unscanned rollout target."""
+    source_flat = {("base", "decoder", "decoder_norm", "scale"): np.ones((2,))}
+    target_flat = {("model", "decoder", "decoder_norm", "scale"): np.zeros((2,))}
+    for param in self._PER_LAYER_PARAMS:
+      if param not in drop_from_source:
+        # param_scan_axis=1: the layer axis sits after the leading feature dim.
+        source_flat[("base", "decoder", "layers") + param] = np.ones((2, num_layers, 3))
+      for i in range(num_layers):
+        target_flat[("model", "decoder", f"layers_{i}") + param] = np.zeros((2, 3))
+    return unflatten_dict(source_flat), unflatten_dict(target_flat)
+
+  @pytest.mark.cpu_only
+  def test_accepts_homogeneous_scanned_source(self):
+    source, target = self._scanned_llama_trees(num_layers=3)
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 3 * len(self._PER_LAYER_PARAMS))
+
+  @pytest.mark.cpu_only
+  def test_rejects_scanned_source_missing_a_target_parameter(self):
+    source, target = self._scanned_llama_trees(num_layers=2, drop_from_source=(("mlp", "wo", "kernel"),))
+
+    with self.assertRaisesRegex(ValueError, r"matched 6/8 target layer parameters.*decoder\.layers_0\.mlp\.wo\.kernel"):
+      validate_direct_sync_layer_coverage(source, target)
+
+  @pytest.mark.cpu_only
+  def test_accepts_implicitly_stacked_source(self):
+    source = {"base": {"decoder": {"probe": np.ones((2, 2, 3))}}}
+    target = {"model": {"decoder": {"layers_0": {"probe": np.zeros((2, 3))}, "layers_1": {"probe": np.zeros((2, 3))}}}}
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 2)
+
+  @pytest.mark.cpu_only
+  def test_accepts_scanned_split_moe_weights_for_prefused_target(self):
+    experts = {"wi_0": np.ones((4, 2, 3, 5)), "wi_1": np.ones((4, 2, 3, 5))}
+    source = {"base": {"decoder": {"layers": {"mlp": {"routed_experts": experts}}}}}
+    target = {
+        "model": {"decoder": {f"layers_{i}": {"mlp": {"routed_experts": {"wi": np.zeros((4, 3, 10))}}} for i in range(2)}}
+    }
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 2)
+
+  @pytest.mark.cpu_only
+  def test_sampler_leaves_scanned_llama_weights_for_tunix(self):
+    """Regression: llama3.1-70b direct sync failed with `matched 0/720 target layer parameters`."""
+    sampler = object.__new__(MaxTextVllmSampler)
+    sampler._direct_maxtext_sync = True  # pylint: disable=protected-access
+    sampler._is_gemma = False  # pylint: disable=protected-access
+    sampler._is_qwen = False  # pylint: disable=protected-access
+    source, target = self._scanned_llama_trees(num_layers=2)
+
+    with (
+        mock.patch.object(MaxTextVllmSampler, "transformer_state", new_callable=mock.PropertyMock, return_value=target),
+        mock.patch.object(VllmSampler, "update_params") as tunix_update_params,
+    ):
+      sampler.update_params(source, filter_types=None)
+
+    tunix_update_params.assert_called_once_with(source, None)
 
 
 class DirectSyncRolloutConfigTest(unittest.TestCase):

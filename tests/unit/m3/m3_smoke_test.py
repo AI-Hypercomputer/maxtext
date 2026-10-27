@@ -14,6 +14,8 @@
 
 """Smoke test for m3 model registry routing and forward pass under Blaze."""
 
+import re
+
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -21,6 +23,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
+from maxtext.m3 import models as m3_models
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 from maxtext.utils import model_creation_utils
@@ -45,12 +48,12 @@ class M3SmokeTest(absltest.TestCase):
         "skip_jax_distributed_system=true",
     ]
     cfg = pyconfig.initialize_pydantic(config_args)
+    expected_models = ", ".join(sorted(m3_models.MODEL_REGISTRY))
     with self.assertRaisesRegex(
         ValueError,
         r"Model 'default' does not support the m3 backend"
-        r" \(use_m3_model=True\)\. Registered models: glm5\.3-flash,"
-        r" qwen3-0\.6b, qwen3-vl-2b, qwen3\.8-flash-next,"
-        r" qwen3\.8-flash-next-mini\.",
+        r" \(use_m3_model=True\)\. Registered models:"
+        rf" {re.escape(expected_models)}\.",
     ):
       model_creation_utils.create_model(cfg, self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
 
@@ -107,7 +110,7 @@ class M3SmokeTest(absltest.TestCase):
         "base_num_query_heads=4",
         "base_num_kv_heads=2",
         "head_dim=16",
-        "vocab_size=256",
+        "vocab_size=151936",
         "num_hidden_layers_for_vit=2",
         "deepstack_visual_indexes_for_vit=[1]",
         "hidden_size_for_vit=16",
@@ -124,7 +127,7 @@ class M3SmokeTest(absltest.TestCase):
       self.assertIsInstance(model, Qwen3VLModel)
 
       batch_size, seq_len = 1, 4
-      tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+      tokens = jnp.array([[1, 151655, 2, 3]], dtype=jnp.int32)
       images = jnp.zeros((batch_size, 3, 2, 32, 32), dtype=jnp.float32)
       grid_thw = jnp.array([[1, 2, 2]], dtype=jnp.int32)
       logits = model(
@@ -133,6 +136,7 @@ class M3SmokeTest(absltest.TestCase):
           encoder_video_grid_thw=grid_thw,
       )
       self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
+      self.assertTrue(bool(jnp.all(jnp.isfinite(logits))))
 
 
 if __name__ == "__main__":
