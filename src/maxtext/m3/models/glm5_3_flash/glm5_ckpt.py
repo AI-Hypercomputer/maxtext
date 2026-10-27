@@ -14,7 +14,7 @@
 
 """Checkpoint loading and conversion for GLM-5.3-Flash."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import dataclasses
 import functools
 import glob
@@ -50,24 +50,65 @@ def _is_fp8(val: Any) -> bool:
   )
 
 
+_TARGET_TO_INTERMEDIATE_DTYPE: dict[np.dtype, tuple[torch.dtype, np.dtype]] = {
+    np.dtype(np.float64): (torch.float64, np.dtype(np.float64)),
+    np.dtype(np.float32): (torch.float32, np.dtype(np.float32)),
+    np.dtype(ml_dtypes.bfloat16): (torch.float32, np.dtype(np.float32)),
+}
+
+
+def _to_target_np_array(val: Any, target_dtype: Any) -> np.ndarray:
+  """Converts a tensor or array to an owned NumPy array of target_dtype."""
+  target_np_dt = np.dtype(target_dtype)
+  if target_np_dt not in _TARGET_TO_INTERMEDIATE_DTYPE:
+    raise ValueError(
+        f"Unsupported target_dtype {target_dtype!r} (resolved to"
+        f" {target_np_dt}); expected one of"
+        f" {tuple(_TARGET_TO_INTERMEDIATE_DTYPE.keys())}."
+    )
+  if isinstance(val, torch.Tensor):
+    inter_torch_dt, _ = _TARGET_TO_INTERMEDIATE_DTYPE[target_np_dt]
+    val = val.detach().to(inter_torch_dt).cpu().numpy()
+  return np.array(val, dtype=target_np_dt, copy=True)
+
+
 def dequantize_fp8_block128(
     weight: Any,
     scale_inv: Any,
     *,
     block_size: tuple[int, int] = (128, 128),
     target_dtype: Any,
-) -> jax.Array:
-  """Dequantizes 2D or 3D FP8 weights with 128x128 block-wise inverse scales."""
+) -> np.ndarray:
+  """Dequantizes 2D or 3D FP8 weights with 128x128 block-wise inverse scales.
+
+  Returns a np.ndarray of np.dtype(target_dtype) and performs intermediate
+  block-128 multiplication in
+  _TARGET_TO_INTERMEDIATE_DTYPE[np.dtype(target_dtype)] (float64 for float64
+  targets and float32 for float32/bfloat16 targets), operating purely in
+  NumPy/PyTorch on host so float64 targets preserve exact 64-bit precision even
+  when jax_enable_x64 is False.
+
+  Args:
+    weight: 2D or 3D FP8 weight tensor or array.
+    scale_inv: Block-wise inverse scale tensor or array.
+    block_size: 2D block size (bm, bn), default (128, 128).
+    target_dtype: Target dtype (e.g. float32, bfloat16, float64).
+
+  Returns:
+    Dequantized weight as a NumPy array of target_dtype.
+  """
   if not _is_fp8(weight):
     raise ValueError(f"Expected float8_e4m3fn weight, got {weight.dtype}.")
-  to_np_dt = np.float64 if target_dtype in (jnp.float64, np.float64) else np.float32
-
-  def to_np(x: Any) -> np.ndarray:
-    if isinstance(x, torch.Tensor):
-      return x.detach().to(torch.float32).cpu().numpy().astype(to_np_dt)
-    return np.asarray(x, dtype=to_np_dt)
-
-  w_np, s_np = to_np(weight), to_np(scale_inv)
+  target_np_dt = np.dtype(target_dtype)
+  if target_np_dt not in _TARGET_TO_INTERMEDIATE_DTYPE:
+    raise ValueError(
+        f"Unsupported target_dtype {target_dtype!r} (resolved to"
+        f" {target_np_dt}); expected one of"
+        f" {tuple(_TARGET_TO_INTERMEDIATE_DTYPE.keys())}."
+    )
+  _, compute_np_dt = _TARGET_TO_INTERMEDIATE_DTYPE[target_np_dt]
+  w_np = _to_target_np_array(weight, compute_np_dt)
+  s_np = _to_target_np_array(scale_inv, compute_np_dt)
   if len(w_np.shape) not in (2, 3):
     raise ValueError(f"Weight must be 2D or 3D, got shape {w_np.shape}.")
   m, n = w_np.shape[-2], w_np.shape[-1]
@@ -77,7 +118,7 @@ def dequantize_fp8_block128(
   if s_np.shape != exp_scale:
     raise ValueError(f"scale_inv shape {s_np.shape} != expected {exp_scale} for weight shape" f" {w_np.shape}.")
   scale = np.repeat(np.repeat(s_np, bm, axis=-2), bn, axis=-1)[..., :m, :n]
-  return jnp.asarray(w_np * scale, dtype=target_dtype)
+  return np.asarray(w_np * scale, dtype=target_np_dt)
 
 
 def _normalize_key(key: str) -> str:
@@ -87,6 +128,36 @@ def _normalize_key(key: str) -> str:
   if key.startswith("lm_head."):
     return key
   raise ValueError(f"Unknown HF key prefix: {key!r}")
+
+
+def _fetch_and_convert_tensor(
+    hub_k: str,
+    target_dtype: Any,
+    orig_key_map: Mapping[str, str],
+    consumed: set[str],
+    load_raw_fn: Callable[[str], Any],
+) -> np.ndarray:
+  """Fetches a raw tensor from storage, dequantizing or converting to target_dtype."""
+  if hub_k not in orig_key_map:
+    raise ValueError(f"Required parameter missing from HF state: {hub_k!r}")
+  orig_k = orig_key_map[hub_k]
+  consumed.add(orig_k)
+  val = load_raw_fn(orig_k)
+  norm_k = _normalize_key(orig_k)
+  scale_norm_k = norm_k[:-7] + ".weight_scale_inv" if norm_k.endswith(".weight") else norm_k + "_scale_inv"
+  scale_hub_k = scale_norm_k if scale_norm_k.startswith("lm_head.") else f"model.language_model.{scale_norm_k}"
+  is_fp8 = _is_fp8(val)
+  has_scale = scale_hub_k in orig_key_map
+  if is_fp8 and not has_scale:
+    raise ValueError(f"FP8 weight {norm_k!r} is missing scale inverse {scale_norm_k!r}.")
+  if has_scale and not is_fp8:
+    raise ValueError(f"Scale inverse {scale_norm_k!r} present but weight {norm_k!r} is not" f" float8 (got {val.dtype}).")
+  if has_scale:
+    orig_scale_k = orig_key_map[scale_hub_k]
+    consumed.add(orig_scale_k)
+    scale_val = load_raw_fn(orig_scale_k)
+    return dequantize_fp8_block128(val, scale_val, target_dtype=target_dtype)
+  return _to_target_np_array(val, target_dtype)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,7 +199,8 @@ def iter_conversion_specs(
       hf_keys: tuple[str, ...],
       target_path: tuple[str | int, ...],
       kind: str,
-      dtype: Any = p_dt,
+      *,
+      dtype: Any,
       stack_idx: int | None = None,
       num_sbs: int | None = None,
   ) -> None:
@@ -149,11 +221,18 @@ def iter_conversion_specs(
       stack_idx: int | None,
       num_sbs: int | None,
   ) -> None:
-    def _add_l(hf_suffix: str, tgt_suffix: tuple[str | int, ...], kind: str) -> None:
+    def _add_l(
+        hf_suffix: str,
+        tgt_suffix: tuple[str | int, ...],
+        kind: str,
+        *,
+        dtype: Any,
+    ) -> None:
       _add(
           (f"{lp}{hf_suffix}",),
           (*tgt_base, *tgt_suffix),
           kind,
+          dtype=dtype,
           stack_idx=stack_idx,
           num_sbs=num_sbs,
       )
@@ -163,38 +242,49 @@ def iter_conversion_specs(
           f"self_attn.{p}_proj.weight",
           ("self_attn", f"{p}_proj", "kernel"),
           "transpose_2d",
+          dtype=p_dt,
       )
     _add_l(
         "self_attn.kv_a_proj_with_mqa.weight",
         ("self_attn", "kv_a_proj_with_mqa", "kernel"),
         "transpose_2d",
+        dtype=p_dt,
     )
     for p in ("q_a", "kv_a"):
       _add_l(
           f"self_attn.{p}_layernorm.weight",
           ("self_attn", f"{p}_layernorm", "weight"),
           "direct",
+          dtype=p_dt,
       )
     if config.use_indexer:
       _add_l(
           "self_attn.indexer.wq_b.weight",
           ("self_attn", "indexer", "wq_b", "kernel"),
           "transpose_2d",
+          dtype=p_dt,
       )
       for p in ("wk", "weights_proj"):
         _add_l(
             f"self_attn.indexer.{p}.weight",
             ("self_attn", "indexer", p, "kernel"),
             "transpose_2d",
+            dtype=p_dt,
         )
       for p in ("weight", "bias"):
         _add_l(
             f"self_attn.indexer.k_norm.{p}",
             ("self_attn", "indexer", "k_norm", p),
             "direct",
+            dtype=p_dt,
         )
       for p in ("index_kpool_compress_ape", "index_kpool_compress_gate"):
-        _add_l(f"self_attn.indexer.{p}", ("self_attn", "indexer", p), "direct")
+        _add_l(
+            f"self_attn.indexer.{p}",
+            ("self_attn", "indexer", p),
+            "direct",
+            dtype=p_dt,
+        )
 
   def _emit_moe(
       lp: str,
@@ -202,11 +292,13 @@ def iter_conversion_specs(
       stack_idx: int | None,
       num_sbs: int | None,
   ) -> None:
+
     def _add_l(
         hf_suffix: str,
         tgt_suffix: tuple[str | int, ...],
         kind: str,
-        dtype: Any = p_dt,
+        *,
+        dtype: Any,
     ) -> None:
       _add(
           (f"{lp}{hf_suffix}",),
@@ -222,6 +314,7 @@ def iter_conversion_specs(
           f"mlp.shared_experts.{p}_proj.weight",
           ("mlp", "shared_experts", f"{p}_proj", "kernel"),
           "transpose_2d",
+          dtype=p_dt,
       )
     _add_l("mlp.gate.weight", ("mlp", "gate", "weight"), "transpose_2d", dtype=r_dt)
     _add_l(
@@ -243,6 +336,7 @@ def iter_conversion_specs(
         gate_up_keys,
         (*tgt_base, "mlp", "experts", "gate_up_proj"),
         "moe_gate_up",
+        dtype=p_dt,
         stack_idx=stack_idx,
         num_sbs=num_sbs,
     )
@@ -251,6 +345,7 @@ def iter_conversion_specs(
         down_keys,
         (*tgt_base, "mlp", "experts", "down_proj"),
         "moe_down",
+        dtype=p_dt,
         stack_idx=stack_idx,
         num_sbs=num_sbs,
     )
@@ -259,9 +354,20 @@ def iter_conversion_specs(
       ("model.language_model.embed_tokens.weight",),
       ("embed_tokens", "embedding"),
       "direct",
+      dtype=p_dt,
   )
-  _add(("model.language_model.norm.weight",), ("norm", "weight"), "direct")
-  _add(("lm_head.weight",), ("lm_head", "kernel"), "transpose_2d")
+  _add(
+      ("model.language_model.norm.weight",),
+      ("norm", "weight"),
+      "direct",
+      dtype=p_dt,
+  )
+  _add(
+      ("lm_head.weight",),
+      ("lm_head", "kernel"),
+      "transpose_2d",
+      dtype=p_dt,
+  )
 
   def _add_layer_spec(
       layer_prefix: str,
@@ -271,7 +377,8 @@ def iter_conversion_specs(
       hf_suffix: str,
       tgt_suffix: tuple[str | int, ...],
       kind: str,
-      dtype: Any = p_dt,
+      *,
+      dtype: Any,
   ) -> None:
     _add(
         (f"{layer_prefix}{hf_suffix}",),
@@ -301,12 +408,12 @@ def iter_conversion_specs(
     _add_l = functools.partial(_add_layer_spec, lp, tgt_base, stack_idx, num_sbs)
 
     for pre in ("attn", "ffn"):
-      _add_l(f"hc_{pre}_fn", (f"{pre}_hc", "fn"), "transpose_2d")
-      _add_l(f"hc_{pre}_base", (f"{pre}_hc", "base"), "direct")
-      _add_l(f"hc_{pre}_scale", (f"{pre}_hc", "scale"), "direct")
+      _add_l(f"hc_{pre}_fn", (f"{pre}_hc", "fn"), "transpose_2d", dtype=p_dt)
+      _add_l(f"hc_{pre}_base", (f"{pre}_hc", "base"), "direct", dtype=p_dt)
+      _add_l(f"hc_{pre}_scale", (f"{pre}_hc", "scale"), "direct", dtype=p_dt)
 
     for n in ("input_layernorm", "post_attention_layernorm"):
-      _add_l(f"{n}.weight", (n, "weight"), "direct")
+      _add_l(f"{n}.weight", (n, "weight"), "direct", dtype=p_dt)
 
     if layer_types[l] == "linear_attention":
       for p in ("q", "k", "v", "b", "o", "g_a", "g_b", "f_a", "f_b"):
@@ -314,6 +421,7 @@ def iter_conversion_specs(
             f"self_attn.{p}_proj.weight",
             ("self_attn", f"{p}_proj", "kernel"),
             "transpose_2d",
+            dtype=p_dt,
         )
       _add_l("self_attn.A_log", ("self_attn", "A_log"), "direct", dtype=jnp.float32)
       _add_l(
@@ -322,7 +430,12 @@ def iter_conversion_specs(
           "direct",
           dtype=jnp.float32,
       )
-      _add_l("self_attn.o_norm.weight", ("self_attn", "o_norm", "weight"), "direct")
+      _add_l(
+          "self_attn.o_norm.weight",
+          ("self_attn", "o_norm", "weight"),
+          "direct",
+          dtype=p_dt,
+      )
       for c in ("q", "k", "v"):
         _add_l(
             f"self_attn.{c}_conv1d.weight",
@@ -339,6 +452,7 @@ def iter_conversion_specs(
             f"mlp.{p}_proj.weight",
             ("mlp", f"{p}_proj", "kernel"),
             "transpose_2d",
+            dtype=p_dt,
         )
     else:
       _emit_moe(lp, tgt_base, stack_idx, num_sbs)
@@ -352,16 +466,23 @@ def iter_conversion_specs(
         "input_layernorm",
         "post_attention_layernorm",
     ):
-      _add((f"{lp}{pre}.weight",), (*tgt_base, pre, "weight"), "direct")
+      _add(
+          (f"{lp}{pre}.weight",),
+          (*tgt_base, pre, "weight"),
+          "direct",
+          dtype=p_dt,
+      )
     _add(
         (f"{lp}eh_proj.weight",),
         (*tgt_base, "eh_proj", "kernel"),
         "transpose_2d",
+        dtype=p_dt,
     )
     _add(
         (f"{lp}shared_head.norm.weight",),
         (*tgt_base, "shared_head_norm", "weight"),
         "direct",
+        dtype=p_dt,
     )
     _emit_mla(lp, tgt_base, None, None)
     _emit_moe(lp, tgt_base, None, None)
@@ -382,7 +503,7 @@ def resolve_target_var(root: Any, path: tuple[str | int, ...]) -> nnx.Variable:
   return curr
 
 
-def _transform_for_spec(spec: ConversionSpec, get_tensor_fn: Any) -> jax.Array:
+def _transform_for_spec(spec: ConversionSpec, get_tensor_fn: Callable[[str, Any], jax.Array]) -> jax.Array:
   """Applies the conversion specification transformation kind to retrieved tensor(s)."""
   dt = spec.target_dtype
   if spec.kind == "direct":
@@ -436,50 +557,39 @@ def load_hf_state_into_model(
   consumed: set[str] = set()
 
   def _get(hub_k: str, target_dtype: Any) -> jax.Array:
-    if hub_k not in orig_key_map:
-      raise ValueError(f"Required parameter missing from HF state: {hub_k!r}")
-    orig_k = orig_key_map[hub_k]
-    consumed.add(orig_k)
-    val = hf_tensors[orig_k]
-    norm_k = _normalize_key(orig_k)
-    scale_norm_k = norm_k[:-7] + ".weight_scale_inv" if norm_k.endswith(".weight") else norm_k + "_scale_inv"
-    scale_hub_k = scale_norm_k if scale_norm_k.startswith("lm_head.") else f"model.language_model.{scale_norm_k}"
-    is_fp8 = _is_fp8(val)
-    has_scale = scale_hub_k in orig_key_map
-    if is_fp8 and not has_scale:
-      raise ValueError(f"FP8 weight {norm_k!r} is missing scale inverse {scale_norm_k!r}.")
-    if has_scale and not is_fp8:
-      raise ValueError(
-          f"Scale inverse {scale_norm_k!r} present but weight {norm_k!r} is not"
-          f" float8 (got {getattr(val, 'dtype', type(val))})."
-      )
-    if has_scale:
-      orig_scale_k = orig_key_map[scale_hub_k]
-      consumed.add(orig_scale_k)
-      val = dequantize_fp8_block128(val, hf_tensors[orig_scale_k], target_dtype=target_dtype)
-    if isinstance(val, torch.Tensor):
-      dt = torch.float64 if target_dtype == jnp.float64 else torch.float32
-      val = val.detach().to(dt).cpu().numpy()
-    return jnp.asarray(val, dtype=target_dtype)
+    return jnp.asarray(
+        _fetch_and_convert_tensor(
+            hub_k,
+            target_dtype,
+            orig_key_map,
+            consumed,
+            lambda k: hf_tensors[k],
+        ),
+        dtype=target_dtype,
+    )
 
   assigned_slots: set[tuple[int, int]] = set()
 
   def _assign(
       var: nnx.Variable,
       val: jax.Array,
-      b_idx: int = 0,
-      is_stacked: bool = False,
-      key_name: str = "",
+      *,
+      b_idx: int,
+      is_stacked: bool,
+      key_name: str,
   ) -> None:
     expected_shape = var.value.shape[1:] if is_stacked else var.value.shape
     if val.shape != expected_shape:
       raise ValueError(f"Shape mismatch for {key_name}: got {val.shape}, expected" f" {expected_shape}")
     assigned_slots.add((id(var), b_idx))
-    v = val.astype(var.value.dtype)
+    if val.dtype != var.value.dtype:
+      raise ValueError(
+          f"Dtype mismatch for {key_name}: spec produced {val.dtype}, model" f" variable expects {var.value.dtype}"
+      )
     if is_stacked:
-      var.value = var.value.at[b_idx].set(v)
+      var.value = var.value.at[b_idx].set(val)
     else:
-      var.value = v
+      var.value = val
 
   specs = iter_conversion_specs(model.config, include_mtp=not ignore_mtp_layer)
 
