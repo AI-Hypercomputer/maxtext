@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793119835229,
+  "lastUpdate": 1793121951588,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -58411,6 +58411,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
             "value": 74,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Fenghui Zhang",
+            "username": "fenghuizhang",
+            "email": "fhzhang@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "8591d5e5900bde88c5f9a75b4d60c0390bac4571",
+          "message": "Relocates src/maxtext/m3/models/glm5_3_flash/glm5_config.py to src/maxtext/m3/configs/glm5_3_flash_config.py per the m3 layout convention (src/maxtext/m3/configs/):\n- Moves glm5_config.py to src/maxtext/m3/configs/glm5_3_flash_config.py with 100% byte and AST identity (verified via verify_c_w3_ast.py) and no re-export shim at the old path.\n- Adds pytype_strict_library target glm5_3_flash_config in src/maxtext/m3/configs/BUILD and updates src/maxtext/m3/README.md to document per-model config and sharding modules under m3/configs/, while leaving src/maxtext/m3/configs/__init__.py untouched (preserving tokamax-free importability).\n- Updates all 18 Python importers and 4 BUILD files (src/maxtext/m3/configs/BUILD, src/maxtext/m3/models/glm5_3_flash/BUILD, tests/unit/m3/BUILD, tests/utils/BUILD) to depend on src/maxtext/m3/configs:glm5_3_flash_config.\n\n- [x] Tested with unit tests\n\nPiperOrigin-RevId: 1007839204",
+          "timestamp": "2026-10-27T06:13:47Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/8591d5e5900bde88c5f9a75b4d60c0390bac4571"
+        },
+        "date": 1793121950838,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 295.14,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 115.792,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 49,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2039.4180000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 99.109,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 157.077,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4386.772999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 309,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1490.365,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.915,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4126.826000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 309,
             "unit": "count"
           }
         ]
