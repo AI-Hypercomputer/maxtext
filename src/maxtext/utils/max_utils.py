@@ -668,7 +668,6 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
-        jnp.ndarray,
     ],
 ]:
   """Forward-mode of `cross_entropy_with_logits`."""
@@ -683,7 +682,6 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
   total_z_loss = z_loss * jax.lax.square(log_z)
   loss += total_z_loss
   return (loss, total_z_loss), (  # pyrefly: ignore[bad-return]
-      logits,
       targets,
       z_loss,
       exp_shifted,
@@ -699,19 +697,18 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
-        jnp.ndarray,
     ],
     g: tuple[jnp.ndarray, jnp.ndarray],
 ) -> tuple[jnp.ndarray, None, None]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.  # pyrefly: ignore[bad-assignment]
-  logits, targets, z_loss, exp_shifted, sum_exp, log_z = res
+  targets, z_loss, exp_shifted, sum_exp, log_z = res
   # z-loss term adds the (2 * z_loss * log_z) factor.
   deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp - targets
   g_logits = jnp.expand_dims(g, axis=-1) * deriv  # pyrefly: ignore[bad-argument-type]
 
   return (
-      jnp.asarray(g_logits, logits.dtype),
+      jnp.asarray(g_logits, exp_shifted.dtype),  # exp_shifted has the logits' dtype
       None,  # we don't need gradients on targets
       None,  # we don't need gradients on z_loss
   )  # sets z-loss coeff gradient to 0
