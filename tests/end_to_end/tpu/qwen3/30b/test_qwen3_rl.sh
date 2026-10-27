@@ -44,6 +44,8 @@ UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/it
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
 # Step 1: Run inference on the pre-converted checkpoint
+# Keep prefuse_moe_weights=False for the inference steps: with ici_expert_parallelism > 1 the prefused
+# MoE weights are laid out incorrectly and vLLM decodes gibberish.
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
@@ -56,7 +58,7 @@ python3 -m maxtext.inference.vllm_decode \
     ici_expert_parallelism=2 \
     ici_data_parallelism=2 \
     allow_split_physical_axes=True \
-    prefuse_moe_weights=True \
+    prefuse_moe_weights=False \
     use_chat_template=True \
     scan_layers=True \
     enable_single_controller=True
@@ -105,7 +107,7 @@ python3 -m maxtext.inference.vllm_decode \
     ici_expert_parallelism=2 \
     ici_data_parallelism=2 \
     allow_split_physical_axes=True \
-    prefuse_moe_weights=True \
+    prefuse_moe_weights=False \
     use_chat_template=True \
     scan_layers=True \
     enable_single_controller=True
