@@ -42,13 +42,16 @@ def validate_no_packing(decoder_segment_ids: Any) -> None:
     raise ValueError(msg)
 
 
+_VALID_DSA_ATTENTION_IMPLEMENTATIONS = frozenset({"dense_mask"})
+
 _GLM_ONLY_FIELDS = frozenset(
     (
         "layer_types indexer_types mtp_indexer_type linear_num_key_heads"
         " linear_num_value_heads linear_key_head_dim linear_value_head_dim"
-        " linear_conv_kernel_dim kda_implementation rope_parameters"
-        " index_kpool index_kpool_always_select_tail linear_lower_bound"
-        " mhc_eps enable_debug_stats"
+        " linear_conv_kernel_dim kda_implementation"
+        " dsa_attention_implementation rope_parameters index_kpool"
+        " index_kpool_always_select_tail linear_lower_bound mhc_eps"
+        " enable_debug_stats"
     ).split()
 )
 
@@ -64,9 +67,10 @@ class Glm5Config:
   fields owned here: layer_types, indexer_types, mtp_indexer_type,
   linear_num_key_heads, linear_num_value_heads, linear_key_head_dim,
   linear_value_head_dim, linear_conv_kernel_dim, kda_implementation,
-  qk_head_dim (derived from qk_nope_head_dim + qk_rope_head_dim),
-  rope_parameters, index_kpool, index_kpool_always_select_tail,
-  linear_lower_bound, mhc_eps, enable_debug_stats.
+  dsa_attention_implementation, qk_head_dim (derived from
+  qk_nope_head_dim + qk_rope_head_dim), rope_parameters, index_kpool,
+  index_kpool_always_select_tail, linear_lower_bound, mhc_eps,
+  enable_debug_stats.
   """
 
   vocab_size: int = 154880
@@ -93,6 +97,7 @@ class Glm5Config:
   v_head_dim: int = 256
   rope_parameters: Any = None
   use_indexer: bool = True
+  dsa_attention_implementation: str = "dense_mask"
   index_n_heads: int = 32
   index_head_dim: int = 128
   index_topk: int = 2048
@@ -181,6 +186,14 @@ class Glm5Config:
       raise ValueError(f"mlp_clamp_limit must be > 0.0; got {self.mlp_clamp_limit}.")
     if self.num_nextn_predict_layers not in (0, 1):
       raise ValueError("num_nextn_predict_layers must be 0 or 1, got" f" {self.num_nextn_predict_layers}.")
+    dsa = self.dsa_attention_implementation
+    if not isinstance(dsa, str):
+      raise ValueError("Glm5Config.dsa_attention_implementation must be a str; got" f" {type(dsa).__name__}: {dsa!r}.")
+    if dsa not in _VALID_DSA_ATTENTION_IMPLEMENTATIONS:
+      raise ValueError(
+          "Glm5Config.dsa_attention_implementation must be one of"
+          f" {sorted(_VALID_DSA_ATTENTION_IMPLEMENTATIONS)}; got {dsa!r}."
+      )
     if self.qk_rope_head_dim != 0 or self.rope_parameters is not None:
       raise ValueError(f"NoPE violation: {self.qk_rope_head_dim=}, {self.rope_parameters=}.")
     if self.num_key_value_heads != self.num_attention_heads:

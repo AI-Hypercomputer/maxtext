@@ -14,6 +14,8 @@
 
 """NoPE Multi-Head Latent Attention (MLA) and DSA Indexer for GLM-5.3-Flash."""
 
+import typing
+from typing import Literal
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -322,6 +324,64 @@ class Glm5DsaMlaAttention(nnx.Module):
     min_val = jnp.finfo(query_states.dtype).min
     return jnp.where(mask, 0.0, min_val).astype(query_states.dtype)
 
+  def _call_dense_mask(
+      self,
+      q: jax.Array,
+      k: jax.Array,
+      v: jax.Array,
+      mask_or_topk: jax.Array,
+      decoder_segment_ids: jax.Array | None,
+      s: int | None = None,
+  ) -> jax.Array:
+    """Computes attention using dense bias mask [B, 1, S, S] with unified zero-padding."""
+    if mask_or_topk.ndim == 4:
+      mask = mask_or_topk
+    else:
+      if s is None:
+        s = q.shape[2]
+      mask = self.build_attention_mask_from_topk(mask_or_topk, q, s)
+    scores = jnp.matmul(q, jnp.swapaxes(k, -1, -2), precision=jax.lax.Precision.HIGHEST) * self.scaling + mask
+    scores_f32 = scores.astype(jnp.float32)
+    weights = jax.nn.softmax(scores_f32, axis=-1).astype(q.dtype)
+    out = jnp.matmul(weights, v, precision=jax.lax.Precision.HIGHEST)
+    if decoder_segment_ids is not None:
+      valid_q = (decoder_segment_ids != 0)[:, None, :, None]
+      out = jnp.where(valid_q, out, 0.0)
+    return out
+
+  @typing.overload
+  def __call__(
+      self,
+      hidden_states: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+      *,
+      _force_indexer: bool = False,
+      return_topk_indices: Literal[False] = False,
+  ) -> jax.Array:
+    ...
+
+  @typing.overload
+  def __call__(
+      self,
+      hidden_states: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+      *,
+      _force_indexer: bool = False,
+      return_topk_indices: Literal[True],
+  ) -> tuple[jax.Array, jax.Array | None]:
+    ...
+
+  @typing.overload
+  def __call__(
+      self,
+      hidden_states: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+      *,
+      _force_indexer: bool = False,
+      return_topk_indices: bool = False,
+  ) -> jax.Array | tuple[jax.Array, jax.Array | None]:
+    ...
+
   def __call__(
       self,
       hidden_states: jax.Array,
@@ -380,10 +440,14 @@ class Glm5DsaMlaAttention(nnx.Module):
       topk_idx = self.indexer(hidden_states, q_resid, attention_mask=attn_mask)
       mask = self.build_attention_mask_from_topk(topk_idx, q, s)
 
-    scores = jnp.matmul(q, jnp.swapaxes(k, -1, -2)) * self.scaling + mask
-    scores_f32 = scores.astype(jnp.float32)
-    weights = jax.nn.softmax(scores_f32, axis=-1).astype(q.dtype)
-    out = jnp.matmul(weights, v).transpose(0, 2, 1, 3).reshape(b, s, -1)
+    if self.config.dsa_attention_implementation == "dense_mask":
+      out = self._call_dense_mask(q, k, v, mask, decoder_segment_ids)
+    else:
+      raise ValueError(
+          "Unsupported Glm5Config.dsa_attention_implementation:" f" {self.config.dsa_attention_implementation!r}."
+      )
+
+    out = out.transpose(0, 2, 1, 3).reshape(b, s, -1)
     out = self.o_proj(out)
     if self.sharding:
       axes = ("batch", "length", "embed")
