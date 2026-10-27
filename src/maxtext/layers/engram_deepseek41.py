@@ -123,7 +123,7 @@ def _mulmod_u32(a: Array, b: Array, p: Array) -> Array:
 
 
 class DeepSeek41NgramHasher:
-  """Host-side tables + on-device hashing for one engram layer (mirrors upstream `NgramHashState`, text only)."""
+  """Host-side tables + on-device n-gram hashing (mirrors `NgramHashState`, with `image_mask` `DEAD` barriers)."""
 
   def __init__(
       self,
@@ -155,25 +155,58 @@ class DeepSeek41NgramHasher:
     self.pow32_mod_p = (np.int64(2**32) % flat_primes).astype(np.uint32)
     self.offsets = np.concatenate([[0], np.cumsum(flat_primes)[:-1]]).astype(np.int32)
 
-  def __call__(self, input_ids: Array, decoder_segment_ids: Array | None = None) -> Array:
-    """[B, S] token ids (positions contiguous from 0) -> [B, S, (max_ngram_size - 1) * n_heads] row ids."""
+  def _gather_ngram_tokens(
+      self,
+      input_ids: Array,
+      decoder_segment_ids: Array | None = None,
+      image_mask: Array | None = None,
+  ) -> list[Array]:
+    """Returns per-shift compressed token IDs `[B, S]` with segment and image DEAD barriers applied."""
     compressed = jnp.asarray(self.token_map)[input_ids]
     b, s = compressed.shape
     if decoder_segment_ids is not None:
       compressed = jnp.where(decoder_segment_ids != 0, compressed, self.pad_id)
-    prod_hi, prod_lo = jnp.asarray(self.prod_hi), jnp.asarray(self.prod_lo)
-    rolling_hi = rolling_lo = None
-    hashes = []
+    blocked = None
+    img_mask = None
+    if image_mask is not None:
+      if image_mask.shape != (b, s):
+        raise ValueError(f"DeepSeek41NgramHasher image_mask shape {image_mask.shape} != expected {(b, s)}.")
+      img_mask = jnp.asarray(image_mask, dtype=jnp.bool_)
+      blocked = img_mask
+    per_shift_tokens: list[Array] = []
     for shift in range(self.max_ngram_size):
       if shift == 0:
         tokens = compressed
       else:
         pad = jnp.full((b, min(shift, s)), self.pad_id, dtype=compressed.dtype)
-        tokens = jnp.concatenate([pad, compressed[:, : s - shift]], axis=1)[:, :s]
+        tokens = jnp.concatenate([pad, compressed[:, : max(s - shift, 0)]], axis=1)[:, :s]
         if decoder_segment_ids is not None:
           seg_pad = jnp.zeros((b, min(shift, s)), dtype=decoder_segment_ids.dtype)
-          prev_seg = jnp.concatenate([seg_pad, decoder_segment_ids[:, : s - shift]], axis=1)[:, :s]
+          prev_seg = jnp.concatenate([seg_pad, decoder_segment_ids[:, : max(s - shift, 0)]], axis=1)[:, :s]
           tokens = jnp.where((prev_seg == decoder_segment_ids) & (decoder_segment_ids != 0), tokens, self.pad_id)
+      if blocked is not None:
+        if shift > 0:
+          img_pad = jnp.zeros((b, min(shift, s)), dtype=jnp.bool_)
+          shifted_img = jnp.concatenate([img_pad, img_mask[:, : max(s - shift, 0)]], axis=1)[:, :s]
+          blocked = blocked | shifted_img
+        tokens = jnp.where(blocked, self.pad_id, tokens)
+      per_shift_tokens.append(tokens)
+    return per_shift_tokens
+
+  def __call__(
+      self,
+      input_ids: Array,
+      decoder_segment_ids: Array | None = None,
+      image_mask: Array | None = None,
+  ) -> Array:
+    """[B, S] token ids (positions contiguous from 0) -> [B, S, (max_ngram_size - 1) * n_heads] row ids."""
+    per_shift_tokens = self._gather_ngram_tokens(
+        input_ids, decoder_segment_ids=decoder_segment_ids, image_mask=image_mask
+    )
+    prod_hi, prod_lo = jnp.asarray(self.prod_hi), jnp.asarray(self.prod_lo)
+    rolling_hi = rolling_lo = None
+    hashes = []
+    for shift, tokens in enumerate(per_shift_tokens):
       hi, lo = prod_hi[shift][tokens], prod_lo[shift][tokens]
       if shift == 0:
         rolling_hi, rolling_lo = hi, lo
@@ -239,7 +272,13 @@ class DeepSeek41Engram(nnx.Module):
     self.q_weight = nnx.Param(jnp.ones((self.hc_mult, self.dim), dtype=config.weight_dtype), out_sharding=(None, "embed"))
     self.k_weight = nnx.Param(jnp.ones((self.hc_mult, self.dim), dtype=config.weight_dtype), out_sharding=(None, "embed"))
 
-  def __call__(self, h: Array, hash_ids: Array, decoder_segment_ids: Array | None = None) -> Array:
+  def __call__(
+      self,
+      h: Array,
+      hash_ids: Array,
+      decoder_segment_ids: Array | None = None,
+      image_mask: Array | None = None,
+  ) -> Array:
     """h: [B, S, hc, D] residual stream; hash_ids: [B, S, n_hash_cols] -> [B, S, hc, D]."""
     b, s = hash_ids.shape[:2]
     rows = jnp.take(self.embed[...], hash_ids, axis=0).astype(self.config.dtype)  # [B, S, cols, hd]
@@ -247,10 +286,11 @@ class DeepSeek41Engram(nnx.Module):
     if deepseek41_quant.enabled(self.config):  # the reference's FP8 `wkv` quantizes its input
       rows = deepseek41_quant.fp8_qdq(rows)
     kv = self.wkv(rows)
-    key = kv[..., : self.hc_mult * self.dim].astype(jnp.float32).reshape(b, s, self.hc_mult, self.dim)
-    value = kv[..., self.hc_mult * self.dim :].astype(jnp.float32)
-    weight = self.q_weight[...].astype(jnp.float32) * self.k_weight[...].astype(jnp.float32)
-    hf = h.astype(jnp.float32)
+    work_dtype = jnp.promote_types(h.dtype, jnp.float32)
+    key = kv[..., : self.hc_mult * self.dim].astype(work_dtype).reshape(b, s, self.hc_mult, self.dim)
+    value = kv[..., self.hc_mult * self.dim :].astype(work_dtype)
+    weight = self.q_weight[...].astype(work_dtype) * self.k_weight[...].astype(work_dtype)
+    hf = h.astype(work_dtype)
     # Normalized per (token, hc copy) over `dim`, not jointly over the copies.
     rstd = jax.lax.rsqrt(jnp.mean(hf**2, axis=-1) + self.eps) * jax.lax.rsqrt(jnp.mean(key**2, axis=-1) + self.eps)
     dot = jnp.sum(hf * weight * key, axis=-1) * rstd * self.dim**-0.5
@@ -259,6 +299,10 @@ class DeepSeek41Engram(nnx.Module):
     gate = jax.nn.sigmoid(jnp.where(dot < 0, -root, root))
     if decoder_segment_ids is not None:
       gate = jnp.where((decoder_segment_ids != 0)[..., None], gate, 0.0)
+    if image_mask is not None:
+      if image_mask.shape != (b, s):
+        raise ValueError(f"DeepSeek41Engram image_mask shape {image_mask.shape} != expected {(b, s)}.")
+      gate = jnp.where(jnp.asarray(image_mask, dtype=jnp.bool_)[..., None], 0.0, gate)
     return (hf + gate[..., None] * value[:, :, None, :]).astype(h.dtype)
 
 
