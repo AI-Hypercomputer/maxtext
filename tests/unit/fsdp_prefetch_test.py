@@ -24,11 +24,13 @@ from unittest import mock
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import AbstractMesh, AxisType, Mesh, NamedSharding, PartitionSpec
 import numpy as np
 
 from maxtext.common.common_types import ShardMode
 from maxtext.layers import fsdp_prefetch
+from maxtext.layers import fsdp_prefetch_inhomogeneous
 from maxtext.utils import sharding
 
 
@@ -346,6 +348,109 @@ class FsdpPrefetchReducedGradTest(unittest.TestCase):
     # One tagged reduce-scatter per weight and no all-reduce: the gradient is reduced exactly once.
     self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 2)
     self.assertNotIn("stablehlo.all_reduce", hlo)
+
+
+class _ToySubLayer(nnx.Module):
+  """tanh(x @ kernel) (+ bias): a sub-layer of `_ToyBlock`."""
+
+  def __init__(self, dim, rngs, bias=False):
+    self.kernel = nnx.Param(jax.random.normal(rngs.params(), (dim, dim)) / dim**0.5)
+    self.has_bias = bias
+    self.bias = nnx.Param(0.1 * jax.random.normal(rngs.params(), (dim,)) if bias else jnp.zeros((0,)))
+
+  def __call__(self, x):
+    y = jnp.tanh(x @ self.kernel[...])
+    return (y + self.bias[...] if self.has_bias else y), None
+
+
+class _ToyBlock(nnx.Module):
+  """An inhomogeneous block: `num_a` identical sub-layers, then one with a bias (2 sub-layer groups)."""
+
+  def __init__(self, num_a, dim, rngs):
+    self.sub_names = tuple(f"a{i}" for i in range(num_a)) + ("b",)
+    for i in range(num_a):
+      setattr(self, f"a{i}", _ToySubLayer(dim, rngs))
+    self.b = _ToySubLayer(dim, rngs, bias=True)
+
+  def prefetch_sublayer_names(self):
+    return self.sub_names
+
+  def __call__(self, x):
+    for name in self.sub_names:
+      x, _ = getattr(self, name)(x)
+    return x, None
+
+
+class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
+  """Per-sub-layer prefetch of inhomogeneous blocks with deferred dW reduce-scatters on CPU devices."""
+
+  def _grads(self, num_blocks, num_a, defer):
+    """(gradients of the prefetch pipeline, reference gradients, lowered HLO) for a toy block stack."""
+    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
+    dim, batch = 8, 8
+    blocks = [_ToyBlock(num_a, dim, nnx.Rngs(params=b)) for b in range(num_blocks)]
+    graphdef = nnx.graphdef(blocks[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(b, nnx.Param) for b in blocks])
+    x_np = np.random.default_rng(0).standard_normal((batch, dim)).astype(np.float32)
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=defer,
+    )
+
+    def loss(p, x):
+      layers = nnx.merge(graphdef, p)
+      stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+      y, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+          layers, stages, x, length=num_blocks, mesh=mesh, config=config
+      )
+      return (y * y).sum()
+
+    def ref_loss(p, x):
+      for b in range(num_blocks):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, b=b: v[b], p))(x)
+      return (x * x).sum()
+
+    with jax.set_mesh(mesh):
+      # Kernels are FSDP-sharded on their input dimension; biases are replicated (untagged gradients).
+      p_sharded = jax.tree.map(
+          lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None) if v.ndim == 3 else PartitionSpec()), params
+      )
+      x = jax.device_put(x_np, PartitionSpec("fsdp", None))
+      f = jax.jit(jax.grad(loss))
+      grads = f(p_sharded, x)
+      hlo = f.lower(p_sharded, x).as_text()
+    return grads, jax.grad(ref_loss)(params, x_np), hlo
+
+  def _assert_matches_reference(self, num_blocks, num_a):
+    """Asserts deferred gradients match an unsharded reference and the non-deferred pipeline."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    grads, ref, hlo = self._grads(num_blocks, num_a, defer=True)
+    for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+    # The kernel gradients are reduce-scattered by the tagged (deferred) reduce-scatter.
+    self.assertIn("stablehlo.reduce_scatter", hlo)
+    self.assertIn('xla_explicit_fsdp = "yes"', hlo)
+    # Deferral only reorders the reduce-scatters: same gradients as without it.
+    no_defer, _, _ = self._grads(num_blocks, num_a, defer=False)
+    for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(no_defer)):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-6, atol=1e-6)
+
+  def test_three_sublayer_group(self):
+    # Groups [a0, a1, a2] (entry, same-group and exit steps) and [b] (entry is exit).
+    self._assert_matches_reference(num_blocks=3, num_a=3)
+
+  def test_one_block(self):
+    # The first block step's placeholder flush targets the sub-layer whose deferred dW is flushed last.
+    self._assert_matches_reference(num_blocks=1, num_a=3)
+
+  def test_group_sizes(self):
+    # 1 (entry is exit), 2 (entry and exit) and 5 (unrolled same-group steps) identical sub-layers.
+    for num_a in (1, 2, 5):
+      with self.subTest(num_a=num_a):
+        self._assert_matches_reference(num_blocks=2, num_a=num_a)
 
 
 if __name__ == "__main__":
