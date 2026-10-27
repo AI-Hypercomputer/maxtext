@@ -312,6 +312,7 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
         dense_fsdp_use_two_stage_all_gather=False,
         dense_weight_grad_in_kernel_order=False,
         moe_flat_fsdp_weights=False,
+        use_te_grouped_gemm=False,
         debug_sharding=False,
         weight_block_size=128,
         emb_dim=16,
