@@ -127,6 +127,30 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     self.assertEqual(jax.grad(loss)(logits.astype(jnp.bfloat16)).dtype, jnp.bfloat16)
 
 
+class MaxUtilsTieCotangents(unittest.TestCase):
+  """Tests for tie_cotangents in max_utils.py"""
+
+  def test_tie_cotangents_matches_untied(self):
+    """Tying the cotangents changes neither the values nor the gradients, and adds the barrier."""
+    x = random.normal(random.PRNGKey(0), (4, 8))
+    w = {"kernel": random.normal(random.PRNGKey(1), (8, 16))}
+
+    def loss(x, w, tie):
+      if tie:
+        x, w = max_utils.tie_cotangents(x, w)
+      return jnp.sum(jnp.tanh(x @ w["kernel"]) ** 2)
+
+    tied_x, tied_w = max_utils.tie_cotangents(x, w)
+    np.testing.assert_array_equal(tied_x, x)
+    np.testing.assert_array_equal(tied_w["kernel"], w["kernel"])
+    np.testing.assert_array_equal(max_utils.tie_cotangents(x), x)
+    tied_grads = jax.grad(loss, argnums=(0, 1))(x, w, True)
+    untied_grads = jax.grad(loss, argnums=(0, 1))(x, w, False)
+    jax.tree.map(np.testing.assert_array_equal, tied_grads, untied_grads)
+    tied_grad_jaxpr = jax.make_jaxpr(jax.grad(lambda x, w: loss(x, w, True), argnums=(0, 1)))(x, w)
+    self.assertIn("optimization_barrier", str(tied_grad_jaxpr))
+
+
 class MaxUtilsCustomMesh(unittest.TestCase):
   """Tests for the is_valid_custom_mesh function in max_utils.py"""
 
