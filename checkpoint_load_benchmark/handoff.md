@@ -3,7 +3,7 @@
 > **Snapshot:** 2026-10-28 ~12:50 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
 >
 > The numbers below come from the per-phase result JSONs in GCS at snapshot time. Pods were still running, so
-> re-check §6 before acting. To refresh the status tables, run
+> re-check §6 before acting. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
 > [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py) (see §9).
 
 ---
@@ -13,7 +13,7 @@
 | Workstream | Status |
 | :--- | :--- |
 | **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | `qwen3-235b-a22b` 4/4 ✅ · `deepseek4-284b` 4/4 ✅ (synthetic sparse files, see §7.10) · `qwen3-480b-a35b` 2/4 ✅ (1 slice can't hold it) · `qwen3.5-397b-a17b` 0/4 ❌ (HBM OOM in the scanned 2-slice transform, fix written but not deployed; unscanned · 2 not run yet) · `deepseek3-671b` 0/4 ❌ (exceeds 1- and 2-slice capacity) |
-| **P1 · Exp 1A BEFORE** (`origin/main`) | No config succeeded. `qwen3-480b-a35b` hits `KeyError` (no mapping before #5706). Everything else was **killed by the watchdog**. That proves a failure only for `qwen3-235b-a22b` (killed at 900 s; with the PRs it takes 697–792 s). **The DeepSeek runs killed at 360 s prove nothing**, because with the PRs they take 353–453 s (§7.5). |
+| **P1 · Exp 1A BEFORE** (`origin/main`) | No config succeeded. `qwen3-480b-a35b` hits `KeyError` (no mapping before #5706), the only conclusive BEFORE failure. Everything else was **killed by a 360 s watchdog** (`PHASE_TIMEOUT_S=360` in the manifests deployed at 06:00), which is shorter than the WITH-PRs load times (306–942 s), so those kills **prove nothing** (§7.5). The 1800 s re-runs are queued (`before_*` tasks). |
 | **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | Only `to_maxtext` Step 1 is measured so far (235B: 583.3 s, 480B: 1,135.5 s). Two conversion attempts for 235B scanned were lost: one to an eviction, and one that ran 2 h at leaf 1/15 because shards were streamed through a 3-shard LRU cache (§7.15). The harness now stages the full checkpoint when it fits on the host. **Scanned conversion of 397B/480B does not fit one tpu7x host**, so it now fails fast with a recorded reason; unscanned conversion streams per layer and works. |
 | **P1 completion run** | Started 10:30 UTC as a GCS task queue (`configs/p1_completion_tasks.json`, 23 tasks; see README "Finishing Priority 1") drained by preemption-tolerant workers. At snapshot, worker `g1`+`h1` (2 slices, driven by `mesakh-ctrl-g1`) is the only one alive (pair `g`'s runner and `f1` were evicted within minutes of starting). Progress: `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/done/`. |
 | **P2 · 16-model suite** | 10 of the 14 P2-only models are complete in all 4 configs. Gaps: `qwen3-32b` (1 cell), `qwen3-30b-a3b` (4 cells), `llama3.1-70b` (running), `gpt-oss-120b` (queued). `deepseek4-284b` and `deepseek3-671b` come from the P1 runs (`safetensors_dynamic` only). |
@@ -95,7 +95,7 @@ Code bundles verified against git: `code/maxtext_lance_prs.tar.gz` `src/` = this
 
 - **Pod pair `<id>`**: `mesakh-tpu7x-<id>0` (`ROLE=runner`, slice 0, runs `RUNNER_SCRIPT`), `mesakh-tpu7x-<id>1` (`ROLE=daemon`, slice 1, `--remote-slice-daemon --daemon-port 55555`), and the headless Service `mesakh-w1-<id>`.
   [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py) generates them and [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) deploys them.
-  - P1 pairs: `a` = 235B, `b` = 397B, `c` = 480B, `f` = 284B + 671B. Each runs 3 stages: WITH PRs → BEFORE (`origin/main`, watchdog `PHASE_TIMEOUT_S=900`) → full TM vs ST comparison.
+  - P1 pairs: `a` = 235B, `b` = 397B, `c` = 480B, `f` = 284B + 671B. Each runs 3 stages: WITH PRs → BEFORE (`origin/main`, watchdog `PHASE_TIMEOUT_S`: 360 s when these pairs were deployed, 900 s in the current generator) → full TM vs ST comparison.
   - P2 pairs: `d` = 10 small and medium models, `e` = `qwen3-32b`, `mixtral-8x7b`, `llama3.1-70b`, `gpt-oss-120b`.
 - **What [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py) does at pod start** (it is downloaded from `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`):
   1. Installs missing Python packages from `site_packages_overlay.tar.gz`, without shadowing the image's jax, flax, or orbax.
@@ -136,9 +136,9 @@ ST S2 = sharded load + in-memory conversion (the load and transform split is in 
 
 | Model | Config | BEFORE (`origin/main`) | WITH PRs: ST S2 (load + transform) | Peak host RAM |
 | :--- | :--- | :--- | :--- | ---: |
-| `qwen3-235b-a22b`<br>Step 1: 583.3 s | scanned · 1 | ❌ killed by the 900 s watchdog during the load | **757.5 s** (674.8 + 82.7) | 391.8 GB |
+| `qwen3-235b-a22b`<br>Step 1: 583.3 s | scanned · 1 | ⚠️ killed by the 360 s watchdog during the load (inconclusive) | **757.5 s** (674.8 + 82.7) | 391.8 GB |
 | | unscanned · 1 | skipped (harness rule) | **697.1 s** (661.8 + 35.2) | 392.7 GB |
-| | scanned · 2 | ❌ killed by the 900 s watchdog | **792.4 s** (708.0 + 83.6) | 255.9 GB |
+| | scanned · 2 | ⚠️ killed by the watchdog during the load (inconclusive) | **792.4 s** (708.0 + 83.6) | 255.9 GB |
 | | unscanned · 2 | skipped | **749.0 s** (704.9 + 44.0) | 254.6 GB |
 | `deepseek4-284b`<br>(synthetic sparse local files) | scanned · 1 | ❌ killed by the 360 s watchdog ⚠️ inconclusive | **453.3 s** (366.3 + 86.8) | 963.4 GB |
 | | unscanned · 1 | skipped | **414.1 s** (377.0 + 37.0) | 980.3 GB |
@@ -269,7 +269,7 @@ Queue status at snapshot: `tm_235b_scanned_s1` was interrupted on purpose (lock 
 2. **Linux `MAX_ARG_STRLEN` (131,072 bytes).** The harness ships its own source to the remote daemon as one argument, which grew past the limit (`[Errno 7] Argument list too long`). *Fixed*: zlib then base64, about 28 KB.
 3. **SIGABRT (-6) at multi-slice interpreter teardown.** *Fixed*: the run is not marked failed when its result JSON is already complete.
 4. **Watchdog kills are recorded as `OOMKilled / Exit Code 137`.** The harness labels every `-9` exit as OOM (`benchmark_ckpt_load_time.py` ~L2276/L2417), including SIGKILLs from `PHASE_TIMEOUT_S`. Every BEFORE `-9` above had a peak host RAM of ≤194 GB out of 1,014.5 GB, so they were timeouts, not OOMs. **TODO**: record `TIMEOUT (<N>s)` from the watchdog state, and reclassify existing records from the `[TIMEOUT_WATCHDOG]` lines in the run output.
-5. **A watchdog shorter than the WITH-PRs time is inconclusive.** The DeepSeek BEFORE runs were killed at 360 s, but with the PRs they need 353–453 s. Likewise, `qwen3.5-397b-a17b` scanned · 1 took 947.7 s just to load with the PRs. **Re-run BEFORE with `PHASE_TIMEOUT_S=1800`** or more. For `qwen3-235b-a22b`, 900 s vs. 697–792 s is a fair comparison, but it only shows that `origin/main` is "> 900 s".
+5. **A watchdog shorter than the WITH-PRs time is inconclusive.** The DeepSeek BEFORE runs were killed at 360 s, but with the PRs they need 353–453 s. Likewise, `qwen3.5-397b-a17b` scanned · 1 took 947.7 s just to load with the PRs. **Re-run BEFORE with `PHASE_TIMEOUT_S=1800`** or more. The original P1 manifests (deployed 06:00 UTC) used `PHASE_TIMEOUT_S=360` for all BEFORE runs, so `qwen3-235b-a22b` (WITH: 697–792 s) is inconclusive too; the generator was later changed to 900 s.
 6. **`qwen3.5-397b-a17b` scanned · 2-slice HBM OOM in the composite `(wi_0, wi_1)` path.**
    - **What happens:** each layer's `mlp.experts.gate_up_proj` is 512 × 2048 × 4096 BF16, about 8.6 GB. 45 local layers are stacked into one composite target `(…, 2)` of about 387 GB, about 24.2 GB per device across 16 devices. It is then sliced into `wi_0` and `wi_1` (about 12.1 GB per device each, which is the failed `11.25G` allocation) while the rest of the model already fills HBM.
    - **What changed:** the uncommitted fix does three things:
