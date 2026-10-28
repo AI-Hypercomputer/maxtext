@@ -491,24 +491,40 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
     raise RuntimeError(f"No .safetensors files found on HF Hub for {repo_id}")
 
   shared_st_cache_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/shared/hf_cache/{repo_id.replace('/', '_')}"
-  st_res_json = epath.Path(f"{args.gcs_run_dir}/logs/{args.model}/scanned/safetensors_dynamic_result.json")
   reused_existing = False
-  if (
-      os.environ.get("REUSE_SHARED_ST_GCS_CACHE") == "1" or getattr(args, "reuse_model_hf_cache", False)
-  ) and st_res_json.exists():
+  if os.environ.get("REUSE_SHARED_ST_GCS_CACHE") == "1" or getattr(args, "reuse_model_hf_cache", False):
+    # Reuse the shared cache when every shard is in it. Requiring a cold HF->GCS time in the scanned 1-slice
+    # safetensors_dynamic record made two workers re-download qwen3.5-397b-a17b (795 GB) from HF Hub into the cache
+    # that other runs were reading, because that record was an infra failure without a Step 1 time.
     try:
-      st_prev = json.loads(st_res_json.read_text())
-      if st_prev.get("hf_to_gcs_s", 0.0) > 0:
+      from google.cloud import storage as gcs_storage
+
+      c_bucket, _, c_prefix = shared_st_cache_dir.removeprefix("gs://").partition("/")
+      cached = {
+          b.name.rsplit("/", 1)[-1]: b.size
+          for b in gcs_storage.Client().list_blobs(c_bucket, prefix=c_prefix.rstrip("/") + "/")
+      }
+      if all(cached.get(os.path.basename(f), 0) > 0 for f in files):
+        # The cold download is the largest Step 1 time recorded for this model; warm cache checks take ~1 s.
+        recorded = []
+        for res in epath.Path(f"{args.gcs_run_dir}/logs/{args.model}").glob("*/*_result.json"):
+          if res.name in ("safetensors_dynamic_result.json", "to_maxtext_step1_result.json"):
+            try:
+              recorded.append(float(json.loads(res.read_text()).get("hf_to_gcs_s", 0.0) or 0.0))
+            except Exception:  # pylint: disable=broad-exception-caught
+              pass
+        cold_s = max(recorded, default=0.0)
         gcs_cache_dir = shared_st_cache_dir
-        hf_to_gcs_s = float(st_prev["hf_to_gcs_s"])
+        hf_to_gcs_s = cold_s if cold_s >= 60.0 else 0.0
         reused_existing = True
+        cold_note = f"recorded cold HF->GCS={hf_to_gcs_s:.2f}s" if hf_to_gcs_s else "no cold HF->GCS time in this run dir"
         print(
-            f"[to_maxtext Step 1] Reusing populated HF->GCS cache {gcs_cache_dir} "
-            f"(recorded cold HF->GCS={hf_to_gcs_s:.2f}s, {len(files)} safetensors files)",
+            f"[to_maxtext Step 1] Reusing populated HF->GCS cache {gcs_cache_dir} ({cold_note}, "
+            f"{len(files)} safetensors files)",
             flush=True,
         )
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
+    except Exception as ex:  # pylint: disable=broad-exception-caught
+      print(f"[to_maxtext Step 1] Could not check the shared HF->GCS cache ({ex}); downloading from HF Hub", flush=True)
 
   if not reused_existing:
     gcs_cache_dir = (
@@ -580,8 +596,26 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
     total_gb = sum(blob_sizes.get(os.path.basename(f), 4.2e9) for f in files) / 1e9
   except Exception:  # pylint: disable=broad-exception-caught
     total_gb = len(files) * 4.2
-  # Staged shards on /ramdisk live in host RAM, which the conversion itself also needs for materialized leaves.
-  stage_budget_gb = (free_disk_gb - 20.0) * (0.55 if local_hf_dir.startswith("/ramdisk") else 1.0)
+  # `to_maxtext` holds the whole converted state (about the checkpoint size) in host RAM before the Orbax save. On
+  # tpu7x (1,014.5 GB RAM, 986.7 GB allocatable), a conversion pod was evicted at 944 GB container memory, so a
+  # conversion whose state alone does not fit in ~93% of host RAM cannot finish here. Record that instead of running
+  # for hours (qwen3-480b-a35b: 960 GB).
+  _, _, host_ram_gb = _read_host_mem_gb()
+  usable_ram_gb = 0.93 * host_ram_gb
+  if total_gb + 40.0 > usable_ram_gb:
+    raise RuntimeError(
+        f"to_maxtext conversion of {args.model} holds the whole converted state (~{total_gb:.1f} GB) in host RAM "
+        f"before the Orbax save, but this host has ~{usable_ram_gb:.1f} GB usable ({host_ram_gb:.1f} GB total). "
+        f"Convert on a host with more RAM."
+    )
+  # Staged shards on /ramdisk live in host RAM. `to_maxtext` then holds the whole converted state in host RAM before
+  # the Orbax save (about the checkpoint size again), so stage only when both fit, plus a margin for transients. On
+  # tpu7x (944.8 GiB RAM, ~100 GB boot disk), a scanned qwen3-235b-a22b conversion (470 GB) with all shards staged
+  # was OOM-killed at leaf 4 of 15.
+  if local_hf_dir.startswith("/ramdisk"):
+    stage_budget_gb = free_disk_gb - total_gb - 60.0
+  else:
+    stage_budget_gb = free_disk_gb - 20.0
   if total_gb <= stage_budget_gb:
     print(
         f"[to_maxtext Step 1] Staging all {len(files)} shards ({total_gb:.1f} GB) from {gcs_cache_dir} "
@@ -596,7 +630,8 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
     # qwen3-235b-a22b conversion wrote 1 of 15 leaves in 2 h. Scanned conversion needs the checkpoint staged.
     raise RuntimeError(
         f"Scanned to_maxtext conversion of {args.model} needs all {len(files)} shards ({total_gb:.1f} GB) staged on "
-        f"one host, but the staging budget is {stage_budget_gb:.1f} GB ({free_disk_gb:.1f} GB free in "
+        f"one host, and the converted state (about {total_gb:.1f} GB more) is held in host RAM before the save. "
+        f"Only {stage_budget_gb:.1f} GB is left for staging ({free_disk_gb:.1f} GB free in "
         f"{os.path.dirname(local_hf_dir)}). Convert on a host with more local storage or RAM."
     )
   else:
