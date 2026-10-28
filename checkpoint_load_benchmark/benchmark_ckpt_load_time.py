@@ -1,17 +1,52 @@
-"""Benchmark runtime (load time) comparison between `to_maxtext` and `safetensor` (`safetensors_dynamic`).
+"""Unified MaxText Checkpoint Load-Time Benchmark Suite (`to_maxtext` vs. `safetensors_dynamic`).
 
-For `to_maxtext`, records:
-  1. HF -> GCS execution time
-  2. Convert to an Orbax checkpoint execution time
-  3. Load the Orbax checkpoint execution time
+Compares end-to-end and warm checkpoint loading latency, sub-phase breakdowns, and peak Host RAM /
+TPU HBM usage between MaxText's offline Orbax conversion pipeline (`to_maxtext`) and on-the-fly
+distributed SafeTensors loading (`safetensors_dynamic`) across:
+  - Scan Modes: `scanned` (`scan_layers=True`) and `unscanned` (`scan_layers=False`)
+  - Slice Topologies: Single-Slice (`num_slices=1`) and Multi-Slice (`num_slices>=2`)
+  - Hardware Generations:
+      * TPU v5p (`bodaborg-v5p-nap`, `ct5p-hightpu-4t`, `2x2x1`): 4 devices/slice, 368 GB HBM/slice, 270 GB RAM/slice
+      * TPU v7 / Ironwood (`bodaborg-tpu7x-nap`, `tpu7x-standard-4t`, `2x2x1`): 8 TPU cores/slice, 813.80 GB HBM/slice, 1,014.50 GB RAM/slice
 
-For `safetensor` (`safetensors_dynamic`), records:
-  1. HF -> GCS execution time
-  2. Safetensors and convert to MaxText execution time
+Pipelines Measured:
+  1. `to_maxtext` (3-Step Offline Orbax Pipeline):
+     - Step 1 (`hf_to_gcs_s`): Download HuggingFace `.safetensors` shards to GCS and local staging dir
+     - Step 2 (`convert_to_orbax_s`): Offline CPU weight conversion (`to_maxtext.py`) to GCS Orbax checkpoint
+     - Step 3 (`load_orbax_s`): Restore Orbax checkpoint into the MaxText mesh (`source_checkpoint_layout="orbax"`)
 
-Usage:
-  PYTHONPATH=src /usr/local/google/home/mesakh/Documents/mesakh/py312/bin/python \
-      benchmark_ckpt_load_time.py --models qwen3-0.6b
+  2. `safetensor` (`safetensors_dynamic`, 2-Step Direct Pipeline):
+     - Step 1 (`hf_to_gcs_s`): Stream HuggingFace `.safetensors` shards directly to shared GCS `hf_cache`
+     - Step 2 (`safetensors_and_convert_s`): Distributed sharded load + in-memory layout transformation
+       (`source_checkpoint_layout="safetensors_dynamic"`), decomposed into:
+         * `[1/3]` (`mappings_s`): Parameter mapping derivation
+         * `[2/3]` (`load_sharded_hf_s`): Distributed byte-ranged `.safetensors` read via `ocp.v1.load_pytree`
+         * `[3/3]` (`transform_hf_to_mt_s`): In-memory weight transformation / layer stacking (`_transform_matched_weights`)
+
+Supported Environment Variables:
+  - `REMOTE_SLICE1_ADDR`: Comma-separated `host:port` list of remote slice worker daemons (`--remote-slice-daemon`)
+  - `KEEP_HF_CACHE=1`: Preserve the shared GCS `hf_cache` across runs to measure warm load or reuse across branches
+  - `SKIP_FAILED_RESULTS=1`: When `--skip-completed` is set, also skip (do not retry) cached JSON results with
+    `status == "FAILED"`; by default those are re-run
+  - `SHARED_HF_CACHE_BASE_DIR`: Reuse an existing shared GCS `hf_cache` directory (e.g., when comparing `origin/main` vs. PRs)
+  - `REUSE_SHARED_ST_GCS_CACHE=1`: Copy `.safetensors` shards directly from the `safetensors_dynamic` GCS cache in `to_maxtext` Step 1
+  - `PHASE_TIMEOUT_S`: Optional per-phase wall-clock timeout in seconds (e.g., `360` to capture multi-host hangs on `origin/main`)
+  - `STAGE_SPARSE_DEEPSEEK_OOM=1`: Stage sparse BF16 `.safetensors` headers on local disk for ultra-large DeepSeek models
+
+Usage Examples:
+  # Local or single-slice run:
+  PYTHONPATH=src python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py --models qwen3-0.6b
+
+  # Multi-slice TPU v7 (tpu7x) run across 1 and 2 slices (8 and 16 TPU cores):
+  PYTHONPATH=src python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
+      --models qwen3-235b-a22b deepseek4-284b qwen3.5-397b-a17b qwen3-480b-a35b deepseek3-671b \
+      --scan-modes scanned unscanned \
+      --num-slices-list 1 2 \
+      --devices-per-slice 8 \
+      --hardware tpu \
+      --reuse-model-hf-cache \
+      --skip-completed \
+      --allow-step-failure
 """
 
 import argparse
@@ -30,6 +65,9 @@ import sys
 import time
 from typing import Any
 
+# Prevent PyTorch (if installed in container) from autoloading torch_xla and locking libtpu before JAX distributed init
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+
 # Register OmegaConf resolver for HF_TOKEN if present in configs
 try:
   from omegaconf import OmegaConf
@@ -39,16 +77,18 @@ try:
 except ImportError:
   pass
 
-# Ensure newer HuggingFace Config classes fall back to PretrainedConfig on older transformers
-try:
-  import transformers
-  from transformers.configuration_utils import PretrainedConfig as _PTConfig
 
-  for _cfg_cls in ("Qwen3OmniMoeConfig", "Qwen3NextConfig", "Olmo3Config"):
-    if not hasattr(transformers, _cfg_cls):
-      setattr(transformers, _cfg_cls, _PTConfig)
-except ImportError:
-  pass
+def _register_transformers_fallbacks() -> None:
+  """Ensures newer HuggingFace Config classes fall back to PretrainedConfig on older transformers."""
+  try:
+    import transformers
+    from transformers.configuration_utils import PretrainedConfig as _PTConfig
+
+    for _cfg_cls in ("Qwen3OmniMoeConfig", "Qwen3NextConfig", "Olmo3Config"):
+      if not hasattr(transformers, _cfg_cls):
+        setattr(transformers, _cfg_cls, _PTConfig)
+  except ImportError:
+    pass
 
 
 DEFAULT_MODELS = ["qwen3-0.6b"]
@@ -75,6 +115,11 @@ def resolve_dcn_axis(model_name: str, dcn_axis_arg: str = "auto") -> str:
   if model_name in (
       "gpt-oss-120b",
       "llama3.1-70b",
+      "llama3.1-405b",
+      "mixtral-8x22b",
+      "qwen3-235b-a22b",
+      "qwen3.5-397b-a17b",
+      "qwen3-480b-a35b",
       "deepseek3-671b",
       "deepseek3.2-671b",
       "deepseek4-284b",
@@ -82,7 +127,6 @@ def resolve_dcn_axis(model_name: str, dcn_axis_arg: str = "auto") -> str:
   ):
     return "dcn_fsdp_parallelism"
   return "dcn_data_parallelism"
-
 
 
 def get_hf_token() -> str:
@@ -100,11 +144,7 @@ def get_hf_token() -> str:
 def resolve_hardware(hw_arg: str) -> str:
   if hw_arg in ("cpu", "tpu"):
     return hw_arg
-  if (
-      os.path.exists("/dev/vfio/0")
-      or os.path.exists("/dev/accel0")
-      or os.environ.get("TPU_ACCELERATOR_TYPE")
-  ):
+  if os.path.exists("/dev/vfio/0") or os.path.exists("/dev/accel0") or os.environ.get("TPU_ACCELERATOR_TYPE"):
     return "tpu"
   return "cpu"
 
@@ -112,13 +152,21 @@ def resolve_hardware(hw_arg: str) -> str:
 def get_concurrent_gb(model_name: str, scan_mode: str = "scanned", num_slices: int = 1) -> int:
   """Returns checkpoint_storage_concurrent_gb sized to fit the largest single leaf while minimizing transient RAM."""
   if scan_mode == "unscanned":
-    return 16
+    return 24
   if model_name == "llama3.1-70b":
     return 20 if num_slices > 1 else 38
   if model_name in ("mixtral-8x7b", "gpt-oss-120b", "qwen3-next-80b-a3b"):
     return 45
-  if model_name in ("mixtral-8x22b",):
+  if model_name in ("mixtral-8x22b", "deepseek4-284b"):
     return 96
+  if model_name in ("qwen3-235b-a22b",):
+    return 160
+  if model_name in ("qwen3.5-397b-a17b", "llama3.1-405b"):
+    return 210
+  if model_name in ("qwen3-480b-a35b",):
+    return 330
+  if model_name in ("deepseek3-671b", "deepseek3.2-671b", "deepseek4-1600b"):
+    return 460
   return 20
 
 
@@ -180,21 +228,19 @@ def build_abstract_state_for_load(config):
 
   mesh = maxtext_utils.get_mesh_from_config(config, None)
   create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh, None)
-  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(
-      config, mesh, create_model_partial, is_training=False
-  )
+  unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, create_model_partial, is_training=False)
   return mesh, unboxed_abstract_state
 
 
 def _stage_sparse_bf16_safetensors(model_name: str, target_dir: str) -> tuple[int, int, float]:
-  """Creates sparse BF16 .safetensors files matching HF_SHAPE[model_name] for cluster OOM testing."""
+  """Creates sharded sparse BF16 .safetensors files (~4 GB per shard) matching HF_SHAPE[model_name]."""
   import math
   import struct
   from maxtext.checkpoint_conversion.utils import hf_model_configs
   from maxtext.checkpoint_conversion.utils import hf_shape
 
   os.makedirs(target_dir, exist_ok=True)
-  marker = os.path.join(target_dir, ".sparse_ready")
+  marker = os.path.join(target_dir, ".sparse_sharded_v2_ready")
   index_path = os.path.join(target_dir, "model.safetensors.index.json")
   cfg_dict = hf_model_configs.HF_MODEL_CONFIGS[model_name].to_dict()
   shapes_map = hf_shape.HF_SHAPE[model_name](cfg_dict)
@@ -206,7 +252,7 @@ def _stage_sparse_bf16_safetensors(model_name: str, target_dir: str) -> tuple[in
     return num_st, len(clean_shapes), total_gb
 
   for fn in os.listdir(target_dir):
-    if fn.endswith(".safetensors") or fn == "model.safetensors.index.json":
+    if fn.endswith(".safetensors") or fn in ("model.safetensors.index.json", ".sparse_ready", ".sparse_sharded_v2_ready"):
       try:
         os.remove(os.path.join(target_dir, fn))
       except OSError:
@@ -215,58 +261,174 @@ def _stage_sparse_bf16_safetensors(model_name: str, target_dir: str) -> tuple[in
   with open(os.path.join(target_dir, "config.json"), "w", encoding="utf-8") as cf:
     json.dump(cfg_dict, cf, indent=2)
 
-  header_dict = {}
-  offset = 0
+  max_shard_bytes = 4 * 10**9
+  max_tensors_per_shard = 500
+  shards: list[list[tuple[str, list[int], int]]] = []
+  cur_shard: list[tuple[str, list[int], int]] = []
+  cur_bytes = 0
   for k, shp in clean_shapes.items():
     nbytes = int(math.prod(shp)) * 2
-    header_dict[k] = {"dtype": "BF16", "shape": shp, "data_offsets": [offset, offset + nbytes]}
-    offset += nbytes
+    if cur_shard and (cur_bytes + nbytes > max_shard_bytes or len(cur_shard) >= max_tensors_per_shard):
+      shards.append(cur_shard)
+      cur_shard = []
+      cur_bytes = 0
+    cur_shard.append((k, shp, nbytes))
+    cur_bytes += nbytes
+  if cur_shard:
+    shards.append(cur_shard)
 
-  header_bytes = json.dumps(header_dict, separators=(",", ":")).encode("utf-8")
-  pad_len = (8 - (len(header_bytes) % 8)) % 8
-  if pad_len:
-    header_bytes += b" " * pad_len
-  st_path = os.path.join(target_dir, "model-00001-of-00001.safetensors")
-  with open(st_path, "wb") as sf:
-    sf.write(struct.pack("<Q", len(header_bytes)))
-    sf.write(header_bytes)
-    sf.flush()
-    os.truncate(sf.fileno(), 8 + len(header_bytes) + offset)
+  num_shards = len(shards)
+  weight_map: dict[str, str] = {}
+  for idx, shard_items in enumerate(shards, start=1):
+    shard_fname = f"model-{idx:05d}-of-{num_shards:05d}.safetensors"
+    header_dict = {}
+    offset = 0
+    for k, shp, nbytes in shard_items:
+      header_dict[k] = {"dtype": "BF16", "shape": shp, "data_offsets": [offset, offset + nbytes]}
+      weight_map[k] = shard_fname
+      offset += nbytes
+    header_bytes = json.dumps(header_dict, separators=(",", ":")).encode("utf-8")
+    pad_len = (8 - (len(header_bytes) % 8)) % 8
+    if pad_len:
+      header_bytes += b" " * pad_len
+    st_path = os.path.join(target_dir, shard_fname)
+    with open(st_path, "wb") as sf:
+      sf.write(struct.pack("<Q", len(header_bytes)))
+      sf.write(header_bytes)
+      sf.flush()
+      os.truncate(sf.fileno(), 8 + len(header_bytes) + offset)
 
   with open(index_path, "w", encoding="utf-8") as ix_f:
     json.dump(
         {
-            "metadata": {"total_size": offset},
-            "weight_map": {k: "model-00001-of-00001.safetensors" for k in clean_shapes},
+            "metadata": {"total_size": total_bytes},
+            "weight_map": weight_map,
         },
         ix_f,
     )
 
   with open(marker, "w", encoding="utf-8") as mf:
     mf.write(f"{total_gb:.2f}\n")
-  return 1, len(clean_shapes), total_gb
+  return num_shards, len(clean_shapes), total_gb
 
 
-def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str, Any]:
-  """Step 1 for `to_maxtext`: Transfer HF checkpoint from HF Hub to GCS (and stage locally for conversion)."""
-  import huggingface_hub
-  from maxtext.checkpoint_conversion.utils import load_dynamic
-  from maxtext.utils import globals as maxtext_globals
-
-  repo_id = maxtext_globals.HF_IDS[args.model]
-  token = get_hf_token() or None
-
-  if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1" and args.model in (
+def _should_stage_sparse_bf16(model_name: str) -> bool:
+  if os.environ.get("STAGE_SPARSE_ALL_LARGE") == "1" and model_name in (
+      "qwen3-235b-a22b",
+      "qwen3.5-397b-a17b",
+      "qwen3-480b-a35b",
+      "llama3.1-405b",
       "deepseek3-671b",
       "deepseek3.2-671b",
       "deepseek4-284b",
       "deepseek4-1600b",
   ):
+    return True
+  return os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1" and model_name in (
+      "deepseek3-671b",
+      "deepseek3.2-671b",
+      "deepseek4-284b",
+      "deepseek4-1600b",
+  )
+
+
+def _list_hf_repo_files(repo_id: str, token: str | None) -> list[str]:
+  """Lists repository files on HF Hub using a single lightweight API call with 429 backoff."""
+  import random
+  import huggingface_hub
+
+  is_gated = repo_id.startswith(("meta-llama/", "google/"))
+  for attempt in range(8):
+    try:
+      use_tok = token if (is_gated or attempt % 2 == 1) else None
+      api = huggingface_hub.HfApi(token=use_tok)
+      return list(api.list_repo_files(repo_id=repo_id))
+    except Exception as ex:  # pylint: disable=broad-exception-caught
+      if attempt < 7:
+        wait_s = min(15 * (attempt + 1), 60) + random.uniform(1.0, 5.0)
+        print(f"[HF API] list_repo_files({repo_id}) retry {attempt+1}/8 in {wait_s:.1f}s ({ex})", flush=True)
+        time.sleep(wait_s)
+      else:
+        raise
+  return []
+
+
+def fast_build_gcs_cache_worker(fpath: str, gcs_cache_dir: str, hf_access_token: str | None) -> None:
+  """Streams a single .safetensors shard from HF Hub to GCS using 1 HTTP GET request (instead of 800 5MB range reads)."""
+  import random
+  from google.cloud import storage
+  import huggingface_hub
+  import requests
+
+  parts = fpath.strip("/").split("/")
+  repo_id = "/".join(parts[:2])
+  filename = "/".join(parts[2:])
+  url = huggingface_hub.hf_hub_url(repo_id=repo_id, filename=filename)
+
+  no_scheme = gcs_cache_dir.replace("gs://", "")
+  bucket_name, _, blob_prefix = no_scheme.partition("/")
+  blob_name = os.path.join(blob_prefix, os.path.basename(fpath))
+
+  storage_client = storage.Client()
+  bucket = storage_client.bucket(bucket_name)
+  blob = bucket.blob(blob_name)
+  if blob.exists() and (blob.size or 0) > 0:
+    return
+
+  time.sleep(random.uniform(0.0, 2.0))
+  is_gated = repo_id.startswith(("meta-llama/", "google/"))
+  t0 = time.time()
+  max_retries = 8
+  for attempt in range(max_retries):
+    try:
+      headers = {}
+      if hf_access_token and (is_gated or attempt % 2 == 1):
+        headers["Authorization"] = f"Bearer {hf_access_token}"
+      with requests.get(url, headers=headers, stream=True, timeout=(30, 300)) as resp:
+        if resp.status_code == 429:
+          retry_after = float(resp.headers.get("Retry-After", 20 * (attempt + 1)))
+          wait_s = min(retry_after, 90.0) + random.uniform(1.0, 5.0)
+          print(
+              f"[Worker] 429 on {os.path.basename(fpath)}, backing off {wait_s:.1f}s (attempt {attempt+1}/{max_retries})",
+              flush=True,
+          )
+          time.sleep(wait_s)
+          continue
+        resp.raise_for_status()
+        resp.raw.decode_content = True
+        with blob.open("wb", chunk_size=32 * 1024 * 1024) as gcs_out:
+          shutil.copyfileobj(resp.raw, gcs_out, length=16 * 1024 * 1024)
+      print(f"[Worker] Cached {os.path.basename(fpath)} in {time.time() - t0:.1f}s", flush=True)
+      return
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      if attempt < max_retries - 1:
+        wait_s = min(12 * (attempt + 1), 60) + random.uniform(1.0, 5.0)
+        print(
+            f"[Worker] Error fetching {os.path.basename(fpath)}: {e}. Retrying in {wait_s:.1f}s ({attempt+1}/{max_retries})",
+            flush=True,
+        )
+        time.sleep(wait_s)
+      else:
+        raise
+
+
+def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str, Any]:
+  """Step 1 for `to_maxtext`: Transfer HF checkpoint from HF Hub to GCS (and stage locally for conversion)."""
+  import huggingface_hub
+  import requests
+  from maxtext.checkpoint_conversion.utils import load_dynamic
+  from maxtext.utils import globals as maxtext_globals
+
+  load_dynamic.build_gcs_cache_worker = fast_build_gcs_cache_worker
+  repo_id = maxtext_globals.HF_IDS[args.model]
+  token = get_hf_token() or None
+
+  if _should_stage_sparse_bf16(args.model):
     t_gcs_start = time.perf_counter()
-    fs = huggingface_hub.HfFileSystem(token=token)
     print(f"[to_maxtext Step 1] Inspecting HF Hub repository {repo_id} for {args.model} ...", flush=True)
     try:
-      files = fs.glob(f"{repo_id}/*.safetensors")
+      all_rfiles = _list_hf_repo_files(repo_id, token)
+      files = [f"{repo_id}/{fn}" for fn in all_rfiles if fn.endswith(".safetensors")]
       if files:
         print(
             f"[to_maxtext Step 1] Found {len(files)} .safetensors shards on HF Hub for {repo_id}. "
@@ -275,9 +437,15 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
         )
         import struct
 
-        with fs.open(files[0], "rb") as rf:
-          hlen = struct.unpack("<Q", rf.read(8))[0]
-          hdr = json.loads(rf.read(hlen).decode("utf-8"))
+        first_fn = files[0].split("/", 2)[2]
+        hdr_url = huggingface_hub.hf_hub_url(repo_id=repo_id, filename=first_fn)
+        with requests.get(hdr_url, headers={"Range": "bytes=0-65535"}, timeout=30) as rf:
+          raw_hdr = rf.content
+          hlen = struct.unpack("<Q", raw_hdr[:8])[0]
+          if len(raw_hdr) < 8 + hlen:
+            with requests.get(hdr_url, headers={"Range": f"bytes=0-{8 + hlen}"}, timeout=30) as rf2:
+              raw_hdr = rf2.content
+          hdr = json.loads(raw_hdr[8 : 8 + hlen].decode("utf-8"))
         dtypes_seen = sorted({v.get("dtype", "") for k, v in hdr.items() if k != "__metadata__"})
         scale_keys = [k for k in hdr if "scale" in k]
         print(
@@ -301,7 +469,7 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
     hf_to_local_s = time.perf_counter() - t_local_start
     print(
         f"[to_maxtext Step 1] Staged sparse BF16 .safetensors for {args.model} at {args.local_hf_dir} "
-        f"({num_tensors} tensors, {total_gb:.2f} GB BF16 footprint) in {hf_to_local_s:.2f}s",
+        f"({num_st} shards, {num_tensors} tensors, {total_gb:.2f} GB BF16 footprint) in {hf_to_local_s:.2f}s",
         flush=True,
     )
     return {
@@ -314,26 +482,48 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
     }
 
   # 1a. Measure HF -> GCS transfer using the same mechanism as load_dynamic.py
-  gcs_cache_dir = f"{args.gcs_run_dir}/to_maxtext/{args.model}/{args.scan_mode}/hf_cache/{repo_id.replace('/', '_')}"
-  print(f"[to_maxtext Step 1] Downloading {repo_id}/*.safetensors from HF Hub -> {gcs_cache_dir} ...", flush=True)
+  from etils import epath
 
-  t_gcs_start = time.perf_counter()
-  fs = huggingface_hub.HfFileSystem(token=token)
-  files = fs.glob(f"{repo_id}/*.safetensors")
+  all_repo_files = _list_hf_repo_files(repo_id, token)
+  files = [f"{repo_id}/{fn}" for fn in all_repo_files if fn.endswith(".safetensors")]
+  json_files = [fn for fn in all_repo_files if fn.endswith(".json")]
   if not files:
     raise RuntimeError(f"No .safetensors files found on HF Hub for {repo_id}")
 
-  with concurrent.futures.ProcessPoolExecutor(
-      max_workers=min(32, max(1, len(files))), mp_context=multiprocessing.get_context("spawn")
-  ) as executor:
-    futures = [
-        executor.submit(load_dynamic.build_gcs_cache_worker, fpath, gcs_cache_dir, token)
-        for fpath in files
-    ]
-    for f in concurrent.futures.as_completed(futures):
-      f.result()
-  hf_to_gcs_s = time.perf_counter() - t_gcs_start
-  print(f"[to_maxtext Step 1] HF -> GCS completed in {hf_to_gcs_s:.2f}s ({len(files)} safetensors files)", flush=True)
+  shared_st_cache_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/shared/hf_cache/{repo_id.replace('/', '_')}"
+  st_res_json = epath.Path(f"{args.gcs_run_dir}/logs/{args.model}/scanned/safetensors_dynamic_result.json")
+  reused_existing = False
+  if (
+      os.environ.get("REUSE_SHARED_ST_GCS_CACHE") == "1" or getattr(args, "reuse_model_hf_cache", False)
+  ) and st_res_json.exists():
+    try:
+      st_prev = json.loads(st_res_json.read_text())
+      if st_prev.get("hf_to_gcs_s", 0.0) > 0:
+        gcs_cache_dir = shared_st_cache_dir
+        hf_to_gcs_s = float(st_prev["hf_to_gcs_s"])
+        reused_existing = True
+        print(
+            f"[to_maxtext Step 1] Reusing populated HF->GCS cache {gcs_cache_dir} "
+            f"(recorded cold HF->GCS={hf_to_gcs_s:.2f}s, {len(files)} safetensors files)",
+            flush=True,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
+  if not reused_existing:
+    gcs_cache_dir = (
+        shared_st_cache_dir
+        if getattr(args, "reuse_model_hf_cache", False)
+        else f"{args.gcs_run_dir}/to_maxtext/{args.model}/{args.scan_mode}/hf_cache/{repo_id.replace('/', '_')}"
+    )
+    print(f"[to_maxtext Step 1] Downloading {repo_id}/*.safetensors from HF Hub -> {gcs_cache_dir} ...", flush=True)
+    t_gcs_start = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, max(1, len(files)))) as executor:
+      futures = [executor.submit(fast_build_gcs_cache_worker, fpath, gcs_cache_dir, token) for fpath in files]
+      for f in concurrent.futures.as_completed(futures):
+        f.result()
+    hf_to_gcs_s = time.perf_counter() - t_gcs_start
+    print(f"[to_maxtext Step 1] HF -> GCS completed in {hf_to_gcs_s:.2f}s ({len(files)} safetensors files)", flush=True)
 
   # 1b. Stage HF checkpoint to a clean local directory so `to_maxtext` Step 2 converts without HF network I/O
   local_hf_dir = args.local_hf_dir
@@ -346,13 +536,30 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
 
   print(f"[to_maxtext Step 1] Staging {repo_id} to local directory {local_hf_dir} for Step 2 conversion...", flush=True)
   t_local_start = time.perf_counter()
-  huggingface_hub.snapshot_download(
-      repo_id=repo_id,
-      local_dir=local_hf_dir,
-      token=token,
-      allow_patterns=["*.json"],
-  )
+  is_gated = repo_id.startswith(("meta-llama/", "google/"))
+  for jf in json_files:
+    jf_url = huggingface_hub.hf_hub_url(repo_id=repo_id, filename=jf)
+    jf_dst = os.path.join(local_hf_dir, jf)
+    os.makedirs(os.path.dirname(jf_dst), exist_ok=True)
+    for attempt in range(6):
+      try:
+        hdrs = {"Authorization": f"Bearer {token}"} if (token and (is_gated or attempt % 2 == 1)) else {}
+        with requests.get(jf_url, headers=hdrs, timeout=30) as jresp:
+          if jresp.status_code == 429:
+            time.sleep(15 * (attempt + 1))
+            continue
+          jresp.raise_for_status()
+          with open(jf_dst, "wb") as jout:
+            jout.write(jresp.content)
+        break
+      except Exception:  # pylint: disable=broad-exception-caught
+        if attempt == 5:
+          raise
+        time.sleep(10 * (attempt + 1))
   from etils import epath
+
+  with open(os.path.join(local_hf_dir, ".gcs_cache_dir"), "w", encoding="utf-8") as gf:
+    gf.write(gcs_cache_dir)
 
   def _copy_from_gcs_cache(fpath: str) -> None:
     fname = os.path.basename(fpath)
@@ -361,8 +568,45 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
     with src.open("rb") as fsrc, open(dst, "wb") as fdst:
       shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
 
-  with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, max(1, len(files)))) as pool:
-    list(pool.map(_copy_from_gcs_cache, files))
+  free_disk_gb = shutil.disk_usage(local_hf_dir).free / 1e9
+  try:
+    from google.cloud import storage as gcs_storage
+
+    c_bucket, _, c_prefix = gcs_cache_dir.removeprefix("gs://").partition("/")
+    blob_sizes = {
+        b.name.rsplit("/", 1)[-1]: b.size
+        for b in gcs_storage.Client().list_blobs(c_bucket, prefix=c_prefix.rstrip("/") + "/")
+    }
+    total_gb = sum(blob_sizes.get(os.path.basename(f), 4.2e9) for f in files) / 1e9
+  except Exception:  # pylint: disable=broad-exception-caught
+    total_gb = len(files) * 4.2
+  # Staged shards on /ramdisk live in host RAM, which the conversion itself also needs for materialized leaves.
+  stage_budget_gb = (free_disk_gb - 20.0) * (0.55 if local_hf_dir.startswith("/ramdisk") else 1.0)
+  if total_gb <= stage_budget_gb:
+    print(
+        f"[to_maxtext Step 1] Staging all {len(files)} shards ({total_gb:.1f} GB) from {gcs_cache_dir} "
+        f"(staging budget {stage_budget_gb:.1f} GB)",
+        flush=True,
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, max(1, len(files)))) as pool:
+      list(pool.map(_copy_from_gcs_cache, files))
+  elif args.scan_mode == "scanned":
+    # A scanned leaf stacks each MoE weight expert by expert across all layers, so every leaf reads every shard.
+    # Streaming shards through a small LRU then downloads the checkpoint once per expert: on tpu7x, a scanned
+    # qwen3-235b-a22b conversion wrote 1 of 15 leaves in 2 h. Scanned conversion needs the checkpoint staged.
+    raise RuntimeError(
+        f"Scanned to_maxtext conversion of {args.model} needs all {len(files)} shards ({total_gb:.1f} GB) staged on "
+        f"one host, but the staging budget is {stage_budget_gb:.1f} GB ({free_disk_gb:.1f} GB free in "
+        f"{os.path.dirname(local_hf_dir)}). Convert on a host with more local storage or RAM."
+    )
+  else:
+    # Unscanned leaves read one layer at a time (a few adjacent shards), so a small LRU of streamed shards works.
+    print(
+        f"[to_maxtext Step 1] Model {args.model} ({len(files)} shards, {total_gb:.1f} GB) exceeds the staging budget "
+        f"({stage_budget_gb:.1f} GB); staged index/config JSONs and enabled bounded LRU shard streaming from "
+        f"{gcs_cache_dir}",
+        flush=True,
+    )
   hf_to_local_s = time.perf_counter() - t_local_start
   shutil.rmtree(os.path.join(local_hf_dir, ".cache"), ignore_errors=True)
   shutil.rmtree(local_hf_cache, ignore_errors=True)
@@ -425,12 +669,7 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
   checkpointing.save_checkpoint = timed_save_checkpoint
   checkpointing.wait_until_finished = timed_wait_until_finished
 
-  if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1" and args.model in (
-      "deepseek3-671b",
-      "deepseek3.2-671b",
-      "deepseek4-284b",
-      "deepseek4-1600b",
-  ):
+  if _should_stage_sparse_bf16(args.model):
     _stage_sparse_bf16_safetensors(args.model, args.local_hf_dir)
     import jax.numpy as jnp
     import numpy as np
@@ -446,8 +685,49 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
       return res
 
     jnp.asarray = _materialized_jnp_asarray
+  elif not os.path.isdir(args.local_hf_dir) or not os.listdir(args.local_hf_dir):
+    print(
+        f"[to_maxtext Step 2] Local staging dir {args.local_hf_dir} missing after GCS log restore; re-staging from GCS cache...",
+        flush=True,
+    )
+    # Step 1 ran on another pod (or this one was replaced): the local copy is part of to_maxtext's cost, so record it.
+    sub_timings["hf_to_local_restage_s"] = run_worker_to_maxtext_step1_hf_to_gcs(args)["hf_to_local_s"]
 
   from etils import epath
+
+  gcs_marker = os.path.join(args.local_hf_dir, ".gcs_cache_dir")
+  if os.path.exists(gcs_marker) and hasattr(to_maxtext, "LazyHFLoader"):
+    with open(gcs_marker, "r", encoding="utf-8") as gf:
+      staged_gcs_cache_dir = gf.read().strip()
+    import collections
+    import threading
+
+    _orig_get_tensor = to_maxtext.LazyHFLoader.get_tensor
+    _lru_shards: collections.OrderedDict[str, str] = collections.OrderedDict()
+    _fetch_lock = threading.Lock()
+
+    def _streaming_get_tensor(self, key: str, dtype: str | None = None):
+      if self.is_local:
+        resolved_key = to_maxtext.resolve_scale_key(key, self.shard_map)
+        shard_name = self.shard_map.get(resolved_key) or self.shard_map.get(None)
+        if shard_name:
+          local_shard = os.path.join(self.model_id, shard_name)
+          with _fetch_lock:
+            if not os.path.exists(local_shard):
+              while len(_lru_shards) >= 3:
+                _, old_path = _lru_shards.popitem(last=False)
+                try:
+                  os.remove(old_path)
+                except OSError:
+                  pass
+              src_p = epath.Path(f"{staged_gcs_cache_dir}/{shard_name}")
+              with src_p.open("rb") as fsrc, open(local_shard, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
+            _lru_shards[shard_name] = local_shard
+            _lru_shards.move_to_end(shard_name)
+      return _orig_get_tensor(self, key, dtype=dtype)
+
+    to_maxtext.LazyHFLoader.get_tensor = _streaming_get_tensor
 
   scan_bool = "True" if args.scan_mode == "scanned" else "False"
   orbax_output_dir = f"{args.gcs_run_dir}/to_maxtext/{args.model}/{args.scan_mode}/orbax_ckpt"
@@ -466,6 +746,7 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
       "hardware=cpu",
       "skip_jax_distributed_system=True",
       f"scan_layers={scan_bool}",
+      f"checkpoint_storage_concurrent_gb={get_concurrent_gb(args.model, args.scan_mode, 1)}",
       *(["attention=dot_product"] if args.model.startswith(("deepseek3.2", "deepseek4")) else []),
   ]
   sys.argv = list(model_args)
@@ -497,25 +778,85 @@ def find_free_port() -> int:
 
 
 def init_worker_runtime(args: argparse.Namespace) -> str:
-  """Initializes JAX platform and (when num_slices > 1) JAX multi-slice distributed runtime."""
+  """Initializes JAX platform and (when multi-slice or multi-host) JAX distributed runtime."""
+  hw = resolve_hardware(args.hardware)
+  total_procs = getattr(args, "num_slices", 1) * getattr(args, "num_hosts_per_slice", 1)
+  if hw == "tpu":
+    if getattr(args, "num_slices", 1) > 1:
+      coord_ip = args.coordinator_address.split(":")[0]
+      slice_idx = args.slice_id // max(1, getattr(args, "num_hosts_per_slice", 1))
+      os.environ["MEGASCALE_NUM_SLICES"] = str(args.num_slices)
+      os.environ["MEGASCALE_SLICE_ID"] = str(slice_idx)
+      os.environ["MEGASCALE_PORT"] = "8477"
+      os.environ["MEGASCALE_COORDINATOR_ADDRESS"] = f"{coord_ip}:8477"
+    elif total_procs == 1:
+      for _ms_key in ("MEGASCALE_NUM_SLICES", "MEGASCALE_SLICE_ID", "MEGASCALE_PORT", "MEGASCALE_COORDINATOR_ADDRESS"):
+        os.environ.pop(_ms_key, None)
+
   import jax
 
-  hw = resolve_hardware(args.hardware)
+  try:
+    from jax.experimental import hijax as _hjx
+
+    if not hasattr(_hjx, "HiPrimitive") and hasattr(_hjx, "Primitive"):
+      _hjx.HiPrimitive = _hjx.Primitive
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
   if hw == "cpu":
     jax.config.update("jax_platforms", "cpu")
-  if getattr(args, "num_slices", 1) > 1:
+  if total_procs > 1:
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
-        num_processes=args.num_slices,
+        num_processes=total_procs,
         process_id=args.slice_id,
     )
     print(
-        f"[Slice {args.slice_id}/{args.num_slices}] JAX distributed initialized: "
-        f"process_index={jax.process_index()}, process_count={jax.process_count()}, "
+        f"[Process {args.slice_id}/{total_procs} (num_slices={args.num_slices}, hosts_per_slice={getattr(args, 'num_hosts_per_slice', 1)})] "
+        f"JAX distributed initialized: process_index={jax.process_index()}, process_count={jax.process_count()}, "
         f"local_devices={jax.local_device_count()}, global_devices={jax.device_count()}",
         flush=True,
     )
+  _register_transformers_fallbacks()
   return hw
+
+
+def _get_parallelism_flags(args: argparse.Namespace, concurrent_gb: int) -> list[str]:
+  """Builds MaxText parallelism CLI flags for single-host, multi-host single-slice, and multi-slice."""
+  num_slices = getattr(args, "num_slices", 1)
+  num_hosts_per_slice = getattr(args, "num_hosts_per_slice", 1)
+  total_procs = num_slices * num_hosts_per_slice
+  dcn_axis = resolve_dcn_axis(args.model, getattr(args, "dcn_parallelism_axis", "auto"))
+  ici_expert = int(os.environ.get("ICI_EXPERT_PARALLELISM", "1"))
+  ici_tensor = int(os.environ.get("ICI_TENSOR_PARALLELISM", "1"))
+  extra_ici = []
+  if ici_expert > 1:
+    extra_ici.append(f"ici_expert_parallelism={ici_expert}")
+  if ici_tensor > 1:
+    extra_ici.append(f"ici_tensor_parallelism={ici_tensor}")
+  if num_slices > 1:
+    return [
+        "skip_jax_distributed_system=False",
+        f"num_slices={num_slices}",
+        f"{dcn_axis}={num_slices}",
+        "ici_fsdp_parallelism=-1",
+        f"checkpoint_storage_concurrent_gb={concurrent_gb}",
+        *extra_ici,
+    ]
+  if total_procs > 1:
+    return [
+        "skip_jax_distributed_system=False",
+        "num_slices=1",
+        "ici_fsdp_parallelism=-1",
+        f"checkpoint_storage_concurrent_gb={concurrent_gb}",
+        *extra_ici,
+    ]
+  return [
+      "skip_jax_distributed_system=True",
+      "ici_fsdp_parallelism=-1",
+      f"checkpoint_storage_concurrent_gb={concurrent_gb}",
+      *extra_ici,
+  ]
 
 
 def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str, Any]:
@@ -535,21 +876,7 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   slice_suffix = f"_slices{num_slices}" if num_slices > 1 else ""
 
   concurrent_gb = get_concurrent_gb(args.model, args.scan_mode, num_slices)
-  dcn_axis = resolve_dcn_axis(args.model, getattr(args, "dcn_parallelism_axis", "auto"))
-  multi_slice_flags = (
-      [
-          "skip_jax_distributed_system=False",
-          f"num_slices={num_slices}",
-          f"{dcn_axis}={num_slices}",
-          "ici_fsdp_parallelism=-1",
-          f"checkpoint_storage_concurrent_gb={concurrent_gb}",
-      ]
-      if num_slices > 1
-      else [
-          "skip_jax_distributed_system=True",
-          f"checkpoint_storage_concurrent_gb={concurrent_gb}",
-      ]
-  )
+  multi_slice_flags = _get_parallelism_flags(args, concurrent_gb)
   weight_dtype_flag = (
       [f"weight_dtype={args.weight_dtype}"]
       if getattr(args, "weight_dtype", "auto") not in ("", "auto", "default")
@@ -647,6 +974,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   from maxtext.configs import pyconfig
   from maxtext.utils import globals as maxtext_globals
 
+  enable_legacy_shims = os.environ.get("ENABLE_LEGACY_BENCHMARK_SHIMS", "0") == "1"
   orig_apply_hook_fns = tensor_handling.apply_hook_fns
 
   def multihost_safe_apply_hook_fns(weight, target_shape, hook_fns):
@@ -674,7 +1002,8 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       weight.block_until_ready()
     return weight
 
-  tensor_handling.apply_hook_fns = multihost_safe_apply_hook_fns
+  if enable_legacy_shims:
+    tensor_handling.apply_hook_fns = multihost_safe_apply_hook_fns
 
   import ctypes
   import gc
@@ -724,7 +1053,17 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       _trim_malloc()
     return res
 
-  tensor_handling._binary_chunked_stack = low_mem_binary_chunked_stack
+  if enable_legacy_shims:
+    tensor_handling._binary_chunked_stack = low_mem_binary_chunked_stack
+
+  try:
+    from absl import logging as absl_logging
+
+    absl_logging.set_verbosity(absl_logging.INFO)
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  load_dynamic.build_gcs_cache_worker = fast_build_gcs_cache_worker
 
   from etils import epath
 
@@ -733,12 +1072,30 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   token = get_hf_token()
   num_slices = getattr(args, "num_slices", 1)
   slice_suffix = f"_slices{num_slices}" if num_slices > 1 else ""
-  if getattr(args, "reuse_model_hf_cache", False):
+  shared_cache_base = os.environ.get("SHARED_HF_CACHE_BASE_DIR", "").strip()
+  if shared_cache_base:
+    base_out_dir = f"{shared_cache_base.rstrip('/')}/{args.model}/shared"
+    should_clean_cache = False
+  elif getattr(args, "reuse_model_hf_cache", False):
     base_out_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/shared"
-    should_clean_cache = args.scan_mode == "scanned" and num_slices == 1
+    tm_step1_json = epath.Path(f"{args.gcs_run_dir}/logs/{args.model}/scanned/to_maxtext_step1_result.json")
+    tm_already_cached = False
+    if tm_step1_json.exists():
+      try:
+        tm_prev = json.loads(tm_step1_json.read_text())
+        if tm_prev.get("status") != "FAILED" and tm_prev.get("hf_to_gcs_s", 0.0) > 0:
+          tm_already_cached = True
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    should_clean_cache = (
+        args.scan_mode == "scanned"
+        and num_slices == 1
+        and not tm_already_cached
+        and os.environ.get("KEEP_HF_CACHE", "0") != "1"
+    )
   else:
     base_out_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/{args.scan_mode}{slice_suffix}"
-    should_clean_cache = True
+    should_clean_cache = os.environ.get("KEEP_HF_CACHE", "0") != "1"
   if jax.process_index() == 0 and should_clean_cache:
     epath.Path(f"{base_out_dir}/hf_cache").rmtree(missing_ok=True)
   if num_slices > 1:
@@ -747,38 +1104,19 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
     multihost_utils.sync_global_devices("safetensors_clean_cache_complete")
 
   concurrent_gb = get_concurrent_gb(args.model, args.scan_mode, num_slices)
-  dcn_axis = resolve_dcn_axis(args.model, getattr(args, "dcn_parallelism_axis", "auto"))
-  multi_slice_flags = (
-      [
-          "skip_jax_distributed_system=False",
-          f"num_slices={num_slices}",
-          f"{dcn_axis}={num_slices}",
-          "ici_fsdp_parallelism=-1",
-          f"checkpoint_storage_concurrent_gb={concurrent_gb}",
-      ]
-      if num_slices > 1
-      else [
-          "skip_jax_distributed_system=True",
-          f"checkpoint_storage_concurrent_gb={concurrent_gb}",
-      ]
-  )
+  multi_slice_flags = _get_parallelism_flags(args, concurrent_gb)
   weight_dtype_flag = (
       [f"weight_dtype={args.weight_dtype}"]
       if getattr(args, "weight_dtype", "auto") not in ("", "auto", "default")
       else ([] if args.model in ("qwen3-0.6b", "gemma2-2b") else ["weight_dtype=bfloat16"])
   )
 
-  if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1" and args.model in (
-      "deepseek3-671b",
-      "deepseek3.2-671b",
-      "deepseek4-284b",
-      "deepseek4-1600b",
-  ):
-    local_sparse_dir = args.local_hf_dir if os.path.exists(os.path.dirname(args.local_hf_dir)) else f"/tmp/hf_local_{args.model}"
-    _, num_t, tot_gb = _stage_sparse_bf16_safetensors(args.model, local_sparse_dir)
+  if _should_stage_sparse_bf16(args.model):
+    local_sparse_dir = f"/tmp/hf_local_{args.model}"
+    num_st, num_t, tot_gb = _stage_sparse_bf16_safetensors(args.model, local_sparse_dir)
     print(
         f"[safetensor] Ensured sparse BF16 .safetensors for {args.model} at {local_sparse_dir} "
-        f"({num_t} tensors, {tot_gb:.2f} GB BF16)",
+        f"({num_st} shards, {num_t} tensors, {tot_gb:.2f} GB BF16)",
         flush=True,
     )
     load_params_uri = local_sparse_dir
@@ -837,25 +1175,23 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
   def timed_load_sharded(path, *a, **kw):
     t0 = time.perf_counter()
-    use_custom_byte_reader = not hasattr(load_dynamic, "_leading_axis_shardings") and (
-        num_slices > 1
-        or args.model
-        in (
-            "mixtral-8x7b",
-            "llama3.1-70b",
-            "gpt-oss-120b",
-            "deepseek3-671b",
-            "deepseek3.2-671b",
-            "deepseek4-284b",
-            "deepseek4-1600b",
+    use_custom_byte_reader = enable_legacy_shims and (
+        not hasattr(load_dynamic, "_leading_axis_shardings")
+        and (
+            num_slices > 1
+            or args.model
+            in (
+                "mixtral-8x7b",
+                "llama3.1-70b",
+                "gpt-oss-120b",
+                "deepseek3-671b",
+                "deepseek3.2-671b",
+                "deepseek4-284b",
+                "deepseek4-1600b",
+            )
         )
     )
-    if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM", "0") == "1" and args.model in (
-        "deepseek3-671b",
-        "deepseek3.2-671b",
-        "deepseek4-284b",
-        "deepseek4-1600b",
-    ):
+    if os.environ.get("CUSTOM_BYTE_READER", "0") == "1":
       use_custom_byte_reader = True
     if use_custom_byte_reader:
       import collections
@@ -916,22 +1252,26 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
             chosen_ax = 2
           elif (
               len(shp) == 2
-              and k.endswith((
-                  "q_proj.weight",
-                  "k_proj.weight",
-                  "v_proj.weight",
-                  "gate_proj.weight",
-                  "up_proj.weight",
-                  "w1.weight",
-                  "w3.weight",
-                  "embed_tokens.weight",
-                  "wq_a.weight",
-                  "wkv.weight",
-              ))
+              and k.endswith(
+                  (
+                      "q_proj.weight",
+                      "k_proj.weight",
+                      "v_proj.weight",
+                      "gate_proj.weight",
+                      "up_proj.weight",
+                      "w1.weight",
+                      "w3.weight",
+                      "embed_tokens.weight",
+                      "wq_a.weight",
+                      "wkv.weight",
+                  )
+              )
               and shp[1] % fsdp_size == 0
           ):
             chosen_ax = 1
-          elif len(shp) == 2 and k.endswith(("o_proj.weight", "down_proj.weight", "w2.weight")) and shp[0] % fsdp_size == 0:
+          elif (
+              len(shp) == 2 and k.endswith(("o_proj.weight", "down_proj.weight", "w2.weight")) and shp[0] % fsdp_size == 0
+          ):
             chosen_ax = 0
           else:
             for ax, dim in enumerate(shp):
@@ -1031,6 +1371,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
                     arrs.append(jax.device_put(s_buf, jax.sharding.SingleDeviceSharding(d)))
                   del s_buf
                 res[t_name] = jax.make_array_from_single_device_arrays(t_shp, t_sharding, arrs, dtype=t_dt)
+
               return _build
 
             batch_builders.append(_make_builder(k, shp, dt, sharding, shard_specs))
@@ -1091,9 +1432,18 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
           del batch_builders
           _trim_malloc()
     else:
-      res = orig_load_sharded(path, *a, **kw)
+      if (
+          hasattr(load_dynamic, "_leading_axis_shardings")
+          and jax.process_count() == 1
+          and not a
+          and "num_groups" not in kw
+      ):
+        res = orig_load_sharded(path, num_groups=1)
+      else:
+        res = orig_load_sharded(path, *a, **kw)
     _trim_malloc()
     timings["load_sharded_hf_s"] = time.perf_counter() - t0
+    print(f"[safetensor] load_sharded_hf_state completed in {timings['load_sharded_hf_s']:.2f}s", flush=True)
     return res
 
   def timed_transform(*a, **kw):
@@ -1104,12 +1454,15 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
     def _low_mem_get_load_fn(hf_source, tensor_getter, hook_fn, target_leaf, maxtext_config, mt_key):
       popped = []
+
       def _track_getter(key):
         arr = tensor_getter(key)
         if isinstance(arr, jax.Array):
           popped.append(arr)
         return arr
+
       inner_fn = _orig_get_load_fn(hf_source, _track_getter, hook_fn, target_leaf, maxtext_config, mt_key)
+
       def _wrapped_fn():
         out = inner_fn()
         out_id = id(out)
@@ -1124,23 +1477,28 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
         if _step_cnt[0] % 8 == 0:
           _trim_malloc()
         return out
+
       return _wrapped_fn
 
-    load_dynamic.get_hf_loading_function = _low_mem_get_load_fn
-    if jax.process_count() > 1:
-      def _synced_dp(*da, **dkw):
-        r = _orig_dp(*da, **dkw)
-        try:
-          jax.block_until_ready(r)
-        except Exception:
-          pass
-        return r
-      jax.device_put = _synced_dp
+    if enable_legacy_shims:
+      load_dynamic.get_hf_loading_function = _low_mem_get_load_fn
+      if jax.process_count() > 1:
+
+        def _synced_dp(*da, **dkw):
+          r = _orig_dp(*da, **dkw)
+          try:
+            jax.block_until_ready(r)
+          except Exception:
+            pass
+          return r
+
+        jax.device_put = _synced_dp
     try:
       res = orig_transform(*a, **kw)
     finally:
-      jax.device_put = _orig_dp
-      load_dynamic.get_hf_loading_function = _orig_get_load_fn
+      if enable_legacy_shims:
+        jax.device_put = _orig_dp
+        load_dynamic.get_hf_loading_function = _orig_get_load_fn
     _trim_malloc()
     timings["transform_hf_to_mt_s"] = time.perf_counter() - t0
     return res
@@ -1204,7 +1562,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   }
 
 
-SITE_CUSTOMIZE_CONTENT = '''\
+SITE_CUSTOMIZE_CONTENT = """\
 import dataclasses
 import resource
 import sys
@@ -1502,7 +1860,40 @@ try:
   _th.ArrayHandler.deserialize = _batched_ah_deserialize
 except Exception:
   pass
-'''
+
+# 8. Single-GET streaming for HuggingFace Hub -> GCS caching (1 resolver request per shard instead of 800)
+try:
+  import os as _os
+  import random as _random
+  import shutil as _shutil
+  import time as _time
+  import huggingface_hub as _hfh
+  import requests as _requests
+
+  _orig_hffs_glob = _hfh.HfFileSystem.glob
+
+  def _fast_hffs_glob(self, path, ** kwargs):
+    if isinstance(path, str) and path.endswith("/*.safetensors") and not kwargs:
+      repo_id = path[: -len("/*.safetensors")].strip("/")
+      if repo_id.count("/") == 1:
+        is_gated = repo_id.startswith(("meta-llama/", "google/"))
+        tok = getattr(self, "token", None) or _os.environ.get("HF_TOKEN")
+        for attempt in range(8):
+          try:
+            use_tok = tok if (is_gated or attempt % 2 == 1) else None
+            api = _hfh.HfApi(token=use_tok)
+            return [f"{repo_id}/{fn}" for fn in api.list_repo_files(repo_id=repo_id) if fn.endswith(".safetensors")]
+          except Exception:
+            if attempt < 7:
+              _time.sleep(min(15 * (attempt + 1), 60) + _random.uniform(1.0, 5.0))
+            else:
+              break
+    return _orig_hffs_glob(self, path, **kwargs)
+
+  _hfh.HfFileSystem.glob = _fast_hffs_glob
+except Exception:
+  pass
+"""
 
 
 def _read_host_mem_gb() -> tuple[float, float, float]:
@@ -1547,6 +1938,18 @@ def _read_host_mem_gb() -> tuple[float, float, float]:
     return 0.0, 250.0, 250.0
 
 
+def _failure_tag(returncode: int, watchdog_state: dict[str, Any]) -> str:
+  """Returns why a worker died: a PHASE_TIMEOUT_S watchdog kill, a host OOM kill, or "" for other failures.
+
+  Both watchdogs use SIGKILL (exit code -9), so the exit code alone cannot tell a timeout from an OOM kill.
+  """
+  if watchdog_state.get("timeout_triggered"):
+    return f" (TIMEOUT: exceeded PHASE_TIMEOUT_S={watchdog_state.get('timeout_s', 0.0):.0f}s)"
+  if returncode in (-9, 137) or watchdog_state.get("oom_triggered"):
+    return " (OOMKilled / Exit Code 137)"
+  return ""
+
+
 def _start_oom_watchdog(proc: subprocess.Popen, min_avail_gb: float = 8.5) -> dict[str, Any]:
   """Monitors host RAM while `proc` runs and kills ONLY `proc` if MemAvailable drops below `min_avail_gb`.
 
@@ -1557,11 +1960,15 @@ def _start_oom_watchdog(proc: subprocess.Popen, min_avail_gb: float = 8.5) -> di
 
   if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1":
     min_avail_gb = max(min_avail_gb, 24.0)
+  max_wall_s = float(os.environ.get("PHASE_TIMEOUT_S", "14400"))
+  t_watch0 = time.time()
 
   state: dict[str, Any] = {
       "peak_ram_gb": 0.0,
       "total_ram_gb": 0.0,
       "oom_triggered": False,
+      "timeout_triggered": False,
+      "timeout_s": max_wall_s,
       "oom_message": "",
       "stop": False,
   }
@@ -1572,6 +1979,22 @@ def _start_oom_watchdog(proc: subprocess.Popen, min_avail_gb: float = 8.5) -> di
       state["total_ram_gb"] = total_gb
       if used_gb > state["peak_ram_gb"]:
         state["peak_ram_gb"] = used_gb
+      elapsed_s = time.time() - t_watch0
+      if elapsed_s > max_wall_s:
+        msg = (
+            f"\n[TIMEOUT_WATCHDOG] Worker subprocess PID {proc.pid} exceeded PHASE_TIMEOUT_S={max_wall_s:.0f}s "
+            f"(elapsed={elapsed_s:.1f}s, Peak RAM={state['peak_ram_gb']:.2f}/{total_gb:.2f} GB). "
+            f"Sending SIGKILL to worker subprocess.\n"
+        )
+        state["timeout_triggered"] = True
+        state["oom_message"] = msg
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+        try:
+          os.kill(proc.pid, signal.SIGKILL)
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+        break
       if total_gb > 0 and avail_gb < min_avail_gb:
         msg = (
             f"\n[OOM_WATCHDOG] Host RAM exhausted! Peak RAM Usage: {used_gb:.2f}/{total_gb:.2f} GB "
@@ -1608,16 +2031,29 @@ def _start_self_oom_watchdog(min_avail_gb: float = 9.0) -> dict[str, Any]:
 
   if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1":
     min_avail_gb = max(min_avail_gb, 25.0)
+  max_wall_s = float(os.environ.get("PHASE_TIMEOUT_S", "14400"))
 
   state: dict[str, Any] = {"peak_ram_gb": 0.0, "total_ram_gb": 0.0, "stop": False}
 
   def _self_watch():
     pid = os.getpid()
+    t_watch0 = time.time()
     while not state["stop"]:
       used_gb, avail_gb, total_gb = _read_host_mem_gb()
       state["total_ram_gb"] = total_gb
       if used_gb > state["peak_ram_gb"]:
         state["peak_ram_gb"] = used_gb
+      elapsed_s = time.time() - t_watch0
+      if elapsed_s > max_wall_s:
+        msg = (
+            f"\n[TIMEOUT_WATCHDOG] Worker PID {pid} exceeded PHASE_TIMEOUT_S={max_wall_s:.0f}s "
+            f"(elapsed={elapsed_s:.1f}s, Peak RAM={state['peak_ram_gb']:.2f}/{total_gb:.2f} GB). "
+            f"Sending SIGKILL to worker PID {pid}.\n"
+        )
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+        os.kill(pid, signal.SIGKILL)
+        break
       if total_gb > 0 and avail_gb < min_avail_gb:
         msg = (
             f"\n[OOM_WATCHDOG] Host RAM exhausted! Peak RAM Usage: {used_gb:.2f}/{total_gb:.2f} GB "
@@ -1647,8 +2083,14 @@ def run_remote_slice_daemon(port: int) -> None:
         if not header:
           return
         req = json.loads(header)
+        if req.get("shutdown"):
+          print(f"[RemoteDaemon] Received shutdown request from {addr}. Exiting cleanly.", flush=True)
+          conn.sendall(b"__REMOTE_EXIT_CODE__:0\n")
+          os._exit(0)
         cmd = req["cmd"]
-        c_env = req["env"]
+        c_env = os.environ.copy()
+        if req.get("env"):
+          c_env.update(req["env"])
         r_work_dir = req.get("local_work_dir", "/tmp/benchmark_remote")
         os.makedirs(r_work_dir, exist_ok=True)
         site_dir = os.path.join(r_work_dir, "_sitecustomize")
@@ -1657,9 +2099,7 @@ def run_remote_slice_daemon(port: int) -> None:
           sf.write(SITE_CUSTOMIZE_CONTENT)
         subprocess.run(["pkill", "-9", "-f", "--", "--worker-phase"], check=False)
         print(f"[RemoteDaemon] Starting command from {addr}: {' '.join(cmd)}", flush=True)
-        with subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=c_env, text=True
-        ) as proc:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=c_env, text=True) as proc:
           r_wd = _start_oom_watchdog(proc)
           assert proc.stdout is not None
           for line in proc.stdout:
@@ -1724,7 +2164,8 @@ def invoke_worker_subprocess(
 
   result_json = os.path.join(log_dir, f"{phase}_result.json")
   log_file = os.path.join(log_dir, f"{phase}.log")
-  local_hf_dir = os.path.join(local_work_dir, "hf_local", model)
+  hf_stage_root = "/ramdisk" if os.path.isdir("/ramdisk") else local_work_dir
+  local_hf_dir = os.path.join(hf_stage_root, "hf_local", model)
 
   if skip_completed and not os.path.exists(result_json):
     try:
@@ -1740,50 +2181,43 @@ def invoke_worker_subprocess(
       pass
 
   if skip_completed and os.path.exists(result_json):
-    print(
-        f"[SKIP COMPLETED]: {phase} | Model: {model} | Scan Mode: {scan_mode} "
-        f"| Slices: {num_slices} -> {result_json}",
-        flush=True,
-    )
     with open(result_json, "r", encoding="utf-8") as rf:
       data = json.load(rf)
-    if os.path.exists(log_file):
-      with open(log_file, "r", encoding="utf-8") as lf:
-        worker_cached_times = [
-            float(m.group(1))
-            for m in re.finditer(r"\[Worker\] Cached .* in ([0-9.]+)s", lf.read())
-        ]
-      if worker_cached_times:
-        data["worker_upload_max_s"] = max(worker_cached_times)
-    return data
-
-  if (
-      reuse_model_hf_cache
-      and phase == "to_maxtext_step1"
-      and scan_mode != "scanned"
-      and not os.path.exists(result_json)
-  ):
-    scanned_json = os.path.join(local_work_dir, "logs", model, "scanned", "to_maxtext_step1_result.json")
-    scanned_log = os.path.join(local_work_dir, "logs", model, "scanned", "to_maxtext_step1.log")
-    if os.path.exists(scanned_json):
-      shutil.copyfile(scanned_json, result_json)
-      if os.path.exists(scanned_log):
-        shutil.copyfile(scanned_log, log_file)
+    if data.get("status") != "FAILED" or os.environ.get("SKIP_FAILED_RESULTS") == "1":
       print(
-          f"[REUSE MODEL HF STAGE]: {phase} | Model: {model} | Scan Mode: {scan_mode} -> {result_json}",
+          f"[SKIP COMPLETED]: {phase} | Model: {model} | Scan Mode: {scan_mode} "
+          f"| Slices: {num_slices} -> {result_json}",
           flush=True,
       )
-      with open(result_json, "r", encoding="utf-8") as rf:
-        data = json.load(rf)
       if os.path.exists(log_file):
         with open(log_file, "r", encoding="utf-8") as lf:
-          worker_cached_times = [
-              float(m.group(1))
-              for m in re.finditer(r"\[Worker\] Cached .* in ([0-9.]+)s", lf.read())
-          ]
+          worker_cached_times = [float(m.group(1)) for m in re.finditer(r"\[Worker\] Cached .* in ([0-9.]+)s", lf.read())]
         if worker_cached_times:
           data["worker_upload_max_s"] = max(worker_cached_times)
       return data
+
+  if reuse_model_hf_cache and phase == "to_maxtext_step1" and scan_mode != "scanned" and not os.path.exists(result_json):
+    scanned_json = os.path.join(local_work_dir, "logs", model, "scanned", "to_maxtext_step1_result.json")
+    scanned_log = os.path.join(local_work_dir, "logs", model, "scanned", "to_maxtext_step1.log")
+    if os.path.exists(scanned_json):
+      with open(scanned_json, "r", encoding="utf-8") as rf:
+        data = json.load(rf)
+      if data.get("status") != "FAILED":
+        shutil.copyfile(scanned_json, result_json)
+        if os.path.exists(scanned_log):
+          shutil.copyfile(scanned_log, log_file)
+        print(
+            f"[REUSE MODEL HF STAGE]: {phase} | Model: {model} | Scan Mode: {scan_mode} -> {result_json}",
+            flush=True,
+        )
+        if os.path.exists(log_file):
+          with open(log_file, "r", encoding="utf-8") as lf:
+            worker_cached_times = [
+                float(m.group(1)) for m in re.finditer(r"\[Worker\] Cached .* in ([0-9.]+)s", lf.read())
+            ]
+          if worker_cached_times:
+            data["worker_upload_max_s"] = max(worker_cached_times)
+        return data
 
   base_cmd = [
       sys.executable,
@@ -1821,9 +2255,7 @@ def invoke_worker_subprocess(
     sf.write(SITE_CUSTOMIZE_CONTENT)
   src_dir = os.path.join(repo_root, "src")
   existing_pythonpath = env.get("PYTHONPATH", "")
-  env["PYTHONPATH"] = (
-      f"{site_dir}:{src_dir}:{existing_pythonpath}" if existing_pythonpath else f"{site_dir}:{src_dir}"
-  )
+  env["PYTHONPATH"] = f"{site_dir}:{src_dir}:{existing_pythonpath}" if existing_pythonpath else f"{site_dir}:{src_dir}"
   if extra_env:
     env.update(extra_env)
 
@@ -1868,7 +2300,9 @@ def invoke_worker_subprocess(
               worker_cached_times.append(float(m.group(1)))
           proc.wait(timeout=14400)
           watchdog_state["stop"] = True
-          if watchdog_state.get("oom_triggered") and watchdog_state.get("oom_message"):
+          if (watchdog_state.get("oom_triggered") or watchdog_state.get("timeout_triggered")) and watchdog_state.get(
+              "oom_message"
+          ):
             lf.write(watchdog_state["oom_message"])
           if watchdog_state.get("peak_ram_gb", 0.0) > 0:
             peak_msg = (
@@ -1881,7 +2315,7 @@ def invoke_worker_subprocess(
           lf.flush()
 
       if proc.returncode != 0:
-        oom_tag = " (OOMKilled / Exit Code 137)" if (proc.returncode in (-9, 137) or watchdog_state.get("oom_triggered")) else ""
+        oom_tag = _failure_tag(proc.returncode, watchdog_state)
         raise RuntimeError(
             f"Worker phase '{phase}' failed with exit code {proc.returncode}{oom_tag} "
             f"(Peak RAM: {watchdog_state.get('peak_ram_gb', 0.0):.2f}/{watchdog_state.get('total_ram_gb', 251.69):.2f} GB). "
@@ -1925,23 +2359,40 @@ def invoke_worker_subprocess(
             def _run_remote(s_id, target_addr, c_list, c_env, log_f):
               host, port_s = target_addr.split(":", 1)
               rc = 1
+              clean_env = {
+                  k: v
+                  for k, v in c_env.items()
+                  if not (
+                      k.endswith("_SERVICE_HOST")
+                      or "_SERVICE_PORT" in k
+                      or "_TCP" in k
+                      or (
+                          k.endswith("_PORT")
+                          and not k.startswith("TPU_")
+                          and not k.startswith("DAEMON_")
+                          and not k.startswith("MEGASCALE_")
+                      )
+                      or k in ("HOSTNAME", "TPU_WORKER_ID")
+                  )
+              }
               try:
                 import base64
+                import zlib
 
                 script_abs = os.path.abspath(__file__)
                 with open(script_abs, "rb") as f_self:
-                  b64_self = base64.b64encode(f_self.read()).decode("ascii")
+                  b64_self = base64.b64encode(zlib.compress(f_self.read(), level=9)).decode("ascii")
                 sync_cmd = [
                     "python3",
                     "-c",
                     (
-                        f"import base64, os; p = {script_abs!r}; "
+                        f"import base64, os, zlib; p = {script_abs!r}; "
                         f"os.makedirs(os.path.dirname(p), exist_ok=True); "
-                        f"open(p, 'wb').write(base64.b64decode('{b64_self}'))"
+                        f"open(p, 'wb').write(zlib.decompress(base64.b64decode('{b64_self}')))"
                     ),
                 ]
                 with socket.create_connection((host, int(port_s)), timeout=60) as sync_sock:
-                  sync_payload = json.dumps({"cmd": sync_cmd, "env": c_env, "local_work_dir": local_work_dir}) + "\n"
+                  sync_payload = json.dumps({"cmd": sync_cmd, "env": clean_env, "local_work_dir": local_work_dir}) + "\n"
                   sync_sock.sendall(sync_payload.encode("utf-8"))
                   with sync_sock.makefile("r", encoding="utf-8", errors="replace") as sf_sync:
                     for _ in sf_sync:
@@ -1950,7 +2401,7 @@ def invoke_worker_subprocess(
                 pass
               try:
                 with socket.create_connection((host, int(port_s)), timeout=14400) as sock:
-                  payload = json.dumps({"cmd": c_list, "env": c_env, "local_work_dir": local_work_dir}) + "\n"
+                  payload = json.dumps({"cmd": c_list, "env": clean_env, "local_work_dir": local_work_dir}) + "\n"
                   sock.sendall(payload.encode("utf-8"))
                   with sock.makefile("r", encoding="utf-8", errors="replace") as sf_in:
                     for rline in sf_in:
@@ -1997,7 +2448,9 @@ def invoke_worker_subprocess(
           for idx, p in enumerate(procs):
             p.wait(timeout=14400)
           watchdog_state["stop"] = True
-          if watchdog_state.get("oom_triggered") and watchdog_state.get("oom_message"):
+          if (watchdog_state.get("oom_triggered") or watchdog_state.get("timeout_triggered")) and watchdog_state.get(
+              "oom_message"
+          ):
             lf.write(watchdog_state["oom_message"])
           if watchdog_state.get("peak_ram_gb", 0.0) > 0:
             peak_msg = (
@@ -2010,7 +2463,7 @@ def invoke_worker_subprocess(
           lf.flush()
           for idx, p in enumerate(procs):
             if p.returncode != 0:
-              oom_tag = " (OOMKilled / Exit Code 137)" if (p.returncode in (-9, 137) or watchdog_state.get("oom_triggered")) else ""
+              oom_tag = _failure_tag(p.returncode, watchdog_state)
               raise RuntimeError(
                   f"Multi-slice worker phase '{phase}' local slice {idx} failed with exit code {p.returncode}{oom_tag} "
                   f"(Peak RAM: {watchdog_state.get('peak_ram_gb', 0.0):.2f}/{watchdog_state.get('total_ram_gb', 251.69):.2f} GB). "
@@ -2020,23 +2473,89 @@ def invoke_worker_subprocess(
             t.join(timeout=14400)
             rc = remote_rc.get(s_id, 1)
             if rc != 0:
+              r_ep = remote_endpoints[s_id - 1] if (s_id - 1) < len(remote_endpoints) else "remote"
               raise RuntimeError(
-                  f"Multi-slice worker phase '{phase}' remote slice {s_id} ({remote_slice1}) failed with exit code {rc}. "
+                  f"Multi-slice worker phase '{phase}' remote slice {s_id} ({r_ep}) failed with exit code {rc}. "
                   f"See logs in: {log_dir}"
               )
       finally:
+        for _, t in remote_threads:
+          t.join(timeout=15.0)
         for slf in slice_log_files:
           slf.close()
   except RuntimeError as e:
+    if os.path.exists(result_json):
+      try:
+        with open(result_json, "r", encoding="utf-8") as rf_ok:
+          existing_ok = json.load(rf_ok)
+        if existing_ok.get("status") != "FAILED" and any(
+            existing_ok.get(k, 0.0) > 0.0
+            for k in ("safetensors_and_convert_s", "load_orbax_s", "convert_to_orbax_s", "hf_to_gcs_s")
+        ):
+          print(
+              f"[WARN] Subprocess exited non-zero during teardown ({e}), but valid result JSON already written: {result_json}",
+              flush=True,
+          )
+          _mirror_logs_to_gcs()
+          return existing_ok
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     if not allow_step_failure:
       raise
     print(f"[STEP FAILED (continuing due to --allow-step-failure)]: {e}", flush=True)
     parsed_step1_s = 0.0
     if os.path.exists(log_file):
       with open(log_file, "r", encoding="utf-8", errors="replace") as lf_err:
-        m_s1 = re.search(r"\[safetensor\] Step 1 \(HF->GCS\) completed in ([0-9.]+)s", lf_err.read())
+        log_txt = lf_err.read()
+        m_s1 = re.search(r"\[safetensor\] Step 1 \(HF->GCS\) completed in ([0-9.]+)s", log_txt)
         if m_s1:
           parsed_step1_s = float(m_s1.group(1))
+        m_orb = re.search(
+            r"\[to_maxtext Step 3\] Loaded Orbax checkpoint \(([0-9]+) parameter leaves, num_slices=([0-9]+), global_devices=([0-9]+)\) in ([0-9.]+)s",
+            log_txt,
+        )
+        if m_orb and phase == "to_maxtext_step3":
+          m_init = re.search(r"\[to_maxtext Step 3\] Abstract state initialized in ([0-9.]+)s", log_txt)
+          rec_orb = {
+              "load_orbax_s": float(m_orb.group(4)),
+              "init_abstract_state_s": float(m_init.group(1)) if m_init else 0.0,
+              "num_param_leaves": int(m_orb.group(1)),
+              "num_slices": int(m_orb.group(2)),
+              "global_devices": int(m_orb.group(3)),
+              "peak_host_ram_gb": round(watchdog_state.get("peak_ram_gb", 0.0), 2),
+              "total_host_ram_gb": round(watchdog_state.get("total_ram_gb", 251.69), 2),
+          }
+          with open(result_json, "w", encoding="utf-8") as rf_rec:
+            json.dump(rec_orb, rf_rec, indent=2)
+          _mirror_logs_to_gcs()
+          return rec_orb
+        m_st = re.search(
+            r"\[safetensor\] Completed: \(1\) HF->GCS=([0-9.]+)s, \(2\) safetensors & convert to MaxText=([0-9.]+)s \(total=([0-9.]+)s, ([0-9]+) parameter leaves, num_slices=([0-9]+), global_devices=([0-9]+)\)",
+            log_txt,
+        )
+        if m_st and phase == "safetensors_dynamic":
+          m_init = re.search(r"\[safetensor\] Abstract state initialized in ([0-9.]+)s", log_txt)
+          m_shd = re.search(r"\[safetensor\] load_sharded_hf_state completed in ([0-9.]+)s", log_txt)
+          m_tr = re.search(r"CPU Transformations completed in ([0-9.]+)s", log_txt)
+          rec_st = {
+              "hf_to_gcs_s": float(m_st.group(1)),
+              "safetensors_and_convert_s": float(m_st.group(2)),
+              "derive_mappings_s": 0.0,
+              "load_sharded_hf_s": float(m_shd.group(1)) if m_shd else 0.0,
+              "transform_hf_to_mt_s": float(m_tr.group(1)) if m_tr else 0.0,
+              "init_abstract_state_s": float(m_init.group(1)) if m_init else 0.0,
+              "total_s": float(m_st.group(3)),
+              "num_param_leaves": int(m_st.group(4)),
+              "num_slices": int(m_st.group(5)),
+              "global_devices": int(m_st.group(6)),
+              "worker_upload_max_s": max(worker_cached_times) if worker_cached_times else 0.0,
+              "peak_host_ram_gb": round(watchdog_state.get("peak_ram_gb", 0.0), 2),
+              "total_host_ram_gb": round(watchdog_state.get("total_ram_gb", 251.69), 2),
+          }
+          with open(result_json, "w", encoding="utf-8") as rf_rec:
+            json.dump(rec_st, rf_rec, indent=2)
+          _mirror_logs_to_gcs()
+          return rec_st
     fail_data: dict[str, Any] = {
         "status": "FAILED",
         "error": str(e),
@@ -2047,14 +2566,18 @@ def invoke_worker_subprocess(
         "safetensors_and_convert_s": 0.0,
         "worker_upload_max_s": max(worker_cached_times) if worker_cached_times else 0.0,
         "num_slices": num_slices,
-        "global_devices": num_slices * 4,
+        "global_devices": num_slices * devices_per_slice,
     }
     with open(result_json, "w", encoding="utf-8") as rf:
       json.dump(fail_data, rf, indent=2)
     _mirror_logs_to_gcs()
     return fail_data
   finally:
-    if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1" and os.path.isdir(local_hf_dir) and hasattr(os, "posix_fadvise"):
+    if (
+        os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1"
+        and os.path.isdir(local_hf_dir)
+        and hasattr(os, "posix_fadvise")
+    ):
       for fn in os.listdir(local_hf_dir):
         if fn.endswith(".safetensors"):
           try:
@@ -2251,6 +2774,30 @@ def main() -> None:
       action="store_true",
       help="Record OOM or step failures in result JSON and continue remaining phases.",
   )
+  parser.add_argument(
+      "--skip-to-maxtext",
+      action="store_true",
+      help="Skip to_maxtext Steps 1-3 and only run safetensors_dynamic.",
+  )
+  parser.add_argument(
+      "--skip-safetensors",
+      action="store_true",
+      help="Skip safetensors_dynamic and only run to_maxtext Steps 1-3 (e.g. to add to_maxtext to finished runs).",
+  )
+  parser.add_argument(
+      "--tm-convert-only",
+      action="store_true",
+      help=(
+          "Run only to_maxtext Steps 1-2 (HF->GCS and CPU conversion to Orbax) and skip Step 3 and safetensors_dynamic,"
+          " e.g. to convert on one slice a checkpoint that only fits in HBM on two."
+      ),
+  )
+  parser.add_argument(
+      "--num-hosts-per-slice",
+      type=int,
+      default=1,
+      help="Number of TPU hosts per slice (e.g., 1 for 2x2x1, 2 for 2x2x2).",
+  )
   # Internal worker arguments
   parser.add_argument("--worker-phase", default=None, help=argparse.SUPPRESS)
   parser.add_argument("--model", default=None, help=argparse.SUPPRESS)
@@ -2274,32 +2821,50 @@ def main() -> None:
     return
 
   if args.worker_phase:
+    import traceback
+
     os.chdir(repo_root)
     exec(SITE_CUSTOMIZE_CONTENT, globals())  # pylint: disable=exec-used
     self_wd = _start_self_oom_watchdog()
-    if args.worker_phase == "to_maxtext_step1":
-      res = run_worker_to_maxtext_step1_hf_to_gcs(args)
-    elif args.worker_phase == "to_maxtext_step2":
-      res = run_worker_to_maxtext_step2_convert(args)
-    elif args.worker_phase == "to_maxtext_step3":
-      res = run_worker_to_maxtext_step3_load_orbax(args)
-    elif args.worker_phase == "safetensors_dynamic":
-      res = run_worker_safetensors_dynamic(args)
-    else:
-      raise ValueError(f"Unknown worker phase: {args.worker_phase}")
-    self_wd["stop"] = True
-    if self_wd.get("peak_ram_gb", 0.0) > 0:
-      print(
-          f"INFO:watchdog:Worker Peak Host RAM: {self_wd['peak_ram_gb']:.2f}/{self_wd.get('total_ram_gb', 251.69):.2f} GB",
-          flush=True,
-      )
-      res["peak_host_ram_gb"] = round(self_wd["peak_ram_gb"], 2)
-      res["total_host_ram_gb"] = round(self_wd.get("total_ram_gb", 251.69), 2)
+    try:
+      if args.worker_phase == "to_maxtext_step1":
+        res = run_worker_to_maxtext_step1_hf_to_gcs(args)
+      elif args.worker_phase == "to_maxtext_step2":
+        res = run_worker_to_maxtext_step2_convert(args)
+      elif args.worker_phase == "to_maxtext_step3":
+        res = run_worker_to_maxtext_step3_load_orbax(args)
+      elif args.worker_phase == "safetensors_dynamic":
+        res = run_worker_safetensors_dynamic(args)
+      else:
+        raise ValueError(f"Unknown worker phase: {args.worker_phase}")
+      self_wd["stop"] = True
+      if self_wd.get("peak_ram_gb", 0.0) > 0:
+        print(
+            f"INFO:watchdog:Worker Peak Host RAM: {self_wd['peak_ram_gb']:.2f}/{self_wd.get('total_ram_gb', 251.69):.2f} GB",
+            flush=True,
+        )
+        res["peak_host_ram_gb"] = round(self_wd["peak_ram_gb"], 2)
+        res["total_host_ram_gb"] = round(self_wd.get("total_ram_gb", 251.69), 2)
 
-    if args.slice_id == 0:
-      with open(args.result_json, "w", encoding="utf-8") as f:
-        json.dump(res, f, indent=2)
-    return
+      if args.slice_id == 0:
+        with open(args.result_json, "w", encoding="utf-8") as f:
+          json.dump(res, f, indent=2)
+      else:
+        time.sleep(2.0)
+      sys.stdout.flush()
+      sys.stderr.flush()
+      os._exit(0)
+    except Exception:  # pylint: disable=broad-exception-caught
+      self_wd["stop"] = True
+      traceback.print_exc()
+      if self_wd.get("peak_ram_gb", 0.0) > 0:
+        print(
+            f"INFO:watchdog:Worker Peak Host RAM: {self_wd['peak_ram_gb']:.2f}/{self_wd.get('total_ram_gb', 251.69):.2f} GB",
+            flush=True,
+        )
+      sys.stdout.flush()
+      sys.stderr.flush()
+      os._exit(1)
 
   run_id = args.run_id or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
   gcs_run_dir = f"{args.gcs_base.rstrip('/')}/run_{run_id}"
@@ -2348,7 +2913,23 @@ def main() -> None:
     # Pass 1: Run to_maxtext Step 1 (HF -> GCS + local stage) and Step 2 (Convert to Orbax)
     # across all scan_modes first, then remove the local HF staging directory to free disk/RAM
     # before running Step 3 and safetensors_dynamic across single/multi-slice configurations.
+    skip_to_maxtext = args.skip_to_maxtext or os.environ.get("SKIP_TO_MAXTEXT", "0") == "1"
     for scan_mode in args.scan_modes:
+      if skip_to_maxtext:
+        m_step1_by_scan[scan_mode] = {
+            "status": "SKIPPED",
+            "hf_to_gcs_s": 0.0,
+            "hf_to_local_s": 0.0,
+            "worker_upload_max_s": 0.0,
+        }
+        m_step2_by_scan[scan_mode] = {
+            "status": "SKIPPED",
+            "convert_to_orbax_s": 0.0,
+            "init_abstract_model_s": 0.0,
+            "transform_and_shard_s": 0.0,
+            "orbax_save_to_gcs_s": 0.0,
+        }
+        continue
       m_step1_by_scan[scan_mode] = invoke_worker_subprocess(
           phase="to_maxtext_step1",
           model=model,
@@ -2364,6 +2945,19 @@ def main() -> None:
           reuse_model_hf_cache=args.reuse_model_hf_cache,
           allow_step_failure=args.allow_step_failure,
       )
+      if m_step1_by_scan[scan_mode].get("status") == "FAILED" and args.allow_step_failure:
+        print(
+            f"[SKIP to_maxtext_step2]: Step 1 failed for {model} ({scan_mode}); skipping Orbax conversion.",
+            flush=True,
+        )
+        m_step2_by_scan[scan_mode] = {
+            "status": "SKIPPED_DUE_TO_STEP1_FAILURE",
+            "convert_to_orbax_s": 0.0,
+            "init_abstract_model_s": 0.0,
+            "transform_and_shard_s": 0.0,
+            "orbax_save_to_gcs_s": 0.0,
+        }
+        continue
       m_step2_by_scan[scan_mode] = invoke_worker_subprocess(
           phase="to_maxtext_step2",
           model=model,
@@ -2382,25 +2976,28 @@ def main() -> None:
       )
 
     # Clean up staged local HF weights once Step 2 conversions for this model are done
-    local_hf_model_dir = os.path.join(local_work_dir, "hf_local", model)
-    if os.environ.get("USE_LOCAL_HF_FOR_SAFETENSORS") != "1":
-      shutil.rmtree(local_hf_model_dir, ignore_errors=True)
-    shutil.rmtree(f"{local_hf_model_dir}_cache", ignore_errors=True)
+    for _stage_root in (local_work_dir, "/ramdisk"):
+      local_hf_model_dir = os.path.join(_stage_root, "hf_local", model)
+      if os.environ.get("USE_LOCAL_HF_FOR_SAFETENSORS") != "1":
+        shutil.rmtree(local_hf_model_dir, ignore_errors=True)
+      shutil.rmtree(f"{local_hf_model_dir}_cache", ignore_errors=True)
 
     # Pass 2: Run to_maxtext Step 3 (Load Orbax) and safetensors_dynamic across num_slices and scan_modes
     # Run all single-slice configurations first before multi-slice configurations.
     rows_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    s_res_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     for num_slices in args.num_slices_list:
       for scan_mode in args.scan_modes:
         m_step1 = m_step1_by_scan[scan_mode]
         m_step2 = m_step2_by_scan[scan_mode]
-        if m_step2.get("status") == "FAILED" and args.allow_step_failure:
-          print(
-              f"[SKIP to_maxtext_step3]: Step 2 failed for {model} ({scan_mode}); skipping Orbax load.",
-              flush=True,
-          )
+        if skip_to_maxtext or args.tm_convert_only or (m_step2.get("status") == "FAILED" and args.allow_step_failure):
+          if not skip_to_maxtext and not args.tm_convert_only:
+            print(
+                f"[SKIP to_maxtext_step3]: Step 2 failed for {model} ({scan_mode}); skipping Orbax load.",
+                flush=True,
+            )
           m_step3 = {
-              "status": "SKIPPED_DUE_TO_STEP2_FAILURE",
+              "status": "SKIPPED" if (skip_to_maxtext or args.tm_convert_only) else "SKIPPED_DUE_TO_STEP2_FAILURE",
               "load_orbax_s": 0.0,
               "num_slices": num_slices,
               "global_devices": num_slices * args.devices_per_slice,
@@ -2423,24 +3020,62 @@ def main() -> None:
               allow_step_failure=args.allow_step_failure,
           )
 
-        s_res = invoke_worker_subprocess(
-            phase="safetensors_dynamic",
-            model=model,
-            scan_mode=scan_mode,
-            gcs_run_dir=gcs_run_dir,
-            local_work_dir=local_work_dir,
-            hardware=args.hardware,
-            num_slices=num_slices,
-            weight_dtype=args.weight_dtype,
-            dcn_parallelism_axis=args.dcn_parallelism_axis,
-            devices_per_slice=args.devices_per_slice,
-            remote_slice_addrs=args.remote_slice_addrs,
-            skip_completed=args.skip_completed,
-            reuse_model_hf_cache=args.reuse_model_hf_cache,
-            allow_step_failure=args.allow_step_failure,
-        )
+        if (
+            scan_mode == "unscanned"
+            and ("scanned", num_slices) in s_res_by_key
+            and s_res_by_key[("scanned", num_slices)].get("status") == "FAILED"
+            and s_res_by_key[("scanned", num_slices)].get("load_sharded_hf_s", 0.0) == 0.0
+            and args.allow_step_failure
+        ):
+          print(
+              f"[SKIP safetensors_dynamic]: {model} (unscanned, num_slices={num_slices}) skipped because "
+              f"scanned on num_slices={num_slices} already failed with OOM/timeout.",
+              flush=True,
+          )
+          s_res = dict(s_res_by_key[("scanned", num_slices)])
+          s_res["hf_to_gcs_s"] = 0.0
+          s_res["worker_upload_max_s"] = 0.0
+        elif args.skip_safetensors or args.tm_convert_only:
+          s_res = {
+              "status": "SKIPPED",
+              "hf_to_gcs_s": 0.0,
+              "worker_upload_max_s": 0.0,
+              "safetensors_and_convert_s": 0.0,
+              "num_slices": num_slices,
+              "global_devices": num_slices * args.devices_per_slice,
+          }
+        else:
+          s_res = invoke_worker_subprocess(
+              phase="safetensors_dynamic",
+              model=model,
+              scan_mode=scan_mode,
+              gcs_run_dir=gcs_run_dir,
+              local_work_dir=local_work_dir,
+              hardware=args.hardware,
+              num_slices=num_slices,
+              weight_dtype=args.weight_dtype,
+              dcn_parallelism_axis=args.dcn_parallelism_axis,
+              devices_per_slice=args.devices_per_slice,
+              remote_slice_addrs=args.remote_slice_addrs,
+              skip_completed=args.skip_completed,
+              reuse_model_hf_cache=args.reuse_model_hf_cache,
+              allow_step_failure=args.allow_step_failure,
+          )
+        s_res_by_key[(scan_mode, num_slices)] = s_res
 
-        if s_res.get("worker_upload_max_s", 0.0) > 0.0 or cold_st_step1_s is None:
+        if s_res.get("worker_upload_max_s", 0.0) > 0.0:
+          cold_st_step1_s = s_res["hf_to_gcs_s"]
+          cold_st_worker_s = s_res.get("worker_upload_max_s", 0.0)
+          st_step1_s = s_res["hf_to_gcs_s"]
+          st_worker_s = cold_st_worker_s
+          st_warm_cache_s = 0.0
+        elif cold_st_step1_s is None and m_step1.get("hf_to_gcs_s", 0.0) > s_res["hf_to_gcs_s"]:
+          cold_st_step1_s = m_step1["hf_to_gcs_s"]
+          cold_st_worker_s = m_step1.get("worker_upload_max_s", 0.0)
+          st_step1_s = cold_st_step1_s
+          st_worker_s = cold_st_worker_s
+          st_warm_cache_s = s_res["hf_to_gcs_s"]
+        elif cold_st_step1_s is None:
           cold_st_step1_s = s_res["hf_to_gcs_s"]
           cold_st_worker_s = s_res.get("worker_upload_max_s", 0.0)
           st_step1_s = s_res["hf_to_gcs_s"]
@@ -2451,9 +3086,7 @@ def main() -> None:
           st_worker_s = cold_st_worker_s
           st_warm_cache_s = s_res["hf_to_gcs_s"]
 
-        to_maxtext_total_s = (
-            m_step1["hf_to_gcs_s"] + m_step2["convert_to_orbax_s"] + m_step3["load_orbax_s"]
-        )
+        to_maxtext_total_s = m_step1["hf_to_gcs_s"] + m_step2["convert_to_orbax_s"] + m_step3["load_orbax_s"]
         safetensor_total_s = st_step1_s + s_res["safetensors_and_convert_s"]
 
         row = {
@@ -2478,9 +3111,7 @@ def main() -> None:
             "safetensor_2b_load_sharded_hf_s": s_res.get("load_sharded_hf_s", 0.0),
             "safetensor_2c_transform_hf_to_mt_s": s_res.get("transform_hf_to_mt_s", 0.0),
             "safetensor_total_s": safetensor_total_s,
-            "speedup_total_vs_to_maxtext_x": (
-                to_maxtext_total_s / safetensor_total_s if safetensor_total_s > 0 else 0.0
-            ),
+            "speedup_total_vs_to_maxtext_x": (to_maxtext_total_s / safetensor_total_s if safetensor_total_s > 0 else 0.0),
             "load_time_diff_safetensor_step2_vs_orbax_step3_s": (
                 s_res["safetensors_and_convert_s"] - m_step3["load_orbax_s"]
             ),
