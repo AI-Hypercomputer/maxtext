@@ -27,6 +27,7 @@ import struct
 
 import numpy as np
 import grain.python as grain
+from grain.experimental import WindowShuffleMapDataset
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ class MMapDatasetConfig:
   seed: int = 1234
   split_ratio: str | None = None
   split_index: int = 0
+  # Samples per step of all data replicas; set only when there are several (see `get_mmap_npy_dataset`).
+  blend_shard_window: int | None = None
 
 
 class MMapIndexedDataset:
@@ -1231,6 +1234,7 @@ def get_mmap_npy_dataset(
     blend_margin=0.5,
     split=None,
     split_index=0,
+    blend_shard_window=None,
 ):
   """Build an mmap_npy dataset pipeline with optional Megatron blending.
 
@@ -1254,6 +1258,13 @@ def get_mmap_npy_dataset(
       blend_margin: Overprovisioning margin %% for blend buffers (default 0.5).
       split: Megatron-style split ratio string (e.g. ``'99,1'``).
       split_index: Which partition to use (0=train, 1=eval, 2=test).
+      blend_shard_window: Samples per step of all data replicas, set only when
+          several replicas train on separate shards.  The blend is then
+          permuted within each window of this many samples before sharding, so
+          each replica gets a random part of every step's blend instead of a
+          fixed stride of Megatron's deterministic interleave (which can hold a
+          single component); together the replicas still read exactly that
+          step's samples.  A trailing partial window is dropped.
   """
   from maxtext.input_pipeline import _mmap_index_utils  # pylint: disable=import-outside-toplevel
   from maxtext.input_pipeline._megatron_blending import MegatronBlendedDataSource  # pylint: disable=import-outside-toplevel  # avoid circular at module level
@@ -1336,6 +1347,9 @@ def get_mmap_npy_dataset(
       split=blend_split,
   )
   dataset = grain.MapDataset.source(blended_source)
+  if blend_shard_window:
+    dataset = dataset[: len(dataset) // blend_shard_window * blend_shard_window]
+    dataset = WindowShuffleMapDataset(dataset, window_size=blend_shard_window, seed=seed)
   dataset = dataset[host_index::host_count]
   return dataset.to_iter_dataset(
       read_options=grain.ReadOptions(

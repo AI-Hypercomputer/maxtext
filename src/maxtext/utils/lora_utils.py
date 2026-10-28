@@ -649,7 +649,9 @@ def apply_lora_to_model(
   return lora_model  # pyrefly: ignore[bad-return]
 
 
-def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameters) -> nnx.Module:
+def restore_lora_from_path(
+    model: nnx.Module, mt_config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh | None = None
+) -> nnx.Module:
   """Restores LoRA parameter weights from an external Orbax checkpoint.
 
   This function performs the restore in-place on the model's parameters and
@@ -658,6 +660,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
   Args:
     model: The JAX/Flax NNX model (nnx.Module).
     mt_config: The HyperParameters config containing the lora configuration.
+    mesh: Mesh to restore onto when `model` has none; defaults to the mesh derived from `mt_config`.
 
   Returns:
     The model with the restored LoRA weights applied in-place.
@@ -679,8 +682,10 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 
   sync_lora_metadata(mt_config)
 
-  mesh = getattr(model, "mesh", None)
-  if mesh is None:
+  model_mesh = getattr(model, "mesh", None)
+  if model_mesh is not None:
+    mesh = model_mesh
+  elif mesh is None:
     try:
       mesh = maxtext_utils.get_mesh_from_config(mt_config)
     except Exception:  # pylint: disable=broad-exception-caught
