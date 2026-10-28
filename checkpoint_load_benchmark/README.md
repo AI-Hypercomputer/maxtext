@@ -167,6 +167,11 @@ so the remaining Priority 1 work runs as a queue that any number of workers drai
   (`tpu7x_p1_completion_recovery.yaml`: daemon `h1` + controller `ctrl-g1` driving `g1`).
 - **Progress**: `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/{locks,done,attempts}/` and
   [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py).
+- **Scale-out** (`tpu7x_p1_completion_scaleout.yaml`, written by `generate_tpu7x_manifests.py`): more workers on the
+  same queue when spot `2x2x1` capacity is idle. It adds 2-slice pairs `i`, `j`, single-slice workers `s1`–`s3` (for
+  the multi-hour `to_maxtext` CPU conversions, so no slice-1 node idles), and a **4-slice group `m`** (runner `m0` +
+  daemons `m1`–`m3`, `--min-slices 4`) for `deepseek3-671b`. That model's 1.34 TB BF16 needs 32 TPU cores / 3.26 TB HBM.
+  A worker uses as many slices as it has reachable daemons (`--max-slices`, `--min-slices`).
 - **HBM fix variant**: the run labeled `hbmfix` (`--run-id tpu7x_200b_hbmfix`) uses
   [`patches/hbmfix`](patches/hbmfix.patch); every other run uses `src/` exactly as on this branch (Lance's 3 PRs).
 
