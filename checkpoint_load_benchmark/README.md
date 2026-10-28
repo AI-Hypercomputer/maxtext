@@ -171,9 +171,14 @@ so the remaining Priority 1 work runs as a queue that any number of workers drai
   same queue when spot `2x2x1` capacity is idle. It adds 2-slice pairs `i`, `j`, single-slice workers `s1`–`s3` (for
   the multi-hour `to_maxtext` CPU conversions, so no slice-1 node idles), and a **4-slice group `m`** (runner `m0` +
   daemons `m1`–`m3`, `--min-slices 4`) for `deepseek3-671b`. That model's 1.34 TB BF16 needs 32 TPU cores / 3.26 TB HBM.
-  A worker uses as many slices as it has reachable daemons (`--max-slices`, `--min-slices`).
-- **HBM fix variant**: the run labeled `hbmfix` (`--run-id tpu7x_200b_hbmfix`) uses
-  [`patches/hbmfix`](patches/hbmfix.patch); every other run uses `src/` exactly as on this branch (Lance's 3 PRs).
+  A worker uses as many slices as it has reachable daemons (`--max-slices`, `--min-slices`). A second wave
+  (`tpu7x_p1_completion_scaleout2.yaml`: pair `k`, singles `s4`–`s8`) starts the remaining single-slice tasks at once.
+  Workers exit when no task they can run is left, which frees their nodes.
+- **Code variants**: runs labeled `hbmfix` (`--run-id tpu7x_200b_hbmfix`) use [`patches/hbmfix`](patches/hbmfix.patch).
+  The other WITH-PRs runs use `src/` from this branch (Lance's 3 PRs) **plus the string patches applied by
+  [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py)**: single-GET HF→GCS streaming (Step 1 only), and, for the Step 2 HBM
+  peak, freeing reshard/stack intermediates and splitting composite leaves before the reshard. BEFORE runs
+  (`origin/main` `checkpoint_conversion`) get only the streaming patch.
 
 ### 5.2 Run a Single-Slice Benchmark (`num_slices=1`)
 ```bash
