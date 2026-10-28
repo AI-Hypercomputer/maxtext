@@ -51,6 +51,7 @@ checkpoint_load_benchmark/
     ├── tpu7x_benchmark_ckpt_load_time_summary.md    # [tpu7x] Executive summary on bodaborg-tpu7x-nap (two-row side-by-side comparison table)
     ├── tpu7x_benchmark_ckpt_load_time_report.md     # [tpu7x] Detailed engineering report on bodaborg-tpu7x-nap with phase breakdowns
     ├── tpu7x_benchmark_ckpt_load_time_issues.md     # [tpu7x] HBM/RAM capacity boundaries, multi-host timeout analysis, and fixes on tpu7x
+    ├── tpu7x_priority1_progress.md                  # [tpu7x] Priority 1 per-test status (summary, row-by-row, all tests)
     └── tpu7x_benchmark_ckpt_load_time_summary.csv   # [tpu7x] Raw benchmark metrics CSV on bodaborg-tpu7x-nap
 ```
 

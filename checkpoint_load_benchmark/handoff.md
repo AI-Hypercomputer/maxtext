@@ -14,7 +14,7 @@
 | :--- | :--- |
 | **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit, 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s). 397B scanned on 1–2 slices runs out of HBM, also with `hbmfix` (§7.19) |
 | **P1 · Exp 1A BEFORE** (`origin/main`) | ✅ Done. Every BEFORE run **timed out at 1800 s while still loading** (235B · 1 and · 2, 284B · 1 and · 2, 397B unscanned · 2, 671B · 4), except 480B, which hits `KeyError`. With the PRs, the same loads take 353–708 s |
-| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). Unscanned 235B converted in **5,150.1 s** (shards streamed); its Orbax loads are running. The unscanned 397B conversion is ~27% done, with loads to follow (ETA ~17:45 UTC) |
+| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). Unscanned 235B converted in **5,150.1 s** (shards streamed); its Orbax loads are running. The unscanned 397B conversion lost its pod at ~65% (16:43 UTC, after 3 h) and was restarted on a new `s1` at 17:56 UTC (ETA ~22:00 UTC for the conversion; a 2-slice pair has to be recreated for the last load) |
 | **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 29 tasks). All tasks are done except the two unscanned conversion chains (235B, 397B). Workers left: `s3` (235B), `s8` (397B), standby `s1`, pairs `i` and `k` for the 2-slice loads |
 | **P2 · 16-model suite** | ✅ Done (`p2_leftovers` and re-runs). `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned loads. `llama3.1-70b` scanned · 2 Orbax load needed `concurrent_gb=38` (T-13). Re-ran the `qwen3-14b` and `qwen3-32b` scanned · 1 outliers (U-7) |
 | **Reports** | Written: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, plus the live `tpu7x_priority1_progress.md`. To do: fill in the 235B/397B unscanned `to_maxtext` results when they land (re-run `scripts/build_tpu7x_tables.py --md-into`), then clean up the cluster |
@@ -216,7 +216,7 @@ Manifests: `tpu7x_p1_completion_scaleout.yaml` (pairs `i`, `j`, singles `s1`–`
 | Worker | Pods | Slices | Task at snapshot (15:05 UTC) |
 | :--- | :--- | :---: | :--- |
 | `s3` | `mesakh-tpu7x-s3` | 1 | `tm_235b_unscanned_s1`: conversion done (5,150.1 s), 1-slice Orbax load running |
-| `s8` | `mesakh-tpu7x-s8` | 1 | `tm_397b_unscanned_s1`: conversion ~27% (streams shards; ETA ~17:15 UTC, then save and load) |
+| `s1` | `mesakh-tpu7x-s1` (recreated 17:56) | 1 | `tm_397b_unscanned_s1`: conversion restarted (the first attempt on `s8` was evicted at ~65%) |
 | `s1` | `mesakh-tpu7x-s1` | 1 | idle standby with the `stagefix` tree (can take over `s3`/`s8` tasks) |
 | `i`, `k` | `mesakh-tpu7x-{i,k}{0,1}` | 2 | idle until `tm_235b_unscanned_s2` / `tm_397b_unscanned_s2` become claimable |
 
