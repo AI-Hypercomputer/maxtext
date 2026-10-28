@@ -1,12 +1,12 @@
 # Priority 1 (>200B models) progress on TPU v7x (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~12:55 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
+> **Snapshot:** 2026-10-28 ~13:16 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
 > `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/` (task ids below refer to
 > [`configs/p1_completion_tasks.json`](../configs/p1_completion_tasks.json))
 
 **Hardware per slice:** `tpu7x-standard-4t`, topology `2x2x1` = 4 chips = 8 TPU cores, **813.8 GB HBM**,
 **1,014.5 GB host RAM**, spot capacity. **1 slice** = 8 cores; **2 slices** = 16 cores (multi-slice over DCN,
-`dcn_fsdp_parallelism=2`).
+`dcn_fsdp_parallelism=2`); **4 slices** = 32 cores, 3.26 TB HBM (`deepseek3-671b` only, `dcn_fsdp_parallelism=4`).
 
 **Experiments**
 - **1A**: `safetensors_dynamic` BEFORE (`origin/main`, `f596f5369`) vs WITH Lance's 3 PRs (#5706, #5828, #5705).
@@ -21,9 +21,9 @@
 | :--- | :--- | ---: | :--- | :--- | :--- |
 | `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ⚠️ killed mid-load by the 360 s watchdog → ⏳ re-run at 1800 s | ⏳ 4 tasks (scanned conversion re-queued after the shard-thrash fix) |
 | `deepseek4-284b` | 581.9 GB / 146 *(synthetic sparse files)* | – | ✅ 4/4 | ⚠️ killed at 360 s → ⏳ re-run at 1800 s | ⏳ 4 tasks |
-| `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | 🔄 unscanned · 2 running; ❌ scanned (TPU HBM OOM) | ⚠️ killed at 360 s → ⏳ unscanned · 2 at 1800 s | ⏳ unscanned only (scanned conversion does not fit one host) |
+| `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s); ❌ scanned (TPU HBM OOM; fix variant 🔄) | ⚠️ killed at 360 s → ⏳ unscanned · 2 at 1800 s | ⏳ unscanned only (scanned conversion does not fit one host) |
 | `qwen3-480b-a35b` | 961.0 GB / 241 | 1,046.1 s | ✅ 2/2 that fit (1 slice ❌ HBM) | ❌ `KeyError` (no mapping before #5706); conclusive | ⏳ unscanned only (scanned conversion does not fit one host) |
-| `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ does not fit 1 or 2 slices | ➖ | ➖ |
+| `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ does not fit 1 or 2 slices; ⏳ **4 slices** (`st_671b_s4`) | ⏳ 4 slices at 1800 s (`before_671b_s4`) | ➖ |
 
 ## `to_maxtext` vs `safetensor` (row-by-row, same layout as the earlier small-model summary)
 
@@ -33,7 +33,7 @@ For each `(Model, Scan Mode, Slices)` configuration, **`to_maxtext`** and **`saf
 - **Col 2 (`Convert to Orbax`)**: `to_maxtext` Step 2 vs `—`. `safetensor` has no conversion step.
 - **Col 3 (`Load into MaxText`)**: `to_maxtext` Step 3 (`Load Orbax`) vs `safetensor` Step 2 (`Safetensors+Convert`).
 
-Slices (Devices): `1 (8)` = 1 slice, 8 TPU cores; `2 (16)` = 2 slices, 16 TPU cores. The speedup is filled in once both
+Slices (Devices): `1 (8)` = 1 slice, 8 TPU cores; `2 (16)` = 2 slices, 16 TPU cores; `4 (32)` = 4 slices, 32 TPU cores (`deepseek3-671b` only). The speedup is filled in once both
 rows have finished.
 
 | Model | Scan Mode | Slices (Devices) | Pipeline | 1. `HF -> GCS` (s) | 2. `Convert to Orbax` (s) | 3. `Load into MaxText` (s) | **Total (No Step 1) (s)** | **Total (End-to-End) (s)** | **Speedup (E2E / No Step 1)** |
@@ -61,7 +61,7 @@ rows have finished.
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(queued: `tm_397b_unscanned_s1`)* | ⏳ *(Load Orbax; expected HBM OOM)* | ⏳ | ⏳ | 1.00x (baseline) |
 | ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **Not run** *(795 GB ≈ 98% of 1-slice HBM)* | **—** | **—** | — |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_397b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
-| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | 🔄 *(running: `st_397b_unscanned_s2`)* | 🔄 | 🔄 | ⏳ |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **1,311.85** *(Safetensors+Convert)* | **1,311.85** | **2,126.38** | ⏳ *(awaiting `to_maxtext`)* |
 | **`qwen3-480b-a35b`** *(961.0 GB MoE)* | `scanned` | `1 (8)` | `to_maxtext` | 1,135.50 | **Does not fit one host** *(961 GB > staging budget; recorded by `tm_480b_scanned_conv`)* | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **1,046.14** | **—** | **HBM OOM** *(961 GB > 813.8 GB)* | **OOM** | **OOM** | Failed (1-slice HBM) |
 | **`qwen3-480b-a35b`** *(961.0 GB MoE)* | `scanned` | `2 (16)` | `to_maxtext` | 1,135.50 | **Does not fit one host** | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
@@ -76,6 +76,10 @@ rows have finished.
 | ↳ | `scanned` | `2 (16)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **OOMKilled** *(host, 742.1 GB sampled peak; needs ≥ 4 slices)* | **OOM** | **OOM** | Failed (2-slice capacity) |
 | **`deepseek3-671b`** *(1,342.4 GB MoE, synthetic sparse files)* | `unscanned` | `1 (8)` / `2 (16)` | `to_maxtext` | — | **Not run** | — | **N/A** | **N/A** | N/A |
 | ↳ | `unscanned` | `1 (8)` / `2 (16)` | **`safetensor`** | — | **—** | **Skipped** *(same capacity limits as scanned)* | **—** | **—** | — |
+| **`deepseek3-671b`** *(1,342.4 GB MoE, synthetic sparse files)* | `scanned` | `4 (32)` | `to_maxtext` | — | **Not run** *(single-host conversion of 1.34 TB does not fit)* | — | **N/A** | **N/A** | N/A |
+| ↳ | `scanned` | `4 (32)` | **`safetensor`** | **0.00** *(local stage)* | **—** | ⏳ *(queued: `st_671b_s4`, 4-slice group `m`)* | ⏳ | ⏳ | ⏳ |
+| **`deepseek3-671b`** *(1,342.4 GB MoE, synthetic sparse files)* | `unscanned` | `4 (32)` | `to_maxtext` | — | **Not run** | — | **N/A** | **N/A** | N/A |
+| ↳ | `unscanned` | `4 (32)` | **`safetensor`** | **0.00** *(local stage)* | **—** | ⏳ *(queued: `st_671b_s4`)* | ⏳ | ⏳ | ⏳ |
 
 ## All tests
 
@@ -94,8 +98,8 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 | | unscanned · 2 | ➖ skipped → ⏳ `before_284b_s2` | ✅ **353.0 s** (306.3 + 46.5) | (shared) | ⏳ `tm_284b_unscanned_s2` |
 | `qwen3.5-397b-a17b` | scanned · 1 | ⚠️ killed at 360 s | ❌ load finished (947.7 s), then TPU HBM OOM in the transform (795 GB ≈ 98% of HBM) → ⏳ clean record `st_397b_scanned_s1` | ➖ needs the full checkpoint staged on one host (795 GB > budget); recorded by ⏳ `tm_397b_scanned_s1` | ➖ |
 | | unscanned · 1 | ➖ | ➖ does not fit 1 slice | ⏳ `tm_397b_unscanned_s1` (streams per layer) | ⏳ `tm_397b_unscanned_s1` (expected HBM OOM) |
-| | scanned · 2 | ⚠️ killed at 360 s (WITH load alone takes 484 s) | ❌ load finished (483.8 s), then HBM OOM splitting `wi_0`/`wi_1` → ⏳ fix variant `st_397b_scanned_s2_hbmfix` | ➖ | ➖ |
-| | unscanned · 2 | ⏳ `before_397b_unscanned_s2` (1800 s) | 🔄 `st_397b_unscanned_s2` (started 12:48 UTC) | (shared) | ⏳ `tm_397b_unscanned_s2` |
+| | scanned · 2 | ⚠️ killed at 360 s (WITH load alone takes 484 s) | ❌ load finished (483.8 s), then HBM OOM splitting `wi_0`/`wi_1` → 🔄 fix variant `st_397b_scanned_s2_hbmfix` | ➖ | ➖ |
+| | unscanned · 2 | 🔄 `before_397b_unscanned_s2` (1800 s) | ✅ **1,311.9 s** (515.9 + 795.7; peak host RAM 98.7 GB) | (shared) | ⏳ `tm_397b_unscanned_s2` |
 | `qwen3-480b-a35b` | scanned · 1 | ❌ `KeyError: 'qwen3-480b-a35b'` | ❌ TPU HBM OOM (961 GB > 813.8 GB) | ➖ does not fit one host's staging budget; recorded by ⏳ `tm_480b_scanned_conv` | ➖ |
 | | unscanned · 1 | ❌ `KeyError` (skipped after scanned) | ➖ does not fit 1 slice | ⏳ `tm_480b_unscanned_conv` (streams per layer) | ➖ does not fit 1 slice |
 | | scanned · 2 | ❌ `KeyError` | ✅ **1,067.9 s** (942.0 + 125.8) | ➖ | ➖ |
@@ -103,6 +107,8 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 | `deepseek3-671b` | scanned · 1 | ⚠️ killed at 360 s | ❌ exceeds 1-slice HBM (1,342 GB > 813.8 GB) | ➖ | ➖ |
 | | scanned · 2 | ⚠️ killed at 360 s | ❌ host OOM-killed at 742.1 GB sampled peak; needs ≥ 4 slices | ➖ | ➖ |
 | | unscanned · 1 / 2 | ➖ skipped | ➖ same capacity limits | ➖ | ➖ |
+| | scanned · 4 | ⏳ `before_671b_s4` (1800 s) | ⏳ `st_671b_s4` (4-slice group `m`: 32 cores, 3.26 TB HBM) | ➖ | ➖ |
+| | unscanned · 4 | ⏳ `before_671b_s4` | ⏳ `st_671b_s4` | ➖ | ➖ |
 
 ## Notes
 - **Peak host RAM (WITH PRs)**:

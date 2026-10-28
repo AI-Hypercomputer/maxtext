@@ -66,6 +66,8 @@ CONFIGS = [
     ("unscanned", "unscanned", 1),
     ("scanned_slices2", "scanned", 2),
     ("unscanned_slices2", "unscanned", 2),
+    ("scanned_slices4", "scanned", 4),  # only deepseek3-671b (needs 4 slices); rows without results are skipped
+    ("unscanned_slices4", "unscanned", 4),
 ]
 
 
@@ -107,6 +109,8 @@ def main():
   print("| :--- | :--- | ---: | ---: | ---: | ---: | ---: |")
   for model in models:
     for cfg, scan, slices in CONFIGS:
+      if slices > 2 and not os.path.isdir(os.path.join(args.root, model, cfg)):
+        continue
       s3 = _load(args.root, model, cfg, "to_maxtext_step3")
       st = _load(args.root, model, cfg, "safetensors_dynamic")
       if slices == 1:
