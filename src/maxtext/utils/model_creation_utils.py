@@ -33,6 +33,7 @@ import collections
 from collections.abc import Sequence
 import dataclasses
 from functools import partial
+import math
 import os
 import subprocess
 import sys
@@ -69,6 +70,74 @@ except ImportError:
 
   def _is_orbax_array_metadata(x):
     return hasattr(x, "shape") and hasattr(x, "sharding") and hasattr(x, "dtype") and not isinstance(x, jax.Array)
+
+
+def _is_array_meta_or_qtensor(node: Any) -> bool:
+  """Returns True if `node` is an ArrayMetadata leaf or an AQT `QTensor` dict of ArrayMetadata.
+
+  A `QTensor` is recognized by its `qvalue` key, so a parameter subtree under a
+  submodule that is itself named `value` (e.g. the attention V projection,
+  `{"kernel": ArrayMetadata}`) is not mistaken for a `'value'`-wrapped leaf.
+  """
+  if _is_orbax_array_metadata(node):
+    return True
+  if not isinstance(node, dict) or "qvalue" not in node:
+    return False
+  return all(_is_orbax_array_metadata(x) for x in jax.tree.leaves(node, is_leaf=_is_orbax_array_metadata))
+
+
+def _checkpoint_uses_value_wrapper(meta_tree: Any, param_state: Any) -> bool:
+  """Returns whether an NNX checkpoint metadata tree wraps leaves under `'value'`.
+
+  Standard NNX checkpoints and quantized checkpoints written by
+  `layerwise_quantization._load_and_quantize_nnx` wrap every variable as
+  `{"value": node}` — including AQT serve-mode `QTensor` leaves whose on-disk
+  structure is `{"value": {"qvalue": ArrayMetadata, "scale": ...}}`. Pure-dict
+  checkpoints store `ArrayMetadata` directly at each parameter path without an
+  intermediate `'value'` dictionary.
+
+  Resolves the first `nnx.Param` path from `param_state.flat_state()` in
+  `meta_tree`: if that node is an `ArrayMetadata` leaf, returns `False`; if it
+  is a `dict` containing `'value'`, returns `True`. If no `nnx.Param` path
+  resolves (e.g. under fused-MoE `wi` vs `wi_0`/`wi_1` renames), falls back to
+  scanning `meta_tree` for any `dict` whose `'value'` child is an
+  `ArrayMetadata` leaf or an AQT `QTensor` dict (see `_is_array_meta_or_qtensor`).
+  """
+  if not isinstance(meta_tree, dict) or not meta_tree:
+    return False
+
+  if param_state is not None and hasattr(param_state, "flat_state"):
+    for path, var in param_state.flat_state():
+      if not isinstance(var, nnx.Param):
+        continue
+      node = meta_tree
+      resolved = True
+      for key in path:
+        if not isinstance(node, dict):
+          resolved = False
+          break
+        if key in node:
+          node = node[key]
+        elif str(key) in node:
+          node = node[str(key)]
+        else:
+          resolved = False
+          break
+      if not resolved:
+        continue
+      if _is_orbax_array_metadata(node):
+        return False
+      if isinstance(node, dict) and "value" in node:
+        return True
+
+  def _has_wrapped_value(node: Any) -> bool:
+    if not isinstance(node, dict):
+      return False
+    if "value" in node and _is_array_meta_or_qtensor(node["value"]):
+      return True
+    return any(_has_wrapped_value(v) for v in node.values())
+
+  return _has_wrapped_value(meta_tree)
 
 
 # Logical axis names whose padding semantics are "replicate the existing values"
@@ -573,6 +642,62 @@ def get_nnx_create_model_fn(
   return _create_model
 
 
+def _apply_m3_default_named_sharding(
+    abs_var_state: Any,
+    named_sharding_state: Any,
+    mesh: Any,
+) -> Any:
+  """Assigns 1D NamedSharding across fsdp/fsdp_transpose for unpartitioned M3 variables.
+
+  Falls back to the largest non-data/non-stage mesh axis when
+  fsdp/fsdp_transpose are absent.
+  """
+  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
+  if not shard_axes:
+    fallback_axes = [
+        (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
+    ]
+    if not fallback_axes:
+      max_logging.log(
+          "WARNING: M3 default sharding found no fsdp/fsdp_transpose or"
+          " non-data axis with size > 1; keeping weights replicated."
+      )
+      return named_sharding_state
+    shard_axes = (max(fallback_axes, key=lambda x: x[1])[0],)
+  axis_size = math.prod(int(mesh.shape[a]) for a in shard_axes)
+  spec_axis = shard_axes[0] if len(shard_axes) == 1 else shard_axes
+
+  def _shard_leaf(path, a_var, s_var):
+    cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
+    is_unsharded = (
+        not hasattr(cur_sharding, "spec")
+        or cur_sharding.spec == jax.sharding.PartitionSpec()
+        or all(s is None for s in cur_sharding.spec)
+    )
+    if not is_unsharded:
+      return s_var
+    inner_a = a_var.get_value() if hasattr(a_var, "get_value") else a_var
+    if not hasattr(inner_a, "shape"):
+      return s_var
+    shape = inner_a.shape
+    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
+    # Scanned `decoder.cycles.{gdn_0,gdn_1,gdn_2,qsa_3}` params carry a leading cycle axis; never shard it.
+    start_d = 1 if "cycles" in path_strs else 0
+    for d in range(start_d, len(shape)):
+      if shape[d] % axis_size == 0:
+        new_spec = jax.sharding.PartitionSpec(*(spec_axis if i == d else None for i in range(len(shape))))
+        new_sharding = jax.sharding.NamedSharding(mesh, new_spec)
+        return s_var.replace(new_sharding) if hasattr(s_var, "replace") else new_sharding
+    return s_var
+
+  return jax.tree_util.tree_map_with_path(
+      _shard_leaf,
+      abs_var_state,
+      named_sharding_state,
+      is_leaf=lambda n: isinstance(n, nnx.Variable),
+  )
+
+
 def create_nnx_abstract_model(
     config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
 ) -> tuple[Callable, nnx.Module]:
@@ -602,6 +727,8 @@ def create_nnx_abstract_model(
       mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
+    if getattr(config, "use_m3_model", False) and mesh is not None and getattr(mesh, "size", 1) > 1:
+      named_sharding_state = _apply_m3_default_named_sharding(abs_var_state, named_sharding_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
@@ -985,13 +1112,13 @@ def from_pretrained(
             "Please check your load_parameters_path."
         )
 
-      def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx):
+      def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx, use_value_wrapper=True):
         if not hasattr(target, "items") or not hasattr(meta_tree, "items"):
           return target
         new_target = {}
         for k, v in target.items():
           if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
-            if not is_nnx:
+            if not is_nnx or not use_value_wrapper:
               arr = v
               half_dim = arr.shape[-1] // 2
               new_target["wi_0"] = jax.ShapeDtypeStruct(
@@ -1014,7 +1141,12 @@ def from_pretrained(
                   )
               }
           else:
-            new_target[k] = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
+            new_target[k] = _adjust_target_for_moe_fusion(
+                v,
+                meta_tree.get(k, {}),
+                is_nnx,
+                use_value_wrapper=use_value_wrapper,
+            )
 
         return new_target
 
@@ -1030,6 +1162,8 @@ def from_pretrained(
           lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
       )
       is_nnx_checkpoint = True
+      has_base_key = False
+      use_value_wrapper = False
       if (
           "params" in metadata.item_metadata.tree.keys()
           and "params" in metadata.item_metadata.tree.get("params", {}).keys()
@@ -1071,6 +1205,10 @@ def from_pretrained(
         # and pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
         # don't carry RNG/dropout state at all (they only persist weight-like leaves, including
         # AQT serve-mode `qrhs.frozen` which is not an aqt Variable subclass).
+        has_base_key = "base" in metadata.item_metadata.tree
+        meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
+        use_value_wrapper = _checkpoint_uses_value_wrapper(meta_tree_for_params, param_state)
+
         def _build_value_target(v):
           # `v[...]` (a.k.a. `v.get_value(index=...)`) descends into the inner
           # value with `value[Ellipsis]`. AQT serve-mode `qrhs.frozen` variables
@@ -1080,7 +1218,7 @@ def from_pretrained(
           # restore target preserves the QTensor's qvalue/scale sub-structure.
           inner = v.get_value() if hasattr(v, "get_value") else v[...]
           if hasattr(inner, "shape"):
-            return {"value": v[...]}
+            return {"value": v[...]} if use_value_wrapper else v[...]
           # AQT QTensor: qvalue/scale leaves come back wrapped in flax
           # `Partitioned` (a logical-axis sharding box). The on-disk save in
           # `_load_and_quantize_nnx` flushes the QTensor as plain arrays —
@@ -1094,7 +1232,7 @@ def from_pretrained(
               inner,
               is_leaf=lambda x: isinstance(x, Partitioned),
           )
-          return {"value": inner}
+          return {"value": inner} if use_value_wrapper else inner
 
         # Keep persisted weight-like leaves: `nnx.Param` plus AQT serve-mode
         # `qrhs.frozen` (a separate `aqt` Variable type, NOT a Param subclass).
@@ -1108,9 +1246,12 @@ def from_pretrained(
             param_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
-        has_base_key = "base" in metadata.item_metadata.tree
-        meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
-        target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_tree_for_params, True)
+        target_for_restore = _adjust_target_for_moe_fusion(
+            target_for_restore,
+            meta_tree_for_params,
+            True,
+            use_value_wrapper=use_value_wrapper,
+        )
         item_to_restore = {"base": target_for_restore} if has_base_key else target_for_restore
         restore_args = _fix_restore_args_for_shape_mismatch(
             ocp.checkpoint_utils.construct_restore_args(target_for_restore), meta_tree_for_params, mesh
@@ -1152,12 +1293,15 @@ def from_pretrained(
       )
 
       if is_nnx_checkpoint:
-        restored_root = restored["base"] if has_base_key else restored  # pyrefly: ignore[unbound-name]
-        checkpoint = jax.tree.map(
-            lambda v: v["value"],
-            restored_root,
-            is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
-        )
+        restored_root = restored["base"] if has_base_key else restored
+        if use_value_wrapper:
+          checkpoint = jax.tree.map(
+              lambda v: v["value"],
+              restored_root,
+              is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+          )
+        else:
+          checkpoint = restored_root
       else:
         checkpoint = restored["params"]["params"]
         for col, col_tree in restored["params"].items():

@@ -19,18 +19,15 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from absl.testing import absltest
+from flax import nnx
+import flax.linen as nn
+from flax.training import train_state
 import jax
 import jax.numpy as jnp
-import numpy as np
-import flax.linen as nn
-from flax import nnx
 from jax.sharding import Mesh
-from orbax import checkpoint as ocp
-import pytest
-
-from flax.training import train_state
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -42,6 +39,14 @@ from maxtext.utils.model_creation_utils import (
     _zero_pad_axis,
 )
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+from orbax import checkpoint as ocp
+import pytest
+
+if "maxtext" in sys.modules and not hasattr(sys.modules["maxtext"], "utils"):
+  setattr(sys.modules["maxtext"], "utils", sys.modules["maxtext.src.maxtext.utils"])
+  sys.modules.setdefault("maxtext.utils", sys.modules["maxtext.src.maxtext.utils"])
+  sys.modules.setdefault("maxtext.utils.model_creation_utils", model_creation_utils)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +76,7 @@ def _make_restore_arg(global_shape):
       global_shape=global_shape,
       shape=global_shape,
       sharding=sharding,
-      dtype=jnp.float32,
+      dtype=jnp.dtype(jnp.float32),
   )
 
 
@@ -661,8 +666,16 @@ class TestCreateNnxModel(unittest.TestCase):
   """Tests for from_pretrained()."""
 
   def setUp(self):
+    super().setUp()
     self.config = _make_config()
     self.mesh = _make_mesh(self.config)
+    self._meta_patcher = patch.object(
+        model_creation_utils.checkpointing,
+        "load_checkpoint_metadata",
+        return_value={},
+    )
+    self._meta_patcher.start()
+    self.addCleanup(self._meta_patcher.stop)
 
   def test_no_checkpoint_returns_model_and_mesh(self):
     """Without load_parameters_path, should return the model cleanly."""
@@ -726,6 +739,196 @@ class TestCreateNnxModel(unittest.TestCase):
     cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/nnx_ckpt")
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
+
+  def test_checkpoint_uses_value_wrapper(self):
+    fn = model_creation_utils._checkpoint_uses_value_wrapper  # pylint: disable=protected-access
+    param_state = nnx.state(model_creation_utils.from_pretrained(self.config, self.mesh), nnx.Param)
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+
+    pure = jax.tree.map(fake_meta, nnx.to_pure_dict(param_state))
+    self.assertFalse(fn(pure, param_state))
+
+    wrapped = jax.tree.map(lambda a: {"value": fake_meta(a)}, nnx.to_pure_dict(param_state))
+    self.assertTrue(fn(wrapped, param_state))
+
+    # Value-wrapped AQT serve-mode tree: QTensor leaves under "value" previously misdetected as pure-dict.
+    wrapped_qtensor = jax.tree.map(lambda a: {"value": fake_meta(a)}, nnx.to_pure_dict(param_state))
+    wo_shape = tuple(param_state["decoder"]["layers"]["mlp"]["wo"]["kernel"].get_value().shape)
+    qtensor_leaf = {
+        "value": {
+            "qvalue": _FakeArrayMetadata(wo_shape),
+            "scale": {"0": _FakeArrayMetadata((1,))},
+        }
+    }
+    wrapped_qtensor["decoder"]["layers"]["mlp"]["wo"]["kernel"] = qtensor_leaf
+    wrapped_qtensor["decoder"]["layers"]["mlp"]["qrhs"] = {"frozen": qtensor_leaf}
+    self.assertTrue(fn(wrapped_qtensor, param_state))
+
+    self.assertTrue(fn({"renamed": {"value": _FakeArrayMetadata((4, 4))}}, param_state))
+    self.assertFalse(fn({"renamed": _FakeArrayMetadata((4, 4))}, param_state))
+    # With no resolvable nnx.Param path, the fallback scan must not mistake a submodule that is
+    # itself named `value` (the attention V projection) for a 'value' wrapper.
+    self.assertIn("value", pure["decoder"]["layers"]["self_attention"])
+    self.assertFalse(fn({"renamed": pure}, param_state))
+    self.assertTrue(fn({"renamed": wrapped}, param_state))
+    self.assertTrue(fn({"renamed": {"qrhs": {"frozen": qtensor_leaf}}}, param_state))
+    self.assertFalse(fn({}, param_state))
+    self.assertFalse(fn(None, param_state))
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_pure_dict_nnx_checkpoint(self, mock_ocp):
+    """Pure-dict NNX checkpoint: leaves are arrays directly without 'value' wrapper."""
+    params = nnx.to_pure_dict(
+        nnx.state(
+            model_creation_utils.from_pretrained(self.config, self.mesh),
+            nnx.Param,
+        )
+    )
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+    metadata = MagicMock()
+    metadata.item_metadata.tree = jax.tree.map(fake_meta, params)
+
+    def restore_fn(path, item=None, **kw):
+      restored = _restore_as_zeros(path, item, **kw)
+      restored["decoder"]["decoder_norm"]["scale"] = restored["decoder"]["decoder_norm"]["scale"] + 7.0
+      return restored
+
+    mock_ckptr = self._mock_ocp_for_restore(mock_ocp, metadata, restore_fn)
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="gs://fake/pure_dict_ckpt",
+    )
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    item = mock_ckptr.restore.call_args.kwargs["item"]
+    scale_target = item["decoder"]["decoder_norm"]["scale"]
+    self.assertTrue(hasattr(scale_target, "shape"))
+    self.assertNotIsInstance(scale_target, dict)
+    leaf_keys = [getattr(path[-1], "key", path[-1]) for path, _ in jax.tree_util.tree_flatten_with_path(item)[0]]
+    self.assertNotIn("value", leaf_keys)
+    np.testing.assert_array_equal(np.asarray(model.decoder.decoder_norm.scale[...]), 7.0)
+    np.testing.assert_array_equal(np.asarray(model.decoder.layers.mlp.wo.kernel[...]), 0.0)
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_value_wrapped_nnx_checkpoint(self, mock_ocp):
+    """Value-wrapped NNX checkpoint: leaves are stored under a 'value' dictionary."""
+    params = nnx.to_pure_dict(
+        nnx.state(
+            model_creation_utils.from_pretrained(self.config, self.mesh),
+            nnx.Param,
+        )
+    )
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+    metadata = MagicMock()
+    metadata.item_metadata.tree = jax.tree.map(lambda a: {"value": fake_meta(a)}, params)
+
+    def restore_fn(path, item=None, **kw):
+      restored = _restore_as_zeros(path, item, **kw)
+      restored["decoder"]["decoder_norm"]["scale"]["value"] = restored["decoder"]["decoder_norm"]["scale"]["value"] + 7.0
+      return restored
+
+    mock_ckptr = self._mock_ocp_for_restore(mock_ocp, metadata, restore_fn)
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="gs://fake/wrapped_nnx_ckpt",
+    )
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    item = mock_ckptr.restore.call_args.kwargs["item"]
+    scale_target = item["decoder"]["decoder_norm"]["scale"]
+    self.assertIsInstance(scale_target, dict)
+    self.assertIn("value", scale_target)
+    self.assertTrue(hasattr(scale_target["value"], "shape"))
+    leaf_keys = {getattr(path[-1], "key", path[-1]) for path, _ in jax.tree_util.tree_flatten_with_path(item)[0]}
+    self.assertEqual(leaf_keys, {"value"})
+    np.testing.assert_array_equal(np.asarray(model.decoder.decoder_norm.scale[...]), 7.0)
+    np.testing.assert_array_equal(np.asarray(model.decoder.layers.mlp.wo.kernel[...]), 0.0)
+
+  def test_apply_m3_default_named_sharding(self):
+    mesh = jax.sharding.Mesh(jax.local_devices()[:1], ("data",))
+    dummy_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+    def _make_states():
+      # Paths mirror Qwen3_8FlashNextModel: scanned Qwen3_8CycleBlock params live under
+      # `decoder.cycles.{gdn_0,gdn_1,gdn_2,qsa_3}` with a leading cycle axis (4 cycles here).
+      shapes = {
+          "lm_head": {"kernel": (32, 64)},
+          "decoder": {
+              "token_embedder": {"embedding": (6, 64)},
+              "cycles": {
+                  "gdn_0": {"mlp": {"experts": {"gate_up_proj": (4, 8, 32, 64)}}},
+                  "qsa_3": {"self_attn": {"q_proj": {"kernel": (4, 16, 32)}}},
+              },
+          },
+      }
+      is_shape = lambda x: isinstance(x, tuple)  # pylint: disable=unnecessary-lambda-assignment
+      abs_state = nnx.State(
+          jax.tree.map(lambda s: nnx.Param(jax.ShapeDtypeStruct(s, jnp.float32)), shapes, is_leaf=is_shape)
+      )
+      sharding_state = nnx.State(jax.tree.map(lambda _: nnx.Param(dummy_sharding), shapes, is_leaf=is_shape))
+      return abs_state, sharding_state
+
+    cases = [
+        (
+            "single_fsdp",
+            jax.sharding.AbstractMesh((4,), ("fsdp",)),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec(None, "fsdp"),
+            jax.sharding.PartitionSpec(None, "fsdp", None, None),
+            jax.sharding.PartitionSpec(None, "fsdp", None),
+        ),
+        (
+            "data_2_fsdp_4",
+            jax.sharding.AbstractMesh((2, 4), ("data", "fsdp")),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec(None, "fsdp"),
+            jax.sharding.PartitionSpec(None, "fsdp", None, None),
+            jax.sharding.PartitionSpec(None, "fsdp", None),
+        ),
+        (
+            "data_4_fsdp_2",
+            jax.sharding.AbstractMesh((4, 2), ("data", "fsdp")),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec(None, "fsdp", None, None),
+            jax.sharding.PartitionSpec(None, "fsdp", None),
+        ),
+        (
+            "fsdp_and_fsdp_transpose",
+            jax.sharding.AbstractMesh((2, 2), ("fsdp", "fsdp_transpose")),
+            jax.sharding.PartitionSpec(("fsdp", "fsdp_transpose"), None),
+            jax.sharding.PartitionSpec(None, ("fsdp", "fsdp_transpose")),
+            jax.sharding.PartitionSpec(None, ("fsdp", "fsdp_transpose"), None, None),
+            jax.sharding.PartitionSpec(None, ("fsdp", "fsdp_transpose"), None),
+        ),
+        (
+            "tensor_fallback",
+            jax.sharding.AbstractMesh((4, 2), ("data", "tensor")),
+            jax.sharding.PartitionSpec("tensor", None),
+            jax.sharding.PartitionSpec("tensor", None),
+            jax.sharding.PartitionSpec(None, "tensor", None, None),
+            jax.sharding.PartitionSpec(None, "tensor", None),
+        ),
+        (
+            "pure_data_unchanged",
+            jax.sharding.AbstractMesh((4,), ("data",)),
+            jax.sharding.PartitionSpec(),
+            jax.sharding.PartitionSpec(),
+            jax.sharding.PartitionSpec(),
+            jax.sharding.PartitionSpec(),
+        ),
+    ]
+
+    for name, target_mesh, exp_lm_head, exp_embed, exp_moe, exp_attn in cases:
+      with self.subTest(mesh=name):
+        abs_state, sharding_state = _make_states()
+        result = model_creation_utils._apply_m3_default_named_sharding(  # pylint: disable=protected-access
+            abs_state, sharding_state, target_mesh
+        )
+        res_dict = nnx.to_pure_dict(result)
+        cycles = res_dict["decoder"]["cycles"]
+        self.assertEqual(res_dict["lm_head"]["kernel"].spec, exp_lm_head)
+        self.assertEqual(res_dict["decoder"]["token_embedder"]["embedding"].spec, exp_embed)
+        self.assertEqual(cycles["gdn_0"]["mlp"]["experts"]["gate_up_proj"].spec, exp_moe)
+        self.assertEqual(cycles["qsa_3"]["self_attn"]["q_proj"]["kernel"].spec, exp_attn)
 
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_linen_checkpoint(self, mock_ocp):
@@ -1020,12 +1223,18 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
 
 
-if __name__ == "__main__":
-  unittest.main()
-
-
 class TestFromPretrainedAuth(unittest.TestCase):
   """Tests for Hugging Face authentication in from_pretrained."""
+
+  def setUp(self):
+    super().setUp()
+    self._meta_patcher = patch.object(
+        model_creation_utils.checkpointing,
+        "load_checkpoint_metadata",
+        return_value={},
+    )
+    self._meta_patcher.start()
+    self.addCleanup(self._meta_patcher.stop)
 
   def _make_nnx_metadata_mock(self):
     meta = MagicMock()
@@ -1119,3 +1328,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+if __name__ == "__main__":
+  absltest.main()
