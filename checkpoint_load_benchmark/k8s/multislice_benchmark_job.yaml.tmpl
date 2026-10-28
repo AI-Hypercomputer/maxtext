@@ -1,0 +1,149 @@
+# ==============================================================================
+# Kubernetes Manifest Template for 2-Slice GKE TPU Benchmark Execution
+#
+# Deploys:
+#   1. Headless Service (${JOB_NAME}-svc) for Pod DNS resolution between Slice 0 and Slice 1
+#   2. Slice 1 Companion Worker Daemon Job (${JOB_NAME}-slice1) running `--remote-slice-daemon`
+#   3. Slice 0 Coordinator & Benchmark Job (${JOB_NAME}) running `benchmark_ckpt_load_time.py`
+#      with `REMOTE_SLICE1_ADDR` pointing to Slice 1's Pod IP
+# ==============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${JOB_NAME}-svc
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    bench-group: ${JOB_NAME}
+  ports:
+    - name: daemon
+      port: 55555
+      targetPort: 55555
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}-slice1
+  namespace: default
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        bench-group: ${JOB_NAME}
+        bench-role: slice1
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 180Gi
+      containers:
+        - name: slice1-daemon
+          image: ${CONTAINER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            - name: STAGE_SPARSE_DEEPSEEK_OOM
+              value: "${STAGE_SPARSE_DEEPSEEK_OOM}"
+          volumeMounts:
+            - name: dshm
+              mountPath: /mnt/shm
+          resources:
+            requests:
+              google.com/tpu: 4
+            limits:
+              google.com/tpu: 4
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              mkdir -p /mnt/shm/workspace /mnt/shm/tmp
+              cd /mnt/shm/workspace
+              git clone --depth 1 --branch "${GIT_BRANCH}" https://github.com/AI-Hypercomputer/maxtext.git .
+              pip install --no-cache-dir --upgrade "orbax-checkpoint>=0.12.7"
+              export PYTHONPATH="/mnt/shm/workspace/src:${PYTHONPATH:-}"
+              python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
+                --remote-slice-daemon \
+                --daemon-port 55555
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: default
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        bench-group: ${JOB_NAME}
+        bench-role: coordinator
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 180Gi
+      containers:
+        - name: coordinator
+          image: ${CONTAINER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            - name: REMOTE_SLICE1_ADDR
+              value: "${SLICE1_IP}:55555"
+            - name: STAGE_SPARSE_DEEPSEEK_OOM
+              value: "${STAGE_SPARSE_DEEPSEEK_OOM}"
+          volumeMounts:
+            - name: dshm
+              mountPath: /mnt/shm
+          resources:
+            requests:
+              google.com/tpu: 4
+            limits:
+              google.com/tpu: 4
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              mkdir -p /mnt/shm/workspace /mnt/shm/tmp
+              cd /mnt/shm/workspace
+              git clone --depth 1 --branch "${GIT_BRANCH}" https://github.com/AI-Hypercomputer/maxtext.git .
+              pip install --no-cache-dir --upgrade "orbax-checkpoint>=0.12.7"
+              export PYTHONPATH="/mnt/shm/workspace/src:${PYTHONPATH:-}"
+              python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
+                --models ${MODELS_STR} \
+                --scan-modes ${SCAN_MODES_STR} \
+                --num-slices-list ${NUM_SLICES_STR} \
+                --dcn-parallelism-axis "${DCN_AXIS}" \
+                --hardware "${HARDWARE}" \
+                --weight-dtype "${WEIGHT_DTYPE}" \
+                --gcs-base "${GCS_BASE}" \
+                --run-id "${RUN_ID}" \
+                --local-work-dir "/mnt/shm/tmp/benchmark_${RUN_ID}" \
+                --csv-report "/mnt/shm/tmp/benchmark_${RUN_ID}/summary.csv" \
+                --reuse-model-hf-cache \
+                --skip-completed \
+                --allow-step-failure
