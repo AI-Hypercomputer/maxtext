@@ -35,7 +35,6 @@ Architecture Overview:
 
 import inspect
 import itertools
-import logging
 import shlex
 from typing import Sequence, Callable, Any
 from absl import app
@@ -54,6 +53,7 @@ from orbax import checkpoint
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.layers import quantizations
 from maxtext.layers.learn_to_init_layer import apply_lti_model_update
 from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.distillation import distillation_utils, lti_utils
@@ -75,7 +75,6 @@ from maxtext.utils import model_creation_utils
 from tunix.sft import peft_trainer
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
-
 
 # -----------------------------------------------------------------------------
 # Distillation Optimizer with cosine decay and warmup
@@ -163,8 +162,14 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_target_mask=kwargs.get("decoder_target_mask", None),
     )
     out_projection_activations = None
+    features_preselected = False
     if config.distill_beta > 0.0:
-      out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
+      if config.scan_layers:
+        out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
+      else:
+        # Unscanned decoders sow the block-boundary activations of distill_layer_indices (or all layers if unset).
+        out_projection_activations = maxtext_utils.get_intermediate_value(model, "block_boundary_activations", clear=True)
+        features_preselected = config.distill_layer_indices is not None
 
     moe_lb_loss = None
     if config.num_experts > 1 and config.load_balance_loss_weight > 0.0:
@@ -174,7 +179,10 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
 
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss
+        logits=logits,
+        out_projection_activations=out_projection_activations,
+        moe_lb_loss=moe_lb_loss,
+        features_preselected=features_preselected,
     )
     return retval
 
@@ -244,6 +252,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     self.strategy = strategy
     self.checkpoint_manager: distillation_utils.MaxTextCheckpointManager = None  # pyrefly: ignore[bad-assignment]
+    # Mesh used to shard the optimizer state before jitting the train step (see `jit_train_and_eval_step`).
+    self.maxtext_mesh: jax.sharding.Mesh | None = None
 
     # Per-step per-device TFLOPs (constants for the run): student fwd+bwd + teacher fwd-only.
     (
@@ -266,9 +276,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       def wrt_filter(path, x):
         if not isinstance(x, base_wrt):
           return False
-        freeze = student_freeze_param_filter(path)
-        logging.info("Student model freezing info: Parameter %s; freeze=%s", path, freeze)
-        return not freeze
+        return not student_freeze_param_filter(path)
 
       self.wrt_filter = wrt_filter
     else:
@@ -285,7 +293,18 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       # Fallback if source code is unavailable
       pass
 
-  # Inherits _shard_optimizer from PeftTrainer.
+  def jit_train_and_eval_step(self, skip_jit: bool = False, cache_nnx_graph: bool = False):
+    """Shards the optimizer state onto `maxtext_mesh`, then defers to Tunix.
+
+    Tunix shards the optimizer state on `pxla.thread_resources.env.physical_mesh`,
+    which is empty under `jax.set_mesh(...)` (how MaxText activates its mesh), so
+    the optimizer state would otherwise stay unsharded. Sharding it here first
+    makes the Tunix call a no-op re-shard; jitting and buffer donation are
+    unchanged.
+    """
+    if not skip_jit and self._jitted_train_step_fn is None and self.maxtext_mesh is not None:
+      self._shard_optimizer(self.maxtext_mesh)
+    return super().jit_train_and_eval_step(skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph)
 
   def _train_step(
       self,
@@ -327,12 +346,14 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       )
     teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
 
-    # Split student into differentiable params and non-differentiable rest.
+    # Split student into differentiable params, frozen params, and non-param state (e.g. RNG counters).
+    # Keeping frozen params separate from the non-param rest means they are neither differentiated nor
+    # returned as updated state, so they are not rewritten every step.
     # Capture graphdef outside of jax.value_and_grad for stable graph tracking.
-    student_graphdef, diff_params, rest = nnx.split(student, self.wrt_filter, ...)
+    student_graphdef, diff_params, frozen_params, rest = nnx.split(student, self.wrt_filter, nnx.Param, ...)
 
-    def loss_wrapper_pure(diff_params, rest):
-      local_student = nnx.merge(student_graphdef, diff_params, rest, copy=True)
+    def loss_wrapper_pure(diff_params, frozen_params, rest):
+      local_student = nnx.merge(student_graphdef, diff_params, frozen_params, rest, copy=True)
       student_output = self.strategy.student_forward_fn(
           model=local_student,
           input_tokens=batch["input_tokens"],
@@ -346,22 +367,25 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       loss, aux = self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
       # Capture updated non-param state (e.g. RNG counters) from local_student.
-      _, _, new_rest = nnx.split(local_student, self.wrt_filter, ...)
+      _, _, _, new_rest = nnx.split(local_student, self.wrt_filter, nnx.Param, ...)
       return loss, (aux, new_rest)
 
     grad_fn = jax.value_and_grad(loss_wrapper_pure, argnums=0, has_aux=True)
-    (loss, (aux, new_rest)), grads = grad_fn(diff_params, rest)
+    (loss, (aux, new_rest)), grads = grad_fn(diff_params, frozen_params, rest)
 
     # Propagate updated non-param state back to student.
     nnx.update(student, new_rest)
+
+    # Compute the gradient norm before the optimizer update so `grads` need not stay live after it.
+    tunix_expects_grad_norm = getattr(self, "_tunix_expects_grad_norm", True)
+    grad_norm = optax.global_norm(grads) if tunix_expects_grad_norm else None
 
     optimizer.update(student, grads)
 
     model.training_step.set_value(current_step + 1)
 
-    tunix_expects_grad_norm = getattr(self, "_tunix_expects_grad_norm", True)
     if tunix_expects_grad_norm:
-      return loss, aux, optax.global_norm(grads)
+      return loss, aux, grad_norm
     return loss, aux
 
   def _eval_step(self, model, inputs):
@@ -542,7 +566,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     # 2. Assign the specialized manager
     self.checkpoint_manager = distillation_utils.MaxTextCheckpointManager(
         raw_iterator=iterator_to_manage,
-        root_directory=config.checkpoint_dir,
+        root_directory=config.checkpoint_dir if config.enable_checkpointing else None,
         student_config=config,  # Pass the config here
         options=self.config.checkpointing_options,  # pyrefly: ignore[bad-argument-type]
     )
@@ -590,6 +614,15 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
 # -----------------------------------------------------------------------------
 
 
+def _lm_head_spec(config: pyconfig.HyperParameters) -> distillation_utils.LMHeadSpec:
+  """Returns the tied-embedding LM head settings of a model config (used by `distill_fused_lm_head`)."""
+  return distillation_utils.LMHeadSpec(
+      normalize_embedding_logits=config.normalize_embedding_logits,
+      final_logits_soft_cap=config.final_logits_soft_cap,
+      logits_dot_in_fp32=config.logits_dot_in_fp32,
+  )
+
+
 def build_training_components(
     student_config: pyconfig.HyperParameters,
     teacher_config: pyconfig.HyperParameters,
@@ -616,6 +649,11 @@ def build_training_components(
   pad_id = tok.pad_id if tok.pad_id is not None else 0
 
   # 3. Define Distillation Strategy
+  if bool(student_config.distill_fused_lm_head) != bool(teacher_config.distill_fused_lm_head):
+    raise ValueError(
+        "distill_fused_lm_head must match between student and teacher configs, got "
+        f"student={student_config.distill_fused_lm_head} vs teacher={teacher_config.distill_fused_lm_head}."
+    )
 
   # Both Student and Teacher use the same forward logic via the adapter
   student_forward_fn = create_forward_fn(student_config)
@@ -639,6 +677,9 @@ def build_training_components(
       beta_end=student_config.distill_beta_end,
       beta_schedule=student_config.distill_beta_schedule,
       max_steps=student_config.steps,
+      fused_lm_head_chunks=student_config.distill_lm_head_chunks if student_config.distill_fused_lm_head else None,
+      student_lm_head=_lm_head_spec(student_config),
+      teacher_lm_head=_lm_head_spec(teacher_config),
   )
 
   # Prepare optimizer
@@ -761,6 +802,12 @@ def _train_distill_impl(
             student_weights_share_map=getattr(student_config, "distill_student_weights_share_map", {}),
         )
 
+      # Prune the student's initial weights with the configured N:M sparsity (no-op if unset).
+      quantizations.apply_initial_weight_sparsity(student_model, student_config)
+
+      # Store frozen student params that are identical to the teacher's only once.
+      if teacher_model and student_config.distill_share_frozen_teacher_weights:
+        lti_utils.share_frozen_params(student_model, teacher_model, student_freeze_param_fn)
       student_model.train()
       model_bundle = ModelBundle(teacher_model, student_model)
 
@@ -783,6 +830,7 @@ def _train_distill_impl(
           is_offline=is_offline,
           student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
       )
+      trainer.maxtext_mesh = mesh
       trainer.is_managed_externally = True
       trainer._has_aux = True  # pylint: disable=protected-access
 
@@ -923,6 +971,23 @@ def _save_run_manifest(argv: Sequence[str], config: pyconfig.HyperParameters) ->
     max_logging.log(f"Warning: could not save run manifest: {e}")
 
 
+# CLI flags forwarded to the teacher config: the teacher consumes batches from the student-driven input
+# pipeline, so the batch shape must match (validated in `main`).
+_TEACHER_SHARED_CLI_KEYS = frozenset(
+    {
+        "per_device_batch_size",
+        "max_target_length",
+        "max_prefill_predict_length",
+        "gradient_accumulation_steps",
+    }
+)
+
+
+def _teacher_argv(argv: Sequence[str]) -> list[str]:
+  """Returns `[script_name, config_file]` plus the CLI `key=value` flags shared with the teacher."""
+  return [argv[0], argv[1]] + [arg for arg in argv[2:] if arg.split("=", 1)[0] in _TEACHER_SHARED_CLI_KEYS]
+
+
 def main(argv: Sequence[str]) -> None:
   """Entry point for the script.
 
@@ -955,6 +1020,11 @@ def main(argv: Sequence[str]) -> None:
   # We isolate the Teacher from Student CLI arguments (like pruning params).
   teacher_overrides = dict(global_config.teacher_overrides or {})
   teacher_overrides.setdefault("distill_beta", global_config.distill_beta)
+  if global_config.distill_layer_indices is not None:
+    teacher_overrides.setdefault("distill_layer_indices", global_config.distill_layer_indices)
+  if global_config.distill_fused_lm_head:
+    teacher_overrides.setdefault("distill_fused_lm_head", True)
+    teacher_overrides.setdefault("distill_lm_head_chunks", global_config.distill_lm_head_chunks)
 
   # Ensure load_parameters_path is set in overrides
   if not is_offline and not teacher_overrides.get("load_parameters_path"):
@@ -963,9 +1033,10 @@ def main(argv: Sequence[str]) -> None:
         "in your config or arguments."
     )
 
-  # Construct sanitized argv: [script_name, config_file]
-  # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.
-  teacher_argv = [argv[0], argv[1]]
+  # Construct sanitized argv: [script_name, config_file] plus the CLI batch-shape flags, which the
+  # teacher shares with the student input pipeline. Other CLI flags (e.g. `num_query_heads=16` or
+  # sparsity settings) only affect the student.
+  teacher_argv = _teacher_argv(argv)
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
   # Batch shape (per_device_batch_size / max_target_length / gradient_accumulation_steps)
@@ -981,6 +1052,19 @@ def main(argv: Sequence[str]) -> None:
           f"student-driven input pipeline, so these must agree. Set '{batch_field}' at "
           f"the YAML top level (not inside *_overrides) so both configs inherit it."
       )
+  if bool(student_config.distill_fused_lm_head) != bool(teacher_config.distill_fused_lm_head):
+    raise ValueError(
+        "distill_fused_lm_head must match between student and teacher configs, got "
+        f"student={student_config.distill_fused_lm_head} vs teacher={teacher_config.distill_fused_lm_head}."
+    )
+
+  # Feature distillation compares the same kind of features: per-layer out-projection activations with scanned
+  # layers, block-boundary activations with unscanned layers.
+  if not is_offline and student_config.distill_beta > 0.0 and student_config.scan_layers != teacher_config.scan_layers:
+    raise ValueError(
+        "distill_beta > 0 requires the student and the teacher to use the same scan_layers setting, got "
+        f"student={student_config.scan_layers}, teacher={teacher_config.scan_layers}."
+    )
 
   # 4. Run Training
   train_distill(student_config, teacher_config, is_offline, global_config.offline_data_dir)

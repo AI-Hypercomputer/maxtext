@@ -190,6 +190,11 @@ weight_sparsity_m: null
 weight_sparsity_update_step: 10
 # The first number of steps before updating the sparsity masks.
 weight_sparsity_start_step: 50
+# Comma-separated, ascending decoder layer indices or inclusive ranges to apply weight sparsity to
+# (e.g. "0-13,24-31"). Empty means all decoder layers. Requires weight_sparsity_n/m and scan_layers=False.
+sparse_layers: ""
+# Only apply weight sparsity to MoE expert kernels, not dense matmuls. Requires num_experts > 1.
+sparse_experts_only: False
 # Whether to use Transformer Engine's collective GEMM overlap algorithm with quantization in MLP layers. Note: only valid with tensor-sequence parallelism.
 # "disabled" means no overlap, "mlp" means to only overlap up and down projections in MLP layers,
 # and "full" means to overlap MLP projections as well as the QKV and output projection layers in attention.
@@ -526,6 +531,9 @@ set_remat_policy_on_layers_per_stage: false
 # 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
+# With scan_layers=False, run each rematerialized decoder layer as a length-1 scan when no KV cache is used (e.g.
+# training) so that XLA does not CSE or fuse recomputation across layers (matches the scan_layers=True remat memory).
+remat_unscanned_layers_with_scan: False
 # If "custom" remat_policy is chosen, you can select tensors from the following list to offload on host memory, rematerialize or save on device memory.
 # Pick one of these options for following tensors: ['remat','device','offload']
 decoder_layer_input: 'device' # this tensor cannot be rematerialized - it serves as periodic checkpoints that act as the remat start points
@@ -1229,7 +1237,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
-opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+opt_type: "adamw"  # one of "adamw", "adam_pax", "adam_pax_low_memory", "sgd", or "muon"
 
 # If true, skip the training step when loss or gradient spike is detected
 # No updates for both weights and momentums (if applies)
@@ -1253,6 +1261,11 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 adam_weight_decay: 0.1 # AdamW Weight decay
 adamw_mask: [] # List of parameter names/patterns to exclude from weight decay in AdamW, like ['bias', '.*norm', '.*ln.*'].
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
+# opt_type "adam_pax_low_memory" only: rounding of bf16 parameter updates.
+# "nearest": round to nearest (no extra state); "kahan": deterministic Kahan-compensated updates (param-sized bf16
+# residual in optimizer state); "stochastic": unbiased stochastic rounding seeded by stochastic_rounding_seed.
+bf16_update_rounding: "nearest"
+stochastic_rounding_seed: 0
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
 
@@ -1710,6 +1723,14 @@ distill_beta: 0.0
 # distill_feature_loss_type is the type of loss to use for feature distillation ("cosine" or "l2").
 distill_feature_loss_type: "cosine"
 distill_layer_indices: None
+# If True (requires logits_via_embedding), the model returns (hidden_states, embedding_table) in training and the
+# distillation losses project to logits in distill_lm_head_chunks sequence chunks instead of materializing
+# full-vocabulary logits. distill_lm_head_chunks must divide max_target_length.
+distill_fused_lm_head: False
+distill_lm_head_chunks: 8
+# If True (online distillation with student_params_to_update), frozen student params that are identical to the
+# teacher's (same path, shape, dtype, sharding and values) reference the teacher's arrays and are stored once.
+distill_share_frozen_teacher_weights: False
 # Dynamic loss weight scheduling: set *_end to a target value and *_schedule to "linear" or "cosine".
 # When *_end is None (default), the corresponding weight stays fixed throughout training.
 distill_alpha_end: None

@@ -65,6 +65,7 @@ import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
+from qwix._src.core import qarray as qwix_qarray
 import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
@@ -5282,7 +5283,16 @@ class RoutedMoE(nnx.Module):
         else:
           wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
-    if self.wi_0_sparsity_module is not None:
+    # Weight-only N:M sparsity from a Qwix `rhs_sparsity_rule`. Qwix only applies
+    # it to dot_general, so mask the expert kernels here, before the matmul path
+    # is chosen, along their contracting (input) axis: axis 1 of [E, in, out].
+    gmm_rule = qpl.get_current_rule("gmm")
+    rhs_sparsity_rule = getattr(gmm_rule, "rhs_sparsity_rule", None)
+    if rhs_sparsity_rule is not None and rhs_sparsity_rule.weight_sparsity_n and rhs_sparsity_rule.weight_sparsity_m:
+      w0_kernel = qwix_qarray.sparsify(w0_kernel, rhs_sparsity_rule, axis=1)
+      w1_kernel = qwix_qarray.sparsify(w1_kernel, rhs_sparsity_rule, axis=1)
+      wo_kernel = qwix_qarray.sparsify(wo_kernel, rhs_sparsity_rule, axis=1)
+    elif self.wi_0_sparsity_module is not None:
       _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
       _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
       _, wo_kernel = self.wo_sparsity_module(jnp.zeros_like(wo_kernel), wo_kernel)
