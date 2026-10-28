@@ -109,6 +109,7 @@ HF_IDS = {
     "glm5.3-flash": "zai-org/GLM-5.3-Flash",
     "granite-3.0-1b-a400m": "ibm-granite/granite-3.0-1b-a400m-instruct",
     "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",
+    "ming-3.0-audio-tiny-talker": "inclusionAI/Ming-3.0-audio-tiny",  # convert with --hf_model_path=<snapshot>/talker
     "hy4-preview": "tencent/Hy4-preview",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),

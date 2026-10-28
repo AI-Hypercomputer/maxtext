@@ -18,7 +18,7 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 
-from maxtext.common.common_types import Config, VisionEncoderBlockType
+from maxtext.common.common_types import AudioDecoderBlockType, Config, VisionEncoderBlockType
 from maxtext.layers import linears
 
 
@@ -256,3 +256,54 @@ class AudioEncoder(nnx.Module):
       embeddings = projector(embeddings)
 
     return embeddings
+
+
+class AudioDecoder(nnx.Module):
+  """Speech generation head driven by the text decoder: hidden states -> audio latents -> waveform.
+
+  Model-specific blocks (selected by `config.audio_decoder_block`) implement:
+    * `init_state(batch)`: the per-sequence carry (e.g. previous latents).
+    * `step(hidden, state, key)`: one generation step from the decoder's final-normed last hidden state
+      `[B, 1, emb]`; returns `(latent [B, P, latent_dim], next decoder input embedding [B, 1, emb],
+      done [B] bool, state)`.
+    * `decode_audio(latents [B, N, latent_dim], num_latents)`: the vocoder, `[B, N * samples_per_latent]`.
+    * `sample_rate`, `samples_per_latent`.
+  The generic generation loop lives in `maxtext.inference.audio_decode`.
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self.block_name = self._setup_audio_decoder_layers(rngs)
+
+  def _setup_audio_decoder_layers(self, rngs):
+    """Setup the audio decoder block specific to the model, instantiate NNX modules."""
+    if self.config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+      from maxtext.models import ming  # pylint: disable=import-outside-toplevel
+
+      block_name = "MingTalker_0"
+      setattr(self, block_name, ming.MingTalker(config=self.config, rngs=rngs))
+      return block_name
+    else:
+      raise ValueError(f"No AudioDecoder implemented for audio_decoder_block={self.config.audio_decoder_block} yet")
+
+  @property
+  def block(self):
+    return getattr(self, self.block_name)
+
+  @property
+  def sample_rate(self) -> int:
+    return self.block.sample_rate
+
+  @property
+  def samples_per_latent(self) -> int:
+    return self.block.samples_per_latent
+
+  def init_state(self, batch: int):
+    return self.block.init_state(batch)
+
+  def step(self, hidden, state, key):
+    return self.block.step(hidden, state, key)
+
+  def decode_audio(self, latents, num_latents=None):
+    return self.block.decode_audio(latents, num_latents)

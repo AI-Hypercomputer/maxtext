@@ -20,10 +20,14 @@ Mirrors `processing_bailing_moe_v3_audio.BailingMoeV3AudioProcessor`:
   2. whisper `log_mel_spectrogram` (128 mels, n_fft 400, hop 160) without 30 s padding.
   3. Chat-template the prompt and expand `<|audio_pad|>` to the number of audio tokens:
      per 3000-frame chunk, L -> conv2 (s2) -> 3x projector conv (s2).
+
+The talker (text -> speech) frontend lives at the end of this file (see `TALKER_TTS_PROMPT`).
 """
 
-import math
 from dataclasses import dataclass
+import json
+import math
+import re
 
 import numpy as np
 
@@ -224,3 +228,105 @@ def add_extra_tokens_for_ming(tokens: np.ndarray, processor_output) -> np.ndarra
 def get_dummy_audio_shape_for_init_ming(config):
   """(batch, T_mel, n_mels) for one full whisper chunk."""
   return (config.micro_batch_size_to_train_on, config.ming_audio_chunk_size, config.num_mel_bins_for_audio)
+
+
+# -----------------------------------------
+# Talker (text -> speech) frontend
+# -----------------------------------------
+#
+# Prompt protocol of the publisher's `talker/inference.py` + `talker/tts_prompt.py` for the default "IP" task
+# (named voice, no reference audio); every piece is tokenized separately and concatenated like the reference:
+#
+#   <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt} Text input:\n{text}
+#   <|im_end|>\n<|im_start|>assistant\n{instruction}<|im_end|><audio>
+#
+# The publisher's text normalization (pynini FST) is not ported: text is synthesized as written.
+
+TALKER_TTS_PROMPT = "Please generate speech based on the following description.\n"
+# `append_optional_target_language`: zh/en (the training languages) add no "Target language" line.
+_TALKER_LANGUAGE_NAMES = {
+    "ja": "Japanese",
+    "japanese": "Japanese",
+    "ko": "Korean",
+    "korean": "Korean",
+    "de": "German",
+    "german": "German",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "yue": "Chinese",
+    "zh-yue": "Chinese",
+    "cantonese": "Chinese",
+}
+_TALKER_NO_TARGET_LANGUAGE_IDS = {"", "zh", "zh-cn", "chinese", "en", "en-us", "en-gb", "english"}
+
+
+def build_tts_prompt(language: str = "") -> str:
+  """`append_optional_target_language(TALKER_TTS_PROMPT, language)`."""
+  key = language.strip().lower().replace("_", "-")
+  if key in _TALKER_NO_TARGET_LANGUAGE_IDS:
+    return TALKER_TTS_PROMPT
+  return TALKER_TTS_PROMPT + f"Target language: {_TALKER_LANGUAGE_NAMES.get(key, language.strip())}.\n"
+
+
+def build_ip_instruction(ip_name: str) -> str:
+  """`build_task_instruction("IP", ip=ip_name)`: the assistant-side JSON caption (zh schema)."""
+  item = {
+      "序号": 1,
+      "说话人": "speaker_1",
+      "方言": None,
+      "风格": None,
+      "语速": None,
+      "基频": None,
+      "音量": None,
+      "情感": None,
+  }
+  item["BGM"] = {"Genre": None, "Mood": None, "Instrument": None, "Theme": None, "ENV": None, "SNR": None}
+  item["IP"] = ip_name
+  return json.dumps({"audio_sequence": [item]}, ensure_ascii=False)
+
+
+def talker_input_ids(tokenizer, text: str, prompt: str, instruction: str) -> np.ndarray:
+  """Talker prompt token ids for one text fragment (`MingTalker.input_embeddings` without speakers)."""
+  pieces = (
+      "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n",
+      "<|im_start|>user\n",
+      prompt,
+      " Text input:\n",
+      text,
+      "<|im_end|>\n",
+      "<|im_start|>assistant\n",
+      instruction,
+      "<|im_end|>",
+      "<audio>",
+  )
+  return np.asarray([t for piece in pieces for t in tokenizer.encode(piece, add_special_tokens=False)], np.int32)
+
+
+def split_text(text: str, max_length: int = 50) -> list[str]:
+  """Sentence split on terminal punctuation, then pack sentences up to `max_length` characters."""
+  sentences = [s.strip() for s in re.split(r"(?<=[.!?。！？])\s*", " ".join(text.split())) if s.strip()]
+  fragments = []
+  for sentence in sentences:
+    if fragments and len(fragments[-1]) + 1 + len(sentence) <= max_length:
+      separator = "" if re.search(r"[\u4e00-\u9fff。！？]$", fragments[-1]) else " "
+      fragments[-1] += separator + sentence
+    else:
+      fragments.append(sentence)
+  # The reference closes every fragment with a sentence terminator.
+  return [
+      f if re.search(r"[.!?。！？,，;；]$", f) else f + ("。" if re.search(r"[\u4e00-\u9fff]", f) else ".")
+      for f in fragments
+  ]
+
+
+def trim_trailing_silence(speech: np.ndarray, sample_rate: int, threshold: float = 1e-3, keep: float = 0.3):
+  """`MingTalker.silence_holder(..., last_chunk=True)` for one complete fragment waveform `[T]`."""
+  frame, keep_len = int(sample_rate * 0.1), int(keep * sample_rate)
+  framed = speech[: speech.shape[-1] // frame * frame]
+  loud = np.nonzero(np.abs(framed.reshape(-1, frame)).mean(axis=-1) > threshold)[0]
+  if loud.size == 0:
+    return speech[:keep_len]
+  # The reference drops the sub-frame remainder of a fragment that ends with speech.
+  return framed[: (int(loud[-1]) + 1) * frame + keep_len]
