@@ -26,6 +26,7 @@ on:
 
 jobs:
   qa:
+    # ci_pipeline.yml (all_tests_passed) and Copybara's config match "Code Quality Check / Pre-commit Linters"; keep this name in sync.
     name: "Pre-commit Linters"
     runs-on: ubuntu-latest
     timeout-minutes: 15
