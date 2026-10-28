@@ -53,7 +53,7 @@ Capacity is spot, admitted through Kueue queue `default`, which has 0 nominal tp
   `wi_1` separately, so that only one target leaf (~12 GB per device) is built at a time. Alternatively, move the
   composite to host memory before splitting it.
 - **Workarounds measured:** unscanned on 2 slices works (1,311.9 s; per-layer composites are ~0.5 GB per device).
-  `st_397b_scanned_s4` measures scanned on 4 slices.
+  Scanned on 4 slices also works: 1,399.7 s (load 260.0 s + transform 1,139.1 s).
 - **Also on 1 slice:** the load finished (942.1 s), then the transform hit `RESOURCE_EXHAUSTED` (795 GB ≈ 98% of
   1-slice HBM). This is a capacity limit, not a bug.
 
