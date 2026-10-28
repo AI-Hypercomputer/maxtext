@@ -147,7 +147,7 @@ class KimiK3ParamMappingTest(unittest.TestCase):
     kda = ("q_proj-kernel", "q_conv1d-kernel", "k_proj-kernel", "k_conv1d-kernel", "v_proj-kernel")
     kda += ("v_conv1d-kernel", "f_a_proj-kernel", "f_b_proj-kernel", "A_log", "dt_bias", "b_proj-kernel")
     kda += ("g_proj-kernel", "o_norm-scale", "out-kernel")
-    moe = ("routed_experts-gate-kernel", "routed_experts-gate-bias", "routed_expert_down_proj-kernel")
+    moe = ("routed_experts-gate-kernel", "routed_expert_down_proj-kernel")
     moe += ("routed_expert_norm-scale", "routed_expert_up_proj-kernel", "shared_expert-wi_0-kernel")
     moe += ("shared_expert-wi_1-kernel", "shared_expert-wo-kernel")
 
@@ -167,6 +167,9 @@ class KimiK3ParamMappingTest(unittest.TestCase):
       else:
         for name in moe:
           self.assertIn(f"{prefix}-mlp-{name}", self.mapping)
+        # The router bias is a `moe.MoEBiasVar`, so it maps into that collection (as for DeepSeek).
+        self.assertIn(f"MoEBiasVar-decoder-layers_{i}-mlp-routed_experts-gate-bias", self.mapping)
+        self.assertNotIn(f"{prefix}-mlp-routed_experts-gate-bias", self.mapping)
         for name in ("wi_0", "wi_1", "wo"):
           self.assertEqual(len(self.mapping[f"{prefix}-mlp-routed_experts-{name}"]), num_experts)
     # Every hook must refer to a mapped key.

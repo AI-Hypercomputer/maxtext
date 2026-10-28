@@ -522,13 +522,18 @@ class MLA(Attention):
       rope_factor: float = 40.0,  # rotary embedding factor
       name: str | None = None,
       rngs: Optional[nnx.Rngs] = None,
+      mla_use_output_gate: bool = False,
   ):
     """Initializes the MLA module.
 
     Args:
       config: The model configuration.
       ... and other configuration parameters for MLA attention.
+      is_nope_layer: If True, the rotary transform is skipped for the `qk_rope_head_dim`
+        slices of the query and key (the slices are still projected and attended over).
       rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
+      mla_use_output_gate: If True, adds a per-head sigmoid output gate before the output
+        projection: `out = out_proj(attn * sigmoid(g_proj(inputs_q)))`.
     """
     base_kv_cache = config.attention != "paged" and config.mla_naive_kvcache
 
@@ -543,6 +548,7 @@ class MLA(Attention):
     self.original_max_position_embeddings = original_max_position_embeddings
     self.mscale = mscale
     self.rope_factor = rope_factor
+    self.use_output_gate = mla_use_output_gate
 
     self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -765,6 +771,23 @@ class MLA(Attention):
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
+    if self.use_output_gate:
+      self.g_proj = DenseGeneral(
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=(self.num_query_heads, self.v_head_dim),
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed_attn", "q_heads", "kv"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
+    else:
+      self.g_proj = None
+
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
   def _attention_op_num_kv_heads(self) -> int:
@@ -866,7 +889,10 @@ class MLA(Attention):
     # Partial RoPE: Split into non-positional and rotary parts.
     # last dimension: qk_nope_head_dim, qk_rope_head_dim
     q_nope = self._maybe_shard_with_logical(q_nope, query_logical_name)
-    q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
+    # NoPE layers (e.g. Kimi-K3) still carry a `qk_rope_head_dim` slice through the
+    # projections, but never apply the rotary transform to it.
+    if not self.is_nope_layer:
+      q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
@@ -1024,9 +1050,10 @@ class MLA(Attention):
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
     low_rank_main = checkpoint_name(low_rank_main, "mla_kv")
-    # Apply rotary embedding to key_rope.
+    # Apply rotary embedding to key_rope (skipped entirely for NoPE layers).
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
-    key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)
+    if not self.is_nope_layer:
+      key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)
 
     key, value = self._build_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
@@ -1299,6 +1326,12 @@ class MLA(Attention):
 
     out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
+
+    if self.use_output_gate:
+      # Matches the HF reference: the sigmoid is computed in the activation dtype.
+      g = jax.nn.sigmoid(self.g_proj(inputs_q))
+      g = self._maybe_shard_with_logical(g, self.out_axis_names)
+      out = out * g
 
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)

@@ -602,6 +602,16 @@ class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
 
 
+# Models that use DeepSeek-V3-style routing: sigmoid scores plus a correction bias that only steers top-k
+# selection, with the routing weights gathered from the pre-bias scores (`GateLogit` returns both).
+DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "kimi-k3")
+# Models whose router bias is stored as a `MoEBiasVar` (outside `nnx.Param`). The bias only steers top-k
+# selection, so it has no gradient; keeping it out of `nnx.Param` also keeps it out of the optimizer, so AdamW
+# weight decay cannot pull it toward zero and no Adam moments are allocated for it. The variable path
+# (`.../gate/bias`) is unchanged, and checkpoints that store it under `params` are aliased on restore.
+MOE_BIAS_VAR_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "kimi-k3")
+
+
 class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
@@ -686,8 +696,8 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
+      if self.model_name.startswith(MOE_BIAS_VAR_MODEL_PREFIXES):
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
             out_sharding=bias_axes,
@@ -752,7 +762,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
+    if self.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -1049,8 +1059,13 @@ class RoutedMoE(nnx.Module):
       self.quant_einsums = None
 
     gate_weight_dtype = ctypes.get_weight_dtype(self.config, "gate")
+    # The router may read a different (wider) input than the experts, e.g. Kimi-K3's latent MoE routes on the
+    # full hidden state but runs the experts on a down-projected latent; that input arrives as `gate_inputs`.
+    self.moe_router_input_dim = (
+        self.moe_expert_input_dim if self.config.moe_router_input_dim <= 0 else self.config.moe_router_input_dim
+    )
     self.gate = GateLogit(
-        in_features_shape=self.moe_expert_input_dim,
+        in_features_shape=self.moe_router_input_dim,
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
@@ -1102,6 +1117,24 @@ class RoutedMoE(nnx.Module):
 
     # pylint: disable=protected-access
     self.activation_fn = linears._convert_to_activation_function(self.config.mlp_activations[0])
+    # Activation on the second (`wi_1`, "up") branch. Every existing config uses "linear" here (or omits it);
+    # Kimi-K3 uses SiTU on both branches: situ_gate(wi_0 x) * situ_linear(wi_1 x).
+    self.up_activation_name = self.config.mlp_activations[1] if len(self.config.mlp_activations) > 1 else "linear"
+    self.up_activation_fn = linears._convert_to_activation_function(self.up_activation_name)
+    if self.up_activation_name != "linear" and (
+        self.config.te_moe_block or self.config.attention in ("vllm_rpa", "vllm_batched_rpa")
+    ):
+      raise ValueError(
+          f"mlp_activations[1]={self.up_activation_name!r} is not supported by the fused MoE kernels"
+          " (te_moe_block / vllm_rpa), which only apply mlp_activations[0]."
+      )
+    if self.up_activation_name != "linear" and (
+        self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS or self.config.mlp_activations_limit > 0.0
+    ):
+      raise ValueError(
+          f"mlp_activations[1]={self.up_activation_name!r} is not supported with the GPT-OSS or clipped-SwiGLU"
+          " (mlp_activations_limit > 0) expert activations, which ignore mlp_activations[1]."
+      )
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -1402,7 +1435,7 @@ class RoutedMoE(nnx.Module):
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
         top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
+      elif self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -1411,10 +1444,15 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
+    # Kimi-K3 (kimi_linear block) uses DeepSeek-V3 routing; gate on the model name too so a future kimi_linear
+    # model with different routing does not silently pick up the sigmoid renormalization and scaling.
     if self.config.decoder_block in (
         ctypes.DecoderBlockType.DEEPSEEK,
         ctypes.DecoderBlockType.DEEPSEEK4,
         ctypes.DecoderBlockType.MING,
+    ) or (
+        self.config.decoder_block == ctypes.DecoderBlockType.KIMI_LINEAR
+        and self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
     ):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
@@ -1554,7 +1592,7 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       else:
         layer_act = self.activation_fn(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+        intermediate_layer = jnp.multiply(layer_act, self.up_activation_fn(layer_w1))
       return intermediate_layer.astype(self.dtype)
 
   def permute(
@@ -2679,7 +2717,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
+      if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -4127,7 +4165,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming"))
+        if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -4579,7 +4617,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
+    if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
@@ -5174,6 +5212,11 @@ class RoutedMoE(nnx.Module):
 
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
+    if gate_inputs is None and self.moe_router_input_dim != self.moe_expert_input_dim:
+      raise ValueError(
+          f"moe_router_input_dim={self.moe_router_input_dim} differs from the expert input dim"
+          f" {self.moe_expert_input_dim}, so the router input must be passed as `gate_inputs`."
+      )
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
 
