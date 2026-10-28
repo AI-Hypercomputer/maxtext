@@ -1155,5 +1155,142 @@ class FlatMoeWeightsLoadTest(parameterized.TestCase):
     self.assertEqual(plan[("wi_0",)][1].sharding.spec, PartitionSpec(None, None, "fsdp", None))
 
 
+class MXFP4DequantizeOnLoadTest(parameterized.TestCase):
+  """MXFP4 `k_packed` / `k_scale` checkpoints restore into a model that wants a dense `k`."""
+
+  def setUp(self):
+    super().setUp()
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+
+  @staticmethod
+  def _packed_pair(experts=2, d=64, m=4, seed=0):
+    """Random MXFP4 pair for `[E, d, m]` quantized along d (axis -2)."""
+    rng = np.random.RandomState(seed)
+    packed = rng.randint(0, 256, size=(experts, d // 2, m)).astype(np.uint8)
+    scale = rng.randint(120, 134, size=(experts, d // 32, m)).astype(np.uint8)
+    return packed, scale
+
+  def _save_and_restore(self, ckpt_weights, target_abstract):
+    path = self.tmp_dir / "mxfp4_ckpt"
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(path, {"params": {"params": ckpt_weights}}, force=True)
+    restored = checkpointing.load_params_from_path(str(path), target_abstract, 8)
+    return restored.to_pure_dict() if isinstance(restored, nnx.State) else restored
+
+  def test_dense_model_restores_packed_pair_and_aliased_bias(self):
+    """`wi_0_packed` + `wi_0_scale` decode into `wi_0`; `e_score_correction_bias` restores as `bias`."""
+    from maxtext.layers import mxfp4  # pylint: disable=import-outside-toplevel
+
+    class DenseExperts(nnx.Module):
+
+      def __init__(self):
+        self.experts = nnx.Dict(wi_0=nnx.Param(jnp.zeros((2, 64, 4), jnp.float32)))
+        self.gate = nnx.Dict(bias=nnx.Param(jnp.zeros((2,), jnp.float32)))
+
+    _, params_abstract, _ = nnx.split(DenseExperts(), nnx.Param, ...)
+    packed, scale = self._packed_pair()
+    bias = np.array([0.5, -1.25], np.float32)
+    ckpt = {"experts": {"wi_0_packed": packed, "wi_0_scale": scale}, "gate": {"e_score_correction_bias": bias}}
+
+    with mock.patch.object(checkpointing.max_logging, "log") as log:
+      pure = self._save_and_restore(ckpt, params_abstract)
+    unconsumed = [c.args[0] for c in log.call_args_list if "were not requested by the model" in str(c.args[0])]
+    self.assertEmpty(unconsumed, "packed pair / aliased bias should count as consumed")
+
+    self.assertEqual(set(pure["experts"]), {"wi_0"})
+    expected = mxfp4.dequantize_mxfp4(jnp.asarray(packed), jnp.asarray(scale), axis=-2, dtype=jnp.float32)
+    self.assertEqual(pure["experts"]["wi_0"].shape, (2, 64, 4))
+    self.assertEqual(pure["experts"]["wi_0"].dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(pure["experts"]["wi_0"]), np.asarray(expected))
+    self.assertEqual(set(pure["gate"]), {"bias"})
+    np.testing.assert_array_equal(np.asarray(pure["gate"]["bias"]), bias)
+
+  @parameterized.named_parameters(
+      ("moe_bias_var_collection", "MoEBiasVar", "bias"),
+      ("legacy_params_collection", "params", "bias"),
+      ("hf_name_in_params", "params", "e_score_correction_bias"),
+  )
+  def test_moe_bias_var_router_bias_restores(self, stored_collection, stored_name):
+    """Kimi-K3's `MoEBiasVar` router bias restores from its own collection, `params`, or its HF name."""
+    from maxtext.layers import moe  # pylint: disable=import-outside-toplevel
+
+    class Router(nnx.Module):
+
+      def __init__(self):
+        self.gate = nnx.Dict(
+            kernel=nnx.Param(jnp.zeros((4, 2), jnp.float32)), bias=moe.MoEBiasVar(jnp.zeros((2,), jnp.float32))
+        )
+
+    abstract = nnx.state(Router(), nnx.Any(nnx.Param, moe.MoEBiasVar))
+    kernel = np.arange(8, dtype=np.float32).reshape(4, 2)
+    bias = np.array([0.5, -1.25], np.float32)
+    collections_on_disk = {"params": {"gate": {"kernel": kernel}}}
+    collections_on_disk.setdefault(stored_collection, {}).setdefault("gate", {})[stored_name] = bias
+
+    path = self.tmp_dir / f"router_{stored_collection}_{stored_name}"
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(path, {"params": collections_on_disk}, force=True)
+    with mock.patch.object(checkpointing.max_logging, "log") as log:
+      restored = checkpointing.load_params_from_path(str(path), abstract, 8)
+    unconsumed = [c.args[0] for c in log.call_args_list if "were not requested by the model" in str(c.args[0])]
+    self.assertEmpty(unconsumed)
+
+    pure = restored.to_pure_dict() if isinstance(restored, nnx.State) else restored
+    self.assertEqual(set(pure["gate"]), {"kernel", "bias"})
+    np.testing.assert_array_equal(np.asarray(pure["gate"]["kernel"]), kernel)
+    np.testing.assert_array_equal(np.asarray(pure["gate"]["bias"]), bias)
+
+  def test_packed_model_restores_packed_pair_unchanged(self):
+    """A model that itself holds `wi_0_packed` / `wi_0_scale` gets the stored bytes (no decode)."""
+
+    class PackedExperts(nnx.Module):
+
+      def __init__(self):
+        self.experts = nnx.Dict(
+            wi_0_packed=nnx.Param(jnp.zeros((2, 32, 4), jnp.uint8)),
+            wi_0_scale=nnx.Param(jnp.zeros((2, 2, 4), jnp.uint8)),
+        )
+
+    _, params_abstract, _ = nnx.split(PackedExperts(), nnx.Param, ...)
+    packed, scale = self._packed_pair()
+    pure = self._save_and_restore({"experts": {"wi_0_packed": packed, "wi_0_scale": scale}}, params_abstract)
+    np.testing.assert_array_equal(np.asarray(pure["experts"]["wi_0_packed"]), packed)
+    np.testing.assert_array_equal(np.asarray(pure["experts"]["wi_0_scale"]), scale)
+
+  def test_decodes_pairs_in_sorted_order(self):
+    """Multi-host restores must launch the decode programs in the same order on every process.
+
+    Set iteration order of str keys depends on the per-process hash seed, so the decode order
+    must come from sorting, not from a set.
+    """
+    names = ["wo", "wi_1", "zz_last", "wi_0", "a_first"]
+    packed, scale = self._packed_pair()
+    restored = {}
+    for n in reversed(names):  # insertion order deliberately not sorted
+      restored[f"{n}_packed"], restored[f"{n}_scale"] = packed, scale
+    expected = {n: jax.ShapeDtypeStruct((2, 64, 4), jnp.float32) for n in names}
+    calls = []
+
+    def _record(p, s, target):
+      del s
+      calls.append(next(n for n in names if restored[f"{n}_packed"] is p))
+      return jnp.zeros(target.shape, target.dtype)
+
+    with mock.patch.object(checkpointing, "_dequantize_mxfp4_to", side_effect=_record):
+      # Distinct objects per name so the recorder can tell them apart.
+      for n in names:
+        restored[f"{n}_packed"] = np.array(packed)
+      out = checkpointing.maybe_dequantize_restored_params(restored, expected)
+    self.assertEqual(calls, sorted(names))
+    self.assertEqual(set(out), set(names))
+
+  def test_packed_sharding_leaves_contraction_axis_unsharded(self):
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape((1, 1, 1)), axis_names=("expert", "fsdp", "tensor"))
+    weight = NamedSharding(mesh, PartitionSpec("expert", "fsdp", "tensor"))
+    got = checkpointing._mxfp4_packed_sharding(weight, (2, 32, 4))  # pylint: disable=protected-access
+    self.assertEqual(got.spec, PartitionSpec("expert", None, "tensor"))
+    single = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+    self.assertIs(checkpointing._mxfp4_packed_sharding(single, (2, 32, 4)), single)  # pylint: disable=protected-access
+    self.assertIsNone(checkpointing._mxfp4_packed_sharding(None, (2, 32, 4)))  # pylint: disable=protected-access
+
+
 if __name__ == "__main__":
   absltest.main()

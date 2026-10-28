@@ -33,7 +33,8 @@ from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
 from maxtext.layers import moe
-from maxtext.layers.latent_moe import KimiDenseMLP, KimiLatentMoEBlock
+from maxtext.layers.initializers import nd_dense_init
+from maxtext.layers.latent_moe import KimiDenseMLP, KimiLatentMoEBlock, KimiMxfp4RoutedExperts, ROUTER_KERNEL_AXES
 from maxtext.utils import maxtext_utils
 from tests.utils.kimi_k3_reference import KIMI_K3_REFERENCE_DIR, reference_available
 from tests.utils.test_helpers import get_test_config_path
@@ -77,7 +78,7 @@ def _hf_reference():
 
 
 class KimiK3LatentMoETest(unittest.TestCase):
-  """Tests validating KimiDenseMLP and KimiLatentMoEBlock."""
+  """Tests validating KimiDenseMLP, KimiLatentMoEBlock and the mxfp4 routed experts' router."""
 
   def setUp(self):
     super().setUp()
@@ -173,13 +174,57 @@ class KimiK3LatentMoETest(unittest.TestCase):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         mesh=mesh,
+        routed_experts_weight_format=cfg.routed_experts_weight_format,
         config=cfg,
         rngs=nnx.Rngs(0),
     )
     return block, cfg, mesh
 
+  def _make_mxfp4_experts(self):
+    """`KimiMxfp4RoutedExperts` at this test's dims (intermediate 32: MXFP4 groups are 32 wide)."""
+    cfg = self._make_config(
+        routed_experts_weight_format="mxfp4", model_call_mode="inference", moe_intermediate_size=32, base_moe_mlp_dim=32
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    experts = KimiMxfp4RoutedExperts(
+        config=cfg,
+        mesh=mesh,
+        num_experts=self.num_experts,
+        num_experts_per_tok=self.top_k,
+        intermediate_dim=32,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=ROUTER_KERNEL_AXES,
+        dtype=cfg.dtype,
+        rngs=nnx.Rngs(1),
+    )
+    return experts, cfg
+
+  def test_mxfp4_router_matches_routed_moe(self):
+    """The mxfp4 experts' routing equals moe.RoutedMoE's (same GateLogit params, same top-k)."""
+    block, _, _ = self._make_block()
+    experts, _ = self._make_mxfp4_experts()
+    rng = np.random.default_rng(0)
+    kernel = rng.standard_normal((self.hidden_size, self.num_experts)).astype(np.float32) / 8
+    bias = rng.standard_normal((self.num_experts,)).astype(np.float32) / 10
+    for gate in (block.routed_experts.gate, experts.gate):
+      gate.kernel[...] = jnp.asarray(kernel)
+      gate.bias[...] = jnp.asarray(bias)  # a `moe.MoEBiasVar` for kimi-k3
+
+    x = jnp.asarray(rng.standard_normal((self.batch_size * self.seq_len, self.hidden_size)).astype(np.float32))
+    idx, weight = experts.route(x)
+    logits, pre_bias = block.routed_experts.gate(x)
+    want_weight, want_idx = block.routed_experts.get_topk(logits, pre_bias)
+
+    np.testing.assert_array_equal(np.asarray(idx), np.asarray(want_idx))
+    np.testing.assert_allclose(np.asarray(weight), np.asarray(want_weight), rtol=1e-6, atol=1e-6)
+    # Renormalized top-k weights, scaled by `routed_scaling_factor` (DeepSeek-V3 routing).
+    np.testing.assert_allclose(np.asarray(weight).sum(-1), self.routed_scaling_factor, rtol=1e-5)
+
   def test_routed_expert_params_have_sharding_axes(self):
-    """Router and routed-expert params carry logical sharding axes (else they replicate per chip)."""
+    """Router and routed-expert params carry logical sharding axes (else they replicate per chip).
+
+    MXFP4 packed codes / scales leave the quantized contraction axis (-2) unsharded.
+    """
 
     def sharding_of(module, var_type):
       return {
@@ -187,26 +232,39 @@ class KimiK3LatentMoETest(unittest.TestCase):
           for path, var in nnx.state(module, var_type).flat_state()
       }
 
-    block, _, _ = self._make_block()
-    self.assertIsInstance(block.routed_experts, moe.RoutedMoE)
-    self.assertEqual(
-        sharding_of(block.routed_experts, nnx.Param),
-        {
-            "gate/kernel": ("embed_router", None),
-            "wi_0": ("exp", "embed_moe", "mlp_moe"),
-            "wi_1": ("exp", "embed_moe", "mlp_moe"),
-            "wo": ("exp", "mlp_moe", "embed_moe"),
-        },
-    )
-    # The router bias is a `MoEBiasVar` (as for DeepSeek-V3 / Kimi-K2): same `gate/bias` path, but outside
-    # `nnx.Param`, so the optimizer (and AdamW weight decay) never touches it.
-    self.assertIsInstance(block.routed_experts.gate.bias, moe.MoEBiasVar)
-    self.assertEqual(sharding_of(block.routed_experts, moe.MoEBiasVar), {"gate/bias": (None,)})
-    # Router reads the full hidden state; experts run on the latent.
-    self.assertEqual(block.routed_experts.gate.kernel.shape, (self.hidden_size, self.num_experts))
-    self.assertEqual(
-        block.routed_experts.wi_0.shape, (self.num_experts, self.routed_expert_hidden_size, self.moe_intermediate_size)
-    )
+    with self.subTest(weight_format="bf16"):
+      block, _, _ = self._make_block()
+      self.assertIsInstance(block.routed_experts, moe.RoutedMoE)
+      self.assertEqual(
+          sharding_of(block.routed_experts, nnx.Param),
+          {
+              "gate/kernel": ("embed_router", None),
+              "wi_0": ("exp", "embed_moe", "mlp_moe"),
+              "wi_1": ("exp", "embed_moe", "mlp_moe"),
+              "wo": ("exp", "mlp_moe", "embed_moe"),
+          },
+      )
+      # The router bias is a `MoEBiasVar` (as for DeepSeek-V3 / Kimi-K2): same `gate/bias` path, but outside
+      # `nnx.Param`, so the optimizer (and AdamW weight decay) never touches it.
+      self.assertIsInstance(block.routed_experts.gate.bias, moe.MoEBiasVar)
+      self.assertEqual(sharding_of(block.routed_experts, moe.MoEBiasVar), {"gate/bias": (None,)})
+      # Router reads the full hidden state; experts run on the latent.
+      self.assertEqual(block.routed_experts.gate.kernel.shape, (self.hidden_size, self.num_experts))
+      self.assertEqual(
+          block.routed_experts.wi_0.shape, (self.num_experts, self.routed_expert_hidden_size, self.moe_intermediate_size)
+      )
+
+    with self.subTest(weight_format="mxfp4"):
+      experts, _ = self._make_mxfp4_experts()
+      self.assertEqual(
+          sharding_of(experts, nnx.Param),
+          {
+              "gate/kernel": ("embed_router", None),
+              **{f"{n}_{s}": ("exp", None, "mlp_moe") for n in ("wi_0", "wi_1") for s in ("packed", "scale")},
+              **{f"wo_{s}": ("exp", None, "embed_moe") for s in ("packed", "scale")},
+          },
+      )
+      self.assertEqual(sharding_of(experts, moe.MoEBiasVar), {"gate/bias": (None,)})
 
   def test_rejects_load_balance_loss_it_would_drop(self):
     """The block returns only the MoE output, so a config that needs its aux loss fails fast."""

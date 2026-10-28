@@ -17,6 +17,7 @@
 
 import collections
 import contextlib
+import functools
 import importlib
 import os
 import time
@@ -233,7 +234,18 @@ def _log_unconsumed_checkpoint_weights(want, stored_collection):
     stored_paths = set(nnx.traversals.flatten_mapping(stored_collection).keys())
   except Exception:  # pylint: disable=broad-except
     return
-  unconsumed = sorted("/".join(str(p) for p in path) for path in stored_paths - want_paths)
+
+  def _consumed_as_companion(path):
+    """`k_scale` / `k_packed` decoded into a wanted `k`, or an aliased name of a wanted weight."""
+    *parent, leaf = path
+    leaf = str(leaf)
+    bases = [leaf[: -len(sfx)] for sfx in ("_scale", _MXFP4_PACKED_SUFFIX) if leaf.endswith(sfx)]
+    bases += [want_key for want_key, stored_key in _RESTORE_PARAM_ALIASES.items() if stored_key == leaf]
+    return any((*parent, base) in want_paths for base in bases)
+
+  unconsumed = sorted(
+      "/".join(str(p) for p in path) for path in stored_paths - want_paths if not _consumed_as_companion(path)
+  )
   if not unconsumed:
     return
   preview = ", ".join(unconsumed[:5])
@@ -908,6 +920,112 @@ def _scale_sharding(weight_sharding, scale_shape):
     return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
 
+# MXFP4 dequantize-on-load. A packed checkpoint stores weight `k` as `k_packed` (uint8, two E2M1
+# codes per byte) plus `k_scale` (uint8 E8M0 exponents, one per 32 elements), both quantized along
+# the MaxText-orientation contraction axis (-2), as `to_maxtext` writes MXFP4 sidecars. A model
+# that wants a dense `k` restores the pair and decodes it to `k`'s dtype and sharding.
+_MXFP4_PACKED_SUFFIX = "_packed"
+_MXFP4_AXIS = -2
+# Model param name -> name in older checkpoints. Kimi-K3 MXFP4 checkpoints store the router bias
+# under its Hugging Face name; bf16 Kimi-K3 runs the router through moe.RoutedMoE (`gate/bias`).
+_RESTORE_PARAM_ALIASES = {"bias": "e_score_correction_bias"}
+
+
+def _mxfp4_pair_keys(base: str) -> tuple[str, str]:
+  return f"{base}{_MXFP4_PACKED_SUFFIX}", f"{base}_scale"
+
+
+def _alias_renamed_collection_leaves(params_collection, stored_collection_meta):
+  """Requests non-`params` leaves that the checkpoint keeps in `params` under a `_RESTORE_PARAM_ALIASES` name.
+
+  Kimi-K3's router bias is a `moe.MoEBiasVar` (`.../gate/bias`), but Kimi-K3 MXFP4 checkpoints store it
+  in `params` as `.../gate/e_score_correction_bias`. `_alias_legacy_collections` only finds same-named
+  leaves, so request such a leaf from `params` under its stored name here; `maybe_dequantize_restored_params`
+  renames it back. NNX only: the NNX restore merges every collection by path, so no un-aliasing is needed.
+  """
+  if not isinstance(stored_collection_meta, dict) or not isinstance(stored_collection_meta.get("params"), dict):
+    return params_collection
+  stored_params = stored_collection_meta["params"]
+  patched = dict(params_collection)
+  params_flat = dict(nnx.traversals.flatten_mapping(patched.get("params", {})))
+  moved_any = False
+  for col, tree in params_collection.items():
+    if col == "params" or col in stored_collection_meta or not isinstance(tree, dict):
+      continue
+    tree_flat = dict(nnx.traversals.flatten_mapping(tree))
+    remaining = {}
+    for path, leaf in tree_flat.items():
+      alias = _RESTORE_PARAM_ALIASES.get(path[-1])
+      alias_path = (*path[:-1], alias)
+      if (
+          alias is None
+          or _lookup_path(stored_params, path) is not None
+          or _lookup_path(stored_params, alias_path) is None
+          or alias_path in params_flat
+      ):
+        remaining[path] = leaf
+        continue
+      params_flat[alias_path] = leaf
+      moved_any = True
+    if len(remaining) != len(tree_flat):
+      max_logging.log(
+          f"Restoring {len(tree_flat) - len(remaining)} '{col}' weight(s) from their aliased names in 'params'."
+      )
+      if remaining:
+        patched[col] = nnx.traversals.unflatten_mapping(remaining)
+      else:
+        patched.pop(col, None)
+  if moved_any:
+    patched["params"] = nnx.traversals.unflatten_mapping(params_flat)
+  return patched
+
+
+def _mxfp4_packed_sharding(weight_sharding, packed_shape):
+  """Sharding for an MXFP4 `_packed` / `_scale` leaf restored in place of a dense weight.
+
+  Same layout as the weight, except the quantized contraction axis is left unsharded so the
+  32-element groups never straddle devices (as in the packed MXFP4 model layout).
+  """
+  mesh = getattr(weight_sharding, "mesh", None)
+  if mesh is None:
+    # Not mesh-based (e.g. SingleDeviceSharding): it is shape-agnostic, so reuse it as is.
+    return weight_sharding if isinstance(weight_sharding, jax.sharding.Sharding) else None
+  spec = getattr(weight_sharding, "spec", None)
+  packed_shape = tuple(packed_shape)
+  if spec is None or len(spec) != len(packed_shape):
+    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+  entries = list(spec)
+  entries[_MXFP4_AXIS] = None
+  try:
+    pspec = maxtext_sharding.adjust_pspec_for_indivisible_shapes(jax.sharding.PartitionSpec(*entries), packed_shape, mesh)
+    return jax.sharding.NamedSharding(mesh, pspec)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+
+@functools.lru_cache(maxsize=None)
+def _mxfp4_decoder(dtype, out_shardings):
+  """One jitted decoder per (dtype, output sharding), so equal-shaped weights reuse one compile."""
+  from maxtext.layers import mxfp4  # pylint: disable=import-outside-toplevel
+
+  return jax.jit(
+      functools.partial(mxfp4.dequantize_mxfp4, axis=_MXFP4_AXIS, dtype=dtype),
+      out_shardings=out_shardings,
+  )
+
+
+def _dequantize_mxfp4_to(packed, scale, target):
+  """Decodes an MXFP4 pair into `target`'s dtype (and sharding, when it has one)."""
+  dtype = jnp.dtype(getattr(target, "dtype", jnp.bfloat16))
+  sharding = getattr(target, "sharding", None)
+  out_shardings = sharding if isinstance(sharding, jax.sharding.Sharding) else None
+  out = _mxfp4_decoder(dtype, out_shardings)(packed, scale)
+  want_shape = getattr(target, "shape", None)
+  if want_shape is not None and tuple(out.shape) != tuple(want_shape):
+    raise ValueError(f"MXFP4 pair decodes to {tuple(out.shape)} but the model expects {tuple(want_shape)}")
+  return out
+
+
 def _augment_target_with_scales(want_node: Any, meta_node: Any) -> Any:
   """Augments `want_node` with companion scales from `meta_node` if present in checkpoint but not in want."""
   if not isinstance(want_node, dict) or not isinstance(meta_node, dict):
@@ -916,8 +1034,22 @@ def _augment_target_with_scales(want_node: Any, meta_node: Any) -> Any:
   augmented = {}
   for k, v in want_node.items():
     scale_key = f"{k}_scale"
+    packed_key, _ = _mxfp4_pair_keys(k)
+    alias = _RESTORE_PARAM_ALIASES.get(k)
     if isinstance(v, dict):
       augmented[k] = _augment_target_with_scales(v, meta_node.get(k))
+    elif k not in meta_node and packed_key in meta_node and scale_key in meta_node and packed_key not in want_node:
+      # MXFP4 dequantize-on-load: request the stored pair instead of the dense weight.
+      weight_sharding = getattr(v, "sharding", None)
+      for key in (packed_key, scale_key):
+        meta_leaf = meta_node[key]
+        augmented[key] = jax.ShapeDtypeStruct(
+            shape=meta_leaf.shape,
+            dtype=getattr(meta_leaf, "dtype", jnp.uint8),
+            sharding=_mxfp4_packed_sharding(weight_sharding, meta_leaf.shape),
+        )
+    elif k not in meta_node and alias is not None and alias in meta_node and alias not in want_node:
+      augmented[alias] = v
     elif scale_key not in want_node and scale_key in meta_node:
       meta_scale = meta_node[scale_key]
       meta_param = meta_node.get(k)
@@ -962,6 +1094,10 @@ def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytre
   dynamically dequantizes the weight to the target compute dtype using `dequantize_weight` from
   `maxtext.layers.quantizations` and removes the companion scale from the restored parameter dictionary.
 
+  MXFP4 checkpoints store weight `k` as a `k_packed` / `k_scale` pair instead (no `k`); when the
+  target wants a dense `k`, the pair is decoded with `maxtext.layers.mxfp4.dequantize_mxfp4` into
+  `k`'s dtype and sharding. Names in `_RESTORE_PARAM_ALIASES` are renamed to the model's name.
+
   Args:
     restored_weights: The restored parameter PyTree from the checkpoint.
     expected_param_pytree: The expected parameter PyTree structure / ShapeDtypeStructs.
@@ -973,6 +1109,36 @@ def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytre
     return restored_weights
 
   expected_dict = expected_param_pytree if isinstance(expected_param_pytree, dict) else {}
+  # MXFP4 pairs (`k_packed` + `k_scale`) for a dense `k` the model wants but the checkpoint lacks.
+  # Sorted, never a set: on multi-host runs every process must launch the decode programs (which
+  # reshard across hosts) in the same order, and str hashing differs between processes.
+  mxfp4_bases = sorted(
+      {
+          k[: -len(_MXFP4_PACKED_SUFFIX)]
+          for k in restored_weights
+          if k.endswith(_MXFP4_PACKED_SUFFIX)
+          and k[: -len(_MXFP4_PACKED_SUFFIX)] in expected_dict
+          and k[: -len(_MXFP4_PACKED_SUFFIX)] not in restored_weights
+          and k not in expected_dict
+          and _mxfp4_pair_keys(k[: -len(_MXFP4_PACKED_SUFFIX)])[1] in restored_weights
+      }
+  )
+  aliases = {
+      want_key: stored_key
+      for want_key, stored_key in _RESTORE_PARAM_ALIASES.items()
+      if want_key in expected_dict
+      and want_key not in restored_weights
+      and stored_key in restored_weights
+      and stored_key not in expected_dict
+  }
+  consumed = {key for base in mxfp4_bases for key in _mxfp4_pair_keys(base)} | set(aliases.values())
+  restored_weights = {k: v for k, v in restored_weights.items() if k not in consumed} | {
+      **{
+          base: _dequantize_mxfp4_to(*(restored_weights[k] for k in _mxfp4_pair_keys(base)), expected_dict[base])
+          for base in mxfp4_bases
+      },
+      **{want_key: restored_weights[stored_key] for want_key, stored_key in aliases.items()},
+  }
   scales_to_drop = {
       f"{k}_scale" for k in restored_weights if f"{k}_scale" in restored_weights and f"{k}_scale" not in expected_dict
   }
@@ -1205,6 +1371,7 @@ def load_params_from_path(
     # Rescue weights whose collection is newer than the checkpoint BEFORE discarding
     # unknown collections below -- otherwise they are dropped with no error and stay
     # at their initialiser values. See _alias_legacy_collections.
+    params_collection = _alias_renamed_collection_leaves(params_collection, stored_params_meta)
     params_collection, aliased_collections = _alias_legacy_collections(params_collection, stored_params_meta)
 
     # Anything the checkpoint is KNOWN not to hold genuinely is not there; keep dropping it
