@@ -35,6 +35,7 @@ Capacity is spot, admitted through Kueue queue `default`, which has 0 nominal tp
 | **T-11** | P2 `qwen3-30b-a3b` unscanned | `to_maxtext` S2 | `HFValidationError` | The local staging dir from an older harness version (`/tmp/p2_lance_prs/hf_local/...`) was missing, so the path was treated as a repo id. | Re-stage into `/ramdisk/hf_local/` (re-run in `p2_leftovers`). |
 | **T-12** | Docs | — | `SKIP_FAILED_RESULTS` described backwards | In code, `--skip-completed` re-runs FAILED records unless `SKIP_FAILED_RESULTS=1`. | Docs fixed. The 2-slice `to_maxtext` load tasks set `SKIP_FAILED_RESULTS=1`, so they never re-run a conversion that failed for capacity reasons. |
 | **T-13** | P2 `llama3.1-70b` scanned · 2 | `to_maxtext` S3 | `ValueError: Requested more bytes than we reserved space for: 37580963840 > 20000000000` | The harness used `checkpoint_storage_concurrent_gb=20` for 2 slices (v5p tuning), but on tpu7x each process still requests the whole 37.58 GB scanned leaf. | 38 GB for all slice counts; re-run as `p2_llama70b_scanned_s2_tm`. |
+| **T-14** | `qwen3-235b-a22b` unscanned · 2, first run | `to_maxtext` S3 | Slice 1: `TimeoutError: Timeout waiting at barrier '[op=1] _load_impl'` (`DEADLINE_EXCEEDED`); slice 0 then killed (`-9`) | An Orbax v1 multi-host barrier timed out while the two processes restored 1,131 arrays. | Transient: the retry (`tm_235b_unscanned_s2_retry`) loaded in 617.1 s. If it recurs, raise `ctx.asynchronous.timeout_secs` (MaxText sets 60 min with `enable_continuous_checkpointing`). |
 
 ---
 
@@ -93,7 +94,7 @@ host (1,014.5 GB RAM):
 
 | Model (checkpoint) | Scanned conversion | Unscanned conversion |
 | :--- | :--- | :--- |
-| `qwen3-235b-a22b` (470 GB) | ❌ staged source + converted state ≈ 940 GB + transients; OOM-killed at leaf 4/15 | ✅ streams shards (see the progress report for times) |
+| `qwen3-235b-a22b` (470 GB) | ❌ staged source + converted state ≈ 940 GB + transients; OOM-killed at leaf 4/15 | ✅ 5,150.1 s, streaming shards (peak host RAM 663.5 GB) |
 | `deepseek4-284b` (582 GB, synthetic sparse files) | ❌ OOM-killed at 989.6 GB | ❌ OOM-killed at 989.6 GB |
 | `qwen3.5-397b-a17b` (807 GB on disk) | ❌ fails fast: the source must be staged | streams shards; the converted state (~807 GB) fits |
 | `qwen3-480b-a35b` (960 GB) | ❌ fails fast: the source must be staged | ❌ fails fast: the converted state exceeds ~943 GB usable RAM |
