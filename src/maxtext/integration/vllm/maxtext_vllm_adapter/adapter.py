@@ -654,7 +654,7 @@ def patch_kv_cache_manager():
 def patch_raiden_worker_h2d():
   """Monkey-patches TPUWorker.raiden_h2d and RaidenWorkerSync to apply Raiden weights to runner."""
   try:
-    from tunix.experimental.weight_sync.raiden_synchronizer import patch_raiden_worker_sync  # pylint: disable=import-outside-toplevel
+    from tunix.dist_rl.weight_sync.raiden_synchronizer import patch_raiden_worker_sync  # pylint: disable=import-outside-toplevel
 
     patch_raiden_worker_sync()
   except Exception as e:  # pylint: disable=broad-exception-caught
