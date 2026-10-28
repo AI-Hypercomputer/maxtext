@@ -197,7 +197,7 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
 
 ```bash
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run smoke   # qwen3-0.6b on 1 x 2x2x2
-./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run 235b    # also 284b, 397b, 480b, 671b (2x2x4), 235b-2s (2 x 2x2x2)
+./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run 235b    # also 284b, 397b, 397b-u (unscanned only), 480b, 671b (2x2x4), 235b-2s (2 x 2x2x2)
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --status
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --cleanup     # this owner's JobSets only
 ```
