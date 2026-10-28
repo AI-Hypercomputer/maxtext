@@ -37,9 +37,10 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 import pytest
-from tunix.experimental.common import datatypes
-from tunix.experimental.train import abstract_trainer
+from tunix.dist_rl.common import datatypes
+from tunix.dist_rl.train import abstract_trainer
 from tunix.rl import algo_core
+from tunix.rl import algorithm_config
 from tunix.sft import utils as sft_utils
 
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
@@ -1199,7 +1200,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIsInstance(tunix_metric, abstract_engine.WeightedMetric)
     self.assertIsInstance(sft_utils.LossOutput(primary_loss=tunix_metric, aux_metrics={}), abstract_engine.LossOutput)
 
-    # Must be the sft.utils class, not the same-named one in tunix.experimental.metrics
+    # Must be the sft.utils class, not the same-named one in tunix.dist_rl.metrics
     # whose compute()/compute_scale() raise NotImplementedError -- importing that one
     # would break gradient scaling at runtime rather than at import.
     self.assertEqual(float(tunix_metric.compute()), 2.0)
@@ -1424,7 +1425,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(t._has_aux)
 
   def test_signatures_match_the_tunix_trainer_contract(self):
-    """`with_loss_fn` returns self, `fwd_bwd` takes kwargs, `update` returns train_step."""
+    """`with_loss_fn` returns self, `fwd_bwd` rejects undeclared options, `update` returns train_step."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
 
     returned = t.with_loss_fn(
@@ -1435,9 +1436,11 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
     self.assertIs(returned, t)
 
-    # Unknown kwargs are accepted and ignored rather than raising.
-    t.fwd_bwd(DummyPayload(), skip_jit=False)
-    step = t.update(skip_jit=False)
+    # The contract declares no implementation-specific options, so a stray one is a caller bug.
+    with self.assertRaises(TypeError):
+      t.fwd_bwd(DummyPayload(), skip_jit=False)  # pylint: disable=unexpected-keyword-arg
+    t.fwd_bwd(DummyPayload())
+    step = t.update()
     self.assertIsInstance(step, int)
     self.assertEqual(step, t.train_step)
     self.assertEqual(step, 1)
@@ -1740,16 +1743,18 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
         wrap_with_tunix_adapter=True,
         tokenizer_pad_id=0,
     )
-    algo_config = types.SimpleNamespace(
+    # The real config, not a SimpleNamespace stub: grpo_loss_fn reads more fields over time,
+    # and the dataclass defaults keep this test from breaking each time Tunix adds one.
+    algo_config = algorithm_config.GRPOConfig(
         beta=0.0,
         epsilon=0.2,
         epsilon_high=0.2,
         loss_algo="grpo",
         loss_agg_mode="token-mean",
-        temperature=1.0,
         kl_loss_mode="low_var_kl",
         kl_clamp_value=None,
     )
+    algo_config.temperature = 1.0  # init=False on AlgorithmConfig.
     engine.with_loss_fn(algo_core.grpo_loss_fn, has_aux=True)
     engine.with_gen_model_input_fn(
         lambda payload: {

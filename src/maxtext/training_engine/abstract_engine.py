@@ -63,15 +63,15 @@ import jax
 # drifts the moment Tunix changes a field.
 #
 # WeightedMetric must come from `tunix.sft.utils`, NOT from
-# `tunix.experimental.metrics.metrics` -- the latter declares a same-named class
+# `tunix.dist_rl.metrics.metrics` -- the latter declares a same-named class
 # whose `compute()` and `compute_scale()` raise NotImplementedError.
 #
 # `__all__` below declares them part of this module's public surface, which is what
 # keeps pylint from reporting them as unused imports. Do not use the redundant-alias
 # form (`X as X`) instead: MaxText's pylint config does not recognise that convention
 # and reports `C0414 useless-import-alias` for every one of them.
-from tunix.experimental.common.datatypes import RLTrainerPayload
-from tunix.experimental.common.datatypes import TrainerPayload
+from tunix.dist_rl.common.datatypes import RLTrainerPayload
+from tunix.dist_rl.common.datatypes import TrainerPayload
 from tunix.sft.utils import LossOutput
 from tunix.sft.utils import WeightedMetric
 
@@ -172,34 +172,29 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload, **kwargs: Any) -> None:
+  def fwd_bwd(self, payload: TrainerPayload) -> None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
-      **kwargs: Implementation-specific options.
     """
 
   @abc.abstractmethod
-  def update(self, **kwargs: Any) -> int:
+  def update(self) -> int:
     """Executes a model weight update step using accumulated gradients.
-
-    Args:
-      **kwargs: Implementation-specific options.
 
     Returns:
       The train step count after the update.
     """
 
   @abc.abstractmethod
-  def eval_step(self, payload: TrainerPayload, **kwargs: Any) -> None:
+  def eval_step(self, payload: TrainerPayload) -> None:
     """Executes one evaluation step on the given payload.
 
     Args:
       payload: Packed micro-batch payload for evaluation.
-      **kwargs: Additional evaluation keyword arguments.
     """
 
   @abc.abstractmethod
@@ -221,23 +216,24 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
+  def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
     """Forces the trainer to serialize its state (model + optimizer).
 
     Args:
       metadata: Checkpoint identifier or UUID metadata pytree.
-      **kwargs: Additional checkpointing keyword arguments.
+      step: Step to save under. If None, the implementation derives it.
+      force: Save even if the checkpoint policy would skip this step.
     """
 
   @abc.abstractmethod
-  def restore_checkpoint(self, **kwargs: Any) -> Any:
-    """Restores state from latest checkpoint and returns the metadata pytree.
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
+    """Restores state from a checkpoint and returns the metadata pytree.
 
     The returned metadata (e.g., global_step) matches what was stored in
     save_checkpoint.
 
     Args:
-      **kwargs: Additional restoration keyword arguments.
+      step: Checkpoint step to restore. If None, restores the latest checkpoint.
 
     Returns:
       The metadata PyTree stored with the checkpoint.
@@ -255,19 +251,23 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, **kwargs: Any) -> Any:
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns metadata/coordinates.
 
     Args:
-      **kwargs: Weight staging configuration parameters.
+      sync_request: The round's request from Tunix's `WeightSyncCoordinator`.
 
     Returns:
       Synchronization endpoints or file coordinates for weight transfer.
     """
 
   @abc.abstractmethod
-  def release_weight_sync(self, **kwargs: Any) -> Any:
-    """Releases staged weight buffers after transfer completion."""
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
+    """Releases staged weight buffers after transfer completion.
+
+    Args:
+      sync_request: The round's request from Tunix's `WeightSyncCoordinator`.
+    """
 
   @property
   @abc.abstractmethod
