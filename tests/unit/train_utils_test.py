@@ -14,6 +14,7 @@
 
 """Unit tests for train_utils.py."""
 
+import contextlib
 import itertools
 import pathlib
 import sys
@@ -36,6 +37,7 @@ import pytest
 from maxtext.common import grain_utility
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.trainers.pre_train import train
+from maxtext.trainers.pre_train import train_compile
 from maxtext.utils import elastic_utils
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
@@ -432,6 +434,61 @@ class TestValidateCompletedSteps(unittest.TestCase):
     self.assertIn(
         "Requested training up to step 100, but a checkpoint already exists at step 104", str(context.exception)
     )
+
+
+class TestTrainStateDonation(unittest.TestCase):
+  """Overwritten state leaves must remain available for input/output buffer aliasing."""
+
+  def test_donates_state_leaves_whose_previous_values_are_unused(self):
+    mesh = Mesh(np.array([jax.devices()[0]]), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = SimpleNamespace(enable_diloco=False, compiled_trainstep_file="", compile_xla_flags="", dump_jaxpr=False)
+    state = jax.device_put({"weight": np.zeros(4, dtype=np.float32), "stats": np.zeros(8, dtype=np.float32)}, replicated)
+    state_shardings = jax.tree.map(lambda _: replicated, state)
+    batch = jax.device_put(np.arange(8, dtype=np.float32), replicated)
+
+    def train_step(model, config, state_mesh_shardings, params_shardings, state, batch):
+      del model, config, state_mesh_shardings, params_shardings
+      # Like overwrite-with-gradient FP8 statistics, the new value does not read the old one.
+      return {"weight": state["weight"] + 1, "stats": batch * 2}, {}
+
+    p_train_step = train_utils.jit_train_step(
+        config,
+        model=None,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        data_sharding=replicated,
+        train_step=train_step,
+        params_shardings=state_shardings,
+    )
+    compiled_steps = {
+        "jit": p_train_step.lower(state, batch).compile(),
+        "aot": train_compile.jit_and_compile(
+            p_train_step.__wrapped__,
+            (state, batch),
+            {},
+            mesh,
+            (state_shardings, replicated),
+            (state_shardings, None),
+            (),
+            0,
+            config,
+            contextlib.nullcontext(),
+        ),
+    }
+    # The distinct shapes ensure each output aliases its corresponding state input.
+    expected_alias_bytes = sum(leaf.nbytes for leaf in jax.tree.leaves(state))
+    for mode, compiled in compiled_steps.items():
+      with self.subTest(mode=mode):
+        self.assertEqual(compiled.memory_analysis().alias_size_in_bytes, expected_alias_bytes)
+        # Each compiled function donates its input state, so give it fresh buffers.
+        state = jax.device_put(
+            {"weight": np.zeros(4, dtype=np.float32), "stats": np.zeros(8, dtype=np.float32)}, replicated
+        )
+        for step_index in range(3):
+          state, _ = compiled(state, batch)
+          np.testing.assert_array_equal(state["weight"], np.full(4, step_index + 1, dtype=np.float32))
+          np.testing.assert_array_equal(state["stats"], np.arange(8, dtype=np.float32) * 2)
 
 
 class TestCompileXlaFlags(unittest.TestCase):
