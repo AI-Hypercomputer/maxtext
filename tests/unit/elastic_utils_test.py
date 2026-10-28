@@ -68,7 +68,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.original_max_logging = elastic_utils.max_logging
     self.original_elastic = elastic_utils.elastic
     self.original_manager_class = pathwaysutils.elastic.manager.Manager
-    self.original_scale_up_signal_error = getattr(pathwaysutils.elastic.manager, "ScaleUpSignalError", None)
+    self.original_scale_up_signal_error = pathwaysutils.elastic.manager.ScaleUpSignalError
 
     # Initialize fakes as mocks
     self.fake_gcs_utils = create_autospec(gcs_utils)
@@ -112,9 +112,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     elastic_utils.max_logging = self.original_max_logging
     elastic_utils.elastic = self.original_elastic
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
-    pathwaysutils.elastic.manager.ScaleUpSignalError = (  # pyrefly: ignore[bad-assignment]
-        self.original_scale_up_signal_error,
-    )
+    pathwaysutils.elastic.manager.ScaleUpSignalError = self.original_scale_up_signal_error
     elastic_utils.elastic_manager = None
     elastic_utils.pending_reinit_recorder = None
     elastic_utils.pending_elastic_event_type = None
