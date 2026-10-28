@@ -1252,8 +1252,10 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     Reference: ``EMoRouter`` in the standalone model. A document aggregates its
     tokens' full-softmax scores, keeps its top ``pool`` experts by that total,
     and every token of the document then routes within the pool. ``pool`` is
-    sampled uniformly from [emo_min, emo_max] per document during training and
-    fixed at ``emo_eval_document_expert_pool`` otherwise.
+    sampled per document during training, uniformly from the integer range
+    [emo_min, emo_max] or, with ``emo_document_expert_pool_choices`` set,
+    uniformly from that set of sizes; outside training it is fixed at
+    ``emo_eval_document_expert_pool``.
 
     MaxText packs documents contiguously, so the per-document score totals are
     cumulative-sum differences at document boundaries rather than a scatter
@@ -1283,9 +1285,13 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
 
     if rngs is not None and cfg.model_call_mode != "inference" and not _EMO_EVAL_POOLS.get():
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
-      draws = jax.random.randint(
-          rng, (batch, seq_len), cfg.emo_min_document_expert_pool, cfg.emo_max_document_expert_pool + 1
-      )
+      if cfg.emo_document_expert_pool_choices:
+        choices = jnp.asarray(cfg.emo_document_expert_pool_choices, dtype=jnp.int32)
+        draws = choices[jax.random.randint(rng, (batch, seq_len), 0, choices.shape[0])]
+      else:
+        draws = jax.random.randint(
+            rng, (batch, seq_len), cfg.emo_min_document_expert_pool, cfg.emo_max_document_expert_pool + 1
+        )
       # One draw per document: every token reads the draw at its document start.
       pool = jnp.take_along_axis(draws, start, axis=1)
     else:
@@ -1405,6 +1411,12 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
       eval_ok = self.num_experts_per_tok <= cfg.emo_eval_document_expert_pool <= self.num_experts
       if not pool_ok or not eval_ok:
         raise ValueError("EMo pool sizes must satisfy top_k <= min <= max/eval <= num_experts.")
+      for size in cfg.emo_document_expert_pool_choices:
+        if not self.num_experts_per_tok <= size <= self.num_experts:
+          raise ValueError(
+              f"emo_document_expert_pool_choices entry {size} must satisfy top_k <= size <= num_experts"
+              f" ({self.num_experts_per_tok} <= size <= {self.num_experts})."
+          )
     if gate_in_features != self.moe_expert_input_dim:
       self.gate = moe.GateLogit(
           in_features_shape=gate_in_features,

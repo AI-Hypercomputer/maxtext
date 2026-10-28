@@ -1381,6 +1381,13 @@ class MoEGeneral(BaseModel):
   )
   emo_max_document_expert_pool: int = Field(512, description="Largest EMo training pool size (must be <= num_experts).")
   emo_eval_document_expert_pool: int = Field(512, description="Fixed EMo pool size outside training.")
+  emo_document_expert_pool_choices: list[int] = Field(
+      default_factory=list,
+      description=(
+          "EMo training pool sizes to sample from uniformly (e.g. [8, 64, 256]) instead of the integer range"
+          " [emo_min_document_expert_pool, emo_max_document_expert_pool]; empty keeps the range."
+      ),
+  )
   emo_threshold_by_bisection: bool = Field(
       False,
       description="With moe_lean_routing, find the EMo pool threshold by bisecting on the score bits"

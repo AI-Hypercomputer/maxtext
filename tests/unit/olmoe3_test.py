@@ -370,6 +370,57 @@ class OLMoE3RoutingTest(unittest.TestCase):
           expected = set(np.argsort(-masked)[:k].tolist())
           self.assertEqual(set(np.asarray(indices[b, t]).tolist()), expected, f"b={b} t={t}")
 
+  def test_emo_pool_choices_sample_from_the_set(self):
+    """emo_document_expert_pool_choices: every training pool draw is one of the listed sizes.
+
+    The 30m config samples the range [16, 32]; with choices [16, 24, 32] only
+    those three sizes may appear (17..23 and 25..31 no longer can), one size
+    per document, and over enough documents all three do. The pool size is
+    read back as the number of experts a document's tokens are left to route
+    among.
+    """
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import numpy as np
+    from flax import nnx
+    from maxtext.common.common_types import MODEL_MODE_TRAIN
+    from maxtext.models.olmoe3 import OLMoE3DecoderLayer
+
+    choices = [16, 24, 32]
+    cfg = _config(
+        "olmoe3-30m",
+        extra=("override_model_config=True", f"emo_document_expert_pool_choices={choices}"),
+    )
+    self.assertEqual(list(cfg.emo_document_expert_pool_choices), choices)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with mesh:
+      layer = OLMoE3DecoderLayer(cfg, mesh, MODEL_MODE_TRAIN, layer_idx=1, rngs=nnx.Rngs(params=0))
+    assert layer.moe_block is not None
+    batch, docs, doc_len = 4, 16, 4
+    segs = jnp.broadcast_to(jnp.repeat(jnp.arange(1, docs + 1, dtype=jnp.int32), doc_len)[None], (batch, docs * doc_len))
+    logits = jax.random.normal(jax.random.PRNGKey(5), (batch, docs * doc_len, cfg.num_experts), jnp.float32)
+    masked = layer.moe_block._emo_mask_logits(logits, segs, jax.random.PRNGKey(6))  # pylint: disable=protected-access
+    pools = np.asarray(jnp.isfinite(masked).sum(axis=-1))  # [b, s]: the pool size each token routes within
+    self.assertTrue(set(np.unique(pools).tolist()) <= set(choices), f"pool sizes {np.unique(pools)}")
+    self.assertEqual(set(np.unique(pools).tolist()), set(choices), f"pool sizes {np.unique(pools)}")
+    per_doc = pools.reshape(batch, docs, doc_len)
+    self.assertTrue(bool((per_doc == per_doc[..., :1]).all()), "pool size must be constant within a document")
+    # Eval keeps the fixed eval pool regardless of the choices.
+    masked_eval = layer.moe_block._emo_mask_logits(logits, segs, None)  # pylint: disable=protected-access
+    self.assertTrue(bool((jnp.isfinite(masked_eval).sum(axis=-1) == cfg.emo_eval_document_expert_pool).all()))
+
+  def test_emo_pool_choices_are_validated(self):
+    """A choice below top_k or above num_experts is rejected at construction."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from flax import nnx
+    from maxtext.common.common_types import MODEL_MODE_TRAIN
+    from maxtext.models.olmoe3 import OLMoE3DecoderLayer
+
+    for bad in ([8, 32], [16, 64]):
+      cfg = _config("olmoe3-30m", extra=("override_model_config=True", f"emo_document_expert_pool_choices={bad}"))
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      with mesh, self.assertRaises(ValueError):
+        OLMoE3DecoderLayer(cfg, mesh, MODEL_MODE_TRAIN, layer_idx=1, rngs=nnx.Rngs(params=0))
+
   def test_emo_threshold_keep_matches_double_argsort(self):
     """The one-sort EMo mask equals ``argsort(argsort(-s)) < pool``, ties included."""
     # pylint: disable=g-import-not-at-top,import-outside-toplevel
