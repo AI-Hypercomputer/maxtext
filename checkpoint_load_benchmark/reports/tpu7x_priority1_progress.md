@@ -1,6 +1,6 @@
 # Priority 1 (>200B models) progress on TPU v7x (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~18:00 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
+> **Snapshot:** 2026-10-28 ~21:10 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
 > `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/` (task ids below refer to
 > [`configs/p1_completion_tasks.json`](../configs/p1_completion_tasks.json))
 
@@ -22,7 +22,7 @@
 | :--- | :--- | ---: | :--- | :--- | :--- |
 | `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 757.5 s / 792.4 s) | ❌ scanned: S2 can't run on one host · ✅ unscanned: S2 5,150.1 s (streams shards), S3 454.7 s on 1 slice and 617.1 s on 2 slices |
 | `deepseek4-284b` | 581.9 GB / 146 *(synthetic sparse files)* | – | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 453.3 s / 440.7 s) | ❌ S2 OOM-killed at 989.6 GB host RAM (scanned and unscanned) |
-| `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s) · ✅ scanned · 4 (1,399.7 s) · ❌ scanned · 1 and · 2 (HBM OOM; also with `hbmfix` on 2 slices) | ❌ unscanned · 2: **timeout at 1800 s**, still in the load phase (WITH: load 515.9 s, total 1,311.9 s) | ❌ scanned: S2 can't run on one host · 🔄 unscanned: conversion restarted 17:56 UTC (the first attempt reached ~65% in 3 h, then its pod was evicted) |
+| `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s) · ✅ scanned · 4 (1,399.7 s) · ❌ scanned · 1 and · 2 (HBM OOM; also with `hbmfix` on 2 slices) | ❌ unscanned · 2: **timeout at 1800 s**, still in the load phase (WITH: load 515.9 s, total 1,311.9 s) | ❌ scanned: S2 can't run on one host · ❌ unscanned: S2 needs ~4.3 h streaming shards, longer than the cluster's ~3 h limit per workload; both attempts were deactivated (at ~65% and ~40%) |
 | `qwen3-480b-a35b` | 961.0 GB / 241 | 1,046.1 s | ✅ 2/2 that fit (1 slice ❌ HBM) | ❌ `KeyError` (no mapping before #5706); conclusive | ❌ scanned: S2 can't run on one host · ⏳ unscanned (expected: the 960 GB converted state doesn't fit host RAM) |
 | `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ doesn't fit 1 or 2 slices · ✅ **4 slices**: scanned 649.4 s, unscanned 531.0 s | ❌ scanned · 4: **timeout at 1800 s**, still loading (WITH: 649.4 s) | ➖ |
 
@@ -60,7 +60,7 @@ Slices (Devices): `1 (8)` = 1 slice, 8 TPU cores; `2 (16)` = 2 slices, 16 TPU co
 | ↳ | `scanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **HBM OOM** *(load 483.84 s, then OOM splitting `wi_0`/`wi_1`; the `hbmfix` variant loads in 469.69 s and fails at the same 11.25 GiB allocation)* | **OOM** | **OOM** | Failed (transform HBM peak) |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `scanned` | `4 (32)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | — | **N/A** | **N/A** | Not run (no 4-slice `to_maxtext` task) |
 | ↳ | `scanned` | `4 (32)` | **`safetensor`** | **814.53** | **—** | **1,399.68** *(Safetensors+Convert)* | **1,399.68** | **2,214.21** | **Only `safetensor` loads this config** |
-| **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | 🔄 *(`tm_397b_unscanned_s1`, restarted 17:56 UTC after an eviction at ~65%; ~4 h streaming shards)* | ⏳ *(Load Orbax; 795 GB ≈ 98% of 1-slice HBM)* | ⏳ | ⏳ | 1.00x (baseline) |
+| **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | **Not completed** *(~4.3 h streaming shards > the cluster's ~3 h limit per workload; deactivated at ~65% and ~40%)* | ⏳ *(Load Orbax; 795 GB ≈ 98% of 1-slice HBM)* | ⏳ | ⏳ | 1.00x (baseline) |
 | ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **Not run** *(795 GB ≈ 98% of 1-slice HBM)* | **—** | **—** | — |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_397b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
 | ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **1,311.85** *(Safetensors+Convert)* | **1,311.85** | **2,126.38** | ⏳ *(awaiting `to_maxtext`)* |
@@ -99,7 +99,7 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 | | scanned · 2 | ❌ **timeout at 1800 s**, still loading (peak host RAM 576.0 GB) | ✅ **440.7 s** (352.9 + 87.6) | (shared) | ➖ no checkpoint |
 | | unscanned · 2 | ➖ skipped after the scanned timeout | ✅ **353.0 s** (306.3 + 46.5) | (shared) | ⏳ `tm_284b_unscanned_s2` (no checkpoint expected) |
 | `qwen3.5-397b-a17b` | scanned · 1 | ⚠️ killed at 360 s | ❌ load finished (942.1 s), then TPU HBM OOM in the transform (795 GB ≈ 98% of HBM) | ⏳ `tm_397b_scanned_s1` (expected: doesn't fit one host) | ➖ |
-| | unscanned · 1 | ➖ | ➖ does not fit 1 slice | 🔄 `tm_397b_unscanned_s1` (streams shards; the first attempt was evicted at ~65% after 3 h) | ⏳ `tm_397b_unscanned_s1` |
+| | unscanned · 1 | ➖ | ➖ does not fit 1 slice | ❌ not completed: ~4.3 h when streaming shards, but workloads are deactivated after ~3 h (2 attempts, ~65% and ~40%) | ➖ no checkpoint |
 | | scanned · 2 | ⚠️ killed at 360 s (WITH load alone takes 484 s) | ❌ load finished (483.8 s), then HBM OOM splitting `wi_0`/`wi_1`. `hbmfix`: load 469.7 s, then the same 11.25 GiB allocation fails (2.77 GiB free) | ➖ | ➖ |
 | | unscanned · 2 | ❌ **timeout at 1800 s** while still loading (WITH load: 515.9 s; peak host RAM 301.7 GB vs 98.7 GB WITH) | ✅ **1,311.9 s** (515.9 + 795.7; peak host RAM 98.7 GB) | (shared) | ⏳ `tm_397b_unscanned_s2` |
 | | scanned · 4 | ➖ | ✅ **1,399.7 s** (260.0 + 1,139.1; peak host RAM 127.7 GB) | ➖ | ➖ |
