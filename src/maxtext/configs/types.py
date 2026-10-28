@@ -1772,6 +1772,12 @@ class Ming(BaseModel):
       -5.0,
       description="Lower bound of the KDA forget gate in log space: g = lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).",
   )
+  ming_audio_chunk_size: int = Field(
+      3000, description="Number of mel frames per independent whisper audio-encoder chunk (30 s at 100 frames/s)."
+  )
+  ming_norm_audio_embeds: bool = Field(
+      True, description="L2-normalize the projected audio embeddings (norm_query_embeds)."
+  )
 
 
 class Qwen3Next(BaseModel):
@@ -5888,6 +5894,7 @@ class MaxTextConfig(
           "weaver-mini",
           "weaver-max",
           "weaver-mini-diffuser",
+          "ming-3.0-audio-tiny",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")

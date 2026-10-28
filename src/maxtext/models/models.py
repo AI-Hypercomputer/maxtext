@@ -26,7 +26,7 @@ from flax.core import FrozenDict
 from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
+from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -140,8 +140,11 @@ class Transformer(nnx.Module):
         config=cfg,
         rngs=rngs,
     )
+    # Audio-only multimodal models (e.g. Ming) have no vision tower.
     self.vision_encoder = (
-        VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_multimodal", False) else None
+        VisionEncoder(config=cfg, mesh=mesh, rngs=rngs)
+        if getattr(cfg, "use_multimodal", False) and cfg.vision_encoder_block != VisionEncoderBlockType.NONE
+        else None
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
@@ -248,7 +251,7 @@ class Transformer(nnx.Module):
     video_embeddings = None
     audio_embeddings = None
     deepstack_visual_embeds = None
-    if getattr(self.config, "use_multimodal", False) and encoder_images is not None:
+    if getattr(self.config, "use_multimodal", False) and self.vision_encoder is not None and encoder_images is not None:
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_images, deterministic=not enable_dropout
       )
@@ -256,7 +259,7 @@ class Transformer(nnx.Module):
           self.config, decoder_input_tokens, is_video=False
       )
 
-    if getattr(self.config, "use_multimodal", False) and encoder_videos is not None:
+    if getattr(self.config, "use_multimodal", False) and self.vision_encoder is not None and encoder_videos is not None:
       video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos,
           input_masks=encoder_video_masks,

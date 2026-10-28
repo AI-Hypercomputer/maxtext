@@ -72,7 +72,17 @@ rope_attention_scaling: false
 # Cache the compressed latent + rope key (the naive cache assumes head_dim == qk_head_dim).
 mla_naive_kvcache: false
 
-
-# Audio input support is added by the next PR in the stack.
-use_multimodal: false
-use_audio: false
+# Whisper audio encoder + conv projector
+use_multimodal: true
+use_audio: true
+d_model_for_audio: 1280
+encoder_layers_for_audio: 32
+encoder_attention_heads_for_audio: 20
+encoder_ffn_dim_for_audio: 5120
+num_mel_bins_for_audio: 128
+max_source_positions_for_audio: 3000
+num_conv_layers_for_audio: 3
+output_dim_for_audio: 1536
+attention_dropout_for_audio: 0.0
+ming_audio_chunk_size: 3000
+ming_norm_audio_embeds: true
