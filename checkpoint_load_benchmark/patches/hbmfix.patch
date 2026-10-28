@@ -1,0 +1,258 @@
+diff --git a/src/maxtext/checkpoint_conversion/utils/load_dynamic.py b/src/maxtext/checkpoint_conversion/utils/load_dynamic.py
+index 0d4824d13..995d6689d 100644
+--- a/src/maxtext/checkpoint_conversion/utils/load_dynamic.py
++++ b/src/maxtext/checkpoint_conversion/utils/load_dynamic.py
+@@ -373,22 +373,61 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
+     else:
+       target_leaf = leaves[0]
+ 
++    # Device buffers of HF tensors that this leaf consumed for the last time (popped from `hf_state`), freed as
++    # soon as the hook has produced its output, so the stacked tensor and its inputs do not coexist in HBM.
++    # Tensors that a later leaf still needs stay in `hf_state` and are never freed here.
++    last_popped = []
++
++    def _pop_and_track(k):
++      arr = tensor_getter(k)
++      if isinstance(arr, jax.Array) and k not in hf_state:
++        last_popped.append(arr)
++      return arr
++
++    if hook_fn is not None:
++      _orig_hook_fn = hook_fn
++
++      def _deleting_hook_fn(w, shape, _fn=_orig_hook_fn):
++        res = tensor_handling.apply_hook_fns(w, shape, _fn)
++        if isinstance(res, jax.Array):
++          jax.block_until_ready(res)
++        for _p in last_popped:
++          if _p is not res and isinstance(_p, jax.Array) and not _p.is_deleted():
++            _p.delete()
++        last_popped.clear()
++        return res
++
++      hook_fn = _deleting_hook_fn
++
+     load_fn = get_hf_loading_function(
+         hf_source,
+-        tensor_getter,
++        _pop_and_track,
+         hook_fn,
+         target_leaf,
+         maxtext_config,
+-        mt_keys[0],
++        mt_key if isinstance(mt_key, tuple) else mt_keys[0],
+     )
+ 
+     # Execute transformation and assign to flat_restored
+     t_layer = time.time()
+     loaded = load_fn()
++    if isinstance(loaded, jax.Array):
++      jax.block_until_ready(loaded)
++    for _p in last_popped:
++      if _p is not loaded and isinstance(_p, jax.Array) and not _p.is_deleted():
++        _p.delete()
++    last_popped.clear()
+     if isinstance(mt_key, tuple):
+       for i, (name, leaf) in enumerate(zip(check_names, leaves)):
+-        part = loaded[..., i]
+-        flat_restored[name] = jax.device_put(part, leaf.sharding) if hasattr(leaf, "sharding") else part
++        part = jax.lax.slice_in_dim(loaded, i, i + 1, axis=-1)[..., 0]
++        jax.block_until_ready(part)
++        if i == len(leaves) - 1:
++          if isinstance(loaded, jax.Array) and not loaded.is_deleted():
++            loaded.delete()
++          del loaded
++        flat_restored[name] = (
++            tensor_handling._reshard(part, leaf.sharding, delete_input=True) if hasattr(leaf, "sharding") else part
++        )
+     else:
+       flat_restored[check_names[0]] = loaded
+ 
+diff --git a/src/maxtext/checkpoint_conversion/utils/tensor_handling.py b/src/maxtext/checkpoint_conversion/utils/tensor_handling.py
+index 90a329f31..d06b6d629 100644
+--- a/src/maxtext/checkpoint_conversion/utils/tensor_handling.py
++++ b/src/maxtext/checkpoint_conversion/utils/tensor_handling.py
+@@ -82,11 +82,14 @@ def _apply_hook_fns_any_host(weight, target_shape, hook_fns):
+   the same tensors in the same order, so all hosts take the fallback together, as the gather requires.
+   """
+   try:
+-    return apply_hook_fns(weight, target_shape, hook_fns)
++    res = apply_hook_fns(weight, target_shape, hook_fns)
+   except RuntimeError:
+     if not _spans_other_hosts(weight):
+       raise
+-    return apply_hook_fns(_gather_to_host(weight), target_shape, hook_fns)
++    res = apply_hook_fns(_gather_to_host(weight), target_shape, hook_fns)
++  if isinstance(res, jax.Array) and res is not weight:
++    jax.block_until_ready(res)
++  return res
+ 
+ 
+ def _device_put(array, sharding):
+@@ -125,12 +128,16 @@ def _concatenate_fn(axis, sharding):
+   return jax.jit(lambda *pieces: np.concatenate(pieces, axis=axis), out_shardings=sharding)
+ 
+ 
+-def _reshard(array, sharding):
++def _reshard(array, sharding, delete_input=False):
+   """Places `array` with `sharding`; a large `jax.Array` is moved in slices along an axis `sharding` does not split.
+ 
+   The read layout orders the devices by process and the model's mesh by topology. Between two device orders, XLA can
+   reshard by gathering the whole array on every device: on two v5e-256 slices with data parallelism across them, the
+   80-layer llama3.1-70b `wi_0` (37.6 GB) needed 70 GB per device. Slices of at most `_MAX_RESHARD_BYTES` bound that copy.
++
++  If `delete_input` is True, the caller guarantees `array` is an intermediate that nothing else references (e.g. not a
++  tensor still held in the HF state), so its device buffer is freed as soon as the slices are placed instead of
++  coexisting with the slices and the result.
+   """
+   if not isinstance(array, jax.Array) or array.nbytes <= _MAX_RESHARD_BYTES or not hasattr(sharding, "spec"):
+     return _device_put(array, sharding)
+@@ -144,7 +151,17 @@ def _reshard(array, sharding):
+       jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
+       for start in range(0, size, step)
+   ]
+-  return _concatenate_fn(axis, sharding)(*pieces)
++  if delete_input:
++    jax.block_until_ready(pieces)
++    if not array.is_deleted():
++      array.delete()
++  res = _concatenate_fn(axis, sharding)(*pieces)
++  jax.block_until_ready(res)
++  # The slices are this function's own intermediates; free them unless the result is one of them.
++  for _p in pieces:
++    if _p is not res and isinstance(_p, jax.Array) and not _p.is_deleted():
++      _p.delete()
++  return res
+ 
+ 
+ def _split_over_all_devices(tensor) -> bool:
+@@ -253,19 +270,35 @@ def composite_hook_fn(hook_fns: Any, num_leaves: int) -> Callable:
+   return hook
+ 
+ 
+-def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
++def _binary_chunked_stack(tensors: List[np.ndarray], axis: int, delete_inputs: bool = False) -> np.ndarray:
+   """Stacks JAX arrays along axis by binary division to limit memory usage from JAX compiler."""
+   if not tensors:
+     raise ValueError("Cannot stack empty list of tensors.")
+   if len(tensors) == 1:
+-    return np.expand_dims(tensors[0], axis=axis)
++    res = np.expand_dims(tensors[0], axis=axis)
++    if delete_inputs and isinstance(res, jax.Array):
++      jax.block_until_ready(res)
++      if isinstance(tensors[0], jax.Array) and not tensors[0].is_deleted():
++        tensors[0].delete()
++    return res
+   if len(tensors) == 2:
+-    return np.stack(tensors, axis=axis)
++    res = np.stack(tensors, axis=axis)
++    if delete_inputs and isinstance(res, jax.Array):
++      jax.block_until_ready(res)
++      for _t in tensors:
++        if isinstance(_t, jax.Array) and not _t.is_deleted():
++          _t.delete()
++    return res
+ 
+   mid = len(tensors) // 2
+-  left = _binary_chunked_stack(tensors[:mid], axis=axis)
+-  right = _binary_chunked_stack(tensors[mid:], axis=axis)
+-  return np.concatenate([left, right], axis=axis)
++  left = _binary_chunked_stack(tensors[:mid], axis=axis, delete_inputs=delete_inputs)
++  right = _binary_chunked_stack(tensors[mid:], axis=axis, delete_inputs=delete_inputs)
++  res = np.concatenate([left, right], axis=axis)
++  jax.block_until_ready(res)
++  for _side in (left, right):
++    if isinstance(_side, jax.Array) and not _side.is_deleted():
++      _side.delete()
++  return res
+ 
+ 
+ def _build_multi_axis_stacked_tensor(
+@@ -321,8 +354,11 @@ def _build_multi_axis_stacked_tensor(
+       as_read = _split_over_all_devices(tensor)
+     else:
+       parts = [gather(sub, level + 1) for sub in keys]
+-      tensor = _binary_chunked_stack([part for part, _ in parts], axis=0)
+       as_read = all(part_as_read for _, part_as_read in parts)
++      part_tensors = [part for part, _ in parts]
++      del parts
++      tensor = _binary_chunked_stack(part_tensors, axis=0, delete_inputs=(level + 1 < depth))
++      del part_tensors
+     # A stack of tensors split over all devices stays as read until the final reshard. `sharding_at` leaves out
+     # the target's sharding of the axes not stacked yet, so placing an inner stack with it copies the stack across
+     # those mesh axes: with ici_expert_parallelism=16, the DeepSeek-V3 experts took 16 times their final size on
+@@ -330,14 +366,26 @@ def _build_multi_axis_stacked_tensor(
+     if as_read:
+       return tensor, True
+     if target_sharding is not None and level > 0:
+-      tensor = _reshard(tensor, sharding_at(level))
++      # Below the leaf level `tensor` is a stack built here; at the leaf level it may be the HF tensor itself.
++      tensor = _reshard(tensor, sharding_at(level), delete_input=level < depth)
+     return tensor, False
+ 
+-  stacked_array = gather(hf_source_keys, 0)[0].astype(target_dtype)
++  raw_stacked = gather(hf_source_keys, 0)[0]
++  stacked_array = raw_stacked.astype(target_dtype)
++  if stacked_array is not raw_stacked:
++    jax.block_until_ready(stacked_array)
++    if isinstance(raw_stacked, jax.Array) and not raw_stacked.is_deleted():
++      raw_stacked.delete()
++  del raw_stacked
+   if axes != tuple(range(depth)):
+-    stacked_array = np.moveaxis(stacked_array, tuple(range(depth)), axes)
+-  if target_sharding is not None:
+-    stacked_array = _reshard(stacked_array, target_sharding)
++    moved = np.moveaxis(stacked_array, tuple(range(depth)), axes)
++    if moved is not stacked_array:
++      jax.block_until_ready(moved)
++      if isinstance(stacked_array, jax.Array) and not stacked_array.is_deleted():
++        stacked_array.delete()
++    stacked_array = moved
++  if target_sharding is not None and not isinstance(mt_key, tuple):
++    stacked_array = _reshard(stacked_array, target_sharding, delete_input=True)
+   return stacked_array
+ 
+ 
+@@ -395,12 +443,22 @@ def _build_single_axis_stacked_tensor(
+     processed_hf_tensor = _apply_hook_fns_any_host(hf_tensor, mt_slice_shape, hook_fns)
+ 
+     if target_sharding is not None and not _split_over_all_devices(processed_hf_tensor):
+-      processed_hf_tensor = _reshard(processed_hf_tensor, slice_sharding)
++      # Only a hook output may be freed; without a hook the tensor may still be held in the HF state.
++      processed_hf_tensor = _reshard(
++          processed_hf_tensor, slice_sharding, delete_input=processed_hf_tensor is not hf_tensor
++      )
+     tensors_to_stack.append(processed_hf_tensor)
+ 
+-  stacked_array = _binary_chunked_stack(tensors_to_stack, axis=axis_to_stack).astype(target_dtype)
+-  if target_sharding is not None:
+-    stacked_array = _reshard(stacked_array, target_sharding)
++  raw_stacked = _binary_chunked_stack(tensors_to_stack, axis=axis_to_stack)
++  del tensors_to_stack
++  stacked_array = raw_stacked.astype(target_dtype)
++  if stacked_array is not raw_stacked:
++    jax.block_until_ready(stacked_array)
++    if isinstance(raw_stacked, jax.Array) and not raw_stacked.is_deleted():
++      raw_stacked.delete()
++  del raw_stacked
++  if target_sharding is not None and not isinstance(mt_key, tuple):
++    stacked_array = _reshard(stacked_array, target_sharding, delete_input=True)
+   return stacked_array
+ 
+ 
+@@ -423,10 +481,13 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
+     # Case 1: Single hf key (str), or a tuple of keys that the hook fuses into one leaf
+     def _loader(getter, key, leaf, hook):
+       if hasattr(leaf, "sharding"):
+-        array = _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf.shape, hook)
++        raw = _get_hf_tensor(getter, key)
++        array = _apply_hook_fns_any_host(raw, leaf.shape, hook)
+         # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
+         # even when weight_dtype is float32.
+-        return _reshard(array.astype(leaf.dtype), leaf.sharding)
++        cast = array.astype(leaf.dtype)
++        # Without a hook or a cast, `cast` is the HF tensor itself, which may still be held in the HF state.
++        return _reshard(cast, leaf.sharding, delete_input=cast is not raw)
+       else:
+         return _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf, hook)
+ 
