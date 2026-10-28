@@ -9,6 +9,8 @@ Responsibilities:
          * `/tmp/maxtext_origin_main`: `origin/main` (`f596f5369`, before Lance Wang's 3 PRs) for Experiment 1A comparison.
          * `/tmp/maxtext_hbmfix`: `/tmp/maxtext` with the HBM-peak fix for composite keys (`load_dynamic.py` and
            `tensor_handling.py` from `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`), used only by runs labeled hbmfix.
+         * `/tmp/maxtext_stagefix`: a symlink to `/tmp/maxtext` that marks pods started with the RAM-aware
+           `to_maxtext` staging, so queue tasks that need it are only claimed by those pods.
        A run selects its tree by running `<tree>/checkpoint_load_benchmark/benchmark_ckpt_load_time.py`; the harness
        copies itself to the same path on the slice-1 daemon, so both slices use the same tree.
      - Patches `load_dynamic.py` to use single-GET streaming (`1` HTTP GET per `.safetensors` shard with 32 MB GCS upload chunks)
@@ -234,7 +236,20 @@ def setup_environment() -> None:
     )
 
   stage_hbmfix_tree()
+  stage_stagefix_alias()
   print(f"[Bootstrap] Environment ready in {time.time() - t0:.2f}s", flush=True)
+
+
+def stage_stagefix_alias() -> None:
+  """Links `/tmp/maxtext_stagefix` to `/tmp/maxtext` on pods started with the RAM-aware `to_maxtext` staging.
+
+  Queue workers started before `tpu7x_task_queue.py` synced the harness per task keep the harness from pod start,
+  and only claim tasks whose tree exists on their pod. Tasks that need the RAM-aware staging (qwen3-235b-a22b:
+  470 GB staged in RAM plus the 470 GB converted state OOM-killed the pod) name this tree, so older pods skip them.
+  """
+  if not os.path.lexists("/tmp/maxtext_stagefix"):
+    os.symlink("/tmp/maxtext", "/tmp/maxtext_stagefix")
+  print("[Bootstrap] Linked /tmp/maxtext_stagefix -> /tmp/maxtext", flush=True)
 
 
 def stage_hbmfix_tree() -> None:

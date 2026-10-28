@@ -93,7 +93,14 @@ fi
 if [[ "${ACTION}" == "cleanup" ]]; then
   echo "[run_tpu7x_cluster] Cleaning up all mesakh-tpu7x-bench pods and services on ${CLUSTER_CONTEXT}..."
   kubectl --context="${CLUSTER_CONTEXT}" delete pod,svc -l app=mesakh-tpu7x-bench --ignore-not-found
-  kubectl --context="${CLUSTER_CONTEXT}" delete svc mesakh-w1-a mesakh-w1-b mesakh-w1-c mesakh-w1-d mesakh-w1-e mesakh-w1-f --ignore-not-found
+  # The headless daemon Services (mesakh-w<k>-<id>) carry no labels, so delete them by name. mesakh-ctrl-c1 is the
+  # first recovery controller, created before the controllers got the app label.
+  daemon_svcs=$(kubectl --context="${CLUSTER_CONTEXT}" get svc -o name | grep -E '^service/mesakh-w[0-9]+-' || true)
+  if [[ -n "${daemon_svcs}" ]]; then
+    # shellcheck disable=SC2086
+    kubectl --context="${CLUSTER_CONTEXT}" delete ${daemon_svcs} --ignore-not-found
+  fi
+  kubectl --context="${CLUSTER_CONTEXT}" delete pod mesakh-ctrl-c1 --ignore-not-found
   exit 0
 fi
 
