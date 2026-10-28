@@ -488,6 +488,11 @@ class MetricLogger:
     kind = entry[0]
     if kind == "train":
       _, step, metrics, step_time_delta = entry
+      if os.environ.get("OLMOE3_FAST_HOST_LOOP", "0") == "1" and "scalar" in metrics:
+        # One batched device_get instead of a transfer per metric (each is a proxy round trip under Pathways).
+        metrics["scalar"] = {
+            k: float(v) if v is not None and np.ndim(v) == 0 else v for k, v in jax.device_get(metrics["scalar"]).items()
+        }
       self.write_metrics(metrics, step)
       # tracked_stats calls .item() on learning/loss. Deferring it to here means the step it
       # belongs to has already completed, so the materialization does not block the train loop.
@@ -550,7 +555,15 @@ class MetricLogger:
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
     if step_time > 0:
       metrics["scalar"].update({"perf/steps_per_sec": 1.0 / step_time})
-    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    if os.environ.get("OLMOE3_FAST_HOST_LOOP", "0") == "1":
+      try:
+        with jax.default_device(jax.local_devices(backend="cpu")[0]):
+          lr_val = float(self.learning_rate_schedule(step))
+      except Exception:  # pylint: disable=broad-except
+        lr_val = self.learning_rate_schedule(step)
+      metrics["scalar"].update({"learning/current_learning_rate": lr_val})
+    else:
+      metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
     if step >= self.config.rampup_end_step:
       metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
       metrics["scalar"].update(

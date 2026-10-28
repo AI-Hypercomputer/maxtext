@@ -94,8 +94,9 @@ class LatentFFNTiling:
   dwo: Tile3 = (512, 768, 896)
   vmem_limit_bytes: int | None = None
   # Feed the backward kernels pre-transposed weight copies (wo^T [E, D, F], wi^T [E, F, D]; a few MB each) so
-  # every in-kernel matmul is a plain [m, k] @ [k, n] instead of a transposed-rhs one.
-  pretranspose_weights: bool = False
+  # every in-kernel matmul is a plain [m, k] @ [k, n] instead of a transposed-rhs one. On by default: the
+  # TPU v4 8x8x48 / 3x v4-2048 OLMoE3 benchmarks ran with it.
+  pretranspose_weights: bool = True
   # TGMM contraction over rows: "swap" transposes the lhs tile explicitly, "dot_general" lets Mosaic contract
   # dim 0 of both operands.
   tgmm_lhs_mode: str = "swap"

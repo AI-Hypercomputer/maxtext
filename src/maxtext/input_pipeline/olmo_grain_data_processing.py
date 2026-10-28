@@ -152,12 +152,51 @@ def _make_loader_for_host(
 
 
 def make_olmo_grain_train_iterator(config, global_mesh, process_indices):
-  """Train iterator for ``dataset_type=olmo_grain``."""
+  """Train iterator for ``dataset_type=olmo_grain`` (supports both Driver/McJAX and Pathways Colocated Python)."""
   if not getattr(config, "olmo_index_path", ""):
     raise ValueError(
         "When dataset_type=olmo_grain, please set config.olmo_index_path to "
         "the JSON produced by tools/data_generation/build_olmo_npy_index.py."
     )
+  if getattr(config, "colocated_python_data_input", False):
+    seed_val = int(getattr(config, "data_shuffle_seed", 0))
+    global_idx_path = getattr(config, "olmo_global_indices_path", "") or ""
+    resumed_step = _detect_resumed_step(config)
+
+    def _cp_get_ds_fn(dataloading_host_index: int, dataloading_host_count: int):
+      return (int(dataloading_host_index), int(dataloading_host_count))
+
+    def _cp_preprocessing_fn(dataset):
+      shard_index, shard_count = dataset
+      idx = load_index(config.olmo_index_path)
+      per_host_batch = config.global_batch_size_to_load // shard_count
+      worker_count = max(int(getattr(config, "grain_worker_count", 0) or 0), 0)
+      worker_buffer = int(getattr(config, "grain_per_worker_buffer_size", 1) or 1)
+      return make_olmo_grain_data_loader(
+          idx,
+          seed=seed_val,
+          batch_size=per_host_batch,
+          shard_index=shard_index,
+          shard_count=shard_count,
+          apply_ngram_filter=getattr(config, "olmo_apply_ngram_filter", True),
+          segment_eos_token_id=int(getattr(config, "olmo_segment_eos_token_id", -1)),
+          shift_to_inputs_targets=True,
+          path_remap=_build_path_remap(config),
+          grain_worker_count=worker_count,
+          grain_worker_buffer_size=worker_buffer,
+          initial_step=resumed_step * per_host_batch,
+          global_indices_path=global_idx_path,
+      )
+
+    return multihost_dataloading.RemoteIteratorWrapper(
+        _cp_get_ds_fn,
+        _cp_preprocessing_fn,
+        global_mesh,
+        (config.global_batch_size_to_load, config.max_target_length),
+        checkpoint_path=config.checkpoint_dir,
+        elastic=False,
+    )
+
   loader = _make_loader_for_host(
       config,
       process_indices=process_indices,

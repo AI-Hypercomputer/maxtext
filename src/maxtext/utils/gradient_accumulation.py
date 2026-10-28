@@ -14,6 +14,7 @@
 
 """Functions for gradient accumulation (GA)"""
 
+import contextlib
 import functools
 
 import jax
@@ -78,12 +79,36 @@ def gradient_accumulation_loss_and_grad(
   # FSDP already consumes every device — in which case data parallelism is not active.
   param_mesh = jax.tree.leaves(params_shardings)[0].mesh
   data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
+  cast_params_to_compute_dtype = getattr(config, "cast_params_to_compute_dtype", False)
   if data_parallel_active:
     # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
     # traces its body against an AbstractMesh whose axis types are all Auto, and the
     # annotations require Explicit axes. Keep plain params_shardings in the carry and
     # apply the data-parallel all-reduce to the gradients after the scan instead.
     ga_params_shardings = params_shardings
+    grad_shardings = params_shardings
+  elif config.shard_optimizer_over_data and cast_params_to_compute_dtype and param_mesh.shape.get("data", 1) > 1:
+    # Opt-in (cast_params_to_compute_dtype): gather the ZeRO-1 params over "data" once, in the compute dtype,
+    # before the loop instead of inside every micro-batch.
+
+    def _strip_data_axis(s):
+      if not isinstance(s, NamedSharding):
+        return s
+      new_dims = []
+      changed = False
+      for d in s.spec:
+        if d == "data":
+          new_dims.append(None)
+          changed = True
+        elif isinstance(d, tuple) and "data" in d:
+          rem = tuple(ax for ax in d if ax != "data")
+          new_dims.append(rem[0] if len(rem) == 1 else (rem if rem else None))
+          changed = True
+        else:
+          new_dims.append(d)
+      return NamedSharding(s.mesh, jax.sharding.PartitionSpec(*new_dims)) if changed else s
+
+    ga_params_shardings = jax.tree.map(_strip_data_axis, params_shardings)
     grad_shardings = params_shardings
   else:
     ga_params_shardings = grad_shardings = params_shardings
@@ -93,7 +118,19 @@ def gradient_accumulation_loss_and_grad(
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
-  if config.shard_optimizer_over_data:
+  if cast_params_to_compute_dtype:
+    # Same rule as train.py's GA=1 cast: large fp32 weights go to the compute dtype; router kernels (`gate`) and
+    # small tensors (norms, convs, decay parameters) stay fp32.
+
+    def _cast_large_non_gate_to_compute_dtype(path, x):
+      if not hasattr(x, "dtype") or x.dtype != jnp.float32 or x.size < (1 << 22):
+        return x
+      if any(getattr(k, "key", None) == "gate" for k in path):
+        return x
+      return x.astype(getattr(config, "dtype", jnp.bfloat16))
+
+    ga_params = jax.tree_util.tree_map_with_path(_cast_large_non_gate_to_compute_dtype, params)
+  elif config.shard_optimizer_over_data:
 
     def convert_to_bf16(param):
       if param.dtype == jnp.float32:
@@ -136,15 +173,25 @@ def gradient_accumulation_loss_and_grad(
       # params to this micro-batch's data makes them loop-variant. On olmo35-tiny at v4-2048, GA=2, this cut the
       # compiled temporaries from 49.9 to 44.3 GB.
       ga_params, data = jax.lax.optimization_barrier((ga_params, data))
-    # Scope double-buffering to model scans, not the enclosing gradient accumulation scan.
-    # This metadata only affects XLA:GPU; see https://github.com/openxla/xla/pull/43468.
-    # Enable it with JAX_OPTIMIZATION_LEVEL=O1 and
+    # Scope double-buffering to model scans, not the enclosing gradient
+    # accumulation scan. `_xla_loop_unroll_strategy` is only read by XLA:GPU
+    # (https://github.com/openxla/xla/pull/43468); enable it with
+    # JAX_OPTIMIZATION_LEVEL=O1 and
     # XLA_FLAGS="--xla_gpu_enable_while_loop_unrolling=WHILE_LOOP_UNROLLING_MANUAL_UNROLL".
+    # Skip on TPU/CPU: `set_xla_metadata` pre-populates frontend attributes on
+    # every traced op, causing XLA's CallInliner to drop `_xla_compute_type`
+    # from `compute_on("device")` calls and XLA:TPU to auto-offload those
+    # collectives to SparseCore.
+    loop_unroll_ctx = (
+        set_xla_metadata(_xla_loop_unroll_strategy="double-buffer")
+        if getattr(config, "hardware", "tpu") in ("gpu", "gpu_multiprocess")
+        else contextlib.nullcontext()
+    )
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
-      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+      with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
@@ -154,7 +201,7 @@ def gradient_accumulation_loss_and_grad(
           if dropout_rng is not None
           else None
       )
-      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+      with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
