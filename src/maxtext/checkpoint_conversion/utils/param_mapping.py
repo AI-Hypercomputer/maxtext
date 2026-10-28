@@ -4371,6 +4371,81 @@ def MING_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
   return hooks
 
 
+def MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText Ming talker keys to the HF `talker/model.safetensors` + `talker/vae/model.safetensors` keys.
+
+  The talker LLM is a Qwen2 decoder (`model.*`, reusing the Qwen mapping; embeddings are tied so there is
+  no `lm_head`). The heads live under `params-ming_talker-*` (see `maxtext.models.ming_talker`). Only the
+  AudioVAE decoder is mapped (`decoder.*`); the VAE encoder is used for voice cloning only.
+  """
+  mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+  mapping.pop("params-decoder-logits_dense-kernel", None)
+
+  def dense(mt_prefix, hf_prefix, bias=True):
+    mapping[f"{mt_prefix}-kernel"] = f"{hf_prefix}.weight"
+    if bias:
+      mapping[f"{mt_prefix}-bias"] = f"{hf_prefix}.bias"
+
+  def dit_blocks(mt_prefix, hf_prefix, num_layers):
+    for i in range(num_layers):
+      mt, hf = f"{mt_prefix}-blocks_{i}", f"{hf_prefix}.blocks.{i}"
+      mapping[f"{mt}-norm1-scale"] = f"{hf}.norm1.weight"
+      mapping[f"{mt}-norm2-scale"] = f"{hf}.norm2.weight"
+      for name in ("to_q", "to_k", "to_v"):
+        dense(f"{mt}-attn-{name}", f"{hf}.attn.{name}")
+      dense(f"{mt}-attn-to_out", f"{hf}.attn.to_out.0")
+      dense(f"{mt}-mlp_in", f"{hf}.mlp.ff.0.0")
+      dense(f"{mt}-mlp_out", f"{hf}.mlp.ff.2")
+    mapping[f"{mt_prefix}-final_norm-scale"] = f"{hf_prefix}.final_layer.norm_final.weight"
+    dense(f"{mt_prefix}-final_linear", f"{hf_prefix}.final_layer.linear")
+
+  cfm, hf_cfm = "params-ming_talker-cfm", "cfm.model"
+  dense(f"{cfm}-x_embedder", f"{hf_cfm}.x_embedder")
+  dense(f"{cfm}-c_embedder", f"{hf_cfm}.c_embedder.cond_embedder")
+  dense(f"{cfm}-time_fc1", f"{hf_cfm}.t_embedder.time_mlp.0")
+  dense(f"{cfm}-time_fc2", f"{hf_cfm}.t_embedder.time_mlp.2")
+  dit_blocks(cfm, hf_cfm, maxtext_config.ming_talker_dit_num_layers)
+
+  agg = "params-ming_talker-aggregator"
+  mapping[f"{agg}-word_embedder"] = "aggregator.word_embedder.weight"
+  dense(f"{agg}-x_embedder", "aggregator.x_embedder")
+  dit_blocks(agg, "aggregator", maxtext_config.ming_talker_aggregator_num_layers)
+
+  dense("params-ming_talker-stop_head", "stop_head")
+  dense("params-ming_talker-spk_head", "spk_head")
+
+  vae, hf_vae = "params-ming_talker-audio_vae", "decoder"
+  dense(f"{vae}-fc1", f"{hf_vae}.fc1")
+  for i in range(maxtext_config.ming_vae_num_layers):
+    mt, hf = f"{vae}-layers_{i}", f"{hf_vae}.decoder.layers.{i}"
+    mapping[f"{mt}-input_layernorm-scale"] = f"{hf}.input_layernorm.weight"
+    mapping[f"{mt}-post_attention_layernorm-scale"] = f"{hf}.post_attention_layernorm.weight"
+    for name in ("q_proj", "k_proj", "v_proj"):
+      dense(f"{mt}-{name}", f"{hf}.self_attn.{name}")
+    dense(f"{mt}-o_proj", f"{hf}.self_attn.o_proj", bias=False)
+    for name in ("gate_proj", "up_proj", "down_proj"):
+      dense(f"{mt}-{name}", f"{hf}.mlp.{name}", bias=False)
+  mapping[f"{vae}-norm-scale"] = f"{hf_vae}.decoder.norm.weight"
+  dense(f"{vae}-head_out", f"{hf_vae}.head.out")
+  return mapping
+
+
+def MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Qwen hooks for the talker LLM plus transposed `[in, out]` <-> `[out, in]` kernels for the heads."""
+  hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
+  hooks.pop("params-decoder-logits_dense-kernel", None)
+
+  def linear(x, target_shape):
+    if saving_to_hf:
+      return x.reshape(np.flip(np.array(target_shape))).T
+    return x.T.reshape(target_shape)
+
+  for mt_key in MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers):
+    if mt_key.startswith("params-ming_talker-") and mt_key.endswith("-kernel"):
+      hooks[mt_key] = linear
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 
 
@@ -5290,6 +5365,7 @@ PARAM_MAPPING = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -5357,6 +5433,7 @@ HOOK_FNS = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {
