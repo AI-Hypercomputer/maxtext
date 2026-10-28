@@ -34,7 +34,7 @@
 #                      list; finished tasks (queue/p1/done/*.json) are never re-run.
 #   --priority multihost --run <id>
 #                    : Multi-host slices (2x2x2, 2x2x4): deploy the JobSet <owner>-mh-<id> from
-#                      MH_RUNS in generate_tpu7x_manifests.py (smoke, 235b, 284b, 397b, 480b,
+#                      MH_RUNS in generate_tpu7x_manifests.py (smoke, 235b, 284b, 397b, 397b-u, 480b,
 #                      671b, 235b-2s). <owner> is $BENCH_OWNER (default $USER). Code goes to
 #                      gs://mesa-maxtext/<owner>_tpu7x_bench/code, never to the mesakh code dir.
 #                      With --status / --cleanup, acts on that owner's JobSets only.
