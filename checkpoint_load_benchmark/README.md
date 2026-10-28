@@ -67,7 +67,7 @@ checkpoint_load_benchmark/
 ### 2.2 Priority 1 (`>200B`) Experiment Structure on `bodaborg-tpu7x-nap`
 Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x_manifests.py`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/generate_tpu7x_manifests.py):
 1. **Step 1 — `safetensors_dynamic` WITH Lance's 3 PRs (`#5706 + #5828 + #5705`)**: Runs `scanned` and `unscanned` across `num_slices=1` (`8` TPU cores) and `num_slices=2` (`16` TPU cores) using `/tmp/maxtext` (`origin/docs/checkpoint-load-benchmark`).
-2. **Step 2 — `safetensors_dynamic` BEFORE Lance's 3 PRs (`origin/main`)**: Runs the same `>200B` models against `/tmp/maxtext_origin_main` (`f596f5369`) reusing the populated GCS `hf_cache` (`SHARED_HF_CACHE_BASE_DIR`) with a per-phase watchdog (`PHASE_TIMEOUT_S=900` in the generated pair manifests; the later DeepSeek re-run on `c1+f1` used `360`) to capture `origin/main` failures (`KeyError` for models without a mapping, e.g. `qwen3-480b-a35b`; slow full-file multi-host reads that exceed the watchdog). A watchdog limit below the WITH-PRs load time is inconclusive (see [`handoff.md`](handoff.md)).
+2. **Step 2 — `safetensors_dynamic` BEFORE Lance's 3 PRs (`origin/main`)**: Runs the same `>200B` models against `/tmp/maxtext_origin_main` (`f596f5369`) reusing the populated GCS `hf_cache` (`SHARED_HF_CACHE_BASE_DIR`) with a per-phase watchdog (`PHASE_TIMEOUT_S`: the original P1 pairs were deployed with `360`, the generator now uses `900`, and the completion queue re-runs BEFORE at `1800`) to capture `origin/main` failures (`KeyError` for models without a mapping, e.g. `qwen3-480b-a35b`; slow full-file multi-host reads that exceed the watchdog). A watchdog limit below the WITH-PRs load time is inconclusive (see [`handoff.md`](handoff.md)).
 3. **Step 3 — Full `to_maxtext` vs. `safetensors_dynamic` Comparison**: Runs `to_maxtext` Steps 1, 2, and 3 alongside the completed `safetensors_dynamic` runs (`--skip-completed`) and writes consolidated CSV/JSON results to `gs://mesa-maxtext/mesakh_tpu7x_bench/results/`.
 
 ---
@@ -267,6 +267,7 @@ python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
 ## 7. Benchmark Reports & Results (`reports/`)
 
 ### 7.1 TPU v7 (`bodaborg-tpu7x-nap`, `tpu7x-standard-4t`) Reports
+- **[Priority 1 (`>200B`) Progress: Every Test and Its Status](reports/tpu7x_priority1_progress.md)** *(live tracker, updated with the completion queue)*
 - **[Priority 1 (`>200B` Models): Before vs. After Lance's 3 PRs & `to_maxtext` vs. `safetensors_dynamic`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_large_model_200b_experiment_report.md)**
 - **[`tpu7x` Executive Summary (Two-Row Side-by-Side Comparison Table)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.md)**
 - **[`tpu7x` Full Technical Report (Sub-Phase Timings, Scaling & HBM/RAM Analysis)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_report.md)**
