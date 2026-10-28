@@ -56,6 +56,7 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 
@@ -148,6 +149,7 @@ def train_loop(config) -> float:
 
   with jax.set_mesh(mesh):
     model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+    model = m3_scan.maybe_apply_scan(model, config)
     optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))

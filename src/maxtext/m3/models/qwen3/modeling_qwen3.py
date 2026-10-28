@@ -315,7 +315,7 @@ class Qwen3DecoderLayer(nnx.Module):
 
 
 class Qwen3Decoder(nnx.Module):
-  """Qwen3 Decoder stack composing decoder layers with flat attribute naming."""
+  """Qwen3 decoder stack with an `nnx.Sequential` of decoder layers."""
 
   def __init__(
       self,
@@ -334,15 +334,8 @@ class Qwen3Decoder(nnx.Module):
       layer_cls: Decoder layer constructor for model-family subclasses.
     """
     self.config = config
-    self.num_layers = config.num_decoder_layers
 
-    # Flat attribute names: layers_0, layers_1, ...
-    for lyr in range(self.num_layers):
-      layer = layer_cls(
-          config=config,
-          rngs=rngs,
-      )
-      setattr(self, f"layers_{lyr}", layer)
+    self.layers = nnx.Sequential(*(layer_cls(config=config, rngs=rngs) for _ in range(config.num_decoder_layers)))
 
     self.decoder_norm = nnx.RMSNorm(
         num_features=config.emb_dim,
@@ -361,22 +354,7 @@ class Qwen3Decoder(nnx.Module):
     """Applies final decoder norm and projects hidden states to logits via tied embedding."""
     y = self.decoder_norm(y)
     attend_dtype = jnp.float32 if self.config.logits_dot_in_fp32 else self.config.dtype
-    if self.config.logits_dot_in_fp32:
-      table = (
-          shared_embedding.embedding.value
-          if hasattr(shared_embedding, "embedding")
-          else getattr(shared_embedding, "value", shared_embedding)
-      )
-      logits = jnp.dot(y.astype(attend_dtype), jnp.asarray(table, attend_dtype).T)
-    elif hasattr(shared_embedding, "attend"):
-      logits = shared_embedding.attend(y)
-    else:
-      table = (
-          shared_embedding.embedding.value
-          if hasattr(shared_embedding, "embedding")
-          else getattr(shared_embedding, "value", shared_embedding)
-      )
-      logits = jnp.dot(y.astype(attend_dtype), jnp.asarray(table, attend_dtype).T)
+    logits = jnp.dot(y.astype(attend_dtype), shared_embedding.embedding[...].astype(attend_dtype).T)
 
     if self.config.normalize_embedding_logits:
       logits = logits / jnp.sqrt(y.shape[-1])
@@ -399,14 +377,12 @@ class Qwen3Decoder(nnx.Module):
     """Iterates through all decoder layers and projects to logits via tied embeddings."""
     y = shared_embedding(decoder_input_tokens)
 
-    for lyr in range(self.num_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      y = layer(
-          y,
-          decoder_segment_ids=decoder_segment_ids,
-          decoder_positions=decoder_positions,
-          deterministic=deterministic,
-      )
+    y = self.layers(
+        y,
+        decoder_segment_ids=decoder_segment_ids,
+        decoder_positions=decoder_positions,
+        deterministic=deterministic,
+    )
 
     logits = self.apply_output_head(shared_embedding, y, deterministic=deterministic)
     return logits, y

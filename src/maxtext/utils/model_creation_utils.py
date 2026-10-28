@@ -55,6 +55,7 @@ from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import models
+from maxtext.m3.core import checkpoint as m3_checkpoint
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
@@ -621,8 +622,11 @@ def create_model(
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
-    return m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+    model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+    model = m3_scan.maybe_apply_scan(model, config)
+    return model
 
   # Model definition
   quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
@@ -1176,6 +1180,10 @@ def from_pretrained(
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
 
+        if config.use_m3_model:
+          target_for_restore = m3_checkpoint.match_checkpoint_layer_names(
+              target_for_restore, metadata.item_metadata.tree["params"]["params"]
+          )
         target_for_restore = _adjust_target_for_moe_fusion(
             target_for_restore, metadata.item_metadata.tree["params"]["params"], False
         )
@@ -1246,6 +1254,8 @@ def from_pretrained(
             param_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
+        if config.use_m3_model:
+          target_for_restore = m3_checkpoint.match_checkpoint_layer_names(target_for_restore, meta_tree_for_params)
         target_for_restore = _adjust_target_for_moe_fusion(
             target_for_restore,
             meta_tree_for_params,
@@ -1309,6 +1319,9 @@ def from_pretrained(
             checkpoint = checkpointing._deep_merge_dicts(checkpoint, col_tree)  # pylint: disable=protected-access
 
       if checkpoint:
+        if config.use_m3_model:
+          checkpoint = m3_checkpoint.from_legacy_layer_names(checkpoint, sharded_state)
+
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
         # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to
         # access the inner value directly without index-style descent.
@@ -1442,6 +1455,8 @@ def setup_decode_state_from_nnx(model, config, rng, mesh):
 
   nnx_param_state = nnx.state(nnx_model, nnx.Param)
   raw_params = _state_to_dict(nnx_param_state)
+  if config.use_m3_model:
+    raw_params = m3_checkpoint.to_legacy_layer_names(raw_params)  # The linen decode model uses `layers_<i>`.
   del nnx_model, nnx_param_state  # free memory
 
   params = {"params": raw_params}

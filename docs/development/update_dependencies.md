@@ -152,6 +152,8 @@ python3 src/dependencies/scripts/generate_decoupled_requirements.py
 
 The `decoupled-requirements` pre-commit hook fails when a change under `src/dependencies/requirements/` leaves this file stale.
 
+This file has no base or override file of its own, so a change to a pre-training base file (for example, raising the `flax` floor in `base_requirements/cuda12-requirements.txt`) also changes it.
+
 ### Optional TensorFlow and JetStream dependencies
 
 Optional TensorFlow, SeqIO, and JetStream dependencies are listed with pinned versions in `src/dependencies/extra_deps/tf_requirements.txt` and installed with `--no-deps` when `--with-tf` is passed to `install_pre_train_extra_deps.py`.
