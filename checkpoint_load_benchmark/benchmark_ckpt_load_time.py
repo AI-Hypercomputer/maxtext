@@ -154,7 +154,9 @@ def get_concurrent_gb(model_name: str, scan_mode: str = "scanned", num_slices: i
   if scan_mode == "unscanned":
     return 24
   if model_name == "llama3.1-70b":
-    return 20 if num_slices > 1 else 38
+    # The largest scanned leaf is 37.58 GB. On tpu7x, a 2-slice restore with dcn_fsdp_parallelism=2 still requests
+    # the whole leaf per process (`Requested more bytes than we reserved space for: 37580963840 > 20000000000`).
+    return 38
   if model_name in ("mixtral-8x7b", "gpt-oss-120b", "qwen3-next-80b-a3b"):
     return 45
   if model_name in ("mixtral-8x22b", "deepseek4-284b"):
@@ -505,7 +507,7 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
           for b in gcs_storage.Client().list_blobs(c_bucket, prefix=c_prefix.rstrip("/") + "/")
       }
       if all(cached.get(os.path.basename(f), 0) > 0 for f in files):
-        # The cold download is the largest Step 1 time recorded for this model; warm cache checks take ~1 s.
+        # The cold download is the largest Step 1 time recorded for this model; warm cache checks take under 1 s.
         recorded = []
         for res in epath.Path(f"{args.gcs_run_dir}/logs/{args.model}").glob("*/*_result.json"):
           if res.name in ("safetensors_dynamic_result.json", "to_maxtext_step1_result.json"):
@@ -515,7 +517,7 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
               pass
         cold_s = max(recorded, default=0.0)
         gcs_cache_dir = shared_st_cache_dir
-        hf_to_gcs_s = cold_s if cold_s >= 60.0 else 0.0
+        hf_to_gcs_s = cold_s if cold_s >= 1.0 else 0.0
         reused_existing = True
         cold_note = f"recorded cold HF->GCS={hf_to_gcs_s:.2f}s" if hf_to_gcs_s else "no cold HF->GCS time in this run dir"
         print(

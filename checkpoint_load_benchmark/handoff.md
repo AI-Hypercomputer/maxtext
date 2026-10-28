@@ -275,7 +275,7 @@ Gone (all recorded in §7.14 and §7.18):
 17. **Two workers re-downloaded the 397B checkpoint from HF Hub into the shared GCS cache** while other runs read it (13:26–13:38 UTC).
     - **Cause:** TM Step 1 reused the shared cache only if the scanned 1-slice `safetensors_dynamic` record had a cold Step 1 time. For 397B, that record is an infra failure with `hf_to_gcs_s=0`.
     - **What I did:** stopped both workers by replacing their task locks with a far-future heartbeat (worker `hold-coordinator`), which made their workers drop the tasks (LOST LOCK).
-    - **Fix:** TM Step 1 now reuses the cache when all shards are present. The cold time recorded with it is the largest Step 1 time recorded for the model, or 0 if only warm checks (<60 s) exist (397B: use 814.53 s from the ST run).
+    - **Fix:** TM Step 1 now reuses the cache when all shards are present. The cold time recorded with it is the largest Step 1 time recorded for the model, or 0 if only warm checks (under 1 s) exist (397B: use 814.53 s from `results/p1_st_lance_b.csv`).
     - **Impact on other runs:** an interrupted upload never replaces an object, and the re-uploaded bytes are identical. The concurrent `hbmfix` load completed and failed later in HBM, for the reason in §7.19. The BEFORE 397B load (`origin/main`) overlapped the re-download and never left its load phase before the 1800 s timeout. With the PRs, that load takes 515.9 s, so the overlap can't explain the gap; the reports still mention it.
 18. **More capacity loss during the scale-out:**
     - Kueue deactivated `g1` at 13:32 UTC (`The workload is deactivated`, same as `c1` in §7.14), so its daemon controller and slice 1 (`h1`) were deleted.
