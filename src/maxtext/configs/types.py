@@ -103,9 +103,15 @@ class QuantizationType(str, Enum):
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
+  JAX_MXFP8 = "jax_mxfp8"
+  JAX_MXFP4 = "jax_mxfp4"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
   SERVE_FP8_WEIGHT = "serve_fp8_weight"
+
+
+# The OCP MX recipes that run through jax.nn.scaled_dot_general.
+JAX_MX_QUANTIZATIONS = (QuantizationType.JAX_MXFP8.value, QuantizationType.JAX_MXFP4.value)
 
 
 class TEGroupedGemmQuantizationType(str, Enum):
@@ -522,6 +528,10 @@ class Quantization(BaseModel):
   quantization: None | QuantizationType = Field(
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
+  )
+  jax_mx_gradient_mode: Literal["", "mxfp8", "mxfp4"] = Field(
+      "",
+      description="Gradient format for jax_mxfp8 / jax_mxfp4: '' (same as the operands), 'mxfp8' or 'mxfp4'.",
   )
   unquantized_modules: list[str] = Field(
       default_factory=list,
@@ -4662,6 +4672,28 @@ class MaxTextConfig(
       )
     return self
 
+  def _validate_jax_mx_quantization(self) -> None:
+    """Rejects jax_mxfp8 and jax_mxfp4 settings that would silently leave GEMMs unquantized or fail obscurely in JAX."""
+    name = QuantizationType(self.quantization).value
+    if self.use_qwix_quantization:
+      raise ValueError(f"quantization='{name}' does not support use_qwix_quantization=True.")
+    if self.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(f"quantization='{name}' does not support shard_mode='explicit'.")
+    if self.num_experts > 1:
+      raise ValueError(f"quantization='{name}' does not support MoE models (num_experts > 1).")
+    if is_fp8_dtype(self.weight_dtype):
+      raise ValueError(
+          f"quantization='{name}' quantizes the weights itself; weight_dtype must not be fp8, got"
+          f" '{DType(self.weight_dtype).value}'."
+      )
+    if self.hardware not in ("gpu", "gpu_multiprocess"):
+      logger.warning(
+          "quantization='%s' has native MX kernels on GPU only; on hardware='%s' JAX dequantizes before "
+          "each GEMM, so steps are slower than bf16.",
+          name,
+          self.hardware,
+      )
+
   @model_validator(mode="after")
   def resolve_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
     """Resolve the tri-state flag, and reject it where it cannot be honored.
@@ -5016,6 +5048,7 @@ class MaxTextConfig(
       if self.quantization not in (
           "fp8",
           "nanoo_fp8",
+          *JAX_MX_QUANTIZATIONS,
       ) and not self.quantization.startswith("te_"):
         logger.warning(
             "WARNING: AQT quantization is deprecated and will be removed in a future release. "
@@ -6428,6 +6461,9 @@ class MaxTextConfig(
             "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
             "counterparts) to 1, or turn off `shard_optimizer_over_data`."
         )
+
+    if self.quantization in JAX_MX_QUANTIZATIONS:
+      self._validate_jax_mx_quantization()
 
     # Diloco params
     # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
