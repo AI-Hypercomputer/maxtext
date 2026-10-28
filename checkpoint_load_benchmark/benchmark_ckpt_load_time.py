@@ -911,6 +911,8 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   token = get_hf_token()
   num_slices = getattr(args, "num_slices", 1)
   slice_suffix = f"_slices{num_slices}" if num_slices > 1 else ""
+  if getattr(args, "num_hosts_per_slice", 1) > 1:
+    slice_suffix += f"_hosts{args.num_hosts_per_slice}"
 
   concurrent_gb = get_concurrent_gb(args.model, args.scan_mode, num_slices)
   multi_slice_flags = _get_parallelism_flags(args, concurrent_gb)
@@ -973,7 +975,7 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
         maxtext_config=config,
     )
     jax.block_until_ready(raw_params)
-  if num_slices > 1:
+  if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
     multihost_utils.sync_global_devices("orbax_step3_load_complete")
@@ -1109,6 +1111,8 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   token = get_hf_token()
   num_slices = getattr(args, "num_slices", 1)
   slice_suffix = f"_slices{num_slices}" if num_slices > 1 else ""
+  if getattr(args, "num_hosts_per_slice", 1) > 1:
+    slice_suffix += f"_hosts{args.num_hosts_per_slice}"
   shared_cache_base = os.environ.get("SHARED_HF_CACHE_BASE_DIR", "").strip()
   if shared_cache_base:
     base_out_dir = f"{shared_cache_base.rstrip('/')}/{args.model}/shared"
@@ -1135,7 +1139,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
     should_clean_cache = os.environ.get("KEEP_HF_CACHE", "0") != "1"
   if jax.process_index() == 0 and should_clean_cache:
     epath.Path(f"{base_out_dir}/hf_cache").rmtree(missing_ok=True)
-  if num_slices > 1:
+  if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
     multihost_utils.sync_global_devices("safetensors_clean_cache_complete")
@@ -1160,7 +1164,9 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   else:
     load_params_uri = (
         args.local_hf_dir
-        if os.environ.get("USE_LOCAL_HF_FOR_SAFETENSORS") == "1" and num_slices == 1 and os.path.isdir(args.local_hf_dir)
+        if os.environ.get("USE_LOCAL_HF_FOR_SAFETENSORS") == "1"
+        and jax.process_count() == 1
+        and os.path.isdir(args.local_hf_dir)
         else f"hf://{repo_id}"
     )
   config_argv = (
@@ -1565,7 +1571,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
         maxtext_config=config,
     )
     jax.block_until_ready(raw_params)
-  if num_slices > 1:
+  if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
     multihost_utils.sync_global_devices("safetensors_dynamic_load_complete")
@@ -2182,6 +2188,7 @@ def invoke_worker_subprocess(
     local_work_dir: str,
     hardware: str = "auto",
     num_slices: int = 1,
+    num_hosts_per_slice: int = 1,
     weight_dtype: str = "auto",
     dcn_parallelism_axis: str = "auto",
     devices_per_slice: int = 4,
@@ -2191,11 +2198,21 @@ def invoke_worker_subprocess(
     reuse_model_hf_cache: bool = False,
     allow_step_failure: bool = False,
 ) -> dict[str, Any]:
-  """Runs a single benchmark phase in clean subprocess(es) and returns its JSON metrics."""
+  """Runs a single benchmark phase in clean subprocess(es) and returns its JSON metrics.
+
+  Multi-process phases (to_maxtext Step 3 and safetensors_dynamic) run one JAX process per TPU host:
+  num_slices * num_hosts_per_slice processes. Process 0 runs locally and process k > 0 runs on
+  remote_slice_addrs[k - 1], so the endpoints are listed host by host within each slice.
+  """
   repo_root = get_repo_root()
   os.makedirs(local_work_dir, exist_ok=True)
-  is_multislice_phase = num_slices > 1 and phase in ("to_maxtext_step3", "safetensors_dynamic")
-  scan_dir_name = f"{scan_mode}_slices{num_slices}" if is_multislice_phase else scan_mode
+  total_procs = num_slices * num_hosts_per_slice
+  is_multislice_phase = total_procs > 1 and phase in ("to_maxtext_step3", "safetensors_dynamic")
+  scan_dir_name = scan_mode
+  if is_multislice_phase and num_slices > 1:
+    scan_dir_name += f"_slices{num_slices}"
+  if is_multislice_phase and num_hosts_per_slice > 1:
+    scan_dir_name += f"_hosts{num_hosts_per_slice}"
   log_dir = os.path.join(local_work_dir, "logs", model, scan_dir_name)
   os.makedirs(log_dir, exist_ok=True)
 
@@ -2273,6 +2290,8 @@ def invoke_worker_subprocess(
       dcn_parallelism_axis,
       "--num-slices",
       str(num_slices if is_multislice_phase else 1),
+      "--num-hosts-per-slice",
+      str(num_hosts_per_slice if is_multislice_phase else 1),
       "--gcs-run-dir",
       gcs_run_dir,
       "--local-hf-dir",
@@ -2297,7 +2316,10 @@ def invoke_worker_subprocess(
     env.update(extra_env)
 
   print(f"\n{'-' * 80}")
-  print(f"[PHASE]: {phase} | Model: {model} | Scan Mode: {scan_mode} | Slices: {num_slices}")
+  print(
+      f"[PHASE]: {phase} | Model: {model} | Scan Mode: {scan_mode} | Slices: {num_slices} "
+      f"| Hosts/slice: {num_hosts_per_slice}"
+  )
   print(f"[LOG]:   {log_file}")
   print(f"{'-' * 80}", flush=True)
 
@@ -2377,7 +2399,8 @@ def invoke_worker_subprocess(
       remote_rc: dict[int, int] = {}
       slice_log_files = []
       try:
-        for slice_id in range(num_slices):
+        # `slice_id` is the JAX process id (one per host); the slice index is slice_id // num_hosts_per_slice.
+        for slice_id in range(total_procs):
           cmd_i = base_cmd + ["--slice-id", str(slice_id), "--coordinator-address", coord_addr]
           if slice_id == 0:
             p = subprocess.Popen(
@@ -2409,7 +2432,16 @@ def invoke_worker_subprocess(
                           and not k.startswith("DAEMON_")
                           and not k.startswith("MEGASCALE_")
                       )
-                      or k in ("HOSTNAME", "TPU_WORKER_ID")
+                      # Per-host TPU and Indexed Job identity: each remote pod keeps its own values.
+                      or k
+                      in (
+                          "HOSTNAME",
+                          "TPU_WORKER_ID",
+                          "TPU_WORKER_HOSTNAMES",
+                          "TPU_PROCESS_ADDRESSES",
+                          "JOB_COMPLETION_INDEX",
+                          "JOBSET_JOB_INDEX",
+                      )
                   )
               }
               try:
@@ -2471,7 +2503,10 @@ def invoke_worker_subprocess(
             procs.append(p)
 
         with open(log_file, "w", encoding="utf-8") as lf:
-          lf.write(f"Multi-slice Command (num_slices={num_slices}, coord={coord_addr}): {' '.join(base_cmd)}\n\n")
+          lf.write(
+              f"Multi-slice Command (num_slices={num_slices}, hosts_per_slice={num_hosts_per_slice}, "
+              f"coord={coord_addr}): {' '.join(base_cmd)}\n\n"
+          )
           lf.flush()
           watchdog_state = _start_oom_watchdog(procs[0])
           assert procs[0].stdout is not None
@@ -2603,6 +2638,7 @@ def invoke_worker_subprocess(
         "safetensors_and_convert_s": 0.0,
         "worker_upload_max_s": max(worker_cached_times) if worker_cached_times else 0.0,
         "num_slices": num_slices,
+        "num_hosts_per_slice": num_hosts_per_slice,
         "global_devices": num_slices * devices_per_slice,
     }
     with open(result_json, "w", encoding="utf-8") as rf:
@@ -2638,6 +2674,7 @@ def print_summary_table(results: list[dict[str, Any]], csv_path: str) -> None:
       "model",
       "scan_mode",
       "num_slices",
+      "num_hosts_per_slice",
       "global_devices",
       "to_maxtext_1_hf_to_gcs_s",
       "to_maxtext_1b_hf_to_local_s",
@@ -3048,6 +3085,7 @@ def main() -> None:
               local_work_dir=local_work_dir,
               hardware=args.hardware,
               num_slices=num_slices,
+              num_hosts_per_slice=args.num_hosts_per_slice,
               weight_dtype=args.weight_dtype,
               dcn_parallelism_axis=args.dcn_parallelism_axis,
               devices_per_slice=args.devices_per_slice,
@@ -3090,6 +3128,7 @@ def main() -> None:
               local_work_dir=local_work_dir,
               hardware=args.hardware,
               num_slices=num_slices,
+              num_hosts_per_slice=args.num_hosts_per_slice,
               weight_dtype=args.weight_dtype,
               dcn_parallelism_axis=args.dcn_parallelism_axis,
               devices_per_slice=args.devices_per_slice,
@@ -3130,6 +3169,7 @@ def main() -> None:
             "model": model,
             "scan_mode": scan_mode,
             "num_slices": num_slices,
+            "num_hosts_per_slice": args.num_hosts_per_slice,
             "global_devices": s_res.get("global_devices", m_step3.get("global_devices", 1)),
             "to_maxtext_1_hf_to_gcs_s": m_step1["hf_to_gcs_s"],
             "to_maxtext_1_worker_upload_s": m_step1.get("worker_upload_max_s", 0.0),

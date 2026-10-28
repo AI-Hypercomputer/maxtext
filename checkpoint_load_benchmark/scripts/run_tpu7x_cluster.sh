@@ -32,6 +32,12 @@
 #                      workers: pair g (2 slices) and mesakh-ctrl-f1 (single-slice tasks on the
 #                      surviving daemon pod mesakh-tpu7x-f1). Re-running only re-uploads the task
 #                      list; finished tasks (queue/p1/done/*.json) are never re-run.
+#   --priority multihost --run <id>
+#                    : Multi-host slices (2x2x2, 2x2x4): deploy the JobSet <owner>-mh-<id> from
+#                      MH_RUNS in generate_tpu7x_manifests.py (smoke, 235b, 284b, 397b, 480b,
+#                      671b, 235b-2s). <owner> is $BENCH_OWNER (default $USER). Code goes to
+#                      gs://mesa-maxtext/<owner>_tpu7x_bench/code, never to the mesakh code dir.
+#                      With --status / --cleanup, acts on that owner's JobSets only.
 #   --pair <a..f>    : Deploy only a specific 2-slice pod pair (a, b, c, d, e, f)
 #   --status         : Show current pod and job status on bodaborg-tpu7x-nap
 #   --cleanup        : Delete all benchmark pods and services on bodaborg-tpu7x-nap
@@ -77,13 +83,37 @@ while [[ $# -gt 0 ]]; do
       MANIFEST_DIR="$2"
       shift 2
       ;;
+    --run)
+      MH_RUN="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--priority p1|p2|all|p1-completion] [--pair a|b|c|d|e|f] [--status] [--cleanup] [--upload-only]" >&2
+      echo "Usage: $0 [--priority p1|p2|all|p1-completion|multihost] [--run <id>] [--pair a|b|c|d|e|f] [--status] [--cleanup] [--upload-only]" >&2
       exit 1
       ;;
   esac
 done
+
+if [[ "${PRIORITY}" == "multihost" ]]; then
+  MH_OWNER="${BENCH_OWNER:-${USER}}"
+  MH_APP="${MH_OWNER}-tpu7x-bench"
+  # Multi-host runs never write to the mesakh code dir, which running queue workers sync from.
+  SOURCE_CODE_DIR="${GCS_CODE_DIR}"
+  GCS_CODE_DIR="gs://mesa-maxtext/${MH_OWNER}_tpu7x_bench/code"
+  if [[ "${ACTION}" == "status" ]]; then
+    kubectl --context="${CLUSTER_CONTEXT}" get jobsets,pods -l app="${MH_APP}" -o wide
+    exit 0
+  fi
+  if [[ "${ACTION}" == "cleanup" ]]; then
+    kubectl --context="${CLUSTER_CONTEXT}" delete jobsets -l app="${MH_APP}" --ignore-not-found
+    exit 0
+  fi
+  if [[ "${ACTION}" == "deploy" && -z "${MH_RUN:-}" ]]; then
+    echo "--priority multihost needs --run <id>" >&2
+    exit 1
+  fi
+fi
 
 if [[ "${ACTION}" == "status" ]]; then
   kubectl --context="${CLUSTER_CONTEXT}" get pods,svc -l app=mesakh-tpu7x-bench -o wide
@@ -128,6 +158,14 @@ for local_p, name in files.items():
     epath.Path(gcs_p).write_bytes(open(local_p, 'rb').read())
     print(f'  Uploaded {local_p} -> {gcs_p}')
 "
+if [[ "${PRIORITY}" == "multihost" ]]; then
+  # The bootstrap also reads the code tarballs from its code dir; copy them once from the source code dir.
+  for tarball in maxtext_lance_prs.tar.gz checkpoint_conversion_origin_main.tar.gz site_packages_overlay.tar.gz; do
+    if ! gcloud storage ls "${GCS_CODE_DIR}/${tarball}" >/dev/null 2>&1; then
+      gcloud storage cp "${SOURCE_CODE_DIR}/${tarball}" "${GCS_CODE_DIR}/${tarball}"
+    fi
+  done
+fi
 
 if [[ "${ACTION}" == "upload" ]]; then
   exit 0
@@ -135,11 +173,18 @@ fi
 
 # 2. Generate Kubernetes manifests
 echo "[2/3] Generating Kubernetes manifests in ${MANIFEST_DIR}..."
-MANIFEST_OUT_DIR="${MANIFEST_DIR}" "${PYTHON_BIN}" "${BENCHMARK_DIR}/generate_tpu7x_manifests.py"
+BENCH_OWNER="${MH_OWNER:-${BENCH_OWNER:-${USER}}}" MANIFEST_OUT_DIR="${MANIFEST_DIR}" \
+  "${PYTHON_BIN}" "${BENCHMARK_DIR}/generate_tpu7x_manifests.py"
 
 # 3. Apply manifests to bodaborg-tpu7x-nap
 echo "[3/3] Deploying pod pairs to ${CLUSTER_CONTEXT}..."
-if [[ -n "${PAIR_FILTER}" ]]; then
+if [[ "${PRIORITY}" == "multihost" ]]; then
+  kubectl --context="${CLUSTER_CONTEXT}" apply -f "${MANIFEST_DIR}/tpu7x_multihost_${MH_RUN}.yaml"
+  echo ""
+  echo "Deployed JobSet ${MH_OWNER}-mh-${MH_RUN}. Runner logs:"
+  echo "  kubectl --context=${CLUSTER_CONTEXT} logs -f -l jobset.sigs.k8s.io/jobset-name=${MH_OWNER}-mh-${MH_RUN},batch.kubernetes.io/job-completion-index=0,jobset.sigs.k8s.io/replicatedjob-name=slice0"
+  exit 0
+elif [[ -n "${PAIR_FILTER}" ]]; then
   kubectl --context="${CLUSTER_CONTEXT}" delete pod "mesakh-tpu7x-${PAIR_FILTER}0" "mesakh-tpu7x-${PAIR_FILTER}1" --ignore-not-found
   "${PYTHON_BIN}" -c "
 import yaml, subprocess
