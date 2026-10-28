@@ -128,7 +128,10 @@ class RMSNorm(nnx.Module):
       return jnp.asarray(y, self.dtype)
 
     effective_scale = jnp.asarray(effective_scale, self.dtype)
-    return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    out = y * effective_scale
+    if out_sharding is not None:
+      out = jax.lax.with_sharding_constraint(out, out_sharding)
+    return out
 
 
 class GlobalRMSNorm(RMSNorm):
