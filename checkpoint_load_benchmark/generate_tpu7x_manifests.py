@@ -172,6 +172,14 @@ P1C_SCALEOUT_PAIRS = [(pid, make_queue_runner_script(pid, QUEUE_P1)) for pid in 
 P1C_SCALEOUT_SINGLES = [(wid, make_queue_runner_script(wid, QUEUE_P1, max_slices=1)) for wid in ("s1", "s2", "s3")]
 P1C_SCALEOUT_GROUPS = [("m", 4, make_queue_runner_script("m", QUEUE_P1, max_slices=4, min_slices=4))]
 
+# Second scale-out wave (11 spot 2x2x1 nodes were still idle at 13:22 UTC): five more single-slice workers so the
+# long unscanned to_maxtext conversions (480B, 397B), which gate their 2-slice Orbax loads, start right away, and
+# one more 2-slice pair. Workers exit when no task they can run is left, which frees their nodes.
+P1C_SCALEOUT2_PAIRS = [("k", make_queue_runner_script("k", QUEUE_P1))]
+P1C_SCALEOUT2_SINGLES = [
+    (wid, make_queue_runner_script(wid, QUEUE_P1, max_slices=1)) for wid in ("s4", "s5", "s6", "s7", "s8")
+]
+
 
 def group_to_docs(gid: str, n_slices: int, runner_script: str) -> list[dict]:
   """An N-slice group: runner `mesakh-tpu7x-<gid>0` (slice 0) and daemons `mesakh-tpu7x-<gid><k>` (slices 1..N-1).
@@ -370,10 +378,7 @@ def pairs_to_docs(pairs_list):
 
 
 def build_manifests():
-  out_dir = os.environ.get(
-      "MANIFEST_OUT_DIR",
-      "/usr/local/google/home/mesakh/.gemini/jetski/brain/c29bd623-4106-4942-aa52-ca670ebb5170/scratch",
-  )
+  out_dir = os.environ.get("MANIFEST_OUT_DIR", "/tmp/tpu7x_manifests")
   os.makedirs(out_dir, exist_ok=True)
   for fname, plist in [
       ("tpu7x_p1_pods.yaml", P1_PAIRS),
@@ -414,6 +419,14 @@ def build_manifests():
   with open(p, "w", encoding="utf-8") as f:
     yaml.safe_dump_all(scaleout, f, sort_keys=False)
   print(f"Wrote {len(scaleout)} resources to {p}")
+
+  scaleout2 = pairs_to_docs(P1C_SCALEOUT2_PAIRS)
+  for wid, script in P1C_SCALEOUT2_SINGLES:
+    scaleout2 += single_worker_docs(wid, script)
+  p = os.path.join(out_dir, "tpu7x_p1_completion_scaleout2.yaml")
+  with open(p, "w", encoding="utf-8") as f:
+    yaml.safe_dump_all(scaleout2, f, sort_keys=False)
+  print(f"Wrote {len(scaleout2)} resources to {p}")
 
 
 if __name__ == "__main__":
