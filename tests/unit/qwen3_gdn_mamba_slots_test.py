@@ -75,6 +75,8 @@ def _install_tpu_inference_stubs(captured):
     del b, a, args
     captured["state_indices"] = kwargs.get("state_indices")
     captured["read_state_indices"] = kwargs.get("read_state_indices")
+    captured["read_offsets"] = kwargs.get("read_offsets")
+    captured["num_spec_tokens"] = kwargs.get("num_spec_tokens")
     num_tokens = mixed_qkv.shape[0]
     out = jnp.zeros((num_tokens, recurrent_state.shape[1] * recurrent_state.shape[-1]), dtype=mixed_qkv.dtype)
     return (conv_state, recurrent_state), out
@@ -246,6 +248,71 @@ class Qwen3GdnAlignCallTest(unittest.TestCase):
 
     np.testing.assert_array_equal(np.asarray(self.captured["state_indices"]), [3])
     np.testing.assert_array_equal(np.asarray(self.captured["read_state_indices"]), [3])
+
+  def test_spec_decode_forwards_read_offsets_and_num_spec_tokens(self):
+    cfg = _gdn_config(gdn_mamba_block_size=0)
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape([1] * len(cfg.mesh_axes)), cfg.mesh_axes)
+    layer = qwen3.Qwen3NextGatedDeltaNet(config=cfg, mesh=mesh, rngs=nnx.Rngs(0), inputs_shape=(1, 4, cfg.emb_dim))
+
+    metadata = types.SimpleNamespace(
+        seq_lens=jnp.asarray([9, 0], dtype=jnp.int32),
+        query_start_loc=jnp.asarray([0, 4, 4], dtype=jnp.int32),
+        block_tables=jnp.asarray([[10, 11, 12, 13], [0, 0, 0, 0]], dtype=jnp.int32),
+        request_distribution=jnp.asarray([1, 1, 1], dtype=jnp.int32),
+        padded_num_reqs=1,
+        mamba_state_indices=jnp.asarray([4, 8], dtype=jnp.int32),
+        gdn_read_offsets=jnp.asarray([2, 0], dtype=jnp.int32),
+        num_spec_tokens=3,
+    )
+    kv_cache = (
+        jnp.zeros((16, cfg.gdn_conv_kernel_dim - 1, 3 * 32), dtype=jnp.float32),
+        jnp.zeros((16, cfg.gdn_num_value_heads, 32, 32), dtype=jnp.float32),
+    )
+
+    layer(
+        jnp.ones((1, 4, cfg.emb_dim), dtype=cfg.dtype),
+        kv_cache=kv_cache,
+        attention_metadata=metadata,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+    )
+
+    np.testing.assert_array_equal(np.asarray(self.captured["state_indices"]), [4])
+    np.testing.assert_array_equal(np.asarray(self.captured["read_offsets"]), [2])
+    self.assertEqual(self.captured["num_spec_tokens"], 3)
+
+  def test_attention_forward_serve_vllm_passes_decode_query_size_for_spec_decode(self):
+    from unittest import mock
+    from maxtext.common.common_types import AttentionType
+    from maxtext.layers import attentions
+
+    attn = object.__new__(attentions.Attention)
+    object.__setattr__(attn, "mesh", None)
+    object.__setattr__(attn, "dtype", jnp.float32)
+    object.__setattr__(attn, "attention_type", AttentionType.GLOBAL)
+    object.__setattr__(attn, "share_kv_layer", False)
+    object.__setattr__(attn, "config", types.SimpleNamespace(attention="vllm_rpa", attention_sink=False))
+    object.__setattr__(attn, "sinks", None)
+
+    q = jnp.ones((1, 4, 2, 32), dtype=jnp.float32)
+    k = jnp.ones((1, 4, 2, 32), dtype=jnp.float32)
+    v = jnp.ones((1, 4, 2, 32), dtype=jnp.float32)
+    kv_cache = [jnp.zeros((4, 16, 2, 32), dtype=jnp.float32)]
+    md = types.SimpleNamespace(
+        seq_lens=jnp.asarray([8], dtype=jnp.int32),
+        block_tables=jnp.asarray([0], dtype=jnp.int32),
+        query_start_loc=jnp.asarray([0, 4], dtype=jnp.int32),
+        request_distribution=jnp.asarray([1, 1, 1], dtype=jnp.int32),
+        num_spec_tokens=3,
+    )
+
+    mock_rpa = mock.MagicMock(return_value=(jnp.ones((4, 2, 32), dtype=jnp.float32), kv_cache[0]))
+    ai_mod = types.ModuleType("tpu_inference.layers.common.attention_interface")
+    ai_mod.sharded_ragged_paged_attention = mock_rpa
+    with mock.patch.dict(sys.modules, {"tpu_inference.layers.common.attention_interface": ai_mod}):
+      attn.forward_serve_vllm(q, k, v, rpa_kv_cache=kv_cache, rpa_metadata=md)
+
+    mock_rpa.assert_called_once()
+    self.assertEqual(mock_rpa.call_args.kwargs.get("decode_query_size"), 4)
 
 
 if __name__ == "__main__":

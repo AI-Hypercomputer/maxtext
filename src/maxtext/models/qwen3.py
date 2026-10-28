@@ -941,6 +941,22 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             local_rows=max(conv_state_paged.shape[0] // dp_size, 1),
         )
 
+      raw_num_spec = getattr(attention_metadata, "num_spec_tokens", 0)
+      num_spec_tokens = int(raw_num_spec) if isinstance(raw_num_spec, int) else 0
+      raw_read_offsets = getattr(attention_metadata, "gdn_read_offsets", None)
+      if raw_read_offsets is not None:
+        read_offsets = truncate_sharded_tensor(
+            raw_read_offsets.astype(jnp.int32),
+            padded_num_reqs_per_dp,
+            dp_size,
+        )
+      else:
+        read_offsets = None
+      rjg_kwargs: dict[str, Any] = {}
+      if num_spec_tokens > 0 or read_offsets is not None:
+        rjg_kwargs["read_offsets"] = read_offsets
+        rjg_kwargs["num_spec_tokens"] = num_spec_tokens
+
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
           b_flat,
@@ -962,6 +978,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           cfg.gdn_conv_kernel_dim,
           mesh=self.mesh,
           read_state_indices=read_state_indices,
+          **rjg_kwargs,
       )
 
       # Reshape GDN output and apply gated norm + out projection.

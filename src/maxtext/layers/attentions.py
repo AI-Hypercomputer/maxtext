@@ -1060,6 +1060,12 @@ class Attention(nnx.Module):
       )
       return output, kv_cache
 
+    raw_num_spec = getattr(md, "num_spec_tokens", 0)
+    num_spec_tokens = int(raw_num_spec) if isinstance(raw_num_spec, int) else 0
+    rpa_kwargs: dict[str, Any] = {"update_kv_cache": update_kv_cache}
+    if num_spec_tokens > 0:
+      rpa_kwargs["decode_query_size"] = num_spec_tokens + 1
+
     output, kv_cache = rpa_ops(
         self.mesh,
         query,
@@ -1076,7 +1082,7 @@ class Attention(nnx.Module):
         q_scale,
         k_scale,
         v_scale,
-        update_kv_cache=update_kv_cache,
+        **rpa_kwargs,
     )
     return output, kv_cache
 
