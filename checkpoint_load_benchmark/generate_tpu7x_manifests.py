@@ -22,6 +22,7 @@ Pod Pair Assignments:
         surviving daemon pod `mesakh-tpu7x-f1`, one task per daemon command.
 """
 
+import copy
 import os
 import yaml
 
@@ -151,18 +152,54 @@ CODE_DIR = "gs://mesa-maxtext/mesakh_tpu7x_bench/code"
 QUEUE_P1 = "gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1"
 
 
-def make_queue_runner_script(pair_id: str, queue: str) -> str:
+def make_queue_runner_script(pair_id: str, queue: str, max_slices: int = 2, min_slices: int = 1) -> str:
   return f"""set -e
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 KEEP_HF_CACHE=1 HF_HOME=/ramdisk/hf_cache TMPDIR=/ramdisk/tmp
 mkdir -p /ramdisk/hf_cache /ramdisk/tmp
 python3 -c "from etils import epath; open('/tmp/tpu7x_task_queue.py','wb').write(epath.Path('{CODE_DIR}/tpu7x_task_queue.py').read_bytes())"
-echo "=== [Pair {pair_id}] Task-queue worker for {queue} ==="
-python3 -u /tmp/tpu7x_task_queue.py --queue {queue} --worker {pair_id} --max-slices 2 --prefer-max-slices
-echo "=== [Pair {pair_id}] ALL DONE ==="
+echo "=== [Worker {pair_id}] Task-queue worker for {queue} (slices {min_slices}..{max_slices}) ==="
+python3 -u /tmp/tpu7x_task_queue.py --queue {queue} --worker {pair_id} --max-slices {max_slices} --min-slices {min_slices} --prefer-max-slices
+echo "=== [Worker {pair_id}] ALL DONE ==="
 """
 
 
 P1C_PAIRS = [("g", make_queue_runner_script("g", QUEUE_P1))]
+
+# Scale-out while spot 2x2x1 capacity is idle: two more 2-slice workers, three single-slice workers for the
+# to_maxtext CPU conversions (no idle slice-1 node during multi-hour conversions), and a 4-slice group that only
+# takes 4-slice tasks (deepseek3-671b, 1.34 TB BF16: needs 32 TPU cores / 3.26 TB HBM).
+P1C_SCALEOUT_PAIRS = [(pid, make_queue_runner_script(pid, QUEUE_P1)) for pid in ("i", "j")]
+P1C_SCALEOUT_SINGLES = [(wid, make_queue_runner_script(wid, QUEUE_P1, max_slices=1)) for wid in ("s1", "s2", "s3")]
+P1C_SCALEOUT_GROUPS = [("m", 4, make_queue_runner_script("m", QUEUE_P1, max_slices=4, min_slices=4))]
+
+
+def group_to_docs(gid: str, n_slices: int, runner_script: str) -> list[dict]:
+  """An N-slice group: runner `mesakh-tpu7x-<gid>0` (slice 0) and daemons `mesakh-tpu7x-<gid><k>` (slices 1..N-1).
+
+  Each daemon gets a headless Service `mesakh-w<k>-<gid>`; the runner waits for all of them (bootstrap_tpu7x.py
+  exports them as REMOTE_SLICE1_ADDR, in slice order).
+  """
+  svc1, daemon1, runner = pairs_to_docs([(gid, runner_script)])
+  docs = [svc1, daemon1]
+  for k in range(2, n_slices):
+    svc, daemon = copy.deepcopy(svc1), copy.deepcopy(daemon1)
+    svc["metadata"]["name"] = svc["spec"]["selector"]["role"] = f"mesakh-w{k}-{gid}"
+    daemon["metadata"]["name"] = f"mesakh-tpu7x-{gid}{k}"
+    daemon["metadata"]["labels"]["role"] = f"mesakh-w{k}-{gid}"
+    docs += [svc, daemon]
+  for env in runner["spec"]["containers"][0]["env"]:
+    if env["name"] == "WAIT_FOR_DAEMON_HOST":
+      env["value"] = ",".join(f"mesakh-w{k}-{gid}" for k in range(1, n_slices))
+  return docs + [runner]
+
+
+def single_worker_docs(wid: str, runner_script: str) -> list[dict]:
+  """A single-slice worker pod `mesakh-tpu7x-<wid>` (runner without a slice-1 daemon)."""
+  runner = pairs_to_docs([(wid, runner_script)])[2]
+  runner["metadata"]["name"] = f"mesakh-tpu7x-{wid}"
+  container = runner["spec"]["containers"][0]
+  container["env"] = [e for e in container["env"] if e["name"] != "WAIT_FOR_DAEMON_HOST"]
+  return [runner]
 
 
 def make_daemon_worker_command(worker: str, queue: str, max_slices: int = 1, remote: str | None = None) -> str:
@@ -367,6 +404,16 @@ def build_manifests():
   with open(p, "w", encoding="utf-8") as f:
     yaml.safe_dump_all(h_docs + [ctrl], f, sort_keys=False)
   print(f"Wrote {len(h_docs) + 1} resources to {p}")
+
+  scaleout = pairs_to_docs(P1C_SCALEOUT_PAIRS)
+  for wid, script in P1C_SCALEOUT_SINGLES:
+    scaleout += single_worker_docs(wid, script)
+  for gid, n_slices, script in P1C_SCALEOUT_GROUPS:
+    scaleout += group_to_docs(gid, n_slices, script)
+  p = os.path.join(out_dir, "tpu7x_p1_completion_scaleout.yaml")
+  with open(p, "w", encoding="utf-8") as f:
+    yaml.safe_dump_all(scaleout, f, sort_keys=False)
+  print(f"Wrote {len(scaleout)} resources to {p}")
 
 
 if __name__ == "__main__":
