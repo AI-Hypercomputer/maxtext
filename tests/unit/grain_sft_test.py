@@ -66,6 +66,27 @@ class GrainSftTest(unittest.TestCase):
     # Ensure BOS (token 2 in Gemma) is not added at the beginning
     self.assertNotEqual(res["text"][0], tok.bos_id)
 
+  def test_gemma3_vision_sft_prompt_starts_with_bos(self):
+    """Verifies that Gemma 3 vision SFT prompts start with exactly one BOS, as in Gemma 3's chat format."""
+    tok, _ = data_processing_utils.get_tokenizer_and_pad_id(self.config, add_bos=False, add_eos=False)
+    raw_data = [
+        {"query": f"What is in chart {i}?", "label": [f"Data {i}"], "image": Image.new("RGB", (100, 100), color="red")}
+        for i in range(2)
+    ]
+    processed_ds = grain_data_processing.vision_sft_preprocessing_pipeline(
+        dataset=grain.MapDataset.source(raw_data),
+        config=self.config,
+        data_columns=["query", "label"],
+        image_column="image",
+        tokenize=True,
+        grain_worker_count=0,
+        grain_per_worker_buffer_size=1,
+    )
+    inputs = next(iter(processed_ds))["inputs"]
+    start_of_turn_id = 105
+    np.testing.assert_array_equal(inputs[:, 0], tok.bos_id)
+    np.testing.assert_array_equal(inputs[:, 1], start_of_turn_id)
+
   def test_elastic_iterator_unsupported_error(self):
     """Verifies that enabling grain_use_elastic_iterator raises a ValueError."""
     config = pyconfig.initialize(
