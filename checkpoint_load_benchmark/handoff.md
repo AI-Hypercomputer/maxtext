@@ -1,6 +1,6 @@
 # Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~13:50 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
+> **Snapshot:** 2026-10-28 ~15:05 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
 >
 > The numbers below come from the per-phase result JSONs in GCS at snapshot time. Pods were still running, so
 > re-check §6 before acting. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
@@ -12,12 +12,12 @@
 
 | Workstream | Status |
 | :--- | :--- |
-| **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | `qwen3-235b-a22b` 4/4 ✅ · `deepseek4-284b` 4/4 ✅ (synthetic sparse files, see §7.10) · `qwen3-480b-a35b` 2/4 ✅ (1 slice can't hold it) · `qwen3.5-397b-a17b` 1/4 ✅ (unscanned · 2: **1,311.9 s**; scanned · 2 runs out of HBM in the `(wi_0, wi_1)` split, **also with `hbmfix`** (§7.19); scanned · 1 clean re-run running; scanned · 4 queued) · `deepseek3-671b` ❌ on 1–2 slices, ✅ **4 slices: scanned 649.4 s, unscanned 531.0 s** |
-| **P1 · Exp 1A BEFORE** (`origin/main`) | Conclusive so far: `qwen3-480b-a35b` hits `KeyError` (no mapping before #5706), and `qwen3.5-397b-a17b` unscanned · 2 **timed out at 1800 s** (WITH the PRs: 1,311.9 s). The older BEFORE kills came from a **360 s watchdog** and prove nothing (§7.5); their 1800 s re-runs are running or queued (`before_*` tasks). |
-| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | **`to_maxtext` S2 (CPU conversion) cannot run on one tpu7x host for most >200B configs** (§7.16): scanned 235B/397B/480B (the source must be staged in RAM next to the converted state), unscanned 480B (the 960 GB converted state alone exceeds host RAM), and 284B (OOM-killed at 989.6 GB, both scan modes). Recorded with reasons. Still running: unscanned 235B and 397B conversions (shards streamed per layer), then their 1- and 2-slice Orbax loads. |
-| **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 26 tasks; see README "Finishing Priority 1") drained by preemption-tolerant workers on spot `2x2x1` nodes: pairs `i`, `j`, `k`, singles `s1`–`s4`, `s6`, `s8`, 4-slice group `m` (§6). At 13:50 UTC, 12 tasks are done, 8 running, 6 pending. Progress: `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/done/`. |
-| **P2 · 16-model suite** | 10 of the 14 P2-only models are complete in all 4 configs. Gaps: `qwen3-32b` (1 cell), `qwen3-30b-a3b` (4 cells), `llama3.1-70b` (running), `gpt-oss-120b` (queued). `deepseek4-284b` and `deepseek3-671b` come from the P1 runs (`safetensors_dynamic` only). |
-| **Not started** | The 5 final `reports/tpu7x_*` files (the live progress table is in `reports/tpu7x_priority1_progress.md`), cluster cleanup |
+| **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit, 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s). 397B scanned on 1–2 slices runs out of HBM, also with `hbmfix` (§7.19) |
+| **P1 · Exp 1A BEFORE** (`origin/main`) | ✅ Done. Every BEFORE run **timed out at 1800 s while still loading** (235B · 1 and · 2, 284B · 1 and · 2, 397B unscanned · 2, 671B · 4), except 480B, which hits `KeyError`. With the PRs, the same loads take 353–708 s |
+| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). Unscanned 235B converted in **5,150.1 s** (shards streamed); its Orbax loads are running. The unscanned 397B conversion is ~27% done, with loads to follow (ETA ~17:45 UTC) |
+| **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 29 tasks). All tasks are done except the two unscanned conversion chains (235B, 397B). Workers left: `s3` (235B), `s8` (397B), standby `s1`, pairs `i` and `k` for the 2-slice loads |
+| **P2 · 16-model suite** | ✅ Done (`p2_leftovers` and re-runs). `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned loads. `llama3.1-70b` scanned · 2 Orbax load needed `concurrent_gb=38` (T-13). Re-ran the `qwen3-14b` and `qwen3-32b` scanned · 1 outliers (U-7) |
+| **Reports** | Written: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, plus the live `tpu7x_priority1_progress.md`. To do: fill in the 235B/397B unscanned `to_maxtext` results when they land (re-run `scripts/build_tpu7x_tables.py --md-into`), then clean up the cluster |
 
 ---
 
@@ -213,20 +213,14 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
 
 Manifests: `tpu7x_p1_completion_scaleout.yaml` (pairs `i`, `j`, singles `s1`–`s3`, 4-slice group `m`) and `tpu7x_p1_completion_scaleout2.yaml` (pair `k`, singles `s4`–`s8`), both from `generate_tpu7x_manifests.py`. All are queue workers (`scripts/tpu7x_task_queue.py`) on spot `2x2x1` nodes. Pods started after 13:31 UTC (`s1`, `s3`, `s8`, `m0`, `m3`) have the `/tmp/maxtext_stagefix` tree and sync the harness before every task (§7.16).
 
-| Worker | Pods | Slices | Task at snapshot (13:50 UTC) |
+| Worker | Pods | Slices | Task at snapshot (15:05 UTC) |
 | :--- | :--- | :---: | :--- |
-| `i` | `mesakh-tpu7x-i0` (runner) + `i1` | 2 | `before_284b_s2` |
-| `j` | `mesakh-tpu7x-j0` + `j1` | 2 | `p2_leftovers` |
-| `k` | `mesakh-tpu7x-k0` + `k1` | 2 | `before_235b_s2` |
-| `m` | `mesakh-tpu7x-m0` (runner, recreated 13:44, waiting for a node) + daemons `m1`, `m2`, `m3` (recreated) | 4 | next: `before_671b_s4`, `st_397b_scanned_s4` |
-| `s1` | `mesakh-tpu7x-s1` (recreated) | 1 | `st_397b_scanned_s1` |
-| `s2` | `mesakh-tpu7x-s2` | 1 | `before_284b_s1` |
-| `s3` | `mesakh-tpu7x-s3` (recreated) | 1 | `tm_235b_unscanned_s1` (streams shards) |
-| `s4` | `mesakh-tpu7x-s4` | 1 | idle standby; exits when no single-slice task is left |
-| `s6` | `mesakh-tpu7x-s6` | 1 | `before_235b_s1` |
-| `s8` | `mesakh-tpu7x-s8` (recreated) | 1 | `tm_397b_unscanned_s1` (streams shards) |
+| `s3` | `mesakh-tpu7x-s3` | 1 | `tm_235b_unscanned_s1`: conversion done (5,150.1 s), 1-slice Orbax load running |
+| `s8` | `mesakh-tpu7x-s8` | 1 | `tm_397b_unscanned_s1`: conversion ~27% (streams shards; ETA ~17:15 UTC, then save and load) |
+| `s1` | `mesakh-tpu7x-s1` | 1 | idle standby with the `stagefix` tree (can take over `s3`/`s8` tasks) |
+| `i`, `k` | `mesakh-tpu7x-{i,k}{0,1}` | 2 | idle until `tm_235b_unscanned_s2` / `tm_397b_unscanned_s2` become claimable |
 
-Pending: `tm_235b_unscanned_s2`, `tm_284b_unscanned_s2`, `tm_397b_unscanned_s2` and `tm_480b_unscanned_s2` (2-slice Orbax loads; the last two only run the load if a checkpoint exists), `before_671b_s4`, `st_397b_scanned_s4`. Workers exit when no task they can run is left, which frees their nodes. Delete group `m` after its two 4-slice tasks.
+Pending: `tm_235b_unscanned_s2`, `tm_397b_unscanned_s2`. Every other task is done. Group `m`, pair `j`, and singles `s2`, `s4`–`s7` were deleted after their work finished.
 
 Gone (all recorded in §7.14 and §7.18):
 - `c1`, `f1`, `g0`, then `g1` at 13:32 (Kueue `The workload is deactivated`); `mesakh-ctrl-c1` is `Completed`, `mesakh-ctrl-g1` and `h1` were deleted. Delete `mesakh-ctrl-c1` at cleanup.
