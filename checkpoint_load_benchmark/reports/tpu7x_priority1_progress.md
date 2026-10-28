@@ -1,6 +1,6 @@
 # Priority 1 (>200B models) progress on TPU v7x (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~15:00 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
+> **Snapshot:** 2026-10-28 ~15:55 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
 > `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/` (task ids below refer to
 > [`configs/p1_completion_tasks.json`](../configs/p1_completion_tasks.json))
 
@@ -20,7 +20,7 @@
 
 | Model | BF16 size / shards | S1 HF→GCS (cold) | 1A WITH PRs | 1A BEFORE (`origin/main`) | 1B `to_maxtext` |
 | :--- | :--- | ---: | :--- | :--- | :--- |
-| `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 757.5 s / 792.4 s) | ❌ scanned: S2 can't run on one host · 🔄 unscanned S2 (streams shards) |
+| `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 757.5 s / 792.4 s) | ❌ scanned: S2 can't run on one host · ✅ unscanned: S2 5,150.1 s (streams shards), S3 454.7 s on 1 slice and 617.1 s on 2 slices |
 | `deepseek4-284b` | 581.9 GB / 146 *(synthetic sparse files)* | – | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 453.3 s / 440.7 s) | ❌ S2 OOM-killed at 989.6 GB host RAM (scanned and unscanned) |
 | `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s) · ✅ scanned · 4 (1,399.7 s) · ❌ scanned · 1 and · 2 (HBM OOM; also with `hbmfix` on 2 slices) | ❌ unscanned · 2: **timeout at 1800 s**, still in the load phase (WITH: load 515.9 s, total 1,311.9 s) | ⏳ scanned (expected: does not fit one host) and unscanned |
 | `qwen3-480b-a35b` | 961.0 GB / 241 | 1,046.1 s | ✅ 2/2 that fit (1 slice ❌ HBM) | ❌ `KeyError` (no mapping before #5706); conclusive | ❌ scanned: S2 can't run on one host · ⏳ unscanned (expected: the 960 GB converted state doesn't fit host RAM) |
@@ -42,10 +42,10 @@ Slices (Devices): `1 (8)` = 1 slice, 8 TPU cores; `2 (16)` = 2 slices, 16 TPU co
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **757.50** *(Safetensors+Convert)* | **757.50** | **1,340.81** | **Only `safetensor` loads this config** |
 | **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `scanned` | `2 (16)` | `to_maxtext` | 583.32 | **Does not fit one host** | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
 | ↳ | `scanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **792.38** *(Safetensors+Convert)* | **792.38** | **1,375.69** | **Only `safetensor` loads this config** |
-| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 583.32 | 🔄 *(`tm_235b_unscanned_s1`, streaming shards)* | ⏳ *(Load Orbax)* | ⏳ | ⏳ | 1.00x (baseline) |
-| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **697.13** *(Safetensors+Convert)* | **697.13** | **1,280.44** | ⏳ *(awaiting `to_maxtext`)* |
-| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 583.32 | 🔄 *(shared with 1 slice)* | ⏳ *(queued: `tm_235b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
-| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **749.00** *(Safetensors+Convert)* | **749.00** | **1,332.31** | ⏳ *(awaiting `to_maxtext`)* |
+| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 583.32 | 5,150.13 *(shards streamed from GCS)* | 454.72 *(Load Orbax)* | 5,604.85 | 6,188.17 | 1.00x (baseline) |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **697.13** *(Safetensors+Convert)* | **697.13** | **1,280.44** | **4.83x / 8.04x** |
+| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 583.32 | 5,150.13 *(shared with 1 slice)* | 617.12 *(Load Orbax; a first run hit an Orbax barrier timeout)* | 5,767.25 | 6,350.57 | 1.00x (baseline) |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **749.00** *(Safetensors+Convert)* | **749.00** | **1,332.31** | **4.77x / 7.70x** |
 | **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `scanned` | `1 (8)` | `to_maxtext` | 0.00 *(local stage)* | **OOM-killed** *(989.6 GB host RAM)* | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **453.27** *(Safetensors+Convert)* | **453.27** | **453.27** | **Only `safetensor` loads this config** |
 | **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `scanned` | `2 (16)` | `to_maxtext` | 0.00 *(local stage)* | **OOM-killed** *(shared with 1 slice)* | — | **N/A** | **N/A** | N/A |
@@ -91,9 +91,9 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 | Model | Config | 1A BEFORE (`origin/main`) | 1A WITH PRs: WITH S2 (load + transform) | 1B TM S2 convert | 1B TM S3 load |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `qwen3-235b-a22b` | scanned · 1 | ❌ **timeout at 1800 s**, still loading (peak host RAM 528.0 GB) | ✅ **757.5 s** (674.8 + 82.7) | ❌ doesn't fit one host: 470 GB staged + 470 GB converted state (the full-staging attempt was OOM-killed at leaf 4/15); streaming thrashes | ➖ no checkpoint |
-| | unscanned · 1 | ➖ skipped after the scanned timeout | ✅ **697.1 s** (661.8 + 35.2) | 🔄 `tm_235b_unscanned_s1` (streams shards; the full-staging attempt was evicted at 944 GB) | ⏳ `tm_235b_unscanned_s1` |
+| | unscanned · 1 | ➖ skipped after the scanned timeout | ✅ **697.1 s** (661.8 + 35.2) | ✅ **5,150.1 s** (streams shards; peak host RAM 663.5 GB; the full-staging attempt was evicted at 944 GB) | ✅ **454.7 s** |
 | | scanned · 2 | ❌ **timeout at 1800 s**, still loading (peak host RAM 300.8 GB) | ✅ **792.4 s** (708.0 + 83.6) | (shared) | ➖ no checkpoint |
-| | unscanned · 2 | ➖ skipped after the scanned timeout | ✅ **749.0 s** (704.9 + 44.0) | (shared) | ⏳ `tm_235b_unscanned_s2` |
+| | unscanned · 2 | ➖ skipped after the scanned timeout | ✅ **749.0 s** (704.9 + 44.0) | (shared) | ✅ **617.1 s** (a first run hit an Orbax barrier timeout on slice 1) |
 | `deepseek4-284b` | scanned · 1 | ❌ **timeout at 1800 s**, still loading (peak host RAM 501.4 GB) | ✅ **453.3 s** (366.3 + 86.8) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
 | | unscanned · 1 | ➖ skipped after the scanned timeout | ✅ **414.1 s** (377.0 + 37.0) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
 | | scanned · 2 | ❌ **timeout at 1800 s**, still loading (peak host RAM 576.0 GB) | ✅ **440.7 s** (352.9 + 87.6) | (shared) | ➖ no checkpoint |
