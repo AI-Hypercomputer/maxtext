@@ -277,6 +277,7 @@ Gone (all recorded in §7.14 and §7.18):
     - Node `gke-tpu-fd9dfbd0-2jfc` stopped answering kubelet calls.
     - **Recovery:** reset the dead worker's lock heartbeat to 0, then recreate the pod from the scale-out manifest. A runner pod resolves its daemons' IPs once at start, so after a daemon is recreated, recreate the runner too (`m0`).
 19. **`hbmfix` did not fix `qwen3.5-397b-a17b` scanned · 2.** The load finished (469.7 s), then the split of the stacked `(wi_0, wi_1)` composite failed at the same allocation (11.25 GiB needed, 2.77 GiB free): the composite (~22.5 GiB per device) is still alive while its first half is created. Next fix: split each layer's `gate_up_proj` before stacking, so only one target leaf is built at a time. Alternatively, move the composite to host before splitting. Meanwhile, `st_397b_scanned_s4` measures scanned 397B with 4 slices of HBM headroom.
+20. **A queue worker's heartbeat thread can die on a transient auth error.** On the 397B re-run (`s1`, 19:49 UTC), a failed credential refresh raised inside `_beat`, which ended the thread while the harness kept converting. The lock then goes stale, and any new worker that can run the task would take it over and start a duplicate run. *Fixed* in `tpu7x_task_queue.py` (the heartbeat logs and retries), but only for pods started after the fix. For the running re-run: create the 2-slice pair for `tm_397b_unscanned_s2` only after `tm_397b_unscanned_s1` is in `done/`.
 
 ---
 
