@@ -20,6 +20,9 @@ Responsibilities:
      - `ROLE=runner` (Slice 0 pod `mesakh-tpu7x-<id>0`): Waits for the Slice 1 daemon via headless Kubernetes Service DNS
        (`WAIT_FOR_DAEMON_HOST=mesakh-w1-<id>`), exports `REMOTE_SLICE1_ADDR=<ip>:55555`, runs `RUNNER_SCRIPT`, and sends a clean
        shutdown signal to Slice 1 upon completion.
+     - Multi-host slices (`2x2x2`, `2x2x4`) run as a JobSet (`generate_tpu7x_manifests.py`): host 0 of slice 0 is the
+       runner and every other host is a daemon. `WAIT_FOR_DAEMON_HOST` lists the daemons in JAX process order.
+  `BENCH_CODE_DIR` overrides the GCS code directory (default: `gs://mesa-maxtext/mesakh_tpu7x_bench/code`).
 """
 
 import json
@@ -33,7 +36,9 @@ import tarfile
 import time
 from etils import epath
 
-GCS_CODE_DIR = "gs://mesa-maxtext/mesakh_tpu7x_bench/code"
+# BENCH_CODE_DIR points a run at its own copy of the code, so it can test harness changes without touching the
+# copies that other running pods sync from.
+GCS_CODE_DIR = os.environ.get("BENCH_CODE_DIR", "gs://mesa-maxtext/mesakh_tpu7x_bench/code")
 
 
 def download_from_gcs(gcs_uri: str, local_path: str) -> None:
