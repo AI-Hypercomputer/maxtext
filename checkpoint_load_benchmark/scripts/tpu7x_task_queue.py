@@ -238,7 +238,13 @@ def run_task(q: Queue, task: dict, gen: int, args) -> int:
       time.sleep(args.heartbeat_s)
       if proc.poll() is not None:
         break
-      new_gen = q.heartbeat(task["id"], args.worker, state["gen"])
+      try:
+        new_gen = q.heartbeat(task["id"], args.worker, state["gen"])
+      except Exception as ex:  # pylint: disable=broad-exception-caught
+        # A transient GCS or auth error (e.g. a failed credential refresh) must not end the heartbeat thread: the
+        # lock would then go stale and another worker would start a duplicate run of this task.
+        _log(f"WARN: heartbeat for {task['id']} failed ({type(ex).__name__}: {ex}); retrying")
+        continue
       if new_gen is None:
         # Another worker took the lock over (it thought we were preempted): stop to avoid two runs at once.
         state["lost"] = True
