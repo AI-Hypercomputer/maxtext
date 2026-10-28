@@ -1,6 +1,6 @@
 # Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~15:05 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
+> **Snapshot:** 2026-10-28 ~21:10 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
 >
 > The numbers below come from the per-phase result JSONs in GCS at snapshot time. Pods were still running, so
 > re-check §6 before acting. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
@@ -17,7 +17,7 @@
 | **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). Unscanned 235B converted in **5,150.1 s** (shards streamed); its Orbax loads are running. The unscanned 397B conversion **could not finish**. Streaming shards takes ~4.3 h, but workloads are deactivated after ~3 h (§7.14): the attempts stopped at ~65% (16:43 UTC) and ~40% (20:57 UTC). To finish it, either fetch shards in parallel to get under 3 h (and re-run 235B the same way, for comparability) or book a longer window |
 | **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 29 tasks). All tasks are done except the two unscanned conversion chains (235B, 397B). Workers left: `s3` (235B), `s8` (397B), standby `s1`, pairs `i` and `k` for the 2-slice loads |
 | **P2 · 16-model suite** | ✅ Done (`p2_leftovers` and re-runs). `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned loads. `llama3.1-70b` scanned · 2 Orbax load needed `concurrent_gb=38` (T-13). Re-ran the `qwen3-14b` and `qwen3-32b` scanned · 1 outliers (U-7) |
-| **Reports** | Written: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, plus the live `tpu7x_priority1_progress.md`. To do: fill in the 235B/397B unscanned `to_maxtext` results when they land (re-run `scripts/build_tpu7x_tables.py --md-into`), then clean up the cluster |
+| **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`. Regenerate the tables with `scripts/build_tpu7x_tables.py --md-into`. The cluster is cleaned up |
 
 ---
 
@@ -211,23 +211,7 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
 
 ## 6. Live cluster state (at snapshot)
 
-Manifests: `tpu7x_p1_completion_scaleout.yaml` (pairs `i`, `j`, singles `s1`–`s3`, 4-slice group `m`) and `tpu7x_p1_completion_scaleout2.yaml` (pair `k`, singles `s4`–`s8`), both from `generate_tpu7x_manifests.py`. All are queue workers (`scripts/tpu7x_task_queue.py`) on spot `2x2x1` nodes. Pods started after 13:31 UTC (`s1`, `s3`, `s8`, `m0`, `m3`) have the `/tmp/maxtext_stagefix` tree and sync the harness before every task (§7.16).
-
-| Worker | Pods | Slices | Task at snapshot (15:05 UTC) |
-| :--- | :--- | :---: | :--- |
-| `s3` | `mesakh-tpu7x-s3` | 1 | `tm_235b_unscanned_s1`: conversion done (5,150.1 s), 1-slice Orbax load running |
-| `s1` | `mesakh-tpu7x-s1` (recreated 17:56) | 1 | `tm_397b_unscanned_s1`: conversion restarted (the first attempt on `s8` was evicted at ~65%) |
-| `s1` | `mesakh-tpu7x-s1` | 1 | idle standby with the `stagefix` tree (can take over `s3`/`s8` tasks) |
-| `i`, `k` | `mesakh-tpu7x-{i,k}{0,1}` | 2 | idle until `tm_235b_unscanned_s2` / `tm_397b_unscanned_s2` become claimable |
-
-Pending: `tm_235b_unscanned_s2`, `tm_397b_unscanned_s2`. Every other task is done. Group `m`, pair `j`, and singles `s2`, `s4`–`s7` were deleted after their work finished.
-
-Gone (all recorded in §7.14 and §7.18):
-- `c1`, `f1`, `g0`, then `g1` at 13:32 (Kueue `The workload is deactivated`); `mesakh-ctrl-c1` is `Completed`, `mesakh-ctrl-g1` and `h1` were deleted. Delete `mesakh-ctrl-c1` at cleanup.
-- `s1` (evicted at 944 GB host memory) and `s3` (OOM-killed): full staging for the 235B conversion (§7.16); both recreated.
-- `m3` and `s7`: spot node shutdown at 13:42. `m3` and `m0` were recreated; `s7` was not needed.
-- `s8` first landed on node `gke-tpu-fd9dfbd0-2jfc`, whose kubelet stopped responding; recreated elsewhere. `s5` deleted while idle to free a node for `m0`.
-- P2 pair `e`: evicted earlier (its leftovers are in `p2_leftovers`). P2 pair `d`: deleted (misconfigured, §7.11).
+**Cleaned up at 21:09 UTC.** `run_tpu7x_cluster.sh --cleanup` removed every `mesakh-*` pod and `mesakh-w*` service; `kubectl get pods,svc | grep mesakh` returns nothing. The GCS queue (`queue/p1/`) and all results stay in GCS: 28 of 30 tasks are done. The two open tasks, `tm_397b_unscanned_s1` (its lock is stale) and `tm_397b_unscanned_s2`, only matter if the 397B conversion is attempted again (§8).
 
 ---
 
