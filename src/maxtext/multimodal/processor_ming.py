@@ -20,10 +20,14 @@ Mirrors `processing_bailing_moe_v3_audio.BailingMoeV3AudioProcessor`:
   2. whisper `log_mel_spectrogram` (128 mels, n_fft 400, hop 160) without 30 s padding.
   3. Chat-template the prompt and expand `<|audio_pad|>` to the number of audio tokens:
      per 3000-frame chunk, L -> conv2 (s2) -> 3x projector conv (s2).
+
+The talker (text -> speech) frontend lives at the end of this file (see `TALKER_TTS_PROMPT`).
 """
 
-import math
 from dataclasses import dataclass
+import json
+import math
+import re
 
 import numpy as np
 
@@ -224,3 +228,152 @@ def add_extra_tokens_for_ming(tokens: np.ndarray, processor_output) -> np.ndarra
 def get_dummy_audio_shape_for_init_ming(config):
   """(batch, T_mel, n_mels) for one full whisper chunk."""
   return (config.micro_batch_size_to_train_on, config.ming_audio_chunk_size, config.num_mel_bins_for_audio)
+
+
+# -----------------------------------------
+# Talker (text -> speech) frontend
+# -----------------------------------------
+#
+# Prompt protocol of the publisher's `talker/inference.py` + `talker/tts_prompt.py` for the default "IP" task
+# (named voice, no reference audio); every piece is tokenized separately and concatenated like the reference:
+#
+#   <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt} Text input:\n{text}
+#   <|im_end|>\n<|im_start|>assistant\n{instruction}<|im_end|><audio>
+#
+# The publisher's text normalization (pynini FST) is not ported: text is synthesized as written.
+
+TALKER_TTS_PROMPT = "Please generate speech based on the following description.\n"
+# `append_optional_target_language`: zh/en (the training languages) add no "Target language" line.
+_TALKER_LANGUAGE_NAMES = {
+    "ja": "Japanese",
+    "japanese": "Japanese",
+    "ko": "Korean",
+    "korean": "Korean",
+    "de": "German",
+    "german": "German",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "yue": "Chinese",
+    "zh-yue": "Chinese",
+    "cantonese": "Chinese",
+}
+_TALKER_NO_TARGET_LANGUAGE_IDS = {"", "zh", "zh-cn", "chinese", "en", "en-us", "en-gb", "english"}
+
+
+def build_tts_prompt(language: str = "") -> str:
+  """`append_optional_target_language(TALKER_TTS_PROMPT, language)`."""
+  key = language.strip().lower().replace("_", "-")
+  if key in _TALKER_NO_TARGET_LANGUAGE_IDS:
+    return TALKER_TTS_PROMPT
+  return TALKER_TTS_PROMPT + f"Target language: {_TALKER_LANGUAGE_NAMES.get(key, language.strip())}.\n"
+
+
+def build_ip_instruction(ip_name: str) -> str:
+  """`build_task_instruction("IP", ip=ip_name)`: the assistant-side JSON caption (zh schema)."""
+  item = {
+      "序号": 1,
+      "说话人": "speaker_1",
+      "方言": None,
+      "风格": None,
+      "语速": None,
+      "基频": None,
+      "音量": None,
+      "情感": None,
+  }
+  item["BGM"] = {"Genre": None, "Mood": None, "Instrument": None, "Theme": None, "ENV": None, "SNR": None}
+  item["IP"] = ip_name
+  return json.dumps({"audio_sequence": [item]}, ensure_ascii=False)
+
+
+def talker_input_ids(tokenizer, text: str, prompt: str, instruction: str) -> np.ndarray:
+  """Talker prompt token ids for one text fragment (`MingTalker.input_embeddings` without speakers)."""
+  pieces = (
+      "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n",
+      "<|im_start|>user\n",
+      prompt,
+      " Text input:\n",
+      text,
+      "<|im_end|>\n",
+      "<|im_start|>assistant\n",
+      instruction,
+      "<|im_end|>",
+      "<audio>",
+  )
+  return np.asarray([t for piece in pieces for t in tokenizer.encode(piece, add_special_tokens=False)], np.int32)
+
+
+# Dots that do not end a sentence (the reference `front/text_segment_cut.py` protects decimals and dotted
+# capitals such as "U.S.A."): decimals ("3.14"), single-letter abbreviations ("e.g.", "J. K."), common titles.
+_TALKER_DOT = "\ue000"  # private-use placeholder, restored after splitting
+_TALKER_PROTECTED_DOTS = re.compile(
+    r"(?<=\d)\.(?=\d)"  # decimals
+    # Initials / single-letter abbreviations and titles (fixed-width look-behinds), unless the dot ends the text.
+    r"|(?:(?<=\b[A-Za-z])|(?<=\b(?:Mr|Ms|Dr|St|Jr|Sr|vs))|(?<=\bMrs)|(?<=\bProf))\.(?=\s*\S)"
+)
+# A sentence ends after a run of terminators ("...", "?!"), so ellipses stay with their sentence.
+_TALKER_SENTENCE_END = re.compile(r"(?<=[.!?。！？…])(?![.!?。！？…])\s*")
+_TALKER_CLAUSE_END = re.compile(r"(?<=[,，;；、:：])\s*")
+_TALKER_CJK = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _join_text(left: str, right: str) -> str:
+  """Joins two text pieces with a space unless the left one ends in CJK text or punctuation."""
+  if not left:
+    return right
+  separator = "" if re.search(r"[\u4e00-\u9fff。！？，；、：]$", left) else " "
+  return left + separator + right
+
+
+def _pack(pieces: list[str], max_length: int) -> list[str]:
+  """Greedily concatenates consecutive pieces while the result stays within `max_length` characters."""
+  fragments = []
+  for piece in pieces:
+    if fragments and len(_join_text(fragments[-1], piece)) <= max_length:
+      fragments[-1] = _join_text(fragments[-1], piece)
+    else:
+      fragments.append(piece)
+  return fragments
+
+
+def _split_long(sentence: str, max_length: int) -> list[str]:
+  """Splits a sentence longer than `max_length`: at clause punctuation, then words, then characters."""
+  if len(sentence) <= max_length:
+    return [sentence]
+  pieces = []
+  for clause in (c.strip() for c in _TALKER_CLAUSE_END.split(sentence) if c.strip()):
+    if len(clause) <= max_length:
+      pieces.append(clause)
+      continue
+    for word in clause.split(" "):
+      # A single over-long "word" (e.g. unspaced CJK text) is cut into max_length characters.
+      pieces.extend(word[i : i + max_length] for i in range(0, len(word), max_length))
+  return _pack(pieces, max_length)
+
+
+def split_text(text: str, max_length: int = 50) -> list[str]:
+  """Splits text into fragments of at most `max_length` characters, synthesized one at a time.
+
+  Sentences end after a run of `.!?。！？…` (not inside decimals, initials, abbreviations or ellipses); sentences
+  longer than `max_length` fall back to clause punctuation, then whitespace, then characters. Consecutive pieces
+  are packed up to `max_length`, and the final fragment gets a sentence terminator like the reference.
+  """
+  text = _TALKER_PROTECTED_DOTS.sub(_TALKER_DOT, " ".join(text.split()))
+  sentences = [s.strip() for s in _TALKER_SENTENCE_END.split(text) if s.strip()]
+  pieces = [piece for sentence in sentences for piece in _split_long(sentence, max_length)]
+  fragments = [f.replace(_TALKER_DOT, ".") for f in _pack(pieces, max_length)]
+  if fragments and not re.search(r"[.!?。！？…]$", fragments[-1]):
+    fragments[-1] += "。" if _TALKER_CJK.search(fragments[-1]) else "."
+  return fragments
+
+
+def trim_trailing_silence(speech: np.ndarray, sample_rate: int, threshold: float = 1e-3, keep: float = 0.3):
+  """`MingTalker.silence_holder(..., last_chunk=True)` for one complete fragment waveform `[T]`."""
+  frame, keep_len = int(sample_rate * 0.1), int(keep * sample_rate)
+  framed = speech[: speech.shape[-1] // frame * frame]
+  loud = np.nonzero(np.abs(framed.reshape(-1, frame)).mean(axis=-1) > threshold)[0]
+  if loud.size == 0:
+    return speech[:keep_len]
+  # The reference drops the sub-frame remainder of a fragment that ends with speech.
+  return framed[: (int(loud[-1]) + 1) * frame + keep_len]
