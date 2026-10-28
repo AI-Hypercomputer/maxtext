@@ -283,6 +283,10 @@ capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, a
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
 moe_accumulate_chunk_wgrad: false # with num_moe_token_chunks>1, gather/quantize MoE weights once and accumulate their gradients in place across chunks via tgmm_v2 partial_sum. requires use_tokamax_gmm=true, use_gmm_v2=true, num_moe_emb_chunks=0, prefuse_moe_weights=false.
 moe_accumulate_wi_dlhs: false # accumulate the MoE wi_1 backward DLHS into the wi_0 DLHS in place (gmm_v2 partial_sum) and fold per-tensor DLHS scales into the kernel. Requires use_tokamax_gmm=True, use_gmm_v2=True, prefuse_moe_weights=False.
+moe_cache_argsort: false # sort selected_experts with lax.sort_key_val and pass inverse permutation into sort/combine backward to avoid redundant argsorts.
+moe_pallas_row_gather: false # use the Pallas DMA row gather (kernels/row_gather.py) for MoE token sort/route gathers.
+moe_pallas_row_gather_sites: "route,unsort" # comma-separated gather sites that use the Pallas row gather: 'route' and/or 'unsort'.
+moe_pallas_combine: false # fuse the MoE unsort gather and the top-k weighted sum into one Pallas kernel (kernels/moe_combine.py).
 moe_gmm_v2_dlhs_transpose_rhs: false # use native transpose_rhs in GMM v2 backward DLHS; false keeps the explicit RHS transpose
 moe_flat_fsdp_weights: false # store routed-expert weights as 2D [num_experts * rows, cols] sharded (expert, fsdp) on dim 0 to eliminate FSDP all-gather / reduce-scatter relayout copies.
 moe_bwd_prequant_before_unsort: false # fuse TC unsort-reduce into the wo GMM custom VJP so backward quantization runs on the smaller [N_tokens, D // 128, 128] cotangent before the TC unsort-gather into the expert buffer. With quantization, needs fixed weight, act and bwd calibration.

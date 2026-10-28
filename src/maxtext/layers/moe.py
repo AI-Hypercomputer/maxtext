@@ -36,6 +36,8 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine
+from maxtext.kernels import row_gather
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -178,6 +180,8 @@ def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
     use_custom_vjp: bool,
+    inv_sort_indices: jax.Array | None = None,
+    use_pallas_gather: bool = False,
 ) -> jax.Array:
   """Sort activations by `sort_indices`.
 
@@ -193,6 +197,10 @@ def _sort_activations(
     inputs: `(tokens, ...)`-shaped array of input activations to sort.
     sort_indices: `(tokens,)`-shaped array containing the sort order.
     use_custom_vjp: Whether to use the explicit backward pass.
+    inv_sort_indices: Optional precomputed `jnp.argsort(sort_indices)` to skip
+      recomputing argsort in the backward pass.
+    use_pallas_gather: Use the Pallas DMA row gather (kernels/row_gather.py)
+      for the forward and backward gathers. Requires `use_custom_vjp=True`.
 
   Returns:
     `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
@@ -200,14 +208,26 @@ def _sort_activations(
   assert inputs.shape[0] == sort_indices.shape[0]
 
   with jax.named_scope("sort_activations"):
+    if use_custom_vjp and use_pallas_gather:
+      return _sort_activations_pallas(inputs, sort_indices, inv_sort_indices)
     if use_custom_vjp:
+      if inv_sort_indices is not None:
+        return _sort_activations_custom_cached(inputs, sort_indices, inv_sort_indices)
       return _sort_activations_custom(inputs, sort_indices)
     return inputs[sort_indices, ...]
 
 
-def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
+def _route_activations(
+    inputs: jax.Array,
+    selected_experts: jax.Array,
+    use_pallas_gather: bool = False,
+    sorted_selected_experts: jax.Array | None = None,
+    inv_sort_indices: jax.Array | None = None,
+) -> jax.Array:
   """Groups token activations by expert without materializing Top-K copies."""
   selected_experts = selected_experts.reshape((inputs.shape[0], -1))
+  if use_pallas_gather:
+    return _route_pallas(inputs, selected_experts, sorted_selected_experts, inv_sort_indices)
   # When use_gather_mosaic_kernel=False, use the general JAX backward, which
   # gathers and sums gradients from all expert copies of each token. The
   # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
@@ -233,6 +253,111 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 
 
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
+
+
+@jax.custom_vjp
+def _sort_activations_custom_cached(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    inv_sort_indices: jax.Array,
+) -> jax.Array:
+  """Sort functions with custom vjp and precomputed inverse permutation."""
+  del inv_sort_indices
+  return inputs[sort_indices, ...]
+
+
+def _sort_activations_custom_cached_fwd(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    inv_sort_indices: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+  """Forward pass of the custom vjp for `_sort_activations_custom_cached()`."""
+  return _sort_activations_custom_cached(inputs, sort_indices, inv_sort_indices), (sort_indices, inv_sort_indices)
+
+
+def _sort_activations_custom_cached_bwd(
+    residuals: tuple[jax.Array, jax.Array],
+    grads: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward pass of the custom vjp for `_sort_activations_custom_cached()`."""
+  sort_indices, inv_sort_indices = residuals
+  return _sort_activations_custom_cached(grads, inv_sort_indices, sort_indices), None, None
+
+
+_sort_activations_custom_cached.defvjp(_sort_activations_custom_cached_fwd, _sort_activations_custom_cached_bwd)
+
+
+@jax.custom_vjp
+def _sort_activations_pallas(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    inv_sort_indices: jax.Array | None = None,
+) -> jax.Array:
+  """Same as `_sort_activations_custom`, with the Pallas row gather."""
+  del inv_sort_indices
+  return row_gather.gather_rows(inputs, sort_indices, use_pallas=True)
+
+
+def _sort_activations_pallas_fwd(inputs, sort_indices, inv_sort_indices=None):
+  return _sort_activations_pallas(inputs, sort_indices, inv_sort_indices), (sort_indices, inv_sort_indices)
+
+
+def _sort_activations_pallas_bwd(residuals, grads):
+  sort_indices, inv_sort_indices = residuals
+  inv_idx = inv_sort_indices if inv_sort_indices is not None else jnp.argsort(sort_indices)
+  return _sort_activations_pallas(grads, inv_idx, sort_indices), None, None
+
+
+_sort_activations_pallas.defvjp(_sort_activations_pallas_fwd, _sort_activations_pallas_bwd)
+
+
+@jax.custom_vjp
+def _route_pallas(
+    inputs: jax.Array,
+    selected_experts: jax.Array,
+    sorted_selected_experts: jax.Array | None = None,
+    inv_sort_indices: jax.Array | None = None,
+) -> jax.Array:
+  """Same as `sort_activations.route(..., use_gather_mosaic_kernel=False)`, with the Pallas row gather."""
+  del inv_sort_indices
+  s = sorted_selected_experts if sorted_selected_experts is not None else jnp.argsort(jnp.ravel(selected_experts))
+  inds = s // selected_experts.shape[1]
+  return row_gather.gather_rows(inputs, inds, use_pallas=True)
+
+
+def _use_pallas_gather(config, site: str) -> bool:
+  """Whether the MoE gather at `site` ('route' or 'unsort') uses the Pallas row gather."""
+  if not getattr(config, "moe_pallas_row_gather", False):
+    return False
+  sites = getattr(config, "moe_pallas_row_gather_sites", "route,unsort")
+  return site in [s.strip() for s in sites.split(",")]
+
+
+def _route_pallas_fwd(inputs, selected_experts, sorted_selected_experts=None, inv_sort_indices=None):
+  out = _route_pallas(inputs, selected_experts, sorted_selected_experts, inv_sort_indices)
+  return out, (selected_experts, sorted_selected_experts, inv_sort_indices)
+
+
+def _route_pallas_bwd(residuals, grads):
+  """Backward pass for _route_pallas using the fused combine kernel."""
+  # d_inputs[t] = sum_j grads[rank(t * k + j)]: the fused combine kernel with
+  # unit weights, so the (T*k, D) gathered tensor is never written to HBM.
+  selected_experts, sorted_selected_experts, inv_sort_indices = residuals
+  if inv_sort_indices is not None:
+    inds = inv_sort_indices
+  elif sorted_selected_experts is not None:
+    inds = jnp.argsort(sorted_selected_experts)
+  else:
+    inds = jnp.argsort(jnp.argsort(jnp.ravel(selected_experts)))
+  t, k = selected_experts.shape
+  ones = jnp.ones((t, k), jnp.float32)
+  d = grads.size // grads.shape[0]
+  g_in = grads.reshape(grads.shape[0], d // 128, 128) if d % 128 == 0 else grads.reshape(grads.shape[0], d)
+  out = moe_combine.combine_fwd(g_in, inds, ones, interpret=jax.default_backend() != "tpu")
+  return out.reshape((t,) + grads.shape[1:]), None, None, None
+
+
+_route_pallas.defvjp(_route_pallas_fwd, _route_pallas_bwd)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
@@ -264,6 +389,29 @@ def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
 
 
 take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def top_k_dense_vjp(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+  """`jax.lax.top_k(x, k)` whose backward is a dense compare-select-reduce rather than a scatter-add."""
+  vals, indices = jax.lax.top_k(x, k)
+  return vals, indices
+
+
+def _top_k_dense_vjp_fwd(x: jax.Array, k: int):
+  vals, indices = jax.lax.top_k(x, k)
+  return (vals, indices), (indices, x.shape[-1])
+
+
+def _top_k_dense_vjp_bwd(k: int, res, g):
+  del k
+  indices, num_classes = res
+  g_vals, _ = g
+  dx, _ = _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g_vals)
+  return (dx,)
+
+
+top_k_dense_vjp.defvjp(_top_k_dense_vjp_fwd, _top_k_dense_vjp_bwd)
 
 
 def get_batchsplit_init_kernel_axes():
@@ -1409,7 +1557,10 @@ class RoutedMoE(nnx.Module):
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
         top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
       else:
-        top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+        if getattr(self.config, "router_topk_matmul_vjp", False):
+          top_k_weights, top_k_indices = top_k_dense_vjp(gate_logits, self.num_experts_per_tok)
+        else:
+          top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
     if self.config.decoder_block in (
         ctypes.DecoderBlockType.DEEPSEEK,
@@ -1658,6 +1809,7 @@ class RoutedMoE(nnx.Module):
     topk_argsort_indices = None
     use_tc_sort = False
     tc_routing = None
+    sorted_experts_from_sort = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       if forced_routed_experts is not None:
@@ -1756,13 +1908,32 @@ class RoutedMoE(nnx.Module):
       else:
         flatten_selected_experts_safe = flatten_selected_experts
 
-      sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      if getattr(self.config, "moe_cache_argsort", False):
+        iota = jax.lax.broadcasted_iota(jnp.int32, flatten_selected_experts_safe.shape, 0)
+        sorted_experts_from_sort, sorted_selected_experts = jax.lax.sort_key_val(
+            flatten_selected_experts_safe, iota, is_stable=True
+        )
+        _, topk_argsort_indices = jax.lax.sort_key_val(sorted_selected_experts, iota, is_stable=False)
+      else:
+        sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = _route_activations(
+            inputs_2d,
+            flatten_selected_experts_safe,
+            _use_pallas_gather(self.config, "route"),
+            sorted_selected_experts=sorted_selected_experts,
+            inv_sort_indices=topk_argsort_indices,
+        )
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        sorted_inputs = _sort_activations(
+            replicated_inputs_2d,
+            sorted_selected_experts,
+            use_custom_sort_vjp,
+            inv_sort_indices=topk_argsort_indices,
+            use_pallas_gather=_use_pallas_gather(self.config, "route"),
+        )
 
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
@@ -1805,12 +1976,15 @@ class RoutedMoE(nnx.Module):
       )
     else:
       local_group_size = None
-      expert_indices = jnp.arange(self.num_experts)
-      sorted_experts = jnp.repeat(
-          expert_indices,
-          repeats=group_size,
-          total_repeat_length=math.prod(selected_experts.shape),
-      )
+      if sorted_experts_from_sort is not None:
+        sorted_experts = sorted_experts_from_sort
+      else:
+        expert_indices = jnp.arange(self.num_experts)
+        sorted_experts = jnp.repeat(
+            expert_indices,
+            repeats=group_size,
+            total_repeat_length=math.prod(selected_experts.shape),
+        )
 
     # Reconstruct QArray with sorted qvalue payload and preserved global scale.
     if is_qarray:
@@ -1890,10 +2064,35 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
       )
     else:
+      cache_argsort = getattr(self.config, "moe_cache_argsort", False)
+      inv_sort = (
+          topk_argsort_indices
+          if (cache_argsort and topk_argsort_indices is not None)
+          else jnp.argsort(sorted_selected_experts)
+      )
+      if getattr(self.config, "moe_pallas_combine", False):
+        reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+        if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+          reshaped_weights = jnp.ones_like(reshaped_weights)
+        combine_in = (
+            intermediate
+            if (intermediate.ndim == 3 and intermediate.shape[2] == 128)
+            else intermediate.reshape(intermediate.shape[0], -1)
+        )
+        with jax.named_scope("pallas_unsort_combine"):
+          output = moe_combine.fused_unsort_combine(
+              combine_in,
+              inv_sort,
+              reshaped_weights,
+              sorted_selected_experts if cache_argsort else None,
+          )
+        return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
       unsort_intermediate = _sort_activations(
           intermediate,
-          jnp.argsort(sorted_selected_experts),
+          inv_sort,
           use_custom_sort_vjp,
+          inv_sort_indices=sorted_selected_experts if cache_argsort else None,
+          use_pallas_gather=_use_pallas_gather(self.config, "unsort"),
       )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
       reshaped_intermediate = jnp.reshape(
@@ -2459,6 +2658,9 @@ class RoutedMoE(nnx.Module):
         tc_routing=None,
         tc_unsort_cfg=None,
         bias=None,
+        rhs2=None,
+        out_3d_fwd=False,
+        out_3d_dlhs=False,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2486,10 +2688,19 @@ class RoutedMoE(nnx.Module):
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
       if self.config.use_te_grouped_gemm:
-        if return_lhs or return_rhs or out_is_3d or tc_unsort_cfg is not None:
+        if (
+            return_lhs
+            or return_rhs
+            or out_is_3d
+            or tc_unsort_cfg is not None
+            or rhs2 is not None
+            or out_3d_fwd
+            or out_3d_dlhs
+        ):
           raise NotImplementedError(
-              "use_te_grouped_gemm does not support return_lhs, return_rhs, out_is_3d or a fused TC unsort "
-              f"(got {return_lhs=}, {return_rhs=}, {out_is_3d=}, tc_unsort={tc_unsort_cfg is not None})."
+              "use_te_grouped_gemm does not support return_lhs, return_rhs, out_is_3d, fused TC unsort, "
+              f"rhs2, out_3d_fwd, or out_3d_dlhs (got {return_lhs=}, {return_rhs=}, {out_is_3d=}, "
+              f"tc_unsort={tc_unsort_cfg is not None}, rhs2={rhs2 is not None}, {out_3d_fwd=}, {out_3d_dlhs=})."
           )
         # Highest priority when the flag is on. Skip megablox/tokamax tile padding:
         # TE v1 walks only sum(group_sizes) rows and zeros the leftover.
@@ -2520,6 +2731,42 @@ class RoutedMoE(nnx.Module):
       # CPU (JAX_PLATFORMS=cpu) but self.mesh targets tpu7x -> compile natively; interpret
       # mode on a TPU target breaks check_vma and bloats HBM temporaries.
       megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
+
+      if (
+          rhs2 is not None
+          and self.config.megablox
+          and not self.config.use_tokamax_gmm
+          and not self.config.quantization
+          and not self.config.use_qwix_quantization
+          and lhs_quantize_dtype is None
+          and rhs_quantize_dtype is None
+          and partial_sum is None
+          and not isinstance(inputs, qpl.QArray)
+          and not is_native_kernel
+          and not isinstance(rhs2, qpl.QArray)
+          and not self.config.use_te_grouped_gemm
+          and self.config.hardware != "cpu"
+          and not self.config.moe_flat_fsdp_weights
+          and bias is None
+      ):
+        rhs2 = rhs2.astype(self.dtype)
+        out0, out1 = mblx.gmm_dual_up(
+            lhs=inputs,
+            rhs0=kernel,
+            rhs1=rhs2,
+            group_sizes=group_sizes,
+            preferred_element_type=self.dtype,
+            tiling=tiling,
+            group_offset=group_offset,
+            interpret=megablox_interpret,
+            lhs_vma_axes=lhs_vma_axes,
+            rhs_vma_axes=rhs_vma_axes,
+            out_3d_dlhs=out_3d_dlhs,
+        )
+        if padding_amount > 0:
+          out0 = out0[: orig_inputs_shape[0]]
+          out1 = out1[: orig_inputs_shape[0]]
+        return out0, out1
 
       # We support various implementations for gmm - TE grouped_dense, tokamax gmm (v1, v2),
       # older forked megablox, or jax.lax.ragged_dot.
@@ -2594,6 +2841,7 @@ class RoutedMoE(nnx.Module):
             return_rhs=return_rhs,
             flat_fsdp_shard=flat_fsdp_shard,
             fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+            out_3d_fwd=out_3d_fwd,
             **({"out_is_3d": True} if out_is_3d else {}),
             **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
         )
@@ -3037,7 +3285,7 @@ class RoutedMoE(nnx.Module):
           local_group_sizes,
           _,
           _,
-          _,
+          topk_argsort_indices,
           _,
       ) = self.permute(
           x,
@@ -3123,6 +3371,7 @@ class RoutedMoE(nnx.Module):
               lb_loss=lb_loss,
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
+              topk_argsort_indices=topk_argsort_indices,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -3310,6 +3559,43 @@ class RoutedMoE(nnx.Module):
           if mask is not None:
             layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
             layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
+        layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+        return layer_w0, layer_w1
+      elif (
+          self.config.megablox
+          and not self.config.use_tokamax_gmm
+          and not getattr(self.config, "use_te_grouped_gemm", False)
+          and getattr(self.config, "hardware", "tpu") != "cpu"
+          and not getattr(self.config, "moe_flat_fsdp_weights", False)
+          and not self.config.quantization
+          and not self.config.use_qwix_quantization
+          and not self.config.mlp_bias
+          and w0_bias is None
+          and w1_bias is None
+          and partial_accum0 is None
+          and partial_accum1 is None
+          and not return_weights
+          and (
+              getattr(self.config, "moe_pallas_combine", False)
+              or getattr(self.config, "moe_pallas_row_gather", False)
+              or getattr(self.config, "moe_cache_argsort", False)
+          )
+      ):
+        use_3d_dlhs = (
+            self.config.moe_use_direct_token_gather
+            and _use_pallas_gather(self.config, "route")
+            and self.get_expert_parallelism_size() == 1
+            and not (self.config.use_ragged_sort and self.config.use_ring_of_experts)
+        )
+        layer_w0, layer_w1 = gmm_fn(
+            x,
+            w0,
+            tiling=wi_tile_size,
+            weight_gather_axes=wi_gather_axes,
+            rhs2=w1,
+            out_3d_dlhs=use_3d_dlhs,
+        )
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
         return layer_w0, layer_w1
@@ -3692,6 +3978,20 @@ class RoutedMoE(nnx.Module):
                 ),
             ),
         }
+      use_3d_wo_out = (
+          getattr(self.config, "moe_pallas_combine", False)
+          and self.config.megablox
+          and not self.config.use_tokamax_gmm
+          and not getattr(self.config, "use_te_grouped_gemm", False)
+          and getattr(self.config, "hardware", "tpu") != "cpu"
+          and not getattr(self.config, "moe_flat_fsdp_weights", False)
+          and not self.config.quantization
+          and not self.config.use_qwix_quantization
+          and self.get_tensor_parallelism_size() == 1
+          and self.get_expert_parallelism_size() == 1
+          and not self.config.mlp_bias
+          and not self.config.use_ring_of_experts
+      )
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
@@ -3699,6 +3999,7 @@ class RoutedMoE(nnx.Module):
           weight_gather_axes=wo_gather_axes,
           bias=wo_bias if use_te_wo_bias else None,
           return_rhs=return_weights,
+          out_3d_fwd=use_3d_wo_out,
           **({"out_is_3d": True} if x_is_3d else {}),
           **tc_unsort_kwargs,
       )
@@ -3816,6 +4117,7 @@ class RoutedMoE(nnx.Module):
           sequence_length=sequence_length,
           use_custom_sort_vjp=self.config.use_custom_sort_vjp,
           group_sizes=routing.group_sizes,
+          topk_argsort_indices=routing.topk_argsort_indices,
       )
 
       return (
