@@ -25,6 +25,58 @@
 | `qwen3-480b-a35b` | 961.0 GB / 241 | 1,046.1 s | ✅ 2/2 that fit (1 slice ❌ HBM) | ❌ `KeyError` (no mapping before #5706); conclusive | ⏳ unscanned only (scanned conversion does not fit one host) |
 | `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ does not fit 1 or 2 slices | ➖ | ➖ |
 
+## `to_maxtext` vs `safetensor` (row-by-row, same layout as the earlier small-model summary)
+
+For each `(Model, Scan Mode, Slices)` configuration, **`to_maxtext`** and **`safetensor`** are on consecutive rows:
+- **Col 1 (`HF -> GCS`)**: `to_maxtext` Step 1 vs `safetensor` Step 1. Both are the same cold download of the
+  `.safetensors` shards, measured once per model.
+- **Col 2 (`Convert to Orbax`)**: `to_maxtext` Step 2 vs `—`. `safetensor` has no conversion step.
+- **Col 3 (`Load into MaxText`)**: `to_maxtext` Step 3 (`Load Orbax`) vs `safetensor` Step 2 (`Safetensors+Convert`).
+
+Slices (Devices): `1 (8)` = 1 slice, 8 TPU cores; `2 (16)` = 2 slices, 16 TPU cores. The speedup is filled in once both
+rows have finished.
+
+| Model | Scan Mode | Slices (Devices) | Pipeline | 1. `HF -> GCS` (s) | 2. `Convert to Orbax` (s) | 3. `Load into MaxText` (s) | **Total (No Step 1) (s)** | **Total (End-to-End) (s)** | **Speedup (E2E / No Step 1)** |
+| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `scanned` | `1 (8)` | `to_maxtext` | 583.32 | ⏳ *(queued: `tm_235b_scanned_s1`)* | ⏳ *(Load Orbax)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **757.50** *(Safetensors+Convert)* | **757.50** | **1,340.81** | ⏳ *(awaiting `to_maxtext`)* |
+| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `scanned` | `2 (16)` | `to_maxtext` | 583.32 | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_235b_scanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **792.38** *(Safetensors+Convert)* | **792.38** | **1,375.69** | ⏳ *(awaiting `to_maxtext`)* |
+| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 583.32 | ⏳ *(queued: `tm_235b_unscanned_s1`)* | ⏳ *(Load Orbax)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **697.13** *(Safetensors+Convert)* | **697.13** | **1,280.44** | ⏳ *(awaiting `to_maxtext`)* |
+| **`qwen3-235b-a22b`** *(470.4 GB MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 583.32 | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_235b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **749.00** *(Safetensors+Convert)* | **749.00** | **1,332.31** | ⏳ *(awaiting `to_maxtext`)* |
+| **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `scanned` | `1 (8)` | `to_maxtext` | ⏳ *(local stage)* | ⏳ *(queued: `tm_284b_scanned_s1`)* | ⏳ *(Load Orbax)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **453.27** *(Safetensors+Convert)* | **453.27** | **453.27** | ⏳ *(awaiting `to_maxtext`)* |
+| **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `scanned` | `2 (16)` | `to_maxtext` | ⏳ *(local stage)* | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_284b_scanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **440.72** *(Safetensors+Convert)* | **440.72** | **440.72** | ⏳ *(awaiting `to_maxtext`)* |
+| **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `unscanned` | `1 (8)` | `to_maxtext` | ⏳ *(local stage)* | ⏳ *(queued: `tm_284b_unscanned_s1`)* | ⏳ *(Load Orbax)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **414.09** *(Safetensors+Convert)* | **414.09** | **414.09** | ⏳ *(awaiting `to_maxtext`)* |
+| **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `unscanned` | `2 (16)` | `to_maxtext` | ⏳ *(local stage)* | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_284b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **352.96** *(Safetensors+Convert)* | **352.96** | **352.96** | ⏳ *(awaiting `to_maxtext`)* |
+| **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `scanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | **Does not fit one host** *(795 GB > staging budget; recorded by `tm_397b_scanned_s1`)* | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
+| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **HBM OOM** *(load 947.72 s, then OOM in transform; clean re-run queued: `st_397b_scanned_s1`)* | **OOM** | **OOM** | Failed (1-slice HBM) |
+| **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `scanned` | `2 (16)` | `to_maxtext` | 814.53 *(shared)* | **Does not fit one host** | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
+| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **HBM OOM** *(load 483.84 s, then OOM splitting `wi_0`/`wi_1`; fix variant queued: `st_397b_scanned_s2_hbmfix`)* | **OOM** | **OOM** | Failed (transform HBM peak) |
+| **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(queued: `tm_397b_unscanned_s1`)* | ⏳ *(Load Orbax; expected HBM OOM)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **Not run** *(795 GB ≈ 98% of 1-slice HBM)* | **—** | **—** | — |
+| **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_397b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | 🔄 *(running: `st_397b_unscanned_s2`)* | 🔄 | 🔄 | ⏳ |
+| **`qwen3-480b-a35b`** *(961.0 GB MoE)* | `scanned` | `1 (8)` | `to_maxtext` | 1,135.50 | **Does not fit one host** *(961 GB > staging budget; recorded by `tm_480b_scanned_conv`)* | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
+| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **1,046.14** | **—** | **HBM OOM** *(961 GB > 813.8 GB)* | **OOM** | **OOM** | Failed (1-slice HBM) |
+| **`qwen3-480b-a35b`** *(961.0 GB MoE)* | `scanned` | `2 (16)` | `to_maxtext` | 1,135.50 | **Does not fit one host** | — | **N/A** | **N/A** | N/A (`to_maxtext` infeasible on 1 host) |
+| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **1,046.14** | **—** | **1,067.86** *(Safetensors+Convert)* | **1,067.86** | **2,114.00** | **Only `safetensor` loads this config** |
+| **`qwen3-480b-a35b`** *(961.0 GB MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 1,135.50 | ⏳ *(queued: `tm_480b_unscanned_conv`)* | **Does not fit 1 slice** *(961 GB > 813.8 GB)* | **N/A** | **N/A** | N/A (1-slice HBM) |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **1,046.14** | **—** | **Not run** *(961 GB > 813.8 GB)* | **—** | **—** | — |
+| **`qwen3-480b-a35b`** *(961.0 GB MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 1,135.50 | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_480b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **1,046.14** | **—** | **992.17** *(Safetensors+Convert)* | **992.17** | **2,038.31** | ⏳ *(awaiting `to_maxtext`)* |
+| **`deepseek3-671b`** *(1,342.4 GB MoE, synthetic sparse files)* | `scanned` | `1 (8)` | `to_maxtext` | — | **Not run** *(does not fit 1 slice)* | — | **N/A** | **N/A** | N/A |
+| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **HBM OOM** *(1,342 GB > 813.8 GB)* | **OOM** | **OOM** | Failed (1-slice HBM) |
+| **`deepseek3-671b`** *(1,342.4 GB MoE, synthetic sparse files)* | `scanned` | `2 (16)` | `to_maxtext` | — | **Not run** *(does not fit 2 slices)* | — | **N/A** | **N/A** | N/A |
+| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **OOMKilled** *(host, 742.1 GB sampled peak; needs ≥ 4 slices)* | **OOM** | **OOM** | Failed (2-slice capacity) |
+| **`deepseek3-671b`** *(1,342.4 GB MoE, synthetic sparse files)* | `unscanned` | `1 (8)` / `2 (16)` | `to_maxtext` | — | **Not run** | — | **N/A** | **N/A** | N/A |
+| ↳ | `unscanned` | `1 (8)` / `2 (16)` | **`safetensor`** | — | **—** | **Skipped** *(same capacity limits as scanned)* | **—** | **—** | — |
+
 ## All tests
 
 **WITH S2** is `safetensors_dynamic` Step 2 (sharded load + transform). **TM S2** is the `to_maxtext` CPU conversion,
