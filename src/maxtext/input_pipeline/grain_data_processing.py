@@ -34,6 +34,7 @@ from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
@@ -685,6 +686,16 @@ def vision_sft_preprocessing_pipeline(
 
   if tokenize:
     dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(text_columns, config.max_target_length, tokenizer_model))
+
+  # Formats that leave BOS to the token ids (Gemma 3) need it added back to the prompt.
+  if mm_processor.reformatted_prompt_needs_bos(config.model_name):
+    dataset = dataset.map(
+        functools.partial(
+            input_pipeline_utils.prepend_bos,
+            column_name=text_columns[0],
+            bos_id=tokenizer_model.bos_id,
+        )
+    )
 
   dataset = dataset.map(
       functools.partial(
