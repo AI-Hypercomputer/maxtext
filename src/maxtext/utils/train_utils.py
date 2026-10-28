@@ -271,6 +271,9 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
         out_shardings=out_shardings,
         static_argnums=static_argnums,
         donate_argnums=donate_argnums,
+        # Keep overwritten state leaves (e.g. Qwix FP8 statistics) eligible for donation.
+        # Pruning their unused inputs forces fresh output buffers and can fragment device memory.
+        keep_unused=True,
         compiler_options=compiler_options or None,
     )
 

@@ -204,6 +204,8 @@ def jit_and_compile(
         out_shardings=out_shardings,
         static_argnums=static_argnums,
         donate_argnums=donate_argnums,
+        # Match jit_train_step: retain overwritten state inputs so their buffers can be donated.
+        keep_unused=True,
     )
     maxtext_utils.maybe_dump_jaxpr(config, jitted, func_input_args)
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
