@@ -16,6 +16,7 @@
 
 import contextlib
 import gc
+import importlib
 import io
 import logging
 import os
@@ -1267,6 +1268,32 @@ def shard_jax_weights(jax_weights, device_count, mem_info):
   return jax_weights
 
 
+def _is_lazy_leaf(x) -> bool:
+  # Duck-typed check for `to_maxtext.LazyTensor` (to_maxtext imports this module).
+  return type(x).__name__ == "LazyTensor" and hasattr(x, "_load_fn")
+
+
+def _lazy_save_registry(jax_weights, device_count: int):
+  """Returns `(checkpointables_registry, has_lazy_leaves, jax_weights)` for the save.
+
+  With `device_count == 1`, `to_maxtext.LazyTensor` leaves are written by the budgeted
+  lazy leaf handler in `lazy_save`. If that module cannot be imported (it uses private
+  Orbax APIs), the stock handler is used and lazy leaves are materialized up front
+  with a warning.
+  """
+  has_lazy = device_count == 1 and any(_is_lazy_leaf(x) for x in jax.tree_util.tree_leaves(jax_weights))
+  try:
+    # Imported on demand: an incompatible Orbax must not break the other conversion entry points.
+    lazy_save = importlib.import_module("maxtext.checkpoint_conversion.utils.lazy_save")
+  except ImportError as e:
+    if has_lazy:
+      max_logging.log(f"WARNING: lazy checkpoint save unavailable, materializing all lazy leaves up front: {e}")
+      jax_weights = jax.tree.map(lambda x: np.asarray(x) if _is_lazy_leaf(x) else x, jax_weights)
+    return None, False, jax_weights
+  # `save_checkpoint` saves the train state as the "items" checkpointable.
+  return lazy_save.lazy_aware_checkpointables_registry("items"), has_lazy, jax_weights
+
+
 def save_weights_to_checkpoint(
     maxtext_model_path: str,
     jax_weights: dict,
@@ -1274,6 +1301,8 @@ def save_weights_to_checkpoint(
     use_ocdbt: bool,
     use_zarr3: bool,
     config=None,
+    checkpoint_storage_concurrent_gb: float = 96,
+    save_timeout_secs: int | None = None,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1290,6 +1319,18 @@ def save_weights_to_checkpoint(
           (OCDBT) format for improved metadata handling.
       use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
       config: Optional config to save along with checkpoint metadata.
+      checkpoint_storage_concurrent_gb: Orbax write budget in GB (may be fractional).
+          With `device_count == 1`, lazily-loaded leaves (`to_maxtext.LazyTensor`) are
+          loaded just in time during the save, in groups of at most half this budget,
+          so peak host memory tracks the budget rather than the model size (roughly
+          max(budget, 2 x largest leaf) plus loader transients; see
+          `lazy_save.BudgetedLazyLeafHandler`). With `device_count > 1`,
+          `shard_jax_weights` still materializes every leaf before the save.
+      save_timeout_secs: Deadline for the save's background commit. Lazy leaves are
+          loaded (read from the source checkpoint and transformed) inside the commit,
+          so it must cover the whole conversion, not just the write. Defaults to 24 h
+          when the tree has lazy leaves and `device_count == 1`, else to the
+          checkpoint manager's 60-minute default.
   """
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -1300,6 +1341,7 @@ def save_weights_to_checkpoint(
     jax_weights = shard_jax_weights(jax_weights, device_count, mem_info)
   else:
     # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
+    # Lazy leaves stay lazy: `lazy_save.BudgetedLazyLeafHandler` loads them during the save.
     max_logging.log("Single device: Skip sharding")
 
   # Save checkpoint
@@ -1310,6 +1352,9 @@ def save_weights_to_checkpoint(
   async_checkpointing = False
   save_interval_steps = 1
 
+  checkpointables_registry, has_lazy, jax_weights = _lazy_save_registry(jax_weights, device_count)
+  if save_timeout_secs is None and has_lazy:
+    save_timeout_secs = 24 * 3600
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path,
       enable_checkpointing,
@@ -1317,8 +1362,11 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
-      # Sets Orbax-V1 I/O write timeout to 60 minutes (up from 20-minute default) to facilitate large model saving.
       enable_continuous_checkpointing=True,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+      # Orbax v1 bounds the whole background commit by this deadline.
+      async_timeout_secs=save_timeout_secs,
+      checkpointables_registry=checkpointables_registry,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")

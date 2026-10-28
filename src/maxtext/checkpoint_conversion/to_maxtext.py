@@ -73,7 +73,6 @@ from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
-from orbax.checkpoint import type_handlers
 from safetensors import safe_open
 
 try:
@@ -360,29 +359,6 @@ class LazyTensor:
 
   def __repr__(self):
     return f"LazyTensor(name={self.name}, shape={self.shape}, dtype={self.dtype})"
-
-
-class LazyTensorHandler(type_handlers.NumpyHandler):
-  """
-  Custom Orbax handler for LazyTensor.
-
-  It masquerades as a standard NumpyHandler so that the resulting checkpoint
-  has the standard 'array_metadatas' structure and can be loaded by
-  standard MaxText instances.
-  """
-
-  async def serialize(self, value, *args, **kwargs):
-    # MATERIALIZE: Trigger the lazy load (__array__) explicitly before saving.
-    # This ensures the parent NumpyHandler receives a real np.ndarray.
-    if hasattr(value, "__array__"):
-      value = np.array(value)
-
-    return await super().serialize(value, *args, **kwargs)
-
-
-# Register LazyTensor with the custom handler.
-# It's safe to register this globally even if eager loading is used.
-type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
 
 
 def get_maxtext_model_info(config):
@@ -1228,7 +1204,9 @@ def main(
 
   # Save the converted weights to a MaxText checkpoint.
   # If simulated_cpu_devices_count > 1, weights are promoted from NumPy to JAX arrays
-  # and sharded across virtual devices.
+  # and sharded across virtual devices, which materializes every lazy leaf. Only with
+  # simulated_cpu_devices_count=1 and lazy loading are weights loaded just in time
+  # during the save, bounded by `checkpoint_storage_concurrent_gb`.
   save_weights_to_checkpoint(
       output_directory,
       state_params,
@@ -1236,6 +1214,7 @@ def main(
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
       config=config,
+      checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
   )
 
   print_ram_usage("Program Ends")
