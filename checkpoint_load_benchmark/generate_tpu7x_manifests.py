@@ -400,7 +400,14 @@ P2_HF_CACHE = "gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs/run_tpu7x_16m/s
 
 
 def make_multihost_runner_script(
-    run_id: str, models_str: str, topology: str, num_slices: int, hf_cache: str, *, extra_exports: str = ""
+    run_id: str,
+    models_str: str,
+    topology: str,
+    num_slices: int,
+    hf_cache: str,
+    *,
+    scan_modes: str = "scanned unscanned",
+    extra_exports: str = "",
 ) -> str:
   """safetensors_dynamic WITH Lance's 3 PRs on `num_slices` multi-host slices of `topology`."""
   hosts = HOSTS_PER_SLICE[topology]
@@ -411,7 +418,7 @@ export SHARED_HF_CACHE_BASE_DIR="{hf_cache}"
 echo "=== [{run_id}] safetensors_dynamic WITH Lance's 3 PRs on {num_slices} x {topology} ({hosts} hosts per slice) ==="
 python3 -u /tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py \\
   --models {models_str} \\
-  --scan-modes scanned unscanned \\
+  --scan-modes {scan_modes} \\
   --num-slices-list {num_slices} \\
   --num-hosts-per-slice {hosts} \\
   --devices-per-slice {8 * hosts} \\
@@ -541,16 +548,21 @@ def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_scrip
   }
 
 
-# (run id, topology, num_slices, models, HF cache, extra exports). `smoke` checks the multi-host plumbing on a small
-# model first. 2x2x2 has the HBM of the earlier 2 x 2x2x1 runs over ICI instead of DCN, and 2x2x4 that of 4 x 2x2x1.
+# (run id, topology, num_slices, models, scan modes, HF cache, extra exports). `smoke` checks the multi-host plumbing
+# on a small model first. 2x2x2 has the HBM of the earlier 2 x 2x2x1 runs over ICI instead of DCN, and 2x2x4 that of
+# 4 x 2x2x1. When scanned fails before the load finishes, the harness skips unscanned for the same config, so a model
+# whose scanned run is known to fail gets a separate unscanned run (`397b-u`).
+BOTH = "scanned unscanned"
+SPARSE = "export STAGE_SPARSE_DEEPSEEK_OOM=1"
 MH_RUNS = [
-    ("smoke", "2x2x2", 1, "qwen3-0.6b", P2_HF_CACHE, ""),
-    ("235b", "2x2x2", 1, "qwen3-235b-a22b", P1_HF_CACHE, ""),
-    ("284b", "2x2x2", 1, "deepseek4-284b", P1_HF_CACHE, "export STAGE_SPARSE_DEEPSEEK_OOM=1"),
-    ("397b", "2x2x2", 1, "qwen3.5-397b-a17b", P1_HF_CACHE, ""),
-    ("480b", "2x2x2", 1, "qwen3-480b-a35b", P1_HF_CACHE, ""),
-    ("671b", "2x2x4", 1, "deepseek3-671b", P1_HF_CACHE, "export STAGE_SPARSE_DEEPSEEK_OOM=1"),
-    ("235b-2s", "2x2x2", 2, "qwen3-235b-a22b", P1_HF_CACHE, ""),
+    ("smoke", "2x2x2", 1, "qwen3-0.6b", BOTH, P2_HF_CACHE, ""),
+    ("235b", "2x2x2", 1, "qwen3-235b-a22b", BOTH, P1_HF_CACHE, ""),
+    ("284b", "2x2x2", 1, "deepseek4-284b", BOTH, P1_HF_CACHE, SPARSE),
+    ("397b", "2x2x2", 1, "qwen3.5-397b-a17b", BOTH, P1_HF_CACHE, ""),
+    ("397b-u", "2x2x2", 1, "qwen3.5-397b-a17b", "unscanned", P1_HF_CACHE, ""),
+    ("480b", "2x2x2", 1, "qwen3-480b-a35b", BOTH, P1_HF_CACHE, ""),
+    ("671b", "2x2x4", 1, "deepseek3-671b", BOTH, P1_HF_CACHE, SPARSE),
+    ("235b-2s", "2x2x2", 2, "qwen3-235b-a22b", BOTH, P1_HF_CACHE, ""),
 ]
 
 
@@ -605,8 +617,10 @@ def build_manifests():
     yaml.safe_dump_all(scaleout2, f, sort_keys=False)
   print(f"Wrote {len(scaleout2)} resources to {p}")
 
-  for run_id, topology, num_slices, models_str, hf_cache, extra_exports in MH_RUNS:
-    script = make_multihost_runner_script(run_id, models_str, topology, num_slices, hf_cache, extra_exports=extra_exports)
+  for run_id, topology, num_slices, models_str, scan_modes, hf_cache, extra_exports in MH_RUNS:
+    script = make_multihost_runner_script(
+        run_id, models_str, topology, num_slices, hf_cache, scan_modes=scan_modes, extra_exports=extra_exports
+    )
     p = os.path.join(out_dir, f"tpu7x_multihost_{run_id}.yaml")
     with open(p, "w", encoding="utf-8") as f:
       yaml.safe_dump(multihost_jobset_doc(f"{MH_OWNER}-mh-{run_id}", topology, num_slices, script), f, sort_keys=False)
