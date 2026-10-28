@@ -20,6 +20,9 @@ Pod Pair Assignments:
       * Pair `g`: 2-slice worker (`--max-slices 2`).
       * `mesakh-ctrl-f1`: CPU controller (`scripts/tpu7x_daemon_controller.py`) that runs single-slice tasks on the
         surviving daemon pod `mesakh-tpu7x-f1`, one task per daemon command.
+  - Multi-host slices (`tpu7x_multihost_<run>.yaml`, one per `MH_RUNS` entry): a JobSet `<owner>-mh-<run>` on
+    `2x2x2` (2 hosts per slice) or `2x2x4` (4 hosts per slice) nodes. `<owner>` is `$BENCH_OWNER` (default `$USER`);
+    code, results and logs go to `gs://mesa-maxtext/<owner>_tpu7x_bench/`.
 """
 
 import copy
@@ -27,11 +30,17 @@ import os
 import yaml
 
 IMAGE = "gcr.io/cloud-tpu-shared-capacity/yaoyuchen-runner:ds41-2026-10-22-16-03-48"
-BOOTSTRAP_CMD = (
-    'python3 -c "from etils import epath; '
-    "open('/tmp/bootstrap.py','wb').write(epath.Path('gs://mesa-maxtext/mesakh_tpu7x_bench/code/bootstrap_tpu7x.py').read_bytes())\" "
-    "&& python3 -u /tmp/bootstrap.py"
-)
+
+
+def make_bootstrap_cmd(code_dir: str) -> str:
+  return (
+      'python3 -c "from etils import epath; '
+      f"open('/tmp/bootstrap.py','wb').write(epath.Path('{code_dir}/bootstrap_tpu7x.py').read_bytes())\" "
+      "&& python3 -u /tmp/bootstrap.py"
+  )
+
+
+BOOTSTRAP_CMD = make_bootstrap_cmd("gs://mesa-maxtext/mesakh_tpu7x_bench/code")
 
 
 def make_p1_runner_script(pair_id: str, models_str: str, extra_exports: str = "") -> str:
@@ -377,6 +386,174 @@ def pairs_to_docs(pairs_list):
   return docs
 
 
+# Multi-host slices. A tpu7x-standard-4t host has 4 chips (8 TPU cores), so a 2x2x2 slice is 2 hosts / 16 cores /
+# 1,627.6 GB HBM, and a 2x2x4 slice is 4 hosts / 32 cores / 3,255.2 GB HBM. These runs use their owner's GCS prefix,
+# pod names and app label, so they never touch the mesakh_tpu7x_bench code, queue or pods.
+MH_OWNER = os.environ.get("BENCH_OWNER", os.environ.get("USER", "bench"))
+MH_BASE = f"gs://mesa-maxtext/{MH_OWNER}_tpu7x_bench"
+MH_CODE_DIR = f"{MH_BASE}/code"
+MH_APP = f"{MH_OWNER}-tpu7x-bench"
+HOSTS_PER_SLICE = {"2x2x2": 2, "2x2x4": 4}
+# HF caches that the earlier runs filled (every shard present). The multi-host runs only read them.
+P1_HF_CACHE = "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/safetensors_dynamic"
+P2_HF_CACHE = "gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs/run_tpu7x_16m/safetensors_dynamic"
+
+
+def make_multihost_runner_script(
+    run_id: str, models_str: str, topology: str, num_slices: int, hf_cache: str, *, extra_exports: str = ""
+) -> str:
+  """safetensors_dynamic WITH Lance's 3 PRs on `num_slices` multi-host slices of `topology`."""
+  hosts = HOSTS_PER_SLICE[topology]
+  return f"""set -e
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0 KEEP_HF_CACHE=1 HF_HOME=/ramdisk/hf_cache TMPDIR=/ramdisk/tmp
+export SHARED_HF_CACHE_BASE_DIR="{hf_cache}"
+{extra_exports}
+echo "=== [{run_id}] safetensors_dynamic WITH Lance's 3 PRs on {num_slices} x {topology} ({hosts} hosts per slice) ==="
+python3 -u /tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py \\
+  --models {models_str} \\
+  --scan-modes scanned unscanned \\
+  --num-slices-list {num_slices} \\
+  --num-hosts-per-slice {hosts} \\
+  --devices-per-slice {8 * hosts} \\
+  --hardware tpu \\
+  --gcs-base {MH_BASE}/lance_prs \\
+  --run-id tpu7x_multihost \\
+  --local-work-dir /tmp/mh_lance_prs \\
+  --csv-report /tmp/{run_id}.csv \\
+  --reuse-model-hf-cache \\
+  --skip-to-maxtext \\
+  --skip-completed \\
+  --allow-step-failure
+python3 - <<'EOF'
+from etils import epath
+epath.Path("{MH_BASE}/results/{run_id}.csv").write_bytes(open("/tmp/{run_id}.csv", "rb").read())
+EOF
+echo "=== [{run_id}] ALL DONE ==="
+"""
+
+
+def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_script: str) -> dict:
+  """A JobSet with one Indexed Job per slice (`slice<k>`, one pod per host).
+
+  GKE sets TPU_WORKER_ID and TPU_WORKER_HOSTNAMES only on Indexed Job pods, and a multi-host slice needs them, so
+  these runs cannot use bare pod pairs. Pod `<name>-slice0-0-0` (slice 0, host 0) is the runner and every other pod
+  runs the remote slice daemon. WAIT_FOR_DAEMON_HOST lists the daemons slice by slice and host by host, the order in
+  which the harness assigns JAX process ids 1..N-1.
+  """
+  hosts = HOSTS_PER_SLICE[topology]
+  daemons = [f"{name}-slice{s}-0-{h}.{name}" for s in range(num_slices) for h in range(hosts) if (s, h) != (0, 0)]
+  command = (
+      'if [ "$SLICE_INDEX" = 0 ] && [ "$JOB_COMPLETION_INDEX" = 0 ]; then export ROLE=runner; '
+      "else export ROLE=daemon; fi; mkdir -p /ramdisk/hf_cache /ramdisk/tmp; " + make_bootstrap_cmd(MH_CODE_DIR)
+  )
+  replicated_jobs = []
+  for s in range(num_slices):
+    env_list = [
+        {"name": "SLICE_INDEX", "value": str(s)},
+        {"name": "DAEMON_PORT", "value": "55555"},
+        {"name": "BENCH_CODE_DIR", "value": MH_CODE_DIR},
+        {"name": "TORCH_DEVICE_BACKEND_AUTOLOAD", "value": "0"},
+        {
+            "name": "HF_TOKEN",
+            "valueFrom": {"secretKeyRef": {"name": "mesakh-hf-token", "key": "HF_TOKEN", "optional": True}},
+        },
+    ]
+    if s == 0:
+      env_list.append({"name": "WAIT_FOR_DAEMON_HOST", "value": ",".join(daemons)})
+      env_list.append({"name": "RUNNER_SCRIPT", "value": runner_script})
+    pod_spec = {
+        "restartPolicy": "Never",
+        "imagePullSecrets": [{"name": "gitimg"}],
+        "affinity": {
+            "nodeAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [
+                        {"matchExpressions": [{"key": "cloud.google.com/reservation-name", "operator": "DoesNotExist"}]}
+                    ]
+                }
+            }
+        },
+        "nodeSelector": {
+            "cloud.google.com/gke-tpu-accelerator": "tpu7x",
+            "cloud.google.com/gke-tpu-topology": topology,
+            "cloud.google.com/gke-spot": "true",
+            "tpu7x.gke.io/capacity": "spot",
+        },
+        "tolerations": [
+            {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"},
+            {"key": "cloud.google.com/gke-spot", "operator": "Equal", "value": "true", "effect": "NoSchedule"},
+        ],
+        "volumes": [{"name": "ramdisk", "emptyDir": {"medium": "Memory"}}],
+        "containers": [
+            {
+                "name": "worker",
+                "image": IMAGE,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["bash", "-c", command],
+                "env": env_list,
+                "volumeMounts": [{"name": "ramdisk", "mountPath": "/ramdisk"}],
+                "resources": {"requests": {"google.com/tpu": "4"}, "limits": {"google.com/tpu": "4"}},
+            }
+        ],
+    }
+    replicated_jobs.append(
+        {
+            "name": f"slice{s}",
+            "replicas": 1,
+            "template": {
+                "metadata": {
+                    "annotations": {"alpha.jobset.sigs.k8s.io/exclusive-topology": "cloud.google.com/gke-nodepool"}
+                },
+                "spec": {
+                    "parallelism": hosts,
+                    "completions": hosts,
+                    "completionMode": "Indexed",
+                    "backoffLimit": 0,
+                    "template": {
+                        "metadata": {
+                            "labels": {"app": MH_APP},
+                            "annotations": {
+                                "kueue.x-k8s.io/podset-slice-required-topology": "cloud.google.com/gke-nodepool",
+                                "kueue.x-k8s.io/podset-slice-size": str(hosts),
+                                "kueue.x-k8s.io/podset-unconstrained-topology": "true",
+                            },
+                        },
+                        "spec": pod_spec,
+                    },
+                },
+            },
+        }
+    )
+  return {
+      "apiVersion": "jobset.x-k8s.io/v1alpha2",
+      "kind": "JobSet",
+      "metadata": {
+          "name": name,
+          "namespace": "default",
+          "labels": {"kueue.x-k8s.io/queue-name": "default", "app": MH_APP},
+      },
+      "spec": {
+          # A spot preemption restarts every pod; --skip-completed resumes from the finished phases.
+          "failurePolicy": {"maxRestarts": 2},
+          "network": {"enableDNSHostnames": True, "publishNotReadyAddresses": True},
+          "replicatedJobs": replicated_jobs,
+      },
+  }
+
+
+# (run id, topology, num_slices, models, HF cache, extra exports). `smoke` checks the multi-host plumbing on a small
+# model first. 2x2x2 has the HBM of the earlier 2 x 2x2x1 runs over ICI instead of DCN, and 2x2x4 that of 4 x 2x2x1.
+MH_RUNS = [
+    ("smoke", "2x2x2", 1, "qwen3-0.6b", P2_HF_CACHE, ""),
+    ("235b", "2x2x2", 1, "qwen3-235b-a22b", P1_HF_CACHE, ""),
+    ("284b", "2x2x2", 1, "deepseek4-284b", P1_HF_CACHE, "export STAGE_SPARSE_DEEPSEEK_OOM=1"),
+    ("397b", "2x2x2", 1, "qwen3.5-397b-a17b", P1_HF_CACHE, ""),
+    ("480b", "2x2x2", 1, "qwen3-480b-a35b", P1_HF_CACHE, ""),
+    ("671b", "2x2x4", 1, "deepseek3-671b", P1_HF_CACHE, "export STAGE_SPARSE_DEEPSEEK_OOM=1"),
+    ("235b-2s", "2x2x2", 2, "qwen3-235b-a22b", P1_HF_CACHE, ""),
+]
+
+
 def build_manifests():
   out_dir = os.environ.get("MANIFEST_OUT_DIR", "/tmp/tpu7x_manifests")
   os.makedirs(out_dir, exist_ok=True)
@@ -427,6 +604,13 @@ def build_manifests():
   with open(p, "w", encoding="utf-8") as f:
     yaml.safe_dump_all(scaleout2, f, sort_keys=False)
   print(f"Wrote {len(scaleout2)} resources to {p}")
+
+  for run_id, topology, num_slices, models_str, hf_cache, extra_exports in MH_RUNS:
+    script = make_multihost_runner_script(run_id, models_str, topology, num_slices, hf_cache, extra_exports=extra_exports)
+    p = os.path.join(out_dir, f"tpu7x_multihost_{run_id}.yaml")
+    with open(p, "w", encoding="utf-8") as f:
+      yaml.safe_dump(multihost_jobset_doc(f"{MH_OWNER}-mh-{run_id}", topology, num_slices, script), f, sort_keys=False)
+    print(f"Wrote 1 resource to {p}")
 
 
 if __name__ == "__main__":
