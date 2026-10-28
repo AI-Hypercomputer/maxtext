@@ -182,6 +182,26 @@ so the remaining Priority 1 work runs as a queue that any number of workers drai
   peak, freeing reshard/stack intermediates and splitting composite leaves before the reshard. BEFORE runs
   (`origin/main` `checkpoint_conversion`) get only the streaming patch.
 
+#### Multi-host slices (`--priority multihost`)
+The runs above use single-host `2x2x1` slices. A `2x2x2` slice has 2 hosts (16 cores, 1,627.6 GB HBM) and a `2x2x4`
+slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
+- **Harness**: `--num-hosts-per-slice H` runs one JAX process per host, `num_slices * H` in total. Process 0 runs
+  locally and process `k` runs on `--remote-slice-addrs[k - 1]` (or `REMOTE_SLICE1_ADDR`), listed slice by slice and
+  host by host. Results go to `<scan_mode>[_slices<N>]_hosts<H>` log directories.
+- **Pods**: GKE sets `TPU_WORKER_ID` / `TPU_WORKER_HOSTNAMES` only on Indexed Job pods, so each run is a JobSet
+  `<owner>-mh-<run>` with one Indexed Job per slice. Pod `<owner>-mh-<run>-slice0-0-0` is the runner and every other
+  pod is a daemon. The runs are listed in `MH_RUNS` in [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py).
+- **Isolation**: `<owner>` is `$BENCH_OWNER` (default `$USER`). Code, logs and CSVs go to
+  `gs://mesa-maxtext/<owner>_tpu7x_bench/`, so the `mesakh_tpu7x_bench` code dir that queue workers sync from is
+  never overwritten. The runs read the existing P1/P2 HF caches through `SHARED_HF_CACHE_BASE_DIR`.
+
+```bash
+./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run smoke   # qwen3-0.6b on 1 x 2x2x2
+./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run 235b    # also 284b, 397b, 480b, 671b (2x2x4), 235b-2s (2 x 2x2x2)
+./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --status
+./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --cleanup     # this owner's JobSets only
+```
+
 ### 5.2 Run a Single-Slice Benchmark (`num_slices=1`)
 ```bash
 ./checkpoint_load_benchmark/scripts/run_single_slice.sh \
