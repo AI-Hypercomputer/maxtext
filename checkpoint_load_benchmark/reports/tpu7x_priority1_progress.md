@@ -1,6 +1,6 @@
 # Priority 1 (>200B models) progress on TPU v7x (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~13:50 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
+> **Snapshot:** 2026-10-28 ~14:35 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
 > `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/` (task ids below refer to
 > [`configs/p1_completion_tasks.json`](../configs/p1_completion_tasks.json))
 
@@ -20,11 +20,11 @@
 
 | Model | BF16 size / shards | S1 HF→GCS (cold) | 1A WITH PRs | 1A BEFORE (`origin/main`) | 1B `to_maxtext` |
 | :--- | :--- | ---: | :--- | :--- | :--- |
-| `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ⚠️ killed mid-load by the 360 s watchdog → 🔄 re-runs at 1800 s (`before_235b_s1`, `before_235b_s2`) | ❌ scanned: S2 can't run on one host · 🔄 unscanned S2 (streams shards) |
-| `deepseek4-284b` | 581.9 GB / 146 *(synthetic sparse files)* | – | ✅ 4/4 | ⚠️ killed at 360 s → 🔄 1 slice at 1800 s; ⏳ 2 slices (re-queued after a Kueue eviction) | ❌ S2 OOM-killed at 989.6 GB host RAM (scanned and unscanned) |
+| `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 757.5 s / 792.4 s) | ❌ scanned: S2 can't run on one host · 🔄 unscanned S2 (streams shards) |
+| `deepseek4-284b` | 581.9 GB / 146 *(synthetic sparse files)* | – | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 453.3 s / 440.7 s) | ❌ S2 OOM-killed at 989.6 GB host RAM (scanned and unscanned) |
 | `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s) · ❌ scanned · 2 (HBM OOM, also with `hbmfix`) · 🔄 scanned · 1 (clean record) · ⏳ scanned · 4 | ❌ unscanned · 2: **timeout at 1800 s**, still in the load phase (WITH: load 515.9 s, total 1,311.9 s) | ⏳ scanned (expected: does not fit one host) and unscanned |
 | `qwen3-480b-a35b` | 961.0 GB / 241 | 1,046.1 s | ✅ 2/2 that fit (1 slice ❌ HBM) | ❌ `KeyError` (no mapping before #5706); conclusive | ❌ scanned: S2 can't run on one host · ⏳ unscanned (expected: the 960 GB converted state doesn't fit host RAM) |
-| `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ doesn't fit 1 or 2 slices · ✅ **4 slices**: scanned 649.4 s, unscanned 531.0 s | ⏳ 4 slices at 1800 s (`before_671b_s4`, retry after a spot preemption) | ➖ |
+| `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ doesn't fit 1 or 2 slices · ✅ **4 slices**: scanned 649.4 s, unscanned 531.0 s | ❌ scanned · 4: **timeout at 1800 s**, still loading (WITH: 649.4 s) | ➖ |
 
 ## `to_maxtext` vs `safetensor` (row-by-row, same layout as the earlier small-model summary)
 
@@ -90,14 +90,14 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 
 | Model | Config | 1A BEFORE (`origin/main`) | 1A WITH PRs: WITH S2 (load + transform) | 1B TM S2 convert | 1B TM S3 load |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `qwen3-235b-a22b` | scanned · 1 | ⚠️ killed mid-load by the watchdog (deployed manifest: 360 s) → 🔄 `before_235b_s1` | ✅ **757.5 s** (674.8 + 82.7) | ❌ doesn't fit one host: 470 GB staged + 470 GB converted state (the full-staging attempt was OOM-killed at leaf 4/15); streaming thrashes | ➖ no checkpoint |
-| | unscanned · 1 | ➖ skipped after scanned → 🔄 `before_235b_s1` | ✅ **697.1 s** (661.8 + 35.2) | 🔄 `tm_235b_unscanned_s1` (streams shards; the full-staging attempt was evicted at 944 GB) | ⏳ `tm_235b_unscanned_s1` |
-| | scanned · 2 | ⚠️ killed mid-load (watchdog / slice teardown) → 🔄 `before_235b_s2` | ✅ **792.4 s** (708.0 + 83.6) | (shared) | ➖ no checkpoint |
-| | unscanned · 2 | ➖ skipped → 🔄 `before_235b_s2` | ✅ **749.0 s** (704.9 + 44.0) | (shared) | ⏳ `tm_235b_unscanned_s2` |
-| `deepseek4-284b` | scanned · 1 | ⚠️ killed at 360 s → 🔄 `before_284b_s1` | ✅ **453.3 s** (366.3 + 86.8) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
-| | unscanned · 1 | ➖ skipped → 🔄 `before_284b_s1` | ✅ **414.1 s** (377.0 + 37.0) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
-| | scanned · 2 | ⚠️ killed at 360 s → ⏳ `before_284b_s2` (re-queued after a Kueue eviction) | ✅ **440.7 s** (352.9 + 87.6) | (shared) | ➖ no checkpoint |
-| | unscanned · 2 | ➖ skipped → ⏳ `before_284b_s2` | ✅ **353.0 s** (306.3 + 46.5) | (shared) | ⏳ `tm_284b_unscanned_s2` (no checkpoint expected) |
+| `qwen3-235b-a22b` | scanned · 1 | ❌ **timeout at 1800 s**, still loading (peak host RAM 528.0 GB) | ✅ **757.5 s** (674.8 + 82.7) | ❌ doesn't fit one host: 470 GB staged + 470 GB converted state (the full-staging attempt was OOM-killed at leaf 4/15); streaming thrashes | ➖ no checkpoint |
+| | unscanned · 1 | ➖ skipped after the scanned timeout | ✅ **697.1 s** (661.8 + 35.2) | 🔄 `tm_235b_unscanned_s1` (streams shards; the full-staging attempt was evicted at 944 GB) | ⏳ `tm_235b_unscanned_s1` |
+| | scanned · 2 | ❌ **timeout at 1800 s**, still loading (peak host RAM 300.8 GB) | ✅ **792.4 s** (708.0 + 83.6) | (shared) | ➖ no checkpoint |
+| | unscanned · 2 | ➖ skipped after the scanned timeout | ✅ **749.0 s** (704.9 + 44.0) | (shared) | ⏳ `tm_235b_unscanned_s2` |
+| `deepseek4-284b` | scanned · 1 | ❌ **timeout at 1800 s**, still loading (peak host RAM 501.4 GB) | ✅ **453.3 s** (366.3 + 86.8) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
+| | unscanned · 1 | ➖ skipped after the scanned timeout | ✅ **414.1 s** (377.0 + 37.0) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
+| | scanned · 2 | ❌ **timeout at 1800 s**, still loading (peak host RAM 576.0 GB) | ✅ **440.7 s** (352.9 + 87.6) | (shared) | ➖ no checkpoint |
+| | unscanned · 2 | ➖ skipped after the scanned timeout | ✅ **353.0 s** (306.3 + 46.5) | (shared) | ⏳ `tm_284b_unscanned_s2` (no checkpoint expected) |
 | `qwen3.5-397b-a17b` | scanned · 1 | ⚠️ killed at 360 s | ❌ load finished (947.7 s), then TPU HBM OOM in the transform (795 GB ≈ 98% of HBM) → 🔄 clean record `st_397b_scanned_s1` | ⏳ `tm_397b_scanned_s1` (expected: doesn't fit one host) | ➖ |
 | | unscanned · 1 | ➖ | ➖ does not fit 1 slice | ⏳ `tm_397b_unscanned_s1` (streams per layer) | ⏳ `tm_397b_unscanned_s1` |
 | | scanned · 2 | ⚠️ killed at 360 s (WITH load alone takes 484 s) | ❌ load finished (483.8 s), then HBM OOM splitting `wi_0`/`wi_1`. `hbmfix`: load 469.7 s, then the same 11.25 GiB allocation fails (2.77 GiB free) | ➖ | ➖ |
@@ -110,8 +110,8 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 | `deepseek3-671b` | scanned · 1 | ⚠️ killed at 360 s | ❌ exceeds 1-slice HBM (1,342 GB > 813.8 GB) | ➖ | ➖ |
 | | scanned · 2 | ⚠️ killed at 360 s | ❌ host OOM-killed at 742.1 GB sampled peak; needs ≥ 4 slices | ➖ | ➖ |
 | | unscanned · 1 / 2 | ➖ skipped | ➖ same capacity limits | ➖ | ➖ |
-| | scanned · 4 | ⏳ `before_671b_s4` (1800 s; the first attempt was cut off by a spot preemption of one slice) | ✅ **649.4 s** (468.9 + 176.8; peak host RAM 689.9 GB) | ➖ | ➖ |
-| | unscanned · 4 | ⏳ `before_671b_s4` | ✅ **531.0 s** (409.9 + 120.7; peak host RAM 689.9 GB) | ➖ | ➖ |
+| | scanned · 4 | ❌ **timeout at 1800 s**, still loading (peak host RAM 344.3 GB; a first attempt was cut off by a spot preemption) | ✅ **649.4 s** (468.9 + 176.8; peak host RAM 689.9 GB) | ➖ | ➖ |
+| | unscanned · 4 | ➖ skipped after the scanned timeout | ✅ **531.0 s** (409.9 + 120.7; peak host RAM 689.9 GB) | ➖ | ➖ |
 
 ## Notes
 - **Peak host RAM (WITH PRs)**:
@@ -120,7 +120,7 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
   - 397B: 99 GB on 2 slices (unscanned).
   - 480B: 416 GB on 2 slices.
   - 671B: 690 GB per host on 4 slices.
-- **BEFORE watchdog**: the original BEFORE runs used `PHASE_TIMEOUT_S=360`, shorter than the WITH-PRs load times (306–942 s), so their kills don't show that `origin/main` fails. The 1800 s re-runs (`before_*` tasks) resolve this. Conclusive BEFORE failures so far: `qwen3-480b-a35b` (`KeyError`) and `qwen3.5-397b-a17b` unscanned · 2 (more than 1800 s, vs 1,311.9 s WITH the PRs).
+- **BEFORE watchdog**: the original BEFORE runs used `PHASE_TIMEOUT_S=360`, shorter than the WITH-PRs load times (306–942 s), so their kills don't show that `origin/main` fails. The 1800 s re-runs (`before_*` tasks) resolve this. Conclusive BEFORE failures so far: `qwen3-480b-a35b` (`KeyError`), and six runs that timed out at 1800 s while still loading: 235B scanned · 1 and · 2, 284B scanned · 1 and · 2, 397B unscanned · 2, 671B scanned · 4. With the PRs, the same load phases take 353–708 s. The harness skips unscanned after a scanned timeout at the same slice count.
 - **DeepSeek numbers** use synthetic sparse BF16 files staged on the host (`STAGE_SPARSE_DEEPSEEK_OOM=1`). They measure load/transform mechanics and capacity, not GCS bandwidth.
 - **`to_maxtext` S1** is the same HF→GCS download as `safetensors_dynamic` S1, measured once per model (480B's TM S1 was measured separately at 1,135.5 s). TM S2 conversions that re-stage the checkpoint locally now record `hf_to_local_restage_s`.
 - **Why `to_maxtext` S2 fails for >200B models on one host**: `to_maxtext` keeps the whole converted state (about the checkpoint size) in host RAM before the Orbax save. A tpu7x host has 1,014.5 GB RAM, of which 986.7 GB is allocatable to pods, and a ~100 GB boot disk, so the source shards can only be staged in RAM.
