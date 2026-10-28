@@ -714,7 +714,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             name_prefix = "-".join(map(str, prefix))
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
-            node.bias.value = node.bias.value + jnp.array(update_val)
+            # Match the generic bias update path: dtype promotion would change the
+            # train state's input types and trigger recompilation on the next step.
+            node.bias.value = node.bias.value + update_val.astype(node.bias.value.dtype)
             diag_bias_values.append(node.bias.value)
             diag_bias_updates.append(update_val)
             if getattr(config, "log_moe_bias_norms", False):
