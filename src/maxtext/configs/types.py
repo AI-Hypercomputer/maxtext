@@ -1384,8 +1384,15 @@ class MoEGeneral(BaseModel):
   emo_document_expert_pool_choices: list[int] = Field(
       default_factory=list,
       description=(
-          "EMo training pool sizes to sample from uniformly (e.g. [8, 64, 256]) instead of the integer range"
+          "EMo training pool sizes to sample from (e.g. [8, 64, 256]) instead of the integer range"
           " [emo_min_document_expert_pool, emo_max_document_expert_pool]; empty keeps the range."
+      ),
+  )
+  emo_document_expert_pool_probs: list[float] = Field(
+      default_factory=list,
+      description=(
+          "Sampling probability of each entry of emo_document_expert_pool_choices (same length, summing to 1);"
+          " empty draws the choices uniformly."
       ),
   )
   emo_threshold_by_bisection: bool = Field(

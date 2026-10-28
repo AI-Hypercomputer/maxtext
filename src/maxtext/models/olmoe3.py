@@ -1254,8 +1254,8 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     and every token of the document then routes within the pool. ``pool`` is
     sampled per document during training, uniformly from the integer range
     [emo_min, emo_max] or, with ``emo_document_expert_pool_choices`` set,
-    uniformly from that set of sizes; outside training it is fixed at
-    ``emo_eval_document_expert_pool``.
+    from that set of sizes (uniformly, or with ``emo_document_expert_pool_probs``);
+    outside training it is fixed at ``emo_eval_document_expert_pool``.
 
     MaxText packs documents contiguously, so the per-document score totals are
     cumulative-sum differences at document boundaries rather than a scatter
@@ -1287,7 +1287,11 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
       if cfg.emo_document_expert_pool_choices:
         choices = jnp.asarray(cfg.emo_document_expert_pool_choices, dtype=jnp.int32)
-        draws = choices[jax.random.randint(rng, (batch, seq_len), 0, choices.shape[0])]
+        if cfg.emo_document_expert_pool_probs:
+          probs = jnp.asarray(cfg.emo_document_expert_pool_probs, dtype=jnp.float32)
+          draws = jax.random.choice(rng, choices, (batch, seq_len), p=probs)
+        else:
+          draws = choices[jax.random.randint(rng, (batch, seq_len), 0, choices.shape[0])]
       else:
         draws = jax.random.randint(
             rng, (batch, seq_len), cfg.emo_min_document_expert_pool, cfg.emo_max_document_expert_pool + 1
@@ -1417,6 +1421,12 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
               f"emo_document_expert_pool_choices entry {size} must satisfy top_k <= size <= num_experts"
               f" ({self.num_experts_per_tok} <= size <= {self.num_experts})."
           )
+      probs = cfg.emo_document_expert_pool_probs
+      if probs:
+        if len(probs) != len(cfg.emo_document_expert_pool_choices):
+          raise ValueError("emo_document_expert_pool_probs must have one entry per emo_document_expert_pool_choices.")
+        if min(probs) < 0 or abs(sum(probs) - 1.0) > 1e-6:
+          raise ValueError("emo_document_expert_pool_probs must be non-negative and sum to 1.")
     if gate_in_features != self.moe_expert_input_dim:
       self.gate = moe.GateLogit(
           in_features_shape=gate_in_features,

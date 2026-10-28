@@ -408,15 +408,57 @@ class OLMoE3RoutingTest(unittest.TestCase):
     masked_eval = layer.moe_block._emo_mask_logits(logits, segs, None)  # pylint: disable=protected-access
     self.assertTrue(bool((jnp.isfinite(masked_eval).sum(axis=-1) == cfg.emo_eval_document_expert_pool).all()))
 
+  def test_emo_pool_probs_weight_the_choices(self):
+    """emo_document_expert_pool_probs: documents draw each listed size at the given probability.
+
+    1024 documents with probabilities (0.25, 0.25, 0.5): three sigma on each frequency is about 0.045.
+    """
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import numpy as np
+    from flax import nnx
+    from maxtext.common.common_types import MODEL_MODE_TRAIN
+    from maxtext.models.olmoe3 import OLMoE3DecoderLayer
+
+    choices, probs = [16, 24, 32], [0.25, 0.25, 0.5]
+    cfg = _config(
+        "olmoe3-30m",
+        extra=(
+            "override_model_config=True",
+            f"emo_document_expert_pool_choices={choices}",
+            f"emo_document_expert_pool_probs={probs}",
+        ),
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with mesh:
+      layer = OLMoE3DecoderLayer(cfg, mesh, MODEL_MODE_TRAIN, layer_idx=1, rngs=nnx.Rngs(params=0))
+    assert layer.moe_block is not None
+    batch, docs, doc_len = 64, 16, 4
+    segs = jnp.broadcast_to(jnp.repeat(jnp.arange(1, docs + 1, dtype=jnp.int32), doc_len)[None], (batch, docs * doc_len))
+    logits = jax.random.normal(jax.random.PRNGKey(5), (batch, docs * doc_len, cfg.num_experts), jnp.float32)
+    masked = layer.moe_block._emo_mask_logits(logits, segs, jax.random.PRNGKey(6))  # pylint: disable=protected-access
+    per_doc = np.asarray(jnp.isfinite(masked).sum(axis=-1)).reshape(batch, docs, doc_len)
+    self.assertTrue(bool((per_doc == per_doc[..., :1]).all()), "pool size must be constant within a document")
+    doc_pools = per_doc[..., 0].ravel()
+    self.assertTrue(set(np.unique(doc_pools).tolist()) <= set(choices), f"pool sizes {np.unique(doc_pools)}")
+    freqs = [float((doc_pools == c).mean()) for c in choices]
+    np.testing.assert_allclose(freqs, probs, atol=0.05)
+
   def test_emo_pool_choices_are_validated(self):
-    """A choice below top_k or above num_experts is rejected at construction."""
+    """A choice below top_k or above num_experts, or probabilities that don't fit the choices, are rejected."""
     # pylint: disable=g-import-not-at-top,import-outside-toplevel
     from flax import nnx
     from maxtext.common.common_types import MODEL_MODE_TRAIN
     from maxtext.models.olmoe3 import OLMoE3DecoderLayer
 
-    for bad in ([8, 32], [16, 64]):
-      cfg = _config("olmoe3-30m", extra=("override_model_config=True", f"emo_document_expert_pool_choices={bad}"))
+    bad_configs = [
+        ("emo_document_expert_pool_choices=[8, 32]",),
+        ("emo_document_expert_pool_choices=[16, 64]",),
+        ("emo_document_expert_pool_choices=[16, 32]", "emo_document_expert_pool_probs=[0.5]"),  # length
+        ("emo_document_expert_pool_choices=[16, 32]", "emo_document_expert_pool_probs=[0.5, 0.4]"),  # sum
+        ("emo_document_expert_pool_choices=[16, 32]", "emo_document_expert_pool_probs=[1.5, -0.5]"),  # sign
+    ]
+    for bad in bad_configs:
+      cfg = _config("olmoe3-30m", extra=("override_model_config=True", *bad))
       mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
       with mesh, self.assertRaises(ValueError):
         OLMoE3DecoderLayer(cfg, mesh, MODEL_MODE_TRAIN, layer_idx=1, rngs=nnx.Rngs(params=0))

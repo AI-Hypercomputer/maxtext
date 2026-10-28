@@ -309,9 +309,12 @@ emo_enabled: false
 emo_min_document_expert_pool: 16
 emo_max_document_expert_pool: 512
 emo_eval_document_expert_pool: 512
-# Instead of sampling the training pool size uniformly from [min, max], sample it uniformly from this set of sizes
+# Instead of sampling the training pool size uniformly from [min, max], sample it from this set of sizes
 # (e.g. [8, 64, 256]). Empty keeps the range. Each size must satisfy num_experts_per_tok <= size <= num_experts.
 emo_document_expert_pool_choices: []
+# Sampling probability of each entry of emo_document_expert_pool_choices (same length, summing to 1), e.g.
+# [0.25, 0.25, 0.5]. Empty draws the choices uniformly.
+emo_document_expert_pool_probs: []
 # With moe_lean_routing, find the EMo pool threshold by bisection instead of a sort.
 emo_threshold_by_bisection: false
 # OLMoE3: attention/KDA mixers ignore segment ids (whole-instance, as OLMo-core); only EMo uses them.
