@@ -1,6 +1,6 @@
 # Priority 1 (>200B models) progress on TPU v7x (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~14:35 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
+> **Snapshot:** 2026-10-28 ~15:00 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Live queue:**
 > `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/` (task ids below refer to
 > [`configs/p1_completion_tasks.json`](../configs/p1_completion_tasks.json))
 
@@ -22,7 +22,7 @@
 | :--- | :--- | ---: | :--- | :--- | :--- |
 | `qwen3-235b-a22b` | 470.4 GB / 118 | 583.3 s | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 757.5 s / 792.4 s) | ❌ scanned: S2 can't run on one host · 🔄 unscanned S2 (streams shards) |
 | `deepseek4-284b` | 581.9 GB / 146 *(synthetic sparse files)* | – | ✅ 4/4 | ❌ scanned · 1 and · 2: **timeout at 1800 s**, still loading (WITH: 453.3 s / 440.7 s) | ❌ S2 OOM-killed at 989.6 GB host RAM (scanned and unscanned) |
-| `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s) · ❌ scanned · 2 (HBM OOM, also with `hbmfix`) · 🔄 scanned · 1 (clean record) · ⏳ scanned · 4 | ❌ unscanned · 2: **timeout at 1800 s**, still in the load phase (WITH: load 515.9 s, total 1,311.9 s) | ⏳ scanned (expected: does not fit one host) and unscanned |
+| `qwen3.5-397b-a17b` | 795.5 GB / 94 | 814.5 s | ✅ unscanned · 2 (1,311.9 s) · ✅ scanned · 4 (1,399.7 s) · ❌ scanned · 1 and · 2 (HBM OOM; also with `hbmfix` on 2 slices) | ❌ unscanned · 2: **timeout at 1800 s**, still in the load phase (WITH: load 515.9 s, total 1,311.9 s) | ⏳ scanned (expected: does not fit one host) and unscanned |
 | `qwen3-480b-a35b` | 961.0 GB / 241 | 1,046.1 s | ✅ 2/2 that fit (1 slice ❌ HBM) | ❌ `KeyError` (no mapping before #5706); conclusive | ❌ scanned: S2 can't run on one host · ⏳ unscanned (expected: the 960 GB converted state doesn't fit host RAM) |
 | `deepseek3-671b` | 1,342.4 GB / 336 *(synthetic sparse files)* | – | ❌ doesn't fit 1 or 2 slices · ✅ **4 slices**: scanned 649.4 s, unscanned 531.0 s | ❌ scanned · 4: **timeout at 1800 s**, still loading (WITH: 649.4 s) | ➖ |
 
@@ -55,11 +55,11 @@ Slices (Devices): `1 (8)` = 1 slice, 8 TPU cores; `2 (16)` = 2 slices, 16 TPU co
 | **`deepseek4-284b`** *(581.9 GB MoE, synthetic sparse files)* | `unscanned` | `2 (16)` | `to_maxtext` | 0.00 *(local stage)* | **OOM-killed** *(shared with 1 slice)* | — | **N/A** | **N/A** | N/A |
 | ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **0.00** *(local stage)* | **—** | **352.96** *(Safetensors+Convert)* | **352.96** | **352.96** | **Only `safetensor` loads this config** |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `scanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(expected: does not fit one host; `tm_397b_scanned_s1`)* | — | ⏳ | ⏳ | ⏳ |
-| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **HBM OOM** *(load 947.72 s, then OOM in transform; clean re-run 🔄 `st_397b_scanned_s1`)* | **OOM** | **OOM** | Failed (1-slice HBM) |
+| ↳ | `scanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **HBM OOM** *(load 942.10 s, then OOM in the transform)* | **OOM** | **OOM** | Failed (1-slice HBM) |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `scanned` | `2 (16)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | — | ⏳ | ⏳ | ⏳ |
 | ↳ | `scanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **HBM OOM** *(load 483.84 s, then OOM splitting `wi_0`/`wi_1`; the `hbmfix` variant loads in 469.69 s and fails at the same 11.25 GiB allocation)* | **OOM** | **OOM** | Failed (transform HBM peak) |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `scanned` | `4 (32)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | — | **N/A** | **N/A** | Not run (no 4-slice `to_maxtext` task) |
-| ↳ | `scanned` | `4 (32)` | **`safetensor`** | **814.53** | **—** | ⏳ *(queued: `st_397b_scanned_s4`)* | ⏳ | ⏳ | ⏳ |
+| ↳ | `scanned` | `4 (32)` | **`safetensor`** | **814.53** | **—** | **1,399.68** *(Safetensors+Convert)* | **1,399.68** | **2,214.21** | **Only `safetensor` loads this config** |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(queued: `tm_397b_unscanned_s1`)* | ⏳ *(Load Orbax; 795 GB ≈ 98% of 1-slice HBM)* | ⏳ | ⏳ | 1.00x (baseline) |
 | ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **Not run** *(795 GB ≈ 98% of 1-slice HBM)* | **—** | **—** | — |
 | **`qwen3.5-397b-a17b`** *(795.5 GB Hybrid MoE)* | `unscanned` | `2 (16)` | `to_maxtext` | 814.53 *(shared)* | ⏳ *(shared with 1 slice)* | ⏳ *(queued: `tm_397b_unscanned_s2`)* | ⏳ | ⏳ | 1.00x (baseline) |
@@ -98,11 +98,11 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
 | | unscanned · 1 | ➖ skipped after the scanned timeout | ✅ **414.1 s** (377.0 + 37.0) | ❌ OOM-killed at 989.6 GB host RAM | ➖ no checkpoint |
 | | scanned · 2 | ❌ **timeout at 1800 s**, still loading (peak host RAM 576.0 GB) | ✅ **440.7 s** (352.9 + 87.6) | (shared) | ➖ no checkpoint |
 | | unscanned · 2 | ➖ skipped after the scanned timeout | ✅ **353.0 s** (306.3 + 46.5) | (shared) | ⏳ `tm_284b_unscanned_s2` (no checkpoint expected) |
-| `qwen3.5-397b-a17b` | scanned · 1 | ⚠️ killed at 360 s | ❌ load finished (947.7 s), then TPU HBM OOM in the transform (795 GB ≈ 98% of HBM) → 🔄 clean record `st_397b_scanned_s1` | ⏳ `tm_397b_scanned_s1` (expected: doesn't fit one host) | ➖ |
+| `qwen3.5-397b-a17b` | scanned · 1 | ⚠️ killed at 360 s | ❌ load finished (942.1 s), then TPU HBM OOM in the transform (795 GB ≈ 98% of HBM) | ⏳ `tm_397b_scanned_s1` (expected: doesn't fit one host) | ➖ |
 | | unscanned · 1 | ➖ | ➖ does not fit 1 slice | ⏳ `tm_397b_unscanned_s1` (streams per layer) | ⏳ `tm_397b_unscanned_s1` |
 | | scanned · 2 | ⚠️ killed at 360 s (WITH load alone takes 484 s) | ❌ load finished (483.8 s), then HBM OOM splitting `wi_0`/`wi_1`. `hbmfix`: load 469.7 s, then the same 11.25 GiB allocation fails (2.77 GiB free) | ➖ | ➖ |
 | | unscanned · 2 | ❌ **timeout at 1800 s** while still loading (WITH load: 515.9 s; peak host RAM 301.7 GB vs 98.7 GB WITH) | ✅ **1,311.9 s** (515.9 + 795.7; peak host RAM 98.7 GB) | (shared) | ⏳ `tm_397b_unscanned_s2` |
-| | scanned · 4 | ➖ | ⏳ `st_397b_scanned_s4` | ➖ | ➖ |
+| | scanned · 4 | ➖ | ✅ **1,399.7 s** (260.0 + 1,139.1; peak host RAM 127.7 GB) | ➖ | ➖ |
 | `qwen3-480b-a35b` | scanned · 1 | ❌ `KeyError: 'qwen3-480b-a35b'` | ❌ TPU HBM OOM (961 GB > 813.8 GB) | ❌ doesn't fit one host (all 961 GB must be staged) | ➖ |
 | | unscanned · 1 | ❌ `KeyError` (skipped after scanned) | ➖ does not fit 1 slice | ⏳ `tm_480b_unscanned_conv` (expected: the converted state doesn't fit host RAM) | ➖ does not fit 1 slice |
 | | scanned · 2 | ❌ `KeyError` | ✅ **1,067.9 s** (942.0 + 125.8) | ➖ | ➖ |
@@ -127,7 +127,7 @@ run once per scan mode on one host and shared by the 1- and 2-slice loads. **TM 
   - Scanned conversions read every shard for every MoE expert, so they need the whole source staged: source plus converted state exceeds host RAM from 235B up, and streaming through a small shard cache thrashes.
   - Unscanned conversions read one layer at a time, so shards can be streamed. They fit when the converted state alone fits in RAM (235B; 397B expected), but not for 480B (960 GB).
   - 284B (synthetic sparse files) was OOM-killed at 989.6 GB in both scan modes.
-- **`qwen3.5-397b-a17b` scanned on 2 slices** runs out of HBM while splitting the stacked `(wi_0, wi_1)` composite (11.25 GiB needed, 2.77 GiB free), both with Lance's PRs and with [`patches/hbmfix`](../patches/hbmfix.patch). The remaining fix is to split each layer before stacking (see [`../handoff.md`](../handoff.md) §7.6). `st_397b_scanned_s4` measures it with 4 slices of HBM headroom.
+- **`qwen3.5-397b-a17b` scanned on 2 slices** runs out of HBM while splitting the stacked `(wi_0, wi_1)` composite (11.25 GiB needed, 2.77 GiB free), both with Lance's PRs and with [`patches/hbmfix`](../patches/hbmfix.patch). The remaining fix is to split each layer before stacking (see [`../handoff.md`](../handoff.md) §7.6). With 4 slices of HBM headroom, scanned loads in 1,399.7 s, but the transform takes 1,139.1 s of that, vs 795.7 s for unscanned on 2 slices.
 
 ## How to refresh
 ```bash

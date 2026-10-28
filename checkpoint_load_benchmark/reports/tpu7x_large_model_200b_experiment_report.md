@@ -11,7 +11,7 @@
   - `qwen3-235b-a22b`: 697–792 s, 1 or 2 slices
   - `deepseek4-284b`: 353–453 s, 1 or 2 slices (synthetic files)
   - `qwen3-480b-a35b`: 992–1,068 s, 2 slices
-  - `qwen3.5-397b-a17b`: unscanned 1,312 s, 2 slices
+  - `qwen3.5-397b-a17b`: unscanned 1,312 s on 2 slices; scanned 1,400 s on 4 slices
   - `deepseek3-671b`: 531–649 s, 4 slices (synthetic files)
 - BEFORE the PRs, no >200B load finished:
   - `qwen3-480b-a35b` has no parameter mapping (`KeyError`).
@@ -56,7 +56,7 @@
 | `qwen3.5-397b-a17b` | scanned · 1 | – | ❌ load 942.1 s, then TPU HBM OOM (795 GB ≈ 98% of HBM) | – / 48.3 GB |
 | | scanned · 2 | – | ❌ load 483.8 s, then HBM OOM splitting `(wi_0, wi_1)` (U-1); `hbmfix`: load 469.7 s, same OOM | – / 161.2 GB |
 | | unscanned · 2 | ❌ timeout at 1800 s, still loading | **1,311.9 s** (515.9 + 795.7) | 301.7 / 98.7 GB |
-| | scanned · 4 | – | ⏳ `st_397b_scanned_s4` | – |
+| | scanned · 4 | – | **1,399.7 s** (260.0 + 1,139.1) | – / 127.7 GB |
 | `qwen3-480b-a35b` | scanned · 1 | ❌ `KeyError` | ❌ TPU HBM OOM (961 GB > 813.8 GB) | – |
 | | scanned · 2 | ❌ `KeyError` | **1,067.9 s** (942.0 + 125.8) | – / 415.7 GB |
 | | unscanned · 2 | ❌ `KeyError` | **992.2 s** (907.7 + 84.3) | – / 415.5 GB |
@@ -89,7 +89,7 @@ summary) is in [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md). It 
 | :--- | :--- | :--- | :--- |
 | `qwen3-235b-a22b` | ✅ | ✅ | – |
 | `deepseek4-284b` | ✅ | ✅ | – |
-| `qwen3.5-397b-a17b` | ❌ transform OOM (98% of HBM) | ✅ unscanned · ❌ scanned (U-1) | ⏳ scanned |
+| `qwen3.5-397b-a17b` | ❌ transform OOM (98% of HBM) | ✅ unscanned · ❌ scanned (U-1) | ✅ scanned |
 | `qwen3-480b-a35b` | ❌ | ✅ | – |
 | `deepseek3-671b` | ❌ | ❌ host OOM | ✅ |
 

@@ -24,12 +24,17 @@ The cold HF->GCS time (Step 1) is measured once per model and shared by both pip
 It is the largest Step 1 time recorded for the model (warm cache checks take ~0.2-1 s);
 `--cold-s1 MODEL=SECONDS` overrides it when no record of this run dir holds the cold download.
 
-Usage:
-  gcloud storage rsync -r gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/logs /tmp/t7/p1
-  gcloud storage rsync -r gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs/run_tpu7x_16m/logs /tmp/t7/p2 \\
-      --exclude='.*\\.log$'
-  python3 checkpoint_load_benchmark/scripts/build_tpu7x_tables.py /tmp/t7/p2 /tmp/t7/p1 \\
-      --cold-s1 qwen3.5-397b-a17b=814.53 --csv out.csv --md out.md
+Usage (later mirrors override earlier ones file by file, so list re-run dirs after the runs they repeat):
+  B=gs://mesa-maxtext/mesakh_tpu7x_bench
+  gcloud storage rsync -r $B/p2_lance_prs/run_tpu7x_16m/logs /tmp/t7/p2
+  gcloud storage rsync -r $B/p2_lance_prs/run_tpu7x_16m_rerun/logs /tmp/t7/p2_rerun
+  gcloud storage rsync -r $B/p1_lance_prs/run_tpu7x_200b/logs /tmp/t7/p1
+  python3 checkpoint_load_benchmark/scripts/build_tpu7x_tables.py /tmp/t7/p2 /tmp/t7/p2_rerun /tmp/t7/p1 \\
+      --cold-s1 qwen3.5-397b-a17b=814.53 \\
+      --csv checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md /tmp/t7/table.md \\
+      --md-into checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.md
+
+The 397B override is the cold download recorded in `results/p1_st_lance_b.csv` (its result JSON was later replaced).
 """
 
 import argparse
@@ -37,6 +42,29 @@ import csv
 import json
 import os
 import re
+
+# Table order: by size within each tier, as in the v5p summary.
+MODEL_ORDER = [
+    "qwen3-0.6b",
+    "gemma2-2b",
+    "qwen3-4b",
+    "gemma3-4b",
+    "llama3.1-8b",
+    "qwen3-8b",
+    "qwen3-14b",
+    "qwen3-32b",
+    "deepseek2-16b",
+    "gpt-oss-20b",
+    "qwen3-30b-a3b",
+    "mixtral-8x7b",
+    "llama3.1-70b",
+    "gpt-oss-120b",
+    "qwen3-235b-a22b",
+    "deepseek4-284b",
+    "qwen3.5-397b-a17b",
+    "qwen3-480b-a35b",
+    "deepseek3-671b",
+]
 
 CSV_FIELDS = [
     "model",
@@ -115,7 +143,8 @@ class Logs:
     self.roots = roots
 
   def models(self) -> list[str]:
-    return sorted({n for r in self.roots for n in os.listdir(r) if os.path.isdir(os.path.join(r, n))})
+    names = {n for r in self.roots for n in os.listdir(r) if os.path.isdir(os.path.join(r, n))}
+    return sorted(names, key=lambda n: (MODEL_ORDER.index(n) if n in MODEL_ORDER else len(MODEL_ORDER), n))
 
   def configs(self, model: str) -> list[str]:
     return sorted(
@@ -283,6 +312,12 @@ def main() -> None:
   p.add_argument("--cold-s1", action="append", default=[], help="MODEL=SECONDS cold HF->GCS override")
   p.add_argument("--csv", required=True, help="Output CSV path")
   p.add_argument("--md", required=True, help="Output markdown table path")
+  p.add_argument(
+      "--md-into",
+      action="append",
+      default=[],
+      help="Markdown file whose text between `<!-- TABLE START -->` and `<!-- TABLE END -->` is replaced by the table",
+  )
   args = p.parse_args()
   overrides = {k: float(v) for k, v in (o.split("=", 1) for o in args.cold_s1)}
   rows = build_rows(args.roots, overrides)
@@ -291,8 +326,16 @@ def main() -> None:
     w.writeheader()
     for r in rows:
       w.writerow({k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in r.items()})
+  table = markdown(rows)
   with open(args.md, "w", encoding="utf-8") as f:
-    f.write(markdown(rows))
+    f.write(table)
+  for path in args.md_into:
+    with open(path, encoding="utf-8") as f:
+      text = f.read()
+    start, end = "<!-- TABLE START -->\n", "<!-- TABLE END -->"
+    i, j = text.index(start) + len(start), text.index(end)
+    with open(path, "w", encoding="utf-8") as f:
+      f.write(text[:i] + table + text[j:])
   print(f"Wrote {len(rows)} configurations to {args.csv} and {args.md}")
 
 
