@@ -14,14 +14,18 @@
 
 """Training and optimizer helpers for GLM-5.3-Flash."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
-from maxtext.training_engine import abstract_engine
 import optax
+
+if TYPE_CHECKING:
+  from maxtext.training_engine import abstract_engine
 
 _GLM5_LOSS_BATCH_KEYS = (
     "inputs",
@@ -58,6 +62,9 @@ def glm5_engine_loss_fn(
     is_train: bool,
 ) -> tuple[abstract_engine.WeightedMetric, dict[str, jax.Array]]:
   """Engine loss function adapter conforming to MaxTextTrainingEngine signature."""
+  # pylint: disable-next=g-import-not-at-top,import-outside-toplevel,redefined-outer-name,reimported
+  from maxtext.training_engine import abstract_engine
+
   del config, dropout_rng, params
   filtered_batch = {k: data[k] for k in _GLM5_LOSS_BATCH_KEYS if k in data}
   total_loss, aux = modeling_glm5_3_flash.glm5_loss_fn(model, is_train=is_train, **filtered_batch)

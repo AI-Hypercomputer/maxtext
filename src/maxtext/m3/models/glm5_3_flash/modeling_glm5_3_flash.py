@@ -28,8 +28,6 @@ from jax.typing import DTypeLike
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.configs import glm5_3_flash_config as glm5_config
 import optax
-from tokamax._src.ops.kda import api as tokamax_kda
-from tokamax._src.ops.kda import pallas_mosaic_tpu as _tokamax_kda_mosaic  # pylint: disable=unused-import  # buildcleaner: keep
 
 
 def _make_lin(dt: DTypeLike, p_dt: DTypeLike, sharding, rngs: nnx.Rngs):
@@ -333,6 +331,13 @@ class Glm5KdaAttention(nnx.Module):
     beta_h = jnp.transpose(beta, (2, 0, 1))
 
     # Tokamax KDA
+    # Lazy import keeps modeling_glm5_3_flash importable when tokamax<0.0.16 (e.g., GPU/decoupled CI).
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from tokamax._src.ops.kda import api as tokamax_kda
+    # pylint: disable-next=unused-import
+    from tokamax._src.ops.kda import pallas_mosaic_tpu as _tokamax_kda_mosaic  # buildcleaner: keep
+    # pylint: enable=g-import-not-at-top,import-outside-toplevel
+
     impl = cast(tokamax_kda.Implementation, self.kda_implementation)
 
     def _run_kda(q_arg, k_arg, v_arg, f_arg, beta_arg, a_log_arg, dt_bias_arg):
