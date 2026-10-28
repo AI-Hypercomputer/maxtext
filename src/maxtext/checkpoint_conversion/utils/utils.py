@@ -1267,6 +1267,31 @@ def shard_jax_weights(jax_weights, device_count, mem_info):
   return jax_weights
 
 
+def materialize_lazy_weights(jax_weights):
+  """Materializes lazily-loaded leaves (e.g. ``LazyTensor`` proxies) into NumPy arrays.
+
+  The Orbax v1 save path used by ``checkpointing.save_checkpoint`` resolves a handler for
+  each leaf via ``is_handleable`` and does not consult the v0 ``type_handlers`` registry,
+  so array-like proxy objects must be concrete before saving. Leaves that are already
+  ``np.ndarray`` / ``jax.Array`` (or are not array-like) are returned unchanged.
+
+  Args:
+    jax_weights: Pytree of model weights, possibly containing lazy array-like leaves.
+
+  Returns:
+    Pytree with the same structure where every array-like leaf is a concrete array.
+  """
+
+  def _materialize(leaf):
+    if isinstance(leaf, (np.ndarray, jax.Array)):
+      return leaf
+    if hasattr(leaf, "__array__"):
+      return np.asarray(leaf)
+    return leaf
+
+  return tree.map(_materialize, jax_weights)
+
+
 def save_weights_to_checkpoint(
     maxtext_model_path: str,
     jax_weights: dict,
@@ -1300,7 +1325,11 @@ def save_weights_to_checkpoint(
     jax_weights = shard_jax_weights(jax_weights, device_count, mem_info)
   else:
     # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
+    # Lazy leaves (e.g. LazyTensor) are normally materialized inside shard_jax_weights;
+    # on this path they must be materialized explicitly or the Orbax v1 save fails with
+    # NoEntryError because no handler accepts the proxy objects (GitHub #5106).
     max_logging.log("Single device: Skip sharding")
+    jax_weights = materialize_lazy_weights(jax_weights)
 
   # Save checkpoint
   start = time.time()
