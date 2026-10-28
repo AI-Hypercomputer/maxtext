@@ -14,7 +14,8 @@
 
 
 """
-Tests for Engram: CompressedTokenizer, NgramHashMapping, MultiHeadEmbedding, ShortConv, Engram
+Tests for Engram: CompressedTokenizer, NgramHashMapping, MultiHeadEmbedding, ShortConv, Engram,
+and NgramHashMapping / ShortConv under context-parallel load balancing.
 
 Reference implementation:
 https://github.com/deepseek-ai/Engram/blob/fb7f84a21f91223715394a33a1dc24bbfb7f788e/engram_demo_v1.py
@@ -25,10 +26,18 @@ To run the test:
 """
 
 
+import functools
+import os
 from typing import List
 from dataclasses import dataclass, field
 import math
 import unittest
+
+# The load-balancing tests shard the sequence over a context axis of up to 4 devices. Ask XLA
+# for four host devices before JAX initializes its backend.
+os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
+
+# pylint: disable=wrong-import-position
 from absl.testing import parameterized
 
 import numpy as np
@@ -42,7 +51,7 @@ from torch import nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maxtext.configs import pyconfig
 from maxtext.layers.engram import CompressedTokenizer as CompressedTokenizerJAX
@@ -50,6 +59,7 @@ from maxtext.layers.engram import NgramHashMapping as NgramHashMappingJAX
 from maxtext.layers.engram import MultiHeadEmbedding as MultiHeadEmbeddingJAX
 from maxtext.layers.engram import ShortConv as ShortConvJAX
 from maxtext.layers.engram import Engram as EngramJAX
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -466,7 +476,7 @@ def init_torch_weights(module, std=1):
       torch.nn.init.normal_(param, mean=0.0, std=std)
 
 
-def get_cfg_and_mesh(config):
+def get_cfg_and_mesh(config, **overrides):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, get_test_config_path()],
@@ -480,6 +490,7 @@ def get_cfg_and_mesh(config):
       float32_qk_product=True,
       float32_logits=True,
       base_emb_dim=config.base_emb_dim,
+      **overrides,
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
@@ -552,6 +563,30 @@ class NgramHashMappingTest(parameterized.TestCase):
     # keys are layer_ids
     self.assertDictEqual(jax_hash_mapping.vocab_size_across_layers, pt_hash_mapping.vocab_size_across_layers)
     np.testing.assert_equal(pt_out, jax_out)
+
+  @parameterized.named_parameters(("cp2", 2), ("cp4", 4))
+  def test_hash_load_balanced(self, cp_size):
+    """Sequences permuted for context-parallel load balancing keep each token's natural-order hashes."""
+    np.random.seed(42)
+    config = Config()
+    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+    hash_mapping = NgramHashMappingJAX(
+        engram_vocab_bases=config.engram_vocab_bases,
+        max_ngram_size=config.engram_max_ngram_size,
+        engram_num_heads=config.engram_num_heads,
+        layer_ids=config.engram_layers,
+        tokenizer=tokenizer,
+        pad_id=config.engram_pad_id,
+        seed=config.engram_seed,
+    )
+    input_ids = np.random.randint(0, len(tokenizer), (4, 128))
+    to_natural = functools.partial(max_utils.reorder_sequence, cp_size=cp_size, to_contiguous=True)
+
+    expected = hash_mapping(input_ids)
+    # The training input pipeline hands the model DUAL_CHUNK_SWAP-permuted sequences.
+    actual = hash_mapping(max_utils.reorder_sequence(input_ids, cp_size=cp_size), load_balanced_cp_size=cp_size)
+    for layer_id in config.engram_layers:
+      np.testing.assert_array_equal(to_natural(actual[layer_id]), expected[layer_id])
 
 
 # -----------------------------------------------------------------------------
@@ -694,6 +729,39 @@ class ShortConvTest(parameterized.TestCase):
 
     # 3. Compare
     np.testing.assert_allclose(y_jax, to_jax(y_pt), rtol=1e-3, atol=1e-3)
+
+  @parameterized.named_parameters(("cp2", 2), ("cp4", 4))
+  def test_shortconv_load_balanced(self, cp_size, mhc_expansion_rate=4, hidden_size=16):
+    """Sequences permuted for context-parallel load balancing get natural-order outputs and gradients."""
+    cfg, mesh = get_cfg_and_mesh(Config(), ici_context_parallelism=cp_size)
+    # Engram's kernel size and dilation: each output reads 9 tokens of history, across chunk seams.
+    jax_model = ShortConvJAX(cfg, hidden_size, 4, 3, mhc_expansion_rate=mhc_expansion_rate, rngs=self.nnx_rngs, mesh=mesh)
+    # The kernel is zero-initialized, which would hide any mixing of tokens.
+    kernel = jax_model.conv.kernel
+    kernel[...] = jax.random.normal(jax.random.key(0), kernel.shape, jnp.float32)
+    # Input and output cotangent, shape [B, S, G, D]
+    x, w = jax.random.normal(jax.random.key(1), (2, 4, 128, mhc_expansion_rate, hidden_size), jnp.float32)
+
+    def loss_fn(model, x, w, load_balanced_cp_size):
+      y = model(x, load_balanced_cp_size=load_balanced_cp_size)
+      return jnp.sum(y * w), y
+
+    grad_fn = nnx.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
+    (_, y), (param_grads, x_grads) = grad_fn(jax_model, x, w, 1)
+    with jax.set_mesh(mesh):
+      # The training input pipeline hands the model DUAL_CHUNK_SWAP-permuted sequences, sharded over context.
+      x_lb, w_lb = (
+          jax.device_put(max_utils.reorder_sequence(a, cp_size=cp_size), NamedSharding(mesh, P(None, "context")))
+          for a in (x, w)
+      )
+      (_, y_lb), (param_grads_lb, x_grads_lb) = grad_fn(jax_model, x_lb, w_lb, cp_size)
+
+    to_natural = functools.partial(max_utils.reorder_sequence, cp_size=cp_size, to_contiguous=True)
+    assert_close = functools.partial(np.testing.assert_allclose, rtol=1e-4, atol=1e-4)
+    assert_close(to_natural(y_lb), y)
+    assert_close(to_natural(x_grads_lb), x_grads)
+    # Parameter gradients sum over all tokens, in a different order on each device.
+    jax.tree.map(assert_close, param_grads_lb, param_grads)
 
 
 # -----------------------------------------------------------------------------
