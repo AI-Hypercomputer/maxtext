@@ -37,6 +37,7 @@ checkpoint_load_benchmark/
 │   ├── tpu7x_task_queue.py                          # Preemption-tolerant GCS task queue worker (claims tasks via atomic GCS locks)
 │   ├── tpu7x_daemon_controller.py                   # CPU-pod controller that runs queue tasks on a daemon pod whose runner was evicted
 │   ├── summarize_tpu7x_results.py                   # Markdown status matrix from per-phase result JSONs (works on partial runs)
+│   ├── build_tpu7x_tables.py                        # tpu7x summary CSV + row-by-row to_maxtext vs safetensor table (merges re-runs)
 │   └── run_full_matrix.sh                           # Reproduce the 48-configuration v5p benchmark matrix by tier (0, 1, 2, 3, all)
 ├── k8s/
 │   └── multislice_benchmark_job.yaml.tmpl           # Kubernetes Service + 2-Node Coordinator/Worker Job template for GKE TPU v5p-8
@@ -65,7 +66,7 @@ checkpoint_load_benchmark/
 | **`safetensor`**<br>*(`safetensors_dynamic`, 2-Step Direct)* | **Step 1**: `HF -> GCS`<br>**Step 2**: `Safetensors & convert to MaxText`<br>*(sub-phases: `[1/3]` mappings, `[2/3]` sharded GCS load, `[3/3]` in-memory transform)* | Streams HuggingFace `.safetensors` shards to GCS `hf_cache`, reads byte-ranged shards directly into the distributed mesh across slices, and transforms/stacks parameters in memory via `checkpointing.load_state_if_possible(source_checkpoint_layout="safetensors_dynamic")`. |
 
 ### 2.2 Priority 1 (`>200B`) Experiment Structure on `bodaborg-tpu7x-nap`
-Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x_manifests.py`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/generate_tpu7x_manifests.py):
+Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py):
 1. **Step 1 — `safetensors_dynamic` WITH Lance's 3 PRs (`#5706 + #5828 + #5705`)**: Runs `scanned` and `unscanned` across `num_slices=1` (`8` TPU cores) and `num_slices=2` (`16` TPU cores) using `/tmp/maxtext` (`origin/docs/checkpoint-load-benchmark`).
 2. **Step 2 — `safetensors_dynamic` BEFORE Lance's 3 PRs (`origin/main`)**: Runs the same `>200B` models against `/tmp/maxtext_origin_main` (`f596f5369`) reusing the populated GCS `hf_cache` (`SHARED_HF_CACHE_BASE_DIR`) with a per-phase watchdog (`PHASE_TIMEOUT_S`: the original P1 pairs were deployed with `360`, the generator now uses `900`, and the completion queue re-runs BEFORE at `1800`) to capture `origin/main` failures (`KeyError` for models without a mapping, e.g. `qwen3-480b-a35b`; slow full-file multi-host reads that exceed the watchdog). A watchdog limit below the WITH-PRs load time is inconclusive (see [`handoff.md`](handoff.md)).
 3. **Step 3 — Full `to_maxtext` vs. `safetensors_dynamic` Comparison**: Runs `to_maxtext` Steps 1, 2, and 3 alongside the completed `safetensors_dynamic` runs (`--skip-completed`) and writes consolidated CSV/JSON results to `gs://mesa-maxtext/mesakh_tpu7x_bench/results/`.
@@ -100,7 +101,7 @@ Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x
    ```
 2. **MaxText Hybrid Mesh & DCN Parallelism Flags**:
    - Passes `skip_jax_distributed_system=False`, `num_slices=<N>`, and `ici_fsdp_parallelism=-1`.
-   - Automatically selects (or overrides via `--dcn-parallelism-axis {auto,data,fsdp}`) the DCN axis via [`resolve_dcn_axis`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/benchmark_ckpt_load_time.py#L74-L94):
+   - Automatically selects (or overrides via `--dcn-parallelism-axis {auto,data,fsdp}`) the DCN axis via [`resolve_dcn_axis`](benchmark_ckpt_load_time.py#L74-L94):
      - **Data Parallelism Across Slices (`dcn_data_parallelism=<N>`)**: Default for `<=47B` models (`qwen3-0.6b..32b`, `llama3.1-8b`, `gemma2-2b`, `gemma3-4b`, `deepseek2-16b`, `gpt-oss-20b`, `qwen3-30b-a3b`, `mixtral-8x7b`).
      - **FSDP Sharding Across Slices (`dcn_fsdp_parallelism=<N>`)**: Default for `>=70B` models (`llama3.1-70b`, `gpt-oss-120b`, `qwen3-235b-a22b`, `deepseek4-284b`, `qwen3.5-397b-a17b`, `qwen3-480b-a35b`, `deepseek3-671b`, `deepseek3.2-671b`, `deepseek4-1600b`) so parameters are sharded across all global devices (`16` TPU cores on 2 `tpu7x` slices = `(1, 1, 1, 16, ...)` mesh).
 
@@ -128,7 +129,7 @@ Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x
 ## 5. Quick Start & Reproduction Commands
 
 ### 5.1 Run Priority 1 (`>200B`) & Priority 2 (`16 Models`) on `bodaborg-tpu7x-nap` (`tpu7x`)
-Use [`scripts/run_tpu7x_cluster.sh`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh) to sync [`benchmark_ckpt_load_time.py`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/benchmark_ckpt_load_time.py) and [`bootstrap_tpu7x.py`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/bootstrap_tpu7x.py) to GCS, generate the Kubernetes manifests via [`generate_tpu7x_manifests.py`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/generate_tpu7x_manifests.py), and deploy the 2-slice pod pairs:
+Use [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) to sync [`benchmark_ckpt_load_time.py`](benchmark_ckpt_load_time.py) and [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py) to GCS, generate the Kubernetes manifests via [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py), and deploy the 2-slice pod pairs:
 
 ```bash
 # Deploy both Priority 1 (>200B models: Pairs a, b, c, f) and Priority 2 (16-model suite: Pairs d, e):
@@ -223,7 +224,7 @@ so the remaining Priority 1 work runs as a queue that any number of workers drai
 
 ## 6. Direct Python CLI & Environment Variable Reference
 
-You can invoke [`benchmark_ckpt_load_time.py`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/benchmark_ckpt_load_time.py) directly from any directory:
+You can invoke [`benchmark_ckpt_load_time.py`](benchmark_ckpt_load_time.py) directly from any directory:
 
 ```bash
 python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
@@ -278,15 +279,15 @@ python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
 
 ### 7.1 TPU v7 (`bodaborg-tpu7x-nap`, `tpu7x-standard-4t`) Reports
 - **[Priority 1 (`>200B`) Progress: Every Test and Its Status](reports/tpu7x_priority1_progress.md)** *(live tracker, updated with the completion queue)*
-- **[Priority 1 (`>200B` Models): Before vs. After Lance's 3 PRs & `to_maxtext` vs. `safetensors_dynamic`](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_large_model_200b_experiment_report.md)**
-- **[`tpu7x` Executive Summary (Two-Row Side-by-Side Comparison Table)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.md)**
-- **[`tpu7x` Full Technical Report (Sub-Phase Timings, Scaling & HBM/RAM Analysis)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_report.md)**
-- **[`tpu7x` Issues, Capacity Boundaries & Multi-Host Fixes](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_issues.md)**
-- **[`tpu7x` Consolidated Raw Metrics CSV](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.csv)**
+- **[Priority 1 (`>200B` Models): Before vs. After Lance's 3 PRs & `to_maxtext` vs. `safetensors_dynamic`](reports/tpu7x_large_model_200b_experiment_report.md)**
+- **[`tpu7x` Executive Summary (Two-Row Side-by-Side Comparison Table)](reports/tpu7x_benchmark_ckpt_load_time_summary.md)**
+- **[`tpu7x` Full Technical Report (Sub-Phase Timings, Scaling & HBM/RAM Analysis)](reports/tpu7x_benchmark_ckpt_load_time_report.md)**
+- **[`tpu7x` Issues, Capacity Boundaries & Multi-Host Fixes](reports/tpu7x_benchmark_ckpt_load_time_issues.md)**
+- **[`tpu7x` Consolidated Raw Metrics CSV](reports/tpu7x_benchmark_ckpt_load_time_summary.csv)**
 
 ### 7.2 TPU v5p (`bodaborg-v5p-nap`, `ct5p-hightpu-4t`) Reports
-- **[Team Sync, PR Cherry-Picks (`#5706`, `#5828`, `#5705`) & `>200B` Cluster Capacity Guide](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/team_sync_and_200b_experiment_plan.md)**
-- **[`v5p` Executive Summary (48 Configurations, Two-Row Side-by-Side Table)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/benchmark_ckpt_load_time_summary.md)**
-- **[`v5p` Full Technical Report (Architecture, Sub-Phase Timings, Scaling & OOM Analysis)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/benchmark_ckpt_load_time_report.md)**
-- **[`v5p` Issues, Cluster OOM Logs & Upstream Fixes (`F-1`–`F-9`, `U-1`–`U-4`)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/benchmark_ckpt_load_time_issues.md)**
-- **[`v5p` Consolidated Raw Metrics CSV (48 Rows)](file:///usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/benchmark_ckpt_load_time_summary.csv)**
+- **[Team Sync, PR Cherry-Picks (`#5706`, `#5828`, `#5705`) & `>200B` Cluster Capacity Guide](reports/team_sync_and_200b_experiment_plan.md)**
+- **[`v5p` Executive Summary (48 Configurations, Two-Row Side-by-Side Table)](reports/benchmark_ckpt_load_time_summary.md)**
+- **[`v5p` Full Technical Report (Architecture, Sub-Phase Timings, Scaling & OOM Analysis)](reports/benchmark_ckpt_load_time_report.md)**
+- **[`v5p` Issues, Cluster OOM Logs & Upstream Fixes (`F-1`–`F-9`, `U-1`–`U-4`)](reports/benchmark_ckpt_load_time_issues.md)**
+- **[`v5p` Consolidated Raw Metrics CSV (48 Rows)](reports/benchmark_ckpt_load_time_summary.csv)**
