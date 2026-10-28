@@ -23,11 +23,29 @@ Configuration reuses the legacy `pyconfig` surface, because that is what m3
 model constructors take today. The fields read here are `steps`,
 `per_device_batch_size`, `max_target_length`, `learning_rate`, the optimizer
 fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
-`gradient_clipping_threshold`, `init_weights_seed`, and the profiler fields
-consumed by `maxtext.common.profiler.Profiler` (`profiler`,
+`gradient_clipping_threshold`, `init_weights_seed`, the precision fields
+`matmul_precision` and `quantization`, and the profiler fields consumed by
+`maxtext.common.profiler.Profiler` (`profiler`,
 `skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The trace is
-written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1` and
-batch sizes that do not split over the mesh are rejected rather than emulated.
+written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1`,
+`grad_dtype` other than float32, and batch sizes that do not split over the
+mesh are rejected rather than emulated.
+
+`setup_model` is where infrastructure is composed, in the order every m3
+driver follows:
+
+    construct -> quantize -> optimizer
+
+Each transform is a function from `maxtext.m3.infra` that reads one config
+field and is a no-op when that field is off. Models never see any of it.
+
+Precision follows legacy MaxText: `weight_dtype` (float32 master weights)
+and `dtype` (bfloat16 compute) are applied by the model at construction;
+the optimizer keeps its moments in `weight_dtype`; the loss is computed in
+float32; and `matmul_precision` is applied here, by running setup and every
+step under `jax.default_matmul_precision`. It only affects float32 matmul
+operands -- on TPU, `default` is one bfloat16 pass and `highest` is full
+float32 -- so with bfloat16 compute it is a no-op, as in legacy.
 
 Example (CPU or TPU)::
 
@@ -56,6 +74,7 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
@@ -71,6 +90,21 @@ def make_optimizer(config) -> optax.GradientTransformation:
   if config.gradient_clipping_threshold > 0:
     return optax.chain(optax.clip_by_global_norm(config.gradient_clipping_threshold), tx)
   return tx
+
+
+def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
+  """Builds the model and optimizer with every transform applied, in the fixed order.
+
+  Must run inside `jax.set_mesh(mesh)`. Scan comes before quantization, which
+  records module paths and so must see the final structure; quantization
+  traces one forward pass of the training shape and comes before the
+  optimizer, which must see the final model.
+  """
+  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+  model = m3_scan.maybe_apply_scan(model, config)
+  model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
+  optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
+  return model, optimizer
 
 
 @functools.lru_cache(maxsize=32)
@@ -139,6 +173,10 @@ def train_loop(config) -> float:
         "m3 loop does not accumulate gradients yet; "
         f"got gradient_accumulation_steps={config.gradient_accumulation_steps}."
     )
+  # Legacy casts gradients to `grad_dtype` before the optimizer; this loop keeps
+  # them in float32, so any other setting would be ignored rather than applied.
+  if jnp.dtype(config.grad_dtype) != jnp.float32:
+    raise ValueError(f"m3 loop keeps gradients in float32; got grad_dtype={jnp.dtype(config.grad_dtype).name}.")
   batch_size = config.global_batch_size_to_train_on
   batch_shards = math.prod(mesh.shape[axis] for axis in _BATCH_AXES)
   if batch_size == 0 or batch_size % batch_shards:
@@ -147,16 +185,18 @@ def train_loop(config) -> float:
         f"split over the {batch_shards} shards of mesh axes {_BATCH_AXES}."
     )
 
-  with jax.set_mesh(mesh):
-    model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
-    model = m3_scan.maybe_apply_scan(model, config)
-    optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
+  # Same strings as legacy (`default` / `high` / `highest`); pyconfig hands over a `str` Enum.
+  matmul_precision = getattr(config.matmul_precision, "value", config.matmul_precision)
+  with jax.set_mesh(mesh), jax.default_matmul_precision(matmul_precision):
+    model, optimizer = setup_model(config, mesh)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
     tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length
     max_logging.log(
         f"m3 loop: {config.model_name}, {num_params / 1e9:.3f}B params, "
-        f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens"
+        f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens, "
+        f"matmul_precision={matmul_precision}, "
+        f"quantization={getattr(config.quantization, 'value', config.quantization) or 'none'}"
     )
 
     prof = profiler.Profiler(config, offset_step=0)

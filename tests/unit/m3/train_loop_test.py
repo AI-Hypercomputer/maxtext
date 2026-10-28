@@ -22,6 +22,7 @@ from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import jax
+import jax.extend as jex
 import numpy as np
 
 from maxtext.configs import pyconfig
@@ -104,6 +105,44 @@ class TrainLoopTest(absltest.TestCase):
 
     self.assertEqual(state_calls_2, state_calls_5)
     self.assertEqual(flatten_calls_2, flatten_calls_5)
+
+  def test_matmul_precision_reaches_the_step(self):
+    """`matmul_precision` is baked into every `dot_general` of the step at trace time."""
+    seen = {}
+    original = nnx.cached_partial
+
+    def precisions(jaxpr):
+      for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "dot_general":
+          yield str(eqn.params["precision"])
+        for value in eqn.params.values():
+          if isinstance(value, jex.core.ClosedJaxpr):
+            yield from precisions(value.jaxpr)
+
+    def spy(fn, model, optimizer):
+      # Trace the forward pass functionally (the cached step mutates state in place, which a bare
+      # `make_jaxpr` rejects); it runs inside the loop's `default_matmul_precision` like the step does.
+      graphdef, state = nnx.split(model)
+      step_fn = original(fn, model, optimizer)
+
+      def forward(state, batch):
+        return loop.loss_fn(nnx.merge(graphdef, state), batch)
+
+      def traced(batch):
+        seen["precisions"] = set(precisions(jax.make_jaxpr(forward)(state, batch).jaxpr))
+        return step_fn(batch)
+
+      return traced
+
+    for setting, expected in (("highest", "HIGHEST"), ("default", "DEFAULT")):
+      with mock.patch.object(nnx, "cached_partial", spy):
+        loop.train_loop(_tiny_config(self.output_dir, dtype="float32", matmul_precision=setting, steps=1))
+      self.assertNotEmpty(seen["precisions"])
+      self.assertTrue(all(expected in p for p in seen["precisions"]), (setting, seen["precisions"]))
+
+  def test_rejects_grad_dtype_other_than_float32(self):
+    with self.assertRaisesRegex(ValueError, "grad_dtype=bfloat16"):
+      loop.train_loop(_tiny_config(self.output_dir, grad_dtype="bfloat16"))
 
   def test_rejects_gradient_accumulation(self):
     with self.assertRaisesRegex(ValueError, "gradient_accumulation_steps=2"):
