@@ -231,6 +231,8 @@ def main():
 
   total_times_by_job = {}
   total_tests_by_job = {}
+  active_keys_by_job = {}
+  corrupt_jobs = set()
 
   # A shard that was cancelled or timed out leaves no result file. Its tests keep their previous baseline
   # entries and the tests that ran are recorded as usual, but the flavor's totals would be short, so they
@@ -258,6 +260,11 @@ def main():
         time_val = float(testcase.get("time", 0.0))
         job_time += time_val
 
+        if testcase.find("skipped") is None:
+          name = testcase.get("name", "unknown")
+          classname = testcase.get("classname", "unknown")
+          active_keys_by_job.setdefault(job_name, set()).add(f"{job_name}::{classname}.{name}")
+
         # Micro-level regression check (enforced for non-excluded modules, warn-only for excluded)
         if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
           has_regression = True
@@ -268,14 +275,34 @@ def main():
 
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Error parsing or processing {xml_file}: {e}")
+      corrupt_jobs.add(job_name)
       has_errors = True
+
+  # Prune stale baseline entries (deleted, renamed, moved, or skipped tests) for flavors that ran all shards.
+  # Flavors that did not run in this invocation or have missing/corrupt shards keep their previous baseline entries.
+  for job_name in total_times_by_job:
+    if job_name == "unknown" or job_name in missing_shards or job_name in corrupt_jobs:
+      continue
+    active_keys = active_keys_by_job.get(job_name, set())
+    if not active_keys:
+      print(f"::warning::[EMPTY RESULTS] Flavor {job_name} recorded 0 active tests; preserving its baseline entries.")
+      continue
+    prefix = f"{job_name}::"
+    for key in [k for k in new_baseline_data if k.startswith(prefix) and k not in active_keys]:
+      del new_baseline_data[key]
 
   # Output macro-level benchmark JSON if requested
   if args.output_benchmark:
     benchmarks = []
     for job, total_time in sorted(total_times_by_job.items()):
-      # Exclude CPU and decoupled suites (runner noise) and flavors with a missing shard (short totals) from the dashboard
-      if "cpu" in job.lower() or "decoupled" in job.lower() or job in missing_shards:
+      # Exclude CPU/decoupled suites (runner noise) and flavors with missing/corrupt shards or 0 active tests
+      if (
+          "cpu" in job.lower()
+          or "decoupled" in job.lower()
+          or job in missing_shards
+          or job in corrupt_jobs
+          or not active_keys_by_job.get(job)
+      ):
         continue
       benchmarks.append(
           {

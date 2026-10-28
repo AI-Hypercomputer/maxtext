@@ -598,8 +598,8 @@ jobs:
 
   track_performance:
     name: Track Test Performance
-    needs: [tpu-pretrain-tests, tpu-posttrain-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
-    if: ${{ !cancelled() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
+    needs: [tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
+    if: ${{ !cancelled() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success' || needs.tpu7x-tests.result == 'success') }}
     uses: ./.github/workflows/track_performance.yml
     permissions:
       contents: write
