@@ -3467,6 +3467,23 @@ class AdamW(BaseModel):
           "List of parameter names/patterns to exclude from weight decay in AdamW," " like ['bias', '.*norm', '.*ln.*']"
       ),
   )
+  mup_base_model_name: str = Field(
+      "",
+      description=(
+          "muP (OLMo-core's MuPConfig in base-model mode; olmoe3 with opt_type=adamw and scan_layers=False): each"
+          " weight matrix trains at lr * (its fan-in in this base model) / (its fan-in), so every matrix of the base"
+          " model trains at lr; the embedding at lr * mup_embedding_lr_multiplier, every other parameter at lr."
+          " Empty: off. Pair with olmo_init_method=nanochat."
+      ),
+  )
+  mup_scale_weight_decay: bool = Field(
+      True,
+      description=(
+          "Under muP, each matrix's weight decay is adam_weight_decay / multiplier, so it decays by lr * wd per step"
+          " at every width. False keeps adam_weight_decay (decay lr * multiplier * wd, OLMo-core's default)."
+      ),
+  )
+  mup_embedding_lr_multiplier: float = Field(1.0, description="Under muP, the token embedding's learning-rate multiplier.")
   mu_dtype: str = Field(
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",

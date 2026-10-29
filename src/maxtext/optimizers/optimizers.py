@@ -22,7 +22,9 @@ import jax.numpy as jnp
 import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.optimizers import mup
 from maxtext.optimizers.muon import muon as maxtext_muon
+from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
@@ -170,7 +172,12 @@ def skip_step_on_spikes(
 
 def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   """Create optimizer."""
-  if config.opt_type == "adamw":
+  if getattr(config, "mup_base_model_name", ""):
+    mup.check_supported(config)
+    if config.olmo_init_method != "nanochat":
+      max_logging.warning(f"muP learning rates with olmo_init_method={config.olmo_init_method}; muP expects nanochat.")
+    base_opt = mup.mup_adamw(learning_rate_schedule, config, mup.load_base_config(config), mask=get_adamw_mask(config))
+  elif config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     base_opt = optax.adamw(
         learning_rate_schedule,
