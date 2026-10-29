@@ -14,6 +14,10 @@
 
 # This workflow will build and test the MaxText package, and build Docker images
 # for a Release Candidate when a new release tag is created.
+#
+# This workflow is being replaced by release_pipeline_v2.yml
+# which decouples weekly RC validation in rc_release.yml from release-day promotion.
+# It is kept active temporarily until end-to-end cutover to release_pipeline_v2.yml is complete.
 
 name: MaxText Release Pipeline
 

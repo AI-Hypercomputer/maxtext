@@ -12,16 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow publishes MaxText to PyPI once the Airflow E2E DAG reports success.
+# This workflow builds and publishes the MaxText package to PyPI,
+# updates Read the Docs, and promotes the verified Docker images in Artifact Registry.
 
 name: Publish MaxText to PyPI
 
-# Triggered by release_pipeline.yml via workflow_call or manually via workflow_dispatch.
+# Triggered by release_pipeline.yml or release_pipeline_v2.yml via workflow_call,
+# or manually via workflow_dispatch.
 on:
   workflow_call:
     inputs:
       run_id:
-        description: 'GitHub workflow run_id passed to the Airflow DAG run.'
+        description: 'Docker image tag in Artifact Registry to promote to release version.'
         required: true
         type: string
       maxtext_sha:
@@ -40,7 +42,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 'GitHub workflow run_id passed to the Airflow DAG run.'
+        description: 'Docker image tag in Artifact Registry to promote to release version.'
         required: true
         type: string
       maxtext_sha:
@@ -255,10 +257,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: 'TPU Pre-Training Stable'
-            image_name: maxtext_jax_stable
-          - name: 'TPU Post-Training Stable'
-            image_name: maxtext_post_training_stable
+          - name: 'TPU Pre-Training'
+            image_name: tpu_pre_training
+            legacy_image_name: maxtext_jax_stable
+          - name: 'TPU Post-Training'
+            image_name: tpu_post_training
+            legacy_image_name: maxtext_post_training_stable
     steps:
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev -q
@@ -267,11 +271,24 @@ jobs:
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME: ${{ matrix.image_name }}
+          # TODO: Remove legacy_image_name when release_pipeline.yml is deprecated and release_pipeline_v2.yml is fully adopted.
+          LEGACY_IMAGE_NAME: ${{ matrix.legacy_image_name }}
           RUN_ID: ${{ inputs.run_id }}
           PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
           PUBLISH: ${{ inputs.publish }}
         run: |
-          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${IMAGE_NAME}"
+          RC_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${IMAGE_NAME}"
+          LEGACY_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${LEGACY_IMAGE_NAME}"
+          if gcloud container images describe "${RC_IMAGE}:${RUN_ID}" >/dev/null 2>&1; then
+            SOURCE_IMAGE="${RC_IMAGE}"
+          elif gcloud container images describe "${LEGACY_IMAGE}:${RUN_ID}" >/dev/null 2>&1; then
+            SOURCE_IMAGE="${LEGACY_IMAGE}"
+          else
+            echo "Error: Neither ${RC_IMAGE}:${RUN_ID} nor ${LEGACY_IMAGE}:${RUN_ID} exists in Artifact Registry."
+            exit 1
+          fi
+          echo "Found source image: ${SOURCE_IMAGE}:${RUN_ID}"
+
           if [ "$PUBLISH" != "true" ]; then
             echo "[Dry Run] Verifying source image exists: ${SOURCE_IMAGE}:${RUN_ID}..."
             gcloud container images describe "${SOURCE_IMAGE}:${RUN_ID}" >/dev/null
