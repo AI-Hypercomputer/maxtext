@@ -523,6 +523,7 @@ class MLA(Attention):
       name: str | None = None,
       rngs: Optional[nnx.Rngs] = None,
       mla_use_output_gate: bool = False,
+      lora_norm_epsilon: float | None = None,
   ):
     """Initializes the MLA module.
 
@@ -534,6 +535,8 @@ class MLA(Attention):
       rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
       mla_use_output_gate: If True, adds a per-head sigmoid output gate before the output
         projection: `out = out_proj(attn * sigmoid(g_proj(inputs_q)))`.
+      lora_norm_epsilon: Optional epsilon override for the `q_norm` and `kv_norm` low-rank
+        RMSNorms; defaults to `config.normalization_layer_epsilon` when None.
     """
     base_kv_cache = config.attention != "paged" and config.mla_naive_kvcache
 
@@ -549,6 +552,7 @@ class MLA(Attention):
     self.mscale = mscale
     self.rope_factor = rope_factor
     self.use_output_gate = mla_use_output_gate
+    self.lora_norm_epsilon = config.normalization_layer_epsilon if lora_norm_epsilon is None else lora_norm_epsilon
 
     self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -705,7 +709,7 @@ class MLA(Attention):
           num_features=self.q_lora_rank,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
-          epsilon=self.config.normalization_layer_epsilon,
+          epsilon=self.lora_norm_epsilon,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -743,7 +747,7 @@ class MLA(Attention):
         num_features=self.kv_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
-        epsilon=self.config.normalization_layer_epsilon,
+        epsilon=self.lora_norm_epsilon,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )

@@ -41,6 +41,7 @@ from maxtext.common.common_types import (
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
+from maxtext.layers.attn_res import _apply_attn_res
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -59,6 +60,7 @@ from maxtext.models import (
     gemma4_small,
     gpt3,
     gpt_oss,
+    kimi_k3,
     llama2,
     llama4,
     ming,
@@ -631,6 +633,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
     self.is_ming = self.config.decoder_block == DecoderBlockType.MING
+    self.is_kimi_linear = self.config.decoder_block == DecoderBlockType.KIMI_LINEAR
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -644,6 +647,16 @@ class NNXDecoder(nnx.Module):
   def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
     """Routes layer construction through three main paths: pipeline, scanned non-pipeline, sequential."""
     config = self.config
+
+    if self.is_kimi_linear and (
+        getattr(config, "using_pipeline_parallelism", False) or getattr(config, "scan_layers", False)
+    ):
+      # Kimi-K3 layers are heterogeneous (KDA/MLA, dense/MoE, AttnRes block boundaries per
+      # layer index), which neither jax.lax.scan nor the pipeline stage builder can express.
+      raise ValueError(
+          "kimi_linear (Kimi-K3) does not support pipeline parallelism or scan_layers; "
+          "set scan_layers=False and do not enable pipeline parallelism."
+      )
 
     if self.is_gemma4_small:
       # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
@@ -1022,8 +1035,47 @@ class NNXDecoder(nnx.Module):
 
     if self.is_deepseek:
       self._init_sequential_deepseek(decoder_block_classes, rngs)
+    elif self.is_kimi_linear:
+      self._init_sequential_kimi(decoder_block_classes, rngs, self.mesh)
     else:
       self._init_sequential_generic(decoder_block_classes, rngs)
+
+  def _init_sequential_kimi(self, decoder_block_classes, rngs, mesh):
+    """Initializes sequential Kimi-K3 decoder layers and output AttnRes modules."""
+    del decoder_block_classes  # Heterogeneous layers are built per index below.
+    cfg = self.config
+    layer_spec = kimi_k3.build_kimi_layer_spec(cfg.num_decoder_layers, cfg.full_attn_layers, cfg.first_num_dense_layers)
+    for lyr in range(cfg.num_decoder_layers):
+      is_linear_attn, is_moe = layer_spec[lyr]
+      layer = kimi_k3.KimiK3DecoderLayer(
+          config=cfg,
+          model_mode=self.model_mode,
+          mesh=mesh,
+          rngs=rngs,
+          quant=self.quant,
+          layer_idx=lyr,
+          is_linear_attn=is_linear_attn,
+          is_moe=is_moe,
+      )
+      setattr(self, f"layers_{lyr}", layer)
+
+    self.output_attn_res_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=cfg.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+    self.output_attn_res_proj = linears.DenseGeneral(
+        in_features_shape=cfg.emb_dim,
+        out_features_shape=(1,),
+        use_bias=False,
+        kernel_axes=("embed", None),
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        rngs=rngs,
+    )
 
   def _init_sequential_deepseek(self, decoder_block_classes, rngs):
     """Initializes sequential DeepSeek dense and MoE layers."""
@@ -1485,6 +1537,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
         DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
+        DecoderBlockType.KIMI_LINEAR: [kimi_k3.KimiK3DecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1648,6 +1701,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
         DecoderBlockType.MING,
+        DecoderBlockType.KIMI_LINEAR,
     }:
       return functools.partial(
           RMSNorm,
@@ -2398,6 +2452,18 @@ class NNXDecoder(nnx.Module):
                 forced_routed_experts_scanned=forced_routed_experts_scanned,
                 **layer_kwargs,
             )
+      elif self.is_kimi_linear:
+        y, kv_caches = self._apply_kimi_layers(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            kv_caches=kv_caches,
+            attention_metadata=attention_metadata,
+            previous_chunk=previous_chunk,
+            slot=slot,
+        )
       else:
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
         dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
@@ -3110,6 +3176,72 @@ class NNXDecoder(nnx.Module):
       if kv_caches is not None and kv_cache is not None:
         kv_caches[cache_idx] = kv_cache
 
+    return y, kv_caches
+
+  def _apply_kimi_layers(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      kv_caches=None,
+      attention_metadata=None,
+      previous_chunk=None,
+      slot=None,
+  ):
+    """Apply Kimi-K3 decoder layers with Attention Residuals highway."""
+    cfg = self.config
+    policy = self.get_remat_policy()
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+    block_residual = None
+
+    for lyr in range(cfg.num_decoder_layers):
+      layer = getattr(self, f"layers_{lyr}")
+      kv_cache = kv_caches[lyr] if kv_caches is not None else None
+
+      if cfg.remat_policy and cfg.remat_policy != "none":
+        y, block_residual, kv_cache = self._apply_layer_with_remat(
+            layer,
+            y,
+            policy,
+            prevent_cse,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            block_residual=block_residual,
+            previous_chunk=previous_chunk,
+            slot=slot,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+        )
+      else:
+        y, block_residual, kv_cache = layer(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            block_residual=block_residual,
+            previous_chunk=previous_chunk,
+            slot=slot,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+        )
+
+      if kv_caches is not None and kv_cache is not None:
+        kv_caches[lyr] = kv_cache
+
+    # final output pooling before decoder_norm
+    y = _apply_attn_res(
+        prefix_sum=y,
+        block_residual=block_residual,
+        proj_weight=self.output_attn_res_proj.kernel.value,
+        norm_weight=self.output_attn_res_norm.scale.value,
+        epsilon=cfg.normalization_layer_epsilon,
+        num_blocks=None,
+    )
     return y, kv_caches
 
   def get_layers(self) -> list[nnx.Module]:
