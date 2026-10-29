@@ -1,6 +1,6 @@
 # Multi-host slices on TPU v7x (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-29 ~16:00 UTC · **Owner:** Lance Wang · **Branch:** `docs/checkpoint-load-benchmark`
+> **Snapshot:** 2026-10-29 ~19:30 UTC · **Owner:** Lance Wang · **Branch:** `docs/checkpoint-load-benchmark`
 >
 > The P1 runs ([`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md)) use single-host `2x2x1` slices. These
 > runs load the same models on multi-host slices. The runs are `MH_RUNS` in
@@ -21,6 +21,7 @@
 | 1 × `2x2x2` | 2 | 16 | 1,627.6 GB | ICI |
 | 1 × `2x2x4` | 4 | 32 | 3,255.2 GB | ICI |
 | 2 × `2x2x2` | 4 | 32 | 3,255.2 GB | ICI within a slice, DCN between the slices |
+| 4 × `2x2x2` | 8 | 64 | 6,510.4 GB | ICI within a slice, DCN between the slices |
 | 2 × `2x2x1`, 4 × `2x2x1` (P1) | 2, 4 | 16, 32 | 1,627.6 GB, 3,255.2 GB | DCN |
 
 - **Load** = `load_sharded_hf_state`, **Transform** = `transform_hf_state_to_mt_state`, **Total** =
@@ -37,8 +38,10 @@
 | `qwen3-0.6b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **11.50** | 5.50 | 5.95 | 78.1 | `smoke-2s` |
 | `qwen3-235b-a22b` | scanned | 1 × 2x2x2 | 2 | 16 | ICI | **908.33** | 826.12 | 82.18 | 220.1 | `235b` |
 | `qwen3-235b-a22b` | scanned | 2 × 2x2x1 | 2 | 16 | DCN | **792.38** | 707.97 | 83.58 | 255.8 | P1 (mesakh) |
+| `qwen3-235b-a22b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **800.69** | 713.38 | 86.77 | 182.8 | `235b-2s` |
 | `qwen3-235b-a22b` | unscanned | 1 × 2x2x2 | 2 | 16 | ICI | **817.59** | 775.01 | 42.52 | 222.0 | `235b` |
 | `qwen3-235b-a22b` | unscanned | 2 × 2x2x1 | 2 | 16 | DCN | **749.00** | 704.88 | 44.03 | 254.6 | P1 (mesakh) |
+| `qwen3-235b-a22b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **788.66** | 736.01 | 52.54 | 177.7 | `235b-2s` |
 | `deepseek4-284b` | scanned | 1 × 2x2x2 | 2 | 16 | ICI | **414.93** | 327.55 | 87.14 | 534.7 | `284b` |
 | `deepseek4-284b` | scanned | 2 × 2x2x1 | 2 | 16 | DCN | **440.72** | 352.94 | 87.63 | 822.6 | P1 (mesakh) |
 | `deepseek4-284b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **302.91** | 209.34 | 93.48 | 318.4 | `284b-2s` |
@@ -47,10 +50,12 @@
 | `deepseek4-284b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **258.40** | 200.93 | 57.23 | 318.3 | `284b-2s` |
 | `qwen3.5-397b-a17b` | scanned | 1 × 2x2x2 | 2 | 16 | ICI | ❌ HBM OOM in transform (load 488.18 s; 11.25 GiB needed, 2.77 GiB free) |  |  |  | `397b` |
 | `qwen3.5-397b-a17b` | scanned | 2 × 2x2x1 | 2 | 16 | DCN | ❌ HBM OOM in transform (load 483.84 s), also with `hbmfix` |  |  |  | P1 (mesakh) |
+| `qwen3.5-397b-a17b` | scanned | 1 × 2x2x4 | 4 | 32 | ICI | **2,618.13** | 261.18 | 2,356.85 | 88.6 | `397b-4h` |
 | `qwen3.5-397b-a17b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **1,361.95** | 248.24 | 1,113.67 | 130.8 | `397b-2s` |
 | `qwen3.5-397b-a17b` | scanned | 4 × 2x2x1 | 4 | 32 | DCN | **1,399.68** | 260.01 | 1,139.07 | 127.7 | P1 (mesakh) |
 | `qwen3.5-397b-a17b` | unscanned | 1 × 2x2x2 | 2 | 16 | ICI | **1,150.92** | 484.68 | 666.14 | 48.9 | `397b-u` |
 | `qwen3.5-397b-a17b` | unscanned | 2 × 2x2x1 | 2 | 16 | DCN | **1,311.85** | 515.91 | 795.72 | 98.7 | P1 (mesakh) |
+| `qwen3.5-397b-a17b` | unscanned | 1 × 2x2x4 | 4 | 32 | ICI | **954.34** | 268.01 | 686.26 | 88.1 | `397b-4h` |
 | `qwen3.5-397b-a17b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **1,018.83** | 266.41 | 751.78 | 130.5 | `397b-2s` |
 | `qwen3-480b-a35b` | scanned | 1 × 2x2x2 | 2 | 16 | ICI | **1,298.61** | 953.07 | 345.50 | 380.6 | `480b` |
 | `qwen3-480b-a35b` | scanned | 2 × 2x2x1 | 2 | 16 | DCN | **1,067.86** | 941.98 | 125.78 | 415.7 | P1 (mesakh) |
@@ -62,15 +67,23 @@
 | `deepseek3-671b` | unscanned | 1 × 2x2x4 | 4 | 32 | ICI | **672.66** | 468.79 | 203.51 | 655.0 | `671b` |
 | `deepseek3-671b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **587.07** | 480.07 | 106.76 | 645.0 | `671b-2s` |
 | `deepseek3-671b` | unscanned | 4 × 2x2x1 | 4 | 32 | DCN | **530.96** | 409.94 | 120.74 | 689.9 | P1 (mesakh) |
+| `deepseek3.2-671b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **672.46** | 493.25 | 178.76 | 653.4 | `ds32-2s` |
+| `deepseek3.2-671b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **569.71** | 459.39 | 109.96 | 690.9 | `ds32-2s` |
+| `deepseek4-1600b` | scanned | 4 × 2x2x2 | 8 | 64 | ICI + DCN | **1,047.93** | 757.75 | 289.55 | 696.1 | `1600b-4s` |
+| `deepseek4-1600b` | unscanned | 4 × 2x2x2 | 8 | 64 | ICI + DCN | **1,008.62** | 771.74 | 236.49 | 676.0 | `1600b-4s` |
 
 ## Findings
 
 1. **`qwen3.5-397b-a17b` scanned needs 32 devices.** On 16 devices it runs out of HBM while splitting the stacked
-   `(wi_0, wi_1)` composite, on one `2x2x2` slice and on 2 × `2x2x1` alike. On 32 devices it loads: 2 × `2x2x2`
-   takes 1,361.95 s, close to 4 × `2x2x1` (1,399.68 s).
-2. **On 32 devices, the transform depends on the layout** (`deepseek3-671b`). The load takes 410–491 s on every
-   layout, but the transform takes 298.30 / 203.51 s (scanned / unscanned) on one `2x2x4` slice, 166.72 / 106.76 s on
-   2 × `2x2x2`, and 176.84 / 120.74 s on 4 × `2x2x1`. The cause is not verified.
+   `(wi_0, wi_1)` composite, on one `2x2x2` slice and on 2 × `2x2x1` alike. On 32 devices it loads on every layout:
+   2 × `2x2x2` takes 1,361.95 s, 4 × `2x2x1` 1,399.68 s, and one `2x2x4` slice 2,618.13 s.
+2. **On 32 devices, the scanned transform is slowest on one `2x2x4` slice.** The load takes about the same time on
+   every layout (410–491 s for `deepseek3-671b`, 248–268 s for `qwen3.5-397b-a17b`), but the scanned transform takes:
+   - `deepseek3-671b`: 298.30 s on one `2x2x4` slice, 166.72 s on 2 × `2x2x2`, 176.84 s on 4 × `2x2x1`.
+   - `qwen3.5-397b-a17b`: 2,356.85 s on one `2x2x4` slice, 1,113.67 s on 2 × `2x2x2`, 1,139.07 s on 4 × `2x2x1`.
+
+   Unscanned, the gap is smaller for `deepseek3-671b` (203.51 vs 106.76 / 120.74 s), and `qwen3.5-397b-a17b` is
+   faster on one `2x2x4` slice (686.26 vs 751.78 s on 2 × `2x2x2`). The cause is not verified.
 3. **On 16 devices, one `2x2x2` slice vs 2 × `2x2x1` is mixed:**
    - `qwen3-235b-a22b` is slower (908.33 vs 792.38 s scanned). The gap is in the GCS read; the transform is equal.
    - `qwen3-480b-a35b` is slower (1,298.61 vs 1,067.86 s scanned). The read is equal; the transform takes 345.50 vs
@@ -78,20 +91,29 @@
    - `deepseek4-284b` and `qwen3.5-397b-a17b` unscanned are faster (414.93 vs 440.72 s, 1,150.92 vs 1,311.85 s).
 4. **Peak host RAM per host is lower on one `2x2x2` slice** than on 2 × `2x2x1`, for example 534.7 vs 822.6 GB for
    `deepseek4-284b` scanned.
+5. **More devices do not speed up `qwen3-235b-a22b`.** 2 × `2x2x2` (32 devices) takes 800.69 / 788.66 s (scanned /
+   unscanned), close to 2 × `2x2x1` (16 devices, 792.38 / 749.00 s): 713–736 s of it is the GCS read.
+6. **`deepseek3.2-671b` and `deepseek4-1600b` load on tpu7x.**
+   - `deepseek3.2-671b` on 2 × `2x2x2`: 672.46 / 569.71 s, close to `deepseek3-671b` on the same layout
+     (657.75 / 587.07 s).
+   - `deepseek4-1600b` (3,197.7 GB) on 4 × `2x2x2` (64 devices, 6,510.4 GB HBM): 1,047.93 / 1,008.62 s, with
+     676–696 GB peak host RAM per host.
 
-## Queued (deployed 15:28 UTC, waiting for spot capacity)
+## Not run
 
-| Run | Model | Layout |
-| :--- | :--- | :--- |
-| `ds32-2s` | `deepseek3.2-671b` (synthetic sparse files) | 2 × `2x2x2` |
-| `235b-2s` | `qwen3-235b-a22b` | 2 × `2x2x2` |
-| `480b-2s` | `qwen3-480b-a35b` | 2 × `2x2x2` |
-| `397b-4h` | `qwen3.5-397b-a17b` | 1 × `2x2x4` (ICI-only point at 32 devices) |
-| `1600b-4s` | `deepseek4-1600b` (3,198 GB, synthetic sparse files) | 4 × `2x2x2` (8 hosts, 6,510.4 GB HBM) |
+- `480b-2s` (`qwen3-480b-a35b` on 2 × `2x2x2`): its JobSet was redeployed at 17:02 UTC, after the admission policy
+  in the notes started rewriting new JobSets, so it never started.
+- The v5p runs (`--platform v5p`, `V5P_MH_RUNS`): `v5p-smoke-2s` (17:56 UTC) hit the same policy on
+  `bodaborg-v5p-nap`.
 
 ## Notes
 
-- **Spot node failures.** On 10-29, four spot `2x2x2` node pools went NotReady during the 2 × `2x2x2` runs. Kueue
+- **JobSet admission policy.** Since 2026-10-29 16:43 UTC, the Kyverno ClusterPolicy `owner-only-exec-stamp-creator`
+  on `bodaborg-tpu7x-nap` and `bodaborg-v5p-nap` rewrites every new JobSet that has no ownerReferences: rule
+  `stamp-creator-jobset-templates` keeps only the last replicated job and drops its pod spec. The Jobs then fail
+  (`spec.template.spec.containers: Required value`), and Kueue creates no Workload. JobSets created before then, and
+  xpk JobSets (which have a ConfigMap ownerReference), are not affected. New multi-host runs need the policy fixed.
+- **Spot node failures.** On 10-29, several spot `2x2x2` node pools went NotReady during the multi-slice runs. Kueue
   evicted the workloads (`NodeFailures`), the JobSets restarted (`maxRestarts: 2`), and `--skip-completed` resumed
   from the per-phase result JSONs in GCS. When a remote slice dies, the runner's local worker is killed, and the
   harness records it as `OOMKilled / Exit Code 137` although the peak host RAM was far below the limit (handoff §7.4).
