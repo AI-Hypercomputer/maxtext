@@ -38,6 +38,7 @@ checkpoint_load_benchmark/
 │   ├── tpu7x_daemon_controller.py                   # CPU-pod controller that runs queue tasks on a daemon pod whose runner was evicted
 │   ├── summarize_tpu7x_results.py                   # Markdown status matrix from per-phase result JSONs (works on partial runs)
 │   ├── build_tpu7x_tables.py                        # tpu7x summary CSV + row-by-row to_maxtext vs safetensor table (merges re-runs)
+│   ├── build_tpu7x_sheet_table.py                   # Plain-text >200B table (P1 + multi-host rows) for the "tpu-v7x" sheet tab
 │   └── run_full_matrix.sh                           # Reproduce the 48-configuration v5p benchmark matrix by tier (0, 1, 2, 3, all)
 ├── k8s/
 │   └── multislice_benchmark_job.yaml.tmpl           # Kubernetes Service + 2-Node Coordinator/Worker Job template for GKE TPU v5p-8
@@ -51,7 +52,7 @@ checkpoint_load_benchmark/
     ├── tpu7x_benchmark_ckpt_load_time_summary.md    # [tpu7x] Executive summary on bodaborg-tpu7x-nap (two-row side-by-side comparison table)
     ├── tpu7x_benchmark_ckpt_load_time_report.md     # [tpu7x] Detailed engineering report on bodaborg-tpu7x-nap with phase breakdowns
     ├── tpu7x_benchmark_ckpt_load_time_issues.md     # [tpu7x] HBM/RAM capacity boundaries, multi-host timeout analysis, and fixes on tpu7x
-    ├── tpu7x_priority1_progress.md                  # [tpu7x] Priority 1 per-test status (summary, row-by-row, all tests)
+    ├── tpu7x_priority1_progress.md                  # [tpu7x] Priority 1 per-test status (summary, "tpu-v7x" sheet table, all tests)
     ├── tpu7x_multihost_results.md                   # [tpu7x] Multi-host slices (2x2x2, 2x2x4, 2 x 2x2x2) vs the same-HBM P1 multi-slice runs
     ├── tpu7x_multihost_results.csv                  # [tpu7x] Raw multi-host metrics CSV
     └── tpu7x_benchmark_ckpt_load_time_summary.csv   # [tpu7x] Raw benchmark metrics CSV on bodaborg-tpu7x-nap
