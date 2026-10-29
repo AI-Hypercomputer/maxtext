@@ -15,9 +15,13 @@
 
 from maxtext.kernels.megablox.ops import (
     TcUnsortCfg,
+    dequantize_fp8_codes,
     gmm,
     gmm_dswiglu,
     gmm_dswiglu_bwd,
+    gmm_dswiglu_fp8,
+    gmm_fp8_forward,
     gmm_silu,
+    gmm_silu_fp8,
     gmm_silu_pre_act_tile_n,
 )
