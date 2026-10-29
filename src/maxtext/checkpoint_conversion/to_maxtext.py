@@ -149,14 +149,22 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
 # Router state bf16 cannot hold exactly: the fp32 routing bias and integer
 # token-to-expert ids (bf16 rounds integers above 256).
 _FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+_FULL_PRECISION_SUBSTRINGS = (
+    "-attn_hc-",
+    "-ffn_hc-",
+    "-hc_head-",
+    "-self_attention-sinks",
+    "-self_attention-indexer-k_norm-",
+    "-self_attention-indexer-weights_proj-",
+)
 
 
 def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
-  """Returns float32 for full-precision router state when saving bfloat16."""
+  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
   if save_dtype not in ("bfloat16", DType.BFLOAT16):
     return save_dtype
   keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
-  if any(k.startswith(_FULL_PRECISION_PREFIXES) for k in keys):
+  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
     return "float32"
   return save_dtype
 

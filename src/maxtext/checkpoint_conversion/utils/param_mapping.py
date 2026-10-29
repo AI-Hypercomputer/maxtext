@@ -4830,6 +4830,232 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_
   return hooks
 
 
+def HY4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter keys to HuggingFace safetensors keys for tencent/Hy4-preview."""
+
+  def _get(cfg, key, default=None):
+    if isinstance(cfg, dict):
+      return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+  n_layers = (
+      getattr(maxtext_config, "num_decoder_layers", None)
+      or getattr(maxtext_config, "base_num_decoder_layers", None)
+      or _get(config, "num_hidden_layers", 78)
+  )
+  first_num_dense = int(getattr(maxtext_config, "first_num_dense_layers", _get(config, "first_num_dense_layers", 1)))
+  cycle = int(getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 4) or 4)
+
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-hc_head-hc_fn": "model.hc_head.hc_head_fn",
+      "params-decoder-hc_head-hc_base": "model.hc_head.hc_head_base",
+      "params-decoder-hc_head-hc_scale": "model.hc_head.hc_head_scale",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+
+  def _is_full_indexer(layer_idx: int) -> bool:
+    if layer_idx < first_num_dense:
+      return True
+    return ((layer_idx - first_num_dense) % cycle) == 0
+
+  def _add_layer(prefix, get_hf_key, is_moe: bool, is_full_idx: bool):
+    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = get_hf_key("input_layernorm.weight")
+    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = get_hf_key("post_attention_layernorm.weight")
+
+    mapping[f"{prefix}-attn_hc-fn"] = get_hf_key("hc_attn_layer.hc_pre.hc_fn")
+    mapping[f"{prefix}-attn_hc-base"] = get_hf_key("hc_attn_layer.hc_pre.hc_base")
+    mapping[f"{prefix}-attn_hc-scale"] = get_hf_key("hc_attn_layer.hc_pre.hc_scale")
+
+    mapping[f"{prefix}-ffn_hc-fn"] = get_hf_key("hc_mlp_layer.hc_pre.hc_fn")
+    mapping[f"{prefix}-ffn_hc-base"] = get_hf_key("hc_mlp_layer.hc_pre.hc_base")
+    mapping[f"{prefix}-ffn_hc-scale"] = get_hf_key("hc_mlp_layer.hc_pre.hc_scale")
+
+    mapping[f"{prefix}-self_attention-wq_a-kernel"] = get_hf_key("self_attn.q_a_proj.weight")
+    mapping[f"{prefix}-self_attention-q_norm-scale"] = get_hf_key("self_attn.q_a_layernorm.weight")
+    mapping[f"{prefix}-self_attention-wq_b-kernel"] = get_hf_key("self_attn.q_b_proj.weight")
+    mapping[f"{prefix}-self_attention-wkv_a-kernel"] = get_hf_key("self_attn.kv_a_proj_with_mqa.weight")
+    mapping[f"{prefix}-self_attention-kv_norm-scale"] = get_hf_key("self_attn.kv_a_layernorm.weight")
+    mapping[f"{prefix}-self_attention-wkv_b-kernel"] = get_hf_key("self_attn.kv_b_proj.weight")
+    mapping[f"{prefix}-self_attention-gate_proj-kernel"] = get_hf_key("self_attn.linear_gate.weight")
+    mapping[f"{prefix}-self_attention-out-kernel"] = get_hf_key("self_attn.o_proj.weight")
+    mapping[f"{prefix}-self_attention-sinks"] = get_hf_key("self_attn.learnable_sink_param")
+
+    if is_full_idx:
+      mapping[f"{prefix}-self_attention-indexer-wq_b-kernel"] = get_hf_key("self_attn.indexer.wq_b.weight")
+      mapping[f"{prefix}-self_attention-indexer-wk-kernel"] = get_hf_key("self_attn.indexer.wk.weight")
+      mapping[f"{prefix}-self_attention-indexer-k_norm-scale"] = get_hf_key("self_attn.indexer.k_norm.weight")
+      mapping[f"{prefix}-self_attention-indexer-k_norm-bias"] = get_hf_key("self_attn.indexer.k_norm.bias")
+      mapping[f"{prefix}-self_attention-indexer-weights_proj-kernel"] = get_hf_key(
+          "self_attn.indexer.weights_proj.weight"
+      )
+
+    if not is_moe:
+      mapping[f"{prefix}-mlp-wi_0-kernel"] = get_hf_key("mlp.gate_proj.weight")
+      mapping[f"{prefix}-mlp-wi_1-kernel"] = get_hf_key("mlp.up_proj.weight")
+      mapping[f"{prefix}-mlp-wo-kernel"] = get_hf_key("mlp.down_proj.weight")
+    else:
+      mapping[f"{prefix}-moe_block-MoeBlock_0-gate-kernel"] = get_hf_key("mlp.gate.weight")
+      mapping[f"{prefix.replace('params-', 'MoEBiasVar-')}-moe_block-MoeBlock_0-gate-bias"] = get_hf_key(
+          "mlp.gate.e_score_correction_bias"
+      )
+      mapping[(f"{prefix}-moe_block-MoeBlock_0-wi_0", f"{prefix}-moe_block-MoeBlock_0-wi_1")] = get_hf_key(
+          "mlp.experts.gate_up_proj"
+      )
+      mapping[f"{prefix}-moe_block-MoeBlock_0-wo"] = get_hf_key("mlp.experts.down_proj")
+      mapping[f"{prefix}-moe_block-shared_experts-wi_0-kernel"] = get_hf_key("mlp.shared_experts.gate_proj.weight")
+      mapping[f"{prefix}-moe_block-shared_experts-wi_1-kernel"] = get_hf_key("mlp.shared_experts.up_proj.weight")
+      mapping[f"{prefix}-moe_block-shared_experts-wo-kernel"] = get_hf_key("mlp.shared_experts.down_proj.weight")
+
+  def _make_unrolled_hf_key_fn(layer_idx: int):
+    return lambda target: f"model.layers.{layer_idx}.{target}"
+
+  def _make_scanned_hf_key_fn(layer_indices):
+    return lambda target: [f"model.layers.{idx}.{target}" for idx in layer_indices]
+
+  num_prefix = min(n_layers, first_num_dense)
+  moe_layers = max(0, n_layers - num_prefix)
+  num_blocks = (moe_layers // cycle) if scan_layers else 0
+
+  if not scan_layers or num_blocks == 0:
+    for i in range(n_layers):
+      _add_layer(
+          f"params-decoder-layers_{i}",
+          _make_unrolled_hf_key_fn(i),
+          is_moe=(i >= first_num_dense),
+          is_full_idx=_is_full_indexer(i),
+      )
+  else:
+    for i in range(num_prefix):
+      _add_layer(
+          f"params-decoder-layers_{i}",
+          _make_unrolled_hf_key_fn(i),
+          is_moe=False,
+          is_full_idx=True,
+      )
+    for j in range(cycle):
+      block_indices = [num_prefix + b * cycle + j for b in range(num_blocks)]
+      _add_layer(
+          f"params-decoder-scanned_blocks-layers_{j}",
+          _make_scanned_hf_key_fn(block_indices),
+          is_moe=True,
+          is_full_idx=(j == 0),
+      )
+    rem_start = num_prefix + num_blocks * cycle
+    for i in range(rem_start, n_layers):
+      _add_layer(
+          f"params-decoder-layers_{i}",
+          _make_unrolled_hf_key_fn(i),
+          is_moe=True,
+          is_full_idx=_is_full_indexer(i),
+      )
+
+  return mapping
+
+
+def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Parameter transformation hooks for tencent/Hy4-preview."""
+
+  def _get(cfg, key, default=None):
+    if isinstance(cfg, dict):
+      return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+  n_layers = (
+      getattr(maxtext_config, "num_decoder_layers", None)
+      or getattr(maxtext_config, "base_num_decoder_layers", None)
+      or _get(config, "num_hidden_layers", 78)
+  )
+  first_num_dense = int(getattr(maxtext_config, "first_num_dense_layers", _get(config, "first_num_dense_layers", 1)))
+  cycle = int(getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 4) or 4)
+
+  def reshape_kernel(input_tensor, target_shape=None):
+    if saving_to_hf:
+      if target_shape is not None:
+        flipped_target_shape = np.flip(np.array(target_shape))
+        return input_tensor.reshape(flipped_target_shape).T
+      return input_tensor.T
+    return input_tensor.T.reshape(target_shape) if target_shape is not None else input_tensor.T
+
+  def transpose_expert(input_tensor, target_shape=None):
+    del target_shape
+    return input_tensor.swapaxes(-1, -2)
+
+  def process_wi_0_wi_1(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      wi_0, wi_1 = input_tensor
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up.swapaxes(-1, -2)
+    gate, up = np.split(input_tensor, 2, axis=-2)
+    gate = gate.swapaxes(-1, -2)
+    up = up.swapaxes(-1, -2)
+    return np.stack([gate, up], axis=-1)
+
+  hooks = {
+      "params-decoder-hc_head-hc_fn": reshape_kernel,
+      "params-decoder-logits_dense-kernel": reshape_kernel,
+  }
+
+  def _is_full_indexer(layer_idx: int) -> bool:
+    if layer_idx < first_num_dense:
+      return True
+    return ((layer_idx - first_num_dense) % cycle) == 0
+
+  def _attach_layer_hooks(prefix, is_moe: bool, is_full_idx: bool):
+    hooks[f"{prefix}-attn_hc-fn"] = reshape_kernel
+    hooks[f"{prefix}-ffn_hc-fn"] = reshape_kernel
+    for k in ("wq_a", "wq_b", "wkv_a", "wkv_b", "gate_proj", "out"):
+      hooks[f"{prefix}-self_attention-{k}-kernel"] = reshape_kernel
+    if is_full_idx:
+      for k in ("wq_b", "wk", "weights_proj"):
+        hooks[f"{prefix}-self_attention-indexer-{k}-kernel"] = reshape_kernel
+    if not is_moe:
+      for k in ("wi_0", "wi_1", "wo"):
+        hooks[f"{prefix}-mlp-{k}-kernel"] = reshape_kernel
+    else:
+      hooks[f"{prefix}-moe_block-MoeBlock_0-gate-kernel"] = reshape_kernel
+      hooks[(f"{prefix}-moe_block-MoeBlock_0-wi_0", f"{prefix}-moe_block-MoeBlock_0-wi_1")] = process_wi_0_wi_1
+      hooks[f"{prefix}-moe_block-MoeBlock_0-wo"] = transpose_expert
+      for k in ("wi_0", "wi_1", "wo"):
+        hooks[f"{prefix}-moe_block-shared_experts-{k}-kernel"] = reshape_kernel
+
+  num_prefix = min(n_layers, first_num_dense)
+  moe_layers = max(0, n_layers - num_prefix)
+  num_blocks = (moe_layers // cycle) if scan_layers else 0
+
+  if not scan_layers or num_blocks == 0:
+    for i in range(n_layers):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_moe=(i >= first_num_dense),
+          is_full_idx=_is_full_indexer(i),
+      )
+  else:
+    for i in range(num_prefix):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_moe=False,
+          is_full_idx=True,
+      )
+    for j in range(cycle):
+      _attach_layer_hooks(
+          f"params-decoder-scanned_blocks-layers_{j}",
+          is_moe=True,
+          is_full_idx=(j == 0),
+      )
+    rem_start = num_prefix + num_blocks * cycle
+    for i in range(rem_start, n_layers):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_moe=True,
+          is_full_idx=_is_full_indexer(i),
+      )
+
+  return hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4891,6 +5117,7 @@ PARAM_MAPPING = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -4956,6 +5183,7 @@ HOOK_FNS = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {

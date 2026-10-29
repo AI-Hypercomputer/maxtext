@@ -329,6 +329,7 @@ ModelName = Literal[
     "envy-switch-xxl",
     "glm5.3-flash",
     "ming-3.0-audio-tiny",
+    "hy4-preview",
 ]
 
 
