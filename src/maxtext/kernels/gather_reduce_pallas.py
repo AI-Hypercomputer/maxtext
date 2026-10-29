@@ -114,9 +114,14 @@ def sc_gather_reduce(
     in_spec = pl.BlockSpec((row_chunk_size,), lambda i: (subcore_first_row_chunk + i,))
     in_specs = (in_spec,) * (1 + (weights_hbm_ref is not None))
 
-    @functools.partial(pltpu.emit_pipeline, grid=(num_row_chunks,), in_specs=in_specs)
-    def idx_pipeline(idx_ref, weights_ref=None):
-      row_chunk_idx = subcore_first_row_chunk + pl.program_id(0)
+    @functools.partial(
+        pltpu.emit_pipeline,
+        grid=(num_row_chunks,),
+        in_specs=in_specs,
+        _explicit_indices=True,
+    )
+    def idx_pipeline(idx_step: pltpu.PipelineStep, idx_ref, weights_ref=None):
+      row_chunk_idx = subcore_first_row_chunk + idx_step.index[0]
 
       row_subchunk_size = sc_info.num_lanes
       out_rows_per_step = row_subchunk_size // reduce_group_size
@@ -142,12 +147,13 @@ def sc_gather_reduce(
               (out_rows_per_step // packing, col_chunk_size),
               lambda r, c: (row_chunk_idx * num_row_subchunks + r, c),
           ),
+          _explicit_indices=True,
       )
-      def data_pipeline(gather_ref, out_ref):
+      def data_pipeline(data_step: pltpu.PipelineStep, gather_ref, out_ref):
         gather_ref = gather_ref.bitcast(op.dtype)
         out_ref = out_ref.bitcast(op.dtype)
 
-        row_slice = pl.ds(pl.program_id(0) * row_subchunk_size, row_subchunk_size)
+        row_slice = pl.ds(data_step.index[0] * row_subchunk_size, row_subchunk_size)
         subchunk_idxs = idx_ref[row_slice]
         weights = None if weights_ref is None else weights_ref[row_slice].astype(jnp.float32)
 
