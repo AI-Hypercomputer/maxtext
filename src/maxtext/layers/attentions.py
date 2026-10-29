@@ -68,6 +68,7 @@ from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNo
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
+from maxtext.kernels import qk_norm_rope_tc
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -929,6 +930,64 @@ class Attention(nnx.Module):
     else:
       return self.rotary_embedding(inputs, inputs_positions)
 
+  def _can_fuse_qk_norm_rope(self, query: Array, model_mode: str, is_llama4_decoder_block: bool, use_qk_norm: bool):
+    """Whether `fused_qk_norm_rope` applies to this layer/call (otherwise the XLA path runs unchanged)."""
+    if not getattr(self.config, "fused_qk_norm_rope", False):
+      return False
+    if model_mode != MODEL_MODE_TRAIN or query.ndim != 4:
+      return False
+    if not use_qk_norm or is_llama4_decoder_block or self.is_qwen3_hybrid:
+      return False
+    # Exact RotaryEmbedding types: rotate-half RoPE fully described by sin/cos tables of `embedding_dims / 2`.
+    if type(self.rotary_embedding) not in (RotaryEmbedding, PartialRotaryEmbedding, Gemma4PartialRotaryEmbedding):
+      return False
+    for norm in (self.query_norm, self.key_norm):
+      if norm is None:
+        continue
+      # Per-head RMSNorm with a scale that is on device (GlobalRMSNorm normalizes over heads * head_dim).
+      if type(norm) is not RMSNorm or not norm.with_scale or norm.parameter_memory_host_offload:  # pylint: disable=unidiomatic-typecheck
+        return False
+    return True
+
+  def _fused_qk_norm_rope(
+      self,
+      x: Array,
+      norm: RMSNorm,
+      inputs_positions: Array,
+      axis_names: tuple,
+      pre_attn_scalar: float = 1.0,
+  ) -> Array:
+    """RMSNorm + RoPE (+ `query_pre_attn_scalar`) in one Pallas kernel; returns the logical `[B, S, N, H]`.
+
+    The kernel writes `[B, N, S, H]`, the layout `tpu_flash_attention` transposes q/k into; the transpose back
+    here and that one are an inverse pair XLA folds away, so the activation is never relaid out in HBM.
+    The kernel is per-row, so it runs under `shard_map` with the array's own (batch, sequence, heads) sharding.
+    """
+    x = x.astype(norm.dtype)
+    sin_half, cos_half = self.rotary_embedding.sin_cos_tables(inputs_positions, x.dtype)
+    scale = norm.scale.get_value()
+    spec = self._logical_to_mesh_axes(axis_names)
+    table_spec = jax.sharding.PartitionSpec(spec[0], spec[1], None)
+    kernel = functools.partial(
+        qk_norm_rope_tc.fused_rmsnorm_rope,
+        eps=norm.epsilon,
+        scale_offset=norm.scale_offset,
+        out_dtype=norm.dtype,
+        pre_attn_scalar=pre_attn_scalar,
+    )
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(spec, jax.sharding.PartitionSpec(), table_spec, table_spec),
+        out_specs=spec,
+    )
+    def run(x, scale, sin_half, cos_half):
+      y_bnsh = kernel(x, scale, sin_half, cos_half)
+      return jnp.transpose(y_bnsh, (0, 2, 1, 3))
+
+    return run(x, scale, sin_half, cos_half)
+
   def init_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes KVCache.
 
@@ -1170,9 +1229,23 @@ class Attention(nnx.Module):
       gate = gate.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
 
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
+    # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
+    use_rope = not self.is_nope_layer
+    use_qk_norm = self.use_qk_norm and use_rope
+
+    # Fused per-head RMSNorm + RoPE + relayout (kernels/qk_norm_rope_tc.py). Replaces the
+    # query_norm/key_norm, apply_rotary_embedding and query_pre_attn_scalar steps below.
+    fuse_qk_norm_rope = self._can_fuse_qk_norm_rope(query, model_mode, is_llama4_decoder_block, use_qk_norm)
+    if fuse_qk_norm_rope:
+      query = self._fused_qk_norm_rope(
+          query, self.query_norm, inputs_positions, self.query_axis_names, self.query_pre_attn_scalar or 1.0
+      )
+      if not use_shared_kv:
+        key = self._fused_qk_norm_rope(key, self.key_norm, inputs_positions, self.key_axis_names)
+
     # NOTE: llama 4 does L2 normalization after RoPE
     # Apply Qwen3Next specific RMS Norm
-    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid:
+    if ((self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid) and not fuse_qk_norm_rope:
       query = self.query_norm(query)
       if not use_shared_kv:
         key = self.key_norm(key)
@@ -1180,11 +1253,7 @@ class Attention(nnx.Module):
     if self.use_v_norm and not use_shared_kv:
       value = self.value_norm(value)
 
-    # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
-    use_rope = not self.is_nope_layer
-    use_qk_norm = self.use_qk_norm and use_rope
-
-    if use_rope:
+    if use_rope and not fuse_qk_norm_rope:
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
       if not use_shared_kv:
         key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
@@ -1196,7 +1265,7 @@ class Attention(nnx.Module):
         key = l2_norm(key)
 
     # apply query_pre_attn_scalar if it's present.
-    if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
+    if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0 and not fuse_qk_norm_rope:
       query = query * self.query_pre_attn_scalar
 
     if self.temperature_tuning and not use_rope:

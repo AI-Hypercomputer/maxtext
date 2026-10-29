@@ -1462,6 +1462,11 @@ eval_sa_q_layout: "HEAD_DIM_MINOR"
 eval_sa_k_layout: "HEAD_DIM_MINOR"
 eval_sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
+# Fuse the per-head q/k RMSNorm, the rotary embedding and the [B, S, N, H] -> [B, N, S, H] relayout that splash
+# attention needs into one TensorCore Pallas kernel (kernels/qk_norm_rope_tc.py, custom VJP). Training only; applies
+# to 4-D q/k with use_qk_norm and a RotaryEmbedding / PartialRotaryEmbedding / Gemma4PartialRotaryEmbedding RoPE
+# (e.g. Gemma 4); every other path is unchanged. Saves ~3 HBM passes per q and k per layer.
+fused_qk_norm_rope: false
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
