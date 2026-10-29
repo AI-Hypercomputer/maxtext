@@ -15,7 +15,7 @@
 """Unit tests for Elastic Training utility functions."""
 
 import unittest
-from unittest.mock import Mock, create_autospec
+from unittest.mock import Mock, call, create_autospec
 from absl.testing import parameterized
 from maxtext.common import checkpointing
 from maxtext.utils import elastic_utils
@@ -26,6 +26,10 @@ from pathwaysutils.elastic.manager import ScaleUpSignalError
 
 class MockJaxRuntimeError(Exception):
   """Fake JAX Runtime Error class for unit tests."""
+
+
+class WrappedLoadError(Exception):
+  """Stands in for a library exception that wraps the original error, e.g. Orbax's `NoEntryError`."""
 
 
 class FakeDevice:
@@ -535,6 +539,103 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     train_func()  # Slice-down, then success.
 
+    callback_fn.assert_called_once_with(scale_up=False)
+
+  def test_elastic_retry_makes_live_device_the_default_of_every_thread(self):
+    """Each attempt sets the default device of the process, not just of the thread that runs the attempt."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {1}
+    self.fake_manager.default_device = FakeDevice(slice_index=1)
+
+    elastic_utils.elastic_retry(config)
+    self.fake_manager.elastic_retry.call_args.kwargs["pre_callback"]()
+
+    self.fake_jax.config.update.assert_called_once_with("jax_default_device", self.fake_manager.default_device)
+
+  @parameterized.named_parameters(("success", None), ("failure", WrappedLoadError))
+  def test_elastic_retry_restores_default_device_after_run(self, error_cls):
+    """The default device of the process is put back when the elastic run ends, whether or not it failed."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {1}
+    self.fake_manager.default_device = FakeDevice(slice_index=1)
+    self.fake_jax.config.jax_default_device = None
+
+    def fake_pathways_retry(**kwargs):
+      def decorator(func):
+        def run():
+          kwargs["pre_callback"]()
+          return func()
+
+        return run
+
+      return decorator
+
+    self.fake_manager.elastic_retry.side_effect = fake_pathways_retry
+
+    def train():
+      if error_cls is not None:
+        raise error_cls()
+
+    train_func = elastic_utils.elastic_retry(config)(train)
+    if error_cls is None:
+      train_func()
+    else:
+      with self.assertRaises(error_cls):
+        train_func()
+
+    self.assertEqual(
+        self.fake_jax.config.update.call_args_list,
+        [call("jax_default_device", self.fake_manager.default_device), call("jax_default_device", None)],
+    )
+
+  @parameterized.named_parameters(
+      ("wrapped_slice_down", True, True, MockJaxRuntimeError),
+      ("wrapped_other_jax_error", True, False, WrappedLoadError),
+      ("wrapped_non_jax_error", False, False, WrappedLoadError),
+  )
+  def test_elastic_retry_unwraps_slice_down_error(self, jax_cause, slice_down, expected_error):
+    """A slice-down error that a library re-raised as its own exception type reaches pathwaysutils as itself."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.elastic_retry.side_effect = lambda **kwargs: lambda func: func
+    self.fake_elastic.is_error_due_to_slice_down.return_value = slice_down
+    cause = MockJaxRuntimeError("DATA_LOSS: Full data loss while copying to devices") if jax_cause else KeyError("x")
+
+    def train():
+      try:
+        raise cause
+      except (MockJaxRuntimeError, KeyError) as e:
+        raise WrappedLoadError("Failed to load checkpointable") from e
+
+    with self.assertRaises(expected_error) as raised:
+      elastic_utils.elastic_retry(config)(train)()
+
+    if expected_error is MockJaxRuntimeError:
+      self.assertEqual(str(raised.exception), str(cause))
+      self.assertIsInstance(raised.exception.__cause__, WrappedLoadError)
+    else:
+      self.assertIs(raised.exception.__cause__, cause)
+
+  def test_elastic_retry_retries_wrapped_slice_down_error(self):
+    """The attempt after a wrapped slice-down error runs, and the event is reported as a slice-down."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_elastic.is_error_due_to_slice_down.return_value = True
+    callback_fn = Mock()
+    attempts = []
+
+    def train():
+      attempts.append(len(attempts))
+      if len(attempts) == 1:
+        raise WrappedLoadError("Failed to load checkpointable") from MockJaxRuntimeError("DATA_LOSS")
+
+    self._fake_pathways_retry_with_one_retry()
+
+    elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)()
+
+    self.assertLen(attempts, 2)
     callback_fn.assert_called_once_with(scale_up=False)
 
   def test_retry_cache_class(self):
