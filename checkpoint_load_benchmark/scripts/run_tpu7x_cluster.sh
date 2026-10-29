@@ -40,6 +40,9 @@
 #                      $BENCH_OWNER (default $USER). Code goes to
 #                      gs://mesa-maxtext/<owner>_tpu7x_bench/code, never to the mesakh code dir.
 #                      With --status / --cleanup, acts on that owner's JobSets only.
+#   --platform v5p   : With --priority multihost, use bodaborg-v5p-nap and V5P_MH_RUNS (v5p-smoke-2s,
+#                      v5p-284b, v5p-284b-2s, v5p-671b, v5p-671b-2s, v5p-ds32, v5p-ds32-2s,
+#                      v5p-1600b, v5p-1600b-2s). Default: tpu7x.
 #   --pair <a..f>    : Deploy only a specific 2-slice pod pair (a, b, c, d, e, f)
 #   --status         : Show current pod and job status on bodaborg-tpu7x-nap
 #   --cleanup        : Delete all benchmark pods and services on bodaborg-tpu7x-nap
@@ -58,6 +61,7 @@ PRIORITY="all"
 PAIR_FILTER=""
 ACTION="deploy"
 MANIFEST_DIR="${MANIFEST_DIR:-/tmp/tpu7x_manifests}"
+MH_PLATFORM="tpu7x"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,9 +93,13 @@ while [[ $# -gt 0 ]]; do
       MH_RUN="$2"
       shift 2
       ;;
+    --platform)
+      MH_PLATFORM="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--priority p1|p2|all|p1-completion|multihost] [--run <id>] [--pair a|b|c|d|e|f] [--status] [--cleanup] [--upload-only]" >&2
+      echo "Usage: $0 [--priority p1|p2|all|p1-completion|multihost] [--run <id>] [--platform tpu7x|v5p] [--pair a|b|c|d|e|f] [--status] [--cleanup] [--upload-only]" >&2
       exit 1
       ;;
   esac
@@ -103,6 +111,14 @@ if [[ "${PRIORITY}" == "multihost" ]]; then
   # Multi-host runs never write to the mesakh code dir, which running queue workers sync from.
   SOURCE_CODE_DIR="${GCS_CODE_DIR}"
   GCS_CODE_DIR="gs://mesa-maxtext/${MH_OWNER}_tpu7x_bench/code"
+  case "${MH_PLATFORM}" in
+    tpu7x) ;;
+    v5p) CLUSTER_CONTEXT="${V5P_CLUSTER_CONTEXT:-gke_cloud-tpu-shared-capacity_europe-west4_bodaborg-v5p-nap}" ;;
+    *)
+      echo "Unknown --platform: ${MH_PLATFORM} (tpu7x or v5p)" >&2
+      exit 1
+      ;;
+  esac
   if [[ "${ACTION}" == "status" ]]; then
     kubectl --context="${CLUSTER_CONTEXT}" get jobsets,pods -l app="${MH_APP}" -o wide
     exit 0
@@ -181,7 +197,7 @@ BENCH_OWNER="${MH_OWNER:-${BENCH_OWNER:-${USER}}}" MANIFEST_OUT_DIR="${MANIFEST_
 # 3. Apply manifests to bodaborg-tpu7x-nap
 echo "[3/3] Deploying pod pairs to ${CLUSTER_CONTEXT}..."
 if [[ "${PRIORITY}" == "multihost" ]]; then
-  kubectl --context="${CLUSTER_CONTEXT}" apply -f "${MANIFEST_DIR}/tpu7x_multihost_${MH_RUN}.yaml"
+  kubectl --context="${CLUSTER_CONTEXT}" apply -f "${MANIFEST_DIR}/${MH_PLATFORM}_multihost_${MH_RUN}.yaml"
   echo ""
   echo "Deployed JobSet ${MH_OWNER}-mh-${MH_RUN}. Runner logs:"
   echo "  kubectl --context=${CLUSTER_CONTEXT} logs -f -l jobset.sigs.k8s.io/jobset-name=${MH_OWNER}-mh-${MH_RUN},batch.kubernetes.io/job-completion-index=0,jobset.sigs.k8s.io/replicatedjob-name=slice0"
