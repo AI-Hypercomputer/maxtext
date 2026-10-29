@@ -197,12 +197,15 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
   `gs://mesa-maxtext/<owner>_tpu7x_bench/`, so the `mesakh_tpu7x_bench` code dir that queue workers sync from is
   never overwritten. The runs read the existing P1/P2 HF caches through `SHARED_HF_CACHE_BASE_DIR`.
 - **Results**: [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md).
+- **v5p**: `--platform v5p` deploys `V5P_MH_RUNS` on `bodaborg-v5p-nap` (reservation capacity, 4 devices per host, no
+  Kueue TAS). Their results go to the `v5p_multihost` run id, apart from the tpu7x results.
 
 ```bash
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run smoke   # qwen3-0.6b on 1 x 2x2x2
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run 235b    # also 284b, 397b, 397b-u (unscanned only), 480b, 671b and 397b-4h (2x2x4)
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run 671b-2s # 2 x 2x2x2: also smoke-2s, 235b-2s, 284b-2s, 397b-2s, 480b-2s, ds32-2s
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run 1600b-4s # deepseek4-1600b on 4 x 2x2x2
+./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --platform v5p --run v5p-smoke-2s
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --status
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --cleanup     # this owner's JobSets only
 ```
