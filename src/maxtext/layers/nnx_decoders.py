@@ -26,6 +26,7 @@ from flax import nnx
 from flax.core.spmd import logical_axis_rules
 import jax
 from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import (
@@ -1169,16 +1170,18 @@ class NNXDecoder(nnx.Module):
   def _apply_layer_with_remat(self, layer: nnx.Module, y: jax.Array, policy: Any, prevent_cse: bool, **kwargs):
     """Helper to cleanly apply jax.checkpoint to a single unscanned layer or block."""
 
-    graphdef, state = nnx.split(layer)
+    # Params are inputs only; just the non-Param state (e.g. RNG counters, quantization statistics) is written back.
+    graphdef, params, rest_state = nnx.split(layer, nnx.Param, ...)
 
-    def pure_layer_fn(state_in, y_in):
-      merged_layer = nnx.merge(graphdef, state_in)
+    def pure_layer_fn(params_in, rest_in, y_in):
+      merged_layer = nnx.merge(graphdef, params_in, rest_in)
       out = merged_layer(y_in, **kwargs)
-      return out, nnx.state(merged_layer)
+      _, _, new_rest = nnx.split(merged_layer, nnx.Param, ...)
+      return out, new_rest
 
     checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
-    out, new_state = checkpointed_fn(state, y)
-    nnx.update(layer, new_state)
+    out, new_rest_state = checkpointed_fn(params, rest_state, y)
+    nnx.update(layer, new_rest_state)
 
     return out
 
@@ -1878,6 +1881,9 @@ class NNXDecoder(nnx.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       embedding_table = shared_embedding.embedding[...]
+      if cfg.distill_fused_lm_head and model_mode == MODEL_MODE_TRAIN:
+        # Distillation computes the logits from (hidden states, embedding table) in sequence chunks.
+        return (y, embedding_table)
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
       # Release the head's input and embedding cotangents together, so the backward pass does not keep
       # the [batch, length, vocab] dlogits alive until the embedding-gradient matmul (see max_utils.tie_cotangents).
@@ -2422,15 +2428,50 @@ class NNXDecoder(nnx.Module):
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
           out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
-          state_out = nnx.state(merged_layer)
-
           if dynamic_graph_init:
             new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
-            return out_y, out_kv, state_out, new_graphdef
-          else:
-            return out_y, out_kv, state_out, graphdef_in
+            return out_y, out_kv, nnx.state(merged_layer), new_graphdef
+          # Params are not modified by the forward pass; only return the non-Param state.
+          return out_y, out_kv, nnx.state(merged_layer, nnx.Not(nnx.Param)), graphdef_in
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+
+        def remat_layer_as_scan(layer, y, current_kwargs):
+          """Applies one rematerialized layer as a length-1 `jax.lax.scan` (`remat_unscanned_layers_with_scan`).
+
+          Each unrolled layer becomes its own while loop, which XLA does not merge or CSE across layers, so
+          rematerialization stays per layer as with `scan_layers=True`. The XLA metadata keeps XLA from
+          simplifying the trip-count-1 loop away.
+          """
+          graphdef_p, params, non_params = nnx.split(layer, nnx.Param, ...)
+
+          def body(carry, non_params_slice):
+            y_c, params_c = carry
+            if cfg.parameter_memory_host_offload:
+              params_c = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), params_c)
+            merged = nnx.merge(graphdef_p, params_c, non_params_slice)
+            out_y, _ = merged(y_c, *layer_args, kv_cache=None, **current_kwargs)
+            _, _, new_non_params = nnx.split(merged, nnx.Param, ...)
+            return (out_y, params_c), new_non_params
+
+          ckpt_body = jax.checkpoint(body, policy=policy, prevent_cse=prevent_cse)
+          with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+            (y, _), stacked_non_params = jax.lax.scan(
+                ckpt_body, (y, params), jax.tree.map(lambda x: x[None], non_params), length=1
+            )
+          return y, jax.tree.map(lambda x: x[0], stacked_non_params), graphdef_p
+
+        # Block-boundary features for distillation: with unscanned layers, the decoder output of the layers in
+        # distill_layer_indices (all layers if unset) is sown as "block_boundary_activations".
+        boundary_feature_layers = []
+        if cfg.distill_beta > 0.0:
+          boundary_feature_layers = list(
+              cfg.distill_layer_indices if cfg.distill_layer_indices is not None else range(cfg.num_decoder_layers)
+          )
+          for idx in boundary_feature_layers:
+            if not 0 <= idx < cfg.num_decoder_layers:
+              raise ValueError(f"distill_layer_indices entry {idx} is out of range for {cfg.num_decoder_layers} layers.")
+        boundary_features = {}
 
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
@@ -2506,7 +2547,14 @@ class NNXDecoder(nnx.Module):
                 routed_experts[:, :, lyr, :] if routed_experts.ndim == 4 else routed_experts
             )
 
-          if cfg.remat_policy != "none":
+          if (
+              cfg.remat_unscanned_layers_with_scan
+              and cfg.remat_policy != "none"
+              and not dynamic_graph_init
+              and kv_cache is None
+          ):
+            y, new_state, new_graphdef = remat_layer_as_scan(layer, y, current_kwargs)
+          elif cfg.remat_policy != "none":
             y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
           else:
             y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
@@ -2544,6 +2592,17 @@ class NNXDecoder(nnx.Module):
             visual_embeds = deepstack_visual_embeds[lyr]
             if bidirectional_mask is not None and visual_embeds is not None:
               y = deepstack_process(y, bidirectional_mask, visual_embeds)
+
+          if lyr in boundary_feature_layers:
+            boundary_features[lyr] = y
+
+        if boundary_feature_layers:
+          # [len(distill_layer_indices), batch, seq, emb], in distill_layer_indices order.
+          self.sow(
+              nnx.Intermediate,
+              "block_boundary_activations",
+              jnp.stack([boundary_features[idx] for idx in boundary_feature_layers], axis=0),
+          )
 
     assert isinstance(y, jax.Array)
 
