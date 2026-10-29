@@ -50,6 +50,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MODEL_MODE_PREFILL,
     AttentionType,
+    is_fp8_dtype,
 )
 from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
@@ -293,6 +294,9 @@ class Attention(nnx.Module):
     self.rope_max_timescale = rope_max_timescale if rope_max_timescale is not None else self.config.rope_max_timescale
     self.partial_rotary_factor = partial_rotary_factor
     self.share_kv_layer = share_kv_layer
+    self._q_scale = 1.0
+    self._k_scale = 1.0
+    self._v_scale = 1.0
 
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
     self.is_qwen3_hybrid = (
@@ -1032,6 +1036,15 @@ class Attention(nnx.Module):
       attention_chunk_size = None
 
     q_scale, k_scale, v_scale = None, None, None
+    kv_cache_dtype = getattr(rpa_kv_cache, "dtype", None)
+    if kv_cache_dtype is None and isinstance(rpa_kv_cache, (list, tuple)) and rpa_kv_cache:
+      kv_cache_dtype = getattr(rpa_kv_cache[0], "dtype", None)
+    if kv_cache_dtype is not None and is_fp8_dtype(kv_cache_dtype):
+      from tpu_inference.layers.common.quantization import quantize_kv  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+      k_scale = self._k_scale
+      v_scale = self._v_scale
+      key, value = quantize_kv(kv_cache_dtype, key, value, k_scale, v_scale)
 
     md = rpa_metadata
 

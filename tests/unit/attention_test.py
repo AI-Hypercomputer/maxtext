@@ -3783,20 +3783,33 @@ class AttentionTest(parameterized.TestCase):
     )
 
   @staticmethod
-  def _stub_tpu_inference_attention(mock_rpa_ops=None, mock_dcp_forward=None):
+  def _stub_tpu_inference_attention(mock_rpa_ops=None, mock_dcp_forward=None, mock_quantize_kv=None):
     pkg = types.ModuleType("tpu_inference")
     layers = types.ModuleType("tpu_inference.layers")
     common = types.ModuleType("tpu_inference.layers.common")
     attn_iface = types.ModuleType("tpu_inference.layers.common.attention_interface")
     cp_attn = types.ModuleType("tpu_inference.layers.common.cp_attention")
+    quant_mod = types.ModuleType("tpu_inference.layers.common.quantization")
     attn_iface.sharded_ragged_paged_attention = mock_rpa_ops or mock.MagicMock()
     cp_attn.dcp_forward = mock_dcp_forward or mock.MagicMock()
+    if mock_quantize_kv is None:
+
+      def _default_quantize_kv(dtype, key, value=None, k_scale=1.0, v_scale=1.0):
+        finfo = jnp.finfo(dtype)
+        k_q = jnp.clip(key / k_scale, float(finfo.min), float(finfo.max)).astype(dtype)
+        v_q = None if value is None else jnp.clip(value / v_scale, float(finfo.min), float(finfo.max)).astype(dtype)
+        return k_q, v_q
+
+      quant_mod.quantize_kv = mock.MagicMock(side_effect=_default_quantize_kv)
+    else:
+      quant_mod.quantize_kv = mock_quantize_kv
     return {
         "tpu_inference": pkg,
         "tpu_inference.layers": layers,
         "tpu_inference.layers.common": common,
         "tpu_inference.layers.common.attention_interface": attn_iface,
         "tpu_inference.layers.common.cp_attention": cp_attn,
+        "tpu_inference.layers.common.quantization": quant_mod,
     }
 
   def test_forward_serve_vllm(self):
@@ -4028,6 +4041,141 @@ class AttentionTest(parameterized.TestCase):
         rngs=self.nnx_rng,
     )
     self.assertEqual(moe_layer._expert_parallelism_name, ("attn_dp_expert", "expert", "dcp"))  # pylint: disable=protected-access
+
+  def test_forward_serve_vllm_fp8_kv_cache(self):
+    """Tests that forward_serve_vllm quantizes K/V and passes scales when rpa_kv_cache is FP8."""
+    mock_rpa_ops = mock.MagicMock()
+
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+    attention_vllm._k_scale = 2.0  # pylint: disable=protected-access
+    attention_vllm._v_scale = 0.5  # pylint: disable=protected-access
+
+    total_tokens = self.global_batch_size * seq_len
+    query = jnp.ones((self.global_batch_size, seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jnp.full((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), 4.0, dtype=self.dtype)
+    value = jnp.full((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), 1.5, dtype=self.dtype)
+    mock_kv_cache = jnp.zeros((1,), dtype=jnp.float8_e4m3fn)
+    mock_attention_metadata = mock.Mock()
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_updated_kv_cache = jnp.zeros((1,), dtype=jnp.float8_e4m3fn)
+    mock_rpa_ops.return_value = (mock_output, mock_updated_kv_cache)
+
+    stubbed_modules = self._stub_tpu_inference_attention(mock_rpa_ops=mock_rpa_ops)
+    mock_quantize_kv = stubbed_modules["tpu_inference.layers.common.quantization"].quantize_kv
+
+    with mock.patch.dict(sys.modules, stubbed_modules):
+      output, updated_kv_cache = attention_vllm.forward_serve_vllm(
+          query,
+          key,
+          value,
+          rpa_kv_cache=mock_kv_cache,
+          rpa_metadata=mock_attention_metadata,
+      )
+
+    mock_quantize_kv.assert_called_once()
+    mock_rpa_ops.assert_called_once()
+    rpa_args = mock_rpa_ops.call_args[0]
+    self.assertEqual(rpa_args[1].dtype, self.dtype)
+    self.assertEqual(rpa_args[2].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(rpa_args[3].dtype, jnp.float8_e4m3fn)
+    self.assertTrue(jnp.allclose(rpa_args[2].astype(jnp.float32), 2.0))
+    self.assertTrue(jnp.allclose(rpa_args[3].astype(jnp.float32), 3.0))
+    self.assertIsNone(rpa_args[12])  # q_scale
+    self.assertEqual(rpa_args[13], 2.0)  # k_scale
+    self.assertEqual(rpa_args[14], 0.5)  # v_scale
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertTrue(jnp.allclose(output, mock_output))
+
+  def test_forward_serve_vllm_dcp_fp8_kv_cache(self):
+    """Tests that forward_serve_vllm passes quantized FP8 K/V and scales to dcp_forward."""
+    mock_rpa_ops = mock.MagicMock()
+    mock_dcp_forward = mock.MagicMock()
+
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    total_tokens = self.global_batch_size * seq_len
+    query = jnp.ones((self.global_batch_size, seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    value = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    mock_kv_cache = [jnp.zeros((1,), dtype=jnp.float8_e4m3fn)]
+    mock_attention_metadata = mock.Mock()
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,), dtype=jnp.float8_e4m3fn)]
+    mock_dcp_forward.return_value = (mock_updated_kv_cache, mock_output)
+
+    attention_vllm.mesh = types.SimpleNamespace(shape={"dcp": 2})
+
+    stubbed_modules = self._stub_tpu_inference_attention(mock_rpa_ops=mock_rpa_ops, mock_dcp_forward=mock_dcp_forward)
+    mock_quantize_kv = stubbed_modules["tpu_inference.layers.common.quantization"].quantize_kv
+
+    with mock.patch.dict(sys.modules, stubbed_modules):
+      output, updated_kv_cache = attention_vllm.forward_serve_vllm(
+          query,
+          key,
+          value,
+          rpa_kv_cache=mock_kv_cache,
+          rpa_metadata=mock_attention_metadata,
+      )
+
+    mock_quantize_kv.assert_called_once()
+    mock_dcp_forward.assert_called_once()
+    dcp_args, dcp_kwargs = mock_dcp_forward.call_args
+    self.assertEqual(dcp_args[1].dtype, self.dtype)
+    self.assertEqual(dcp_args[2].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(dcp_args[3].dtype, jnp.float8_e4m3fn)
+    self.assertIsNone(dcp_kwargs["q_scale"])
+    self.assertEqual(dcp_kwargs["k_scale"], 1.0)
+    self.assertEqual(dcp_kwargs["v_scale"], 1.0)
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertTrue(jnp.allclose(output, mock_output))
 
 
 class MLATest(attention_test_util.MLATestBase):
