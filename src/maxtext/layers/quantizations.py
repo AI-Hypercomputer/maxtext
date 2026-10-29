@@ -43,6 +43,7 @@ from flax.linen import fp8_ops
 import flax.linen as nn
 from flax import nnx
 from flax.nnx import variablelib
+
 # Support different packaging structures across environments even within
 # the same Qwix version identifier (imports from _src.utils vs _src).
 try:
@@ -280,7 +281,12 @@ def native_fp8_dot_general(
 
   # Qwix requires scale.ndim == qvalue.ndim. Determine scheme before reshaping minimal-rank scales.
   if kernel_scale.ndim == quantized_kernel.ndim:
-    scheme, _ = infer_scale_granularity(kernel_scale.shape)
+    if kernel_scale.size == 1:
+      scheme = "per_tensor"
+    elif kernel_scale.shape[rhs_axis] == 1:
+      scheme = "per_channel"
+    else:
+      scheme = "block_wise"
   elif kernel_scale.size == 1:
     scheme = "per_tensor"
     kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
