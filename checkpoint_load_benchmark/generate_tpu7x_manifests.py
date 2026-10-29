@@ -552,6 +552,8 @@ def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_scrip
 # on a small model first. 2x2x2 has the HBM of the earlier 2 x 2x2x1 runs over ICI instead of DCN, and 2x2x4 that of
 # 4 x 2x2x1. When scanned fails before the load finishes, the harness skips unscanned for the same config, so a model
 # whose scanned run is known to fail gets a separate unscanned run (`397b-u`).
+# The `-2s` runs use 2 x 2x2x2 (4 hosts, ICI within a slice and DCN between them), the HBM of 2x2x4 and 4 x 2x2x1.
+# `397b-2s` runs unscanned first, so a scanned failure cannot skip it.
 BOTH = "scanned unscanned"
 SPARSE = "export STAGE_SPARSE_DEEPSEEK_OOM=1"
 MH_RUNS = [
@@ -562,7 +564,11 @@ MH_RUNS = [
     ("397b-u", "2x2x2", 1, "qwen3.5-397b-a17b", "unscanned", P1_HF_CACHE, ""),
     ("480b", "2x2x2", 1, "qwen3-480b-a35b", BOTH, P1_HF_CACHE, ""),
     ("671b", "2x2x4", 1, "deepseek3-671b", BOTH, P1_HF_CACHE, SPARSE),
+    ("smoke-2s", "2x2x2", 2, "qwen3-0.6b", BOTH, P2_HF_CACHE, ""),
     ("235b-2s", "2x2x2", 2, "qwen3-235b-a22b", BOTH, P1_HF_CACHE, ""),
+    ("284b-2s", "2x2x2", 2, "deepseek4-284b", BOTH, P1_HF_CACHE, SPARSE),
+    ("397b-2s", "2x2x2", 2, "qwen3.5-397b-a17b", "unscanned scanned", P1_HF_CACHE, ""),
+    ("671b-2s", "2x2x2", 2, "deepseek3-671b", BOTH, P1_HF_CACHE, SPARSE),
 ]
 
 
