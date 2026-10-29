@@ -1,7 +1,7 @@
 # Priority 1 (>200B models) on TPU v7x: Lance's PRs, and `to_maxtext` vs `safetensors_dynamic`
 
 > Cluster `bodaborg-tpu7x-nap` (`tpu7x-standard-4t`, topology `2x2x1`). Branch `docs/checkpoint-load-benchmark`.
-> Per-test status, including runs still in progress: [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md).
+> Per-test details: [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md). All runs are finished.
 > Issues and fixes: [`tpu7x_benchmark_ckpt_load_time_issues.md`](tpu7x_benchmark_ckpt_load_time_issues.md).
 
 ## 1. Summary
@@ -94,7 +94,14 @@ summary) is in [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md). It 
 | `qwen3-480b-a35b` | ❌ | ✅ | – |
 | `deepseek3-671b` | ❌ | ❌ host OOM | ✅ |
 
-## 6. Reproduce
+## 6. Not run
+
+- `deepseek3.2-671b` (1,367 GB) and `deepseek4-1600b` (3,198 GB), the v5p matrix's extra DeepSeek capacity tests, weren't in
+  the tpu7x scope. They would need about 4 and 8 slices.
+- `deepseek3-671b`: unscanned on 1–2 slices, and `to_maxtext` (can't be converted on one host).
+- `origin/main` unscanned variants after a scanned timeout (the harness skips them).
+
+## 7. Reproduce
 
 - Every run is a task in [`configs/p1_completion_tasks.json`](../configs/p1_completion_tasks.json); see the README
   section "Finishing Priority 1" and [`../handoff.md`](../handoff.md) §9 for the deployment and monitoring commands.
