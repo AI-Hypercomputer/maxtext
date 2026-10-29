@@ -242,7 +242,15 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 6. **Lance's PRs are required on tpu7x for >200B models.** Without them, `origin/main` either has no mapping (480B)
    or doesn't finish loading within 1800 s.
 
-## 5. Issues found and fixed
+## 5. Not run
+
+| What | Why |
+| :--- | :--- |
+| `deepseek3.2-671b` (1,367 GB), `deepseek4-1600b` (3,198 GB) | Extra DeepSeek capacity tests from the v5p matrix that weren't in the tpu7x lists. They would need about 4 and 8 slices. |
+| `deepseek3-671b` unscanned on 1–2 slices; `deepseek3-671b` `to_maxtext` | Same capacity limits as scanned; 1.34 TB can't be converted on one host. |
+| `qwen3.5-397b-a17b` and `qwen3-480b-a35b` unscanned on 1 slice (`safetensor`) | 98% of / more than one slice's HBM. |
+
+## 6. Issues found and fixed
 
 See [`tpu7x_benchmark_ckpt_load_time_issues.md`](tpu7x_benchmark_ckpt_load_time_issues.md):
 - **T-1 … T-15:** harness, infrastructure and capacity issues, all resolved.
