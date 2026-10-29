@@ -24,6 +24,8 @@ from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
 import functools
+import gc
+import time
 from typing import Any, Optional
 
 from absl import logging
@@ -2461,42 +2463,43 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
       return
 
-    # Drain all inflight computations and log pending metrics before checkpointing.
-    self._throttler.wait_for_all()
-    # Settle uncompiled state onto the mesh before Orbax serializes it. `_place_state_on_mesh()`
-    # commits uncommitted or single-device 0-D optimizer leaves (`count`, `step`) onto the full
-    # mesh; `_shard_optimizer_state_over_data()` shards parameter-shaped moments over the data
-    # axis for Zero-1 and leaves scalar leaves untouched. A compiled engine has already done both.
-    if self._state is None or not self._compiled:
-      self._refresh_pure_state()
-      self._place_state_on_mesh()
-      self._shard_optimizer_state_over_data()
-      self._offload_optimizer_state()
-      if not self._compiled:
-        # An uncompiled engine re-splits the module graph on every step; a cache left behind
-        # here would go stale as soon as the live variables change.
-        self._invalidate_pure_state()
+    with jax.profiler.TraceAnnotation("save_checkpoint"):
+      # Drain all inflight computations and log pending metrics before checkpointing.
+      self._throttler.wait_for_all()
+      # Settle uncompiled state onto the mesh before Orbax serializes it. `_place_state_on_mesh()`
+      # commits uncommitted or single-device 0-D optimizer leaves (`count`, `step`) onto the full
+      # mesh; `_shard_optimizer_state_over_data()` shards parameter-shaped moments over the data
+      # axis for Zero-1 and leaves scalar leaves untouched. A compiled engine has already done both.
+      if self._state is None or not self._compiled:
+        self._refresh_pure_state()
+        self._place_state_on_mesh()
+        self._shard_optimizer_state_over_data()
+        self._offload_optimizer_state()
+        if not self._compiled:
+          # An uncompiled engine re-splits the module graph on every step; a cache left behind
+          # here would go stale as soon as the live variables change.
+          self._invalidate_pure_state()
 
-    if step is None and isinstance(metadata, Mapping):
-      step = metadata.get("step")
-    if step is None:
-      step = self.train_step
-    logging.info("Saving checkpoint at step %d.", step)
+      if step is None and isinstance(metadata, Mapping):
+        step = metadata.get("step")
+      if step is None:
+        step = self.train_step
+      logging.info("Saving checkpoint at step %d.", step)
 
-    custom_metadata = {}
-    # Metadata from the orchestrator is a black box: stored as given, so falsy values such as
-    # `{}` or `0` round-trip too.
-    if metadata is not None:
-      custom_metadata["additional_metadata"] = metadata
+      custom_metadata = {}
+      # Metadata from the orchestrator is a black box: stored as given, so falsy values such as
+      # `{}` or `0` round-trip too.
+      if metadata is not None:
+        custom_metadata["additional_metadata"] = metadata
 
-    ckpt_saved = self._checkpoint_manager.save_checkpoint(
-        step=step,
-        checkpoint_state=checkpointing.CheckpointState(model=self.model, optimizer=self.optimizer),
-        custom_metadata=custom_metadata,
-        force=force,
-    )
-    if ckpt_saved:
-      logging.info("Checkpoint saved at step %d.", step)
+      ckpt_saved = self._checkpoint_manager.save_checkpoint(
+          step=step,
+          checkpoint_state=checkpointing.CheckpointState(model=self.model, optimizer=self.optimizer),
+          custom_metadata=custom_metadata,
+          force=force,
+      )
+      if ckpt_saved:
+        logging.info("Checkpoint saved at step %d.", step)
 
   def restore_checkpoint(self, *, step: int | None = None) -> Any:
     """Restores a Multi-Tier Checkpoint and returns its metadata.
@@ -2668,6 +2671,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
     del sync_request
+    t_start = time.monotonic()
     if staging_transport == "raiden":
       try:
         from tunix.dist_rl.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -2688,77 +2692,124 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           and self._last_staged_step == self.train_step
           and self._staged_metadata is not None
       ):
+        total_variables = sum(len(m.variables) for m in self._staged_metadata)
         logging.info(
             "Trainer reusing staged weight sync for step %d (%d variables)",
             self.train_step,
-            sum(len(m.variables) for m in self._staged_metadata),
+            total_variables,
+        )
+        logging.info(
+            "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%d transport=%s reused=True"
+            " total_s=%.3f work_units=%d variables=%d",
+            self.train_step,
+            staging_transport,
+            time.monotonic() - t_start,
+            len(self._staged_metadata),
+            total_variables,
         )
         return self._staged_metadata
 
-      # 1. Drain all in-flight TPU computations to ensure weights are fully updated
-      self._throttler.wait_for_all()
+      with jax.profiler.TraceAnnotation("prepare_weight_sync"):
+        # 1. Drain in-flight TPU computations so the weights are fully updated, and drop the
+        # previous round's converted tree before converting again, so at most one converted
+        # tree is alive at a time. Async checkpoint persistence is not waited for: it overlaps
+        # with the conversion and transfer.
+        t_throttle = time.monotonic()
+        self._throttler.wait_for_all()
+        throttler_wait_s = time.monotonic() - t_throttle
 
-      # 2. Extract clean trainable parameters
-      params_state = self._get_trainable_params_state()
+        t_purge = time.monotonic()
+        self._purge_raiden_buffers()
+        purge_buffers_s = time.monotonic() - t_purge
 
-      if self._use_weight_converter:
-        converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
-      else:
-        # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
-        # on-device (HBM, not host RAM) full materialization -- a different
-        # memory pool than the host OOM this plan addresses. Candidate
-        # fast-follow: fold into unscan_layers_streaming's per-piece slicing.
-        params_state = jax.tree_util.tree_map(
-            lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
-            params_state,
-        )
-        if self._config.scan_layers:
-          converted_state = raiden_unscan.unscan_layers(
-              params_state,
-              num_layers=self._config.num_decoder_layers,
-              scan_axis=self._config.param_scan_axis,
-              cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
-          )
+        # 2. Extract clean trainable parameters
+        t_convert = time.monotonic()
+        params_state = self._get_trainable_params_state()
+
+        if self._use_weight_converter:
+          converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
         else:
-          converted_state = params_state
+          # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
+          # on-device (HBM, not host RAM) full materialization -- a different
+          # memory pool than the host OOM this plan addresses. Candidate
+          # fast-follow: fold into unscan_layers_streaming's per-piece slicing.
+          params_state = jax.tree_util.tree_map(
+              lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
+              params_state,
+          )
+          if self._config.scan_layers:
+            converted_state = raiden_unscan.unscan_layers(
+                params_state,
+                num_layers=self._config.num_decoder_layers,
+                scan_axis=self._config.param_scan_axis,
+                cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
+            )
+          else:
+            converted_state = params_state
 
-      del params_state
+        del params_state
+        convert_s = time.monotonic() - t_convert
 
-      # 3. Bind parameters to the Raiden transport. Construct the synchronizer
-      # once, matching the persistent-instance-per-cycle pattern the rebind
-      # optimization depends on.
-      if self._raiden_sync is None:
-        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
-            job_name="trainer",
-            worker_index=jax.process_index(),
-            auto_h2d=False,
-            parallelism=4,
+        # 3. Bind parameters to the Raiden transport. Construct the synchronizer
+        # once, matching the persistent-instance-per-cycle pattern the rebind
+        # optimization depends on.
+        t_bind = time.monotonic()
+        if self._raiden_sync is None:
+          self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
+              job_name="trainer",
+              worker_index=jax.process_index(),
+              auto_h2d=False,
+              parallelism=4,
+          )
+
+        self._raiden_sync.bind(converted_state)
+        del converted_state
+        bind_s = time.monotonic() - t_bind
+
+        # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
+        t_d2h = time.monotonic()
+        if self._raiden_sync.active:
+          self._raiden_sync.d2h()
+        d2h_s = time.monotonic() - t_d2h
+
+        checksum_s = 0.0
+        if is_verify_weights_enabled():
+          t_checksum = time.monotonic()
+          logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
+          checksum_s = time.monotonic() - t_checksum
+
+        t_metadata = time.monotonic()
+        all_metadata = self._raiden_sync.work_unit_metadata_all()
+        metadata_s = time.monotonic() - t_metadata
+        total_variables = sum(len(m.variables) for m in all_metadata)
+
+        logging.info(
+            "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
+            self.train_step,
+            len(all_metadata),
+            total_variables,
+            all_metadata[0].mesh_axes if all_metadata else (),
         )
-
-      self._raiden_sync.bind(converted_state)
-      del converted_state
-
-      # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
-      if self._raiden_sync.active:
-        self._raiden_sync.d2h()
-
-      verify_weights = is_verify_weights_enabled()
-      if verify_weights:
-        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
-
-      all_metadata = self._raiden_sync.work_unit_metadata_all()
-      total_variables = sum(len(m.variables) for m in all_metadata)
-
-      logging.info(
-          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
-          self.train_step,
-          len(all_metadata),
-          total_variables,
-          all_metadata[0].mesh_axes if all_metadata else (),
-      )
-      self._last_staged_step = self.train_step
-      self._staged_metadata = all_metadata
-      return all_metadata
+        logging.info(
+            "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%d transport=%s"
+            " throttler_wait_s=%.3f purge_buffers_s=%.3f convert_s=%.3f bind_s=%.3f d2h_s=%.3f"
+            " checksum_s=%.3f metadata_s=%.3f total_s=%.3f work_units=%d variables=%d",
+            self.train_step,
+            staging_transport,
+            throttler_wait_s,
+            purge_buffers_s,
+            convert_s,
+            bind_s,
+            d2h_s,
+            checksum_s,
+            metadata_s,
+            time.monotonic() - t_start,
+            len(all_metadata),
+            total_variables,
+        )
+        self._last_staged_step = self.train_step
+        self._staged_metadata = all_metadata
+        return all_metadata
 
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
@@ -2772,11 +2823,42 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       sync_request: The round's request, forwarded by Tunix's `TrainerWorker`. Unused.
     """
     del sync_request
+    t_start = time.monotonic()
     self._last_staged_step = None
     self._staged_metadata = None
+    purge_buffers_s = 0.0
+    purged_leaves = 0
     if self._raiden_sync:
+      # Read while the converted tree is still bound; releasing it resets what the metrics describe.
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+      t_purge = time.monotonic()
+      purged_leaves = self._purge_raiden_buffers()
+      purge_buffers_s = time.monotonic() - t_purge
+    logging.info(
+        "TRAINER_WEIGHT_SYNC_TIMING step=release_weight_sync train_step=%d purge_buffers_s=%.3f"
+        " purged_leaves=%d total_s=%.3f",
+        self.train_step,
+        purge_buffers_s,
+        purged_leaves,
+        time.monotonic() - t_start,
+    )
     return True
+
+  def _purge_raiden_buffers(self) -> int:
+    """Drops the converted tree bound to the Raiden synchronizer from the last round.
+
+    `bind()` keeps references to the converted arrays until the next `bind()`, so without this
+    the previous round's tree stays alive while the next one is converted.
+
+    Returns:
+      The number of array references released.
+    """
+    if self._raiden_sync is None or not hasattr(self._raiden_sync, "release_buffers"):
+      return 0
+    released = self._raiden_sync.release_buffers()
+    if released:
+      gc.collect()
+    return released
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""

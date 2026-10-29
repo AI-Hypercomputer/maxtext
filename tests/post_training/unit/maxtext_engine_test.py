@@ -15,6 +15,7 @@
 """Unit tests for MaxText training engine."""
 # pylint: disable=protected-access
 
+import contextlib
 import dataclasses
 import os
 import types
@@ -503,6 +504,24 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("model_params", args_dict)
     self.assertNotIn("accumulated_metrics", args_dict)
     self.assertNotIn("accumulated_grads", args_dict)
+
+  def test_save_checkpoint_is_annotated_in_profiles(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    entered = []
+
+    @contextlib.contextmanager
+    def trace_annotation(name, **kwargs):
+      del kwargs
+      entered.append(name)
+      yield
+      if name == "save_checkpoint":
+        mock_orbax_mgr.save.assert_called_once()
+
+    with mock.patch.object(jax.profiler, "TraceAnnotation", side_effect=trace_annotation):
+      t.save_checkpoint(metadata=None)
+
+    self.assertEqual(entered, ["save_checkpoint"])
 
   def test_save_checkpoint_writes_only_the_model_and_optimizer(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
