@@ -1838,6 +1838,28 @@ class Qwen3_8FlashNext(BaseModel):
   gdn_output_gate_activation: str = Field(
       "sigmoid", description="Output gate activation function for GDN linear attention."
   )
+  gdn_chunk_inverse: Literal["solve", "block_doubling"] = Field(
+      "block_doubling",
+      description=(
+          "Qwen3.8 GDN chunk-matrix inverse. 'block_doubling' (default) builds the exact inverse from MXU matmuls"
+          " via bottom-up block doubling (TPU-friendly; stable in float32 even for correlated keys with weak decay);"
+          " 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
+      ),
+  )
+  qsa_indexer_mask: Literal["gather", "reshape"] = Field(
+      "gather",
+      description=(
+          "Qwen3.8 QSA indexer mask construction: 'gather' uses per-token take_along_axis, 'reshape' uses"
+          " broadcast/reshape expansion plus a gather-free one-hot contraction when segment ids are present."
+      ),
+  )
+  qsa_attention_kernel: Literal["dense", "flash"] = Field(
+      "dense",
+      description=(
+          "Qwen3.8 QSA attention kernel: 'dense' materializes the score matrix, 'flash' dispatches through"
+          " Tokamax Splash Attention (requires max_target_length <= index_select_budget)."
+      ),
+  )
   use_ple_layer: bool = Field(False, description="Whether to use Per-Layer Embedding (PLE).")
   ple_layer_id: int = Field(
       1, description="0-indexed layer where PLE is applied (corresponds to HF 1-indexed ple_layer_ids=[2])."

@@ -58,6 +58,12 @@ except ImportError:
   _HAS_QWEN4_EXP = False
 
 
+def _assert_allclose_to_scale(actual: Any, desired: Any, rtol: float = 1e-4, atol_scale: float = 1e-5) -> None:
+  """Like assert_allclose, with atol relative to max|desired| (gradients here reach O(100s))."""
+  desired = np.asarray(desired)
+  np.testing.assert_allclose(np.asarray(actual), desired, rtol=rtol, atol=atol_scale * float(np.abs(desired).max()))
+
+
 # =================================================================================================
 # Hyper-connection and normalization layers
 # =================================================================================================
@@ -426,6 +432,92 @@ class Qwen3_8GDNTest(absltest.TestCase):
     jax_out = np.array(jax_gdn(jnp.array(x)))
     np.testing.assert_allclose(jax_out, pt_out, rtol=1e-5, atol=1e-5)
 
+  def test_block_doubling_unit_lower_inverse_parity_and_validation(self):
+    """Verifies the block-doubling unit-lower inverse matches solve_triangular / fp64 in kernel and layer."""
+    rng = np.random.default_rng(7)
+    for c_size in (16, 64):
+      raw = rng.standard_normal((2, 3, c_size, c_size), dtype=np.float32) * 0.1
+      s_mat = jnp.tril(jnp.array(raw), k=-1)
+      rhs = jnp.array(rng.standard_normal((2, 3, c_size, 24), dtype=np.float32))
+      expected = jax.scipy.linalg.solve_triangular(
+          jnp.eye(c_size, dtype=jnp.float32) + s_mat, rhs, lower=True, unit_diagonal=True
+      )
+      actual = jnp.matmul(
+          modeling_qwen3_8_flash_next._block_doubling_unit_lower_inverse(s_mat, c_size),  # pylint: disable=protected-access
+          rhs,
+          precision=jax.lax.Precision.HIGHEST,
+      )
+      np.testing.assert_allclose(np.array(actual), np.array(expected), rtol=1e-5, atol=1e-5)
+
+    # Correlated keys + weak decay: entries of (I+S) stay <= 1 but the Neumann powers N^(2^j) blow up to 1e7+, so a
+    # product-form inverse cancels catastrophically in float32. Block doubling must stay accurate vs an fp64 solve.
+    d_k = 32
+    for c_size in (16, 48, 64):
+      rhs64 = rng.standard_normal((c_size, 24))
+      for case_name, key_cos, beta_val, g_val in (
+          ("identical_keys_weak_decay", 1.0, 0.9, -0.05),
+          ("correlated_keys_weak_decay", 0.5, 0.9, -0.05),
+          ("identical_keys_no_decay", 1.0, 1.0, 0.0),
+      ):
+        with self.subTest(case_name=case_name, chunk_size=c_size):
+          base = rng.standard_normal((1, d_k))
+          keys = np.sqrt(key_cos) * base + np.sqrt(1.0 - key_cos) * rng.standard_normal((c_size, d_k))
+          keys = keys / np.linalg.norm(keys, axis=-1, keepdims=True)
+          g_cumsum = np.cumsum(np.full((c_size,), g_val))
+          decay = np.tril(np.exp(np.tril(g_cumsum[:, None] - g_cumsum[None, :])), k=-1)
+          s64 = np.tril((beta_val * keys) @ keys.T * decay, k=-1)
+          s32 = jnp.array(s64, dtype=jnp.float32)
+          expected = np.linalg.solve(np.eye(c_size) + s64, rhs64)
+          actual = jnp.matmul(
+              modeling_qwen3_8_flash_next._block_doubling_unit_lower_inverse(s32, c_size),  # pylint: disable=protected-access
+              jnp.array(rhs64, dtype=jnp.float32),
+              precision=jax.lax.Precision.HIGHEST,
+          )
+          np.testing.assert_allclose(np.array(actual), expected, rtol=1e-5, atol=1e-5)
+
+    with self.assertRaises(ValueError):
+      q0 = jnp.zeros((1, 16, 2, 16), dtype=jnp.float32)
+      b0 = jnp.zeros((1, 16, 2), dtype=jnp.float32)
+      modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(q0, q0, q0, b0, b0, chunk_inverse="invalid")
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+          output_gate_activation="silu", chunk_inverse="invalid", rngs=nnx.Rngs(0)
+      )
+
+    emb_dim = 64
+    kw = {
+        "emb_dim": emb_dim,
+        "num_k_heads": 2,
+        "num_v_heads": 4,
+        "head_k_dim": 32,
+        "head_v_dim": 32,
+        "chunk_size": 16,
+        "output_gate_activation": "silu",
+        "dtype": jnp.float32,
+        "weight_dtype": jnp.float32,
+    }
+    mod_solve = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(**kw, chunk_inverse="solve", rngs=nnx.Rngs(5))
+    mod_block_doubling = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+        **kw, chunk_inverse="block_doubling", rngs=nnx.Rngs(5)
+    )
+    nnx.update(mod_block_doubling, nnx.state(mod_solve))
+
+    x = jnp.array(rng.standard_normal((2, 70, emb_dim), dtype=np.float32))
+    out_s, st_s = mod_solve(x, output_final_state=True)
+    out_n, st_n = mod_block_doubling(x, output_final_state=True)
+    np.testing.assert_allclose(np.array(out_n), np.array(out_s), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(st_n), np.array(st_s), rtol=1e-5, atol=1e-5)
+
+    def loss_fn(mod: modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet, inp: jax.Array) -> jax.Array:
+      out = mod(inp)
+      assert isinstance(out, jax.Array)
+      return jnp.sum(out * jnp.arange(1, emb_dim + 1, dtype=jnp.float32))
+
+    _, (grads_s, dx_s) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(mod_solve, x)
+    _, (grads_n, dx_n) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(mod_block_doubling, x)
+    _assert_allclose_to_scale(dx_n, dx_s)
+    _assert_allclose_to_scale(grads_n.in_proj_qkv.kernel[...], grads_s.in_proj_qkv.kernel[...])
+
 
 # =================================================================================================
 # Gated DeltaNet recurrence numerics
@@ -477,6 +569,87 @@ class Qwen3_8GDNNumericsTest(absltest.TestCase):
     grads = jax.grad(loss_fn, argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
     for grad in grads:
       self.assertTrue(np.all(np.isfinite(np.array(grad))))
+
+  def test_block_doubling_chunked_scan_numerics_long_seq_and_grad(self):
+    """Checks the block-doubling chunk inverse matches solve_triangular at seq_len=8192 and under large decay."""
+    rng = np.random.default_rng(2027)
+    b, seq_len, h, d_k, d_v = 1, 8192, 2, 32, 32
+    q, k, v = (jnp.array(rng.standard_normal((b, seq_len, h, d), dtype=np.float32) * 0.1) for d in (d_k, d_k, d_v))
+    beta = jnp.array(rng.uniform(0.1, 0.9, size=(b, seq_len, h)).astype(np.float32))
+    g = jnp.array(-rng.uniform(0.01, 0.2, size=(b, seq_len, h)).astype(np.float32))
+
+    solve_out, solve_state = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+        q, k, v, g, beta, chunk_size=64, output_final_state=True, chunk_inverse="solve"
+    )
+    block_doubling_out, block_doubling_state = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+        q, k, v, g, beta, chunk_size=64, output_final_state=True, chunk_inverse="block_doubling"
+    )
+    np.testing.assert_allclose(np.array(block_doubling_out), np.array(solve_out), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(block_doubling_state), np.array(solve_state), rtol=1e-5, atol=1e-5)
+
+    s_short = 128
+    q_s, k_s, v_s = (x[:, :s_short] for x in (q, k, v))
+    beta_s = beta[:, :s_short]
+    g_s = jnp.full((b, s_short, h), -5.0, dtype=jnp.float32)
+
+    def make_loss(inv_mode: str):
+      def _loss(q_in: jax.Array, k_in: jax.Array, v_in: jax.Array, g_in: jax.Array, b_in: jax.Array) -> jax.Array:
+        out, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+            q_in, k_in, v_in, g_in, b_in, chunk_size=64, chunk_inverse=inv_mode
+        )
+        return jnp.sum(out)
+
+      return _loss
+
+    grads_solve = jax.grad(make_loss("solve"), argnums=(0, 1, 2, 3, 4))(q_s, k_s, v_s, g_s, beta_s)
+    grads_block_doubling = jax.grad(make_loss("block_doubling"), argnums=(0, 1, 2, 3, 4))(q_s, k_s, v_s, g_s, beta_s)
+    for g_solve, g_block_doubling in zip(grads_solve, grads_block_doubling):
+      self.assertTrue(np.all(np.isfinite(np.array(g_block_doubling))))
+      np.testing.assert_allclose(np.array(g_block_doubling), np.array(g_solve), rtol=1e-5, atol=1e-5)
+
+  def test_block_doubling_chunk_inverse_correlated_keys_weak_decay(self):
+    """Checks the MXU chunk inverse matches solve_triangular for correlated keys with weak decay.
+
+    Identical or strongly correlated l2-normed keys with beta ~0.9 and g ~-0.05 keep (I+S)^-1 at O(1) while the
+    Neumann powers N^(2^j) grow past 1e7, which breaks a product-form inverse in float32; the block-doubling inverse
+    must stay at solve parity in outputs, final state and gradients.
+    """
+    rng = np.random.default_rng(2028)
+    b, s, h, d_k, d_v = 1, 256, 2, 32, 32
+    base_key = rng.standard_normal((1, 1, h, d_k)).astype(np.float32)
+    q = jnp.array(rng.standard_normal((b, s, h, d_k), dtype=np.float32))
+    v = jnp.array(rng.standard_normal((b, s, h, d_v), dtype=np.float32) * 0.1)
+    beta = jnp.full((b, s, h), 0.9, dtype=jnp.float32)
+    g = jnp.full((b, s, h), -0.05, dtype=jnp.float32)
+
+    def make_loss(inv_mode: str):
+      def _loss(q_in: jax.Array, k_in: jax.Array, v_in: jax.Array, g_in: jax.Array, b_in: jax.Array) -> jax.Array:
+        out, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+            q_in, k_in, v_in, g_in, b_in, chunk_size=64, chunk_inverse=inv_mode
+        )
+        return jnp.sum(out)
+
+      return _loss
+
+    for case_name, key_noise in (("identical_keys", 0.0), ("correlated_keys", 0.3)):
+      with self.subTest(case_name=case_name):
+        k = jnp.array(base_key + key_noise * rng.standard_normal((b, s, h, d_k)).astype(np.float32))
+        results = {
+            inv_mode: modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+                q, k, v, g, beta, chunk_size=64, output_final_state=True, chunk_inverse=inv_mode
+            )
+            for inv_mode in ("solve", "block_doubling")
+        }
+        for got, want in zip(results["block_doubling"], results["solve"]):
+          self.assertTrue(np.all(np.isfinite(np.array(got))))
+          np.testing.assert_allclose(np.array(got), np.array(want), rtol=1e-4, atol=1e-4)
+        grads_solve = jax.grad(make_loss("solve"), argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+        grads_block_doubling = jax.grad(make_loss("block_doubling"), argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+        for g_solve, g_block_doubling in zip(grads_solve, grads_block_doubling):
+          self.assertTrue(np.all(np.isfinite(np.array(g_block_doubling))))
+          # Two different fp32 inverse algorithms through a 256-step recurrence differ by accumulation-order noise
+          # (~1e-7 absolute); the product-form inverse this guards against is off by O(1) here.
+          _assert_allclose_to_scale(g_block_doubling, g_solve, atol_scale=1e-4)
 
 
 # =================================================================================================
@@ -727,6 +900,168 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(num_query_heads=5, num_kv_heads=2, rngs=nnx.Rngs(0))
 
+  def test_indexer_reshape_mask_mode_bit_exact_parity(self):
+    """Verifies mask_mode='reshape' is bit-identical to 'gather' across budget and packing modes."""
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(mask_mode="invalid", rngs=nnx.Rngs(0))
+
+    b, emb_dim = 2, 64
+    rng = np.random.default_rng(7)
+    rope = modeling_qwen3_8_flash_next.Qwen3_8RotaryEmbedding(32, 0.25, 10000.0, (2, 1, 1))
+
+    # Case 1: s <= token_budget (unpacked and packed)
+    s_short = 32
+    x_short = jnp.array(rng.standard_normal((b, s_short, emb_dim), dtype=np.float32))
+    pos_short = jnp.tile(jnp.arange(s_short), (b, 1))
+    cos_s, sin_s = rope(x_short, pos_short)
+
+    idx_gather_le = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="gather", rngs=nnx.Rngs(3)
+    )
+    idx_reshape_le = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="reshape", rngs=nnx.Rngs(3)
+    )
+    nnx.update(idx_reshape_le, nnx.state(idx_gather_le))
+
+    seg_short = jnp.ones((b, s_short), dtype=jnp.int32).at[0, 16:28].set(2).at[0, 28:].set(0)
+    mask_short = jnp.ones((b, s_short), dtype=jnp.int32).at[1, 24:].set(0)
+    for seg_in, mask_in in ((None, None), (seg_short, None), (seg_short, mask_short)):
+      m_g, b_g = idx_gather_le(x_short, (cos_s, sin_s), attention_mask=mask_in, segment_ids=seg_in)
+      m_r, b_r = idx_reshape_le(x_short, (cos_s, sin_s), attention_mask=mask_in, segment_ids=seg_in)
+      np.testing.assert_array_equal(np.array(m_r), np.array(m_g))
+      np.testing.assert_array_equal(np.array(b_r), np.array(b_g))
+
+    m_none, b_none = idx_reshape_le(x_short, (cos_s, sin_s), return_token_mask=False)
+    self.assertIsNone(m_none)
+    np.testing.assert_array_equal(np.array(b_none), np.array(idx_gather_le(x_short, (cos_s, sin_s))[1]))
+
+    # Case 2: s > token_budget (unpacked non-multiple of compress_ratio, and packed fallback)
+    s_long = 70
+    x_long = jnp.array(rng.standard_normal((b, s_long, emb_dim), dtype=np.float32))
+    pos_long = jnp.tile(jnp.arange(s_long), (b, 1))
+    cos_l, sin_l = rope(x_long, pos_long)
+
+    idx_gather_gt = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="gather", rngs=nnx.Rngs(5)
+    )
+    idx_reshape_gt = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="reshape", rngs=nnx.Rngs(5)
+    )
+    nnx.update(idx_reshape_gt, nnx.state(idx_gather_gt))
+
+    m_g_unpacked, b_g_unpacked = idx_gather_gt(x_long, (cos_l, sin_l))
+    m_r_unpacked, b_r_unpacked = idx_reshape_gt(x_long, (cos_l, sin_l))
+    np.testing.assert_array_equal(np.array(m_r_unpacked), np.array(m_g_unpacked))
+    np.testing.assert_array_equal(np.array(b_r_unpacked), np.array(b_g_unpacked))
+
+    seg_long = jnp.ones((b, s_long), dtype=jnp.int32).at[0, 30:60].set(2).at[0, 60:].set(0)
+    m_g_packed, b_g_packed = idx_gather_gt(x_long, (cos_l, sin_l), segment_ids=seg_long)
+    m_r_packed, b_r_packed = idx_reshape_gt(x_long, (cos_l, sin_l), segment_ids=seg_long)
+    np.testing.assert_array_equal(np.array(m_r_packed), np.array(m_g_packed))
+    np.testing.assert_array_equal(np.array(b_r_packed), np.array(b_g_packed))
+
+  def test_indexer_reshape_packed_multi_doc_parity(self):
+    """Verifies gather-free packed reshape matches gather bit-identically at S=64 and S=512 with >=3 unequal docs."""
+    b, emb_dim = 2, 64
+    rng = np.random.default_rng(29)
+    rope = modeling_qwen3_8_flash_next.Qwen3_8RotaryEmbedding(32, 0.25, 10000.0, (2, 1, 1))
+
+    for s, budget, doc_splits_b0, doc_splits_b1 in (
+        (64, 16, (0, 17, 39, 58), (0, 11, 29, 53, 64)),
+        (512, 64, (0, 93, 247, 419, 490), (0, 130, 311, 477, 512)),
+    ):
+      with self.subTest(seq_len=s, token_budget=budget):
+        x = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+        pos = jnp.tile(jnp.arange(s), (b, 1))
+        cos, sin = rope(x, pos)
+
+        seg_np = np.zeros((b, s), dtype=np.int32)
+        for doc_id, (start, end) in enumerate(zip(doc_splits_b0[:-1], doc_splits_b0[1:]), start=1):
+          seg_np[0, start:end] = doc_id
+        for doc_id, (start, end) in enumerate(zip(doc_splits_b1[:-1], doc_splits_b1[1:]), start=1):
+          seg_np[1, start:end] = doc_id
+        seg = jnp.array(seg_np)
+        attn_mask = (seg != 0).astype(jnp.int32)
+
+        idx_gather = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+            emb_dim, 2, 1, 32, budget, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="gather", rngs=nnx.Rngs(31)
+        )
+        idx_reshape = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+            emb_dim, 2, 1, 32, budget, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="reshape", rngs=nnx.Rngs(31)
+        )
+        nnx.update(idx_reshape, nnx.state(idx_gather))
+
+        for mask_in in (None, attn_mask):
+          m_g, b_g = idx_gather(x, (cos, sin), attention_mask=mask_in, segment_ids=seg)
+          m_r, b_r = idx_reshape(x, (cos, sin), attention_mask=mask_in, segment_ids=seg)
+          np.testing.assert_array_equal(np.array(m_r), np.array(m_g))
+          np.testing.assert_array_equal(np.array(b_r), np.array(b_g))
+
+  def test_flash_attention_kernel_parity_and_validation(self):
+    """Verifies attention_kernel='flash' matches 'dense' when s <= token_budget and rejects s > token_budget."""
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(attention_kernel="invalid", rngs=nnx.Rngs(0))
+
+    args_16 = (64, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    flash_16 = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_16, attention_kernel="flash", rngs=nnx.Rngs(0))
+    with self.assertRaises(ValueError):
+      flash_16(jnp.zeros((1, 32, 64), dtype=jnp.float32))
+
+    b, s, emb_dim = 2, 32, 64
+    args_64 = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32)
+    dense_attn = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_64, attention_kernel="dense", rngs=nnx.Rngs(11))
+    flash_attn = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        *args_64, indexer_mask_mode="reshape", attention_kernel="flash", rngs=nnx.Rngs(11)
+    )
+    nnx.update(flash_attn, nnx.state(dense_attn))
+
+    rng = np.random.default_rng(19)
+    x = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+    pos = jnp.tile(jnp.arange(s), (b, 1))
+    mask_2d = jnp.ones((b, s), dtype=jnp.int32).at[0, 26:].set(0).at[1, 29:].set(0)
+    seg_2d = jnp.ones((b, s), dtype=jnp.int32).at[0, 12:24].set(2).at[0, 24:].set(0).at[1, 20:].set(2)
+
+    for case_name, mask_in, seg_in in (
+        ("unpacked", None, None),
+        ("mask_2d", mask_2d, None),
+        ("packed_seg", None, seg_2d),
+    ):
+      with self.subTest(case_name=case_name):
+        # Padding positions attend to nothing under flash; only non-padding outputs must match dense.
+        valid = jnp.ones((b, s), dtype=bool)
+        if mask_in is not None:
+          valid &= mask_in != 0
+        if seg_in is not None:
+          valid &= seg_in != 0
+        out_d, blk_d = dense_attn(
+            x, position_ids=pos, attention_mask=mask_in, segment_ids=seg_in, return_selected_blocks=True
+        )
+        out_f, blk_f = flash_attn(
+            x, position_ids=pos, attention_mask=mask_in, segment_ids=seg_in, return_selected_blocks=True
+        )
+        np.testing.assert_array_equal(np.array(blk_f), np.array(blk_d))
+        self.assertTrue(np.all(np.isfinite(np.array(out_f))))
+        np.testing.assert_allclose(
+            np.array(out_f)[np.array(valid)], np.array(out_d)[np.array(valid)], rtol=1e-4, atol=1e-4
+        )
+
+        def loss_fn(
+            mod: modeling_qwen3_8_flash_next.Qwen3_8SparseAttention,
+            inp: jax.Array,
+            mask_in: jax.Array | None = mask_in,
+            seg_in: jax.Array | None = seg_in,
+            valid: jax.Array = valid,
+        ) -> jax.Array:
+          out = mod(inp, position_ids=pos, attention_mask=mask_in, segment_ids=seg_in)
+          assert isinstance(out, jax.Array)
+          return jnp.sum(jnp.where(valid[:, :, None], out, 0.0) * jnp.arange(1, emb_dim + 1, dtype=jnp.float32))
+
+        _, (grads_d, dx_d) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(dense_attn, x)
+        _, (grads_f, dx_f) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(flash_attn, x)
+        self.assertTrue(np.all(np.isfinite(np.array(dx_f))))
+        _assert_allclose_to_scale(dx_f, dx_d)
+        _assert_allclose_to_scale(grads_f.q_proj.kernel[...], grads_d.q_proj.kernel[...])
+
 
 # =================================================================================================
 # Sparse MoE block
@@ -826,12 +1161,7 @@ class Qwen3_8MoETest(absltest.TestCase):
       self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
     n, d, m, e, k = 16, 32, 16, 12, 2
     experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e,
-        emb_dim=d,
-        moe_mlp_dim=m,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        rngs=nnx.Rngs(7),
+        num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(7)
     )
     x = jax.random.normal(jax.random.key(11), (n, d))
     top_k_idx = jax.random.randint(jax.random.key(12), (n, k), 0, e)
@@ -868,16 +1198,10 @@ class Qwen3_8MoETest(absltest.TestCase):
     np.testing.assert_allclose(np.asarray(actual_loss), np.asarray(ref_loss), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(np.asarray(actual_dx), np.asarray(ref_dx), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(
-        np.asarray(actual_grads.gate_up_proj.value),
-        np.asarray(ref_grads.gate_up_proj.value),
-        rtol=1e-5,
-        atol=1e-5,
+        np.asarray(actual_grads.gate_up_proj.value), np.asarray(ref_grads.gate_up_proj.value), rtol=1e-5, atol=1e-5
     )
     np.testing.assert_allclose(
-        np.asarray(actual_grads.down_proj.value),
-        np.asarray(ref_grads.down_proj.value),
-        rtol=1e-5,
-        atol=1e-5,
+        np.asarray(actual_grads.down_proj.value), np.asarray(ref_grads.down_proj.value), rtol=1e-5, atol=1e-5
     )
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
@@ -993,6 +1317,63 @@ class Qwen3_8MoETest(absltest.TestCase):
         grads.shared_expert_gate.kernel,
     ):
       self.assertTrue(jnp.any(jnp.asarray(getattr(g, "value", g)) != 0.0))
+
+  def test_experts_tokamax_gmm_matches_reference_and_default(self):
+    """Verifies use_tokamax_gmm=True matches jax.lax.ragged_dot and the per-token reference, forward and backward."""
+    n, d, m, e, k = 12, 32, 16, 8, 2
+    experts_default = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=e,
+        emb_dim=d,
+        moe_mlp_dim=m,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        use_tokamax_gmm=False,
+        rngs=nnx.Rngs(9),
+    )
+    experts_tokamax = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=e,
+        emb_dim=d,
+        moe_mlp_dim=m,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        use_tokamax_gmm=True,
+        rngs=nnx.Rngs(9),
+    )
+    nnx.update(experts_tokamax, nnx.state(experts_default))
+
+    x = jax.random.normal(jax.random.key(21), (n, d))
+    top_k_idx = jax.random.randint(jax.random.key(22), (n, k), 0, e)
+    top_k_w = jax.random.uniform(jax.random.key(23), (n, k))
+    top_k_w = top_k_w / jnp.sum(top_k_w, axis=-1, keepdims=True)
+
+    ref_out = experts_default.reference_forward(x, top_k_idx, top_k_w)
+    def_out = experts_default(x, top_k_idx, top_k_w)
+    tok_out = experts_tokamax(x, top_k_idx, top_k_w)
+    np.testing.assert_allclose(tok_out, ref_out, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(tok_out, def_out, rtol=1e-5, atol=1e-5)
+
+    skewed_idx = jnp.zeros((n, k), dtype=jnp.int32).at[:, 1].set(1)
+    np.testing.assert_allclose(
+        experts_tokamax(x, skewed_idx, top_k_w),
+        experts_default.reference_forward(x, skewed_idx, top_k_w),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    def loss_fn(mod: modeling_qwen3_8_flash_next.Qwen3_8Experts, inp: jax.Array) -> jax.Array:
+      return jnp.sum(mod(inp, top_k_idx, top_k_w) * jnp.arange(1, d + 1, dtype=jnp.float32))
+
+    _, (grads_def, dx_def) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_default, x)
+    _, (grads_tok, dx_tok) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_tokamax, x)
+    np.testing.assert_allclose(dx_tok, dx_def, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(grads_tok.gate_up_proj.value, grads_def.gate_up_proj.value, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(grads_tok.down_proj.value, grads_def.down_proj.value, rtol=1e-5, atol=1e-5)
+
+    moe_def = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=False)
+    moe_tok = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=True)
+    nnx.update(moe_tok, nnx.state(moe_def))
+    x_3d = x.reshape(3, 4, d)
+    np.testing.assert_allclose(moe_tok(x_3d), moe_def(x_3d), rtol=1e-5, atol=1e-5)
 
 
 # =================================================================================================
@@ -1486,6 +1867,51 @@ class Qwen3_8BackboneTest(absltest.TestCase):
         hf_sel = {m for m in range((q + 1) // 4) if np.all(mask[b, 0, q, m * 4 : (m + 1) * 4])}
         self.assertEqual(hf_sel, {int(idx) for idx in jax_b[b, q] if idx >= 0})
 
+  def test_kernel_path_flags_match_defaults_end_to_end(self):
+    """Verifies the TPU kernel-path config flags match the reference paths end-to-end on the mini backbone."""
+    common_kw = {
+        "scan_layers": True,
+        "base_num_decoder_layers": 4,
+        "num_experts": 2,
+        "num_experts_per_tok": 2,
+        "use_ple_layer": False,
+        "index_select_budget": 64,
+        "sparse_matmul": True,
+    }
+    cfg_default = _get_mini_config(**common_kw)
+    self.assertEqual(
+        (
+            cfg_default.gdn_chunk_inverse,
+            cfg_default.qsa_indexer_mask,
+            cfg_default.qsa_attention_kernel,
+            cfg_default.use_tokamax_gmm,
+        ),
+        ("block_doubling", "gather", "dense", False),
+    )
+    # Reference paths (triangular solve, gather mask, dense attention, dense MoE) vs. the TPU kernel paths.
+    cfg_base = _get_mini_config(**common_kw, gdn_chunk_inverse="solve")
+    cfg_opt = _get_mini_config(
+        **common_kw,
+        gdn_chunk_inverse="block_doubling",
+        qsa_indexer_mask="reshape",
+        qsa_attention_kernel="flash",
+        use_tokamax_gmm=True,
+    )
+    mod_base = m3_models.create_model(cfg_base, mesh=None)
+    mod_opt = m3_models.create_model(cfg_opt, mesh=None)
+    nnx.update(mod_opt, nnx.state(mod_base))
+
+    toks = jnp.array([[3, 17, 42, 88, 3, 50, 61, 99]], dtype=jnp.int32)
+    pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (1, 8))
+    seg = jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32)
+
+    (logits_base, aux_base) = mod_base(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    (logits_opt, aux_opt) = mod_opt(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    np.testing.assert_allclose(np.array(logits_opt), np.array(logits_base), rtol=1e-4, atol=1e-4)
+    jax.tree.map(
+        lambda b, o: np.testing.assert_allclose(np.array(o), np.array(b), rtol=1e-4, atol=1e-4), aux_base, aux_opt
+    )
+
 
 # =================================================================================================
 # MTP draft block and integrated loss
@@ -1547,6 +1973,9 @@ def _create_mini_config(
       "mtp_loss_scaling_factor": 0.1,
       "load_balance_loss_weight": 0.001,
       "gdn_output_gate_activation": "silu",
+      "gdn_chunk_inverse": "block_doubling",
+      "qsa_indexer_mask": "gather",
+      "qsa_attention_kernel": "dense",
       "ple_layer_ids": [],
   }
   base.update(kwargs)

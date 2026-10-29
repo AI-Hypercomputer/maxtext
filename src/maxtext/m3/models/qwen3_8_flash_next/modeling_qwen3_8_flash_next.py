@@ -39,6 +39,9 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
+import tokamax
 
 
 # =================================================================================================
@@ -242,6 +245,30 @@ def _init_state(shape: tuple[int, ...], state: jax.Array | None) -> jax.Array:
   return jnp.zeros(shape, jnp.float32) if state is None else state.astype(jnp.float32)
 
 
+def _block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+  """Computes the exact inverse of (I + s_mat) for strictly lower-triangular s_mat with MXU-friendly matmuls.
+
+  Bottom-up block doubling: starting from 1x1 blocks (inverse = I), each level merges adjacent b x b diagonal
+  blocks whose inverses A11^-1 and A22^-1 are already known, using
+  [[A11, 0], [A21, A22]]^-1 = [[A11^-1, 0], [-A22^-1 A21 A11^-1, A22^-1]].
+  Every intermediate is a block of the true inverse, so unlike the Neumann product (I+N)(I+N^2)(I+N^4)... it
+  does not suffer catastrophic cancellation in float32 when keys within a chunk are correlated and decay is weak
+  (N^(2^j) can reach 1e7+ while the inverse stays O(1)). Costs 2 * ceil(log2(chunk_size)) matmuls per chunk and
+  works for non-power-of-two chunk sizes.
+  """
+  prec = jax.lax.Precision.HIGHEST
+  ar = jnp.arange(chunk_size)
+  inv = jnp.broadcast_to(jnp.eye(chunk_size, dtype=jnp.float32), s_mat.shape)
+  b = 1
+  while b < chunk_size:
+    # Lower-left b x b sub-block of each 2b x 2b diagonal block: the only part of s_mat not yet folded into inv.
+    cross = ((ar[:, None] // (2 * b)) == (ar[None, :] // (2 * b))) & ((ar[:, None] // b) == (ar[None, :] // b) + 1)
+    off = jnp.matmul(jnp.matmul(inv, jnp.where(cross, s_mat, 0.0), precision=prec), inv, precision=prec)
+    inv = inv - jnp.where(cross, off, 0.0)
+    b *= 2
+  return inv
+
+
 def jax_chunk_gated_delta_rule(
     query: jax.Array,
     key: jax.Array,
@@ -252,8 +279,11 @@ def jax_chunk_gated_delta_rule(
     initial_state: jax.Array | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
+    chunk_inverse: str = "block_doubling",
 ) -> tuple[jax.Array, jax.Array | None]:
   """Chunked Gated DeltaNet forward pass in float32."""
+  if chunk_inverse not in ("solve", "block_doubling"):
+    raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
   init_dtype = value.dtype
   if use_qk_l2norm_in_kernel:
     query, key = l2norm(query, dim=-1, eps=1e-6), l2norm(key, dim=-1, eps=1e-6)
@@ -278,11 +308,13 @@ def jax_chunk_gated_delta_rule(
   g_cumsum = jnp.cumsum(g, axis=-1)
   decay_mask = jnp.tril(jnp.exp(jnp.tril(jnp.expand_dims(g_cumsum, -1) - jnp.expand_dims(g_cumsum, -2))))
   s_mat = (jnp.matmul(k_beta, jnp.swapaxes(key, -1, -2), precision=prec)) * jnp.tril(decay_mask, k=-1)
-  i_plus_s = jnp.eye(chunk_size, dtype=jnp.float32) + s_mat
   rhs = jnp.concatenate([v_beta, k_beta * jnp.expand_dims(jnp.exp(g_cumsum), -1)], axis=-1)
-  v_inv, k_cumdecay = jnp.split(
-      jax.scipy.linalg.solve_triangular(i_plus_s, rhs, lower=True, unit_diagonal=True), [d_v], axis=-1
-  )
+  if chunk_inverse == "block_doubling":
+    solved = jnp.matmul(_block_doubling_unit_lower_inverse(s_mat, chunk_size), rhs, precision=prec)
+  else:
+    i_plus_s = jnp.eye(chunk_size, dtype=jnp.float32) + s_mat
+    solved = jax.scipy.linalg.solve_triangular(i_plus_s, rhs, lower=True, unit_diagonal=True)
+  v_inv, k_cumdecay = jnp.split(solved, [d_v], axis=-1)
 
   init_state = _init_state((b, h, d_k, d_v), initial_state)
 
@@ -367,10 +399,13 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       sharding: Any | None = None,
       *,
       output_gate_activation: str,
+      chunk_inverse: str = "block_doubling",
       rngs: nnx.Rngs,
   ):
     del sharding
-    self.emb_dim, self.chunk_size = emb_dim, chunk_size
+    if chunk_inverse not in ("solve", "block_doubling"):
+      raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
+    self.emb_dim, self.chunk_size, self.chunk_inverse = emb_dim, chunk_size, chunk_inverse
     self.num_k_heads, self.num_v_heads = num_k_heads, num_v_heads
     if num_v_heads % num_k_heads != 0:
       raise ValueError(f"num_v_heads ({num_v_heads}) must be divisible by num_k_heads ({num_k_heads}).")
@@ -461,6 +496,7 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           initial_state=initial_state,
           output_final_state=output_final_state,
           use_qk_l2norm_in_kernel=True,
+          chunk_inverse=self.chunk_inverse,
       )
     core_normed = self.norm(core_attn_out, z).reshape(b, s, self.value_dim)
     out = self.out_proj(core_normed)
@@ -556,6 +592,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
       *,
+      mask_mode: str = "gather",
       rngs: nnx.Rngs,
   ):
     if index_kv_heads != 1:
@@ -565,8 +602,12 @@ class Qwen3_8QSAIndexer(nnx.Module):
           "Expected compress_ratio > 0 and token_budget >= compress_ratio,"
           f" got compress_ratio={compress_ratio}, token_budget={token_budget}."
       )
+    if mask_mode not in ("gather", "reshape"):
+      raise ValueError(f"Expected mask_mode in ('gather', 'reshape'), got {mask_mode!r}.")
     self.index_head_dim, self.index_n_heads = index_head_dim, index_n_heads
+    self.token_budget = token_budget
     self.compress_ratio, self.block_topk = compress_ratio, token_budget // compress_ratio
+    self.mask_mode = mask_mode
 
     kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
     self.index_qk_proj = nnx.Linear(emb_dim, (index_n_heads + index_kv_heads) * index_head_dim, **kw)
@@ -579,7 +620,8 @@ class Qwen3_8QSAIndexer(nnx.Module):
       position_embeddings: tuple[jax.Array, jax.Array],
       attention_mask: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
-  ) -> tuple[jax.Array, jax.Array]:
+      return_token_mask: bool = True,
+  ) -> tuple[jax.Array | None, jax.Array]:
     """Computes sparse token mask (B, 1, S, S) and document-local block indices (B, S, topk).
 
     Args:
@@ -588,9 +630,10 @@ class Qwen3_8QSAIndexer(nnx.Module):
       attention_mask: Optional (B, S) mask; 0/False = padding, non-zero/True = active (NOT a PyTorch additive mask).
       segment_ids: Optional (B, S) 1-indexed document IDs (0 = padding); when both are given, padding from
         attention_mask is folded into segment_ids.
+      return_token_mask: Whether to construct and return the (B, 1, S, S) boolean token mask.
 
     Returns:
-      Tuple of (token_mask, selected_block_indices).
+      Tuple of (token_mask_or_none, selected_block_indices).
     """
     if attention_mask is not None and attention_mask.ndim != 2:
       raise ValueError(f"Expected 2D (B, S) attention_mask or None, got shape {attention_mask.shape}.")
@@ -607,6 +650,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
     assert isinstance(q_rot, jax.Array)
     raw_keys = qk[..., q_dim:].reshape(b, s, self.index_head_dim)
 
+    unpacked = segment_ids is None and attention_mask is None
     if segment_ids is None:
       segment_ids = jnp.ones((b, s), dtype=jnp.int32)
     if attention_mask is not None:
@@ -656,11 +700,35 @@ class Qwen3_8QSAIndexer(nnx.Module):
           selected_block_indices, ((0, 0), (0, 0), (0, self.block_topk - k_top)), constant_values=-1
       )
 
+    if not return_token_mask:
+      return None, selected_block_indices
+    if self.mask_mode == "reshape" and s <= self.token_budget:
+      ar_k, ar_q = jnp.arange(s)[None, None, :], jnp.arange(s)[None, :, None]
+      token_mask = (same_doc & (ar_k <= ar_q))[:, None, :, :]
+      return token_mask, selected_block_indices
     m_local = jnp.arange(num_blocks)[None, None, :]
     in_topk = jnp.any(
         (selected_block_indices[:, :, :, None] == m_local) & (selected_block_indices[:, :, :, None] >= 0), axis=2
     )
     ar_k, ar_q = jnp.arange(s)[None, None, :], jnp.arange(s)[None, :, None]
+    if self.mask_mode == "reshape" and unpacked:
+      expanded = jnp.broadcast_to(in_topk[:, :, :, None], (b, s, num_blocks, c)).reshape(b, s, num_blocks * c)
+      if num_blocks * c < s:
+        pad_cols = jnp.broadcast_to(in_topk[:, :, -1:], (b, s, s - num_blocks * c))
+        is_selected = jnp.concatenate([expanded, pad_cols], axis=-1)
+      else:
+        is_selected = expanded[..., :s]
+      in_tail = ar_k >= (((ar_q + 1) // c) * c)
+      token_mask = ((ar_k <= ar_q) & (is_selected | in_tail))[:, None, :, :]
+      return token_mask, selected_block_indices
+    if self.mask_mode == "reshape":
+      lblk = jnp.clip(local_pos // c, 0, num_blocks - 1)
+      one_hot_lblk = jax.nn.one_hot(lblk, num_blocks, dtype=jnp.bfloat16)
+      is_selected = jnp.einsum("bqm,bkm->bqk", in_topk.astype(jnp.bfloat16), one_hot_lblk) > 0.5
+      in_tail = local_pos[:, None, :] >= (((local_pos + 1) // c) * c)[:, :, None]
+      token_mask = (same_doc & (ar_k <= ar_q) & (is_selected | in_tail))[:, None, :, :]
+      return token_mask, selected_block_indices
+
     is_selected = jnp.take_along_axis(in_topk, jnp.clip((ar_k - doc_start[:, :, None]) // c, 0, num_blocks - 1), axis=-1)
     in_tail = ar_k >= (doc_start + ((jnp.arange(s)[None, :] - doc_start + 1) // c) * c)[:, :, None]
     token_mask = (same_doc & (ar_k <= ar_q) & (is_selected | in_tail))[:, None, :, :]
@@ -689,12 +757,17 @@ class Qwen3_8SparseAttention(nnx.Module):
       weight_dtype: Any = jnp.bfloat16,
       sharding: Any | None = None,
       *,
+      indexer_mask_mode: str = "gather",
+      attention_kernel: str = "dense",
       rngs: nnx.Rngs,
   ):
     del sharding
     if num_query_heads % num_kv_heads != 0:
       raise ValueError(f"num_query_heads ({num_query_heads}) must be divisible by num_kv_heads ({num_kv_heads}).")
+    if attention_kernel not in ("dense", "flash"):
+      raise ValueError(f"Expected attention_kernel in ('dense', 'flash'), got {attention_kernel!r}.")
     self.head_dim, self.num_query_heads, self.num_kv_heads = head_dim, num_query_heads, num_kv_heads
+    self.attention_kernel = attention_kernel
 
     kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
     self.q_proj = nnx.Linear(emb_dim, num_query_heads * head_dim * 2, **kw)
@@ -716,8 +789,94 @@ class Qwen3_8SparseAttention(nnx.Module):
         eps,
         dtype,
         weight_dtype,
+        mask_mode=indexer_mask_mode,
         rngs=rngs,
     )
+
+  def _flash_attention(
+      self,
+      query_states: jax.Array,
+      key_states: jax.Array,
+      value_states: jax.Array,
+      *,
+      attention_mask: jax.Array | None = None,
+      segment_ids: jax.Array | None = None,
+  ) -> jax.Array:
+    """Runs causal Tokamax Splash Attention when seq_len <= token_budget."""
+    b, s, _, _ = query_states.shape
+    block_size = 128
+    pad_len = (block_size - s % block_size) % block_size
+    padded_s = s + pad_len
+
+    q = jnp.swapaxes(query_states, 1, 2)
+    q = (q * (1.0 / jnp.sqrt(float(self.head_dim)))).astype(q.dtype)
+    k = jnp.swapaxes(key_states, 1, 2)
+    v = jnp.swapaxes(value_states, 1, 2)
+    if pad_len > 0:
+      pad_cfg = ((0, 0), (0, 0), (0, pad_len), (0, 0))
+      q, k, v = jnp.pad(q, pad_cfg), jnp.pad(k, pad_cfg), jnp.pad(v, pad_cfg)
+
+    seg_q: jax.Array | None = None
+    seg_kv: jax.Array | None = None
+    if segment_ids is not None or attention_mask is not None or pad_len > 0:
+      seg = jnp.ones((b, s), dtype=jnp.int32) if segment_ids is None else segment_ids.astype(jnp.int32)
+      if attention_mask is not None:
+        seg = jnp.where(attention_mask != 0, seg, 0)
+      seg_q = jnp.where(seg == 0, -2, seg)
+      seg_kv = jnp.where(seg == 0, -1, seg)
+      if pad_len > 0:
+        seg_q = jnp.pad(seg_q, ((0, 0), (0, pad_len)), constant_values=-2)
+        seg_kv = jnp.pad(seg_kv, ((0, 0), (0, pad_len)), constant_values=-1)
+
+    sa_config = tokamax_splash_kernel.SplashConfig(
+        block_q=block_size,
+        block_kv=block_size,
+        block_kv_compute=block_size,
+        block_q_dkv=block_size,
+        block_kv_dkv=block_size,
+        block_kv_dkv_compute=block_size,
+        block_q_dq=block_size,
+        block_kv_dq=block_size,
+        fuse_reciprocal=True,
+        use_base2_exp=True,
+        interpret=(jax.default_backend() != "tpu"),
+    )
+    causal_mask = tokamax_splash_mask.CausalMask(shape=(padded_s, padded_s))
+
+    def _run_batch(
+        q_b: jax.Array,
+        k_b: jax.Array,
+        v_b: jax.Array,
+        sq_b: jax.Array | None,
+        skv_b: jax.Array | None,
+    ) -> jax.Array:
+      kernel = tokamax_splash_kernel.make_splash_mha_single_device(causal_mask, config=sa_config)
+      if sq_b is None:
+        return jax.vmap(kernel)(q_b, k_b, v_b)
+      return jax.vmap(
+          lambda q_i, k_i, v_i, sq_i, skv_i: kernel(
+              q_i, k_i, v_i, segment_ids=tokamax_splash_kernel.SegmentIds(q=sq_i, kv=skv_i)
+          )
+      )(q_b, k_b, v_b, sq_b, skv_b)
+
+    mesh = jax.sharding.get_abstract_mesh()
+    batch_axes = get_batch_mesh_axes()
+    batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
+    if batch_axes and b % batch_shards == 0:
+      qkv_spec = jax.sharding.PartitionSpec(batch_axes, None, None, None)
+      seg_spec = jax.sharding.PartitionSpec(batch_axes, None) if seg_q is not None else None
+      out = jax.shard_map(
+          _run_batch,
+          mesh=mesh,
+          in_specs=(qkv_spec, qkv_spec, qkv_spec, seg_spec, seg_spec),
+          out_specs=qkv_spec,
+          check_vma=False,
+      )(q, k, v, seg_q, seg_kv)
+    else:
+      out = _run_batch(q, k, v, seg_q, seg_kv)
+
+    out = jnp.swapaxes(out[:, :, :s, :], 1, 2)
+    return out.reshape(b, s, self.num_query_heads * self.head_dim)
 
   def __call__(
       self,
@@ -741,12 +900,20 @@ class Qwen3_8SparseAttention(nnx.Module):
       Attention output tensor, or tuple of (output, selected_block_indices) if return_selected_blocks is True.
     """
     b, s, _ = hidden_states.shape
+    if self.attention_kernel == "flash" and s > self.indexer.token_budget:
+      raise ValueError(
+          f"qsa_attention_kernel='flash' requires seq_len <= token_budget ({self.indexer.token_budget}), got seq_len={s}."
+      )
     if position_ids is None:
       position_ids = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
 
     cos, sin = self.rotary_emb(hidden_states, position_ids)
     selected_token_mask, selected_block_indices = self.indexer(
-        hidden_states, (cos, sin), attention_mask=attention_mask, segment_ids=segment_ids
+        hidden_states,
+        (cos, sin),
+        attention_mask=attention_mask,
+        segment_ids=segment_ids,
+        return_token_mask=(self.attention_kernel == "dense"),
     )
 
     q_and_gate = self.q_proj(hidden_states).reshape(b, s, self.num_query_heads, 2 * self.head_dim)
@@ -759,15 +926,21 @@ class Qwen3_8SparseAttention(nnx.Module):
     assert isinstance(res, tuple)
     query_states, key_states = res
 
-    if (rep := self.num_query_heads // self.num_kv_heads) > 1:
-      key_states, value_states = jnp.repeat(key_states, rep, axis=2), jnp.repeat(value_states, rep, axis=2)
+    if self.attention_kernel == "flash":
+      attn_output = self._flash_attention(
+          query_states, key_states, value_states, attention_mask=attention_mask, segment_ids=segment_ids
+      )
+    else:
+      assert selected_token_mask is not None
+      if (rep := self.num_query_heads // self.num_kv_heads) > 1:
+        key_states, value_states = jnp.repeat(key_states, rep, axis=2), jnp.repeat(value_states, rep, axis=2)
 
-    attn_weights = jnp.einsum("bqhd,bkhd->bhqk", query_states, key_states) * (1.0 / jnp.sqrt(float(self.head_dim)))
-    min_val = jnp.finfo(jnp.float32).min
-    attn_weights = jnp.where(selected_token_mask, attn_weights, min_val)
+      attn_weights = jnp.einsum("bqhd,bkhd->bhqk", query_states, key_states) * (1.0 / jnp.sqrt(float(self.head_dim)))
+      min_val = jnp.finfo(jnp.float32).min
+      attn_weights = jnp.where(selected_token_mask, attn_weights, min_val)
 
-    probs = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(value_states.dtype)
-    attn_output = jnp.einsum("bhqk,bkhd->bqhd", probs, value_states).reshape(b, s, self.num_query_heads * self.head_dim)
+      probs = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(value_states.dtype)
+      attn_output = jnp.einsum("bhqk,bkhd->bqhd", probs, value_states).reshape(b, s, self.num_query_heads * self.head_dim)
     attn_output = (attn_output * jax.nn.sigmoid(gate.astype(jnp.float32))).astype(attn_output.dtype)
 
     out = self.o_proj(attn_output)
@@ -822,12 +995,14 @@ class Qwen3_8Experts(nnx.Module):
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
       *,
+      use_tokamax_gmm: bool = False,
       rngs: nnx.Rngs,
   ):
     self.num_experts = num_experts
     self.emb_dim = emb_dim
     self.moe_mlp_dim = moe_mlp_dim
     self.dtype = dtype
+    self.use_tokamax_gmm = use_tokamax_gmm
 
     self.gate_up_proj = nnx.Param(
         nnx.initializers.lecun_normal()(rngs.params(), (num_experts, emb_dim, 2 * moe_mlp_dim), weight_dtype)
@@ -836,13 +1011,28 @@ class Qwen3_8Experts(nnx.Module):
         nnx.initializers.lecun_normal()(rngs.params(), (num_experts, moe_mlp_dim, emb_dim), weight_dtype)
     )
 
+  def _ragged_dot(self, lhs: jax.Array, rhs: jax.Array, group_sizes: jax.Array) -> jax.Array:
+    """Executes ragged dot via jax.lax.ragged_dot or tokamax.ragged_dot."""
+    if not self.use_tokamax_gmm:
+      return jax.lax.ragged_dot(lhs, rhs, group_sizes)
+    impl = (
+        "mosaic" if jax.default_backend() == "tpu" and all(s >= 128 for s in lhs.shape[-2:] + rhs.shape[-2:]) else "xla"
+    )
+    return tokamax.ragged_dot(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, lhs.shape[0]),
+        preferred_element_type=self.dtype,
+        implementation=impl,
+    )
+
   def __call__(
       self,
       hidden_states: jax.Array,
       top_k_index: jax.Array,
       top_k_weights: jax.Array,
   ) -> jax.Array:
-    """Dispatches tokens via sorted token-expert grouping and jax.lax.ragged_dot."""
+    """Dispatches tokens via sorted token-expert grouping and ragged_dot."""
     orig_shape = hidden_states.shape
     if hidden_states.ndim == 3:
       hidden_states = hidden_states.reshape(-1, orig_shape[-1])
@@ -866,10 +1056,10 @@ class Qwen3_8Experts(nnx.Module):
       flat_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
       sorted_x = x_2d[flat_token_ids[perm]]
 
-      gate_up = jax.lax.ragged_dot(sorted_x.astype(self.dtype), w_gu, group_sizes)
+      gate_up = self._ragged_dot(sorted_x.astype(self.dtype), w_gu, group_sizes)
       gate, up = jnp.split(gate_up, 2, axis=-1)
       act = jax.nn.silu(gate) * up
-      sorted_out = jax.lax.ragged_dot(act, w_dn, group_sizes)
+      sorted_out = self._ragged_dot(act, w_dn, group_sizes)
 
       inv_perm = jnp.argsort(perm)
       expert_outs = sorted_out[inv_perm].reshape(num_tokens, top_k, self.emb_dim)
@@ -885,13 +1075,7 @@ class Qwen3_8Experts(nnx.Module):
       out = jax.shard_map(
           _dispatch_2d,
           mesh=mesh,
-          in_specs=(
-              token_spec,
-              token_spec,
-              token_spec,
-              weight_spec,
-              weight_spec,
-          ),
+          in_specs=(token_spec, token_spec, token_spec, weight_spec, weight_spec),
           out_specs=token_spec,
           check_vma=False,
       )(hidden_states, top_k_index, top_k_weights, w_gate_up, w_down)
@@ -985,6 +1169,7 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
       sharding: Any | None = None,
       *,
       shared_expert_intermediate_size: int,
+      use_tokamax_gmm: bool = False,
       rngs: nnx.Rngs,
   ):
     del sharding
@@ -1015,6 +1200,7 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
         moe_mlp_dim=moe_mlp_dim,
         dtype=dtype,
         weight_dtype=weight_dtype,
+        use_tokamax_gmm=use_tokamax_gmm,
         rngs=rngs,
     )
     self.shared_expert = Qwen3_8MLP(
@@ -1413,6 +1599,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
           chunk_size=int(c.gdn_chunk_size),
           conv_kernel_size=int(c.gdn_conv_kernel_dim),
           output_gate_activation=str(c.gdn_output_gate_activation),
+          chunk_inverse=str(c.gdn_chunk_inverse),
       )
     else:
       self.self_attn = Qwen3_8SparseAttention(
@@ -1429,8 +1616,11 @@ class Qwen3_8DecoderLayer(nnx.Module):
           index_head_dim=int(c.index_head_dim),
           token_budget=int(c.index_select_budget),
           compress_ratio=int(c.index_select_block_size),
+          indexer_mask_mode=str(c.qsa_indexer_mask),
+          attention_kernel=str(c.qsa_attention_kernel),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
+    use_tokamax_gmm = bool(getattr(c, "sparse_matmul", False) and getattr(c, "use_tokamax_gmm", False))
     self.mlp = Qwen3_8SparseMoeBlock(
         emb_dim=emb,
         shared_expert_intermediate_size=int(c.mlp_dim),
@@ -1442,6 +1632,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
         norm_topk_prob=bool(c.norm_topk_prob),
         dtype=dt,
         weight_dtype=wdt,
+        use_tokamax_gmm=use_tokamax_gmm,
     )
     self.ple = build_ple_layer(c, layer_idx, rngs=rngs) if include_ple else None
 
@@ -1536,10 +1727,7 @@ def apply_scanned_cycles(
       h, a3 = blk.qsa_3(h, return_aux=True, **kw)
       return shard_batch(h), (a0, a1, a2, a3)
     h = ple_step(blk.gdn_0(carry, **kw), xs[2])
-    return (
-        shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw)),
-        None,
-    )
+    return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw)), None
 
   step_fn = jax.checkpoint(scan_fn, prevent_cse=False) if remat else scan_fn
   res = jax.lax.scan(step_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
