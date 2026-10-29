@@ -39,6 +39,7 @@ The 397B override is the cold download recorded in `results/p1_st_lance_b.csv` (
 
 import argparse
 import csv
+import glob
 import json
 import os
 import re
@@ -107,14 +108,19 @@ def _ok(rec: dict | None) -> bool:
 
 
 def failure_reason(rec: dict | None, log_path: str) -> str:
-  """Short reason for a failed phase, from its result JSON and (when mirrored) its log."""
+  """Short reason for a failed phase, from its result JSON and (when mirrored) its logs.
+
+  A multi-slice phase writes one log per slice (`<phase>.log` for slice 0, `<phase>_slice<N>.log` for the others),
+  and the error that ended the run can be in any of them.
+  """
   if rec is None:
     return "not run"
   err = rec.get("error", "") or ""
   log_tail = ""
-  if os.path.exists(log_path):
-    with open(log_path, encoding="utf-8", errors="replace") as f:
-      log_tail = f.read()[-200_000:]
+  for path in [log_path] + sorted(glob.glob(log_path.removesuffix(".log") + "_slice*.log")):
+    if os.path.exists(path):
+      with open(path, encoding="utf-8", errors="replace") as f:
+        log_tail += f.read()[-200_000:] + "\n"
   text = err + "\n" + log_tail
   peak = re.search(r"Peak RAM: ([\d.]+)/", err)
   peak_s = f", peak host RAM {float(peak.group(1)):.1f} GB" if peak else ""

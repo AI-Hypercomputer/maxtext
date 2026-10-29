@@ -192,7 +192,7 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 | **`qwen3.5-397b-a17b`** | `scanned` | `1 (8)` | `to_maxtext` | 814.53 | **source must be staged in RAM next to the converted state; exceeds host RAM** | — | N/A | N/A | N/A |
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **TPU HBM OOM** | — | — | — |
 | **`qwen3.5-397b-a17b`** | `scanned` | `2 (16)` | `to_maxtext` | 814.53 | **source must be staged in RAM next to the converted state; exceeds host RAM** | — | N/A | N/A | N/A |
-| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **killed (-9) on slice 0, peak host RAM 161.2 GB** | — | — | — |
+| ↳ | `scanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **TPU HBM OOM** | — | — | — |
 | **`qwen3.5-397b-a17b`** | `scanned` | `4 (32)` | `to_maxtext` | 814.53 | **source must be staged in RAM next to the converted state; exceeds host RAM** | — | N/A | N/A | N/A |
 | ↳ | `scanned` | `4 (32)` | **`safetensor`** | **814.53** | **—** | **1,399.68** | **1,399.68** | **2,214.21** | **Only `safetensor` loads this config** |
 | **`qwen3.5-397b-a17b`** | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 | **host OOM-killed** | — | N/A | N/A | N/A |
@@ -246,7 +246,7 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 
 | What | Why |
 | :--- | :--- |
-| `deepseek3.2-671b` (1,367 GB), `deepseek4-1600b` (3,198 GB) | Extra DeepSeek capacity tests from the v5p matrix that weren't in the tpu7x lists. They would need about 4 and 8 slices. |
+| `deepseek3.2-671b` (1,367 GB), `deepseek4-1600b` (3,198 GB) on single-host slices | Extra DeepSeek capacity tests from the v5p matrix that weren't in the tpu7x lists. Lance's multi-host runs loaded both with `safetensor` (scanned / unscanned): `deepseek3.2-671b` in 672.46 / 569.71 s on 2 × `2x2x2`, `deepseek4-1600b` in 1,047.93 / 1,008.62 s on 4 × `2x2x2` ([`tpu7x_multihost_results.md`](tpu7x_multihost_results.md)). |
 | `deepseek3-671b` unscanned on 1–2 slices; `deepseek3-671b` `to_maxtext` | Same capacity limits as scanned; 1.34 TB can't be converted on one host. |
 | `qwen3.5-397b-a17b` and `qwen3-480b-a35b` unscanned on 1 slice (`safetensor`) | 98% of / more than one slice's HBM. |
 

@@ -81,8 +81,10 @@ The PR changes behind the WITH results:
 | `deepseek3-671b` (1.34 TB) | ➖ not attempted | ➖ | 531–649 s (4 slices) |
 
 The row-by-row table (a `to_maxtext` row and a `safetensor` row per configuration, as in the earlier small-model
-summary) is in [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md). It is regenerated from the result JSONs by
-[`scripts/build_tpu7x_tables.py`](../scripts/build_tpu7x_tables.py).
+summary, plus Lance's multi-host rows) is in [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md), in plain
+text for the "tpu-v7x" sheet tab. It is regenerated from the result JSONs and
+[`tpu7x_multihost_results.csv`](tpu7x_multihost_results.csv) by
+[`scripts/build_tpu7x_sheet_table.py`](../scripts/build_tpu7x_sheet_table.py).
 
 ## 5. What fits where
 
@@ -97,7 +99,9 @@ summary) is in [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md). It 
 ## 6. Not run
 
 - `deepseek3.2-671b` (1,367 GB) and `deepseek4-1600b` (3,198 GB), the v5p matrix's extra DeepSeek capacity tests, weren't in
-  the tpu7x scope. They would need about 4 and 8 slices.
+  the tpu7x scope on single-host slices. Lance's multi-host runs loaded both with `safetensor` (scanned / unscanned):
+  `deepseek3.2-671b` in 672.46 / 569.71 s on 2 × `2x2x2`, `deepseek4-1600b` in 1,047.93 / 1,008.62 s on 4 × `2x2x2`
+  ([`tpu7x_multihost_results.md`](tpu7x_multihost_results.md)).
 - `deepseek3-671b`: unscanned on 1–2 slices, and `to_maxtext` (can't be converted on one host).
 - `origin/main` unscanned variants after a scanned timeout (the harness skips them).
 
