@@ -35,7 +35,8 @@ python3 -m maxtext.inference.vllm_decode \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
     scan_layers=false \
-    enable_single_controller=${use_pathways}
+    enable_single_controller=${use_pathways} \
+    weight_dtype=bfloat16
 
 # Step 2: Run LoRA on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -67,4 +68,5 @@ python3 -m maxtext.inference.vllm_decode \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
     scan_layers=true \
-    enable_single_controller=${use_pathways}
+    enable_single_controller=${use_pathways} \
+    weight_dtype=bfloat16

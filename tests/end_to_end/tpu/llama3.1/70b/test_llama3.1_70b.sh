@@ -67,7 +67,8 @@ python3 -m maxtext.trainers.pre_train.train \
     max_target_length=2048 steps=2 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} scan_layers=false use_multimodal=${USE_MULTIMODAL} \
-    ici_tensor_parallelism=4
+    ici_tensor_parallelism=4 \
+    allow_split_physical_axes=True
 
 # Step 3: Run inference on the checkpoint generated from the previous run
 if [ ${USE_MULTIMODAL} == true ]; then

@@ -36,7 +36,9 @@ python3 -m maxtext.inference.vllm_decode \
     scan_layers=false \
     enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True \
-    ici_tensor_parallelism=4
+    ici_tensor_parallelism=8 \
+    ici_data_parallelism=8 \
+    weight_dtype=bfloat16
 
 # Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
@@ -48,7 +50,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     num_batches=2 \
     batch_size=4 \
     train_micro_batch_size=4 \
-    ici_expert_parallelism=4 \
+    ici_expert_parallelism=8 \
     ici_fsdp_parallelism=2 \
     ici_data_parallelism=1 \
     num_test_batches=2 \
@@ -56,11 +58,16 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
-    rollout_tensor_parallelism=2 \
+    rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "gemma4-26b", "log_config": "false", "prefuse_moe_weights": "true"}}' \
     remat_policy=full \
-    hbm_utilization_vllm=0.55
+    hbm_utilization_vllm=0.55 \
+    ici_tensor_parallelism=2 \
+    allow_split_physical_axes=True \
+    opt_type=sgd \
+    rl.num_generations=4 \
+    rl.reshard_chunk_size=1
 
 # Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
@@ -73,4 +80,6 @@ python3 -m maxtext.inference.vllm_decode \
     scan_layers=false \
     enable_single_controller=${use_pathways} \
     prefuse_moe_weights=True \
-    ici_tensor_parallelism=4
+    ici_tensor_parallelism=8 \
+    ici_data_parallelism=8 \
+    weight_dtype=bfloat16
