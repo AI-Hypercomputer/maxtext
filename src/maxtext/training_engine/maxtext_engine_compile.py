@@ -58,8 +58,8 @@ from maxtext.utils import model_creation_utils
 KERNEL_NAMES = maxtext_engine.KERNEL_NAMES
 
 # Both `dump_hlo` filters default to `jit_train_step`, `train.py`'s fused step; the engine's
-# kernels lower as `jit_first_kernel`, `jit_accum_kernel` and `jit__update_kernel`, so on those
-# defaults the dump comes back empty.
+# kernels lower as `jit_<name>` for each of `KERNEL_NAMES` (`jit_fwd_bwd`, `jit_accumulate`,
+# `jit_update`), so on those defaults the dump comes back empty.
 HLO_DUMP_DEFAULTS = {
     "dump_hlo_local_module_name": f"jit_({'|'.join(KERNEL_NAMES)})",
     "dump_hlo_module_name": "jit_",
@@ -297,10 +297,11 @@ def main(argv: Sequence[str]) -> None:
     # `upload_dump` deletes what it uploaded; say which filter was too narrow rather than raise
     # from the rmtree of a directory XLA never wrote.
     if not os.path.isdir(config.dump_hlo_local_dir):
+      modules = ", ".join(f"jit_{name}" for name in KERNEL_NAMES)
       raise FileNotFoundError(
           f"dump_hlo is set but XLA wrote nothing to {config.dump_hlo_local_dir}: "
           f"dump_hlo_local_module_name={config.dump_hlo_local_module_name!r} matched none of the engine's "
-          f"kernels (jit_first_kernel, jit_accum_kernel, jit__update_kernel)."
+          f"kernels ({modules})."
       )
     gcs_utils.upload_dump(
         config.dump_hlo_local_dir,

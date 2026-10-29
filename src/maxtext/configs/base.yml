@@ -126,6 +126,14 @@ save_config_to_gcs: false
 
 # gradient dtype
 grad_dtype: "float32"
+# dtype MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "" uses grad_dtype.
+# "float32" with grad_dtype=bfloat16 sums more precisely, at the cost of float32 gradients on device: the accumulator,
+# and each micro-batch's gradients beside it.
+grad_accumulation_dtype: ""
+# MaxTextTrainingEngine only: gradients that its forward/backward pass sums across devices by an all-reduce alone
+# (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass in the
+# parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the all-reduce.
+cast_grads_after_all_reduce: false
 
 # activation dtypes.
 dtype: "bfloat16"
@@ -1241,6 +1249,10 @@ skip_step_on_spikes: false
 skip_step_interval: 128
 # The scaling factor to determine if a spike occurred
 skip_step_scaling_factor: 6.0
+# MaxTextTrainingEngine only: if true, skip the training step when the gradient norm is NaN or Inf
+skip_step_on_nan: true
+# MaxTextTrainingEngine only: if > 0, skip the training step when the raw gradient norm exceeds this threshold
+max_grad_norm_spike: 0.0
 
 # List of parameter names/patterns to train.
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].

@@ -23,11 +23,12 @@ import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.optimizers.muon import muon as maxtext_muon
+from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
 
-def _get_path_mask_fn(patterns, match_returns_true=True):
+def get_path_mask_fn(patterns, match_returns_true=True):
   """Helper to create a mask function from a list of regex patterns."""
   if not patterns:
     return None
@@ -48,7 +49,7 @@ def _get_path_mask_fn(patterns, match_returns_true=True):
 
 def get_adamw_mask(config):
   """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
-  return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
+  return get_path_mask_fn(config.adamw_mask, match_returns_true=False)
 
 
 def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
@@ -120,6 +121,11 @@ def skip_step_on_spikes(
     losses = state["losses"]
     grad_norms = state["grad_norms"]
 
+    # Ensure non-finite metrics are never treated as valid
+    is_finite = jnp.isfinite(loss)
+    if grad_norm is not None:
+      is_finite = jnp.logical_and(is_finite, jnp.isfinite(grad_norm))
+
     # Compute rolling stats
     loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
     grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
@@ -132,10 +138,11 @@ def skip_step_on_spikes(
     else:
       is_ok = is_loss_ok
 
-    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum)
+    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum).
+    # Warmup permits normal variations before statistics stabilize, but never non-finite values.
     min_history = max(2, interval // 2)
     is_warmup = (count + 1) < min_history
-    is_ok = jnp.logical_or(is_warmup, is_ok)
+    is_ok = jnp.logical_and(is_finite, jnp.logical_or(is_warmup, is_ok))
 
     # Conditionally execute the inner optimizer to prevent momentum poisoning
     def do_update():
@@ -148,19 +155,21 @@ def skip_step_on_spikes(
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
 
-    # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    # Update rolling buffers (append only finite values so spikes become the new baseline without NaN poisoning)
     idx = count % interval
-    new_losses = losses.at[idx].set(loss)
+    new_losses = jnp.where(is_finite, losses.at[idx].set(loss), losses)
 
     new_grad_norms = grad_norms
     if grad_norm is not None:
-      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+      new_grad_norms = jnp.where(is_finite, grad_norms.at[idx].set(grad_norm), grad_norms)
+
+    new_count = jnp.where(is_finite, count + 1, count)
 
     new_state = {
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": count + 1,
+        "count": new_count,
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state
@@ -258,20 +267,62 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
     )
 
   # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
-    return optax.multi_transform(
-        {"trainable": base_opt, "frozen": optax.set_to_zero()},
-        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
-    )
+  return apply_trainable_parameters_mask(base_opt, config)
 
-  return base_opt
+
+def apply_trainable_parameters_mask(base_opt, config):
+  """Freeze every parameter not matched by `config.trainable_parameters_mask`.
+
+  Returns `base_opt` unchanged when the mask is empty, so callers can apply this
+  unconditionally. Wrap only the optimizer itself, not a chain that includes
+  gradient clipping: clipping must see the whole gradient tree so the global
+  norm is the same with and without freezing.
+  """
+  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  trainable_patterns = config.trainable_parameters_mask
+  freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  if freeze_mask_fn is None:
+    return base_opt
+
+  has_logged = False
+
+  def _label_params(params):
+    """Labels every parameter array, and reports what the mask actually did.
+
+    `trainable_parameters_mask` is a whitelist, so expressing "freeze only X"
+    needs a negative pattern -- and a pattern that matches nothing freezes the
+    whole model. That failure is otherwise silent: gradients are still computed
+    and `grad_norm` looks normal, only the updates are zeroed. Log the counts
+    once so the intent is checkable against the run log.
+    """
+    nonlocal has_logged
+    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
+    if not has_logged:
+      has_logged = True
+      leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
+      frozen = [p for p, v in leaves if v == "frozen"]
+      max_logging.log(
+          f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}" f" of {len(leaves)} parameter arrays"
+      )
+      if not frozen:
+        max_logging.log("  WARNING: mask froze nothing -- did the pattern match everything?")
+      elif len(frozen) == len(leaves):
+        max_logging.log("  WARNING: mask froze EVERY parameter -- training is a no-op")
+      max_display = 50
+      for path in frozen[:max_display]:
+        max_logging.log(f"  frozen: {jax.tree_util.keystr(path, simple=True, separator='/')}")
+      if len(frozen) > max_display:
+        max_logging.log(f"  ... and {len(frozen) - max_display} more frozen parameter arrays")
+    return labels
+
+  # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
+  # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
+  # massive states (momentum, variance) for the entire model before zeroing the updates.
+  # By using multi_transform, only the trainable parameters get states allocated.
+  return optax.multi_transform(
+      {"trainable": base_opt, "frozen": optax.set_to_zero()},
+      _label_params,
+  )
 
 
 def adam_pax(

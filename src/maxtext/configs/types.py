@@ -514,6 +514,34 @@ class DataTypes(BaseModel):
 
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
+  grad_accumulation_dtype: Literal["", "float32", "bfloat16"] = Field(
+      "",
+      description=(
+          "The data type MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "
+          "empty uses grad_dtype. 'float32' with grad_dtype=bfloat16 sums more precisely, at the cost of float32 "
+          "gradients on device: the accumulator, and each micro-batch's gradients beside it."
+      ),
+  )
+
+  @classmethod
+  def _clean_none_for_grad_accumulation_dtype(cls, v: Any) -> Any:
+    """Coerces None, which an empty `grad_accumulation_dtype=` on the command line becomes, into ''."""
+    return "" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues.
+  _validate_grad_accumulation_dtype = field_validator("grad_accumulation_dtype", mode="before")(
+      _clean_none_for_grad_accumulation_dtype
+  )
+
+  cast_grads_after_all_reduce: bool = Field(
+      False,
+      description=(
+          "MaxTextTrainingEngine only. Gradients that its forward/backward pass sums across devices by an all-reduce "
+          "alone (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass "
+          "in the parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the "
+          "all-reduce."
+      ),
+  )
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
@@ -2966,6 +2994,20 @@ class Optimizer(BaseModel):
       description="The rolling interval to calculate the mean and standard deviation.",
   )
   skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
+  skip_step_on_nan: bool = Field(
+      True,
+      description=(
+          "MaxTextTrainingEngine only. If True, skip the training step and preserve weights/optimizer state when the"
+          " gradient norm is NaN/Inf."
+      ),
+  )
+  max_grad_norm_spike: NonNegativeFloat = Field(
+      0.0,
+      description=(
+          "MaxTextTrainingEngine only. If positive, skip the training step when the raw gradient norm exceeds this"
+          " threshold."
+      ),
+  )
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
