@@ -1734,6 +1734,10 @@ moe_a2a_token_chunks: 1
 kda_conv_in_compute_dtype: false
 # Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.
 olmoe3_per_layer_remat: false
+# OLMoE3 weight init, as OLMo-core's InitMethod: "normal" (truncated normal, std 0.02, the reference's) or
+# "nanochat" (spectral condition: std 1/sqrt(fan_in) * min(1, sqrt(fan_out/fan_in)) per matrix, 1/sqrt(kernel)
+# for the KDA short convs, std 1.0 untruncated embeddings). Init only: optimizer and forward pass are unchanged.
+olmo_init_method: "normal"
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

@@ -129,8 +129,12 @@ class Transformer(nnx.Module):
 
     cfg = self.config
     mesh = self.mesh
+    if cfg.olmo_init_method != "normal" and cfg.decoder_block != DecoderBlockType.OLMOE3:
+      raise ValueError(f"olmo_init_method={cfg.olmo_init_method} is only implemented for the olmoe3 decoder block.")
     embedding_init = (
-        olmoe3.olmoe3_init if cfg.decoder_block == DecoderBlockType.OLMOE3 else jax.nn.initializers.normal(stddev=1.0)
+        olmoe3.olmoe3_embedding_init(cfg)
+        if cfg.decoder_block == DecoderBlockType.OLMOE3
+        else jax.nn.initializers.normal(stddev=1.0)
     )
     self.token_embedder = Embed(
         mesh=self.mesh,

@@ -2127,6 +2127,16 @@ class Qwen3Next(BaseModel):
           " unrolled first cycle is not rematerialized at all and the scanned cycles remat as a block."
       ),
   )
+  olmo_init_method: Literal["normal", "nanochat"] = Field(
+      "normal",
+      description=(
+          "OLMoE3 weight init, as OLMo-core's InitMethod. 'normal': truncated normal with std 0.02 for every"
+          " matrix and the embedding (the reference's). 'nanochat': the spectral-condition init, std"
+          " 1/sqrt(fan_in) * min(1, sqrt(fan_out/fan_in)) per matrix (fused matrices per projection, experts per"
+          " expert), 1/sqrt(kernel_size) for the KDA short convs, and an untruncated normal with std 1.0 for the"
+          " embedding. Init only."
+      ),
+  )
   moe_lean_routing: bool = Field(
       False,
       description=(

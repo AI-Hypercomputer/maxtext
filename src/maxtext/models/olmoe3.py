@@ -105,13 +105,69 @@ def olmoe3_init(key, shape, dtype=jnp.float32, in_axis=None, out_axis=None):
   return jax.nn.initializers.truncated_normal(stddev=_INIT_STD, lower=-3.0, upper=3.0)(key, shape, dtype)
 
 
+def nanochat_std(fan_in: int, fan_out: int) -> float:
+  """OLMo-core's ``nanochat_std``: ``1/sqrt(fan_in) * min(1, sqrt(fan_out/fan_in))``."""
+  return fan_in**-0.5 * min(1.0, (fan_out / fan_in) ** 0.5)
+
+
+def nanochat_init(key, shape, dtype=jnp.float32, in_axis=None, out_axis=None):
+  """OLMo-core's ``InitMethod.nanochat`` for one weight: truncated normal, bounds +/-3 std, std ``nanochat_std``.
+
+  Fan-in and fan-out are the products of the kernel's in and out axes (a 2-D kernel without
+  axes is ``[in, out]``). A kernel with more dims than those axes cover is a stack of matrices
+  over its leading dims: MaxText's MoE passes its ``[experts, in, out]`` kernels
+  ``in_axis=(0,)`` and ``out_axis=(1,)``, and the reference inits each expert as its own
+  ``in -> out`` matrix, so the last two dims are used.
+  """
+  if in_axis is None or out_axis is None:
+    in_axis, out_axis = (0,), (1,)
+  in_axis, out_axis = tuple(np.atleast_1d(in_axis)), tuple(np.atleast_1d(out_axis))
+  if len(in_axis) + len(out_axis) < len(shape):
+    fan_in, fan_out = shape[-2], shape[-1]
+  else:
+    fan_in = int(np.prod([shape[i] for i in in_axis]))
+    fan_out = int(np.prod([shape[i] for i in out_axis]))
+  std = nanochat_std(fan_in, fan_out)
+  return jax.nn.initializers.truncated_normal(stddev=std, lower=-3.0, upper=3.0)(key, shape, dtype)
+
+
+def olmoe3_kernel_init(config: Config):
+  """The weight-matrix init that ``olmo_init_method`` selects (also the LM head's)."""
+  return nanochat_init if config.olmo_init_method == "nanochat" else olmoe3_init
+
+
+def olmoe3_embedding_init(config: Config):
+  """The token-embedding init: the block init under "normal"; an untruncated std-1.0 normal under "nanochat"."""
+  return jax.nn.initializers.normal(stddev=1.0) if config.olmo_init_method == "nanochat" else olmoe3_init
+
+
+def _olmoe3_attention_init(config: Config):
+  """The attention projections' init.
+
+  Under "nanochat" the query kernel ``[emb, heads, 2 * head_dim]`` holds each head's query and
+  output gate, the reference's separate ``w_q`` and ``w_g``: two projections of ``heads * head_dim``
+  outputs each, so its fan-out is half the stored width. Key, value and output kernels use their axes.
+  """
+  if config.olmo_init_method != "nanochat":
+    return olmoe3_init
+  head_dim = config.head_dim
+
+  def init(key, shape, dtype=jnp.float32, in_axis=None, out_axis=None):
+    if len(shape) == 3 and shape[-1] == 2 * head_dim and tuple(np.atleast_1d(in_axis)) == (0,):
+      std = nanochat_std(shape[0], shape[1] * head_dim)
+      return jax.nn.initializers.truncated_normal(stddev=std, lower=-3.0, upper=3.0)(key, shape, dtype)
+    return nanochat_init(key, shape, dtype, in_axis, out_axis)
+
+  return init
+
+
 def _dense(config, in_features, out_features, kernel_axes, quant, rngs, use_bias=False, mesh=None):
   """DenseGeneral with the config-derived arguments this model always passes."""
   return DenseGeneral(
       in_features_shape=in_features,
       out_features_shape=out_features,
       axis=-1,
-      kernel_init=olmoe3_init,
+      kernel_init=olmoe3_kernel_init(config),
       kernel_axes=kernel_axes,
       dtype=config.dtype,
       weight_dtype=config.weight_dtype,
@@ -186,7 +242,9 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     self.w_k = _dense(cfg, cfg.emb_dim, key_width, ("embed", "mlp"), quant, rngs, mesh=mesh)
     self.w_v = _dense(cfg, cfg.emb_dim, value_width, ("embed", "mlp"), quant, rngs, mesh=mesh)
 
-    conv_init = jax.nn.initializers.truncated_normal(stddev=_INIT_STD, lower=-3.0, upper=3.0)
+    # Under "nanochat" each depthwise conv is a square conv_size -> conv_size map per channel.
+    conv_std = nanochat_std(conv_size, conv_size) if cfg.olmo_init_method == "nanochat" else _INIT_STD
+    conv_init = jax.nn.initializers.truncated_normal(stddev=conv_std, lower=-3.0, upper=3.0)
     self.q_conv = nnx.Param(conv_init(rngs.params(), (key_width, conv_size), cfg.weight_dtype))
     self.k_conv = nnx.Param(conv_init(rngs.params(), (key_width, conv_size), cfg.weight_dtype))
     self.v_conv = nnx.Param(conv_init(rngs.params(), (value_width, conv_size), cfg.weight_dtype))
@@ -1166,7 +1224,7 @@ class OLMoE3Attention(nnx.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
-        kernel_init=olmoe3_init,
+        kernel_init=_olmoe3_attention_init(cfg),
         name="self_attention",
         quant=quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
@@ -1465,6 +1523,9 @@ class OLMoE3DecoderLayer(nnx.Module):
     self.layer_idx = layer_idx
     cfg = config
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    if cfg.olmo_init_method == "nanochat" and (cfg.fused_mlp or cfg.prefuse_moe_weights):
+      # Both store gate and up as one kernel, whose fan-out would count both halves.
+      raise ValueError("olmo_init_method=nanochat does not support fused_mlp or prefuse_moe_weights.")
 
     def block_norm():
       return RMSNorm(
@@ -1498,7 +1559,7 @@ class OLMoE3DecoderLayer(nnx.Module):
         in_features=cfg.emb_dim,
         intermediate_dim=shared_dim,
         activations=cfg.mlp_activations,
-        kernel_init=olmoe3_init,
+        kernel_init=olmoe3_kernel_init(cfg),
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -1519,7 +1580,7 @@ class OLMoE3DecoderLayer(nnx.Module):
           num_experts=cfg.num_experts,
           num_experts_per_tok=cfg.num_experts_per_tok,
           mesh=mesh,
-          kernel_init=olmoe3_init,
+          kernel_init=olmoe3_kernel_init(cfg),
           # The router weight is small (emb x experts); replicated, it needs no all-gather per use.
           kernel_axes=(None, None) if cfg.olmoe3_replicate_router else ("embed", None),
           intermediate_dim=cfg.moe_mlp_dim,

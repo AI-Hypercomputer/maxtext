@@ -24,6 +24,7 @@ independently reproduced by running its ``standalone_model.py`` reference.
 # pylint: disable=missing-function-docstring,unnecessary-lambda-assignment,use-dict-literal,unbalanced-tuple-unpacking,cell-var-from-loop,redefined-outer-name,reimported,consider-using-from-import,line-too-long
 
 import collections
+import json
 import unittest
 
 from absl.testing import absltest
@@ -37,7 +38,7 @@ from maxtext.layers import quantizations
 import maxtext.models.models as models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
 
 import os
 
@@ -1272,6 +1273,208 @@ class OLMoE3FusedInputProjTest(unittest.TestCase):
       # dt_bias and A_log gradients are cancellation-heavy sums, so accumulation order shows up there first.
       rel = jnp.max(jnp.abs(a - b)) / (jnp.max(jnp.abs(a)) + 1e-30)
       self.assertLess(float(rel), 2e-3, f"fused projection grad rel err {rel:.2e}")
+
+
+class OLMoE3NanochatInitTest(unittest.TestCase):
+  """`olmo_init_method=nanochat` against OLMo-core's `InitMethod.nanochat` rules.
+
+  The expected (fan_in, fan_out) of each parameter is written out from the reference's rules
+  (OLMo-core `tanushy/parameterization-ladders`, docs/NANOCHAT_INIT_HANDOFF.md section 1),
+  by name and the model's widths, not from the kernel shapes the implementation reads.
+  """
+
+  # Tiny sh2x widths, with fewer layers and experts and a smaller vocab so the init fits on CPU.
+  D, KEY, VALUE, HEAD_V, HEADS, CONV = 1024, 1024, 2048, 256, 8, 4
+  Q_DIM, KV_DIM, LATENT, MOE_H, SHARED_H, DENSE_H, EXPERTS, VOCAB = 1024, 512, 512, 2048, 2048, 8192, 8, 8192
+  # std of a normal truncated at +/-3 std, relative to the untruncated std.
+  TRUNC = 0.986534
+
+  def _params(self, init_method):
+    cfg = _config(
+        "olmo35-tiny-e256k8-sh2x",
+        extra=(
+            "override_model_config=True",
+            "base_num_decoder_layers=3",  # 0: dense KDA, 1: attention + MoE, 2: KDA + MoE
+            "inhomogeneous_layer_cycle_interval=2",
+            f"num_experts={self.EXPERTS}",
+            "num_experts_per_tok=2",
+            f"vocab_size={self.VOCAB}",
+            "emo_enabled=False",
+            f"olmo_init_method={init_method}",
+        ),
+    )
+    _, model = _build(cfg)
+    rng = jax.random.PRNGKey(0)
+    ids = jnp.ones((1, 64), dtype=jnp.int32)
+    params = model.init({"params": rng, "dropout": rng}, ids, ids, enable_dropout=False)["params"]
+    flat = {}
+    for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+      name = "/".join(str(getattr(k, "key", k)) for k in path).replace("/.value", "")
+      flat[name] = np.asarray(leaf, np.float64)
+    return flat
+
+  def _expected(self, name):
+    """("matrix", fan_in, fan_out) | ("conv",) | ("embedding",) | ("ones",) | ("zeros",) | ("a_log",)."""
+    d = self.D
+    rules = {
+        "mixer/w_q/kernel": (d, self.KEY),
+        "mixer/w_k/kernel": (d, self.KEY),
+        "mixer/w_v/kernel": (d, self.VALUE),
+        "mixer/f_proj_1/kernel": (d, self.HEAD_V),
+        "mixer/f_proj_2/kernel": (self.HEAD_V, self.KEY),
+        "mixer/g_proj_1/kernel": (d, self.HEAD_V),
+        "mixer/g_proj_2/kernel": (self.HEAD_V, self.VALUE),
+        "mixer/w_b/kernel": (d, self.HEADS),
+        "mixer/w_out/kernel": (self.VALUE, d),
+        # The fused query kernel holds the reference's w_q and w_g, each d -> q_dim.
+        "attention/query/kernel": (d, self.Q_DIM),
+        "attention/key/kernel": (d, self.KV_DIM),
+        "attention/value/kernel": (d, self.KV_DIM),
+        "attention/out/kernel": (self.Q_DIM, d),
+        "latent_down/kernel": (d, self.LATENT),
+        "latent_up/kernel": (self.LATENT, d),
+        "moe_block/gate/kernel": (d, self.EXPERTS),
+        # Per expert; wi_0/wi_1 are the halves of the reference's fused w_up_gate.
+        "moe_block/wi_0": (self.LATENT, self.MOE_H),
+        "moe_block/wi_1": (self.LATENT, self.MOE_H),
+        "moe_block/wo": (self.MOE_H, self.LATENT),
+        "logits_dense/kernel": (d, self.VOCAB),
+    }
+    for suffix, (fan_in, fan_out) in rules.items():
+      if name.endswith(suffix):
+        return ("matrix", fan_in, fan_out)
+    if "/shared_ffn/" in name:
+      hidden = self.DENSE_H if name.startswith("decoder/layers_0/") else self.SHARED_H
+      return ("matrix", hidden, d) if name.endswith("wo/kernel") else ("matrix", d, hidden)
+    if name.endswith(("q_conv", "k_conv", "v_conv")):
+      return ("conv",)
+    if name == "token_embedder/embedding":
+      return ("embedding",)
+    if name.endswith(("/scale", "ssmax_scale")):
+      return ("ones",)
+    if name.endswith(("dt_bias", "g_proj_2/bias")):
+      return ("zeros",)
+    if name.endswith("A_log"):
+      return ("a_log",)
+    raise AssertionError(f"no reference rule for {name}")
+
+  def _check_normal(self, name, w, std, truncated=True):
+    rel = w.std() / (std * (self.TRUNC if truncated else 1.0))
+    self.assertLess(abs(rel - 1.0), 0.05, f"{name}: std {w.std():.5f}, expected {std:.5f}")
+    self.assertLess(abs(w.mean()), 0.05 * std + 3 * std / np.sqrt(w.size), name)
+    if truncated:
+      self.assertLessEqual(np.abs(w).max(), 3 * std * (1 + 1e-6), f"{name}: not truncated at 3 std")
+
+  def _check_fixed(self, name, w, kind):
+    if kind == "ones":
+      np.testing.assert_array_equal(w, 1.0, err_msg=name)
+    elif kind == "zeros":
+      np.testing.assert_array_equal(w, 0.0, err_msg=name)
+    else:  # A_log = log(U[1, 16))
+      self.assertTrue(np.all((w >= 0.0) & (w <= np.log(16.0))), name)
+
+  def test_nanochat_std(self):
+    # OLMo-core's test_nanochat_std cases.
+    for fan_in, fan_out, expected in ((256, 256, 1 / 16), (256, 1024, 1 / 16), (1024, 256, 1 / 64), (1024, 8, 8**0.5 / 1024)):
+      self.assertAlmostEqual(olmoe3_module().nanochat_std(fan_in, fan_out), expected, places=12)
+
+  def test_nanochat_init_follows_the_reference_rules(self):
+    params = self._params("nanochat")
+    for name, w in params.items():
+      kind = self._expected(name)
+      if kind[0] == "matrix":
+        _, fan_in, fan_out = kind
+        self._check_normal(name, w, fan_in**-0.5 * min(1.0, (fan_out / fan_in) ** 0.5))
+      elif kind[0] == "conv":
+        self._check_normal(name, w, self.CONV**-0.5)
+      elif kind[0] == "embedding":
+        self._check_normal(name, w, 1.0, truncated=False)
+        self.assertGreater(np.abs(w).max(), 3.0, "the embedding init is not truncated")
+      else:
+        self._check_fixed(name, w, kind[0])
+
+  def test_normal_init_is_std_0p02_everywhere(self):
+    params = self._params("normal")
+    for name, w in params.items():
+      kind = self._expected(name)
+      if kind[0] in ("matrix", "conv", "embedding"):
+        self._check_normal(name, w, 0.02)
+      else:
+        self._check_fixed(name, w, kind[0])
+
+  def test_nanochat_init_matches_olmo_core(self):
+    """Every parameter against the std OLMo-core's InitMethod.nanochat gives it, on the same reduced hero.
+
+    The golden file holds, per MaxText parameter (names from OLMo-core's MaxText checkpoint converter), the init
+    OLMo-core's code applied; see its _source. Values can't match bitwise (different RNGs), so this checks the
+    distribution: kind, std, truncation, and that both models have exactly the same parameters and shapes.
+    """
+    with open(os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_nanochat_init_olmo_core.json"), encoding="utf-8") as f:
+      golden = json.load(f)["params"]
+    cfg = _config(
+        "olmo35-tiny",
+        extra=(
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
+            "num_experts=16",
+            "num_experts_per_tok=2",
+            "vocab_size=8192",
+            "emo_enabled=False",
+            "olmo_init_method=nanochat",
+        ),
+    )
+    _, model = _build(cfg)
+    rng = jax.random.PRNGKey(0)
+    ids = jnp.ones((1, 64), dtype=jnp.int32)
+    params = model.init({"params": rng, "dropout": rng}, ids, ids, enable_dropout=False)["params"]
+    flat = {
+        "/".join(str(getattr(k, "key", k)) for k in path).replace("/.value", ""): np.asarray(leaf, np.float64)
+        for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+    }
+    self.assertEqual(sorted(flat), sorted(golden))
+    for name, w in flat.items():
+      self.assertEqual(list(w.shape), golden[name]["shape"], name)
+      kind, *args = golden[name]["init"]
+      if kind == "trunc_normal":
+        self._check_normal(name, w, args[0])
+      elif kind == "normal":
+        self._check_normal(name, w, args[0], truncated=False)
+      elif kind == "log_uniform":
+        self.assertEqual(tuple(args), (1, 16), name)
+        self._check_fixed(name, w, "a_log")
+      else:
+        self._check_fixed(name, w, kind)
+
+  def test_nanochat_query_kernel_uses_the_query_width(self):
+    # With q_dim = d (the tiny widths above) the query and query+gate fan-outs give the same std. Here
+    # q_dim < d, so the kernel is contracting and counting the gate half would raise the std by sqrt(2).
+    olmoe3 = olmoe3_module()
+    cfg = collections.namedtuple("Cfg", "olmo_init_method head_dim")("nanochat", 64)
+    init = olmoe3._olmoe3_attention_init(cfg)  # pylint: disable=protected-access
+    d, heads = 2048, 4  # q_dim = 256
+    for shape, in_axis, out_axis, fan_in, fan_out in (
+        ((d, heads, 2 * 64), (0,), (1, 2), d, heads * 64),  # query + gate
+        ((d, heads, 64), (0,), (1, 2), d, heads * 64),  # key / value
+        ((heads * 64, d), (0,), (1,), heads * 64, d),  # out
+    ):
+      w = np.asarray(init(jax.random.PRNGKey(1), shape, jnp.float32, in_axis, out_axis), np.float64)
+      self._check_normal(str(shape), w, olmoe3.nanochat_std(fan_in, fan_out))
+
+  def test_nanochat_rejects_fused_gate_and_up_kernels(self):
+    for flag in ("fused_mlp=True", "prefuse_moe_weights=True"):
+      cfg = _config(
+          "olmo35-tiny-e256k8-sh2x",
+          extra=("override_model_config=True", "base_num_decoder_layers=2", "olmo_init_method=nanochat", flag),
+      )
+      _, model = _build(cfg)
+      with self.assertRaisesRegex(ValueError, "nanochat"):
+        _abstract_params(cfg, model, 64)
+
+
+def olmoe3_module():
+  from maxtext.models import olmoe3  # pylint: disable=import-outside-toplevel
+
+  return olmoe3
 
 
 class OLMoE3SharedExpertWidthTest(unittest.TestCase):
