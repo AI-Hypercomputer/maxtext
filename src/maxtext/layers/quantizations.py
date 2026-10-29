@@ -43,6 +43,7 @@ from flax.linen import fp8_ops
 import flax.linen as nn
 from flax import nnx
 from flax.nnx import variablelib
+
 # Support different packaging structures across environments even within
 # the same Qwix version identifier (imports from _src.utils vs _src).
 try:
@@ -172,8 +173,76 @@ def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | No
   return "block_wise", None
 
 
-def native_fp8_dot_general(
+def resolve_fp8_scale_scheme(
+    kernel_shape: Tuple[int, ...],
+    scale_shape: Tuple[int, ...],
+    rhs_axis: int,
+) -> str:
+  """Resolves the FP8 weight scale scheme ('per_tensor', 'per_channel', or 'block_wise').
+
+  Unlike `infer_scale_granularity`, this accounts for multi-axis output kernels
+  (e.g. 3D `(embed, heads, head_dim)`) where a per-output-channel scale has shape
+  `(1, heads, head_dim)`: because the contracted axis `rhs_axis` has scale dimension 1,
+  there is no subchannel tiling along the contracted axis and the scheme is `'per_channel'`.
+  """
+  norm_rhs_axis = rhs_axis if rhs_axis >= 0 else len(kernel_shape) + rhs_axis
+  if math.prod(scale_shape) == 1:
+    return "per_tensor"
+  if len(scale_shape) == len(kernel_shape):
+    if scale_shape[norm_rhs_axis] == 1:
+      return "per_channel"
+    return "block_wise"
+  return "per_channel"
+
+
+def quantize_fp8_activations(
     inputs: jnp.ndarray,
+    lhs_axis: int,
+    scheme: str,
+    rhs_block_size: int | None = None,
+    compute_dtype: DType = jnp.bfloat16,
+    act_calibration_method: str = "absmax",
+) -> qwix.QArray:
+  """Quantizes activations to FP8 `qwix.QArray` for `native_fp8_dot_general`."""
+  norm_lhs_axis = lhs_axis if lhs_axis >= 0 else inputs.ndim + lhs_axis
+  channelwise_axes = [d for d in range(inputs.ndim) if d != norm_lhs_axis]
+  if scheme in ("per_tensor", "per_channel"):
+    tiled_axes = {}
+  else:
+    tiled_axes = {norm_lhs_axis: rhs_block_size}
+  if is_static_calibration(act_calibration_method):
+    channelwise_axes = []
+    tiled_axes = {}
+  return qwix.quantize(
+      jnp.asarray(inputs, compute_dtype),
+      jnp.float8_e4m3fn,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes,
+      calibration_method=act_calibration_method,
+  )
+
+
+def requantize_blockwise_fp8_to_per_channel(
+    kernel: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    contract_axis: int = 0,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+  """Converts a block-wise quantized FP8 weight and scale to per-output-channel FP8.
+
+  Collapses the contracted axis (`contract_axis`) of `kernel_scale` to 1 and computes
+  one scale per output channel across all non-contracted axes. This eliminates
+  subchannel block tiling along the contracted axis in `native_fp8_dot_general`.
+  """
+  w_deq = dequantize_weight(kernel, kernel_scale, compute_dtype=jnp.float32)
+  max_val = float(jnp.finfo(kernel.dtype).max)
+  amax = jnp.max(jnp.abs(w_deq), axis=contract_axis, keepdims=True)
+  per_channel_scale = jnp.where(amax == 0, 1.0, amax / max_val)
+  q_kernel = jnp.clip(jnp.round(w_deq / per_channel_scale), -max_val, max_val).astype(kernel.dtype)
+  return q_kernel, per_channel_scale.astype(kernel_scale.dtype)
+
+
+def native_fp8_dot_general(
+    inputs: jnp.ndarray | qwix.QArray,
     quantized_kernel: jnp.ndarray,
     kernel_scale: jnp.ndarray,
     scale_block_size: int | Tuple[int, ...] | None,
@@ -192,42 +261,39 @@ def native_fp8_dot_general(
     )
   lhs_axis = axis[0]
   rhs_axis = contract_ind[0]
+  norm_rhs_axis = rhs_axis if rhs_axis >= 0 else quantized_kernel.ndim + rhs_axis
 
   # Qwix requires scale.ndim == qvalue.ndim. Determine scheme before reshaping minimal-rank scales.
-  if kernel_scale.ndim == quantized_kernel.ndim:
-    scheme, _ = infer_scale_granularity(kernel_scale.shape)
-  elif kernel_scale.size == 1:
-    scheme = "per_tensor"
-    kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
-  else:
-    # Reshape flattened per-channel scale over output axes.
-    scheme = "per_channel"
-    out_axes_shape = tuple(d for i, d in enumerate(quantized_kernel.shape) if i != rhs_axis)
-    if kernel_scale.size != math.prod(out_axes_shape):
-      raise ValueError(
-          f"kernel_scale with shape {kernel_scale.shape} does not match the "
-          f"kernel's non-contracted output shape {out_axes_shape} (kernel "
-          f"shape {quantized_kernel.shape}, contracted axis {rhs_axis})."
-      )
-    kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
+  scheme = resolve_fp8_scale_scheme(quantized_kernel.shape, kernel_scale.shape, norm_rhs_axis)
+  if kernel_scale.ndim != quantized_kernel.ndim:
+    if scheme == "per_tensor":
+      kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
+    else:
+      # Reshape flattened per-channel scale over output axes.
+      out_axes_shape = tuple(d for i, d in enumerate(quantized_kernel.shape) if i != norm_rhs_axis)
+      if kernel_scale.size != math.prod(out_axes_shape):
+        raise ValueError(
+            f"kernel_scale with shape {kernel_scale.shape} does not match the "
+            f"kernel's non-contracted output shape {out_axes_shape} (kernel "
+            f"shape {quantized_kernel.shape}, contracted axis {rhs_axis})."
+        )
+      kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=norm_rhs_axis)
 
   rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
-  channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
-  if scheme in ("per_tensor", "per_channel"):
-    tiled_axes = {}
+  if isinstance(inputs, qwix.QArray):
+    lhs = inputs
   else:
-    rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
-    tiled_axes = {lhs_axis: rhs_block_size}
-  if is_static_calibration(act_calibration_method):
-    channelwise_axes = []
-    tiled_axes = {}
-  lhs = qwix.quantize(
-      jnp.asarray(inputs, compute_dtype),
-      jnp.float8_e4m3fn,
-      channelwise_axes=channelwise_axes,
-      tiled_axes=tiled_axes,
-      calibration_method=act_calibration_method,
-  )
+    rhs_block_size = scale_block_size[norm_rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
+    if rhs_block_size is None and scheme == "block_wise":
+      rhs_block_size = quantized_kernel.shape[norm_rhs_axis] // kernel_scale.shape[norm_rhs_axis]
+    lhs = quantize_fp8_activations(
+        inputs,
+        lhs_axis=lhs_axis,
+        scheme=scheme,
+        rhs_block_size=rhs_block_size,
+        compute_dtype=compute_dtype,
+        act_calibration_method=act_calibration_method,
+    )
   dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
   out = qwix.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
   out = out.astype(compute_dtype)
