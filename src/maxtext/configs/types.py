@@ -262,6 +262,8 @@ ModelName = Literal[
     "deepseek4-284b",
     "deepseek4-1600b",
     "deepseek-custom",
+    "glm5.1-744b",
+    "glm5.2-744b",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
@@ -950,6 +952,10 @@ class AttentionIndexer(BaseModel):
       False,
       description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
   )
+  indexer_rope_interleave: bool = Field(
+      False,
+      description="Whether to interleave rotary embedding dimensions for the indexer. Defaults to False.",
+  )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
   indexer_use_approx_top_k: bool = Field(
       False, description="Whether to use approximate top-k selection for the indexer on TPU."
@@ -962,6 +968,17 @@ class AttentionIndexer(BaseModel):
           " When False, uses raw thresholding which is faster but may unmask > k elements"
           " during ties."
       ),
+  )
+  use_index_share: bool = Field(
+      False, description="Whether to enable cross-layer index cache sharing (GLM-5.2 IndexShare)."
+  )
+  index_share_pattern: str = Field(
+      "FSSS",
+      description="Cross-layer pattern string for IndexShare (e.g. 'FSSS', 'F,S,S,S', 'FSFSS...').",
+  )
+  prune_shared_indexers: bool = Field(
+      True,
+      description="Whether to prune indexer parameters on Shared (S) layers when use_index_share is enabled.",
   )
 
 
@@ -5374,7 +5391,7 @@ class MaxTextConfig(
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     if self.pipeline_parallel_layers == -1:
-      if self.decoder_block == DecoderBlockType.DEEPSEEK:
+      if self.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
         self.pipeline_parallel_layers = moe_layers
       else:
@@ -5706,6 +5723,8 @@ class MaxTextConfig(
               "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
               "short-circuits to select all compressed blocks and no indexer loss is produced."
           )
+    if not self.use_indexer and self.use_index_share:
+      raise ValueError("`use_index_share=True` requires `use_indexer=True`.")
     if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
       raise ValueError(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
@@ -5883,9 +5902,9 @@ class MaxTextConfig(
       if (
           self.routed_bias
           and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.GLM5)
       ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+        raise ValueError("Loss-free load balancing is only supported for the DeepSeek/GLM decoder block.")
       if self.te_moe_block and not self.sparse_matmul:
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
       if self.te_moe_quantize_before_fsdp_all_gather:
