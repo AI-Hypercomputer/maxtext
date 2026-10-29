@@ -29,6 +29,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
+from maxtext.training_engine import checkpointing
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import maxtext_utils
@@ -266,6 +267,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
             save_interval_steps=mock_config.checkpoint_period,
             max_to_keep=mock_config.max_num_checkpoints_to_keep,
             enable_async_checkpointing=mock_config.async_checkpointing,
+            async_options=ocp.AsyncOptions(timeout_secs=mock_config.async_checkpointing_timeout_secs),
         ),
         item_handlers={
             "model_params": mock_handler.return_value,
@@ -308,19 +310,65 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch(
+      "orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler",
+      return_value=type("CloudPathwaysArrayHandler", (), {})(),
+  )
   @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
-  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
+  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers, _):
     import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
-    from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
 
-    checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
-    checkpointing_module._maybe_register_pathways_persistence()
+    checkpointing._maybe_register_pathways_persistence()
 
     mock_register_type_handlers.assert_called_once()
     self.assertEqual(
         mock_register_type_handlers.call_args.kwargs["checkpointing_impl"],
         ocp_pathways.CheckpointingImpl.PERSISTENCE,
     )
+    # Latched on success: a second call does not register again.
+    self.assertTrue(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+    checkpointing._maybe_register_pathways_persistence()
+    mock_register_type_handlers.assert_called_once()
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch(
+      "orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler",
+      return_value=type("ArrayHandler", (), {})(),
+  )
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_pathways_persistence_fallback_handler_raises_and_does_not_latch(self, mock_register_type_handlers, _):
+    """An explicit request that ends with the controller-side handler fails loudly, every time."""
+    for _ in range(2):
+      with self.assertRaisesRegex(checkpointing.PathwaysCheckpointingUnavailableError, "ArrayHandler"):
+        checkpointing._maybe_register_pathways_persistence()
+      self.assertFalse(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+    self.assertEqual(mock_register_type_handlers.call_count, 2)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers", side_effect=NotImplementedError("no pathways"))
+  def test_pathways_persistence_registration_failure_raises(self, _):
+    with self.assertRaisesRegex(checkpointing.PathwaysCheckpointingUnavailableError, "no pathways") as cm:
+      checkpointing._maybe_register_pathways_persistence()
+    self.assertIsInstance(cm.exception.__cause__, NotImplementedError)
+    self.assertFalse(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": ""})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_pathways_persistence_not_requested_is_a_no_op(self, mock_register_type_handlers):
+    checkpointing._maybe_register_pathways_persistence()
+    mock_register_type_handlers.assert_not_called()
+    self.assertFalse(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_pathways_persistence_requires_a_gcs_checkpoint_dir(self, mock_register_type_handlers):
+    with self.assertRaisesRegex(ValueError, "gs://"):
+      checkpointing.CheckpointManager(self.create_tempdir().full_path, self.setup_config(enable_checkpointing=True))
+    mock_register_type_handlers.assert_not_called()
 
   def test_save_checkpoint_called_after_update(self):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -490,9 +538,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         mock_metadata.custom_metadata = custom_metadata
         mock_orbax_mgr.metadata.return_value = mock_metadata
 
-        with self.assertRaisesRegex(
-            maxtext_engine.checkpointing.CheckpointRestoreError, "Mid-step checkpoints are not supported"
-        ):
+        with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "Mid-step checkpoints are not supported"):
           t.restore_checkpoint(step=5)
         mock_orbax_mgr.restore.assert_not_called()
 
@@ -523,6 +569,189 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIsNone(t._accumulated_denominator)
     self.assertEmpty(t._cached_losses)
     self.assertEmpty(t._metrics_recorder.get_metrics_history(clear_cache=False))
+
+  def test_save_restore_metadata_is_a_black_box(self):
+    """Falsy orchestrator metadata (`{}`, `0`) round-trips as given instead of becoming None."""
+    for metadata in ({}, 0, {"step": 3, "nested": {"k": [1, 2]}}):
+      t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+      mock_orbax_mgr = self._mock_orbax_manager(t)
+      t.save_checkpoint(metadata=metadata, step=3)
+      custom_metadata = mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]
+      self.assertIn("additional_metadata", custom_metadata)
+      self.assertEqual(custom_metadata["additional_metadata"], metadata)
+
+      t2 = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+      mock_orbax_mgr2 = self._mock_orbax_manager(t2, latest_step=3)
+      saved_metadata = mock.MagicMock()
+      saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+      saved_metadata.custom_metadata = custom_metadata
+      mock_orbax_mgr2.metadata.return_value = saved_metadata
+      mock_orbax_mgr2.restore.return_value = {
+          "model_params": nnx.state(t2.model),
+          "optimizer_state": nnx.state(t2.optimizer, nnx.optimizer.OptState),
+      }
+      restored = t2.restore_checkpoint(step=3)
+      self.assertEqual(restored, metadata)
+      self.assertEqual(type(restored), type(metadata))
+
+    # No metadata at all records none.
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    t.save_checkpoint(metadata=None, step=3)
+    self.assertNotIn("additional_metadata", mock_orbax_mgr.save.call_args.kwargs["custom_metadata"])
+
+  def test_checkpoint_manager_does_not_mutate_caller_metadata(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    caller_metadata = {"origin": "caller"}
+    t._checkpoint_manager.save_checkpoint(
+        step=1,
+        checkpoint_state=checkpointing.CheckpointState(model=t.model),
+        custom_metadata=caller_metadata,
+    )
+    saved = mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]
+    self.assertEqual(saved, {"origin": "caller"})
+    self.assertIsNot(saved, caller_metadata)
+
+  def test_checkpoint_manager_waits_for_the_previous_save_only_when_saving(self):
+    """A step the save-interval policy declines neither blocks on nor saves over the in-flight save."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    state = checkpointing.CheckpointState(model=t.model)
+
+    mock_orbax_mgr.should_save.return_value = False
+    mock_orbax_mgr.save.return_value = False
+    self.assertFalse(t._checkpoint_manager.save_checkpoint(step=1, checkpoint_state=state))
+    mock_orbax_mgr.wait_until_finished.assert_not_called()
+
+    mock_orbax_mgr.should_save.return_value = True
+    mock_orbax_mgr.save.return_value = True
+    self.assertTrue(t._checkpoint_manager.save_checkpoint(step=2, checkpoint_state=state))
+    mock_orbax_mgr.wait_until_finished.assert_called_once()
+
+    # `force` bypasses the policy, so it waits too.
+    mock_orbax_mgr.reset_mock()
+    mock_orbax_mgr.should_save.return_value = False
+    t._checkpoint_manager.save_checkpoint(step=3, checkpoint_state=state, force=True)
+    mock_orbax_mgr.wait_until_finished.assert_called_once()
+    self.assertTrue(mock_orbax_mgr.save.call_args.kwargs["force"])
+
+  def test_checkpoint_manager_close_waits_for_the_in_flight_save(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    calls = []
+    mock_orbax_mgr.wait_until_finished.side_effect = lambda: calls.append("wait")
+    mock_orbax_mgr.close.side_effect = lambda: calls.append("close")
+
+    t._checkpoint_manager.close()
+
+    self.assertEqual(calls, ["wait", "close"])
+
+  def test_restore_checkpoint_raises_when_an_existing_checkpoint_fails_to_restore(self):
+    """A checkpoint that exists but cannot be read must not look like a fresh start."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    mock_orbax_mgr.restore.side_effect = OSError("corrupt shard")
+    t.train_step = 3
+
+    with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "step 7.*corrupt shard") as cm:
+      t.restore_checkpoint()
+    self.assertIsInstance(cm.exception.__cause__, OSError)
+    self.assertEqual(t.train_step, 3)
+
+  def test_restore_checkpoint_raises_when_the_optimizer_state_is_missing(self):
+    """Resuming with a freshly initialized optimizer would silently change the run."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+
+    with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "no optimizer state"):
+      t.restore_checkpoint(step=7)
+    mock_orbax_mgr.restore.assert_not_called()
+
+    # Without an optimizer, a params-only checkpoint restores normally.
+    mock_orbax_mgr.restore.return_value = {"model_params": nnx.state(t.model)}
+    restored_step, _, _ = t._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpointing.CheckpointState(model=t.model, optimizer=None), step=7
+    )
+    self.assertEqual(restored_step, 7)
+    self.assertNotIn("optimizer_state", dict(mock_orbax_mgr.restore.call_args.kwargs["args"].items()))
+
+  def test_restore_checkpoint_is_a_no_op_when_disabled_or_absent(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)  # Checkpointing disabled.
+    self.assertIsNone(t.restore_checkpoint())
+
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=None)
+    self.assertIsNone(t.restore_checkpoint())
+    mock_orbax_mgr.metadata.assert_not_called()
+    mock_orbax_mgr.restore.assert_not_called()
+
+  def test_restore_targets_device_memory_for_host_offloaded_optimizer_state(self):
+    """A `pinned_host` optimizer leaf is restored into device memory with the same sharding otherwise."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    mock_orbax_mgr.restore.return_value = {}
+
+    # Move every optimizer array leaf to pinned host memory, as optimizer offload leaves them.
+    opt_state = nnx.state(t.optimizer, nnx.optimizer.OptState)
+    offloaded = jax.tree.map(
+        lambda x: jax.device_put(x, x.sharding.with_memory_kind("pinned_host")) if hasattr(x, "sharding") else x,
+        opt_state,
+    )
+    nnx.update(t.optimizer, offloaded)
+    self.assertTrue(
+        any(
+            getattr(getattr(x, "sharding", None), "memory_kind", None) == "pinned_host"
+            for x in jax.tree.leaves(offloaded)
+        )
+    )
+
+    t._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpointing.CheckpointState(model=t.model, optimizer=t.optimizer), step=7
+    )
+
+    targets = jax.tree.leaves(mock_orbax_mgr.restore.call_args.kwargs["args"]["optimizer_state"].item)
+    self.assertNotEmpty(targets)
+    for target, source in zip(targets, jax.tree.leaves(offloaded)):
+      if getattr(source.sharding, "memory_kind", None) == "pinned_host":
+        self.assertIsInstance(target, jax.ShapeDtypeStruct)
+        self.assertEqual(target.sharding.memory_kind, "device")
+        self.assertEqual((target.shape, target.dtype), (source.shape, source.dtype))
+
+  def test_step_boundary_checkpoint_round_trips_through_real_orbax(self):
+    """Through real Orbax: the trained state and falsy caller metadata come back at the saved step."""
+
+    def loss_fn(*args, **kwargs):
+      del args, kwargs
+      return abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)), {}
+
+    cfg = self.setup_config(enable_checkpointing=True)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(loss_fn)
+    t.fwd_bwd(payload)
+    t.update()
+    saved_params = jax.tree.map(np.asarray, nnx.state(t.model, nnx.Param))
+    t.save_checkpoint(metadata={})
+    t._checkpoint_manager.wait_until_finished()
+
+    t2 = maxtext_engine.MaxTextTrainingEngine(cfg)
+    self.assertEqual(t2.restore_checkpoint(), {})
+    self.assertEqual((t2.train_step, t2.micro_step_count), (1, 0))
+    for got, want in zip(jax.tree.leaves(nnx.state(t2.model, nnx.Param)), jax.tree.leaves(saved_params)):
+      np.testing.assert_array_equal(np.asarray(got), want)
 
   def test_record_and_get_metrics(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
