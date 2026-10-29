@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Qwen3 family of model decoder layers."""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -56,7 +57,7 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
 from maxtext.layers.initializers import nd_dense_init
-from maxtext.layers.linears import DenseGeneral, MlpBlock
+from maxtext.layers.linears import DenseGeneral, MlpBlock, maybe_quantize_shared_fp8_activations
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -766,10 +767,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
+    gdn_inputs = maybe_quantize_shared_fp8_activations(hidden_states, (self.in_proj_qkvz, self.in_proj_ba))
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-    qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+    qkvz = self.in_proj_qkvz(gdn_inputs, out_sharding=flat_sharding)
     # ba: (B, S, 2 * H_v)
-    ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
+    ba = self.in_proj_ba(gdn_inputs, out_sharding=flat_sharding)
 
     # =========================================================================
     # QKVZ and BA Reshaping and Splitting (shared by both paths)

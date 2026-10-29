@@ -63,7 +63,12 @@ from maxtext.layers.embeddings import (
     Gemma4PartialRotaryEmbedding,
 )
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, default_bias_init
-from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
+from maxtext.layers.linears import (
+    DenseGeneral,
+    canonicalize_tuple,
+    maybe_quantize_shared_fp8_activations,
+    normalize_axes,
+)
 from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
@@ -1137,8 +1142,9 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
+    inputs_q_is_kv = inputs_q is inputs_kv
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
-    inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
+    inputs_kv = inputs_q if inputs_q_is_kv else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     use_shared_kv = shared_key is not None and shared_value is not None
@@ -1155,12 +1161,26 @@ class Attention(nnx.Module):
       query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
       key, value = shared_key, shared_value
     else:
-      query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
-      key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
       if self.share_kv_projections:
+        if inputs_q_is_kv:
+          qkv_inputs = maybe_quantize_shared_fp8_activations(inputs_q, (self.query, self.key))
+          query = self.query_projection(qkv_inputs, out_sharding=qkv_sharding)
+          key = self.kv_projection(qkv_inputs, proj_name="key", out_sharding=qkv_sharding)
+        else:
+          query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+          key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
         value = key
       else:
-        value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
+        if inputs_q_is_kv:
+          qkv_inputs = maybe_quantize_shared_fp8_activations(inputs_q, (self.query, self.key, self.value))
+          query = self.query_projection(qkv_inputs, out_sharding=qkv_sharding)
+          key = self.kv_projection(qkv_inputs, proj_name="key", out_sharding=qkv_sharding)
+          value = self.kv_projection(qkv_inputs, proj_name="value", out_sharding=qkv_sharding)
+        else:
+          kv_inputs = maybe_quantize_shared_fp8_activations(inputs_kv, (self.key, self.value))
+          query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+          key = self.kv_projection(kv_inputs, proj_name="key", out_sharding=qkv_sharding)
+          value = self.kv_projection(kv_inputs, proj_name="value", out_sharding=qkv_sharding)
 
     gate = None
     if self.is_qwen3_hybrid:

@@ -56,10 +56,8 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif callable(fn_or_string):
     return fn_or_string
   else:
-    raise ValueError(
-        f"""Don't know how to convert {fn_or_string}
-                         to an activation function"""
-    )
+    raise ValueError(f"""Don't know how to convert {fn_or_string}
+                         to an activation function""")
 
 
 def normalize_axes(axes: Iterable[int], ndim: int) -> tuple[int, ...]:
@@ -173,11 +171,12 @@ def _compute_dot_general_nnx(
       quant_dot_general.lazy_init(inputs, kernel, dimension_numbers, precision=None)
     return quant_dot_general(inputs, kernel, dimension_numbers, precision=None, mutable=["aqt"])
 
+  inputs_ndim = inputs.qvalue.ndim if isinstance(inputs, quantizations.qwix.QArray) else inputs.ndim
   if compute_dtype is None:
-    compute_dtype = inputs.dtype
+    compute_dtype = inputs.qvalue.dtype if isinstance(inputs, quantizations.qwix.QArray) else inputs.dtype
 
   if out_sharding is not None:
-    out_ndim = (inputs.ndim - len(axis)) + (kernel.ndim - len(contract_ind))
+    out_ndim = (inputs_ndim - len(axis)) + (kernel.ndim - len(contract_ind))
     out_sharding = truncate_out_sharding(out_sharding, out_ndim)
 
   if (
@@ -473,13 +472,19 @@ class DenseGeneral(nnx.Module):
     Returns:
       The transformed input.
     """
-    inputs = jnp.asarray(inputs, self.dtype)
-    norm_axis = normalize_axes(self.axis, inputs.ndim)
+    if isinstance(inputs, quantizations.qwix.QArray):
+      inputs_shape = inputs.qvalue.shape
+      inputs_ndim = inputs.qvalue.ndim
+    else:
+      inputs = jnp.asarray(inputs, self.dtype)
+      inputs_shape = inputs.shape
+      inputs_ndim = inputs.ndim
+    norm_axis = normalize_axes(self.axis, inputs_ndim)
 
     for i, ax in enumerate(norm_axis):
-      if inputs.shape[ax] != self.in_features_shape[i]:
+      if inputs_shape[ax] != self.in_features_shape[i]:
         raise ValueError(
-            f"Input dimension {inputs.shape[ax]} at axis {ax} "
+            f"Input dimension {inputs_shape[ax]} at axis {ax} "
             f"does not match expected input feature size {self.in_features_shape[i]}"
         )
 
@@ -574,6 +579,102 @@ class DenseGeneral(nnx.Module):
       bias = _align_bias_with_output(bias, output, self.shard_mode, self.debug_sharding)
       output += bias
     return output
+
+  def requantize_blockwise_to_per_channel(self) -> bool:
+    """Converts a block-wise FP8 kernel and scale in-place to per-output-channel FP8."""
+    if self.kernel_scale is None or quantizations.in_serve_mode(self.quant) or len(self.axis) != 1:
+      return False
+    kernel = _extract_param_value(self.kernel)
+    kernel_scale = _extract_param_value(self.kernel_scale)
+    if not is_fp8_dtype(getattr(kernel, "dtype", None)):
+      return False
+    if quantizations.resolve_fp8_scale_scheme(kernel.shape, kernel_scale.shape, 0) != "block_wise":
+      return False
+    q_kernel, per_channel_scale = quantizations.requantize_blockwise_fp8_to_per_channel(
+        kernel, kernel_scale, contract_axis=0
+    )
+    padded_kernel_axes = self.kernel_axes + (None,) * (len(kernel.shape) - len(self.kernel_axes))
+    resolved_scale_axes = tuple(
+        ax if s_dim > 1 else None for ax, s_dim in zip(padded_kernel_axes, per_channel_scale.shape)
+    )
+    self.kernel[...] = q_kernel
+    self.scale_axes = resolved_scale_axes
+    self.kernel_scale = nnx.Param(per_channel_scale, sharding=resolved_scale_axes)
+    self.block_size = None
+    return True
+
+
+def _extract_param_value(param):
+  """Extracts the underlying array value from an nnx.Param or State wrapper."""
+  if hasattr(param, "get_value"):
+    val = param.get_value()
+  elif isinstance(param, (dict, nnx.State)) and "value" in param:
+    val = param["value"]
+  else:
+    val = getattr(param, "value", param)
+  if hasattr(val, "value"):
+    val = val.value
+  return val
+
+
+def maybe_quantize_shared_fp8_activations(inputs: Any, modules: Sequence[Any]):
+  """Pre-quantizes `inputs` once into a `qwix.QArray` if all sibling `DenseGeneral`
+  modules use `ServeFp8WeightQuantization` with identical activation quantization settings.
+  """
+  if len(modules) < 2 or isinstance(inputs, quantizations.qwix.QArray):
+    return inputs
+
+  shared_config = None
+  for m in modules:
+    if (
+        not isinstance(m, DenseGeneral)
+        or not isinstance(m.quant, quantizations.ServeFp8WeightQuantization)
+        or quantizations.in_serve_mode(m.quant)
+        or m.kernel_scale is None
+        or len(m.axis) != 1
+    ):
+      return inputs
+    kernel = _extract_param_value(m.kernel)
+    kernel_scale = _extract_param_value(m.kernel_scale)
+    if not is_fp8_dtype(getattr(kernel, "dtype", None)):
+      return inputs
+    norm_axis = normalize_axes(m.axis, inputs.ndim)
+    lhs_axis = norm_axis[0]
+    rhs_axis = 0
+    scheme = quantizations.resolve_fp8_scale_scheme(kernel.shape, kernel_scale.shape, rhs_axis)
+    calib = m.quant.act_calibration_method
+    if quantizations.is_static_calibration(calib) or scheme in ("per_tensor", "per_channel"):
+      eff_scheme = "per_channel"
+      rhs_block_size = None
+    else:
+      eff_scheme = "block_wise"
+      rhs_block_size = m.block_size[rhs_axis] if isinstance(m.block_size, (list, tuple)) else m.block_size
+      if rhs_block_size is None:
+        rhs_block_size = kernel.shape[rhs_axis] // kernel_scale.shape[rhs_axis]
+    cfg_key = (lhs_axis, eff_scheme, rhs_block_size, m.dtype, calib)
+    if shared_config is None:
+      shared_config = cfg_key
+    elif shared_config != cfg_key:
+      return inputs
+
+  lhs_axis, eff_scheme, rhs_block_size, compute_dtype, calib = shared_config
+  return quantizations.quantize_fp8_activations(
+      inputs,
+      lhs_axis=lhs_axis,
+      scheme=eff_scheme,
+      rhs_block_size=rhs_block_size,
+      compute_dtype=compute_dtype,
+      act_calibration_method=calib,
+  )
+
+
+def requantize_model_dense_fp8_to_per_channel(model: nnx.Module) -> int:
+  """Converts all block-wise FP8 `DenseGeneral` layers in `model` to per-channel FP8."""
+  count = 0
+  for _, node in nnx.iter_graph(model):
+    if isinstance(node, DenseGeneral) and node.requantize_blockwise_to_per_channel():
+      count += 1
+  return count
 
 
 class Dropout(nnx.Dropout):
@@ -821,10 +922,13 @@ class MlpBlock(nnx.Module):
         y = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x[:, :, idx, ...]))
         activations.append(y)
     else:
-      for idx, act_fn in enumerate(self.activations):
+      dense_modules = [
+          getattr(self, "wi" if len(self.activations) == 1 else f"wi_{idx}") for idx in range(len(self.activations))
+      ]
+      shared_inputs = maybe_quantize_shared_fp8_activations(inputs, dense_modules)
+      for idx, (act_fn, module) in enumerate(zip(self.activations, dense_modules)):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-        module = getattr(self, dense_name)
-        x = module(inputs, out_sharding=intermediate_sharding)
+        x = module(shared_inputs, out_sharding=intermediate_sharding)
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
