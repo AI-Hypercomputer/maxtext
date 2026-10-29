@@ -37,7 +37,7 @@ from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 import jax.numpy as jnp
-from maxtext.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary
+from maxtext.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary, uses_maxtext_vllm_adapter
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
@@ -175,19 +175,6 @@ def _as_dict(value: Any) -> dict:
 
     return OmegaConf.to_container(value, resolve=True)
   return {}
-
-
-def uses_maxtext_vllm_adapter(config: Any) -> bool:
-  """Returns whether vLLM is configured to instantiate MaxTextForCausalLM."""
-  overrides = getattr(config, "vllm_hf_overrides", None)
-  if isinstance(overrides, str):
-    return "MaxTextForCausalLM" in overrides
-  if isinstance(overrides, dict):
-    architectures = overrides.get("architectures", ())
-    if isinstance(architectures, str):
-      architectures = (architectures,)
-    return "MaxTextForCausalLM" in architectures
-  return False
 
 
 def requires_maxtext_scanned_weight_unroll(config: Any) -> bool:

@@ -68,6 +68,34 @@ def pad_to_tpu_lanes(dim: int, lane_size: int = DEFAULT_TPU_NUM_LANES) -> int:
   return ((dim + lane_size - 1) // lane_size) * lane_size
 
 
+def get_moe_intermediate_size(hf_config: Any) -> Optional[int]:
+  """Returns the per-expert MLP dimension of a Hugging Face config, or None for a dense model.
+
+  Most MoE configs store it as `moe_intermediate_size`. Models whose MLPs are all MoE (e.g. GPT-OSS,
+  Mixtral) have no such field; their per-expert MLP dimension is `intermediate_size`.
+  """
+  moe_intermediate_size = getattr(hf_config, "moe_intermediate_size", None)
+  if moe_intermediate_size is not None:
+    return moe_intermediate_size
+  num_experts = getattr(hf_config, "num_local_experts", None) or getattr(hf_config, "num_experts", None)
+  if num_experts is not None and num_experts > 1:
+    return getattr(hf_config, "intermediate_size", None)
+  return None
+
+
+def uses_maxtext_vllm_adapter(config: Any) -> bool:
+  """Returns whether vLLM is configured to instantiate MaxTextForCausalLM."""
+  overrides = getattr(config, "vllm_hf_overrides", None)
+  if isinstance(overrides, str):
+    return "MaxTextForCausalLM" in overrides
+  if isinstance(overrides, dict):
+    architectures = overrides.get("architectures", ())
+    if isinstance(architectures, str):
+      architectures = (architectures,)
+    return "MaxTextForCausalLM" in architectures
+  return False
+
+
 def compute_padded_moe_mlp_dim(
     hidden_size: Optional[int],
     moe_mlp_tp_size: int,
@@ -80,7 +108,7 @@ def compute_padded_moe_mlp_dim(
   `2 * num_lanes * moe_mlp_tp_size`.
 
   Args:
-    hidden_size: Unpadded MoE intermediate size (`moe_intermediate_size`).
+    hidden_size: Unpadded MoE intermediate size (see `get_moe_intermediate_size`).
     moe_mlp_tp_size: TP degree across the MLP dimension (`tp * attn_dp`).
     num_lanes: TPU vector-register lane count. Pass the runtime-probed
       `pltpu.get_tpu_info().num_lanes` when a TPU handle is available; the default

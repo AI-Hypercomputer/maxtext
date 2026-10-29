@@ -24,7 +24,11 @@ from jax.sharding import Mesh
 import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
-from maxtext.integration.vllm.convert_utils import DEFAULT_TPU_NUM_LANES, compute_padded_moe_mlp_dim
+from maxtext.integration.vllm.convert_utils import (
+    DEFAULT_TPU_NUM_LANES,
+    compute_padded_moe_mlp_dim,
+    get_moe_intermediate_size,
+)
 from maxtext.integration.vllm.hybrid_cache_utils import (
     build_qwen_gdn_cache_layout,
     call_with_supported_kwargs,
@@ -126,7 +130,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       if hasattr(vllm_config.model_config.hf_config, "text_config")
       else vllm_config.model_config.hf_config
   )
-  hidden_size = getattr(hf_config, "moe_intermediate_size", None)
+  hidden_size = get_moe_intermediate_size(hf_config)
   try:
     num_lanes = pltpu.get_tpu_info().num_lanes
   except Exception:  # pylint: disable=broad-exception-caught

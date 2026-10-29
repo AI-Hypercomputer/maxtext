@@ -15,6 +15,7 @@
 """Tests for MaxText convert_utils functions."""
 
 import os
+from types import SimpleNamespace
 import unittest
 
 import jax.numpy as jnp
@@ -25,6 +26,7 @@ from maxtext.integration.vllm.convert_utils import (
     _interleave_moe_weights,
     compute_padded_moe_mlp_dim,
     DEFAULT_TPU_NUM_LANES,
+    get_moe_intermediate_size,
     is_verify_weights_enabled,
     pad_to_tpu_lanes,
     resolve_prefuse_moe_weights,
@@ -163,6 +165,24 @@ class ConvertUtilsTest(unittest.TestCase):
     self.assertEqual(compute_padded_moe_mlp_dim(1024, 4, lanes), 1024)
     self.assertEqual(compute_padded_moe_mlp_dim(2560, 2, lanes), 2560)
     self.assertIsNone(compute_padded_moe_mlp_dim(None, 4, lanes))
+
+  def test_get_moe_intermediate_size(self):
+    # Qwen3-30B-A3B: the expert MLP dim has its own field, distinct from the dense one.
+    qwen3_moe = SimpleNamespace(moe_intermediate_size=768, intermediate_size=6144, num_experts=128)
+    self.assertEqual(get_moe_intermediate_size(qwen3_moe), 768)
+    # GPT-OSS-20B: every MLP is an MoE, so the expert MLP dim is `intermediate_size`.
+    gpt_oss = SimpleNamespace(intermediate_size=2880, num_local_experts=32)
+    self.assertEqual(get_moe_intermediate_size(gpt_oss), 2880)
+    # Dense models have no expert MLP dim.
+    self.assertIsNone(get_moe_intermediate_size(SimpleNamespace(intermediate_size=14336)))
+    self.assertIsNone(get_moe_intermediate_size(SimpleNamespace(intermediate_size=14336, num_local_experts=1)))
+
+  def test_gpt_oss_moe_mlp_dim_is_padded_for_gmm_v2(self):
+    # 2880 / tp is not a multiple of 2 * lanes for any tp, so GPT-OSS always needs padding.
+    lanes = DEFAULT_TPU_NUM_LANES
+    self.assertEqual(compute_padded_moe_mlp_dim(2880, 1, lanes), 3072)
+    self.assertEqual(compute_padded_moe_mlp_dim(2880, 4, lanes), 3072)
+    self.assertEqual(compute_padded_moe_mlp_dim(2880, 8, lanes), 4096)
 
   def test_is_verify_weights_enabled(self):
     orig = os.environ.get("VERIFY_WEIGHTS")

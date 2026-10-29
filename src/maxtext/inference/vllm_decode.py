@@ -41,6 +41,7 @@ from maxtext.common.common_types import Config
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+from maxtext.integration.vllm.convert_utils import uses_maxtext_vllm_adapter
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
@@ -125,6 +126,14 @@ def create_vllm_llm(config: Config, **overrides: Any) -> LLM:
   }
 
   if config.load_parameters_path:
+    if not uses_maxtext_vllm_adapter(config):
+      # Only MaxTextForCausalLM reads load_parameters_path. vLLM's own model implementation loads the full
+      # Hugging Face checkpoint of `model` through host memory instead (e.g. ~40 GB for gpt-oss-20b in BF16).
+      max_logging.warning(
+          f"load_parameters_path={config.load_parameters_path} is ignored and vLLM will load the Hugging Face "
+          f"checkpoint of {config.tokenizer_path} instead, which can run out of host memory. Set "
+          "vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' to decode the MaxText checkpoint."
+      )
     vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = config.load_parameters_path
   else:
     vllm_args["load_format"] = "dummy"
@@ -230,17 +239,9 @@ def decode_with_tunix(
     mesh: The JAX mesh for parallelism.
   """
   # Wrap the model for Tunix
-  use_no_op_mappings = False
-  if hasattr(config, "vllm_hf_overrides") and config.vllm_hf_overrides:
-    overrides = config.vllm_hf_overrides
-    if isinstance(overrides, str) and "MaxTextForCausalLM" in overrides:
-      use_no_op_mappings = True
-    elif isinstance(overrides, dict) and "MaxTextForCausalLM" in overrides.get("architectures", []):
-      use_no_op_mappings = True
-
   tunix_model = TunixMaxTextAdapter(
       base_model=model,
-      use_no_op_mappings=use_no_op_mappings,
+      use_no_op_mappings=uses_maxtext_vllm_adapter(config),
   )
 
   # Load the tokenizer
