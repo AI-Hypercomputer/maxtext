@@ -190,7 +190,17 @@ weight_sparsity_m: null
 weight_sparsity_update_step: 10
 # The first number of steps before updating the sparsity masks.
 weight_sparsity_start_step: 50
+quantization_multipass_mode: ""
+quantization_dlhs_multipass_mode: ""
+quantization_drhs_multipass_mode: ""
+quantization_exclude_module_path: ""
+quantization_start_step: 0
+quantization_end_step: -1
+quantization_target_scan_indices: ""
+quantization_rules_json: ""
+quantization_target_roles: ["actor", "student"]
 # Whether to use Transformer Engine's collective GEMM overlap algorithm with quantization in MLP layers. Note: only valid with tensor-sequence parallelism.
+
 # "disabled" means no overlap, "mlp" means to only overlap up and down projections in MLP layers,
 # and "full" means to overlap MLP projections as well as the QKV and output projection layers in attention.
 te_comm_gemm_overlap: "disabled"

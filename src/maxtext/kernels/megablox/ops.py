@@ -122,18 +122,23 @@ def gmm(
     # run off-TPU (e.g. equiv_chunk_test) pass interpret based on their target mesh.
     interpret = False
   quantization_rule = None
-  if use_qwix_quantization:
+  if use_qwix_quantization or qwix_rule is not None:
     # 1. for non-batchsplit, retrieve rule ("gmm") via qwix interception
     #   get_current_rule has to be called outside of the _gmm_fwd function.
     # 2. for batchsplit, explicitly pass the rule
     quantization_rule = qwix_rule if qwix_rule else qpl.get_current_rule("gmm")
-    # Only "fp8_full" defines a Qwix rule for GMM.
+    # Only "fp8_full" or "qwix" defines a Qwix rule for GMM.
     # quantization_rule is None when:
     # 1. Quantization scheme does not target GMM (e.g., "fp8", "int8").
     # 2. Module is excluded from quantization (e.g., MTP when quantize_mtp=False).
     if quantization_rule and not isinstance(quantization_rule, qwix.QtRule):
       raise ValueError("Expect a QtRule for quantized training.")
+    if quantization_rule and hasattr(qwix._src.qconfig, "is_rule_active_in_context"):
+      active = qwix._src.qconfig.is_rule_active_in_context(quantization_rule)
+      if isinstance(active, bool) and not active:
+        quantization_rule = None
   else:
+
     # Handcraft a rule that matches the AQT's behavior.
     if lhs_quantize_dtype or rhs_quantize_dtype:
       quantization_rule = qwix.QtRule(
@@ -320,35 +325,64 @@ def _gmm_fwd(
     rhs = _fwd_gather_weight(rhs, weight_gather_axes, gathered_shape=flat_fsdp_shard)
 
   # Backend Execution Routing
-  if use_tokamax_backend and not use_gmm_v2:
-    out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization)
-  elif use_tokamax_backend and use_gmm_v2:
-    out = _fwd_run_tokamax_v2(
-        lhs,
-        rhs,
+  def _run_fwd_backend(curr_lhs, curr_rhs, curr_existing_out, curr_partial_sum):
+    if use_tokamax_backend and not use_gmm_v2:
+      return _fwd_run_tokamax_v1(
+          curr_lhs, curr_rhs, group_sizes, preferred_element_type, transpose_rhs, use_manual_quantization
+      )
+    if use_tokamax_backend and use_gmm_v2:
+      return _fwd_run_tokamax_v2(
+          curr_lhs,
+          curr_rhs,
+          group_sizes,
+          preferred_element_type,
+          tiling,
+          use_gmm_v2_heuristic_tiling,
+          group_offset,
+          curr_partial_sum,
+          transpose_rhs,
+          quantization_rule,
+          out_is_3d=out_is_3d,
+      )
+    return _fwd_run_megablox(
+        curr_lhs,
+        curr_rhs,
         group_sizes,
         preferred_element_type,
         tiling,
-        use_gmm_v2_heuristic_tiling,
         group_offset,
-        partial_sum,
-        transpose_rhs,
-        quantization_rule,
-        out_is_3d=out_is_3d,
-    )
-  else:
-    out = _fwd_run_megablox(
-        lhs,
-        rhs,
-        group_sizes,
-        preferred_element_type,
-        tiling,
-        group_offset,
-        existing_out,
+        curr_existing_out,
         transpose_rhs,
         interpret,
         lhs_vma_axes,
     )
+
+  multipass_mode = (
+      (quantization_rule.additional_qt_config or {}).get("multipass_mode")
+      if quantization_rule and quantization_rule.additional_qt_config
+      else None
+  )
+  if multipass_mode is not None and not isinstance(lhs, qpl.QArray) and not isinstance(rhs, qpl.QArray):
+    mp_cfg = _resolve_gmm_multipass_config(multipass_mode, getattr(quantization_rule, "tile_size", None))
+    lhs_passes = qwix.decompose_multipass_operand(
+        lhs, mp_cfg.lhs, channelwise_axes=() if quantization_rule.disable_channelwise_axes else (0,)
+    )
+    rhs_ch_axes = () if quantization_rule.disable_channelwise_axes else ((1,) if transpose_rhs else (2,))
+    rhs_passes = qwix.decompose_multipass_operand(rhs, mp_cfg.rhs, channelwise_axes=rhs_ch_axes)
+    out = None
+    for pass_idx, (i, j) in enumerate(mp_cfg.get_active_terms()):
+      lp, rp = lhs_passes[i], rhs_passes[j]
+      l_arr = qwix.dequantize(lp).astype(lhs.dtype) if isinstance(lp, qpl.QArray) else lp
+      r_arr = qwix.dequantize(rp).astype(rhs.dtype) if isinstance(rp, qpl.QArray) else rp
+      term = _run_fwd_backend(
+          l_arr,
+          r_arr,
+          existing_out if pass_idx == 0 else None,
+          partial_sum if pass_idx == 0 else None,
+      )
+      out = term if out is None else out + term
+  else:
+    out = _run_fwd_backend(lhs, rhs, existing_out, partial_sum)
 
   if tc_unsort_cfg is not None:
     cfg = tc_unsort_cfg
@@ -384,7 +418,10 @@ def _fwd_quantize_activation_and_weight(
     transpose_rhs: bool,
     rhs_is_flat2d: bool = False,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
-  """Handles act and weight quantization for GMM forward inputs."""
+  """Handles act and weight sparsity and quantization for GMM forward inputs."""
+  if (quantization_rule.additional_qt_config or {}).get("multipass_mode") is not None:
+    return lhs, rhs
+
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
     lhs = qpl.quantize(
         lhs,
@@ -913,7 +950,6 @@ def _bwd_prepare_inputs(
     quantization_rule: qwix.QtRule | None,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray, jnp.ndarray, jnp.ndarray]:
   """Prepares backward operands."""
-
   # dlhs_dout and drhs_dout can be different when quantization is enabled.
   dlhs_dout = grad
   drhs_dout = grad
@@ -937,13 +973,18 @@ def _bwd_prepare_inputs(
 
   # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
   # in the residual tuple. In BWD, we explicitly quantize lhs.
-  if quantization_rule and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
+  if (
+      quantization_rule
+      and quantization_rule.act_qtype
+      and not isinstance(lhs, qpl.QArray)
+      and not (quantization_rule.additional_qt_config or {}).get("multipass_mode")
+  ):
     lhs = qpl.quantize(
         lhs,
         quantization_rule.act_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
         # pyrefly: ignore[bad-argument-type]
-        calibration_method=quantization_rule.act_calibration_method,
+        calibration_method=quantization_rule.act_calibration_method or "absmax",
     )
 
   # Assume channelwise scale on lhs m, lhs_transpose[k, m] @ drhs_out[m, n] = drhs[g, k, n]
@@ -959,12 +1000,41 @@ def _bwd_prepare_inputs(
   return dlhs_dout, drhs_dout, lhs, rhs
 
 
+def _resolve_gmm_multipass_config(multipass_mode, tile_size=None) -> qwix.MultipassConfig:
+  """Resolves a multipass mode preset, shorthand ('2xint8'), or MultipassConfig."""
+  resolved = qwix.resolve_multipass_config(multipass_mode, tile_size=tile_size)
+  if resolved is not None:
+    return resolved
+  if isinstance(multipass_mode, str) and len(parts := multipass_mode.split("x", 1)) == 2 and parts[0].isdigit():
+    op_cfg = qwix.OperandMultipassConfig(pass_dtypes=(parts[1],) * int(parts[0]), tile_size=tile_size)
+    return qwix.MultipassConfig(lhs=op_cfg, rhs=op_cfg)
+  raise ValueError(f"Unsupported GMM multipass_mode: {multipass_mode!r}")
+
+
 def _bwd_quantize_gradient(
     dlhs_dout: jnp.ndarray | qpl.QArray,
     drhs_dout: jnp.ndarray | qpl.QArray,
     quantization_rule: qwix.QtRule,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
-  """Applies backward quantization to incoming gradients."""
+  """Applies backward quantization or multi-pass reconstruction to incoming gradients."""
+  add_cfg = quantization_rule.additional_qt_config or {}
+  tile_size = getattr(quantization_rule, "tile_size", None)
+  if (dlhs_mp := add_cfg.get("dlhs_multipass_mode")) is not None and not isinstance(dlhs_dout, qpl.QArray):
+    mp_cfg = _resolve_gmm_multipass_config(dlhs_mp, tile_size=tile_size)
+    dlhs_dout = qwix.reconstruct_multipass_operand(
+        qwix.decompose_multipass_operand(
+            dlhs_dout, mp_cfg.lhs, channelwise_axes=() if quantization_rule.disable_channelwise_axes else (0,)
+        )
+    )
+  if (drhs_mp := add_cfg.get("drhs_multipass_mode")) is not None and not isinstance(drhs_dout, qpl.QArray):
+    mp_cfg = _resolve_gmm_multipass_config(drhs_mp, tile_size=tile_size)
+    drhs_dout = qwix.reconstruct_multipass_operand(
+        qwix.decompose_multipass_operand(
+            drhs_dout,
+            mp_cfg.lhs,
+            channelwise_axes=() if quantization_rule.disable_channelwise_axes else tuple(range(1, drhs_dout.ndim)),
+        )
+    )
   if quantization_rule.bwd_qtype:
     bwd_cal = quantization_rule.bwd_calibration_method
     share_quantized_grad = dlhs_dout is drhs_dout and quantizations.is_static_calibration(bwd_cal)

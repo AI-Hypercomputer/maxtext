@@ -99,6 +99,7 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  QWIX = "qwix"
   TE_NO_QUANT = "te_no_quant"
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
@@ -649,6 +650,42 @@ class Quantization(BaseModel):
   weight_sparsity_start_step: int = Field(
       50,
       description=("The first number of steps before updating the sparsity masks."),
+  )
+  quantization_multipass_mode: str = Field(
+      "",
+      description="Qwix multi-pass mode for forward matmuls (e.g. '2xfp8_e4m3', '3xbf16', or JSON MultipassConfig).",
+  )
+  quantization_dlhs_multipass_mode: str = Field(
+      "",
+      description="Qwix multi-pass mode for backward activation-gradient (dLHS) matmuls.",
+  )
+  quantization_drhs_multipass_mode: str = Field(
+      "",
+      description="Qwix multi-pass mode for backward weight-gradient (dRHS) matmuls.",
+  )
+  quantization_exclude_module_path: str = Field(
+      "",
+      description="Regex of module paths to exclude from Qwix quantization rules.",
+  )
+  quantization_start_step: int = Field(
+      0,
+      description="First training step (inclusive) at which Qwix quantization rules are active.",
+  )
+  quantization_end_step: int = Field(
+      -1,
+      description="Last training step (exclusive) at which Qwix quantization rules are active (-1 for no limit).",
+  )
+  quantization_target_scan_indices: str = Field(
+      "",
+      description="Comma-separated or range (e.g. '0,2,4-7') of scanned decoder layer indices to target.",
+  )
+  quantization_rules_json: str = Field(
+      "",
+      description="Optional JSON list of Qwix QtRule overrides for fine-grained per-layer/per-op quantization.",
+  )
+  quantization_target_roles: list[str] = Field(
+      default_factory=lambda: ["actor", "student"],
+      description="Model roles (e.g. 'actor', 'student') to quantize in multi-model RL/distillation workloads.",
   )
   te_comm_gemm_overlap: str = Field(
       TeCommGemmOverlapPolicy.DISABLED.value,

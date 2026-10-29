@@ -1152,16 +1152,155 @@ def _drhs_grad_calibration_override(config: Config) -> dict:
   return {"drhs_grad_calibration_method": m} if m else {}
 
 
-def get_fp8_full_qwix_rule_w_sparsity(config: Config):
-  """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
-  sparsity_rule = None
-  if config.weight_sparsity_n and config.weight_sparsity_m:
-    sparsity_rule = sparsity.SparsityRule(
-        weight_sparsity_n=config.weight_sparsity_n,
-        weight_sparsity_m=config.weight_sparsity_m,
-        weight_sparsity_update_step=config.weight_sparsity_update_step,
-        weight_sparsity_start_step=config.weight_sparsity_start_step,
+def parse_scan_indices(spec: str | Sequence[int] | None) -> tuple[int, ...] | None:
+  """Parses a comma-separated list/range string (e.g. '0,2,4-7') into a tuple of scan indices."""
+  if not spec:
+    return None
+  if not isinstance(spec, str):
+    return tuple(int(i) for i in spec)
+  indices: list[int] = []
+  for part in spec.split(","):
+    part = part.strip()
+    if not part:
+      continue
+    if "-" in part:
+      start_s, end_s = part.split("-", 1)
+      indices.extend(range(int(start_s), int(end_s) + 1))
+    else:
+      indices.append(int(part))
+  return tuple(indices) if indices else None
+
+
+def parse_multipass_mode(spec: str | dict | None):
+  """Parses a multipass mode string or JSON/dict into a Qwix multipass mode or MultipassConfig."""
+  if not spec:
+    return None
+  if isinstance(spec, str):
+    stripped = spec.strip()
+    if not stripped:
+      return None
+    if not stripped.startswith("{"):
+      return stripped
+    spec = json.loads(stripped)
+  if isinstance(spec, dict):
+
+    def _to_operand_cfg(d: dict | None):
+      if not d:
+        return qwix.OperandMultipassConfig()
+      raw_passes = d.get("pass_dtypes", d.get("passes", ()))
+      pass_dtypes = tuple(qwix.DtypeSpec(**p) if isinstance(p, dict) else p for p in raw_passes)
+      num_passes = int(d.get("num_passes", len(pass_dtypes) or 1))
+      if len(pass_dtypes) == 1 and num_passes > 1:
+        pass_dtypes = pass_dtypes * num_passes
+      return qwix.OperandMultipassConfig(
+          pass_dtypes=pass_dtypes or (jnp.float8_e4m3fn,) * num_passes,
+          tile_size=d.get("tile_size"),
+          rounding_mode=d.get("rounding_mode", "nearest"),
+          flush_subnormals=bool(d.get("flush_subnormals", False)),
+          calibration_method=d.get("calibration_method", "absmax"),
+      )
+
+    active_terms = spec.get("active_terms")
+    if active_terms is not None:
+      active_terms = tuple(tuple(pair) for pair in active_terms)
+    return qwix.MultipassConfig(
+        lhs=_to_operand_cfg(spec.get("lhs")),
+        rhs=_to_operand_cfg(spec.get("rhs")),
+        active_terms=active_terms,
     )
+  return spec
+
+
+def _get_qwix_rule_scoping_kwargs(config: Config) -> dict:
+  """Returns QtRule scoping kwargs (exclude_module_path, start_step, end_step, target_scan_indices)."""
+  valid_fields = {f.name for f in qwix.QtRule.__dataclass_fields__.values()}
+  scoping = {}
+  exclude_path = getattr(config, "quantization_exclude_module_path", "") or None
+  start_step = getattr(config, "quantization_start_step", 0)
+  end_step = getattr(config, "quantization_end_step", -1)
+  scan_indices = parse_scan_indices(getattr(config, "quantization_target_scan_indices", ""))
+
+  if exclude_path and "exclude_module_path" in valid_fields:
+    scoping["exclude_module_path"] = exclude_path
+  if start_step > 0 and "start_step" in valid_fields:
+    scoping["start_step"] = start_step
+  if end_step >= 0 and "end_step" in valid_fields:
+    scoping["end_step"] = end_step
+  if scan_indices is not None and "target_scan_indices" in valid_fields:
+    scoping["target_scan_indices"] = scan_indices
+  return scoping
+
+
+def _get_qwix_multipass_overrides(config: Config) -> dict:
+  """Returns multipass overrides for QtRule.additional_qt_config."""
+  overrides = {}
+  if fwd_mp := parse_multipass_mode(getattr(config, "quantization_multipass_mode", "")):
+    overrides["multipass_mode"] = fwd_mp
+  if dlhs_mp := parse_multipass_mode(getattr(config, "quantization_dlhs_multipass_mode", "")):
+    overrides["dlhs_multipass_mode"] = dlhs_mp
+  if drhs_mp := parse_multipass_mode(getattr(config, "quantization_drhs_multipass_mode", "")):
+    overrides["drhs_multipass_mode"] = drhs_mp
+  return overrides
+
+
+def _parse_custom_qt_rules(config: Config) -> list[qwix.QtRule]:
+  """Parses config.quantization_rules_json into a list of qwix.QtRule instances."""
+  raw_rules = json.loads(config.quantization_rules_json)
+  if isinstance(raw_rules, dict):
+    raw_rules = [raw_rules]
+  dtype_map = {
+      "int4": jnp.int4,
+      "int8": jnp.int8,
+      "fp4": jnp.float4_e2m1fn,
+      "fp4_e2m1": jnp.float4_e2m1fn,
+      "fp8": jnp.float8_e4m3fn,
+      "fp8_e4m3": jnp.float8_e4m3fn,
+      "fp8_e4m3fn": jnp.float8_e4m3fn,
+      "fp8_e5m2": jnp.float8_e5m2,
+      "bf16": jnp.bfloat16,
+      "bfloat16": jnp.bfloat16,
+      "fp16": jnp.float16,
+      "float16": jnp.float16,
+  }
+  rules = []
+  scoping_defaults = _get_qwix_rule_scoping_kwargs(config)
+  for item in raw_rules:
+    item = dict(item)
+    for k in ("weight_qtype", "act_qtype", "bwd_qtype"):
+      if k in item and isinstance(item[k], str):
+        item[k] = dtype_map.get(item[k], item[k])
+    if "op_names" in item and isinstance(item["op_names"], list):
+      item["op_names"] = tuple(item["op_names"])
+    if "target_scan_indices" in item:
+      item["target_scan_indices"] = parse_scan_indices(item["target_scan_indices"])
+    add_cfg = dict(item.pop("additional_qt_config", None) or {})
+    for mp_key in ("multipass_mode", "dlhs_multipass_mode", "drhs_multipass_mode"):
+      if mp_key in item:
+        add_cfg[mp_key] = parse_multipass_mode(item.pop(mp_key))
+      elif mp_key in add_cfg:
+        add_cfg[mp_key] = parse_multipass_mode(add_cfg[mp_key])
+    if add_cfg:
+      item["additional_qt_config"] = add_cfg
+    for k, v in scoping_defaults.items():
+      item.setdefault(k, v)
+    rules.append(qwix.QtRule(**item))
+  return rules
+
+
+def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+  """Returns Qwix quantization rules for fp8_full with optional sparsity and multipass."""
+  sparsity_rule = (
+      sparsity.SparsityRule(
+          weight_sparsity_n=config.weight_sparsity_n,
+          weight_sparsity_m=config.weight_sparsity_m,
+          weight_sparsity_update_step=config.weight_sparsity_update_step,
+          weight_sparsity_start_step=config.weight_sparsity_start_step,
+      )
+      if config.weight_sparsity_n and config.weight_sparsity_m
+      else None
+  )
+  scoping_kwargs = _get_qwix_rule_scoping_kwargs(config)
+  mp_overrides = _get_qwix_multipass_overrides(config)
 
   rules = []
   if not config.quantize_router_proj:
@@ -1176,6 +1315,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
       logits_drhs_override = {"drhs_grad_calibration_method": logits_bwd_calib}
     else:
       logits_drhs_override = _drhs_grad_calibration_override(config)
+    logits_add_cfg = {**logits_drhs_override, **mp_overrides}
     rules.append(
         qwix.QtRule(
             module_path="decoder/logits_dense.*",
@@ -1185,8 +1325,9 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
             weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
             act_calibration_method=logits_calib or config.act_quantization_calibration_method,
             bwd_calibration_method=logits_bwd_calib or config.bwd_quantization_calibration_method,
-            additional_qt_config=logits_drhs_override or None,
+            additional_qt_config=logits_add_cfg or None,
             op_names=("dot_general",),
+            **scoping_kwargs,
         )
     )
 
@@ -1206,8 +1347,9 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
             weight_calibration_method=config.weight_quantization_calibration_method,
             act_calibration_method=config.act_quantization_calibration_method,
             bwd_calibration_method=config.bwd_quantization_calibration_method,
-            additional_qt_config={"sparsity_rule": sparsity_rule},
+            additional_qt_config={"sparsity_rule": sparsity_rule, **mp_overrides},
             op_names=("dot_general",),
+            **scoping_kwargs,
         )
     )
 
@@ -1220,23 +1362,41 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           weight_calibration_method=config.weight_quantization_calibration_method,
           act_calibration_method=config.act_quantization_calibration_method,
           bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule, **_drhs_grad_calibration_override(config)},
+          additional_qt_config={
+              "sparsity_rule": sparsity_rule,
+              **_drhs_grad_calibration_override(config),
+              **mp_overrides,
+          },
           op_names=("dot_general", "gmm", "ragged_dot"),
+          **scoping_kwargs,
       )
   )
   return rules
 
 
 def get_quantization_rule(config: Config):
-  """Returns a list of qwix.QtRule from `dtype`."""
+  """Returns a list of qwix.QtRule from `config`."""
+  if getattr(config, "quantization_rules_json", ""):
+    return _parse_custom_qt_rules(config)
 
-  def make_qt_rule(dtype) -> list[qwix.QtRule]:
+  scoping_kwargs = _get_qwix_rule_scoping_kwargs(config)
+  mp_overrides = _get_qwix_multipass_overrides(config)
+  extra_qt_cfg = {
+      **_drhs_grad_calibration_override(config),
+      **mp_overrides,
+  }
+
+  def make_qt_rule(dtype, op_names=("dot_general",)) -> list[qwix.QtRule]:
     rules = []
     if not config.quantize_router_proj:
       rules.append(_get_router_proj_unquantized_rule())
+    paths = ["decoder/.*layers.*"]
+    if config.quantize_mtp:
+      paths.append("mtp_block/.*")
+    module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
     rules.append(
         qwix.QtRule(
-            module_path="decoder/.*layers.*",
+            module_path=module_path,
             weight_qtype=dtype,
             act_qtype=dtype,
             bwd_qtype=dtype,
@@ -1244,7 +1404,9 @@ def get_quantization_rule(config: Config):
                 1 / config.qwix_bwd_weight_grad_tile_count if config.qwix_bwd_weight_grad_tile_count > 1 else None
             ),
             disable_channelwise_axes=False,
-            op_names=("dot_general",),
+            additional_qt_config=extra_qt_cfg or None,
+            op_names=op_names,
+            **scoping_kwargs,
         )
     )
     return rules
@@ -1267,8 +1429,10 @@ def get_quantization_rule(config: Config):
 
     case "fp8_full":
       return get_fp8_full_qwix_rule_w_sparsity(config)
-    case "fp8_gpu":
-      return make_qt_rule(jnp.float8_e4m3fn)
+
+    case "qwix":
+      return make_qt_rule(None, op_names=("dot_general", "einsum", "gmm", "ragged_dot"))
+
     case "":
       return None
 
@@ -1276,7 +1440,7 @@ def get_quantization_rule(config: Config):
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
-    case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+    case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full" | "qwix":
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))
@@ -1285,8 +1449,43 @@ def get_qt_provider(config):
   return None
 
 
-def maybe_quantize_model(model, config):
-  """Quantize the model if quantization is enabled."""
+def maybe_quantize_model(model, config, role: str = "actor"):
+  """Quantize the model if quantization is enabled and `role` is in `quantization_target_roles`."""
+  target_roles = getattr(config, "quantization_target_roles", ["actor", "student"])
+  if isinstance(target_roles, str):
+    target_roles = [r.strip() for r in target_roles.split(",") if r.strip()]
+  if target_roles and role not in target_roles:
+    return model
+  # Batch split is not using Qwix's interception feature but manual plumbing
+  if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
+    quantization_provider = get_qt_provider(config)
+    if quantization_provider:
+      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+      # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+      dummy_targets = {}
+      if config.mtp_num_layers > 0:
+        dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
+      model = qwix.quantize_model(
+          model,
+          quantization_provider,
+          dummy_tokens,
+          dummy_positions,
+          dummy_segment_ids,
+          enable_dropout=False,
+          **dummy_targets,
+      )
+      # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+      # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+      # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+      nnx.pop(model, nnx.Intermediate)
+      for _, val in nnx.graph.iter_graph(model):
+        if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+          del val.qwix_rngs
+  return model
   # Batch split is not using Qwix's interception feature but manual plumbing
   if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
