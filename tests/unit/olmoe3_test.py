@@ -53,6 +53,7 @@ CANONICAL_COUNTS = {
     "olmo35-tiny-e256k8": (12_492_409_472, 790_301_312),
     "olmo35-tiny-e256k8-sh2x": (12_539_595_392, 837_487_232),
     "olmo35-tiny-e256k8-sh4x": (12_633_967_232, 931_859_072),
+    "olmo35-small-e256k8-sh2x": (72_498_550_144, 4_041_217_408),
 }
 
 
@@ -152,6 +153,9 @@ class OLMoE3ParameterCountTest(unittest.TestCase):
   def test_tiny_and_e256k8_variants_total_parameters(self):
     for name in ("olmo35-tiny", "olmo35-tiny-e256k8", "olmo35-tiny-e256k8-sh2x", "olmo35-tiny-e256k8-sh4x"):
       self._assert_total(name)
+
+  def test_small_e256k8_sh2x_total_parameters(self):
+    self._assert_total("olmo35-small-e256k8-sh2x")
 
   def test_30m_total_parameters_scanned(self):
     """Scanned cycles share one parameter set, so the dense first layer has to be peeled out.
