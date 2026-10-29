@@ -1330,6 +1330,90 @@ class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
     )
 
 
+_GPT_OSS_CONFIG = {
+    "run_name": "gpt_oss_nnx_decoder_test",
+    "model_name": "gpt-oss-20b",
+    "max_target_length": 8,
+    "base_emb_dim": 64,
+    # A cycle of 2 over 4 layers gives two scanned blocks, the fewest that can mix up caches across blocks.
+    "base_num_decoder_layers": 4,
+    "base_num_query_heads": 4,
+    "base_num_kv_heads": 2,
+    "head_dim": 16,
+    "base_mlp_dim": 64,
+    "base_moe_mlp_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "vocab_size": 32,
+    # With the TPU kernels off the sparse path lowers to ragged_dot, which runs on CPU.
+    "sparse_matmul": True,
+    "megablox": False,
+    "use_tokamax_gmm": False,
+    "dtype": "float32",
+    "weight_dtype": "float32",
+}
+
+
+class TestNNXDecoderGptOssKvCaches(unittest.TestCase):
+  """Every GPT-OSS decoder layer must get its own vLLM KV cache and hand back its update.
+
+  vLLM serves the model with one externally-managed KV cache per decoder layer and keeps the caches the decoder
+  returns. Scanned, one scan iteration runs a block of two layers, so passing the flat list straight through gave
+  block i only ``kv_caches[i]``: the block's second layer attended without a cache, the layers dropped their updates
+  under scan_layers, and decoding a scanned checkpoint with vLLM produced gibberish.
+  """
+
+  def _forward_with_kv_caches(self, scan_layers):
+    """Runs one forward pass with a distinct cache per layer; returns the config and the caches handed back."""
+    cfg = _make_config(**{**_GPT_OSS_CONFIG, "scan_layers": scan_layers})
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        config=cfg,
+        mesh=mesh,
+        rngs=nnx.Rngs(params=0),
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+    kv_caches = [jnp.full((2,), 10.0 * i) for i in range(cfg.num_decoder_layers)]
+    original_call = Attention.__call__
+
+    def bump_returned_kv_cache(attention, *args, **kwargs):
+      # Outside vLLM serving the attention passes its cache through; the bump stands in for vLLM's update.
+      out, kv_cache = original_call(attention, *args, **kwargs)
+      return out, None if kv_cache is None else kv_cache + 1
+
+    with mock.patch.object(Attention, "__call__", bump_returned_kv_cache):
+      decoder(
+          shared_embedding,
+          ids,
+          decoder_positions=positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          kv_caches=kv_caches,
+      )
+    return cfg, kv_caches
+
+  def test_each_layer_updates_its_own_kv_cache(self):
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        cfg, kv_caches = self._forward_with_kv_caches(scan_layers)
+
+        self.assertEqual(cfg.inhomogeneous_layer_cycle_interval, 2)
+        self.assertEqual(len(kv_caches), cfg.num_decoder_layers)
+        for i, kv_cache in enumerate(kv_caches):
+          self.assertIsNotNone(kv_cache, f"layer {i}'s KV cache update was dropped")
+          # Bumped exactly once, by its own layer.
+          np.testing.assert_array_equal(np.asarray(kv_cache), np.full((2,), 10.0 * i + 1), err_msg=f"layer {i}")
+
+
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
   """Tests for Deepseek and Gemma4 specific decoder logic."""
 

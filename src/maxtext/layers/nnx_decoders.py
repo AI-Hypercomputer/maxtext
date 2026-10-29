@@ -84,6 +84,10 @@ from maxtext.utils.sharding import create_sharding
 _FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 _GATHERED_FSDP_WEIGHT = "gathered_fsdp_weight"
 
+# Decoder blocks scanned by NNXDecoder's generic branch whose scanned module is a block of
+# `inhomogeneous_layer_cycle_interval` layers that takes vLLM's external KV caches as a tuple, one cache per layer.
+_SCANNED_BLOCKS_WITH_PER_LAYER_KV_CACHES = (DecoderBlockType.GPT_OSS,)
+
 
 def _drop_fsdp_mesh_axes(entry):
   """Return one PartitionSpec entry with the FSDP mesh axes removed."""
@@ -2392,15 +2396,29 @@ class NNXDecoder(nnx.Module):
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
             # The _apply_layers_sequentially function will handle it by statically unrolling.
+            group_kv_caches_per_block = cfg.decoder_block in _SCANNED_BLOCKS_WITH_PER_LAYER_KV_CACHES
+            if group_kv_caches_per_block:
+              # vLLM hands over one cache per decoder layer, but a scan iteration runs a whole block of
+              # `cycle_interval` layers: the flat list would give block i only `kv_caches[i]`. Hand each block a
+              # tuple of its own layers' caches instead, and write the updated caches back to the flat list below.
+              scanned_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
+                  kv_caches, scan_length, cycle_interval, stack=False
+              )
+            else:
+              scanned_kv_caches = kv_caches
             y, self.layers, _ = self._apply_layers_sequentially(
                 self.layers,
                 y,
                 *layer_args,
                 length=scan_length,
-                kv_caches_stacked=kv_caches,
+                kv_caches_stacked=scanned_kv_caches,
                 **layer_kwargs,
             )
             # kv_caches list is updated in-place inside _apply_layers_sequentially
+            if group_kv_caches_per_block:
+              maxtext_utils.update_kv_caches_after_scan(
+                  kv_caches, scanned_kv_caches, scan_length, cycle_interval, stacked=False
+              )
           else:
             y, self.layers, _ = self._apply_layers_sequentially(
                 self.layers,
