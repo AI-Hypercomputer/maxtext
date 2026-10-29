@@ -263,6 +263,7 @@ ModelName = Literal[
     "deepseek4-1600b",
     "deepseek-custom",
     "kimi-k2-1t",
+    "kimi-k3",
     "gemma-7b",
     "gemma-2b",
     "gemma2-2b",
@@ -1289,6 +1290,14 @@ class MoEGeneral(BaseModel):
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
   )
+  moe_router_input_dim: int = Field(
+      -1,
+      description=(
+          "Dimension of the router (gate) input when it differs from the expert input, e.g. a latent MoE that"
+          " routes on the full hidden state but runs experts on a down-projected latent (pass the router input"
+          " as `gate_inputs`). If < 0, defaults to the expert input dim."
+      ),
+  )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
   padded_base_moe_mlp_dim: Optional[int] = Field(
       None,
@@ -1877,6 +1886,61 @@ class Qwen3_8FlashNext(BaseModel):
   split_ngram_parts: int = Field(128, description="Number of embedding shards for PLE.")
   ple_seed: int = Field(1234, description="Hash seed for PLE n-gram hashing.")
   ple_eos_token_id: int = Field(248044, description="EOS token ID used for PLE n-gram boundary resets (HF eos_token_id).")
+
+
+class KimiK3(BaseModel):
+  """Configuration specific to Kimi-K3 models.
+
+  `moe_intermediate_size` / `num_shared_experts` mirror the HF names the Kimi-K3 layers read;
+  the generic MoE code reads `base_moe_mlp_dim` / `shared_experts`. When set (non-zero), each
+  must equal its generic twin, so overriding only one of a pair fails loudly instead of
+  leaving the other stale.
+  """
+
+  attn_res_block_size: PositiveInt = Field(12, description="Attention residual block interval.")
+  full_attn_layers: list[NonNegativeInt] = Field(
+      default_factory=list,
+      description="0-indexed decoder layers that use full (MLA) attention; all others use KDA linear attention.",
+  )
+  routed_expert_hidden_size: NonNegativeInt = Field(0, description="Routed expert projection size for latent MoE.")
+  shared_intermediate_size: NonNegativeInt = Field(0, description="Shared expert intermediate size for latent MoE.")
+  moe_intermediate_size: NonNegativeInt = Field(
+      0, description="Routed expert intermediate size read by the Kimi-K3 layers; must equal base_moe_mlp_dim if set."
+  )
+  num_shared_experts: NonNegativeInt = Field(
+      0, description="Shared expert count read by the Kimi-K3 layers; must equal shared_experts if set."
+  )
+  short_conv_kernel_size: PositiveInt = Field(4, description="Kernel size for the KDA short convolution.")
+  kda_gate_lower_bound: Optional[float] = Field(
+      -5.0,
+      lt=0.0,
+      description=(
+          "KDA decay-gate lower bound (must be negative). When set, the gate is the bounded sigmoid "
+          "`lb * sigmoid(exp(A_log) * (g + dt_bias))` (as in fla); None selects the softplus gate."
+      ),
+  )
+  kda_chunk_size: int = Field(64, gt=0, description="Chunk size of the KDA chunked (WY) prefill/train core.")
+  kda_compute_dtype: Literal["float32", "bfloat16"] = Field(
+      "float32",
+      description=(
+          "Precision of the KDA q/k/v inputs to the core (and of the q/k L2-norm). The decay gate, its "
+          "cumsum, the chunked WY solve and the recurrent state are always float32, as in fla. The output "
+          "is cast back to `dtype`."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_kimi_k3_alias_pairs(self):
+    """Rejects a Kimi-K3 HF-named field that disagrees with its generic MaxText twin."""
+    for kimi_name, generic_name in (
+        ("moe_intermediate_size", "base_moe_mlp_dim"),
+        ("num_shared_experts", "shared_experts"),
+    ):
+      kimi_value = getattr(self, kimi_name)
+      generic_value = getattr(self, generic_name, None)
+      if kimi_value and generic_value is not None and kimi_value != generic_value:
+        raise ValueError(f"{kimi_name}={kimi_value} must equal {generic_name}={generic_value}; override both together.")
+    return self
 
 
 # ----------------------------------------------------------------------------
@@ -4333,6 +4397,7 @@ class MaxTextConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    KimiK3,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -5572,6 +5637,17 @@ class MaxTextConfig(
       raise ValueError("`grain_use_elastic_iterator=True` requires `packing=False`.")
     if self.use_dpo and self.packing:
       raise ValueError("DPO does not support packing. Set `packing=False`.")
+    if (
+        self.decoder_block == DecoderBlockType.KIMI_LINEAR
+        and self.packing
+        and getattr(self, "kda_max_num_segments", 0) <= 0
+    ):
+      # KDA's recurrence and short conv ignore `decoder_segment_ids`, so packed documents would
+      # leak state into each other in 70 of the 93 layers.
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) does not support packed sequences yet: KDA layers ignore "
+          "segment ids. Set `packing=False`."
+      )
     if self.grain_use_elastic_iterator and not self.use_truncation:
       raise ValueError(
           "`grain_use_elastic_iterator=True` requires `use_truncation=True`. "
