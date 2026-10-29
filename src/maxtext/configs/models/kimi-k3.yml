@@ -46,7 +46,7 @@ attn_res_block_size: 12
 
 # MLP and MoE Specifications
 first_num_dense_layers: 1
-mlp_activations: ["situ", "linear"]
+mlp_activations: ["situ_gate", "situ_linear"]
 # `base_mlp_dim` is the layer-0 dense MLP width (HF `intermediate_size`); the MoE
 # shared expert uses `shared_intermediate_size` = moe_intermediate_size * num_shared_experts.
 base_mlp_dim: 33792
