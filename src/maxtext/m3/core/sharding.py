@@ -262,21 +262,28 @@ class DefaultSharding(Sharding):
         raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
 
 
-def _resolve_axis_sizes(sizes: Sequence[int], target_product: int, kind: str, target_desc: str) -> tuple[int, ...]:
+def _resolve_axis_sizes(
+    sizes: Sequence[int],
+    target_product: int,
+    kind: str,
+    target_desc: str,
+    axis_names: Sequence[str] = MESH_AXIS_NAMES,
+) -> tuple[int, ...]:
   """Fills in a single `-1` axis and checks the result tiles `target_product` exactly.
 
   Split out from `create_mesh` so the arithmetic is testable without needing a
   particular number of devices attached.
 
   Args:
-    sizes: Per-axis sizes, in `MESH_AXIS_NAMES` order.
+    sizes: Per-axis sizes, in `axis_names` order.
     target_product: What the sizes must multiply to.
     kind: `"ICI"` or `"DCN"`; names the network in error messages.
     target_desc: A count noun naming what `target_product` counts, such as
       `"slice count"`. Phrased so error messages read correctly at any value.
+    axis_names: The mesh axes `sizes` refers to; names the axes in error messages.
 
   Returns:
-    The resolved sizes, in `MESH_AXIS_NAMES` order.
+    The resolved sizes, in `axis_names` order.
 
   Raises:
     ValueError: If more than one axis is -1, if any size is invalid, or if the
@@ -285,9 +292,9 @@ def _resolve_axis_sizes(sizes: Sequence[int], target_product: int, kind: str, ta
   resolved = list(sizes)
 
   if resolved.count(-1) > 1:
-    raise ValueError(f"At most one {kind} mesh axis may be -1 (auto); got {dict(zip(MESH_AXIS_NAMES, resolved))}.")
+    raise ValueError(f"At most one {kind} mesh axis may be -1 (auto); got {dict(zip(axis_names, resolved))}.")
 
-  invalid = {name: size for name, size in zip(MESH_AXIS_NAMES, resolved) if size < 1 and size != -1}
+  invalid = {name: size for name, size in zip(axis_names, resolved) if size < 1 and size != -1}
   if invalid:
     raise ValueError(f"{kind} mesh axis sizes must be >= 1, or -1 for auto; got {invalid}.")
 
@@ -296,14 +303,14 @@ def _resolve_axis_sizes(sizes: Sequence[int], target_product: int, kind: str, ta
     if target_product % specified:
       raise ValueError(
           f"Cannot auto-size the -1 {kind} mesh axis: {target_desc} ({target_product}) is not divisible by "
-          f"{specified}, the product of the specified axes {dict(zip(MESH_AXIS_NAMES, resolved))}."
+          f"{specified}, the product of the specified axes {dict(zip(axis_names, resolved))}."
       )
     resolved[resolved.index(-1)] = target_product // specified
 
   product = math.prod(resolved)
   if product != target_product:
     raise ValueError(
-        f"{kind} mesh axes {dict(zip(MESH_AXIS_NAMES, resolved))} have product {product}, "
+        f"{kind} mesh axes {dict(zip(axis_names, resolved))} have product {product}, "
         f"which does not match the {target_desc} ({target_product})."
     )
   return tuple(resolved)
@@ -319,18 +326,30 @@ def _count_slices(devices: Sequence[jax.Device]) -> int:
   return len({getattr(device, "slice_index", 0) for device in devices})
 
 
-def _shape_from_mapping(sizes: Mapping[str, int] | None, kind: str) -> tuple[int, ...]:
-  """Turns `{axis: size}` into a shape tuple in `MESH_AXIS_NAMES` order.
+def _shape_from_mapping(
+    sizes: Mapping[str, int] | None, kind: str, axis_names: Sequence[str] = MESH_AXIS_NAMES
+) -> tuple[int, ...]:
+  """Turns `{axis: size}` into a shape tuple in `axis_names` order.
 
   Unnamed axes default to 1, so a caller names only the axes it is actually
   splitting. Unknown names are rejected rather than ignored -- a typo would
   otherwise silently leave that axis at 1 and shard nothing.
   """
   sizes = dict(sizes or {})
-  unknown = sorted(set(sizes) - set(MESH_AXIS_NAMES))
+  unknown = sorted(set(sizes) - set(axis_names))
   if unknown:
-    raise ValueError(f"Unknown {kind} mesh axes {unknown}; expected names from {MESH_AXIS_NAMES}.")
-  return tuple(sizes.get(name, 1) for name in MESH_AXIS_NAMES)
+    raise ValueError(f"Unknown {kind} mesh axes {unknown}; expected names from {tuple(axis_names)}.")
+  return tuple(sizes.get(name, 1) for name in axis_names)
+
+
+def _default_sizes(axis: str, kind: str, axis_names: Sequence[str]) -> dict[str, int]:
+  """`{axis: -1}` when `axis` is on the mesh; otherwise the caller has to say how to lay the devices out."""
+  if axis not in axis_names:
+    raise ValueError(
+        f"The default {kind} layout puts every device on {axis!r}, which is not one of the mesh axes "
+        f"{tuple(axis_names)}; pass `{kind.lower()}=` explicitly."
+    )
+  return {axis: -1}
 
 
 def create_mesh(
@@ -338,8 +357,9 @@ def create_mesh(
     ici: Mapping[str, int] | None = None,
     dcn: Mapping[str, int] | None = None,
     devices: Sequence[jax.Device] | None = None,
+    axis_names: Sequence[str] = MESH_AXIS_NAMES,
 ) -> Mesh:
-  """Builds the device mesh over `MESH_AXIS_NAMES`.
+  """Builds the device mesh over `axis_names` (by default `MESH_AXIS_NAMES`).
 
   The mesh is the product of two shapes over the same axes. `ici` spreads the
   devices within one slice over the fast interconnect; `dcn` spreads the slices
@@ -385,17 +405,22 @@ def create_mesh(
       to `{"fsdp": -1}`.
     dcn: Axis sizes across slices. Defaults to `{"data": -1}`.
     devices: Devices to arrange; defaults to `jax.devices()`.
+    axis_names: The mesh axes, in mesh order. A model whose strategy needs other
+      axes (Wan's `context`, say) passes its own; the `ici` / `dcn` defaults then
+      apply only if `fsdp` / `data` are among them, otherwise both must be given.
 
   Returns:
-    A `Mesh` over `MESH_AXIS_NAMES`.
+    A `Mesh` over `axis_names`.
 
   Raises:
     ValueError: If `devices` is empty, if either mapping names an unknown axis,
       has more than one -1, contains an invalid size, or does not multiply to
-      the device or slice count.
+      the device or slice count; or if `ici` / `dcn` is omitted while its
+      default axis is not in `axis_names`.
   """
-  ici_sizes = _shape_from_mapping({"fsdp": -1} if ici is None else ici, "ICI")
-  dcn_sizes = _shape_from_mapping({"data": -1} if dcn is None else dcn, "DCN")
+  axis_names = tuple(axis_names)
+  ici_sizes = _shape_from_mapping(_default_sizes("fsdp", "ICI", axis_names) if ici is None else ici, "ICI", axis_names)
+  dcn_sizes = _shape_from_mapping(_default_sizes("data", "DCN", axis_names) if dcn is None else dcn, "DCN", axis_names)
 
   devices = list(jax.devices() if devices is None else devices)
   if not devices:
@@ -405,8 +430,8 @@ def create_mesh(
   if len(devices) % num_slices:
     raise ValueError(f"{len(devices)} devices do not divide evenly into {num_slices} slices.")
 
-  ici_shape = _resolve_axis_sizes(ici_sizes, len(devices) // num_slices, "ICI", "per-slice device count")
-  dcn_shape = _resolve_axis_sizes(dcn_sizes, num_slices, "DCN", "slice count")
+  ici_shape = _resolve_axis_sizes(ici_sizes, len(devices) // num_slices, "ICI", "per-slice device count", axis_names)
+  dcn_shape = _resolve_axis_sizes(dcn_sizes, num_slices, "DCN", "slice count", axis_names)
 
   if num_slices > 1:
     device_array = mesh_utils.create_hybrid_device_mesh(ici_shape, dcn_shape, devices)
@@ -416,4 +441,4 @@ def create_mesh(
     # devices do not, so it raises rather than degrading to the ICI-only case.
     device_array = mesh_utils.create_device_mesh(ici_shape, devices)
 
-  return Mesh(device_array, MESH_AXIS_NAMES)
+  return Mesh(device_array, axis_names)
