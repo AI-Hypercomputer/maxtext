@@ -598,6 +598,68 @@ def fused_moe_lhs_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
   return {"w1_lhs_scale": scale, "w2_lhs_scale": scale}
 
 
+# GPT-OSS's SwiGLU clamp limit. tpu-inference's fused "swigluoai" activation hardcodes it, along with
+# alpha=1.702 (see swigluoai in tpu_inference/kernels/megablox/gmm_v2.py).
+_FUSED_SWIGLUOAI_LIMIT = 7.0
+
+
+def fused_moe_activation(config) -> str:
+  """Name of the tpu-inference fused MoE activation that matches `RoutedMoE.apply_ffn_activation`."""
+  if config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+    # GPT-OSS's clamped SwiGLU is the kernel's "swigluoai". Its mlp_activations[0] ("sigmoid") is not a
+    # kernel activation at all.
+    if config.mlp_activations[0] != "sigmoid" or config.mlp_activations_limit != _FUSED_SWIGLUOAI_LIMIT:
+      raise NotImplementedError(
+          "The fused MoE kernel only implements GPT-OSS's SwiGLU with mlp_activations[0]='sigmoid' and "
+          f"mlp_activations_limit={_FUSED_SWIGLUOAI_LIMIT}, got {config.mlp_activations[0]!r} and "
+          f"{config.mlp_activations_limit}."
+      )
+    return "swigluoai"
+  return config.mlp_activations[0]
+
+
+def fuse_moe_biases_for_kernel(w0_bias, w1_bias, fused_size, num_shards, per_shard_layout) -> jax.Array:
+  """Lays out the gate/up expert biases as the `w1_bias` of tpu-inference's `fused_moe_func`.
+
+  The kernel adds `w1_bias` to `x @ w1` before the activation, so the bias has to follow the layout
+  the kernel reads `w1` in. The vLLM weight loader zero-pads the tail of every MLP-dim shard of the
+  expert kernels (GMM_v2 alignment), so the bias is padded the same way. Then gate and up are either
+  interleaved per shard, for the tensor-parallel kernel, which splits each shard of the fused axis
+  into gate and up (the layout of a prefused `wi`, see `model_creation_utils._fuse_moe_weights`), or
+  concatenated whole, for the expert-parallel kernel, which splits the whole fused axis.
+
+  Args:
+    w0_bias: Gate bias, [num_experts, mlp_dim].
+    w1_bias: Up bias, [num_experts, mlp_dim].
+    fused_size: Last dim of the fused kernel, i.e. twice the (padded) MoE MLP dim.
+    num_shards: Number of shards along the expert kernels' MLP dim.
+    per_shard_layout: Whether each shard holds its own [gate | up] chunk (tensor-parallel kernel)
+      instead of the kernel holding [all of gate | all of up] (expert-parallel kernel).
+
+  Returns:
+    The float32 bias, [num_experts, 1, fused_size].
+  """
+  num_experts, mlp_dim = w0_bias.shape
+  padded_mlp_dim = fused_size // 2
+  if mlp_dim % num_shards or padded_mlp_dim % num_shards or padded_mlp_dim < mlp_dim:
+    raise ValueError(
+        f"Cannot lay out MoE biases of MLP dim {mlp_dim} for a fused kernel of MLP dim {padded_mlp_dim} "
+        f"over {num_shards} shards."
+    )
+
+  def pad_shards(bias):
+    """[E, mlp_dim] -> [E, num_shards, padded_mlp_dim // num_shards], zero-padding each shard's tail."""
+    bias = bias.astype(jnp.float32).reshape(num_experts, num_shards, mlp_dim // num_shards)
+    return jnp.pad(bias, ((0, 0), (0, 0), (0, (padded_mlp_dim - mlp_dim) // num_shards)))
+
+  gate, up = pad_shards(w0_bias), pad_shards(w1_bias)
+  if per_shard_layout:
+    fused = jnp.concatenate([gate, up], axis=-1)
+  else:
+    fused = jnp.concatenate([gate.reshape(num_experts, -1), up.reshape(num_experts, -1)], axis=-1)
+  return fused.reshape(num_experts, 1, fused_size)
+
+
 class Tid2EidVar(nnx.Variable):
   """Custom variable to hold tid2eid without trainable param overhead."""
 
@@ -1166,7 +1228,10 @@ class RoutedMoE(nnx.Module):
       )
 
     if self.config.mlp_bias:
-      wi_bias_axes = ("exp", "activation_mlp")
+      # vLLM's rules map "activation_mlp" onto mesh axes that "exp" already takes, which makes no valid
+      # NamedSharding; there "activation_mlp_moe" shards the bias like the expert kernels' MLP dim.
+      is_vllm = self.config.attention in ("vllm_rpa", "vllm_batched_rpa")
+      wi_bias_axes = ("exp", "activation_mlp_moe" if is_vllm else "activation_mlp")
       wo_bias_axes = ("exp", "activation_embed")
       wi_bias_shape = (self.num_experts, self.intermediate_dim)
       wo_bias_shape = (self.num_experts, self.moe_expert_input_dim)
@@ -1341,6 +1406,21 @@ class RoutedMoE(nnx.Module):
 
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape.get("context_autoregressive", 1)
+
+  def _moe_mlp_num_shards(self):
+    """Number of shards along the expert kernels' MLP dim.
+
+    These are the chunks the vLLM weight loader pads and fuses the expert kernels by: it reads them off
+    the sharding of the same logical axis (see `model_creation_utils._fuse_moe_weights`).
+    """
+    if self.mesh is None:
+      return 1
+    mlp_axes = self._logical_to_mesh_axes(self.wi_kernel_axes)[-1]
+    if mlp_axes is None:
+      return 1
+    if isinstance(mlp_axes, str):
+      mlp_axes = (mlp_axes,)
+    return math.prod(self.mesh.shape.get(axis, 1) for axis in mlp_axes)
 
   def should_update_load_balance(self):
     """Determines if loss-free load balancing updates should be applied.
@@ -4917,11 +4997,15 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       native_w1_scale=None,
       native_w2_scale=None,
+      w0_bias=None,
+      w1_bias=None,
+      wo_bias=None,
   ) -> tuple[jax.Array, None, None]:
     """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
 
     fused_moe_func handles routing, GMM, and weighted combination internally.
-    It does not compute lb_loss or bias_updates (inference-only).
+    It does not compute lb_loss or bias_updates (inference-only). Expert biases
+    (`w0_bias`, `w1_bias`, `wo_bias`, e.g. GPT-OSS) are applied by the kernel.
     """
     if forced_routed_experts is not None:
       raise NotImplementedError("Forced routing via forced_routed_experts is not supported with" " fused_moe_matmul.")
@@ -4950,8 +5034,16 @@ class RoutedMoE(nnx.Module):
     # Use expert parallelism if the expert axis has size > 1
     use_ep = self.get_expert_parallelism_size() > 1
 
+    # The kernel takes the biases as [E, 1, N], the gate/up one in the layout it reads the fused kernel in.
+    fused_w1_bias = None
+    if w0_bias is not None and w1_bias is not None:
+      fused_w1_bias = fuse_moe_biases_for_kernel(
+          w0_bias, w1_bias, fused_kernel.shape[-1], self._moe_mlp_num_shards(), per_shard_layout=not use_ep
+      )
+    fused_w2_bias = None if wo_bias is None else wo_bias.astype(jnp.float32)[:, None, :]
+
     # Map MaxText config fields to fused_moe_func args
-    activation = self.config.mlp_activations[0]  # e.g. "silu"
+    activation = fused_moe_activation(self.config)  # e.g. "silu"
     scoring_fn = self.config.routed_score_func if self.config.routed_score_func else "softmax"
 
     # Check if the model architecture intrinsically renormalizes weights
@@ -4985,8 +5077,8 @@ class RoutedMoE(nnx.Module):
         w2=quantized_w2,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
-        w1_bias=None,
-        w2_bias=None,
+        w1_bias=fused_w1_bias,
+        w2_bias=fused_w2_bias,
         gating_output=gating_output,
         topk=self.num_experts_per_tok,
         renormalize=renormalize,
@@ -5308,6 +5400,9 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           native_w1_scale=wi_native_scale,
           native_w2_scale=wo_native_scale,
+          w0_bias=w0_bias,
+          w1_bias=w1_bias,
+          wo_bias=wo_bias,
       )
     elif cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
