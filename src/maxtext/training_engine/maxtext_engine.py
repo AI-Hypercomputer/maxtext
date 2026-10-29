@@ -1734,13 +1734,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       }
 
   @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
     Args:
       payload: Packed micro-batch training input.
-      **kwargs: Implementation-specific options, accepted for interface compatibility
-        and ignored by this engine.
     """
     batch = self._prepare_batch(payload)
 
@@ -1804,14 +1802,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._total_micro_steps += 1
 
   @_profiled_step("update")
-  def update(self, **kwargs: Any) -> int:
+  def update(self) -> int:
     """Applies accumulated gradients to update NNX model weights in HBM.
 
     Reuses NNX optimizer step from train.py (lines 511-535).
-
-    Args:
-      **kwargs: Implementation-specific options, accepted for interface compatibility
-        and ignored by this engine.
 
     Returns:
       The train step count after this update. Unchanged when there is nothing to apply.
@@ -1905,7 +1899,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         self._metrics_logger.write_metrics(buffer, mode=metrics_module.Mode.EVAL)
       self._eval_metrics_recorder.cleanup()
 
-  def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
+  def eval_step(self, payload: abstract_engine.TrainerPayload) -> None:
     """Prepares inputs, runs the evaluation, and logs eval metrics.
 
     Callers should bracket a sequence of eval_step calls with eval_context() so that the metrics
@@ -1913,7 +1907,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     Args:
       payload: Packed micro-batch evaluation input.
-      **kwargs: Additional keyword arguments for evaluation.
     """
     batch = self._prepare_batch(payload)
 
@@ -2052,12 +2045,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     with self._sharding_ctx():
       return jax.tree.map(jax.sharding.reshard, self._accumulated_grads, self._plain_grad_shardings)
 
-  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
+  def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
     """Forces asynchronous Orbax checkpoint serialization.
 
     Args:
       metadata: Checkpoint metadata payload from Orchestrator.
-      **kwargs: Additional checkpoint saving options.
+      step: Step to save under. Defaults to `metadata["step"]`, then to the current step.
+      force: Save even if Orbax's save-interval policy would skip this step.
     """
     if not self._config.enable_checkpointing or not self._checkpoint_dir():
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
@@ -2066,7 +2060,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
 
-    step = kwargs.pop("step", None)
     if step is None and isinstance(metadata, Mapping):
       step = metadata.get("step")
     if step is None:
@@ -2106,21 +2099,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             micro_step_count=self._micro_step_count,
         ),
         custom_metadata=custom_metadata,
-        **kwargs,
+        force=force,
     )
     if ckpt_saved:
       logging.info("Checkpoint saved at step %d.", step)
 
-  def restore_checkpoint(self, **kwargs: Any) -> Any:
-    """Restores the latest Multi-Tier Checkpoint and returns its metadata.
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
+    """Restores a Multi-Tier Checkpoint and returns its metadata.
 
     Args:
-      **kwargs: Additional checkpoint restoration options.
+      step: Checkpoint step to restore. If None, restores the latest checkpoint.
 
     Returns:
       The metadata PyTree of the restored checkpoint.
     """
-    step = kwargs.get("step", None)
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
@@ -2331,21 +2323,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def prepare_weight_sync(
       self,
+      *,
+      sync_request: Any = None,
       staging_transport: str = "raiden",
-      **kwargs: Any,
   ) -> Any:
     """Stages weights for transfer and returns access coordinates.
 
     Args:
+      sync_request: The round's request from Tunix's `WeightSyncCoordinator`, forwarded by
+        `TrainerWorker`. Unused: staging does not depend on the round.
       staging_transport: Weight staging transport ('raiden' or custom).
-      **kwargs: Weight staging parameters.
 
     Returns:
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
+    del sync_request
     if staging_transport == "raiden":
       try:
-        from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        from tunix.dist_rl.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       except ImportError as exc:
         # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
         # provided. Returning empty metadata instead defers the failure to the caller --
@@ -2353,7 +2348,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # side", which reports a count from another process and never mentions the missing
         # module, leaving the real cause in this worker's log on another host.
         raise RuntimeError(
-            "staging_transport='raiden' requires tunix.experimental.weight_sync."
+            "staging_transport='raiden' requires tunix.dist_rl.weight_sync."
             "raiden_synchronizer, which the installed tunix does not provide. Install a"
             " tunix build that ships it, or select a different staging_transport."
         ) from exc
@@ -2440,8 +2435,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # naming the transport that was actually asked for.
     raise ValueError(f"unknown staging_transport {staging_transport!r}; expected 'raiden'.")
 
-  def release_weight_sync(self, **kwargs: Any) -> Any:
-    """Releases staged weight buffers after transfer completion."""
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
+    """Releases staged weight buffers after transfer completion.
+
+    Args:
+      sync_request: The round's request, forwarded by Tunix's `TrainerWorker`. Unused.
+    """
+    del sync_request
     self._last_staged_step = None
     self._staged_metadata = None
     if self._raiden_sync:

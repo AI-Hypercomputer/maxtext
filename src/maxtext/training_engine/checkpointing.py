@@ -211,7 +211,7 @@ class CheckpointManager:
       step: int,
       checkpoint_state: CheckpointState,
       custom_metadata: Any = None,
-      **kwargs,
+      force: bool = False,
   ) -> bool:
     """Saves the params for the given step along with optional intra-step state.
 
@@ -220,6 +220,7 @@ class CheckpointManager:
       checkpoint_state: CheckpointState object containing model, optimizer, and
         optional intra_step_state.
       custom_metadata: Custom metadata to save with the checkpoint.
+      force: Save even if Orbax's save-interval policy would skip this step.
 
     Returns:
       Whether the checkpoint was saved.
@@ -246,7 +247,7 @@ class CheckpointManager:
       self._delete_saved_step(step)
       # Orbax's save-interval policy declines a step it has already saved, so the
       # replacement has to be forced through.
-      kwargs["force"] = True
+      force = True
 
     params = nnx.state(checkpoint_state.model)
     jax.block_until_ready(params)
@@ -291,7 +292,7 @@ class CheckpointManager:
         step=step,
         args=ocp.args.Composite(**save_args),
         custom_metadata=custom_metadata,
-        **kwargs,
+        force=force,
     )
 
   def restore_checkpoint(

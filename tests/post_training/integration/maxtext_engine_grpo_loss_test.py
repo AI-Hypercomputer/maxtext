@@ -113,6 +113,8 @@ class _GrpoConfig:
   temperature: float = 1.0
   kl_loss_mode: str = "low_var_kl"
   kl_clamp_value: float | None = None
+  # Tunix's AlgorithmConfig default. Inert here: these examples carry no old_per_token_logps.
+  use_rollout_logps: bool = True
 
 
 def _train_example(
