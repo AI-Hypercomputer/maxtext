@@ -15,15 +15,18 @@
 # This workflow builds MaxText package, builds and tags TPU Release Candidate
 # Docker images (:maxtext_${SHA_RC}_${YYYYMMDD}, :${SHA_RC}, and :latest-rc),
 # and triggers Airflow E2E functional tests.
-# The workflow is designed to run on a schedule (every Monday at 06:00 UTC)
-# or on-demand via workflow_dispatch.
+# The workflow is designed to run on a schedule (every Sunday at 19:00 Pacific
+# time) or on-demand via workflow_dispatch.
 
 name: MaxText Release Candidate Pipeline
 
 on:
   schedule:
-    # Runs every Monday at 06:00 UTC
-    - cron: '0 6 * * 1'
+    # Runs every Sunday at 19:00 Pacific time (Monday 02:00 or 03:00 UTC), one
+    # hour before the daily 20:00-24:00 Pacific TPU quota window of the queue
+    # that runs the E2E tests.
+    - cron: '0 19 * * 0'
+      timezone: 'America/Los_Angeles'
   workflow_dispatch:
     inputs:
       maxtext_sha:
