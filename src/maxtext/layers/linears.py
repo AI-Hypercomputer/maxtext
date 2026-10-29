@@ -56,10 +56,8 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif callable(fn_or_string):
     return fn_or_string
   else:
-    raise ValueError(
-        f"""Don't know how to convert {fn_or_string}
-                         to an activation function"""
-    )
+    raise ValueError(f"""Don't know how to convert {fn_or_string}
+                         to an activation function""")
 
 
 def normalize_axes(axes: Iterable[int], ndim: int) -> tuple[int, ...]:
@@ -687,8 +685,9 @@ class MlpBlock(nnx.Module):
 
     weight_quant = quantizations.get_weight_quant_config(config, "mlp")
     block_size = weight_quant.block_size if weight_quant is not None else getattr(config, "weight_block_size", None)
+    self._use_fused_wi = bool(config.fused_mlp)
 
-    if config.fused_mlp:
+    if self._use_fused_wi:
       self.wi = DenseGeneral(
           in_features_shape=in_features,
           out_features_shape=(len(self.activations), self.intermediate_dim),
@@ -809,8 +808,13 @@ class MlpBlock(nnx.Module):
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
-    if cfg.fused_mlp:
-      x = self.wi(inputs, out_sharding=intermediate_sharding)
+    if self._use_fused_wi:
+      wi_out_sharding = intermediate_sharding
+      if wi_out_sharding is not None and len(wi_out_sharding.spec) == len(self.intermediate_logical):
+        spec = tuple(wi_out_sharding.spec)
+        fused_spec = PartitionSpec(*(spec[:2] + (None,) + spec[2:]))
+        wi_out_sharding = NamedSharding(wi_out_sharding.mesh, fused_spec, memory_kind=wi_out_sharding.memory_kind)
+      x = self.wi(inputs, out_sharding=wi_out_sharding)
 
       # Enforce fused activations don't shard on num_activations axis
       fused_intermediate_logical = self.intermediate_logical[:2] + (None,) + self.intermediate_logical[2:]
@@ -818,7 +822,10 @@ class MlpBlock(nnx.Module):
 
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
-        y = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x[:, :, idx, ...]))
+        y = x[:, :, idx, ...]
+        if cfg.activations_in_float32:
+          y = y.astype(jnp.float32)
+        y = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, y))
         activations.append(y)
     else:
       for idx, act_fn in enumerate(self.activations):
@@ -840,6 +847,78 @@ class MlpBlock(nnx.Module):
 
     output = checkpoint_name(output, "mlpwo")
     return output
+
+  def fuse_wi_weights(self) -> bool:
+    """Fuses separate `wi_0`, `wi_1`, ... `DenseGeneral` layers in-place into `self.wi`."""
+    if self._use_fused_wi or len(self.activations) <= 1:
+      return False
+    modules = [getattr(self, f"wi_{idx}", None) for idx in range(len(self.activations))]
+    if any(m is None or quantizations.in_serve_mode(m.quant) for m in modules):
+      return False
+
+    kernels = [m.kernel[...] for m in modules]
+    fused_kernel = jnp.stack(kernels, axis=1)
+
+    has_scale = modules[0].kernel_scale is not None
+    fused_scale = None
+    resolved_scale_axes = None
+    if has_scale:
+      scales = [m.kernel_scale[...] for m in modules]
+      if scales[0].ndim == 0:
+        fused_scale = jnp.stack(scales, axis=0).reshape(1, len(scales), 1)
+      elif scales[0].ndim == 1:
+        fused_scale = jnp.stack(scales, axis=0)[None, :, :]
+      else:
+        fused_scale = jnp.stack(scales, axis=1)
+
+    fused_bias = None
+    if self.use_bias and modules[0].bias is not None:
+      fused_bias = jnp.stack([m.bias[...] for m in modules], axis=0)
+
+    weight_quant = quantizations.get_weight_quant_config(self.config, "mlp")
+    block_size = modules[0].block_size
+    self.wi = DenseGeneral(
+        in_features_shape=self.in_features,
+        out_features_shape=(len(self.activations), self.intermediate_dim),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "num_activations", "mlp"),
+        quant=self.quant,
+        use_bias=self.use_bias,
+        shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
+        matmul_precision=self.config.matmul_precision,
+        mesh=self.mesh,
+        use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
+        debug_sharding=self.config.debug_sharding,
+        block_size=block_size,
+        weight_quant=weight_quant,
+        rngs=nnx.Rngs(params=0),
+    )
+    self.wi.kernel = nnx.Param(fused_kernel, sharding=self.wi.kernel_axes)
+    if has_scale and fused_scale is not None:
+      padded_kernel_axes = self.wi.kernel_axes + (None,) * (len(fused_kernel.shape) - len(self.wi.kernel_axes))
+      resolved_scale_axes = tuple(ax if s_dim > 1 else None for ax, s_dim in zip(padded_kernel_axes, fused_scale.shape))
+      self.wi.scale_axes = resolved_scale_axes
+      self.wi.kernel_scale = nnx.Param(fused_scale, sharding=resolved_scale_axes)
+    if fused_bias is not None and self.wi.bias is not None:
+      bias_axes = self.wi.kernel_axes[-len(self.wi.out_features_shape) :]
+      self.wi.bias = nnx.Param(fused_bias, sharding=bias_axes)
+
+    for idx in range(len(self.activations)):
+      delattr(self, f"wi_{idx}")
+    self._use_fused_wi = True
+    return True
+
+
+def fuse_model_mlp_wi(model: nnx.Module) -> int:
+  """Fuses separate `wi_0`/`wi_1` projections into `wi` across all `MlpBlock`s in `model`."""
+  count = 0
+  for _, node in nnx.iter_graph(model):
+    if isinstance(node, MlpBlock) and node.fuse_wi_weights():
+      count += 1
+  return count
 
 
 class DeepSeekV4GroupedLinear(nnx.Module):

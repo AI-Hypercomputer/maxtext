@@ -256,6 +256,56 @@ class MoEFusionTest(unittest.TestCase):
     self.assertIn("wi_1", moe)
     self.assertNotIn("wi", moe)
 
+  def test_shared_expert_mlp_fusion_in_target_and_target_free_modes(self):
+    """Tests fusing MlpBlock (`shared_expert`) `wi_0`/`wi_1` into 3D `wi` (`(emb, 2, mlp)`)."""
+    source = _source_tree(True)
+    target = _target_tree(fused=True)
+    for slot in range(CYCLE):
+      base = (slot + 1) * 2000
+      source["base"]["decoder"]["layers"][f"layer_{slot}"]["moe_block"]["shared_expert"] = {
+          "wi_0": {
+              "kernel": _scanned(EMB, MOE_DIM, offset=base),
+              "kernel_scale": _scanned(1, MOE_DIM, offset=base + 10),
+          },
+          "wi_1": {
+              "kernel": _scanned(EMB, MOE_DIM, offset=base + 20),
+              "kernel_scale": _scanned(1, MOE_DIM, offset=base + 30),
+          },
+          "wo": {
+              "kernel": _scanned(MOE_DIM, EMB, offset=base + 40),
+              "kernel_scale": _scanned(1, EMB, offset=base + 50),
+          },
+      }
+    for layer in range(NUM_LAYERS):
+      target["decoder"][f"layers_{layer}"]["moe_block"]["shared_expert"] = {
+          "wi": {
+              "kernel": _arr(EMB, 2, MOE_DIM),
+              "kernel_scale": _arr(1, 2, MOE_DIM),
+          },
+          "wo": {
+              "kernel": _arr(MOE_DIM, EMB),
+              "kernel_scale": _arr(1, EMB),
+          },
+      }
+
+    out = MaxTextToMaxTextConverter(_config()).convert(source, target)
+    se0 = out["decoder"]["layers_0"]["moe_block"]["shared_expert"]
+    self.assertEqual(se0["wi"]["kernel"].shape, (EMB, 2, MOE_DIM))
+    self.assertEqual(se0["wi"]["kernel_scale"].shape, (1, 2, MOE_DIM))
+    src_se0 = source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]["shared_expert"]
+    w0_expected = np.asarray(jnp.take(src_se0["wi_0"]["kernel"], 0, axis=SCAN_AXIS))
+    w1_expected = np.asarray(jnp.take(src_se0["wi_1"]["kernel"], 0, axis=SCAN_AXIS))
+    np.testing.assert_array_equal(np.asarray(se0["wi"]["kernel"])[:, 0, :], w0_expected)
+    np.testing.assert_array_equal(np.asarray(se0["wi"]["kernel"])[:, 1, :], w1_expected)
+
+    # Also verify target-free mode when config.fused_mlp=True.
+    cfg_tf = _config(fused_mlp=True, prefuse_moe_weights=True)
+    out_tf = MaxTextToMaxTextConverter(cfg_tf, prefuse_moe_weights=True).convert(source, target_state=None)
+    out_tf_root = out_tf["base"] if "base" in out_tf else out_tf
+    se0_tf = out_tf_root["decoder"]["layers_0"]["moe_block"]["shared_expert"]
+    self.assertEqual(se0_tf["wi"]["kernel"].shape, (EMB, 2, MOE_DIM))
+    self.assertEqual(se0_tf["wi"]["kernel_scale"].shape, (1, 2, MOE_DIM))
+
 
 class CoverageValidationTest(unittest.TestCase):
   """vLLM boots on dummy weights, so an unmatched target must not be silent."""
