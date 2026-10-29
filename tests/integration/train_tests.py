@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for train.py with various configs"""
+import importlib
 import json
 import os
 import tempfile
@@ -1000,7 +1001,15 @@ class TrainTests(unittest.TestCase):
     GEMMs unless matmul_precision is HIGHEST, and fuses ops into Triton kernels with
     different accumulation order. Hence the loose tolerance.
     """
-    pytest.importorskip("transformer_engine.jax.mhc")
+    # A TE install mismatched with this JAX or CUDA runtime fails at import
+    # time with more than ModuleNotFoundError (all pytest.importorskip catches
+    # by default in pytest >= 9.1): dlopen/symbol errors raise ImportError or
+    # OSError, missing CUDA libs raise RuntimeError, and XLA FFI mismatches
+    # raise JaxRuntimeError (a RuntimeError subclass).
+    try:
+      importlib.import_module("transformer_engine.jax.mhc")
+    except (ImportError, OSError, RuntimeError) as e:
+      self.skipTest(f"TE JAX mHC is not usable: {type(e).__name__}: {e}")
     mhc_model = [
         "model_name=deepseek-custom",
         "override_model_config=True",
