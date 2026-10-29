@@ -35,7 +35,8 @@
 #   --priority multihost --run <id>
 #                    : Multi-host slices (2x2x2, 2x2x4): deploy the JobSet <owner>-mh-<id> from
 #                      MH_RUNS in generate_tpu7x_manifests.py (smoke, 235b, 284b, 397b, 397b-u, 480b,
-#                      671b, 235b-2s). <owner> is $BENCH_OWNER (default $USER). Code goes to
+#                      671b; 2 x 2x2x2: smoke-2s, 235b-2s, 284b-2s, 397b-2s, 671b-2s). <owner> is
+#                      $BENCH_OWNER (default $USER). Code goes to
 #                      gs://mesa-maxtext/<owner>_tpu7x_bench/code, never to the mesakh code dir.
 #                      With --status / --cleanup, acts on that owner's JobSets only.
 #   --pair <a..f>    : Deploy only a specific 2-slice pod pair (a, b, c, d, e, f)
