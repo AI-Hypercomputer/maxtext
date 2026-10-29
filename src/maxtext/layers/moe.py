@@ -205,6 +205,68 @@ def _sort_activations(
     return inputs[sort_indices, ...]
 
 
+def _repeat_and_sort_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_experts_per_tok: int,
+    use_custom_vjp: bool = True,
+) -> jax.Array:
+  """Repeat each token `num_experts_per_tok` times and sort by `sort_indices`."""
+  assert inputs.shape[0] * num_experts_per_tok == sort_indices.shape[0]
+
+  with jax.named_scope("sort_activations"):
+    if use_custom_vjp:
+      return _repeat_and_sort_activations_custom(inputs, sort_indices, num_experts_per_tok)
+    return inputs[sort_indices // num_experts_per_tok, ...]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _repeat_and_sort_activations_custom(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_experts_per_tok: int,
+) -> jax.Array:
+  """Repeat and sort activations with custom vjp."""
+  return inputs[sort_indices // num_experts_per_tok, ...]
+
+
+def _repeat_and_sort_activations_custom_fwd(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_experts_per_tok: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Forward pass of the custom vjp for `_repeat_and_sort_activations()`."""
+  return (
+      _repeat_and_sort_activations_custom(inputs, sort_indices, num_experts_per_tok),
+      sort_indices,
+  )
+
+
+def _repeat_and_sort_activations_custom_bwd(
+    num_experts_per_tok: int,
+    residuals: jax.Array,
+    grads: jax.Array,
+) -> tuple[jax.Array, None]:
+  """Backward pass of the custom vjp for `_repeat_and_sort_activations()`."""
+  sort_indices = residuals
+  unsorted_grads = _sort_activations_custom(grads, jnp.argsort(sort_indices))
+  return (
+      jax.lax.reduce(
+          jnp.reshape(unsorted_grads, (-1, num_experts_per_tok) + grads.shape[1:]),
+          jnp.array(0, dtype=grads.dtype),
+          jax.lax.add,
+          (1,),
+      ),
+      None,
+  )
+
+
+_repeat_and_sort_activations_custom.defvjp(
+    _repeat_and_sort_activations_custom_fwd,
+    _repeat_and_sort_activations_custom_bwd,
+)
+
+
 def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
   """Groups token activations by expert without materializing Top-K copies."""
   selected_experts = selected_experts.reshape((inputs.shape[0], -1))
@@ -1761,8 +1823,12 @@ class RoutedMoE(nnx.Module):
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
-        replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        sorted_inputs = _repeat_and_sort_activations(
+            inputs_2d,
+            sorted_selected_experts,
+            self.num_experts_per_tok,
+            use_custom_sort_vjp,
+        )
 
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
