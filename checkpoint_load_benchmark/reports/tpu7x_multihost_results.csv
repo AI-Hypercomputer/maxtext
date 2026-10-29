@@ -1,0 +1,32 @@
+model,scan_mode,layout,hosts,devices,hbm_gb,link,status,total_s,load_s,transform_s,peak_host_ram_gb,note,source
+qwen3-0.6b,scanned,1 × 2x2x2,2,16,1627.6,ICI,OK,18.03,8.99,9.00,38.20,,lance
+qwen3-0.6b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,19.34,8.66,10.67,78.26,,lance
+qwen3-0.6b,unscanned,1 × 2x2x2,2,16,1627.6,ICI,OK,9.61,6.32,3.28,38.02,,lance
+qwen3-0.6b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,11.50,5.50,5.95,78.06,,lance
+qwen3-235b-a22b,scanned,1 × 2x2x2,2,16,1627.6,ICI,OK,908.33,826.12,82.18,220.10,,lance
+qwen3-235b-a22b,scanned,2 × 2x2x1,2,16,1627.6,DCN,OK,792.38,707.97,83.58,255.85,,mesakh
+qwen3-235b-a22b,unscanned,1 × 2x2x2,2,16,1627.6,ICI,OK,817.59,775.01,42.52,221.98,,lance
+qwen3-235b-a22b,unscanned,2 × 2x2x1,2,16,1627.6,DCN,OK,749.00,704.88,44.03,254.57,,mesakh
+deepseek4-284b,scanned,1 × 2x2x2,2,16,1627.6,ICI,OK,414.93,327.55,87.14,534.70,,lance
+deepseek4-284b,scanned,2 × 2x2x1,2,16,1627.6,DCN,OK,440.72,352.94,87.63,822.56,,mesakh
+deepseek4-284b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,302.91,209.34,93.48,318.41,,lance
+deepseek4-284b,unscanned,1 × 2x2x2,2,16,1627.6,ICI,OK,349.57,307.45,41.90,520.10,,lance
+deepseek4-284b,unscanned,2 × 2x2x1,2,16,1627.6,DCN,OK,352.96,306.30,46.47,822.56,,mesakh
+deepseek4-284b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,258.40,200.93,57.23,318.34,,lance
+qwen3.5-397b-a17b,scanned,1 × 2x2x2,2,16,1627.6,ICI,FAILED,,,,,"HBM OOM in transform (load 488.18 s; 11.25 GiB needed, 2.77 GiB free)",lance
+qwen3.5-397b-a17b,scanned,2 × 2x2x1,2,16,1627.6,DCN,FAILED,,,,,"HBM OOM in transform (load 483.84 s), also with `hbmfix`",mesakh
+qwen3.5-397b-a17b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,1361.95,248.24,1113.67,130.84,,lance
+qwen3.5-397b-a17b,scanned,4 × 2x2x1,4,32,3255.2,DCN,OK,1399.68,260.01,1139.07,127.68,,mesakh
+qwen3.5-397b-a17b,unscanned,1 × 2x2x2,2,16,1627.6,ICI,OK,1150.92,484.68,666.14,48.91,,lance
+qwen3.5-397b-a17b,unscanned,2 × 2x2x1,2,16,1627.6,DCN,OK,1311.85,515.91,795.72,98.66,,mesakh
+qwen3.5-397b-a17b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,1018.83,266.41,751.78,130.49,,lance
+qwen3-480b-a35b,scanned,1 × 2x2x2,2,16,1627.6,ICI,OK,1298.61,953.07,345.50,380.57,,lance
+qwen3-480b-a35b,scanned,2 × 2x2x1,2,16,1627.6,DCN,OK,1067.86,941.98,125.78,415.66,,mesakh
+qwen3-480b-a35b,unscanned,1 × 2x2x2,2,16,1627.6,ICI,OK,1231.98,938.51,293.40,380.50,,lance
+qwen3-480b-a35b,unscanned,2 × 2x2x1,2,16,1627.6,DCN,OK,992.17,907.65,84.30,415.53,,mesakh
+deepseek3-671b,scanned,1 × 2x2x4,4,32,3255.2,ICI,OK,749.86,451.28,298.30,654.92,,lance
+deepseek3-671b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,657.75,490.93,166.72,673.67,,lance
+deepseek3-671b,scanned,4 × 2x2x1,4,32,3255.2,DCN,OK,649.35,468.92,176.84,689.88,,mesakh
+deepseek3-671b,unscanned,1 × 2x2x4,4,32,3255.2,ICI,OK,672.66,468.79,203.51,654.97,,lance
+deepseek3-671b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,587.07,480.07,106.76,644.95,,lance
+deepseek3-671b,unscanned,4 × 2x2x1,4,32,3255.2,DCN,OK,530.96,409.94,120.74,689.92,,mesakh

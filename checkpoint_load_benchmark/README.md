@@ -52,6 +52,8 @@ checkpoint_load_benchmark/
     ├── tpu7x_benchmark_ckpt_load_time_report.md     # [tpu7x] Detailed engineering report on bodaborg-tpu7x-nap with phase breakdowns
     ├── tpu7x_benchmark_ckpt_load_time_issues.md     # [tpu7x] HBM/RAM capacity boundaries, multi-host timeout analysis, and fixes on tpu7x
     ├── tpu7x_priority1_progress.md                  # [tpu7x] Priority 1 per-test status (summary, row-by-row, all tests)
+    ├── tpu7x_multihost_results.md                   # [tpu7x] Multi-host slices (2x2x2, 2x2x4, 2 x 2x2x2) vs the same-HBM P1 multi-slice runs
+    ├── tpu7x_multihost_results.csv                  # [tpu7x] Raw multi-host metrics CSV
     └── tpu7x_benchmark_ckpt_load_time_summary.csv   # [tpu7x] Raw benchmark metrics CSV on bodaborg-tpu7x-nap
 ```
 
@@ -194,6 +196,7 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
 - **Isolation**: `<owner>` is `$BENCH_OWNER` (default `$USER`). Code, logs and CSVs go to
   `gs://mesa-maxtext/<owner>_tpu7x_bench/`, so the `mesakh_tpu7x_bench` code dir that queue workers sync from is
   never overwritten. The runs read the existing P1/P2 HF caches through `SHARED_HF_CACHE_BASE_DIR`.
+- **Results**: [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md).
 
 ```bash
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run smoke   # qwen3-0.6b on 1 x 2x2x2
