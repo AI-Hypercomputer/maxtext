@@ -115,9 +115,38 @@ def l2norm(x: jax.Array, dim: int = -1, eps: float = 1e-6) -> jax.Array:
   return (x_f32 * jax.lax.rsqrt(jnp.sum(jnp.square(x_f32), axis=dim, keepdims=True) + eps)).astype(x.dtype)
 
 
+_BATCH_MESH_AXES = ("data", "stage", "fsdp", "fsdp_transpose", "expert")
+
+
+def get_batch_mesh_axes() -> tuple[str, ...]:
+  """Returns active batch mesh axis names when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  return tuple(ax for ax in _BATCH_MESH_AXES if mesh.shape.get(ax, 1) > 1)
+
+
+def shard_batch(x: jax.Array) -> jax.Array:
+  """Constrains axis 0 of x to active batch mesh axes when a multi-device mesh is set.
+
+  Batches that don't divide evenly over the batch shards (e.g. batch-1 decode) are left unconstrained, matching the
+  unsharded fallback in `Qwen3_8Experts`.
+  """
+  if x.ndim == 0:
+    return x
+  batch_axes = get_batch_mesh_axes()
+  if not batch_axes:
+    return x
+  mesh = jax.sharding.get_abstract_mesh()
+  if x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) != 0:
+    return x
+  spec = jax.sharding.PartitionSpec(batch_axes, *([None] * (x.ndim - 1)))
+  return jax.lax.with_sharding_constraint(x, spec)
+
+
 def init_hyper_connection_streams(token_embeddings: jax.Array, hc_count: int = 4) -> jax.Array:
   """Initializes residual stream by replicating token embeddings across streams."""
-  return jnp.concatenate([token_embeddings] * hc_count, axis=-1)
+  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1))
 
 
 class Qwen3_8GatedResidual(nnx.Module):
@@ -750,6 +779,9 @@ class Qwen3_8SparseAttention(nnx.Module):
 # =================================================================================================
 
 
+# pylint: disable=no-name-in-module
+
+
 class Qwen3_8MLP(nnx.Module):
   """SwiGLU MLP used as shared expert in Qwen3.8-Flash-Next MoE."""
 
@@ -817,25 +849,54 @@ class Qwen3_8Experts(nnx.Module):
       top_k_index = top_k_index.reshape(-1, top_k_index.shape[-1])
       top_k_weights = top_k_weights.reshape(-1, top_k_weights.shape[-1])
 
-    num_tokens, top_k = top_k_index.shape
-    flat_expert_ids = top_k_index.reshape(-1)
-    perm = jnp.argsort(flat_expert_ids)
-    group_sizes = jnp.bincount(flat_expert_ids, length=self.num_experts).astype(jnp.int32)
-    flat_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
-    sorted_x = hidden_states[flat_token_ids[perm]]
-
     w_gate_up = jnp.asarray(self.gate_up_proj.value, dtype=self.dtype)
-    gate_up = jax.lax.ragged_dot(sorted_x.astype(self.dtype), w_gate_up, group_sizes)
-    gate, up = jnp.split(gate_up, 2, axis=-1)
-    act = jax.nn.silu(gate) * up
-
     w_down = jnp.asarray(self.down_proj.value, dtype=self.dtype)
-    sorted_out = jax.lax.ragged_dot(act, w_down, group_sizes)
 
-    inv_perm = jnp.argsort(perm)
-    expert_outs = sorted_out[inv_perm].reshape(num_tokens, top_k, self.emb_dim)
-    out = jnp.sum(expert_outs * top_k_weights[:, :, None].astype(expert_outs.dtype), axis=1)
-    out = out.astype(hidden_states.dtype)
+    def _dispatch_2d(
+        x_2d: jax.Array,
+        idx_2d: jax.Array,
+        w_2d: jax.Array,
+        w_gu: jax.Array,
+        w_dn: jax.Array,
+    ) -> jax.Array:
+      num_tokens, top_k = idx_2d.shape
+      flat_expert_ids = idx_2d.reshape(-1)
+      perm = jnp.argsort(flat_expert_ids)
+      group_sizes = jnp.bincount(flat_expert_ids, length=self.num_experts).astype(jnp.int32)
+      flat_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
+      sorted_x = x_2d[flat_token_ids[perm]]
+
+      gate_up = jax.lax.ragged_dot(sorted_x.astype(self.dtype), w_gu, group_sizes)
+      gate, up = jnp.split(gate_up, 2, axis=-1)
+      act = jax.nn.silu(gate) * up
+      sorted_out = jax.lax.ragged_dot(act, w_dn, group_sizes)
+
+      inv_perm = jnp.argsort(perm)
+      expert_outs = sorted_out[inv_perm].reshape(num_tokens, top_k, self.emb_dim)
+      out_2d = jnp.sum(expert_outs * w_2d[:, :, None].astype(expert_outs.dtype), axis=1)
+      return out_2d.astype(x_2d.dtype)
+
+    mesh = jax.sharding.get_abstract_mesh()
+    batch_axes = get_batch_mesh_axes()
+    batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
+    if batch_axes and hidden_states.shape[0] % batch_shards == 0:
+      token_spec = jax.sharding.PartitionSpec(batch_axes, None)
+      weight_spec = jax.sharding.PartitionSpec()
+      out = jax.shard_map(
+          _dispatch_2d,
+          mesh=mesh,
+          in_specs=(
+              token_spec,
+              token_spec,
+              token_spec,
+              weight_spec,
+              weight_spec,
+          ),
+          out_specs=token_spec,
+          check_vma=False,
+      )(hidden_states, top_k_index, top_k_weights, w_gate_up, w_down)
+    else:
+      out = _dispatch_2d(hidden_states, top_k_index, top_k_weights, w_gate_up, w_down)
 
     if len(orig_shape) == 3:
       out = out.reshape(orig_shape)
@@ -1191,7 +1252,12 @@ class Qwen3_8NGramEmbedding(nnx.Module):
     return jnp.concatenate(blocks, axis=-1)[:, self.ngram_size - 1 :, :]
 
   def __call__(self, input_ids: jax.Array) -> jax.Array:
-    return self.ngram_embedding(self.compute_ngram_ids(input_ids)).reshape(input_ids.shape[0], -1, self.ple_embed_dim)
+    ngram_ids = self.compute_ngram_ids(input_ids)
+    mesh = jax.sharding.get_abstract_mesh()
+    if not mesh.empty and mesh.size > 1:
+      ngram_ids = jax.lax.with_sharding_constraint(ngram_ids, jax.sharding.PartitionSpec())
+    embeds = shard_batch(self.ngram_embedding(ngram_ids))
+    return embeds.reshape(input_ids.shape[0], -1, self.ple_embed_dim)
 
 
 class Qwen3_8PLELayer(nnx.Module):
@@ -1447,6 +1513,7 @@ def apply_scanned_cycles(
     ple_input_ids: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
     return_aux: bool = False,
+    remat: bool = False,
 ) -> Any:
   """Executes scan over stacked cycle weights with conditional PLE at cycle 0."""
   c_def, c_params, c_rest = nnx.split(cycles, nnx.Param, ...)
@@ -1460,17 +1527,22 @@ def apply_scanned_cycles(
     return h
 
   def scan_fn(carry, xs):
+    carry = shard_batch(carry)
     blk, kw = nnx.merge(c_def, xs[0], xs[1]), {"positions": positions, "conv_mask": conv_mask, "segment_ids": segment_ids}
     if return_aux:
       h, a0 = blk.gdn_0(carry, return_aux=True, **kw)
       h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
       h, a2 = blk.gdn_2(h, return_aux=True, **kw)
       h, a3 = blk.qsa_3(h, return_aux=True, **kw)
-      return h, (a0, a1, a2, a3)
+      return shard_batch(h), (a0, a1, a2, a3)
     h = ple_step(blk.gdn_0(carry, **kw), xs[2])
-    return blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw), None
+    return (
+        shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw)),
+        None,
+    )
 
-  res = jax.lax.scan(scan_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
+  step_fn = jax.checkpoint(scan_fn, prevent_cse=False) if remat else scan_fn
+  res = jax.lax.scan(step_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
   if return_aux:
     return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
   return res[0]
@@ -1742,6 +1814,11 @@ class Qwen3_8Decoder(nnx.Module):
     c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
     self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
     self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
+    self.remat = str(getattr(c, "remat_policy", "none")) not in (
+        "none",
+        "",
+        "None",
+    )
     self.dtype, self.weight_dtype = dt, wdt
     self.token_embedder = nnx.Embed(self.vocab_size, self.emb_dim, dtype=dt, param_dtype=wdt, rngs=rngs)
     self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
@@ -1785,7 +1862,11 @@ class Qwen3_8Decoder(nnx.Module):
     tok = decoder_input_tokens
     pos, cmask = _positions_and_conv_mask(tok, decoder_positions, decoder_segment_ids)
     pids = tok if cmask is None else jnp.where(cmask.astype(jnp.bool_), tok, self.eos_token_id)
-    h, aux_list = init_hyper_connection_streams(self.token_embedder(tok), hc_count=self.hc_count), []
+    tok_emb = shard_batch(self.token_embedder(tok))
+    h, aux_list = (
+        init_hyper_connection_streams(tok_emb, hc_count=self.hc_count),
+        [],
+    )
     if self.scan_layers:
       res = apply_scanned_cycles(
           self.cycles,
@@ -1797,6 +1878,7 @@ class Qwen3_8Decoder(nnx.Module):
           ple_input_ids=pids,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
+          remat=self.remat,
       )
       h, aux_list = res if return_aux else (res, [])
     else:
@@ -1805,7 +1887,7 @@ class Qwen3_8Decoder(nnx.Module):
             h, positions=pos, conv_mask=cmask, ple_input_ids=pids, segment_ids=decoder_segment_ids, return_aux=return_aux
         )
         h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
-    h_4stream, h_mixed = h, self.hyper_connection_mixer.mix_input(h)
+    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h))
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
     return (h_mixed, aux_list) if return_aux else h_mixed
@@ -1866,15 +1948,15 @@ class Qwen3_8FlashNextModel(nnx.Module):
       pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
       mtp_out = self.mtp(
           h_4stream,
-          self.decoder.token_embedder(next_tok),
+          shard_batch(self.decoder.token_embedder(next_tok)),
           positions=pos,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
       )
       mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
-      mtp_logits = self.lm_head(mtp_h)
-      logits = self.lm_head(h_mixed)
+      mtp_logits = shard_batch(self.lm_head(mtp_h))
+      logits = shard_batch(self.lm_head(h_mixed))
       if return_aux:
         aux_dict = {"layer_aux": aux_list, "mtp_aux": mtp_aux, "mtp_logits": mtp_logits}
         return (logits, aux_dict)
@@ -1887,7 +1969,9 @@ class Qwen3_8FlashNextModel(nnx.Module):
         return_aux=return_aux,
         return_pre_mixer=return_hidden_states,
     )
-    return (self.lm_head(out[0]), *out[1:]) if (return_hidden_states or return_aux) else self.lm_head(out)
+    if return_hidden_states or return_aux:
+      return (shard_batch(self.lm_head(out[0])), *out[1:])
+    return shard_batch(self.lm_head(out))
 
 
 def create_qwen3_8_flash_next_model(

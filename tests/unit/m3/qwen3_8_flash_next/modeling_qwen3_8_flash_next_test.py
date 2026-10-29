@@ -28,6 +28,7 @@ Sections:
 import types
 from typing import Any
 import unittest
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -820,6 +821,65 @@ class Qwen3_8MoETest(absltest.TestCase):
     expected_skewed = experts.reference_forward(x, skewed_idx, top_k_w)
     np.testing.assert_allclose(actual_skewed, expected_skewed, rtol=1e-5, atol=1e-5)
 
+  def test_experts_shard_map_matches_reference_forward_on_cpu_mesh(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+    n, d, m, e, k = 16, 32, 16, 12, 2
+    experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=e,
+        emb_dim=d,
+        moe_mlp_dim=m,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(7),
+    )
+    x = jax.random.normal(jax.random.key(11), (n, d))
+    top_k_idx = jax.random.randint(jax.random.key(12), (n, k), 0, e)
+    top_k_w = jax.random.uniform(jax.random.key(13), (n, k))
+    top_k_w = top_k_w / jnp.sum(top_k_w, axis=-1, keepdims=True)
+
+    def ref_loss_fn(mod, inp):
+      return jnp.sum(mod.reference_forward(inp, top_k_idx, top_k_w) * jnp.arange(1, d + 1, dtype=jnp.float32))
+
+    ref_out = experts.reference_forward(x, top_k_idx, top_k_w)
+    ref_loss, (ref_grads, ref_dx) = nnx.value_and_grad(ref_loss_fn, argnums=(0, 1))(experts, x)
+
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("fsdp",))
+    token_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None))
+    weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "fsdp", None))
+
+    x_sharded = jax.device_put(x, token_sharding)
+    idx_sharded = jax.device_put(top_k_idx, token_sharding)
+    w_sharded = jax.device_put(top_k_w, token_sharding)
+    experts.gate_up_proj.value = jax.device_put(experts.gate_up_proj.value, weight_sharding)
+    experts.down_proj.value = jax.device_put(experts.down_proj.value, weight_sharding)
+
+    with jax.set_mesh(mesh):
+      actual_out = jax.jit(lambda mod, inp, idx, w: mod(inp, idx, w))(experts, x_sharded, idx_sharded, w_sharded)
+
+      def sharded_loss_fn(mod, inp):
+        return jnp.sum(mod(inp, idx_sharded, w_sharded) * jnp.arange(1, d + 1, dtype=jnp.float32))
+
+      actual_loss, (actual_grads, actual_dx) = jax.jit(nnx.value_and_grad(sharded_loss_fn, argnums=(0, 1)))(
+          experts, x_sharded
+      )
+
+    np.testing.assert_allclose(np.asarray(actual_out), np.asarray(ref_out), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(actual_loss), np.asarray(ref_loss), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(actual_dx), np.asarray(ref_dx), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(actual_grads.gate_up_proj.value),
+        np.asarray(ref_grads.gate_up_proj.value),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual_grads.down_proj.value),
+        np.asarray(ref_grads.down_proj.value),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_pytorch_moe_weight_copy_parity(self):
     if torch is None or modeling_qwen4_exp is None or configuration_qwen4_exp is None:
@@ -1345,6 +1405,45 @@ class Qwen3_8BackboneTest(absltest.TestCase):
         modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(m3_models.create_model(cu, mesh=None), ms)
     with self.assertRaises(ValueError):
       modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(ms, ms)
+
+  def test_scan_remat_matches_no_remat(self):
+    """Verifies the checkpointed scanned cycle (remat) matches the uncheckpointed one (loss and gradients)."""
+    cfgs = [_get_mini_config(scan_layers=True, base_num_decoder_layers=8, remat_policy=p) for p in ("full", "none")]
+    m_remat, m_plain = (m3_models.create_model(c, mesh=None) for c in cfgs)
+    nnx.update(m_plain, nnx.state(m_remat))
+    self.assertTrue(m_remat.decoder.remat)
+    self.assertFalse(m_plain.decoder.remat)
+    toks = jnp.array([[3, 17, 42, 88, 3, 50, 61, 99]], dtype=jnp.int32)
+    targets = jnp.array([[17, 42, 88, 3, 50, 61, 99, 5]], dtype=jnp.int32)
+    seg = jnp.ones((1, 8), dtype=jnp.int32).at[:, 4:].set(2)
+
+    def loss_fn(model):
+      loss, _ = modeling_qwen3_8_flash_next.compute_total_loss(
+          model, toks, targets, segment_ids=seg, router_aux_coeff=0.01, use_mtp=False
+      )
+      return loss
+
+    def loss_and_grad(model, expect_remat):
+      with mock.patch.object(jax, "checkpoint", wraps=jax.checkpoint) as checkpoint:
+        out = nnx.value_and_grad(loss_fn)(model)
+      # The scan body is the only jax.checkpoint in the model, so only the remat path may wrap it.
+      self.assertEqual(checkpoint.called, expect_remat)
+      return out
+
+    (l_remat, g_remat), (l_plain, g_plain) = loss_and_grad(m_remat, True), loss_and_grad(m_plain, False)
+    np.testing.assert_allclose(l_remat, l_plain, atol=1e-6, rtol=1e-6)
+    # Recomputing the cycle in the backward pass changes XLA's fusion/accumulation order, so allow f32 noise.
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, atol=1e-4, rtol=1e-4), g_remat, g_plain)
+
+  def test_shard_batch_skips_indivisible_batches(self):
+    """Verifies shard_batch constrains evenly divisible batches and leaves indivisible ones unconstrained."""
+    if len(jax.devices()) < 4:
+      self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("fsdp",))
+    with jax.set_mesh(mesh):
+      for batch, constrained in ((8, True), (3, False), (1, False)):
+        jaxpr = str(jax.make_jaxpr(modeling_qwen3_8_flash_next.shard_batch)(jnp.zeros((batch, 16))))
+        self.assertEqual("sharding_constraint" in jaxpr, constrained, msg=f"batch={batch}")
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_pytorch_full_model_weight_copy_parity(self):
