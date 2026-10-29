@@ -492,6 +492,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: None = None,
     quant_mode_str: str = "train",
+    role: str = "actor",
 ) -> nnx_wrappers.ToLinen:
   ...
 
@@ -505,6 +506,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
     quant_mode_str: str = "train",
+    role: str = "actor",
 ) -> models.Transformer:
   ...
 
@@ -517,6 +519,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
     quant_mode_str: str = "train",
+    role: str = "actor",
 ) -> nnx_wrappers.ToLinen | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
@@ -530,7 +533,7 @@ def from_config(
   """
   if mesh is None:
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
-  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs, quant_mode_str=quant_mode_str)
+  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs, quant_mode_str=quant_mode_str, role=role)
 
   # Return only the model
   return model
@@ -547,7 +550,13 @@ def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAI
 
 
 def create_model(
-    config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None, *, quant_mode_str: str = "train"
+    config,
+    mesh,
+    model_mode: str = MODEL_MODE_TRAIN,
+    rngs: nnx.Rngs | None = None,
+    *,
+    quant_mode_str: str = "train",
+    role: str = "actor",
 ):
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
@@ -558,23 +567,37 @@ def create_model(
   # Model definition
   quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
   model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
-  model = quantizations.maybe_quantize_model(model, config)
+  model = quantizations.maybe_quantize_model(model, config, role=role)
   return model
 
 
 def get_nnx_create_model_fn(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
+    config,
+    mesh=None,
+    devices=None,
+    model_mode=MODEL_MODE_TRAIN,
+    rng_key=None,
+    *,
+    quant_mode_str: str = "train",
+    role: str = "actor",
 ) -> Callable:
 
   def _create_model():
     rngs = maxtext_utils_nnx.create_nnx_rngs(config, model_mode=model_mode, rng_key=rng_key)
-    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode, quant_mode_str=quant_mode_str)
+    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode, quant_mode_str=quant_mode_str, role=role)
 
   return _create_model
 
 
 def create_nnx_abstract_model(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
+    config,
+    mesh=None,
+    devices=None,
+    model_mode=MODEL_MODE_TRAIN,
+    rng_key=None,
+    *,
+    quant_mode_str: str = "train",
+    role: str = "actor",
 ) -> tuple[Callable, nnx.Module]:
   """Creates an abstract NNX model.
 
@@ -588,7 +611,9 @@ def create_nnx_abstract_model(
   """
 
   with logical_axis_rules(config.logical_axis_rules):
-    _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
+    _create_model = get_nnx_create_model_fn(
+        config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str, role=role
+    )
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
     # param_scan_axis / nnx.PARTITION_NAME metadata set by _create_scanned_layers,

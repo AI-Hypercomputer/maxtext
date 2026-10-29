@@ -20,6 +20,7 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import qwix
 
 
 def create_scanned_layers(
@@ -180,10 +181,10 @@ def apply_scanned_layers(
 
   def scan_body(current_carry, scanned_state):
     if xs is None:
-      current_params, current_rest = scanned_state
+      scan_idx, current_params, current_rest = scanned_state
       apply_args = ()
     else:
-      current_params, current_rest, current_xs = scanned_state
+      scan_idx, current_params, current_rest, current_xs = scanned_state
       apply_args = (current_xs,)
     current_params = jax.tree.map(
         _strip_scan_metadata,
@@ -191,7 +192,8 @@ def apply_scanned_layers(
         is_leaf=lambda x: hasattr(x, "replace") and hasattr(x, "value"),
     )
     current_layer = nnx.merge(layer_graphdef, current_params, current_rest)
-    next_carry = apply_fn(current_layer, current_carry, *apply_args)
+    with qwix.scan_index_context(scan_idx):
+      next_carry = apply_fn(current_layer, current_carry, *apply_args)
     # Drop the parameters that were carried in: ``jax.lax.scan`` stacks every
     # output, so returning them would materialize a second copy of the stacked
     # layer weights. Parameters created inside the body are still returned.
@@ -202,7 +204,8 @@ def apply_scanned_layers(
     return next_carry, (new_params, updated_rest)
 
   scan_fn = jax.checkpoint(scan_body, policy=remat_policy, prevent_cse=prevent_cse) if remat else scan_body
-  scan_xs = (params, rest) if xs is None else (params, rest, xs)
+  scan_indices = jnp.arange(length, dtype=jnp.int32)
+  scan_xs = (scan_indices, params, rest) if xs is None else (scan_indices, params, rest, xs)
   final_carry, (scanned_new_params, scanned_rest) = jax.lax.scan(scan_fn, carry, scan_xs, length=length, unroll=unroll)
 
   if param_scan_axis != 0:
