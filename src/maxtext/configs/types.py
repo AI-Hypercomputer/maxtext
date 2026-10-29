@@ -1889,6 +1889,15 @@ class KimiK3(BaseModel):
           "is cast back to `dtype`."
       ),
   )
+  routed_experts_weight_format: Literal["bf16", "mxfp4"] = Field(
+      "bf16",
+      description=(
+          "Storage format of the Kimi latent-MoE routed experts. 'bf16' keeps dense float kernels "
+          "(dtype = weight_dtype); 'mxfp4' keeps the released MXFP4 packed uint8 codes + E8M0 scales "
+          "and dequantizes only the gathered top-k experts in the forward pass. 'mxfp4' is an "
+          "inference/parity path: it requires model_call_mode='inference' and cannot be trained."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_kimi_k3_alias_pairs(self):
@@ -1901,6 +1910,22 @@ class KimiK3(BaseModel):
       generic_value = getattr(self, generic_name, None)
       if kimi_value and generic_value is not None and kimi_value != generic_value:
         raise ValueError(f"{kimi_name}={kimi_value} must equal {generic_name}={generic_value}; override both together.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_routed_experts_weight_format(self) -> "KimiK3":
+    """MXFP4 routed experts are uint8 params decoded in the forward pass: inference only."""
+    if self.routed_experts_weight_format != "mxfp4":
+      return self
+    if getattr(self, "model_call_mode", "") != "inference":
+      raise ValueError(
+          "routed_experts_weight_format='mxfp4' stores the routed experts as packed uint8 params, which "
+          "cannot be trained (no gradients / optimizer state); it is an inference and parity path. Set "
+          "model_call_mode='inference', or use routed_experts_weight_format='bf16' for training."
+      )
+    for name in ("routed_expert_hidden_size", "moe_intermediate_size"):
+      if getattr(self, name) % 32:
+        raise ValueError(f"routed_experts_weight_format='mxfp4' needs {name} divisible by 32 (MXFP4 group size).")
     return self
 
 

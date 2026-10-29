@@ -4766,6 +4766,7 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   first_num_dense_layers = config.get("first_k_dense_replace", 1)
   num_experts = config.get("num_experts", 896)
   full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+  routed_weight_format = getattr(maxtext_config, "routed_experts_weight_format", "bf16")
 
   mapping = {}
 
@@ -4856,8 +4857,8 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping.update(
           {
               f"{prefix}-mlp-routed_experts-gate-kernel": f"language_model.model.layers.{i}.block_sparse_moe.gate.weight",
-              # The router bias is `gate/bias`; for kimi-k3 it is a `moe.MoEBiasVar`, so (as for
-              # DeepSeek) it lives in the `MoEBiasVar` collection.
+              # The router (moe.GateLogit, both weight formats) names its bias `gate/bias`; for kimi-k3
+              # it is a `moe.MoEBiasVar`, so (as for DeepSeek) it lives in the `MoEBiasVar` collection.
               f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-routed_experts-gate-bias": (
                   f"language_model.model.layers.{i}.block_sparse_moe.gate.e_score_correction_bias"
               ),
@@ -4881,8 +4882,13 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               ),
           }
       )
-      # Routed experts: dense `.weight` kernels.
-      expert_suffixes = (("", ".weight"),)
+      # Routed experts: dense `.weight` (dequantized by the loader) or, in mxfp4 mode, the
+      # released `weight_packed` / `weight_scale` sidecars kept as uint8.
+      expert_suffixes = (
+          (("", ".weight"),)
+          if routed_weight_format != "mxfp4"
+          else (("_packed", ".weight_packed"), ("_scale", ".weight_scale"))
+      )
       for mt_name, hf_name in (("wi_0", "w1"), ("wi_1", "w3"), ("wo", "w2")):
         for mt_suffix, hf_suffix in expert_suffixes:
           mapping[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = [
@@ -5012,6 +5018,14 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   qk_rope_head_dim = config.get("qk_rope_head_dim", 64)
   v_head_dim = config.get("v_head_dim", 128)
   qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+  routed_weight_format = getattr(maxtext_config, "routed_experts_weight_format", "bf16")
+  # Mirror the mapping: only register hooks for the routed-expert keys of the active weight format.
+  routed_expert_suffixes = ("_packed", "_scale") if routed_weight_format == "mxfp4" else ("",)
+  if saving_to_hf and routed_weight_format == "mxfp4":
+    raise NotImplementedError(
+        "Exporting Kimi-K3 with routed_experts_weight_format=mxfp4 to Hugging Face is not supported; "
+        "convert from a bf16 MaxText checkpoint instead."
+    )
 
   def transpose(input_tensor, target_shape=None):
     if input_tensor.ndim == 3:
@@ -5124,8 +5138,8 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = transpose
       hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = transpose
       for mt_name in ("wi_0", "wi_1", "wo"):
-        # HF [out, in] (dense) -> MaxText [in.., out].
-        for mt_suffix in ("",):
+        # HF [out, in] (dense) or [out, in/2] / [out, in/32] (MXFP4 sidecars) -> MaxText [in.., out].
+        for mt_suffix in routed_expert_suffixes:
           hooks[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = transpose
 
   return hooks

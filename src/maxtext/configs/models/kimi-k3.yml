@@ -69,6 +69,9 @@ routed_bias: true
 moe_expert_input_dim: 3584
 moe_router_input_dim: 7168
 float32_gate_logits: true
+# Routed-expert storage: "bf16" (dense kernels) or "mxfp4" (released packed uint8 codes +
+# E8M0 scales, dequantized after the top-k gather; ~4x smaller routed-expert footprint).
+routed_experts_weight_format: "bf16"
 
 # Sequence Length & RoPE
 # Kimi-K3 uses NoPE for its MLA layers (HF `mla_use_nope: true`) and ships no
