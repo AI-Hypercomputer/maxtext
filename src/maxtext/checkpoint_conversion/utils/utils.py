@@ -52,7 +52,10 @@ from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
 from maxtext.utils import max_logging
+from maxtext.utils import sparsity_utils
 import orbax.checkpoint as ocp
+from qwix._src.core import qarray as qwix_qarray
+from qwix._src.core import sparsity
 
 _storage = gcs_storage()
 Client = _storage.Client
@@ -207,6 +210,34 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
     output_weights.append((hf_path, numpy_slice))
 
 
+def _maybe_sparsify_outputs(output_weights, maxtext_config):
+  """Applies N:M magnitude sparsity to exported decoder weights if configured.
+
+  Uses the same layer selection (`sparse_layers`, `sparse_experts_only`) and
+  mask (`qarray.sparsify`) as weight-only sparsity in training, so that the
+  exported weights have the structure the model was trained with. Hugging Face
+  matmul weights are laid out as [..., out, in], so groups of M are taken
+  along the last (input) axis, which corresponds to the innermost contracting
+  axis in MaxText.
+  """
+  n = maxtext_config.weight_sparsity_n
+  m = maxtext_config.weight_sparsity_m
+  if not (n and m) or maxtext_config.quantization:
+    return output_weights
+
+  sparse_indices = sparsity_utils.get_sparse_layer_indices(maxtext_config)
+  target_layers = set(sparse_indices) if sparse_indices is not None else None
+  rule = sparsity.SparsityRule(weight_sparsity_n=n, weight_sparsity_m=m)
+  sparsified = []
+  for hf_path, weight in output_weights:
+    if weight.ndim >= 2 and sparsity_utils.is_sparsifiable_hf_param(
+        hf_path, target_layers, maxtext_config.sparse_experts_only
+    ):
+      weight = np.asarray(qwix_qarray.sparsify(jnp.asarray(weight), rule, axis=-1))
+    sparsified.append((hf_path, weight))
+  return sparsified
+
+
 def process_maxtext_param(
     maxtext_param_key: str | tuple[str, ...],
     maxtext_param_weight: jax.Array | list[jax.Array],
@@ -274,7 +305,7 @@ def process_maxtext_param(
         hf_shape_map,
         save_dtype=maxtext_config.weight_dtype,
     )
-    return output_weights
+    return _maybe_sparsify_outputs(output_weights, maxtext_config)
 
   # Stacked MaxText weight
   # This handles the 3 remaining cases:
@@ -324,7 +355,7 @@ def process_maxtext_param(
           save_dtype=maxtext_config.weight_dtype,
       )
 
-    return output_weights
+    return _maybe_sparsify_outputs(output_weights, maxtext_config)
 
   # Case 4: Multi-axis stacked -- the exact inverse of _build_multi_axis_stacked_tensor.
   # `stacked_axes` says where the stacked axes sit in the MaxText tensor: leading for
@@ -359,7 +390,7 @@ def process_maxtext_param(
 
   _emit_slices(maxtext_param_weight, hf_target_paths, 0)
 
-  return output_weights
+  return _maybe_sparsify_outputs(output_weights, maxtext_config)
 
 
 def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
