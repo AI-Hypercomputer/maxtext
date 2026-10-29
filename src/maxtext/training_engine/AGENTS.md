@@ -16,3 +16,6 @@ The execution scripts for this code currently live in the Tunix `atwigg/mlperf` 
 * AI agents tend to use defensive `getattr(config, "flag_name", None)`. We should directly use `config.flag_name` instead. Some unit tests might need to be updated to use Pydantic to avoid test failures.
 
 If config flags are changed according to the rules above, clearly document this in the PR description so that the execution scripts can be updated accordingly.
+
+## Documentation and Comments
+* Comments and docstrings must explain the current state of the code from first principles. Do not write comments that describe how the code is different from deleted code, legacy implementations, or prior branches (e.g., avoid "diff-style" explanations comparing against removed paths). A reader who never saw the old code should be able to understand the comment entirely from context.
