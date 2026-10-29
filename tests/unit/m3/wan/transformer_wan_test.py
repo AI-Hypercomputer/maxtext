@@ -96,6 +96,27 @@ class WanModelTest(parameterized.TestCase):
     self.assertFalse(np.allclose(np.asarray(model(latents, timestep + 100.0, text)), out))
     self.assertFalse(np.allclose(np.asarray(model(latents, timestep, text + 1.0)), out))
 
+  @parameterized.named_parameters(("scanned", True), ("unscanned", False))
+  def test_remat_policy_keeps_output_and_gradients(self, scan_layers):
+    """`remat_policy` (per-layer `nnx.remat`) changes memory, not math, and keeps the parameter paths."""
+    latents, timestep, text = _inputs()
+    plain = WanModel(rngs=nnx.Rngs(0), scan_layers=scan_layers, **_CONFIG)
+    rematted = WanModel(
+        rngs=nnx.Rngs(0), scan_layers=scan_layers, remat_policy=jax.checkpoint_policies.nothing_saveable, **_CONFIG
+    )
+
+    def loss(model):
+      return jnp.sum(model(latents, timestep, text) ** 2)
+
+    plain_loss, plain_grads = nnx.value_and_grad(loss)(plain)
+    remat_loss, remat_grads = nnx.value_and_grad(loss)(rematted)
+    np.testing.assert_allclose(np.asarray(remat_loss), np.asarray(plain_loss), rtol=1e-6)
+    plain_flat, remat_flat = nnx.to_flat_state(plain_grads), nnx.to_flat_state(remat_grads)
+    self.assertEqual([path for path, _ in plain_flat], [path for path, _ in remat_flat])
+    for (path, a), (_, b) in zip(plain_flat, remat_flat):
+      # Recomputation reorders float ops: ~1e-5 relative noise.
+      np.testing.assert_allclose(np.asarray(b[...]), np.asarray(a[...]), rtol=1e-4, atol=1e-5, err_msg=str(path))
+
 
 class EmbeddingTest(unittest.TestCase):
 
