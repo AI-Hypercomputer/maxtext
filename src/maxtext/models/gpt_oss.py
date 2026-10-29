@@ -224,9 +224,9 @@ class GptOssDecoderLayer(nnx.Module):
 
       stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
       return (layer_output, stacked_kv_cache, layer_idx + 1), None
-    elif cfg.scan_layers:
-      return layer_output, None
     else:
+      # Also under scan_layers: when vLLM serves a scanned model, GptOssScannableBlock hands each layer its own
+      # `kv_cache` and keeps the cache returned here.
       return layer_output, kv_cache
 
 
@@ -288,15 +288,25 @@ class GptOssScannableBlock(nnx.Module):
       kv_cache=None,
       attention_metadata=None,
   ):
+    """Applies the block's decoder layers in order.
+
+    `kv_cache` holds vLLM's externally-managed KV caches, one per layer of the block in layer order, or is None
+    when the caches are not managed externally. Returns the block output and, when `kv_cache` is given, the
+    layers' updated caches as a tuple in the same order (else None).
+    """
     cfg = self.config
 
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
+    updated_kv_caches = []
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
       layer_name = f"layers_{layer_id}"
       layer = getattr(self, layer_name)
-      y, kv_cache = layer(
+      # Each layer attends with its own cache: one cache handed down the block would leave every layer after
+      # the first without one.
+      layer_kv_cache = kv_cache[layer_id] if kv_cache is not None else None
+      y, layer_kv_cache = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -304,7 +314,10 @@ class GptOssScannableBlock(nnx.Module):
           model_mode,
           previous_chunk=previous_chunk,
           slot=slot,
-          kv_cache=kv_cache,
+          kv_cache=layer_kv_cache,
           attention_metadata=attention_metadata,
       )
-    return y, kv_cache
+      updated_kv_caches.append(layer_kv_cache)
+    if kv_cache is None:
+      return y, None
+    return y, tuple(updated_kv_caches)
