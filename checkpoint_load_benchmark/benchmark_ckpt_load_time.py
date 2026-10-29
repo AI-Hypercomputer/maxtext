@@ -492,7 +492,16 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
   if not files:
     raise RuntimeError(f"No .safetensors files found on HF Hub for {repo_id}")
 
-  shared_st_cache_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/shared/hf_cache/{repo_id.replace('/', '_')}"
+  # SHARED_HF_CACHE_BASE_DIR (`<run dir>/safetensors_dynamic` of another run) lets a new run dir reuse that run's
+  # cache, as the safetensors_dynamic step already does; the cold Step 1 time is then looked up in that run's logs.
+  shared_cache_root = os.environ.get("SHARED_HF_CACHE_BASE_DIR", "").strip().rstrip("/")
+  shared_st_cache_dir = (
+      f"{shared_cache_root or args.gcs_run_dir + '/safetensors_dynamic'}/{args.model}/shared/hf_cache/"
+      f"{repo_id.replace('/', '_')}"
+  )
+  log_roots = [f"{args.gcs_run_dir}/logs/{args.model}"]
+  if shared_cache_root.endswith("/safetensors_dynamic"):
+    log_roots.append(f"{shared_cache_root.removesuffix('/safetensors_dynamic')}/logs/{args.model}")
   reused_existing = False
   if os.environ.get("REUSE_SHARED_ST_GCS_CACHE") == "1" or getattr(args, "reuse_model_hf_cache", False):
     # Reuse the shared cache when every shard is in it. Requiring a cold HF->GCS time in the scanned 1-slice
@@ -509,12 +518,13 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
       if all(cached.get(os.path.basename(f), 0) > 0 for f in files):
         # The cold download is the largest Step 1 time recorded for this model; warm cache checks take under 1 s.
         recorded = []
-        for res in epath.Path(f"{args.gcs_run_dir}/logs/{args.model}").glob("*/*_result.json"):
-          if res.name in ("safetensors_dynamic_result.json", "to_maxtext_step1_result.json"):
-            try:
-              recorded.append(float(json.loads(res.read_text()).get("hf_to_gcs_s", 0.0) or 0.0))
-            except Exception:  # pylint: disable=broad-exception-caught
-              pass
+        for log_root in log_roots:
+          for res in epath.Path(log_root).glob("*/*_result.json"):
+            if res.name in ("safetensors_dynamic_result.json", "to_maxtext_step1_result.json"):
+              try:
+                recorded.append(float(json.loads(res.read_text()).get("hf_to_gcs_s", 0.0) or 0.0))
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
         cold_s = max(recorded, default=0.0)
         gcs_cache_dir = shared_st_cache_dir
         hf_to_gcs_s = cold_s if cold_s >= 1.0 else 0.0
@@ -658,6 +668,40 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
   }
 
 
+def _parallel_gcs_download(src_uri: str, dst: str, workers: int, chunk_bytes: int = 128 * 1024 * 1024) -> int:
+  """Downloads one GCS object to `dst` as concurrent byte-range reads; returns the object size in bytes.
+
+  A single sequential stream reached ~55 MB/s from a tpu7x host, which made streaming the shards of a 807 GB
+  checkpoint through `to_maxtext` take ~4.3 h. Each worker thread uses its own client (one HTTP session each).
+  """
+  import concurrent.futures
+  import threading
+
+  from google.cloud import storage as gcs_storage
+
+  bucket_name, _, blob_name = src_uri.removeprefix("gs://").partition("/")
+  size = gcs_storage.Client().bucket(bucket_name).get_blob(blob_name).size
+  with open(dst, "wb") as f:
+    f.truncate(size)
+  local = threading.local()
+
+  def _read_range(start: int) -> None:
+    if not hasattr(local, "blob"):
+      local.blob = gcs_storage.Client().bucket(bucket_name).blob(blob_name)
+    data = local.blob.download_as_bytes(start=start, end=min(start + chunk_bytes, size) - 1, checksum=None)
+    fd = os.open(dst, os.O_WRONLY)
+    try:
+      os.pwrite(fd, data, start)
+    finally:
+      os.close(fd)
+
+  with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+    list(pool.map(_read_range, range(0, size, chunk_bytes)))
+  if os.path.getsize(dst) != size:
+    raise RuntimeError(f"Downloaded {os.path.getsize(dst)} of {size} bytes of {src_uri}")
+  return size
+
+
 def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, Any]:
   """Step 2 for `to_maxtext`: Convert HF checkpoint to an Orbax checkpoint on GCS."""
   import jax
@@ -742,6 +786,10 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
     _orig_get_tensor = to_maxtext.LazyHFLoader.get_tensor
     _lru_shards: collections.OrderedDict[str, str] = collections.OrderedDict()
     _fetch_lock = threading.Lock()
+    # TM_STREAM_DOWNLOAD_WORKERS=1 reproduces the original single-stream fetch (used for the first 235B run).
+    stream_workers = int(os.environ.get("TM_STREAM_DOWNLOAD_WORKERS", "16"))
+    stream_stats = {"bytes": 0, "seconds": 0.0, "shards": 0}
+    sub_timings["stream_download_workers"] = stream_workers
 
     def _streaming_get_tensor(self, key: str, dtype: str | None = None):
       if self.is_local:
@@ -757,9 +805,32 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
                   os.remove(old_path)
                 except OSError:
                   pass
-              src_p = epath.Path(f"{staged_gcs_cache_dir}/{shard_name}")
-              with src_p.open("rb") as fsrc, open(local_shard, "wb") as fdst:
-                shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
+              t_fetch = time.perf_counter()
+              if stream_workers > 1:
+                for attempt in range(3):
+                  try:
+                    stream_stats["bytes"] += _parallel_gcs_download(
+                        f"{staged_gcs_cache_dir}/{shard_name}", local_shard, stream_workers
+                    )
+                    break
+                  except Exception:  # pylint: disable=broad-exception-caught
+                    # Never leave a partial shard behind: the next lookup would treat it as cached.
+                    try:
+                      os.remove(local_shard)
+                    except OSError:
+                      pass
+                    if attempt == 2:
+                      raise
+              else:
+                src_p = epath.Path(f"{staged_gcs_cache_dir}/{shard_name}")
+                with src_p.open("rb") as fsrc, open(local_shard, "wb") as fdst:
+                  shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
+                stream_stats["bytes"] += os.path.getsize(local_shard)
+              stream_stats["seconds"] += time.perf_counter() - t_fetch
+              stream_stats["shards"] += 1
+              sub_timings["stream_download_s"] = stream_stats["seconds"]
+              sub_timings["stream_download_gb"] = stream_stats["bytes"] / 1e9
+              sub_timings["stream_download_shards"] = stream_stats["shards"]
             _lru_shards[shard_name] = local_shard
             _lru_shards.move_to_end(shard_name)
       return _orig_get_tensor(self, key, dtype=dtype)
