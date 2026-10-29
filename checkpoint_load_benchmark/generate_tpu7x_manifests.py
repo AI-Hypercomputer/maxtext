@@ -387,13 +387,20 @@ def pairs_to_docs(pairs_list):
 
 
 # Multi-host slices. A tpu7x-standard-4t host has 4 chips (8 TPU cores), so a 2x2x2 slice is 2 hosts / 16 cores /
-# 1,627.6 GB HBM, and a 2x2x4 slice is 4 hosts / 32 cores / 3,255.2 GB HBM. These runs use their owner's GCS prefix,
-# pod names and app label, so they never touch the mesakh_tpu7x_bench code, queue or pods.
+# 1,627.6 GB HBM, and a 2x2x4 slice is 4 hosts / 32 cores / 3,255.2 GB HBM. A v5p host (ct5p-hightpu-4t,
+# bodaborg-v5p-nap) has 4 chips (4 devices, 95 GB HBM each), so 2x2x4 is 4 hosts / 1,520 GB HBM and 4x4x4 is 16 hosts /
+# 6,080 GB HBM. These runs use their owner's GCS prefix, pod names and app label, so they never touch the
+# mesakh_tpu7x_bench code, queue or pods.
 MH_OWNER = os.environ.get("BENCH_OWNER", os.environ.get("USER", "bench"))
 MH_BASE = f"gs://mesa-maxtext/{MH_OWNER}_tpu7x_bench"
 MH_CODE_DIR = f"{MH_BASE}/code"
 MH_APP = f"{MH_OWNER}-tpu7x-bench"
-HOSTS_PER_SLICE = {"2x2x2": 2, "2x2x4": 4}
+HOSTS_PER_SLICE = {"2x2x2": 2, "2x2x4": 4, "4x4x4": 16}
+# Per platform: TPU devices per host and the harness run id, which keeps the result paths of the platforms apart.
+MH_PLATFORMS = {
+    "tpu7x": {"devices_per_host": 8, "harness_run_id": "tpu7x_multihost"},
+    "v5p": {"devices_per_host": 4, "harness_run_id": "v5p_multihost"},
+}
 # HF caches that the earlier runs filled (every shard present). The multi-host runs only read them.
 P1_HF_CACHE = "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/safetensors_dynamic"
 P2_HF_CACHE = "gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs/run_tpu7x_16m/safetensors_dynamic"
@@ -406,25 +413,28 @@ def make_multihost_runner_script(
     num_slices: int,
     hf_cache: str,
     *,
+    platform: str = "tpu7x",
     scan_modes: str = "scanned unscanned",
     extra_exports: str = "",
 ) -> str:
   """safetensors_dynamic WITH Lance's 3 PRs on `num_slices` multi-host slices of `topology`."""
   hosts = HOSTS_PER_SLICE[topology]
+  plat = MH_PLATFORMS[platform]
+  layout = topology if platform == "tpu7x" else f"{platform} {topology}"
   return f"""set -e
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 KEEP_HF_CACHE=1 HF_HOME=/ramdisk/hf_cache TMPDIR=/ramdisk/tmp
 export SHARED_HF_CACHE_BASE_DIR="{hf_cache}"
 {extra_exports}
-echo "=== [{run_id}] safetensors_dynamic WITH Lance's 3 PRs on {num_slices} x {topology} ({hosts} hosts per slice) ==="
+echo "=== [{run_id}] safetensors_dynamic WITH Lance's 3 PRs on {num_slices} x {layout} ({hosts} hosts per slice) ==="
 python3 -u /tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py \\
   --models {models_str} \\
   --scan-modes {scan_modes} \\
   --num-slices-list {num_slices} \\
   --num-hosts-per-slice {hosts} \\
-  --devices-per-slice {8 * hosts} \\
+  --devices-per-slice {plat["devices_per_host"] * hosts} \\
   --hardware tpu \\
   --gcs-base {MH_BASE}/lance_prs \\
-  --run-id tpu7x_multihost \\
+  --run-id {plat["harness_run_id"]} \\
   --local-work-dir /tmp/mh_lance_prs \\
   --csv-report /tmp/{run_id}.csv \\
   --reuse-model-hf-cache \\
@@ -439,37 +449,20 @@ echo "=== [{run_id}] ALL DONE ==="
 """
 
 
-def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_script: str) -> dict:
+def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_script: str, platform: str = "tpu7x") -> dict:
   """A JobSet with one Indexed Job per slice (`slice<k>`, one pod per host).
 
   GKE sets TPU_WORKER_ID and TPU_WORKER_HOSTNAMES only on Indexed Job pods, and a multi-host slice needs them, so
   these runs cannot use bare pod pairs. Pod `<name>-slice0-0-0` (slice 0, host 0) is the runner and every other pod
   runs the remote slice daemon. WAIT_FOR_DAEMON_HOST lists the daemons slice by slice and host by host, the order in
   which the harness assigns JAX process ids 1..N-1.
+
+  tpu7x runs on spot capacity with Kueue topology-aware scheduling. bodaborg-v5p-nap runs on reservation capacity:
+  Kueue adds the reservation selector, and the cluster has no Kueue topology, so the pods carry no TAS annotations.
   """
   hosts = HOSTS_PER_SLICE[topology]
-  daemons = [f"{name}-slice{s}-0-{h}.{name}" for s in range(num_slices) for h in range(hosts) if (s, h) != (0, 0)]
-  command = (
-      'if [ "$SLICE_INDEX" = 0 ] && [ "$JOB_COMPLETION_INDEX" = 0 ]; then export ROLE=runner; '
-      "else export ROLE=daemon; fi; mkdir -p /ramdisk/hf_cache /ramdisk/tmp; " + make_bootstrap_cmd(MH_CODE_DIR)
-  )
-  replicated_jobs = []
-  for s in range(num_slices):
-    env_list = [
-        {"name": "SLICE_INDEX", "value": str(s)},
-        {"name": "DAEMON_PORT", "value": "55555"},
-        {"name": "BENCH_CODE_DIR", "value": MH_CODE_DIR},
-        {"name": "TORCH_DEVICE_BACKEND_AUTOLOAD", "value": "0"},
-        {
-            "name": "HF_TOKEN",
-            "valueFrom": {"secretKeyRef": {"name": "mesakh-hf-token", "key": "HF_TOKEN", "optional": True}},
-        },
-    ]
-    if s == 0:
-      env_list.append({"name": "WAIT_FOR_DAEMON_HOST", "value": ",".join(daemons)})
-      env_list.append({"name": "RUNNER_SCRIPT", "value": runner_script})
-    pod_spec = {
-        "restartPolicy": "Never",
+  if platform == "tpu7x":
+    placement = {
         "imagePullSecrets": [{"name": "gitimg"}],
         "affinity": {
             "nodeAffinity": {
@@ -490,6 +483,45 @@ def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_scrip
             {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"},
             {"key": "cloud.google.com/gke-spot", "operator": "Equal", "value": "true", "effect": "NoSchedule"},
         ],
+    }
+    pod_annotations = {
+        "kueue.x-k8s.io/podset-slice-required-topology": "cloud.google.com/gke-nodepool",
+        "kueue.x-k8s.io/podset-slice-size": str(hosts),
+        "kueue.x-k8s.io/podset-unconstrained-topology": "true",
+    }
+  else:
+    placement = {
+        "nodeSelector": {
+            "cloud.google.com/gke-tpu-accelerator": "tpu-v5p-slice",
+            "cloud.google.com/gke-tpu-topology": topology,
+        },
+        "tolerations": [{"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"}],
+    }
+    pod_annotations = {}
+  daemons = [f"{name}-slice{s}-0-{h}.{name}" for s in range(num_slices) for h in range(hosts) if (s, h) != (0, 0)]
+  command = (
+      'if [ "$SLICE_INDEX" = 0 ] && [ "$JOB_COMPLETION_INDEX" = 0 ]; then export ROLE=runner; '
+      "else export ROLE=daemon; fi; mkdir -p /ramdisk/hf_cache /ramdisk/tmp; " + make_bootstrap_cmd(MH_CODE_DIR)
+  )
+  replicated_jobs = []
+  for s in range(num_slices):
+    env_list = [
+        {"name": "SLICE_INDEX", "value": str(s)},
+        {"name": "DAEMON_PORT", "value": "55555"},
+        {"name": "BENCH_CODE_DIR", "value": MH_CODE_DIR},
+        {"name": "TORCH_DEVICE_BACKEND_AUTOLOAD", "value": "0"},
+        {
+            "name": "HF_TOKEN",
+            "valueFrom": {"secretKeyRef": {"name": "mesakh-hf-token", "key": "HF_TOKEN", "optional": True}},
+        },
+    ]
+    if s == 0:
+      env_list.append({"name": "WAIT_FOR_DAEMON_HOST", "value": ",".join(daemons)})
+      env_list.append({"name": "RUNNER_SCRIPT", "value": runner_script})
+    # Each slice gets its own copies: YAML would otherwise write the shared objects as anchors and aliases.
+    pod_spec = {
+        "restartPolicy": "Never",
+        **copy.deepcopy(placement),
         "volumes": [{"name": "ramdisk", "emptyDir": {"medium": "Memory"}}],
         "containers": [
             {
@@ -517,14 +549,7 @@ def multihost_jobset_doc(name: str, topology: str, num_slices: int, runner_scrip
                     "completionMode": "Indexed",
                     "backoffLimit": 0,
                     "template": {
-                        "metadata": {
-                            "labels": {"app": MH_APP},
-                            "annotations": {
-                                "kueue.x-k8s.io/podset-slice-required-topology": "cloud.google.com/gke-nodepool",
-                                "kueue.x-k8s.io/podset-slice-size": str(hosts),
-                                "kueue.x-k8s.io/podset-unconstrained-topology": "true",
-                            },
-                        },
+                        "metadata": {"labels": {"app": MH_APP}, "annotations": dict(pod_annotations)},
                         "spec": pod_spec,
                     },
                 },
@@ -574,6 +599,21 @@ MH_RUNS = [
     ("671b-2s", "2x2x2", 2, "deepseek3-671b", BOTH, P1_HF_CACHE, SPARSE),
     ("ds32-2s", "2x2x2", 2, "deepseek3.2-671b", BOTH, P1_HF_CACHE, SPARSE),
     ("1600b-4s", "2x2x2", 4, "deepseek4-1600b", BOTH, P1_HF_CACHE, SPARSE),
+]
+
+# bodaborg-v5p-nap runs for the DeepSeek checklist of the v5p sheet (single slice and multi slice, multi host), in the
+# same tuple format. Each layout keeps the model under ~50% of HBM: 284B on 2x2x4 (1,520 GB HBM), 671B and 1600B on
+# 4x4x4 (6,080 GB) for one slice, and 2 x 2x2x4 (3,040 GB) or 2 x 4x4x4 for two.
+V5P_MH_RUNS = [
+    ("v5p-smoke-2s", "2x2x2", 2, "qwen3-0.6b", BOTH, P2_HF_CACHE, ""),
+    ("v5p-284b", "2x2x4", 1, "deepseek4-284b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-284b-2s", "2x2x4", 2, "deepseek4-284b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-671b", "4x4x4", 1, "deepseek3-671b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-671b-2s", "2x2x4", 2, "deepseek3-671b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-ds32", "4x4x4", 1, "deepseek3.2-671b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-ds32-2s", "2x2x4", 2, "deepseek3.2-671b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-1600b", "4x4x4", 1, "deepseek4-1600b", BOTH, P1_HF_CACHE, SPARSE),
+    ("v5p-1600b-2s", "4x4x4", 2, "deepseek4-1600b", BOTH, P1_HF_CACHE, SPARSE),
 ]
 
 
@@ -628,14 +668,23 @@ def build_manifests():
     yaml.safe_dump_all(scaleout2, f, sort_keys=False)
   print(f"Wrote {len(scaleout2)} resources to {p}")
 
-  for run_id, topology, num_slices, models_str, scan_modes, hf_cache, extra_exports in MH_RUNS:
-    script = make_multihost_runner_script(
-        run_id, models_str, topology, num_slices, hf_cache, scan_modes=scan_modes, extra_exports=extra_exports
-    )
-    p = os.path.join(out_dir, f"tpu7x_multihost_{run_id}.yaml")
-    with open(p, "w", encoding="utf-8") as f:
-      yaml.safe_dump(multihost_jobset_doc(f"{MH_OWNER}-mh-{run_id}", topology, num_slices, script), f, sort_keys=False)
-    print(f"Wrote 1 resource to {p}")
+  for platform, runs in (("tpu7x", MH_RUNS), ("v5p", V5P_MH_RUNS)):
+    for run_id, topology, num_slices, models_str, scan_modes, hf_cache, extra_exports in runs:
+      script = make_multihost_runner_script(
+          run_id,
+          models_str,
+          topology,
+          num_slices,
+          hf_cache,
+          platform=platform,
+          scan_modes=scan_modes,
+          extra_exports=extra_exports,
+      )
+      doc = multihost_jobset_doc(f"{MH_OWNER}-mh-{run_id}", topology, num_slices, script, platform=platform)
+      p = os.path.join(out_dir, f"{platform}_multihost_{run_id}.yaml")
+      with open(p, "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+      print(f"Wrote 1 resource to {p}")
 
 
 if __name__ == "__main__":
