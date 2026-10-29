@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793263821459,
+  "lastUpdate": 1793277803721,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -59690,6 +59690,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4201.003000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 311,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Shraer CA",
+            "username": "shralex",
+            "email": "shralex@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "5033cc46064ed426e4a966ad8e33a58ef1d92c96",
+          "message": "This is a small modification of https://github.com/AI-Hypercomputer/maxtext/pull/5882 by @gobbleturk\n\nAdd a shared TPU and GPU performance review focus area for MaxText changes touching model, layer, trainer, optimizer, inference, or multimodal code (`src/maxtext/layers/`, `src/maxtext/models/`, `src/maxtext/m3/`, `src/maxtext/trainers/`, `src/maxtext/training_engine/`, `src/maxtext/optimizers/`, `src/maxtext/inference/`, `src/maxtext/multimodal/`).\n\nDefine the platform-neutral performance checks in `.gemini/commands/maxtext-review-performance.md` and include them under the path-specific focus areas in `.gemini/commands/maxtext-review.toml`:\n- Host-device synchronization, host callbacks, and CPU execution in JIT-compiled hot paths (recommending deferred/pipelined on-device metric buffering).\n- Materializing full `seq_len x seq_len` attention score, softmax, or mask matrices in HBM instead of fused kernels (`AttentionOp`, Splash/Flash/Paged/Ring attention) and procedural `_ComputableMask` masks.\n- Unrolled Python loops over homogeneous decoder layers or sequence positions where `jax.lax.scan` (`scan_layers`) or vectorized ops apply.\n- Per-expert Python loops or dense padding in MoE layers where grouped matrix multiplication (`ragged_dot`, Megablox, Tokamax GMM) applies.\n- Unintended `float32` promotion before GEMMs and missing or misapplied logical sharding (`maybe_shard_with_logical`, `sharding.constrain`, vs. `with_logical_constraint`) and rematerialization `checkpoint_name` tags.\n\nPiperOrigin-RevId: 1009432252",
+          "timestamp": "2026-10-29T05:55:22Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/5033cc46064ed426e4a966ad8e33a58ef1d92c96"
+        },
+        "date": 1793277802638,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 261.82199999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 65.98299999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2041.9390000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.90599999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4474.687000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 311,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1491.439,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.519,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4120.096,
             "unit": "sec"
           },
           {
