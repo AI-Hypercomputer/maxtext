@@ -66,6 +66,7 @@ import jax
 from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from maxtext.checkpoint_conversion.utils.lazy_tensor import LazyTensor
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
@@ -73,7 +74,6 @@ from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
-from orbax.checkpoint import type_handlers
 from safetensors import safe_open
 
 try:
@@ -286,103 +286,6 @@ class LazyHFLoader:
       with safe_open(local_path, framework=framework, device="cpu") as f:
         t = f.get_tensor(resolved_key)
         return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
-
-
-class LazyTensor:
-  """
-  A proxy object that looks like a NumPy array but delays actual loading
-  and transformation until __array__ is called (e.g., by Orbax during save).
-  """
-
-  def __init__(
-      self,
-      load_fn: Callable[[], np.ndarray],
-      shape: tuple,
-      dtype,
-      name: str = "unknown",
-  ):
-    self._load_fn = load_fn
-    self.shape = shape
-    try:
-      self.dtype = np.dtype(dtype)
-    except (TypeError, ValueError):
-      dtype_str = str(dtype)
-      if "float8_e4m3fn" in dtype_str:
-        self.dtype = np.dtype(ml_dtypes.float8_e4m3fn)
-      elif "bfloat16" in dtype_str:
-        self.dtype = np.dtype(ml_dtypes.bfloat16)
-      else:
-        self.dtype = np.dtype(np.float32)
-    self.ndim = len(shape)
-    self.name = name
-
-  @property
-  def size(self):
-    """Total number of elements in the tensor."""
-    return np.prod(self.shape)
-
-  @property
-  def nbytes(self):
-    """Return estimated nbytes so Orbax doesn't need to load the real array to find out."""
-    return self.size * self.dtype.itemsize
-
-  @property
-  def itemsize(self):
-    return self.dtype.itemsize
-
-  def __array__(self, dtype=None):
-    """
-    Materializes the tensor data.
-
-    When this method is invoked, it finally calls the `_load_fn` that was
-    provided during initialization. This function executes the actual loading
-    and transformation of the tensor from the Hugging Face checkpoint. The
-    resulting NumPy array is then returned to the caller.
-    """
-    # This method is called just-in-time by Orbax when saving this specific leaf.
-    try:
-      arr = self._load_fn()
-    except Exception as e:
-      max_logging.log(f"FATAL ERROR: Failed to load tensor '{self.name}' (shape {self.shape}). Error: {e}")
-      # Re-raise the original exception so it doesn't get masked by "object __array__..."
-      raise
-
-    if not isinstance(self.shape, list) and arr.shape != self.shape:
-      raise ValueError(f"Shape mismatch for tensor '{self.name}'. Expected {self.shape}, but got {arr.shape}.")
-
-    # Ensure it's a standard numpy array (converts JAX arrays if necessary)
-    if not isinstance(arr, np.ndarray):
-      arr = np.array(arr)
-
-    if dtype is not None and arr.dtype != dtype:
-      return arr.astype(dtype)
-    return arr
-
-  def __repr__(self):
-    return f"LazyTensor(name={self.name}, shape={self.shape}, dtype={self.dtype})"
-
-
-class LazyTensorHandler(type_handlers.NumpyHandler):
-  """
-  Custom Orbax handler for LazyTensor.
-
-  It masquerades as a standard NumpyHandler so that the resulting checkpoint
-  has the standard 'array_metadatas' structure and can be loaded by
-  standard MaxText instances.
-  """
-
-  async def serialize(self, value, *args, **kwargs):
-    # MATERIALIZE: Trigger the lazy load (__array__) explicitly before saving.
-    # This ensures the parent NumpyHandler receives a real np.ndarray.
-    if hasattr(value, "__array__"):
-      value = np.array(value)
-
-    return await super().serialize(value, *args, **kwargs)
-
-
-# Register LazyTensor with the custom handler.
-# It's safe to register this globally even if eager loading is used.
-type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
 
 
 def get_maxtext_model_info(config):
@@ -1228,7 +1131,9 @@ def main(
 
   # Save the converted weights to a MaxText checkpoint.
   # If simulated_cpu_devices_count > 1, weights are promoted from NumPy to JAX arrays
-  # and sharded across virtual devices.
+  # and sharded across virtual devices, which materializes every lazy leaf. Only with
+  # simulated_cpu_devices_count=1 and lazy loading are weights loaded just in time
+  # during the save, bounded by `checkpoint_storage_concurrent_gb`.
   save_weights_to_checkpoint(
       output_directory,
       state_params,
@@ -1236,6 +1141,7 @@ def main(
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
       config=config,
+      checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
   )
 
   print_ram_usage("Program Ends")
