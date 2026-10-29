@@ -33,6 +33,7 @@ python3 -m maxtext.inference.vllm_decode \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.85 \
     prompt='Suggest some famous landmarks in London.' \
+    decode_sampling_temperature=0.0 \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=8 \
     ici_data_parallelism=4
@@ -60,6 +61,7 @@ python3 -m maxtext.inference.vllm_decode \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.6 \
     prompt='Suggest some famous landmarks in London.' \
+    decode_sampling_temperature=0.0 \
     use_chat_template=True scan_layers=true enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=8 \
     ici_data_parallelism=4
