@@ -58,7 +58,9 @@ DEFAULT_TPU_NUM_LANES = 128
 # zero rows contribute nothing to the output, whereas repeating rows would
 # double-count every padded lane. Repeat is not merely suboptimal for `wo`, it
 # is numerically wrong.
-MOE_MLP_WEIGHTS = frozenset({"wi", "wi_0", "wi_1", "wo"})
+MOE_MLP_WEIGHTS = frozenset({"wi", "wi_0", "wi_1", "wo", "wi_scale", "wi_0_scale", "wi_1_scale", "wo_scale"})
+
+FP8_DTYPES = frozenset({jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.float8_e5m2)})
 
 
 def pad_to_tpu_lanes(dim: int, lane_size: int = DEFAULT_TPU_NUM_LANES) -> int:
@@ -200,6 +202,90 @@ def normalize_dtype(tgt_dtype: Any) -> Any:
       return jnp.float32
     return jnp.dtype(tgt_dtype)
   return tgt_dtype
+
+
+def is_fp8_dtype(dtype: Any) -> bool:
+  """Returns True when `dtype` is one of the supported FP8 dtypes."""
+  if dtype is None:
+    return False
+  try:
+    return jnp.dtype(normalize_dtype(dtype)) in FP8_DTYPES
+  except TypeError:
+    return False
+
+
+@functools.partial(jax.jit, static_argnames=("scale_shape", "weight_dtype", "scale_dtype"))
+def _jit_quantize_fp8_weight_and_scale(
+    arr: jax.Array,
+    scale_shape: Tuple[int, ...],
+    weight_dtype: jnp.dtype,
+    scale_dtype: jnp.dtype,
+) -> Tuple[jax.Array, jax.Array]:
+  """JIT-compiled dynamic absmax FP8 quantization producing `(q_weight, scale)`."""
+  w = arr.astype(jnp.float32)
+  max_val = float(jnp.finfo(weight_dtype).max)
+
+  if scale_shape == ():
+    expanded_scale_shape = (1,) * w.ndim
+  elif len(scale_shape) == 1 and w.ndim == 3 and scale_shape[0] == w.shape[0]:
+    # 1D per-expert scale `(num_experts,)` for 3D MoE weights `(num_experts, K, N)`.
+    expanded_scale_shape = (scale_shape[0], 1, 1)
+  elif len(scale_shape) <= w.ndim:
+    expanded_scale_shape = (1,) * (w.ndim - len(scale_shape)) + scale_shape
+  else:
+    raise ShapeMismatchError(f"Unsupported FP8 scale shape {scale_shape} for weight shape {w.shape}.")
+
+  for axis, (w_dim, s_dim) in enumerate(zip(w.shape, expanded_scale_shape)):
+    if s_dim <= 0 or w_dim % s_dim != 0:
+      raise ShapeMismatchError(
+          f"Weight shape {w.shape} is not divisible by scale shape {scale_shape} "
+          f"(expanded to {expanded_scale_shape}) on axis {axis}."
+      )
+
+  split_shape = []
+  reduce_axes = []
+  for axis, (w_dim, s_dim) in enumerate(zip(w.shape, expanded_scale_shape)):
+    split_shape.extend([s_dim, w_dim // s_dim])
+    reduce_axes.append(2 * axis + 1)
+
+  w_blocks = w.reshape(split_shape)
+  amax = jnp.max(jnp.abs(w_blocks), axis=tuple(reduce_axes))
+  raw_scale = jnp.where(amax == 0, jnp.ones_like(amax), amax / max_val)
+  scale_expanded = raw_scale.astype(scale_dtype)
+
+  scale_bcast = scale_expanded.astype(jnp.float32)
+  for axis, (w_dim, s_dim) in enumerate(zip(w.shape, expanded_scale_shape)):
+    block_size = w_dim // s_dim
+    if block_size > 1:
+      scale_bcast = jnp.repeat(scale_bcast, block_size, axis=axis)
+
+  q_weight = jnp.clip(w / scale_bcast, -max_val, max_val).astype(weight_dtype)
+  return q_weight, scale_expanded.reshape(scale_shape)
+
+
+def quantize_fp8_weight_and_scale(
+    arr: jax.Array | np.ndarray | jax.ShapeDtypeStruct,
+    scale_shape: Tuple[int, ...],
+    weight_dtype: Any,
+    scale_dtype: Any = jnp.float32,
+) -> Tuple[Any, Any]:
+  """Quantizes an unquantized weight array into `(q_weight, scale)` matching `scale_shape`.
+
+  Supports all FP8 scale layouts used across MaxText `DenseGeneral` and `RoutedMoE`:
+    * 0D scalar `()` or rank-matched `(1, ...)` per-tensor scale
+    * Rank-matched per-channel `(1, N)` / `(1, H, D)` or block-wise `(K // B, N // B)` scale
+    * 3D MoE block-wise `(E, K // B, N // B)` or 1D per-expert `(E,)` scale
+    * Lower-rank output-axis scales `(N,)` or `(H, D)`
+  """
+  weight_dtype = jnp.dtype(normalize_dtype(weight_dtype))
+  scale_dtype = jnp.dtype(normalize_dtype(scale_dtype))
+  scale_shape = tuple(scale_shape)
+  if isinstance(arr, jax.ShapeDtypeStruct):
+    return (
+        jax.ShapeDtypeStruct(arr.shape, weight_dtype),
+        jax.ShapeDtypeStruct(scale_shape, scale_dtype),
+    )
+  return _jit_quantize_fp8_weight_and_scale(arr, scale_shape, weight_dtype, scale_dtype)
 
 
 def _apply_dtype_cast(val: Any, tgt_dtype: Any, src_key: str) -> Any:

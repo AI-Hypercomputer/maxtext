@@ -937,5 +937,172 @@ class TargetFreeConversionTest(unittest.TestCase):
         self.assertEqual(leaf.dtype, jnp.dtype(want))
 
 
+class Fp8WeightQuantizationConversionTest(unittest.TestCase):
+  """Tests dynamic BF16/FP32 -> FP8 quantization and pre-quantized FP8 fusion in MaxTextToMaxTextConverter."""
+
+  def _build_fp8_target_tree(self, moe_scale_mode: str = "blockwise", moe_intermediate: int = MOE_DIM):
+    target = _target_tree(moe_intermediate=moe_intermediate, fused=True, wo_intermediate=moe_intermediate)
+    target["decoder"]["logits_dense"] = {
+        "kernel": jnp.zeros((EMB, 16), dtype=jnp.float8_e4m3fn),
+        "kernel_scale": jnp.ones((1, 16), dtype=jnp.float32),
+    }
+    for layer in range(NUM_LAYERS):
+      slot = layer % CYCLE
+      block = target["decoder"][f"layers_{layer}"]
+      moe = block["moe_block"]
+      moe["wi"] = jnp.zeros((EXPERTS, EMB, moe_intermediate * 2), dtype=jnp.float8_e4m3fn)
+      moe["wo"] = jnp.zeros((EXPERTS, moe_intermediate, EMB), dtype=jnp.float8_e4m3fn)
+      if moe_scale_mode == "per_expert":
+        moe["wi_scale"] = jnp.ones((EXPERTS,), dtype=jnp.float32)
+        moe["wo_scale"] = jnp.ones((EXPERTS,), dtype=jnp.float32)
+      else:
+        moe["wi_scale"] = jnp.ones((EXPERTS, 2, 2), dtype=jnp.float32)
+        moe["wo_scale"] = jnp.ones((EXPERTS, 2, 2), dtype=jnp.float32)
+      if slot == CYCLE - 1:
+        block["self_attention"]["query"] = {
+            "kernel": jnp.zeros((EMB, 2, 4), dtype=jnp.float8_e4m3fn),
+            "kernel_scale": jnp.ones((1, 2, 4), dtype=jnp.float32),
+        }
+      else:
+        block["linear_attention"]["conv"] = {
+            "kernel": jnp.zeros((EMB, 1, 4), dtype=jnp.float8_e4m3fn),
+            "kernel_scale": jnp.ones((), dtype=jnp.float32),
+        }
+    return target
+
+  def test_bf16_trainer_to_fp8_rollout_dense_and_moe_quantization(self):
+    for moe_scale_mode in ("blockwise", "per_expert"):
+      with self.subTest(moe_scale_mode=moe_scale_mode):
+        source = _source_tree(True)
+        source["base"]["decoder"]["logits_dense"] = {"kernel": _arr(EMB, 16, offset=700)}
+        target = self._build_fp8_target_tree(moe_scale_mode=moe_scale_mode, moe_intermediate=8)
+
+        converter = MaxTextToMaxTextConverter(_config(), moe_fused_layout=MoEFusedLayout.CONCAT)
+        out = converter.convert(source, target)
+
+        # 1. Verify unscanned `identity` FP8 weight + per-channel scale
+        logits_q = out["decoder"]["logits_dense"]["kernel"].value
+        logits_s = out["decoder"]["logits_dense"]["kernel_scale"].value
+        self.assertEqual(logits_q.dtype, jnp.float8_e4m3fn)
+        self.assertEqual(logits_s.shape, (1, 16))
+        np.testing.assert_allclose(
+            np.asarray(logits_q.astype(jnp.float32) * logits_s),
+            np.asarray(source["base"]["decoder"]["logits_dense"]["kernel"]),
+            rtol=0.15,
+            atol=1.0,
+        )
+
+        # 2. Verify scanned 3D attention query FP8 weight + (1, 2, 4) per-channel scale
+        q_kernel = out["decoder"]["layers_3"]["self_attention"]["query"]["kernel"].value
+        q_scale = out["decoder"]["layers_3"]["self_attention"]["query"]["kernel_scale"].value
+        self.assertEqual(q_kernel.dtype, jnp.float8_e4m3fn)
+        self.assertEqual(q_scale.shape, (1, 2, 4))
+        want_q = jnp.take(
+            source["base"]["decoder"]["layers"]["layer_3"]["self_attention"]["query"]["kernel"],
+            0,
+            axis=SCAN_AXIS,
+        )
+        np.testing.assert_allclose(
+            np.asarray(q_kernel.astype(jnp.float32) * q_scale),
+            np.asarray(want_q),
+            rtol=0.15,
+            atol=1.0,
+        )
+
+        # 3. Verify scanned 0D per-tensor scale on GDN conv
+        conv_q = out["decoder"]["layers_0"]["linear_attention"]["conv"]["kernel"].value
+        conv_s = out["decoder"]["layers_0"]["linear_attention"]["conv"]["kernel_scale"].value
+        self.assertEqual(conv_q.dtype, jnp.float8_e4m3fn)
+        self.assertEqual(conv_s.shape, ())
+
+        # 4. Verify fused + padded MoE `wi` + `wi_scale` and padded `wo` + `wo_scale`
+        wi_q = out["decoder"]["layers_0"]["moe_block"]["wi"].value
+        wi_s = out["decoder"]["layers_0"]["moe_block"]["wi_scale"].value
+        wo_q = out["decoder"]["layers_0"]["moe_block"]["wo"].value
+        wo_s = out["decoder"]["layers_0"]["moe_block"]["wo_scale"].value
+        self.assertEqual(wi_q.dtype, jnp.float8_e4m3fn)
+        self.assertEqual(wo_q.dtype, jnp.float8_e4m3fn)
+        self.assertEqual(wi_q.shape, (EXPERTS, EMB, 16))
+        self.assertEqual(wo_q.shape, (EXPERTS, 8, EMB))
+        if moe_scale_mode == "per_expert":
+          self.assertEqual(wi_s.shape, (EXPERTS,))
+          self.assertEqual(wo_s.shape, (EXPERTS,))
+          wo_deq = wo_q.astype(jnp.float32) * wi_s[:, None, None] * 0 + wo_q.astype(jnp.float32) * wo_s[:, None, None]
+        else:
+          self.assertEqual(wi_s.shape, (EXPERTS, 2, 2))
+          self.assertEqual(wo_s.shape, (EXPERTS, 2, 2))
+          wo_s_bcast = jnp.repeat(jnp.repeat(wo_s, 4, axis=1), 4, axis=2)
+          wo_deq = wo_q.astype(jnp.float32) * wo_s_bcast
+
+        want_wo = jnp.take(source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]["wo"], 0, axis=SCAN_AXIS)
+        np.testing.assert_allclose(np.asarray(wo_deq[:, :MOE_DIM, :]), np.asarray(want_wo), rtol=0.15, atol=2.0)
+        np.testing.assert_array_equal(np.asarray(wo_deq[:, MOE_DIM:, :]), np.zeros((EXPERTS, 8 - MOE_DIM, EMB)))
+
+  def test_prequantized_fp8_trainer_moe_scale_fusion(self):
+    for moe_scale_mode in ("blockwise", "per_expert"):
+      with self.subTest(moe_scale_mode=moe_scale_mode):
+        source = _source_tree(True)
+        for slot in range(CYCLE):
+          moe = source["base"]["decoder"]["layers"][f"layer_{slot}"]["moe_block"]
+          moe["wi_0"] = moe["wi_0"].astype(jnp.float8_e4m3fn)
+          moe["wi_1"] = moe["wi_1"].astype(jnp.float8_e4m3fn)
+          moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+          if moe_scale_mode == "per_expert":
+            moe["wi_0_scale"] = _scanned(EXPERTS, offset=slot + 10)
+            moe["wi_1_scale"] = _scanned(EXPERTS, offset=slot + 20)
+            moe["wo_scale"] = _scanned(EXPERTS, offset=slot + 30)
+          else:
+            moe["wi_0_scale"] = _scanned(EXPERTS, 2, 1, offset=slot + 10)
+            moe["wi_1_scale"] = _scanned(EXPERTS, 2, 1, offset=slot + 20)
+            moe["wo_scale"] = _scanned(EXPERTS, 2, 2, offset=slot + 30)
+
+        target = _target_tree(moe_intermediate=MOE_DIM, fused=True, wo_intermediate=MOE_DIM)
+        for layer in range(NUM_LAYERS):
+          moe_t = target["decoder"][f"layers_{layer}"]["moe_block"]
+          moe_t["wi"] = moe_t["wi"].astype(jnp.float8_e4m3fn)
+          moe_t["wo"] = moe_t["wo"].astype(jnp.float8_e4m3fn)
+          if moe_scale_mode == "per_expert":
+            moe_t["wi_scale"] = jnp.ones((EXPERTS,), dtype=jnp.float32)
+            moe_t["wo_scale"] = jnp.ones((EXPERTS,), dtype=jnp.float32)
+          else:
+            moe_t["wi_scale"] = jnp.ones((EXPERTS, 2, 2), dtype=jnp.float32)
+            moe_t["wo_scale"] = jnp.ones((EXPERTS, 2, 2), dtype=jnp.float32)
+
+        converter = MaxTextToMaxTextConverter(_config(), moe_fused_layout=MoEFusedLayout.CONCAT)
+        out = converter.convert(source, target)
+        wi_scale = out["decoder"]["layers_0"]["moe_block"]["wi_scale"].value
+        src_moe = source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+        s0 = jnp.take(src_moe["wi_0_scale"], 0, axis=SCAN_AXIS)
+        s1 = jnp.take(src_moe["wi_1_scale"], 0, axis=SCAN_AXIS)
+        if moe_scale_mode == "per_expert":
+          np.testing.assert_array_equal(np.asarray(wi_scale), np.asarray(jnp.maximum(s0, s1)))
+        else:
+          np.testing.assert_array_equal(np.asarray(wi_scale), np.asarray(jnp.concatenate([s0, s1], axis=-1)))
+
+  @unittest.skipIf(
+      jax.device_count() < 8,
+      "needs 8 devices; set XLA_FLAGS=--xla_force_host_platform_device_count=8",
+  )
+  def test_cross_mesh_fp8_quantization_stays_on_source_mesh(self):
+    devices = jax.devices()
+    src_mesh = _mesh(devices[:4])
+    tgt_mesh = _mesh(devices[4:8])
+    src_ids = {int(d.id) for d in devices[:4]}
+
+    source = _source_tree(True)
+    source["base"]["decoder"]["logits_dense"] = {"kernel": _arr(EMB, 16, offset=700)}
+    target = self._build_fp8_target_tree(moe_scale_mode="blockwise", moe_intermediate=8)
+
+    placed_src = _place(source, src_mesh, lambda *_: jax.sharding.PartitionSpec())
+    placed_tgt = _place(target, tgt_mesh, lambda *_: jax.sharding.PartitionSpec())
+
+    out = MaxTextToMaxTextConverter(_config()).convert(placed_src, placed_tgt)
+    for key, value in traverse_util.flatten_dict(out).items():
+      self.assertTrue(
+          _device_id_set(value) <= src_ids,
+          f"{'.'.join(map(str, key))} leaked to {sorted(_device_id_set(value))}",
+      )
+
+
 if __name__ == "__main__":
   unittest.main()

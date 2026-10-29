@@ -36,8 +36,10 @@ from maxtext.integration.vllm.convert_utils import (
     _jit_unstack,
     _scanned_sharding_from_per_layer,
     _sharding_summary,
+    is_fp8_dtype,
     normalize_dtype,
     pad_to_tpu_lanes,
+    quantize_fp8_weight_and_scale,
     resolve_rollout_tp,
 )
 
@@ -481,6 +483,15 @@ _NON_WEIGHT_PATH_PREFIXES = ("cache", "rngs", "intermediates")
 
 _SUPPORTED_TARGET_FREE_DTYPES = frozenset({jnp.dtype(jnp.bfloat16), jnp.dtype(jnp.float16), jnp.dtype(jnp.float32)})
 
+# Maps rollout FP8 scale leaf names to their companion weight leaf names.
+_SCALE_TO_WEIGHT_LEAF: Dict[str, str] = {
+    "kernel_scale": "kernel",
+    "wi_scale": "wi",
+    "wi_0_scale": "wi_0",
+    "wi_1_scale": "wi_1",
+    "wo_scale": "wo",
+}
+
 
 def _cast_target_free_floating_leaf(val: Any, target_dtype: Any, path: str) -> Any:
   """Casts floating-point leaves to `target_dtype`, leaving non-floating leaves untouched."""
@@ -518,6 +529,8 @@ class _PlanEntry:
   # Index along the scan axis, or None when the source is already per-layer.
   slice_index: Optional[int]
   op: str  # "identity" | "slice" | "fuse_moe"
+  # Optional companion FP8 scale target leaf dynamically computed alongside `target_key`.
+  scale_target_key: Optional[Tuple[Any, ...]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -542,6 +555,8 @@ class _PlanGroup:
   # Dot-joined source path, precomputed for diagnostics and for the
   # leaf-name check inside `_align_per_axis`.
   source_path: str
+  # Parallel (slice_index, scale_target_key) pairs when dynamic FP8 quantization is active.
+  scale_targets: Tuple[Tuple[Optional[int], Optional[Tuple[Any, ...]]], ...] = ()
 
 
 def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
@@ -566,6 +581,10 @@ def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
   for key in order:
     entries = grouped[key]
     source_keys, op = key
+    sorted_entries = sorted(
+        entries,
+        key=lambda e: -1 if e.slice_index is None else e.slice_index,
+    )
     groups.append(
         _PlanGroup(
             source_keys=source_keys,
@@ -575,12 +594,10 @@ def _group_plan(plan: List[_PlanEntry]) -> List[_PlanGroup]:
                 # `identity` entries carry no index; -1 keeps the sort key
                 # totally ordered so None is never compared against an int
                 # (or against another None).
-                for e in sorted(
-                    entries,
-                    key=lambda e: -1 if e.slice_index is None else e.slice_index,
-                )
+                for e in sorted_entries
             ),
             source_path=".".join(map(str, source_keys[0])),
+            scale_targets=tuple((e.slice_index, e.scale_target_key) for e in sorted_entries),
         )
     )
   return groups
@@ -851,14 +868,47 @@ class MaxTextToMaxTextConverter:
     unmatched: List[Tuple[Any, ...]] = []
     consumed: set = set()
 
+    # Pre-detect rollout FP8 companion scale leaves (`kernel_scale`, `wi_scale`,
+    # `wi_0_scale`, `wi_1_scale`, `wo_scale`) that have no counterpart in an
+    # unquantized (BF16/FP32) trainer state so they are dynamically quantized
+    # alongside their companion FP8 weight leaf.
+    dynamic_scale_for_weight: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
+    dynamically_quantized_scales: set = set()
+
+    def _scale_has_source(scale_tgt_key: Tuple[Any, ...]) -> bool:
+      if scale_tgt_key in src_flat:
+        return True
+      l_idx, p_len, s_start = _find_unrolled_layer(scale_tgt_key)
+      if l_idx < 0 or l_idx >= self.num_decoder_layers:
+        return False
+      cands = self._scanned_candidates(scale_tgt_key, p_len, s_start, l_idx % self.cycle)
+      if any(c in src_flat for c in cands):
+        return True
+      if scale_tgt_key[-1] == "wi_scale":
+        return any((c[:-1] + ("wi_0_scale",) in src_flat and c[:-1] + ("wi_1_scale",) in src_flat) for c in cands)
+      return False
+
     for tgt_key in tgt_flat:
       if tgt_key in skip_paths or _is_non_weight_path(tgt_key):
         continue
+      if tgt_key and tgt_key[-1] in _SCALE_TO_WEIGHT_LEAF and not _scale_has_source(tgt_key):
+        weight_leaf = _SCALE_TO_WEIGHT_LEAF[tgt_key[-1]]
+        weight_tgt_key = tgt_key[:-1] + (weight_leaf,)
+        weight_tgt_val = tgt_flat.get(weight_tgt_key)
+        if weight_tgt_val is not None and is_fp8_dtype(getattr(weight_tgt_val, "dtype", None)):
+          dynamic_scale_for_weight[weight_tgt_key] = tgt_key
+          dynamically_quantized_scales.add(tgt_key)
+
+    for tgt_key in tgt_flat:
+      if tgt_key in skip_paths or _is_non_weight_path(tgt_key) or tgt_key in dynamically_quantized_scales:
+        continue
+
+      scale_tgt_key = dynamic_scale_for_weight.get(tgt_key)
 
       # 1. Identical path on both sides (embeddings, final norm, lm head,
       #    and any layer already stored unscanned).
       if tgt_key in src_flat:
-        plan.append(_PlanEntry(tgt_key, (tgt_key,), None, "identity"))
+        plan.append(_PlanEntry(tgt_key, (tgt_key,), None, "identity", scale_tgt_key))
         consumed.add(tgt_key)
         continue
 
@@ -878,16 +928,18 @@ class MaxTextToMaxTextConverter:
       # 2. Scanned source, sliced at this block index.
       matched = next((c for c in candidates if c in src_flat), None)
       if matched is not None:
-        plan.append(_PlanEntry(tgt_key, (matched,), block, "slice"))
+        plan.append(_PlanEntry(tgt_key, (matched,), block, "slice", scale_tgt_key))
         consumed.add(matched)
         continue
 
-      # 3. Rollout pre-fuses MoE `wi`; trainer still has `wi_0`/`wi_1`.
-      if tgt_key and tgt_key[-1] == "wi":
+      # 3. Rollout pre-fuses MoE `wi` (and `wi_scale`); trainer still has `wi_0`/`wi_1`.
+      if tgt_key and tgt_key[-1] in ("wi", "wi_scale"):
+        src_0_name = "wi_0" if tgt_key[-1] == "wi" else "wi_0_scale"
+        src_1_name = "wi_1" if tgt_key[-1] == "wi" else "wi_1_scale"
         for cand in candidates:
-          wi_0, wi_1 = cand[:-1] + ("wi_0",), cand[:-1] + ("wi_1",)
+          wi_0, wi_1 = cand[:-1] + (src_0_name,), cand[:-1] + (src_1_name,)
           if wi_0 in src_flat and wi_1 in src_flat:
-            plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), block, "fuse_moe"))
+            plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), block, "fuse_moe", scale_tgt_key))
             consumed.update((wi_0, wi_1))
             break
         else:
@@ -942,11 +994,18 @@ class MaxTextToMaxTextConverter:
   def _fuse_moe_bulk(self, wi_0, wi_1, tgt_val, key_path: str):
     """Fuses the *scanned* gate/up kernels, returning one array per block."""
     tgt_shape = tgt_val.shape
+    if len(tgt_shape) <= 1:
+      # Per-expert `(num_experts,)` or scalar `()` MoE scale: combine via elementwise max.
+      return _jit_unstack(jnp.maximum(wi_0, wi_1), self.scan_axis)
+
     # MaxText stores MoE kernels as (experts, in_dim, intermediate); the
     # gate/up fusion always doubles the trailing intermediate axis.
     tgt_fused_axis = len(tgt_shape) - 1
     # Same logical axis, shifted by the scan dim the trainer inserted.
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
+    if tgt_shape[tgt_fused_axis] == wi_0.shape[scan_fused_axis]:
+      # Non-doubled trailing axis (e.g. `(num_experts, in_blocks, 1)` scale): combine via max.
+      return _jit_unstack(jnp.maximum(wi_0, wi_1), self.scan_axis)
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
       n_shards = (
@@ -1104,20 +1163,45 @@ class MaxTextToMaxTextConverter:
     """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
     first_tgt = tgt_flat[group.targets[0][1]]
     path = group.source_path
+    has_scale = bool(group.scale_targets and group.scale_targets[0][1] is not None)
+    first_scale_tgt = tgt_flat[group.scale_targets[0][1]] if has_scale else None
 
     if group.op == "identity":
-      val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
+      raw = src_flat[group.source_keys[0]]
+      if has_scale:
+        aligned = _align_per_axis(raw, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
+        q_weight, scale = quantize_fp8_weight_and_scale(
+            aligned, first_scale_tgt.shape, first_tgt.dtype, first_scale_tgt.dtype
+        )
+        outs = [(tgt_key, q_weight) for _, tgt_key in group.targets]
+        outs.extend((scale_key, scale) for _, scale_key in group.scale_targets if scale_key is not None)
+        return outs
+      val = _apply_dtype_cast(raw, first_tgt.dtype, path)
       out = _align_per_axis(val, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
       return [(tgt_key, out) for _, tgt_key in group.targets]
 
     if group.op == "fuse_moe":
-      wi_0, wi_1 = (_apply_dtype_cast(src_flat[k], first_tgt.dtype, path) for k in group.source_keys)
+      if has_scale:
+        wi_0, wi_1 = (src_flat[k] for k in group.source_keys)
+      else:
+        wi_0, wi_1 = (_apply_dtype_cast(src_flat[k], first_tgt.dtype, path) for k in group.source_keys)
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk(wi_0, wi_1, first_tgt, path)
     else:  # "slice"
-      val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
+      raw = src_flat[group.source_keys[0]]
+      val = raw if has_scale else _apply_dtype_cast(raw, first_tgt.dtype, path)
       self._check_scan_axis(val, path)
       per_block = _bulk_align_and_unstack(val, self.scan_axis, first_tgt, path)
+
+    if has_scale:
+      outs = []
+      for (idx, tgt_key), (_, scale_key) in zip(group.targets, group.scale_targets):
+        tgt_val = tgt_flat[tgt_key]
+        scale_val = tgt_flat[scale_key]
+        q_weight, scale = quantize_fp8_weight_and_scale(per_block[idx], scale_val.shape, tgt_val.dtype, scale_val.dtype)
+        outs.append((tgt_key, q_weight))
+        outs.append((scale_key, scale))
+      return outs
 
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
 
