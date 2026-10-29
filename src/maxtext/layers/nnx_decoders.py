@@ -28,6 +28,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
+import qwix
 from maxtext.common.common_types import (
     Config,
     DecoderBlockType,
@@ -471,14 +472,15 @@ class NNXSequentialPipelineStage(nnx.Module):
   ):
     for i in range(self.num_layers):
       layer = getattr(self, f"layers_{i}")
-      out = layer(
-          inputs,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          **kwargs,
-      )
+      with qwix.scan_index_context(i):
+        out = layer(
+            inputs,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            **kwargs,
+        )
       inputs = out[0] if isinstance(out, tuple) else out
     if self.scan_layers:
       return inputs, None
@@ -500,6 +502,7 @@ class NNXScannedPipelineStage(nnx.Module):
       rngs: nnx.Rngs,
   ):
     self.config = config
+    self.num_layers = num_layers
 
     def create_layer_fn(rng):
       return layer_cls(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=rng)
@@ -531,23 +534,25 @@ class NNXScannedPipelineStage(nnx.Module):
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
     def layer_fn(carry, scanned_vars):
-      current_params, current_state = scanned_vars
+      scan_idx, current_params, current_state = scanned_vars
       layer = nnx.merge(graphdef, current_params, current_state)
-      layer_out = layer(
-          carry,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          **kwargs,
-      )
+      with qwix.scan_index_context(scan_idx):
+        layer_out = layer(
+            carry,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            **kwargs,
+        )
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
       # Avoid returning and stacking read-only parameters inside the scan body.
       # This prevents huge unnecessary memory allocation.
       _, _, updated_state = nnx.split(layer, nnx.Param, ...)
       return new_carry, updated_state
 
-    final_carry, scanned_state = jax.lax.scan(layer_fn, inputs, (params, state))
+    scan_indices = jnp.arange(self.num_layers, dtype=jnp.int32)
+    final_carry, scanned_state = jax.lax.scan(layer_fn, inputs, (scan_indices, params, state))
 
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
@@ -1299,6 +1304,7 @@ class NNXDecoder(nnx.Module):
     use_forced_routing = forced_routed_experts_scanned is not None
 
     def layer_fn(carry, scanned_vars):
+      scan_idx, scanned_vars = scanned_vars
       # Ensure metadata rank matches the sliced values
       scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
 
@@ -1335,7 +1341,8 @@ class NNXDecoder(nnx.Module):
       if iteration_kwargs:
         call_kwargs.update(iteration_kwargs)
 
-      layer_out = layer(carry, *args, **call_kwargs)
+      with qwix.scan_index_context(scan_idx):
+        layer_out = layer(carry, *args, **call_kwargs)
 
       if isinstance(layer_out, tuple):
         new_carry = layer_out[0]
@@ -1385,7 +1392,7 @@ class NNXDecoder(nnx.Module):
 
         # Call the layer
         current_carry, (_, updated_kv) = layer_fn_wrapped(
-            current_carry, (current_params, current_state, kv_caches_list[i], iteration_kwargs)
+            current_carry, (i, (current_params, current_state, kv_caches_list[i], iteration_kwargs))
         )
 
         # Update the list in-place (mutates the list passed by reference)
@@ -1399,9 +1406,10 @@ class NNXDecoder(nnx.Module):
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
 
       if use_forced_routing:
-        scan_xs = (params, state, forced_routed_experts_scanned)
+        inner_xs = (params, state, forced_routed_experts_scanned)
       else:
-        scan_xs = (params, state)
+        inner_xs = (params, state)
+      scan_xs = (jnp.arange(length, dtype=jnp.int32), inner_xs)
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
       returned_kv_stacked = None
 
@@ -2494,10 +2502,11 @@ class NNXDecoder(nnx.Module):
                 routed_experts[:, :, lyr, :] if routed_experts.ndim == 4 else routed_experts
             )
 
-          if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
-          else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
+          with qwix.scan_index_context(lyr):
+            if cfg.remat_policy != "none":
+              y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
+            else:
+              y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)

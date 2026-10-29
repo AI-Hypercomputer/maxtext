@@ -46,6 +46,7 @@ from jax.sharding import NamedSharding
 from flax import nnx, traverse_util
 from flax.core.spmd import logical_axis_rules
 from flax.nnx import variablelib
+import qwix
 
 from maxtext.configs import pyconfig
 from maxtext.configs.types import TeCommGemmOverlapPolicy
@@ -560,15 +561,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
-    loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
-        loss_fn,
-        config,
-        loss_model,
-        loss_params,
-        params_shardings,
-        data,
-        loss_rng,
-    )
+    with qwix.step_context(state.step):
+      loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
+          loss_fn,
+          config,
+          loss_model,
+          loss_params,
+          params_shardings,
+          data,
+          loss_rng,
+      )
     if lineage_adapter is not None and lineage_adapter.is_native(config):
       # The Lineage model leaves its router state untouched per microbatch; apply
       # one full-batch routed-bias / expert-permutation update for the step.
@@ -628,7 +630,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       return loss, (aux, non_param_rest)
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-    (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+    with qwix.step_context(state.step):
+      (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
     nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
@@ -824,7 +827,8 @@ def eval_step(model, config, state, data, dropout_rng=None):
   """eval_step no backprop and new state compared with train_step."""
   del dropout_rng  # unused for NNX (kept for jit signature parity)
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-  loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
+  with qwix.step_context(state.step):
+    loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
