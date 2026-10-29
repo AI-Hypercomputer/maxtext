@@ -30,6 +30,7 @@ from maxtext.integration.vllm.convert_utils import (
     _apply_dtype_cast,
     _bulk_align_and_unstack,
     _device_ids,
+    _fuse_and_unstack_mlp,
     _fuse_and_unstack_moe,
     _get_n_shards,
     _jit_repeat_axes,
@@ -593,11 +594,12 @@ def _group_plan(
   for key in order:
     entries = grouped[key]
     source_keys, op, local_index = key
-    has_scale_target = any(str(e.target_key[-1]).endswith("_scale") for e in entries)
+    source_is_scale = all(str(sk[-1]).endswith("_scale") for sk in source_keys)
+    has_scale_target = any(str(e.target_key[-1]).endswith("_scale") for e in entries) and not source_is_scale
     if src_flat is not None and source_keys[0] in src_flat:
       val = src_flat[source_keys[0]]
       is_nested = local_index is not None
-      is_scanned = op in ("slice", "fuse_moe")
+      is_scanned = op in ("slice", "fuse_moe", "fuse_mlp")
       is_expert = _is_expert_tensor(val, is_nested=is_nested, is_scanned=is_scanned)
       is_moe_weight = is_expert and (op == "fuse_moe" or str(source_keys[0][-1]) in ("wi", "wi_0", "wi_1", "wo"))
     else:
@@ -927,6 +929,10 @@ class MaxTextToMaxTextConverter:
       wi_1_key = src_key[:-1] + ("wi_1",) if is_wi_0 else None
       fuse_moe = self.prefuse_moe_weights and is_wi_0 and (wi_1_key in src_flat)
 
+      is_mlp_wi_0 = bool(len(suffix) >= 2 and suffix[-2] == "wi_0")
+      mlp_wi_1_key = src_key[:-2] + ("wi_1", suffix[-1]) if is_mlp_wi_0 else None
+      fuse_mlp = bool(getattr(self.config, "fused_mlp", False)) and is_mlp_wi_0 and (mlp_wi_1_key in src_flat)
+
       if fuse_moe:
         consumed_wi_1.add(wi_1_key)
         for slot, local_index in slot_refs:
@@ -938,6 +944,20 @@ class MaxTextToMaxTextConverter:
               tgt_scale_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + ("wi_scale",)
               plan.append(_PlanEntry(tgt_scale_key, (src_key, wi_1_key), b, "fuse_moe", local_index))
       elif self.prefuse_moe_weights and suffix and suffix[-1] == "wi_1" and (src_key[:-1] + ("wi_0",) in src_flat):
+        continue
+      elif fuse_mlp:
+        consumed_wi_1.add(mlp_wi_1_key)
+        for slot, local_index in slot_refs:
+          for b in range(self.num_blocks):
+            global_idx = b * self.cycle + slot
+            tgt_key = prefix + (f"layers_{global_idx}",) + suffix[:-2] + ("wi", suffix[-1])
+            plan.append(_PlanEntry(tgt_key, (src_key, mlp_wi_1_key), b, "fuse_mlp", local_index))
+      elif (
+          bool(getattr(self.config, "fused_mlp", False))
+          and len(suffix) >= 2
+          and suffix[-2] == "wi_1"
+          and (src_key[:-2] + ("wi_0", suffix[-1]) in src_flat)
+      ):
         continue
       else:
         is_wo = bool(suffix and suffix[-1] == "wo")
@@ -981,6 +1001,13 @@ class MaxTextToMaxTextConverter:
 
       layer_idx, prefix_len, suffix_start = _find_unrolled_layer(lookup_key)
       if layer_idx < 0:
+        if len(tgt_key) >= 2 and tgt_key[-2] == "wi":
+          wi_0 = tgt_key[:-2] + ("wi_0", tgt_key[-1])
+          wi_1 = tgt_key[:-2] + ("wi_1", tgt_key[-1])
+          if wi_0 in src_flat and wi_1 in src_flat:
+            plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), None, "fuse_mlp_identity"))
+            consumed.update((wi_0, wi_1))
+            continue
         unmatched.append(tgt_key)
         continue
       if layer_idx >= self.num_decoder_layers:
@@ -991,9 +1018,12 @@ class MaxTextToMaxTextConverter:
 
       slot, block = layer_idx % self.cycle, layer_idx // self.cycle
       candidates = self._scanned_candidates(lookup_key, prefix_len, suffix_start, slot)
+      search_candidates = (
+          self._scanned_candidates(tgt_key, prefix_len, suffix_start, slot) + candidates if is_scale else candidates
+      )
 
       # 2. Scanned source, sliced at this block index.
-      matched = next(((c, li) for c, li in candidates if c in src_flat), None)
+      matched = next(((c, li) for c, li in search_candidates if c in src_flat), None)
       if matched is not None:
         matched_key, local_index = matched
         plan.append(_PlanEntry(tgt_key, (matched_key,), block, "slice", local_index))
@@ -1006,6 +1036,20 @@ class MaxTextToMaxTextConverter:
           wi_0, wi_1 = cand[:-1] + ("wi_0",), cand[:-1] + ("wi_1",)
           if wi_0 in src_flat and wi_1 in src_flat:
             plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), block, "fuse_moe", local_index))
+            consumed.update((wi_0, wi_1))
+            break
+        else:
+          unmatched.append(tgt_key)
+        continue
+
+      # 4. Rollout fuses MlpBlock (e.g. `shared_expert` or dense `mlp`) `wi_0`/`wi_1` -> `wi`.
+      if len(tgt_key) >= 2 and tgt_key[-2] == "wi":
+        leaf_name = tgt_key[-1]
+        for cand, local_index in candidates:
+          wi_0 = cand[:-2] + ("wi_0", leaf_name)
+          wi_1 = cand[:-2] + ("wi_1", leaf_name)
+          if wi_0 in src_flat and wi_1 in src_flat:
+            plan.append(_PlanEntry(tgt_key, (wi_0, wi_1), block, "fuse_mlp", local_index))
             consumed.update((wi_0, wi_1))
             break
         else:
@@ -1221,6 +1265,22 @@ class MaxTextToMaxTextConverter:
         return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
       return _quantize_fp8_targets(group, per_block)
 
+    if group.op == "fuse_mlp":
+      raw_0 = src_flat[group.source_keys[0]]
+      raw_1 = src_flat[group.source_keys[1]]
+      wi_0, wi_1 = (
+          _cast_target_free_floating_leaf(self._take_cycle_slot(raw_0, group), target_dtype, path),
+          _cast_target_free_floating_leaf(self._take_cycle_slot(raw_1, group), target_dtype, path),
+      )
+      self._check_scan_axis(wi_0, path)
+      if isinstance(wi_0, jax.ShapeDtypeStruct):
+        unrolled = list(wi_0.shape[: self.scan_axis] + wi_0.shape[self.scan_axis + 1 :])
+        fused_shape = tuple(unrolled[:-1] + [2, unrolled[-1]])
+        per_block = tuple(jax.ShapeDtypeStruct(fused_shape, wi_0.dtype) for _ in range(wi_0.shape[self.scan_axis]))
+      else:
+        per_block = _fuse_and_unstack_mlp(wi_0, wi_1, self.scan_axis, stack_axis=-2)
+      return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
+
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
     val = _cast_target_free_floating_leaf(self._take_cycle_slot(raw_val, group), calc_dtype, path)
@@ -1242,6 +1302,14 @@ class MaxTextToMaxTextConverter:
       out = _align_per_axis(val, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
       return [(tgt_key, out) for _, tgt_key in group.targets]
 
+    if group.op == "fuse_mlp_identity":
+      wi_0, wi_1 = (_apply_dtype_cast(src_flat[k], first_tgt.dtype, path) for k in group.source_keys)
+      if first_tgt.shape == ():
+        out = jnp.maximum(wi_0, wi_1)
+      else:
+        out = jnp.stack([wi_0, wi_1], axis=-2)
+      return [(tgt_key, out) for _, tgt_key in group.targets]
+
     # For FP8 MoE quantization, quantize from self.compute_dtype (the trainer's
     # `dtype`, typically bfloat16) to match the trainer's forward pass in
     # RoutedMoE, which casts weights to compute_dtype before fake-quantization.
@@ -1252,6 +1320,15 @@ class MaxTextToMaxTextConverter:
       )
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk(wi_0, wi_1, first_tgt, path)
+    elif group.op == "fuse_mlp":
+      wi_0, wi_1 = (
+          _apply_dtype_cast(self._take_cycle_slot(src_flat[k], group), first_tgt.dtype, path) for k in group.source_keys
+      )
+      self._check_scan_axis(wi_0, path)
+      if first_tgt.shape == ():
+        per_block = _jit_unstack(jnp.maximum(wi_0, wi_1), self.scan_axis)
+      else:
+        per_block = _fuse_and_unstack_mlp(wi_0, wi_1, self.scan_axis, stack_axis=-2)
     else:  # "slice"
       val = _apply_dtype_cast(self._take_cycle_slot(src_flat[group.source_keys[0]], group), calc_dtype, path)
       self._check_scan_axis(val, path)
