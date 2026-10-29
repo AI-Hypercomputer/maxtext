@@ -1594,6 +1594,13 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+  fp8_dense_fake_quant: bool = Field(
+      False,
+      description=(
+          "Apply native FP8 (float8_e4m3fn) straight-through fake quantization to non-MoE DenseGeneral layers "
+          "in train mode to align with ServeFp8WeightQuantization on the rollout."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_moe_chunks(self) -> "MoEGeneral":

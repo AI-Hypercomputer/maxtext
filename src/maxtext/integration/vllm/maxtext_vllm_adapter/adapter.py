@@ -37,6 +37,7 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.layers import linears, quantizations
 from tpu_inference.models.jax.utils.multi_modal_utils import merge_multimodal_embeddings
 from .multimodal import get_multimodal_handler
 
@@ -478,9 +479,18 @@ class MaxTextForCausalLM(nnx.Module):
       return
 
     with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      if os.environ.get("ENABLE_FULL_FP8_OPTIMIZATIONS", "1") == "1":
+        os.environ.setdefault("MAXTEXT_FP8_DENSE_PER_CHANNEL", "1")
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
+      if (
+          isinstance(getattr(model, "quant", None), quantizations.ServeFp8WeightQuantization)
+          and os.environ.get("ENABLE_FULL_FP8_OPTIMIZATIONS", "1") == "1"
+      ):
+        num_requant = linears.requantize_model_dense_fp8_to_per_channel(model)
+        if num_requant > 0:
+          max_logging.log(f"Requantized {num_requant} block-wise FP8 DenseGeneral layers to per-channel.")
       if self.maxtext_config.lora.enable_lora:
         model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
         if self.maxtext_config.lora.lora_restore_path:
