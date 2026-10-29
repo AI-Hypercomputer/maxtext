@@ -1812,6 +1812,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       lr = self._learning_rate_schedule(self.train_step)
       self.record_metrics("learning_rate", lr)
 
+    # Materialize the step's recorded metrics before the optimizer step: a value that cannot be
+    # converted then raises here, with nothing applied, instead of after the update has landed
+    # and before the step counter and accumulator are reset (a retry would apply it twice).
+    self._metrics_recorder.get_step_metrics(self.train_step)
+
     # Wait for previous computations to finish before dispatching the update step to TPU.
     self._throttler.wait_for_next()
 
@@ -2113,14 +2118,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
       mode: metrics_module.Mode = metrics_module.Mode.TRAIN,
   ) -> None:
-    """Records a metric into the buffer, appending to JAX arrays.
+    """Records a metric into the step's buffer (host-side; concatenated once at flush time).
 
     Args:
       name: The name of the metric.
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
-    if metric is None:
+    # `loss_fn` auxiliary outputs can contain `None` entries (disabled optional losses),
+    # `"intermediate_outputs"` (sow activations/mutable collections), or tuples/lists
+    # (e.g., `(total_loss, aux)`). Skip these so `buffer_metrics` only receives scalar
+    # metrics, arrays, or nested metric dicts.
+    if metric is None or name == "intermediate_outputs" or isinstance(metric, (tuple, list)):
       return
     if isinstance(metric, dict):
       for sub_k, sub_v in metric.items():
