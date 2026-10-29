@@ -1,0 +1,53 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+ENV: [host=0] HOSTNAME=tpu-job
+ENV: [host=0] LIBTPU_INIT_ARGS=--xla_tpu_enable_sdc_checker=true --xla_tpu_sdc_check_repeat_count=0 --xla_tpu_sdc_check_halt_on_detection=false --xla_tpu_enable_log_recorder=true --xla_tpu_ici_sdc_test_run_on_program_start=true --xla_tpu_ici_sdc_test_max_distance=1 --xla_tpu_ici_sdc_test_pipeline_depth=13 --xla_tpu_ici_sdc_test_buffer_size_chunks=256 --xla_tpu_ici_sdc_test_packet_size_chunks=256 --xla_tpu_ici_sdc_test_iterations=5000 --xla_tpu_ici_sdc_test_sflag_wait_timeout_ms=5
+ENV: [host=0] JOB_COMPLETION_INDEX=0
+ENV: [host=0] TPU_ACCELERATOR_TYPE=tpu7x-256
+ENV: [host=0] TPU_CHIPS_PER_HOST_BOUNDS=2,2,1
+ENV: [host=0] TPU_HOST_BOUNDS=2,2,8
+ENV: [host=0] TPU_LOG_DIR=/tmp/tpu_logs/jax-tpu
+ENV: [host=0] TPU_PROCESS_ADDRESSES=tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471,tpu-job.tpu-job:8471
+ENV: [host=0] TPU_PROCESS_PORT=8471
+ENV: [host=0] TPU_RUNTIME_METRICS_PORTS=8431,8432,8433,8434,8435,8436,8437,8438
+ENV: [host=0] TPU_SKIP_MDS_QUERY=true
+ENV: [host=0] TPU_TOPOLOGY=4x4x8
+ENV: [host=0] TPU_TOPOLOGY_ALT=false
+ENV: [host=0] TPU_TOPOLOGY_WRAP=true,true,true
+ENV: [host=0] TPU_WORKER_HOSTNAMES=tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job,tpu-job.tpu-job
+ENV: [host=0] TPU_WORKER_ID=0
+DEVICE_MAP: [host=0] id=0 process_index=0 coords=[0, 0, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=1 process_index=0 coords=[0, 0, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=1, process_index=0, coords=(0,0,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=2 process_index=0 coords=[1, 0, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=2, process_index=0, coords=(1,0,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=3 process_index=0 coords=[1, 0, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=3, process_index=0, coords=(1,0,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=8 process_index=0 coords=[0, 1, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=8, process_index=0, coords=(0,1,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=9 process_index=0 coords=[0, 1, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=9, process_index=0, coords=(0,1,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=10 process_index=0 coords=[1, 1, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=10, process_index=0, coords=(1,1,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=11 process_index=0 coords=[1, 1, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=11, process_index=0, coords=(1,1,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=4 process_index=1 coords=[2, 0, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=4, process_index=1, coords=(2,0,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=5 process_index=1 coords=[2, 0, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=5, process_index=1, coords=(2,0,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=6 process_index=1 coords=[3, 0, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=6, process_index=1, coords=(3,0,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=7 process_index=1 coords=[3, 0, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=7, process_index=1, coords=(3,0,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=12 process_index=1 coords=[2, 1, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=12, process_index=1, coords=(2,1,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=13 process_index=1 coords=[2, 1, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=13, process_index=1, coords=(2,1,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=14 process_index=1 coords=[3, 1, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=14, process_index=1, coords=(3,1,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=15 process_index=1 coords=[3, 1, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=15, process_index=1, coords=(3,1,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=16 process_index=2 coords=[0, 2, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=16, process_index=2, coords=(0,2,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=17 process_index=2 coords=[0, 2, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=17, process_index=2, coords=(0,2,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=18 process_index=2 coords=[1, 2, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=18, process_index=2, coords=(1,2,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=19 process_index=2 coords=[1, 2, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=19, process_index=2, coords=(1,2,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=24 process_index=2 coords=[0, 3, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=24, process_index=2, coords=(0,3,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=25 process_index=2 coords=[0, 3, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=25, process_index=2, coords=(0,3,0), core_on_chip=1)
+DEVICE_MAP: [host=0] id=26 process_index=2 coords=[1, 3, 0] core_on_chip=0 slice_index=None kind=TPU7x repr=TpuDevice(id=26, process_index=2, coords=(1,3,0), core_on_chip=0)
+DEVICE_MAP: [host=0] id=27 process_index=2 coords=[1, 3, 0] core_on_chip=1 slice_index=None kind=TPU7x repr=TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1)
