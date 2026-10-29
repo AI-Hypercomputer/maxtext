@@ -11,8 +11,8 @@
 ## 1. Executive summary
 
 - **`safetensor` beats `to_maxtext` end-to-end** in 54 of the 56 configurations where both pipelines load the model.
-  The median speedup is 1.80×, up to 4.83× (unscanned 235B). The conversion step (`to_maxtext` Step 2) alone costs
-  19–780 s for models up to 120B, and 5,150 s for unscanned 235B.
+  The median speedup is 1.80×, up to 4.21× (`llama3.1-70b` scanned · 2). The conversion step (`to_maxtext` Step 2) alone
+  costs 19–780 s for models up to 120B, and 2,626 s for unscanned 235B (shards streamed with 16 parallel reads).
 - **`safetensor` Step 2 on tpu7x is far faster than on v5p** for the same models. For example:
   - `llama3.1-70b` scanned · 1: 199.2 s vs 1,012.5 s.
   - `mixtral-8x7b` scanned · 2: 63.1 s vs 786.3 s.

@@ -177,10 +177,10 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **757.50** | **757.50** | **1,340.81** | **Only `safetensor` loads this config** |
 | **`qwen3-235b-a22b`** | `scanned` | `2 (16)` | `to_maxtext` | 583.32 | **source must be staged in RAM next to the converted state; exceeds host RAM** | — | N/A | N/A | N/A |
 | ↳ | `scanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **792.38** | **792.38** | **1,375.69** | **Only `safetensor` loads this config** |
-| **`qwen3-235b-a22b`** | `unscanned` | `1 (8)` | `to_maxtext` | 583.32 | 5,150.13 | 454.72 | 5,604.85 | 6,188.16 | 1.00x (baseline) |
-| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **697.13** | **697.13** | **1,280.44** | **4.83x / 8.04x** |
-| **`qwen3-235b-a22b`** | `unscanned` | `2 (16)` | `to_maxtext` | 583.32 | 5,150.13 | 617.12 | 5,767.25 | 6,350.56 | 1.00x (baseline) |
-| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **749.00** | **749.00** | **1,332.31** | **4.77x / 7.70x** |
+| **`qwen3-235b-a22b`** | `unscanned` | `1 (8)` | `to_maxtext` | 583.32 | 2,625.50 | 545.51 | 3,171.02 | 3,754.33 | 1.00x (baseline) |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **583.32** | **—** | **697.13** | **697.13** | **1,280.44** | **2.93x / 4.55x** |
+| **`qwen3-235b-a22b`** | `unscanned` | `2 (16)` | `to_maxtext` | 583.32 | 2,625.50 | 659.15 | 3,284.65 | 3,867.97 | 1.00x (baseline) |
+| ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **583.32** | **—** | **749.00** | **749.00** | **1,332.31** | **2.90x / 4.39x** |
 | **`deepseek4-284b`** | `scanned` | `1 (8)` | `to_maxtext` | 0.45 | **host OOM-killed, peak host RAM 989.6 GB** | — | N/A | N/A | N/A |
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **0.00** | **—** | **453.27** | **453.27** | **453.27** | **Only `safetensor` loads this config** |
 | **`deepseek4-284b`** | `scanned` | `2 (16)` | `to_maxtext` | 0.45 | **host OOM-killed, peak host RAM 989.6 GB** | — | N/A | N/A | N/A |
@@ -195,7 +195,9 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 | ↳ | `scanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **killed (-9) on slice 0, peak host RAM 161.2 GB** | — | — | — |
 | **`qwen3.5-397b-a17b`** | `scanned` | `4 (32)` | `to_maxtext` | 814.53 | **source must be staged in RAM next to the converted state; exceeds host RAM** | — | N/A | N/A | N/A |
 | ↳ | `scanned` | `4 (32)` | **`safetensor`** | **814.53** | **—** | **1,399.68** | **1,399.68** | **2,214.21** | **Only `safetensor` loads this config** |
-| **`qwen3.5-397b-a17b`** | `unscanned` | `2 (16)` | `to_maxtext` | 814.53 | **not run** | — | N/A | N/A | N/A |
+| **`qwen3.5-397b-a17b`** | `unscanned` | `1 (8)` | `to_maxtext` | 814.53 | **host OOM-killed** | — | N/A | N/A | N/A |
+| ↳ | `unscanned` | `1 (8)` | **`safetensor`** | **814.53** | **—** | **not run** | — | — | — |
+| **`qwen3.5-397b-a17b`** | `unscanned` | `2 (16)` | `to_maxtext` | 814.53 | **host OOM-killed** | — | N/A | N/A | N/A |
 | ↳ | `unscanned` | `2 (16)` | **`safetensor`** | **814.53** | **—** | **1,311.85** | **1,311.85** | **2,126.38** | **Only `safetensor` loads this config** |
 | **`qwen3-480b-a35b`** | `scanned` | `1 (8)` | `to_maxtext` | 1,135.50 | **source must be staged in RAM next to the converted state; exceeds host RAM** | — | N/A | N/A | N/A |
 | ↳ | `scanned` | `1 (8)` | **`safetensor`** | **1,046.14** | **—** | **TPU HBM OOM** | — | — | — |
@@ -218,8 +220,8 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 ## 4. Key takeaways
 
 1. **`safetensor` is faster end-to-end in 54 of the 56 configurations where both pipelines load the model:**
-   median 1.80×, up to 4.83× (`qwen3-235b-a22b` unscanned · 1 slice). `to_maxtext` needs an extra CPU conversion
-   before its Orbax load: 19 s (0.6B) to 780 s (70B), and 5,150 s for unscanned 235B.
+   median 1.80×, up to 4.21× (`llama3.1-70b` scanned · 2 slices). `to_maxtext` needs an extra CPU conversion
+   before its Orbax load: 19 s (0.6B) to 780 s (70B), and 2,626 s for unscanned 235B.
 2. **`to_maxtext` Orbax loads are fast for unscanned checkpoints but slow for scanned MoE checkpoints:**
    - unscanned: 3.3–115 s
    - scanned: `mixtral-8x7b` 534 s / 793 s, `qwen3-30b-a3b` 386 s / 449 s, `gpt-oss-120b` 839 s / 894 s (1 / 2 slices)
@@ -228,7 +230,8 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 3. **Above 200B, only `safetensor` works in most configurations** (details in the large-model report):
    - `to_maxtext` keeps the whole converted state in host RAM.
    - Scanned conversions also need the source staged in RAM.
-   - So 235B scanned, 284B, 397B scanned, and 480B can't be converted on one tpu7x host. Unscanned 235B converts by streaming shards, in 5,150 s.
+   - So 235B scanned, 284B, 397B, and 480B can't be converted on one tpu7x host. Unscanned 397B finished its transform, then was OOM-killed when the Orbax save started.
+   - Unscanned 235B converts by streaming shards from GCS, in 2,626 s with 16 parallel range reads (5,150 s single-stream).
    - `safetensor` loads them directly: 235B and 284B on 1 slice, 480B and unscanned 397B on 2, 671B on 4.
 4. **Two configurations favor `to_maxtext`** (see the issues report):
    - `qwen3-14b` scanned · 1 slice (0.65×): its `safetensor` transform takes ~290 s, reproduced in a re-run.
@@ -242,5 +245,5 @@ The same values, with sub-phases, are in [`tpu7x_benchmark_ckpt_load_time_summar
 ## 5. Issues found and fixed
 
 See [`tpu7x_benchmark_ckpt_load_time_issues.md`](tpu7x_benchmark_ckpt_load_time_issues.md):
-- **T-1 … T-14:** harness, infrastructure and capacity issues, all resolved.
+- **T-1 … T-15:** harness, infrastructure and capacity issues, all resolved.
 - **U-1 … U-7:** MaxText issues and capacity limits. Two are open MaxText bugs: the `qwen3.5-397b-a17b` composite-split HBM peak and the `gpt-oss-120b` jitted transform temporaries.

@@ -23,7 +23,8 @@
 - On a tpu7x host (1,014.5 GB RAM, ~100 GB boot disk), `to_maxtext` S2 **cannot convert most >200B configurations**:
   - It keeps the whole converted state in host RAM before the Orbax save.
   - Scanned conversions need the whole source staged locally, and the only local storage large enough is RAM.
-  - Only unscanned 235B and 397B can convert, by streaming shards. 397B needs ~4.3 h, longer than the cluster's ~3 h workload limit, so it never finished. For 235B, `to_maxtext` takes 6,188 s end-to-end on 1 slice (S1 583 s + S2 5,150 s + S3 455 s), vs 1,280 s for `safetensors_dynamic`: 4.8× end-to-end and 8.0× without Step 1. On 2 slices: 6,351 s vs 1,332 s (4.8× / 7.7×).
+  - Only unscanned 235B converts, by streaming shards from GCS (16 parallel range reads). It takes 3,754 s end-to-end on 1 slice (S1 583 s + S2 2,626 s + S3 546 s), vs 1,280 s for `safetensors_dynamic`: 2.9× end-to-end and 4.5× without Step 1. On 2 slices: 3,868 s vs 1,332 s (2.9× / 4.4×). With single-stream reads, the conversion took 5,150 s.
+  - Unscanned 397B finished its transform (6,860 s), then ran out of host RAM when the Orbax save started.
 - `safetensors_dynamic` loads straight from the HF shards, so it is the only pipeline that loads the scanned 235B,
   284B, 480B, and 671B configurations at all.
 
@@ -73,9 +74,9 @@ The PR changes behind the WITH results:
 
 | Model (checkpoint) | `to_maxtext` S2 conversion on one host | `to_maxtext` S3 load | `safetensors_dynamic` S2 |
 | :--- | :--- | :--- | :--- |
-| `qwen3-235b-a22b` (470 GB) | scanned ❌: the staged source plus the converted state exceed host RAM (OOM-killed at leaf 4/15). Unscanned ✅ **5,150.1 s** (shards streamed from GCS; peak host RAM 663.5 GB) | unscanned: **454.7 s** on 1 slice, **617.1 s** on 2 slices | 697–792 s |
+| `qwen3-235b-a22b` (470 GB) | scanned ❌: the staged source plus the converted state exceed host RAM (OOM-killed at leaf 4/15). Unscanned ✅ **2,625.5 s** (shards streamed from GCS as 16 parallel range reads; single stream: 5,150.1 s) | unscanned: **545.5 s** on 1 slice, **659.1 s** on 2 slices | 697–792 s |
 | `deepseek4-284b` (582 GB) | ❌ OOM-killed at 989.6 GB (scanned and unscanned) | ➖ no checkpoint | 353–453 s |
-| `qwen3.5-397b-a17b` (807 GB on disk) | scanned ❌: the source must be staged in RAM. Unscanned: ❌ not completed. Streaming shards takes ~4.3 h, but this cluster deactivates workloads after ~3 h; both attempts stopped (at ~65% and ~40%) | ➖ no checkpoint | unscanned · 2: 1,311.9 s; scanned · 4: 1,399.7 s |
+| `qwen3.5-397b-a17b` (807 GB on disk) | scanned ❌: the source must be staged in RAM. Unscanned ❌: with parallel shard reads the transform finished (6,860 s), then the pod was OOM-killed when the Orbax save started (~807 GB converted state). Single-stream attempts hit the ~3 h workload limit | ➖ no checkpoint | unscanned · 2: 1,311.9 s; scanned · 4: 1,399.7 s |
 | `qwen3-480b-a35b` (960 GB) | ❌ scanned: the source must be staged; unscanned: the converted state exceeds ~943 GB usable RAM | ➖ no checkpoint | 992–1,068 s (2 slices) |
 | `deepseek3-671b` (1.34 TB) | ➖ not attempted | ➖ | 531–649 s (4 slices) |
 
