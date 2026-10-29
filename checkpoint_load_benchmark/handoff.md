@@ -1,6 +1,6 @@
 # Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-28 ~21:10 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
+> **Snapshot:** 2026-10-29 ~10:30 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
 >
 > The numbers below come from the per-phase result JSONs in GCS at snapshot time. Pods were still running, so
 > re-check §6 before acting. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
@@ -14,7 +14,7 @@
 | :--- | :--- |
 | **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit, 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s). 397B scanned on 1–2 slices runs out of HBM, also with `hbmfix` (§7.19) |
 | **P1 · Exp 1A BEFORE** (`origin/main`) | ✅ Done. Every BEFORE run **timed out at 1800 s while still loading** (235B · 1 and · 2, 284B · 1 and · 2, 397B unscanned · 2, 671B · 4), except 480B, which hits `KeyError`. With the PRs, the same loads take 353–708 s |
-| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). Unscanned 235B converted in **5,150.1 s** (shards streamed); its Orbax loads are running. The unscanned 397B conversion **could not finish**. Streaming shards takes ~4.3 h, but workloads are deactivated after ~3 h (§7.14): the attempts stopped at ~65% (16:43 UTC) and ~40% (20:57 UTC). To finish it, either fetch shards in parallel to get under 3 h (and re-run 235B the same way, for comparability) or book a longer window |
+| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | ✅ Done. `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). **Unscanned 397B** finished its transform (6,860 s with parallel shard reads), then was **OOM-killed when the Orbax save started** (~807 GB converted state). **Unscanned 235B** (re-run with 16 parallel shard reads, run `tpu7x_200b_pstream`): S2 2,625.5 s, S3 545.5 s / 659.1 s on 1 / 2 slices, so `safetensors_dynamic` is 2.9× faster end-to-end (4.4–4.5× without Step 1). The single-stream first run took 5,150.1 s |
 | **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 29 tasks). All tasks are done except the two unscanned conversion chains (235B, 397B). Workers left: `s3` (235B), `s8` (397B), standby `s1`, pairs `i` and `k` for the 2-slice loads |
 | **P2 · 16-model suite** | ✅ Done (`p2_leftovers` and re-runs). `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned loads. `llama3.1-70b` scanned · 2 Orbax load needed `concurrent_gb=38` (T-13). Re-ran the `qwen3-14b` and `qwen3-32b` scanned · 1 outliers (U-7) |
 | **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`. Regenerate the tables with `scripts/build_tpu7x_tables.py --md-into`. The cluster is cleaned up |
@@ -211,7 +211,7 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
 
 ## 6. Live cluster state (at snapshot)
 
-**Cleaned up at 21:09 UTC.** `run_tpu7x_cluster.sh --cleanup` removed every `mesakh-*` pod and `mesakh-w*` service; `kubectl get pods,svc | grep mesakh` returns nothing. The GCS queue (`queue/p1/`) and all results stay in GCS: 28 of 30 tasks are done. The two open tasks, `tm_397b_unscanned_s1` (its lock is stale) and `tm_397b_unscanned_s2`, only matter if the 397B conversion is attempted again (§8).
+**Cleaned up at 10:28 UTC on 10-29.** No `mesakh-*` pods or services remain. Every queue task in `queue/p1/` is done or closed (`tm_397b_unscanned_*` are closed with notes). All results are in GCS and the reports.
 
 ---
 
@@ -263,32 +263,20 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
     - **Recovery:** reset the dead worker's lock heartbeat to 0, then recreate the pod from the scale-out manifest. A runner pod resolves its daemons' IPs once at start, so after a daemon is recreated, recreate the runner too (`m0`).
 19. **`hbmfix` did not fix `qwen3.5-397b-a17b` scanned · 2.** The load finished (469.7 s), then the split of the stacked `(wi_0, wi_1)` composite failed at the same allocation (11.25 GiB needed, 2.77 GiB free): the composite (~22.5 GiB per device) is still alive while its first half is created. Next fix: split each layer's `gate_up_proj` before stacking, so only one target leaf is built at a time. Alternatively, move the composite to host before splitting. Meanwhile, `st_397b_scanned_s4` measures scanned 397B with 4 slices of HBM headroom.
 20. **A queue worker's heartbeat thread can die on a transient auth error.** On the 397B re-run (`s1`, 19:49 UTC), a failed credential refresh raised inside `_beat`, which ended the thread while the harness kept converting. The lock then goes stale, and any new worker that can run the task would take it over and start a duplicate run. *Fixed* in `tpu7x_task_queue.py` (the heartbeat logs and retries), but only for pods started after the fix. For the running re-run: create the 2-slice pair for `tm_397b_unscanned_s2` only after `tm_397b_unscanned_s1` is in `done/`.
+21. **Parallel shard reads for `to_maxtext` streaming (10-29).** The single-stream fetch (~55 MB/s) made unscanned 397B take ~4.3 h, longer than the ~3 h workload limit. `_parallel_gcs_download` now fetches each shard as 16 concurrent range reads (`TM_STREAM_DOWNLOAD_WORKERS`). Re-runs went to run dir `p1_lance_prs/run_tpu7x_200b_pstream`.
+    - **235B unscanned:** S2 2,625.5 s (569 GB downloaded in 1,538 s), S3 545.5 s / 659.1 s on 1 / 2 slices.
+    - **397B unscanned:** the transform finished in 6,860 s, then the pod was OOM-killed when the Orbax save started. The ~807 GB converted state plus save buffers exceed the ~944 GB a pod can use. Its `to_maxtext_step2_result.json` in the pstream run dir was written from the pod log (`recorded_by`).
+    - **Capacity:** spot capacity was scarce on 10-29 (3–16 single-host spot nodes, frequent taint evictions). Two 397B attempts and three pair pods were lost before the last attempt ran.
 
 ---
 
 ## 8. Next steps (in order)
 
-1. **Let the P1 queue drain.** Watch `queue/p1/done/` and the locks (§9). If a worker is evicted, reset its lock heartbeat to 0 and recreate the pod from `tpu7x_p1_completion_scaleout.yaml` or `tpu7x_p1_completion_scaleout2.yaml` (from `generate_tpu7x_manifests.py`). For an N-slice group, recreate the runner after any daemon. Finished tasks are never re-run, and interrupted ones resume from their last finished phase.
-2. **Check the remaining results:**
-   - unscanned 235B and 397B conversions, and their 1- and 2-slice Orbax loads (the only 1B comparisons possible for >200B on one host)
-   - the BEFORE 1800 s re-runs (235B, 284B, 671B on 4 slices)
-   - `st_397b_scanned_s4`
-   - `p2_leftovers`
-3. **Optional follow-up:** the leaf-level `(wi_0, wi_1)` split for `qwen3.5-397b-a17b` scanned · 2 (§7.19), as a separate patch and run.
-4. **Review failed phases** with `summarize_tpu7x_results.py`. Re-queue any task whose phases failed for infrastructure reasons by deleting its `done/<id>.json`.
-5. **Write the reports** (leave the v5p reports untouched):
-   - `reports/tpu7x_large_model_200b_experiment_report.md`
-   - `reports/tpu7x_benchmark_ckpt_load_time_summary.md`
-   - `reports/tpu7x_benchmark_ckpt_load_time_report.md`
-   - `reports/tpu7x_benchmark_ckpt_load_time_issues.md`
-   - `reports/tpu7x_benchmark_ckpt_load_time_summary.csv`
-6. **Clean up the cluster** (zero pods left):
-   ```bash
-   CTX=gke_cloud-tpu-shared-capacity_us-central1_bodaborg-tpu7x-nap
-   ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --cleanup   # pods with app=mesakh-tpu7x-bench, all mesakh-w<k>-<id> services, mesakh-ctrl-c1
-   kubectl --context=$CTX get pods,svc | grep mesakh                     # expect no output
-   ```
-7. **Commit and push** further changes to `docs/checkpoint-load-benchmark`. Keep `src/` equal to Lance's PRs; the HBM fix lives in `patches/hbmfix` and would go upstream as its own PR.
+All planned runs are finished and documented; the cluster is cleaned up. Optional follow-ups:
+1. Leaf-level `(wi_0, wi_1)` split for `qwen3.5-397b-a17b` scanned on 2 slices (§7.19, issue U-1), as its own patch and run.
+2. Find out why the `gpt-oss-120b` scanned `safetensors_dynamic` transform needs ~7× the leaf in HBM temporaries (issue U-6).
+3. Profile the slow scanned MoE Orbax restores on tpu7x versus v5p (report §5).
+4. Rebuild the tables after any new run: `scripts/build_tpu7x_tables.py <p2> <p2_rerun> <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --md-into reports/tpu7x_benchmark_ckpt_load_time_summary.md`.
 
 ## 9. Command cheat sheet
 
