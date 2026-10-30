@@ -14,11 +14,13 @@
 
 """Standalone parity, negative-control, and end-to-end output check helpers."""
 
+from tests.utils.parity import ckpt_roundtrip_check
 from tests.utils.parity import e2e_check
 from tests.utils.parity import layer_parity
 from tests.utils.parity import negctl
 
 __all__ = [
+    "ckpt_roundtrip_check",
     "e2e_check",
     "layer_parity",
     "negctl",

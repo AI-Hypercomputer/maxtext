@@ -22,22 +22,30 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 from typing import Any
 import unittest
+from unittest import mock
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from safetensors import safe_open
+from safetensors.flax import save_file as save_flax_file
 
+from maxtext.checkpoint_conversion import to_huggingface
+from maxtext.checkpoint_conversion import to_maxtext
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils import utils as ckpt_utils
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.models import deepseek41
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from tests.utils.parity import ckpt_roundtrip_check
 from tests.utils import deepseek_v41_mm_testing as mm_testing
 from tests.utils.parity import negctl
 
@@ -249,6 +257,136 @@ def _verify_t11_round_trip(
 
   checked_mm_count = len(mm_specs) + len(bias_vl_by_layer)
   return failures, checked_mm_count, all_finite
+
+
+def _load_safetensors_dir(ckpt_dir: str) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+  """Loads all `.safetensors` shards in `ckpt_dir` as `(float32_numpy_tensors, exact_dtype_names)`."""
+  tensors: dict[str, np.ndarray] = {}
+  dtypes: dict[str, str] = {}
+  shard_files = sorted(f for f in os.listdir(ckpt_dir) if f.endswith(".safetensors"))
+  if not shard_files:
+    raise FileNotFoundError(f"No .safetensors files found in {ckpt_dir}")
+  for fname in shard_files:
+    fpath = os.path.join(ckpt_dir, fname)
+    with safe_open(fpath, framework="flax", device="cpu") as f:
+      for key in f.keys():
+        arr = f.get_tensor(key)
+        dtypes[key] = str(arr.dtype)
+        if arr.dtype == jnp.bfloat16:
+          tensors[key] = np.asarray(arr.astype(jnp.float32), dtype=np.float32)
+        else:
+          tensors[key] = np.asarray(arr)
+  return tensors, dtypes
+
+
+def _stage_offline_mini_hf_dir(base_dir: str) -> tuple[str, int, int]:
+  """Prepares an offline mini multimodal HF checkpoint dir with BF16 weights, F32 routing/mHC/sinks, and tokenizer."""
+  hf_dir = os.path.join(base_dir, "roundtrip_hf_src")
+  if os.path.exists(hf_dir):
+    shutil.rmtree(hf_dir)
+  os.makedirs(hf_dir, exist_ok=True)
+  _, np_tensors = mm_testing.write_numpy_mini_mm_checkpoint(hf_dir, seed=17, use_multimodal=True)
+  flax_tensors: dict[str, jax.Array] = {}
+  for key, arr in np_tensors.items():
+    target_dtype = jnp.float32 if key.endswith(mm_testing.F32_CHECKPOINT_SUFFIXES) else jnp.bfloat16
+    flax_tensors[key] = jnp.asarray(arr, dtype=target_dtype)
+  save_flax_file(flax_tensors, os.path.join(hf_dir, "model-00001-of-00001.safetensors"))
+  for fn in os.listdir(mm_testing.OFFLINE_TOKENIZER_PATH):
+    src_f = os.path.join(mm_testing.OFFLINE_TOKENIZER_PATH, fn)
+    if os.path.isfile(src_f):
+      shutil.copy2(src_f, os.path.join(hf_dir, fn))
+  return hf_dir, mm_testing.MINI_VOCAB_SIZE, mm_testing.MINI_IMAGE_TOKEN_ID
+
+
+def _mini_conversion_cli_args(
+    *,
+    run_name: str,
+    base_output_directory: str,
+    hf_model_path: str,
+    scan_layers: bool,
+    use_multimodal: bool,
+    vocab_size: int,
+    image_token_id: int,
+    load_parameters_path: str = "",
+    for_to_huggingface: bool = False,
+) -> list[str]:
+  """Builds CLI arguments for `to_maxtext.main` or `to_huggingface.main` on the 14-layer mini model."""
+  args = [
+      sys.argv[0],
+      "src/maxtext/configs/base.yml",
+      "model_name=deepseek4.1-flash-mini",
+      f"run_name={run_name}",
+      f"base_output_directory={base_output_directory}",
+      f"hf_model_path={hf_model_path}",
+      "override_model_config=True",
+      f"use_multimodal={use_multimodal}",
+      "vision_encoder_block=deepseek41",
+      "freeze_vision_encoder_params=False",
+      f"scan_layers={scan_layers}",
+      "hardware=cpu",
+      "skip_jax_distributed_system=True",
+      "dtype=bfloat16",
+      "weight_dtype=bfloat16",
+      "dtype_mm=bfloat16",
+      "base_emb_dim=64",
+      "base_num_query_heads=4",
+      "head_dim=32",
+      "qk_rope_head_dim=8",
+      "q_lora_rank=16",
+      "o_groups=2",
+      "o_lora_rank=8",
+      "base_mlp_dim=32",
+      "base_moe_mlp_dim=32",
+      "num_experts=4",
+      "num_experts_per_tok=2",
+      "sparse_matmul=False",
+      "capacity_factor=-1",
+      "sliding_window_size=8",
+      f"base_num_decoder_layers={len(mm_testing.MINI_COMPRESS_RATIOS)}",
+      f"compress_ratios={list(mm_testing.MINI_COMPRESS_RATIOS)}",
+      f"kv_source_layers={list(mm_testing.MINI_KV_SOURCE_LAYERS)}",
+      f"index_source_layers={list(mm_testing.MINI_INDEX_SOURCE_LAYERS)}",
+      "indexer_n_heads=16",
+      "indexer_head_dim=16",
+      "indexer_topk=3",
+      f"candidate_source_layer={mm_testing.MINI_CANDIDATE_SOURCE_LAYER}",
+      "candidate_topk_blocks=2",
+      "candidate_block_size=4",
+      f"ds41_engram_layers={list(mm_testing.MINI_ENGRAM_LAYER_IDS)}",
+      "ds41_engram_vocab_size=50",
+      "ds41_engram_max_ngram_size=3",
+      "ds41_engram_n_heads=2",
+      "ds41_engram_head_dim=8",
+      "ds41_engram_compressed_vocab_size=0",
+      f"vocab_size={vocab_size}",
+      f"ds41_image_token_id={image_token_id}",
+      "num_hidden_layers_for_vit=2",
+      "hidden_size_for_vit=128",
+      "num_attention_heads_for_vit=2",
+      "intermediate_size_for_vit=352",
+      "patch_size_for_vit=14",
+      "rope_theta_for_vit=10000.0",
+      "num_channels_for_vit=3",
+      "ds41_vision_downsample_ratio=3",
+      f"ds41_vision_grid={list(mm_testing.MINI_GRID_PADDED)}",
+      f"tokenizer_path={mm_testing.OFFLINE_TOKENIZER_PATH}",
+  ]
+  if for_to_huggingface:
+    args.extend(
+        [
+            f"load_parameters_path={load_parameters_path}",
+            "override_model_architecture=True",
+        ]
+    )
+  else:
+    args.extend(
+        [
+            "lazy_load_tensors=False",
+            "save_dtype=bfloat16",
+            "simulated_cpu_devices_count=1",
+        ]
+    )
+  return args
 
 
 @pytest.mark.cpu_only
@@ -532,6 +670,252 @@ class DeepSeek41MultimodalCheckpointTest(unittest.TestCase):
       bvl_by_layer = _extract_moe_biases_by_layer(model_np, cfg_np, "bias_vl")
       for lid in range(cfg_np.num_decoder_layers):
         np.testing.assert_array_equal(np.asarray(bvl_by_layer[lid]), hf_tensors[f"layers.{lid}.ffn.gate.bias_vl"])
+
+  def test_t11_hf_to_maxtext_to_hf_roundtrip_and_negctl(self) -> None:
+    hf_src_dir, vocab_size, image_token_id = _stage_offline_mini_hf_dir(self.base_dir)
+    source_tensors, source_dtypes = _load_safetensors_dir(hf_src_dir)
+    self.assertEqual(len(source_tensors), 544)
+
+    mm_only_keys = {
+        k for k in source_tensors if k.startswith(("vision.", "aligner.", "image_")) or k.endswith(".ffn.gate.bias_vl")
+    }
+    self.assertEqual(len(mm_only_keys), 40)
+    for lid in range(len(mm_testing.MINI_COMPRESS_RATIOS)):
+      self.assertEqual(source_dtypes[f"layers.{lid}.ffn.gate.bias_vl"], "float32")
+      self.assertEqual(source_dtypes[f"layers.{lid}.ffn.gate.bias"], "float32")
+    for k in mm_only_keys:
+      if not k.endswith(".ffn.gate.bias_vl"):
+        self.assertEqual(source_dtypes[k], "bfloat16", msg=f"Expected bfloat16 on {k}")
+
+    tol = ckpt_roundtrip_check.RoundTripTol.exact()
+    cached_orbax: dict[bool, Any] = {}
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers), mock.patch("gc.collect"):
+        tag = "scanned" if scan_layers else "unscanned"
+        mt_out_dir = os.path.join(self.base_dir, f"rt_mt_{tag}")
+        hf_out_dir = os.path.join(self.base_dir, f"rt_hf_{tag}")
+        to_maxtext.main(
+            _mini_conversion_cli_args(
+                run_name=f"rt_mt_{tag}",
+                base_output_directory=mt_out_dir,
+                hf_model_path=hf_src_dir,
+                scan_layers=scan_layers,
+                use_multimodal=True,
+                vocab_size=vocab_size,
+                image_token_id=image_token_id,
+                for_to_huggingface=False,
+            )
+        )
+        orbax_items_path = os.path.join(mt_out_dir, "0", "items")
+
+        def _memoized_load_orbax(cfg: Any, _scan: bool = scan_layers) -> dict[str, Any]:
+          if _scan not in cached_orbax:
+            cached_orbax[_scan] = ckpt_utils.load_orbax_checkpoint(cfg)
+          return cached_orbax[_scan]
+
+        with mock.patch.object(to_huggingface, "load_orbax_checkpoint", side_effect=_memoized_load_orbax):
+          to_huggingface.main(
+              _mini_conversion_cli_args(
+                  run_name=f"rt_hf_{tag}",
+                  base_output_directory=hf_out_dir,
+                  hf_model_path=hf_src_dir,
+                  scan_layers=scan_layers,
+                  use_multimodal=True,
+                  vocab_size=vocab_size,
+                  image_token_id=image_token_id,
+                  load_parameters_path=orbax_items_path,
+                  for_to_huggingface=True,
+              )
+          )
+
+        primary_exported, exported_dtypes = _load_safetensors_dir(hf_out_dir)
+        for lid in range(len(mm_testing.MINI_COMPRESS_RATIOS)):
+          self.assertEqual(exported_dtypes[f"layers.{lid}.ffn.gate.bias_vl"], "float32")
+          self.assertEqual(exported_dtypes[f"layers.{lid}.ffn.gate.bias"], "float32")
+        for k in mm_only_keys:
+          if not k.endswith(".ffn.gate.bias_vl"):
+            self.assertEqual(exported_dtypes[k], "bfloat16", msg=f"Expected bfloat16 on exported {k}")
+
+        ok, metrics, failures = ckpt_roundtrip_check.check_hf_roundtrip(
+            source_tensors,
+            primary_exported,
+            tol=tol,
+            source_dtypes=source_dtypes,
+            exported_dtypes=exported_dtypes,
+        )
+        self.assertTrue(ok, msg=f"Round-trip failed (scan_layers={scan_layers}): {failures}")
+        self.assertEqual(failures, [])
+        self.assertEqual(len(metrics), len(source_tensors))
+
+        # Negative controls: perturb a BF16 vision leaf and an FP32 bias_vl leaf in MaxText state before export.
+        bias_vl_mt_key = (
+            "MoEBiasVar-decoder-segments_1-layers_0-mlp-MoeBlock_0-gate-bias_vl"
+            if scan_layers
+            else "MoEBiasVar-decoder-layers_2-mlp-MoeBlock_0-gate-bias_vl"
+        )
+        neg_targets = (
+            ("params-vision_encoder-DeepSeek41VisionProjector_0-w1-kernel", 81),
+            (bias_vl_mt_key, 82),
+        )
+        for target_mt_key, seed in neg_targets:
+          with self.subTest(scan_layers=scan_layers, neg_target=target_mt_key):
+            hf_pert_dir = os.path.join(self.base_dir, f"rt_hf_pert_{tag}_{seed}")
+
+            def _extract_perturbed_state(
+                ckpt_dict: dict[str, Any], _key: str = target_mt_key, _seed: int = seed
+            ) -> dict[str, Any]:
+              state_dict = dict(ckpt_utils.detect_and_extract_checkpoint(ckpt_dict))
+              orig_leaf = state_dict[_key]
+              pert_np = ckpt_roundtrip_check.perturb_one_tensor(
+                  {_key: np.asarray(orig_leaf)},
+                  target_key=_key,
+                  rel_scale=1e-2,
+                  seed=_seed,
+              )[_key]
+              state_dict[_key] = jnp.asarray(pert_np, dtype=orig_leaf.dtype)
+              return state_dict
+
+            with (
+                mock.patch.object(to_huggingface, "load_orbax_checkpoint", side_effect=_memoized_load_orbax),
+                mock.patch.object(to_huggingface, "detect_and_extract_checkpoint", side_effect=_extract_perturbed_state),
+            ):
+              to_huggingface.main(
+                  _mini_conversion_cli_args(
+                      run_name=f"rt_hf_pert_{tag}_{seed}",
+                      base_output_directory=hf_pert_dir,
+                      hf_model_path=hf_src_dir,
+                      scan_layers=scan_layers,
+                      use_multimodal=True,
+                      vocab_size=vocab_size,
+                      image_token_id=image_token_id,
+                      load_parameters_path=orbax_items_path,
+                      for_to_huggingface=True,
+                  )
+              )
+            perturbed_exported, perturbed_dtypes = _load_safetensors_dir(hf_pert_dir)
+            status, reasons = ckpt_roundtrip_check.negative_roundtrip_status(
+                source_tensors,
+                primary_exported,
+                perturbed_exported,
+                tol=tol,
+                source_dtypes=source_dtypes,
+                exported_dtypes=perturbed_dtypes,
+            )
+            self.assertEqual(
+                (status, reasons),
+                ("FIRED", []),
+                msg=f"Negative control did not fire for {target_mt_key} (scan_layers={scan_layers}): {status} {reasons}",
+            )
+
+        if not scan_layers:
+          hf_text_out_dir = os.path.join(self.base_dir, "rt_hf_text_only_unscanned")
+          with mock.patch.object(to_huggingface, "load_orbax_checkpoint", side_effect=_memoized_load_orbax):
+            to_huggingface.main(
+                _mini_conversion_cli_args(
+                    run_name="rt_hf_text_only_unscanned",
+                    base_output_directory=hf_text_out_dir,
+                    hf_model_path=hf_src_dir,
+                    scan_layers=False,
+                    use_multimodal=False,
+                    vocab_size=vocab_size,
+                    image_token_id=image_token_id,
+                    load_parameters_path=orbax_items_path,
+                    for_to_huggingface=True,
+                )
+            )
+          text_exported, text_dtypes = _load_safetensors_dir(hf_text_out_dir)
+          self.assertTrue(mm_only_keys.isdisjoint(text_exported.keys()))
+          text_ok, _, text_failures = ckpt_roundtrip_check.check_hf_roundtrip(
+              source_tensors,
+              text_exported,
+              tol=tol,
+              unexported_source_keys=mm_only_keys,
+              source_dtypes=source_dtypes,
+              exported_dtypes=text_dtypes,
+          )
+          self.assertTrue(text_ok, msg=f"Text-only export failed: {text_failures}")
+
+  def test_t12_non_ds41_conversion_helpers_noop(self):
+    """Proves non-deepseek4.1 models preserve legacy numpy and full-precision helper behavior."""
+    # pylint: disable=import-outside-toplevel,protected-access
+    import ml_dtypes
+
+    arr_f32 = np.array([1.25, -2.5], dtype=np.float32)
+    out_legacy = to_maxtext._convert_tensor_to_numpy(arr_f32, save_dtype="bfloat16", is_ds41=False)
+    self.assertIs(out_legacy, arr_f32)
+    self.assertEqual(out_legacy.dtype, np.float32)
+
+    out_ds41 = to_maxtext._convert_tensor_to_numpy(arr_f32, save_dtype="bfloat16", is_ds41=True)
+    self.assertEqual(out_ds41.dtype, ml_dtypes.bfloat16)
+
+    for bf16_dtype in ("bfloat16", jnp.bfloat16, np.dtype("bfloat16"), jnp.dtype("bfloat16")):
+      for fn in (to_maxtext._param_save_dtype, ckpt_utils._param_save_dtype):
+        self.assertEqual(fn("params-decoder-layers_0-hc_attn_fn", bf16_dtype, is_ds41=False), bf16_dtype)
+        self.assertEqual(fn("params-decoder-layers_0-self_attention-sinks", bf16_dtype, is_ds41=False), bf16_dtype)
+        self.assertEqual(fn("params-decoder-layers_0-hc_attn_fn", bf16_dtype, is_ds41=True), "float32")
+        self.assertEqual(fn("params-decoder-layers_0-self_attention-sinks", bf16_dtype, is_ds41=True), "float32")
+        self.assertEqual(
+            fn("MoEBiasVar-decoder-layers_0-mlp-MoeBlock_0-gate-bias", bf16_dtype, is_ds41=True),
+            "float32",
+        )
+      self.assertEqual(
+          to_maxtext._param_save_dtype("MoEBiasVar-decoder-layers_0-mlp-MoeBlock_0-gate-bias", bf16_dtype, is_ds41=False),
+          "float32",
+      )
+      self.assertEqual(
+          ckpt_utils._param_save_dtype("MoEBiasVar-decoder-layers_0-mlp-MoeBlock_0-gate-bias", bf16_dtype, is_ds41=False),
+          bf16_dtype,
+      )
+
+    # Verify config.json with `"text_config": null` sets hf_config_dict["quantization_config"] = None without TypeError.
+    null_text_cfg_dir = os.path.join(self.base_dir, "null_text_cfg")
+    os.makedirs(null_text_cfg_dir, exist_ok=True)
+    with open(os.path.join(null_text_cfg_dir, "config.json"), "w", encoding="utf-8") as f:
+      json.dump({"model_type": "deepseek_v41", "text_config": None}, f)
+    captured_hf_cfg: dict[str, Any] = {}
+
+    def _capture_param_map(hf_cfg, _mt_cfg, _scan):
+      captured_hf_cfg.update(hf_cfg)
+      return {}
+
+    fake_cfg = types.SimpleNamespace(
+        model_name="deepseek4.1-flash",
+        base_output_directory=os.path.join(self.base_dir, "null_text_out"),
+        run_name="null_text_run",
+        hf_access_token="",
+        hf_lora_adapter_path="",
+        load_parameters_path="",
+        use_multimodal=False,
+        scan_layers=False,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    with (
+        mock.patch.object(to_maxtext.pyconfig, "initialize", return_value=fake_cfg),
+        mock.patch.object(to_maxtext.max_utils, "print_system_information"),
+        mock.patch.object(
+            to_maxtext,
+            "load_hf_dict_from_safetensors",
+            return_value={"w": np.zeros((1,), dtype=np.float32)},
+        ),
+        mock.patch.dict(to_maxtext.PARAM_MAPPING, {"deepseek4.1-flash": _capture_param_map}),
+        mock.patch.dict(to_maxtext.HOOK_FNS, {"deepseek4.1-flash": lambda *_a, **_kw: {}}),
+        mock.patch.object(to_maxtext, "get_maxtext_model_info", return_value=({}, types.SimpleNamespace(num_leaves=0))),
+        mock.patch.object(to_maxtext, "validate_and_filter_param_map_keys", return_value=[]),
+        mock.patch.object(to_maxtext.jax.tree_util, "tree_unflatten", return_value={}),
+        mock.patch.object(to_maxtext, "save_weights_to_checkpoint"),
+    ):
+      to_maxtext.main(
+          [
+              "to_maxtext.py",
+              "src/maxtext/configs/base.yml",
+              "model_name=deepseek4.1-flash",
+              f"--hf_model_path={null_text_cfg_dir}",
+              "--lazy_load_tensors=False",
+          ]
+      )
+    self.assertIn("quantization_config", captured_hf_cfg)
+    self.assertIsNone(captured_hf_cfg["quantization_config"])
 
 
 if __name__ == "__main__":

@@ -1338,6 +1338,128 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def DEEPSEEK_V41_HF_WEIGHTS_TO_SHAPE(config):
+  """Generates a mapping of Hugging Face parameter paths to their expected shapes for DeepSeek-V4.1."""
+  vocab_size = config["vocab_size"]
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  num_attention_heads = config["num_attention_heads"]
+  head_dim = config["head_dim"]
+  q_lora_rank = config["q_lora_rank"]
+  o_lora_rank = config["o_lora_rank"]
+  o_groups = config["o_groups"]
+  moe_intermediate_size = config["moe_intermediate_size"]
+  n_routed_experts = config["n_routed_experts"]
+  hc_mult = config["hc_mult"]
+  hc_dim = (2 + hc_mult) * hc_mult
+  compress_ratios = config["compress_ratios"]
+  kv_source_layer_ids = set(config["kv_source_layer_ids"])
+  index_source_layer_ids = set(config["index_source_layer_ids"])
+  index_n_heads = config["index_n_heads"]
+  index_head_dim = config["index_head_dim"]
+  engram_layer_ids = list(config["engram_layer_ids"])
+  engram_num_embeddings = list(config["engram_num_embeddings"])
+  engram_max_ngram_size = config["engram_max_ngram_size"]
+  engram_n_heads = config["engram_n_heads"]
+  engram_head_dim = config["engram_head_dim"]
+  n_hash_cols = (engram_max_ngram_size - 1) * engram_n_heads
+  has_vision = "vision_config" in config and config["vision_config"] is not None
+
+  mapping = {
+      "embed.weight": [vocab_size, hidden_size],
+      "norm.weight": [hidden_size],
+      "head.weight": [vocab_size, hidden_size],
+  }
+  for layer_idx in range(num_hidden_layers):
+    pfx = f"layers.{layer_idx}"
+    mapping.update(
+        {
+            f"{pfx}.attn_norm.weight": [hidden_size],
+            f"{pfx}.ffn_norm.weight": [hidden_size],
+            f"{pfx}.hc_attn_fn": [hc_dim, hidden_size * hc_mult],
+            f"{pfx}.hc_attn_base": [hc_dim],
+            f"{pfx}.hc_attn_scale": [3],
+            f"{pfx}.hc_ffn_fn": [hc_dim, hidden_size * hc_mult],
+            f"{pfx}.hc_ffn_base": [hc_dim],
+            f"{pfx}.hc_ffn_scale": [3],
+            f"{pfx}.attn.wq_a.weight": [q_lora_rank, hidden_size],
+            f"{pfx}.attn.q_norm.weight": [q_lora_rank],
+            f"{pfx}.attn.wq_b.weight": [num_attention_heads * head_dim, q_lora_rank],
+            f"{pfx}.attn.wkv.weight": [head_dim, hidden_size],
+            f"{pfx}.attn.kv_norm.weight": [head_dim],
+            f"{pfx}.attn.wo_a.weight": [o_groups * o_lora_rank, num_attention_heads * head_dim // o_groups],
+            f"{pfx}.attn.wo_b.weight": [hidden_size, o_groups * o_lora_rank],
+            f"{pfx}.attn.attn_sink": [num_attention_heads],
+            f"{pfx}.ffn.gate.weight": [n_routed_experts, hidden_size],
+            f"{pfx}.ffn.gate.bias": [n_routed_experts],
+            f"{pfx}.ffn.shared_experts.w1.weight": [moe_intermediate_size, hidden_size],
+            f"{pfx}.ffn.shared_experts.w2.weight": [hidden_size, moe_intermediate_size],
+            f"{pfx}.ffn.shared_experts.w3.weight": [moe_intermediate_size, hidden_size],
+        }
+    )
+    if has_vision:
+      mapping[f"{pfx}.ffn.gate.bias_vl"] = [n_routed_experts]
+    if layer_idx in kv_source_layer_ids:
+      mapping[f"{pfx}.attn.compressor.wkv.weight"] = [head_dim, hidden_size]
+      mapping[f"{pfx}.attn.compressor.norm.weight"] = [head_dim]
+      if compress_ratios[layer_idx] > 1:
+        mapping[f"{pfx}.attn.compressor.wgate.weight"] = [head_dim, hidden_size]
+    if layer_idx in index_source_layer_ids:
+      mapping[f"{pfx}.attn.indexer.wq_b.weight"] = [index_n_heads * index_head_dim, q_lora_rank]
+      mapping[f"{pfx}.attn.indexer.weights_proj.weight"] = [index_n_heads, hidden_size]
+      if layer_idx in kv_source_layer_ids:
+        mapping[f"{pfx}.attn.indexer.wk.weight"] = [index_head_dim, head_dim]
+        mapping[f"{pfx}.attn.indexer.k_norm.weight"] = [index_head_dim]
+    for exp_idx in range(n_routed_experts):
+      mapping[f"{pfx}.ffn.experts.{exp_idx}.w1.weight"] = [moe_intermediate_size, hidden_size]
+      mapping[f"{pfx}.ffn.experts.{exp_idx}.w2.weight"] = [hidden_size, moe_intermediate_size]
+      mapping[f"{pfx}.ffn.experts.{exp_idx}.w3.weight"] = [moe_intermediate_size, hidden_size]
+    if layer_idx in engram_layer_ids:
+      engram_pos = engram_layer_ids.index(layer_idx)
+      mapping[f"{pfx}.engram.embed.weight"] = [engram_num_embeddings[engram_pos], engram_head_dim]
+      mapping[f"{pfx}.engram.wkv.weight"] = [hidden_size * (hc_mult + 1), n_hash_cols * engram_head_dim]
+      mapping[f"{pfx}.engram.q_weight"] = [hc_mult, hidden_size]
+      mapping[f"{pfx}.engram.k_weight"] = [hc_mult, hidden_size]
+
+  if has_vision:
+    vcfg = config["vision_config"]
+    vis_hidden = vcfg["hidden_size"]
+    vis_inter = vcfg["intermediate_size"]
+    vis_layers = vcfg["num_hidden_layers"]
+    patch_size = vcfg["patch_size"]
+    num_channels = vcfg["num_channels"]
+    downsample_ratio = vcfg["downsample_ratio"]
+    mapping.update(
+        {
+            "vision.patch_embed.proj.weight": [vis_hidden, num_channels * patch_size * patch_size],
+            "vision.patch_embed.proj.bias": [vis_hidden],
+            "vision.norm.weight": [vis_hidden],
+            "aligner.w1.weight": [hidden_size, vis_hidden * downsample_ratio * downsample_ratio],
+            "aligner.w1.bias": [hidden_size],
+            "aligner.w2.weight": [hidden_size, hidden_size],
+            "aligner.w2.bias": [hidden_size],
+            "image_start": [hidden_size],
+            "image_end": [hidden_size],
+            "image_newline": [hidden_size],
+        }
+    )
+    for blk_idx in range(vis_layers):
+      vblk = f"vision.blocks.{blk_idx}"
+      mapping.update(
+          {
+              f"{vblk}.norm1.weight": [vis_hidden],
+              f"{vblk}.norm2.weight": [vis_hidden],
+              f"{vblk}.attn.wqkv.weight": [3 * vis_hidden, vis_hidden],
+              f"{vblk}.attn.wqkv.bias": [3 * vis_hidden],
+              f"{vblk}.attn.wo.weight": [vis_hidden, vis_hidden],
+              f"{vblk}.attn.wo.bias": [vis_hidden],
+              f"{vblk}.mlp.w1.weight": [2 * vis_inter, vis_hidden],
+              f"{vblk}.mlp.w2.weight": [vis_hidden, vis_inter],
+          }
+      )
+  return mapping
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1374,6 +1496,8 @@ HF_SHAPE = {
     "deepseek3.2-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-1600b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
+    "deepseek4.1-flash": DEEPSEEK_V41_HF_WEIGHTS_TO_SHAPE,
+    "deepseek4.1-flash-mini": DEEPSEEK_V41_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,

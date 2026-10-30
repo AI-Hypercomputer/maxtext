@@ -36,7 +36,9 @@ except ImportError:
   F = None
   HAS_TORCH = False
 
+import ml_dtypes
 from tests.utils import parity
+from tests.utils.parity import ckpt_roundtrip_check
 from tests.utils.parity import e2e_check
 from tests.utils.parity import layer_parity
 from tests.utils.parity import negctl
@@ -122,6 +124,7 @@ def _build_five_class_fixture() -> tuple[
 class ParityUtilsTest(unittest.TestCase):
 
   def test_package_reexports_modules_and_constants(self):
+    self.assertIs(parity.ckpt_roundtrip_check, ckpt_roundtrip_check)
     self.assertIs(parity.layer_parity, layer_parity)
     self.assertIs(parity.negctl, negctl)
     self.assertIs(parity.e2e_check, e2e_check)
@@ -937,6 +940,111 @@ class ParityUtilsTest(unittest.TestCase):
           np.array(2.0, dtype=np.float64),
           tol,
       )
+
+  def test_ckpt_roundtrip_tol_validation(self):
+    tol = ckpt_roundtrip_check.RoundTripTol.exact()
+    self.assertTrue(tol.is_exact)
+    self.assertEqual((tol.atol, tol.rtol, tol.frob_rel), (0.0, 0.0, 0.0))
+    non_exact = ckpt_roundtrip_check.RoundTripTol(atol=1e-5, rtol=1e-5, frob_rel=1e-5)
+    self.assertFalse(non_exact.is_exact)
+
+  def test_ckpt_roundtrip_check_pass_and_failure_modes(self):
+    tol = ckpt_roundtrip_check.RoundTripTol.exact()
+    src = {
+        "w_bf16": np.array([1.0, -2.5, 0.125], dtype=ml_dtypes.bfloat16),
+        "w_f32": np.array([0.5, -1.25], dtype=np.float32),
+        "w_i64": np.array([1, 2, 3], dtype=np.int64),
+        "unexported": np.array([9.0], dtype=np.float32),
+    }
+    exp = {
+        "w_bf16": src["w_bf16"].copy(),
+        "w_f32": src["w_f32"].copy(),
+        "w_i64": src["w_i64"].copy(),
+    }
+    src_dtypes = {k: str(v.dtype) for k, v in src.items()}
+    exp_dtypes = {k: str(v.dtype) for k, v in exp.items()}
+    ok, metrics, failures = ckpt_roundtrip_check.check_hf_roundtrip(
+        src,
+        exp,
+        tol=tol,
+        unexported_source_keys=frozenset({"unexported"}),
+        source_dtypes=src_dtypes,
+        exported_dtypes=exp_dtypes,
+    )
+    self.assertTrue(ok, msg=f"Unexpected failures: {failures}")
+    self.assertEqual(failures, [])
+    self.assertEqual(metrics["w_bf16"]["max_abs"], 0.0)
+
+    # Missing and extra key failures.
+    ok_miss, _, fail_miss = ckpt_roundtrip_check.check_hf_roundtrip(src, exp, tol=tol)
+    self.assertFalse(ok_miss)
+    self.assertTrue(any("missing exported keys" in f and "unexported" in f for f in fail_miss))
+
+    exp_extra = dict(exp, extra_key=np.array([1.0], dtype=np.float32))
+    ok_extra, _, fail_extra = ckpt_roundtrip_check.check_hf_roundtrip(
+        src, exp_extra, tol=tol, unexported_source_keys=frozenset({"unexported"})
+    )
+    self.assertFalse(ok_extra)
+    self.assertTrue(any("unexpected exported keys" in f and "extra_key" in f for f in fail_extra))
+
+    # Shape and dtype mismatch failures.
+    exp_shape = dict(exp, w_f32=np.zeros((3,), dtype=np.float32))
+    ok_shape, _, fail_shape = ckpt_roundtrip_check.check_hf_roundtrip(
+        src, exp_shape, tol=tol, unexported_source_keys=frozenset({"unexported"})
+    )
+    self.assertFalse(ok_shape)
+    self.assertTrue(any("w_f32: shape mismatch" in f for f in fail_shape))
+
+    exp_bad_dtypes = dict(exp_dtypes, w_f32="bfloat16")
+    ok_dt, _, fail_dt = ckpt_roundtrip_check.check_hf_roundtrip(
+        src,
+        exp,
+        tol=tol,
+        unexported_source_keys=frozenset({"unexported"}),
+        source_dtypes=src_dtypes,
+        exported_dtypes=exp_bad_dtypes,
+    )
+    self.assertFalse(ok_dt)
+    self.assertTrue(any("w_f32: dtype mismatch" in f for f in fail_dt))
+
+    # 1-ULP bfloat16 perturbation failure.
+    w_bf16_u16 = src["w_bf16"].view(np.uint16).copy()
+    w_bf16_u16[0] = np.uint16(w_bf16_u16[0] + 1)
+    exp_ulp = dict(exp, w_bf16=w_bf16_u16.view(ml_dtypes.bfloat16))
+    ok_ulp, _, fail_ulp = ckpt_roundtrip_check.check_hf_roundtrip(
+        src, exp_ulp, tol=tol, unexported_source_keys=frozenset({"unexported"})
+    )
+    self.assertFalse(ok_ulp)
+    self.assertTrue(any("w_bf16: max_abs=" in f for f in fail_ulp))
+
+  def test_ckpt_roundtrip_perturb_and_negative_status(self):
+    tol = ckpt_roundtrip_check.RoundTripTol.exact()
+    src = {
+        "w_bf16": np.linspace(-1.0, 1.0, 16, dtype=np.float32).astype(ml_dtypes.bfloat16),
+        "w_f32": np.linspace(0.5, 2.5, 8, dtype=np.float32),
+    }
+    primary = {k: v.copy() for k, v in src.items()}
+    perturbed = ckpt_roundtrip_check.perturb_one_tensor(primary, target_key="w_bf16", rel_scale=1e-2, seed=0)
+    self.assertTrue(np.array_equal(perturbed["w_f32"], primary["w_f32"]))
+    self.assertFalse(np.array_equal(perturbed["w_bf16"].view(np.uint16), primary["w_bf16"].view(np.uint16)))
+
+    status, reasons = ckpt_roundtrip_check.negative_roundtrip_status(src, primary, perturbed, tol=tol)
+    self.assertEqual((status, reasons), ("FIRED", []))
+
+    status_ident, _ = ckpt_roundtrip_check.negative_roundtrip_status(src, primary, primary, tol=tol)
+    self.assertEqual(status_ident, "ERROR")
+
+    loose_tol = ckpt_roundtrip_check.RoundTripTol(atol=1.0, rtol=1.0, frob_rel=1.0)
+    status_missed, _ = ckpt_roundtrip_check.negative_roundtrip_status(src, primary, perturbed, tol=loose_tol)
+    self.assertEqual(status_missed, "MISSED")
+
+    status_pfail, _ = ckpt_roundtrip_check.negative_roundtrip_status(src, perturbed, perturbed, tol=tol)
+    self.assertEqual(status_pfail, "ERROR")
+
+    with self.assertRaises(KeyError):
+      ckpt_roundtrip_check.perturb_one_tensor(primary, target_key="missing", rel_scale=1e-2, seed=0)
+    with self.assertRaises(ValueError):
+      ckpt_roundtrip_check.perturb_one_tensor(primary, target_key="w_f32", rel_scale=0.0, seed=0)
 
 
 if __name__ == "__main__":
