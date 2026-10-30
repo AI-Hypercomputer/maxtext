@@ -1,0 +1,71 @@
+# model config for OLMo 3.5 "gagik-fixed": `olmoe3-3p5b-e256k8-sh2x.yml` (Option A, d_model 1792, 30 layers,
+# 4:1 KDA:attention, E=256, K=8, F=3584, 2x shared expert = 3584) with the OLMo 3.5 tiny / small attention and
+# embedding features it lacks: the embedding scaled by sqrt(d_model) and RMSNormed, per-head QK norm gains and
+# scalable softmax. Every other setting as `olmoe3-3p5b-e256k8-sh2x.yml`. With these, every parameter has a
+# counterpart role in `olmo35-tiny-e256k8-sh2x`, so CompletedP can use tiny as its base model.
+# Parameter counts:
+#   total 63,130,193,648 / active 3,741,994,736 / active non-embedding 3,562,163,952
+#   (15,408 more than olmoe3-3p5b-e256k8-sh2x: per-head QK norm gains and SSMax gains in the 6 attention layers)
+
+base_emb_dim: 1792
+base_num_query_heads: 8
+base_num_kv_heads: 4
+head_dim: 256
+base_num_decoder_layers: 30
+
+# Layer 0 is dense with a wide SwiGLU (8 * d_model); MoE layers use a 2x wider
+# shared expert (base_shared_expert_mlp_dim: 3584 = 2 * base_emb_dim).
+first_num_dense_layers: 1
+base_mlp_dim: 14336
+base_moe_mlp_dim: 3584
+base_shared_expert_mlp_dim: 3584
+
+# Routed experts run in a compressed latent space; the router still scores the
+# full-width residual (handled by OLMoE3LatentRoutedMoE).
+num_experts: 256
+num_experts_per_tok: 8
+moe_expert_input_dim: 768
+
+# Mixer cycle: full attention on every 5th layer (indices 4, 9, ... 29),
+# Kimi Delta Attention elsewhere.
+inhomogeneous_layer_cycle_interval: 5
+gdn_num_key_heads: 8
+gdn_num_value_heads: 8
+gdn_key_head_dim: 256
+gdn_value_head_dim: 512   # head_dim * kda_expand_v (2.0)
+gdn_conv_kernel_dim: 4
+gdn_chunk_size: 64
+
+vocab_size: 100352
+enable_dropout: false
+logits_via_embedding: false   # untied LM head
+normalization_layer_epsilon: 1.0e-6
+mlp_activations: ["silu", "linear"]
+decoder_block: "olmoe3"
+
+# Embedding is scaled by sqrt(d_model) and then RMSNormed, before the stack.
+scale_embeddings_by_sqrt_emb_dim: true
+use_embedding_norm: true
+
+# Full attention: per-head QK RMSNorm gains and scalable softmax (log-span times a learned per-head gain).
+use_qk_norm: true
+qk_norm_per_head: true
+use_scalable_softmax: true
+
+# Auxiliary losses, matching OLMo-core's ladder settings. The router z-loss
+# (1e-5) is a module constant in olmoe3.py.
+load_balance_loss_weight: 0.01
+# The reference computes router logits in fp32 (`x.float() @ w.float()`).
+float32_gate_logits: true
+
+# EMo document-pool routing, canonical settings for E=256, K=8:
+# min = top_k (8), max = eval = num_experts (256).
+emo_enabled: true
+emo_min_document_expert_pool: 8
+emo_max_document_expert_pool: 256
+emo_eval_document_expert_pool: 256
+
+# As OLMo-core: the load-balancing loss over the whole batch (expert counts averaged across the devices that shard
+# the tokens), and vocab tiles cut along the sequence (no all-gather of the hidden states at one sequence per device).
+moe_global_load_balancing: true
+vocab_tiling_seq_major: true

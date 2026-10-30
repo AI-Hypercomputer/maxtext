@@ -324,6 +324,7 @@ ModelName = Literal[
     "olmo35-tiny-e256k8",
     "olmo35-tiny-e256k8-sh2x",
     "olmo35-small-e256k8-sh2x",
+    "olmo35-gagik-fixed-e256k8-sh2x",
     "olmo35-tiny-e256k8-sh4x",
     "olmo35-small",
     "olmo35-medium",
