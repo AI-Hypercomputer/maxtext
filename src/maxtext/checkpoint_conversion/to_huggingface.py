@@ -68,8 +68,9 @@ Example Usage:
 
 import gc
 import os
+import copy
 import time
-from typing import Sequence
+from typing import Any, Sequence
 import jax
 import jax.numpy as jnp
 
@@ -79,6 +80,7 @@ from absl import app
 from absl import flags
 
 from maxtext.configs import pyconfig
+from maxtext.layers import engram_deepseek41
 from maxtext.checkpoint_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
@@ -319,6 +321,44 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     )
     raise ValueError(error_msg)
 
+  if hasattr(target_cfg, "model_type") and target_cfg.model_type == "deepseek_v41_text":
+    if hasattr(target_cfg, "quantization_config"):
+      delattr(target_cfg, "quantization_config")
+    if override:
+      target_cfg.compress_ratios = list(max_config.compress_ratios)
+      target_cfg.kv_source_layer_ids = list(max_config.kv_source_layers)
+      target_cfg.index_source_layer_ids = list(max_config.index_source_layers)
+      target_cfg.index_topk = int(max_config.indexer_topk)
+      target_cfg.candidate_source_layer_id = int(max_config.candidate_source_layer)
+      target_cfg.candidate_topk_blocks = int(max_config.candidate_topk_blocks)
+      target_cfg.candidate_block_size = int(max_config.candidate_block_size)
+      target_cfg.engram_layer_ids = list(max_config.ds41_engram_layers)
+      target_cfg.engram_vocab_size = int(max_config.ds41_engram_vocab_size)
+      target_cfg.engram_max_ngram_size = int(max_config.ds41_engram_max_ngram_size)
+      target_cfg.engram_n_heads = int(max_config.ds41_engram_n_heads)
+      target_cfg.engram_head_dim = int(max_config.ds41_engram_head_dim)
+      primes = engram_deepseek41.engram_primes(
+          max_config.ds41_engram_layers,
+          max_config.ds41_engram_max_ngram_size,
+          max_config.ds41_engram_n_heads,
+          max_config.ds41_engram_vocab_size,
+      )
+      target_cfg.engram_num_embeddings = [sum(sum(per_ngram) for per_ngram in layer) for layer in primes]
+    if max_config.use_multimodal:
+      if override:
+        target_cfg.vision_config = {
+            "hidden_size": int(max_config.hidden_size_for_vit),
+            "intermediate_size": int(max_config.intermediate_size_for_vit),
+            "num_hidden_layers": int(max_config.num_hidden_layers_for_vit),
+            "num_attention_heads": int(max_config.num_attention_heads_for_vit),
+            "patch_size": int(max_config.patch_size_for_vit),
+            "num_channels": int(max_config.num_channels_for_vit),
+            "downsample_ratio": int(max_config.ds41_vision_downsample_ratio),
+            "rope_theta": float(max_config.rope_theta_for_vit),
+        }
+    else:
+      target_cfg.vision_config = None
+
 
 def _apply_yarn_rope_config(hf_config, max_config) -> None:
   """Apply MaxText YaRN RoPE values without dropping HF model-specific fields."""
@@ -454,6 +494,23 @@ def _transform_and_save_weights(
   max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")
 
 
+def _extract_to_hf_args(argv: Sequence[str]) -> tuple[dict[str, Any], list[str]]:
+  """Extracts `to_huggingface` flags (`override_model_architecture`, `hf_model_path`) from `argv`."""
+  extracted: dict[str, Any] = {}
+  cleaned_argv: list[str] = []
+  for item in argv:
+    if item in ("--override_model_architecture", "--nooverride_model_architecture"):
+      extracted["override_model_architecture"] = item == "--override_model_architecture"
+    elif item.startswith(("override_model_architecture=", "--override_model_architecture=")):
+      val = item.split("=", 1)[1].strip().lower()
+      extracted["override_model_architecture"] = val in ("true", "1", "yes", "t")
+    elif item.startswith(("hf_model_path=", "--hf_model_path=")):
+      extracted["hf_model_path"] = item.split("=", 1)[1]
+    else:
+      cleaned_argv.append(item)
+  return extracted, cleaned_argv
+
+
 def main(argv: Sequence[str]) -> None:
   """Main function to convert a MaxText checkpoint to HuggingFace format.
 
@@ -465,8 +522,19 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments, which are parsed by `pyconfig`.
   """
+  extracted_flags, cleaned_argv = _extract_to_hf_args(argv)
+  override_arch = (
+      extracted_flags["override_model_architecture"]
+      if "override_model_architecture" in extracted_flags
+      else (FLAGS.override_model_architecture if FLAGS.is_parsed() else False)
+  )
+  hf_model_path_arg = (
+      extracted_flags["hf_model_path"]
+      if "hf_model_path" in extracted_flags
+      else (FLAGS.hf_model_path if FLAGS.is_parsed() else None)
+  )
   # Initialize maxtext config
-  config = pyconfig.initialize_pydantic(argv)
+  config = pyconfig.initialize_pydantic(cleaned_argv)
   assert (
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
@@ -504,12 +572,15 @@ def main(argv: Sequence[str]) -> None:
 
   # 1. Get HuggingFace Model Configuration
   model_key = config.model_name
+  is_ds41 = model_key.startswith("deepseek4.1")
   if model_key not in HF_IDS:
     raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
-  hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  hf_config_obj = copy.deepcopy(HF_MODEL_CONFIGS[model_key]) if is_ds41 else HF_MODEL_CONFIGS[model_key]
 
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
-  _validate_or_update_architecture(hf_config_obj, config, override=FLAGS.override_model_architecture)
+  _validate_or_update_architecture(
+      hf_config_obj, config, override=override_arch if is_ds41 else FLAGS.override_model_architecture
+  )
 
   # Ensure YaRN rope params are preserved if specified in the maxtext config
   if getattr(config, "rope_type", None) == "yarn":
@@ -519,11 +590,14 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
-  hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
+  hf_tokenizer_id = (hf_model_path_arg if is_ds41 else FLAGS.hf_model_path) or HF_IDS[model_key]
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:
-  processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if config.use_multimodal else None
+  has_hf_processor = config.use_multimodal and not (
+      hasattr(hf_config_obj, "model_type") and hf_config_obj.model_type == "deepseek_v41_text"
+  )
+  processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if has_hf_processor else None
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict(), config)
@@ -534,20 +608,20 @@ def main(argv: Sequence[str]) -> None:
   # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
-  # Validate that checkpoint keys match the parameter mapping
   state_keys = {k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict}
-  filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
-
-  # When not converting a multimodal model, skip vision encoder weights even if
-  # they are present in the checkpoint (e.g. converting text-only from a
-  # multimodal checkpoint).
-  if not config.use_multimodal:
-    filtered_map_keys = [
-        k
-        for k in filtered_map_keys
-        if not (isinstance(k, str) and "vision_encoder" in k)
-        and not (isinstance(k, tuple) and any("vision_encoder" in sub for sub in k))
-    ]
+  if is_ds41:
+    if not config.use_multimodal:
+      state_keys = {k for k in state_keys if "vision_encoder" not in k and not k.endswith("-bias_vl")}
+    filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
+  else:
+    filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
+    if not config.use_multimodal:
+      filtered_map_keys = [
+          k
+          for k in filtered_map_keys
+          if not (isinstance(k, str) and "vision_encoder" in k)
+          and not (isinstance(k, tuple) and any("vision_encoder" in sub for sub in k))
+      ]
 
   # Iterate through the parameter map to transform and collect weights.
   max_logging.log("\nProcessing weights...")

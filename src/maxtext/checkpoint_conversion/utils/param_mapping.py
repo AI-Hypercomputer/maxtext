@@ -4672,6 +4672,8 @@ def pad_rows_to_target(x, target_shape):
   """Pads dim 0 with zeros up to `target_shape[0]` (e.g. the row-padded DeepSeek-V4.1 engram tables)."""
   if target_shape is None or x.shape[0] == target_shape[0]:
     return x
+  if x.shape[0] > target_shape[0]:
+    return x[: target_shape[0]]
   xp = _array_module(x)
   return xp.pad(x, ((0, target_shape[0] - x.shape[0]),) + ((0, 0),) * (x.ndim - 1))
 
