@@ -202,6 +202,42 @@ def _window(tile: int, full: int) -> bool:
   return relayout.needs_window(tile // num_lanes, full // num_lanes)
 
 
+def tgmm_vmem_bytes(
+    tiles: gmm_v2.TileSizes,
+    *,
+    lhs_cfgs: gmm_v2.InputConfigs,
+    rhs_cfgs: gmm_v2.InputConfigs,
+    out_dtype: jnp.dtype,
+    acc_dtype: jnp.dtype,
+    has_partial_sum: bool,
+) -> float:
+  """Estimated VMEM use of tgmm_v2 with `tiles` (tile_m is the contracted token dim).
+
+  Like gmm_v2.gmm_vmem_bytes, the factors and the constant (which covers the 2 MiB zero-init buffer) were fitted to
+  which bf16 tile configs compile on TPU v4 (16 MiB VMEM); the fit leaves a ~1.1 MiB margin.
+  """
+  tm, tk, tn = tiles.tile_m, tiles.tile_k, tiles.tile_n
+  lhs = 3 * tm * tk * gmm_v2._itemsize(lhs_cfgs.dtype)  # pylint: disable=protected-access
+  rhs = 1.5 * tm * tn * gmm_v2._itemsize(rhs_cfgs.dtype)  # pylint: disable=protected-access
+  acc_out = tk * tn * (gmm_v2._itemsize(acc_dtype) + gmm_v2._itemsize(out_dtype))  # pylint: disable=protected-access
+  partial_sum = 2 * tk * tn * gmm_v2._itemsize(out_dtype) if has_partial_sum else 0  # pylint: disable=protected-access
+  return lhs + rhs + acc_out + partial_sum + 4.5 * 2**20
+
+
+def avoid_slow_large_tiles(tiles: gmm_v2.TileSizes, mxu_column_size: int) -> gmm_v2.TileSizes:
+  """Halves tile_m out of a slow regime of tgmm_v2 on chips with a 128-wide MXU (v4, v5e, v5p).
+
+  On v5p, tgmm_v2 runs ~3x slower than with tile_m=128 once tile_m > 128 and tile_m * tile_k * tile_n > 2**30
+  (e.g. 256/4096/1280, 512/2048/1280); megablox, v6e and v7x have no such cliff. Below that size, the larger
+  tile_m is kept because it is faster.
+  """
+  if mxu_column_size != 128:
+    return tiles
+  while tiles.tile_m > 128 and tiles.tile_m * tiles.tile_k * tiles.tile_n > 2**30:
+    tiles = dataclasses.replace(tiles, tile_m=tiles.tile_m // 2)
+  return tiles
+
+
 def make_tgmm_configs(
     lhs: jax.Array,  # [m, k]
     rhs: jax.Array,  # [m, n]
@@ -277,7 +313,21 @@ def make_tgmm_configs(
   if acc_dtype is None:
     acc_dtype = jnp.float32.dtype
   if isinstance(tile_info, gmm_v2.TileSizes):
-    tiles = tile_info
+    # Explicit tiles are often tuned for megablox, which clamps tiles to the matrix and needs less VMEM; do the same
+    # and shrink them if tgmm_v2 would overflow.
+    tiles = gmm_v2.fit_tiles_to_vmem(
+        gmm_v2.clamp_tiles_to_dims(tile_info, size_m, size_k, size_n, size_lhs_sublane),
+        functools.partial(
+            tgmm_vmem_bytes,
+            lhs_cfgs=lhs_cfgs,
+            rhs_cfgs=rhs_cfgs,
+            out_dtype=jnp.dtype(out_dtype),
+            acc_dtype=jnp.dtype(acc_dtype),
+            has_partial_sum=partial_sum is not None,
+        ),
+        vmem_limit_bytes,
+        resizable=not (lhs.ndim == 3 or rhs.ndim == 3),
+    )
   else:
     tiles = tile_info(
         dims,
@@ -289,6 +339,7 @@ def make_tgmm_configs(
         target_zero_ref_bytes,
         partial_sum is not None,
     )
+  tiles = avoid_slow_large_tiles(tiles, pltpu.get_tpu_info().mxu_column_size)
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   if lhs_cfgs.is_3d:
@@ -606,15 +657,15 @@ def zero_out_start(
         ).start(priority=1)
     return 1
 
-  num_groups_to_zero = 0
   group_offset = group_offset_ref[0]
-  for local_group_id in range(num_actual_groups):
+
+  def body(local_group_id, num_groups_to_zero):
     global_group_id = local_group_id + group_offset
     should_copy = lhs_group_sizes_ref[global_group_id] == 0
-    num_groups_to_zero += should_copy.astype(int)
     fill_zero(local_group_id, should_copy)
+    return num_groups_to_zero + should_copy.astype(jnp.int32)
 
-  return num_groups_to_zero
+  return lax.fori_loop(0, num_actual_groups, body, jnp.int32(0))
 
 
 def zero_out_end(
@@ -664,12 +715,17 @@ def tgmm_kernel_main(
   """
   num_groups_to_zero = 0
   if not cfgs.has_partial_sum:
-    num_groups_to_zero = zero_out_start(
-        lhs_group_sizes_ref,
-        group_offset_ref,
-        out_ref,
-        zero_ref,
-        semaphore_ref,
+    # Every TensorCore runs tgmm_kernel_main and the empty groups are the same for all of them, so only core 0 zeroes.
+    num_groups_to_zero = lax.cond(
+        pl.program_id(0) == 0,
+        lambda: zero_out_start(
+            lhs_group_sizes_ref,
+            group_offset_ref,
+            out_ref,
+            zero_ref,
+            semaphore_ref,
+        ),
+        lambda: jnp.int32(0),
     )
 
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
@@ -682,11 +738,15 @@ def tgmm_kernel_main(
   )
 
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  # Split the (N, K) output tiles across the TensorCores (one per step of the
+  # outer grid, axis 0); each core accumulates over all gm tiles of its outputs.
   pipeline_fn = pltpu.emit_pipeline(
       functools.partial(tgmm_inner_kernel, cfgs=cfgs),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
+      core_axis=0,
+      dimension_semantics=(pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY),
   )
   # [M, S] -> [M // sublane, sublane, S]; 3D [M, D0, 128] -> [M // sublane, sublane, D0, 128].
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, *lhs_ref.shape[1:])
@@ -817,10 +877,10 @@ def tgmm_v2(
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
-  # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
-  # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
-  # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
-  aligned_k = gmm_v2.align_to(dims.size_k, tiles.tile_k)
+  # Pad K only up to the out sublane tiling, so the zero-init path can slice in sublane-aligned chunks; emit_pipeline
+  # clips the last, partial k-tile. Padding to a tile_k multiple would make the final [:, :size_k] slice copy all of
+  # drhs whenever tile_k doesn't divide size_k.
+  aligned_k = gmm_v2.align_to(dims.size_k, pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype))
   out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
@@ -874,16 +934,20 @@ def tgmm_v2(
     partial_sum_idx = sum(1 for x in leaves if x is not None)
     input_output_aliases = {partial_sum_idx: 0}
 
+  # One outer grid step per TensorCore, so that megacore chips (v4, v5p) use
+  # both cores; tgmm_kernel_main splits the output tiles across them.
   raw_out = pl.pallas_call(
       functools.partial(tgmm_kernel_main, cfgs=cfgs),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
+          grid=(pltpu.get_tpu_info().num_cores,),
           in_specs=in_specs,
           out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
           scratch_shapes=scratch_shapes,  # pyrefly: ignore[bad-argument-type]
       ),
       compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel",),
           vmem_limit_bytes=vmem_limit_bytes,
           disable_bounds_checks=True,
       ),
