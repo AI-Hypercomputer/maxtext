@@ -12,15 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""m3 configuration: slim Pydantic types plus YAML defaults.
+"""m3 configuration: pure-Python Pydantic v2 runtime configs, CLI reflection parser, and `pyconfig` bridge.
 
-Planned contents:
-  * `config.py` — `ModelConfig`, `TransformConfig`, `RootConfig`, `load_config`.
-  * `base.yml` — base defaults that model YAMLs override.
-
-m3 configs are intentionally small and additive: fields are added as
-architectures require them, not preemptively. Interop with the legacy
-`maxtext.configs.pyconfig.HyperParameters` surface (required by the training
-engine and the RL path) is handled by a separate bridge, not by widening these
-types.
+Modules:
+  * `training_config.py` — `TrainingConfig`, `MeshConfig`, `TransformConfig`, `DataPipelineConfig`.
+  * `cli_parser.py` — `M3ArgumentParser` (`--preset`, dotted leaf overrides, `--save_config_json`).
+  * `pyconfig_bridge.py` — `from_pyconfig`, `ConfigMigrationError`, `format_cli_migration_hint`.
 """
+
+from maxtext.m3.configs.cli_parser import M3ArgumentParser
+from maxtext.m3.configs.pyconfig_bridge import (
+    ConfigMigrationError,
+    format_cli_migration_hint,
+    from_pyconfig,
+)
+from maxtext.m3.configs.training_config import (
+    DataPipelineConfig,
+    MeshConfig,
+    TrainingConfig,
+    TransformConfig,
+)
+
+__all__ = [
+    "ConfigMigrationError",
+    "DataPipelineConfig",
+    "M3ArgumentParser",
+    "MeshConfig",
+    "TrainingConfig",
+    "TransformConfig",
+    "format_cli_migration_hint",
+    "from_pyconfig",
+]

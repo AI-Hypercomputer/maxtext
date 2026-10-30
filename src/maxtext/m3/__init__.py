@@ -33,6 +33,18 @@ entry point. See `README.md` in this directory for the architecture rules that
 contributions must follow.
 """
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from maxtext.m3 import configs, core, infra, models, train
+  from maxtext.m3.configs.training_config import (
+      DataPipelineConfig,
+      MeshConfig,
+      TrainingConfig,
+      TransformConfig,
+  )
+  from maxtext.m3.models.registry import ModelConfig
+
 __all__ = [
     "configs",
     "core",
@@ -40,3 +52,16 @@ __all__ = [
     "models",
     "train",
 ]
+
+
+def __getattr__(name: str):
+  """Lazily exposes top-level m3 SDK symbols without triggering eager JAX imports."""
+  if name in ("DataPipelineConfig", "MeshConfig", "TrainingConfig", "TransformConfig"):
+    from maxtext.m3.configs import training_config  # pylint: disable=import-outside-toplevel
+
+    return getattr(training_config, name)
+  if name == "ModelConfig":
+    from maxtext.m3.models.registry import ModelConfig  # pylint: disable=import-outside-toplevel
+
+    return ModelConfig
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
