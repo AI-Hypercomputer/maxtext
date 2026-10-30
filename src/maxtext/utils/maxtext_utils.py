@@ -748,7 +748,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING):
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING, DecoderBlockType.HY4):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -1149,6 +1149,141 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
   )
 
 
+def calculate_hy4_tflops_training_per_device(config, total_ffn_flops_all_layers, embedding_flops):
+  """Calculates the training TFLOPs per device for Hy4.
+
+  Hy4 combines Gated MLA, a periodic DeepSeek Sparse Attention (DSA) indexer,
+  and Identity Hyper-Connections (iHC). This function models:
+  1. Gated MLA projections (Q LoRA, KV LoRA, output, and elementwise sigmoid gate)
+     applied on all layers.
+  2. Sparse causal attention restricted to the top-k keys selected by the indexer,
+     or dense causal attention when max_target_length <= indexer_topk.
+  3. DSA indexer projections and scoring on "full" indexer layers only (the first
+     dense layer(s) plus the first layer of every inhomogeneous_layer_cycle_interval
+     MoE cycle); "shared" layers reuse the preceding full layer's top-k mask.
+  4. iHC pre/post projections and stream contraction/expansion, applied twice per
+     layer (around attention and FFN), plus the final HC head. Unlike mHC, iHC has
+     no k^2 residual-mixing matrix.
+
+  The indexer's inputs are stop-gradient, its top-k mask is nondifferentiable, and
+  Hy4 has no indexer loss, so the indexer receives no gradient and its projection
+  and scoring FLOPs are counted forward-only (1x) instead of 3x.
+
+  Args:
+    config: MaxTextConfig instance containing architectural hyperparameters.
+    total_ffn_flops_all_layers: Pre-computed Feed-Forward (dense MLP + MoE) FLOPs.
+    embedding_flops: Pre-computed unembedding projection FLOPs.
+
+  Returns:
+    A tuple of (total_attn_flops_in_tflops, total_weight_flops_in_tflops).
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  emb_dim = config.emb_dim
+  num_layers = config.num_decoder_layers
+  qk_head_dim_sum = config.qk_nope_head_dim + config.qk_rope_head_dim
+  bs_tokens = batch_size * seq_len
+
+  # 1. Gated MLA Projections (Executed on all layers)
+  # - Q projection: down-projects inputs to q_lora_rank, then up-projects to query_heads * (qk_nope + qk_rope).
+  #   FLOPs = 2 * B * S * (D * Q_rank + Q_rank * H * (D_nope + D_rope))
+  q_flops = (
+      2
+      * batch_size
+      * seq_len
+      * (emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+  )
+  # - KV projection: down-projects inputs to kv_lora_rank + shared rope key, then up-projects the latent
+  #   to per-head nope keys and values.
+  #   FLOPs = 2 * B * S * (D * (KV_rank + D_rope) + KV_rank * H * (D_nope + D_v))
+  kv_flops = (
+      2
+      * batch_size
+      * seq_len
+      * (
+          emb_dim * (config.kv_lora_rank + config.qk_rope_head_dim)
+          + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
+      )
+  )
+  # - Out projection: projects attention output H * D_v -> D.
+  #   FLOPs = 2 * B * S * (H * D_v) * D
+  projection_flops = 2 * batch_size * seq_len * emb_dim * config.num_query_heads * config.v_head_dim
+  # - Elementwise sigmoid gate (`gate_proj`): projects inputs D -> H * D_v, same size as the out projection.
+  gate_projection_flops = projection_flops
+
+  # 2. DSA Indexer Layer Counting
+  # "full" indexer layers: the first dense layer(s), plus the first layer of every
+  # inhomogeneous_layer_cycle_interval MoE cycle (e.g. 1 + ceil(77 / 4) = 21 of 78 layers).
+  # "shared" layers reuse the preceding full layer's top-k mask and run no indexer.
+  num_full_indexer_layers = min(config.first_num_dense_layers, num_layers)
+  num_remaining_layers = max(0, num_layers - config.first_num_dense_layers)
+  num_full_indexer_layers += (
+      num_remaining_layers + config.inhomogeneous_layer_cycle_interval - 1
+  ) // config.inhomogeneous_layer_cycle_interval
+
+  # 3. Attention Core (Executed on all layers)
+  indexer_projection_flops_per_layer = 0
+  indexer_scoring_flops_per_layer = 0
+  if config.use_indexer and seq_len > config.indexer_topk:
+    # - Indexer projections (Q_rank -> H_idx * D_idx, D -> D_idx, D -> H_idx) and causal
+    #   query-key scoring + head reduction, on full indexer layers only.
+    indexer_projection_flops_per_layer, indexer_scoring_flops_per_layer = calculate_indexer_tflops_per_device(config)
+    # - Sparse causal attention: each query attends to at most indexer_topk keys.
+    #   Ratio = (K/T) - 0.5 * (K/T)^2 already accounts for the causal mask.
+    #   FLOPs = 2 * B * S^2 * H * (D_qk + D_v) * Ratio
+    indexer_mask_ratio = calculate_indexer_mask_ratio(config.indexer_topk, seq_len)
+    attention_flops_per_layer = (
+        2
+        * batch_size
+        * seq_len
+        * seq_len
+        * config.num_query_heads
+        * (qk_head_dim_sum + config.v_head_dim)
+        * indexer_mask_ratio
+    )
+  else:
+    # - Dense causal attention: the indexer is bypassed when S <= indexer_topk (or disabled).
+    #   FLOPs = 2 * B * S^2 * H * (D_qk + D_v) / 2 (divided by 2 for causal mask)
+    attention_flops_per_layer = (
+        batch_size * seq_len * seq_len * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+    )
+    num_full_indexer_layers = 0
+
+  # 4. Identity Hyper-Connections (iHC) Overheads
+  # Mirrors calculate_mhc_flops_per_layer minus the k^2 residual-mixing terms iHC lacks.
+  hc_expansion_rate = config.mhc_expansion_rate
+  # - Pre/post mixing projection: flattened streams [B, S, k * D] -> [B, S, 2k].
+  #   FLOPs = 2 * B * S * (k * D) * 2k
+  hc_mix_flops = 2 * bs_tokens * (hc_expansion_rate * emb_dim) * (2 * hc_expansion_rate)
+  # - Pre-contraction: weighted sum of k streams into the branch input [B, S, D].
+  hc_pre_contract_flops = 2 * bs_tokens * hc_expansion_rate * emb_dim
+  # - Post-expansion: outer product of post weights [B, S, k] with branch output [B, S, D].
+  hc_post_outer_flops = bs_tokens * hc_expansion_rate * emb_dim
+  hc_flops_per_block = hc_mix_flops + hc_pre_contract_flops + hc_post_outer_flops
+  # - HC head (once, before the final norm): [B, S, k * D] -> [B, S, k] projection + stream contraction.
+  hc_head_flops = 2 * bs_tokens * (hc_expansion_rate * emb_dim) * hc_expansion_rate + hc_pre_contract_flops
+  # iHC wraps both attention and FFN, so it runs twice per layer.
+  hc_flops = 2 * num_layers * hc_flops_per_block + hc_head_flops
+
+  # 5. Pipeline TFLOP Aggregation
+  indexer_projection_flops = indexer_projection_flops_per_layer * num_full_indexer_layers
+  indexer_attention_flops = indexer_scoring_flops_per_layer * num_full_indexer_layers
+  total_weight_flops = (
+      total_ffn_flops_all_layers
+      + (q_flops + kv_flops + projection_flops + gate_projection_flops) * num_layers
+      + hc_flops
+      + embedding_flops
+  )
+  total_attention_flops = attention_flops_per_layer * num_layers
+
+  # Scale by 3x for Forward + Backward training passes, except the gradient-free
+  # indexer, which runs forward-only (1x).
+  return (
+      (total_attention_flops * 3 + indexer_attention_flops) / 10**12,
+      (total_weight_flops * 3 + indexer_projection_flops) / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   if config.use_m3_model:
@@ -1168,6 +1303,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.HY4,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
@@ -1260,6 +1396,10 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
   elif config.decoder_block == DecoderBlockType.DEEPSEEK4:
     attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops
+    )
+  elif config.decoder_block == DecoderBlockType.HY4:
+    attention_tflops, learnable_weight_tflops = calculate_hy4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops
     )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
