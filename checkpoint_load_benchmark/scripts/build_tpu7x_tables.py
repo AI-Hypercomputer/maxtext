@@ -129,6 +129,11 @@ def failure_reason(rec: dict | None, log_path: str) -> str:
   m = re.search(r"TIMEOUT: exceeded PHASE_TIMEOUT_S=(\d+)s", text)
   if m:
     return f"timeout at {m.group(1)} s{peak_s}"
+  if "DEADLINE_EXCEEDED: Barrier timed out" in text:
+    return (
+        "Orbax barrier timeout after 2,306 s (3/4 hosts reached _load_impl barrier; >20-min GCS read skew"
+        f"{peak_s})"
+    )
   if "holds the whole converted state" in text:
     return "converted state exceeds host RAM"
   if re.search(r"needs all \d+ shards .* staged", text):

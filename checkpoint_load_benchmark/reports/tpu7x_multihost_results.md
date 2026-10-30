@@ -156,4 +156,5 @@ comparing against `safetensors_dynamic` on the same multi-host layout:
 | `qwen3-235b-a22b` | unscanned | 1 × 2x2x2 | 2 | 16 | 583.32 | 2,625.50 | **841.12** (peak 54.9 GB) | 3,466.62 / 4,049.94 | 817.59 / 1,400.91 | **2.89× / 4.24×** | `235b-tm` |
 | `qwen3-235b-a22b` | unscanned | 2 × 2x2x2 | 4 | 32 | 583.32 | 2,625.50 | **682.05** (peak 90.4 GB) | 3,307.56 / 3,890.87 | 788.66 / 1,371.98 | **2.84× / 4.19×** | `235b-tm-2s` |
 | `qwen3.5-397b-a17b` | unscanned | 1 × 2x2x2 | 2 | 16 | 814.53 | 8,096.53 | **1,838.26** (peak 58.5 GB) | 9,934.79 / 10,749.32 | 1,150.92 / 1,965.45 | **5.47× / 8.63×** | `397b-tm` |
+| `qwen3.5-397b-a17b` | unscanned | 2 × 2x2x2 | 4 | 32 | 814.53 | 8,096.53 | **FAILED at 2,306 s** (`DEADLINE_EXCEEDED` at Orbax 300 s `_load_impl` barrier, 3/4 hosts reached; peak 95.2 GB; re-running with 1,800 s barrier timeout) | N/A | 1,018.83 / 1,833.36 | **Only safetensor loads** (without barrier fix) | `397b-tm-2s` |
 
