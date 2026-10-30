@@ -1319,6 +1319,13 @@ def save_weights_to_checkpoint(
       use_zarr3=use_zarr3,
       # Sets Orbax-V1 I/O write timeout to 60 minutes (up from 20-minute default) to facilitate large model saving.
       enable_continuous_checkpointing=True,
+      # The save buffers up to this many GB on the host on top of the converted weights, which are all in host memory
+      # by now: the default 96 GB pushed a 807 GB qwen3.5-397b-a17b conversion past a 1 TB host's memory.
+      **(
+          {"checkpoint_storage_concurrent_gb": config.checkpoint_storage_concurrent_gb}
+          if getattr(config, "checkpoint_storage_concurrent_gb", None)
+          else {}
+      ),
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
