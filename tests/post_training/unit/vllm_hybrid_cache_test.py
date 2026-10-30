@@ -222,6 +222,25 @@ class LayerOrderedKvCachesTest(unittest.TestCase):
     self.assertEqual(scattered, ["c0'", "c1''"])
 
   @pytest.mark.cpu_only
+  def test_unchanged_shared_cache_alias_does_not_overwrite_donor_update(self):
+    # gemma4_small-style KV sharing: layers 0 and 1 own physical caches 0 and 1;
+    # layer 2 shares donor layer 1's cache via kv_cache_slot_map and leaves its
+    # own entry in the layer-ordered view untouched.
+    c0, c1, c0_updated, c1_updated = object(), object(), object(), object()
+    kv_caches = [c0, c1]
+    physical_indices = [0, 1, 1]
+    cache_index_of = {0: 0, 1: 1, 2: 1}
+
+    layer_view = gather_layer_kv_caches(kv_caches, physical_indices)
+    for lyr, updated in ((0, c0_updated), (1, c1_updated)):
+      layer_view[cache_index_of[lyr]] = updated
+    # Layer 2 reads/writes layer_view[cache_index_of[2]] (index 1), leaving
+    # layer_view[2] as the original `c1` alias.
+    scattered = scatter_layer_kv_caches(kv_caches, layer_view, physical_indices)
+
+    self.assertEqual(scattered, [c0_updated, c1_updated])
+
+  @pytest.mark.cpu_only
   def test_missing_map_keeps_positional_indexing(self):
     kv_caches = ["c0", "c1"]
 
