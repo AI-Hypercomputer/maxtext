@@ -16,7 +16,7 @@
 | **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | ✅ Done. `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). **Unscanned 397B** finished its transform (6,860 s with parallel shard reads), then was **OOM-killed when the Orbax save started** (~807 GB converted state). **Unscanned 235B** (re-run with 16 parallel shard reads, run `tpu7x_200b_pstream`): S2 2,625.5 s, S3 545.5 s / 659.1 s on 1 / 2 slices, so `safetensors_dynamic` is 2.9× faster end-to-end (4.4–4.5× without Step 1). The single-stream first run took 5,150.1 s |
 | **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 29 tasks). All tasks are done except the two unscanned conversion chains (235B, 397B). Workers left: `s3` (235B), `s8` (397B), standby `s1`, pairs `i` and `k` for the 2-slice loads |
 | **P2 · 16-model suite** | ✅ Done (`p2_leftovers` and re-runs). `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned loads. `llama3.1-70b` scanned · 2 Orbax load needed `concurrent_gb=38` (T-13). Re-ran the `qwen3-14b` and `qwen3-32b` scanned · 1 outliers (U-7) |
-| **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`. Regenerate the tables with `scripts/build_tpu7x_tables.py --md-into` and `scripts/build_tpu7x_sheet_table.py --md-into` (§8). The cluster is cleaned up |
+| **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`. Regenerate the CSV with `scripts/build_tpu7x_tables.py` and the row-by-row tables with `scripts/build_tpu7x_sheet_table.py --md-into` (§8). The cluster is cleaned up |
 
 ---
 
@@ -47,7 +47,7 @@
 | `bootstrap_tpu7x.py`, `generate_tpu7x_manifests.py`, `scripts/run_tpu7x_cluster.sh` | Pod bootstrap (trees: Lance's PRs, `origin/main`, `hbmfix`), manifests (P1/P2 pairs, P1-completion pair `g`, daemon controllers, recovery), launcher |
 | `scripts/tpu7x_task_queue.py`, `scripts/tpu7x_daemon_controller.py`, `configs/p1_completion_tasks.json` | P1 completion queue (README "Finishing Priority 1"); workers sync the harness before each task, and tasks can be limited to newer pods with the `/tmp/maxtext_stagefix` tree (§7.16) |
 | `scripts/summarize_tpu7x_results.py` | Status matrix from per-phase result JSONs |
-| `scripts/build_tpu7x_tables.py`, `scripts/build_tpu7x_sheet_table.py` | Summary CSV and row-by-row tables; the plain-text "tpu-v7x" sheet table (P1 rows plus Lance's multi-host rows) |
+| `scripts/build_tpu7x_tables.py`, `scripts/build_tpu7x_sheet_table.py` | Summary CSV; the plain-text row-by-row tables for the sheet tabs (`--suite p1`: >200B models plus Lance's multi-host rows; `--suite p2`: models up to 120B) |
 | `patches/hbmfix.patch`, `patches/hbmfix/src/...` | HBM-peak fix for composite keys (§7.6). Same 63 passing and 13 failing unit tests as HEAD in a local CPU venv (the 13 failures are from the old local JAX); `src/` itself stays equal to Lance's PRs |
 | Not committed: `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md` | Unrelated to this work |
 
@@ -132,7 +132,7 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
 
 ### 5.3 P2 · 16-model suite (WITH PRs)
 
-✅ Complete. All configurations are in [`reports/tpu7x_benchmark_ckpt_load_time_summary.md`](reports/tpu7x_benchmark_ckpt_load_time_summary.md) (row by row) and the summary CSV. Points to know:
+✅ Complete. All configurations are in [`reports/tpu7x_benchmark_ckpt_load_time_summary.md`](reports/tpu7x_benchmark_ckpt_load_time_summary.md) (row by row, §3.1) and the summary CSV. Points to know:
 - `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned works.
 - The `llama3.1-70b` scanned 2-slice Orbax load needed `checkpoint_storage_concurrent_gb=38` (T-13).
 - `qwen3-14b` and `qwen3-32b` scanned 1-slice outliers were re-run (U-7, `run_tpu7x_16m_rerun`).
@@ -211,7 +211,7 @@ All planned runs are finished and documented; the cluster is cleaned up. Optiona
 1. Leaf-level `(wi_0, wi_1)` split for `qwen3.5-397b-a17b` scanned on 2 slices (§7.19, issue U-1), as its own patch and run.
 2. Find out why the `gpt-oss-120b` scanned `safetensors_dynamic` transform needs ~7× the leaf in HBM temporaries (issue U-6).
 3. Profile the slow scanned MoE Orbax restores on tpu7x versus v5p (report §5).
-4. Rebuild the tables after any new run: `scripts/build_tpu7x_tables.py <p2> <p2_rerun> <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --md-into reports/tpu7x_benchmark_ckpt_load_time_summary.md`, and the "tpu-v7x" sheet section of the progress report with `scripts/build_tpu7x_sheet_table.py <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --multihost-csv reports/tpu7x_multihost_results.csv --md-into reports/tpu7x_priority1_progress.md`.
+4. Rebuild the tables after any new run: the CSV with `scripts/build_tpu7x_tables.py <p2> <p2_rerun> <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --csv reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md <scratch.md>`, and the row-by-row tables with `scripts/build_tpu7x_sheet_table.py --suite p1 <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --multihost-csv reports/tpu7x_multihost_results.csv --md-into reports/tpu7x_priority1_progress.md` and `scripts/build_tpu7x_sheet_table.py --suite p2 <p2> <p2_rerun> --md-into reports/tpu7x_benchmark_ckpt_load_time_summary.md`.
 
 ## 9. Command cheat sheet
 
