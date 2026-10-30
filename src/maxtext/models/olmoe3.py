@@ -162,6 +162,16 @@ def _olmoe3_attention_init(config: Config):
   return init
 
 
+def _attention_logit_scale(cfg):
+  """Full attention's query scale: head_dim^-0.5, times sqrt(base head_dim / head_dim) under `head_dim_transfer` with
+  a muP or CompletedP base model (muP's 1/head_dim beyond the base's head_dim; applied after the QK norm)."""
+  scale = cfg.head_dim**-0.5
+  name = getattr(cfg, "completedp_base_model_name", "") or getattr(cfg, "mup_base_model_name", "")
+  if getattr(cfg, "head_dim_transfer", False) and name:
+    scale *= (olmoe3_roles.load_base_config(name).head_dim / cfg.head_dim) ** 0.5
+  return scale
+
+
 def _completedp_base(config):
   """The base model's config under CompletedP (`completedp_base_model_name`), else None."""
   name = getattr(config, "completedp_base_model_name", "")
@@ -1297,7 +1307,7 @@ class OLMoE3Attention(nnx.Module):
         quant=quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         use_qk_norm=cfg.use_qk_norm,
-        query_pre_attn_scalar=cfg.head_dim**-0.5,
+        query_pre_attn_scalar=_attention_logit_scale(cfg),
         model_mode=model_mode,
         is_nope_layer=True,  # OLMoE3 uses no positional embedding at all.
         rngs=rngs,

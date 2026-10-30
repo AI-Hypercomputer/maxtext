@@ -3506,6 +3506,15 @@ class AdamW(BaseModel):
   completedp_base_train_tokens: int = Field(
       0, description="CompletedP: the base run's training tokens (duration rules). 0: this run's."
   )
+  head_dim_transfer: bool = Field(
+      False,
+      description=(
+          "With mup_base_model_name or completedp_base_model_name, the rules for head dims that differ from the base"
+          " model's: full attention's logit scale is head_dim^-0.5 * sqrt(base head_dim / head_dim); under CompletedP"
+          " also a matrix is a readout iff its output width equals the base model's, and a head-shared gain's eps is"
+          " multiplied by (heads / base heads) / m_N. False: OLMo-core's rules."
+      ),
+  )
   mu_dtype: str = Field(
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",

@@ -46,6 +46,45 @@ LAYER_MATRICES = (
     (r"shared_ffn/(wi_0|wi_1)/kernel", lambda c, dense: c.emb_dim, False),
     (r"shared_ffn/wo/kernel", lambda c, dense: c.mlp_dim if dense else c.shared_expert_mlp_dim, False),
 )
+
+
+def fan_out(c, sub, dense):
+  """The output width of the in-layer matrix at `sub` (e.g. "mixer/w_q/kernel"), from config `c`."""
+  kda_heads = c.gdn_num_value_heads  # MaxText's KDA uses gdn_num_value_heads heads for keys and values alike
+  widths = (
+      (r"mixer/(w_q|w_k|f_proj_2)/kernel", lambda: kda_heads * c.gdn_key_head_dim),
+      (r"mixer/(w_v|g_proj_2)/kernel", lambda: kda_heads * c.gdn_value_head_dim),
+      (r"mixer/w_b/kernel", lambda: kda_heads),
+      (r"mixer/(f_proj_1|g_proj_1)/kernel", lambda: c.gdn_value_head_dim),
+      (r"mixer/attention/query/kernel", lambda: c.num_query_heads * c.head_dim),
+      (r"mixer/attention/(key|value)/kernel", lambda: c.num_kv_heads * c.head_dim),
+      (r"(mixer/w_out|mixer/attention/out|latent_up|shared_ffn/wo)/kernel", lambda: c.emb_dim),
+      (r"latent_down/kernel", lambda: c.moe_expert_input_dim),
+      (r"moe_block/gate/kernel", lambda: c.num_experts),
+      (r"moe_block/(wi_0|wi_1)", lambda: c.moe_mlp_dim),
+      (r"moe_block/wo", lambda: c.moe_expert_input_dim),
+      (r"shared_ffn/(wi_0|wi_1)/kernel", lambda: c.mlp_dim if dense else c.shared_expert_mlp_dim),
+  )
+  for pattern, width in widths:
+    if re.fullmatch(pattern, sub):
+      return width()
+  raise NotImplementedError(f"no output width for matrix {sub}")
+
+
+def is_readout(config, base_config, sub, dense, readout):
+  """Whether the in-layer matrix at `sub` is a readout: the fixed `readout` flag (OLMo-core's list), or, under
+  `head_dim_transfer` with a base model, whether its output width is the same as in the base model (so it doesn't
+  grow with width, e.g. KDA's f_proj_1 / g_proj_1 only while the value head dim stays)."""
+  if base_config is None or not getattr(config, "head_dim_transfer", False):
+    return readout
+  return fan_out(config, sub, dense) == fan_out(base_config, sub, dense)
+
+
+def head_count(config, sub):
+  """The number of heads a head-shared gain at `sub` is shared across."""
+  if re.search(_HEAD_SHARED, sub):
+    return config.gdn_num_value_heads
+  return config.num_query_heads if "query_norm" in sub else config.num_kv_heads
 # In-layer element-wise parameters, whatever their rank: norm gains (2-D for per-head QK norms), biases, KDA's
 # decay parameters and depthwise short convs, and the SSMax gains.
 _LAYER_VECTORS = r"(/scale|/bias|ssmax_scale|A_log|dt_bias|_conv)$"
@@ -71,6 +110,7 @@ class ParamRole:
   role: str
   key: None | str = None  # matrices: the role key, to match the same matrix in a base model
   fan_in: None | int = None  # matrices
+  sub: None | str = None  # in-layer parameters: the path within the layer, e.g. "mixer/o_norm/scale"
 
 
 def path_str(path):
@@ -84,8 +124,9 @@ def layer_kind(config, layer):
   return ("dense" if dense else "moe") + "+" + ("attention" if attention else "kda")
 
 
-def classify(config, path, shape=None):
-  """The `ParamRole` of the parameter at `path` (a '/'-joined path); raises if there's no rule for it."""
+def classify(config, path, shape=None, base_config=None):
+  """The `ParamRole` of the parameter at `path` (a '/'-joined path); raises if there's no rule for it. `base_config`
+  is only read under `head_dim_transfer` (readouts by output width)."""
   if path.endswith("token_embedder/embedding"):
     return ParamRole(INPUT_EMBEDDING)
   if path.endswith("decoder/embedding_norm/scale"):
@@ -99,14 +140,15 @@ def classify(config, path, shape=None):
     raise NotImplementedError(f"no parametrization rule for parameter {path}")
   layer, sub = int(match.group(1)), match.group(2)
   if re.search(_HEAD_SHARED, sub) or (re.search(_QK_NORMS, sub) and shape is not None and len(shape) == 1):
-    return ParamRole(HIDDEN_HEAD_SHARED_VECTOR)
+    return ParamRole(HIDDEN_HEAD_SHARED_VECTOR, sub=sub)
   if re.search(_LAYER_VECTORS, sub):
     return ParamRole(HIDDEN_VECTOR)
   kind = layer_kind(config, layer)
+  dense = kind.startswith("dense")
   for pattern, fan_in, readout in LAYER_MATRICES:
     if re.fullmatch(pattern, sub):
-      role = HIDDEN_READOUT_MATRIX if readout else HIDDEN_MATRIX
-      return ParamRole(role, f"{kind}/{pattern}", fan_in(config, kind.startswith("dense")))
+      role = HIDDEN_READOUT_MATRIX if is_readout(config, base_config, sub, dense, readout) else HIDDEN_MATRIX
+      return ParamRole(role, f"{kind}/{pattern}", fan_in(config, dense), sub)
   raise NotImplementedError(f"no parametrization rule for parameter {path}")
 
 
@@ -118,13 +160,13 @@ def shape_fan_in(config, path, shape):
   return shape[0]
 
 
-def classify_tree(config, params, check_shapes=True):
+def classify_tree(config, params, check_shapes=True, base_config=None):
   """The `ParamRole` of every leaf of `params`, checking each matrix's fan-in against its kernel shape."""
 
   def role(path, leaf):
     p = path_str(path)
     shape = getattr(leaf, "shape", None)
-    r = classify(config, p, shape)
+    r = classify(config, p, shape, base_config)
     if check_shapes and r.fan_in is not None and shape is not None and shape_fan_in(config, p, shape) != r.fan_in:
       raise ValueError(f"{p} has shape {shape}, but its config gives fan-in {r.fan_in}")
     return r
@@ -176,5 +218,5 @@ def completedp_init_factor(config, base_config, sub, dense=False):
   for pattern, fan_in, readout in LAYER_MATRICES:
     if re.fullmatch(pattern, sub):
       ratio = fan_in(base_config, dense) / fan_in(config, dense)
-      return ratio if readout else ratio**0.5
+      return ratio if is_readout(config, base_config, sub, dense, readout) else ratio**0.5
   raise NotImplementedError(f"no parametrization rule for matrix {sub}")

@@ -27,7 +27,9 @@ tokens per step and the training tokens. Per parameter role (`olmoe3_roles`), mu
   output matrix (LM head)    s / r                 1 / s                r s
   output vector              s                     1 / s                s
 
-and both betas become ``1 - (1 - beta) m_B / m_D``. The model side (residual multipliers ``m_L^-a`` and the init
+and both betas become ``1 - (1 - beta) m_B / m_D``. Under `head_dim_transfer`, a head-shared vector's eps is also
+multiplied by ``(H / H_base) / m_N`` (H: the heads it is shared across), which is 1 when width grows by heads alone,
+and readout matrices are the matrices whose output width is the base model's (`olmoe3_roles.is_readout`). The model side (residual multipliers ``m_L^-a`` and the init
 scaling) is in models/olmoe3.py. Reference: OLMo-core ``tanushy/parameterization-ladders`` (``optim/completedp.py``,
 ``nn/transformer/completedp.py``, docs/COMPLETEDP_HANDOFF.md).
 """
@@ -114,8 +116,9 @@ def betas(config, base_config):
   return scaled
 
 
-def role_multipliers(role, r, rt):
-  """(lr, eps, weight decay) multipliers of a parameter with `role` and width ratio `r` (1 for non-matrices)."""
+def role_multipliers(role, r, rt, heads=1.0):
+  """(lr, eps, weight decay) multipliers of a parameter with `role` and width ratio `r` (1 for non-matrices).
+  `heads`: for a head-shared vector under `head_dim_transfer`, (H / H_base) / m_N; else 1."""
   hidden_lr = rt.m_l ** (rt.alpha - 1)
   hidden_eps = rt.m_l**-rt.alpha / rt.m_n
   if role in (roles.INPUT_EMBEDDING, roles.INPUT_VECTOR):
@@ -127,7 +130,7 @@ def role_multipliers(role, r, rt):
   elif role == roles.HIDDEN_VECTOR:
     lr, eps, wd = hidden_lr, hidden_eps, 1.0
   elif role == roles.HIDDEN_HEAD_SHARED_VECTOR:
-    lr, eps, wd = hidden_lr, rt.m_l**-rt.alpha, 1.0
+    lr, eps, wd = hidden_lr, rt.m_l**-rt.alpha * heads, 1.0
   elif role == roles.OUTPUT_MATRIX:
     lr, eps, wd = 1 / r, 1.0, r
   elif role == roles.OUTPUT_VECTOR:
@@ -145,9 +148,13 @@ def multipliers(config, base_config, params):
 
   def of(role):
     r = 1.0 if role.fan_in is None else role.fan_in / roles.base_fan_in(base, role, config.completedp_base_model_name)
-    return role_multipliers(role.role, r, rt)
+    heads = 1.0
+    if role.role == roles.HIDDEN_HEAD_SHARED_VECTOR and config.head_dim_transfer:
+      heads = roles.head_count(config, role.sub) / roles.head_count(base_config, role.sub) / rt.m_n
+    return role_multipliers(role.role, r, rt, heads)
 
-  triples = jax.tree.map(of, roles.classify_tree(config, params), is_leaf=lambda x: isinstance(x, roles.ParamRole))
+  tree = roles.classify_tree(config, params, base_config=base_config)
+  triples = jax.tree.map(of, tree, is_leaf=lambda x: isinstance(x, roles.ParamRole))
   is_triple = lambda x: isinstance(x, tuple) and len(x) == 3 and all(isinstance(v, float) for v in x)
   return tuple(jax.tree.map(lambda t, i=i: t[i], triples, is_leaf=is_triple) for i in range(3))
 

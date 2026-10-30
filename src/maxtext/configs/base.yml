@@ -1313,6 +1313,13 @@ completedp_alpha: 1.0
 # (lr and wd x sqrt(m_B / m_D), eps / sqrt(m_B / m_D), 1 - beta x m_B / m_D). 0: this run's own (no scaling).
 completedp_base_batch_tokens: 0
 completedp_base_train_tokens: 0
+# With mup_base_model_name or completedp_base_model_name, the rules for a head_dim (or KDA head dims) that differs
+# from the base model's. Full attention's logit scale becomes head_dim^-0.5 * sqrt(base head_dim / head_dim): today's
+# 1/sqrt(head_dim) at the base's head_dim, muP's 1/head_dim beyond it. Under CompletedP also: a matrix is a readout iff
+# its output width equals the base model's (instead of the fixed list: MoE router, KDA f_proj_1 / g_proj_1), and a
+# head-shared gain's eps (KDA o_norm, QK norms not per head) is multiplied by (heads / base heads) / m_N. False:
+# OLMo-core's rules.
+head_dim_transfer: false
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.

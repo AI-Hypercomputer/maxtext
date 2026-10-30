@@ -23,6 +23,7 @@ init, forward pass and optimizer against what those values mean.
 
 import json
 import os
+import re
 import unittest
 
 import jax
@@ -286,6 +287,106 @@ class CompletedPOptimizerTest(unittest.TestCase):
     params = _params(cfg, init=True)
     updates, _ = jax.jit(tx.update)(jax.tree.map(jnp.ones_like, params), tx.init(params), params)
     self.assertEqual(jax.tree.structure(updates), jax.tree.structure(params))
+
+
+class HeadDimTransferTest(unittest.TestCase):
+  """head_dim_transfer (small, head_dim 256 / KDA 256 x 512, on tiny, 128 / 128 x 256): the full-attention logit
+  scale (muP and CompletedP), readout matrices by output width, and the eps of head-shared gains."""
+
+  ON = ("head_dim_transfer=True",)
+
+  @classmethod
+  def setUpClass(cls):
+    cls.base = roles.load_base_config(BASE)
+    cls.off, cls.on = _config(TARGET), _config(TARGET, extra=cls.ON)
+    cls.params = _params(cls.off)
+
+  def _roles(self, cfg):
+    tree = roles.classify_tree(cfg, self.params, base_config=self.base)
+    flat = jax.tree_util.tree_flatten_with_path(tree, is_leaf=lambda x: isinstance(x, roles.ParamRole))[0]
+    return {_name(p): r.role for p, r in flat}
+
+  def _mults(self, cfg):
+    return [{_name(p): m for p, m in jax.tree_util.tree_flatten_with_path(tree)[0]}
+            for tree in completedp.multipliers(cfg, self.base, self.params)]
+
+  def test_off_by_default(self):
+    from maxtext.models import olmoe3  # pylint: disable=import-outside-toplevel
+
+    self.assertFalse(self.off.head_dim_transfer)
+    self.assertEqual(olmoe3._attention_logit_scale(self.off), 256**-0.5)  # pylint: disable=protected-access
+
+  def test_logit_scale(self):
+    # 1/sqrt(256) * sqrt(128 / 256) = sqrt(128) / 256 under CompletedP and muP; 1/sqrt(head_dim) at the base.
+    from maxtext.models import olmoe3  # pylint: disable=import-outside-toplevel
+
+    scale = olmoe3._attention_logit_scale  # pylint: disable=protected-access
+    self.assertAlmostEqual(scale(self.on), 128**0.5 / 256, places=12)
+    mup_cfg = t._config(TARGET, extra=(f"mup_base_model_name={BASE}", *self.ON))
+    self.assertAlmostEqual(scale(mup_cfg), 128**0.5 / 256, places=12)
+    self.assertAlmostEqual(scale(_config(BASE, extra=self.ON)), 128**-0.5, places=12)
+    self.assertEqual(scale(t._config(TARGET, extra=self.ON)), 256**-0.5)  # no base model: no change
+
+  def test_logit_scale_in_the_model(self):
+    from maxtext.models import olmoe3  # pylint: disable=import-outside-toplevel
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    from jax.sharding import Mesh  # pylint: disable=import-outside-toplevel
+    from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+
+    for extra, expected in (((), 256**-0.5), (self.ON, 128**0.5 / 256)):
+      cfg = _config(TARGET, extra=(*REDUCED, *extra))
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      layer = olmoe3.OLMoE3DecoderLayer(cfg, mesh, "train", layer_idx=1, rngs=nnx.Rngs(0))  # full attention
+      self.assertAlmostEqual(layer.mixer.attention.query_pre_attn_scalar, expected, places=12)
+
+  def test_readouts_by_output_width(self):
+    # Small grows KDA's value head dim (256 -> 512) at a fixed head count (8): f_proj_1 / g_proj_1 then grow with
+    # width (hidden), and w_b (one output per head) doesn't (readout). The router stays a readout.
+    off, on = self._roles(self.off), self._roles(self.on)
+    changed = {n: (off[n], on[n]) for n in off if off[n] != on[n]}
+    self.assertTrue(changed)
+    for name, (was, now) in changed.items():
+      if re.search(r"mixer/(f_proj_1|g_proj_1)/kernel$", name):
+        self.assertEqual((was, now), (roles.HIDDEN_READOUT_MATRIX, roles.HIDDEN_MATRIX), name)
+      else:
+        self.assertRegex(name, r"mixer/w_b/kernel$")
+        self.assertEqual((was, now), (roles.HIDDEN_MATRIX, roles.HIDDEN_READOUT_MATRIX), name)
+    self.assertEqual({r for n, r in on.items() if n.endswith("moe_block/gate/kernel")}, {roles.HIDDEN_READOUT_MATRIX})
+
+  def test_multipliers(self):
+    # lr and weight decay don't depend on either rule; eps does: m_L^-a / m_N (hidden) vs m_L^-a (readout), and a
+    # head-shared gain's m_L^-a times (H / H_base) / m_N = (8 / 8) / 1.5.
+    (lr0, eps0, wd0), (lr1, eps1, wd1) = self._mults(self.off), self._mults(self.on)
+    self.assertEqual(lr0, lr1)
+    self.assertEqual(wd0, wd1)
+    m_n, m_l = 1536 / 1024, 40 / 16
+    roles_on = self._roles(self.on)
+    for name in eps0:
+      if re.search(r"mixer/(f_proj_1|g_proj_1)/kernel$", name):
+        expected = m_l**-1 / m_n
+      elif re.search(r"mixer/w_b/kernel$", name):
+        expected = m_l**-1
+      elif roles_on[name] == roles.HIDDEN_HEAD_SHARED_VECTOR:
+        expected = eps0[name] * (8 / 8) / m_n
+      else:
+        expected = eps0[name]
+      self.assertAlmostEqual(eps1[name], expected, places=12, msg=name)
+
+  def test_init_factors(self):
+    # sqrt(base fan-in / fan-in) for a hidden matrix, base fan-in / fan-in for a readout: 1024 / 1536 for both here.
+    ratio = 1024 / 1536
+    for sub, off, on in (("mixer/f_proj_1/kernel", ratio, ratio**0.5), ("mixer/w_b/kernel", ratio**0.5, ratio),
+                         ("moe_block/gate/kernel", ratio, ratio), ("mixer/w_q/kernel", ratio**0.5, ratio**0.5)):
+      self.assertAlmostEqual(roles.completedp_init_factor(self.off, self.base, sub), off, places=12, msg=sub)
+      self.assertAlmostEqual(roles.completedp_init_factor(self.on, self.base, sub), on, places=12, msg=sub)
+
+  def test_base_model_unchanged(self):
+    # At the base model every multiplier is 1 either way (every output width matches, so every matrix is a readout,
+    # but with r = m_N = 1 a readout's rules are a hidden matrix's).
+    cfg = _config(BASE, extra=self.ON)
+    params = _params(cfg)
+    for tree in completedp.multipliers(cfg, self.base, params):
+      self.assertEqual(set(jax.tree_util.tree_leaves(tree)), {1.0})
 
 
 if __name__ == "__main__":
