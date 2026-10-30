@@ -51,6 +51,7 @@ from maxtext.configs import pyconfig
 from maxtext.utils.generate_param_only_checkpoint import _read_train_checkpoint
 from maxtext.checkpoint_conversion.standalone_scripts import llama_or_mistral_ckpt
 from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils.max_utils import unpermute_from_match_maxtext_rope
@@ -83,9 +84,9 @@ def load_hf_model(model_size):
   return model
 
 
-def load_model_state(config):
+def load_model_params(config):
   """
-  Loads the MaxText model's TrainState from the Orbax checkpoint
+  Loads the MaxText model's weights from the Orbax checkpoint, in the Linen checkpoint layout
   """
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -101,12 +102,15 @@ def load_model_state(config):
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")
   training_state, _ = _read_train_checkpoint(config, checkpoint_manager, mesh)
-  return training_state
+  # `_read_train_checkpoint` returns a flat nnx.State (weights under `model`, plus optimizer
+  # and RNG state). Reshape it to the on-disk Linen layout the porting below indexes, i.e.
+  # what used to be `TrainState.params["params"]`.
+  return train_state_nnx.to_checkpoint_dict(training_state)["params"]["params"]
 
 
-def convert_state_to_hf(training_state, model_size):
+def convert_state_to_hf(params, model_size):
   """
-  Port the parameters from the Orbax training_state into the hf_model
+  Port the parameters from the MaxText weights (Linen checkpoint layout) into the hf_model
   """
 
   if model_size not in llama_or_mistral_ckpt.MODEL_PARAMS_DICT:
@@ -124,7 +128,7 @@ def convert_state_to_hf(training_state, model_size):
 
   # Port the embedding weights
   hf_model_params["model.embed_tokens.weight"] = torch.tensor(
-      np.asarray(training_state.params["params"]["token_embedder"]["embedding"]), dtype=torch.float16
+      np.asarray(params["token_embedder"]["embedding"]), dtype=torch.float16
   )
 
   for layer_int in tqdm(range(base_num_decoder_layers), desc="Porting parameters layerwise"):
@@ -135,9 +139,7 @@ def convert_state_to_hf(training_state, model_size):
         np.asarray(
             unpermute_from_match_maxtext_rope(
                 reverse_scale(
-                    training_state.params["params"]["decoder"]["layers"]["self_attention"]["query"]["kernel"][
-                        :, layer_int, :, :
-                    ],
+                    params["decoder"]["layers"]["self_attention"]["query"]["kernel"][:, layer_int, :, :],
                     head_dim,
                 ),
                 model_size,
@@ -151,9 +153,7 @@ def convert_state_to_hf(training_state, model_size):
     hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = torch.tensor(
         np.asarray(
             unpermute_from_match_maxtext_rope(
-                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][
-                    :, layer_int, :, :
-                ],
+                params["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :],
                 model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)
@@ -163,7 +163,7 @@ def convert_state_to_hf(training_state, model_size):
     )
     hf_model_params[f"model.layers.{layer_int}.self_attn.v_proj.weight"] = torch.tensor(
         np.asarray(
-            training_state.params["params"]["decoder"]["layers"]["self_attention"]["value"]["kernel"][:, layer_int, :, :]
+            params["decoder"]["layers"]["self_attention"]["value"]["kernel"][:, layer_int, :, :]
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)
             .T
         ),
@@ -171,7 +171,7 @@ def convert_state_to_hf(training_state, model_size):
     )
     hf_model_params[f"model.layers.{layer_int}.self_attn.o_proj.weight"] = torch.tensor(
         np.asarray(
-            training_state.params["params"]["decoder"]["layers"]["self_attention"]["out"]["kernel"][:, layer_int, :, :]
+            params["decoder"]["layers"]["self_attention"]["out"]["kernel"][:, layer_int, :, :]
             .reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim)
             .T
         ),
@@ -181,64 +181,60 @@ def convert_state_to_hf(training_state, model_size):
     # MLP Layers
     if num_experts is None:
       hf_model_params[f"model.layers.{layer_int}.mlp.gate_proj.weight"] = torch.tensor(
-          np.asarray(training_state.params["params"]["decoder"]["layers"]["mlp"]["wi_0"]["kernel"][:, layer_int, :].T),
+          np.asarray(params["decoder"]["layers"]["mlp"]["wi_0"]["kernel"][:, layer_int, :].T),
           dtype=torch.float16,
       )
       hf_model_params[f"model.layers.{layer_int}.mlp.up_proj.weight"] = torch.tensor(
-          np.asarray(training_state.params["params"]["decoder"]["layers"]["mlp"]["wi_1"]["kernel"][:, layer_int, :].T),
+          np.asarray(params["decoder"]["layers"]["mlp"]["wi_1"]["kernel"][:, layer_int, :].T),
           dtype=torch.float16,
       )
       hf_model_params[f"model.layers.{layer_int}.mlp.down_proj.weight"] = torch.tensor(
-          np.asarray(training_state.params["params"]["decoder"]["layers"]["mlp"]["wo"]["kernel"][:, layer_int, :].T),
+          np.asarray(params["decoder"]["layers"]["mlp"]["wo"]["kernel"][:, layer_int, :].T),
           dtype=torch.float16,
       )
     else:
       hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.gate.weight"] = torch.tensor(
-          np.asarray(
-              training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"][:, layer_int, :].T
-          ),
+          np.asarray(params["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"][:, layer_int, :].T),
           dtype=torch.float16,
       )
       for k in range(num_experts):
         hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.experts.{k}.w1.weight"] = torch.tensor(
-            np.asarray(training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["wi_0"][k, layer_int, :, :].T),
+            np.asarray(params["decoder"]["layers"]["MoeBlock_0"]["wi_0"][k, layer_int, :, :].T),
             dtype=torch.float16,
         )
         hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.experts.{k}.w2.weight"] = torch.tensor(
-            np.asarray(training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["wo"][k, layer_int, :, :].T),
+            np.asarray(params["decoder"]["layers"]["MoeBlock_0"]["wo"][k, layer_int, :, :].T),
             dtype=torch.float16,
         )
         hf_model_params[f"model.layers.{layer_int}.block_sparse_moe.experts.{k}.w3.weight"] = torch.tensor(
-            np.asarray(training_state.params["params"]["decoder"]["layers"]["MoeBlock_0"]["wi_1"][k, layer_int, :, :].T),
+            np.asarray(params["decoder"]["layers"]["MoeBlock_0"]["wi_1"][k, layer_int, :, :].T),
             dtype=torch.float16,
         )
 
     # Pre/post attention layer norm
     hf_model_params[f"model.layers.{layer_int}.input_layernorm.weight"] = torch.tensor(
         np.asarray(
-            training_state.params["params"]["decoder"]["layers"]["pre_self_attention_layer_norm"]["scale"][
-                :, layer_int
-            ].reshape(base_num_query_heads * head_dim)
+            params["decoder"]["layers"]["pre_self_attention_layer_norm"]["scale"][:, layer_int].reshape(
+                base_num_query_heads * head_dim
+            )
         ),
         dtype=torch.float16,
     )
     hf_model_params[f"model.layers.{layer_int}.post_attention_layernorm.weight"] = torch.tensor(
         np.asarray(
-            training_state.params["params"]["decoder"]["layers"]["post_self_attention_layer_norm"]["scale"][
-                :, layer_int
-            ].reshape(base_num_query_heads * head_dim)
+            params["decoder"]["layers"]["post_self_attention_layer_norm"]["scale"][:, layer_int].reshape(
+                base_num_query_heads * head_dim
+            )
         ),
         dtype=torch.float16,
     )
 
   # LM head and layernorm
   hf_model_params["lm_head.weight"] = torch.tensor(
-      np.asarray(training_state.params["params"]["decoder"]["logits_dense"]["kernel"].T), dtype=torch.float16
+      np.asarray(params["decoder"]["logits_dense"]["kernel"].T), dtype=torch.float16
   )
   hf_model_params["model.norm.weight"] = torch.tensor(
-      np.asarray(
-          training_state.params["params"]["decoder"]["decoder_norm"]["scale"].reshape(base_num_query_heads * head_dim)
-      ),
+      np.asarray(params["decoder"]["decoder_norm"]["scale"].reshape(base_num_query_heads * head_dim)),
       dtype=torch.float16,
   )
 
@@ -250,8 +246,8 @@ def convert_orbax_hf(hf_model_path, config):
   Landing function to convert MaxText model's checkpoint to HuggingFace format
   """
   hf_model = load_hf_model(config.model_name)
-  training_state = load_model_state(config)
-  new_hf_model_params = convert_state_to_hf(training_state, config.model_name)
+  params = load_model_params(config)
+  new_hf_model_params = convert_state_to_hf(params, config.model_name)
   print(f"Saving HuggingFace model to path = {hf_model_path}")
   hf_model.save_pretrained(hf_model_path, state_dict=new_hf_model_params)
 
