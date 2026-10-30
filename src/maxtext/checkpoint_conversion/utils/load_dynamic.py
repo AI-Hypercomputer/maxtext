@@ -367,28 +367,72 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 
     leaves = [flat_target[name] for name in check_names]
     hook_fn = hook_fn_map_mt.get(mt_key)
+    # A composite key with a stacked (list) source builds each of its leaves on its own (`num_parts`), so the
+    # stacked composite never holds them all at once. A composite key with one source tensor (unscanned) loads its
+    # leaves as one target and splits it below.
+    num_parts = len(leaves) if isinstance(mt_key, tuple) and isinstance(hf_source, list) else 0
     if isinstance(mt_key, tuple):
-      target_leaf = tensor_handling.composite_target_leaf(leaves)
+      target_leaf = leaves[0] if num_parts else tensor_handling.composite_target_leaf(leaves)
       hook_fn = tensor_handling.composite_hook_fn(hook_fn, len(leaves))
     else:
       target_leaf = leaves[0]
 
+    # Device buffers of HF tensors that this leaf consumed for the last time (popped from `hf_state`), freed as
+    # soon as the hook has produced its output, so the stacked tensor and its inputs do not coexist in HBM.
+    # Tensors that a later leaf still needs stay in `hf_state` and are never freed here.
+    last_popped = []
+
+    def _pop_and_track(k):
+      arr = tensor_getter(k)
+      if isinstance(arr, jax.Array) and k not in hf_state:
+        last_popped.append(arr)
+      return arr
+
+    if hook_fn is not None:
+      _orig_hook_fn = hook_fn
+
+      def _deleting_hook_fn(w, shape, _fn=_orig_hook_fn):
+        res = tensor_handling.apply_hook_fns(w, shape, _fn)
+        tensor_handling._delete_inputs(res, last_popped)  # pylint: disable=protected-access
+        last_popped.clear()
+        return res
+
+      hook_fn = _deleting_hook_fn
+
     load_fn = get_hf_loading_function(
         hf_source,
-        tensor_getter,
+        _pop_and_track,
         hook_fn,
         target_leaf,
         maxtext_config,
-        mt_keys[0],
+        mt_key if isinstance(mt_key, tuple) else mt_keys[0],
+        num_parts=num_parts,
     )
 
     # Execute transformation and assign to flat_restored
     t_layer = time.time()
     loaded = load_fn()
-    if isinstance(mt_key, tuple):
+    # A popped HF tensor may also be the loaded leaf itself, or share its buffer: _delete_inputs keeps those.
+    tensor_handling._delete_inputs(loaded if num_parts else [loaded], last_popped)  # pylint: disable=protected-access
+    last_popped.clear()
+    if num_parts:
+      for name, leaf, part in zip(check_names, leaves, loaded):
+        # The parts were placed with the first leaf's sharding.
+        if hasattr(leaf, "sharding") and getattr(part, "sharding", None) != leaf.sharding:
+          part = tensor_handling._reshard(part, leaf.sharding, delete_input=True)  # pylint: disable=protected-access
+        flat_restored[name] = part
+      del loaded
+    elif isinstance(mt_key, tuple):
+      parts = [jax.lax.slice_in_dim(loaded, i, i + 1, axis=-1)[..., 0] for i in range(len(leaves))]
+      tensor_handling._delete_inputs(parts, (loaded,))  # pylint: disable=protected-access
+      del loaded
       for i, (name, leaf) in enumerate(zip(check_names, leaves)):
-        part = loaded[..., i]
-        flat_restored[name] = jax.device_put(part, leaf.sharding) if hasattr(leaf, "sharding") else part
+        part, parts[i] = parts[i], None
+        flat_restored[name] = (
+            tensor_handling._reshard(part, leaf.sharding, delete_input=True)  # pylint: disable=protected-access
+            if hasattr(leaf, "sharding")
+            else part
+        )
     else:
       flat_restored[check_names[0]] = loaded
 
