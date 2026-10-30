@@ -377,6 +377,85 @@ class TensorHandlingTest(parameterized.TestCase):
     self.assertEqual(restored["wi_0"].sharding, sharding)
 
   @parameterized.named_parameters(
+      ("single_axis", ["gate_up_0", "gate_up_1", "gate_up_2"], (4, 3, 8)),
+      ("multi_axis", [["gate_up_0", "gate_up_1"], ["gate_up_2", "gate_up_3"]], (2, 2, 4, 8)),
+  )
+  def test_stacked_composite_leaves_are_stacked_separately(self, hf_source, leaf_shape):
+    # A stacked composite key is split slice by slice and each leaf is stacked on its own: no stacked tensor with
+    # the composite's last axis is ever built, and the leaves match splitting the stacked composite.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    flat_keys = [k for row in hf_source for k in (row if isinstance(row, list) else [row])]
+    hf_state = {
+        k: jax.device_put(np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i) for i, k in enumerate(flat_keys)
+    }
+    expected = {k: np.asarray(v) for k, v in hf_state.items()}
+    composite_shapes = []
+
+    def split(weight, target_shape):
+      del target_shape
+      out = np.stack([weight[:, :8], weight[:, 8:]], axis=-1)
+      composite_shapes.append(out.shape)
+      return out
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding)
+    target_tree = {"mlp": {"wi_0": leaf, "wi_1": leaf}}
+    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
+
+    with mock.patch.object(
+        tensor_handling, "_binary_chunked_stack", wraps=tensor_handling._binary_chunked_stack  # pylint: disable=protected-access
+    ) as stack:
+      restored = load_dynamic.transform_hf_state_to_mt_state(
+          hf_state, target_tree, {mt_key: hf_source}, {mt_key: split}, MockConfig()
+      )["params"]["mlp"]
+
+    # The hook still sees one HF slice at a time (4 x 8 leaves stacked on a last axis of 2) ...
+    self.assertEqual(set(composite_shapes), {(4, 8, 2)})
+    # ... but nothing stacks tensors that still have that axis.
+    for call in stack.call_args_list:
+      self.assertTrue(all(t.shape[-1] != 2 for t in call.args[0]))
+    for i, k in enumerate(flat_keys):
+      # Multi-axis: (outer, inner) leading axes; single-axis: the scan axis 1.
+      index = divmod(i, leaf_shape[1]) if len(leaf_shape) == 4 else (slice(None), i)
+      np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
+      np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
+    self.assertEqual(restored["wi_0"].sharding, sharding)
+    self.assertEqual(restored["wi_1"].sharding, sharding)
+    self.assertEmpty(hf_state)
+
+  @parameterized.named_parameters(("one", 1), ("two", 2), ("three", 3), ("seven", 7), ("eight", 8))
+  def test_pieces_are_concatenated_in_pairs(self, num_pieces):
+    # One jitted concatenate of many pieces can take several times its result in XLA temporaries, so the pieces of a
+    # reshard are joined two at a time.
+    sharding = NamedSharding(self.mesh, PartitionSpec(None, "x"))
+    pieces = [jax.device_put(np.full((2, 4), i, dtype=np.float32), sharding) for i in range(num_pieces)]
+    expected = np.concatenate([np.asarray(p) for p in pieces], axis=0)
+    real_fn = tensor_handling._concatenate_fn  # pylint: disable=protected-access
+    arities = []
+
+    def counting_fn(axis, shard):
+      fn = real_fn(axis, shard)
+
+      def wrapped(*args):
+        arities.append(len(args))
+        return fn(*args)
+
+      return wrapped
+
+    with mock.patch.object(tensor_handling, "_concatenate_fn", side_effect=counting_fn):
+      result = tensor_handling._concatenate_pieces(pieces, 0, sharding)  # pylint: disable=protected-access
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, sharding)
+    self.assertLen(arities, num_pieces - 1)
+    self.assertTrue(all(a == 2 for a in arities))
+
+  @parameterized.named_parameters(
       # Tensors split over all devices: one reshard of the whole stack. Host tensors: one per tensor, per inner
       # stack and of the whole.
       ("single_axis_on_device", ["w0", "w1"], True, 1),

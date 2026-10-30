@@ -82,11 +82,14 @@ def _apply_hook_fns_any_host(weight, target_shape, hook_fns):
   the same tensors in the same order, so all hosts take the fallback together, as the gather requires.
   """
   try:
-    return apply_hook_fns(weight, target_shape, hook_fns)
+    res = apply_hook_fns(weight, target_shape, hook_fns)
   except RuntimeError:
     if not _spans_other_hosts(weight):
       raise
-    return apply_hook_fns(_gather_to_host(weight), target_shape, hook_fns)
+    res = apply_hook_fns(_gather_to_host(weight), target_shape, hook_fns)
+  if isinstance(res, jax.Array) and res is not weight:
+    jax.block_until_ready(res)
+  return res
 
 
 def _device_put(array, sharding):
@@ -125,12 +128,16 @@ def _concatenate_fn(axis, sharding):
   return jax.jit(lambda *pieces: np.concatenate(pieces, axis=axis), out_shardings=sharding)
 
 
-def _reshard(array, sharding):
+def _reshard(array, sharding, delete_input=False):
   """Places `array` with `sharding`; a large `jax.Array` is moved in slices along an axis `sharding` does not split.
 
   The read layout orders the devices by process and the model's mesh by topology. Between two device orders, XLA can
   reshard by gathering the whole array on every device: on two v5e-256 slices with data parallelism across them, the
   80-layer llama3.1-70b `wi_0` (37.6 GB) needed 70 GB per device. Slices of at most `_MAX_RESHARD_BYTES` bound that copy.
+
+  If `delete_input` is True, the caller guarantees `array` is an intermediate that nothing else references (e.g. not a
+  tensor still held in the HF state), so its device buffer is freed as soon as the slices are placed instead of
+  coexisting with the slices and the result.
   """
   if not isinstance(array, jax.Array) or array.nbytes <= _MAX_RESHARD_BYTES or not hasattr(sharding, "spec"):
     return _device_put(array, sharding)
@@ -144,7 +151,62 @@ def _reshard(array, sharding):
       jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
       for start in range(0, size, step)
   ]
-  return _concatenate_fn(axis, sharding)(*pieces)
+  if delete_input:
+    _delete_inputs(pieces, (array,))
+  return _concatenate_pieces(pieces, axis, sharding)
+
+
+def _buffer_pointers(array) -> set | None:
+  """The device buffer addresses of `array`'s addressable shards, or None if they cannot be read."""
+  try:
+    return {shard.data.unsafe_buffer_pointer() for shard in array.addressable_shards}
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+
+
+def _delete_inputs(results, inputs) -> None:
+  """Frees the device buffers of `inputs`, intermediates nothing else holds, once `results` are computed.
+
+  `results` is an array or a list of them. An input that is a result, or shares a buffer with one (e.g.
+  `jax.device_put` of an array already in place returns an array on the same buffer), is kept, and so is every
+  input when the buffers cannot be compared.
+  """
+  results = [r for r in (results if isinstance(results, (list, tuple)) else [results]) if isinstance(r, jax.Array)]
+  jax.block_until_ready(results)
+  kept = set()
+  for r in results:
+    pointers = None if r.is_deleted() else _buffer_pointers(r)
+    if pointers is None and not r.is_deleted():
+      return
+    kept |= pointers or set()
+  for x in inputs:
+    if not isinstance(x, jax.Array) or x.is_deleted() or any(x is r for r in results):
+      continue
+    pointers = _buffer_pointers(x)
+    if pointers is not None and not kept & pointers:
+      x.delete()
+
+
+def _concatenate_pieces(pieces, axis, sharding):
+  """Concatenates `pieces`, each placed with `sharding`, along `axis`, two at a time.
+
+  One jitted concatenate of many pieces can take several times its result in XLA temporaries: gpt-oss-120b scanned
+  asked for 200 GiB per device to join the slices of its 76 GB composite expert leaf on 8 TPU devices, and XLA on CPU
+  reports 4x the result for 43 slices but none for 2 to 8. Concatenating pairs keeps the peak at the pieces plus the
+  result, and each pair's inputs are freed as soon as the pair is joined.
+  """
+  pieces = list(pieces)
+  while len(pieces) > 1:
+    merged = []
+    for i in range(0, len(pieces) - 1, 2):
+      pair = _concatenate_fn(axis, sharding)(pieces[i], pieces[i + 1])
+      _delete_inputs(pair, (pieces[i], pieces[i + 1]))
+      pieces[i] = pieces[i + 1] = None
+      merged.append(pair)
+    if len(pieces) % 2:
+      merged.append(pieces[-1])
+    pieces = merged
+  return pieces[0]
 
 
 def _split_over_all_devices(tensor) -> bool:
@@ -253,19 +315,50 @@ def composite_hook_fn(hook_fns: Any, num_leaves: int) -> Callable:
   return hook
 
 
-def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
+def _binary_chunked_stack(tensors: List[np.ndarray], axis: int, delete_inputs: bool = False) -> np.ndarray:
   """Stacks JAX arrays along axis by binary division to limit memory usage from JAX compiler."""
   if not tensors:
     raise ValueError("Cannot stack empty list of tensors.")
   if len(tensors) == 1:
-    return np.expand_dims(tensors[0], axis=axis)
+    res = np.expand_dims(tensors[0], axis=axis)
+    if delete_inputs:
+      _delete_inputs(res, tensors)
+    return res
   if len(tensors) == 2:
-    return np.stack(tensors, axis=axis)
+    res = np.stack(tensors, axis=axis)
+    if delete_inputs:
+      _delete_inputs(res, tensors)
+    return res
 
   mid = len(tensors) // 2
-  left = _binary_chunked_stack(tensors[:mid], axis=axis)
-  right = _binary_chunked_stack(tensors[mid:], axis=axis)
-  return np.concatenate([left, right], axis=axis)
+  left = _binary_chunked_stack(tensors[:mid], axis=axis, delete_inputs=delete_inputs)
+  right = _binary_chunked_stack(tensors[mid:], axis=axis, delete_inputs=delete_inputs)
+  res = np.concatenate([left, right], axis=axis)
+  # `left` and `right` are this function's own stacks.
+  _delete_inputs(res, (left, right))
+  return res
+
+
+def _split_parts(tensor, num_parts: int, source) -> list:
+  """Returns the `num_parts` leaves of a composite hook output, which stacks them along its last axis.
+
+  With `num_parts` 0 the tensor is not composite and is returned alone. The composite output is freed once its parts
+  exist, unless it is `source` (the HF tensor the hook read), which the HF state may still hold.
+  """
+  if not num_parts:
+    return [tensor]
+  parts = [tensor[..., i] for i in range(num_parts)]
+  if tensor is not source:
+    _delete_inputs(parts, (tensor,))
+  return parts
+
+
+def _cast_and_free(array, dtype):
+  """`array.astype(dtype)`, freeing `array` when the cast made a copy."""
+  cast = array.astype(dtype)
+  if cast is not array:
+    _delete_inputs(cast, (array,))
+  return cast
 
 
 def _build_multi_axis_stacked_tensor(
@@ -275,13 +368,20 @@ def _build_multi_axis_stacked_tensor(
     target_leaf: Any,
     config,
     mt_key: str | tuple[str, ...] = "",
-) -> np.ndarray:
+    num_parts: int = 0,
+) -> Any:
   """Builds a MaxText tensor by stacking HF weights along several axes, in place on device.
 
   ``hf_source_keys`` is nested one level per stacked axis, outermost first (see
   ``nesting_depth``), and ``stacked_axes`` decides where those axes land in the
   target: leading for MoE expert stacking, or at ``param_scan_axis`` and beyond
   for a nested block scan.
+
+  With ``num_parts`` > 0, ``hook_fns`` is the hook of a composite key (see ``composite_hook_fn``) and
+  ``target_leaf`` is one of its leaves: each HF slice is split into its ``num_parts`` leaves right after the hook,
+  each leaf is stacked on its own, and the list of leaves is returned. The stacked composite never exists, so its
+  leaves are not sliced out of it while it still holds them all (qwen3.5-397b-a17b scanned on 16 devices ran out
+  of HBM there).
   """
   if hasattr(target_leaf, "sharding"):
     target_shape = target_leaf.shape
@@ -295,6 +395,8 @@ def _build_multi_axis_stacked_tensor(
   depth = nesting_depth(hf_source_keys)
   axes = stacked_axes(mt_key, config, depth)
   mt_slice_shape = slice_shape(target_shape, axes)
+  hook_shape = mt_slice_shape + (num_parts,) if num_parts else mt_slice_shape
+  num_outputs = max(1, num_parts)
 
   # Pre-derive the compatible sharding specs to avoid rank mismatches. The tensor
   # is assembled with its stacked axes leading and only moved into place at the
@@ -314,31 +416,55 @@ def _build_multi_axis_stacked_tensor(
     return jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*stacked_spec, *slice_spec))
 
   def gather(keys, level):
-    """Returns the tensor for `keys`, and whether it is still in the read layout (split over all devices)."""
+    """Returns the tensors (one per leaf) for `keys`, and whether they are still in the read layout."""
     if level == depth:
       # A tuple of keys is a composite HF source that the hook fuses into one leaf.
-      tensor = _apply_hook_fns_any_host(_get_hf_tensor(tensor_getter_fn, keys), mt_slice_shape, hook_fns)
-      as_read = _split_over_all_devices(tensor)
+      hf_tensor = _get_hf_tensor(tensor_getter_fn, keys)
+      tensors = _split_parts(_apply_hook_fns_any_host(hf_tensor, hook_shape, hook_fns), num_parts, hf_tensor)
+      del hf_tensor
+      as_read = all(_split_over_all_devices(t) for t in tensors)
     else:
-      parts = [gather(sub, level + 1) for sub in keys]
-      tensor = _binary_chunked_stack([part for part, _ in parts], axis=0)
-      as_read = all(part_as_read for _, part_as_read in parts)
+      subs = [gather(sub, level + 1) for sub in keys]
+      as_read = all(sub_as_read for _, sub_as_read in subs)
+      sub_tensors = [sub for sub, _ in subs]
+      del subs
+      tensors = []
+      for i in range(num_outputs):
+        column = [sub[i] for sub in sub_tensors]
+        for sub in sub_tensors:
+          sub[i] = None
+        # Leaf-level tensors are composite parts (new arrays) or may be HF tensors the HF state still holds.
+        tensors.append(_binary_chunked_stack(column, axis=0, delete_inputs=bool(num_parts) or level + 1 < depth))
+        del column
+      del sub_tensors
     # A stack of tensors split over all devices stays as read until the final reshard. `sharding_at` leaves out
     # the target's sharding of the axes not stacked yet, so placing an inner stack with it copies the stack across
     # those mesh axes: with ici_expert_parallelism=16, the DeepSeek-V3 experts took 16 times their final size on
     # each device.
     if as_read:
-      return tensor, True
+      return tensors, True
     if target_sharding is not None and level > 0:
-      tensor = _reshard(tensor, sharding_at(level))
-    return tensor, False
+      # Below the leaf level a tensor is a stack built here; at the leaf level it may be the HF tensor itself.
+      free = bool(num_parts) or level < depth
+      tensors = [_reshard(t, sharding_at(level), delete_input=free) for t in tensors]
+    return tensors, False
 
-  stacked_array = gather(hf_source_keys, 0)[0].astype(target_dtype)
-  if axes != tuple(range(depth)):
-    stacked_array = np.moveaxis(stacked_array, tuple(range(depth)), axes)
-  if target_sharding is not None:
-    stacked_array = _reshard(stacked_array, target_sharding)
-  return stacked_array
+  stacked = gather(hf_source_keys, 0)[0]
+  results = []
+  for i in range(num_outputs):
+    stacked_array = _cast_and_free(stacked[i], target_dtype)
+    stacked[i] = None
+    if axes != tuple(range(depth)):
+      moved = np.moveaxis(stacked_array, tuple(range(depth)), axes)
+      if moved is not stacked_array:
+        _delete_inputs(moved, (stacked_array,))
+      stacked_array = moved
+    # Without `num_parts`, a composite key's stacked leaves are split and placed by the caller.
+    if target_sharding is not None and (num_parts or not isinstance(mt_key, tuple)):
+      stacked_array = _reshard(stacked_array, target_sharding, delete_input=True)
+    results.append(stacked_array)
+    del stacked_array
+  return results if num_parts else results[0]
 
 
 def _build_single_axis_stacked_tensor(
@@ -348,8 +474,12 @@ def _build_single_axis_stacked_tensor(
     target_leaf: Any,
     config,
     mt_key: Any = "",
-) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along a single axis directly in place on device."""
+    num_parts: int = 0,
+) -> Any:
+  """Builds a MaxText tensor by stacking HF weights along a single axis directly in place on device.
+
+  ``num_parts`` builds the leaves of a composite key one by one, as in ``_build_multi_axis_stacked_tensor``.
+  """
   if hasattr(target_leaf, "sharding"):
     target_shape = target_leaf.shape
     target_sharding = target_leaf.sharding
@@ -381,6 +511,8 @@ def _build_single_axis_stacked_tensor(
   mt_slice_shape_list = list(target_shape)
   del mt_slice_shape_list[axis_to_stack]
   mt_slice_shape = tuple(mt_slice_shape_list)
+  hook_shape = mt_slice_shape + (num_parts,) if num_parts else mt_slice_shape
+  num_outputs = max(1, num_parts)
 
   if target_sharding is not None and hasattr(target_sharding, "spec"):
     spec_list = _full_spec(target_sharding, len(target_shape))
@@ -389,22 +521,36 @@ def _build_single_axis_stacked_tensor(
   else:
     slice_sharding = target_sharding
 
-  tensors_to_stack = []
+  tensors_to_stack = [[] for _ in range(num_outputs)]
   for hf_key_single in hf_source_keys:
     hf_tensor = _get_hf_tensor(tensor_getter_fn, hf_key_single)
-    processed_hf_tensor = _apply_hook_fns_any_host(hf_tensor, mt_slice_shape, hook_fns)
+    processed = _split_parts(_apply_hook_fns_any_host(hf_tensor, hook_shape, hook_fns), num_parts, hf_tensor)
+    for i, processed_hf_tensor in enumerate(processed):
+      if target_sharding is not None and not _split_over_all_devices(processed_hf_tensor):
+        # Only a hook output may be freed; without a hook the tensor may still be held in the HF state.
+        processed_hf_tensor = _reshard(
+            processed_hf_tensor, slice_sharding, delete_input=processed_hf_tensor is not hf_tensor
+        )
+      tensors_to_stack[i].append(processed_hf_tensor)
+    del hf_tensor, processed
 
-    if target_sharding is not None and not _split_over_all_devices(processed_hf_tensor):
-      processed_hf_tensor = _reshard(processed_hf_tensor, slice_sharding)
-    tensors_to_stack.append(processed_hf_tensor)
+  results = []
+  for i in range(num_outputs):
+    column, tensors_to_stack[i] = tensors_to_stack[i], None
+    stacked_array = _binary_chunked_stack(column, axis=axis_to_stack, delete_inputs=bool(num_parts))
+    del column
+    stacked_array = _cast_and_free(stacked_array, target_dtype)
+    # Without `num_parts`, a composite key's stacked leaves are split and placed by the caller.
+    if target_sharding is not None and (num_parts or not isinstance(mt_key, tuple)):
+      stacked_array = _reshard(stacked_array, target_sharding, delete_input=True)
+    results.append(stacked_array)
+    del stacked_array
+  return results if num_parts else results[0]
 
-  stacked_array = _binary_chunked_stack(tensors_to_stack, axis=axis_to_stack).astype(target_dtype)
-  if target_sharding is not None:
-    stacked_array = _reshard(stacked_array, target_sharding)
-  return stacked_array
 
-
-def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_leaf, config, mt_key=""):
+def get_hf_loading_function(
+    hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_leaf, config, mt_key="", num_parts=0
+):
   """Returns a function that builds one MaxText weight from its HF tensors.
 
   The function takes no arguments. If `mt_target_leaf` has a sharding, the weight is returned in the
@@ -418,15 +564,21 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
     mt_target_leaf: The target leaf, for example a `jax.ShapeDtypeStruct` with a sharding.
     config: The MaxText config.
     mt_key: The MaxText parameter key, used to place the axes of nested block scans.
+    num_parts: For a stacked (list) source of a composite key, its number of leaves: `hook_fn` is then the
+      composite hook, `mt_target_leaf` one of the leaves, and the function returns the list of leaves, each
+      stacked on its own (see `_build_multi_axis_stacked_tensor`).
   """
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str), or a tuple of keys that the hook fuses into one leaf
     def _loader(getter, key, leaf, hook):
       if hasattr(leaf, "sharding"):
-        array = _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf.shape, hook)
+        raw = _get_hf_tensor(getter, key)
+        array = _apply_hook_fns_any_host(raw, leaf.shape, hook)
         # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
         # even when weight_dtype is float32.
-        return _reshard(array.astype(leaf.dtype), leaf.sharding)
+        cast = array.astype(leaf.dtype)
+        # Without a hook or a cast, `cast` is the HF tensor itself, which may still be held in the HF state.
+        return _reshard(cast, leaf.sharding, delete_input=cast is not raw)
       else:
         return _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf, hook)
 
@@ -448,6 +600,7 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
         mt_target_leaf,
         config,
         mt_key,
+        num_parts=num_parts,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -460,4 +613,5 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
         mt_target_leaf,
         config,
         mt_key,
+        num_parts=num_parts,
     )
