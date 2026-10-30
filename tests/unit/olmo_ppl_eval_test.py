@@ -46,8 +46,8 @@ class OlmoPplEvalRowsTest(unittest.TestCase):
     np.testing.assert_array_equal(rows["targets_segmentation"], [[1, 1, 0, 0], [1, 0, 0, 0]])
     np.testing.assert_array_equal(rows["inputs_segmentation"], [[1, 1, 1, 0], [1, 1, 0, 0]])
 
-  def test_batches_hold_one_set_and_count_document_tokens(self):
-    """Each batch is one set; the last is padded with weightless rows; the denominator is sum(L), as OLMo-core."""
+  def _eval(self, loaded, scored):
+    """An OlmoPplEval over sets a (three documents) and b (one), loading `loaded` rows and scoring `scored`."""
     with tempfile.TemporaryDirectory() as d:
       for name, tokens in (("a", [1, 2, EOS, 3, EOS, 4, 5, 6, EOS]), ("b", [7, EOS])):
         os.makedirs(os.path.join(d, name, "val"))
@@ -55,26 +55,47 @@ class OlmoPplEvalRowsTest(unittest.TestCase):
       cfg = types.SimpleNamespace(
           olmo_ppl_eval_interval=1000,
           max_target_length=4,
-          global_batch_size_to_load_eval=2,
+          global_batch_size_to_load_eval=loaded,
+          micro_batch_size_to_eval_on=scored,
           olmo_ppl_eval_eos_token_id=EOS,
           olmo_ppl_eval_pad_token_id=PAD,
           olmo_ppl_eval_sets=["a", "b"],
           olmo_ppl_eval_dir=d,
       )
-      ev = olmo_ppl_eval.OlmoPplEval(cfg)
-    (label_a, batches_a, denom_a), (label_b, batches_b, denom_b) = ev.sets
+      return olmo_ppl_eval.OlmoPplEval(cfg)
+
+  def test_batches_hold_one_set_and_count_document_tokens(self):
+    """Each batch is one set; the last is padded with weightless rows; the denominator is sum(L), as OLMo-core."""
+    ev = self._eval(loaded=2, scored=2)
+    label_a, batches_a, denom_a = ev.sets[0]
+    label_b, batches_b, denom_b = ev.sets[1]
     self.assertEqual((label_a, label_b), ("a-validation", "b-validation"))
     self.assertEqual((len(batches_a), denom_a), (2, 3 + 2 + 4))  # 3 docs in batches of 2
     self.assertEqual((len(batches_b), denom_b), (1, 2))
     np.testing.assert_array_equal(batches_a[1]["targets_segmentation"][1], [0, 0, 0, 0])  # fill row
     self.assertTrue(ev.due(999) and not ev.due(1000) and ev.due(1999))
 
+  def test_documents_only_in_scored_rows(self):
+    """With fewer rows scored than loaded, documents fill only the scored rows, so the denominator counts only
+    documents the eval step sees; the arrays keep the loaded size."""
+    ev = self._eval(loaded=4, scored=2)
+    _, batches, denom = ev.sets[0]
+    self.assertEqual((len(batches), denom), (2, 3 + 2 + 4))  # 3 docs, 2 per batch
+    for rows in batches:
+      self.assertEqual(rows["inputs"].shape, (4, 4))
+      np.testing.assert_array_equal(rows["targets_segmentation"][2:], np.zeros((2, 4)))  # unscored rows
+    scored_targets = sum(int(rows["targets_segmentation"][:2].sum()) for rows in batches)
+    self.assertEqual(scored_targets, (3 - 1) + (2 - 1) + (4 - 1))
+
 
 class EmoEvalPoolsTest(unittest.TestCase):
   """Under ``emo_eval_pools`` the router keeps the eval pool instead of sampling a pool size per document."""
 
   def _mask(self, key):
+    """(logits, EMo-masked logits) for a router with pools in [2, 8] of 8 experts, sampled with `key`."""
     cfg = types.SimpleNamespace(
+        emo_document_expert_pool_choices=[],
+        emo_document_expert_pool_probs=[],
         emo_min_document_expert_pool=2,
         emo_max_document_expert_pool=8,
         emo_eval_document_expert_pool=8,
@@ -97,6 +118,63 @@ class EmoEvalPoolsTest(unittest.TestCase):
     with olmoe3.emo_eval_pools():
       logits, masked = self._mask(jax.random.PRNGKey(1))
     np.testing.assert_array_equal(np.asarray(masked), np.asarray(logits))  # eval pool 8 = every expert
+
+
+class PplEvalGraphdefTest(unittest.TestCase):
+  """The perplexity program's MoE layers don't drop tokens, whatever the training ragged_buffer_factor."""
+
+  def _moe_modules(self, rbf, eval_rbf=-1.0):
+    """The perplexity graphdef's RoutedMoE modules for training / eval ragged_buffer_factor `rbf` / `eval_rbf`.
+
+    The model is built dropless (a capped buffer needs expert parallelism, which one CPU device lacks); the builder
+    only reads the two buffer factors, so they come from a stand-in config.
+    """
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    from jax.sharding import Mesh  # pylint: disable=import-outside-toplevel
+    from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
+    from maxtext.layers import moe, quantizations  # pylint: disable=import-outside-toplevel
+    from maxtext.trainers.pre_train import train  # pylint: disable=import-outside-toplevel
+    from maxtext.utils import maxtext_utils, model_creation_utils  # pylint: disable=import-outside-toplevel
+    from maxtext.utils.globals import MAXTEXT_PKG_DIR  # pylint: disable=import-outside-toplevel
+
+    cfg = pyconfig.initialize(
+        [
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            "model_name=olmoe3-30m",
+            "run_name=ppl_graphdef",
+            "enable_checkpointing=False",
+            "scan_layers=False",
+            "per_device_batch_size=1",
+            "max_target_length=64",
+            "override_model_config=True",
+            "vocab_size=512",
+        ]
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = model_creation_utils.get_transformer_model(
+        cfg, mesh, quantizations.configure_quantization(cfg), rngs=nnx.Rngs(0)
+    )
+    graphdef, state = nnx.split(model)
+    factors = types.SimpleNamespace(ragged_buffer_factor=rbf, eval_ragged_buffer_factor=eval_rbf)
+    ppl = train.build_ppl_eval_graphdef(factors, graphdef, state)
+    modules = [m for _, m in nnx.iter_graph(nnx.merge(ppl, state)) if isinstance(m, moe.RoutedMoE)]
+    self.assertTrue(modules)
+    self.assertTrue(all(type(m).__name__ == "OLMoE3LatentRoutedMoE" for m in modules))  # the subclass is matched
+    return ppl is graphdef, modules
+
+  def test_capped_training_buffer_runs_dropless(self):
+    same, modules = self._moe_modules(1.0625)
+    self.assertFalse(same)
+    self.assertTrue(all(m.force_dropless for m in modules))
+
+  def test_eval_buffer_factor_is_used_when_set(self):
+    _, modules = self._moe_modules(1.0625, eval_rbf=2.0)
+    self.assertTrue(all(m.get_ragged_buffer_factor() == 2.0 and not m.force_dropless for m in modules))
+
+  def test_dropless_training_keeps_its_graphdef(self):
+    same, _ = self._moe_modules(-1.0)
+    self.assertTrue(same)
 
 
 if __name__ == "__main__":

@@ -1408,11 +1408,22 @@ class MoEGeneral(BaseModel):
           " segment ids."
       ),
   )
+  static_loss_cotangent: bool = Field(
+      False,
+      description=(
+          "Without gradient accumulation, differentiate the token-loss sum times a static 1 / (global batch * sequence"
+          " length) and divide the f32 gradients by the loss divisor afterwards, as manual gradient accumulation does,"
+          " instead of differentiating the loss already divided by it: 1 / divisor rounds in the bf16 backward (e.g."
+          " the fused LM-head CE kernel's cotangent), a gradient scale bias of up to ~0.4% that depends on the batch."
+      ),
+  )
   olmoe3_router_metrics: bool = Field(
       False,
       description=(
-          "OLMoE3: log OLMo-core's router metrics per MoE layer (learning/block_NN/...) and in total (learning/...):"
-          " load_balancing_loss and router_z_loss, scaled and unscaled, load_imbalance and global_load_imbalance."
+          "OLMoE3: log OLMo-core's router metrics per MoE layer (learning/block_NN/..., NN the layer's index) and in"
+          " total (learning/...): load_balancing_loss and router_z_loss, scaled and unscaled, load_imbalance and"
+          " global_load_imbalance; and its other training metrics: ce_loss, ce_perplexity, z_loss_unscaled and"
+          " masked_instance_fraction."
           " Totals follow OLMo-core: imbalance is the max over layers for load_imbalance and the sum over layers for"
           " global_load_imbalance; losses are sums over layers."
       ),
