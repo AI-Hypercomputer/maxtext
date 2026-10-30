@@ -1,19 +1,20 @@
 # model config for OLMo 3.5 small, Option A of the e256k8 family
-# (E=256, K=8, F=3072, 2x shared expert = 3072; 4.041B active / 72.499B total).
+# (E=256, K=8, F=3072, 2x shared expert = 3072; 4.123B active / 72.581B total).
 #
-# `olmo35-small.yml` (agagik-olmoe3-v4: d_model 1536, 40 layers, 7:1 KDA:attention, head_dim 128,
-# 512 experts top-16 of width 1536) under the transformation that makes `olmo35-tiny-e256k8-sh2x.yml`
-# from `olmo35-tiny.yml`: half the experts (512 -> 256) and top-k (16 -> 8) at twice the routed
-# expert width (1536 -> 3072), iso-total routed parameters and iso-active routed FLOPs, plus a 2x
-# wider shared expert (1536 -> 3072). The muP target for an `olmo35-tiny-e256k8-sh2x` base: same
-# family, cadence and head_dim, only width and depth differ.
+# `olmo35-small.yml` (agagik-olmoe3-v4: d_model 1536, 40 layers, 7:1 KDA:attention, 512 experts top-16 of
+# width 1536) under the transformation that makes `olmo35-tiny-e256k8-sh2x.yml` from `olmo35-tiny.yml`: half the
+# experts (512 -> 256) and top-k (16 -> 8) at twice the routed expert width (1536 -> 3072), iso-total routed
+# parameters and iso-active routed FLOPs, plus a 2x wider shared expert (1536 -> 3072). With head_dim 256
+# instead of 128 (128 runs poorly on v7x), at the same widths: full attention 8 heads (4 KV) x 256, KDA 8 heads
+# with key / value head dims 256 / 512 -- the head layout of `olmoe3-3p5b-e256k8-sh2x`.
 # Parameter counts:
-#   total 72,498,550,144 / active 4,041,217,408 / active non-embedding 3,887,076,736
+#   total 72,580,704,064 / active 4,123,371,328 / active non-embedding 3,969,230,656
+#   (4:1, inhomogeneous_layer_cycle_interval=5: total 72,547,528,000 / active 4,090,195,264)
 
 base_emb_dim: 1536
-base_num_query_heads: 16
-base_num_kv_heads: 8
-head_dim: 128
+base_num_query_heads: 8
+base_num_kv_heads: 4
+head_dim: 256
 base_num_decoder_layers: 40
 
 # Layer 0 is dense with a wide SwiGLU (8 * d_model); MoE layers use a shared
@@ -32,10 +33,10 @@ moe_expert_input_dim: 768
 # Mixer cycle: full attention on every 8th layer (indices 7, 15, ...),
 # Kimi Delta Attention elsewhere.
 inhomogeneous_layer_cycle_interval: 8
-gdn_num_key_heads: 16
-gdn_num_value_heads: 16
-gdn_key_head_dim: 128
-gdn_value_head_dim: 256   # head_dim * kda_expand_v (2.0)
+gdn_num_key_heads: 8
+gdn_num_value_heads: 8
+gdn_key_head_dim: 256
+gdn_value_head_dim: 512   # head_dim * kda_expand_v (2.0)
 gdn_conv_kernel_dim: 4
 gdn_chunk_size: 64
 
