@@ -120,7 +120,8 @@ case "${TOPOLOGY}" in
       mcjax) ENABLE_SINGLE_CONTROLLER=false ;;
       *) echo "RUNTIME must be pathways or mcjax, got ${RUNTIME}" >&2; exit 1 ;;
     esac
-    MODEL_NAME="olmoe3-3p5b-e256k8-sh2x"
+    # PRESET_MODEL_NAME swaps the model at the same recipe (e.g. olmo35-small-e256k8-sh2x, the 7:1 small, for an A/B).
+    MODEL_NAME="${PRESET_MODEL_NAME:-olmoe3-3p5b-e256k8-sh2x}"
     SEQ_LEN=8192
     PER_DEVICE_BATCH=1.0
     GRAD_ACCUM_STEPS=1
@@ -143,7 +144,9 @@ case "${TOPOLOGY}" in
       *) echo "EP must be 64 or 128 for TOPOLOGY=8x8x48, got ${EP}" >&2; exit 1 ;;
     esac
     MOE_A2A_TOKEN_CHUNKS=2
-    RAGGED_BUFFER_FACTOR=1.0625
+    # PRESET_RAGGED_BUFFER_FACTOR sizes the all-to-all receive buffer (rows beyond it are dropped; add
+    # moe_log_a2a_drops=true to log how many).
+    RAGGED_BUFFER_FACTOR="${PRESET_RAGGED_BUFFER_FACTOR:-1.0625}"
     BF16_KDA_STATE=false
     NORM_METRICS=none
     LIBTPU_OVERRIDE="${V4_8X8X48_LIBTPU}"
@@ -284,8 +287,12 @@ export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} ${LIBTPU}"
 # Megablox tile dimensions: the 256-aligned 896 / 1792 N-tiles divide both the baseline
 # routed width (F=1792) and the 2x wider routed width (F=3584: 3584 = 4 x 896 = 2 x 1792),
 # fit TPU v4's 16 MiB VMEM, and are the tiles verified on 1x and 3x v4-2048.
-WI_TILE_HALF=896
-WI_TILE_FULL=1792
+# GMM tiles along the routed-expert width: half and all of it (3584 for olmoe3-3p5b-e256k8-sh2x, 3072 for
+# olmo35-small-e256k8-sh2x).
+case "${MODEL_NAME}" in
+  olmo35-small-e256k8-sh2x) WI_TILE_HALF=768; WI_TILE_FULL=1536 ;;
+  *) WI_TILE_HALF=896; WI_TILE_FULL=1792 ;;
+esac
 
 echo "=== OLMo 3.5 Small (${MODEL_NAME}) TPU v4 Run ==="
 echo "  model_name               : ${MODEL_NAME}"
