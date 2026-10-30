@@ -270,8 +270,18 @@ def get_data(golden_data_point, config):
   model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
-  if config.use_multimodal:
+  # Audio-only multimodal models (e.g. Ming) provide `audio_values` instead of `pixel_values`.
+  if config.use_audio and golden_data_point.get("audio_values") is not None:
+    audio_values = np.asarray(golden_data_point["audio_values"], dtype=np.float32)  # [1, T_mel, n_mels]
+    # Tile to the global batch: audio embeddings are reshaped per batch row when merged into the text.
+    audio_values = np.concatenate([audio_values] * config.global_batch_size_to_train_on, axis=0)
+    max_logging.log(f"audio_values.shape = {audio_values.shape}")
+  else:
+    audio_values = None
+
+  if config.use_multimodal and audio_values is None:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
+  if config.use_multimodal and "pixel_values" in golden_data_point:
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
     # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
@@ -349,7 +359,7 @@ def get_data(golden_data_point, config):
     decoder_positions = np.stack(
         [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
     )
-  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values
+  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values, audio_values
 
 
 def main(config, test_args):  # pylint: disable=W0621
@@ -402,7 +412,7 @@ def main(config, test_args):  # pylint: disable=W0621
   nnx_graphdef, nnx_state = nnx.split(model)
 
   @jax.jit
-  def eval_step_nnx(step_state, ids, decoder_positions, decoder_segment_ids, images=None):
+  def eval_step_nnx(step_state, ids, decoder_positions, decoder_segment_ids, images=None, audios=None):
     """Fused NNX forward pass.
 
     Without jit the decoder runs op-by-op and every layer's intermediates stay
@@ -417,6 +427,7 @@ def main(config, test_args):  # pylint: disable=W0621
           decoder_positions=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           encoder_images=images,
+          encoder_audios=audios,
           enable_dropout=False,
       )
 
@@ -454,9 +465,11 @@ def main(config, test_args):  # pylint: disable=W0621
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
       max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
+      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images, audios = get_data(
+          golden_data_point, config
+      )
       max_logging.log("maxtext forward pass")
-      full_train_logits = eval_step_nnx(nnx_state, ids, decoder_positions, decoder_segment_ids, images)
+      full_train_logits = eval_step_nnx(nnx_state, ids, decoder_positions, decoder_segment_ids, images, audios)
 
       # Only batch element 0 is compared; slice before the allgather so the
       # full [batch, seq, vocab] logits are never materialized per host.
