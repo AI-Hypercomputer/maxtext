@@ -397,6 +397,10 @@ def generate_decode_checkpoint(config):
 
 def main(argv: Sequence[str]) -> None:
   print(argv)
+  # Match train.py (and the other entry points): the full-state checkpoint was written with
+  # unsafe_rbg keys, so the restore target must use the same PRNG impl or the nnx_aux RNG key
+  # shapes disagree ((layers, 2) threefry vs (layers, 4) rbg) and Orbax refuses to load.
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   config = pyconfig.initialize(argv)
   generate_decode_checkpoint(config)
 

@@ -18,6 +18,7 @@ and then running decode with it.
 """
 from datetime import datetime
 import os
+import jax
 import pytest
 
 from maxtext.inference.decode import main as decode_main
@@ -99,6 +100,10 @@ def run_e2e_test_flow(
       ]
       + pathways_command
   )
+  # The end-to-end scripts run this step as its own process, which starts on JAX's default
+  # threefry impl rather than the unsafe_rbg that train_main left behind in this process.
+  # Reset it so the restore target is built the way it is in production (b/576849994).
+  jax.config.update("jax_default_prng_impl", "threefry2x32")
   generate_param_only_ckpt_main(generate_param_only_ckpt_config)
 
   # Run inference on parameter-only checkpoint
