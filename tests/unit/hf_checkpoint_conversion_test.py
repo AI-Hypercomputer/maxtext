@@ -35,6 +35,7 @@ from maxtext.checkpoint_conversion.utils.hf_shape import (
     GEMMA4_HF_WEIGHTS_TO_SHAPE,
     _get_gemma4_layer_attention_dims,
 )
+from maxtext.checkpoint_conversion.utils import utils as conv_utils
 from maxtext.checkpoint_conversion.utils.utils import (
     _recursive_update,
     load_orbax_checkpoint,
@@ -644,6 +645,35 @@ class Gemma3And4CheckpointConversionTest(unittest.TestCase):
     self.assertEqual(q, 16 * 512)
     self.assertEqual(kv, 2 * 512)
     self.assertEqual(norm, 512)
+
+
+class SaveWeightsToCheckpointTest(unittest.TestCase):
+  """Tests that save_weights_to_checkpoint sizes the Orbax save buffers from the config."""
+
+  def _save(self, config):
+    """Runs save_weights_to_checkpoint with Orbax mocked out and returns the checkpoint manager kwargs."""
+    with (
+        unittest.mock.patch.object(conv_utils.checkpointing, "create_orbax_checkpoint_manager") as create,
+        unittest.mock.patch.object(conv_utils.checkpointing, "save_checkpoint", return_value=True),
+        unittest.mock.patch.object(conv_utils.checkpointing, "wait_until_finished"),
+    ):
+      conv_utils.save_weights_to_checkpoint(
+          "/tmp/unused_checkpoint_dir",
+          {"w": np.zeros((2, 2), dtype=np.float32)},
+          device_count=1,
+          use_ocdbt=True,
+          use_zarr3=True,
+          config=config,
+      )
+    return create.call_args.kwargs
+
+  def test_passes_checkpoint_storage_concurrent_gb_from_config(self):
+    kwargs = self._save(SimpleNamespace(checkpoint_storage_concurrent_gb=40))
+    self.assertEqual(kwargs["checkpoint_storage_concurrent_gb"], 40)
+
+  def test_keeps_the_manager_default_without_config(self):
+    kwargs = self._save(None)
+    self.assertNotIn("checkpoint_storage_concurrent_gb", kwargs)
 
 
 if __name__ == "__main__":
