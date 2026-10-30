@@ -1130,11 +1130,9 @@ def build_first_phase_graphdef(config, jit_model, state):
   return jit_model_first_phase
 
 
-def aot_compile_step(p_step, lower_args, compiler_options, prefix):
+def aot_compile_step(p_step, lower_args, compiler_options=None, prefix=""):
   """Lowers and compiles p_step ahead of time (warms the executable cache) and prints its memory stats."""
-  compiled = p_step.lower(*lower_args).compile(compiler_options=compiler_options)
-  max_utils.print_compiled_memory_stats(compiled.memory_analysis(), prefix=prefix)
-  return compiled
+  return train_utils.aot_compile_step(p_step, lower_args, compiler_options=compiler_options, prefix=prefix)
 
 
 def make_synthetic_batch(config, shaped_batch, seed=0):
@@ -1379,9 +1377,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       # compile would only add a third full compilation on top of the profiling
       # compile and the FDO recompile; skip it and its memory stats.
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
-      compiled_stats = compiled.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_stats, prefix="train")
+      aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
       precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
@@ -1404,9 +1400,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
         eval_lower_args = (state, shaped_eval_batch, init_rng)
       else:
         eval_lower_args = (state, shaped_eval_batch)
-      compiled_eval = p_eval_step.lower(*eval_lower_args).compile(compiler_options=compiler_options)
-      compiled_eval_stats = compiled_eval.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
+      aot_compile_step(p_eval_step, eval_lower_args, compiler_options, prefix="eval")
       precompiled_eval = True
       if p_eval_step_dropless is not None:
         aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")

@@ -16,6 +16,7 @@
 
 import itertools
 import pathlib
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock
 
+from absl.testing import absltest
 import grain
 import jax
 import numpy as np
@@ -33,6 +35,8 @@ import pytest
 
 from maxtext.common import grain_utility
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.utils import max_utils
+from maxtext.utils import sharding
 from maxtext.utils import train_utils
 from maxtext.utils.train_utils import (
     validate_train_config,
@@ -428,5 +432,154 @@ class TestValidateCompletedSteps(unittest.TestCase):
     )
 
 
+class TestCompileXlaFlags(unittest.TestCase):
+  """Tests that compile_xla_flags are applied to JIT and AOT-compiled train/eval steps without step-0 recompilation."""
+
+  # pylint: disable=protected-access
+
+  @staticmethod
+  def _make_compile_config(compile_xla_flags: str):
+    """Builds a minimal config namespace for jit_train_and_eval_step and aot_compile_step."""
+    return SimpleNamespace(
+        enable_diloco=False,
+        compiled_trainstep_file="",
+        logical_axis_rules=(("batch", "data"),),
+        logical_axis_rules_for_eval=(("batch", "data"),),
+        shard_mode="auto",
+        input_data_sharding_logical_axes=("batch",),
+        compile_xla_flags=compile_xla_flags,
+    )
+
+  @staticmethod
+  def _dummy_train_step(model, config, state_mesh_shardings, params_shardings, state, batch):
+    del model, config, state_mesh_shardings, params_shardings
+    return {"w": state["w"] + batch["inputs"]}, {"loss": jax.numpy.sum(batch["inputs"])}
+
+  @staticmethod
+  def _dummy_eval_step(model, config, state, batch):
+    del model, config
+    return {"eval_loss": jax.numpy.sum(state["w"] * batch["inputs"])}
+
+  def test_jit_train_and_eval_step_attaches_compile_xla_flags(self):
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = self._make_compile_config("--xla_cpu_enable_fast_math=False --xla_sc_disable_megacore_partitioning=true")
+    state = {"w": jax.device_put(np.ones((len(jax.devices()), 4), dtype=np.float32), replicated)}
+    state_shardings = {"w": replicated}
+
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model=None,
+        mesh=mesh,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        train_step=self._dummy_train_step,
+        eval_step=self._dummy_eval_step,
+        eval_data_iterator=[1],
+        params_shardings=state_shardings,
+    )
+
+    expected_kvs = (
+        ("xla_cpu_enable_fast_math", "False"),
+        ("xla_sc_disable_megacore_partitioning", "true"),
+    )
+    self.assertEqual(p_train_step._jit_info.compiler_options_kvs, expected_kvs)
+    self.assertEqual(p_eval_step._jit_info.compiler_options_kvs, expected_kvs)
+
+  def test_aot_compile_step_and_step0_use_option_compiled_executable(self):
+    pxla = sys.modules["jax._src.interpreters.pxla"]
+
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = self._make_compile_config("--xla_cpu_enable_fast_math=False")
+    compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+    batch_shape = (len(jax.devices()), 4)
+    state = {"w": jax.device_put(np.ones(batch_shape, dtype=np.float32), replicated)}
+    state_shardings = {"w": replicated}
+
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model=None,
+        mesh=mesh,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        train_step=self._dummy_train_step,
+        eval_step=self._dummy_eval_step,
+        eval_data_iterator=[1],
+        params_shardings=state_shardings,
+    )
+
+    data_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
+    shaped_batch = {"inputs": jax.ShapeDtypeStruct(batch_shape, jax.numpy.float32, sharding=data_sharding)}
+    real_batch = {"inputs": jax.device_put(np.ones(batch_shape, dtype=np.float32), data_sharding)}
+
+    expected_kvs = (("xla_cpu_enable_fast_math", "False"),)
+    aot_compile_fn = getattr(train_utils, "aot_compile_step", None)
+    self.assertIsNotNone(aot_compile_fn, "train_utils.aot_compile_step must be defined")
+
+    with mock.patch.object(
+        pxla.UnloadedMeshExecutable, "from_hlo", wraps=pxla.UnloadedMeshExecutable.from_hlo
+    ) as from_hlo_spy:
+      with jax.set_mesh(mesh):
+        compiled_train = aot_compile_fn(p_train_step, (state, shaped_batch), compiler_options, prefix="train")
+        compiled_eval = aot_compile_fn(p_eval_step, (state, shaped_batch), compiler_options, prefix="eval")
+
+        self.assertEqual(from_hlo_spy.call_count, 2)
+        for call in from_hlo_spy.call_args_list:
+          self.assertEqual(call.kwargs["compiler_options_kvs"], expected_kvs)
+
+        # The option-compiled executables must be cached on the lowered MeshComputation objects.
+        self.assertIs(p_train_step.lower(state, shaped_batch)._lowering._executable, compiled_train._executable)
+        self.assertIs(p_eval_step.lower(state, shaped_batch)._lowering._executable, compiled_eval._executable)
+
+        # Executing step 0 must reuse the option-compiled executables without recompiling.
+        new_state, train_metrics = p_train_step(state, real_batch)
+        eval_metrics = p_eval_step(new_state, real_batch)
+        jax.block_until_ready((new_state, train_metrics, eval_metrics))
+
+        self.assertEqual(from_hlo_spy.call_count, 2)
+
+  def test_empty_compile_xla_flags_caches_executable_without_recompiling(self):
+    pxla = sys.modules["jax._src.interpreters.pxla"]
+
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = self._make_compile_config("")
+    compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+    batch_shape = (len(jax.devices()), 4)
+    state = {"w": jax.device_put(np.ones(batch_shape, dtype=np.float32), replicated)}
+    state_shardings = {"w": replicated}
+
+    p_train_step, _ = train_utils.jit_train_and_eval_step(
+        config,
+        model=None,
+        mesh=mesh,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        train_step=self._dummy_train_step,
+        params_shardings=state_shardings,
+    )
+    self.assertEqual(p_train_step._jit_info.compiler_options_kvs, ())
+
+    data_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
+    shaped_batch = {"inputs": jax.ShapeDtypeStruct(batch_shape, jax.numpy.float32, sharding=data_sharding)}
+    real_batch = {"inputs": jax.device_put(np.ones(batch_shape, dtype=np.float32), data_sharding)}
+
+    aot_compile_fn = getattr(train_utils, "aot_compile_step", None)
+    self.assertIsNotNone(aot_compile_fn, "train_utils.aot_compile_step must be defined")
+
+    with mock.patch.object(
+        pxla.UnloadedMeshExecutable, "from_hlo", wraps=pxla.UnloadedMeshExecutable.from_hlo
+    ) as from_hlo_spy:
+      with jax.set_mesh(mesh):
+        compiled_train = aot_compile_fn(p_train_step, (state, shaped_batch), compiler_options, prefix="train")
+        self.assertEqual(from_hlo_spy.call_count, 1)
+        self.assertIs(p_train_step.lower(state, shaped_batch)._lowering._executable, compiled_train._executable)
+
+        new_state, _ = p_train_step(state, real_batch)
+        jax.block_until_ready(new_state)
+        self.assertEqual(from_hlo_spy.call_count, 1)
+
+
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
