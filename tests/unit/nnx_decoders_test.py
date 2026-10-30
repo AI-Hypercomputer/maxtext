@@ -52,6 +52,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
+from maxtext.layers import embeddings
 from maxtext.layers import fsdp_prefetch
 from maxtext.layers import fsdp_prefetch_inhomogeneous
 from maxtext.layers import linears
@@ -62,7 +63,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
+from maxtext.models import gemma4, gemma4_small, olmo3, qwen3, qwen3_5
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, sharding
@@ -2106,6 +2107,33 @@ class ScannedCycleLayerCountTest(unittest.TestCase):
 
   def test_whole_cycles_build(self):
     self._build(8)
+
+
+class Olmo3RopeScalingTest(unittest.TestCase):
+  """Olmo 3 applies YaRN to full-attention layers only; sliding-window layers use plain RoPE."""
+
+  def _rotary(self, attention_type):
+    """Returns the rotary embedding an olmo3-7b layer of `attention_type` builds."""
+    cfg = _make_config(model_name="olmo3-7b", head_dim=64, vocab_size=256)
+    mesh = _make_mesh(cfg)
+    layer = nnx.eval_shape(
+        lambda: olmo3.Olmo3DecoderLayer(
+            config=cfg,
+            mesh=mesh,
+            model_mode=MODEL_MODE_TRAIN,
+            attention_type=attention_type,
+            rngs=nnx.Rngs(0),
+        )
+    )
+    return layer.attention.rotary_embedding
+
+  def test_global_layers_use_yarn(self):
+    self.assertIsInstance(self._rotary(AttentionType.GLOBAL), embeddings.YarnRotaryEmbedding)
+
+  def test_sliding_layers_use_plain_rope_with_same_theta(self):
+    rotary = self._rotary(AttentionType.LOCAL_SLIDING)
+    self.assertIs(type(rotary), embeddings.RotaryEmbedding)
+    self.assertEqual(rotary.max_timescale, 500000)
 
 
 class TestNNXDecoderPrefetching(unittest.TestCase):
