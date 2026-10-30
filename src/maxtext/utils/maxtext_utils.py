@@ -16,6 +16,7 @@
 """Utils that are only interesting to MaxText."""
 
 import functools
+import math
 import os
 from typing import Sequence
 
@@ -2366,12 +2367,38 @@ def reduce_moe_aux_losses(losses, reduction: str):
   raise ValueError(f"moe_aux_loss_reduction must be 'mean' or 'sum', got {reduction!r}")
 
 
+def wsds_stages(config):
+  """``[(end step, peak LR multiplier)]`` of the stepped WSD-S schedule (``lr_schedule_type=wsds``).
+
+  Stage k ends at Chinchilla multiple c_k = wsds_first_multiple * 2^k (1xC = wsds_chinchilla_tokens tokens) and peaks at
+  learning_rate / sqrt(c_k) (wsds_stepped; else at learning_rate): the LR-vs-duration rule of OLMo-core's
+  WSDSChinchillaRunConfigurator (stepped_schedule), so only learning_rate (optimal at 1xC) is tuned. The last stage ends
+  at learning_rate_schedule_steps and takes its own end multiple (the doubling's, when it ends on one).
+  """
+  tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length
+  c_steps = config.wsds_chinchilla_tokens / tokens_per_step
+  total = config.learning_rate_schedule_steps
+  stages, multiple = [], config.wsds_first_multiple
+  while True:
+    end = int(round(multiple * c_steps))
+    if end >= total:
+      # A run that ends on a doubling (e.g. a 1xC tuning run) keeps its exact multiple, as the longer run's stage does.
+      stages.append((total, multiple if end == total else total / c_steps))
+      break
+    stages.append((end, multiple))
+    multiple *= 2
+  return [(end, 1.0 / math.sqrt(c) if config.wsds_stepped else 1.0) for end, c in stages]
+
+
 def create_learning_rate_schedule(config):
   """Creates a learning rate schedule with warmup and decay.
 
   Supports two schedule types:
   - Cosine: Inspired by Llama2's learning rate schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
   - WSD (Warmup-Stable-Decay): Maintains constant learning rate for most of training before final decay
+  - WSDS (WSD-Simplified, stepped): stages ending at Chinchilla doublings (`wsds_stages`), each at its own peak and ending
+    in a linear decay over wsds_decay_steps_fraction of the stage to [peak * learning_rate_final_fraction]; the warmup
+    is inside the first stage
 
   Schedule structure:
   1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
@@ -2399,6 +2426,8 @@ def create_learning_rate_schedule(config):
 
   pieces = []
   boundaries = []
+  stages = wsds_stages(config) if config.lr_schedule_type == types.LearningRateScheduleType.WSDS else None
+  warmup_peak = lr * stages[0][1] if stages else lr
 
   # With an offset, step i trains at lr * (i + offset) / warmup_steps, so the first step is not wasted at zero and the
   # schedule reaches lr at step warmup_steps - offset, as a trainer that counts steps from one does (OLMo-core).
@@ -2406,7 +2435,7 @@ def create_learning_rate_schedule(config):
   warmup_steps -= offset
   if warmup_steps > 0:
     warmup_schedule = optax.linear_schedule(
-        init_value=lr * offset / (warmup_steps + offset), end_value=lr, transition_steps=warmup_steps
+        init_value=warmup_peak * offset / (warmup_steps + offset), end_value=warmup_peak, transition_steps=warmup_steps
     )
     pieces.append(warmup_schedule)
     boundaries.append(warmup_steps)
@@ -2417,6 +2446,29 @@ def create_learning_rate_schedule(config):
       cos_schedule = make_cos_schedule(lr, final_lr, cos_steps)
       pieces.append(cos_schedule)
       boundaries.append(warmup_steps + cos_steps)
+
+  elif stages:  # WSDS
+    start = 0
+    for i, (end, multiplier) in enumerate(stages):
+      peak = lr * multiplier
+      decay_steps = int(round(config.wsds_decay_steps_fraction * (end - start)))
+      stable_start = max(warmup_steps, 0) if i == 0 else start
+      stable_steps = end - decay_steps - stable_start
+      if stable_steps < 0:
+        raise ValueError(
+            f"WSDS stage {i} (steps {start}..{end}): warmup and its decay ({decay_steps} steps) don't fit in it."
+        )
+      if stable_steps > 0:
+        pieces.append(optax.constant_schedule(peak))
+        boundaries.append(stable_start + stable_steps)
+      if decay_steps > 0:
+        # As OLMo-core's WSDS: the stage's t-th decay step trains at peak + (floor - peak) * t / decay_steps.
+        pieces.append(optax.linear_schedule(peak, peak * config.learning_rate_final_fraction, decay_steps))
+        boundaries.append(end)
+      start = end
+    max_logging.log(
+        "WSDS stages (end step, peak LR): " + ", ".join(f"({end}, {lr * multiplier:.4g})" for end, multiplier in stages)
+    )
 
   else:  # WSD
     decay_steps = int(config.learning_rate_schedule_steps * config.wsd_decay_steps_fraction)

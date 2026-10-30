@@ -924,6 +924,84 @@ class TestLearningRateSchedules(unittest.TestCase):
     self.assertIn("wsd_decay_steps_fraction", str(cm.exception))
 
 
+class TestWsdsSchedule(unittest.TestCase):
+  """lr_schedule_type=wsds: stages at Chinchilla doublings, peak learning_rate / sqrt(c), a linear decay ending each."""
+
+  LR = 1e-3
+
+  def _schedule(self, steps, c_steps=100, **kwargs):
+    """The schedule with 1xC = `c_steps` steps of this config's tokens per step."""
+    base = {
+        "enable_checkpointing": False,
+        "learning_rate": self.LR,
+        "steps": steps,
+        "lr_schedule_type": "wsds",
+        "warmup_steps_fraction": 20 / steps,
+        "learning_rate_final_fraction": 0.0,
+        "wsds_chinchilla_tokens": 1,
+    }
+    base.update(kwargs)
+    cfg = pyconfig.initialize([None, get_test_config_path()], **base)
+    base["wsds_chinchilla_tokens"] = int(round(c_steps * cfg.global_batch_size_to_train_on * cfg.max_target_length))
+    cfg = pyconfig.initialize([None, get_test_config_path()], **base)
+    return maxtext_utils.wsds_stages(cfg), maxtext_utils.create_learning_rate_schedule(cfg)
+
+  def _lr(self, schedule, step):
+    return float(schedule(step))
+
+  def test_stages_peaks_and_decays(self):
+    # 1xC = 100 steps, 400 steps: stages ending at 1x, 2x and 4x, peaks lr, lr / sqrt(2), lr / 2, 10% decays.
+    stages, sched = self._schedule(400)
+    np.testing.assert_allclose([e for e, _ in stages], [100, 200, 400])
+    np.testing.assert_allclose([m for _, m in stages], [1.0, 2**-0.5, 0.5])
+    lr = self.LR
+    self.assertAlmostEqual(self._lr(sched, 0), 0.0, places=9)  # warmup from 0
+    self.assertAlmostEqual(self._lr(sched, 10), lr / 2, places=9)
+    for step, want in (
+        (20, lr),  # end of warmup
+        (89, lr),  # last stable step of stage 0
+        (90, lr),  # its first decay step (OLMo-core's: peak * (D - t) / D)
+        (99, lr * 0.1),  # its last
+        (100, lr / 2**0.5),  # stage 1 restarts at its peak
+        (189, lr / 2**0.5),
+        (199, lr / 2**0.5 * 0.1),
+        (200, lr / 2),
+        (379, lr / 2),
+        (399, lr / 2 * 0.05),  # stage 2 decays over 20 steps
+    ):
+      self.assertAlmostEqual(self._lr(sched, step), want, places=9, msg=f"step {step}")
+
+  def test_last_stage_takes_its_end_multiple(self):
+    # 300 steps end at 3xC: stages to 1x, 2x, then 3x at lr / sqrt(3).
+    stages, sched = self._schedule(300)
+    np.testing.assert_allclose([e for e, _ in stages], [100, 200, 300])
+    self.assertAlmostEqual(stages[-1][1], 3**-0.5, places=12)
+    self.assertAlmostEqual(self._lr(sched, 250), self.LR / 3**0.5, places=9)
+
+  def test_run_ending_on_a_doubling_matches_the_longer_runs_stage(self):
+    # A 1xC run (1xC = 100.4 steps, rounded to 100) is exactly the first stage of a longer run.
+    short_stages, short = self._schedule(100, c_steps=100.4)
+    long_stages, long = self._schedule(400, c_steps=100.4, warmup_steps_fraction=20 / 400)
+    self.assertEqual(short_stages, [(100, 1.0)])
+    self.assertEqual(long_stages[0], (100, 1.0))
+    for step in range(100):
+      self.assertAlmostEqual(self._lr(short, step), self._lr(long, step), places=12, msg=f"step {step}")
+
+  def test_first_multiple_and_unstepped(self):
+    # OLMo-core starts at 0.5xC (peak lr * sqrt(2)); wsds_stepped=False keeps every peak at lr.
+    stages, sched = self._schedule(200, wsds_first_multiple=0.5, warmup_steps_fraction=0.05)
+    np.testing.assert_allclose([e for e, _ in stages], [50, 100, 200])
+    self.assertAlmostEqual(self._lr(sched, 20), self.LR * 2**0.5, places=9)
+    stages, _ = self._schedule(400, wsds_stepped=False)
+    self.assertEqual({m for _, m in stages}, {1.0})
+
+  def test_requires_chinchilla_tokens_and_warmup_in_first_stage(self):
+    with self.assertRaisesRegex(ValueError, "wsds_chinchilla_tokens"):
+      pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, steps=100, lr_schedule_type="wsds")
+    with self.assertRaisesRegex(ValueError, "WSDS stage 0"):
+      self._schedule(400, warmup_steps_fraction=0.24)  # 96 warmup steps + a 10-step decay > 100
+
+
 class TestMeshUtils(unittest.TestCase):
   """Test suite for the mesh creation utility function."""
 

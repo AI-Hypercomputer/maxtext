@@ -40,14 +40,22 @@ shard_exp_on_fsdp: false
 allow_split_physical_axes: true
 shard_optimizer_over_data: true  # Zero-1 over the 48 data-parallel ranks
 
-# --- Training recipe (OLMo-core hero) -------------------------------------------------------------------------------
-# One epoch of Dolma 3.5: 1,708,983,195 sequences = 556,309 full steps (14.0T tokens). Warmup 2,000 steps, then the
-# LR stays at its peak (WSD with final fraction 1: no decay in this run; decays branch off later). The schedule horizon
-# is baked into the LR curve: set once, never change it on a resume.
+# --- Training recipe (OLMo-core hero, LR as a function of duration) ------------------------------------------------
+# One epoch of Dolma 3.5: 1,708,983,195 sequences = 556,309 full steps (14.0T tokens, 176.4 x Chinchilla).
+# LR: stepped WSD-S (OLMo-core's WSDSChinchillaRunConfigurator, stepped_schedule). Stages end at 1, 2, 4, ..., 128 x C
+# and at the epoch's end; stage k holds learning_rate / sqrt(c_k) and decays linearly to 0 over its last 10%, so every
+# Chinchilla doubling has a decayed checkpoint. learning_rate is the 1xC optimum and the only LR to tune: a 1xC run
+# with this schedule (steps: 3154) is exactly this run's first stage. 1xC = 20 x 3,969,230,656 active non-embedding
+# parameters = 79,384,613,120 tokens = 3,154.5 steps. Warmup 2,000 steps (OLMo-core hero's), inside the first stage.
+# The schedule is baked into the LR curve: set once, never change it on a resume.
 steps: 556309
-learning_rate: 1.1e-3
-lr_schedule_type: "wsd"
-learning_rate_final_fraction: 1.0
+learning_rate: 1.1e-3  # base LR at 1xC: to be tuned on small at 1xC
+lr_schedule_type: "wsds"
+wsds_chinchilla_tokens: 79384613120
+wsds_first_multiple: 1.0
+wsds_decay_steps_fraction: 0.1
+wsds_stepped: true
+learning_rate_final_fraction: 0.0
 warmup_steps_fraction: 0.003595125  # 2,000 / 556,309, rounded up so int(steps * fraction) is 2,000
 warmup_step_offset: 1
 opt_type: "adamw"

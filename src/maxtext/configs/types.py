@@ -169,6 +169,7 @@ class LearningRateScheduleType(str, Enum):
 
   COSINE = "cosine"
   WSD = "wsd"
+  WSDS = "wsds"
 
 
 class WsdDecayStyle(str, Enum):
@@ -3434,6 +3435,33 @@ class Optimizer(BaseModel):
       WsdDecayStyle.LINEAR,
       description="The decay style for WSD schedule ('linear' or 'cosine').",
   )
+  wsds_chinchilla_tokens: int = Field(
+      0,
+      ge=0,
+      description=(
+          "lr_schedule_type=wsds: the tokens of one Chinchilla duration (1xC, e.g. 20 x active non-embedding"
+          " parameters); stages end at its doublings."
+      ),
+  )
+  wsds_first_multiple: float = Field(
+      1.0,
+      gt=0.0,
+      description="lr_schedule_type=wsds: the Chinchilla multiple the first stage ends at (0.5 in OLMo-core).",
+  )
+  wsds_decay_steps_fraction: float = Field(
+      0.1,
+      ge=0.0,
+      lt=0.5,
+      description="lr_schedule_type=wsds: the fraction of each stage that decays linearly at its end.",
+  )
+  wsds_stepped: bool = Field(
+      True,
+      description=(
+          "lr_schedule_type=wsds: stage k peaks at learning_rate / sqrt(c_k), c_k its end Chinchilla multiple (OLMo-core's"
+          " stepped_schedule: the LR falls as 1/sqrt(D), so learning_rate is the 1xC optimum); False keeps every peak at"
+          " learning_rate."
+      ),
+  )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
   warmup_step_offset: int = Field(
       0,
@@ -3499,7 +3527,9 @@ class AdamW(BaseModel):
           " at every width. False keeps adam_weight_decay (decay lr * multiplier * wd, OLMo-core's default)."
       ),
   )
-  mup_embedding_lr_multiplier: float = Field(1.0, description="Under muP, the token embedding's learning-rate multiplier.")
+  mup_embedding_lr_multiplier: float = Field(
+      1.0, description="Under muP, the token embedding's learning-rate multiplier."
+  )
   completedp_base_model_name: str = Field(
       "",
       description=(
@@ -5394,6 +5424,8 @@ class MaxTextConfig(
           "Set scan_layers=False in your config to use deepstack features."
       )
 
+    if self.lr_schedule_type == LearningRateScheduleType.WSDS and self.wsds_chinchilla_tokens <= 0:
+      raise ValueError("lr_schedule_type=wsds needs wsds_chinchilla_tokens > 0 (the tokens of 1xC).")
     # Validate WSD learning rate schedule fractions
     if self.lr_schedule_type == LearningRateScheduleType.WSD:
       total_fraction = self.warmup_steps_fraction + self.wsd_decay_steps_fraction

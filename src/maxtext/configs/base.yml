@@ -1159,10 +1159,18 @@ skip_jax_distributed_system: false # If true we will not initialize the jax dist
 #
 # The zero learning rate section can be used to more accurately measure the fully trained model's performance.
 learning_rate: 3.e-5
-lr_schedule_type: 'cosine'  # Options: 'cosine' or 'wsd'
+lr_schedule_type: 'cosine'  # Options: 'cosine', 'wsd' or 'wsds'
 learning_rate_final_fraction: 0.1  # Final LR as fraction of peak LR (applies to both cosine and WSD schedules)
 wsd_decay_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for decay phase in WSD (e.g., 0.1 = 10%)
 wsd_decay_style: 'linear'  # Decay style for WSD schedule: 'linear' or 'cosine'
+# lr_schedule_type: 'wsds' (stepped WSD-S, OLMo-core's WSDSChinchillaRunConfigurator with stepped_schedule): stages end
+# at Chinchilla multiples wsds_first_multiple * 2^k of wsds_chinchilla_tokens (the last at learning_rate_schedule_steps);
+# stage k holds learning_rate / sqrt(c_k) (wsds_stepped) and ends in a linear decay over wsds_decay_steps_fraction of
+# the stage to that peak * learning_rate_final_fraction. learning_rate is then the 1xC optimum, the only LR to tune.
+wsds_chinchilla_tokens: 0
+wsds_first_multiple: 1.0
+wsds_decay_steps_fraction: 0.1
+wsds_stepped: true
 warmup_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for warmup phase (applies to both schedules)
 warmup_step_offset: 0  # Warmup position of step 0: step i trains at learning_rate * (i + offset) / warmup_steps. 1 = OLMo-core's one-based warmup.
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
