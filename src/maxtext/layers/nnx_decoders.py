@@ -40,7 +40,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import nnx_scan
+from maxtext.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -1063,6 +1063,16 @@ class NNXDecoder(nnx.Module):
           layers,
           kv_caches_stacked if kv_caches_stacked is not None else None,
       )
+    if (
+        getattr(self.config, 'prefetch_fsdp_weights', False)
+        and kv_caches_stacked is None
+        and forced_routed_experts_scanned is None
+        and not getattr(self, 'disable_quant_stats_update', False)
+        and fsdp_prefetch.mesh_uses_fsdp(self.mesh)
+    ):
+      return self._apply_layers_sequentially_prefetch(
+          layers, x_in, *args, length=length, skip_block_remat=skip_block_remat, **kwargs
+      )
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     # fp8_fake_quant_hoist (moe.fp8_fake_quant_hoist_mode: the config key or PARAMBOLE_FQ_HOIST; off = the original
@@ -1089,6 +1099,33 @@ class NNXDecoder(nnx.Module):
     ):
       params = moe.gather_scanned_kernels_once(layers, params, self.mesh, self.config.shard_mode)
       gathered_grad_shardings = moe.gathered_kernel_grad_shardings(layers, self.mesh, self.config.logical_axis_rules)
+
+    batch_split_native = bool(
+        getattr(self.config, "prefetch_fsdp_batch_split", False)
+        and kv_caches_stacked is None
+        and forced_routed_experts_scanned is None
+    )
+    orig_x_shape = x_in.shape if batch_split_native else None
+    bs_act_sharding = None
+    if batch_split_native:
+      bs_act_sharding, bs_num_ep = fsdp_prefetch_inhomogeneous._batchsplit_shardings_and_ep(self.mesh, self.config)
+      s_mode = self.config.shard_mode
+      x_in = fsdp_prefetch_inhomogeneous._maybe_constrain(x_in, bs_act_sharding, s_mode)
+      r_in = x_in.reshape(orig_x_shape[0] // 2, 2, *orig_x_shape[1:])
+      x_mb0_init = fsdp_prefetch_inhomogeneous._maybe_constrain(r_in[:, 0], bs_act_sharding, s_mode)
+      base_mb1_init = fsdp_prefetch_inhomogeneous._maybe_constrain(r_in[:, 1], bs_act_sharding, s_mode)
+      unperm_zero = fsdp_prefetch_inhomogeneous._maybe_constrain(
+          jax.lax.broadcast(
+              jnp.zeros((), dtype=base_mb1_init.dtype),
+              (base_mb1_init.shape[0] * bs_num_ep, *base_mb1_init.shape[1:]),
+          ),
+          bs_act_sharding,
+          s_mode,
+      )
+      x_in = (x_mb0_init, unperm_zero, base_mb1_init)
+      args, kwargs = fsdp_prefetch_inhomogeneous.split_batchsplit_args_kwargs(
+          orig_x_shape[0], args, kwargs, self.mesh, self.config
+      )
 
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
@@ -1216,6 +1253,15 @@ class NNXDecoder(nnx.Module):
       if use_fp8_absmax:
         scan_xs = scan_xs + (fp8_absmax_stacked,)
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
+      if batch_split_native:
+        x_mb0_final, unperm_mb1_final, base_mb1_final = final_carry
+        s_mode = self.config.shard_mode
+        x_mb1_final = fsdp_prefetch_inhomogeneous._combine_add_residual(
+            base_mb1_final, unperm_mb1_final, self.mesh, self.config, bs_act_sharding, s_mode
+        )
+        final_carry = fsdp_prefetch_inhomogeneous._maybe_constrain(
+            jnp.stack([x_mb0_final, x_mb1_final], axis=1).reshape(orig_x_shape), bs_act_sharding, s_mode
+        )
       returned_kv_stacked = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
@@ -1235,6 +1281,25 @@ class NNXDecoder(nnx.Module):
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
+
+  def _apply_layers_sequentially_prefetch(
+      self, layers, x_in, *args, length: int, skip_block_remat: bool = False, **kwargs
+  ):
+    prefetch_kwargs = {
+        'length': length,
+        'mesh': self.mesh,
+        'config': self.config,
+        'remat_policy': self.get_remat_policy(),
+        'prevent_cse': maxtext_utils.should_prevent_cse_in_remat(self.config),
+    }
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+    if stages is not None:
+      return fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+          layers, stages, x_in, *args, **prefetch_kwargs, **kwargs
+      )
+    return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+        layers, x_in, *args, skip_block_remat=skip_block_remat, **prefetch_kwargs, **kwargs
+    )
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""

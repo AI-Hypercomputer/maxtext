@@ -2115,10 +2115,6 @@ class Qwen3NextScannableBlock(nnx.Module):
       return (new_hidden_states, new_other), new_intermediate
 
     global_remat_policy = self.remat_policy_fn
-    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-    if offload_names[0] or offload_names[1]:
-      save_names, offload_to_device = offload_names
-      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
     if self._remat_enabled:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)

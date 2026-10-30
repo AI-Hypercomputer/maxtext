@@ -17,14 +17,17 @@
 # pylint: disable=no-name-in-module
 
 import functools
+import os
 from typing import Any, cast
 
 from flax import nnx
+import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_TRAIN, Array, Config, ShardMode, get_weight_dtype
 from maxtext.layers.linears import MlpBlock
+from maxtext.layers.moe import backward_barrier_tie, barrier_tie, combine_ep_ubatch_bwd_fn
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models.qwen3 import (
@@ -52,6 +55,29 @@ class Qwen3_5SparseMoEBlock(Qwen3NextSparseMoeBlock):
   """Shares same MoE code as Qwen3-Next"""
 
 
+def _noop_shard_with_logical(inputs, *args, **kwargs):
+  return inputs
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+def _combine_bwd_bridge(combine_bwd_fn, unperm_prev, base_prev, x_mb1):
+  """Zero-residual bridge routing `dx_mb1` back into `(d_unperm_prev, d_base_prev)` during `B_F1`."""
+  del combine_bwd_fn, unperm_prev, base_prev
+  return x_mb1
+
+
+def _combine_bwd_bridge_fwd(combine_bwd_fn, unperm_prev, base_prev, x_mb1):
+  del combine_bwd_fn, unperm_prev, base_prev
+  return x_mb1, ()
+
+
+def _combine_bwd_bridge_bwd(combine_bwd_fn, _, g_x_mb1):
+  return combine_bwd_fn(g_x_mb1), g_x_mb1, jnp.zeros_like(g_x_mb1)
+
+
+_combine_bwd_bridge.defvjp(_combine_bwd_bridge_fwd, _combine_bwd_bridge_bwd)
+
+
 class Qwen3_5ScannableBlock(nnx.Module):
   """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers."""
 
@@ -77,6 +103,9 @@ class Qwen3_5ScannableBlock(nnx.Module):
       )
       setattr(self, layer_name, layer)
 
+  def prefetch_sublayer_names(self) -> tuple[str, ...]:
+    return tuple(f'layer_{i}' for i in range(self.config.inhomogeneous_layer_cycle_interval))
+
   def __call__(
       self,
       carry: jnp.ndarray,
@@ -91,6 +120,54 @@ class Qwen3_5ScannableBlock(nnx.Module):
       forced_routed_experts: jnp.ndarray | None = None,
   ) -> tuple[Array, None | tuple[Any, ...]]:
     cfg = self.config
+    if getattr(cfg, "prefetch_fsdp_batch_split", False) and isinstance(carry, tuple) and len(carry) == 3:
+      from maxtext.layers import fsdp_prefetch_inhomogeneous  # pylint: disable=import-outside-toplevel
+
+      x_mb0, unperm_mb1, base_mb1 = carry
+      act_sharding, _ = fsdp_prefetch_inhomogeneous._batchsplit_shardings_and_ep(self.mesh, cfg)
+      for i in range(cfg.inhomogeneous_layer_cycle_interval):
+        layer = getattr(self, f"layer_{i}")
+        if forced_routed_experts is None:
+          layer_forced = None
+        elif isinstance(forced_routed_experts, tuple):
+          layer_forced = (forced_routed_experts[0][i], forced_routed_experts[1][i])
+        else:
+          layer_forced = forced_routed_experts[i]
+        if os.environ.get("MAXTEXT_TIE_F1_MB1_COMBINE", "0") == "1":
+          x_mb0, unperm_mb1 = barrier_tie(x_mb0, unperm_mb1, backward=False)
+        x_mb1 = fsdp_prefetch_inhomogeneous._combine_add_residual(
+            base_mb1, unperm_mb1, self.mesh, cfg, act_sharding, cfg.shard_mode
+        )
+        x_mb0 = checkpoint_name(x_mb0, "decoder_layer_input")
+        x_mb1 = checkpoint_name(x_mb1, "decoder_layer_input")
+        moe_block = cast(Qwen3_5SparseMoEBlock, layer.mlp)
+        w_tuple = moe_block.routed_experts.prepare_batchsplit_weights()
+        bwd_tie_mode = os.environ.get("MAXTEXT_TIE_BWD_SHARDED_MOE", "all4")
+        if (
+            bwd_tie_mode == "all4"
+            or (bwd_tie_mode == "top3" and i >= 1)
+            or (bwd_tie_mode == "mid2" and i in (1, 2))
+        ):
+          w0_k, w1_k, wo_k, w0_b, w1_b, wo_b, fq_g = w_tuple
+          if w1_k is not None:
+            (x_mb0, x_mb1), (w0_k, w1_k, wo_k) = backward_barrier_tie((x_mb0, x_mb1), (w0_k, w1_k, wo_k))
+          else:
+            (x_mb0, x_mb1), (w0_k, wo_k) = backward_barrier_tie((x_mb0, x_mb1), (w0_k, wo_k))
+          w_tuple = (w0_k, w1_k, wo_k, w0_b, w1_b, wo_b, fq_g)
+        (x_mb0, unperm_mb1, base_mb1), _ = layer.call_batchsplit(
+            (x_mb0, None, None, x_mb1),
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk,
+            slot,
+            kv_cache=None,
+            attention_metadata=attention_metadata,
+            forced_routed_experts=layer_forced,
+            weights_tuple=w_tuple,
+        )
+      return (x_mb0, unperm_mb1, base_mb1), None
     x = carry
     # Inference with externally-managed (vLLM) caches hands this block one
     # entry per sub-layer of the cycle; the decoder groups the flat per-layer
@@ -143,9 +220,10 @@ class Qwen3_5DecoderLayer(nnx.Module):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
-    self.layer_idx = layer_idx
-    self.quant = quant
     cfg = self.config
+    is_full_attn = (layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    self.layer_idx = layer_idx if (is_full_attn or model_mode != MODEL_MODE_TRAIN) else 0
+    self.quant = quant
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.mlp_activation_axis_names = (
         "activation_batch",
@@ -169,7 +247,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     else:
       self.out_sharding = None
       self.mlp_intermediate_sharding = None
-      self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
+      self._maybe_shard_with_logical = _noop_shard_with_logical
 
     # First LayerNorm, applied before the attention block.
     self.input_layernorm = Qwen3NextRMSNorm(
@@ -182,7 +260,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     )
 
     # Determine the type of attention mechanism for the current layer.
-    is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
+    is_full_attention_layer = is_full_attn
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
@@ -250,7 +328,8 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    if not getattr(self.config, "prefetch_fsdp_weights", False):
+      inputs = checkpoint_name(inputs, "decoder_layer_input")
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     residual = inputs
 
@@ -334,3 +413,187 @@ class Qwen3_5DecoderLayer(nnx.Module):
         self.activation_axis_names,
     )
     return layer_output, new_kv_cache
+
+  def _attn_and_shared(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray,
+      decoder_positions: None | jnp.ndarray,
+      deterministic: bool,
+      model_mode: str,
+      kv_cache: None | dict[str, Array] = None,
+      attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jnp.ndarray | None = None,
+  ):
+    """Runs `input_layernorm -> attention/GDN -> +residual -> post_attn_norm -> shared_expert + router_gate` on 1 ubatch."""
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    residual = inputs
+    if isinstance(attention_metadata, dict):
+      attention_metadata = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
+    hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    if isinstance(self.attention, Qwen3_5FullAttention):
+      attention_output, _ = cast(Qwen3_5FullAttention, self.attention)(
+          hidden_states,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          out_sharding=self.out_sharding,
+      )
+    else:
+      attention_output, _ = cast(Qwen3_5GatedDeltaNet, self.attention)(
+          hidden_states,
+          model_mode=model_mode,
+          kv_cache=kv_cache,
+          decoder_segment_ids=decoder_segment_ids,
+          attention_metadata=attention_metadata,
+          out_sharding=self.out_sharding,
+      )
+    attention_output = self._maybe_shard_with_logical(attention_output, self.activation_axis_names)
+    hidden_states = residual + attention_output
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    post_attn_residual = hidden_states
+
+    normed = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
+    normed = self._maybe_shard_with_logical(normed, self.activation_axis_names)
+
+    token_mask = None
+    if (
+        self.config.moe_exclude_padding_from_routing
+        and decoder_segment_ids is not None
+        and model_mode == MODEL_MODE_TRAIN
+    ):
+      token_mask = decoder_segment_ids != 0
+    exclude_padding = token_mask is not None and self.config.moe_exclude_padding_from_routing
+
+    moe_block = cast(Qwen3_5SparseMoEBlock, self.mlp)
+    normed_bf16, gate_logits, pre_bias_logits, forced = moe_block.routed_experts.compute_gate(
+        normed,
+        forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask if exclude_padding else None,
+    )
+    if moe_block.use_shared_expert:
+      shared_expert_output = moe_block.shared_expert(
+          normed,
+          deterministic=deterministic,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
+      )
+      shared_gate_output = moe_block.shared_expert_gate(
+          normed.astype(jnp.float32) if self.config.float32_gate_logits else normed
+      )
+      if self.config.float32_weight_sum:
+        shared_gate = jax.nn.sigmoid(shared_gate_output.astype(jnp.float32))
+        if exclude_padding:
+          shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
+        shared_term = (shared_gate * shared_expert_output.astype(jnp.float32)).astype(self.config.dtype)
+      else:
+        shared_gate = jax.nn.sigmoid(shared_gate_output)
+        if exclude_padding:
+          shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
+        shared_term = shared_gate * shared_expert_output
+      shared_term = self._maybe_shard_with_logical(shared_term, self.activation_axis_names)
+      base_out = self._maybe_shard_with_logical(post_attn_residual + shared_term, self.activation_axis_names)
+    else:
+      base_out = post_attn_residual
+    return base_out, normed_bf16, gate_logits, pre_bias_logits, forced
+
+  def call_batchsplit(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic: bool,
+      model_mode: str,
+      previous_chunk=None,
+      slot: None | int = None,
+      kv_cache: None | dict[str, Array] = None,
+      attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts=None,
+      weights_tuple=None,
+  ):
+    """4-stage batch-split schedule overlapping EP dispatch & combine with GDN/SplashAttn + SharedExpert + GMMs."""
+    del previous_chunk, slot
+    x_mb0, unperm_prev, base_prev, x_mb1 = inputs
+    seg_mb0, seg_mb1 = (
+        decoder_segment_ids if isinstance(decoder_segment_ids, tuple) else (decoder_segment_ids, decoder_segment_ids)
+    )
+    pos_mb0, pos_mb1 = (
+        decoder_positions if isinstance(decoder_positions, tuple) else (decoder_positions, decoder_positions)
+    )
+    forced_mb0, forced_mb1 = (
+        forced_routed_experts
+        if isinstance(forced_routed_experts, tuple)
+        else (forced_routed_experts, forced_routed_experts)
+    )
+
+    # F1: mb0 GDN/SplashAttn + SharedExpert + RouterGate (overlaps prev sub-layer's mb1 EP combine + next FSDP AG!)
+    base_mb0, normed_mb0, logits_mb0, pre_bias_mb0, forced_mb0_out = self._attn_and_shared(
+        x_mb0,
+        seg_mb0,
+        pos_mb0,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
+        forced_routed_experts=forced_mb0,
+    )
+
+    moe_block = cast(Qwen3_5SparseMoEBlock, self.mlp)
+    if weights_tuple is None:
+      weights_tuple = moe_block.routed_experts.prepare_batchsplit_weights()
+    if os.environ.get("MAXTEXT_BATCHSPLIT_EARLY_WEIGHT_AG", "0") == "1":
+      weights_tuple, x_mb1 = moe_block.routed_experts.prefetch_batchsplit_weights(x_mb1, weights_tuple)
+
+    # Bridge + Tie 1 (forward-only so mb0 backward EP dispatch RS overlaps B_F2 = mb1 attn+shared bwd!)
+    if unperm_prev is not None:
+      combine_bwd_fn = functools.partial(combine_ep_ubatch_bwd_fn, mesh=self.mesh, config=self.config)
+      x_mb1_b = _combine_bwd_bridge(combine_bwd_fn, unperm_prev, base_prev, x_mb1)
+    else:
+      x_mb1_b = x_mb1
+    (normed_mb0, logits_mb0), x_mb1_b = barrier_tie((normed_mb0, logits_mb0), x_mb1_b, backward=False)
+
+    # F2: mb0 EP dispatch || mb1 GDN/SplashAttn + SharedExpert + RouterGate (TC)
+    routed_mb0 = moe_block.routed_experts.batchsplit_dispatch(
+        normed_mb0,
+        logits_mb0,
+        pre_bias_mb0,
+        forced_routed_experts=forced_mb0_out,
+    )
+    base_mb1_out, normed_mb1, logits_mb1, pre_bias_mb1, forced_mb1_out = self._attn_and_shared(
+        x_mb1_b,
+        seg_mb1,
+        pos_mb1,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
+        forced_routed_experts=forced_mb1,
+    )
+
+    # Tie 2 (forward-only so mb1 backward EP dispatch RS overlaps B_F3 = mb0 wo+wi GMMs bwd!)
+    r0_tok, r0_rest, r0_meta = routed_mb0
+    (normed_mb1, logits_mb1), r0_tok = barrier_tie((normed_mb1, logits_mb1), r0_tok, backward=False)
+    routed_mb0 = (r0_tok, r0_rest, r0_meta)
+
+    # F3 + F4: mb0 GMMs || mb1 EP dispatch, then mb1 GMMs || mb0 EP combine + mb1 unpermute (deferred to next layer)
+    routed_out_mb0, unperm_mb1_out, load_balance_loss, _ = moe_block.routed_experts.batchsplit_f3_f4(
+        routed_mb0,
+        normed_mb1,
+        logits_mb1,
+        pre_bias_mb1,
+        weights_tuple,
+        forced_mb1=forced_mb1_out,
+    )
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+
+    if self.config.float32_weight_sum:
+      x_mb0_out = (base_mb0.astype(jnp.float32) + routed_out_mb0.astype(jnp.float32)).astype(self.config.dtype)
+    else:
+      x_mb0_out = base_mb0 + routed_out_mb0
+    x_mb0_out = self._maybe_shard_with_logical(x_mb0_out, self.activation_axis_names)
+    return (x_mb0_out, unperm_mb1_out, base_mb1_out), None

@@ -268,20 +268,29 @@ class Fp8SteWeight:
     del dtype
     return self
 
+  def __getitem__(self, idx):
+    if idx is Ellipsis:
+      return self
+    raise TypeError('Fp8SteWeight only supports `[...]` indexing.')
+
 
 def dequantize_weight_codes_ste(
     w: Array,
     codes: Array,
     scale: Array,
     grad_transform: Callable[[Array], Array] | None = None,
+    w_ste_sharding: Any = None,
 ) -> Any:
   if os.environ.get("MAXTEXT_GMM_V2_IN_KERNEL_FP8_DEQUANT", "") == "1":
     dtype = w.dtype
+    ste_shape = w.shape
 
     @jax.custom_vjp
     def _ste_carrier(w, codes, scale):
       del w
-      w_ste = jax.lax.broadcast(jnp.zeros((), dtype=dtype), codes.shape)
+      w_ste = jax.lax.broadcast(jnp.zeros((), dtype=dtype), ste_shape)
+      if w_ste_sharding is not None:
+        w_ste = jax.lax.with_sharding_constraint(w_ste, w_ste_sharding)
       return Fp8SteWeight(w_ste=w_ste, codes=codes, scale=scale)
 
     def _ste_carrier_fwd(w, codes, scale):

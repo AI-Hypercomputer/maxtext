@@ -1260,3 +1260,34 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+FSDP_CO_AXES = FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert")
+
+
+def fsdp_axes_for_dim(entry):
+  axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+  first_fsdp = next((i for i, a in enumerate(axes) if a in FSDP_MESH_AXES), None)
+  if first_fsdp is None:
+    return ()
+  return tuple(a for a in axes[first_fsdp:] if a in FSDP_CO_AXES)
+
+
+def remove_fsdp_from_partition_spec(pspec):
+  for i, entry in enumerate(pspec):
+    to_remove = fsdp_axes_for_dim(entry)
+    if to_remove:
+      pspec = remove_mesh_axes_from_partition_spec(pspec, to_remove, dims=(i,))
+  return pspec
+
+
+def remove_fsdp_from_sharding(sharding_tree):
+  def _peel(named_sharding):
+    if isinstance(named_sharding, jax.sharding.NamedSharding):
+      return jax.sharding.NamedSharding(
+          named_sharding.mesh,
+          remove_fsdp_from_partition_spec(named_sharding.spec),
+      )
+    return named_sharding
+
+  return jax.tree.map(_peel, sharding_tree)

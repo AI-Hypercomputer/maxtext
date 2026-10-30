@@ -630,6 +630,13 @@ optimizer_device_resident_gib: 0.0
 scan_layers: true
 param_scan_axis: 1
 gather_scanned_kernels_once: false
+prefetch_fsdp_weights: false
+prefetch_fsdp_defer_grad_reduce_scatter: false
+prefetch_fsdp_pin_sparse_core_id: -1
+prefetch_fsdp_pin_moe_only: false
+prefetch_fsdp_use_scheduling_group: false
+prefetch_fsdp_unroll_sublayers: false
+prefetch_fsdp_batch_split: false
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding

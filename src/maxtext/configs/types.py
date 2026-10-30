@@ -1677,6 +1677,34 @@ class MoEGeneral(BaseModel):
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
   )
+  prefetch_fsdp_weights: bool = Field(
+      False,
+      description="Prefetch next-sublayer FSDP weights across scanned layers in fwd and bwd.",
+  )
+  prefetch_fsdp_defer_grad_reduce_scatter: bool = Field(
+      False,
+      description="Defer FSDP weight-gradient reduce-scatter to next backward sublayer.",
+  )
+  prefetch_fsdp_pin_sparse_core_id: int = Field(
+      -1,
+      description="SparseCore ID (-1 = unpinned, 0 or 1 = pinned via compute_on) for FSDP weight prefetches.",
+  )
+  prefetch_fsdp_pin_moe_only: bool = Field(
+      False,
+      description="When True, only pin gather8 routed MoE FSDP prefetches to prefetch_fsdp_pin_sparse_core_id.",
+  )
+  prefetch_fsdp_use_scheduling_group: bool = Field(
+      False,
+      description="Group FSDP prefetch/RS ops using _scheduling_group_id.",
+  )
+  prefetch_fsdp_unroll_sublayers: bool = Field(
+      False,
+      description="Unroll inhomogeneous sub-layers flat inside the outer block scan (0 inner whiles).",
+  )
+  prefetch_fsdp_batch_split: bool = Field(
+      False,
+      description="Enable combine-wrapped 2-microbatch schedule across inhomogeneous sub-layers.",
+  )
   gather_scanned_kernels_once: bool = Field(
       False,
       description=(
@@ -1688,6 +1716,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Pin only the ring-of-experts EP all-gathers (dispatch tokens and routing inputs) to a SparseCore"
       " (OR-ed with moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_ep_all_gathers_fwd_only: bool = Field(
+      False,
+      description="When moe_pin_sparse_core_ep_all_gathers is True, pin only the forward EP all-gather; its backward"
+      " runs unpinned psum_scatter.",
   )
   moe_pin_sparse_core_fsdp_all_gathers: bool = Field(
       False,
@@ -2131,8 +2164,7 @@ class MoEGeneral(BaseModel):
               (not self.mlp_bias, "mlp_bias=False"),
               self._no_weight_quantization_requirement(),
               (not self.moe_tc_ragged_sort, "moe_tc_ragged_sort=False"),
-              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
-              (not self.moe_bwd_prequant_before_unsort, "moe_bwd_prequant_before_unsort=False"),
+                            (not self.moe_bwd_prequant_before_unsort, "moe_bwd_prequant_before_unsort=False"),
               (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
               (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
               self._remat_keeps_moe_tensor_requirement("down-projection output", _MOE_DOWN_PROJECTION_NAMES),
@@ -2187,8 +2219,7 @@ class MoEGeneral(BaseModel):
               (not self.shard_exp_on_fsdp, "shard_exp_on_fsdp=False"),
               (not self.use_2d_fsdp_sharding, "use_2d_fsdp_sharding=False"),
               (not self.shard_embed_moe_on_fsdp, "shard_embed_moe_on_fsdp=False"),
-              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
-              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+                            (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
               # Sharded, a device would hold a slice of [w0 | w1] instead of matching slices of w0 and w1. The layer
               # checks the actual partition spec again when it is traced (custom logical axis rules).
               (
@@ -2243,8 +2274,7 @@ class MoEGeneral(BaseModel):
               # A 2D bf16 token buffer.
               (not self.moe_tc_ragged_3d_gmm, "moe_tc_ragged_3d_gmm=False"),
               (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
-              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
-              self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
+                            self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
           ],
       )
     return self
@@ -2275,8 +2305,7 @@ class MoEGeneral(BaseModel):
               # A 2D bf16 token buffer.
               (not self.moe_tc_ragged_3d_gmm, "moe_tc_ragged_3d_gmm=False"),
               (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
-              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
-              # The up projection hands on its whole [gate | up] output, so its per-half names are never formed.
+                            # The up projection hands on its whole [gate | up] output, so its per-half names are never formed.
               self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
           ]
           + self._moe_wo_gmm_fused_dswiglu_tile_requirements(),
@@ -2300,7 +2329,7 @@ class MoEGeneral(BaseModel):
               (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
               # The backward is the plain reduce-scatter, the transpose of an unpinned all-gather.
               (not self.moe_pin_sparse_core_all_gathers, "moe_pin_sparse_core_all_gathers=False"),
-              (not self.moe_pin_sparse_core_ep_all_gathers, "moe_pin_sparse_core_ep_all_gathers=False"),
+              (not self.moe_pin_sparse_core_ep_all_gathers or self.moe_pin_sparse_core_ep_all_gathers_fwd_only, "moe_pin_sparse_core_ep_all_gathers=False or moe_pin_sparse_core_ep_all_gathers_fwd_only=True"),
           ],
       )
     return self
@@ -7658,7 +7687,7 @@ class MaxTextConfig(
       )
 
     if self.moe_accumulate_chunk_wgrad and not (
-        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
+        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0
     ):
       raise ValueError(
           "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"

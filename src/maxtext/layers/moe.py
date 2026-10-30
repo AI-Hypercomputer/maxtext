@@ -285,6 +285,27 @@ def barrier_tie(x, dep, backward: bool = False):
   return barrier((x, dep))
 
 
+@jax.custom_vjp
+def _backward_optimization_barrier(operands):
+  return operands
+
+
+def _backward_optimization_barrier_fwd(operands):
+  return operands, None
+
+
+def _backward_optimization_barrier_bwd(_, cotangents):
+  return (jax.lax.optimization_barrier(cotangents),)
+
+
+_backward_optimization_barrier.defvjp(_backward_optimization_barrier_fwd, _backward_optimization_barrier_bwd)
+
+
+def backward_barrier_tie(x, dep):
+  """Identity in forward; `jax.lax.optimization_barrier` on `(dx, ddep)` in backward."""
+  return _backward_optimization_barrier((x, dep))
+
+
 def _prefused_ffn_activation(act_fn, h01):
   """`act_fn(h01[..., :n], h01[..., n:])` on the prefused up-projection output `h01 = [gate | up]`.
 
@@ -1233,8 +1254,7 @@ def ep_combine_reduce_scatter(
 
   def _combine_bwd(_, g):
     if bwd_qtype is None:
-      # Same as the transpose of the reduce-scatter (an unpinned tiled all-gather).
-      return (jax.lax.all_gather(g, axis_name=axis_name, tiled=True),)
+      return (_ag(g),)
     qvalue, scale = quantize_rows_fp8(g, bwd_qtype)
     return (dequantize_rows_fp8(_ag(qvalue), _ag(scale), g.dtype),)
 
@@ -1266,6 +1286,119 @@ def ep_fp8_token_all_gather(x: jax.Array, axis_name, all_gather_fn, qtype=jnp.fl
 
   _gather.defvjp(_gather_fwd, _gather_bwd)
   return _gather(x)
+
+
+def _resolve_ep_axis_name(mesh: Mesh, config: ctypes.Config):
+  if config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
+    expert_axes = ["attn_dp_expert", "expert"]
+    if mesh is not None and "dcp" in mesh.shape and mesh.shape["dcp"] > 1:
+      expert_axes.append("dcp")
+    return tuple(expert_axes)
+  if config.custom_mesh_and_rule in (
+      ctypes.CustomRule.CP_AS_EP,
+      ctypes.CustomRule.CP_AS_EP_DENSE_NO_CP,
+      ctypes.CustomRule.CP_AS_EP_DENSE_FSDP,
+  ) and os.environ.get("MAXTEXT_RL_B_NO_CP_AS_EP", "") != "1":
+    return ("context", "expert")
+  return "expert"
+
+
+def combine_ep_ubatch_fn(unperm: jax.Array, mesh: Mesh, config: ctypes.Config) -> jax.Array:
+  """Standalone cross-layer EP combine reduce-scatter (or FP8 all-to-all) on one microbatch's `unperm` buffer."""
+  rules = get_logical_axis_rules() or config.logical_axis_rules
+  pspec = logical_to_mesh_axes(("activation_batch", "activation_norm_length", None), mesh=mesh, rules=rules)
+  ep_axis = _resolve_ep_axis_name(mesh, config)
+
+  if config.moe_pin_sparse_core_all_gathers or getattr(config, "moe_pin_sparse_core_ep_all_gathers", False):
+
+    @functools.partial(
+        compute_on,
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [config.moe_ep_all_gather_sparse_core_id]}},
+    )
+    def _ep_ag(z):
+      return jax.lax.all_gather(z, axis_name=ep_axis, tiled=True)
+
+  else:
+
+    def _ep_ag(z):
+      return jax.lax.all_gather(z, axis_name=ep_axis, tiled=True)
+
+  def _ep_a2a(z):
+    return jax.lax.all_to_all(z, ep_axis, split_axis=0, concat_axis=0, tiled=True)
+
+  if config.moe_fp8_combine_pin_sparse_core:
+    _ep_a2a = functools.partial(
+        compute_on,
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [config.moe_ep_all_gather_sparse_core_id]}},
+    )(_ep_a2a)
+
+  @functools.partial(jax.shard_map, mesh=mesh, in_specs=pspec, out_specs=pspec, check_vma=False)
+  def _combine_sm(z):
+    if config.ring_of_experts_row_major_reduce_scatter:
+      z = forward_row_major(z)
+    combine_bwd_method = config.moe_quantize_combine_bwd_method
+    if config.moe_fp8_combine or config.moe_fp8_bwd_dispatch:
+      out = ep_combine_reduce_scatter(
+          z,
+          ep_axis,
+          all_gather_fn=_ep_ag,
+          bwd_qtype=jnp.dtype(config.moe_fp8_bwd_dispatch_qtype) if config.moe_fp8_bwd_dispatch else None,
+          fwd_qtype=jnp.dtype(jnp.float8_e4m3fn) if config.moe_fp8_combine else None,
+          all_to_all_fn=_ep_a2a,
+      )
+    elif combine_bwd_method:
+      out = _moe_combine_psum_scatter(
+          z, ep_axis, scatter_dimension=0, tiled=True, bwd_method=combine_bwd_method
+      )
+    else:
+      out = jax.lax.psum_scatter(z, ep_axis, scatter_dimension=0, tiled=True)
+    if out.ndim == 4:
+      out = jnp.reshape(out, (*out.shape[:2], -1))
+    return out
+
+  return _combine_sm(unperm)
+
+
+def combine_ep_ubatch_bwd_fn(g: jax.Array, mesh: Mesh, config: ctypes.Config) -> jax.Array:
+  """Exact transpose of `combine_ep_ubatch_fn` (emits ONLY the backward EP all-gather / FP8 bwd dispatch)."""
+  rules = get_logical_axis_rules() or config.logical_axis_rules
+  pspec = logical_to_mesh_axes(("activation_batch", "activation_norm_length", None), mesh=mesh, rules=rules)
+  ep_axis = _resolve_ep_axis_name(mesh, config)
+
+  if config.moe_pin_sparse_core_all_gathers or getattr(config, "moe_pin_sparse_core_ep_all_gathers", False):
+
+    @functools.partial(
+        compute_on,
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [config.moe_ep_all_gather_sparse_core_id]}},
+    )
+    def _ep_ag(z):
+      return jax.lax.all_gather(z, axis_name=ep_axis, tiled=True)
+
+  else:
+
+    def _ep_ag(z):
+      return jax.lax.all_gather(z, axis_name=ep_axis, tiled=True)
+
+  @functools.partial(jax.shard_map, mesh=mesh, in_specs=pspec, out_specs=pspec, check_vma=False)
+  def _combine_bwd_sm(z):
+    combine_bwd_method = config.moe_quantize_combine_bwd_method
+    if config.moe_fp8_bwd_dispatch:
+      qtype = jnp.dtype(config.moe_fp8_bwd_dispatch_qtype)
+      qvalue, scale = quantize_rows_fp8(z, qtype)
+      return dequantize_rows_fp8(_ep_ag(qvalue), _ep_ag(scale), z.dtype)
+    if combine_bwd_method:
+      return _all_gather_quantized_payload(
+          z, ep_axis, axis=0, tiled=True, method=combine_bwd_method, num_feature_axes=z.ndim - 2
+      )
+    return _ep_ag(z)
+
+  return _combine_bwd_sm(g)
 
 
 def _order_after(x, dep):
@@ -1496,8 +1629,18 @@ class RoutedMoE(nnx.Module):
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
-      self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
-      self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      if (
+          getattr(self.config, "ici_tensor_parallelism", 1) <= 1
+          and getattr(self.config, "dcn_tensor_parallelism", 1) <= 1
+          and self.num_experts
+          % (max(1, self.config.ici_expert_parallelism) * max(1, self.config.ici_fsdp_parallelism))
+          == 0
+      ):
+        self.wi_kernel_axes = (CompoundLogicalAxis(("exp", "embed_moe")), None, "mlp_moe")
+        self.wo_kernel_axes = (CompoundLogicalAxis(("exp", "embed_moe")), "mlp_moe", None)
+      else:
+        self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
+        self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
       if self.config.moe_flat_fsdp_weights:
         # Flat layout: wi [E * embed, mlp], wo [E * mlp, embed]; dim 0 is sharded over (expert, fsdp) via the
         # compound logical axis ("exp", "embed_moe") so every FSDP shard is a contiguous tile-aligned row block
@@ -2924,6 +3067,8 @@ class RoutedMoE(nnx.Module):
       input_ids=None,
       forced_routed_experts=None,
       fp8_fake_quant_at_gather=None,
+      batchsplit_mode=None,
+      batchsplit_extra=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
@@ -2933,7 +3078,7 @@ class RoutedMoE(nnx.Module):
     weights that `__call__` left unrounded (w1's is None when w1_kernel is None). They are rounded to their fp8 grid
     here, on the FSDP shard, and the all-gather moves the fp8 codes; see the gather below.
     """
-    if w1_kernel is None and not self.config.prefuse_moe_weights:
+    if batchsplit_mode != "dispatch" and w1_kernel is None and not self.config.prefuse_moe_weights:
       raise ValueError("sparse_matmul got w1_kernel=None (the whole [w0 | w1] layout), which needs prefuse_moe_weights.")
     # log_moe_drops only: the shard_map gets a 5th (moe_audit) output only when requested, so the
     # compiled program is unchanged with the flag off.
@@ -3437,8 +3582,36 @@ class RoutedMoE(nnx.Module):
           out_memory_spaces=jax.memory.Space.Device,
           compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
       )
-      def _ep_all_gather(z):
+      def _ep_all_gather_pinned(z):
         return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+      if getattr(self.config, "moe_pin_sparse_core_ep_all_gathers_fwd_only", False):
+
+        @jax.custom_vjp
+        def _ep_all_gather_floating(z):
+          return _ep_all_gather_pinned(z)
+
+        def _ep_ag_fwd(z):
+          return _ep_all_gather_pinned(z), None
+
+        def _ep_ag_bwd(_, g):
+          if g.dtype == jax.dtypes.float0:
+            return (g,)
+          return (
+              jax.lax.psum_scatter(
+                  g, axis_name=self._expert_parallelism_name, scatter_dimension=0, tiled=True
+              ),
+          )
+
+        _ep_all_gather_floating.defvjp(_ep_ag_fwd, _ep_ag_bwd)
+
+        def _ep_all_gather(z):
+          if not jnp.issubdtype(z.dtype, jnp.floating):
+            return _ep_all_gather_pinned(z)
+          return _ep_all_gather_floating(z)
+
+      else:
+        _ep_all_gather = _ep_all_gather_pinned
 
     else:
 
@@ -4045,8 +4218,8 @@ class RoutedMoE(nnx.Module):
             gather_weights=gather_weights,
             return_weights=return_weights,
         )
-      if return_weights:
-        raise NotImplementedError("moe_wi_gmm_fused_swiglu does not support moe_accumulate_chunk_wgrad.")
+      if return_weights and w1 is not None:
+        raise NotImplementedError("moe_wi_gmm_fused_swiglu return_weights requires moe_unsplit_prefused_wi (w1=None).")
       del w0_bias, w1_bias, mask, gather_weights
       _, wi_tile_size = get_wi_gmm_params()
       # As gmm(): pad the rows to the forward tile and cast to the compute dtype.
@@ -4060,8 +4233,8 @@ class RoutedMoE(nnx.Module):
       rhs_buffers = self.config.wi_tile_fwd_rhs_buffer_count
       one_k_tile = not self.config.use_gmm_v2_heuristic_tiling and wi_tile_size[1] >= inputs.shape[-1]
       out = mblx.gmm_silu(
-          inputs.astype(self.dtype),
-          w_fused.astype(self.dtype),
+          inputs.astype(self.dtype if not isinstance(w_fused, quantizations.Fp8SteWeight) else self.dtype),
+          w_fused if isinstance(w_fused, quantizations.Fp8SteWeight) else w_fused.astype(self.dtype),
           gmm_operands["group_sizes"],
           preferred_element_type=self.dtype,
           tiling=wi_tile_size,
@@ -4072,7 +4245,15 @@ class RoutedMoE(nnx.Module):
           fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
           fuse_bwd_dswiglu=fuse_dswiglu_in_wo_gmm,
           fwd_rhs_buffer_count=rhs_buffers if rhs_buffers and one_k_tile else None,
+          return_rhs=return_weights,
       )
+      if return_weights:
+        if fuse_dswiglu_in_wo_gmm:
+          act, gate_up, w_out = out
+          act_u, gu_u = (act[: x.shape[0]], gate_up[: x.shape[0]]) if padding_amount else (act, gate_up)
+          return act_u, gu_u, w_out, None
+        act, w_out = out
+        return (act[: x.shape[0]] if padding_amount else act), None, w_out, None
       if fuse_dswiglu_in_wo_gmm:
         # moe_wo_gmm_fused_dswiglu: (act, [gate | up]); the backward runs through [gate | up] (_prepare_wo_inputs).
         act, gate_up = out
@@ -4475,7 +4656,7 @@ class RoutedMoE(nnx.Module):
       )
 
     def _ring_down_project_and_unpermute(
-        output0, output1, wo, routing, route_metadata, batch_size, sequence_length, forward_tie=None
+        output0, output1, wo, routing, route_metadata, batch_size, sequence_length, forward_tie=None, return_weights=False
     ):
       """moe_router_grad_from_wo_input: `_ring_unpermute(_down_projection(...))` as one op.
 
@@ -4503,7 +4684,16 @@ class RoutedMoE(nnx.Module):
         )
 
       def down_projection_bwd_dswiglu(
-          gathered, weighted_h, kernel, group_sizes, expert_assignments, group_offset, *, dact_gate_up, dact_row_scale
+          gathered,
+          weighted_h,
+          kernel,
+          group_sizes,
+          expert_assignments,
+          group_offset,
+          *,
+          dact_gate_up,
+          dact_row_scale,
+          drhs_partial_sum=None,
       ):
         """moe_wo_gmm_fused_dswiglu: down_projection's backward at the input weighted_h and cotangent gathered,
         with the SwiGLU backward in the DLHS epilogue (megablox gmm_dswiglu_bwd): (d[gate | up], <u, h>, dwo).
@@ -4519,7 +4709,7 @@ class RoutedMoE(nnx.Module):
         d_gate_up, dot, grad_wo = mblx.gmm_dswiglu_bwd(
             gathered.astype(self.dtype),
             weighted_h.astype(self.dtype),
-            kernel.astype(self.dtype),
+            kernel if isinstance(kernel, quantizations.Fp8SteWeight) else kernel.astype(self.dtype),
             group_sizes,
             group_offset,
             self.dtype,
@@ -4530,6 +4720,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(dact_gate_up),
+            drhs_partial_sum=drhs_partial_sum,
         )
         if padding_amount > 0:
           # dot is an array here (return_dact_dot=True).
@@ -4562,12 +4753,22 @@ class RoutedMoE(nnx.Module):
           dswiglu_gate_up=dswiglu_gate_up,
           down_projection_bwd_dswiglu=None if dswiglu_gate_up is None else down_projection_bwd_dswiglu,
           spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
+          return_wo=return_weights,
       )
-      if forward_tie is not None:
+      wo_ret = wo
+      if return_weights:
+        if forward_tie is not None:
+          output, forward_tie, wo_ret = output
+        else:
+          output, wo_ret = output
+      elif forward_tie is not None:
         output, forward_tie = output
       # The reshapes of unpermute and _ring_unpermute (the embed dim is whole: no tensor parallelism here).
       output = output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
-      return jnp.reshape(output, (-1, sequence_length, self.moe_expert_input_dim)), forward_tie
+      reshaped_out = jnp.reshape(output, (-1, sequence_length, self.moe_expert_input_dim))
+      if return_weights:
+        return reshaped_out, forward_tie, wo_ret
+      return reshaped_out, forward_tie
 
     def _ring_reduce_scatter(output):
       """Ring of experts: sum the partial outputs across the expert shards."""
@@ -4643,10 +4844,6 @@ class RoutedMoE(nnx.Module):
         return_weights=False,
         combine_after=None,
     ):
-      if router_grad_from_wo_input and (return_weights or not gather_weights):
-        # The fused op does not return the weights (the config validator rejects the two keys together).
-        raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
-
       def _unpermute_routing(routing):
         """moe_combine_per_chunk: this chunk's unpermute waits on the previous chunk's combine reduce-scatter
         (`combine_after`), through a data dependency on the small routing-weight operand of the unpermute."""
@@ -4724,9 +4921,20 @@ class RoutedMoE(nnx.Module):
       if router_grad_from_wo_input:
         # moe_router_grad_from_wo_input: the activation, the down projection and the unsort as one op whose
         # backward does not read the down projection's output; then the same reduce-scatter as below.
-        output, _ = _ring_down_project_and_unpermute(
-            output0, output1, wo, _unpermute_routing(routing), route_metadata, batch_size, sequence_length
+        dp_res = _ring_down_project_and_unpermute(
+            output0,
+            output1,
+            wo,
+            _unpermute_routing(routing),
+            route_metadata,
+            batch_size,
+            sequence_length,
+            return_weights=return_weights,
         )
+        if return_weights:
+          output, _, wo = dp_res
+        else:
+          output, _ = dp_res
         return _moe_body_outputs(_ring_reduce_scatter(output), routing, (w0, w1, wo))
 
       tc_prescaled = (
@@ -4889,13 +5097,27 @@ class RoutedMoE(nnx.Module):
 
       return _moe_body_outputs(output, routing, (w0, w1, wo))
 
+    def _kernel_in_spec(w_kern, pspec):
+      if (
+          pspec is not None
+          and isinstance(w_kern, quantizations.Fp8SteWeight)
+          and getattr(w_kern, 'w_ste', None) is not None
+          and w_kern.w_ste.shape != w_kern.codes.shape
+      ):
+        return quantizations.Fp8SteWeight(
+            w_ste=P(('expert', 'fsdp'), *pspec[1:]),
+            codes=pspec,
+            scale=pspec,
+        )
+      return pspec
+
     in_specs = (
         input_partition_pspec,
         gate_logits_pspec,
         pre_bias_logits_pspec,
-        w0_pspec,
-        w1_pspec,
-        wo_pspec,
+        _kernel_in_spec(w0_kernel, w0_pspec),
+        _kernel_in_spec(w1_kernel, w1_pspec),
+        _kernel_in_spec(wo_kernel, wo_pspec),
         w0_bias_pspec,
         w1_bias_pspec,
         wo_bias_pspec,
@@ -4907,7 +5129,8 @@ class RoutedMoE(nnx.Module):
         gate_logits_pspec if forced_routed_experts is not None else None,
     )
     # Not every mesh axis: shard_map rejects axes an enclosing vmap mapped away ("stage", "diloco").
-    input_mesh_axes = {axis for spec in in_specs if spec is not None for dim in spec for axis in mesh_axes_for_dim(dim)}
+    flat_in_specs = jax.tree_util.tree_leaves(in_specs, is_leaf=lambda s: isinstance(s, P))
+    input_mesh_axes = {axis for spec in flat_in_specs if spec is not None for dim in spec for axis in mesh_axes_for_dim(dim)}
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
 
     @functools.partial(
@@ -5057,9 +5280,6 @@ class RoutedMoE(nnx.Module):
         for c in range(n_chunks):
           gather_c = not accum_chunk_wgrad or c == 0
           return_c = accum_chunk_wgrad and c < n_chunks - 1
-          if router_grad_from_wo_input and (return_c or not gather_c):
-            # The fused op does not return the weights (the config validator rejects the two keys together).
-            raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
           if c + 1 < n_chunks:
             # 1. The next chunk's token all-gather waits for this chunk's routed tokens.
             x_next, routed = barrier_tie(x[:, (c + 1) * chunk : (c + 2) * chunk, :], dispatched[c][0])
@@ -5119,7 +5339,7 @@ class RoutedMoE(nnx.Module):
             # moe_router_grad_from_wo_input: the down projection and the unsort as one op. Tie 2 moves inside it
             # (forward only, as barrier_tie's backward=False): this chunk's down-projection output and the next
             # chunk's routed tokens. Tie 3 above already holds the routing weights the op's gather-reduce reads.
-            unpermuted, routed = _ring_down_project_and_unpermute(
+            dp_res = _ring_down_project_and_unpermute(
                 output0,
                 output1,
                 cur_wo,
@@ -5128,7 +5348,13 @@ class RoutedMoE(nnx.Module):
                 x.shape[0],
                 chunk,
                 forward_tie=dispatched[c + 1][0] if c + 1 < n_chunks else None,
+                return_weights=return_c,
             )
+            if return_c:
+              unpermuted, routed, wo_c = dp_res
+              cur_w0, cur_w1, cur_wo = w0_c, w1_c, wo_c
+            else:
+              unpermuted, routed = dp_res
             if c + 1 < n_chunks:
               dispatched[c + 1] = _with_routed(dispatched[c + 1], routed)
           else:
@@ -5411,16 +5637,18 @@ class RoutedMoE(nnx.Module):
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
-    gate_logits = self._maybe_shard_with_pspec(
-        gate_logits,
-        gate_logits_pspec,
-        logical_axes=gate_logits_logical_axes,
-    )
-    pre_bias_logits = self._maybe_shard_with_pspec(
-        pre_bias_logits,
-        pre_bias_logits_pspec,
-        logical_axes=pre_bias_logits_logical_axes,
-    )
+    if gate_logits is not None:
+      gate_logits = self._maybe_shard_with_pspec(
+          gate_logits,
+          gate_logits_pspec,
+          logical_axes=gate_logits_logical_axes,
+      )
+    if pre_bias_logits is not None:
+      pre_bias_logits = self._maybe_shard_with_pspec(
+          pre_bias_logits,
+          pre_bias_logits_pspec,
+          logical_axes=pre_bias_logits_logical_axes,
+      )
     if forced_routed_experts is not None:
       forced_routed_experts = self._maybe_shard_with_pspec(
           forced_routed_experts,
@@ -5470,7 +5698,12 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
-    if fp8_fake_quant_at_gather is None:
+    already_prefetched = isinstance(w0_kernel, quantizations.Fp8SteWeight) or getattr(
+        self.config, 'prefetch_fsdp_weights', False
+    )
+    if already_prefetched:
+      fp8_dequantize_after_gather = None
+    elif fp8_fake_quant_at_gather is None:
       w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
       w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
       wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
@@ -5505,7 +5738,7 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
 
-    prefetch = self.config.moe_expert_weight_prefetch
+    prefetch = None if batchsplit_mode == "dispatch" else self.config.moe_expert_weight_prefetch
     if prefetch is not None and max_utils.xla_strips_optimization_barriers(self.config.compile_xla_flags):
       # XLA would remove the barrier before scheduling, so it could not order anything.
       max_logging.warning(
@@ -5530,11 +5763,26 @@ class RoutedMoE(nnx.Module):
       # Every output of the barrier must be used below. In the rematerialized
       # forward inside the backward pass an unused output is dead, and the ordering
       # it carried is dropped with it.
-      (inputs, gate_logits, pre_bias_logits), (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias) = barrier_tie(
-          (inputs, gate_logits, pre_bias_logits),
-          (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias),
-          backward=prefetch == "forward_backward",
-      )
+      if isinstance(w0_kernel, quantizations.Fp8SteWeight):
+        c0 = w0_kernel.codes
+        c1 = w1_kernel.codes if isinstance(w1_kernel, quantizations.Fp8SteWeight) else w1_kernel
+        co = wo_kernel.codes if isinstance(wo_kernel, quantizations.Fp8SteWeight) else wo_kernel
+        (inputs, gate_logits, pre_bias_logits), (c0, c1, co, w0_bias, w1_bias, wo_bias) = barrier_tie(
+            (inputs, gate_logits, pre_bias_logits),
+            (c0, c1, co, w0_bias, w1_bias, wo_bias),
+            backward=False,
+        )
+        w0_kernel = dataclasses.replace(w0_kernel, codes=c0)
+        if isinstance(w1_kernel, quantizations.Fp8SteWeight):
+          w1_kernel = dataclasses.replace(w1_kernel, codes=c1)
+        if isinstance(wo_kernel, quantizations.Fp8SteWeight):
+          wo_kernel = dataclasses.replace(wo_kernel, codes=co)
+      else:
+        (inputs, gate_logits, pre_bias_logits), (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias) = barrier_tie(
+            (inputs, gate_logits, pre_bias_logits),
+            (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias),
+            backward=prefetch == "forward_backward",
+        )
 
     if fp8_dequantize_after_gather is not None:
       # After the barrier, so the barrier orders the (cheaper) code gathers and the dequantization can fuse
@@ -5547,6 +5795,313 @@ class RoutedMoE(nnx.Module):
           )
           for codes, deq in zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather)
       )
+
+    if batchsplit_mode == "prefetch_weights":
+      return (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, None), inputs
+
+    if batchsplit_mode == "dispatch":
+      rng_key = (
+          self.rngs.params()
+          if (
+              self.config.use_random_routing
+              and self.rngs is not None
+              and hasattr(self.rngs, "params")
+              and callable(getattr(self.rngs, "params"))
+          )
+          else None
+      )
+      force_dropless = getattr(self, "force_dropless", False)
+      batch_axes = _batch_axis_names(input_partition_pspec)
+      disp_in_specs = (
+          input_partition_pspec,
+          gate_logits_pspec,
+          pre_bias_logits_pspec,
+          decoder_tokens_pspec,
+          P() if rng_key is not None else None,
+          gate_logits_pspec if forced_routed_experts is not None else None,
+      )
+      meta_box = []
+
+      def _probe_dispatch(x, logits, pre_bias_logits, sharded_input_ids, rng, forced):
+        r = route(
+            x,
+            logits,
+            pre_bias_logits,
+            rng,
+            input_ids=sharded_input_ids,
+            forced_routed_experts=forced,
+            force_dropless=force_dropless,
+        )
+        leaves, tdef = jax.tree_util.tree_flatten(r)
+        meta_box.append((tdef, tuple(v.ndim == 0 for v in leaves)))
+        return jnp.zeros((), jnp.int32)
+
+      jax.eval_shape(
+          jax.shard_map(
+              _probe_dispatch,
+              mesh=self.mesh,
+              in_specs=disp_in_specs,
+              out_specs=P(),
+              check_vma=False,
+          ),
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          input_ids,
+          rng_key,
+          forced_routed_experts,
+      )
+      routed_treedef, scalar_flags = meta_box[0]
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=disp_in_specs,
+          out_specs=(P(batch_axes),) * len(scalar_flags),
+          check_vma=False,
+      )
+      def _dispatch_sm(x, logits, pre_bias_logits, sharded_input_ids, rng, forced):
+        r = route(
+            x,
+            logits,
+            pre_bias_logits,
+            rng,
+            input_ids=sharded_input_ids,
+            forced_routed_experts=forced,
+            force_dropless=force_dropless,
+        )
+        leaves = jax.tree_util.tree_leaves(r)
+        return tuple(jnp.expand_dims(v, 0) if is_sc else v for v, is_sc in zip(leaves, scalar_flags))
+
+      flat_routed = _dispatch_sm(
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          input_ids,
+          rng_key,
+          forced_routed_experts,
+      )
+      return flat_routed[0], flat_routed[1:], (routed_treedef, scalar_flags)
+
+    if batchsplit_mode == "f3_f4":
+      r0_tok, r0_rest, (routed_treedef, scalar_flags) = batchsplit_extra
+      routed0_flat_in = (r0_tok,) + tuple(r0_rest)
+      rng_key = (
+          self.rngs.params()
+          if (
+              self.config.use_random_routing
+              and self.rngs is not None
+              and hasattr(self.rngs, "params")
+              and callable(getattr(self.rngs, "params"))
+          )
+          else None
+      )
+      force_dropless = getattr(self, "force_dropless", False)
+      batch_axes = _batch_axis_names(input_partition_pspec)
+      f34_in_specs = (
+          (P(batch_axes),) * len(scalar_flags),
+          input_partition_pspec,
+          gate_logits_pspec,
+          pre_bias_logits_pspec,
+          _kernel_in_spec(w0_kernel, w0_pspec),
+          _kernel_in_spec(w1_kernel, w1_pspec),
+          _kernel_in_spec(wo_kernel, wo_pspec),
+          w0_bias_pspec,
+          w1_bias_pspec,
+          wo_bias_pspec,
+          decoder_tokens_pspec,
+          P() if rng_key is not None else None,
+          gate_logits_pspec if forced_routed_experts is not None else None,
+      )
+      f34_out_specs = (
+          output_pspec,
+          input_partition_pspec,
+          P(),
+          P(roe_bias_axis_names, None, None) if defer_small_ars else P(),
+      )
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=f34_in_specs,
+          out_specs=f34_out_specs,
+          check_vma=False,
+      )
+      def _f3_f4_sm(
+          routed0_flat,
+          x1,
+          logits1,
+          pre_bias_logits1,
+          w0,
+          w1,
+          wo,
+          w0_b,
+          w1_b,
+          wo_b,
+          sharded_input_ids1,
+          rng1,
+          forced1,
+      ):
+        restored0 = [jnp.squeeze(v, 0) if is_sc else v for v, is_sc in zip(routed0_flat, scalar_flags)]
+        x0_s, routing0, route_meta0 = jax.tree_util.tree_unflatten(routed_treedef, restored0)
+        seq_len = x1.shape[1]
+        accum = (
+            self.config.use_tokamax_gmm
+            and self.config.use_gmm_v2
+            and self.config.num_moe_emb_chunks <= 0
+        )
+
+        # Launch mb1 EP dispatch concurrently with mb0 expert GMMs (F3)
+        dispatched1 = route(
+            x1,
+            logits1,
+            pre_bias_logits1,
+            rng1,
+            input_ids=sharded_input_ids1,
+            forced_routed_experts=forced1,
+            force_dropless=force_dropless,
+        )
+
+        x0_c, routing0_c, route_meta0_c, out0_0, out1_0, gmm_fn0, wo_bias0, (w0_c, w1_c) = _up_projection(
+            x0_s,
+            routing0,
+            route_meta0,
+            w0,
+            w1,
+            w0_b,
+            w1_b,
+            wo_b,
+            gather_weights=True,
+            return_weights=accum,
+        )
+        if not accum:
+          w0_c, w1_c = w0, w1
+
+        if router_grad_from_wo_input:
+          dp0 = _ring_down_project_and_unpermute(
+              out0_0,
+              out1_0,
+              wo,
+              routing0_c,
+              route_meta0_c,
+              x1.shape[0],
+              seq_len,
+              forward_tie=dispatched1[0],
+              return_weights=accum,
+          )
+          if accum:
+            unperm0, routed1_tok, wo_c = dp0
+          else:
+            unperm0, routed1_tok = dp0
+            wo_c = wo
+        else:
+          inter0, wo_c_tmp, tc_pre0, x3d0 = _down_projection(
+              x0_c,
+              out0_0,
+              out1_0,
+              gmm_fn0,
+              wo,
+              wo_bias0,
+              routing0_c,
+              route_meta0_c,
+              gather_weights=True,
+              return_weights=accum,
+          )
+          wo_c = wo_c_tmp if accum else wo
+          inter0, routed1_tok = barrier_tie(inter0, dispatched1[0])
+          unperm0 = _ring_unpermute(inter0, routing0_c, x1.shape[0], seq_len, tc_prescaled=tc_pre0, x_is_3d=x3d0)
+
+        x1_s, routing1, route_meta1 = routed1_tok, dispatched1[1], dispatched1[2]
+
+        tie_f4_mode = os.environ.get("MAXTEXT_TIE_F4_TO_UNPERM0", "0")
+        if tie_f4_mode == "before_wi":
+          unperm0, x1_s = barrier_tie(unperm0, x1_s, backward=False)
+
+        # Tie E (backward-only): keeps mb1 wo_bwd + wi_bwd ahead of mb0 dp0_bwd so d_x1_s launches mb1 dispatch RS early,
+        # while d_unperm0 = _ep_ag(d_routed_out_mb0) overlaps mb1 wo_bwd + wi_bwd!
+        unperm0, x1_s = backward_barrier_tie(unperm0, x1_s)
+
+        if tie_f4_mode != "before_wo":
+          # Launch mb0 EP combine immediately after dp0 so it overlaps BOTH mb1 wi GMM AND mb1 wo GMM (~6 ms TC window)!
+          routed_out_mb0 = _ring_reduce_scatter(unperm0)
+
+        # F4: mb1 expert GMMs + mb1 unpermute (deferred cross-sub-layer combine)
+        x1_c, routing1_c, route_meta1_c, out0_1, out1_1, gmm_fn1, wo_bias1, _ = _up_projection(
+            x1_s,
+            routing1,
+            route_meta1,
+            w0_c,
+            w1_c,
+            w0_b,
+            w1_b,
+            wo_b,
+            gather_weights=not accum,
+            return_weights=False,
+        )
+        if tie_f4_mode == "before_wo":
+          # Let mb0 SC unpermute overlap mb1 wi GMM with zero TC stall, then materialize unperm0 and launch mb0 EP combine
+          # right before mb1 wo GMM so mb0 EP combine overlaps mb1 wo GMM + next sub-layer FSDP AG slice fusions!
+          out0_1, unperm0 = barrier_tie(out0_1, unperm0, backward=False)
+          routed_out_mb0 = _ring_reduce_scatter(unperm0)
+
+        if router_grad_from_wo_input:
+          unperm_mb1_out, _ = _ring_down_project_and_unpermute(
+              out0_1,
+              out1_1,
+              wo_c,
+              routing1_c,
+              route_meta1_c,
+              x1.shape[0],
+              seq_len,
+              forward_tie=None,
+              return_weights=False,
+          )
+        else:
+          inter1, _, tc_pre1, x3d1 = _down_projection(
+              x1_c,
+              out0_1,
+              out1_1,
+              gmm_fn1,
+              wo_c,
+              wo_bias1,
+              routing1_c,
+              route_meta1_c,
+              gather_weights=not accum,
+              return_weights=False,
+          )
+          unperm_mb1_out = _ring_unpermute(inter1, routing1_c, x1.shape[0], seq_len, tc_prescaled=tc_pre1, x_is_3d=x3d1)
+
+        lb_loss = (
+            None
+            if (routing0_c.lb_loss is None or routing1_c.lb_loss is None)
+            else 0.5 * (routing0_c.lb_loss + routing1_c.lb_loss)
+        )
+        if routing0_c.bias_updates is None or routing1_c.bias_updates is None:
+          bias_upd = None
+        elif defer_small_ars:
+          bias_upd = jnp.stack([routing0_c.bias_updates, routing1_c.bias_updates])[None]
+        else:
+          bias_upd = finalize_bias_updates(routing0_c.bias_updates + routing1_c.bias_updates)
+        return routed_out_mb0, unperm_mb1_out, lb_loss, bias_upd
+
+      routed_out_mb0, unperm_mb1_out, lb_loss, bias_updates = _f3_f4_sm(
+          routed0_flat_in,
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          input_ids,
+          rng_key,
+          forced_routed_experts,
+      )
+      if use_megatron_seq_aux_loss:
+        lb_loss = self.megatron_seq_aux_loss(pre_bias_logits if pre_bias_logits is not None else gate_logits)
+      return routed_out_mb0, unperm_mb1_out, lb_loss, bias_updates
 
     route_and_compute_outputs = sparse_matmul_route_and_compute(
         inputs,
@@ -6655,7 +7210,7 @@ class RoutedMoE(nnx.Module):
         w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
     fp8_fake_quant_at_gather = None
-    if cfg.fp8_moe_fake_quant and not is_fused_moe_path:
+    if cfg.fp8_moe_fake_quant and not is_fused_moe_path and not isinstance(w0_kernel, quantizations.Fp8SteWeight):
       # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
       # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
       # fp8_fake_quant_hoist: inside the decoder's layer scan the absmax comes precomputed for the whole stack
@@ -6753,6 +7308,125 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
       )
     return output, lb_loss, bias_updates
+
+  def compute_gate(self, inputs, forced_routed_experts=None, token_mask=None):
+    """Computes router gate logits on a single microbatch without reading expert weights."""
+    cfg = self.config
+    if token_mask is not None and cfg.moe_exclude_padding_from_routing:
+      forced_routed_experts = fold_padding_into_forced_routing(
+          forced_routed_experts, token_mask, self.num_experts_per_tok
+      )
+    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
+    routing_inputs = inputs.astype(gate_dtype)
+    inputs_bf16 = inputs.astype(cfg.dtype)
+    gate_logits, pre_bias_logits = self.gate(routing_inputs)
+    return inputs_bf16, gate_logits, pre_bias_logits, forced_routed_experts
+
+  def prepare_batchsplit_weights(self):
+    """Extracts `(w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, fp8_fake_quant_at_gather)` once per layer."""
+    cfg = self.config
+    wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
+    wo_kernel = linears.dequantize_weight(self.wo[...], wo_scale, self.dtype)
+    if cfg.prefuse_moe_weights:
+      wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
+      wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
+      if self._keep_prefused_wi_whole():
+        w0_kernel, w1_kernel = wi, None
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
+    else:
+      wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
+      wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
+      w0_kernel = linears.dequantize_weight(self.wi_0[...], wi_0_scale, self.dtype)
+      w1_kernel = linears.dequantize_weight(self.wi_1[...], wi_1_scale, self.dtype)
+
+    fp8_fake_quant_at_gather = None
+    if cfg.fp8_moe_fake_quant and not isinstance(w0_kernel, quantizations.Fp8SteWeight):
+      w0_absmax, w1_absmax, wo_absmax = self._fp8_hoisted_absmax(None if w1_kernel is None else w0_kernel.shape[-1])
+      if wo_absmax is not None and cfg.sparse_matmul and fp8_fake_quant_hoist_mode(cfg) == "gather8":
+        fp8_fake_quant_at_gather = (w0_absmax, w1_absmax, wo_absmax)
+      else:
+        w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel, absmax=w0_absmax)
+        if w1_kernel is not None:
+          w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel, absmax=w1_absmax)
+        wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel, absmax=wo_absmax)
+
+    if self.wi_0_sparsity_module is not None:
+      _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
+      _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
+      _, wo_kernel = self.wo_sparsity_module(jnp.zeros_like(wo_kernel), wo_kernel)
+    if cfg.mlp_bias:
+      w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
+      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
+      wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
+    else:
+      w0_bias, w1_bias, wo_bias = None, None, None
+    return w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, fp8_fake_quant_at_gather
+
+  def prefetch_batchsplit_weights(self, tie_inputs, weights_tuple):
+    """Issues FSDP FP8 code all-gathers and ties them (`backward=False`) to `tie_inputs` before `F2`."""
+    w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, fp8_fake_quant_at_gather = weights_tuple
+    return self.sparse_matmul(
+        tie_inputs,
+        None,
+        None,
+        w0_kernel,
+        w1_kernel,
+        wo_kernel,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        fp8_fake_quant_at_gather=fp8_fake_quant_at_gather,
+        batchsplit_mode="prefetch_weights",
+    )
+
+  def batchsplit_dispatch(self, inputs_bf16, gate_logits, pre_bias_logits, forced_routed_experts=None, input_ids=None):
+    """Runs EP token all-gather + top-k + SparseCore ragged gather on `mb0` (Stage F2)."""
+    return self.sparse_matmul(
+        inputs_bf16,
+        gate_logits,
+        pre_bias_logits,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        input_ids=input_ids,
+        forced_routed_experts=forced_routed_experts,
+        batchsplit_mode="dispatch",
+    )
+
+  def batchsplit_f3_f4(
+      self,
+      routed_mb0,
+      inputs_mb1,
+      logits_mb1,
+      pre_bias_logits_mb1,
+      weights_tuple,
+      forced_mb1=None,
+      input_ids_mb1=None,
+  ):
+    """Runs `mb0` GMMs || `mb1` EP dispatch (F3), then `mb1` GMMs || `mb0` EP combine + `mb1` unpermute (F4)."""
+    w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, fp8_fake_quant_at_gather = weights_tuple
+    return self.sparse_matmul(
+        inputs_mb1,
+        logits_mb1,
+        pre_bias_logits_mb1,
+        w0_kernel,
+        w1_kernel,
+        wo_kernel,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        input_ids=input_ids_mb1,
+        forced_routed_experts=forced_mb1,
+        fp8_fake_quant_at_gather=fp8_fake_quant_at_gather,
+        batchsplit_mode="f3_f4",
+        batchsplit_extra=routed_mb0,
+    )
 
 
 class RoutedAndSharedMoE(nnx.Module):

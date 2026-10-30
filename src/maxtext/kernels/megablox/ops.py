@@ -18,6 +18,7 @@
 
 import dataclasses
 import functools
+import os
 from typing import List, Literal, NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
@@ -707,6 +708,8 @@ def _gmm_bwd(
   else:
     if isinstance(drhs_partial_sum, qpl.QArray):
       drhs_partial_sum = drhs_partial_sum.qvalue
+    elif isinstance(drhs_partial_sum, quantizations.Fp8SteWeight):
+      drhs_partial_sum = drhs_partial_sum.w_ste
     if transpose_rhs:
       drhs_partial_sum = drhs_partial_sum.swapaxes(1, 2)
   # 3D layouts: the incoming grad matches the (possibly 3D) forward output and dlhs is
@@ -767,7 +770,28 @@ def _gmm_bwd(
   if lhs_is_qarray and isinstance(residual_lhs, qpl.QArray):
     lhs_scale_for_dlhs = residual_lhs.scale
 
-  # 3. DLHS Gradient Execution
+  # 3. DRHS Gradient Execution FIRST (frees saved lhs immediately & starts FSDP weight-grad RS early!)
+  drhs = _compute_drhs(
+      drhs_dout,
+      lhs,
+      group_sizes,
+      group_offset,
+      num_actual_groups,
+      rhs_dtype,
+      tiling,
+      use_tokamax_backend,
+      use_gmm_v2,
+      use_manual_quantization,
+      weight_gather_axes,
+      interpret,
+      rhs_vma_axes,
+      quantization_rule,
+      use_gmm_v2_heuristic_tiling,
+      partial_sum=drhs_partial_sum,
+      flat_rhs_shard=flat_fsdp_shard is not None,
+  )
+
+  # 4. DLHS Gradient Execution (runs concurrently with SparseCore weight-grad reduce-scatter)
   dlhs, lhs_scale_applied = _compute_dlhs(
       dlhs_dout,
       rhs,
@@ -790,33 +814,18 @@ def _gmm_bwd(
       fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
   )
 
-  # 4. DRHS Gradient Execution
-  drhs = _compute_drhs(
-      drhs_dout,
-      lhs,
-      group_sizes,
-      group_offset,
-      num_actual_groups,
-      rhs_dtype,
-      tiling,
-      use_tokamax_backend,
-      use_gmm_v2,
-      use_manual_quantization,
-      weight_gather_axes,
-      interpret,
-      rhs_vma_axes,
-      quantization_rule,
-      use_gmm_v2_heuristic_tiling,
-      partial_sum=drhs_partial_sum,
-      flat_rhs_shard=flat_fsdp_shard is not None,
-  )
-
   # 5. Output Formatting
   # NOTE: If the rhs transposition is fused into the forward pass we need to
   # return the transpose of the rhs gradient that we calculated above.
   #
   # TODO(tgale, enriqueps, apaske): Fuse this transposition into the tgmm.
   drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
+  if drhs_partial_sum is not None and os.environ.get("MAXTEXT_TIE_DLHS_TO_DRHS_ACCUM", "0") in (
+      "1",
+      "wi_only",
+      "both",
+  ):
+    dlhs, drhs = jax.lax.optimization_barrier((dlhs, drhs))
   dpartial_sum = grad if partial_sum_fwd is not None else None
   d_existing_out = None if use_tokamax_backend else grad
 
@@ -1369,7 +1378,8 @@ def _drhs_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     drhs_tiling = tgmm_v2.calculate_tgmm_tiling
   else:
-    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+    tn = min(tiling[8], 2048) if partial_sum is not None else tiling[8]
+    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tn)
 
   return tgmm_v2.tgmm_v2(
       lhs=drhs_lhs,
@@ -1428,7 +1438,8 @@ def gmm_silu(
     fuse_3d_dlhs_ps: bool = False,
     fuse_bwd_dswiglu: bool = False,
     fwd_rhs_buffer_count: int | None = None,
-) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+    return_rhs: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
   """silu(lhs @ gate) * (lhs @ up) per group, with the activation in the gmm_v2 epilogue.
 
   `rhs` is the prefused [g, k, 2n] weight, gate = rhs[..., :n] and up = rhs[..., n:]. The unfused path writes
@@ -1459,7 +1470,10 @@ def gmm_silu(
   """
   if isinstance(lhs, qpl.QArray) or isinstance(rhs, qpl.QArray) or lhs.ndim != 2 or rhs.ndim != 3:
     raise NotImplementedError("gmm_silu: plain 2D lhs and [g, k, 2n] rhs only.")
-  fn = _gmm_silu_dswiglu if fuse_bwd_dswiglu else _gmm_silu
+  if return_rhs:
+    fn = _gmm_silu_dswiglu_ret_rhs if fuse_bwd_dswiglu else _gmm_silu_ret_rhs
+  else:
+    fn = _gmm_silu_dswiglu if fuse_bwd_dswiglu else _gmm_silu
   return fn(
       lhs,
       rhs,
@@ -1714,6 +1728,90 @@ def _gmm_silu_dswiglu_bwd(
 _gmm_silu_dswiglu.defvjp(_gmm_silu_dswiglu_fwd, _gmm_silu_dswiglu_bwd)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10))
+def _gmm_silu_ret_rhs(
+    lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, fwd_rhs_buffer_count
+):
+  del dlhs_transpose, fuse_scale, fuse_3d
+  act = _gmm_silu_kernel(
+      lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, False, fwd_rhs_buffer_count
+  )
+  return act, rhs
+
+
+def _gmm_silu_ret_rhs_fwd(
+    lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, fwd_rhs_buffer_count
+):
+  del dlhs_transpose, fuse_scale, fuse_3d
+  act, gate, up = _gmm_silu_kernel(
+      lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, True, fwd_rhs_buffer_count
+  )
+  rhs_res = dataclasses.replace(rhs, w_ste=None) if isinstance(rhs, quantizations.Fp8SteWeight) else rhs
+  return (act, rhs), (lhs, rhs_res, group_sizes, group_offset, gate, up)
+
+
+def _gmm_silu_ret_rhs_bwd(
+    preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, fwd_rhs_buffer_count, residual, grad_out
+):
+  del fwd_rhs_buffer_count
+  lhs, rhs, group_sizes, group_offset, gate, up = residual
+  dact, d_rhs_out = grad_out
+  _, swiglu_vjp = jax.vjp(_swiglu, gate, up)
+  dgate, dup = swiglu_vjp(dact.astype(gate.dtype))
+  grad = jnp.concatenate([dgate, dup], axis=-1)
+  dlhs, drhs, *_ = _gmm_bwd(
+      lhs.dtype, rhs.dtype, preferred_element_type, tiling, False, False, None, True, None, False, (), (),
+      True, heuristic, True, False, fuse_scale, dlhs_transpose, None, False, fuse_3d, None,
+      (lhs, rhs, group_sizes, group_offset, None, False, False, None),
+      (grad, None, d_rhs_out),
+  )
+  return dlhs, drhs, None, None
+
+
+_gmm_silu_ret_rhs.defvjp(_gmm_silu_ret_rhs_fwd, _gmm_silu_ret_rhs_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10))
+def _gmm_silu_dswiglu_ret_rhs(
+    lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, fwd_rhs_buffer_count
+):
+  del dlhs_transpose, fuse_scale, fuse_3d
+  act = _gmm_silu_kernel(
+      lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, False, fwd_rhs_buffer_count
+  )
+  return act, jnp.zeros((lhs.shape[0], rhs.shape[-1]), dtype=preferred_element_type), rhs
+
+
+def _gmm_silu_dswiglu_ret_rhs_fwd(
+    lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, fwd_rhs_buffer_count
+):
+  del dlhs_transpose, fuse_scale, fuse_3d
+  act, gate_up = _gmm_silu_kernel(
+      lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, "concat", fwd_rhs_buffer_count
+  )
+  rhs_res = dataclasses.replace(rhs, w_ste=None) if isinstance(rhs, quantizations.Fp8SteWeight) else rhs
+  return (act, gate_up, rhs), (lhs, rhs_res, group_sizes, group_offset)
+
+
+def _gmm_silu_dswiglu_ret_rhs_bwd(
+    preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, fwd_rhs_buffer_count, residual, grad_out
+):
+  del fwd_rhs_buffer_count
+  lhs, rhs, group_sizes, group_offset = residual
+  _, d_gate_up, d_rhs_out = grad_out
+  grad = d_gate_up.astype(preferred_element_type)
+  dlhs, drhs, *_ = _gmm_bwd(
+      lhs.dtype, rhs.dtype, preferred_element_type, tiling, False, False, None, True, None, False, (), (),
+      True, heuristic, True, False, fuse_scale, dlhs_transpose, None, False, fuse_3d, None,
+      (lhs, rhs, group_sizes, group_offset, None, False, False, None),
+      (grad, None, d_rhs_out),
+  )
+  return dlhs, drhs, None, None
+
+
+_gmm_silu_dswiglu_ret_rhs.defvjp(_gmm_silu_dswiglu_ret_rhs_fwd, _gmm_silu_dswiglu_ret_rhs_bwd)
+
+
 # ==============================================================================
 # GMM of a SwiGLU output: the SwiGLU backward in the DLHS epilogue
 # ==============================================================================
@@ -1734,6 +1832,7 @@ def gmm_dswiglu_bwd(
     use_gmm_v2_heuristic_tiling: bool = False,
     use_dlhs_transpose_rhs: bool = False,
     dact_pre_act_tile_n: int | None = None,
+    drhs_partial_sum: jnp.ndarray | None = None,
 ):
   """The backward of `lhs_act @ rhs` (per group), lhs_act = silu(gate) * up, with the SwiGLU backward fused.
 
@@ -1764,6 +1863,18 @@ def gmm_dswiglu_bwd(
   else:
     kernel_transpose_rhs = False
     dlhs_rhs = rhs_arr.swapaxes(1, 2)
+  ps = drhs_partial_sum.w_ste if isinstance(drhs_partial_sum, quantizations.Fp8SteWeight) else drhs_partial_sum
+  drhs = _drhs_run_tokamax_v2(
+      dout,
+      lhs_act,
+      group_sizes,
+      group_offset,
+      rhs.shape[0],
+      rhs.dtype,
+      tiling,
+      use_gmm_v2_heuristic_tiling,
+      partial_sum=ps,
+  )
   dlhs_out = gmm_v2.gmm_v2(
       lhs=dout,
       rhs=dlhs_rhs,
@@ -1785,24 +1896,22 @@ def gmm_dswiglu_bwd(
       dact_pre_act_tile_n=dact_pre_act_tile_n,
       dequant_rhs_in_vmem=is_ste_rhs,
   )
-  drhs = _drhs_run_tokamax_v2(
-      dout,
-      lhs_act,
-      group_sizes,
-      group_offset,
-      rhs.shape[0],
-      rhs.dtype,
-      tiling,
-      use_gmm_v2_heuristic_tiling,
-      partial_sum=None,
-  )
+  d_gate_up, dot = dlhs_out if return_dact_dot else (dlhs_out, None)
+  if ps is not None and os.environ.get("MAXTEXT_TIE_DLHS_TO_DRHS_ACCUM", "0") in (
+      "1",
+      "wo_only",
+      "both",
+  ):
+    if dot is not None:
+      d_gate_up, dot, drhs = jax.lax.optimization_barrier((d_gate_up, dot, drhs))
+    else:
+      d_gate_up, drhs = jax.lax.optimization_barrier((d_gate_up, drhs))
   if is_ste_rhs:
     drhs = quantizations.Fp8SteWeight(
         w_ste=drhs,
         codes=jnp.zeros_like(rhs.codes),
         scale=jnp.zeros_like(rhs.scale),
     )
-  d_gate_up, dot = dlhs_out if return_dact_dot else (dlhs_out, None)
   return d_gate_up, dot, drhs
 
 

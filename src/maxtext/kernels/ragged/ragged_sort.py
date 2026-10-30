@@ -757,6 +757,7 @@ def ring_ragged_unsort_down_projection(
     dswiglu_gate_up=None,
     down_projection_bwd_dswiglu=None,
     spread_masked_indices=False,
+    return_wo=False,
 ):
   """:func:`ring_ragged_unsort` of the down projection, with a backward that does not read its output.
 
@@ -862,12 +863,23 @@ def ring_ragged_unsort_down_projection(
       # y is not a residual: the backward below never reads it.
       wo_res = dataclasses.replace(wo, w_ste=None) if hasattr(wo, "codes") else wo
       res = (h, gate_up, wo_res, operands, revert, weights, start, end, argsort_indices)
-      return (out if tie is None else (out, tie)), res
+      if return_wo:
+        fwd_ret = (out, wo) if tie is None else (out, tie, wo)
+      else:
+        fwd_ret = out if tie is None else (out, tie)
+      return fwd_ret, res
 
     @jax.named_scope("ragged-unsort-down-projection-bwd")
     def _unsort_down_projection_dswiglu_bwd(res, g_out):
       h, gate_up, wo, operands, revert, weights, start, end, argsort_indices = res
-      g_unsorted, g_tie = (g_out, None) if forward_tie is None else g_out
+      if return_wo:
+        if forward_tie is None:
+          g_unsorted, g_wo_ps, g_tie = g_out[0], g_out[1], None
+        else:
+          g_unsorted, g_tie, g_wo_ps = g_out[0], g_out[1], g_out[2]
+      else:
+        g_wo_ps = None
+        g_unsorted, g_tie = (g_out, None) if forward_tie is None else g_out
       gathered, weight_for_sorted, mask, to_slot_order = _ring_unsort_fan_out(
           g_unsorted,
           revert,
@@ -888,6 +900,7 @@ def ring_ragged_unsort_down_projection(
       weighted_h = jnp.where(mask[:, None], h32 * weight, 0.0).astype(h.dtype)
       # The epilogue's row scale: dh = w u, zero outside this shard's rows, so d[gate | up] is zero there too.
       masked_weight = jnp.where(mask, weight_for_sorted, 0.0)
+      bwd_extra = {"drhs_partial_sum": g_wo_ps} if g_wo_ps is not None else {}
       d_gate_up, dot, grad_wo = down_projection_bwd_dswiglu(
           gathered,
           weighted_h,
@@ -895,6 +908,7 @@ def ring_ragged_unsort_down_projection(
           *operands,
           dact_gate_up=gate_up,
           dact_row_scale=masked_weight,
+          **bwd_extra,
       )
       # The routing-weight gradient <u, h> from the epilogue.
       dot = jnp.where(mask, dot, 0.0)
