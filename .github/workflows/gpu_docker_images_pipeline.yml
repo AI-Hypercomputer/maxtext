@@ -96,14 +96,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "GPU Pre-Training Stable"
+          - name: "GPU Pre-Training Stable (amd64)"
             build_mode: stable
             workflow: pre-training
             image_name: maxtext_gpu_jax_stable
-          - name: "GPU Pre-Training Nightly"
+            platform: amd64
+          - name: "GPU Pre-Training Nightly (amd64)"
             build_mode: nightly
             workflow: pre-training
             image_name: maxtext_gpu_jax_nightly
+            platform: amd64
+          - name: "GPU Pre-Training Stable (arm64)"
+            build_mode: stable
+            workflow: pre-training
+            image_name: maxtext_gpu_jax_stable
+            platform: arm64
+          - name: "GPU Pre-Training Nightly (arm64)"
+            build_mode: nightly
+            workflow: pre-training
+            image_name: maxtext_gpu_jax_nightly
+            platform: arm64
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
@@ -118,6 +130,7 @@ jobs:
       fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
       source_run_id: ${{ needs.resolve_source.outputs.source_run_id || inputs.source_run_id }}
       allow_dependency_drift: ${{ inputs.allow_dependency_drift == true }}
+      platform: ${{ matrix.platform }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -129,15 +142,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "Pre-Training"
+          - name: "Pre-Training (amd64)"
             image_name: maxtext_gpu_jax_stable
             workflow: pre-training
             additional_image_to_tag: maxtext_gpu_jax_nightly
+            platform: amd64
     uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ matrix.image_name }}
       repository_name: ${{ inputs.repository_name || 'maxtext-images' }}
-      image_tag: ${{ github.run_id }}
+      image_tag: ${{ matrix.platform }}-${{ github.run_id }}
       device: gpu
       workflow: ${{ matrix.workflow }}
 

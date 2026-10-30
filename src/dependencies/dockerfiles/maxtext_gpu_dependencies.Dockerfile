@@ -19,19 +19,27 @@ RUN mkdir -p /airlock-apt-methods /airlock-ssl-certs && \
 FROM $BASEIMAGE
 
 ARG USE_AIRLOCK=false
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 # ubuntu:24.04 ships without CA certificates, so the Go-based ar+https apt transport cannot
 # verify TLS to us-apt.pkg.dev. Reuse the CA bundle from the bootstrap stage (empty when USE_AIRLOCK=false).
 COPY --from=airlock-bootstrap /airlock-ssl-certs/ /etc/ssl/certs/
 
-# Install Python 3.12, build tools, and network/DNS utilities on Ubuntu 24.04 (uses Airlock apt repo when USE_AIRLOCK=true)
+# Install Python 3.12, build tools, and network/DNS utilities on Ubuntu 24.04 (uses Airlock apt repo when USE_AIRLOCK=true).
+# Long-running RUN steps start a 60s stdout keepalive loop to prevent the GKE self-hosted runner's
+# 300s kubectl exec idle stream timeout from prematurely closing the BuildKit build stream
+# (e.g., during QEMU arm64 package setup or silent C++/CUDA compilation in setup.sh).
 RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+    (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
+    KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
-        rm -f /etc/apt/sources.list.d/ubuntu.sources && \
-        printf "deb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble noble main restricted universe multiverse\ndeb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble-updates noble-updates main restricted universe multiverse\ndeb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble-security noble-security main restricted universe multiverse\n" > /etc/apt/sources.list; \
+        if [ "$(uname -m)" = "x86_64" ]; then \
+            rm -f /etc/apt/sources.list.d/ubuntu.sources && \
+            printf "deb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble noble main restricted universe multiverse\ndeb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble-updates noble-updates main restricted universe multiverse\ndeb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble-security noble-security main restricted universe multiverse\n" > /etc/apt/sources.list; \
+        fi; \
     fi && \
     apt-get update && apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
@@ -60,6 +68,8 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-
 # Install the Google Cloud SDK
 RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+    (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
+    KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi; \
@@ -70,15 +80,18 @@ RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=
     rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
 
 # Upgrade pip, setuptools, wheel, uv, install nvidia-nvtx-cu12/nvidia-nccl-cu12 for transformer-engine-jax build, and clean up ensurepip cache
-RUN python3 -m pip install --upgrade --no-cache-dir --ignore-installed pip setuptools wheel uv keyrings.google-artifactregistry-auth nvidia-nvtx-cu12 nvidia-nccl-cu12 && \
+RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
+    KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
+    python3 -m pip install --upgrade --no-cache-dir --ignore-installed pip setuptools wheel uv keyrings.google-artifactregistry-auth nvidia-nvtx-cu12 nvidia-nccl-cu12 && \
     apt-get purge -y python3-pip python3-wheel && \
     ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nvtx/include/nvtx3 /usr/local/include/nvtx3 && \
-    ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 /usr/lib/x86_64-linux-gnu/libnccl.so.2 && \
-    ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 /usr/lib/x86_64-linux-gnu/libnccl.so && \
+    ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 "/usr/lib/$(uname -m)-linux-gnu/libnccl.so.2" && \
+    ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 "/usr/lib/$(uname -m)-linux-gnu/libnccl.so" && \
     python3 -c 'import ensurepip, os, shutil; shutil.rmtree(os.path.join(os.path.dirname(ensurepip.__file__), "_bundled"), ignore_errors=True)'
 
 # Set environment variables for Google Cloud SDK, GCC 12, and NVIDIA container runtime
-ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvcc/bin:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc/bin:${PATH}"
+ENV PATH="/usr/local/nvidia/bin:/usr/local/google-cloud-sdk/bin:/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvcc/bin:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/nvidia/lib64:/usr/local/gib/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 ENV CC=gcc-12
 ENV CXX=g++-12
 ENV NVIDIA_VISIBLE_DEVICES=all
@@ -116,9 +129,11 @@ COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Install dependencies (including CUDA and JAX wheels from Airlock when USE_AIRLOCK=true)
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}"
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=uv-${TARGETARCH},target=/root/.cache/uv \
     --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+    (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
+    KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
@@ -130,22 +145,44 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         fi; \
     fi && \
     export UV_LINK_MODE=copy && \
+    cp -a /etc/python3.12/sitecustomize.py /tmp/sitecustomize.py.bak && \
+    printf '\ntry:\n    import importlib.util\n    if importlib.util.find_spec("pybind11") is not None:\n        import setuptools, distutils.ccompiler\n        from concurrent.futures import ThreadPoolExecutor\n        def _pcompile(self, sources, output_dir=None, macros=None, include_dirs=None, debug=0, extra_preargs=None, extra_postargs=None, depends=None):\n            macros, objects, extra_postargs, pp_opts, build = self._setup_compile(output_dir, macros, include_dirs, sources, depends, extra_postargs)\n            cc_args = self._get_cc_args(pp_opts, debug, extra_preargs)\n            def _one(obj):\n                if obj in build:\n                    self._compile(obj, build[obj][0], build[obj][1], cc_args, extra_postargs, pp_opts)\n            with ThreadPoolExecutor(max_workers=8) as ex:\n                list(ex.map(_one, objects))\n            return objects\n        distutils.ccompiler.CCompiler.compile = _pcompile\nexcept Exception:\n    pass\n' >> /etc/python3.12/sitecustomize.py && \
     bash /deps/src/dependencies/scripts/setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE} TF=${ENV_TF} && \
+    mv -f /tmp/sitecustomize.py.bak /etc/python3.12/sitecustomize.py && \
     uv pip install --system nvidia-curand-cu12 && \
     ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/cuda_runtime /usr/local/lib/python3.12/dist-packages/nvidia/cuda_cudart && \
     for so in /usr/local/lib/python3.12/dist-packages/nvidia/*/lib/lib*.so.*; do \
         if [ -f "$so" ]; then \
             base=$(basename "$so" | sed 's/\.so\..*/.so/'); \
-            ln -sf "$so" "/usr/lib/x86_64-linux-gnu/$base"; \
-            ln -sf "$so" "/usr/lib/x86_64-linux-gnu/$(basename "$so")"; \
+            ln -sf "$so" "/usr/lib/$(uname -m)-linux-gnu/$base"; \
+            ln -sf "$so" "/usr/lib/$(uname -m)-linux-gnu/$(basename "$so")"; \
         fi; \
     done && \
-    if [ "$USE_AIRLOCK" = "true" ]; then \
+    if [ "$USE_AIRLOCK" = "true" ] && [ "$(uname -m)" = "x86_64" ]; then \
         echo "deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse" > /etc/apt/sources.list; \
     fi && \
     rm -f /usr/lib/apt/methods/ar+https && \
-    find /usr/local/lib -type d -path "*/nvidia/*/lib" > /etc/ld.so.conf.d/nvidia-wheels.conf && \
+    find /usr/local/lib -type d -path "*/nvidia/*/lib" ! -path "*/nvidia/nccl/lib" > /etc/ld.so.conf.d/nvidia-wheels.conf && \
     ldconfig
+
+# Install CUDA 12-pinned libnccl2 and libnccl-dev and configure NCCL plugin path for multi-node GKE communication
+ARG NCCL_DEB_VERSION=2.32.3-1+cuda12.9
+RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
+    KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
+    printf 'Package: libnccl2 libnccl-dev\nPin: version *+cuda12.9\nPin-Priority: 1001\n\nPackage: libnccl2 libnccl-dev\nPin: version *+cuda13*\nPin-Priority: -1\n' \
+      > /etc/apt/preferences.d/nccl-cuda12 && \
+    CUDA_REPO_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo sbsa || echo x86_64) && \
+    curl -fsSL -o /tmp/cuda-keyring.deb \
+      "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${CUDA_REPO_ARCH}/cuda-keyring_1.1-1_all.deb" && \
+    dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libnccl2=${NCCL_DEB_VERSION} libnccl-dev=${NCCL_DEB_VERSION} && \
+    apt-mark hold libnccl2 libnccl-dev && \
+    ldconfig && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV NCCL_PLUGIN_PATH="/usr/local/gib/lib64:/usr/local/nvidia/lib64"
 
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
@@ -157,9 +194,11 @@ COPY benchmarks*/ benchmarks/
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false
-RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
+RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
+    KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
+    if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         echo "Downloading test assets from GCS..."; \
-        if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}/golden_logits"; then \
+        if ! CLOUDSDK_STORAGE_PROCESS_COUNT=1 CLOUDSDK_STORAGE_THREAD_COUNT=1 gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}/golden_logits"; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi
