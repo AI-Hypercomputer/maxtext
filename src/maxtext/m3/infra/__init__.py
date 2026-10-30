@@ -14,13 +14,15 @@
 
 """Post-construction transforms applied from training setup, never from models.
 
+Modules:
+  * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
+
 Planned modules:
   * `remat.py` — path-transparent remat wrapper + `maybe_apply_remat`.
-  * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
   * `quantization.py` — qwix int8/fp8 rules + `maybe_quantize`.
   * `offload.py` — `to_host` for optimizer/parameter offloading.
 
-Composition order is fixed:
+Planned composition order:
 `construct -> remat -> scan -> quantize -> optimizer -> host offload`.
 
 Model files contain only zero-cost annotations (`checkpoint_name` tags and
