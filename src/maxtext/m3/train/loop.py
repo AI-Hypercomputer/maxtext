@@ -24,7 +24,9 @@ model constructors take today. The fields read here are `steps`,
 `per_device_batch_size`, `max_target_length`, `learning_rate`, the optimizer
 fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
 `gradient_clipping_threshold`, `init_weights_seed`, the precision fields
-`matmul_precision` and `quantization`, and the profiler fields consumed by
+`matmul_precision` and `quantization`, the mesh fields consumed by
+`maxtext.m3.core.sharding.mesh_from_config` (`ici_*_parallelism`,
+`dcn_*_parallelism`, `shard_mode`), and the profiler fields consumed by
 `maxtext.common.profiler.Profiler` (`profiler`,
 `skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The trace is
 written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1`,
@@ -46,6 +48,12 @@ float32; and `matmul_precision` is applied here, by running setup and every
 step under `jax.default_matmul_precision`. It only affects float32 matmul
 operands -- on TPU, `default` is one bfloat16 pass and `highest` is full
 float32 -- so with bfloat16 compute it is a no-op, as in legacy.
+
+Parameters are sharded by the model at construction, from the `Sharding`
+strategy this loop hands it (`DefaultSharding`: FSDP over the model dimension,
+tensor parallelism over heads and MLP width, batch over the data axes). The
+loop asks the same strategy how to lay out the input batch and logs the
+fraction of parameters each device holds, so replication is visible.
 
 Example (CPU or TPU)::
 
@@ -73,15 +81,11 @@ import optax
 from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
-from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, mesh_from_config
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
-
-# Mesh axes the batch dimension is split over. Matches the defaults of
-# `create_mesh` (fsdp within a slice, data across slices).
-_BATCH_AXES = ("data", "fsdp")
 
 
 def make_optimizer(config) -> optax.GradientTransformation:
@@ -92,29 +96,52 @@ def make_optimizer(config) -> optax.GradientTransformation:
   return tx
 
 
-def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
+def setup_model(config, mesh: Mesh, sharding: Sharding) -> tuple[nnx.Module, nnx.Optimizer]:
   """Builds the model and optimizer with every transform applied, in the fixed order.
 
-  Must run inside `jax.set_mesh(mesh)`. Scan comes before quantization, which
+  Must run inside `jax.set_mesh(mesh)`. The model places its parameters from
+  `sharding` as it is constructed. Scan comes before quantization, which
   records module paths and so must see the final structure; quantization
   traces one forward pass of the training shape and comes before the
   optimizer, which must see the final model.
   """
-  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed), sharding=sharding)
   model = m3_scan.maybe_apply_scan(model, config)
   model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
   optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
   return model, optimizer
 
 
+def batch_spec(sharding: Sharding) -> P:
+  """How a `(batch, length)` token array is laid out: the strategy's activation rule for `batch`."""
+  return sharding("input_tokens", ("batch", "length"), TensorType.ACTIVATION)
+
+
+def _batch_shards(mesh: Mesh, spec: P) -> int:
+  """Number of ways `spec` splits the batch dimension on `mesh`."""
+  axes = spec[0] if spec else None
+  axes = () if axes is None else ((axes,) if isinstance(axes, str) else tuple(axes))
+  return math.prod(mesh.shape[axis] for axis in axes)
+
+
+def params_held_per_device(model: nnx.Module) -> float:
+  """Fraction of the parameter elements each device holds: 1.0 means fully replicated."""
+  leaves = jax.tree.leaves(nnx.state(model, nnx.Param))
+  total = sum(x.size for x in leaves)
+  if total == 0:
+    return 1.0
+  local = sum(math.prod(x.sharding.shard_shape(x.shape)) for x in leaves)
+  return local / total
+
+
 @functools.lru_cache(maxsize=32)
-def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Mesh):
-  """Jitted batch generator for one shape, with output sharded along the batch dimension.
+def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Mesh, spec: P):
+  """Jitted batch generator for one shape, with output laid out as `spec`.
 
   One asynchronously dispatched program instead of several eager ops plus a
   `device_put`. This avoids idle time at the start of each step. `out_shardings`
-  (rather than `with_sharding_constraint`) keeps the exact `P(_BATCH_AXES)` spec
-  instead of letting XLA drop size-1 axes.
+  (rather than `with_sharding_constraint`) keeps the exact spec instead of
+  letting XLA drop size-1 axes.
   """
 
   def body(key: jax.Array) -> dict[str, jax.Array]:
@@ -122,16 +149,18 @@ def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Me
     positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, seq_len))
     return {"inputs": tokens[:, :-1], "targets": tokens[:, 1:], "positions": positions}
 
-  return jax.jit(body, out_shardings=NamedSharding(mesh, P(_BATCH_AXES)))
+  return jax.jit(body, out_shardings=NamedSharding(mesh, spec))
 
 
-def make_synthetic_batch(config, mesh: Mesh, key: jax.Array) -> dict[str, jax.Array]:
-  """Random token batch, sharded along the batch dimension.
+def make_synthetic_batch(config, mesh: Mesh, sharding: Sharding, key: jax.Array) -> dict[str, jax.Array]:
+  """Random token batch, laid out as the strategy's batch rule says.
 
   Targets are the inputs shifted left by one, so the loss is ordinary
   next-token prediction rather than a constant.
   """
-  fn = _synthetic_batch_fn(config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh)
+  fn = _synthetic_batch_fn(
+      config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh, batch_spec(sharding)
+  )
   return fn(key)
 
 
@@ -161,10 +190,15 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
 
 def train_loop(config) -> float:
   """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
-  # `create_mesh()` defaults (fsdp within a slice, data across slices) are used as
-  # is; the `ici_*`/`dcn_*` config fields are not wired through yet.
-  mesh = create_mesh()
-  max_logging.log(f"m3 loop: mesh {dict(mesh.shape)} over {len(jax.devices())} device(s)")
+  mesh = mesh_from_config(config)
+  # The parallelism strategy. The mesh shape decides which of its axes are
+  # live; the model is handed the strategy and places its parameters from it.
+  sharding = DefaultSharding()
+  explicit = all(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
+  max_logging.log(
+      f"m3 loop: mesh {dict(mesh.shape)} over {len(jax.devices())} device(s), "
+      f"{'explicit' if explicit else 'auto'} sharding"
+  )
 
   # `global_batch_size_to_train_on` already includes gradient accumulation, and
   # the loop does none, so GA > 1 would silently run one GA-times-larger step.
@@ -178,22 +212,24 @@ def train_loop(config) -> float:
   if jnp.dtype(config.grad_dtype) != jnp.float32:
     raise ValueError(f"m3 loop keeps gradients in float32; got grad_dtype={jnp.dtype(config.grad_dtype).name}.")
   batch_size = config.global_batch_size_to_train_on
-  batch_shards = math.prod(mesh.shape[axis] for axis in _BATCH_AXES)
+  spec = batch_spec(sharding)
+  batch_shards = _batch_shards(mesh, spec)
   if batch_size == 0 or batch_size % batch_shards:
     raise ValueError(
         f"per_device_batch_size={config.per_device_batch_size} gives a global batch of {batch_size}, which does not "
-        f"split over the {batch_shards} shards of mesh axes {_BATCH_AXES}."
+        f"split over the {batch_shards} shards of {spec}."
     )
 
   # Same strings as legacy (`default` / `high` / `highest`); pyconfig hands over a `str` Enum.
   matmul_precision = getattr(config.matmul_precision, "value", config.matmul_precision)
   with jax.set_mesh(mesh), jax.default_matmul_precision(matmul_precision):
-    model, optimizer = setup_model(config, mesh)
+    model, optimizer = setup_model(config, mesh, sharding)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
     tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length
     max_logging.log(
         f"m3 loop: {config.model_name}, {num_params / 1e9:.3f}B params, "
+        f"{params_held_per_device(model):.1%} of them per device, "
         f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens, "
         f"matmul_precision={matmul_precision}, "
         f"quantization={getattr(config.quantization, 'value', config.quantization) or 'none'}"
@@ -213,7 +249,7 @@ def train_loop(config) -> float:
     pending = None  # (step, loss) dispatched but not yet logged.
     last_done = time.perf_counter()
     for step in range(config.steps):
-      batch = make_synthetic_batch(config, mesh, jax.random.fold_in(data_key, step))
+      batch = make_synthetic_batch(config, mesh, sharding, jax.random.fold_in(data_key, step))
       prof.maybe_activate_profiler(step, pending)
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         step_loss = step_fn(batch)
