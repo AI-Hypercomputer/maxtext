@@ -9,6 +9,8 @@ Responsibilities:
          * `/tmp/maxtext_origin_main`: `origin/main` (`f596f5369`, before Lance Wang's 3 PRs) for Experiment 1A comparison.
          * `/tmp/maxtext_hbmfix`: `/tmp/maxtext` with the HBM-peak fix for composite keys (`load_dynamic.py` and
            `tensor_handling.py` from `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`), used only by runs labeled hbmfix.
+         * `/tmp/maxtext_fix`: `/tmp/maxtext` with this branch's fixed checkpoint-conversion utils (from
+           `<code dir>/fix/`), used only by the fix-validation runs (`stage_fix_tree`).
          * `/tmp/maxtext_stagefix`: a symlink to `/tmp/maxtext` that marks pods started with the RAM-aware
            `to_maxtext` staging, so queue tasks that need it are only claimed by those pods.
        A run selects its tree by running `<tree>/checkpoint_load_benchmark/benchmark_ckpt_load_time.py`; the harness
@@ -241,8 +243,37 @@ def setup_environment() -> None:
     )
 
   stage_hbmfix_tree()
+  stage_fix_tree()
   stage_stagefix_alias()
   print(f"[Bootstrap] Environment ready in {time.time() - t0:.2f}s", flush=True)
+
+
+# Checkpoint-conversion utils of this branch's `src/` (uploaded to GCS_CODE_DIR/fix/) that `/tmp/maxtext_fix` uses.
+FIX_FILES = ("load_dynamic.py", "tensor_handling.py", "utils.py")
+
+
+def stage_fix_tree() -> None:
+  """Stages `/tmp/maxtext_fix`: `/tmp/maxtext` with this branch's fixed checkpoint-conversion utils.
+
+  `load_dynamic.py` and `tensor_handling.py` build the leaves of a stacked composite key one by one and join reshard
+  slices two at a time (the `qwen3.5-397b-a17b` and `gpt-oss-120b` scanned HBM OOMs), and `utils.py` caps the
+  `to_maxtext` Orbax save buffers with `checkpoint_storage_concurrent_gb`. Only runs that test these fixes select
+  this tree; the other trees stay as they were.
+  """
+  utils_rel = "src/maxtext/checkpoint_conversion/utils"
+  try:
+    fixed = {name: epath.Path(f"{GCS_CODE_DIR}/fix/{name}").read_bytes() for name in FIX_FILES}
+  except Exception as ex:  # pylint: disable=broad-exception-caught
+    print(f"[Bootstrap] Skipping /tmp/maxtext_fix ({ex})", flush=True)
+    return
+  if os.path.exists("/tmp/maxtext_fix"):
+    shutil.rmtree("/tmp/maxtext_fix")
+  shutil.copytree("/tmp/maxtext", "/tmp/maxtext_fix")
+  for name, data in fixed.items():
+    with open(os.path.join("/tmp/maxtext_fix", utils_rel, name), "wb") as f:
+      f.write(data)
+  _patch_single_get_streaming(os.path.join("/tmp/maxtext_fix", utils_rel, "load_dynamic.py"))
+  print(f"[Bootstrap] Staged /tmp/maxtext_fix with the fixed {', '.join(FIX_FILES)}", flush=True)
 
 
 def stage_stagefix_alias() -> None:
