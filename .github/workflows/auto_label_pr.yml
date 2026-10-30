@@ -16,8 +16,10 @@
 # received at least 2 approving reviews and has a single commit. It doesn't wait for the checks: Copybara imports
 # the PR only after they pass. If the PR still has `skip-ci-tests` and no passing "All Required Tests Passed" run on
 # its head commit, it also removes `skip-ci-tests` with the repo's GitHub App token, which starts the full CI run
-# (a label removed with GITHUB_TOKEN would start no run). It does the same when someone adds "pull ready" by hand,
-# e.g. a maintainer on a PR from a fork. After a push, it removes a "pull ready" label that no longer applies.
+# (a label removed with GITHUB_TOKEN would start no run). It removes it even after a passing run when the PR has the
+# `run-tpu7x` label, whose TPU7X tests `skip-ci-tests` kept from running. It does the same when someone adds
+# "pull ready" by hand, e.g. a maintainer on a PR from a fork, or adds `run-tpu7x` to a PR that already has
+# "pull ready". After a push, it removes a "pull ready" label that no longer applies.
 
 name: Add Pull Ready Label
 
@@ -42,7 +44,8 @@ jobs:
     if: >-
       github.event_name != 'pull_request_target' ||
       github.event.action != 'labeled' ||
-      github.event.label.name == 'pull ready'
+      github.event.label.name == 'pull ready' ||
+      github.event.label.name == 'run-tpu7x'
     permissions:
       checks: read
       pull-requests: write
@@ -93,6 +96,9 @@ jobs:
 
             const needsFullCi = async () => {
               if (!hasSkipCi) return false
+              // run-tpu7x asks for every TPU7X test, but skip-ci-tests keeps TPU7X from running, and a passing run on
+              // this commit may predate the label (adding a label starts no new commit). Only a full run covers it.
+              if (labels.has('run-tpu7x')) return true
               const runs = await github.paginate(github.rest.checks.listForRef, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -103,10 +109,15 @@ jobs:
               return !runs.some(r => r.status === 'completed' && r.conclusion === 'success')
             }
 
-            // 1. Manual "pull ready" added (collaborator or maintainer on a fork PR):
-            //    run full CI first if not already green; Copybara waits on required_check_runs.
+            // 1. A label added by hand:
+            //    - "pull ready" (collaborator or maintainer on a fork PR): run full CI first if not already green;
+            //      Copybara waits on required_check_runs.
+            //    - run-tpu7x on a PR that already has "pull ready": no later event runs this bot again before Copybara
+            //      imports the PR, so start the full CI run (with TPU7X) now. Before "pull ready", the label must not
+            //      lift skip-ci-tests: two approvals still decide when the heavy suites run.
             if (context.eventName === 'pull_request_target' && context.payload.action === 'labeled') {
-              if (!pullRequest.isDraft && await needsFullCi()) {
+              const addedLabel = context.payload.label?.name
+              if (!pullRequest.isDraft && (addedLabel === 'pull ready' || hasPullReady) && await needsFullCi()) {
                 core.setOutput('remove_skip_ci_tests', 'true')
                 core.setOutput('pull_number', pull_number)
               }
