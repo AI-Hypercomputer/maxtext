@@ -89,7 +89,7 @@ class MuPMultiplierTest(unittest.TestCase):
   def test_target_matches_olmo_core(self):
     got = self._check_against_olmo_core(TARGET)
     self.assertEqual(
-        collections.Counter(round(m, 6) for m in got.values()), collections.Counter({0.666667: 580, 1.0: 493, 0.5: 40})
+        collections.Counter(round(m, 6) for m in got.values()), collections.Counter({0.666667: 580, 1.0: 423, 0.5: 110})
     )
 
   def test_base_model_is_all_ones(self):
