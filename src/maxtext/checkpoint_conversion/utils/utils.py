@@ -374,6 +374,23 @@ def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
     max_logging.log(f"\n Created new HuggingFace Hub {repo_type} repo: {repo_id}.")
 
 
+def config_to_json_string(config) -> str:
+  """Serializes an HF config, adding the legacy RoPE fields for per-layer-type rope_parameters.
+
+  transformers 5 writes RoPE only as `rope_parameters`, keyed by layer type for models with
+  sliding-window layers (e.g. Olmo 3). Older transformers and other readers only understand the
+  top-level `rope_theta` and `rope_scaling`, so write those from the full-attention entry.
+  """
+  config_dict = json.loads(config.to_json_string())
+  full_attention = (config_dict.get("rope_parameters") or {}).get("full_attention")
+  if isinstance(full_attention, dict):
+    if "rope_theta" in full_attention:
+      config_dict.setdefault("rope_theta", full_attention["rope_theta"])
+    if full_attention.get("rope_type", "default") != "default":
+      config_dict.setdefault("rope_scaling", {k: v for k, v in full_attention.items() if k != "rope_theta"})
+  return json.dumps(config_dict, indent=2, sort_keys=True) + "\n"
+
+
 def save_config_file(
     config,
     local_path_to_save_to: str,
@@ -385,9 +402,9 @@ def save_config_file(
   if jax.process_index() == 0:
     if config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
       config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
+    json_string = config_to_json_string(config)
     if output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
-      json_string = config.to_json_string()
       json_bytes = json_string.encode("utf-8")
       repo_id = output_dir_final.lstrip("hf://")
       api = HfApi()
@@ -402,7 +419,8 @@ def save_config_file(
     else:
       # local storage
       actual_local_file_path = os.path.join(local_path_to_save_to, file_name)
-      config.to_json_file(actual_local_file_path)
+      with open(actual_local_file_path, "w", encoding="utf-8") as f:
+        f.write(json_string)
       max_logging.log(f"   Saved {file_name} to {actual_local_file_path}")
       # upload
       if output_dir_final.startswith("gs://"):

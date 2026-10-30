@@ -98,6 +98,30 @@ class ParamMappingTest(unittest.TestCase):
     mapping = param_mapping.QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-layers-pre_self_attention_layer_norm-scale", mapping)
 
+  def test_olmo3_shape_mapping_matches_param_mapping(self):
+    maxtext_config = mock.Mock()
+    maxtext_config.inhomogeneous_layer_cycle_interval = 4
+    for model_name in ("olmo3-7b", "olmo3-7b-pt", "olmo3-32b"):
+      config = hf_model_configs.HF_MODEL_CONFIGS[model_name].to_dict()
+      shapes = hf_shape.HF_SHAPE[model_name](config)
+      for scan_layers in (False, True):
+        with self.subTest(model_name=model_name, scan_layers=scan_layers):
+          mapping = param_mapping.PARAM_MAPPING[model_name](config, maxtext_config, scan_layers=scan_layers)
+          mapped_hf_keys = set()
+          for hf_v in mapping.values():
+            mapped_hf_keys.update([hf_v] if isinstance(hf_v, str) else hf_v)
+          self.assertEqual(mapped_hf_keys, set(shapes))
+
+  def test_olmo3_32b_shapes(self):
+    shapes = hf_shape.OLMO3_HF_WEIGHTS_TO_SHAPE(hf_model_configs.olmo3_32b_config.to_dict())
+    self.assertEqual(shapes["model.embed_tokens.weight"], [100278, 5120])
+    self.assertEqual(shapes["model.layers.63.self_attn.q_proj.weight"], [5120, 5120])
+    self.assertEqual(shapes["model.layers.0.self_attn.k_proj.weight"], [1024, 5120])
+    self.assertEqual(shapes["model.layers.0.self_attn.q_norm.weight"], [5120])
+    self.assertEqual(shapes["model.layers.0.self_attn.k_norm.weight"], [1024])
+    self.assertEqual(shapes["model.layers.0.mlp.down_proj.weight"], [5120, 27648])
+    self.assertNotIn("model.layers.0.input_layernorm.weight", shapes)
+
   def test_qwen3_5_dense_mapping(self):
     """Dense Qwen3.5 maps all MLP projections without MoE parameters."""
     config = {"text_config": {"num_hidden_layers": 8, "num_experts": 1}}
