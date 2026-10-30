@@ -22,6 +22,13 @@ family (dense variant) following the m3 modern MaxText architecture:
 - Pure NNX module composition with clean parameter paths matching existing checkpoints.
 - Uses m3 core RoPE.
 - Designed with clear extension points for future MoE and hybrid variants.
+
+Sharding is declared here once, in logical axis names, and resolved by the
+`Sharding` instance every block receives at construction (`DefaultSharding`
+unless the driver passes another strategy). Each parameter carries
+`out_sharding` metadata, so Flax places it under the mesh in scope the moment
+it is created; a few activations carry `constrain` calls at block boundaries.
+Nothing here names a mesh axis.
 """
 
 from typing import Any, Optional
@@ -32,6 +39,18 @@ from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
 from maxtext.m3.core.rope import apply_rope
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, param_metadata
+
+
+def norm_kwargs(config: Config, sharding: Sharding, name: str, rngs: nnx.Rngs) -> dict[str, Any]:
+  """Keyword arguments shared by every `nnx.RMSNorm` in the model, with the scale's sharding."""
+  return {
+      "epsilon": config.normalization_layer_epsilon,
+      "dtype": config.dtype,
+      "param_dtype": config.weight_dtype,
+      "scale_metadata": param_metadata(sharding, name, ("norm",)),
+      "rngs": rngs,
+  }
 
 
 class Qwen3MLP(nnx.Module):
@@ -47,6 +66,7 @@ class Qwen3MLP(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
   ):
     """Initializes Qwen3MLP feed-forward network.
 
@@ -54,8 +74,11 @@ class Qwen3MLP(nnx.Module):
       config: Model configuration specifying dimensions and dtypes.
       mesh: Device mesh used for parallel execution.
       rngs: NNX random number generators.
+      sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
     """
     self.config = config
+    self.sharding = sharding or DefaultSharding()
+    s = self.sharding
 
     kw = {
         "use_bias": False,
@@ -66,16 +89,19 @@ class Qwen3MLP(nnx.Module):
     self.wi_0 = nnx.Linear(
         in_features=config.emb_dim,
         out_features=config.mlp_dim,
+        kernel_metadata=param_metadata(s, "wi_0", ("embed", "mlp")),
         **kw,
     )
     self.wi_1 = nnx.Linear(
         in_features=config.emb_dim,
         out_features=config.mlp_dim,
+        kernel_metadata=param_metadata(s, "wi_1", ("embed", "mlp")),
         **kw,
     )
     self.wo = nnx.Linear(
         in_features=config.mlp_dim,
         out_features=config.emb_dim,
+        kernel_metadata=param_metadata(s, "wo", ("mlp", "embed")),
         **kw,
     )
 
@@ -84,6 +110,7 @@ class Qwen3MLP(nnx.Module):
     gate = jax.nn.silu(self.wi_0(x))
     up = self.wi_1(x)
     hidden = (gate * up).astype(self.config.dtype)
+    hidden = self.sharding.constrain(hidden, "mlp_hidden", ("batch", "length", "mlp"))
     return self.wo(hidden)
 
 
@@ -100,6 +127,7 @@ class Qwen3Attention(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
   ):
     """Initializes Qwen3 Attention module with Q, K, V projections and QK-Norm.
 
@@ -107,8 +135,11 @@ class Qwen3Attention(nnx.Module):
       config: Model configuration specifying dimensions, head counts, and RoPE settings.
       mesh: Device mesh used for parallel execution.
       rngs: NNX random number generators.
+      sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
     """
     self.config = config
+    self.sharding = sharding or DefaultSharding()
+    s = self.sharding
 
     self.num_query_heads = config.num_query_heads
     self.num_kv_heads = config.num_kv_heads
@@ -124,39 +155,31 @@ class Qwen3Attention(nnx.Module):
     self.query = nnx.Einsum(
         "...e,ehd->...hd",
         (config.emb_dim, self.num_query_heads, self.head_dim),
+        kernel_metadata=param_metadata(s, "query", ("embed", "heads", "head_dim")),
         **kw,
     )
     self.key = nnx.Einsum(
         "...e,ehd->...hd",
         (config.emb_dim, self.num_kv_heads, self.head_dim),
+        kernel_metadata=param_metadata(s, "key", ("embed", "kv_heads", "head_dim")),
         **kw,
     )
     self.value = nnx.Einsum(
         "...e,ehd->...hd",
         (config.emb_dim, self.num_kv_heads, self.head_dim),
+        kernel_metadata=param_metadata(s, "value", ("embed", "kv_heads", "head_dim")),
         **kw,
     )
     self.out = nnx.Einsum(
         "...hd,hde->...e",
         (self.num_query_heads, self.head_dim, config.emb_dim),
+        kernel_metadata=param_metadata(s, "out", ("heads", "head_dim", "embed")),
         **kw,
     )
 
     # QK-Norm
-    norm_kw = {
-        "epsilon": config.normalization_layer_epsilon,
-        "dtype": config.dtype,
-        "param_dtype": config.weight_dtype,
-        "rngs": rngs,
-    }
-    self.query_norm = nnx.RMSNorm(
-        num_features=self.head_dim,
-        **norm_kw,
-    )
-    self.key_norm = nnx.RMSNorm(
-        num_features=self.head_dim,
-        **norm_kw,
-    )
+    self.query_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "query_norm", rngs))
+    self.key_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "key_norm", rngs))
 
   def _compute_attention(
       self,
@@ -214,9 +237,10 @@ class Qwen3Attention(nnx.Module):
       **kwargs,
   ) -> jax.Array:
     """Executes Qwen3 self-attention forward pass with RoPE."""
-    query = self.query(inputs)
-    key = self.key(inputs)
-    value = self.value(inputs)
+    s = self.sharding
+    query = s.constrain(self.query(inputs), "query", ("batch", "length", "heads", "head_dim"))
+    key = s.constrain(self.key(inputs), "key", ("batch", "length", "kv_heads", "head_dim"))
+    value = s.constrain(self.value(inputs), "value", ("batch", "length", "kv_heads", "head_dim"))
 
     # QK-Norm before RoPE
     if self.config.use_qk_norm:
@@ -238,6 +262,7 @@ class Qwen3Attention(nnx.Module):
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
     )
+    attn_out = s.constrain(attn_out, "attention_out", ("batch", "length", "heads", "head_dim"))
     return self.out(attn_out)
 
 
@@ -254,6 +279,7 @@ class Qwen3DecoderLayer(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
   ):
     """Initializes pre-norm attention and MLP residual blocks.
 
@@ -261,31 +287,20 @@ class Qwen3DecoderLayer(nnx.Module):
       config: Model configuration specifying dimensions, layers, and dtypes.
       mesh: Device mesh used for parallel execution.
       rngs: NNX random number generators.
+      sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
     """
     self.config = config
+    self.sharding = sharding or DefaultSharding()
+    s = self.sharding
 
-    norm_kw = {
-        "epsilon": config.normalization_layer_epsilon,
-        "dtype": config.dtype,
-        "param_dtype": config.weight_dtype,
-        "rngs": rngs,
-    }
     self.pre_self_attention_layer_norm = nnx.RMSNorm(
-        num_features=config.emb_dim,
-        **norm_kw,
+        num_features=config.emb_dim, **norm_kwargs(config, s, "pre_self_attention_layer_norm", rngs)
     )
-    self.self_attention = Qwen3Attention(
-        config=config,
-        rngs=rngs,
-    )
+    self.self_attention = Qwen3Attention(config=config, rngs=rngs, sharding=s)
     self.post_self_attention_layer_norm = nnx.RMSNorm(
-        num_features=config.emb_dim,
-        **norm_kw,
+        num_features=config.emb_dim, **norm_kwargs(config, s, "post_self_attention_layer_norm", rngs)
     )
-    self.mlp = Qwen3MLP(
-        config=config,
-        rngs=rngs,
-    )
+    self.mlp = Qwen3MLP(config=config, rngs=rngs, sharding=s)
 
   def __call__(
       self,
@@ -296,6 +311,7 @@ class Qwen3DecoderLayer(nnx.Module):
       **kwargs,
   ) -> jax.Array:
     """Applies pre-norm attention and pre-norm MLP blocks with residual connections."""
+    inputs = self.sharding.constrain(inputs, "decoder_layer_input", ("batch", "length", "embed"))
     # Pre-attention norm & Self-attention
     normed_attn_in = self.pre_self_attention_layer_norm(inputs)
     attn_out = self.self_attention(
@@ -324,6 +340,7 @@ class Qwen3Decoder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       layer_cls: type[nnx.Module] = Qwen3DecoderLayer,
+      sharding: Optional[Sharding] = None,
   ):
     """Initializes the Qwen3 decoder stack of N layers and final layer normalization.
 
@@ -332,18 +349,16 @@ class Qwen3Decoder(nnx.Module):
       mesh: Device mesh used for parallel execution.
       rngs: NNX random number generators.
       layer_cls: Decoder layer constructor for model-family subclasses.
+      sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
     """
     self.config = config
+    self.sharding = sharding or DefaultSharding()
+    s = self.sharding
 
-    self.layers = nnx.Sequential(*(layer_cls(config=config, rngs=rngs) for _ in range(config.num_decoder_layers)))
-
-    self.decoder_norm = nnx.RMSNorm(
-        num_features=config.emb_dim,
-        epsilon=config.normalization_layer_epsilon,
-        dtype=config.dtype,
-        param_dtype=config.weight_dtype,
-        rngs=rngs,
+    self.layers = nnx.Sequential(
+        *(layer_cls(config=config, rngs=rngs, sharding=s) for _ in range(config.num_decoder_layers))
     )
+    self.decoder_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kwargs(config, s, "decoder_norm", rngs))
 
   def apply_output_head(
       self,
@@ -355,6 +370,7 @@ class Qwen3Decoder(nnx.Module):
     y = self.decoder_norm(y)
     attend_dtype = jnp.float32 if self.config.logits_dot_in_fp32 else self.config.dtype
     logits = jnp.dot(y.astype(attend_dtype), shared_embedding.embedding[...].astype(attend_dtype).T)
+    logits = self.sharding.constrain(logits, "logits", ("batch", "length", "vocab"))
 
     if self.config.normalize_embedding_logits:
       logits = logits / jnp.sqrt(y.shape[-1])
@@ -397,6 +413,7 @@ class Qwen3Model(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
       **kwargs,
   ):
     """Initializes the top-level Qwen3 language model.
@@ -405,20 +422,25 @@ class Qwen3Model(nnx.Module):
       config: Model configuration specifying dimensions, layers, and vocabulary.
       mesh: Device mesh used for parallel execution.
       rngs: NNX random number generators.
+      sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
+        Parameters are placed from it at construction, under the mesh in scope.
       **kwargs: Additional keyword arguments.
     """
     self.config = config
+    self.sharding = sharding or DefaultSharding()
 
     self.token_embedder = nnx.Embed(
         num_embeddings=config.vocab_size,
         features=config.emb_dim,
         dtype=config.dtype,
         param_dtype=config.weight_dtype,
+        embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
         rngs=rngs,
     )
     self.decoder = Qwen3Decoder(
         config=config,
         rngs=rngs,
+        sharding=self.sharding,
     )
 
   def logits_from_hidden_states_for_vocab_tiling(

@@ -31,6 +31,7 @@ import numpy as np
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, MultimodalInput
+from maxtext.m3.core.sharding import Sharding
 from maxtext.m3.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
     Qwen3Decoder,
@@ -840,6 +841,7 @@ class Qwen3VLDecoderLayer(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
   ):
     self.config = config
     norm_kw = {
@@ -850,8 +852,9 @@ class Qwen3VLDecoderLayer(nnx.Module):
     }
     self.pre_self_attention_layer_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kw)
     self.post_self_attention_layer_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kw)
+    # The attention is hand-rolled (`DenseGeneral`) and carries no sharding yet; the shared MLP does.
     self.self_attention = Qwen3VLAttention(config, rngs=rngs)
-    self.mlp = Qwen3MLP(config, rngs=rngs)
+    self.mlp = Qwen3MLP(config, rngs=rngs, sharding=sharding)
 
   def __call__(
       self,

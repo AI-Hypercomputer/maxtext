@@ -26,6 +26,9 @@ model-name branching.
 """
 
 from collections.abc import Callable
+
+import jax
+
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
@@ -54,12 +57,22 @@ MODEL_REGISTRY: dict[str, Callable] = {
 
 
 def create_model(config, mesh, **kwargs):
-  """Dispatches to a registered m3 constructor using driver configuration."""
+  """Dispatches to a registered m3 constructor using driver configuration.
+
+  Parameters are placed from their sharding metadata as they are created,
+  under the mesh in scope, so drivers construct inside `jax.set_mesh(mesh)`
+  (README rule 3). The mesh in scope must be the one passed: a strategy
+  resolved against another mesh is silently replaced by full replication
+  downstream, so that case is an error here.
+  """
   if config.model_name not in MODEL_REGISTRY:
     raise ValueError(
         f"Model {config.model_name!r} does not support the m3 backend (use_m3_model=True). "
         f"Registered models: {', '.join(sorted(MODEL_REGISTRY))}."
     )
+  ambient = jax.sharding.get_abstract_mesh()
+  if mesh is not None and not ambient.empty and ambient != mesh.abstract_mesh:
+    raise ValueError(f"create_model was passed mesh {mesh} while a different mesh is in scope: {ambient}.")
   return MODEL_REGISTRY[config.model_name](config, mesh, **kwargs)
 
 
