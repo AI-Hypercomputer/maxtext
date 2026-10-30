@@ -95,8 +95,11 @@ jobs:
           output-file-path: benchmark-results.json
           github-token: ${{ github.token }}
           alert-threshold: '115%'
-          comment-on-alert: true
-          fail-on-alert: ${{ github.ref != 'refs/heads/main' && github.head_ref != 'ci/test-duration-tracking' }}
+          # The dashboard compares a run's totals, test counts included, with the last scheduled run on main. A PR
+          # that adds many quick tests would fail on the count alone, so PR runs are judged by the suite check in
+          # process_test_results.py instead (same existing tests on both sides, new tests' time included).
+          comment-on-alert: ${{ github.ref == 'refs/heads/main' }}
+          fail-on-alert: false
           auto-push: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
           gh-pages-branch: 'gh-pages'
           benchmark-data-dir-path: 'dev/bench'

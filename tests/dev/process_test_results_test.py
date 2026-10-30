@@ -171,6 +171,35 @@ class ProcessTestResultsTest(unittest.TestCase):
     )
     self.assertIs(failed, False)
 
+  def test_process_testcase_regression_enforced_for_megablox_gmm_3d_test(self):
+    """megablox_gmm_3d_test left the warn-only list once the class split ended its shard-position swings."""
+    testcase_xml = ET.Element(
+        "testcase",
+        {"name": "test_gmm_3d_lhs", "classname": "tests.unit.megablox_gmm_3d_test.Gmm3dTest", "time": "40.0"},
+    )
+
+    failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1of3.xml",
+        "tpu-unit",
+        {"tpu-unit::tests.unit.megablox_gmm_3d_test.Gmm3dTest.test_gmm_3d_lhs": 5.0},
+        {},
+    )
+    self.assertIs(failed, True)
+
+  def test_process_testcase_ignores_a_bool_baseline(self):
+    """bool is an int subclass, but `true` in the baseline is not a duration of 1 s."""
+    testcase_xml = ET.Element("testcase", {"name": "t", "classname": "tests.unit.some_test.SomeTest", "time": "40.0"})
+
+    failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1of1.xml",
+        "tpu-unit",
+        {"tpu-unit::tests.unit.some_test.SomeTest.t": True},
+        {},
+    )
+    self.assertIs(failed, False)
+
   def test_process_testcase_regression_warn_only_for_function_style_test_in_excluded_module(self):
     """Verifies that a module-level test function in an excluded module is warn-only too.
 
@@ -501,6 +530,305 @@ class ProcessTestResultsTest(unittest.TestCase):
       )
       self.assertFalse(bench_path.exists())
       self.assertFalse(save_path.exists())
+
+  def _run_suite_case(self, baseline, files, extra_args=()):
+    """Writes `files` ({name: xml text}) and `baseline`, runs main() and returns (exit code, output)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = pathlib.Path(tmpdir)
+      for name, text in files.items():
+        (root / name).write_text(text, encoding="utf-8")
+      baseline_path = root / "baseline.json"
+      baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+      out = io.StringIO()
+      with contextlib.redirect_stdout(out):
+        code = self._run_main([tmpdir, "--baseline", str(baseline_path), *extra_args])
+    return code, out.getvalue()
+
+  def test_suite_check_fails_a_pr_whose_new_tests_grow_a_flavor_past_both_limits(self):
+    """1000 s of existing tests plus a 400 s new test is 1.40x and +400 s: over 1.20x and over 300 s."""
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 500.0, "tpu-unit::m.C.t_2": 500.0},
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="500.0"/>'
+            '<testcase name="t_2" classname="m.C" time="500.0"/>'
+            '<testcase name="t_new" classname="m.D" time="400.0"/>'
+            "</testsuite>"
+        },
+    )
+
+    self.assertEqual(code, 1)
+    self.assertIn("::error::[SUITE REGRESSION] Flavor tpu-unit takes 1.40x its baseline time (+400s).", out)
+    self.assertIn("m.D.t_new", out.split("Costliest new tests")[1])
+
+  def test_suite_check_only_warns_on_warn_only_runs(self):
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 1000.0},
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="400.0"/>'
+            "</testsuite>"
+        },
+        extra_args=["--warn-only"],
+    )
+
+    self.assertEqual(code, 0)
+    self.assertIn("[SUITE REGRESSION] Flavor tpu-unit", out)
+
+  def test_suite_check_passes_growth_under_the_floor_or_under_the_ratio(self):
+    """gpu-unit grows 2.5x but only +150 s; tpu-unit grows +400 s but only 1.13x."""
+    code, out = self._run_suite_case(
+        {"gpu-unit::m.C.t_1": 100.0, "tpu-unit::m.C.t_1": 3000.0},
+        {
+            "test-results-gpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="100.0"/>'
+            '<testcase name="t_new" classname="m.D" time="150.0"/>'
+            "</testsuite>",
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="3000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="400.0"/>'
+            "</testsuite>",
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertNotIn("SUITE REGRESSION", out)
+    self.assertIn("[SUITE] Flavor gpu-unit: 250s vs 100s baseline for the same existing tests (2.50x, +150s)", out)
+    self.assertIn("[SUITE] Flavor tpu-unit: 3400s vs 3000s baseline for the same existing tests (1.13x, +400s)", out)
+
+  def test_suite_check_leaves_out_new_scheduled_only_tests(self):
+    """A new scheduled_only test runs in its PR only because it is new (newly_added); later PRs skip it."""
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 1000.0},
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_sweep" classname="m.D" time="900.0"><properties>'
+            '<property name="marker" value="scheduled_only"/><property name="marker" value="newly_added"/>'
+            "</properties></testcase>"
+            "</testsuite>"
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertIn("[SUITE] Flavor tpu-unit: 1000s vs 1000s baseline for the same existing tests (1.00x, +0s)", out)
+
+  def test_suite_check_skips_cpu_and_partial_flavors_and_ignores_failed_tests(self):
+    code, out = self._run_suite_case(
+        {"cpu-unit::m.C.t_1": 1000.0, "tpu-unit::m.C.t_1": 1000.0, "gpu-unit::m.C.t_1": 1000.0},
+        {
+            "test-results-cpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="900.0"/>'
+            "</testsuite>",
+            # Group 2 of 2 is missing, so tpu-unit is partial.
+            "test-results-tpu-unit-1of2.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="900.0"/>'
+            "</testsuite>",
+            "test-results-gpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="900.0"><failure/></testcase>'
+            "</testsuite>",
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertNotIn("SUITE REGRESSION", out)
+    self.assertNotIn("[SUITE] Flavor cpu-unit", out)
+    self.assertNotIn("[SUITE] Flavor tpu-unit", out)
+    self.assertIn("[SUITE] Flavor gpu-unit: 1000s vs 1000s baseline", out)
+
+  def test_duplicate_tests_keep_the_flavor_off_the_dashboard_unpruned_and_unchecked(self):
+    """Shards that overlap report a test twice; the flavor is treated like one with a missing shard."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = pathlib.Path(tmpdir)
+      (root / "test-results-tpu-unit-1of2.xml").write_text(
+          '<testsuite><testcase name="t_1" classname="m.C" time="800.0"/></testsuite>', encoding="utf-8"
+      )
+      (root / "test-results-tpu-unit-2of2.xml").write_text(
+          "<testsuite>"
+          '<testcase name="t_1" classname="m.C" time="800.0"/>'
+          '<testcase name="t_new" classname="m.D" time="900.0"/>'
+          "</testsuite>",
+          encoding="utf-8",
+      )
+      baseline_path = root / "baseline.json"
+      baseline_path.write_text(json.dumps({"tpu-unit::m.C.t_1": 800.0, "tpu-unit::m.C.t_gone": 50.0}), encoding="utf-8")
+      save_path = root / "new_baseline.json"
+      bench_path = root / "bench.json"
+      out = io.StringIO()
+      with contextlib.redirect_stdout(out):
+        code = self._run_main(
+            [
+                tmpdir,
+                "--baseline",
+                str(baseline_path),
+                "--save-baseline",
+                str(save_path),
+                "--output-benchmark",
+                str(bench_path),
+            ]
+        )
+      saved = json.loads(save_path.read_text(encoding="utf-8"))
+
+    self.assertEqual(code, 0)
+    self.assertIn(
+        "::warning::[DUPLICATE TESTS] Flavor tpu-unit ran 1 test(s) in more than one shard (first: tpu-unit::m.C.t_1).",
+        out.getvalue(),
+    )
+    self.assertNotIn("SUITE", out.getvalue())
+    self.assertFalse(bench_path.exists())
+    self.assertIn("tpu-unit::m.C.t_gone", saved)
+
+  def test_module_level_skips_that_every_shard_reports_are_not_duplicates(self):
+    """Each shard reports a skipped module again (empty classname); that is not an overlap between shards."""
+    skipped_module = '<testcase classname="" name="tests.unit.skipped_test" time="0.0"><skipped/></testcase>'
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = pathlib.Path(tmpdir)
+      (root / "test-results-tpu-unit-1of2.xml").write_text(
+          f'<testsuite>{skipped_module}<testcase name="t_1" classname="m.C" time="20.0"/></testsuite>', encoding="utf-8"
+      )
+      (root / "test-results-tpu-unit-2of2.xml").write_text(
+          f'<testsuite>{skipped_module}<testcase name="t_2" classname="m.D" time="30.0"/></testsuite>', encoding="utf-8"
+      )
+      bench_path = root / "bench.json"
+      out = io.StringIO()
+      with contextlib.redirect_stdout(out):
+        code = self._run_main([tmpdir, "--output-benchmark", str(bench_path)])
+      names = [b["name"] for b in json.loads(bench_path.read_text(encoding="utf-8"))]
+
+    self.assertEqual(code, 0)
+    self.assertNotIn("DUPLICATE", out.getvalue())
+    self.assertIn("Total TPU-UNIT Tests Duration", names)
+
+  def test_a_test_failing_then_erroring_in_teardown_is_not_a_duplicate(self):
+    """junitxml writes two entries for that test in the same file; only a second shard file means an overlap."""
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 20.0},
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="20.0"/>'
+            '<testcase name="t_bad" classname="m.C" time="1.0"><failure/></testcase>'
+            '<testcase name="t_bad" classname="m.C" time="0.1"><error/></testcase>'
+            "</testsuite>"
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertNotIn("DUPLICATE", out)
+    self.assertIn("[SUITE] Flavor tpu-unit: 20s vs 20s baseline", out)
+
+  def test_suite_check_leaves_failed_existing_tests_out_of_both_sides(self):
+    """A failing test stops early; counting its short time against its baseline would hide new-test cost."""
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 1000.0, "tpu-unit::m.C.t_broken": 900.0},
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_broken" classname="m.C" time="1.0"><failure/></testcase>'
+            '<testcase name="t_new" classname="m.D" time="400.0"/>'
+            "</testsuite>"
+        },
+    )
+
+    self.assertEqual(code, 1)
+    self.assertIn("[SUITE] Flavor tpu-unit: 1400s vs 1000s baseline for the same existing tests (1.40x, +400s)", out)
+
+  def test_suite_check_limits_are_exclusive(self):
+    """Exactly 1.20x, or exactly +300 s, is not over the limits."""
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 1500.0, "gpu-unit::m.C.t_1": 1000.0},
+        {
+            # 1800 s vs 1500 s: exactly 1.20x (and +300 s).
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1500.0"/>'
+            '<testcase name="t_new" classname="m.D" time="300.0"/>'
+            "</testsuite>",
+            # 1300 s vs 1000 s: 1.30x but exactly +300 s.
+            "test-results-gpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="300.0"/>'
+            "</testsuite>",
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertNotIn("SUITE REGRESSION", out)
+
+  def test_suite_check_skips_decoupled_and_corrupt_flavors(self):
+    code, out = self._run_suite_case(
+        {"decoupled::m.C.t_1": 100.0, "tpu-unit::m.C.t_1": 1000.0},
+        {
+            "test-results-decoupled-targeted.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="100.0"/>'
+            '<testcase name="t_new" classname="m.D" time="900.0"/>'
+            "</testsuite>",
+            "test-results-tpu-unit-1of2.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_new" classname="m.D" time="900.0"/>'
+            "</testsuite>",
+            "test-results-tpu-unit-2of2.xml": "<testsuite><unclosed",
+        },
+    )
+
+    self.assertEqual(code, 1)  # the corrupt file is a critical error on its own
+    self.assertNotIn("[SUITE]", out)
+    self.assertNotIn("SUITE REGRESSION", out)
+
+  def test_suite_check_counts_a_test_with_a_bool_baseline_as_new(self):
+    code, out = self._run_suite_case(
+        {"tpu-unit::m.C.t_1": 1000.0, "tpu-unit::m.C.t_odd": True},
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_odd" classname="m.C" time="50.0"/>'
+            "</testsuite>"
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertIn("(1.05x, +50s); 1 new test(s) took 50s.", out)
+
+  def test_suite_check_counts_tests_with_nan_negative_or_zero_baselines_as_new(self):
+    """json.load accepts NaN; a NaN or negative entry must not poison the flavor's baseline total."""
+    code, out = self._run_suite_case(
+        {
+            "tpu-unit::m.C.t_1": 1000.0,
+            "tpu-unit::m.C.t_nan": float("nan"),
+            "tpu-unit::m.C.t_neg": -5.0,
+            "tpu-unit::m.C.t_zero": 0,
+        },
+        {
+            "test-results-tpu-unit-1of1.xml": "<testsuite>"
+            '<testcase name="t_1" classname="m.C" time="1000.0"/>'
+            '<testcase name="t_nan" classname="m.C" time="50.0"/>'
+            '<testcase name="t_neg" classname="m.C" time="50.0"/>'
+            '<testcase name="t_zero" classname="m.C" time="0.5"/>'
+            "</testsuite>"
+        },
+    )
+
+    self.assertEqual(code, 0)
+    self.assertIn(
+        "[SUITE] Flavor tpu-unit: 1100s vs 1000s baseline for the same existing tests (1.10x, +100s); 3 new", out
+    )
+
+  def test_suite_only_failure_names_the_suite_check_and_lists_the_slowest_existing_tests(self):
+    """40 tests each 10 s slower: under the per-test limit (+15 s) one by one, but 1.25x and +400 s together."""
+    cases = "".join(f'<testcase name="t_{i}" classname="m.C" time="50.0"/>' for i in range(40))
+    code, out = self._run_suite_case(
+        {f"tpu-unit::m.C.t_{i}": 40.0 for i in range(40)},
+        {"test-results-tpu-unit-1of1.xml": f"<testsuite>{cases}</testsuite>"},
+    )
+
+    self.assertEqual(code, 1)
+    self.assertNotIn("REGRESSION ALERT", out)
+    self.assertIn("::error::[SUITE REGRESSION] Flavor tpu-unit takes 1.25x its baseline time (+400s).", out)
+    self.assertIn("Existing tests that got slower the most:", out)
+    self.assertIn("One or more flavors grew past the suite limits", out)
+    self.assertNotIn("One or more tests regressed significantly.", out)
 
 
 if __name__ == "__main__":

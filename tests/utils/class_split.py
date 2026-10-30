@@ -32,6 +32,7 @@ the file the CI workflow downloads next to the checkout.
 """
 
 import json
+import math
 import os
 
 import pytest
@@ -75,10 +76,15 @@ def load_durations(path):
     return {}, f"durations file {path!r} is not a JSON object; using equal weights"
   durations = {}
   for key, value in raw.items():
+    if isinstance(value, bool):  # float(True) is 1.0, but a boolean is not a duration
+      continue
     try:
-      durations[str(key)] = float(value)
+      seconds = float(value)
     except (TypeError, ValueError):
       continue
+    # NaN, infinity or a negative value would skew the deal; the test is charged the fallback weight instead.
+    if math.isfinite(seconds) and seconds >= 0:
+      durations[str(key)] = seconds
   if not durations:
     return {}, f"durations file {path!r} holds no usable entries; using equal weights"
   return durations, ""
@@ -134,14 +140,19 @@ class ClassSplitPlugin:
       raise pytest.UsageError(f"--class-splits must be >= 1, got {self.splits}")
     if not 1 <= self.group <= self.splits:
       raise pytest.UsageError(f"--class-group must be between 1 and {self.splits}, got {self.group}")
+    self._report_lines = []
 
-  @staticmethod
-  def _write_line(config, text):
-    reporter = config.pluginmanager.get_plugin("terminalreporter")
-    if reporter is not None:
-      reporter.write_line(text)
-    else:  # xdist worker, or -p no:terminal
+  def _report(self, config, text):
+    """Shows `text` after pytest's collection summary, or prints it at once when there is no terminal reporter."""
+    if config.pluginmanager.get_plugin("terminalreporter") is None:  # xdist worker, or -p no:terminal
       print(text)
+    else:
+      # Written now, the line would be glued to pytest's unterminated "collecting ... " in CI logs.
+      self._report_lines.append(text)
+
+  def pytest_report_collectionfinish(self):
+    """Returns the class-split lines; pytest prints each on its own line after the collection summary."""
+    return self._report_lines
 
   # trylast: run after pytest's -m deselection and after the marker hooks in tests/conftest.py.
   @pytest.hookimpl(trylast=True)
@@ -151,7 +162,7 @@ class ClassSplitPlugin:
       return
     durations, warning = load_durations(self.durations_path)
     if warning:
-      self._write_line(config, f"[class-split] warning: {warning}")
+      self._report(config, f"[class-split] warning: {warning}")
     shards = deal_groups([item.nodeid for item in items], durations, self.splits)
     keep = set(shards[self.group - 1])
     kept = [item for item in items if item.nodeid in keep]
@@ -161,7 +172,7 @@ class ClassSplitPlugin:
       config.hook.pytest_deselected(items=dropped)
     classes = len({group_key(item.nodeid) for item in kept})
     recorded = sum(1 for item in kept if item.nodeid in durations)
-    self._write_line(
+    self._report(
         config,
         f"[class-split] Running group {self.group}/{self.splits}: {len(kept)} tests in {classes} classes, "
         f"{recorded} with a recorded duration",
