@@ -175,6 +175,22 @@ def pre_process_image_sft(example, image_column, config):
   return example
 
 
+def prepend_bos(example, column_name, bos_id):
+  """Prepends `bos_id` to the token ids in `example[column_name]` unless they already start with it.
+
+  Multimodal SFT tokenizes without BOS because `reformat_prompt` writes the chat format, so prompts whose format
+  leaves BOS to the token ids (see `mm_processor.reformatted_prompt_needs_bos`) get it here.
+  """
+  tokens = example[column_name]
+  if len(tokens) == 0 or tokens[0] != bos_id:
+    if isinstance(tokens, np.ndarray):
+      tokens = np.concatenate([np.asarray([bos_id], dtype=tokens.dtype), tokens])
+    else:
+      tokens = [bos_id, *tokens]
+  example[column_name] = tokens
+  return example
+
+
 def prepare_text_for_image_fusion(example, column_name, config):
   """prepare text for image fusion for multimodal SFT"""
   example[column_name] = mm_processor.prepare_text_for_image_fusion(
