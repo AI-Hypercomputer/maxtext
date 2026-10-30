@@ -539,6 +539,326 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("lr", step0_metrics.aggregation_fns)
     self.assertEqual(step0_metrics.aggregation_fns["lr"](jnp.array([0.002])), 0.002)
 
+  def test_metrics_recorder_buffers_in_python_list_until_flushed(self):
+    recorder = metrics_module.MetricsRecorder()
+    # Passing metric=None is a safe no-op.
+    recorder.buffer_metrics(train_step=0, name="ignored", metric=None)
+    self.assertEmpty(recorder._metrics_buffer)
+
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(10.0), denominator=jnp.array(2.0)),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(20.0), denominator=jnp.array(4.0)),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="grad_norm",
+        metric=jnp.array(1.5),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="grad_norm",
+        metric=jnp.array(2.5),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="per_layer_norm",
+        metric=jnp.array([1.0, 2.0]),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="per_layer_norm",
+        metric=jnp.array([3.0, 4.0]),
+    )
+
+    # Prior to flush, metrics are accumulated in Python lists with no device
+    # array concatenation. Pending lists are keyed by the live buffer object.
+    pending_key = id(recorder._metrics_buffer[-1])
+    self.assertLen(recorder._pending_weighted[pending_key]["loss"], 2)
+    self.assertLen(recorder._pending_scalar[pending_key]["grad_norm"], 2)
+    self.assertLen(recorder._pending_scalar[pending_key]["per_layer_norm"], 2)
+    self.assertEmpty(recorder._metrics_buffer[-1].weighted_metrics)
+    self.assertEmpty(recorder._metrics_buffer[-1].scalar_metrics)
+
+    step_buf = recorder.get_step_metrics(0)
+    self.assertIsNotNone(step_buf)
+    self.assertEmpty(recorder._pending_weighted)
+    self.assertEmpty(recorder._pending_scalar)
+    np.testing.assert_array_equal(
+        step_buf.weighted_metrics["loss"].unreduced_sum,
+        jnp.array([10.0, 20.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf.weighted_metrics["loss"].denominator,
+        jnp.array([2.0, 4.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf.scalar_metrics["grad_norm"],
+        jnp.array([1.5, 2.5]),
+    )
+    np.testing.assert_array_equal(
+        step_buf.scalar_metrics["per_layer_norm"],
+        jnp.array([1.0, 2.0, 3.0, 4.0]),
+    )
+
+    # Additional microbatches on the same step after a mid-step flush concatenate cleanly
+    # with the already-materialized step buffer.
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(30.0), denominator=jnp.array(6.0)),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="grad_norm",
+        metric=jnp.array(3.5),
+    )
+    step_buf_after = recorder.get_step_metrics(0)
+    np.testing.assert_array_equal(
+        step_buf_after.weighted_metrics["loss"].unreduced_sum,
+        jnp.array([10.0, 20.0, 30.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf_after.weighted_metrics["loss"].denominator,
+        jnp.array([2.0, 4.0, 6.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf_after.scalar_metrics["grad_norm"],
+        jnp.array([1.5, 2.5, 3.5]),
+    )
+
+  def test_metrics_recorder_flushes_to_expected_layout(self):
+    """A lone item keeps its shape (wrapped to at least 1D); multiple items are raveled and concatenated."""
+    recorder = metrics_module.MetricsRecorder()
+    # A once-per-step 2-D metric reaches its aggregation_fn with its shape; a second item
+    # concatenates behind it, raveled.
+    recorder.buffer_metrics(train_step=0, name="grid", metric=jnp.array([[1.0, 2.0], [3.0, 4.0]]))
+    step_buf = recorder.get_step_metrics(0)
+    self.assertEqual(step_buf.scalar_metrics["grid"].shape, (2, 2))
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grid"], [[1.0, 2.0], [3.0, 4.0]])
+    recorder.buffer_metrics(train_step=0, name="grid", metric=jnp.array([[5.0, 6.0], [7.0, 8.0]]))
+    step_buf = recorder.get_step_metrics(0)
+    self.assertEqual(step_buf.scalar_metrics["grid"].shape, (8,))
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grid"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+
+    # Weighted metrics with 1-D per-example sums flatten the same way and mix with 0-d ones.
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array([1.0, 2.0]), denominator=jnp.array([1.0, 1.0])),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(3.0), denominator=jnp.array(1.0)),
+    )
+    step_buf = recorder.get_step_metrics(0)
+    self.assertEqual(step_buf.weighted_metrics["loss"].unreduced_sum.shape, (3,))
+    self.assertEqual(step_buf.weighted_metrics["loss"].denominator.shape, (3,))
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].unreduced_sum, [1.0, 2.0, 3.0])
+
+    # A lone 0-d item is still 1-D with one slot (asserted on `.shape`: assert_array_equal
+    # accepts a 0-d array against shape (1,)).
+    recorder.buffer_metrics(train_step=1, name="grad_norm", metric=jnp.array(0.5))
+    step_buf = recorder.get_step_metrics(1)
+    self.assertEqual(step_buf.scalar_metrics["grad_norm"].shape, (1,))
+
+  def test_metrics_recorder_keeps_same_id_buffers_apart(self):
+    """Two history buffers with the same step id never share pending items.
+
+    `buffer_metrics` opens a new buffer whenever the newest one has a different id, so
+    recording for step 1, then 2, then 1 again yields three buffers with ids [1, 2, 1].
+    Each buffer must hold its own distinct arrays, so pending lists are isolated per buffer instance.
+    """
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(train_step=1, name="m", metric=1.0)
+    recorder.buffer_metrics(train_step=2, name="m", metric=2.0)
+    recorder.buffer_metrics(train_step=1, name="m", metric=3.0)
+
+    history = recorder.get_metrics_history(clear_cache=False)
+    self.assertEqual([b.id for b in history], [1, 2, 1])
+    np.testing.assert_array_equal(history[0].scalar_metrics["m"], [1.0])
+    np.testing.assert_array_equal(history[1].scalar_metrics["m"], [2.0])
+    np.testing.assert_array_equal(history[2].scalar_metrics["m"], [3.0])
+    self.assertEmpty(recorder._pending_scalar)
+
+  def test_buffer_metrics_validates_metric_types_and_shapes(self):
+    """buffer_metrics eagerly rejects non-numeric types and malformed WeightedMetrics."""
+    recorder = metrics_module.MetricsRecorder()
+    with self.assertRaisesRegex(TypeError, r"must be a JAX/NumPy array, numeric scalar, or WeightedMetric; got object"):
+      recorder.buffer_metrics(train_step=0, name="bad_obj", metric=object())
+
+    with self.assertRaisesRegex(TypeError, r"must be a JAX/NumPy array, numeric scalar, or WeightedMetric; got str"):
+      recorder.buffer_metrics(train_step=0, name="bad_str", metric="non_numeric")
+
+    with self.assertRaisesRegex(TypeError, r"unreduced_sum must be a JAX/NumPy array or numeric scalar, got str"):
+      recorder.buffer_metrics(
+          train_step=0,
+          name="bad_wm_sum",
+          metric=abstract_engine.WeightedMetric(unreduced_sum="bad", denominator=1.0),
+      )
+
+    with self.assertRaisesRegex(ValueError, r"unreduced_sum shape .* and denominator shape .* are incompatible"):
+      recorder.buffer_metrics(
+          train_step=0,
+          name="bad_wm_shape",
+          metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.zeros((2, 3)), denominator=jnp.zeros((2, 4))),
+      )
+
+    self.assertEmpty(recorder._metrics_buffer)
+
+  def test_buffer_metrics_rejects_mixing_scalar_and_weighted_metrics(self):
+    """A metric cannot be recorded as both a scalar and a WeightedMetric in the same step."""
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(train_step=0, name="m", metric=1.0)
+    with self.assertRaisesRegex(TypeError, r"previously recorded as a scalar metric"):
+      recorder.buffer_metrics(
+          train_step=0,
+          name="m",
+          metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(1.0)),
+      )
+
+  def test_metrics_recorder_flush_failure_keeps_pending_items(self):
+    """A flush that fails to materialize one item leaves every pending item in place."""
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(1.0)),
+    )
+    recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(1.5))
+    buffer = recorder._metrics_buffer[-1]
+    # Injected unconvertible pending item to test flush-time atomicity
+    recorder._pending_scalar[id(buffer)]["bad"] = [object()]
+
+    # Both attempts fail the same way and nothing is committed to the buffer.
+    for _ in range(2):
+      with self.assertRaises(TypeError):
+        recorder.get_step_metrics(0)
+      self.assertEmpty(buffer.weighted_metrics)
+      self.assertEmpty(buffer.scalar_metrics)
+      self.assertLen(recorder._pending_weighted[id(buffer)]["loss"], 1)
+      self.assertLen(recorder._pending_scalar[id(buffer)]["grad_norm"], 1)
+
+    # Once the offending item is gone the retained items flush normally.
+    del recorder._pending_scalar[id(buffer)]["bad"]
+    step_buf = recorder.get_step_metrics(0)
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].unreduced_sum, [4.0])
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grad_norm"], [1.5])
+    self.assertEmpty(recorder._pending_weighted)
+    self.assertEmpty(recorder._pending_scalar)
+
+  def test_metrics_recorder_flush_failure_commits_no_scalar_converted_before_it(self):
+    """All-or-nothing whatever the insertion order: a good scalar ahead of the bad item is not committed.
+
+    `test_metrics_recorder_flush_failure_keeps_pending_items` records the bad item FIRST among the
+    scalars, so a flush that commits each scalar as it converts it would still pass it.
+    """
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(1.5))
+    buffer = recorder._metrics_buffer[-1]
+    # Injected unconvertible pending item to test flush-time atomicity
+    recorder._pending_scalar[id(buffer)]["bad"] = [object()]
+
+    with self.assertRaises(TypeError):
+      recorder.get_step_metrics(0)
+    self.assertEmpty(buffer.scalar_metrics)
+
+    # A retry after the offending item is gone must not double-count the good one.
+    del recorder._pending_scalar[id(buffer)]["bad"]
+    np.testing.assert_array_equal(recorder.get_step_metrics(0).scalar_metrics["grad_norm"], [1.5])
+
+  def test_metrics_recorder_flushes_one_scalar_per_microbatch_with_a_single_stack(self):
+    """Each metric list of per-microbatch scalars is materialized by one stack, not a ravel per item."""
+    recorder = metrics_module.MetricsRecorder()
+    for mb in range(3):
+      recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(1.0 + mb))
+      recorder.buffer_metrics(
+          train_step=0,
+          name="loss",
+          metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(2.0 * mb), denominator=jnp.array(1.0)),
+      )
+
+    with (
+        mock.patch.object(metrics_module.jnp, "stack", wraps=jnp.stack) as stack,
+        mock.patch.object(metrics_module.jnp, "ravel", wraps=jnp.ravel) as ravel,
+    ):
+      step_buf = recorder.get_step_metrics(0)
+
+    # grad_norm, loss.unreduced_sum and loss.denominator: one launch each, whatever the microbatch count.
+    self.assertEqual(stack.call_count, 3)
+    ravel.assert_not_called()
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grad_norm"], [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].unreduced_sum, [0.0, 2.0, 4.0])
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].denominator, [1.0, 1.0, 1.0])
+
+  def test_metrics_recorder_eviction_drops_exactly_the_evicted_pending_items(self):
+    """Evicting never-flushed buffers drops their pending items and nobody else's.
+
+    Pending lists are keyed by `id(buffer)`, and CPython reuses a freed buffer's address: a pending
+    entry that outlives its buffer is inherited by a later buffer and merged into that step.
+    """
+    recorder = metrics_module.MetricsRecorder(max_buffered_steps=4)
+    for step in range(10):
+      recorder.buffer_metrics(train_step=step, name="grad_norm", metric=jnp.array(float(step)))
+      recorder.buffer_metrics(
+          train_step=step,
+          name="loss",
+          metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(float(step)), denominator=jnp.array(1.0)),
+      )
+
+    live = {id(b) for b in recorder._metrics_buffer}
+    self.assertEqual(set(recorder._pending_scalar), live)
+    self.assertEqual(set(recorder._pending_weighted), live)
+    history = recorder.get_metrics_history(clear_cache=False)
+    self.assertEqual([b.id for b in history], [6, 7, 8, 9])
+    for b in history:
+      np.testing.assert_array_equal(b.scalar_metrics["grad_norm"], [float(b.id)])
+      np.testing.assert_array_equal(b.weighted_metrics["loss"].unreduced_sum, [float(b.id)])
+
+  def test_metrics_recorder_cleanup_drops_pending_items(self):
+    """`cleanup` leaves no pending entry behind for a later buffer to inherit."""
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(1.0))
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(1.0)),
+    )
+    recorder.cleanup()
+    self.assertEmpty(recorder._pending_scalar)
+    self.assertEmpty(recorder._pending_weighted)
+
+    recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(2.0))
+    np.testing.assert_array_equal(recorder.get_step_metrics(0).scalar_metrics["grad_norm"], [2.0])
+
+  def test_record_metrics_rejects_unconvertible_metric_immediately(self):
+    """An unconvertible metric raises immediately in record_metrics without mutating engine state."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def _loss_fn(model, *args, **kwargs):
+      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(1.0)), {}
+
+    t.with_loss_fn(_loss_fn)
+    t.fwd_bwd(payload)
+    weights_before = np.asarray(t.model.weights.value)
+
+    with self.assertRaises(TypeError):
+      # What an uncompiled loss function could hand back as an aux value.
+      t.record_metrics("bad", object())
+
+    # The model weights and accumulated gradients are preserved, allowing recovery.
+    np.testing.assert_array_equal(np.asarray(t.model.weights.value), weights_before)
+    self.assertEqual(t.train_step, 0)
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertIsNotNone(t._accumulated_grads)
+
   def test_update_with_inflight_throttling(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     t.with_loss_fn(
