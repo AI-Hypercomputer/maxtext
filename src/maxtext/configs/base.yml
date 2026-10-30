@@ -1693,6 +1693,7 @@ mhc_pallas_kernel_bwd_feature_block_size: 1024
 # Whether to use Transformer Engine's fused Triton kernels for (Sinkhorn) mHC on NVIDIA GPUs.
 # Requires mhc_expansion_rate=4 and enable_mhc_lite=False.
 te_mhc: False
+mhc_split_axis_contraction: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

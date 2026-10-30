@@ -202,6 +202,16 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
     val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
     val_shape = getattr(val, "shape", None)
+    if (
+        config is not None
+        and getattr(config, "mhc_split_axis_contraction", False)
+        and _is_path_contain_any(("mhc_attention", "mhc_mlp"), path_strings)
+        and _is_path_contain_any(("pre_alpha", "post_alpha", "res_alpha"), path_strings)
+    ):
+      ndim = len(val_shape)
+      scan_axis = getattr(config, "param_scan_axis", 1) % ndim if ndim == 4 else None
+      reduction_axes = tuple(axis for axis in range(ndim - 1) if axis != scan_axis)
+      return mdn(reduction_axes, (-1,))
     return transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
 
   # tree_map_with_path handles NNX's PyTree structure; result is an nnx.State with the
