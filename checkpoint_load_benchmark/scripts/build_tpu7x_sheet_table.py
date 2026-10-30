@@ -179,18 +179,9 @@ TM_S3_NOTES = {
     ("qwen3.5-397b-a17b", "unscanned", 1): "Not run (the 795.5 GB checkpoint fills 98% of the 813.8 GB HBM)",
 }
 # Step 3 text of a multi-host `to_maxtext` Orbax load that is currently running or queued on the cluster.
-TM_MH_PENDING = {
-    ("qwen3.5-397b-a17b", "unscanned", "1 × 2x2x4"): (
-        "⏳ Queued (waiting for 1 × 2x2x4 spot slice to load the converted Orbax checkpoint)"
-    ),
-}
+TM_MH_PENDING = {}
 # Multi-host `safetensors_dynamic` runs currently running or queued that don't have a CSV row yet.
-PENDING_MULTIHOST = [
-    ("deepseek3.2-671b", "scanned", "1 × 2x2x4", 4, 32, "⏳ Queued (waiting for 1 × 2x2x4 spot slice)"),
-    ("deepseek3.2-671b", "unscanned", "1 × 2x2x4", 4, 32, "⏳ Queued (waiting for 1 × 2x2x4 spot slice)"),
-    ("deepseek4-1600b", "scanned", "1 × 2x4x4", 8, 64, "⏳ Queued (waiting for 1 × 2x4x4 spot slice)"),
-    ("deepseek4-1600b", "unscanned", "1 × 2x4x4", 8, 64, "⏳ Queued (waiting for 1 × 2x4x4 spot slice)"),
-]
+PENDING_MULTIHOST = []
 # Legend line for the `safetensor (<label>)` rows of a fix variant (`--variant`), added when the table has such rows.
 VARIANT_LEGEND = {
     "with fix": (

@@ -108,10 +108,10 @@ TPU v7x (bodaborg-tpu7x-nap), >200B models: to_maxtext vs safetensor (safetensor
 | qwen3.5-397b-a17b (795.5 GB Hybrid MoE) | unscanned | 2 (16) | to_maxtext | 814.53 | 8,096.53 (shared with 1 (8)) | 2,025.76 (Load Orbax) | 10,122.30 | 10,936.83 | 1.00x (baseline) |
 | ↳ | unscanned | 2 (16) | safetensor | 814.53 | — | 1,311.85 (Safetensors+Convert: load 515.91 + transform 795.72; peak host RAM 98.7 GB) | 1,311.85 | 2,126.38 | 5.14x / 7.72x |
 | ↳ | unscanned | 2 (16) | safetensor (with fix) | 814.53 | — | 1,272.19 (Safetensors+Convert: load 478.85 + transform 793.27; peak host RAM 98.9 GB) | 1,272.19 | 2,086.72 | 5.24x / 7.96x |
-| qwen3.5-397b-a17b (795.5 GB Hybrid MoE) | unscanned | 1 (32) | to_maxtext | 814.53 | 8,096.53 (shared with 1 (8)) | ⏳ Queued (waiting for 1 × 2x2x4 spot slice to load the converted Orbax checkpoint) | ⏳ | ⏳ | ⏳ Queued |
-| ↳ | unscanned | 1 (32) | safetensor | 814.53 | — | 954.34 (Safetensors+Convert: load 268.01 + transform 686.26; peak host RAM 88.1 GB) | 954.34 | 1,768.87 | ⏳ Queued (waiting for to_maxtext Step 3) |
-| qwen3.5-397b-a17b (795.5 GB Hybrid MoE) | unscanned | 2 (32) | to_maxtext | 814.53 | 8,096.53 (shared with 1 (8)) | Orbax barrier timeout after 2,306 s (3/4 hosts reached _load_impl barrier; >20-min GCS read skew, peak host RAM 95.2 GB) | N/A | N/A | N/A |
-| ↳ | unscanned | 2 (32) | safetensor | 814.53 | — | 1,018.83 (Safetensors+Convert: load 266.41 + transform 751.78; peak host RAM 130.5 GB) | 1,018.83 | 1,833.36 | Only safetensor loads this config |
+| qwen3.5-397b-a17b (795.5 GB Hybrid MoE) | unscanned | 1 (32) | to_maxtext | 814.53 | 8,096.53 (shared with 1 (8)) | 2,233.01 (Load Orbax) | 10,329.54 | 11,144.07 | 1.00x (baseline) |
+| ↳ | unscanned | 1 (32) | safetensor | 814.53 | — | 954.34 (Safetensors+Convert: load 268.01 + transform 686.26; peak host RAM 88.1 GB) | 954.34 | 1,768.87 | 6.30x / 10.82x |
+| qwen3.5-397b-a17b (795.5 GB Hybrid MoE) | unscanned | 2 (32) | to_maxtext | 814.53 | 8,096.53 (shared with 1 (8)) | 2,157.89 (Load Orbax) | 10,254.42 | 11,068.95 | 1.00x (baseline) |
+| ↳ | unscanned | 2 (32) | safetensor | 814.53 | — | 1,018.83 (Safetensors+Convert: load 266.41 + transform 751.78; peak host RAM 130.5 GB) | 1,018.83 | 1,833.36 | 6.04x / 10.06x |
 | qwen3-480b-a35b (961.0 GB MoE) | scanned | 1 (8) | to_maxtext | 1,135.50 | Does not fit one host (the source must be staged in RAM next to the converted state) | — | N/A | N/A | N/A |
 | ↳ | scanned | 1 (8) | safetensor | 1,046.14 | — | HBM OOM (961.0 GB > 813.8 GB HBM) | N/A | N/A | N/A |
 | qwen3-480b-a35b (961.0 GB MoE) | scanned | 1 (16) | to_maxtext | — | No checkpoint to load (the single-host conversion fails, see 1 (8)) | — | N/A | N/A | N/A |
@@ -147,19 +147,19 @@ TPU v7x (bodaborg-tpu7x-nap), >200B models: to_maxtext vs safetensor (safetensor
 | deepseek3-671b (1,342.4 GB MoE, synthetic sparse files) | unscanned | 4 (32) | to_maxtext | — | Not run (1.34 TB can't be converted on one host) | — | N/A | N/A | N/A |
 | ↳ | unscanned | 4 (32) | safetensor | 0.00 (local stage) | — | 530.96 (Safetensors+Convert: load 409.94 + transform 120.74; peak host RAM 689.9 GB) | 530.96 | 530.96 | Only safetensor loads this config |
 | deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files) | scanned | 1 (32) | to_maxtext | — | Not run (1.37 TB can't be converted on one host) | — | N/A | N/A | N/A |
-| ↳ | scanned | 1 (32) | safetensor | 0.00 (local stage) | — | ⏳ Queued (waiting for 1 × 2x2x4 spot slice) | ⏳ | ⏳ | ⏳ Queued |
+| ↳ | scanned | 1 (32) | safetensor | 0.00 (local stage) | — | 776.37 (Safetensors+Convert: load 465.23 + transform 311.01; peak host RAM 606.2 GB) | 776.37 | 776.37 | Only safetensor loads this config |
 | deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files) | scanned | 2 (32) | to_maxtext | — | Not run (1.37 TB can't be converted on one host) | — | N/A | N/A | N/A |
 | ↳ | scanned | 2 (32) | safetensor | 0.00 (local stage) | — | 672.46 (Safetensors+Convert: load 493.25 + transform 178.76; peak host RAM 653.4 GB) | 672.46 | 672.46 | Only safetensor loads this config |
 | deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files) | unscanned | 1 (32) | to_maxtext | — | Not run (1.37 TB can't be converted on one host) | — | N/A | N/A | N/A |
-| ↳ | unscanned | 1 (32) | safetensor | 0.00 (local stage) | — | ⏳ Queued (waiting for 1 × 2x2x4 spot slice) | ⏳ | ⏳ | ⏳ Queued |
+| ↳ | unscanned | 1 (32) | safetensor | 0.00 (local stage) | — | 654.24 (Safetensors+Convert: load 449.20 + transform 204.53; peak host RAM 613.3 GB) | 654.24 | 654.24 | Only safetensor loads this config |
 | deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files) | unscanned | 2 (32) | to_maxtext | — | Not run (1.37 TB can't be converted on one host) | — | N/A | N/A | N/A |
 | ↳ | unscanned | 2 (32) | safetensor | 0.00 (local stage) | — | 569.71 (Safetensors+Convert: load 459.39 + transform 109.96; peak host RAM 690.9 GB) | 569.71 | 569.71 | Only safetensor loads this config |
 | deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files) | scanned | 1 (64) | to_maxtext | — | Not run (3.2 TB can't be converted on one host) | — | N/A | N/A | N/A |
-| ↳ | scanned | 1 (64) | safetensor | 0.00 (local stage) | — | ⏳ Queued (waiting for 1 × 2x4x4 spot slice) | ⏳ | ⏳ | ⏳ Queued |
+| ↳ | scanned | 1 (64) | safetensor | 0.00 (local stage) | — | 971.49 (Safetensors+Convert: load 698.05 + transform 273.22; peak host RAM 615.5 GB) | 971.49 | 971.49 | Only safetensor loads this config |
 | deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files) | scanned | 4 (64) | to_maxtext | — | Not run (3.2 TB can't be converted on one host) | — | N/A | N/A | N/A |
 | ↳ | scanned | 4 (64) | safetensor | 0.00 (local stage) | — | 1,047.93 (Safetensors+Convert: load 757.75 + transform 289.55; peak host RAM 696.1 GB) | 1,047.93 | 1,047.93 | Only safetensor loads this config |
 | deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files) | unscanned | 1 (64) | to_maxtext | — | Not run (3.2 TB can't be converted on one host) | — | N/A | N/A | N/A |
-| ↳ | unscanned | 1 (64) | safetensor | 0.00 (local stage) | — | ⏳ Queued (waiting for 1 × 2x4x4 spot slice) | ⏳ | ⏳ | ⏳ Queued |
+| ↳ | unscanned | 1 (64) | safetensor | 0.00 (local stage) | — | 874.31 (Safetensors+Convert: load 709.10 + transform 164.86; peak host RAM 803.1 GB) | 874.31 | 874.31 | Only safetensor loads this config |
 | deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files) | unscanned | 4 (64) | to_maxtext | — | Not run (3.2 TB can't be converted on one host) | — | N/A | N/A | N/A |
 | ↳ | unscanned | 4 (64) | safetensor | 0.00 (local stage) | — | 1,008.62 (Safetensors+Convert: load 771.74 + transform 236.49; peak host RAM 676.0 GB) | 1,008.62 | 1,008.62 | Only safetensor loads this config |
 
@@ -233,10 +233,10 @@ qwen3.5-397b-a17b (795.5 GB Hybrid MoE)	unscanned	1 (16)	to_maxtext	814.53	8,096
 qwen3.5-397b-a17b (795.5 GB Hybrid MoE)	unscanned	2 (16)	to_maxtext	814.53	8,096.53 (shared with 1 (8))	2,025.76 (Load Orbax)	10,122.30	10,936.83	1.00x (baseline)
 ↳	unscanned	2 (16)	safetensor	814.53	—	1,311.85 (Safetensors+Convert: load 515.91 + transform 795.72; peak host RAM 98.7 GB)	1,311.85	2,126.38	5.14x / 7.72x
 ↳	unscanned	2 (16)	safetensor (with fix)	814.53	—	1,272.19 (Safetensors+Convert: load 478.85 + transform 793.27; peak host RAM 98.9 GB)	1,272.19	2,086.72	5.24x / 7.96x
-qwen3.5-397b-a17b (795.5 GB Hybrid MoE)	unscanned	1 (32)	to_maxtext	814.53	8,096.53 (shared with 1 (8))	⏳ Queued (waiting for 1 × 2x2x4 spot slice to load the converted Orbax checkpoint)	⏳	⏳	⏳ Queued
-↳	unscanned	1 (32)	safetensor	814.53	—	954.34 (Safetensors+Convert: load 268.01 + transform 686.26; peak host RAM 88.1 GB)	954.34	1,768.87	⏳ Queued (waiting for to_maxtext Step 3)
-qwen3.5-397b-a17b (795.5 GB Hybrid MoE)	unscanned	2 (32)	to_maxtext	814.53	8,096.53 (shared with 1 (8))	Orbax barrier timeout after 2,306 s (3/4 hosts reached _load_impl barrier; >20-min GCS read skew, peak host RAM 95.2 GB)	N/A	N/A	N/A
-↳	unscanned	2 (32)	safetensor	814.53	—	1,018.83 (Safetensors+Convert: load 266.41 + transform 751.78; peak host RAM 130.5 GB)	1,018.83	1,833.36	Only safetensor loads this config
+qwen3.5-397b-a17b (795.5 GB Hybrid MoE)	unscanned	1 (32)	to_maxtext	814.53	8,096.53 (shared with 1 (8))	2,233.01 (Load Orbax)	10,329.54	11,144.07	1.00x (baseline)
+↳	unscanned	1 (32)	safetensor	814.53	—	954.34 (Safetensors+Convert: load 268.01 + transform 686.26; peak host RAM 88.1 GB)	954.34	1,768.87	6.30x / 10.82x
+qwen3.5-397b-a17b (795.5 GB Hybrid MoE)	unscanned	2 (32)	to_maxtext	814.53	8,096.53 (shared with 1 (8))	2,157.89 (Load Orbax)	10,254.42	11,068.95	1.00x (baseline)
+↳	unscanned	2 (32)	safetensor	814.53	—	1,018.83 (Safetensors+Convert: load 266.41 + transform 751.78; peak host RAM 130.5 GB)	1,018.83	1,833.36	6.04x / 10.06x
 qwen3-480b-a35b (961.0 GB MoE)	scanned	1 (8)	to_maxtext	1,135.50	Does not fit one host (the source must be staged in RAM next to the converted state)	—	N/A	N/A	N/A
 ↳	scanned	1 (8)	safetensor	1,046.14	—	HBM OOM (961.0 GB > 813.8 GB HBM)	N/A	N/A	N/A
 qwen3-480b-a35b (961.0 GB MoE)	scanned	1 (16)	to_maxtext	—	No checkpoint to load (the single-host conversion fails, see 1 (8))	—	N/A	N/A	N/A
@@ -272,19 +272,19 @@ deepseek3-671b (1,342.4 GB MoE, synthetic sparse files)	unscanned	2 (32)	to_maxt
 deepseek3-671b (1,342.4 GB MoE, synthetic sparse files)	unscanned	4 (32)	to_maxtext	—	Not run (1.34 TB can't be converted on one host)	—	N/A	N/A	N/A
 ↳	unscanned	4 (32)	safetensor	0.00 (local stage)	—	530.96 (Safetensors+Convert: load 409.94 + transform 120.74; peak host RAM 689.9 GB)	530.96	530.96	Only safetensor loads this config
 deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files)	scanned	1 (32)	to_maxtext	—	Not run (1.37 TB can't be converted on one host)	—	N/A	N/A	N/A
-↳	scanned	1 (32)	safetensor	0.00 (local stage)	—	⏳ Queued (waiting for 1 × 2x2x4 spot slice)	⏳	⏳	⏳ Queued
+↳	scanned	1 (32)	safetensor	0.00 (local stage)	—	776.37 (Safetensors+Convert: load 465.23 + transform 311.01; peak host RAM 606.2 GB)	776.37	776.37	Only safetensor loads this config
 deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files)	scanned	2 (32)	to_maxtext	—	Not run (1.37 TB can't be converted on one host)	—	N/A	N/A	N/A
 ↳	scanned	2 (32)	safetensor	0.00 (local stage)	—	672.46 (Safetensors+Convert: load 493.25 + transform 178.76; peak host RAM 653.4 GB)	672.46	672.46	Only safetensor loads this config
 deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files)	unscanned	1 (32)	to_maxtext	—	Not run (1.37 TB can't be converted on one host)	—	N/A	N/A	N/A
-↳	unscanned	1 (32)	safetensor	0.00 (local stage)	—	⏳ Queued (waiting for 1 × 2x2x4 spot slice)	⏳	⏳	⏳ Queued
+↳	unscanned	1 (32)	safetensor	0.00 (local stage)	—	654.24 (Safetensors+Convert: load 449.20 + transform 204.53; peak host RAM 613.3 GB)	654.24	654.24	Only safetensor loads this config
 deepseek3.2-671b (1,367.0 GB MoE, synthetic sparse files)	unscanned	2 (32)	to_maxtext	—	Not run (1.37 TB can't be converted on one host)	—	N/A	N/A	N/A
 ↳	unscanned	2 (32)	safetensor	0.00 (local stage)	—	569.71 (Safetensors+Convert: load 459.39 + transform 109.96; peak host RAM 690.9 GB)	569.71	569.71	Only safetensor loads this config
 deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files)	scanned	1 (64)	to_maxtext	—	Not run (3.2 TB can't be converted on one host)	—	N/A	N/A	N/A
-↳	scanned	1 (64)	safetensor	0.00 (local stage)	—	⏳ Queued (waiting for 1 × 2x4x4 spot slice)	⏳	⏳	⏳ Queued
+↳	scanned	1 (64)	safetensor	0.00 (local stage)	—	971.49 (Safetensors+Convert: load 698.05 + transform 273.22; peak host RAM 615.5 GB)	971.49	971.49	Only safetensor loads this config
 deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files)	scanned	4 (64)	to_maxtext	—	Not run (3.2 TB can't be converted on one host)	—	N/A	N/A	N/A
 ↳	scanned	4 (64)	safetensor	0.00 (local stage)	—	1,047.93 (Safetensors+Convert: load 757.75 + transform 289.55; peak host RAM 696.1 GB)	1,047.93	1,047.93	Only safetensor loads this config
 deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files)	unscanned	1 (64)	to_maxtext	—	Not run (3.2 TB can't be converted on one host)	—	N/A	N/A	N/A
-↳	unscanned	1 (64)	safetensor	0.00 (local stage)	—	⏳ Queued (waiting for 1 × 2x4x4 spot slice)	⏳	⏳	⏳ Queued
+↳	unscanned	1 (64)	safetensor	0.00 (local stage)	—	874.31 (Safetensors+Convert: load 709.10 + transform 164.86; peak host RAM 803.1 GB)	874.31	874.31	Only safetensor loads this config
 deepseek4-1600b (3,197.7 GB MoE, synthetic sparse files)	unscanned	4 (64)	to_maxtext	—	Not run (3.2 TB can't be converted on one host)	—	N/A	N/A	N/A
 ↳	unscanned	4 (64)	safetensor	0.00 (local stage)	—	1,008.62 (Safetensors+Convert: load 771.74 + transform 236.49; peak host RAM 676.0 GB)	1,008.62	1,008.62	Only safetensor loads this config
 ```

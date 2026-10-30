@@ -43,3 +43,7 @@ qwen3-0.6b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,20.08,9.41,10.57,72.26,,m
 qwen3-0.6b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,16.29,10.18,6.00,72.25,,mesakh
 qwen3-480b-a35b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,757.70,644.22,111.22,244.93,,mesakh
 qwen3-480b-a35b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,718.65,642.10,76.42,244.62,,mesakh
+deepseek3.2-671b,scanned,1 × 2x2x4,4,32,3255.2,ICI,OK,776.37,465.23,311.01,606.25,,mesakh
+deepseek3.2-671b,unscanned,1 × 2x2x4,4,32,3255.2,ICI,OK,654.24,449.20,204.53,613.29,,mesakh
+deepseek4-1600b,scanned,1 × 2x4x4,8,64,6510.4,ICI,OK,971.49,698.05,273.22,615.50,,mesakh
+deepseek4-1600b,unscanned,1 × 2x4x4,8,64,6510.4,ICI,OK,874.31,709.10,164.86,803.06,,mesakh
