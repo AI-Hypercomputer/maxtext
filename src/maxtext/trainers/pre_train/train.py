@@ -1182,7 +1182,7 @@ def build_dropless_graphdef(config, jit_model, state):
   """Graphdef of the dropless retry program: RoutedMoE force_dropless + token chunks + barrier, decoder full remat."""
   reconstructed = nnx.merge(jit_model, state)
   for _, module in nnx.iter_graph(reconstructed):
-    if type(module).__name__ == "RoutedMoE":
+    if isinstance(module, moe.RoutedMoE):  # OLMoE3LatentRoutedMoE included
       module.force_dropless = True
       module.num_moe_token_chunks = getattr(config, "retry_num_moe_token_chunks", 2)
       module.moe_chunk_barrier = True
@@ -1207,7 +1207,7 @@ def build_eval_graphdef(config, jit_model, state):
   reconstructed = nnx.merge(jit_model, state)
   n_moe = 0
   for _, module in nnx.iter_graph(reconstructed):
-    if type(module).__name__ == "RoutedMoE":
+    if isinstance(module, moe.RoutedMoE):  # OLMoE3LatentRoutedMoE included
       module.ragged_buffer_factor_override = float(config.eval_ragged_buffer_factor)
       n_moe += 1
   max_logging.log(f"eval graphdef: ragged_buffer_factor_override={config.eval_ragged_buffer_factor} on {n_moe} RoutedMoE")
@@ -1259,7 +1259,7 @@ def build_first_phase_graphdef(config, jit_model, state):
   reconstructed = nnx.merge(jit_model, state)
   n_moe = 0
   for _, module in nnx.iter_graph(reconstructed):
-    if type(module).__name__ == "RoutedMoE":
+    if isinstance(module, moe.RoutedMoE):  # OLMoE3LatentRoutedMoE included
       module.ragged_buffer_factor_override = float(config.first_phase_ragged_buffer_factor)
       n_moe += 1
   max_logging.log(

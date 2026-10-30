@@ -818,16 +818,22 @@ def _log_a2a_drops(global_group_sizes, buffer_size, expert_axis, mesh):
 
   ``global_group_sizes`` is ``[source shard, expert]``; each destination shard receives its local experts' rows from
   every source into ``buffer_size`` rows and drops the rest. Every shard of the EP group holds the same matrix, so
-  one device (expert index 0 of data index 0) prints ``A2A_DROPS`` for its group, once per call (layer and chunk).
+  one device prints ``A2A_DROPS`` for its group, once per call (layer and chunk): index 0 on every mesh axis of the
+  routed MoE's shard_map (``LB_REDUCE_AXES``, which leaves out axes an enclosing vmap mapped away), else on the expert
+  and data axes.
   """
   num_shards = global_group_sizes.shape[0]
   loads = global_group_sizes.reshape(num_shards, num_shards, -1).sum(axis=(0, 2))  # rows per destination shard
   total = loads.sum()
   dropped = jnp.maximum(loads - buffer_size, 0).sum()
   max_ratio = loads.max().astype(jnp.float32) / jnp.maximum(total.astype(jnp.float32) / num_shards, 1.0)
-  first = jax.lax.axis_index(expert_axis) == 0
-  if mesh is not None and "data" in mesh.axis_names and mesh.shape["data"] > 1:
-    first = jnp.logical_and(first, jax.lax.axis_index("data") == 0)
+  shard_map_axes = LB_REDUCE_AXES.get()
+  if shard_map_axes:
+    first = jax.lax.axis_index(tuple(shard_map_axes)) == 0
+  else:
+    first = jax.lax.axis_index(expert_axis) == 0
+    if mesh is not None and "data" in mesh.axis_names and mesh.shape["data"] > 1:
+      first = jnp.logical_and(first, jax.lax.axis_index("data") == 0)
 
   def _print(is_first, d, t, r, b):
     if bool(is_first):

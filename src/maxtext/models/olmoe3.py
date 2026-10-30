@@ -1371,7 +1371,13 @@ class OLMoE3Attention(nnx.Module):
         dropout_rate=cfg.dropout_rate,
         # Query, key and value kernels are [emb, heads, dims]; the output kernel is [heads * head_dim, emb].
         kernel_init=_matrix_init_by_shape(
-            cfg, lambda shape: "mixer/attention/query/kernel" if len(shape) == 3 else "mixer/attention/out/kernel"
+            cfg,
+            lambda shape: (
+                "mixer/attention/out/kernel"
+                if len(shape) != 3
+                # The gated query is [emb, heads, 2 * head_dim]; key and value are [emb, kv heads, head_dim].
+                else ("mixer/attention/query/kernel" if shape[-1] == 2 * cfg.head_dim else "mixer/attention/key/kernel")
+            ),
         )
         if _completedp_base(cfg) is not None
         else _olmoe3_attention_init(cfg),

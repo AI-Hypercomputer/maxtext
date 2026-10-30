@@ -102,6 +102,16 @@ NUM_SLICES="${NUM_SLICES:--1}"
 #   - 1 x v4-6144 as 8x8x48 (3,072 chips)          : TOPOLOGY=8x8x48 (EP=64: ICI_DATA=48 + Zero-1; EP=128: ICI_DATA=24)
 TOPOLOGY="${TOPOLOGY:-}"
 PRESET_ARGS=()
+# Megablox tile dimensions along the routed-expert width F, WI_TILE_HALF = F / 4 and WI_TILE_FULL = F / 2 of the
+# e256k8-sh2x models (3584 for olmoe3-3p5b-e256k8-sh2x, 3072 for olmo35-small-e256k8-sh2x). The 896 / 1792 pair also
+# divides the baseline routed width (F=1792); all fit TPU v4's 16 MiB VMEM, and 896 / 1792 are the tiles verified on
+# 1x and 3x v4-2048. Set once MODEL_NAME is final (the 8x8x48 preset can change it).
+set_routed_tiles() {
+  case "${MODEL_NAME}" in
+    olmo35-small-e256k8-sh2x) WI_TILE_HALF=768; WI_TILE_FULL=1536 ;;
+    *) WI_TILE_HALF=896; WI_TILE_FULL=1792 ;;
+  esac
+}
 # XLA flags of the measured 8x8x48 runs. Under Pathways they must also be passed to the pathways resource-manager,
 # proxy, and worker containers (see the JobSet templates next to this script); the TPUs ignore this driver's env.
 V4_8X8X48_LIBTPU="--xla_tpu_spmd_rng_bit_generator_unsafe=true --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
@@ -122,6 +132,7 @@ case "${TOPOLOGY}" in
     esac
     # PRESET_MODEL_NAME swaps the model at the same recipe (e.g. olmo35-small-e256k8-sh2x, the 7:1 small, for an A/B).
     MODEL_NAME="${PRESET_MODEL_NAME:-olmoe3-3p5b-e256k8-sh2x}"
+    set_routed_tiles
     SEQ_LEN=8192
     PER_DEVICE_BATCH=1.0
     GRAD_ACCUM_STEPS=1
@@ -162,8 +173,8 @@ case "${TOPOLOGY}" in
       "olmoe3_replicate_router=true" "olmoe3_segments_for_emo_only=true"
       "moe_fused_swiglu_gmm=true" "moe_a2a_pipeline_chunks=false"
       "moe_fused_swiglu_bwd_tile_batch_seq=256" "moe_fused_swiglu_bwd_tile_embed_dim=768"
-      "moe_fused_swiglu_bwd_tile_mlp_dim=896" "moe_fused_swiglu_dwo_tile_embed_dim=768"
-      "moe_fused_swiglu_dwo_tile_mlp_dim=896"
+      "moe_fused_swiglu_bwd_tile_mlp_dim=${WI_TILE_HALF}" "moe_fused_swiglu_dwo_tile_embed_dim=768"
+      "moe_fused_swiglu_dwo_tile_mlp_dim=${WI_TILE_HALF}"
       "fused_lm_head_ce=true" "fused_lm_head_ce_block_t=512" "fused_lm_head_ce_block_v=1024"
       "fused_lm_head_ce_block_t_bwd=512" "fused_lm_head_ce_block_v_bwd=128" "logits_dot_in_fp32=false"
       "colocated_python_data_input=false"
@@ -284,15 +295,7 @@ if [[ -n "${LIBTPU_OVERRIDE:-}" ]]; then
 fi
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} ${LIBTPU}"
 
-# Megablox tile dimensions: the 256-aligned 896 / 1792 N-tiles divide both the baseline
-# routed width (F=1792) and the 2x wider routed width (F=3584: 3584 = 4 x 896 = 2 x 1792),
-# fit TPU v4's 16 MiB VMEM, and are the tiles verified on 1x and 3x v4-2048.
-# GMM tiles along the routed-expert width: half and all of it (3584 for olmoe3-3p5b-e256k8-sh2x, 3072 for
-# olmo35-small-e256k8-sh2x).
-case "${MODEL_NAME}" in
-  olmo35-small-e256k8-sh2x) WI_TILE_HALF=768; WI_TILE_FULL=1536 ;;
-  *) WI_TILE_HALF=896; WI_TILE_FULL=1792 ;;
-esac
+set_routed_tiles
 
 echo "=== OLMo 3.5 Small (${MODEL_NAME}) TPU v4 Run ==="
 echo "  model_name               : ${MODEL_NAME}"
