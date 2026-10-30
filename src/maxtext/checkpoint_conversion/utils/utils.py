@@ -1310,7 +1310,7 @@ def save_weights_to_checkpoint(
       use_ocdbt: If True, enables the Optimized Checkpoint Database with Transactions
           (OCDBT) format for improved metadata handling.
       use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
-      config: Optional config to save along with checkpoint metadata.
+      config: Optional config to save with checkpoint metadata and size Orbax write buffers.
   """
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -1340,6 +1340,12 @@ def save_weights_to_checkpoint(
       use_zarr3=use_zarr3,
       # Sets Orbax-V1 I/O write timeout to 60 minutes (up from 20-minute default) to facilitate large model saving.
       enable_continuous_checkpointing=True,
+      # Pass when set on config; standalone callers pass config=None and keep the 96 GB default.
+      **(
+          {"checkpoint_storage_concurrent_gb": config.checkpoint_storage_concurrent_gb}
+          if getattr(config, "checkpoint_storage_concurrent_gb", None) is not None
+          else {}
+      ),
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
