@@ -158,7 +158,10 @@ python3 -u /tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
 # BEFORE (origin/main): same command from /tmp/maxtext_origin_main with PHASE_TIMEOUT_S=1800 and
 #   --gcs-base gs://mesa-maxtext/mesakh_tpu7x_bench/p1_origin_main --run-id tpu7x_200b_t1800
 
-# Tables and CSV from the per-phase result JSONs
+# CSV from the per-phase result JSONs
 python3 checkpoint_load_benchmark/scripts/build_tpu7x_tables.py <p2 logs mirror> <p1 logs mirror> \
   --cold-s1 qwen3.5-397b-a17b=814.53 --csv tpu7x_benchmark_ckpt_load_time_summary.csv --md table.md
+# Row-by-row tables (plain text, for the sheet tabs): --suite p1 (>200B, add --multihost-csv) or --suite p2 (up to 120B)
+python3 checkpoint_load_benchmark/scripts/build_tpu7x_sheet_table.py --suite p2 <p2 logs mirror> \
+  --md-into tpu7x_benchmark_ckpt_load_time_summary.md
 ```

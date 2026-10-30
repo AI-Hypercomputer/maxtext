@@ -1,7 +1,8 @@
 # tpu7x Checkpoint Load Time Benchmark Report: `to_maxtext` vs `safetensor` (`safetensors_dynamic`)
 
 > TPU v7x (`bodaborg-tpu7x-nap`). Companion documents:
-> - [`tpu7x_benchmark_ckpt_load_time_summary.md`](tpu7x_benchmark_ckpt_load_time_summary.md): all configurations, row by row.
+> - [`tpu7x_benchmark_ckpt_load_time_summary.md`](tpu7x_benchmark_ckpt_load_time_summary.md): models up to 120B, row by
+>   row; the >200B rows are in [`tpu7x_priority1_progress.md`](tpu7x_priority1_progress.md).
 > - [`tpu7x_benchmark_ckpt_load_time_summary.csv`](tpu7x_benchmark_ckpt_load_time_summary.csv): sub-phase values.
 > - [`tpu7x_large_model_200b_experiment_report.md`](tpu7x_large_model_200b_experiment_report.md): >200B models and Lance's PRs.
 > - [`tpu7x_benchmark_ckpt_load_time_issues.md`](tpu7x_benchmark_ckpt_load_time_issues.md): failures and fixes.

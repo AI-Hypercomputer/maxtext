@@ -29,12 +29,14 @@ Usage (later mirrors override earlier ones file by file, so list re-run dirs aft
   gcloud storage rsync -r $B/p2_lance_prs/run_tpu7x_16m/logs /tmp/t7/p2
   gcloud storage rsync -r $B/p2_lance_prs/run_tpu7x_16m_rerun/logs /tmp/t7/p2_rerun
   gcloud storage rsync -r $B/p1_lance_prs/run_tpu7x_200b/logs /tmp/t7/p1
+  gcloud storage rsync -r $B/p1_lance_prs/run_tpu7x_200b_pstream/logs /tmp/t7/p1_pstream
   python3 checkpoint_load_benchmark/scripts/build_tpu7x_tables.py /tmp/t7/p2 /tmp/t7/p2_rerun /tmp/t7/p1 \\
-      --cold-s1 qwen3.5-397b-a17b=814.53 \\
-      --csv checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md /tmp/t7/table.md \\
-      --md-into checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.md
+      /tmp/t7/p1_pstream --cold-s1 qwen3.5-397b-a17b=814.53 \\
+      --csv checkpoint_load_benchmark/reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md /tmp/t7/table.md
 
 The 397B override is the cold download recorded in `results/p1_st_lance_b.csv` (its result JSON was later replaced).
+The reports' row-by-row tables are built by build_tpu7x_sheet_table.py, in the plain-text format of the benchmark
+Google Sheet; `--md` keeps this script's formatted table of every configuration.
 """
 
 import argparse

@@ -37,8 +37,8 @@ checkpoint_load_benchmark/
 │   ├── tpu7x_task_queue.py                          # Preemption-tolerant GCS task queue worker (claims tasks via atomic GCS locks)
 │   ├── tpu7x_daemon_controller.py                   # CPU-pod controller that runs queue tasks on a daemon pod whose runner was evicted
 │   ├── summarize_tpu7x_results.py                   # Markdown status matrix from per-phase result JSONs (works on partial runs)
-│   ├── build_tpu7x_tables.py                        # tpu7x summary CSV + row-by-row to_maxtext vs safetensor table (merges re-runs)
-│   ├── build_tpu7x_sheet_table.py                   # Plain-text >200B table (P1 + multi-host rows) for the "tpu-v7x" sheet tab
+│   ├── build_tpu7x_tables.py                        # tpu7x summary CSV from per-phase result JSONs (merges re-runs)
+│   ├── build_tpu7x_sheet_table.py                   # Plain-text row-by-row tables for the tpu7x sheet tabs (>200B + multi-host; <=120B)
 │   └── run_full_matrix.sh                           # Reproduce the 48-configuration v5p benchmark matrix by tier (0, 1, 2, 3, all)
 ├── k8s/
 │   └── multislice_benchmark_job.yaml.tmpl           # Kubernetes Service + 2-Node Coordinator/Worker Job template for GKE TPU v5p-8
