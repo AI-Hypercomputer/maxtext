@@ -36,6 +36,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -104,6 +105,30 @@ def _get_te_moe_checkpoint_kwargs(moe_fn) -> dict[str, str]:
 def _get_te_moe_cudnn_gmm_fusion_kwargs(disable_cudnn_gmm_fusion: bool) -> dict[str, bool]:
   """Disable cuDNN GMM fusion when explicitly requested, otherwise preserve TE's default."""
   return {"use_cudnn_fusion": False} if disable_cudnn_gmm_fusion else {}
+
+
+@jax.custom_vjp
+def _split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Split the fused [rows, 2N] gmm output into (gate, up) halves.
+
+  Plain slicing makes XLA assemble the cotangent with two dynamic-update-slices
+  (pad + add) in backward; the custom VJP concatenates the two half-gradients
+  once, which fuses into the following tgmm/gmm input.
+  """
+  n = out.shape[-1] // 2
+  return out[:, :n], out[:, n:]
+
+
+def _split_gate_up_fwd(out: jax.Array) -> tuple[tuple[jax.Array, jax.Array], None]:
+  return _split_gate_up(out), None
+
+
+def _split_gate_up_bwd(_residuals: None, grads: tuple[jax.Array, jax.Array]) -> tuple[jax.Array]:
+  grad_gate, grad_up = grads
+  return (jnp.concatenate([grad_gate, grad_up], axis=-1),)
+
+
+_split_gate_up.defvjp(_split_gate_up_fwd, _split_gate_up_bwd)
 
 
 @struct.dataclass
@@ -264,6 +289,31 @@ def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
 
 
 take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def top_k_dense_vjp(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+  """`jax.lax.top_k(x, k)` with a dense compare-select-reduce backward instead of JAX's default 1-lane scatter-add."""
+  vals, indices = jax.lax.top_k(x, k)
+  return vals, indices
+
+
+def _top_k_dense_vjp_fwd(x: jax.Array, k: int):
+  vals, indices = jax.lax.top_k(x, k)
+  return (vals, indices), (indices, x.shape[-1])
+
+
+def _top_k_dense_vjp_bwd(k: int, residuals, grads):
+  del k
+  indices, num_classes = residuals
+  g_vals, _ = grads
+  iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (num_classes,), indices.ndim)
+  hit = indices[..., None] == iota  # [..., k, num_classes]
+  dx = jnp.sum(jnp.where(hit, g_vals[..., None], jnp.zeros((), g_vals.dtype)), axis=-2)
+  return (dx,)
+
+
+top_k_dense_vjp.defvjp(_top_k_dense_vjp_fwd, _top_k_dense_vjp_bwd)
 
 
 def get_batchsplit_init_kernel_axes():
@@ -1405,9 +1455,13 @@ class RoutedMoE(nnx.Module):
       elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4")):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+        # Softmax is monotonic, so top_k on router_probs selects the same experts as
+        # gate_logits without a separate take_along_axis gather. Since Gemma 4 has 128
+        # experts (matching the 128-lane TPU VPU width), top_k_dense_vjp replaces the
+        # default 1-lane backward scatter-add with a fused 128-lane compare-select-reduce.
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-        top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+        top_k_weights, top_k_indices = top_k_dense_vjp(router_probs, self.num_experts_per_tok)
+        top_k_weights = top_k_weights.astype(self.dtype)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1759,8 +1813,27 @@ class RoutedMoE(nnx.Module):
         flatten_selected_experts_safe = flatten_selected_experts
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = None
+        if self._use_fused_permute(is_qarray):
+          # moe_permute_kernel="tc": gather the tokens into expert-sorted order on
+          # the TensorCore (fwd one-hot MXU selection, bwd = combine forward with
+          # unit weights); see kernels/moe_combine_tc.py. Returns None when the
+          # kernel preconditions do not hold.
+          with jax.named_scope("moe_permute"):
+            sorted_inputs = moe_combine_tc.permute(
+                inputs_2d.astype(self.dtype),
+                sorted_selected_experts,
+                group_size,
+                self.num_experts_per_tok,
+                block_tokens=self.config.moe_permute_block_tokens,
+                vmem_limit_bytes=self.config.moe_tc_vmem_limit_mib * 1024 * 1024,
+                interpret=self._pallas_interpret(),
+            )
+        if sorted_inputs is None:
+          sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1769,8 +1842,6 @@ class RoutedMoE(nnx.Module):
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
-
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1853,6 +1924,7 @@ class RoutedMoE(nnx.Module):
     the result is (batch, seq, emb // 128, 128).
     """
 
+    output = None
     if tc_routing is not None:
       output = ring_ragged_unsort_tc(
           intermediate,
@@ -1891,7 +1963,24 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
       )
-    else:
+    elif self._use_fused_combine(intermediate, weights, group_sizes):
+      # moe_combine_kernel="tc": fused unpermute + top-k weighted sum (f32
+      # accumulation, same arithmetic as float32_weight_sum=True). Never
+      # materializes the [tokens*top_k, emb] unsorted copy; see
+      # kernels/moe_combine_tc.py. Returns None when the kernel preconditions
+      # do not hold so we fall through to the XLA path below.
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            jnp.reshape(weights, (-1, self.num_experts_per_tok)),
+            group_sizes,
+            block_tokens=self.config.moe_combine_block_tokens,
+            vmem_limit_bytes=self.config.moe_tc_vmem_limit_mib * 1024 * 1024,
+            interpret=self._pallas_interpret(),
+            fallback=False,
+        )
+    if output is None:
       unsort_intermediate = _sort_activations(
           intermediate,
           jnp.argsort(sorted_selected_experts),
@@ -1917,6 +2006,37 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
+  def _pallas_interpret(self) -> bool:
+    """Returns True when the target device platform is not TPU (enabling Mosaic interpret mode)."""
+    return self.mesh.devices.flat[0].platform != "tpu"
+
+  def _use_fused_combine(self, intermediate, weights, group_sizes) -> bool:
+    """Returns True iff `moe_combine_kernel="tc"` is configured and the fused combine is valid here.
+
+    Valid only for the plain local sort: every token*top_k row is present in
+    `intermediate` in stable expert-sorted order and `group_sizes` sums to the
+    row count (no expert parallelism, no truncated/ragged buffers).
+    """
+    if self.config.moe_combine_kernel != "tc" or group_sizes is None:
+      return False
+    if not isinstance(intermediate, jax.Array) or intermediate.ndim != 2:
+      return False
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      return False
+    if self.get_expert_parallelism_size() != 1 or self.config.use_ring_of_experts:
+      return False
+    return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
+
+  def _use_fused_permute(self, is_qarray: bool) -> bool:
+    """Returns True iff `moe_permute_kernel="tc"` is configured and the fused permute is valid here.
+
+    Valid only for the plain local sort of unquantized activations (no expert
+    parallelism, no ring-of-experts).
+    """
+    if self.config.moe_permute_kernel != "tc" or is_qarray:
+      return False
+    return self.get_expert_parallelism_size() == 1 and not self.config.use_ring_of_experts
 
   @staticmethod
   def _maybe_truncate_local_group_size(
@@ -2764,7 +2884,8 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
-
+    if w1_kernel is None:  # fused prefused wi travels as w0_kernel
+      w1_pspec = None
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -3298,14 +3419,13 @@ class RoutedMoE(nnx.Module):
         return (layer, *extras) if extras else layer
 
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        # w1 is None when the fused (G, K, 2N) wi was passed through as one operand.
+        w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
         fused_bias = None
         if use_te_bias and w0_bias is not None and w1_bias is not None:
           fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)
         out = _gmm_maybe_bias(x, w_fused, fused_bias)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        layer_w0, layer_w1 = _split_gate_up(out)
         if self.config.mlp_bias and not use_te_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
@@ -5259,9 +5379,21 @@ class RoutedMoE(nnx.Module):
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if (
+          cfg.moe_unsliced_prefused_wi
+          and cfg.sparse_matmul
+          and cfg.num_moe_emb_chunks == 0
+          and not quantizations.in_serve_mode(self.quant)
+          and self.wi_0_sparsity_module is None
+      ):
+        # Keep the fused [E, emb, 2N] wi as a single operand: slicing it into w0 / w1
+        # here and re-concatenating inside gmm_up (and the mirror in backward) costs
+        # full-weight copies; gmm_up consumes the fused weight directly (w1 is None).
+        w0_kernel = wi
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None

@@ -355,6 +355,20 @@ moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the s
 moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.
 moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
+moe_unsliced_prefused_wi: false # when true (with prefuse_moe_weights=true and sparse_matmul=true), pass the fused wi [E, emb, 2*mlp] across shard_map as a single operand (w1_kernel=None) instead of slicing into w0/w1 and re-concatenating inside gmm_up.
+# MoE "combine" (unpermute + Top-K weighted sum) implementation in the sparse matmul path without expert parallelism:
+#   "xla": gather the expert outputs back into token order and einsum with the routing weights (default).
+#   "tc":  fused TensorCore Pallas kernel (kernels/moe_combine_tc.py), f32 accumulation, no unsorted copy in HBM.
+#          Requires sparse_matmul=true and use_ring_of_experts=false; falls back to "xla" for unsupported shapes.
+moe_combine_kernel: "xla"
+moe_combine_block_tokens: 256 # moe_combine_kernel="tc": tokens per grid step (power of two >= 128; stepped down to divide num_tokens and fit moe_tc_vmem_limit_mib).
+# MoE token permute (gather into expert-sorted order) implementation when moe_use_direct_token_gather=true:
+#   "xla": XLA gather (default).
+#   "tc":  fused TensorCore Pallas kernel (kernels/moe_combine_tc.py `permute`). Requires use_ring_of_experts=false;
+#          falls back to "xla" for quantized activations or unsupported shapes.
+moe_permute_kernel: "xla"
+moe_permute_block_tokens: 512 # moe_permute_kernel="tc": tokens per grid step (power of two >= 128; stepped down to divide num_tokens and fit moe_tc_vmem_limit_mib).
+moe_tc_vmem_limit_mib: 120 # moe_combine_kernel="tc" / moe_permute_kernel="tc": maximum per-kernel VMEM budget in MiB.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
@@ -1509,6 +1523,7 @@ dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
+local_context_parallel_strategy: "" # Optional override for LOCAL_SLIDING layers: "" or "halo" (TPU-only, requires attention=flash and use_tokamax_splash=True)
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 

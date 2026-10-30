@@ -1451,6 +1451,47 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
   )
+  moe_combine_kernel: Literal["xla", "tc"] = Field(
+      "xla",
+      description=(
+          "Implementation of the MoE combine (unpermute + Top-K weighted sum) in the sparse matmul path without"
+          " expert parallelism. 'xla': gather back into token order and einsum (default). 'tc': fused TensorCore"
+          " Pallas kernel (kernels/moe_combine_tc.py) with f32 accumulation that never materializes the"
+          " [tokens * top_k, emb] unsorted copy. Requires sparse_matmul=True, use_ring_of_experts=False and"
+          " use_ragged_sort=False; falls back to 'xla' at runtime when the kernel preconditions do not hold."
+      ),
+  )
+  moe_combine_block_tokens: int = Field(
+      256,
+      description=(
+          "Tokens per grid step for moe_combine_kernel='tc' (power of two >= 128). Automatically stepped down by"
+          " powers of two (>= 128) to divide the token count and fit within moe_tc_vmem_limit_mib."
+      ),
+  )
+  moe_permute_kernel: Literal["xla", "tc"] = Field(
+      "xla",
+      description=(
+          "Implementation of the MoE token permute (gather into expert-sorted order) when"
+          " moe_use_direct_token_gather=True. 'xla': XLA gather (default). 'tc': fused TensorCore Pallas kernel"
+          " (kernels/moe_combine_tc.py `permute`, forward and backward). Requires moe_use_direct_token_gather=True"
+          " and use_ring_of_experts=False; falls back to 'xla' at runtime when the kernel preconditions do not"
+          " hold."
+      ),
+  )
+  moe_permute_block_tokens: int = Field(
+      512,
+      description=(
+          "Tokens per grid step for moe_permute_kernel='tc' (power of two >= 128). Automatically stepped down by"
+          " powers of two (>= 128) to divide the token count and fit within moe_tc_vmem_limit_mib."
+      ),
+  )
+  moe_tc_vmem_limit_mib: int = Field(
+      120,
+      description=(
+          "Maximum per-kernel VMEM footprint in MiB for moe_combine_kernel='tc' and moe_permute_kernel='tc'"
+          " (>= 16). Block size is stepped down to fit this budget; shapes that still exceed it fall back to 'xla'."
+      ),
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -1569,6 +1610,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
+  )
+  moe_unsliced_prefused_wi: bool = Field(
+      False,
+      description="When True (with prefuse_moe_weights=True and sparse_matmul=True), pass the fused wi [E, emb, 2*mlp] "
+      "across shard_map as a single operand (w1_kernel=None) instead of slicing into w0/w1 and re-concatenating inside gmm_up.",
   )
   fuse_expert_scales: bool = Field(
       False,
@@ -2059,6 +2105,13 @@ class HardwareAndMesh(BaseModel):
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
+  )
+  local_context_parallel_strategy: str = Field(
+      "",
+      description=(
+          "Optional context parallel strategy override for LOCAL_SLIDING attention layers "
+          "('' or 'halo'). 'halo' is TPU-only and requires attention=flash with use_tokamax_splash=True."
+      ),
   )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
@@ -6085,6 +6138,25 @@ class MaxTextConfig(
     if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
       raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")
     self.context_parallel_strategy = context_parallel_strategy
+    local_context_parallel_strategy = self.local_context_parallel_strategy.lower()
+    if local_context_parallel_strategy not in ("", "halo"):
+      raise ValueError("local_context_parallel_strategy must be one of '' or 'halo'.")
+    self.local_context_parallel_strategy = local_context_parallel_strategy
+    if local_context_parallel_strategy == "halo":
+      if "tpu" not in self.hardware:
+        raise ValueError(
+            "Halo context parallelism (local_context_parallel_strategy='halo') is only supported on TPU "
+            "with attention=flash and use_tokamax_splash=True."
+        )
+      if self.sliding_window_size is None or self.sliding_window_size <= 0:
+        raise ValueError("Halo context parallelism requires sliding_window_size > 0.")
+      if not self.use_tokamax_splash:
+        raise ValueError("Halo context parallelism requires use_tokamax_splash=True.")
+      if context_parallel_strategy == "usp":
+        raise ValueError(
+            "Halo context parallelism (local_context_parallel_strategy='halo') is not supported "
+            "with 2D USP context parallelism (context_parallel_strategy='usp')."
+        )
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
@@ -6201,12 +6273,20 @@ class MaxTextConfig(
             "TPU Ulysses attention requires num_query_heads "
             f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
-      if self.num_kv_heads == 1:
+      # With a local_context_parallel_strategy override, Ulysses only runs on the global
+      # layers, so the head-divisibility constraint applies to their KV head count
+      # (global_num_kv_heads, when the model distinguishes it) rather than num_kv_heads.
+      ulysses_num_kv_heads = (
+          self.global_num_kv_heads
+          if self.global_num_kv_heads > 0 and local_context_parallel_strategy
+          else self.num_kv_heads
+      )
+      if ulysses_num_kv_heads == 1:
         raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
-      if self.num_kv_heads % context_parallel_size != 0:
+      if ulysses_num_kv_heads % context_parallel_size != 0:
         raise ValueError(
             "TPU Ulysses attention requires num_kv_heads "
-            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+            f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
     self._validate_usp_context_parallelism()
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
@@ -6499,6 +6579,25 @@ class MaxTextConfig(
 
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
+    if self.moe_combine_block_tokens < 128 or (self.moe_combine_block_tokens & (self.moe_combine_block_tokens - 1)) != 0:
+      raise ValueError(f"`moe_combine_block_tokens` must be a power of two >= 128, got {self.moe_combine_block_tokens}.")
+    if self.moe_permute_block_tokens < 128 or (self.moe_permute_block_tokens & (self.moe_permute_block_tokens - 1)) != 0:
+      raise ValueError(f"`moe_permute_block_tokens` must be a power of two >= 128, got {self.moe_permute_block_tokens}.")
+    if self.moe_tc_vmem_limit_mib < 16:
+      raise ValueError(f"`moe_tc_vmem_limit_mib` must be >= 16, got {self.moe_tc_vmem_limit_mib}.")
+
+    if self.moe_combine_kernel == "tc":
+      if not self.sparse_matmul:
+        raise ValueError("`moe_combine_kernel='tc'` requires `sparse_matmul=True`.")
+      if self.use_ring_of_experts or self.use_ragged_sort:
+        raise ValueError("`moe_combine_kernel='tc'` requires `use_ring_of_experts=False` and `use_ragged_sort=False`.")
+
+    if self.moe_permute_kernel == "tc":
+      if not self.moe_use_direct_token_gather:
+        raise ValueError("`moe_permute_kernel='tc'` requires `moe_use_direct_token_gather=True`.")
+      if self.use_ring_of_experts:
+        raise ValueError("`moe_permute_kernel='tc'` requires `use_ring_of_experts=False`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

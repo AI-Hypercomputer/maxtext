@@ -84,7 +84,7 @@ class Gemma4MoE(nnx.Module):
 
     self.pre_forward_scale_2 = nnx.Param(
         jnp.ones((self.config.emb_dim,), dtype=self.config.weight_dtype),
-        sharding=("embed",),
+        sharding=("norm",),
     )
     self.pre_feedforward_layernorm_2 = RMSNorm(
         num_features=self.config.emb_dim,
@@ -142,12 +142,12 @@ class Gemma4MoE(nnx.Module):
     unscaled_norm = self.gate_norm(original_inputs, out_sharding=out_sharding)
 
     root_size = self.config.emb_dim**-0.5
-    router_scale = jnp.asarray(self.pre_forward_scale_2.value, gate_dtype)
+    # Scale in fp32 and round once (keeps the norm-scale gradient reductions in
+    # fp32, so XLA can hoist them out of the scanned layer loop).
+    router_scale = jnp.asarray(self.pre_forward_scale_2.value, jnp.float32)
     if self.config.shard_mode == ShardMode.EXPLICIT:
-      # The router scale is declared "embed" but multiplies an activation whose last axis is
-      # "activation_embed", two different mesh axes under the default rules.
       router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
-    gate_inputs = unscaled_norm * root_size * router_scale
+    gate_inputs = jnp.asarray(jnp.asarray(unscaled_norm, jnp.float32) * root_size * router_scale, gate_dtype)
 
     # 3. Pass both to routed_moe
     routed_experts, load_balance_loss, moe_bias_updates = self.moe_block.routed_moe(
