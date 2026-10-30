@@ -140,7 +140,7 @@ kda_chunked_impl: "subblock"
 kda_sub_block: 16
 kda_conv_in_compute_dtype: false
 use_tokamax_kda: false
-gdn_chunk_size: 128
+gdn_chunk_size: 128  # also the model config's: a model config overrides this file (only command-line args beat it)
 gdn_state_dtype: "float32"
 attention: "flash"
 olmoe3_replicate_router: true
