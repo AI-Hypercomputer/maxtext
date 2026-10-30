@@ -1025,6 +1025,15 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
       flush=True,
   )
 
+  try:
+    from orbax.checkpoint.experimental.v1._src.synchronization import multihost as _ocp_mh
+
+    _ocp_mh._DEFAULT_BARRIER_TIMEOUT = max(
+        getattr(_ocp_mh, "_DEFAULT_BARRIER_TIMEOUT", 300),
+        int(os.environ.get("ORBAX_BARRIER_TIMEOUT_S", "1800")),
+    )
+  except ImportError:
+    pass
   print(f"[to_maxtext Step 3] Loading Orbax checkpoint from {orbax_items_path} ...", flush=True)
   t_load0 = time.perf_counter()
   with logical_axis_rules(config.logical_axis_rules):
