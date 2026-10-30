@@ -21,6 +21,9 @@ import jax.numpy as jnp
 
 from .. import compute_gdn as local_compute_gdn
 
+# Chunk sizes supported by the Pallas TPU GDN forward and backward kernels.
+_SUPPORTED_PALLAS_CHUNK_SIZES = (64, 128)
+
 
 def target_platform(*arrays: Any) -> str:
   """Returns the platform ('tpu', 'cpu', 'gpu') the computation is being compiled for.
@@ -43,8 +46,8 @@ def pallas_unsupported_reason(*, head_k_dim: int, head_v_dim: int, chunk_size: i
     return f"head_k_dim={head_k_dim} is not a multiple of 128"
   if head_v_dim % 128 != 0:
     return f"head_v_dim={head_v_dim} is not a multiple of 128"
-  if chunk_size != 64:
-    return f"chunk_size={chunk_size} != 64"
+  if chunk_size not in _SUPPORTED_PALLAS_CHUNK_SIZES:
+    return f"chunk_size={chunk_size} not in {_SUPPORTED_PALLAS_CHUNK_SIZES}"
   return None
 
 
@@ -67,7 +70,7 @@ def ensure_cpu_interpret_registered() -> None:
 
 @jax.custom_vjp
 def invert_triangular_matrix(t: jax.Array) -> jax.Array:
-  """Computes inverse of unit lower-triangular matrix using Tokamax block forward substitution."""
+  """Computes inverse of unit lower-triangular matrix using `compute_gdn.invert_triangular_matrix`."""
   return local_compute_gdn.invert_triangular_matrix(t, block_size=16, precision=jax.lax.Precision.HIGHEST)
 
 

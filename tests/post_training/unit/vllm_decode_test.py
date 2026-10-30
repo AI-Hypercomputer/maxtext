@@ -135,9 +135,7 @@ class RoutedExpertsReplicationTest(unittest.TestCase):
     wrapper = object.__new__(MaxTextForCausalLM)
     object.__setattr__(wrapper, "model", _DummyDecoder())
     object.__setattr__(wrapper, "mesh", mesh)
-    object.__setattr__(
-        wrapper, "maxtext_config", types.SimpleNamespace(dtype=jnp.float32, logical_axis_rules=())
-    )
+    object.__setattr__(wrapper, "maxtext_config", types.SimpleNamespace(dtype=jnp.float32, logical_axis_rules=()))
     object.__setattr__(wrapper, "model_mode", "autoregressive")
 
     attn_metadata = types.SimpleNamespace(input_positions=jnp.arange(4, dtype=jnp.int32))

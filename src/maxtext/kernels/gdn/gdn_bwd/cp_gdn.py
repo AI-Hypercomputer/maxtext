@@ -36,10 +36,48 @@ from jax import lax
 import jax.numpy as jnp
 
 from .. import compute_conv1d as local_compute_conv1d
+from .. import compute_gdn as local_compute_gdn
+from .runtime_utils import target_platform
 
 # Precision of the f32 composition matmuls below: 6 bf16 passes on TPU. `gdn_cp_matmul_precision=high`
 # passes Precision.HIGH (3 passes) to them through their `precision` argument instead.
 DEFAULT_PRECISION = jax.lax.Precision.HIGHEST
+
+
+def _compute_t_inv_batched(
+    k_orig: jax.Array,  # [B, N_c, C, H_k, d_k] f32, already qk-normed if enabled
+    beta_h: jax.Array,  # [N_c, B, H_v, C] f32, already masked if segment_ids
+    cumsum_h: jax.Array,  # [N_c, B, H_v, C] f32
+    seg_c: Optional[jax.Array],  # [N_c, B, 1, C] f32 or None
+    valid_c: Optional[jax.Array],  # [N_c, B, 1, C] bool or None
+    *,
+    repeats: int,
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
+) -> jax.Array:
+  """Computes `t_inv_c: [N_c, B, H_v, C, C]` across all local chunks in one batched call."""
+  num_chunks, batch, num_v_heads, chunk_size = beta_h.shape
+  k_kq = jnp.transpose(k_orig, (1, 0, 3, 2, 4))  # [N_c, B, H_k, C, d_k]
+  if valid_c is not None:
+    k_kq = jnp.where(valid_c[..., None], k_kq, 0.0)
+  kk_kq = jnp.matmul(k_kq, jnp.swapaxes(k_kq, -1, -2), precision=precision)  # [N_c, B, H_k, C, C]
+  kk_h = jnp.repeat(kk_kq, repeats, axis=2)  # [N_c, B, H_v, C, C]
+
+  mask_strict_base = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  if seg_c is not None and valid_c is not None:
+    same_valid = (jnp.abs(seg_c[..., :, None] - seg_c[..., None, :]) < 0.5) & valid_c[..., :, None]
+    mask_strict = mask_strict_base[None, None, None, :, :] * same_valid.astype(jnp.float32)
+  else:
+    mask_strict = mask_strict_base
+  diff = cumsum_h[..., :, None] - cumsum_h[..., None, :]
+  safe_diff = jnp.where(mask_strict > 0.5, diff, -1e4)
+  g_mat_strict = jnp.exp(safe_diff) * mask_strict
+
+  t_lower = kk_h * (beta_h[..., :, None] * g_mat_strict)
+  eye = jnp.eye(chunk_size, dtype=jnp.float32)
+  t_full = eye + t_lower
+  t_flat = t_full.reshape(num_chunks * batch * num_v_heads, chunk_size, chunk_size)
+  t_inv_flat = local_compute_gdn.invert_triangular_matrix(t_flat, precision=precision)
+  return t_inv_flat.reshape(num_chunks, batch, num_v_heads, chunk_size, chunk_size)
 
 
 def gather_cp_segment_metadata(
@@ -100,32 +138,70 @@ def incoming_state(
     h_init: jax.Array,
     cp_axis: str | tuple[str, ...],
     precision: jax.lax.Precision = DEFAULT_PRECISION,
+    *,
+    fast_state_passing: bool = False,
+    has_initial_state: bool = True,
+    need_final_state: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
   """Hillis-Steele prefix scan across `cp_axis` returning (h_in, final_h) in O(log2 D) steps."""
   d_size = lax.axis_size(cp_axis)
   idx = lax.axis_index(cp_axis)
 
+  if fast_state_passing and d_size == 4 and not has_initial_state and a_loc.shape == b_loc.shape:
+    p1 = lax.ppermute(jnp.where(idx == 2, a_loc, b_loc), cp_axis, [(0, 1), (1, 2), (2, 0)])
+    p2 = lax.ppermute(jnp.where(idx == 0, b_loc, a_loc), cp_axis, [(0, 3), (1, 0)])
+    lhs1 = jnp.where(idx == 0, p1, a_loc)
+    rhs1 = jnp.where(idx == 0, p2, p1)
+    m1_prod = jnp.matmul(lhs1, rhs1, precision=precision)
+    m1_b = m1_prod + b_loc
+    b_r2 = lax.ppermute(m1_b, cp_axis, [(1, 2), (2, 3)])
+    a_r2 = lax.ppermute(m1_prod, cp_axis, [(0, 3)])
+    h3_on_3 = jnp.matmul(a_r2, p2, precision=precision) + b_r2
+    h_in = jnp.where(
+        idx == 0,
+        h_init,
+        jnp.where(idx == 1, p1, jnp.where(idx == 2, b_r2, h3_on_3)),
+    )
+    if target_platform(a_loc) == "cpu":
+      h_in = lax.optimization_barrier(h_in)
+    if not need_final_state:
+      return h_in, jnp.zeros_like(b_loc)
+    last_b = jnp.matmul(a_loc, h3_on_3, precision=precision) + b_loc
+    final_h = lax.psum(jnp.where(idx == 3, last_b, jnp.zeros_like(b_loc)), cp_axis)
+    return h_in, final_h
+
   a_run, b_run = a_loc, b_loc
   step = 1
   while step < d_size:
     fwd = [(i, i + step) for i in range(d_size - step)]
-    a_recv = lax.ppermute(a_run, cp_axis, fwd)
     b_recv = lax.ppermute(b_run, cp_axis, fwd)
-    a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run), precision)
     live = idx >= step
-    a_run = jnp.where(live, a_cmp, a_run)
-    b_run = jnp.where(live, b_cmp, b_run)
+    if fast_state_passing and (step * 2 >= d_size) and not has_initial_state and not need_final_state:
+      b_cmp = jnp.matmul(a_run, b_recv, precision=precision) + b_run
+      b_run = jnp.where(live, b_cmp, b_run)
+    else:
+      a_recv = lax.ppermute(a_run, cp_axis, fwd)
+      a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run), precision)
+      a_run = jnp.where(live, a_cmp, a_run)
+      b_run = jnp.where(live, b_cmp, b_run)
     step *= 2
 
   shift1 = [(i, i + 1) for i in range(d_size - 1)]
-  a_ex = lax.ppermute(a_run, cp_axis, shift1)
   b_ex = lax.ppermute(b_run, cp_axis, shift1)
-  carried = jnp.matmul(a_ex, h_init, precision=precision) + b_ex
-  h_in = jnp.where(idx == 0, h_init, carried)
+  if fast_state_passing and not has_initial_state:
+    h_in = jnp.where(idx == 0, h_init, b_ex)
+  else:
+    a_ex = lax.ppermute(a_run, cp_axis, shift1)
+    carried = jnp.matmul(a_ex, h_init, precision=precision) + b_ex
+    h_in = jnp.where(idx == 0, h_init, carried)
 
+  if fast_state_passing and not need_final_state:
+    return h_in, jnp.zeros_like(b_loc)
   last = idx == (d_size - 1)
-  a_tot = lax.psum(jnp.where(last, a_run, jnp.zeros_like(a_run)), cp_axis)
   b_tot = lax.psum(jnp.where(last, b_run, jnp.zeros_like(b_run)), cp_axis)
+  if fast_state_passing and not has_initial_state:
+    return h_in, b_tot
+  a_tot = lax.psum(jnp.where(last, a_run, jnp.zeros_like(a_run)), cp_axis)
   final_h = jnp.matmul(a_tot, h_init, precision=precision) + b_tot
   return h_in, final_h
 
@@ -279,7 +355,7 @@ def compose_local_from_t_inv(
     a: jax.Array,
     a_log: jax.Array,
     dt_bias: jax.Array,
-    t_inv: jax.Array,
+    t_inv: Optional[jax.Array] = None,
     *,
     num_k_heads: int,
     num_v_heads: int,
@@ -324,6 +400,7 @@ def compose_local_from_t_inv(
   dt_bias_f32 = dt_bias.astype(jnp.float32)[None, None, :, None]
   log_g = -jnp.exp(a_log_f32) * jax.nn.softplus(a_h + dt_bias_f32)
 
+  seg_c = None
   valid_c = None
   if segment_ids is not None:
     s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch, seq_len), init_seg=init_seg)
@@ -364,7 +441,18 @@ def compose_local_from_t_inv(
 
   k_beta_g = k_h * beta_h[..., None] * gating_forward
   k_scaled_bwd = k_h * gating_backward
-  t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))  # [N_c, B, H_v, C, C]
+  if t_inv is None:
+    t_inv_c = _compute_t_inv_batched(
+        k_orig,
+        beta_h,
+        cumsum_h,
+        seg_c,
+        valid_c,
+        repeats=repeats,
+        precision=precision,
+    )
+  else:
+    t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))  # [N_c, B, H_v, C, C]
 
   # Pre-batched GEMMs across all chunks outside any sequential loop
   w_all = jnp.matmul(t_inv_c, k_beta_g, precision=precision)  # [N_c, B, H_v, C, d_k]
@@ -422,7 +510,7 @@ def compose_bwd_local_from_t_inv(
     a_log: jax.Array,
     dt_bias: jax.Array,
     do: jax.Array,
-    t_inv: jax.Array,
+    t_inv: Optional[jax.Array] = None,
     *,
     num_k_heads: int,
     num_v_heads: int,
@@ -434,8 +522,15 @@ def compose_bwd_local_from_t_inv(
     segment_ids: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     precision: jax.lax.Precision = DEFAULT_PRECISION,
+    head_major_glue: bool = False,
 ) -> Tuple[jax.Array, jax.Array]:
-  """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs."""
+  """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs.
+
+  `head_major_glue` (on with gdn_bwd_natural_layout) keeps the math identical but changes where XLA may place the
+  token-major -> head-major relayout of q / k / do: once per tensor, in bf16, on the un-repeated [N_c, B, H, C, d] view,
+  pinned with `lax.optimization_barrier`, instead of on the GQA-repeated f32 tensors inside the gating fusions, which
+  is where XLA's layout assignment puts it once the natural-layout backward kernel makes qkv_conv / do token-major.
+  """
   batch, seq_len, _ = qkv_conv.shape
   num_chunks = seq_len // chunk_size
   repeats = num_v_heads // num_k_heads
@@ -443,26 +538,47 @@ def compose_bwd_local_from_t_inv(
   k_size = num_k_heads * head_k_dim
   scale = 1.0 / jnp.sqrt(head_k_dim)
 
-  q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
-  k_orig = (
-      qkv_conv[:, :, q_size : q_size + k_size]
-      .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)
-      .astype(jnp.float32)
-  )
-  if use_qk_norm_in_gdn:
-    q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
-    k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
-  else:
-    q_orig = q_orig * scale
+  if head_major_glue:
 
-  q_rep = jnp.repeat(q_orig, repeats, axis=3)
-  k_rep = jnp.repeat(k_orig, repeats, axis=3)
-  q_h = jnp.transpose(q_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
-  k_h = jnp.transpose(k_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
-  do_h = jnp.transpose(
-      do.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads, head_v_dim),
-      (1, 0, 3, 2, 4),
-  )
+    def _head_major(x: jax.Array, heads: int, dim: int) -> jax.Array:
+      """[B, S, heads * dim] -> [N_c, B, heads, C, dim], relayout pinned on this (un-repeated) tensor."""
+      x = jnp.transpose(x.reshape(batch, num_chunks, chunk_size, heads, dim), (1, 0, 3, 2, 4))
+      # Merging the three major dims leaves no bitcast-compatible token-major layout for this value, and the barrier
+      # keeps the simplifier from cancelling the reshape pair or sinking the GQA broadcast through it.
+      x = lax.optimization_barrier(x.reshape(num_chunks * batch * heads, chunk_size, dim))
+      return x.reshape(num_chunks, batch, heads, chunk_size, dim)
+
+    q_orig = _head_major(qkv_conv[:, :, :q_size], num_k_heads, head_k_dim).astype(jnp.float32)
+    k_orig = _head_major(qkv_conv[:, :, q_size : q_size + k_size], num_k_heads, head_k_dim).astype(jnp.float32)
+    if use_qk_norm_in_gdn:
+      q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
+      k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    else:
+      q_orig = q_orig * scale
+    q_h = jnp.repeat(q_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
+    k_h = jnp.repeat(k_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
+    do_h = _head_major(do.reshape(batch, seq_len, num_v_heads * head_v_dim), num_v_heads, head_v_dim).astype(jnp.float32)
+  else:
+    q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
+    k_orig = (
+        qkv_conv[:, :, q_size : q_size + k_size]
+        .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)
+        .astype(jnp.float32)
+    )
+    if use_qk_norm_in_gdn:
+      q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
+      k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    else:
+      q_orig = q_orig * scale
+
+    q_rep = jnp.repeat(q_orig, repeats, axis=3)
+    k_rep = jnp.repeat(k_orig, repeats, axis=3)
+    q_h = jnp.transpose(q_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
+    k_h = jnp.transpose(k_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
+    do_h = jnp.transpose(
+        do.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads, head_v_dim),
+        (1, 0, 3, 2, 4),
+    )
 
   b_h = jnp.transpose(
       b.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads),
@@ -478,6 +594,8 @@ def compose_bwd_local_from_t_inv(
   dt_bias_f32 = dt_bias.astype(jnp.float32)[None, None, :, None]
   log_g = -jnp.exp(a_log_f32) * jax.nn.softplus(a_h + dt_bias_f32)
 
+  seg_c = None
+  valid_c = None
   mask_causal_base = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0)
   if segment_ids is not None:
     s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch, seq_len), init_seg=init_seg)
@@ -523,7 +641,18 @@ def compose_bwd_local_from_t_inv(
   q_g = q_h * gating_forward
   k_beta_g = k_h * beta_h[..., None] * gating_forward
   k_scaled_bwd = k_h * gating_backward
-  t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))
+  if t_inv is None:
+    t_inv_c = _compute_t_inv_batched(
+        k_orig,
+        beta_h,
+        cumsum_h,
+        seg_c,
+        valid_c,
+        repeats=repeats,
+        precision=precision,
+    )
+  else:
+    t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))
 
   diff = cumsum_h[..., :, None] - cumsum_h[..., None, :]
   safe_diff_causal = jnp.where(mask_causal > 0.5, diff, -1e4)
@@ -571,33 +700,71 @@ def incoming_grad_state(
     dht_final: jax.Array,
     cp_axis: str | tuple[str, ...],
     precision: jax.lax.Precision = DEFAULT_PRECISION,
+    *,
+    fast_state_passing: bool = False,
+    has_recurrent_state: bool = True,
+    need_dh0_total: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
   """Reverse Hillis-Steele prefix scan across `cp_axis` from rank D-1 down to 0."""
   d_size = lax.axis_size(cp_axis)
   idx = lax.axis_index(cp_axis)
 
+  if fast_state_passing and d_size == 4 and not has_recurrent_state and dm_loc.shape == ds_ext_loc.shape:
+    p1 = lax.ppermute(jnp.where(idx == 1, dm_loc, ds_ext_loc), cp_axis, [(3, 2), (2, 1), (1, 3)])
+    p2 = lax.ppermute(jnp.where(idx == 3, ds_ext_loc, dm_loc), cp_axis, [(3, 0), (2, 3)])
+    lhs1 = jnp.where(idx == 3, p1, dm_loc)
+    rhs1 = jnp.where(idx == 3, p2, p1)
+    m1_prod = jnp.matmul(lhs1, rhs1, precision=precision)
+    m1_b = m1_prod + ds_ext_loc
+    b_r2 = lax.ppermute(m1_b, cp_axis, [(2, 1), (1, 0)])
+    a_r2 = lax.ppermute(m1_prod, cp_axis, [(3, 0)])
+    dh0_on_0 = jnp.matmul(a_r2, p2, precision=precision) + b_r2
+    dht_local = jnp.where(
+        idx == 3,
+        dht_final,
+        jnp.where(idx == 2, p1, jnp.where(idx == 1, b_r2, dh0_on_0)),
+    )
+    if target_platform(dm_loc) == "cpu":
+      dht_local = lax.optimization_barrier(dht_local)
+    if not need_dh0_total:
+      return dht_local, jnp.zeros_like(ds_ext_loc)
+    first_b = jnp.matmul(dm_loc, dh0_on_0, precision=precision) + ds_ext_loc
+    dh0_total = lax.psum(jnp.where(idx == 0, first_b, jnp.zeros_like(ds_ext_loc)), cp_axis)
+    return dht_local, dh0_total
+
   a_run, b_run = dm_loc, ds_ext_loc
   step = 1
   while step < d_size:
     bwd = [(i + step, i) for i in range(d_size - step)]
-    a_recv = lax.ppermute(a_run, cp_axis, bwd)
     b_recv = lax.ppermute(b_run, cp_axis, bwd)
-    # Downstream rank (idx + step) acts first on dht_final;
-    # current rank idx acts second.
-    a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run), precision)
     live = idx < (d_size - step)
-    a_run = jnp.where(live, a_cmp, a_run)
-    b_run = jnp.where(live, b_cmp, b_run)
+    if fast_state_passing and (step * 2 >= d_size) and not has_recurrent_state and not need_dh0_total:
+      b_cmp = jnp.matmul(a_run, b_recv, precision=precision) + b_run
+      b_run = jnp.where(live, b_cmp, b_run)
+    else:
+      a_recv = lax.ppermute(a_run, cp_axis, bwd)
+      # Downstream rank (idx + step) acts first on dht_final;
+      # current rank idx acts second.
+      a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run), precision)
+      a_run = jnp.where(live, a_cmp, a_run)
+      b_run = jnp.where(live, b_cmp, b_run)
     step *= 2
 
   shift1_bwd = [(i + 1, i) for i in range(d_size - 1)]
-  a_ex = lax.ppermute(a_run, cp_axis, shift1_bwd)
   b_ex = lax.ppermute(b_run, cp_axis, shift1_bwd)
-  carried = jnp.matmul(a_ex, dht_final, precision=precision) + b_ex
-  dht_local = jnp.where(idx == (d_size - 1), dht_final, carried)
+  if fast_state_passing and not has_recurrent_state:
+    dht_local = jnp.where(idx == (d_size - 1), dht_final, b_ex)
+  else:
+    a_ex = lax.ppermute(a_run, cp_axis, shift1_bwd)
+    carried = jnp.matmul(a_ex, dht_final, precision=precision) + b_ex
+    dht_local = jnp.where(idx == (d_size - 1), dht_final, carried)
 
+  if fast_state_passing and not need_dh0_total:
+    return dht_local, jnp.zeros_like(ds_ext_loc)
   first = idx == 0
-  a_tot = lax.psum(jnp.where(first, a_run, jnp.zeros_like(a_run)), cp_axis)
   b_tot = lax.psum(jnp.where(first, b_run, jnp.zeros_like(b_run)), cp_axis)
+  if fast_state_passing and not has_recurrent_state:
+    return dht_local, b_tot
+  a_tot = lax.psum(jnp.where(first, a_run, jnp.zeros_like(a_run)), cp_axis)
   dh0_total = jnp.matmul(a_tot, dht_final, precision=precision) + b_tot
   return dht_local, dh0_total

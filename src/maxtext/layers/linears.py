@@ -32,10 +32,13 @@ from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Arra
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
-from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned, Initializer
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, Initializer
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding
+from maxtext.utils.sharding import get_logical_axis_rules
+from maxtext.utils.sharding import logical_to_mesh_axes
 from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
@@ -78,54 +81,34 @@ dequantize_weight = quantizations.dequantize_weight
 WeightQuantConfig = quantizations.WeightQuantConfig
 
 
-def _compute_dot_general(
-    inputs,
-    kernel,
-    kernel_axes,
-    axis,
-    contract_ind,
-    matmul_precision,
-    quant,
-    kernel_scale: Array | None = None,
-    compute_dtype: DType | None = None,
-):
-  """Computes a dot_general operation that may be quantized."""
-  dot_general = lax.dot_general
-  matmul_precision = lax.Precision(matmul_precision)
-  if quant:
-    dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
-    dot_general = dot_general_cls()
-    return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
-
-  if kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None)):
-    if compute_dtype is None:
-      compute_dtype = inputs.dtype
-    kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
-
-  return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
-
-
 def _compute_dot_general_nnx(
     inputs,
     kernel,
     axis,
     contract_ind,
     matmul_precision,
-    quant_dot_general: nnx_wrappers.ToNNX | None,
+    quant_dot_general: nnx.Module | None,
     initializing: bool,
     out_sharding: NamedSharding | None = None,
     kernel_scale: Array | None = None,
     compute_dtype: DType | None = None,
     native_fp8_compute: bool = False,
     scale_block_size: int | tuple[int, ...] | None = None,
+    act_calibration_method: str = "absmax",
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
   matmul_precision = lax.Precision(matmul_precision)
   if quant_dot_general is not None:
+    dimension_numbers = ((axis, contract_ind), ((), ()))
+    if not isinstance(quant_dot_general, nnx_wrappers.ToNNX):
+      return quant_dot_general(inputs, kernel, dimension_numbers, precision=None)
     if initializing:
-      quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
-    return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
+      quant_dot_general.lazy_init(inputs, kernel, dimension_numbers, precision=None)
+    return quant_dot_general(inputs, kernel, dimension_numbers, precision=None, mutable=["aqt"])
+
+  if compute_dtype is None:
+    compute_dtype = inputs.dtype
 
   if compute_dtype is None:
     compute_dtype = inputs.dtype
@@ -152,6 +135,7 @@ def _compute_dot_general_nnx(
         compute_dtype=compute_dtype,
         precision=matmul_precision,
         out_sharding=out_sharding,
+        act_calibration_method=act_calibration_method,
     )
 
   if kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None)):
@@ -160,6 +144,114 @@ def _compute_dot_general_nnx(
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
   )
+
+
+# Logical axis a custom rule set maps to every mesh axis the tokens are sharded over when it keeps the dense weights
+# off some of them (cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp); see `route_dense_weight_grad`.
+DENSE_GRAD_AXIS = "embed_grad"
+_DENSE_EMBED_AXES = ("embed", "embed_attn")
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _reshard_cotangent(x, via, to):
+  """Identity whose cotangent is constrained to the PartitionSpec `via` and then to `to`."""
+  del via, to
+  return x
+
+
+def _reshard_cotangent_fwd(x, via, to):
+  del via, to
+  return x, None
+
+
+def _reshard_cotangent_bwd(via, to, _, cotangent):
+  # Without the barrier, XLA:TPU folds the reduce-scatter into `via` and the all-gather into `to` back into one
+  # full-size all-reduce.
+  cotangent = jax.lax.optimization_barrier(jax.lax.with_sharding_constraint(cotangent, via))
+  return (jax.lax.with_sharding_constraint(cotangent, to),)
+
+
+_reshard_cotangent.defvjp(_reshard_cotangent_fwd, _reshard_cotangent_bwd)
+
+
+def route_dense_weight_grad(kernel: Array, kernel_axes: tuple[None | str, ...]) -> Array:
+  """Reduce-scatters a dense weight's gradient over every token axis before resharding it to the weight's sharding.
+
+  A weight's gradient is a partial sum over every mesh axis the tokens are sharded on. When the weight is sharded
+  over only some of them (cp-as-ep-dense-no-cp and cp-as-ep-dense-fsdp replicate the dense weights over context),
+  GSPMD reduces that partial sum with a full-size all-reduce over every device and keeps a slice of it. Under a rule
+  set that maps `embed_grad` to the token axes, the backward of every kernel with an `embed` or `embed_attn`
+  dimension instead constrains the gradient to the kernel's axes with that dimension on `embed_grad` (one
+  reduce-scatter over all of the token axes' devices, as under cp-as-ep), and then, across an optimization barrier,
+  to the kernel's own sharding (an all-gather of that shard over the axes the weight is replicated on). The forward
+  is unchanged, and under every rule set that does not map `embed_grad` the kernel is returned as is.
+
+  Args:
+    kernel: The kernel, as the dot product consumes it.
+    kernel_axes: Its logical axes.
+
+  Returns:
+    The kernel.
+  """
+  rules = get_logical_axis_rules()
+  if not rules or not any(rule[0] == DENSE_GRAD_AXIS for rule in rules):
+    return kernel
+  if not any(isinstance(axis, str) and axis in _DENSE_EMBED_AXES for axis in kernel_axes):
+    return kernel
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty:
+    raise ValueError(f"The logical axis rules map {DENSE_GRAD_AXIS!r}, which needs a mesh set with jax.set_mesh.")
+  via_axes = tuple(DENSE_GRAD_AXIS if isinstance(a, str) and a in _DENSE_EMBED_AXES else a for a in kernel_axes)
+  via = logical_to_mesh_axes(via_axes, mesh, rules=rules)
+  to = logical_to_mesh_axes(tuple(kernel_axes), mesh, rules=rules)
+  return _reshard_cotangent(kernel, via, to)
+
+
+def _gathered_kernel_dot_fwd(inputs, kernel, dimension_numbers, precision, gathered_sharding):
+  """Gathers `kernel` to `gathered_sharding`, contracts it with `inputs` and keeps the gathered kernel."""
+  gathered_kernel = jax.lax.with_sharding_constraint(kernel, gathered_sharding)
+  out = lax.dot_general(inputs, gathered_kernel, dimension_numbers, precision=precision)
+  return out, (inputs, gathered_kernel)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _dot_general_reusing_gathered_kernel(inputs, kernel, dimension_numbers, precision, gathered_sharding):
+  """`lax.dot_general(inputs, kernel)` whose input gradient reuses the forward's gathered kernel.
+
+  The forward gathers the kernel with one explicit sharding constraint and keeps the gathered value as the
+  residual; the backward computes the input gradient from that residual instead of letting the partitioner insert
+  a second all-gather of the same kernel. Under remat the residual is recomputed in the backward together with the
+  rest of the replayed forward, so the replay's gathered kernel is the one the input gradient uses: one all-gather
+  per backward instead of two. The kernel gradient is the stock dot_general transpose with no sharding constraint,
+  so it is reduce-scattered to the kernel's sharding exactly as before (transposing a sharding constraint would
+  instead constrain the kernel gradient to the gathered sharding, i.e. all-reduce it).
+
+  Args:
+    inputs: the left-hand side.
+    kernel: the right-hand side.
+    dimension_numbers: `lax.dot_general` dimension numbers without batch dimensions.
+    precision: `lax.dot_general` precision.
+    gathered_sharding: the sharding the kernel is gathered to: its own with the gathered mesh axes removed.
+
+  Returns:
+    The dot_general output.
+  """
+  return _gathered_kernel_dot_fwd(inputs, kernel, dimension_numbers, precision, gathered_sharding)[0]
+
+
+def _gathered_kernel_dot_bwd(dimension_numbers, precision, gathered_sharding, residuals, out_grad):
+  del gathered_sharding
+  inputs, gathered_kernel = residuals
+
+  def dot(lhs, rhs):
+    return lax.dot_general(lhs, rhs, dimension_numbers, precision=precision)
+
+  (inputs_grad,) = jax.linear_transpose(lambda lhs: dot(lhs, gathered_kernel), inputs)(out_grad)
+  (kernel_grad,) = jax.linear_transpose(lambda rhs: dot(inputs, rhs), gathered_kernel)(out_grad)
+  return inputs_grad, kernel_grad
+
+
+_dot_general_reusing_gathered_kernel.defvjp(_gathered_kernel_dot_fwd, _gathered_kernel_dot_bwd)
 
 
 class DenseGeneral(nnx.Module):
@@ -190,6 +282,7 @@ class DenseGeneral(nnx.Module):
       block_size: int | tuple[int, ...] | None = None,
       weight_quant: quantizations.WeightQuantConfig | None = None,
       *,  # Following arguments are keyword-only
+      gathered_kernel_axes: tuple[None | str, ...] | None = None,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the DenseGeneral module.
@@ -222,6 +315,13 @@ class DenseGeneral(nnx.Module):
       scale_dtype: dtype of kernel_scale (default: float32).
       block_size: block size for block-wise quantization scales.
       weight_quant: optional WeightQuantConfig decoupling weight quantization settings.
+      gathered_kernel_axes: if set, the logical axes of the kernel as the dot reads it
+        (the kernel's axes with the gathered ones replaced by None). The kernel is
+        gathered to them by one explicit sharding constraint and the backward
+        computes the input gradient from that gathered kernel instead of gathering
+        the kernel a second time; under remat the backward's replay gathers it
+        once (see `_dot_general_reusing_gathered_kernel`). The kernel gradient is
+        unchanged. Needs `mesh`; unquantized kernels in auto shard mode only.
       rngs: RNG state for initialization in nnx.
     """
     if weight_quant is not None:
@@ -249,6 +349,7 @@ class DenseGeneral(nnx.Module):
     self.scale_dtype = scale_dtype
     self.block_size = block_size
     self.weight_quant = weight_quant
+    self.gathered_kernel_axes = gathered_kernel_axes
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -336,22 +437,21 @@ class DenseGeneral(nnx.Module):
 
     if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
       # Native FP8 compute runs in _compute_dot_general_nnx; no Linen quantizer needed.
-      dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
-      dot_general_linen = dot_general_cls()
-      quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
-      self._quant_dot_general_name = f"{type(dot_general_linen).__name__}_0"
+      self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
       setattr(self, self._quant_dot_general_name, quant_dot_general)
-      block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
-      dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
-      self(dummy_inputs, _initializing=True)
-      # Backends that never draw at apply time leave dead RNG state in the model.
-      if not quant.needs_apply_rngs:
-        quant_dot_general.release_rngs()
+      if isinstance(quant_dot_general, nnx_wrappers.ToNNX):
+        # A bridged Linen quantizer creates its state on the first call.
+        block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
+        dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
+        self(dummy_inputs, _initializing=True)
+        # Backends that never draw at apply time leave dead RNG state in the model.
+        if not quant.needs_apply_rngs:
+          quant_dot_general.release_rngs()
     else:
       self._quant_dot_general_name = None
 
   @property
-  def quant_dot_general(self) -> nnx_wrappers.ToNNX | None:
+  def quant_dot_general(self) -> nnx.Module | None:
     if self._quant_dot_general_name is None:
       return None
     return getattr(self, self._quant_dot_general_name)
@@ -388,6 +488,27 @@ class DenseGeneral(nnx.Module):
     kernel = jax.lax.optimization_barrier(kernel)
     kernel = shard(kernel, stage2)
     return kernel
+
+  def _dot_general_gathering_kernel_once(self, inputs, kernel, kernel_scale, norm_axis, contract_ind, slice_bounds):
+    """The dot_general of `gathered_kernel_axes` (see `_dot_general_reusing_gathered_kernel`)."""
+    if (
+        self.quant is not None
+        or kernel_scale is not None
+        or is_fp8_dtype(getattr(kernel, "dtype", None))
+        or slice_bounds is not None
+        or self.use_two_stage_all_gather
+        or self.shard_mode == ShardMode.EXPLICIT
+        or self.mesh is None
+    ):
+      raise ValueError(
+          "gathered_kernel_axes supports only an unquantized, unsliced kernel in auto shard mode without the"
+          " two-stage all-gather, and needs the mesh."
+      )
+    gathered_sharding = create_sharding(self.mesh, self.gathered_kernel_axes)
+    dimension_numbers = ((norm_axis, contract_ind), ((), ()))
+    return _dot_general_reusing_gathered_kernel(
+        inputs, kernel, dimension_numbers, lax.Precision(self.matmul_precision), gathered_sharding
+    )
 
   def __call__(
       self,
@@ -464,26 +585,34 @@ class DenseGeneral(nnx.Module):
       kernel = kernel[..., begin:end]
 
     kernel = self._maybe_two_stage_all_gather(kernel)
+    kernel = route_dense_weight_grad(kernel, self.kernel_axes)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
-    output = _compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        self.quant_dot_general if slice_bounds is None else None,
-        _initializing,
-        out_sharding,
-        kernel_scale=kernel_scale,
-        compute_dtype=self.dtype,
-        native_fp8_compute=isinstance(self.quant, quantizations.ServeFp8WeightQuantization),
-        scale_block_size=self.block_size,
-    )
+    native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+    if self.gathered_kernel_axes is not None:
+      output = self._dot_general_gathering_kernel_once(
+          inputs, kernel, kernel_scale, norm_axis, contract_ind, slice_bounds
+      )
+    else:
+      output = _compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          self.quant_dot_general if slice_bounds is None else None,
+          _initializing,
+          out_sharding,
+          kernel_scale=kernel_scale,
+          compute_dtype=self.dtype,
+          native_fp8_compute=native_fp8_compute,
+          scale_block_size=self.block_size,
+          act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
+      )
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)
@@ -492,92 +621,6 @@ class DenseGeneral(nnx.Module):
         bias = bias[..., begin:end]
       output += bias
     return output
-
-
-def dense_general(
-    *,
-    inputs_shape: tuple[int, ...] | None = None,
-    in_features_shape: tuple[int, ...] | int | None = None,
-    out_features_shape: Iterable[int] | int,
-    axis: Iterable[int] | int = -1,
-    weight_dtype: DType = jnp.float32,
-    dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: tuple[None | str, ...] = (),
-    quant: None | Quant = None,
-    use_bias: bool = False,
-    shard_mode: ShardMode = ShardMode.AUTO,
-    matmul_precision: str = "default",
-    parameter_memory_host_offload: bool = False,
-    has_scale: bool | None = None,
-    kernel_scale_init: Initializer | None = None,
-    scale_shape: Shape | None = None,
-    scale_axes: tuple[None | str, ...] | None = None,
-    scale_dtype: DType = jnp.float32,
-    block_size: int | tuple[int, ...] | None = None,
-    weight_quant: quantizations.WeightQuantConfig | None = None,
-    name: None | str = None,
-):
-  """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
-
-  Args:
-    inputs_shape: tuple with the shape of the inputs
-    in_features_shape: tuple with numbers of input features for axes specified in
-      'axis'.
-    out_features_shape: tuple with numbers of output features.
-    axis: tuple with axes to apply the transformation on.
-    weight_dtype: the dtype of the weights (default: float32).
-    dtype: the dtype of the computation (default: float32).
-    kernel_init: initializer function for the weight matrix.
-    kernel_axes: logical axes for partitioning the kernel.
-    quant: quantization config, defaults to None implying no quantization.
-    use_bias: whether to add bias in linear transformation.
-    shard_mode: indicating the shard mode
-    matmul_precision: Precision for matrix multiplication.
-    parameter_memory_host_offload: Determines whether to offload params to host
-    has_scale: whether to initialize a separate scale parameter (kernel_scale).
-    kernel_scale_init: initializer function for kernel_scale.
-    scale_shape: explicit shape for kernel_scale.
-    scale_axes: logical axes for partitioning kernel_scale.
-    scale_dtype: dtype of kernel_scale (default: float32).
-    block_size: block size for block-wise quantization scales.
-    weight_quant: optional WeightQuantConfig decoupling weight quantization settings.
-    name: name passed to the ToLinen Module
-  """
-  if not (inputs_shape is not None) ^ (in_features_shape is not None):
-    raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
-
-  if inputs_shape is not None:
-    axis = canonicalize_tuple(axis)
-    in_features_shape = tuple(inputs_shape[ax] for ax in normalize_axes(axis, len(inputs_shape)))
-  else:
-    assert in_features_shape is not None
-  module = nnx_wrappers.to_linen(
-      DenseGeneral,
-      in_features_shape=in_features_shape,
-      out_features_shape=out_features_shape,
-      axis=axis,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      quant=quant,
-      use_bias=use_bias,
-      shard_mode=shard_mode,
-      matmul_precision=matmul_precision,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      has_scale=has_scale,
-      kernel_scale_init=kernel_scale_init,
-      scale_shape=scale_shape,
-      scale_axes=scale_axes,
-      scale_dtype=scale_dtype,
-      block_size=block_size,
-      weight_quant=weight_quant,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module
 
 
 class Dropout(nnx.Dropout):
@@ -826,46 +869,6 @@ class MlpBlock(nnx.Module):
     return output
 
 
-def mlp_block(
-    *,
-    config: Config,
-    mesh: Mesh,
-    in_features: int,
-    intermediate_dim: int = 2048,
-    activations: Sequence[str | Callable[..., Any]] = ("relu",),
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    intermediate_dropout_rate: float = 0.1,
-    dtype: Any = jnp.float32,
-    weight_dtype: Any = jnp.float32,
-    use_bias: bool = False,
-    use_pre_norm: bool = False,
-    quant: None | Quant = None,
-    model_mode: None | str = None,
-    name: None | str = None,
-):
-  """Creates a MlpBlock Linen module using nnx.bridge.to_linen."""
-  module = nnx_wrappers.to_linen(
-      MlpBlock,
-      config=config,
-      mesh=mesh,
-      in_features=in_features,
-      intermediate_dim=intermediate_dim,
-      activations=activations,
-      kernel_init=kernel_init,
-      intermediate_dropout_rate=intermediate_dropout_rate,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      use_bias=use_bias,
-      use_pre_norm=use_pre_norm,
-      quant=quant,
-      model_mode=model_mode,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module
-
-
 class DeepSeekV4GroupedLinear(nnx.Module):
   """Block-diagonal grouped linear used by the grouped output projection in DeepSeek-V4.
 
@@ -972,35 +975,3 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     output = jnp.einsum("...gi,gio->...go", inputs, kernel, precision=lax.Precision(self.matmul_precision))
 
     return output
-
-
-def deepseek_v4_grouped_linear(
-    *,
-    in_features_per_group: int,
-    out_features: int,
-    n_groups: int,
-    weight_dtype: DType = jnp.float32,
-    dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: tuple[None | str, ...] = ("groups", "embed", "mlp"),
-    matmul_precision: str = "default",
-    parameter_memory_host_offload: bool = False,
-    name: None | str = None,
-):
-  """Creates a DeepSeekV4GroupedLinear Linen module using nnx.bridge.to_linen."""
-  module = nnx_wrappers.to_linen(
-      DeepSeekV4GroupedLinear,
-      in_features_per_group=in_features_per_group,
-      out_features=out_features,
-      n_groups=n_groups,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      matmul_precision=matmul_precision,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module

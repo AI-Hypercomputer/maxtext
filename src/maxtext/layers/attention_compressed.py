@@ -38,11 +38,10 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 
-from maxtext.layers import nnx_wrappers
 from maxtext.layers.attention_mla import indexer_losses
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
-from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -1463,11 +1462,18 @@ class CompressedAttention(Attention):
     # Override the base rotary embedding with the correct theta for this layer.
     # CSA / HCA layers use compressed_rope_max_timescale (160000).
     # Sliding window prefix layers use rope_max_timescale (10000).
-    rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
+    is_compressed = self.compress_ratio > 0
+    rope_theta = self.config.compressed_rope_max_timescale if is_compressed else self.config.rope_max_timescale
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.config.head_dim,
         partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
         rope_theta=rope_theta,
+        rope_type=self.config.rope_type if is_compressed else "default",
+        rope_factor=self.config.rope_factor,
+        beta_fast=self.config.beta_fast,
+        beta_slow=self.config.beta_slow,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        truncate=self.config.rope_truncate,
         fprop_dtype=self.dtype,
     )
 
@@ -1816,12 +1822,18 @@ class CompressedAttention(Attention):
     # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
     # sets inner block size as min(block_kv, key_len) during kernel invocation.
     if self.attention_kernel == "flash":
+      if max_utils.is_eval(self.config):
+        block_q = self.config.eval_sa_block_q
+        block_kv = self.config.eval_sa_block_kv
+      else:
+        block_q = self.config.sa_block_q
+        block_kv = self.config.sa_block_kv
       comp_len = compressed_kv.shape[1] if compressed_kv is not None else 0
       _, pad_kv_total = compute_hca_padding(
           q_len=inputs_q.shape[1],
           comp_len=comp_len,
-          block_q=self.config.sa_block_q,
-          block_kv=self.config.sa_block_kv,
+          block_q=block_q,
+          block_kv=block_kv,
           kv_len=kv.shape[1],
       )
 
@@ -2093,70 +2105,3 @@ class CompressedAttention(Attention):
     indexer_loss = (jnp.sum(kl_per_token) / num_valid_tokens) * scaling_factor
 
     return indexer_loss
-
-
-def compressed_attention(
-    *,
-    config: Config,
-    num_query_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    max_target_length: int,
-    mesh: Mesh,
-    attention_kernel: str,
-    inputs_q_shape: Tuple,
-    inputs_kv_shape: Tuple,
-    dtype: DType = jnp.float32,
-    weight_dtype: DType = jnp.float32,
-    max_prefill_predict_length: int = -1,
-    dropout_rate: float = 0.0,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
-    float32_qk_product: bool = False,
-    float32_logits: bool = False,
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.COMPRESSED,
-    attn_logits_soft_cap: float | None = None,
-    sliding_window_size: int | None = None,
-    use_ragged_attention: bool = False,
-    ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
-    query_pre_attn_scalar: float | None = None,
-    use_bias_in_projections: bool = False,
-    q_lora_rank: int = 1536,
-    name: str | None = None,
-):
-  """Wrapper to create the CompressedAttention linen module."""
-  return nnx_wrappers.to_linen(
-      CompressedAttention,
-      config=config,
-      num_query_heads=num_query_heads,
-      num_kv_heads=num_kv_heads,
-      head_dim=head_dim,
-      max_target_length=max_target_length,
-      mesh=mesh,
-      attention_kernel=attention_kernel,
-      inputs_q_shape=inputs_q_shape,
-      inputs_kv_shape=inputs_kv_shape,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      max_prefill_predict_length=max_prefill_predict_length,
-      dropout_rate=dropout_rate,
-      kernel_init=kernel_init,
-      float32_qk_product=float32_qk_product,
-      float32_logits=float32_logits,
-      quant=quant,
-      kv_quant=kv_quant,
-      attention_type=attention_type,
-      attn_logits_soft_cap=attn_logits_soft_cap,
-      sliding_window_size=sliding_window_size,
-      use_ragged_attention=use_ragged_attention,
-      ragged_block_size=ragged_block_size,
-      use_qk_norm=use_qk_norm,
-      query_pre_attn_scalar=query_pre_attn_scalar,
-      use_bias_in_projections=use_bias_in_projections,
-      q_lora_rank=q_lora_rank,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )

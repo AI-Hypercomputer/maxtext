@@ -283,6 +283,36 @@ class InBufferedRef(BaseBufferedRef):
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
+class ChunkInBufferedRef(BaseBufferedRef):
+  """Input DMA reference that copies whole chunks of a [num_chunks, chunk, dim] array."""
+
+  def copy_in(self, src_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Initiates asynchronous copy of each tile's chunk into current input VMEM slot."""
+    assert self.sem_recvs is not None
+    assert self.window_ref is not None
+    slot = self.current_copy_in_slot
+    sem = self.sem_recvs.at[slot]
+    vmem_ref = self.window_ref.at[slot]
+    p_id = grid_indices[0]
+
+    for idx in range(self.cfg.seq_tile_size):
+      chunk_idx = self.metadata_ref.get_record(p_id, idx).r_base // self.cfg.chunk_size
+      pltpu.make_async_copy(src_ref.at[chunk_idx], vmem_ref.at[idx], sem).start()
+
+  def wait_in(self, src_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Waits for asynchronous chunk copy to complete."""
+    assert self.sem_recvs is not None
+    assert self.window_ref is not None
+    slot = self.current_wait_in_slot
+    sem = self.sem_recvs.at[slot]
+    vmem_ref = self.window_ref.at[slot]
+
+    for idx in range(self.cfg.seq_tile_size):
+      pltpu.make_async_copy(vmem_ref.at[idx], vmem_ref.at[idx], sem).wait()
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class OutBufferedRef(BaseBufferedRef):
   """Output double-buffered DMA reference for Pallas pipeline."""
 
@@ -366,6 +396,7 @@ class ChunkStatesBufferedRef(BaseBufferedRef):
   """DMA buffer for caching intermediate recurrent chunk states."""
 
   def copy_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Initiates asynchronous chunk-state copy from current output VMEM slot."""
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_copy_out_slot
@@ -379,8 +410,18 @@ class ChunkStatesBufferedRef(BaseBufferedRef):
           dst_ref.at[p_id * self.cfg.seq_tile_size + idx],
           sem,
       ).start()
+    if self.buffer_count == 1:
+      for idx in range(self.cfg.seq_tile_size):
+        pltpu.make_async_copy(
+            vmem_ref.at[idx],
+            vmem_ref.at[idx],
+            sem,
+        ).wait()
 
   def wait_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
+    """Waits for asynchronous chunk-state output copy to complete."""
+    if self.buffer_count == 1:
+      return
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_wait_out_slot
@@ -457,21 +498,31 @@ class StateBufferedRef(BaseBufferedRef):
     vmem_ref = self.window_ref.at[slot]
     p_id = grid_indices[0]
 
+    total_dma_size = 0
     for idx in range(self.cfg.seq_tile_size):
       record = self.metadata_ref.get_record(p_id, idx)
       is_last_tile = record.is_last_tile
       s_idx = record.s_idx
       state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
       dma_size = jnp.where(is_last_tile, 1, 0)
+      total_dma_size += dma_size
 
       pltpu.make_async_copy(
           vmem_ref.at[pl.ds(idx, dma_size)],  # pyrefly: ignore[missing-attribute]
           dst_ref.at[pl.ds(state_idx, dma_size)],
           sem,
       ).start()
+    if self.buffer_count == 1:
+      pltpu.make_async_copy(
+          vmem_ref.at[pl.ds(0, total_dma_size)],  # pyrefly: ignore[missing-attribute]
+          vmem_ref.at[pl.ds(0, total_dma_size)],  # pyrefly: ignore[missing-attribute]
+          sem,
+      ).wait()
 
   def wait_out(self, dst_ref: jax.Array, grid_indices: tuple[int | jax.Array]):
     """Waits for asynchronous state output copy to complete."""
+    if self.buffer_count == 1:
+      return
     assert self.sem_sends is not None
     assert self.window_ref is not None
     slot = self.current_wait_out_slot
@@ -496,15 +547,18 @@ def create_allocs(
     qkv_ref: jax.Array,
     b_ref: jax.Array,
     a_ref: jax.Array,
-    out_ref: jax.Array,
+    out_ref: jax.Array | None,
     conv_state_ref: jax.Array,
     recurrent_state_ref: jax.Array,
     cfg: config.GDNConfig,
     t_inv_ref: jax.Array | None = None,
     chunk_states_ref: jax.Array | None = None,
 ) -> tuple[Any, ...]:
-  """Creates all Pallas double-buffered allocations for GDN kernel."""
-  qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
+  """Creates all Pallas double-buffered allocations for GDN kernel (no output buffers without out_ref)."""
+  if cfg.is_prefill_only:
+    qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, cfg.dim_size)
+  else:
+    qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
   ba_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.aligned_num_v_heads)
 
   out_shape = (
@@ -530,7 +584,18 @@ def create_allocs(
       pipeline_mode=pipeline_mode,
   )
 
-  qkv_spec = block_spec_partial(block_shape=qkv_shape)
+  large_fp32_buffer_count = (
+      1
+      if (cfg.chunk_size > 64 and cfg.num_v_heads >= 64 and jnp.dtype(cfg.dtypes.act_in) == jnp.float32)
+      else pipeline_mode.buffer_count
+  )
+  large_fp32_spec_partial = functools.partial(
+      pl.BlockSpec,
+      memory_space=pltpu.VMEM,
+      index_map=lambda i: (i,),
+      pipeline_mode=pl.Buffered(buffer_count=large_fp32_buffer_count, use_lookahead=False),
+  )
+  qkv_spec = large_fp32_spec_partial(block_shape=qkv_shape)
   ba_spec = block_spec_partial(block_shape=ba_shape)
   in_buffered_partial = functools.partial(
       InBufferedRef.input,
@@ -539,21 +604,29 @@ def create_allocs(
       cfg=cfg,
       metadata_ref=metadata_ref,
   )
-  qkv_alloc = in_buffered_partial(spec=qkv_spec, dtype_or_type=qkv_ref)
+  if cfg.is_prefill_only:
+    qkv_alloc = ChunkInBufferedRef.input(
+        spec=qkv_spec,
+        dtype_or_type=qkv_ref,
+        buffer_count=large_fp32_buffer_count,
+        use_lookahead=pipeline_mode.use_lookahead,
+        cfg=cfg,
+        metadata_ref=metadata_ref,
+    )
+  else:
+    qkv_alloc = InBufferedRef.input(
+        spec=qkv_spec,
+        dtype_or_type=qkv_ref,
+        buffer_count=large_fp32_buffer_count,
+        use_lookahead=pipeline_mode.use_lookahead,
+        cfg=cfg,
+        metadata_ref=metadata_ref,
+    )
   b_alloc = in_buffered_partial(spec=ba_spec, dtype_or_type=b_ref)
   a_alloc = in_buffered_partial(spec=ba_spec, dtype_or_type=a_ref)
 
-  out_alloc = OutBufferedRef.output(
-      spec=block_spec_partial(block_shape=out_shape),
-      dtype_or_type=out_ref,
-      buffer_count=pipeline_mode.buffer_count,
-      use_lookahead=pipeline_mode.use_lookahead,
-      cfg=cfg,
-      metadata_ref=metadata_ref,
-  )
-
   conv_spec = block_spec_partial(block_shape=conv_shape)
-  recurrent_spec = block_spec_partial(block_shape=recurrent_shape)
+  recurrent_spec = large_fp32_spec_partial(block_shape=recurrent_shape)
   state_buffered_partial = functools.partial(
       StateBufferedRef.input_output,
       buffer_count=pipeline_mode.buffer_count,
@@ -562,7 +635,14 @@ def create_allocs(
       metadata_ref=metadata_ref,
   )
   conv_alloc = state_buffered_partial(spec=conv_spec, dtype_or_type=conv_state_ref)
-  recurrent_alloc = state_buffered_partial(spec=recurrent_spec, dtype_or_type=recurrent_state_ref)
+  recurrent_alloc = StateBufferedRef.input_output(
+      spec=recurrent_spec,
+      dtype_or_type=recurrent_state_ref,
+      buffer_count=large_fp32_buffer_count,
+      use_lookahead=pipeline_mode.use_lookahead,
+      cfg=cfg,
+      metadata_ref=metadata_ref,
+  )
 
   allocs = [
       qkv_alloc,
@@ -570,8 +650,18 @@ def create_allocs(
       a_alloc,
       conv_alloc,
       recurrent_alloc,
-      out_alloc,
   ]
+
+  if out_ref is not None:
+    out_alloc = OutBufferedRef.output(
+        spec=block_spec_partial(block_shape=out_shape),
+        dtype_or_type=out_ref,
+        buffer_count=pipeline_mode.buffer_count,
+        use_lookahead=pipeline_mode.use_lookahead,
+        cfg=cfg,
+        metadata_ref=metadata_ref,
+    )
+    allocs.append(out_alloc)
 
   if t_inv_ref is not None:
     t_inv_shape = (
@@ -598,9 +688,9 @@ def create_allocs(
         cfg.v_head_dim,
     )
     chunk_states_alloc = ChunkStatesBufferedRef.output(
-        spec=block_spec_partial(block_shape=chunk_states_shape),
+        spec=large_fp32_spec_partial(block_shape=chunk_states_shape),
         dtype_or_type=chunk_states_ref,
-        buffer_count=pipeline_mode.buffer_count,
+        buffer_count=large_fp32_buffer_count,
         use_lookahead=pipeline_mode.use_lookahead,
         cfg=cfg,
         metadata_ref=metadata_ref,

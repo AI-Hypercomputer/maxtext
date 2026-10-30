@@ -20,7 +20,6 @@ limitations under the License.
 
 from typing import Optional
 
-from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax
@@ -31,12 +30,12 @@ from maxtext.layers import attentions
 from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import moe
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import with_logical_constraint
 
 # -----------------------------------------
 # The Decoder Layer for GPT OSS models
@@ -157,11 +156,11 @@ class GptOssDecoderLayer(nnx.Module):
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    lnx = with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     attention_lnx, kv_cache = self.GptOssAttention(
         lnx,
@@ -174,25 +173,25 @@ class GptOssDecoderLayer(nnx.Module):
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = nn.with_logical_constraint(
+    attention_lnx = with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(
+    hidden_states = with_logical_constraint(
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
     load_balance_loss = None
     mlp_lnx, load_balance_loss, _ = self.GptOssMlp(hidden_states)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
 
-    layer_output = nn.with_logical_constraint(
+    layer_output = with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
@@ -224,18 +223,12 @@ class GptOssDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-GptOssDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    GptOssDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
 class GptOssScannableBlock(nnx.Module):
   """A repeatable block of GPT OSS decoder layers.
 
     This block applies multiple decoder layers sequentially, using the attention
     pattern defined by GPT_OSS_ATTENTION_PATTERN. It's designed to be
-    used with `nn.scan` for efficient compilation.
+    used with `jax.lax.scan` for efficient compilation.
 
   Attributes:
     config: Config, MaxText model config
@@ -283,7 +276,7 @@ class GptOssScannableBlock(nnx.Module):
   ):
     cfg = self.config
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
@@ -301,9 +294,3 @@ class GptOssScannableBlock(nnx.Module):
           attention_metadata=attention_metadata,
       )
     return y, kv_cache
-
-
-GptOssScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    GptOssScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

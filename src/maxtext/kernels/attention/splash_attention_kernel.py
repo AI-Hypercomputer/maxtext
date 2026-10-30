@@ -156,7 +156,7 @@ def _attention_reference(
     attn_logits_soft_cap: float | None,
 ):
   """Reference attention implementation."""
-  return _attention_reference_default(  # pytype: disable=bad-return-type
+  return _attention_reference_default(
       mask,
       q,
       k,
@@ -218,7 +218,7 @@ def attention_reference(
     attn_logits_soft_cap: float | None = None,
 ) -> SplashCustomReturnType:
   """Reference attention implementation."""
-  return _attention_reference(  # pytype: disable=wrong-arg-types
+  return _attention_reference(
       mask,
       q,
       k,
@@ -285,7 +285,7 @@ def _attention_reference_custom_bwd(
   logits = jnp.where(mask, logits, mask_value)
 
   p = jnp.exp(logits - logsumexp[..., None])
-  do = do.astype(jnp.float32)  # pytype: disable=attribute-error
+  do = do.astype(jnp.float32)
   dv = jnp.einsum("pt,pd->td", p, do).astype(v.dtype)
   dp = jnp.einsum("pd,td->pt", do, v.astype(jnp.float32))
 
@@ -425,13 +425,13 @@ def make_attention_reference(
     if is_grouped:
 
       def reshape_activations(activations):
-        if activations.ndim == 4:  # pytype: disable=attribute-error
-          kv_heads, q_heads_per_kv_head, q_seq_len, head_dim = activations.shape  # pytype: disable=attribute-error
+        if activations.ndim == 4:
+          kv_heads, q_heads_per_kv_head, q_seq_len, head_dim = activations.shape
           return activations.reshape(
               kv_heads * q_heads_per_kv_head,
               q_seq_len,
               head_dim,
-          )  # pytype: disable=attribute-error
+          )
         return activations
 
       def reshape_residuals(residuals):
@@ -626,7 +626,7 @@ def _apply_mask_and_soft_cap(
       assert rem == 0
       q_sequence = jnp.tile(
           q_sequence_ref[...], (1, repeats)  # pyrefly: ignore[unsupported-operation]
-      )  # [bq, k_slice.size]  # pyrefly: ignore[unsupported-operation]
+      )  # [bq, k_slice.size]
     else:
       assert q_sequence_ref.shape == (NUM_SUBLANES, bq)  # pyrefly: ignore[missing-attribute]
 
@@ -635,7 +635,7 @@ def _apply_mask_and_soft_cap(
       q_sequence = jnp.broadcast_to(q_sequence, (k_slice.size, bq))
 
     assert q_sequence.shape == k_sequence.shape
-    computed_mask = mask_function(q_sequence, k_sequence)  # pytype: disable=wrong-arg-count
+    computed_mask = mask_function(q_sequence, k_sequence)
     if computed_mask.dtype != jnp.dtype(jnp.bool_):
       raise ValueError("Mask function must return a boolean-valued array, but got:" f" {computed_mask.dtype}")
     masks.append(computed_mask)
@@ -766,7 +766,7 @@ def flash_attention_kernel(
 
     qk = apply_mask_and_soft_cap()
 
-    m_curr = qk.max(axis=-1)[:, None]  # pytype: disable=attribute-error
+    m_curr = qk.max(axis=-1)[:, None]  # pyrefly: ignore[missing-attribute]
     assert m_curr.shape == (bq, 1)
     m_next = jnp.maximum(m_prev, m_curr)
     assert m_next.shape == (bq, NUM_LANES)
@@ -1137,7 +1137,7 @@ def _splash_attention_custom(
   # device.
   del dq_mask_info, dkv_mask_info
 
-  return _splash_attention_forward(  # pytype: disable=wrong-arg-types
+  return _splash_attention_forward(  # pyrefly: ignore[no-matching-overload]
       fwd_mask_info,
       q,
       k,
@@ -1178,7 +1178,7 @@ def _splash_attention_fwd(
   if save_residuals:
     raise NotImplementedError("Higher-order AD not supported")
 
-  out, (logsumexp,) = _splash_attention_forward(  # pytype: disable=wrong-arg-types
+  out, (logsumexp,) = _splash_attention_forward(  # pyrefly: ignore[no-matching-overload]
       fwd_mask_info,
       q,
       k,
@@ -1269,7 +1269,7 @@ def _flash_attention_dq_kernel(
         q_segment_ids_ref,
         kv_segment_ids_ref,
         attn_logits_soft_cap=attn_logits_soft_cap,  # pyrefly: ignore[bad-argument-type]
-        k_slice=pl.ds(0, bkv),  # pyrefly: ignore[bad-argument-type]
+        k_slice=pl.ds(0, bkv),
         # When the iteration space is shrunk (for local attention for example),
         # the kv_index program_id does not correspond to the actual coordinates
         # of the KV data. Make sure to use the 'unshrunk' index (coming from the
@@ -1636,7 +1636,7 @@ def _flash_attention_dkv_kernel(
         q_segment_ids_ref,
         kv_segment_ids_ref,
         attn_logits_soft_cap=attn_logits_soft_cap,  # pyrefly: ignore[bad-argument-type]
-        k_slice=slice_k,  # pyrefly: ignore[bad-argument-type]
+        k_slice=slice_k,
         k_offset=kv_index * bkv + i * bkv_compute,
         bq=bq,
         k_in_lanes=False,
@@ -1698,7 +1698,7 @@ def _flash_attention_dkv_kernel(
   elif num_kv_heads < num_q_heads:
     should_write = jnp.logical_and(
         should_write, q_head_index_per_kv_head == q_heads_per_kv_heads - 1  # pyrefly: ignore[unsupported-operation]
-    )  # pyrefly: ignore[unsupported-operation]
+    )
 
   @pl.when(should_write)
   def end():
@@ -2112,7 +2112,7 @@ def _splash_attention_bwd(
   ) = res
 
   # di: [num_heads, q_seq_len]
-  di = jnp.einsum("hsd,hsd->hs", o.astype(jnp.float32), do.astype(jnp.float32))  # pytype: disable=attribute-error
+  di = jnp.einsum("hsd,hsd->hs", o.astype(jnp.float32), do.astype(jnp.float32))
   dq, dk, dv = _splash_attention_bwd_dkv(
       q,
       k,
@@ -2296,7 +2296,7 @@ def _splash_attention_manual_fwd(
   dkv_mask_info = _collapse_partial_mask_blocks(dkv_mask_info)
   del dq_mask_info, dkv_mask_info
 
-  out, (logsumexp,) = _splash_attention_forward(  # pytype: disable=wrong-arg-types
+  out, (logsumexp,) = _splash_attention_forward(  # pyrefly: ignore[no-matching-overload]
       fwd_mask_info,
       q,
       k,
@@ -2425,7 +2425,7 @@ class SplashAttentionKernel:
     partial_mask_blocks_spec = spec if self.fwd_mask_info.is_dynamic_mask else replicated
     # Shard q_sequence over the sequence dimension only.
     q_sequence_spec = jax.sharding.PartitionSpec(spec[1])
-    mask_info_specs = mask_info_lib.MaskInfo(  # pytype: disable=wrong-arg-types
+    mask_info_specs = mask_info_lib.MaskInfo(
         data_next=spec if self.fwd_mask_info.data_next is not None else None,  # pyrefly: ignore[bad-argument-type]
         mask_next=spec if self.fwd_mask_info.mask_next is not None else None,  # pyrefly: ignore[bad-argument-type]
         block_mask=spec if self.fwd_mask_info.block_mask is not None else None,  # pyrefly: ignore[bad-argument-type]

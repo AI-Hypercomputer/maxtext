@@ -36,6 +36,12 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter
+except ImportError:
+  lineage_adapter = None
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -99,10 +105,7 @@ def get_functional_train_with_signature(
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  if getattr(config, "retry_when_tokens_dropped", False) is True:
-    donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
-  else:
-    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -250,6 +253,12 @@ def _expand_gdn_remat_names(names: list[str]) -> list[str]:
   return list(dict.fromkeys(expanded))
 
 
+# Checkpoint name of an attention layer's load-balance-ordered positions and segment ids
+# (Attention._to_load_balanced_order); remat_policy=custom saves it under
+# context_parallel_attention_load_balance_hoist_ids.
+ATTENTION_LB_IDS = "attention_lb_ids"
+
+
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   """Returns the ``(save_names, offload_names)`` split for remat policies built via
   ``jax.checkpoint_policies.save_and_offload_only_these_names``.
@@ -263,7 +272,8 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   Returns a ``(save_names, offload_names)`` tuple:
     * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
       assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
-      list, all set to ``remat`` gives ``([], [])``.
+      list, all set to ``remat`` gives ``([], [])``. With
+      ``context_parallel_attention_load_balance_hoist_ids``, ``ATTENTION_LB_IDS`` is saved too.
     * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
       that only offload and save nothing on device.
     * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
@@ -292,6 +302,9 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
     if getattr(config, "use_gdn_kernel", False):
       save_names = _expand_gdn_remat_names(save_names)
       offload_names = _expand_gdn_remat_names(offload_names)
+    if getattr(config, "context_parallel_attention_load_balance_hoist_ids", False):
+      # On device: the saved value depends only on the batch, so jax.lax.scan keeps one copy, outside the layer loop.
+      save_names.append(ATTENTION_LB_IDS)
     overlap = set(save_names) & set(offload_names)
     if overlap:
       raise ValueError(
@@ -805,7 +818,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1372,6 +1385,7 @@ def calculate_tflops_training_per_device(config, log=True):
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       if config.decoder_block in (
           DecoderBlockType.DEEPSEEK,
+          DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
@@ -1517,7 +1531,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> list:
+def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str, ravel: bool = True) -> list:
   """Collects intermediate leaf values whose dict-key path ends with suffix_keys.
 
   Works regardless of model architecture (scanned, scannable blocks, or standard),
@@ -1527,9 +1541,11 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
     intermediate_outputs: The intermediates dict returned by model.apply().
     *suffix_keys: One or more key names forming the expected path suffix,
       e.g. ``("moe_lb_loss",)`` or ``("self_attention", "indexer_loss")``.
+    ravel: Flatten each leaf to 1-D. Pass False for leaves that are sharded
+      across the mesh, where flattening would force a reshard collective.
 
   Returns:
-    A list of 1-D JAX arrays, one per matching leaf (already ravelled).
+    A list of JAX arrays, one per matching leaf (1-D unless ``ravel=False``).
   """
   suffix = tuple(suffix_keys)
   n = len(suffix)
@@ -1537,7 +1553,7 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
     path_keys = tuple(k.key for k in path if hasattr(k, "key"))
     if len(path_keys) >= n and path_keys[-n:] == suffix:
-      values.append(jnp.ravel(val))
+      values.append(jnp.ravel(val) if ravel else val)
   return values
 
 
@@ -1751,10 +1767,11 @@ def setup_initial_state(
 
   # Initialization
   with axis_rules(config.logical_axis_rules):
+    native = lineage_adapter is not None and lineage_adapter.is_native(config)
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
-        config.load_parameters_path,
+        "" if native else config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
@@ -1768,6 +1785,18 @@ def setup_initial_state(
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
     )
+    if native and restored is None and raw_params is None and config.load_parameters_path:
+      # The Lineage-native model restores MaxText-layout params against its own abstract target.
+      assert lineage_adapter is not None
+      raw_params = checkpointing.load_params_from_path(
+          config.load_parameters_path,
+          lineage_adapter.maxtext_restore_target(config, mesh),
+          config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_single_replica_ckpt_restoring=bool(config.enable_single_replica_ckpt_restoring),
+          colocated_python_checkpointing=bool(config.enable_single_controller and config.colocated_python_checkpointing),
+      )
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)
 
@@ -1782,7 +1811,11 @@ def setup_initial_state(
         in_shardings=None,
         out_shardings=state_mesh_shardings,
     )()
-    if raw_params:
+    if raw_params and native:
+      # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
+      assert lineage_adapter is not None
+      lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+    elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (
           state["model"]
@@ -2088,7 +2121,17 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if num_slices > 1:
+  if getattr(config, "use_lineage", False) and lineage_adapter is not None:
+    dcn_parallelism = (
+        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+    )
+    mesh = lineage_adapter.create_device_mesh(
+        ici_parallelism,
+        devices,
+        dcn_parallelism=dcn_parallelism,
+        allow_split_physical_axes=allow_split_physical_axes,
+    )
+  elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
 

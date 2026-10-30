@@ -134,6 +134,28 @@ def load_compact_to_large(vmem_ref: jax.Ref) -> jax.Array:
   return jnp.concat(vreg_list, axis=-1).reshape(new_shape)
 
 
+def upcast_large_to_compact(large_ref: jax.Ref, compact_ref: jax.Ref) -> None:
+  """Upcast activations from large layout into a compact fp32 reference.
+
+  The inverse of load_as_qkv_large: one strided store per 128-lane column puts
+  each token's lanes into its own row of the compact reference.
+
+  Args:
+    large_ref: Activations in VMEM of shape [seq_tile_size, chunk_size,
+      dim_size].
+    compact_ref: fp32 reference in VMEM of shape [seq_tile_size, chunk_size, 1,
+      dim_size].
+  """
+
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  lanes_per_col = compact_ref.shape[-1] // num_lanes
+  for idx in range(compact_ref.shape[0]):
+    compact_flat_ref = compact_ref.at[idx].reshape(-1, num_lanes)  # pyrefly: ignore[missing-attribute]
+    for lane in range(lanes_per_col):
+      col = large_ref[idx, :, lane * num_lanes : (lane + 1) * num_lanes]
+      compact_flat_ref[lane::lanes_per_col] = col.astype(compact_ref.dtype)
+
+
 def load_and_select_states(
     metadata_ref: memory_ref.MetadataRef,
     p_id: jax.Array,
@@ -253,3 +275,52 @@ def load_activation_as_large(
   a_large = jnp.expand_dims(a_large, axis=1)
 
   return q_large, k_large, v_large, b_large, a_large
+
+
+def load_compact_rows_as_large(compact_ref: jax.Ref) -> jax.Array:
+  """[1, rows, 1, dim] compact reference -> [rows, dim] value with the rows on sublanes (one strided load per column)."""
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  lanes_per_col = compact_ref.shape[-1] // num_lanes
+  flat_ref = compact_ref.at[0].reshape(-1, num_lanes)  # pyrefly: ignore[missing-attribute]
+  return jnp.concat([flat_ref[lane::lanes_per_col] for lane in range(lanes_per_col)], axis=-1)
+
+
+def store_large_rows_to_compact(rows: jax.Array, compact_ref: jax.Ref) -> None:
+  """[rows, dim] value -> [1, rows, 1, dim] compact reference (one strided store per column; inverse of the load)."""
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  lanes_per_col = compact_ref.shape[-1] // num_lanes
+  flat_ref = compact_ref.at[0].reshape(-1, num_lanes)  # pyrefly: ignore[missing-attribute]
+  for lane in range(lanes_per_col):
+    flat_ref[lane::lanes_per_col] = rows[:, lane * num_lanes : (lane + 1) * num_lanes].astype(compact_ref.dtype)
+
+
+def select_natural_conv_halo(
+    hbm_conv: jax.Array,  # [prev_kernel_size, dim] float32: the HBM conv state (conv state slot)
+    carry: jax.Array,  # [rows, dim] float32: the previous chunk's last rows
+    is_first_tile: jax.Array,
+    has_initial_state: jax.Array,
+) -> jax.Array:
+  """[rows, dim] Conv1D halo of a natural-layout tile, selected as load_and_select_states selects the compact one.
+
+  Rows rows - prev_kernel_size .. rows - 1 are the tokens before the tile: the carry on a sequence's later tiles, the
+  HBM conv state on its first tile (zero without an initial state).
+  """
+  rows, dim = carry.shape
+  hbm_conv = jnp.where(has_initial_state, hbm_conv, 0)
+  hbm_halo = jnp.concatenate([jnp.zeros((rows - hbm_conv.shape[0], dim), jnp.float32), hbm_conv], axis=0)
+  return jnp.where(is_first_tile, hbm_halo, carry)
+
+
+def split_qkv_natural(qkv: jax.Array, cfg: config.GDNConfig) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """[chunk, dim] (tokens on sublanes) -> q, k [num_kq_heads, chunk, kq_head_dim], v [num_v_heads, chunk, v_head_dim].
+
+  The values load_as_qkv_large returns from the compact layout, as whole-column slices (head dims are multiples of the
+  lane count), so nothing moves between registers.
+  """
+  dk, dv = cfg.kq_head_dim, cfg.v_head_dim
+  k_offset = cfg.num_kq_heads * dk
+  v_offset = 2 * k_offset
+  q = jnp.stack([qkv[:, h * dk : (h + 1) * dk] for h in range(cfg.num_kq_heads)], axis=0)
+  k = jnp.stack([qkv[:, k_offset + h * dk : k_offset + (h + 1) * dk] for h in range(cfg.num_kq_heads)], axis=0)
+  v = jnp.stack([qkv[:, v_offset + h * dv : v_offset + (h + 1) * dv] for h in range(cfg.num_v_heads)], axis=0)
+  return q, k, v

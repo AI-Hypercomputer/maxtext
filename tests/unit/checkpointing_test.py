@@ -14,6 +14,8 @@
 
 """Unit tests for the checkpointing components."""
 
+# pylint: disable=protected-access
+
 import os
 from typing import Any
 from unittest import mock
@@ -994,7 +996,10 @@ class FP8DequantizeOnLoadTest(parameterized.TestCase):
 class TrainingEngineCheckpointManagerTest(parameterized.TestCase):
   """Tests for training_engine.checkpointing.CheckpointManager gs:// guard and save_optimizer_state."""
 
+  # pylint: disable=protected-access
+
   def _mock_config(self):
+    """Build a mock config for CheckpointManager tests."""
     cfg = mock.MagicMock()
     cfg.checkpoint_storage_use_ocdbt = False
     cfg.checkpoint_storage_use_zarr3 = False
@@ -1008,9 +1013,7 @@ class TrainingEngineCheckpointManagerTest(parameterized.TestCase):
 
   @mock.patch("maxtext.training_engine.checkpointing.ocp.CheckpointManager")
   @mock.patch("maxtext.training_engine.checkpointing.ocp.PyTreeCheckpointHandler")
-  def test_pathways_persistence_rejects_non_gs_uri_on_first_and_second_init(
-      self, mock_handler, mock_orbax_cm
-  ):
+  def test_pathways_persistence_rejects_non_gs_uri_on_first_and_second_init(self, mock_handler, mock_orbax_cm):
     from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
 
     cfg = self._mock_config()
@@ -1033,9 +1036,7 @@ class TrainingEngineCheckpointManagerTest(parameterized.TestCase):
   @mock.patch("maxtext.training_engine.checkpointing._maybe_register_pathways_persistence")
   @mock.patch("maxtext.training_engine.checkpointing.ocp.CheckpointManager")
   @mock.patch("maxtext.training_engine.checkpointing.ocp.PyTreeCheckpointHandler")
-  def test_pathways_persistence_accepts_gs_uri_and_registers(
-      self, mock_handler, mock_orbax_cm, mock_register
-  ):
+  def test_pathways_persistence_accepts_gs_uri_and_registers(self, mock_handler, mock_orbax_cm, mock_register):
     from maxtext.training_engine import checkpointing as engine_ckpt  # pylint: disable=import-outside-toplevel
 
     cfg = self._mock_config()
@@ -1232,4 +1233,3 @@ class PathwaysCheckpointingImplSelectorTest(_PathwaysRegistrationTestBase):
 
 if __name__ == "__main__":
   absltest.main()
-

@@ -544,7 +544,7 @@ def ragged_gather_reduce(
   )
   # Each output row from `main_kernel` will be of type float32, and then
   # casted to the input dtype when doing the filter operation.
-  out = pl.kernel(  # pytype: disable=wrong-keyword-args
+  out = pl.kernel(
       functools.partial(
           main_kernel,
           core_axis_name=vector_mesh.core_axis_name,
@@ -559,7 +559,6 @@ def ragged_gather_reduce(
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
-          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,

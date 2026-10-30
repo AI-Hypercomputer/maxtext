@@ -16,9 +16,42 @@
 """In-VMEM causal depthwise Conv1D computation."""
 
 import jax
+from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 from . import config
+
+# One float32 vector register is 8 sublanes x 128 lanes. gdn_conv1d_dense_token_stack regroups causal_conv1d's
+# per-token rows in units of one register (see stack_conv1d_tokens), so it needs rows of a multiple of this size.
+_F32_VREG_SUBLANES = 8
+_VREG_LANES = 128
+DENSE_TOKEN_STACK_ALIGNMENT = _F32_VREG_SUBLANES * _VREG_LANES
+
+
+def stack_conv1d_tokens(out_list: list[jax.Array], dense: bool) -> jax.Array:
+  """Stacks causal_conv1d's per-token rows, each [seq, 1, dim], into its [seq, chunk, 1, dim] output.
+
+  dense=False is jnp.stack(out_list, axis=1). The stacked value's second-minor dimension is 1, and the TPU compiler
+  of the October 2026 Pathways build (and of the libtpu 0.0.51 nightlies) lays it out in (8, 128) tiles padded from
+  1 to 8 sublanes. The SiLU that wrapper.inner_kernel applies next inherits that layout, so its exp and reciprocal
+  run on 8x as many vector registers as the data fills. Older compilers keep the value in dense (1, 128) tiles.
+
+  dense=True (config gdn_conv1d_dense_token_stack) views each [1, 1, dim] float32 row as [dim / 1024, 8, 128], which
+  is free because the row already fills dim / 1024 registers, concatenates the views along the leading axis and
+  reshapes the result to [1, chunk, 1, dim]. The values and their order are the same; only the layout the compiler
+  chooses changes, and it stays dense on old and new compilers alike. Requires seq == 1 (GDNMode.PER_SEQ), float32
+  rows and dim a multiple of DENSE_TOKEN_STACK_ALIGNMENT.
+  """
+  if not dense:
+    return jnp.stack(out_list, axis=1)
+  row = out_list[0]
+  if row.shape[0] != 1 or row.size % DENSE_TOKEN_STACK_ALIGNMENT or jnp.dtype(row.dtype).itemsize != 4:
+    raise ValueError(
+        "gdn_conv1d_dense_token_stack needs one sequence per tile and float32 rows whose size is a multiple of"
+        f" {DENSE_TOKEN_STACK_ALIGNMENT}, got a {jnp.dtype(row.dtype)} row of shape {row.shape}."
+    )
+  dense_rows = jnp.concatenate([o.reshape(-1, _F32_VREG_SUBLANES, _VREG_LANES) for o in out_list], axis=0)
+  return dense_rows.reshape(row.shape[0], len(out_list), *row.shape[1:])
 
 
 def encode_segment_ids(
@@ -296,4 +329,65 @@ def causal_conv1d(
         new_conv_state,
     )
 
-  return jnp.stack(out_list, axis=1), new_conv_state
+  return stack_conv1d_tokens(out_list, cfg.conv_dense_token_stack), new_conv_state
+
+
+def natural_causal_conv1d(
+    x: jax.Array,  # [chunk, dim] float32: the chunk's qkv, tokens on sublanes
+    halo: jax.Array,  # [rows, dim] float32: rows (rows - prev_kernel_size) .. (rows - 1) = the tokens before the chunk
+    conv_weight: jax.Array,  # [kernel_size, 1, dim] float32
+    conv_bias: jax.Array | None,  # [dim] float32
+    cfg: config.GDNConfig,
+    b_large: jax.Array | None = None,  # [chunk, lanes] float32: b's lanes num_v_heads / num_v_heads + 1
+) -> jax.Array:
+  """causal_conv1d's per-token output rows for a whole chunk with tokens on sublanes: [chunk, dim] float32.
+
+  The same values as causal_conv1d bit for bit, for a tile that is a whole chunk (GDNConfig.is_prefill_only): tap k of
+  token t is token t - (prev_kernel_size - k), from the chunk or, for the first rows, from `halo` (causal_conv1d's
+  `lhs[:, :prev_kernel_size]`); the taps are added in causal_conv1d's order (0 + tap_0 * w_0 + ... + tap_{K-1} *
+  w_{K-1}, then the bias), with its segment masks (b lane num_v_heads: the token's signed active segment; lane
+  num_v_heads + 1, rows 0 .. prev_kernel_size - 1: the halo's segment IDs). Only the layout differs: a shifted tap is
+  a sublane rotation of the chunk (pltpu.roll, jnp.roll semantics) whose first rows are replaced from the rotated halo,
+  so no per-token row is ever stored or loaded.
+  """
+  chunk, _ = x.shape
+  rows = halo.shape[0]
+  prev = cfg.prev_kernel_size
+  if not prev < rows <= chunk or rows % 8:
+    raise ValueError(
+        f"natural_causal_conv1d needs kernel_size - 1 < halo rows <= chunk, a multiple of 8; got {halo.shape}."
+    )
+  has_seg = cfg.has_seg_ids and b_large is not None
+  row = jax.lax.broadcasted_iota(jnp.int32, (rows, 1), 0)
+  seg_cur = seg_hdr = None
+  if has_seg:
+    seg_cur = jnp.maximum(b_large[:, cfg.num_v_heads : cfg.num_v_heads + 1], 0.0)  # [chunk, 1]
+    seg_hdr = jnp.maximum(b_large[:rows, cfg.num_v_heads + 1 : cfg.num_v_heads + 2], 0.0)  # [rows, 1]
+
+  out = jnp.zeros(x.shape, jnp.float32)
+  for k in range(cfg.kernel_size):
+    shift = prev - k
+    seg_tap = seg_cur
+    if shift == 0:
+      tap = x
+    else:
+      # Rows >= shift: x[t - shift]. Rows < shift: halo row rows - shift + t (= causal_conv1d's lhs row t + k).
+      rolled = pltpu.roll(x, shift, 0)
+      top = jnp.where(row < shift, pltpu.roll(halo, shift, 0), rolled[:rows])
+      tap = jnp.concatenate([top, rolled[rows:]], axis=0)
+      if has_seg:
+        seg_rolled = pltpu.roll(seg_cur, shift, 0)
+        # Rows < shift: header row t + k, i.e. seg_hdr rolled by (shift - prev) mod rows.
+        hdr_shift = (shift - prev) % rows
+        hdr = pltpu.roll(seg_hdr, hdr_shift, 0) if hdr_shift else seg_hdr
+        seg_tap = jnp.concatenate([jnp.where(row < shift, hdr, seg_rolled[:rows]), seg_rolled[rows:]], axis=0)
+    if has_seg:
+      same_doc = (seg_cur > 0.5) & (jnp.abs(seg_tap - seg_cur) < 0.5)
+      tap = jnp.where(same_doc, tap, 0.0)
+    out = out + tap * conv_weight[k]
+
+  if conv_bias is not None:
+    out = out + conv_bias.reshape(1, -1)
+  if has_seg:
+    out = jnp.where(seg_cur > 0.5, out, 0.0)
+  return out

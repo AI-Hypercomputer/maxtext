@@ -391,7 +391,12 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         log_dir=trainer_config.tensorboard_dir,
         skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
         profiler_steps=trainer_config.profiler_steps,
+        # Skip setting tracer levels.
         set_profile_options=False,
+        **_kwargs_supported_by(
+            profiler.ProfilerOptions,
+            enable_continuous_profiling=trainer_config.enable_continuous_profiling,
+        ),
     )
 
   # Parse vllm_additional_config
@@ -487,6 +492,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           # to support off-policy filtering and multi-iteration training.
           **({"return_logprobs": True} if trainer_config.rl.use_agentic_rollout else {}),
           **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
+          **_kwargs_supported_by(
+              base_rollout.RolloutConfig,
+              rollout_vllm_free_kv_cache_during_weight_sync=trainer_config.free_kv_cache_during_weight_sync,
+          ),
       ),
   )
 

@@ -860,9 +860,7 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     opt_state = opt.init(params)
 
     # Step 0 with NaN loss during warmup must be skipped
-    updates, opt_state = opt.update(
-        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.float32(1.0)
-    )
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.float32(1.0))
     self.assertTrue(jnp.all(updates["x"] == 0.0))
     self.assertTrue(opt_state["is_skipped"])
     self.assertEqual(opt_state["count"], 0)
@@ -875,9 +873,7 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     opt_state = opt.init(params)
 
     # Step 0 with NaN grad_norm during warmup must be skipped
-    updates, opt_state = opt.update(
-        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.nan
-    )
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.nan)
     self.assertTrue(jnp.all(updates["x"] == 0.0))
     self.assertTrue(opt_state["is_skipped"])
     self.assertEqual(opt_state["count"], 0)
@@ -890,9 +886,7 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     opt_state = opt.init(params)
 
     # Step 0: NaN occurs
-    updates, opt_state = opt.update(
-        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.nan
-    )
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.nan)
     self.assertTrue(opt_state["is_skipped"])
     self.assertEqual(opt_state["count"], 0)
 

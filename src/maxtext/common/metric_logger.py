@@ -56,6 +56,25 @@ _METRICS_TO_MANAGED = {
 }
 
 
+STEP_DIAGNOSTICS_KEYS = (
+    ("raw_grad_norm", "learning/raw_grad_norm"),
+    ("grad_norm", "learning/grad_norm"),
+    ("param_norm", "learning/param_norm"),
+    ("max_abs_grad", "diag/max_abs_grad"),
+    ("moe_bias_checksum", "diag/moe_bias_checksum"),
+    ("moe_bias_update_nonzero", "diag/moe_bias_update_nonzero"),
+    ("moe_overflow", "diag/moe_overflow"),
+)
+
+
+def step_diagnostics_text(scalars):
+  """The log_step_diagnostics part of the step line: 'diag: raw_grad_norm=... grad_norm=... ...' (%.9e; n/a if absent)."""
+  parts = []
+  for name, key in STEP_DIAGNOSTICS_KEYS:
+    parts.append(f"{name}={float(scalars[key]):.9e}" if key in scalars else f"{name}=n/a")
+  return "diag: " + " ".join(parts)
+
+
 def _prepare_metrics_for_json(metrics, step, run_name):
   """Converts metric dictionary into json supported types (e.g. float)"""
   metrics_dict = {val: float(metrics["scalar"][val]) for val in metrics["scalar"]}
@@ -227,6 +246,9 @@ class MetricLogger:
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
+      if "learning/moe_max_load_ratio" in scalars:
+        log_parts.append(f"moe_max_load_ratio: {scalars['learning/moe_max_load_ratio']:.4f}")
+        log_parts.append(f"moe_max_load_ratio_mean: {scalars['learning/moe_max_load_ratio_mean']:.4f}")
 
     if getattr(self.config, "mtp_num_layers", 0) > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)
@@ -237,7 +259,19 @@ class MetricLogger:
       indexer_l = scalars.get("learning/indexer_loss", 0.0)
       log_parts.append(f"indexer_loss: {float(indexer_l)}")
 
+    if getattr(self.config, "log_step_diagnostics", False):
+      log_parts.append(step_diagnostics_text(scalars))
+
     max_logging.log(", ".join(log_parts))
+
+    # Logged here rather than in the train loop: metrics are flushed one step late, so reading
+    # the flag does not add a per-step host sync (which the in-layer fallback exists to avoid).
+    fallback_layers = scalars.get("learning/moe_dropless_fallback_layers")
+    if fallback_layers is not None and int(fallback_layers) > 0:
+      max_logging.log(
+          f"Step {step}: MoE ragged buffer overflow detected in {int(fallback_layers)} layer(s); "
+          f"in-layer dropless fallback was used (no tokens dropped)."
+      )
 
   def _log_eval_metrics(self, metrics, step):
     """Logs the final accumulated eval summary at the end of an eval run."""
@@ -266,6 +300,13 @@ class MetricLogger:
       log_parts.append(f"avg_indexer_loss={indexer_l:.3f}")
 
     max_logging.log(", ".join(log_parts))
+
+    fallback_layers = int(scalars.get("eval/moe_dropless_fallback_layers", 0))
+    if fallback_layers > 0:
+      max_logging.log(
+          f"Eval after train step {step}: MoE ragged buffer overflow detected in {fallback_layers} layer(s) "
+          f"summed over eval steps; in-layer dropless fallback was used (no tokens dropped)."
+      )
 
   def _log_running_eval_metrics(self, metrics, step):
     """Logs a per-eval-step running average (deferred by one eval step)."""
@@ -488,6 +529,10 @@ class MetricLogger:
         scalar.get("evaluation/mtp_acceptance_rate_percent", 0.0)
     )
     self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(scalar.get("evaluation/z_loss", 0.0))
+    if "evaluation/moe_dropless_fallback_layers" in scalar:
+      self.cumulative_eval_metrics["scalar"]["eval/moe_dropless_fallback_layers"] += float(
+          scalar["evaluation/moe_dropless_fallback_layers"]
+      )
 
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""

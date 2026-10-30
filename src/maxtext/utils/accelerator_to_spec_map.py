@@ -15,8 +15,9 @@
 """Static map of TPU names such as v4-8 to properties such as chip layout."""
 
 """ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-IF YOU MODIFY THIS FILE YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO
-UserFacingNameToSystemCharacteristics in xpk/xpk.py !!!!! """
+IF YOU MODIFY THIS FILE YOU SHOULD ALSO CHECK THAT THE LAUNCHERS SUPPORT THE SAME
+ACCELERATORS: AcceleratorShorthandMap in Cluster Toolkit (pkg/config/hardware.go) and,
+for legacy XPK, src/xpk/core/system_characteristics.py !!!!! """
 
 from dataclasses import dataclass
 

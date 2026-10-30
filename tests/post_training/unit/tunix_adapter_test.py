@@ -84,9 +84,7 @@ class _CallableStubBase:
     # Return dummy logits shaped [B, L, V=2] so the adapter has something to forward.
     return jnp.zeros((b, l, 2), dtype=jnp.float32)
 
-  def logits_from_hidden_states_for_vocab_tiling(
-      self, hidden_states, deterministic, model_mode
-  ):
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
     self.captured["vocab_tiling_deterministic"] = deterministic
     self.captured["vocab_tiling_model_mode"] = model_mode
     return jnp.zeros((*hidden_states.shape[:-1], 2), dtype=jnp.float32)
@@ -375,16 +373,10 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
     self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
     self.model_mode = "train"
     self.embed = tunix_adapter_module.nnx.Param(
-        jnp.arange(vocab_size * emb_dim, dtype=jnp.float32).reshape(
-            vocab_size, emb_dim
-        )
-        * 0.1
+        jnp.arange(vocab_size * emb_dim, dtype=jnp.float32).reshape(vocab_size, emb_dim) * 0.1
     )
     self.head = tunix_adapter_module.nnx.Param(
-        jnp.arange(emb_dim * vocab_size, dtype=jnp.float32).reshape(
-            emb_dim, vocab_size
-        )
-        * 0.1
+        jnp.arange(emb_dim * vocab_size, dtype=jnp.float32).reshape(emb_dim, vocab_size) * 0.1
     )
 
   def __call__(
@@ -396,19 +388,12 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
       forced_routed_experts=None,
       skip_lm_head=False,
   ):
-    hidden = (
-        self.embed[...][decoder_input_tokens]
-        + decoder_positions[..., None].astype(jnp.float32) * 0.01
-    )
+    hidden = self.embed[...][decoder_input_tokens] + decoder_positions[..., None].astype(jnp.float32) * 0.01
     if skip_lm_head:
       return hidden
-    return self.logits_from_hidden_states_for_vocab_tiling(
-        hidden, deterministic=True, model_mode=self.model_mode
-    )
+    return self.logits_from_hidden_states_for_vocab_tiling(hidden, deterministic=True, model_mode=self.model_mode)
 
-  def logits_from_hidden_states_for_vocab_tiling(
-      self, hidden_states, deterministic, model_mode
-  ):
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
     del deterministic, model_mode
     return jnp.einsum("bse,ev->bsv", hidden_states, self.head[...])
 
@@ -418,9 +403,7 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    weight_mapping_patcher = mock.patch.object(
-        tunix_adapter_module, "VllmWeightMapping"
-    )
+    weight_mapping_patcher = mock.patch.object(tunix_adapter_module, "VllmWeightMapping")
     weight_mapping_patcher.start()
     self.addCleanup(weight_mapping_patcher.stop)
 
@@ -457,9 +440,7 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
     graphdef, state = tunix_adapter_module.nnx.split(adapter)
 
     prompt_tokens = jnp.array([[1, 2, 3], [2, 3, 4]], dtype=jnp.int32)
-    completion_tokens = jnp.array(
-        [[4, 5, 6, 7, 1], [5, 6, 7, 1, 2]], dtype=jnp.int32
-    )
+    completion_tokens = jnp.array([[4, 5, 6, 7, 1], [5, 6, 7, 1, 2]], dtype=jnp.int32)
 
     expected_logps, expected_entropy = tunix_common.compute_per_token_logps(
         graphdef,
@@ -487,12 +468,8 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
           temperature=0.8,
           chunk_size=chunk_size,
       )
-      np.testing.assert_allclose(
-          chunked_logps, expected_logps, rtol=1e-5, atol=1e-5
-      )
-      np.testing.assert_allclose(
-          chunked_entropy, expected_entropy, rtol=1e-5, atol=1e-5
-      )
+      np.testing.assert_allclose(chunked_logps, expected_logps, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(chunked_entropy, expected_entropy, rtol=1e-5, atol=1e-5)
 
     def _loss(s, csize):
       lps, ent = tunix_common.compute_per_token_logps(
@@ -511,9 +488,7 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
 
     grad_unchunked = jax.grad(_loss)(state, 0)
     grad_chunked = jax.grad(_loss)(state, 2)
-    for g0, g1 in zip(
-        jax.tree.leaves(grad_unchunked), jax.tree.leaves(grad_chunked)
-    ):
+    for g0, g1 in zip(jax.tree.leaves(grad_unchunked), jax.tree.leaves(grad_chunked)):
       np.testing.assert_allclose(g1, g0, rtol=1e-5, atol=1e-5)
 
 

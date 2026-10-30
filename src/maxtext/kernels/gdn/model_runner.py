@@ -591,10 +591,10 @@ def run_jax_gdn_delta_rule(
 def run_gdn_kernel_layer(
     *,
     layer: Any,
-    query: Array,
-    key: Array,
-    value: Array,
-    value_raw: Array,
+    query: Array | None,
+    key: Array | None,
+    value: Array | None,
+    value_raw: Array | None,
     b: Array,
     a: Array,
     active_cache: Any,
@@ -603,10 +603,15 @@ def run_gdn_kernel_layer(
     state_dtype: DType,
     flat_sharding: jax.sharding.NamedSharding | None = None,
     gdn_context_axes_fn: Any = _default_gdn_context_axes,
+    qkv_precomputed: Array | None = None,
 ) -> tuple[Array, Array | None, Array | None]:
-  """Executes the fused/decoupled Pallas GDN conv1d + delta-rule kernel with CP support."""
+  """Executes the fused/decoupled Pallas GDN conv1d + delta-rule kernel with CP support.
+
+  `qkv_precomputed` (gdn_in_proj_kernel_order, models/qwen3.py): the (B, S, 2 * K_dim + V_dim) qkv already in the
+  kernel's [q | k | v] order; query / key / value / value_raw are then unused and may be None.
+  """
   cfg = layer.config
-  batch, seq_len = query.shape[:2]
+  batch, seq_len = (query if qkv_precomputed is None else qkv_precomputed).shape[:2]
 
   cp_axes = tuple(
       ax for ax in gdn_context_axes_fn(cfg) if layer.mesh and ax in layer.mesh.axis_names and layer.mesh.shape[ax] > 1
@@ -617,8 +622,34 @@ def run_gdn_kernel_layer(
       cfg, cp_size, layer.num_k_heads, model_mode, use_gdn_kernel=True
   )
   cp_matmul_precision = jax.lax.Precision[getattr(cfg, "gdn_cp_matmul_precision", "highest").upper()]
+  # Conv1D halo input in qkv's dtype instead of a float32 copy (compute_conv1d_bwd.py). Same values.
+  conv_input_in_qkv_dtype = cfg.gdn_conv1d_input_in_qkv_dtype
+  # Forward kernel's Conv1D output built from dense per-token views (compute_conv1d.py). Same values.
+  conv_dense_token_stack = bool(getattr(cfg, "gdn_conv1d_dense_token_stack", False))
+  cp_m_scan = bool(getattr(cfg, "gdn_cp_m_scan", False))
+  cp_dh_scan = bool(getattr(cfg, "gdn_cp_dh_scan", False))
+  # States-only CP pass 1 kernel and VMEM bf16 qkv upcast (wrapper.py). Same values.
+  pass1_states_and_bf16_qkv = bool(getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False))
+  cp_fast_state_passing = bool(getattr(cfg, "gdn_cp_fast_state_passing", False)) and model_mode == MODEL_MODE_TRAIN
+  # Backward kernel with operand groups in their natural layouts ("off", "states", "all", "no_do", "inputs", "states_dy";
+  # gdn_bwd/pallas_mosaic_tpu_bwd.py NATURAL_LAYOUT_MODES). Same values. Read as an attribute: a config without the key
+  # raises instead of silently running the relayout path.
+  bwd_natural_layout = cfg.gdn_bwd_natural_layout
+  # Forward kernels' Conv1D + SiLU on the bf16 DMA buffer with tokens on sublanes, and their kq-head group size (0 =
+  # default) (wrapper.py, compute_conv1d.natural_causal_conv1d, compute_gdn.chunked_gdn_per_seq). Same values. Read as
+  # attributes: a config without the keys raises instead of silently running the compact path.
+  conv_natural_layout = cfg.gdn_conv1d_natural_layout
+  fwd_head_group_size = cfg.gdn_fwd_kernel_head_group_size
 
-  if use_head_sharded_cp:
+  if qkv_precomputed is not None:
+    if use_head_sharded_cp:
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True requires sequence-sharded GDN context parallelism, but this layer resolved"
+          " to head-sharded GDN context parallelism (gdn_cp_mode='auto' with a GDN context parallelism of 2 that"
+          " divides the key heads); set gdn_cp_mode='seq'."
+      )
+    qkv = qkv_precomputed
+  elif use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
   else:
     q = jnp.reshape(query, (batch, seq_len, -1), out_sharding=flat_sharding)
@@ -641,6 +672,11 @@ def run_gdn_kernel_layer(
     qkv = jnp.where(mask.reshape(mask.shape + (1,) * (qkv.ndim - mask.ndim)), qkv, 0.0)
     a = jnp.where(mask[..., None], a, jnp.asarray(-1e4, dtype=a.dtype))
     b = jnp.where(mask[..., None], b, jnp.asarray(-1e4, dtype=b.dtype))
+    if model_mode == MODEL_MODE_TRAIN and not getattr(cfg, "packing", True):
+      # packing=False means one sequence per row, whose padding the mask above already makes a no-op, so the
+      # kernel's segment path adds work and changes nothing. Other modes keep it: it also ends the carried conv
+      # state at the last valid token.
+      decoder_segment_ids = None
 
   batch, seq_len = qkv.shape[:2]
   conv_kernel_size = cfg.gdn_conv_kernel_dim
@@ -887,6 +923,12 @@ def run_gdn_kernel_layer(
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=state_dtype,
             segment_ids=seg_val,
+            conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+            conv_dense_token_stack=conv_dense_token_stack,
+            pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
+            bwd_natural_layout=bwd_natural_layout,
+            conv_natural_layout=conv_natural_layout,
+            fwd_head_group_size=fwd_head_group_size,
         )
 
         if next_cs is not None:
@@ -926,6 +968,15 @@ def run_gdn_kernel_layer(
           cp_axis_name=cp_axis_name if use_seq_sharded_cp else None,
           segment_ids=seg_val,
           cp_matmul_precision=cp_matmul_precision,
+          conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+          conv_dense_token_stack=conv_dense_token_stack,
+          cp_m_scan=cp_m_scan,
+          cp_dh_scan=cp_dh_scan,
+          pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
+          cp_fast_state_passing=cp_fast_state_passing,
+          bwd_natural_layout=bwd_natural_layout,
+          conv_natural_layout=conv_natural_layout,
+          fwd_head_group_size=fwd_head_group_size,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -968,6 +1019,12 @@ def run_gdn_kernel_layer(
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
         compute_dtype=state_dtype,
         segment_ids=decoder_segment_ids,
+        conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+        conv_dense_token_stack=conv_dense_token_stack,
+        pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
+        bwd_natural_layout=bwd_natural_layout,
+        conv_natural_layout=conv_natural_layout,
+        fwd_head_group_size=fwd_head_group_size,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

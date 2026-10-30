@@ -333,7 +333,7 @@ def _generate_lora_decode_checkpoints_nnx(config, mesh):
     )
 
     lora_config, lora_state, lora_state_annotations = lora_utils.setup_initial_lora_state(
-        model, None, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path
+        None, tx, config, mesh, checkpoint_manager, lora_adapter_path
     )
 
     _possibly_unroll_lora_params_nnx(config, lora_state, lora_state_annotations, mesh)

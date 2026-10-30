@@ -42,7 +42,6 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 from flax.core.spmd import logical_axis_rules
-import flax.linen as nn
 from huggingface_hub import get_token
 import jax
 import jax.numpy as jnp
@@ -52,12 +51,19 @@ from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TR
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.integration.vllm.convert_utils import _partition_size
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
+
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
+except ImportError:
+  lineage_adapter = None
 
 try:
   from orbax.checkpoint.metadata import ArrayMetadata as _OrbaxArrayMetadata
@@ -218,6 +224,19 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         )
       result = jnp.repeat(result, model_dim // ckpt_dim, axis=axis)
   return jax.device_put(result, model_arr.sharding)
+
+
+def _intersect_with_metadata(target, meta_tree):
+  """Returns the sub-tree of `target` whose paths exist in checkpoint `meta_tree`."""
+  if not hasattr(target, "items"):
+    return target
+  out = {}
+  for k, v in target.items():
+    if hasattr(meta_tree, "items") and k in meta_tree:
+      sub_tree = _intersect_with_metadata(v, meta_tree[k])
+      if not hasattr(sub_tree, "items") or sub_tree:
+        out[k] = sub_tree
+  return out
 
 
 def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
@@ -598,7 +617,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: None = None,
     quant_mode_str: str = "train",
-) -> nn.Module:
+) -> nnx_wrappers.ToLinen:
   ...
 
 
@@ -623,8 +642,11 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
     quant_mode_str: str = "train",
-) -> nn.Module | models.Transformer:
+) -> nnx_wrappers.ToLinen | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
+
+  With `rngs` this returns the NNX `Transformer`. Without it, it returns the
+  Linen-wrapped model from `models.transformer_as_linen`, which is deprecated.
 
   `quant_mode_str` is one of "train", "convert", "serve" — controls the AQT
   quantization mode at model construction time. NNX layers freeze their
@@ -641,6 +663,8 @@ def from_config(
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
+  if rngs is not None and lineage_adapter is not None and lineage_adapter.is_native(config):
+    return lineage_adapter.LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   if rngs is not None:
     return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   else:
@@ -651,6 +675,11 @@ def create_model(
     config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None, *, quant_mode_str: str = "train"
 ):
   """Instantiates and returns the model object, sharded across the mesh."""
+  if config.use_m3_model:
+    from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+
+    return m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+
   # Model definition
   quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
   model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
@@ -1158,15 +1187,23 @@ def from_pretrained(
             target_for_restore, metadata.item_metadata.tree["params"]["params"], False
         )
 
+        # Linen checkpoints keep non-trainable variables (e.g. `Tid2EidVar`) in
+        # collections beside "params"; restore the model leaves they hold too.
+        ckpt_collections = metadata.item_metadata.tree["params"]
         item_to_restore = {"params": {"params": target_for_restore}}
-        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+        for col, col_meta in ckpt_collections.items():
+          if col != "params":
+            col_target = _intersect_with_metadata(target_for_restore, col_meta)
+            if col_target:
+              item_to_restore["params"][col] = col_target
         restore_args = {
             "params": {
-                "params": _fix_restore_args_for_shape_mismatch(
-                    base_restore_args,
-                    metadata.item_metadata.tree["params"]["params"],
+                col: _fix_restore_args_for_shape_mismatch(
+                    ocp.checkpoint_utils.construct_restore_args(col_target),
+                    ckpt_collections[col],
                     mesh,
                 )
+                for col, col_target in item_to_restore["params"].items()
             }
         }
       else:

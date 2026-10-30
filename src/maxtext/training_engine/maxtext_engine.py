@@ -77,6 +77,82 @@ _OPTIMIZER_STATE_KEY = "optimizer"
 _HOST_MEMORY_KIND = "pinned_host"
 _DEVICE_MEMORY_KIND = "device"
 
+# Device-resident optimizer leaves under `optimizer_memory_host_offload`, off by default.
+#
+# Offloaded, every optimizer leaf crosses the host link twice per step: the compiled update copies it from pinned
+# host memory to the device and its new value back. On the 397B RL trainer bench those copies are most of the
+# update (14.88 GiB each way per device with residual16 masters). With optimizer_device_resident_gib set to a budget
+# in GiB, the largest optimizer leaves, up to that many bytes per device, stay in device memory between updates
+# instead: `_offload_optimizer_state` keeps them there, the update's shardings are read off the state so it takes
+# them in device memory, and the state is donated, so their new values are written in place and never cross the
+# link. The update computes the same values; only where the chosen leaves live changes. They occupy device memory
+# for the whole step, beside every fwd_bwd and the gradient accumulator, so the budget must fit in what those leave
+# free. 0 (default) offloads every leaf and leaves the traced kernels unchanged.
+_OPT_RESIDENT_KEY = "optimizer_device_resident_gib"
+
+
+def _optimizer_device_resident_budget(config: Any) -> int:
+  """Returns the per-device bytes of optimizer state kept in device memory between updates (0 = off).
+
+  Read from the config's optimizer_device_resident_gib. Anything that is not a finite, non-negative number of GiB
+  raises, so a bad value is never a silent no-op.
+  """
+  gib = float(config.optimizer_device_resident_gib)
+  if not np.isfinite(gib) or gib < 0:
+    raise ValueError(f"{_OPT_RESIDENT_KEY} must be a finite, non-negative number of GiB, got {gib!r}")
+  return int(gib * 2**30)
+
+
+# How many steps of an engine's life print MEM-STATS lines (see `_log_memory_stats`).
+_MEM_STATS_STEPS = 2
+
+
+def _per_device_bytes(aval: Any, leaf_sharding: Any) -> int:
+  """Returns the bytes one device holds of `aval` (an array or `ShapeDtypeStruct`) under `leaf_sharding`."""
+  shape = tuple(aval.shape)
+  if hasattr(leaf_sharding, "shard_shape"):
+    shape = tuple(leaf_sharding.shard_shape(shape))
+  return int(np.prod(shape, dtype=np.int64)) * jnp.dtype(aval.dtype).itemsize
+
+
+def _pick_device_resident_leaves(
+    optimizer_pure: Any, optimizer_shardings: Any, budget: int
+) -> tuple[Any, list[tuple[str, int]]]:
+  """Chooses the optimizer leaves kept in device memory between updates, largest per-device size first.
+
+  A leaf is taken while the running total stays within `budget`, so a smaller leaf can still fill what a
+  larger one left; ties keep tree order. Scalars (step counts) are never taken: they are bytes, not time.
+
+  Args:
+    optimizer_pure: The optimizer state's pure form (arrays or avals).
+    optimizer_shardings: The same tree's shardings, as the update kernel's `in_shardings` hold them.
+    budget: Per-device bytes.
+
+  Returns:
+    `(mask, chosen)`: a tree of bools shaped like `optimizer_shardings` (True = kept in device memory), and the
+    chosen leaves' `(path, per-device bytes)` in the order they were taken.
+  """
+  paths_and_leaves, _ = jax.tree_util.tree_flatten_with_path(optimizer_pure)
+  shardings, treedef = jax.tree.flatten(optimizer_shardings)
+  if len(shardings) != len(paths_and_leaves):
+    raise ValueError(
+        f"{_OPT_RESIDENT_KEY}: the optimizer state has {len(paths_and_leaves)} leaves but its shardings "
+        f"{len(shardings)}; cannot pick the device-resident leaves."
+    )
+  sizes = [
+      _per_device_bytes(leaf, leaf_sharding) if getattr(leaf, "ndim", 0) > 0 else 0
+      for (_, leaf), leaf_sharding in zip(paths_and_leaves, shardings)
+  ]
+  taken = [False] * len(sizes)
+  chosen, total = [], 0
+  for index in sorted(range(len(sizes)), key=lambda i: (-sizes[i], i)):
+    if sizes[index] and total + sizes[index] <= budget:
+      taken[index] = True
+      total += sizes[index]
+      chosen.append((jax.tree_util.keystr(paths_and_leaves[index][0]), sizes[index]))
+  return jax.tree.unflatten(treedef, taken), chosen
+
+
 # The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
 # keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
 KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
@@ -468,6 +544,17 @@ def _to_aval(value: Any) -> Any:
   if not hasattr(value, "shape") or not hasattr(value, "dtype"):
     return value
   return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=getattr(value, "sharding", None))
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedFwdBwdInput:
+  """A micro-batch already mapped to loss inputs and placed on the mesh.
+
+  Made by `MaxTextTrainingEngine.prepare_fwd_bwd_input`; `fwd_bwd` takes it in place of
+  the payload it came from.
+  """
+
+  batch: Any
 
 
 def _row_and_mask(payload: abstract_engine.RLTrainerPayload) -> tuple[jax.Array, jax.Array]:
@@ -923,6 +1010,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Set by `_compile_for_batch` under `optimizer_memory_host_offload`: the device shardings
     # `_update_kernel` moves the pinned-host optimizer state onto. `None` without offload.
     self._optimizer_device_shardings: Any = None
+    # optimizer_device_resident_gib (see `_optimizer_device_resident_budget`): set by `_offload_optimizer_state` to the
+    # tree of bools marking the optimizer leaves kept in device memory between updates, or None when every leaf is
+    # offloaded. `_opt_resident_logged` is the last choice announced, so the banner prints once per distinct choice.
+    self._opt_resident_mask: Any = None
+    self._opt_resident_logged: Any = None
+    # `(layout key, mask)` of the last choice, so `update()` does not re-pick every step (`_optimizer_resident_mask`).
+    self._opt_resident_cache: Any = None
+    # Updates this engine instance has applied, for the MEM-STATS lines of its first steps (`_log_memory_stats`).
+    self._mem_stats_step = 0
     # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
@@ -970,6 +1066,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
+    # Readiness tokens for Tunix's TrainerWorker step timer (TRAINER_STEP_TIMING): arrays that
+    # become ready when the last microbatch's / optimizer step's device work has finished.
+    self.last_fwd_bwd_token: jax.Array | None = None
+    self.last_update_token: jax.Array | None = None
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
     # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
@@ -1442,32 +1542,159 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     in host memory; the eager path runs it before each `fwd_bwd` and after each `update()`.
     Every optimizer leaf moves, scalars included, as in `train.py`. Idempotent: a leaf already in
     host memory is left alone.
+
+    Under optimizer_device_resident_gib the leaves `_optimizer_resident_mask` picks are kept in device memory
+    instead (moved there if they are elsewhere, e.g. after a restore), so the update reads them where they are.
     """
     if not self._optimizer_offload_enabled() or self._state is None:
       return
     state_pure = self._read_state_pure()
     if _OPTIMIZER_STATE_KEY not in state_pure:
       return
+    resident = self._optimizer_resident_mask(state_pure[_OPTIMIZER_STATE_KEY])
+    self._opt_resident_mask = resident
 
     moved = False
 
-    def place(leaf):
+    def place(leaf, keep_on_device=False):
       nonlocal moved
       if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
         return leaf
       base = self._mesh_sharding(leaf)
-      if base.memory_kind == _HOST_MEMORY_KIND:
+      kind = _DEVICE_MEMORY_KIND if keep_on_device else _HOST_MEMORY_KIND
+      if base.memory_kind == kind:
         return leaf
       moved = True
-      return self._place_leaf(leaf, base.with_memory_kind(_HOST_MEMORY_KIND))
+      return self._place_leaf(leaf, base.with_memory_kind(kind))
 
-    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    if resident is None:
+      optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    else:
+      optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY], resident)
     if not moved:
       return
     with self._sharding_ctx():
       nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
     self._invalidate_pure_state()
     self._refresh_pure_state()
+
+  def _optimizer_resident_mask(self, optimizer_pure: Any) -> Any:
+    """Returns the tree of bools marking the optimizer leaves kept in device memory, or None (all offloaded).
+
+    optimizer_device_resident_gib: `_pick_device_resident_leaves`'s choice -- largest per-device size first, a smaller
+    leaf filling what a larger one left, scalars never -- within the budget. It depends only on the budget and the
+    leaves' shapes, dtypes and partition specs, so it is cached on exactly those: `update()` calls this every step,
+    and the choice is made once per state layout. Announced once per distinct choice.
+    """
+    budget = _optimizer_device_resident_budget(self._config)
+    if not budget:
+      return None
+    leaves, treedef = jax.tree.flatten(optimizer_pure)
+    key = (
+        budget,
+        treedef,
+        tuple(
+            (getattr(leaf, "shape", None), str(getattr(leaf, "dtype", None)), self._mesh_sharding(leaf).spec)
+            for leaf in leaves
+        ),
+    )
+    if self._opt_resident_cache is not None and self._opt_resident_cache[0] == key:
+      return self._opt_resident_cache[1]
+    mask, chosen = _pick_device_resident_leaves(optimizer_pure, jax.tree.map(self._mesh_sharding, optimizer_pure), budget)
+    names = tuple(path for path, _ in chosen)
+    if names != self._opt_resident_logged:
+      self._opt_resident_logged = names
+      if not chosen:
+        logging.warning(
+            "%s=%.6f GiB is smaller than every optimizer leaf; every leaf stays in pinned host memory.",
+            _OPT_RESIDENT_KEY,
+            budget / 2**30,
+        )
+      else:
+        logging.info(
+            "OPT-RESIDENT on: %d optimizer leaves (%.3f GiB per device, budget %.3f GiB) stay in device memory "
+            "between updates; the update takes and returns them there, in place: %s",
+            len(chosen),
+            sum(size for _, size in chosen) / 2**30,
+            budget / 2**30,
+            ", ".join(f"{path} {size / 2**30:.4f}" for path, size in chosen),
+        )
+    self._opt_resident_cache = (key, mask if chosen else None)
+    return self._opt_resident_cache[1]
+
+  def _resident_update_shardings(self, update_in_shardings: Any, update_out_shardings: Any) -> tuple[Any, Any]:
+    """Returns the update kernel's `in_shardings` and `out_shardings` with every memory kind named.
+
+    optimizer_device_resident_gib: both trees are read off the state, so the resident leaves are already `device` on
+    the way in and out and every other optimizer leaf `pinned_host`. Naming the rest (an unnamed sharding is in device
+    memory anyway) makes JAX pair each donated input only with an output of its own memory kind
+    (`mlir._set_up_aliases`).
+    """
+    replicated_device = jax.sharding.NamedSharding(
+        self._mesh, jax.sharding.PartitionSpec(), memory_kind=_DEVICE_MEMORY_KIND
+    )
+
+    def named(tree):
+      return jax.tree.map(
+          lambda leaf_sharding: (
+              leaf_sharding
+              if leaf_sharding.memory_kind is not None
+              else leaf_sharding.with_memory_kind(_DEVICE_MEMORY_KIND)
+          ),
+          tree,
+      )
+
+    state_in, grads_in, denominator_in, mean_loss_in = update_in_shardings
+    in_shardings = (
+        named(state_in),
+        named(grads_in),
+        named(denominator_in),
+        # `mean_loss` is passed only under skip_step_on_spikes; otherwise the argument is None.
+        replicated_device if self._config.skip_step_on_spikes else mean_loss_in,
+    )
+    out_shardings = (
+        named(update_out_shardings[0]),
+        replicated_device,  # the gradient norm
+        replicated_device,  # the skip flag, or nothing when no skip rule is on
+    )
+    return in_shardings, out_shardings
+
+  def _log_memory_stats(self, where: str) -> None:
+    """Logs one MEM-STATS line: `memory_stats()` of the first local device, during this engine's first steps.
+
+    Diagnostics only, whatever optimizer_device_resident_gib is: the device memory the train state, the accumulator
+    and the dispatched programs hold, which is what a device-resident budget has to fit beside. Called at
+    `_MEM_STATS_STEPS` steps at most, never in a program, and it never raises: a backend that does not report
+    memory says so in the line.
+    """
+    if jax.process_index() != 0:
+      return
+    try:
+      device = jax.local_devices()[0]
+      stats = device.memory_stats()
+    except Exception as e:  # pylint: disable=broad-except
+      logging.info("MEM-STATS train_step=%d where=%s unavailable: %r", self.train_step, where, e)
+      return
+    if not stats:
+      logging.info(
+          "MEM-STATS train_step=%d where=%s unavailable: memory_stats() returned %r", self.train_step, where, stats
+      )
+      return
+
+    def show(key):
+      value = stats.get(key)
+      return f"{key}={value} ({value / 2**30:.3f} GiB)" if isinstance(value, (int, float)) else f"{key}={value}"
+
+    logging.info(
+        "MEM-STATS train_step=%d where=%s device=%s %s %s %s %s",
+        self.train_step,
+        where,
+        device,
+        show("bytes_in_use"),
+        show("peak_bytes_in_use"),
+        show("bytes_limit"),
+        show("largest_free_block_bytes"),
+    )
 
   def _with_optimizer_on_device(self, state_pure: Any) -> Any:
     """Returns `state_pure` with every optimizer leaf in pinned host memory moved onto the device.
@@ -1519,6 +1746,38 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return x
     return x.astype(self._config.grad_dtype)
 
+  def _freeze_mask_for(self, tree: Any) -> Any:
+    """Returns which leaves of `tree` `trainable_parameters_mask` freezes, or None if it freezes none.
+
+    A pytree of Python bools with `tree`'s structure, read off the leaves' paths alone, so `tree` can
+    be the parameters or a gradient tree shaped like them. `_compile_for_batch` caches the parameters'
+    mask in `_freeze_mask`; while that cache is empty -- on the eager path, or for a kernel traced
+    after `_invalidate_pure_state` -- the mask is computed from `tree` instead. `_fwd_bwd_kernel` and
+    `_update_kernel` both read it here, so the leaves whose gradient `fwd_bwd` stops are exactly the
+    leaves `update` zeroes.
+    """
+    # Read once: a background compile can trace a kernel while the main thread empties the cache
+    # (`_disable_pure_state`), and a second read could then return None and skip the stop.
+    freeze_mask = self._freeze_mask
+    if freeze_mask is not None:
+      return freeze_mask
+    if self._freeze_mask_fn is None:
+      return None
+    return self._freeze_mask_fn(tree)
+
+  def _stop_frozen_gradients(self, params: Any) -> Any:
+    """Returns `params` with `jax.lax.stop_gradient` on every leaf `trainable_parameters_mask` freezes.
+
+    Takes effect only inside the function being differentiated: `_fwd_bwd_kernel`'s `diff_wrapper`
+    calls it on the parameters it differentiates. See the comment there for why it changes no number.
+    The leaves stay in the gradient tree, as zeros, so every kernel's signature, the accumulator's
+    layout and the checkpoint format are unchanged.
+    """
+    freeze_mask = self._freeze_mask_for(params)
+    if freeze_mask is None:
+      return params
+    return jax.tree.map(lambda x, frozen: jax.lax.stop_gradient(x) if frozen else x, params, freeze_mask)
+
   def _fwd_bwd_kernel(self, params, rest, batch, graphdef=None):
     """Executes a single forward and backward pass.
 
@@ -1532,7 +1791,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       `(primary_loss, aux_metrics, new_rest, grads, denominator)`: this micro-batch's gradients,
       not yet normalized, in the accumulation dtype except the leaves in `_uncast_grad_mask`, which
-      keep the parameters' dtype; and the loss denominator to normalize them by. Under
+      keep the parameters' dtype, and exactly zero for the parameters `trainable_parameters_mask`
+      freezes; and the loss denominator to normalize them by. Under
       `retry_when_tokens_dropped`, followed by `has_moe_overflow`: whether any MoE layer's ragged
       buffer dropped tokens, in which case the gradients and denominator are zero and `fwd_bwd`
       reruns the micro-batch once the flag reaches the host.
@@ -1540,6 +1800,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
     def diff_wrapper(p, r, b):
+      # No gradient for frozen parameters. `update()` zeroes the gradient of every leaf that
+      # `trainable_parameters_mask` freezes before the norm, clipping and the optimizer see it, so
+      # nothing uses that gradient; stopped here, inside the differentiated function, it is not computed
+      # either (on `value_and_grad`'s arguments the stop would change nothing). JAX emits no
+      # weight-gradient op for those leaves -- a custom-VJP kernel still runs its whole backward, and
+      # XLA drops the cotangent nobody reads where it can -- and `fwd_bwd` returns a constant zero for
+      # them, with nothing to reduce-scatter or all-reduce inside it. The gradient through a frozen
+      # weight into the activations, and on to the trainable parameters, comes from the same ops as
+      # before, so the rest is the same computation: bitwise equal on CPU
+      # (`maxtext_engine_frozen_grad_test.py`), though on TPU XLA may fuse the smaller program
+      # differently. The MLPerf RL recipes freeze the MoE router (`routed_experts/gate/kernel`), so this
+      # drops the router's weight gradient and its reduce-scatter from every MoE layer.
+      p = self._stop_frozen_gradients(p)
       mdl = nnx.merge(graphdef if graphdef is not None else self._model_graphdef, p, r, copy=True)
       if self._gen_model_input_fn is not None:
         # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
@@ -1778,10 +2051,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Cast to `grad_dtype` once, after the sum and the division, as `train.py` does with its
       # accumulated `raw_grads`. A no-op unless `grad_accumulation_dtype` differs from it.
       grads = jax.tree.map(self._to_grad_dtype, grads)
-      freeze_mask = self._freeze_mask
-      if freeze_mask is None and self._freeze_mask_fn is not None:
-        freeze_mask = self._freeze_mask_fn(accumulated_grads)
+      freeze_mask = self._freeze_mask_for(accumulated_grads)
       if freeze_mask is not None:
+        # `fwd_bwd` already returns zeros for these leaves (`_stop_frozen_gradients`). Zeroing them again
+        # costs nothing and still matters: an accumulator restored from an intra-step checkpoint written
+        # by an older engine, or under another mask, can hold non-zero gradients for them, and it keeps
+        # frozen parameters out of the norm and clipping below by construction.
 
         def _apply_freeze(g, is_frozen):
           return jnp.zeros_like(g) if is_frozen else g
@@ -1892,6 +2167,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _prepare_batch(self, payload: Any) -> Any:
     """Maps a payload to the inputs the loss function is called with."""
+    if getattr(payload, "segment_ids", None) is not None and self._config.use_gdn_kernel and not self._config.packing:
+      raise ValueError(
+          "The payload carries segment_ids, which Tunix sets only on sequence-packed rows, but packing=False: "
+          "with use_gdn_kernel=True the GDN kernel then ignores those document boundaries in training. "
+          "Set packing=True."
+      )
     if self._gen_model_input_fn is not None:
       if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
         payload = dataclasses.replace(payload, metadata={})
@@ -2091,6 +2372,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             lambda s: s.with_memory_kind(_DEVICE_MEMORY_KIND),
             state_mesh_shardings[_OPTIMIZER_STATE_KEY],
         )
+      # optimizer_device_resident_gib: `_offload_optimizer_state` above kept the chosen leaves in device memory, so
+      # the shardings read off the state already give them `device` and the update takes and returns them there,
+      # donated, i.e. in place.
+      if self._opt_resident_mask is not None:
+        update_in_shardings, update_out_shardings = self._resident_update_shardings(
+            update_in_shardings, update_out_shardings
+        )
+      elif _optimizer_device_resident_budget(self._config) and not self._optimizer_offload_enabled():
+        raise ValueError(f"{_OPT_RESIDENT_KEY} > 0 needs optimizer_memory_host_offload=true.")
       # A live accumulator predates this compile -- a checkpoint restore hands one back, and
       # a recompile can flip the deferral on or off -- so it may not be on the shardings the
       # kernels were just built for. `jax.jit` matches `in_shardings` exactly and would
@@ -2115,6 +2405,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._zero1_params_shardings = None
       self._gathered_params_shardings = None
       self._optimizer_device_shardings = None
+      if _optimizer_device_resident_budget(self._config):
+        raise ValueError(f"{_OPT_RESIDENT_KEY} > 0 needs a mesh and optimizer_memory_host_offload=true.")
 
     # 1. JIT Compile Micro FWD/BWD Pass, and the add that accumulates it.
     #
@@ -2404,17 +2696,66 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     cast = iter(self._cast_uncast_grads([g for g, is_uncast in zip(leaves, uncast) if is_uncast]))
     return treedef.unflatten([next(cast) if is_uncast else g for g, is_uncast in zip(leaves, uncast)])
 
-  @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
-    """Executes a micro-batch forward-backward pass and accumulates gradients.
+  def prepare_fwd_bwd_input(self, payload: abstract_engine.TrainerPayload) -> PreparedFwdBwdInput:
+    """Maps a micro-batch to loss inputs and places them on the mesh, ahead of its `fwd_bwd`.
+
+    For a caller that receives the micro-batch early (Tunix's `TrainerWorker.stage_fwd_bwd`,
+    while the device still computes the previous step's last micro-batch, and its update unless
+    the caller deferred it): the input mapping and the host-to-device copy run here, and
+    `fwd_bwd(prepared)` later dispatches without moving data. The traced inputs go to exactly
+    the shardings `fwd_bwd` compiles them onto (`_batch_data_shardings`), with the closed-over
+    half untouched, so the kernel, its inputs and the result are those of `fwd_bwd(payload)`.
+    Holds one micro-batch of inputs in device memory until that `fwd_bwd`.
+
+    Safe between a step's last `fwd_bwd` and its `update()`, the order Tunix uses to stage
+    before a deferred update. Under `retry_when_tokens_dropped` the last micro-batch's
+    overflow flag is still pending there: this neither reads nor resolves it, and the dropless
+    rerun `update()` may then run reads the inputs that micro-batch's pending check kept, never
+    the prepared ones. The mapping reads only the payload (no parameter, gradient or optimizer
+    state), so the prepared input is the same whether the update runs before or after it.
 
     Args:
       payload: Packed micro-batch training input.
+
+    Returns:
+      The input to pass to `fwd_bwd` instead of `payload`.
+    """
+    batch = self._prepare_batch(payload)
+    if self._mesh is not None and isinstance(batch, dict):
+      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+      dynamic_batch = jax.device_put(dynamic_batch, self._batch_data_shardings(dynamic_batch))
+      batch = {**dynamic_batch, **static_batch}
+    return PreparedFwdBwdInput(batch=batch)
+
+  def wait_for_device(self) -> float:
+    """Blocks until the computations this engine holds in flight have finished; returns the seconds waited.
+
+    For a caller that did work after dispatching and wants to know whether it hid behind the
+    device (Tunix's `TrainerWorker.stage_fwd_bwd` reports it): ~0 means the device was already
+    idle. It waits on what the in-flight throttler holds: each queued `fwd_bwd`'s loss and the
+    last `update`'s gradient norm, so the update counts. Anything dispatched before those was
+    waited on when it left the queue. A blocking wait, not an `is_ready()` poll: under Pathways
+    a readiness check is an RPC to the proxy, so a poll can read "not ready" for work that has
+    finished. Changes no state: the in-flight queue and its pending metrics are left as they
+    were (see `InflightThrottler.block_until_ready`), and so is a pending overflow check: under
+    `retry_when_tokens_dropped` the last micro-batch's flag, and its dropless rerun if it
+    overflowed, are still left to the next `fwd_bwd` or `update()`.
+    """
+    start = time.monotonic()
+    self._throttler.block_until_ready()
+    return time.monotonic() - start
+
+  @_profiled_step("fwd_bwd", control_profile=True)
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload | PreparedFwdBwdInput, **kwargs: Any) -> None:
+    """Executes a micro-batch forward-backward pass and accumulates gradients.
+
+    Args:
+      payload: Packed micro-batch training input, or what `prepare_fwd_bwd_input` made of it.
       **kwargs: Implementation-specific options. `apply_optimizer` (bool), which Tunix passes as the
         orchestrator's flag for the step's final micro-batch, selects the final micro-batch's dropless program
         under `retry_dropless_final_micro_batch`; everything else is ignored.
     """
-    batch = self._prepare_batch(payload)
+    batch = payload.batch if isinstance(payload, PreparedFwdBwdInput) else self._prepare_batch(payload)
     apply_optimizer = kwargs.get("apply_optimizer")
     final = False
     if self._dropless_replay and self._final_dropless:
@@ -2529,6 +2870,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           fwd_bwd_kernel = functools.partial(
               self._fwd_bwd_kernel, graphdef=self._final_graphdef_for(self._model_graphdef, params, rest)
           )
+    if self._micro_step_count == 0 and self._mem_stats_step < _MEM_STATS_STEPS:
+      self._log_memory_stats("before micro-batch 1")
     with self._sharding_ctx():
       outputs = fwd_bwd_kernel(params, rest, inputs)
       if (
@@ -2573,6 +2916,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # the update step.
     self._throttler.add_computation(computation=loss, metrics=None)
 
+    # Readiness token for Tunix's step timer (TRAINER_STEP_TIMING): the loss rather than the running sums, which the
+    # next micro-batch's accumulate donates. A dropless rerun dispatched later replaces it (`_resolve_overflow_check`).
+    self.last_fwd_bwd_token = loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
     self._accumulated_grads = acc_grads
     self._accumulated_denominator = acc_denom
     if self._dropless_replay:
@@ -2608,6 +2954,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._record_micro_batch(loss, aux)
     self._micro_step_count += 1
     self._total_micro_steps += 1
+    if self._micro_step_count == 1 and self._mem_stats_step == 0:
+      self._log_memory_stats("after micro-batch 1 dispatched")
 
   def _record_micro_batch(self, loss: Any, aux: Any) -> None:
     """Records a micro-batch's loss and auxiliary metrics, and caches its loss for `update`."""
@@ -2707,6 +3055,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             self._accumulated_grads, self._accumulated_denominator, grads, denominator
         )
       self._throttler.add_computation(computation=loss, metrics=None)
+      # The rerun is the last device work dispatched so far, so it carries the readiness token from here on.
+      self.last_fwd_bwd_token = loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
       if bool(rerun_overflow):
         raise RuntimeError(
             f"The dropless rerun of micro step {check.micro_step} still overflowed; check apply_dropless_overrides."
@@ -2754,7 +3104,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           logging.warning(
               "MOE_DROP_AUDIT step=%d micro=%d program=%s replayed=%s dropped_assignments_used=-1 (no audit was "
               "sown: log_moe_drops needs the ring-of-experts ragged path, and a Tunix loss that returns it)",
-              entry.step, entry.micro, entry.program, entry.replayed,
+              entry.step,
+              entry.micro,
+              entry.program,
+              entry.replayed,
           )
         continue
       dropped = np.asarray(used["dropped"]).astype(np.int64).ravel()
@@ -2869,6 +3222,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Back to pinned host memory, where the compiled update's `out_shardings` would put it.
       self._offload_optimizer_state()
 
+    # Same readiness signal the throttler uses below: the norm comes out of the update executable.
+    self.last_update_token = grad_norm
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
     if self._log_moe_drops:
@@ -2904,6 +3259,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         grad_norm if grad_norm is not None else (self._state if self._state is not None else self._model),
         self._metrics_recorder.get_step_metrics(self.train_step),
     )
+    if self._mem_stats_step == 0:
+      self._log_memory_stats("after update dispatched")
+    self._mem_stats_step += 1
 
     self._cached_losses.clear()
     self._accumulated_grads = None
@@ -3753,7 +4111,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self.save_checkpoint(metadata=None, force=True)
       self._checkpoint_manager.close()
 
-    if self._compile_executor is not None:
+    if getattr(self, "_compile_executor", None) is not None:
       # Cancels a compile not yet started; one already running cannot be stopped, and interpreter exit joins it.
       self._compile_executor.shutdown(wait=False, cancel_futures=True)
       self._compile_executor = None

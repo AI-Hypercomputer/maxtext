@@ -21,7 +21,6 @@ limitations under the License.
 
 from typing import Optional
 
-from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax
@@ -29,15 +28,14 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
-from maxtext.layers import initializers
 from maxtext.layers import linears
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import with_logical_constraint
 
 
 # -----------------------------------------
@@ -169,7 +167,7 @@ class Olmo3DecoderLayer(nnx.Module):
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     attention_lnx, kv_cache = self.attention(
@@ -183,13 +181,13 @@ class Olmo3DecoderLayer(nnx.Module):
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = nn.with_logical_constraint(
+    attention_lnx = with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
     # Normalize stream before addition
     attention_lnx = self.post_self_attention_layer_norm(attention_lnx)
-    attention_lnx = nn.with_logical_constraint(
+    attention_lnx = with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
@@ -197,16 +195,16 @@ class Olmo3DecoderLayer(nnx.Module):
 
     # Fully Connected
     mlp_lnx = self.mlp(intermediate_inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Normalize stream before addition
     mlp_lnx = self.post_mlp_layer_norm(mlp_lnx)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
 
-    layer_output = nn.with_logical_constraint(
+    layer_output = with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
@@ -235,18 +233,12 @@ class Olmo3DecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-Olmo3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Olmo3DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
 class Olmo3ScannableBlock(nnx.Module):
   """A repeatable block of Olmo 3 decoder layers.
 
     This block applies multiple decoder layers sequentially, using the attention
     pattern defined by OLMO3_ATTENTION_PATTERN. It's designed to be
-    used with `nn.scan` for efficient compilation.
+    used with `jax.lax.scan` for efficient compilation.
 
   Attributes:
     config: Config, MaxText model config
@@ -295,7 +287,7 @@ class Olmo3ScannableBlock(nnx.Module):
   ):
     cfg = self.config
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
@@ -318,9 +310,3 @@ class Olmo3ScannableBlock(nnx.Module):
       return y, None
     else:
       return y
-
-
-Olmo3ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Olmo3ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

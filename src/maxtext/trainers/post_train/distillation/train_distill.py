@@ -442,12 +442,12 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     for name, value in aux.items():
       if name not in self._buffered_train_metrics.additional_metrics:
-        self._buffered_train_metrics.additional_metrics[name] = (  # pyrefly: ignore[unsupported-operation]
+        self._buffered_train_metrics.additional_metrics[name] = (
             [],
             distillation_utils.weighted_mean,
-        )  # pyrefly: ignore[unsupported-operation]
+        )
 
-      self._buffered_train_metrics.additional_metrics[name][0].append(value)  # pyrefly: ignore[bad-argument-type]
+      self._buffered_train_metrics.additional_metrics[name][0].append(value)
 
     # Compact per-step summary: only the metrics that change run-to-run, and
     # only those that are nonzero (so MoE / feature-distill terms hide when off).
@@ -639,6 +639,7 @@ def build_training_components(
         skip_first_n_steps=student_config.skip_first_n_steps_for_profiler,
         profiler_steps=student_config.profiler_steps,
         set_profile_options=False,
+        enable_continuous_profiling=student_config.enable_continuous_profiling,
     )
 
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
@@ -914,15 +915,15 @@ def main(argv: Sequence[str]) -> None:
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
-  # Batch shape (per_device_batch_size / max_target_length / gradient_accumulation_steps)
+  # Batch layout (per_device_batch_size / max_target_length / gradient_accumulation_steps / packing)
   # must be set at the YAML top level — not inside *_overrides — since student and
   # teacher share the input pipeline.
-  for batch_field in ("per_device_batch_size", "max_target_length", "gradient_accumulation_steps"):
+  for batch_field in ("per_device_batch_size", "max_target_length", "gradient_accumulation_steps", "packing"):
     s_val = getattr(student_config, batch_field)
     t_val = getattr(teacher_config, batch_field)
     if s_val != t_val:
       raise ValueError(
-          f"Distillation batch shape mismatch on '{batch_field}': "
+          f"Distillation batch layout mismatch on '{batch_field}': "
           f"student={s_val} vs teacher={t_val}. The teacher consumes batches from the "
           f"student-driven input pipeline, so these must agree. Set '{batch_field}' at "
           f"the YAML top level (not inside *_overrides) so both configs inherit it."
