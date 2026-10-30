@@ -104,7 +104,7 @@ def load_documents(path: str) -> list[dict]:
   """The JobSet-like documents of a DRY_RUN output: YAML documents split on `---`; chunks that do not parse as a
   mapping (launcher log lines, kubectl output) are skipped."""
   docs = []
-  with open(path) as f:
+  with open(path, encoding="utf-8") as f:
     text = f.read()
   for chunk in re.split(r"(?m)^---\s*$", text):
     try:
@@ -195,10 +195,9 @@ def libtpu_init_args(prefix: str) -> str:
 
 
 def rewrite_env_prefix(prefix: str, libtpu: list[str], extra_maxtext: str, replace_maxtext: str = "") -> str:
+  """Rewrites the trainer command's env prefix: LIBTPU_INIT_ARGS and the MaxText flag overrides."""
   # LIBTPU_INIT_ARGS='...' (single-quoted in the e2e render).
-  prefix, n = re.subn(
-      r"LIBTPU_INIT_ARGS='[^']*'", lambda _: "LIBTPU_INIT_ARGS=" + shlex.quote(" ".join(libtpu)), prefix
-  )
+  prefix, n = re.subn(r"LIBTPU_INIT_ARGS='[^']*'", lambda _: "LIBTPU_INIT_ARGS=" + shlex.quote(" ".join(libtpu)), prefix)
   if n != 1:
     raise ValueError(f"expected one LIBTPU_INIT_ARGS in the env prefix, found {n}")
   for kv in replace_maxtext.split():
@@ -246,9 +245,7 @@ def current_slice(js: dict) -> tuple[str, str]:
   return accel, topo
 
 
-def apply_trainer_slice(
-    js: dict, trainer_flags: list[str], orch_flags: list[str], topo: str, devices_per_chip: int = 2
-):
+def apply_trainer_slice(js: dict, trainer_flags: list[str], orch_flags: list[str], topo: str, devices_per_chip: int = 2):
   """Re-targets the trainer JobSet and flags at a `topo` slice (e.g. 4x8x8) of the same accelerator, filling it with
   FSDP.
 
@@ -347,6 +344,7 @@ def aot_env(env_prefix: str, libtpu: list[str], trainer_flags: list[str]) -> str
 
 
 def build_parser() -> argparse.ArgumentParser:
+  """Returns the command-line parser for render_bench.py."""
   p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
   p.add_argument("--launch-render", default="", help="DRY_RUN output of the e2e launcher (multi-document YAML)")
   p.add_argument("--train-yaml", default="", help="the e2e trainer JobSet alone (instead of --launch-render)")
@@ -386,9 +384,9 @@ def main(argv=None):
       sys.exit("pass either --launch-render or --train-yaml/--orch-yaml")
     train, orch = select_jobsets(load_documents(a.launch_render), a.trainer_main, a.orch_main)
   elif a.train_yaml and a.orch_yaml:
-    with open(a.train_yaml) as f:
+    with open(a.train_yaml, encoding="utf-8") as f:
       train = yaml.safe_load(f)
-    with open(a.orch_yaml) as f:
+    with open(a.orch_yaml, encoding="utf-8") as f:
       orch = yaml.safe_load(f)
   else:
     sys.exit("pass --launch-render, or both --train-yaml and --orch-yaml")
@@ -437,7 +435,7 @@ def main(argv=None):
   md.setdefault("labels", {})["scheduling.x-k8s.io/gang-id"] = a.name
   js["spec"].setdefault("failurePolicy", {})["maxRestarts"] = 0
 
-  with open(a.driver) as f:
+  with open(a.driver, encoding="utf-8") as f:
     driver_src = f.read()
   main_c["command"] = [
       "bash",
@@ -460,7 +458,7 @@ def main(argv=None):
     extras = [f for f in env["value"].split() if f.split("=", 1)[0] not in base_keys]
     env["value"] = " ".join(libtpu + extras)
 
-  with open(a.out, "w") as f:
+  with open(a.out, "w", encoding="utf-8") as f:
     yaml.dump(js, f, Dumper=_LiteralDumper, sort_keys=False, width=120)
   print(a.out)
   return 0

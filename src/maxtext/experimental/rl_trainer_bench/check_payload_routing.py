@@ -57,34 +57,67 @@ def main():
   assert datatypes.UNSET_ROUTED_EXPERT == d.UNSET_ROUTED_EXPERT
   algo = algorithm_adapter.GRPOAdapter(
       algo_config=algorithm_config.GRPOConfig(num_generations=16, beta=0.0, temperature=1.0),
-      mini_batch_size=72, train_micro_batch_size=64, max_packed_len=65536, max_response_length=57344)
-  bc = batch_assembly.BatchConfig(pad_id=0, max_prompt_length=8192, max_response_length=57344,
-                                  max_seq_token_per_tpu=65536, max_segments_per_packed_row=16,
-                                  trainer_fsdp=32, trainer_dp=1, trainer_expert=2)
+      mini_batch_size=72,
+      train_micro_batch_size=64,
+      max_packed_len=65536,
+      max_response_length=57344,
+  )
+  bc = batch_assembly.BatchConfig(
+      pad_id=0,
+      max_prompt_length=8192,
+      max_response_length=57344,
+      max_seq_token_per_tpu=65536,
+      max_segments_per_packed_row=16,
+      trainer_fsdp=32,
+      trainer_dp=1,
+      trainer_expert=2,
+  )
   t = time.monotonic()
-  warm = trainer_warmup.build_warmup_payload(algo=algo, batch_config=bc, num_generations=16, mini_batch_size=72,
-                                             train_micro_batch_size=64, routed_experts_shape=(LAYERS, TOP_K))
+  warm = trainer_warmup.build_warmup_payload(
+      algo=algo,
+      batch_config=bc,
+      num_generations=16,
+      mini_batch_size=72,
+      train_micro_batch_size=64,
+      routed_experts_shape=(LAYERS, TOP_K),
+  )
   print(f"warm-up payload {time.monotonic() - t:.1f}s: {batch_assembly.describe_payload(warm)}", flush=True)
   w_ratio, w_pad = d.payload_shard_load_ratio(warm, num_experts=NUM_EXPERTS, ep=EP)
   print(f"warm-up: pad {w_pad:.3f}, replayed max ratio {w_ratio.max():.3f} (all routing UNSET: the router decides)")
 
-  kw = dict(num_experts=NUM_EXPERTS, ep=EP, pad_id=0, vocab_size=248_000)
+  kw = {"num_experts": NUM_EXPERTS, "ep": EP, "pad_id": 0, "vocab_size": 248_000}
   targets = d.layer_targets(LAYERS)
   results = {}
-  for name, extra in (("regular", {}), ("scale1.46", {"scale": 1.46}), ("uniform", {"routing": "uniform"}),
-                      ("final", {"pad_rows_fraction": 0.25, "seed": 1})):
+  for name, extra in (
+      ("regular", {}),
+      ("scale1.46", {"scale": 1.46}),
+      ("uniform", {"routing": "uniform"}),
+      ("final", {"pad_rows_fraction": 0.25, "seed": 1}),
+  ):
     t = time.monotonic()
     p = d.realistic_payload(warm, **kw, **extra)
     gen = time.monotonic() - t
     ratio, pad = d.payload_shard_load_ratio(p, num_experts=NUM_EXPERTS, ep=EP)
     top = np.argsort(-ratio)[:5]
-    print(f"{name}: built {gen:.1f}s, pad {pad:.4f}, max ratio {ratio.max():.3f}, hottest "
-          f"{[(int(l), round(float(ratio[l]), 3)) for l in top]}, min {ratio.min():.3f}", flush=True)
+    print(
+        f"{name}: built {gen:.1f}s, pad {pad:.4f}, max ratio {ratio.max():.3f}, hottest "
+        f"{[(int(l), round(float(ratio[l]), 3)) for l in top]}, min {ratio.min():.3f}",
+        flush=True,
+    )
     results[name] = (p, ratio, pad)
 
   p, ratio, pad = results["regular"]
-  for f in ("completion_ids", "completion_mask", "advantages", "segment_ids", "segment_positions",
-            "old_per_token_logps", "rollout_per_token_logps", "overlong", "routed_experts"):
+  for f in (
+      "completion_ids",
+      "completion_mask",
+      "advantages",
+      "segment_ids",
+      "segment_positions",
+      "old_per_token_logps",
+      "rollout_per_token_logps",
+      "overlong",
+      "routed_experts",
+  ):
     a, b = np.asarray(getattr(p, f)), np.asarray(getattr(warm, f))
     assert a.shape == b.shape and a.dtype == b.dtype, (f, a.shape, b.shape, a.dtype, b.dtype)
   assert p.num_segments == warm.num_segments

@@ -32,14 +32,30 @@ import re
 import statistics
 import sys
 
-DT = {"bf16": 2, "f32": 4, "s32": 4, "u32": 4, "f16": 2, "s8": 1, "u8": 1, "pred": 1, "f8e4m3fn": 1, "s16": 2,
-      "u16": 2, "f64": 8, "s64": 8, "u64": 8, "f8e5m2": 1}
+DT = {
+    "bf16": 2,
+    "f32": 4,
+    "s32": 4,
+    "u32": 4,
+    "f16": 2,
+    "s8": 1,
+    "u8": 1,
+    "pred": 1,
+    "f8e4m3fn": 1,
+    "s16": 2,
+    "u16": 2,
+    "f64": 8,
+    "s64": 8,
+    "u64": 8,
+    "f8e5m2": 1,
+}
 KINDS = ("all-gather", "reduce-scatter", "all-reduce", "all-to-all", "collective-permute")
 COMPUTE = re.compile(r"\b(fusion|convolution|custom-call|dot)\(")
 SHAPE = re.compile(r"\b([a-z0-9]+)\[([0-9,]*)\]")
 
 
 def nbytes(shape_text):
+  """Returns the byte size of an HLO shape string (tuples summed)."""
   tot = 0
   for dt, dims in SHAPE.findall(shape_text):
     if dt not in DT:
@@ -61,9 +77,12 @@ def kind_of(name):
 
 
 def parse(path):
+  """Splits an HLO text dump into {computation name: [(instruction name, right-hand side)]}."""
   comps = {}
   cur = None
-  for line in open(path):
+  with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+  for line in lines:
     if cur is None:
       m = re.match(r"^(ENTRY )?%([\w.\-]+) .*\{\s*$", line)  # headers start at column 0, instructions are indented
       if m:
@@ -92,7 +111,6 @@ def main():
   for cname, instrs in comps.items():
     # Only scheduled computations that hold async-starts or wrapped collectives matter; computations that are
     # the async bodies themselves (async_computation.*, wrapped_*) are skipped as places.
-    pos = {n: i for i, (n, _) in enumerate(instrs)}
     for i, (n, rhs) in enumerate(instrs):
       native = re.search(r"\) (all-gather|reduce-scatter|all-reduce|all-to-all|collective-permute)-start\(", rhs)
       if " async-start(" in rhs or native:
@@ -109,11 +127,10 @@ def main():
             break
         if done is None:
           continue
-        between = instrs[i + 1:done]
+        between = instrs[i + 1 : done]
         ncomp = sum(1 for _, r in between if COMPUTE.search(r.split(" metadata=")[0]))
         size = nbytes(instrs[done][1].split(done_op)[0])
-        rows.append((k, thread, "entry" if cname.startswith("main.") else "loop", size, done - i, ncomp,
-                     cname, n))
+        rows.append((k, thread, "entry" if cname.startswith("main.") else "loop", size, done - i, ncomp, cname, n))
       else:
         m = re.search(r"[\]\}\)] (all-gather|reduce-scatter|all-reduce|all-to-all|collective-permute)\(", rhs)
         if m and any(" async-start(" in r for _, r in instrs):  # only scheduled computations, not reducers
@@ -123,13 +140,17 @@ def main():
   agg = collections.defaultdict(list)
   for r in rows:
     agg[(r[0], r[1], r[2])].append(r)
-  print(f"{'kind':16s} {'thread':10s} {'where':5s} {'n':>5s} {'MiB med':>8s} {'MiB tot':>9s} {'instr med':>9s} "
-        f"{'compute med':>11s} "
-        f"{'compute=0':>9s}")
+  print(
+      f"{'kind':16s} {'thread':10s} {'where':5s} {'n':>5s} {'MiB med':>8s} {'MiB tot':>9s} {'instr med':>9s} "
+      f"{'compute med':>11s} "
+      f"{'compute=0':>9s}"
+  )
   for (k, t, w), rs in sorted(agg.items()):
-    print(f"{k:16s} {t:10s} {w:5s} {len(rs):5d} {statistics.median(r[3] for r in rs) / 2**20:8.2f} "
-          f"{sum(r[3] for r in rs) / 2**20:9.1f} {statistics.median(r[4] for r in rs):9.0f} "
-          f"{statistics.median(r[5] for r in rs):11.0f} {sum(1 for r in rs if r[5] == 0):9d}")
+    print(
+        f"{k:16s} {t:10s} {w:5s} {len(rs):5d} {statistics.median(r[3] for r in rs) / 2**20:8.2f} "
+        f"{sum(r[3] for r in rs) / 2**20:9.1f} {statistics.median(r[4] for r in rs):9.0f} "
+        f"{statistics.median(r[5] for r in rs):11.0f} {sum(1 for r in rs if r[5] == 0):9d}"
+    )
   print("synchronous collectives (no start/done; the TensorCore waits on them) in scheduled computations:")
   for key in sorted(sync):
     print(f"  {key[0]:16s} {key[1]:5s} n={sync[key]:4d} MiB tot={sync_bytes[key] / 2**20:9.1f}")

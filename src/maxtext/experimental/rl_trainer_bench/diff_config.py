@@ -24,7 +24,9 @@ import sys
 
 def load(path):
   out = {}
-  for line in open(path, errors="replace"):
+  with open(path, encoding="utf-8", errors="replace") as f:
+    lines = f.readlines()
+  for line in lines:
     m = re.search(r"Config param ([A-Za-z0-9_]+): (.*)$", line.rstrip("\n"))
     if m:
       out[m.group(1)] = m.group(2).strip()

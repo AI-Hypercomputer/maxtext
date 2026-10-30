@@ -51,6 +51,11 @@ The intended difference from e2e: no checkpoint is loaded (random init; the trai
 cleared by the launcher), so weights and routing values differ while shapes, shardings and the program match.
 """
 
+# The JAX, Tunix and MaxText imports sit inside the functions that need them, so the CPU tests and --help run
+# without a TPU runtime or the Tunix package installed.
+# pylint: disable=import-outside-toplevel
+
+import json
 import logging
 import os
 import shlex
@@ -72,10 +77,66 @@ UNSET_ROUTED_EXPERT = -1  # tunix.experimental.common.datatypes.UNSET_ROUTED_EXP
 # `probe_index_to_layer`). For another model or a later training phase, pass your own table in the same order with
 # ROUTING_TARGETS="r0,r1,..." (one ratio per layer), or stretch this one with ROUTING_SCALE.
 PROBE_REGULAR_MEAN_RATIO = (
-    1.721, 1.499, 1.276, 1.515, 1.541, 1.797, 1.466, 1.607, 1.743, 1.341, 1.504, 1.917, 1.570, 1.506, 1.450,
-    1.269, 1.823, 1.241, 1.496, 1.417, 1.388, 1.316, 1.665, 1.820, 1.353, 1.576, 1.336, 1.926, 1.355, 1.532,
-    1.773, 1.518, 1.224, 1.733, 1.507, 1.250, 1.579, 1.466, 1.376, 1.507, 1.558, 1.309, 1.534, 1.733, 1.543,
-    1.280, 1.519, 1.475, 1.497, 1.262, 1.511, 1.463, 1.698, 1.694, 1.746, 1.664, 1.407, 1.524, 1.721, 1.995,
+    1.721,
+    1.499,
+    1.276,
+    1.515,
+    1.541,
+    1.797,
+    1.466,
+    1.607,
+    1.743,
+    1.341,
+    1.504,
+    1.917,
+    1.570,
+    1.506,
+    1.450,
+    1.269,
+    1.823,
+    1.241,
+    1.496,
+    1.417,
+    1.388,
+    1.316,
+    1.665,
+    1.820,
+    1.353,
+    1.576,
+    1.336,
+    1.926,
+    1.355,
+    1.532,
+    1.773,
+    1.518,
+    1.224,
+    1.733,
+    1.507,
+    1.250,
+    1.579,
+    1.466,
+    1.376,
+    1.507,
+    1.558,
+    1.309,
+    1.534,
+    1.733,
+    1.543,
+    1.280,
+    1.519,
+    1.475,
+    1.497,
+    1.262,
+    1.511,
+    1.463,
+    1.698,
+    1.694,
+    1.746,
+    1.664,
+    1.407,
+    1.524,
+    1.721,
+    1.995,
 )
 
 
@@ -127,10 +188,12 @@ def routing_pool(target, num_experts, ep, top_k, pool_size, rng, hot_shard):
   weight multiplier found by bisection, the other experts are uniform."""
   per_shard = num_experts // ep
   hot = np.zeros(num_experts, dtype=bool)
-  hot[hot_shard * per_shard:(hot_shard + 1) * per_shard] = True
+  hot[hot_shard * per_shard : (hot_shard + 1) * per_shard] = True
+
   def draw(log_m, n):
     sub = np.random.default_rng(rng.integers(1 << 62))
     return _gumbel_topk(np.where(hot, log_m, 0.0), n, top_k, sub)
+
   lo, hi = 0.0, 12.0
   if target <= 1.0:
     return draw(0.0, pool_size)
@@ -144,9 +207,24 @@ def routing_pool(target, num_experts, ep, top_k, pool_size, rng, hot_shard):
   return draw(0.5 * (lo + hi), pool_size)
 
 
-def realistic_payload(base, *, num_experts, ep=8, routing="probe", scale=1.0, pad_fraction=0.07,
-                      pad_rows_fraction=0.0, pad_id=0, vocab_size=151_000, seed=0, pool_size=8192, cycle=4,
-                      layer_targets_override=None, advantages="inherit", probe_targets=None):
+def realistic_payload(
+    base,
+    *,
+    num_experts,
+    ep=8,
+    routing="probe",
+    scale=1.0,
+    pad_fraction=0.07,
+    pad_rows_fraction=0.0,
+    pad_id=0,
+    vocab_size=151_000,
+    seed=0,
+    pool_size=8192,
+    cycle=4,
+    layer_targets_override=None,
+    advantages="inherit",
+    probe_targets=None,
+):
   """`base` (the warm-up payload) with realistic tokens, routing and padding; same shapes, dtypes, fields.
 
   Per row: the real tokens fill the first (1 - pad_fraction) of the row, split into the row's own number of
@@ -202,7 +280,7 @@ def realistic_payload(base, *, num_experts, ep=8, routing="probe", scale=1.0, pa
     pos[r] = np.arange(budget)
   ids[real_mask] = rng.integers(256, vocab_size, size=int(real_mask.sum()), dtype=ids.dtype)
 
-  out = dict(completion_ids=ids, segment_ids=seg, segment_positions=pos, completion_mask=cm, advantages=adv)
+  out = {"completion_ids": ids, "segment_ids": seg, "segment_positions": pos, "completion_mask": cm, "advantages": adv}
   for name in ("old_per_token_logps", "rollout_per_token_logps"):
     v = getattr(base, name, None)
     if v is not None:
@@ -210,8 +288,11 @@ def realistic_payload(base, *, num_experts, ep=8, routing="probe", scale=1.0, pa
   if routed0 is not None:
     num_layers, top_k = routed0.shape[2], routed0.shape[3]
     routed = np.full(routed0.shape, UNSET_ROUTED_EXPERT, dtype=routed0.dtype)
-    targets = (layer_targets_override if layer_targets_override is not None
-               else layer_targets(num_layers, scale, cycle, probe_targets))
+    targets = (
+        layer_targets_override
+        if layer_targets_override is not None
+        else layer_targets(num_layers, scale, cycle, probe_targets)
+    )
     flat_real = np.flatnonzero(real_mask.ravel())
     routed_flat = routed.reshape(rows * budget, num_layers, top_k)
     for l in range(num_layers):
@@ -241,8 +322,9 @@ def payload_shard_load_ratio(payload, *, num_experts, ep=8, ep_rows=2, context=4
   for g in range(rows // ep_rows):
     rsel = slice(g * ep_rows, (g + 1) * ep_rows)
     for j in range(chunks):
-      cols = np.concatenate([np.arange(c * slice_len + j * chunk_len, c * slice_len + (j + 1) * chunk_len)
-                             for c in range(context)])
+      cols = np.concatenate(
+          [np.arange(c * slice_len + j * chunk_len, c * slice_len + (j + 1) * chunk_len) for c in range(context)]
+      )
       block = routed[rsel][:, cols]  # [ep_rows, tokens, L, K]
       n_tok = block.shape[0] * block.shape[1]
       balanced = n_tok * top_k / ep
@@ -257,8 +339,12 @@ def payload_shard_load_ratio(payload, *, num_experts, ep=8, ep_rows=2, context=4
 
 # Orchestrator flags of the sampler-vs-trainer log-prob gates (GRPO loss: `sequence_loss_mask` and
 # `truncated_importance_weights`). LOGP_GATES=off strips them, so they take their argparse default None (gate off).
-LOGP_GATE_FLAGS = ("--seq_logprob_error_threshold", "--truncated_importance_sampling_type",
-                   "--truncated_importance_sampling_ratio_min", "--truncated_importance_sampling_ratio")
+LOGP_GATE_FLAGS = (
+    "--seq_logprob_error_threshold",
+    "--truncated_importance_sampling_type",
+    "--truncated_importance_sampling_ratio_min",
+    "--truncated_importance_sampling_ratio",
+)
 
 
 def strip_logp_gates(argv):
@@ -311,15 +397,50 @@ def summarize_metrics(buf):
 def metric_log_lines(step, summary):
   """`STEP_LOSS` (loss, per-micro-batch loss and denominators, grad norm) and `STEP_METRICS` (every metric; a
   per-micro-batch metric as its list) lines for one step."""
-  fmt = lambda x: f"{x:.9g}"
+
+  def fmt(x):
+    return f"{x:.9g}"
+
   gn = summary["scalar"].get("gradient_norm", float("nan"))
-  loss_line = (f"STEP_LOSS step={step} loss={fmt(summary['loss'])} grad_norm={fmt(gn) if isinstance(gn, float) else gn} "
-               f"micro_loss=[{','.join(fmt(x) for x in summary['micro_loss'])}] "
-               f"micro_denominator=[{','.join(fmt(x) for x in summary['micro_denominator'])}]")
+  loss_line = (
+      f"STEP_LOSS step={step} loss={fmt(summary['loss'])} grad_norm={fmt(gn) if isinstance(gn, float) else gn} "
+      f"micro_loss=[{','.join(fmt(x) for x in summary['micro_loss'])}] "
+      f"micro_denominator=[{','.join(fmt(x) for x in summary['micro_denominator'])}]"
+  )
   parts = [f"{k}={fmt(v)}" for k, v in summary["weighted"].items()]
   for k, v in summary["scalar"].items():
     parts.append(f"{k}={fmt(v)}" if isinstance(v, float) else f"{k}=[{','.join(fmt(x) for x in v)}]")
   return loss_line, f"STEP_METRICS step={step} " + " ".join(parts)
+
+
+def finish_step(worker, last_response, step):
+  """Runs the step's optimizer update unless the worker already ran it inside the last fwd_bwd.
+
+  Newer Tunix workers apply the update inside fwd_bwd(apply_optimizer=True) and report `updated` in the response
+  metadata (google/tunix#2719); calling update() again would apply a second optimizer step. Older workers still need
+  the explicit call. Returns True when this function called update().
+  """
+  md = getattr(last_response, "metadata", None)
+  if hasattr(md, "get") and md.get("updated"):
+    logging.info("step %d: optimizer update ran inside the last fwd_bwd (update_ready=%s)", step, md.get("update_ready"))
+    return False
+  worker.update()
+  return True
+
+
+def log_step_timing(worker, step):
+  """Logs the worker's device-side step timeline as a TRAINER_STEP_TIMING line, in the orchestrator's e2e format.
+
+  rtt_s is 0 because the bench calls the worker in process. Workers without get_step_timing log nothing.
+  """
+  if not hasattr(worker, "get_step_timing"):
+    return
+  try:
+    timing = json.dumps(worker.get_step_timing(), separators=(",", ":"))
+  except Exception as e:  # pylint: disable=broad-except
+    logging.info("TRAINER_STEP_TIMING step=%d unavailable: %r", step, e)
+    return
+  logging.info("TRAINER_STEP_TIMING step=%d rtt_s=0.000 timing=%s", step, timing)
 
 
 def main() -> int:
@@ -338,6 +459,7 @@ def main() -> int:
 
   # Same JAX init as K8sJaxContext.initialize() under JAX_PLATFORMS=proxy.
   import pathwaysutils  # pylint: disable=g-import-not-at-top
+
   pathwaysutils.initialize()
   import jax  # pylint: disable=g-import-not-at-top
 
@@ -426,32 +548,43 @@ def main() -> int:
   regular = final = payload
   if mode == "realistic":
     cfg = worker._trainer._config  # pylint: disable=protected-access
-    knobs = dict(
-        num_experts=int(cfg.num_experts),
-        ep=int(os.environ.get("EP_SIZE", "8")),
-        routing=os.environ.get("ROUTING", "probe"),
-        scale=float(os.environ.get("ROUTING_SCALE", "1.0")),
-        pad_id=a_pad,
-        vocab_size=int(getattr(tokenizer, "vocab_size", 151_000)),
-        cycle=int(getattr(cfg, "inhomogeneous_layer_cycle_interval", 4) or 4),
-        advantages=os.environ.get("ADVANTAGES", "inherit"),
-    )
+    knobs = {
+        "num_experts": int(cfg.num_experts),
+        "ep": int(os.environ.get("EP_SIZE", "8")),
+        "routing": os.environ.get("ROUTING", "probe"),
+        "scale": float(os.environ.get("ROUTING_SCALE", "1.0")),
+        "pad_id": a_pad,
+        "vocab_size": int(getattr(tokenizer, "vocab_size", 151_000)),
+        "cycle": int(getattr(cfg, "inhomogeneous_layer_cycle_interval", 4) or 4),
+        "advantages": os.environ.get("ADVANTAGES", "inherit"),
+    }
     if os.environ.get("ROUTING_TARGETS"):
       n_layers = int(np.asarray(payload.routed_experts).shape[2]) if payload.routed_experts is not None else 0
       knobs["probe_targets"] = parse_routing_targets(os.environ["ROUTING_TARGETS"], n_layers)
     seed = int(os.environ.get("PAYLOAD_SEED", "0"))
     tg = time.monotonic()
     regular = realistic_payload(payload, pad_fraction=float(os.environ.get("PAD_FRACTION", "0.07")), seed=seed, **knobs)
-    final = realistic_payload(payload, pad_fraction=float(os.environ.get("PAD_FRACTION", "0.07")),
-                              pad_rows_fraction=float(os.environ.get("FINAL_PAD_FRACTION", "0.25")), seed=seed + 1,
-                              **knobs)
+    final = realistic_payload(
+        payload,
+        pad_fraction=float(os.environ.get("PAD_FRACTION", "0.07")),
+        pad_rows_fraction=float(os.environ.get("FINAL_PAD_FRACTION", "0.25")),
+        seed=seed + 1,
+        **knobs,
+    )
     logging.info("Realistic payloads built in %.1fs (%s).", time.monotonic() - tg, knobs)
     for name, p in (("regular", regular), ("final", final)):
       a = np.asarray(p.advantages)[np.asarray(p.completion_mask) > 0]
-      logging.info("PAYLOAD_ADVANTAGES %s rows=%d scored_tokens=%d nonzero_frac=%.4f mean=%.6g std=%.6g min=%.6g "
-                   "max=%.6g", name, np.asarray(p.completion_ids).shape[0], a.size,
-                   float((a != 0).mean()) if a.size else 0.0, a.mean() if a.size else 0.0,
-                   a.std() if a.size else 0.0, a.min() if a.size else 0.0, a.max() if a.size else 0.0)
+      logging.info(
+          "PAYLOAD_ADVANTAGES %s rows=%d scored_tokens=%d nonzero_frac=%.4f mean=%.6g std=%.6g min=%.6g " "max=%.6g",
+          name,
+          np.asarray(p.completion_ids).shape[0],
+          a.size,
+          float((a != 0).mean()) if a.size else 0.0,
+          a.mean() if a.size else 0.0,
+          a.std() if a.size else 0.0,
+          a.min() if a.size else 0.0,
+          a.max() if a.size else 0.0,
+      )
     for name, p in (("regular", regular), ("final", final)):
       if p.routed_experts is None:
         continue
@@ -459,7 +592,10 @@ def main() -> int:
       top = np.argsort(-ratios)[:5]
       logging.info(
           "PAYLOAD_ROUTING %s pad_fraction=%.4f replayed_max_ratio=%.4f hottest_layers=%s ratios=[%s]",
-          name, pad, ratios.max(), [(int(l), round(float(ratios[l]), 3)) for l in top],
+          name,
+          pad,
+          ratios.max(),
+          [(int(l), round(float(ratios[l]), 3)) for l in top],
           ",".join(f"{v:.3f}" for v in ratios),
       )
   elif mode != "warmup":
@@ -474,9 +610,9 @@ def main() -> int:
       req = datatypes.TrainRequest(request_id=f"bench_{step}_{m}", payload=final if last else regular, metadata={})
       # As DistributedRLEngine.train_step: the step's last micro-batch is the one with apply_optimizer=True.
       # Per-micro-step runtime load ratios: MOE_DROP_AUDIT lines with the MaxText flag log_moe_drops=true.
-      worker.fwd_bwd(request=req, apply_optimizer=last)
+      resp = worker.fwd_bwd(request=req, apply_optimizer=last)
       times.append(time.monotonic() - tm)
-    worker.update()
+    finish_step(worker, resp, step)
     # Drain the step's device work before reading the clock, as maxtext_engine/train.py does.
     throttler = getattr(worker._trainer, "_throttler", None)  # pylint: disable=protected-access
     if throttler is not None:
@@ -484,9 +620,14 @@ def main() -> int:
     else:
       jax.block_until_ready(worker.get_metrics())
     dt = time.monotonic() - t0
+    log_step_timing(worker, step)
     logging.info(
         "completed step: %d, seconds: %.3f, micro_steps: %d, seconds/micro_step: %.3f, fwd_bwd dispatch s: %s",
-        step, dt, micro_steps, dt / micro_steps, [round(x, 3) for x in times],
+        step,
+        dt,
+        micro_steps,
+        dt / micro_steps,
+        [round(x, 3) for x in times],
     )
     # Numerics comparison (e.g. moe_exclude_padding_from_routing on vs off): the step's loss (per micro-batch and
     # pooled), gradient norm and every other trainer metric, read after the step's timing so they do not affect it.

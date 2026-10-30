@@ -32,7 +32,7 @@ sys.path.insert(0, PKG)
 import render_bench as R  # pylint: disable=g-import-not-at-top,wrong-import-position
 import structdiff_render as SD  # pylint: disable=g-import-not-at-top,wrong-import-position
 
-FIXTURE = os.path.join(HERE, "testdata", "launch_dryrun_fixture.yaml")
+FIXTURE = os.path.join(HERE, "testdata", "launch_dryrun_fixture.txt")
 DRIVER = os.path.join(PKG, "bench_driver.py")
 
 pytestmark = pytest.mark.cpu_only
@@ -59,12 +59,26 @@ class RenderBenchTest(unittest.TestCase):
     self.tmp.cleanup()
 
   def render(self, *extra, name="tb-test"):
+    """Renders the fixture with extra CLI args; returns the bench JobSet (parsed) and its output path."""
     out = os.path.join(self.tmp.name, f"{name}.yaml")
-    argv = ["--launch-render", FIXTURE, "--driver", DRIVER, "--out", out, "--name", name, "--namespace", "bench-ns",
-            "--output-prefix", "/bench-out", *extra]
+    argv = [
+        "--launch-render",
+        FIXTURE,
+        "--driver",
+        DRIVER,
+        "--out",
+        out,
+        "--name",
+        name,
+        "--namespace",
+        "bench-ns",
+        "--output-prefix",
+        "/bench-out",
+        *extra,
+    ]
     with redirect_stdout(io.StringIO()):
       self.assertEqual(R.main(argv), 0)
-    with open(out) as f:
+    with open(out, encoding="utf-8") as f:
       return yaml.safe_load(f), out
 
   def test_selects_trainer_and_orchestrator(self):
@@ -89,7 +103,7 @@ class RenderBenchTest(unittest.TestCase):
     script = main_c["command"][-1]
     self.assertIn("cat > /tmp/bench_driver.py <<'BENCH_DRIVER_EOF'", script)
     self.assertNotIn("FT_REGISTERED_MARKER", script)  # Tunix fail-fast wrapper dropped
-    with open(DRIVER) as f:
+    with open(DRIVER, encoding="utf-8") as f:
       self.assertIn(f.read(), script)
 
     env = _client_env(js)
@@ -124,19 +138,33 @@ class RenderBenchTest(unittest.TestCase):
 
   def test_maxtext_flag_knobs(self):
     js, _ = self.render("--replace-maxtext-flags", "context=remat", "--extra-maxtext-flags", "log_moe_drops=true")
-    self.assertEqual(_client_env(js)["MAXTEXT_EXTRA_FLAGS"],
-                     "context=remat num_moe_token_chunks=4 packing=True log_moe_drops=true")
+    self.assertEqual(
+        _client_env(js)["MAXTEXT_EXTRA_FLAGS"], "context=remat num_moe_token_chunks=4 packing=True log_moe_drops=true"
+    )
     with self.assertRaises(ValueError):
       self.render("--replace-maxtext-flags", "not_a_key=1")
 
   def test_trainer_and_orch_flag_knobs(self):
-    js, _ = self.render("--set-trainer-flags", "train_micro_batch_size=128", "--set-orch-flags",
-                        "train_micro_batch_size=128", "--compute-logps-chunk-size", "1024",
-                        "--profiler-skip", "16", "--profiler-steps", "3")
+    js, _ = self.render(
+        "--set-trainer-flags",
+        "train_micro_batch_size=128",
+        "--set-orch-flags",
+        "train_micro_batch_size=128",
+        "--compute-logps-chunk-size",
+        "1024",
+        "--profiler-skip",
+        "16",
+        "--profiler-steps",
+        "3",
+    )
     env = _client_env(js)
     targv = shlex.split(env["TRAINER_ARGV"])
-    for flag in ("--train_micro_batch_size=128", "--compute_logps_chunk_size=1024", "--profiler_steps=3",
-                 "--skip_first_n_profiler_steps=16"):
+    for flag in (
+        "--train_micro_batch_size=128",
+        "--compute_logps_chunk_size=1024",
+        "--profiler_steps=3",
+        "--skip_first_n_profiler_steps=16",
+    ):
       self.assertEqual(sum(t.split("=", 1)[0] == flag.split("=", 1)[0] for t in targv), 1, flag)
       self.assertIn(flag, targv)
     self.assertIn("--train_micro_batch_size=128", shlex.split(env["ORCH_ARGV"]))
@@ -163,24 +191,44 @@ class RenderBenchTest(unittest.TestCase):
       SD.main_args(base_path, path)
     diffs = [l for l in buf.getvalue().splitlines() if l.startswith("[")]
     keys = sorted(re.match(r"\[(\w+)\] (\S+?):", l).group(1, 2) for l in diffs)
-    self.assertEqual(keys, sorted([
-        ("leaf", ".metadata.name"), ("leaf", ".metadata.labels.scheduling.x-k8s.io/gang-id"),
-        ("leaf", ".spec.replicatedJobs[proc].template.spec.template.spec.initContainers[pathways-rm].args[3]"),
-        ("leaf", ".spec.replicatedJobs[pw-node].template.spec.completions"),
-        ("leaf", ".spec.replicatedJobs[pw-node].template.spec.parallelism"),
-        ("leaf", ".spec.replicatedJobs[pw-node].template.spec.template.metadata.annotations."
-                 "cloud.google.com/gke-tpu-slice-topology"),
-        ("trainer_argv", "--maxtext_output_directory"), ("trainer_argv", "--worker_id"),
-        ("trainer_argv", "--mesh_fsdp"), ("orch_argv", "--trainer_fsdp"),
-    ]))
+    self.assertEqual(
+        keys,
+        sorted(
+            [
+                ("leaf", ".metadata.name"),
+                ("leaf", ".metadata.labels.scheduling.x-k8s.io/gang-id"),
+                ("leaf", ".spec.replicatedJobs[proc].template.spec.template.spec.initContainers[pathways-rm].args[3]"),
+                ("leaf", ".spec.replicatedJobs[pw-node].template.spec.completions"),
+                ("leaf", ".spec.replicatedJobs[pw-node].template.spec.parallelism"),
+                (
+                    "leaf",
+                    ".spec.replicatedJobs[pw-node].template.spec.template.metadata.annotations."
+                    "cloud.google.com/gke-tpu-slice-topology",
+                ),
+                ("trainer_argv", "--maxtext_output_directory"),
+                ("trainer_argv", "--worker_id"),
+                ("trainer_argv", "--mesh_fsdp"),
+                ("orch_argv", "--trainer_fsdp"),
+            ]
+        ),
+    )
     del base
 
   def test_driver_env_and_image(self):
-    js, _ = self.render("--driver-env", "PAYLOAD=realistic ROUTING_TARGETS=1.5,2.0", "--image", "example.invalid/x:y",
-                        "--steps", "2", "--micro-steps", "5")
+    js, _ = self.render(
+        "--driver-env",
+        "PAYLOAD=realistic ROUTING_TARGETS=1.5,2.0",
+        "--image",
+        "example.invalid/x:y",
+        "--steps",
+        "2",
+        "--micro-steps",
+        "5",
+    )
     env = _client_env(js)
-    self.assertEqual((env["PAYLOAD"], env["ROUTING_TARGETS"], env["STEPS"], env["MICRO_STEPS"]),
-                     ("realistic", "1.5,2.0", "2", "5"))
+    self.assertEqual(
+        (env["PAYLOAD"], env["ROUTING_TARGETS"], env["STEPS"], env["MICRO_STEPS"]), ("realistic", "1.5,2.0", "2", "5")
+    )
     self.assertEqual(R._proc_main(js)[1]["image"], "example.invalid/x:y")  # pylint: disable=protected-access
     with self.assertRaises(ValueError):
       self.render("--driver-env", "lower=1")

@@ -24,7 +24,8 @@ import re
 
 
 def summarize(path, cap_gib):
-  with open(path, errors="replace") as f:
+  """Prints each compiled program's cost and memory stats from one AOT log, and its device peak against a cap in GiB."""
+  with open(path, errors="replace", encoding="utf-8") as f:
     s = f.read()
   print("==", path)
   costs = [ast.literal_eval(m) for m in re.findall(r"Cost analysis: (\{.*\})", s)]

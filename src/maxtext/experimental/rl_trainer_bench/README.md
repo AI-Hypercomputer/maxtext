@@ -168,6 +168,13 @@ profiler window carries the profiler's start and stop cost, so compare steps tha
 driver also logs `STEP_LOSS` (pooled and per-micro-batch loss and denominators, gradient norm) and `STEP_METRICS`
 (every trainer metric, per-micro-batch ones as lists), read after the step's timing so that they do not affect it.
 
+The driver calls the trainer worker as the orchestrator does. A worker that applies the optimizer inside the last
+`fwd_bwd(apply_optimizer=True)` and reports `updated` in the response (google/tunix#2719) gets no second `update()`;
+an older worker gets the explicit call. When the worker has `get_step_timing`, the driver also logs one
+`TRAINER_STEP_TIMING step=<n> rtt_s=0.000 timing=<JSON>` line per step, in the orchestrator's format, so the same
+per-micro-batch device timeline can be read from a bench run and an e2e run (`rtt_s` is 0 because the bench calls the
+worker in process).
+
 `python3 diff_config.py <e2e trainer log> <bench log>` compares the resolved MaxText `Config param` lines of the two
 runs and prints the keys that differ; we expect only the run name, the output directory and the checkpoint path to
 differ.
@@ -241,7 +248,7 @@ python3 -m pytest src/maxtext/experimental/rl_trainer_bench/tests
 ```
 
 The tests run on CPU with PyYAML and NumPy only: the renderer on a hand-written DRY_RUN fixture
-(`tests/testdata/launch_dryrun_fixture.yaml`), and the payload builder and metric helpers on a small stand-in payload.
+(`tests/testdata/launch_dryrun_fixture.txt`), and the payload builder and metric helpers on a small stand-in payload.
 They live next to the code, so the repository's default `testpaths = tests` does not collect them; run them by path.
 `check_payload_routing.py` and `check_numerics_cpu.py` are the heavier checks at the production shapes and need a
 matching Tunix.

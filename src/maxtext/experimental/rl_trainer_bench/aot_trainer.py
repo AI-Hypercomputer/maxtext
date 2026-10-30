@@ -32,6 +32,10 @@ AOT_MESH_EXPERT (2), AOT_MESH_CONTEXT (4), AOT_NUM_DEVICES (fsdp x tp x expert x
 Extra command-line arguments are appended to the MaxText argv as key=value overrides.
 """
 
+# The JAX, Tunix and MaxText imports sit inside the functions that need them, so the CPU tests and --help run
+# without a TPU runtime or the Tunix package installed.
+# pylint: disable=import-outside-toplevel
+
 import os
 import sys
 
@@ -51,21 +55,25 @@ def main():
 
   def capture(argv):
     captured["argv"] = list(argv)
-    return None
 
   pyconfig.initialize = capture
   gbs = int(os.environ.get("AOT_GLOBAL_BATCH", str(64 * 16)))  # prompts x generations per optimizer step
   micro = int(os.environ.get("AOT_TRAIN_MICRO_BATCH_SIZE", "64"))
-  fsdp, tp, ep, cp = (int(os.environ.get(f"AOT_MESH_{k}", d)) for k, d in
-                      (("FSDP", "32"), ("TP", "1"), ("EXPERT", "2"), ("CONTEXT", "4")))
+  fsdp, tp, ep, cp = (
+      int(os.environ.get(f"AOT_MESH_{k}", d)) for k, d in (("FSDP", "32"), ("TP", "1"), ("EXPERT", "2"), ("CONTEXT", "4"))
+  )
   try:
     tunix_mu.build_maxtext_config(
         model_name="qwen3.5-397b-a17b",
         worker_id="aot",
         train_micro_batch_size=micro,
-        mesh_fsdp=fsdp, mesh_tp=tp, mesh_expert=ep, mesh_context=cp,
+        mesh_fsdp=fsdp,
+        mesh_tp=tp,
+        mesh_expert=ep,
+        mesh_context=cp,
         num_devices=int(os.environ.get("AOT_NUM_DEVICES", str(fsdp * tp * ep * cp))),
-        max_prompt_length=8192, max_response_length=57344,
+        max_prompt_length=8192,
+        max_response_length=57344,
         learning_rate=2e-6,
         warmup_steps_fraction=0.0,
         load_parameters_path="",
@@ -82,10 +90,15 @@ def main():
         attention="flash",
         remat_policy="custom",
         learning_rate_final_fraction=1.0,
-        adam_b1=0.9, adam_b2=0.999, adam_eps=1e-8, adam_weight_decay=0.0,
+        adam_b1=0.9,
+        adam_b2=0.999,
+        adam_eps=1e-8,
+        adam_weight_decay=0.0,
         gradient_clipping_threshold=0.0625,
-        skip_step_on_spikes=False, skip_step_on_nan=True,
-        float32_gate_logits=True, float32_logits=True,
+        skip_step_on_spikes=False,
+        skip_step_on_nan=True,
+        float32_gate_logits=True,
+        float32_logits=True,
     )
   finally:
     pyconfig.initialize = real_initialize
@@ -115,9 +128,11 @@ def main():
   ] + extra
   print("AOT argv:", argv, flush=True)
   import maxtext
+
   print("maxtext from:", maxtext.__file__, flush=True)
 
   from maxtext.training_engine import maxtext_engine_compile
+
   maxtext_engine_compile.main(argv)
 
 

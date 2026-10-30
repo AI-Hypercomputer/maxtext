@@ -49,7 +49,8 @@ def flagmap(tokens):
 
 
 def parse(path):
-  with open(path) as f:
+  """Loads one rendered bench JobSet into sections (YAML leaves, flag maps, argv maps and the remaining env)."""
+  with open(path, encoding="utf-8") as f:
     js = yaml.safe_load(f)
   _, main_c = _proc_main(js)
   script = main_c["command"][-1]
@@ -77,9 +78,9 @@ def main_args(path_a, path_b):
   """Prints one line per difference between two renders and returns the number of differences."""
   a, b = parse(path_a), parse(path_b)
   n = 0
-  for s in a:
-    for k in sorted(set(a[s]) | set(b[s])):
-      va, vb = a[s].get(k, "<absent>"), b[s].get(k, "<absent>")
+  for s, a_s in a.items():
+    for k in sorted(set(a_s) | set(b[s])):
+      va, vb = a_s.get(k, "<absent>"), b[s].get(k, "<absent>")
       if va != vb:
         n += 1
         print(f"[{s}] {k}: {str(va)[:200]} -> {str(vb)[:200]}")

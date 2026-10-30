@@ -34,7 +34,7 @@ import bench_driver as d  # pylint: disable=g-import-not-at-top,wrong-import-pos
 pytestmark = pytest.mark.cpu_only
 
 ROWS, BUDGET, LAYERS, TOP_K, EXPERTS, EP = 4, 4096, 4, 2, 64, 8
-RATIO_KW = dict(ep_rows=2, context=4, chunks=4)
+RATIO_KW = {"ep_rows": 2, "context": 4, "chunks": 4}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -75,8 +75,16 @@ def warmup_like(routed=True):
 
 
 def build(**kw):
-  args = dict(num_experts=EXPERTS, ep=EP, pad_id=0, vocab_size=5000, seed=0, pool_size=4096,
-              layer_targets_override=np.array([1.0, 1.3, 1.6, 2.0]))
+  """Builds a small realistic payload with test defaults, overridden by `kw`."""
+  args = {
+      "num_experts": EXPERTS,
+      "ep": EP,
+      "pad_id": 0,
+      "vocab_size": 5000,
+      "seed": 0,
+      "pool_size": 4096,
+      "layer_targets_override": np.array([1.0, 1.3, 1.6, 2.0]),
+  }
   args.update(kw)
   return d.realistic_payload(warmup_like(), **args)
 
@@ -140,8 +148,14 @@ class PayloadTest(unittest.TestCase):
 
   def test_advantages_random_keeps_everything_else(self):
     a, b = build(), build(advantages="random")
-    for f in ("completion_ids", "segment_ids", "segment_positions", "completion_mask", "routed_experts",
-              "rollout_per_token_logps"):
+    for f in (
+        "completion_ids",
+        "segment_ids",
+        "segment_positions",
+        "completion_mask",
+        "routed_experts",
+        "rollout_per_token_logps",
+    ):
       np.testing.assert_array_equal(getattr(a, f), getattr(b, f), err_msg=f)
     scored = a.completion_mask > 0
     self.assertEqual(set(np.unique(a.advantages[scored])), {-1.0, 1.0})  # inherited from the base
@@ -192,13 +206,21 @@ class CalibrationTest(unittest.TestCase):
 class HelpersTest(unittest.TestCase):
 
   def test_strip_logp_gates(self):
-    argv = ["--a=1", "--seq_logprob_error_threshold=2.0", "--truncated_importance_sampling_type", "seq-mask-tis",
-            "--truncated_importance_sampling_ratio_min=0.999", "--truncated_importance_sampling_ratio=1.002", "--b=2"]
+    argv = [
+        "--a=1",
+        "--seq_logprob_error_threshold=2.0",
+        "--truncated_importance_sampling_type",
+        "seq-mask-tis",
+        "--truncated_importance_sampling_ratio_min=0.999",
+        "--truncated_importance_sampling_ratio=1.002",
+        "--b=2",
+    ]
     self.assertEqual(d.strip_logp_gates(argv), ["--a=1", "--b=2"])
 
   def test_summarize_metrics(self):
     wm = lambda s, den, min_denom=None: types.SimpleNamespace(  # pylint: disable=unnecessary-lambda-assignment
-        unreduced_sum=np.array(s), denominator=np.array(den), eps=None, min_denom=min_denom)
+        unreduced_sum=np.array(s), denominator=np.array(den), eps=None, min_denom=min_denom
+    )
     buf = types.SimpleNamespace(
         weighted_metrics={"loss": wm([2.0, 0.0, -3.0], [4.0, 0.0, 6.0]), "kept": wm([0.0], [0.0], min_denom=1.0)},
         scalar_metrics={"gradient_norm": np.array([0.125]), "is_ratio/mean": np.array([1.0, 1.0, 1.0])},
