@@ -143,6 +143,10 @@ single-host Orbax checkpoints.
 | `qwen3.5-397b-a17b` | scanned | 1 × 2x2x2 | 2 | 16 | ICI | **1,475.17** | 483.50 | 991.62 | 63.8 | `397b-fix` (`with fix`: U-1/U-6 HBM-peak fixes; was HBM OOM) |
 | `qwen3-480b-a35b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **757.70** | 644.22 | 111.22 | 244.9 | `480b-2s` |
 | `qwen3-480b-a35b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **718.65** | 642.10 | 76.42 | 244.6 | `480b-2s` |
+| `deepseek3.2-671b` | scanned | 1 × 2x2x4 | 4 | 32 | ICI | **776.37** | 465.23 | 311.01 | 606.3 | `ds32-4h` |
+| `deepseek3.2-671b` | unscanned | 1 × 2x2x4 | 4 | 32 | ICI | **654.24** | 449.20 | 204.53 | 613.3 | `ds32-4h` |
+| `deepseek4-1600b` | scanned | 1 × 2x4x4 | 8 | 64 | ICI | **971.49** | 698.05 | 273.22 | 615.5 | `1600b-8h` |
+| `deepseek4-1600b` | unscanned | 1 × 2x4x4 | 8 | 64 | ICI | **874.31** | 709.10 | 164.86 | 803.1 | `1600b-8h` |
 
 ### `to_maxtext` Step 3 (Load Orbax) on Multi-Host Slices (`source=mesakh`)
 
@@ -156,5 +160,6 @@ comparing against `safetensors_dynamic` on the same multi-host layout:
 | `qwen3-235b-a22b` | unscanned | 1 × 2x2x2 | 2 | 16 | 583.32 | 2,625.50 | **841.12** (peak 54.9 GB) | 3,466.62 / 4,049.94 | 817.59 / 1,400.91 | **2.89× / 4.24×** | `235b-tm` |
 | `qwen3-235b-a22b` | unscanned | 2 × 2x2x2 | 4 | 32 | 583.32 | 2,625.50 | **682.05** (peak 90.4 GB) | 3,307.56 / 3,890.87 | 788.66 / 1,371.98 | **2.84× / 4.19×** | `235b-tm-2s` |
 | `qwen3.5-397b-a17b` | unscanned | 1 × 2x2x2 | 2 | 16 | 814.53 | 8,096.53 | **1,838.26** (peak 58.5 GB) | 9,934.79 / 10,749.32 | 1,150.92 / 1,965.45 | **5.47× / 8.63×** | `397b-tm` |
-| `qwen3.5-397b-a17b` | unscanned | 2 × 2x2x2 | 4 | 32 | 814.53 | 8,096.53 | **FAILED at 2,306 s** (`DEADLINE_EXCEEDED` at Orbax 300 s `_load_impl` barrier, 3/4 hosts reached; peak 95.2 GB; re-running with 1,800 s barrier timeout) | N/A | 1,018.83 / 1,833.36 | **Only safetensor loads** (without barrier fix) | `397b-tm-2s` |
+| `qwen3.5-397b-a17b` | unscanned | 1 × 2x2x4 | 4 | 32 | 814.53 | 8,096.53 | **2,233.01** (peak 49.9 GB; with 1,800 s Orbax barrier timeout) | 10,329.54 / 11,144.07 | 954.34 / 1,768.87 | **6.30× / 10.82×** | `397b-tm-4h` |
+| `qwen3.5-397b-a17b` | unscanned | 2 × 2x2x2 | 4 | 32 | 814.53 | 8,096.53 | **2,157.89** (peak 87.1 GB; with 1,800 s Orbax barrier timeout; default 300 s timed out at 2,306 s) | 10,254.42 / 11,068.95 | 1,018.83 / 1,833.36 | **6.04× / 10.06×** | `397b-tm-2s` |
 
