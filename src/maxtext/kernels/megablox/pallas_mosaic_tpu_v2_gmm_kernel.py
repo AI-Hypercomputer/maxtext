@@ -180,6 +180,9 @@ class TileSizes:
   tile_m: int
   tile_k: int
   tile_n: int
+  # Pipeline buffers for the rhs weight tile in gmm. 3 hides DMA latency best;
+  # 2 frees VMEM for larger (e.g. full-K) tiles.
+  rhs_buffer_count: int = 3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -452,7 +455,7 @@ def generate_block_specs(
       _ordered(index_map.rhs_weight_index_map),
       # A full-K 3D lhs tile (e.g. a 512 x 7168 fp8 wi forward tile) needs VMEM for
       # the relayout; double-buffer the (large) rhs tile there.
-      pipeline_mode=pl.Buffered(buffer_count=2 if cfgs.lhs_chunk_d0 is not None else 3),
+      pipeline_mode=pl.Buffered(buffer_count=2 if cfgs.lhs_chunk_d0 is not None else cfgs.tiles.rhs_buffer_count),
   )
   rhs_scale_block_spec = rhs_bias_block_spec = ps_block_spec = None
   if cfgs.rhs_cfgs.has_bias:
@@ -1153,12 +1156,18 @@ def kernel_main(
         up=rhs_spec,
     )
 
-  # Execute the inner kernel.
+  # Execute the inner kernel. Split the N tiles across the TensorCores (one per
+  # step of the outer grid, axis 0). gm stays sequential on each core because
+  # consecutive gm tiles can revisit the same output rows.
+  dimension_semantics = [pltpu.ARBITRARY] * 3
+  dimension_semantics[cfgs.n_axis] = pltpu.PARALLEL
   pipeline_fn = pltpu.emit_pipeline(
       functools.partial(inner_kernel, cfgs=cfgs),
       grid=(num_gm, num_n, num_k) if cfgs.out_window else (num_n, num_gm, num_k),
       in_specs=(lhs_spec, rhs_spec, ps_spec),
       out_specs=out_spec,
+      core_axis=0,
+      dimension_semantics=tuple(dimension_semantics),
   )
 
   # Bounded slice requires second last dim to be aligned to the sublane size.
@@ -1420,6 +1429,81 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
   return scope_name
 
 
+def _itemsize(dtype) -> float:
+  return jax.dtypes.itemsize_bits(dtype) / 8
+
+
+def gmm_vmem_bytes(
+    tiles: TileSizes,
+    *,
+    lhs_cfgs: InputConfigs,
+    rhs_cfgs: InputConfigs,
+    out_dtype: jnp.dtype,
+    acc_dtype: jnp.dtype,
+    fuse_act: str | None,
+    has_partial_sum: bool,
+) -> float:
+  """Estimated VMEM use of gmm_v2 with `tiles`.
+
+  Beyond the pipeline buffers, the factors on the lhs, accumulator and output tiles cover Mosaic's temporaries, and
+  the constant covers the 2 MiB zero-init buffer and other scratch. They were fitted to which bf16 tile configs
+  compile on TPU v4 (16 MiB VMEM), where the margin between the largest config that fits and the smallest that
+  doesn't is ~0.7 MiB.
+  """
+  tm, tk, tn = tiles.tile_m, tiles.tile_k, tiles.tile_n
+  f = 2 if fuse_act is not None else 1
+  lhs = 3 * tm * tk * _itemsize(lhs_cfgs.quant_dtype or lhs_cfgs.dtype)
+  rhs = f * tiles.rhs_buffer_count * tk * tn * _itemsize(rhs_cfgs.dtype)
+  acc = 1.5 * tm * f * tn * _itemsize(acc_dtype)
+  out = 1.5 * tm * tn * _itemsize(out_dtype)
+  partial_sum = 2 * tm * tn * _itemsize(out_dtype) if has_partial_sum else 0
+  return lhs + rhs + acc + out + partial_sum + 2.5 * 2**20
+
+
+def clamp_tiles_to_dims(tiles: TileSizes, size_m: int, size_k: int, size_n: int, sublane: int) -> TileSizes:
+  """Caps each tile at its dimension (aligned to the hardware tiling), as megablox does.
+
+  Without this, a dimension smaller than its tile (e.g. n=512 with tile_n=1024) is padded to the full tile.
+  """
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  return dataclasses.replace(
+      tiles,
+      tile_m=min(tiles.tile_m, align_to(size_m, sublane)),
+      tile_k=min(tiles.tile_k, align_to(size_k, num_lanes)),
+      tile_n=min(tiles.tile_n, align_to(size_n, num_lanes)),
+  )
+
+
+def fit_tiles_to_vmem(
+    tiles: TileSizes, vmem_bytes: Callable[[TileSizes], float], vmem_limit_bytes: int, resizable: bool = True
+) -> TileSizes:
+  """Shrinks `tiles` until `vmem_bytes(tiles)` fits in `vmem_limit_bytes`; returns `tiles` unchanged if it fits.
+
+  First drops the rhs to double buffering, then halves tile_n or tile_k (whichever is larger, keeping multiples of
+  128 and at least 256), then tile_m (at least 128). With `resizable=False` only the buffer count may change.
+  """
+  if vmem_bytes(tiles) <= vmem_limit_bytes:
+    return tiles
+  if tiles.rhs_buffer_count > 2:
+    tiles = dataclasses.replace(tiles, rhs_buffer_count=2)
+  while resizable and vmem_bytes(tiles) > vmem_limit_bytes:
+    halvable = {
+        name: getattr(tiles, name) // 2
+        for name, lowest in (("tile_n", 256), ("tile_k", 256), ("tile_m", 128))
+        if getattr(tiles, name) // 2 >= lowest and (getattr(tiles, name) // 2) % 128 == 0
+    }
+    if not halvable:
+      break
+    if "tile_n" in halvable and (tiles.tile_n >= tiles.tile_k or "tile_k" not in halvable):
+      name = "tile_n"
+    elif "tile_k" in halvable:
+      name = "tile_k"
+    else:
+      name = "tile_m"
+    tiles = dataclasses.replace(tiles, **{name: halvable[name]})
+  return tiles
+
+
 def make_gmm_configs(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -1524,7 +1608,23 @@ def make_gmm_configs(
       acc_dtype = jnp.bfloat16.dtype
 
   if isinstance(tile_info, TileSizes):
-    tiles = tile_info
+    # Explicit tiles are often tuned for megablox, which clamps tiles to the matrix and needs less VMEM; do the same
+    # and shrink them if gmm_v2 would overflow.
+    out_size_n = dims.size_n // 2 if fuse_act is not None else dims.size_n
+    tiles = fit_tiles_to_vmem(
+        clamp_tiles_to_dims(tile_info, dims.size_m, dims.size_k, out_size_n, dims.size_lhs_sublane),
+        functools.partial(
+            gmm_vmem_bytes,
+            lhs_cfgs=lhs_cfgs,
+            rhs_cfgs=rhs_cfgs,
+            out_dtype=jnp.dtype(out_dtype),
+            acc_dtype=jnp.dtype(acc_dtype),
+            fuse_act=fuse_act,
+            has_partial_sum=partial_sum is not None,
+        ),
+        vmem_limit_bytes,
+        resizable=not (lhs_cfgs.is_3d or out_is_3d),
+    )
   else:
     tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act, partial_sum is not None)
 
@@ -1797,11 +1897,16 @@ def gmm_v2(
     partial_sum_idx = sum(1 for x in leaves if x is not None)
     input_output_aliases = {partial_sum_idx: 0}
 
+  # One outer grid step per TensorCore, so that megacore chips (v4, v5p) use
+  # both cores; kernel_main splits the N tiles across them. With out_window the
+  # resident out slab spans all of N and can't be split, so use a single core.
+  num_cores = 1 if cfgs.out_window else pltpu.get_tpu_info().num_cores
   out = pl.pallas_call(
       functools.partial(kernel_main, cfgs=cfgs),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
+          grid=(num_cores,),
           in_specs=[
               LhsRef(
                   value=pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1818,6 +1923,7 @@ def gmm_v2(
           scratch_shapes=scratch_shapes,  # pyrefly: ignore[bad-argument-type]
       ),
       compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel",),
           vmem_limit_bytes=vmem_limit_bytes,
           disable_bounds_checks=True,
       ),

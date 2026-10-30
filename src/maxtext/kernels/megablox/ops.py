@@ -516,6 +516,16 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array |
   return jnp.full((1, 1), scale_val, jnp.float32)
 
 
+def _v2_zero_initialize(num_local_groups: int, group_sizes: jnp.ndarray) -> bool:
+  """Whether gmm_v2 should zero the output rows outside the computed groups.
+
+  Like megablox, only when this call computes a subset of the groups (group_offset). Otherwise those rows are
+  padding that nothing reads (e.g. the unused tail of the expert-parallel receive buffer), and zeroing them costs a
+  full HBM write of that part of the output.
+  """
+  return num_local_groups < group_sizes.shape[0]
+
+
 def _fwd_run_tokamax_v2(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -568,6 +578,7 @@ def _fwd_run_tokamax_v2(
       group_offset=group_offset,
       lhs_scale=lhs_scale,
       maybe_quantize_lhs=maybe_quantize_lhs,
+      zero_initialize=_v2_zero_initialize(rhs_operand.shape[0], group_sizes),
       out_is_3d=out_is_3d,
   )
 
@@ -1131,7 +1142,8 @@ def _dlhs_run_tokamax_v2(
       # Bypass internal quantization if incoming dlhs_dout is already a QArray, or when lhs_scale is a
       # post-matmul scale rather than a quantization scale.
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
-      zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
+      zero_initialize=_v2_zero_initialize(rhs.shape[0], group_sizes)
+      and not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
   )
 
