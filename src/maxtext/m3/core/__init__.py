@@ -12,17 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core m3 primitives: the pieces NNX does not already provide.
+"""Core m3 primitives: sharding, data packing, RoPE, and segment-isolated ops.
 
 Modules:
-  * `rope.py` — rotary positional embedding (base implementation).
-  * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
-
-Planned modules:
-  * `interfaces.py` — shared ABCs and `CausalLMOutput`.
-  * `checkpoint.py` — Orbax wrapper.
-  * `data.py` — data loading helpers on top of the MaxText input pipeline.
-
-Leaf layers (`nnx.Linear`, `nnx.Einsum`, `nnx.Embed`, `nnx.RMSNorm`, ...) are
-used directly from NNX and are deliberately not wrapped here.
+  * `rope.py` — rotary positional embedding (1D and 3D M-RoPE).
+  * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, 5-axis mesh creation.
+  * `data.py` — 5-key `M3Batch`, zero-copy 6-key iterator adapter, and pre-shift document bin-packing.
+  * `layers.py` — segment-isolated causal Conv1d, n-gram hashing, and linear recurrence primitives.
 """
+
+from maxtext.m3.core import data
+from maxtext.m3.core import layers
+from maxtext.m3.core import rope
+from maxtext.m3.core import sharding
+
+__all__ = [
+    "data",
+    "layers",
+    "rope",
+    "sharding",
+]

@@ -46,23 +46,16 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-# Data, fully-sharded data, tensor and expert parallelism, in mesh order.
+# Data, fully-sharded data, context, tensor, and expert parallelism, in mesh order.
 #
 # Order is not cosmetic: it is the order handed to `mesh_utils`, which places
 # axes against the physical topology. Inserting an axis in the middle changes
 # the placement of everything after it.
 #
-# The names are legacy's rather than abbreviations because the mesh is shared
-# with `maxtext.training_engine.maxtext_engine` (see `m3/README.md`), which
+# The names match `maxtext.training_engine.maxtext_engine` (see `m3/README.md`), which
 # reads the data axis by name: on a mesh with no axis called `"data"` it
 # declines Zero-1 (one warning) and deferred gradient all-reduce (silently).
-#
-# TODO: This is a basic starting point, this list will be expanded soon.
-# Legacy carries twelve axes, but that list is a union -- its seven strategy
-# configs under `configs/custom_mesh_and_rule/` use between one and six. The
-# ones m3 is likely to need next are `stage` (pipeline), `context` and
-# `context_usp_ulysses` (context parallelism), and `tensor_sequence`.
-MESH_AXIS_NAMES = ("data", "fsdp", "tensor", "expert")
+MESH_AXIS_NAMES = ("data", "fsdp", "context", "tensor", "expert")
 
 # A logical axis maps to one mesh axis, several (their product shards the
 # dimension), or None to leave the dimension replicated.
@@ -222,10 +215,10 @@ class DefaultSharding(Sharding):
   """The design doc's rule set: FSDP weights, tensor-parallel heads and MLP.
 
   Weights: the model dimension (`embed`) is sharded over `fsdp` x `expert`;
-  heads, MLP width and vocabulary over `tensor`; norm scales and `head_dim`
-  replicated. Activations: `batch` over `data` x `fsdp` x `expert`; heads, MLP
-  width and vocabulary over `tensor`; the residual stream (`embed`) and
-  `length` replicated.
+  heads, MLP width and vocabulary over `tensor`; `length`, norm scales and
+  `head_dim` replicated. Activations: `batch` over `data` x `fsdp` x `expert`;
+  `length` over `context`; heads, MLP width and vocabulary over `tensor`; the
+  residual stream (`embed`), norm scales and `head_dim` replicated.
 
   Which of these axes are live is decided by the mesh shape, not here. An axis
   of size 1 shards nothing, so the same rules serve pure FSDP
@@ -250,13 +243,17 @@ class DefaultSharding(Sharding):
     match axis, tensor_type:
       case "batch", TensorType.ACTIVATION:
         return ("data", "fsdp", "expert")
+      case "length", TensorType.ACTIVATION:
+        return "context"
+      case "length", TensorType.WEIGHT:
+        return None
       case "embed", TensorType.WEIGHT:
         return ("fsdp", "expert")
       case "embed", TensorType.ACTIVATION:
         return None
       case ("heads" | "kv_heads" | "mlp" | "vocab"), _:
         return "tensor"
-      case ("length" | "head_dim" | "norm"), _:
+      case ("head_dim" | "norm"), _:
         return None
       case _:
         raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
@@ -434,11 +431,11 @@ def create_mesh(
   dcn_shape = _resolve_axis_sizes(dcn_sizes, num_slices, "DCN", "slice count", axis_names)
 
   if num_slices > 1:
-    device_array = mesh_utils.create_hybrid_device_mesh(ici_shape, dcn_shape, devices)
+    device_array = mesh_utils.create_hybrid_device_mesh(ici_shape, dcn_shape, devices, allow_split_physical_axes=True)
   else:
     # Not `create_hybrid_device_mesh` with an all-ones DCN shape: it requires
     # every device to expose `slice_index`, which single-slice TPU and CPU
     # devices do not, so it raises rather than degrading to the ICI-only case.
-    device_array = mesh_utils.create_device_mesh(ici_shape, devices)
+    device_array = mesh_utils.create_device_mesh(ici_shape, devices, allow_split_physical_axes=True)
 
   return Mesh(device_array, axis_names)
