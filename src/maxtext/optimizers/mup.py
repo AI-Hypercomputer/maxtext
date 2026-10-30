@@ -25,79 +25,17 @@ Reference: OLMo-core ``tanushy/parameterization-ladders`` (``optim/mup.py``, ``n
 docs/MUP_HANDOFF.md) and scaling-ladders ``tanushy/parameterization-mup-wd`` (MUP_WEIGHT_DECAY.md).
 """
 
-import os
-import re
-
 import jax
 import optax
 from optax._src import base as optax_base
 from optax._src import wrappers as optax_wrappers
 
+from maxtext.models import olmoe3_roles as roles
 from maxtext.utils import max_logging
-
-# (pattern on the path within a layer, fan-in from the config and whether the layer is dense).
-_LAYER_MATRICES = (
-    (r"mixer/(w_q|w_k|w_v|f_proj_1|g_proj_1|w_b)/kernel", lambda c, dense: c.emb_dim),
-    (r"mixer/(f_proj_2|g_proj_2)/kernel", lambda c, dense: c.gdn_value_head_dim),
-    (r"mixer/w_out/kernel", lambda c, dense: c.gdn_num_value_heads * c.gdn_value_head_dim),
-    (r"mixer/attention/(query|key|value)/kernel", lambda c, dense: c.emb_dim),
-    (r"mixer/attention/out/kernel", lambda c, dense: c.num_query_heads * c.head_dim),
-    (r"latent_down/kernel", lambda c, dense: c.emb_dim),
-    (r"latent_up/kernel", lambda c, dense: c.moe_expert_input_dim),
-    (r"moe_block/gate/kernel", lambda c, dense: c.emb_dim),
-    (r"moe_block/(wi_0|wi_1)", lambda c, dense: c.moe_expert_input_dim),
-    (r"moe_block/wo", lambda c, dense: c.moe_mlp_dim),
-    (r"shared_ffn/(wi_0|wi_1)/kernel", lambda c, dense: c.emb_dim),
-    (r"shared_ffn/wo/kernel", lambda c, dense: c.mlp_dim if dense else c.shared_expert_mlp_dim),
-)
-# Parameters inside a layer that are vectors for muP whatever their rank: norm gains (2-D for per-head QK
-# norms), biases, KDA's decay parameters and depthwise short convs, and the SSMax gains.
-_LAYER_VECTORS = r"(/scale|/bias|ssmax_scale|A_log|dt_bias|_conv)$"
 
 
 def _path_str(path):
-  """The '/'-joined parameter path, as `adamw_mask` matches it, without the boxed-variable `value` key."""
-  s = jax.tree_util.keystr(path, simple=True, separator="/")
-  return re.sub(r"/value$", "", s)
-
-
-def _layer_kind(config, layer):
-  dense = layer < config.first_num_dense_layers
-  attention = (layer + 1) % config.inhomogeneous_layer_cycle_interval == 0
-  return ("dense" if dense else "moe") + "+" + ("attention" if attention else "kda")
-
-
-def _classify(config, path_str):
-  """("matrix", role, fan_in) | ("embedding",) | ("vector",) for a parameter path; raises if it has no rule.
-
-  A role is the layer kind plus the matrix's rule in `_LAYER_MATRICES` (or the LM head), so the same matrix
-  of a model with another width or depth has the same role.
-  """
-  if path_str.endswith("token_embedder/embedding"):
-    return ("embedding",)
-  if path_str.endswith("decoder/logits_dense/kernel"):
-    return ("matrix", "logits_dense/kernel", config.emb_dim)
-  match = re.search(r"(?:^|/)layers_(\d+)/(.+)$", path_str)
-  if match is None:
-    if re.search(r"(decoder_norm|embedding_norm)/scale$", path_str):
-      return ("vector",)
-    raise NotImplementedError(f"muP has no rule for parameter {path_str}")
-  layer, sub = int(match.group(1)), match.group(2)
-  if re.search(_LAYER_VECTORS, sub):
-    return ("vector",)
-  kind = _layer_kind(config, layer)
-  for pattern, fan_in in _LAYER_MATRICES:
-    if re.fullmatch(pattern, sub):
-      return ("matrix", f"{kind}/{pattern}", fan_in(config, kind.startswith("dense")))
-  raise NotImplementedError(f"muP has no rule for parameter {path_str}")
-
-
-def _shape_fan_in(config, path_str, shape):
-  """The fan-in a kernel's shape implies (dims MaxText contracts over), to check the config-derived one."""
-  if re.search(r"moe_block/(wi_0|wi_1|wo)$", path_str):
-    # [experts, in, out], or [experts * in, out] under moe_flat_fsdp_weights.
-    return shape[1] if len(shape) == 3 else shape[0] // config.num_experts
-  return shape[0]
+  return roles.path_str(path)
 
 
 def check_supported(config):
@@ -111,55 +49,27 @@ def check_supported(config):
 
 
 def load_base_config(config):
-  """The MaxText config of `mup_base_model_name`, with base.yml defaults (only its widths and layer layout are read)."""
-  from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
-  from maxtext.utils.globals import MAXTEXT_PKG_DIR  # pylint: disable=import-outside-toplevel
-
-  return pyconfig.initialize(
-      [
-          "",
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          f"model_name={config.mup_base_model_name}",
-          "run_name=mup_base_model",
-          "enable_checkpointing=False",
-          "skip_jax_distributed_system=True",
-      ]
-  )
-
-
-def base_fan_ins(base_config):
-  """{role: fan_in} for every matrix role of the base model, keyed as `_classify` keys them."""
-  roles = {"logits_dense/kernel": base_config.emb_dim}
-  for layer in range(base_config.num_decoder_layers):
-    kind = _layer_kind(base_config, layer)
-    for pattern, fan_in in _LAYER_MATRICES:
-      roles.setdefault(f"{kind}/{pattern}", fan_in(base_config, kind.startswith("dense")))
-  return roles
+  """The MaxText config of `mup_base_model_name` (only its widths and layer layout are read)."""
+  return roles.load_base_config(config.mup_base_model_name)
 
 
 def lr_multipliers(config, base_config, params):
   """The muP learning-rate multiplier of every parameter of `params` (same tree, Python floats).
 
-  Raises if a parameter has no rule, if its kernel shape disagrees with the fan-in its config gives, or if
-  its role (layer kind) is missing from the base model.
+  Matrices (in-layer, readout and the LM head alike): base fan-in / fan-in. The embedding:
+  `mup_embedding_lr_multiplier`. Everything else: 1. Raises if a parameter has no rule, if its kernel shape
+  disagrees with the fan-in its config gives, or if its layer kind is missing from the base model.
   """
-  base = base_fan_ins(base_config)
+  base = roles.base_fan_ins(base_config)
 
-  def multiplier(path, leaf):
-    path_str = _path_str(path)
-    kind = _classify(config, path_str)
-    if kind[0] == "embedding":
+  def multiplier(role):
+    if role.role == roles.INPUT_EMBEDDING:
       return float(config.mup_embedding_lr_multiplier)
-    if kind[0] == "vector":
-      return 1.0
-    _, role, fan_in = kind
-    if hasattr(leaf, "shape") and _shape_fan_in(config, path_str, leaf.shape) != fan_in:
-      raise ValueError(f"muP: {path_str} has shape {leaf.shape}, but its config gives fan-in {fan_in}")
-    if role not in base:
-      raise ValueError(f"muP: the base model {config.mup_base_model_name} has no {role} (no such layer kind)")
-    return base[role] / fan_in
+    if role.role in roles.MATRIX_ROLES:
+      return roles.base_fan_in(base, role, config.mup_base_model_name) / role.fan_in
+    return 1.0
 
-  return jax.tree_util.tree_map_with_path(multiplier, params)
+  return jax.tree.map(multiplier, roles.classify_tree(config, params), is_leaf=lambda x: isinstance(x, roles.ParamRole))
 
 
 def _log_multipliers(multipliers, params):

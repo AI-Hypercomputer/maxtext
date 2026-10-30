@@ -3484,6 +3484,23 @@ class AdamW(BaseModel):
       ),
   )
   mup_embedding_lr_multiplier: float = Field(1.0, description="Under muP, the token embedding's learning-rate multiplier.")
+  completedp_base_model_name: str = Field(
+      "",
+      description=(
+          "CompletedP (Complete(d)P, arXiv:2512.22382; OLMo-core's CompletedPConfig in base-model mode; olmoe3,"
+          " opt_type=adamw, olmo_init_method=normal, scan_layers=False): relative to this base model and run, every"
+          " residual branch is scaled by (layers / base layers)^-alpha, each matrix's normal init by its width"
+          " ratio, and every parameter's lr, eps and weight decay by its role, width and depth (and batch size and"
+          " duration). Empty: off."
+      ),
+  )
+  completedp_alpha: float = Field(1.0, description="CompletedP's depth exponent, in [0.5, 1] (1: CompleteP).")
+  completedp_base_batch_tokens: int = Field(
+      0, description="CompletedP: the base run's tokens per optimizer step (batch-size rules). 0: this run's."
+  )
+  completedp_base_train_tokens: int = Field(
+      0, description="CompletedP: the base run's training tokens (duration rules). 0: this run's."
+  )
   mu_dtype: str = Field(
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",

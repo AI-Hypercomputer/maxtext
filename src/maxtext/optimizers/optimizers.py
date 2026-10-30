@@ -22,6 +22,8 @@ import jax.numpy as jnp
 import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.models import olmoe3_roles
+from maxtext.optimizers import completedp
 from maxtext.optimizers import mup
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils import max_logging
@@ -172,7 +174,11 @@ def skip_step_on_spikes(
 
 def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   """Create optimizer."""
-  if getattr(config, "mup_base_model_name", ""):
+  if getattr(config, "completedp_base_model_name", ""):
+    completedp.check_supported(config)
+    base = olmoe3_roles.load_base_config(config.completedp_base_model_name)
+    base_opt = completedp.completedp_adamw(learning_rate_schedule, config, base, mask=get_adamw_mask(config))
+  elif getattr(config, "mup_base_model_name", ""):
     mup.check_supported(config)
     if config.olmo_init_method != "nanochat":
       max_logging.warning(f"muP learning rates with olmo_init_method={config.olmo_init_method}; muP expects nanochat.")

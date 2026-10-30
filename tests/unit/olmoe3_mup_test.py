@@ -119,7 +119,7 @@ class MuPMultiplierTest(unittest.TestCase):
 
   def test_rejects_parameters_without_a_rule(self):
     cfg = _config(TARGET)
-    with self.assertRaisesRegex(NotImplementedError, "no rule"):
+    with self.assertRaisesRegex(NotImplementedError, "no parametrization rule"):
       mup.lr_multipliers(cfg, mup.load_base_config(cfg), {"decoder": {"layers_1": {"mixer": {"w_new": {"kernel": jnp.zeros((4, 4))}}}}})
 
   def test_rejects_a_kernel_whose_shape_disagrees(self):

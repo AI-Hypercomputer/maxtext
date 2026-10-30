@@ -576,7 +576,7 @@ class NNXDecoder(nnx.Module):
       if config.decoder_block == DecoderBlockType.OLMOE3:
         # The reference initializes the untied LM head with the block weights' init
         # (std 0.02 under "normal", nanochat_std(emb, vocab) under "nanochat").
-        lm_head_kwargs["kernel_init"] = olmoe3.olmoe3_kernel_init(config)
+        lm_head_kwargs["kernel_init"] = olmoe3.olmoe3_lm_head_init(config)
       self.logits_dense = linears.DenseGeneral(
           in_features_shape=config.emb_dim,
           out_features_shape=config.vocab_size,

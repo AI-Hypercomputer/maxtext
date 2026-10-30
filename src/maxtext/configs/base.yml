@@ -1300,6 +1300,18 @@ mup_base_model_name: ""
 mup_scale_weight_decay: true
 # Under muP, the token embedding's learning-rate multiplier.
 mup_embedding_lr_multiplier: 1.0
+# CompletedP (Complete(d)P, arXiv:2512.22382; OLMo-core's CompletedPConfig in base-model mode), olmoe3 + adamw
+# with olmo_init_method=normal only: relative to this base model (and run), every residual branch is scaled by
+# (layers / base layers)^-alpha, the normal init of each matrix by its width ratio, and every parameter's lr, eps and
+# weight decay by its role, width and depth (and batch size and duration). Empty: off. E.g. olmo35-tiny-e256k8-sh2x
+# as the base of olmo35-small-e256k8-sh2x.
+completedp_base_model_name: ""
+# CompletedP's depth exponent, in [0.5, 1]: 1 is CompleteP (each layer contributes 1/L), 0.5 depth-muP.
+completedp_alpha: 1.0
+# The base run's tokens per optimizer step and training tokens, for CompletedP's batch-size and duration rules
+# (lr and wd x sqrt(m_B / m_D), eps / sqrt(m_B / m_D), 1 - beta x m_B / m_D). 0: this run's own (no scaling).
+completedp_base_batch_tokens: 0
+completedp_base_train_tokens: 0
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
