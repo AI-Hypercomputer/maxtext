@@ -17,14 +17,15 @@
   - `qwen3-480b-a35b` has no parameter mapping (`KeyError`).
   - The other runs didn't finish their **load phase** within an 1800 s watchdog. The WITH-PRs load phases for the same configs take 353–708 s. So the PRs make the load at least 2.5–5× faster on every config where BEFORE got as far as loading: 235B, 284B, 397B and 671B. These are lower bounds.
 - One remaining gap WITH the PRs: `qwen3.5-397b-a17b` scanned on 2 slices runs out of HBM while splitting the stacked
-  `(wi_0, wi_1)` composite (issue U-1). A first fix (`patches/hbmfix`) didn't move that peak.
+  `(wi_0, wi_1)` composite (issue U-1). A first fix (`patches/hbmfix`) didn't move that peak; this branch's fix
+  (stacking `wi_0` and `wi_1` one by one) resolves it in **1,608.3 s** on 2 × `2x2x1` and **1,475.2 s** on 1 × `2x2x2`.
 
 **Exp 1B: `to_maxtext` (S1 HF→GCS, S2 CPU conversion, S3 Orbax load) vs `safetensors_dynamic` (S1, S2 load + convert)**
 - On a tpu7x host (1,014.5 GB RAM, ~100 GB boot disk), `to_maxtext` S2 **cannot convert most >200B configurations**:
   - It keeps the whole converted state in host RAM before the Orbax save.
   - Scanned conversions need the whole source staged locally, and the only local storage large enough is RAM.
-  - Only unscanned 235B converts, by streaming shards from GCS (16 parallel range reads). It takes 3,754 s end-to-end on 1 slice (S1 583 s + S2 2,626 s + S3 546 s), vs 1,280 s for `safetensors_dynamic`: 2.9× end-to-end and 4.5× without Step 1. On 2 slices: 3,868 s vs 1,332 s (2.9× / 4.4×). With single-stream reads, the conversion took 5,150 s.
-  - Unscanned 397B finished its transform (6,860 s), then ran out of host RAM when the Orbax save started.
+  - Unscanned 235B converts by streaming shards from GCS (16 parallel range reads). It takes 3,754 s end-to-end on 1 slice (S1 583 s + S2 2,626 s + S3 546 s), vs 1,280 s for `safetensors_dynamic`: 2.9× end-to-end and 4.5× without Step 1. On 2 slices: 3,868 s vs 1,332 s (2.9× / 4.4×). With single-stream reads, the conversion took 5,150 s.
+  - Unscanned 397B finished its transform (6,860 s), then ran out of host RAM when the Orbax save started (because `save_weights_to_checkpoint` ignored `checkpoint_storage_concurrent_gb`, defaulting to 96 GB of write buffers). With this branch's save-buffer cap (U-8), Step 2 completes in **8,096.5 s** (peak RAM 884.2 GB) and Step 3 loads in **2,025.8 s** on 2 × `2x2x1` (**10,936.8 s** E2E vs `safetensors_dynamic` **2,126.4 s** = **5.14×** E2E / **7.72×** without Step 1) and **1,838.3 s** on 1 × `2x2x2` (**5.47×** / **8.63×**).
 - `safetensors_dynamic` loads straight from the HF shards, so it is the only pipeline that loads the scanned 235B,
   284B, 480B, and 671B configurations at all.
 
@@ -55,9 +56,9 @@
 | | scanned · 2 | ❌ timeout at 1800 s, still loading | **440.7 s** (352.9 + 87.6) | 576.0 / 822.6 GB |
 | | unscanned · 2 | (skipped after scanned) | **353.0 s** (306.3 + 46.5) | – / 822.6 GB |
 | `qwen3.5-397b-a17b` | scanned · 1 | – | ❌ load 942.1 s, then TPU HBM OOM (795 GB ≈ 98% of HBM) | – / 48.3 GB |
-| | scanned · 2 | – | ❌ load 483.8 s, then HBM OOM splitting `(wi_0, wi_1)` (U-1); `hbmfix`: load 469.7 s, same OOM | – / 161.2 GB |
-| | unscanned · 2 | ❌ timeout at 1800 s, still loading | **1,311.9 s** (515.9 + 795.7) | 301.7 / 98.7 GB |
-| | scanned · 4 | – | **1,399.7 s** (260.0 + 1,139.1) | – / 127.7 GB |
+| | scanned · 2 | – | ❌ load 483.8 s, then HBM OOM splitting `(wi_0, wi_1)` (U-1); `hbmfix`: load 469.7 s, same OOM; **with fix (U-1): 1,608.3 s** (513.3 + 1,093.4) | – / 161.2 GB (93.0 GB with fix) |
+| | unscanned · 2 | ❌ timeout at 1800 s, still loading | **1,311.9 s** (515.9 + 795.7); with fix: **1,272.2 s** | 301.7 / 98.7 GB |
+| | scanned · 4 | ❌ timeout at 1800 s, still loading | **1,399.7 s** (260.0 + 1,139.1) | 316.6 / 127.7 GB |
 | `qwen3-480b-a35b` | scanned · 1 | ❌ `KeyError` | ❌ TPU HBM OOM (961 GB > 813.8 GB) | – |
 | | scanned · 2 | ❌ `KeyError` | **1,067.9 s** (942.0 + 125.8) | – / 415.7 GB |
 | | unscanned · 2 | ❌ `KeyError` | **992.2 s** (907.7 + 84.3) | – / 415.5 GB |
@@ -76,7 +77,7 @@ The PR changes behind the WITH results:
 | :--- | :--- | :--- | :--- |
 | `qwen3-235b-a22b` (470 GB) | scanned ❌: the staged source plus the converted state exceed host RAM (OOM-killed at leaf 4/15). Unscanned ✅ **2,625.5 s** (shards streamed from GCS as 16 parallel range reads; single stream: 5,150.1 s) | unscanned: **545.5 s** on 1 slice, **659.1 s** on 2 slices | 697–792 s |
 | `deepseek4-284b` (582 GB) | ❌ OOM-killed at 989.6 GB (scanned and unscanned) | ➖ no checkpoint | 353–453 s |
-| `qwen3.5-397b-a17b` (807 GB on disk) | scanned ❌: the source must be staged in RAM. Unscanned ❌: with parallel shard reads the transform finished (6,860 s), then the pod was OOM-killed when the Orbax save started (~807 GB converted state). Single-stream attempts hit the ~3 h workload limit | ➖ no checkpoint | unscanned · 2: 1,311.9 s; scanned · 4: 1,399.7 s |
+| `qwen3.5-397b-a17b` (807 GB on disk) | scanned ❌: the source must be staged in RAM. Unscanned ✅ **8,096.5 s** with U-8's Orbax save-buffer cap and 16 parallel shard reads (peak RAM 884.2 GB; ❌ OOM-killed at the start of the Orbax save without the cap) | unscanned: **2,025.8 s** on 2 × `2x2x1`, **1,838.3 s** on 1 × `2x2x2` | unscanned · 2: 1,311.9 s (1,272.2 s with fix); scanned · 2 (with fix): 1,608.3 s; scanned · 4: 1,399.7 s |
 | `qwen3-480b-a35b` (960 GB) | ❌ scanned: the source must be staged; unscanned: the converted state exceeds ~943 GB usable RAM | ➖ no checkpoint | 992–1,068 s (2 slices) |
 | `deepseek3-671b` (1.34 TB) | ➖ not attempted | ➖ | 531–649 s (4 slices) |
 

@@ -1,8 +1,8 @@
 # Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-29 ~10:30 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
+> **Snapshot:** 2026-10-30 ~08:25 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
 >
-> The numbers below come from the per-phase result JSONs in GCS. All runs are finished and the cluster is cleaned up (§6). **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
+> The numbers below come from the per-phase result JSONs in GCS. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
 > [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py) (see §9).
 
 ---
@@ -11,12 +11,12 @@
 
 | Workstream | Status |
 | :--- | :--- |
-| **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit, 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s). 397B scanned on 1–2 slices runs out of HBM, also with `hbmfix` (§7.19) |
-| **P1 · Exp 1A BEFORE** (`origin/main`) | ✅ Done. Every BEFORE run **timed out at 1800 s while still loading** (235B · 1 and · 2, 284B · 1 and · 2, 397B unscanned · 2, 671B · 4), except 480B, which hits `KeyError`. With the PRs, the same loads take 353–708 s |
-| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | ✅ Done. `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). **Unscanned 397B** finished its transform (6,860 s with parallel shard reads), then was **OOM-killed when the Orbax save started** (~807 GB converted state). **Unscanned 235B** (re-run with 16 parallel shard reads, run `tpu7x_200b_pstream`): S2 2,625.5 s, S3 545.5 s / 659.1 s on 1 / 2 slices, so `safetensors_dynamic` is 2.9× faster end-to-end (4.4–4.5× without Step 1). The single-stream first run took 5,150.1 s |
-| **P1 completion run** | GCS task queue (`configs/p1_completion_tasks.json`, 29 tasks). All tasks are done except the two unscanned conversion chains (235B, 397B). Workers left: `s3` (235B), `s8` (397B), standby `s1`, pairs `i` and `k` for the 2-slice loads |
-| **P2 · 16-model suite** | ✅ Done (`p2_leftovers` and re-runs). `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned loads. `llama3.1-70b` scanned · 2 Orbax load needed `concurrent_gb=38` (T-13). Re-ran the `qwen3-14b` and `qwen3-32b` scanned · 1 outliers (U-7) |
-| **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`. Regenerate the CSV with `scripts/build_tpu7x_tables.py` and the row-by-row tables with `scripts/build_tpu7x_sheet_table.py --md-into` (§8). The cluster is cleaned up |
+| **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit + `2 × 2x2x2` (757.7 s / 718.7 s), 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s). With commit `1dd7ba3a9` (`safetensor (with fix)`), 397B scanned also completes on `2 × 2x2x1` (**1,608.3 s**) and `1 × 2x2x2` (**1,475.2 s**) |
+| **P1 · Exp 1A BEFORE** (`origin/main`) | ✅ Done. Every BEFORE run **timed out at 1800 s while still loading** (235B · 1 and · 2, 284B · 1 and · 2, 397B unscanned · 2, 397B scanned · 4, 671B · 4), except 480B, which hits `KeyError`. With the PRs, the same loads take 353–1,400 s |
+| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | ✅ Done. `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). **Unscanned 235B**: S2 2,625.5 s, S3 545.5 s (`1 × 2x2x1`), 659.1 s (`2 × 2x2x1`), 841.1 s (`1 × 2x2x2`), and 682.1 s (`2 × 2x2x2`). **Unscanned 397B** (with commit `27dec98be` save-buffer cap): S2 **8,096.5 s** (transform 6,642.8 s + save 1,432.0 s, peak 884.2 GB RAM), S3 **2,025.8 s** (`2 × 2x2x1`) and **1,838.3 s** (`1 × 2x2x2`) |
+| **P1 completion & P3 fixes** | ✅ Queue `p1` (`configs/p1_completion_tasks.json`) and queue `p3` (`configs/p3_tasks.json`, 10/10 tasks) completed. Remaining multi-host JobSets: `mesakh-mh-397b-tm-2s-b` (`2 × 2x2x2`, running) and spot-capacity-gated `2x2x4` / `2x4x4` topologies (`397b-tm-4h`, `ds32-4h`, `1600b-8h`) |
+| **P2 · 16-model suite** | ✅ Done (`p2_leftovers`, re-runs, and `safetensor (with fix)`). With commit `1dd7ba3a9`, `gpt-oss-120b` scanned `safetensors_dynamic` now succeeds on 1 slice (**504.9 s**) and 2 slices (**430.0 s**) (U-6 resolved). `llama3.1-70b` unscanned `to_maxtext` S2 peak host RAM drops from 403.6 GB to **351.9 GB** with commit `27dec98be` (U-8) |
+| **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`, `tpu7x_multihost_results.{csv,md}`. Regenerate the CSV with `scripts/build_tpu7x_tables.py` and the row-by-row tables with `scripts/build_tpu7x_sheet_table.py --md-into` (§8) |
 
 ---
 
