@@ -330,6 +330,7 @@ ModelName = Literal[
     "glm5.3-flash",
     "ming-3.0-audio-tiny",
     "hy4-preview",
+    "ming-3.0-audio-tiny-talker",
 ]
 
 
@@ -1796,6 +1797,45 @@ class Ming(BaseModel):
   ming_norm_audio_embeds: bool = Field(
       True, description="L2-normalize the projected audio embeddings (norm_query_embeds)."
   )
+  # Talker (text -> speech): Qwen2 LLM (the regular decoder) + the heads below, see `maxtext.models.ming_talker`.
+  ming_talker: bool = Field(
+      False, description="Build the Ming talker heads (CFM DiT, aggregator, stop/speaker heads, AudioVAE decoder)."
+  )
+  ming_talker_latent_dim: int = Field(64, description="AudioVAE latent channels predicted per talker step.")
+  ming_talker_patch_size: int = Field(1, description="Latents generated per talker step (`patch_size`).")
+  ming_talker_history_patch_size: int = Field(1, description="Previous latents fed to the CFM DiT.")
+  ming_talker_speaker_dim: int = Field(192, description="CAM++ speaker embedding size (`spk_head` input).")
+  ming_talker_dit_hidden_size: int = Field(1024, description="CFM DiT hidden size (`flowmodel.hidden_size`).")
+  ming_talker_dit_num_layers: int = Field(8, description="CFM DiT depth.")
+  ming_talker_dit_num_heads: int = Field(16, description="CFM DiT attention heads.")
+  ming_talker_dit_mlp_ratio: int = Field(4, description="CFM DiT MLP expansion ratio.")
+  ming_talker_aggregator_hidden_size: int = Field(1024, description="Aggregator hidden size.")
+  ming_talker_aggregator_num_layers: int = Field(8, description="Aggregator depth.")
+  ming_talker_aggregator_num_heads: int = Field(16, description="Aggregator attention heads.")
+  ming_talker_aggregator_mlp_ratio: int = Field(4, description="Aggregator MLP expansion ratio.")
+  ming_talker_cfm_steps: int = Field(10, description="Euler steps of the flow-matching sampler (`steps`).")
+  ming_talker_cfg_strength: float = Field(2.0, description="Classifier-free guidance scale (`cfg`).")
+  ming_talker_sigma: float = Field(0.25, description="SDE noise scale of the sampler (`sigma`).")
+  ming_talker_temperature: float = Field(0.0, description="SDE temperature of the sampler; 0 = deterministic ODE.")
+  ming_talker_max_steps: int = Field(1000, description="Maximum talker steps (latents) per text fragment.")
+  ming_talker_min_steps: int = Field(4, description="Talker steps before the stop head may end a fragment.")
+  ming_talker_stop_threshold: float = Field(0.5, description="Stop when the stop-head probability exceeds this.")
+  ming_talker_ip_name: str = Field("灵小柔", description="Voice (`IP`) name of the assistant-side instruction.")
+  ming_talker_language: str = Field("", description="Optional target language id; empty/zh/en add no prompt line.")
+  ming_talker_max_fragment_length: int = Field(50, description="Approximate characters per synthesized fragment.")
+  ming_talker_seed: int = Field(0, description="Seed of the CFM noise.")
+  ming_vae_hidden_size: int = Field(896, description="AudioVAE decoder backbone hidden size.")
+  ming_vae_num_layers: int = Field(24, description="AudioVAE decoder backbone layers.")
+  ming_vae_num_heads: int = Field(14, description="AudioVAE decoder attention heads.")
+  ming_vae_num_kv_heads: int = Field(2, description="AudioVAE decoder key/value heads.")
+  ming_vae_mlp_dim: int = Field(4864, description="AudioVAE decoder SwiGLU intermediate size.")
+  ming_vae_sliding_window: int = Field(64, description="AudioVAE decoder causal sliding-window size.")
+  ming_vae_rope_theta: float = Field(1_000_000.0, description="AudioVAE decoder RoPE theta.")
+  ming_vae_rms_norm_eps: float = Field(1e-6, description="AudioVAE decoder RMSNorm epsilon.")
+  ming_vae_patch_size: int = Field(4, description="Linear upsampling factor from latents to ISTFT frames.")
+  ming_vae_hop_length: int = Field(882, description="ISTFT hop length (n_fft = 4 * hop).")
+  ming_vae_sample_rate: int = Field(44100, description="Output waveform sample rate.")
+  ming_talker_audio_output_path: str = Field("", description="Output WAV path of `ming_talker_decode`.")
 
 
 class Qwen3Next(BaseModel):

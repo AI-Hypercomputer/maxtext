@@ -148,6 +148,13 @@ class Transformer(nnx.Module):
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    # Ming talker (text -> speech): the decoder above is the talker LLM; these are its non-LLM heads.
+    if getattr(cfg, "ming_talker", False):
+      from maxtext.models import ming_talker  # pylint: disable=import-outside-toplevel
+
+      self.ming_talker = ming_talker.MingTalkerHeads(config=cfg, rngs=rngs)
+    else:
+      self.ming_talker = None
 
     # If MTP is enabled via config, set up the MTP block.
     if getattr(self.config, "mtp_num_layers", 0) > 0:

@@ -1,0 +1,68 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# inclusionAI/Ming-3.0-audio-tiny talker (subfolder `talker/`): text input -> speech output.
+#
+# LLM: Qwen2 decoder (`talker/llm/config.json`), fed with input embeddings. Its last hidden state drives a
+# flow-matching DiT head that samples one 64-dim AudioVAE latent per step; an aggregator embeds the latent
+# as the next LLM input, a stop head ends the fragment, and the AudioVAE decoder turns latents into 44.1 kHz
+# audio. See `maxtext.models.ming_talker` and `maxtext.inference.ming_talker_decode`.
+
+decoder_block: "qwen2"
+base_emb_dim: 896
+base_num_query_heads: 14
+base_num_kv_heads: 2
+head_dim: 64
+base_mlp_dim: 4864
+base_num_decoder_layers: 24
+mlp_activations: ["silu", "linear"]
+vocab_size: 151936
+normalization_layer_epsilon: 1.0e-6
+rope_max_timescale: 1_000_000
+use_qk_norm: false
+attention_bias: true
+logits_via_embedding: true
+normalize_embedding_logits: false
+enable_dropout: false
+tokenizer_type: "huggingface"
+
+# Talker heads (`talker/config.json`, `talker/vae/config.json`).
+ming_talker: true
+ming_talker_latent_dim: 64
+ming_talker_patch_size: 1
+ming_talker_history_patch_size: 1
+ming_talker_speaker_dim: 192
+ming_talker_dit_hidden_size: 1024
+ming_talker_dit_num_layers: 8
+ming_talker_dit_num_heads: 16
+ming_talker_dit_mlp_ratio: 4
+ming_talker_aggregator_hidden_size: 1024
+ming_talker_aggregator_num_layers: 8
+ming_talker_aggregator_num_heads: 16
+ming_talker_aggregator_mlp_ratio: 4
+ming_talker_cfm_steps: 10
+ming_talker_cfg_strength: 2.0
+ming_talker_sigma: 0.25
+ming_talker_temperature: 0.0
+ming_vae_hidden_size: 896
+ming_vae_num_layers: 24
+ming_vae_num_heads: 14
+ming_vae_num_kv_heads: 2
+ming_vae_mlp_dim: 4864
+ming_vae_sliding_window: 64
+ming_vae_rope_theta: 1_000_000
+ming_vae_rms_norm_eps: 1.0e-6
+ming_vae_patch_size: 4
+ming_vae_hop_length: 882
+ming_vae_sample_rate: 44100
