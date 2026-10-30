@@ -170,6 +170,10 @@ files = {
     '${BENCHMARK_DIR}/scripts/tpu7x_task_queue.py': 'tpu7x_task_queue.py',
     '${BENCHMARK_DIR}/patches/hbmfix/src/maxtext/checkpoint_conversion/utils/load_dynamic.py': 'load_dynamic.py',
     '${BENCHMARK_DIR}/patches/hbmfix/src/maxtext/checkpoint_conversion/utils/tensor_handling.py': 'tensor_handling.py',
+    # This branch's fixed utils, staged on the pods as /tmp/maxtext_fix (bootstrap_tpu7x.stage_fix_tree).
+    '${REPO_ROOT}/src/maxtext/checkpoint_conversion/utils/load_dynamic.py': 'fix/load_dynamic.py',
+    '${REPO_ROOT}/src/maxtext/checkpoint_conversion/utils/tensor_handling.py': 'fix/tensor_handling.py',
+    '${REPO_ROOT}/src/maxtext/checkpoint_conversion/utils/utils.py': 'fix/utils.py',
 }
 for local_p, name in files.items():
     gcs_p = '${GCS_CODE_DIR}/' + name

@@ -189,6 +189,14 @@ P1C_SCALEOUT2_SINGLES = [
     (wid, make_queue_runner_script(wid, QUEUE_P1, max_slices=1)) for wid in ("s4", "s5", "s6", "s7", "s8")
 ]
 
+# Queue for the 10-30 single-host-slice runs (configs/p3_tasks.json uploaded to QUEUE_P3/tasks.json): BEFORE
+# qwen3.5-397b-a17b scanned on 4 slices, the fix validations and the to_maxtext save-memory runs. Each worker group
+# is written to its own file, so a group is deployed only when it has tasks to run.
+QUEUE_P3 = "gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p3"
+P3_GROUPS = [("p", 4, make_queue_runner_script("p", QUEUE_P3, max_slices=4, min_slices=4))]
+P3_PAIRS = [("q", make_queue_runner_script("q", QUEUE_P3, max_slices=2, min_slices=2))]
+P3_SINGLES = [(wid, make_queue_runner_script(wid, QUEUE_P3, max_slices=1)) for wid in ("t1", "t2", "t3")]
+
 
 def group_to_docs(gid: str, n_slices: int, runner_script: str) -> list[dict]:
   """An N-slice group: runner `mesakh-tpu7x-<gid>0` (slice 0) and daemons `mesakh-tpu7x-<gid><k>` (slices 1..N-1).
@@ -233,7 +241,7 @@ import os
 from etils import epath
 code = "{CODE_DIR}"
 harness = epath.Path(code + "/benchmark_ckpt_load_time.py").read_bytes()
-for tree in ("/tmp/maxtext", "/tmp/maxtext_origin_main", "/tmp/maxtext_hbmfix"):
+for tree in ("/tmp/maxtext", "/tmp/maxtext_origin_main", "/tmp/maxtext_hbmfix", "/tmp/maxtext_fix"):
     if os.path.isdir(tree + "/checkpoint_load_benchmark"):
         open(tree + "/checkpoint_load_benchmark/benchmark_ckpt_load_time.py", "wb").write(harness)
 open("/tmp/tpu7x_task_queue.py", "wb").write(epath.Path(code + "/tpu7x_task_queue.py").read_bytes())
@@ -395,7 +403,7 @@ MH_OWNER = os.environ.get("BENCH_OWNER", os.environ.get("USER", "bench"))
 MH_BASE = f"gs://mesa-maxtext/{MH_OWNER}_tpu7x_bench"
 MH_CODE_DIR = f"{MH_BASE}/code"
 MH_APP = f"{MH_OWNER}-tpu7x-bench"
-HOSTS_PER_SLICE = {"2x2x2": 2, "2x2x4": 4, "4x4x4": 16}
+HOSTS_PER_SLICE = {"2x2x2": 2, "2x2x4": 4, "2x4x4": 8, "4x4x4": 16}
 # Per platform: TPU devices per host and the harness run id, which keeps the result paths of the platforms apart.
 MH_PLATFORMS = {
     "tpu7x": {"devices_per_host": 8, "harness_run_id": "tpu7x_multihost"},
@@ -416,30 +424,46 @@ def make_multihost_runner_script(
     platform: str = "tpu7x",
     scan_modes: str = "scanned unscanned",
     extra_exports: str = "",
+    pipelines: str = "safetensors",
+    run_dir: tuple[str, str] | None = None,
+    tree: str = "/tmp/maxtext",
 ) -> str:
-  """safetensors_dynamic WITH Lance's 3 PRs on `num_slices` multi-host slices of `topology`."""
+  """safetensors_dynamic WITH Lance's 3 PRs on `num_slices` multi-host slices of `topology`.
+
+  `pipelines` is `safetensors` (the default), `to_maxtext` or `both`. `run_dir` is a (gcs base, run id) pair that
+  replaces this owner's multi-host run dir: with `--skip-completed`, a `to_maxtext` run there reuses the converted
+  checkpoint (Steps 1-2) of an earlier run, so only the Orbax load (Step 3) runs on the multi-host slices. `tree` is
+  the MaxText tree the harness runs from.
+  """
   hosts = HOSTS_PER_SLICE[topology]
   plat = MH_PLATFORMS[platform]
   layout = topology if platform == "tpu7x" else f"{platform} {topology}"
+  gcs_base, harness_run_id = run_dir or (f"{MH_BASE}/lance_prs", plat["harness_run_id"])
+  skip_flag = {"safetensors": "--skip-to-maxtext", "to_maxtext": "--skip-safetensors", "both": ""}[pipelines]
+  skip_line = f"  {skip_flag} \\\n" if skip_flag else ""
+  title = {
+      "safetensors": "safetensors_dynamic WITH Lance's 3 PRs",
+      "to_maxtext": "to_maxtext (Orbax load of the converted checkpoint)",
+      "both": "to_maxtext and safetensors_dynamic",
+  }[pipelines]
   return f"""set -e
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 KEEP_HF_CACHE=1 HF_HOME=/ramdisk/hf_cache TMPDIR=/ramdisk/tmp
 export SHARED_HF_CACHE_BASE_DIR="{hf_cache}"
 {extra_exports}
-echo "=== [{run_id}] safetensors_dynamic WITH Lance's 3 PRs on {num_slices} x {layout} ({hosts} hosts per slice) ==="
-python3 -u /tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py \\
+echo "=== [{run_id}] {title} on {num_slices} x {layout} ({hosts} hosts per slice) ==="
+python3 -u {tree}/checkpoint_load_benchmark/benchmark_ckpt_load_time.py \\
   --models {models_str} \\
   --scan-modes {scan_modes} \\
   --num-slices-list {num_slices} \\
   --num-hosts-per-slice {hosts} \\
   --devices-per-slice {plat["devices_per_host"] * hosts} \\
   --hardware tpu \\
-  --gcs-base {MH_BASE}/lance_prs \\
-  --run-id {plat["harness_run_id"]} \\
+  --gcs-base {gcs_base} \\
+  --run-id {harness_run_id} \\
   --local-work-dir /tmp/mh_lance_prs \\
   --csv-report /tmp/{run_id}.csv \\
   --reuse-model-hf-cache \\
-  --skip-to-maxtext \\
-  --skip-completed \\
+{skip_line}  --skip-completed \\
   --allow-step-failure
 python3 - <<'EOF'
 from etils import epath
@@ -601,6 +625,63 @@ MH_RUNS = [
     ("1600b-4s", "2x2x2", 4, "deepseek4-1600b", BOTH, P1_HF_CACHE, SPARSE),
 ]
 
+# Runs added on 10-30 (mesakh), as keyword arguments of make_multihost_runner_script plus the run id:
+#   * `to_maxtext` on multi-host slices. Its conversion (Step 2) runs on one host and only fits a tpu7x host for the
+#     models up to 120B and qwen3-235b-a22b unscanned, so these runs reuse a converted checkpoint from an earlier run
+#     dir (`run_dir`, with --skip-completed) and only time the Orbax load (Step 3). `smoke-tm-2s` also runs
+#     safetensors_dynamic, to check both pipelines on 2 x 2x2x2 first.
+#   * The DeepSeek layouts missing from MH_RUNS for one multi-host slice: deepseek3.2-671b on 2x2x4 (as
+#     deepseek3-671b in `671b`) and deepseek4-1600b on 2x4x4 (8 hosts, the HBM of 4 x 2x2x2).
+P1_PSTREAM_RUN = ("gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs", "tpu7x_200b_pstream")
+P2_RUN = ("gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs", "tpu7x_16m")
+MESAKH_MH_RUNS = [
+    {
+        "run_id": "smoke-tm-2s",
+        "topology": "2x2x2",
+        "num_slices": 2,
+        "models_str": "qwen3-0.6b",
+        "hf_cache": P2_HF_CACHE,
+        "pipelines": "both",
+        "run_dir": P2_RUN,
+    },
+    {
+        "run_id": "235b-tm",
+        "topology": "2x2x2",
+        "num_slices": 1,
+        "models_str": "qwen3-235b-a22b",
+        "scan_modes": "unscanned",
+        "hf_cache": P1_HF_CACHE,
+        "pipelines": "to_maxtext",
+        "run_dir": P1_PSTREAM_RUN,
+    },
+    {
+        "run_id": "235b-tm-2s",
+        "topology": "2x2x2",
+        "num_slices": 2,
+        "models_str": "qwen3-235b-a22b",
+        "scan_modes": "unscanned",
+        "hf_cache": P1_HF_CACHE,
+        "pipelines": "to_maxtext",
+        "run_dir": P1_PSTREAM_RUN,
+    },
+    {
+        "run_id": "ds32-4h",
+        "topology": "2x2x4",
+        "num_slices": 1,
+        "models_str": "deepseek3.2-671b",
+        "hf_cache": P1_HF_CACHE,
+        "extra_exports": SPARSE,
+    },
+    {
+        "run_id": "1600b-8h",
+        "topology": "2x4x4",
+        "num_slices": 1,
+        "models_str": "deepseek4-1600b",
+        "hf_cache": P1_HF_CACHE,
+        "extra_exports": SPARSE,
+    },
+]
+
 # bodaborg-v5p-nap runs for the DeepSeek checklist of the v5p sheet (single slice and multi slice, multi host), in the
 # same tuple format. Each layout keeps the model under ~50% of HBM: 284B on 2x2x4 (1,520 GB HBM), 671B and 1600B on
 # 4x4x4 (6,080 GB) for one slice, and 2 x 2x2x4 (3,040 GB) or 2 x 4x4x4 for two.
@@ -668,6 +749,15 @@ def build_manifests():
     yaml.safe_dump_all(scaleout2, f, sort_keys=False)
   print(f"Wrote {len(scaleout2)} resources to {p}")
 
+  p3_files = {f"tpu7x_p3_group_{gid}.yaml": group_to_docs(gid, n, script) for gid, n, script in P3_GROUPS}
+  p3_files.update({f"tpu7x_p3_pair_{pid}.yaml": pairs_to_docs([(pid, script)]) for pid, script in P3_PAIRS})
+  p3_files.update({f"tpu7x_p3_single_{wid}.yaml": single_worker_docs(wid, script) for wid, script in P3_SINGLES})
+  for fname, docs in p3_files.items():
+    p = os.path.join(out_dir, fname)
+    with open(p, "w", encoding="utf-8") as f:
+      yaml.safe_dump_all(docs, f, sort_keys=False)
+    print(f"Wrote {len(docs)} resources to {p}")
+
   for platform, runs in (("tpu7x", MH_RUNS), ("v5p", V5P_MH_RUNS)):
     for run_id, topology, num_slices, models_str, scan_modes, hf_cache, extra_exports in runs:
       script = make_multihost_runner_script(
@@ -685,6 +775,16 @@ def build_manifests():
       with open(p, "w", encoding="utf-8") as f:
         yaml.safe_dump(doc, f, sort_keys=False)
       print(f"Wrote 1 resource to {p}")
+
+  for run in MESAKH_MH_RUNS:
+    kwargs = dict(run)
+    run_id = kwargs.pop("run_id")
+    script = make_multihost_runner_script(run_id, **kwargs)
+    doc = multihost_jobset_doc(f"{MH_OWNER}-mh-{run_id}", run["topology"], run["num_slices"], script)
+    p = os.path.join(out_dir, f"tpu7x_multihost_{run_id}.yaml")
+    with open(p, "w", encoding="utf-8") as f:
+      yaml.safe_dump(doc, f, sort_keys=False)
+    print(f"Wrote 1 resource to {p}")
 
 
 if __name__ == "__main__":
