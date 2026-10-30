@@ -81,6 +81,7 @@ from google.cloud import storage
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.input_pipeline.tokenizer import build_tokenizer
 from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT, HF_IDS
 from maxtext.checkpoint_conversion.utils.hf_utils import convert_jax_weight_to_torch
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
@@ -147,7 +148,8 @@ def get_top_k_tokens_scores(logits_tensor, tokenizer_instance, k=10, description
   for i in range(k):
     tok_id = topk_results.indices[i].item()
     score = topk_results.values[i].item()
-    tok = tokenizer_instance.decode(tok_id)
+    # A list of ids is what both HF tokenizers and MaxText's own tokenizers decode.
+    tok = tokenizer_instance.decode([tok_id])
     collected_tokens.append({"id": int(tok_id), "token": tok.strip(), "score": float(score)})
     tokens.append({"id": int(tok_id), "token": tok.strip(), "score": float(score)})
 
@@ -393,10 +395,19 @@ def main(config, test_args):  # pylint: disable=W0621
       last_exception = e
       max_logging.log(f"Failed to load tokenizer from {path}: {e}")
 
+  if tokenizer is None and not test_args.run_hf_model:
+    # Golden-logits mode only calls `decode` on the tokenizer (to print top-k tokens), but models
+    # such as gemma-2b and llama2-7b ship a SentencePiece file that AutoTokenizer cannot open and
+    # have no HF_IDS fallback. Use MaxText's own loader for them. --run_hf_model is excluded: it
+    # tokenizes the prompts for both models and needs a real HF tokenizer.
+    max_logging.log(f"Falling back to the MaxText {config.tokenizer_type} tokenizer at {config.tokenizer_path}.")
+    tokenizer = build_tokenizer(config.tokenizer_path, config.tokenizer_type, False, False, hf_token)
+
   if tokenizer is None:
     raise last_exception
 
-  if config.model_name.startswith(("llama3.1", "mixtral")):
+  # MaxText's own tokenizers have no pad/eos token attributes; only HF tokenizers need this.
+  if config.model_name.startswith(("llama3.1", "mixtral")) and hasattr(tokenizer, "eos_token"):
     tokenizer.pad_token = tokenizer.eos_token
 
   max_logging.log("Initializing MaxText model")
