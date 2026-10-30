@@ -571,6 +571,19 @@ class CheckpointGoodputLoggerTest(unittest.TestCase):
     self.assertIs(logger, cloud_logger.return_value)
     options.assert_called_once_with(job_name="run", logger_name="goodput_run")
 
+  def test_setup_checkpoint_logger_uses_goodput_job_name_override(self):
+    config = SimpleNamespace(
+        enable_checkpoint_cloud_logger=True, run_name="shared_run", goodput_job_name="gemma3-4b-pre-shared_run"
+    )
+    with (
+        mock.patch.object(checkpointing.ocp_logging, "CloudLogger", create=True) as cloud_logger,
+        mock.patch.object(checkpointing.ocp_logging, "CloudLoggerOptions", create=True) as options,
+    ):
+      logger = checkpointing.setup_checkpoint_logger(config)
+
+    self.assertIs(logger, cloud_logger.return_value)
+    options.assert_called_once_with(job_name="gemma3-4b-pre-shared_run", logger_name="goodput_gemma3-4b-pre-shared_run")
+
 
 if __name__ == "__main__":
   unittest.main()
