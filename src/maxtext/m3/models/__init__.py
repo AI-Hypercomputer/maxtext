@@ -45,6 +45,12 @@ def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
 MODEL_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": create_glm5_3_flash_model,
     "qwen3-0.6b": create_qwen3_model,
+    "qwen3-1.7b": create_qwen3_model,
+    "qwen3-4b": create_qwen3_model,
+    "qwen3-8b": create_qwen3_model,
+    "qwen3-14b": create_qwen3_model,
+    "qwen3-32b": create_qwen3_model,
+    "qwen3-mini": create_qwen3_model,
     "qwen3-vl-2b": create_qwen3_vl_model,
     "qwen3.8-flash-next": create_qwen3_8_flash_next_model,
     # Debug-only mini variant of qwen3.8-flash-next: same architecture and constructor, shrunk to

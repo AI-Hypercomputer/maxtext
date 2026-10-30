@@ -20,8 +20,10 @@ Self-contained NNX implementation for multimodal forward passes:
 - Pure RoPE functions: apply_vision_rope (2D) and apply_mrope (3D).
 - Qwen3VLDecoder inherits directly from Qwen3Decoder.
 - Reuses Qwen3MLP from qwen3.
-- Parameter hierarchy matches legacy checkpoints (Qwen3VLVisionEncoder_0, Qwen3VLVisionProjector_0).
+- Parameter hierarchy matches existing MaxText checkpoints (Qwen3VLVisionEncoder_0, Qwen3VLVisionProjector_0).
 """
+
+# pylint: disable=arguments-differ
 
 from typing import Any, Optional, Sequence, Union
 from flax import nnx
@@ -35,7 +37,6 @@ from maxtext.m3.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
     Qwen3Decoder,
 )
-
 
 # ---------------------------------------------------------------------------
 # Core Pure Linear Layer
@@ -923,20 +924,27 @@ class Qwen3VLDecoder(Qwen3Decoder):
           feature_mask=multimodal_input.image_masks,
       )
 
-    for lyr in range(self.num_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      y = layer(
+    if isinstance(self.layers, nnx.Sequential):
+      for lyr, layer in enumerate(self.layers.layers):
+        y = layer(
+            y,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+        )
+        if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
+          feat = deepstack_visual_embeds[lyr]
+          if feat is not None and multimodal_input is not None and multimodal_input.image_masks is not None:
+            feat = _compact_visual_features(feat, multimodal_input.image_masks)
+          if visual_mask is not None and feat is not None:
+            y = deepstack_process(y, visual_mask, feat)
+    else:
+      y = self.layers(
           y,
           decoder_segment_ids=decoder_segment_ids,
           decoder_positions=decoder_positions,
           deterministic=deterministic,
       )
-      if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
-        feat = deepstack_visual_embeds[lyr]
-        if feat is not None and multimodal_input is not None and multimodal_input.image_masks is not None:
-          feat = _compact_visual_features(feat, multimodal_input.image_masks)
-        if visual_mask is not None and feat is not None:
-          y = deepstack_process(y, visual_mask, feat)
 
     logits = self.apply_output_head(shared_embedding, y, deterministic=deterministic)
     return logits, y

@@ -12,22 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core m3 primitives: sharding, data packing, RoPE, and segment-isolated ops.
+"""Core m3 primitives: contracts, sharding, checkpoints, data packing, RoPE, and segment-isolated ops.
 
 Modules:
   * `rope.py` — rotary positional embedding (1D and 3D M-RoPE).
   * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, 5-axis mesh creation.
+  * `interfaces.py` — `CausalLMOutput`, registered nondiff variables, and `verify_m3_model_invariants`.
+  * `checkpoint.py` — Orbax save/restore and unscanned container layer-name translation.
   * `data.py` — 5-key `M3Batch`, zero-copy 6-key iterator adapter, and pre-shift document bin-packing.
   * `layers.py` — segment-isolated causal Conv1d, n-gram hashing, and linear recurrence primitives.
 """
 
+from maxtext.m3.core import checkpoint
 from maxtext.m3.core import data
+from maxtext.m3.core import interfaces
 from maxtext.m3.core import layers
 from maxtext.m3.core import rope
 from maxtext.m3.core import sharding
 
 __all__ = [
+    "checkpoint",
     "data",
+    "interfaces",
     "layers",
     "rope",
     "sharding",

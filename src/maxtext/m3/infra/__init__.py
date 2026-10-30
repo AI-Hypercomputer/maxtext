@@ -14,11 +14,9 @@
 
 """Post-construction transforms applied from training setup, never from models.
 
-Planned modules:
-  * `remat.py` — path-transparent remat wrapper + `maybe_apply_remat`.
-  * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
-  * `quantization.py` — qwix int8/fp8 rules + `maybe_quantize`.
-  * `offload.py` — `to_host` for optimizer/parameter offloading.
+Modules:
+  * `remat.py` — path-transparent `nnx.remat` wrapper + `maybe_apply_remat`.
+  * `scan.py` — layer stacking via `jax.lax.scan` at `param_scan_axis` + `maybe_apply_scan`.
 
 Composition order is fixed:
 `construct -> remat -> scan -> quantize -> optimizer -> host offload`.
@@ -26,3 +24,11 @@ Composition order is fixed:
 Model files contain only zero-cost annotations (`checkpoint_name` tags and
 sharding specs); they must never import from this package.
 """
+
+from maxtext.m3.infra import remat
+from maxtext.m3.infra import scan
+
+__all__ = [
+    "remat",
+    "scan",
+]

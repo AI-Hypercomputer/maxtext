@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
+from maxtext.m3.core import checkpoint as m3_checkpoint
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLModel,
     create_qwen3_vl_model,
@@ -95,7 +96,7 @@ class Qwen3VLComparisonTest(absltest.TestCase):
     p_new = nnx.state(abs_new, nnx.Param)
 
     flat_old = dict(p_old.flat_state())
-    flat_new = dict(p_new.flat_state())
+    flat_new = dict(nnx.to_flat_state(m3_checkpoint.to_flat_layer_names(p_new)))
 
     self.assertEqual(
         len(flat_old), len(flat_new), f"Parameter counts differ: old has {len(flat_old)}, new has {len(flat_new)}"
