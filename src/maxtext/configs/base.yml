@@ -21,6 +21,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
+use_m3_model: false # Use the m3 backend; requires a registered m3 model.
 override_model_config: false # When set to true allows overriding model parameters via CLI (or kwargs or env vars) for the purpose of debugging/testing.
 override_logical_axis_rules: false # When set overrides logical axis rules instead of merging them.
 
@@ -132,7 +133,11 @@ dtype: "bfloat16"
 # 'fp8' for 8-bit floating-point gemms on nvidia gpus.
 # 'nanoo_fp8' for 8-bit floating-point gemms on amd mi300/mi325 gpus.
 # 'fp8_full' for fp8 quantization with static scaling.
+# 'serve_fp8_weight' to load and use FP8 checkpoint directly at inference time.
+# 'jax_mxfp8' / 'jax_mxfp4' for OCP MX training through jax.nn.scaled_dot_general.
 quantization: ""
+# For 'jax_mxfp8' / 'jax_mxfp4': the gradient format, '' (same as the operands), 'mxfp8' or 'mxfp4'.
+jax_mx_gradient_mode: ""
 # used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
 # choose one of default, high, and highest.
@@ -153,6 +158,11 @@ quantize_kvcache: false # set to true to quantize kv cache values, defaults to f
 kv_quant_axis: "heads_and_dkv"
 kv_quant_dtype: "int8"
 quantize_mtp: false # set to true to quantize mtp layers when quantization is enabled. requires mtp_num_layers > 0 and quantization=fp8_full.
+quantize_router_proj: true # set to false to exclude the moe router (gate) projection matmul from quantization when quantization is enabled. default is true for backward compatibility. applicable when use_qwix_quantization=true and quantization is set; ignored otherwise.
+quantize_logits_proj: false # set to true to quantize output logits projection (logits_dense) when quantization is enabled. requires quantization=fp8_full, logits_via_embedding=false, num_vocab_tiling=1. also covers the mtp logits projection, which reuses the same head.
+logits_proj_quant_calibration_method: "" # calibration method for logits_dense when quantize_logits_proj=true. if empty, inherits weight/act_quantization_calibration_method. e.g. "absmax"
+logits_proj_bwd_quant_calibration_method: "" # bwd (gradient) calibration method for logits_dense when quantize_logits_proj=true, applied to both dlhs and drhs gradients. if empty, inherits bwd_quantization_calibration_method and drhs_grad_quantization_calibration_method. e.g. "absmax"
+sa_qproj_bwd_bf16: false # keep self-attention query projection backward pass in bfloat16 instead of fp8 when fp8_full quantization is enabled.
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""
@@ -166,8 +176,15 @@ use_manual_quantization: false # a flag if to use manual quantization for batch 
 weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
-# shard the range finding operation for quantization. by default this is set to number of slices.
+drhs_grad_quantization_calibration_method: null  # weight-gradient-arm cotangent calibration; null = bwd_quantization_calibration_method
+# AQT only (use_qwix_quantization=false, quantization=int8): number of local shards along the contraction
+# axis of weight-gradient matmuls, each with its own scale. -1 = jax.local_device_count(); 0 = do not
+# quantize the weight-gradient matmul. Qwix uses qwix_bwd_weight_grad_tile_count instead.
 quantization_local_shard_count: -1
+# Qwix only (use_qwix_quantization=true): number of tiles along the contraction axis of weight-gradient matmuls, each with its own scale.
+# 1 = no tiling; >1 makes XLA all-reduce the full weight gradient under FSDP instead of reduce-scattering it.
+# Applies to quantization=int8, fp8, etc.; ignored by fp8_full, which never tiles weight gradients (same as 1).
+qwix_bwd_weight_grad_tile_count: 1
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
 weight_sparsity_n: null
 # The 'M' in N:M sparsity, representing the number of values in each block.
@@ -213,13 +230,40 @@ logits_via_embedding: false
 normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+# Release the LM head's input and weight cotangents together in the backward pass (an optimization barrier), so the
+# [batch, length, vocab] dlogits is not kept alive until the weight-gradient matmul. Enabling it may increase
+# step time while potentially reducing peak memory.
+tie_lm_head_cotangents: false
+# Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the transpose back into
+# the gradient dot and the weight gradient comes out in the kernel's stored orientation. Without the region that
+# fold never happens under shard_mode: explicit, because the Sharding custom-call on every dot output is a barrier
+# algsimp will not cross, so the gradient is left sharded on its minor-most dimension and loses the all-reduce ->
+# reduce-scatter fusion (see docs/guides/optimization/shard_mode_performance.md). The stored kernel, its
+# initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto, where XLA folds the transpose itself, and none
+# on a tied head, which has no kernel of its own -- so None means on exactly where it can do something.
+lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_mode: explicit if None
+# Shard the untied LM head on its vocab dimension using the FSDP axes (vocab TP over FSDP) instead of sharding its
+# embed dimension on FSDP. By default `embed_vocab` puts the head's [embed, vocab] kernel on the FSDP axes along
+# embed, so every step gathers the whole kernel forward and reduce-scatters a same-sized weight gradient back.
+# Turning the head sideways (embed replicated, vocab on the FSDP axes) moves those collectives onto the hidden state:
+# the kernel holds emb_dim*vocab_size elements against the hidden state's (fsdp*per_device_batch*length)*emb_dim, so
+# traffic drops when fsdp*per_device_batch*length < vocab_size (small-batch regimes) and the weight gradient needs no
+# collective at all. The logits come out sharded on vocab across FSDP, so the loss builds its one-hot targets
+# shard-locally against a vocab-sharded iota and cross entropy adds two vocab reductions over FSDP.
+# Requires an untied head without MTP, vocab tiling, fp8 head weights, or training_objective: block_diffusion, and a
+# vocab size divisible by the combined tensor and FSDP axes. Defaults to false (opt-in).
+lm_head_fsdp_as_vocab_tp: false
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
 csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
-float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
-float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
-
+# float32_weight_sum - whether to use fp32 accumulation for the MoE combine reduction after GMM for numerical stability (weighted sum of expert outputs by routing weights).
+float32_weight_sum: true
+# float32_gate_logits - whether to run the MoE gate (router) module before GMM in fp32 for numerical stability.
+# compute dtype only (the kernel is still stored in weight_dtype): casts the gate inputs and kernel, emits fp32 logits, and applies to the routed bias add and score function.
+# see quantize_router_proj for whether the gate projection matmul is quantized; enabling both is rejected.
+float32_gate_logits: false
 # multi-token prediction configs
 # the number of auxiliary prediction layers to use for mtp.
 # set to 0 to disable the feature.
@@ -231,6 +275,11 @@ mtp_loss_scaling_factor: 0.1
 # acceptance rate during evaluation. for example, a value of `1` targets the
 # first auxiliary prediction head. set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
+# reuse the main decoder's token embeddings instead of a second lookup
+mtp_reuse_input_embedding: false
+# apply the decoder's final norm to the main hidden state before passing it to
+# MTP, as in Megatron-LM where final_layernorm precedes the MTP hnorm
+mtp_norm_main_hidden_state: false
 
 # mixture of experts (moe)
 num_experts: 1
@@ -239,27 +288,54 @@ megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
+moe_accumulate_chunk_wgrad: false # with num_moe_token_chunks>1, gather/quantize MoE weights once and accumulate their gradients in place across chunks via tgmm_v2 partial_sum. requires use_tokamax_gmm=true, use_gmm_v2=true, num_moe_emb_chunks=0, prefuse_moe_weights=false.
+moe_accumulate_wi_dlhs: false # accumulate the MoE wi_1 backward DLHS into the wi_0 DLHS in place (gmm_v2 partial_sum) and fold per-tensor DLHS scales into the kernel. Requires use_tokamax_gmm=True, use_gmm_v2=True, prefuse_moe_weights=False.
+moe_gmm_v2_dlhs_transpose_rhs: false # use native transpose_rhs in GMM v2 backward DLHS; false keeps the explicit RHS transpose
+moe_flat_fsdp_weights: false # store routed-expert weights as 2D [num_experts * rows, cols] sharded (expert, fsdp) on dim 0 to eliminate FSDP all-gather / reduce-scatter relayout copies.
+moe_bwd_prequant_before_unsort: false # fuse TC unsort-reduce into the wo GMM custom VJP so backward quantization runs on the smaller [N_tokens, D // 128, 128] cotangent before the TC unsort-gather into the expert buffer. With quantization, needs fixed weight, act and bwd calibration.
+moe_combine_bwd_direct_qarray: false # with moe_bwd_prequant_before_unsort, fuse the EP combine psum_scatter into the wo GMM custom VJP so backward quantizes the local cotangent once before the EP all-gather and TC unsort-gather. Incompatible with moe_quantize_combine_bwd_method.
+moe_3d_dlhs_partial_sum: false # skip redundant zero-init in 3D DLHS gmm_v2 when accumulating onto an existing 3D partial_sum (e.g. wi_0 DLHS accumulating onto wi_1 DLHS).
 moe_chunk_barrier: false # wraps its iteration with optimization_barrier to chain the chunked ring-of-experts MoE loop so each chunk's input is fenced on the previous chunk's output, forcing sequential (no-interleave) chunk execution. Math unchanged (barrier is identity), loss bit-exact. Needs num_moe_token_chunks>1 + use_ring_of_experts=True to matter.
+moe_log_max_load_ratio: false # debug: log learning/moe_max_load_ratio{,_mean} (expert-shard load / balanced load) on the ring-of-experts ragged path; overflow iff max > ragged_buffer_factor.
 ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
 # By default (-1), the routed buffer is worst case size to ensure no dropping.
 # When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates
 # a size larger than this then tokens are dropped.
 # In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
-retry_when_tokens_dropped: false # retry the entire train step with worst-case ragged buffer size if tokens would otherwise be dropped.
+eval_ragged_buffer_factor: -1.0 # evaluation override for ragged_buffer_factor.
+# When the ragged buffer would drop tokens: None = drop them; step = replay the whole train step with a
+# dropless buffer; layer = per MoE layer, lax.cond into a chunked dropless branch (no step replay).
+# step requires use_ring_of_experts=True; layer works with ring of experts and with the ragged all-to-all path.
+# Valid values: None, step, layer
+moe_dropless_fallback: None
+retry_dropless_first_steps: 0 # with moe_dropless_fallback=step, run steps with step - start_step < N directly with the dropless program (no normal attempt). 0 = off.
+first_phase_ragged_buffer_factor: 0.0 # with moe_dropless_fallback=step and retry_dropless_first_steps=N, the first N steps use this ragged buffer factor (drops replay dropless). 0 = off.
+log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the min ragged_buffer_factor avoiding drops (REQUIRED_RBF).
+warmup_programs_in_init: false # before init_stop/run_start, run each precompiled train/eval program once on a synthetic batch (state unchanged), then a cross-host barrier.
+warmup_skip_train_dropless: false # requires warmup_programs_in_init=true; do not warm the train_dropless program (its warmup holds a second copy of the train state in HBM and can OOM). Use only when that warmup OOMs; the first dropless replay then pays the program's first load.
+log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias checksum, nonzero bias updates and the overflow flag to every training step log line
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
+moe_use_megatron_seq_aux_loss: false # when true, sigmoid and sqrtsoftplus routers use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
+router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+moe_topk_before_ep_all_gather: false # ring of experts: run top-k on local tokens and all-gather top-k weights/ids instead of router logits
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
+te_moe_disable_cudnn_gmm_fusion: false # force te_moe.moe(..., use_cudnn_fusion=False); false leaves TransformerEngine's default unchanged
+te_moe_quantize_before_fsdp_all_gather: false # true: quantize TE MoE weights before FSDP all-gather; false: quantize after
 te_ep_overflow_check_every_n_steps: 20 # host check interval for TE EP overflow when ragged_buffer_factor limits receive capacity
 te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available options are te_no_quant and te_mxfp8; must be specified when te_moe_block is true
-# Whether to quantize token activations before the All-Gather across EP shards in Ring of Experts, reducing
-# inter-chip token traffic proportionally to the quantized width (2x for FP8 vs BF16).
+# Whether to quantize token activations before the All-Gather across EP shards in Ring-of-Experts forward pass
+# Reduces inter-chip token traffic proportionally to the quantized width (2x for FP8 vs BF16).
 # Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens stay quantized end to end.
 # Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed act calibration.
 moe_quantize_token_all_gather: false
+# Quantization method for output gradients before the All-Gather across EP shards in Ring-of-Experts backward pass (Token Combine)
+# Value: "" = unquantized BF16; "rowwise" = dynamic token-wise FP8 E5M2; "fixed,<bound>" = static per-tensor FP8 E5M2
+moe_quantize_combine_bwd_method: ""
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
@@ -268,6 +344,16 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+moe_tc_ragged_sort: false # ring-of-experts ragged sort/unsort on TensorCore (Pallas DMA kernels) instead of the SparseCore
+                          # kernels; requires use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0.
+moe_tc_ragged_gather_block_size: 1024 # moe_tc_ragged_sort: rows per grid step of the TC ragged gather.
+moe_tc_ragged_reduce_block_size: 896 # moe_tc_ragged_sort: VMEM rows per block of the TC ragged gather-reduce.
+moe_tc_ragged_mask_padding: true # moe_tc_ragged_sort: zero the gather buffer rows past the valid count (left uninitialized otherwise).
+moe_tc_ragged_weights_on_activation: false # moe_tc_ragged_sort: apply routing weights on the (buffer, mlp) activation before wo instead of on the expert output before the unsort.
+moe_tc_ragged_flatten_block_size: 0 # moe_tc_ragged_sort: if > 0, Pallas (N, D/128, 128) <-> (N, D) relayout over the valid rows, this many rows per grid step; 0 uses XLA reshapes.
+moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the sorted buffer in the (buffer, emb // 128, 128) layout through the GMMs.
+moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.
+moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
@@ -280,6 +366,13 @@ ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 
 ragged_gather_reduce_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather reduce kernel
 # Pin MoE FSDP and EP all-gathers to dedicated SparseCores using compute_on
 moe_pin_sparse_core_all_gathers: false
+# Split controls (OR-ed with moe_pin_sparse_core_all_gathers): pin only the ring-of-experts EP all-gathers (dispatch
+# tokens and routing inputs) or only the FSDP weight all-gathers. fwd_only keeps the pinned FSDP weight all-gather in the
+# forward and runs its transpose (the weight-gradient reshard) outside compute_on, so the gradient's cross-slice
+# all-reduce is not consumed by a SparseCore region.
+moe_pin_sparse_core_ep_all_gathers: false
+moe_pin_sparse_core_fsdp_all_gathers: false
+moe_pin_sparse_core_fsdp_all_gathers_fwd_only: false
 moe_fsdp_all_gather_sparse_core_id: 0
 moe_ep_all_gather_sparse_core_id: 1
 # tunable tiling dimensions used for mlp gmm
@@ -288,6 +381,9 @@ moe_ep_all_gather_sparse_core_id: 1
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
+eval_wi_tile_fwd_batch_seq: 512
+eval_wi_tile_fwd_embed_dim: 1024
+eval_wi_tile_fwd_mlp_dim: 1024
 wi_tile_dlhs_batch_seq: 512
 wi_tile_dlhs_embed_dim: 1024
 wi_tile_dlhs_mlp_dim: 1024
@@ -298,6 +394,9 @@ wi_tile_drhs_mlp_dim: 1024
 wo_tile_fwd_batch_seq: 512
 wo_tile_fwd_embed_dim: 1024
 wo_tile_fwd_mlp_dim: 1024
+eval_wo_tile_fwd_batch_seq: 512
+eval_wo_tile_fwd_embed_dim: 1024
+eval_wo_tile_fwd_mlp_dim: 1024
 wo_tile_dlhs_batch_seq: 512
 wo_tile_dlhs_embed_dim: 1024
 wo_tile_dlhs_mlp_dim: 1024
@@ -317,6 +416,13 @@ use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
+# Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
+# returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
+# (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
+# capture routing for router replay; off by default so standard serving does not pay for the extra
+# top-k.
+return_routed_experts: false
+
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
@@ -335,6 +441,7 @@ routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: false # a flag if a learnable bias is added for routing
 routed_bias_update_rate: 0.0 # a flag indicate the update rate applied to the router bias term
+defer_small_all_reduces: false # ring-of-experts only: reduce the per-layer routed-bias counts once after the layer loop rather than with one small all-reduce per layer
 mlp_bias: false # a flag if a learnable bias is added for MLP matmul, and originally implemented to support the GPT-OSS model architecture.
 n_routing_groups: -1 # number of groups for routing, disabled by default
 first_num_hash_layers: 0 # number of hash routing layers, used in DeepSeek V4 (0 means disabled)
@@ -343,6 +450,11 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # all-to-all communication with compute. Currently only implemented with DeepSeek sparse layers.
 use_batch_split_schedule: false # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
 batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is true.
+use_lineage: false # a flag to use Lineage DeepSeek-V3 execution.
+lineage_quantization: "none" # "none", "fp8_full", "fp8_full_splash_qk" or "fp8_full_splash_qk_e3": quantization of the Lineage routed experts and MLA. Only used if use_lineage is true.
+lineage_expert_permutation: None # per-layer expert permutation for Lineage sparse/MTP layers: None (no shuffling) or "lpt" (on-device LPT load balancing from the previous step's expert counts).
+lineage_diag_band_skip: true # enable row-band diagonal skip in Lineage Splash attention. Only used if use_lineage is true.
+lineage_dq_reduction_steps: 1 # Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None. Only used if use_lineage is true.
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
@@ -380,6 +492,28 @@ pipeline_fsdp_ag_once: false # If set to true then all gather all of the weights
 pipeline_fsdp_ag_per_repeat: false
 # Pipeline weight prefetching per repeat is an advanced SPMD pipeline parallelism improvement technique
 # When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
+# Options of the weight prefetching buffer (BSW: two slots holding the FSDP-gathered weights of the previous and the
+# current repeat). They only apply with pipeline_fsdp_ag_per_repeat=true.
+# pipeline_bsw_no_carry (on by default): re-gather the previous repeat's weights at the start of every repeat instead of
+#   carrying the gathered slot across the repeat scan (which saves it for the backward pass once per repeat).
+#   Numerically identical; saves num_pipeline_repeats x one repeat of gathered stage weights (~19 GiB/device for
+#   DeepSeek-V3 PP=8 EP=8 FSDP=128) for one extra FSDP all-gather per repeat (+ a reduce-scatter in the backward pass).
+#   Set it to false to carry the slot instead when that memory is available.
+pipeline_bsw_no_carry: true
+# pipeline_bsw_phase_split: run the microbatch iterations in which every stage already reads the current repeat's slot
+#   (the last num_pipeline_microbatches - (num_stages - 1) of each repeat, and the drain bubble) without the
+#   per-iteration slot select, which materializes a copy of the weights and needs a second gradient accumulator.
+#   Numerically identical up to float summation order. Pays off when num_pipeline_microbatches is well above num_stages
+#   (DeepSeek-V3 PP=8 AOT estimate: -4.5% step time at 16 microbatches, but +2.6% at 8, where only 1 of 8 iterations
+#   per repeat is single-slot and the extra per-repeat gradient reduction dominates; together with
+#   pipeline_bsw_in_compute_dtype that reduction is bf16 and it pays off at 8 too); costs some memory (+7 GiB there).
+pipeline_bsw_phase_split: false
+# pipeline_bsw_in_compute_dtype: hold the gathered weights (and so their gradient accumulation over the microbatches
+#   of a repeat) in `dtype` instead of `weight_dtype`. CHANGES NUMERICS (gradients accumulated in e.g. bf16); halves the
+#   BSW all-gather bytes and memory (DeepSeek-V3 PP=8, 8 microbatches: -8 GiB, -1.2% step time; with
+#   pipeline_bsw_no_carry the re-gather becomes cheap: -27 GiB at the same step time). Routing biases / quantization
+#   state are not cast.
+pipeline_bsw_in_compute_dtype: false
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -411,6 +545,11 @@ mlpwo: 'remat'
 moe_mlpwi_0: 'remat'
 moe_mlpwi_1: 'remat'
 moe_mlpwo: 'remat'
+te_moe_dispatch_remat_location: 'remat' # TE EP dispatch outputs: recompute, save on device, or offload under custom remat.
+moe_x_sorted: 'remat' # routed (expert-sorted) MoE input plus its routing metadata; 'device' keeps it in HBM (tokens x top-k x emb per layer) so the backward skips the dispatch all-gather and ragged sort, 'offload' moves it to host, 'remat' recomputes it. Not supported with num_moe_emb_chunks > 0.
+moe_routing_maps: 'remat' # MoE routing maps (top-k expert ids, ragged-sort permutations, sorted token indices and group sizes); with moe_tc_window_routing, also the TC group sizes
+# TODO: Update to moe_tc_routing_weights.
+moe_tc_routing_checkpoint: 'remat' # TC per-buffer-row routing weights (moe_tc_ragged_sort with moe_tc_ragged_weights_on_activation)
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
@@ -429,6 +568,15 @@ parameter_memory_host_offload: false
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
+# Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in both the
+# forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer; gathered weights are
+# never saved and are re-gathered for the backward pass. See docs/guides/optimization/fsdp_prefetch.md for the
+# recommended XLA flags.
+prefetch_fsdp_weights: false
+# With prefetch_fsdp_weights, defer each layer's weight-gradient reduce-scatters to the next layer's backward step
+# and run them on the SparseCore dedicated to FSDP collectives. Hides them at the cost of extra HBM. Inhomogeneous
+# blocks prefetched per sub-layer defer them to the next sub-layer's step.
+prefetch_fsdp_defer_grad_reduce_scatter: false
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
@@ -494,6 +642,7 @@ qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
 use_sliced_mla_proj: false # Whether to slice projection kernel weights before contraction in MLA instead of running full projection + jnp.split.
+use_mla_absorbed_mqa: false # Whether to use Absorbed-Query Latent MQA mode in MLA (optimizes AR decode KV cache footprint/bandwidth at the cost of higher prefill/training FLOPs).
 
 # Compressed Attention parameters
 o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
@@ -515,6 +664,15 @@ record_internal_nn_metrics: 0
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
+
+# Whether to enable MLPerf logging (mllog). Default is false.
+# Note: MLPerf compliance checking requires eval_interval > 0 (at least one eval_accuracy event).
+enable_mllog: false
+
+# File name for exporting MLPerf mllog entries in base_output_directory (e.g. "mllog.log" or "seed_1.out").
+# If base_output_directory is set and mllog_file is empty, defaults to "mllog_<data_shuffle_seed>.log"
+# inside base_output_directory/run_name.
+mllog_file: ""
 
 # Multi-tier checkpointing is an experimental Orbax feature that: periodically saves to persistent storage(GCS bucket) dictated by `multi_tier_checkpointing_backup_interval_minutes` and,
 # saves to a local directory for smaller checkpoint intervals(local_checkpoint_period).
@@ -587,6 +745,13 @@ logical_axis_rules: [
                       # Vocab Weights
                       ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      # The four rules below are only used when lm_head_fsdp_as_vocab_tp is on; they rotate the
+                      # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+                      # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+                      ['activation_embed_and_logits_batch_no_fsdp', ['data', 'stage', 'expert']],
+                      ['activation_vocab_fsdp', ['tensor', 'tensor_sequence', 'fsdp', 'fsdp_transpose']],
+                      ['vocab_fsdp', ['tensor', 'tensor_sequence', 'autoregressive', 'fsdp', 'fsdp_transpose']],
+                      ['embed_vocab_replicated', []],
                       # ==========================================
                       # Attention
                       # ==========================================
@@ -631,6 +796,8 @@ logical_axis_rules: [
                       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_moe', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses']],
                       ['embed_moe', ['fsdp', 'context', 'context_usp_ulysses']],
+                      ['embed_router', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses']],
+                      ['embed_router', ['fsdp', 'context', 'context_usp_ulysses']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
@@ -737,6 +904,33 @@ shard_optimizer_over_data: false
 
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
+
+# The in-loop counterpart of lm_head_weight_grad_in_kernel_order: trace the attention q/k/v/out and MLP wi/wo dots
+# inside a jax.sharding.auto_axes region so that XLA folds the transpose back into the gradient dot and each weight
+# gradient comes out in its kernel's stored orientation. Same barrier as the LM head flag, same default rule -- None
+# means on wherever it can act, i.e. under shard_mode: explicit. Without it explicit is 0.33%-1.48% slower than auto
+# at every measured layer count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere,
+# and the two flags are additive (see docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels,
+# their initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto or on quantized layers.
+dense_weight_grad_in_kernel_order: None  # on under shard_mode: explicit if None
+
+# Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the gathered value
+# as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: it helps auto and explicit
+# by about the same amount. The compute-dtype cast is what makes it pay -- held at float32 the residuals cost more HBM
+# traffic than the re-gather they save (+9% to +19%, measured), so the cast is not an optimization on top, it is the
+# whole trade. Whether that trade wins depends on how much of the backward pass is FSDP all-gather rather than
+# activation traffic:
+#   worth it   -- up to ~2,048 tokens per device-step, and more so the wider the model or the more experts it has:
+#                 mixtral-8x7b -8.3%, llama2-7b -5.2%, mistral-7b -5.0%, qwen3-8b -4.7%, -6.3% at base_emb_dim 4096
+#   not worth it -- above ~4,096 tokens per device-step (+0.5% to +1.0%), and on gemma2/gemma3 at any size (+0.2% to
+#                 +1.6%), whose 256K-vocab tied-embedding logits make the step long enough to bury the gather
+# See docs/guides/optimization/shard_mode_performance.md section 4.11 for the eight-model table and the ablation.
+# Off by default for that reason, and because the residuals grow HLO temporaries by 25%-75% (qwen3-8b 2.6 -> 3.3 GB,
+# mixtral-8x7b 10.8 -> 18.9 GB; deepseek2-16b runs without it and OOMs with it). Measure step time and peak HBM.
+# Numerics are unchanged: only kernels (rank >= 2 float arrays) are touched, never the rank-1 norm scales, and every
+# consumer already casts its kernel to config.dtype before the dot.
+save_fsdp_gathered_weights: false
 
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
@@ -956,6 +1150,7 @@ skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
 hide_profiler_step_metric: false
+enable_continuous_profiling: false # [Experimental] Enables continuous profiling (Allows saving >2GB traces) Requires JAX >= 0.11.2.
 profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
@@ -973,6 +1168,7 @@ managed_mldiagnostics_on_demand_profiling: true # Enable on-demand profiling ser
 managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 managed_mldiagnostics_region: "" # Optional. GCP region for managed mldiagnostics. If empty, it will be auto-detected by the SDK.
 managed_mldiagnostics_storage_path: "" # Optional parameter to use a separate storage path for mldiagnostic data (profile, telemetry etc.) than the base directory path.
+managed_mldiagnostics_metric_only_run: false # Optional. Whether to create a metric-only run (disabling profiling).
 
 # Dump HLO and jaxpr options
 dump_hlo: false
@@ -998,6 +1194,14 @@ enable_data_shuffling: true
 data_shuffle_seed: 0
 init_weights_seed: 0
 
+# Step-0 / MLPerf time-to-train options (all off by default).
+block_state_before_run_start: false # before run_start: block_until_ready(state), warm the LR schedule, cross-host barrier. No data access.
+warm_input_reshard_before_run_start: false # before run_start: device_put a synthetic zero batch to compile the input reshard program. No data access.
+warm_eval_input_reshard_before_run_start: false # before run_start: device_put a synthetic zero EVAL batch to compile the eval input reshard program. No data access.
+eval_cache_prefill_in_background: false # after run_start: background thread iterates the eval tf.data pipeline once so cache() is complete before the first eval.
+train_shard_in_read: false # c4_mlperf train: shard by file in tfds instead of read-all-then-ds.shard (needs >= n_hosts files).
+train_interleave_cycle_length: -1 # c4_mlperf train: number of files each host reads concurrently (tfds interleave_cycle_length). Applies with or without train_shard_in_read; -1 keeps the tfds default (16). With train_shard_in_read, set it below files-per-host so data_shuffle_seed changes which files are read first.
+
 # DiLoCo params.
 enable_diloco: false
 diloco_sync_period: 36
@@ -1017,6 +1221,10 @@ dcn_bandwidth_interface: "eth0"
 enable_streaming_diloco: false
 num_diloco_fragments: null
 use_sequential_layers: false
+# Split non-scanned matrices (embedding, output projection; any ndim >= 2 leaf, whatever its size) across the layer
+# fragments, along their longest unsharded axis; matrices whose long axes are all sharded stay whole in fragment 0.
+# Requires num_diloco_fragments >= 3.
+diloco_bucketize_non_scanned: false
 num_communication_overlapping_steps: 0
 communication_overlapping_alpha: 0.0
 
@@ -1096,6 +1304,10 @@ rope_attention_scaling: false # Scale the rotary embedding output
 # Keep rank-5 pair tensor intact [batch_size, sequence_length, num_heads, half_dim, 2]
 # where half_dim is the number of 2D rotation planes and 2 contains [real, imag] coordinates, returning interleaved RoPE
 rope_pairwise: false
+# Compute RoPE angles as position * inv_freqs instead of gathering from a [max_position_embeddings, half_dim] table
+rope_direct_position_freqs: false
+# With rope_pairwise, stay in rank 4 and apply the pair swap as a block-skew matmul instead of a rank-5 reshape
+rope_dot_pairwise: false
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -1120,6 +1332,7 @@ abort_on_inf_loss: true # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: false
+goodput_job_name: ""
 monitor_goodput: false
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: false
@@ -1127,6 +1340,8 @@ monitor_step_time_deviation: true
 step_deviation_interval_seconds: 30
 enable_gcp_goodput_metrics: true
 enable_gcp_step_deviation_metrics: true
+rolling_windows_seconds: [3600, 86400, 259200, 432000]
+enable_rolling_window_goodput: true
 
 # GCP workload monitoring
 report_heartbeat_metric_for_gcp_monitoring: false
@@ -1136,12 +1351,14 @@ report_performance_metric_for_gcp_monitoring: false
 enable_tensorboard: true
 
 # Vertex AI Tensorboard Configurations - https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/use_vertex_ai_tensorboard.md
-# Set to true for GCE, false if running via XPK
+# Set to true to have MaxText create (or reuse) the Vertex AI Tensorboard instance and Experiment and upload logs.
+# Leave false if they are created outside MaxText and UPLOAD_DATA_TO_TENSORBOARD is set in the environment
+# (legacy XPK set this automatically; with Cluster Toolkit pass it via `gcluster job submit --env`).
 use_vertex_tensorboard: false
-# Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'
-# Set this to blank if running via XPK
+# Project to create Vertex AI Tensorboard in, blank if project is set using 'gcloud config set project'
+# Leave blank when use_vertex_tensorboard is false
 vertex_tensorboard_project: ""
-# Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
+# Region to create Vertex AI Tensorboard in, blank when use_vertex_tensorboard is false
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
 
@@ -1212,6 +1429,11 @@ optimize_mesh_for_tpu_v6e: false
 
 shardy: true # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
 
+# JAX PRNG implementation for training ("unsafe_rbg", "rbg" or "threefry2x32"). unsafe_rbg is fast, but with pipeline
+# parallelism its key ops (fold_in/random bits via RngBitGenerator) inside the circular pipeline's rematerialized
+# iterations produced NaN gradients for random routing (use_random_routing=true); threefry2x32 does not.
+prng_impl: "unsafe_rbg"
+
 remove_size_one_mesh_axis_from_type: true # Whether to remove size one mesh axis from type through jax.config.
 
 use_ragged_attention: false
@@ -1223,6 +1445,9 @@ ragged_block_size: 256
 sa_block_q: 512
 sa_block_kv: 512
 sa_block_kv_compute: 512
+eval_sa_block_q: 512
+eval_sa_block_kv: 512
+eval_sa_block_kv_compute: 512
 sa_block_q_dkv: 512
 sa_block_kv_dkv: 512
 sa_block_kv_dkv_compute: 512
@@ -1233,15 +1458,30 @@ sa_bwd_dkv_megacore: false  # megacore-parallel kv-head groups in the static dkv
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+eval_sa_q_layout: "HEAD_DIM_MINOR"
+eval_sa_k_layout: "HEAD_DIM_MINOR"
+eval_sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
+# Diagonal sub-tile skipping (requires tokamax>=0.0.15 and use_tokamax_splash=true). Square blocks are required:
+# sa_block_q == sa_block_kv == sa_block_kv_compute, sa_block_q_dkv == sa_block_kv_dkv == sa_block_kv_dkv_compute,
+# and eval_sa_block_q == eval_sa_block_kv == eval_sa_block_kv_compute under custom eval rules.
+# Only applies when the kernel gets a pure causal mask: global/mla attention layers with q_len == kv_len. Disabled
+# for local_sliding/chunk/full/compressed/block_diffusion layers, decode, ring/USP context parallelism and
+# load-balanced all_gather context parallelism (context_parallel_load_balance: true, the default).
+sa_qk_diag_skip: false # skip strictly causal-masked sub-tiles in diagonal QK blocks
+sa_sv_diag_skip: false # skip zeroed strictly causal-masked sub-tiles in diagonal SV blocks
+sa_qk_diag_grid: 2 # sub-grid split factor for diagonal skip (power of 2 >= 2)
 # local_sa_* variants apply to local (sliding window) attention layers;
 # if None, each inherits from the corresponding global sa_* flag.
 local_sa_block_q: None  # inherits from sa_block_q if None
 local_sa_block_kv: None  # inherits from sa_block_kv if None
 local_sa_block_kv_compute: None  # inherits from sa_block_kv_compute if None
+eval_local_sa_block_q: None  # inherits from eval_sa_block_q if None
+eval_local_sa_block_kv: None  # inherits from eval_sa_block_kv if None
+eval_local_sa_block_kv_compute: None  # inherits from eval_sa_block_kv_compute if None
 local_sa_block_q_dkv: None  # inherits from sa_block_q_dkv if None
 local_sa_block_kv_dkv: None  # inherits from sa_block_kv_dkv if None
 local_sa_block_kv_dkv_compute: None  # inherits from sa_block_kv_dkv_compute if None
@@ -1251,11 +1491,17 @@ local_sa_use_fused_bwd_kernel: None  # inherits from sa_use_fused_bwd_kernel if 
 local_sa_q_layout: None  # inherits from sa_q_layout if None
 local_sa_k_layout: None  # inherits from sa_k_layout if None
 local_sa_v_layout: None  # inherits from sa_v_layout if None
+eval_local_sa_q_layout: None  # inherits from eval_sa_q_layout if None
+eval_local_sa_k_layout: None  # inherits from eval_sa_k_layout if None
+eval_local_sa_v_layout: None  # inherits from eval_sa_v_layout if None
 local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
 local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None
 experimental_sa_quant_q_fp8: False # Experimental flag: If enabled, the Q tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
 experimental_sa_quant_k_fp8: False # Experimental flag: If enabled, the K tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
+sa_dkv_reuse_scaled_q: False # Experimental (SplashConfig.dkv_reuse_scaled_q): fused dkv kernel reuses LOG2E-scaled q for dK (1 live q copy instead of 2). Works with bf16 or fp8 q; subsumed by sa_q_prescaled_log2e.
+sa_q_prescaled_log2e: False # Experimental (SplashConfig.q_prescaled_log2e): folds LOG2E into f32 q softmax_scale before fp8 cast (1 fp8 rounding instead of 2) and skips in-kernel q scaling. Preferred over sa_dkv_reuse_scaled_q for MLA with fp8 q.
+sa_ignore_segment_ids: False # Do not pass segment ids to splash attention, for both train and eval. Splash then runs its non-segmented kernels, which skip the per-block segment-id compare and mask (VPU work on every block, not only diagonal ones); causal masking still applies. Only valid for c4_mlperf with stream chunking, where every row is one segment.
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
@@ -1404,6 +1650,8 @@ use_weight_converter: true
 rollout_tensor_parallelism: -1
 # Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax')
 rollout_backend: "maxtext"
+# Rollout weight dtype for trainer->rollout weight conversion (empty string inherits weight_dtype)
+rollout_weight_dtype: ""
 # Degree of tensor parallelism for KV cache / attention heads in rollout
 kv_tp_size: 1
 # Degree of tensor parallelism for MoE MLP dimension in rollout
@@ -1442,6 +1690,9 @@ mhc_pallas_kernel_fwd_block_size: 256
 mhc_pallas_kernel_bwd_block_size: 128
 # Feature block size for backward pass of MHC Pallas kernel.
 mhc_pallas_kernel_bwd_feature_block_size: 1024
+# Whether to use Transformer Engine's fused Triton kernels for (Sinkhorn) mHC on NVIDIA GPUs.
+# Requires mhc_expansion_rate=4 and enable_mhc_lite=False.
+te_mhc: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
@@ -1481,7 +1732,13 @@ distill_beta_schedule: "constant"
 ##### Elastic training parameters
 # Elastic training is Pathways-specific and does not work on McJAX.
 elastic_enabled: false
+# How an attempt after an elastic event gets its train state back: "snapshot" keeps a copy of the state in pinned
+# host memory every elastic_snapshot_interval steps and restores that when it is at least as recent as the latest
+# checkpoint; "checkpoint" only restores the latest persistent checkpoint. Snapshot mode needs
+# grain_use_elastic_iterator (or synthetic data); elastic runs with other data iterators, DiLoCo or rampup batch size
+# must set "checkpoint".
 elastic_backup_kind: "snapshot"
+elastic_snapshot_interval: 10
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1

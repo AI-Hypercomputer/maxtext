@@ -29,12 +29,23 @@ from maxtext.utils import pipeline_utils
 pytestmark = pytest.mark.cpu_only
 
 
-def _decoder_layer_specs():
-  """Physical specs shaped like a Mixtral-style MoE decoder layer, with a leading 'stage' dimension."""
+# The axes from_repeat_weights_to_bsw and get_current_weights_from_bsw remove ("expert" is added for non-MoE weights).
+AXES_TO_REMOVE = ["fsdp", "fsdp_transpose", "context"]
+# cp-as-ep: 'context' co-sharded with 'expert' on the routed-expert dim (exp -> ['context', 'expert']).
+CP_AS_EP = ("context", "expert")
+
+
+def _moe_layer_specs():
+  """Full physical specs ([circular_repeats, stage, ...]) of one DeepSeek MoE decoder layer under cp-as-ep."""
   return {
-      "MoeBlock_0": {"wi_0": P("stage", "expert", "fsdp", "tensor")},
-      "self_attention": {"query": P("stage", "fsdp", "tensor")},
-      "pre_self_attention_layer_norm": {"scale": P("stage", "tensor")},
+      "DeepSeekMoeBlock_0": {
+          "MoeBlock_0": {
+              "wi_0": P(None, "stage", CP_AS_EP, "fsdp", "tensor"),
+              "wo": P(None, "stage", CP_AS_EP, "tensor", ("fsdp", "fsdp_transpose")),
+          },
+          "shared_experts": {"wi_0": {"kernel": P(None, "stage", ("fsdp", "context", "expert"), "tensor")}},
+      },
+      "self_attention": {"out": {"kernel": P(None, "stage", "tensor", None, "expert")}},
   }
 
 
@@ -67,6 +78,31 @@ class GetMeshAxisDimIndicesTest(unittest.TestCase):
 class RemoveGatheredMeshAxesTest(parameterized.TestCase):
   """Tests for remove_gathered_mesh_axes."""
 
+  def test_moe_block_keeps_context_co_sharded_with_expert(self):
+    self.assertEqual(
+        pipeline_utils.remove_gathered_mesh_axes(P(CP_AS_EP, ("fsdp",), "tensor"), True, list(AXES_TO_REMOVE)),
+        P(CP_AS_EP, None, "tensor"),
+    )
+
+  def test_moe_block_removes_context_not_co_sharded_with_expert(self):
+    self.assertEqual(
+        pipeline_utils.remove_gathered_mesh_axes(P("context", ("fsdp", "context"), "expert"), True, list(AXES_TO_REMOVE)),
+        P(None, None, "expert"),
+    )
+
+  def test_non_moe_removes_expert_and_context(self):
+    self.assertEqual(
+        pipeline_utils.remove_gathered_mesh_axes(
+            P(("fsdp", "context", "expert"), "tensor", "expert"), False, list(AXES_TO_REMOVE)
+        ),
+        P(None, "tensor", None),
+    )
+
+  def test_does_not_mutate_axes_to_remove(self):
+    axes_to_remove = list(AXES_TO_REMOVE)
+    pipeline_utils.remove_gathered_mesh_axes(P("expert"), False, axes_to_remove)
+    self.assertEqual(axes_to_remove, AXES_TO_REMOVE)
+
   def test_replaces_removed_axes_with_none(self):
     result = pipeline_utils.remove_gathered_mesh_axes(
         P("stage", "fsdp", "tensor"), is_moe_block_0=True, axes_to_remove=["fsdp"]
@@ -79,31 +115,11 @@ class RemoveGatheredMeshAxesTest(parameterized.TestCase):
     )
     self.assertEqual(result, P("stage", None, "tensor"))
 
-  def test_expert_axis_removed_outside_moe_block(self):
-    result = pipeline_utils.remove_gathered_mesh_axes(
-        P("stage", "expert", "tensor"), is_moe_block_0=False, axes_to_remove=["fsdp"]
-    )
-    self.assertEqual(result, P("stage", None, "tensor"))
-
-  def test_expert_axis_kept_in_moe_block(self):
-    result = pipeline_utils.remove_gathered_mesh_axes(
-        P("stage", "expert", "tensor"), is_moe_block_0=True, axes_to_remove=["fsdp"]
-    )
-    self.assertEqual(result, P("stage", "expert", "tensor"))
-
   def test_compound_entry_keeps_members_that_are_not_removed(self):
     result = pipeline_utils.remove_gathered_mesh_axes(
         P(("fsdp", "tensor"), None), is_moe_block_0=True, axes_to_remove=["fsdp"]
     )
     self.assertEqual(result, P(("tensor",), None))
-
-  @parameterized.named_parameters(("moe_block", True), ("non_moe_block", False))
-  def test_does_not_modify_axes_to_remove(self, is_moe_block_0):
-    axes_to_remove = ["fsdp", "fsdp_transpose", "context"]
-    pipeline_utils.remove_gathered_mesh_axes(
-        P("stage", "expert", "fsdp"), is_moe_block_0=is_moe_block_0, axes_to_remove=axes_to_remove
-    )
-    self.assertEqual(axes_to_remove, ["fsdp", "fsdp_transpose", "context"])
 
   def test_non_partition_spec_is_returned_unchanged(self):
     sentinel = object()
@@ -118,30 +134,30 @@ class RemoveGatheredMeshAxesTest(parameterized.TestCase):
 class DeriveStageWeightPartitionSpecsTest(parameterized.TestCase):
   """Tests for derive_stage_weight_partition_specs."""
 
+  def test_moe_weights_after_non_moe_weights_keep_expert_sharding(self):
+    # A sequential multi-layer stage visits layers_0's non-MoE weights before layers_1's routed experts: the one
+    # axes_to_remove list shared by every leaf must not pick up "expert" along the way.
+    expected_layer = {
+        "DeepSeekMoeBlock_0": {
+            "MoeBlock_0": {
+                "wi_0": P("stage", CP_AS_EP, None, "tensor"),
+                "wo": P("stage", CP_AS_EP, "tensor", None),
+            },
+            "shared_experts": {"wi_0": {"kernel": P("stage", None, "tensor")}},
+        },
+        "self_attention": {"out": {"kernel": P("stage", "tensor", None, None)}},
+    }
+    self.assertEqual(
+        pipeline_utils.derive_stage_weight_partition_specs(
+            {"layers_0": _moe_layer_specs(), "layers_1": _moe_layer_specs()}, list(AXES_TO_REMOVE)
+        ),
+        {"layers_0": expected_layer, "layers_1": expected_layer},
+    )
+
   def test_drops_leading_dimension_and_gathered_axes(self):
     specs = {"kernel": P("stage", "fsdp", "tensor"), "scale": P("stage", "tensor")}
     result = pipeline_utils.derive_stage_weight_partition_specs(specs, ["fsdp", "context"])
     self.assertEqual(result, {"kernel": P(None, "tensor"), "scale": P("tensor")})
-
-  def test_expert_axis_removed_from_non_moe_leaves_only(self):
-    specs = {
-        "MoeBlock_0": {"wi_0": P("stage", "expert", "fsdp", "tensor")},
-        "mlp": {"wi_0": P("stage", "expert", "fsdp", "tensor")},
-    }
-    result = pipeline_utils.derive_stage_weight_partition_specs(specs, ["fsdp"])
-    self.assertEqual(result["MoeBlock_0"]["wi_0"], P("expert", None, "tensor"))
-    self.assertEqual(result["mlp"]["wi_0"], P(None, None, "tensor"))
-
-  def test_moe_block_keeps_expert_axis_in_every_sublayer_of_a_stage(self):
-    # With num_layers_per_pipeline_stage > 1 a stage is an NNXSequentialPipelineStage whose children are named
-    # layers_0, layers_1, ... JAX visits layers_0's non-MoE leaves before layers_1's MoeBlock_0, so state leaking
-    # between leaves would wrongly strip 'expert' from layers_1's routed experts.
-    specs = {f"layers_{i}": _decoder_layer_specs() for i in range(3)}
-    result = pipeline_utils.derive_stage_weight_partition_specs(specs, ["fsdp", "fsdp_transpose", "context"])
-    for i in range(3):
-      with self.subTest(layer=i):
-        self.assertEqual(result[f"layers_{i}"]["MoeBlock_0"]["wi_0"], P("expert", None, "tensor"))
-        self.assertEqual(result[f"layers_{i}"]["self_attention"]["query"], P(None, "tensor"))
 
   @parameterized.named_parameters(
       ("sibling_sorts_before", "Attention"),
@@ -154,11 +170,6 @@ class DeriveStageWeightPartitionSpecsTest(parameterized.TestCase):
     }
     result = pipeline_utils.derive_stage_weight_partition_specs(specs, ["fsdp"])
     self.assertEqual(result["MoeBlock_0"]["wi_0"], P("expert", None, "tensor"))
-
-  def test_does_not_modify_axes_to_remove(self):
-    axes_to_remove = ["fsdp", "fsdp_transpose", "context"]
-    pipeline_utils.derive_stage_weight_partition_specs({"layers_0": _decoder_layer_specs()}, axes_to_remove)
-    self.assertEqual(axes_to_remove, ["fsdp", "fsdp_transpose", "context"])
 
 
 class StripPipelineRepeatLogicalAxisTest(unittest.TestCase):

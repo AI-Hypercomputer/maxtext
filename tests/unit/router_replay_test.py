@@ -28,6 +28,7 @@ import sys
 import unittest
 
 from flax import nnx
+from flax import traverse_util
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
@@ -44,6 +45,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
+from tests.utils import linen_wrappers
 import pytest
 
 
@@ -87,6 +89,47 @@ def _tiny_qwen35_kwargs(seq_len, batch_size, num_experts, top_k, **overrides):
   return kwargs
 
 
+def _batch_rows(cfg):
+  """Rows a data batch needs for `cfg`.
+
+  `per_device_batch_size` is per device and the batch axis is sharded across
+  every device, so a batch built with fewer rows than this cannot be sharded.
+  """
+  return int(round(cfg.per_device_batch_size * jax.device_count()))
+
+
+def _unscan_qwen3_hybrid_params(scanned_params, cycle_interval, num_layers, scan_axis):
+  """Renames a scanned Qwen3-Next/Qwen3.5 param tree to the unscanned decoder's `layers_{i}` params.
+
+  `layers.local_layers` stacks blocks then local slots on `scan_axis`, `layers.global_layer` stacks
+  blocks, and `layers_remainder.local_layers` stacks the layers past the last whole cycle.
+  """
+  num_blocks = num_layers // cycle_interval
+  unscanned = {}
+  for key, value in traverse_util.flatten_dict(scanned_params).items():
+    if "layers" in key:
+      idx = key.index("layers")
+      if key[idx + 1] == "local_layers":
+        per_layer = {
+            block * cycle_interval + slot: value.take(block, axis=scan_axis).take(slot, axis=scan_axis)
+            for block in range(num_blocks)
+            for slot in range(cycle_interval - 1)
+        }
+      else:
+        per_layer = {
+            block * cycle_interval + cycle_interval - 1: value.take(block, axis=scan_axis) for block in range(num_blocks)
+        }
+    elif "layers_remainder" in key:
+      idx = key.index("layers_remainder")
+      per_layer = {num_blocks * cycle_interval + i: value.take(i, axis=scan_axis) for i in range(value.shape[scan_axis])}
+    else:
+      unscanned[key] = value
+      continue
+    for layer, layer_value in per_layer.items():
+      unscanned[key[:idx] + (f"layers_{layer}",) + key[idx + 2 :]] = layer_value
+  return traverse_util.unflatten_dict(unscanned)
+
+
 class DummyConfig:
   """Minimal stand-in for MaxTextConfig, for direct RoutedMoE method calls."""
 
@@ -102,6 +145,7 @@ class DummyConfig:
     self.fuse_expert_scales = False
     self.n_routing_groups = -1
     self.topk_routing_group = 1
+    self.float32_weight_sum = True
 
 
 class DummyRoutedMoE:
@@ -251,6 +295,22 @@ class CheckForcedRoutingSupportTest(unittest.TestCase):
         check_forced_routing_support(decoder_block)
 
 
+class ReturnRoutedExpertsConfigTest(unittest.TestCase):
+  """`return_routed_experts` has to be a real config field, reachable from a real config.
+
+  moe.fused_moe_matmul reads it as a plain attribute, so if the field is ever dropped
+  the read raises AttributeError for every fused MoE layer. Declaring it is also what
+  keeps routing capture switchable at all: with the field pinned to False no layer sows
+  `selected_experts` and the decoder leaves `expert_indices` out of its return tuple.
+  """
+
+  def test_defaults_to_false(self):
+    self.assertIs(_init_test_cfg().return_routed_experts, False)
+
+  def test_can_be_enabled(self):
+    self.assertIs(_init_test_cfg(return_routed_experts=True).return_routed_experts, True)
+
+
 class UnsupportedConfigGuardTest(unittest.TestCase):
   """Configurations forced routing rejects must fail loudly, not silently
 
@@ -397,7 +457,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     os.environ["NEW_MODEL_DESIGN"] = "1"
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-  def _assert_forced_routing_loss_finite(self, cfg, seq_len, batch_size, forced_experts, label):
+  def _assert_forced_routing_loss_finite(self, cfg, seq_len, forced_experts, label):
     """Builds a real model for `cfg`, runs train.loss_fn with a batch carrying
 
     `forced_experts`, and asserts the resulting loss is finite.
@@ -405,14 +465,15 @@ class TrainerRouterReplayTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     rng = jax.random.PRNGKey(42)
+    batch_rows = _batch_rows(cfg)
 
     tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
-    inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_size, 1))
+    inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_rows, 1))
     positions = jnp.tile(
         jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0),
-        (batch_size, 1),
+        (batch_rows, 1),
     )
-    segmentation = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    segmentation = jnp.ones((batch_rows, seq_len), dtype=jnp.int32)
     targets = jnp.roll(inputs, -1, axis=-1)
 
     data_batch = {
@@ -441,18 +502,23 @@ class TrainerRouterReplayTest(unittest.TestCase):
     print(f"\n[Trainer Router Replay][{label}] Computed loss with forced routing" f" + padding: {loss}")
     return loss, aux
 
-  def _loss_for_routing(self, cfg, seq_len, batch_size, forced_experts):
-    """train.loss_fn for one routing, reusing fixed params so losses compare."""
+  def _build_model(self, cfg):
+    """Builds the model for `cfg` from a fixed seed."""
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(42))
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      return model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
+
+  def _loss_for_routing(self, cfg, seq_len, forced_experts, model=None):
+    """train.loss_fn for one routing, reusing fixed params so losses compare."""
+    batch_rows = _batch_rows(cfg)
     tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
-    inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_size, 1))
+    inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_rows, 1))
     positions = jnp.tile(
         jnp.expand_dims(jnp.arange(seq_len, dtype=jnp.int32), axis=0),
-        (batch_size, 1),
+        (batch_rows, 1),
     )
-    segmentation = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(42))
+    segmentation = jnp.ones((batch_rows, seq_len), dtype=jnp.int32)
 
     data_batch = {
         "inputs": inputs,
@@ -463,8 +529,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
     }
     if forced_experts is not None:
       data_batch["forced_routed_experts"] = forced_experts
+    if model is None:
+      model = self._build_model(cfg)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
       loss, _ = train.loss_fn(
           model,
           cfg,
@@ -475,7 +542,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
       )
     return float(loss)
 
-  def _assert_routing_is_load_bearing(self, cfg, seq_len, batch_size, forced_a, forced_b, label):
+  def _assert_routing_is_load_bearing(self, cfg, seq_len, forced_a, forced_b, label):
     """Two different replays must give two different losses.
 
     Every "loss is finite" assertion in this class also passes when
@@ -483,9 +550,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
     train.loss_fn down to RoutedMoE.get_topk, because the model just routes
     normally. This is the assertion that actually pins the plumbing.
     """
-    loss_a = self._loss_for_routing(cfg, seq_len, batch_size, forced_a)
-    loss_b = self._loss_for_routing(cfg, seq_len, batch_size, forced_b)
-    loss_none = self._loss_for_routing(cfg, seq_len, batch_size, None)
+    loss_a = self._loss_for_routing(cfg, seq_len, forced_a)
+    loss_b = self._loss_for_routing(cfg, seq_len, forced_b)
+    loss_none = self._loss_for_routing(cfg, seq_len, None)
     print(f"\n[Router Replay][{label}] a={loss_a} b={loss_b} unforced={loss_none}")
     self.assertNotAlmostEqual(
         loss_a,
@@ -517,7 +584,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
 
     # Synthetic forced routed experts: [batch, seq_len, top_k]
-    forced_experts = jnp.zeros((batch_size, seq_len, top_k), dtype=jnp.int32)
+    forced_experts = jnp.zeros((_batch_rows(cfg), seq_len, top_k), dtype=jnp.int32)
     forced_experts = forced_experts.at[:, :, 0].set(1)
     forced_experts = forced_experts.at[:, :, 1].set(3)
     # Mark the last two tokens of every sequence as padding (-1) in every
@@ -525,7 +592,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     # paths end-to-end, not just in isolated unit tests.
     forced_experts = forced_experts.at[:, -2:, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "qwen3.5")
+    self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "qwen3.5")
 
   def _qwen35_cfg(self, seq_len, batch_size, num_experts, top_k, run_name, **overrides):
     return _init_test_cfg(
@@ -554,9 +621,10 @@ class TrainerRouterReplayTest(unittest.TestCase):
         num_decoder_layers=1,
         scan_layers=False,
     )
-    a = jnp.tile(jnp.array([0, 1], jnp.int32), (batch_size, seq_len, 1))
-    b = jnp.tile(jnp.array([2, 3], jnp.int32), (batch_size, seq_len, 1))
-    self._assert_routing_is_load_bearing(cfg, seq_len, batch_size, a, b, "qwen3.5 unscanned")
+    batch_rows = _batch_rows(cfg)
+    a = jnp.tile(jnp.array([0, 1], jnp.int32), (batch_rows, seq_len, 1))
+    b = jnp.tile(jnp.array([2, 3], jnp.int32), (batch_rows, seq_len, 1))
+    self._assert_routing_is_load_bearing(cfg, seq_len, a, b, "qwen3.5 unscanned")
 
   def test_per_layer_routing_is_not_broadcast_unscanned(self):
     """4D per-layer replay must land layer L's routing on layer L.
@@ -575,17 +643,17 @@ class TrainerRouterReplayTest(unittest.TestCase):
         num_decoder_layers=layers,
         scan_layers=False,
     )
+    batch_rows = _batch_rows(cfg)
     per_layer = jnp.stack(
         [
-            jnp.full((batch_size, seq_len, top_k), 0, jnp.int32),
-            jnp.full((batch_size, seq_len, top_k), 3, jnp.int32),
+            jnp.full((batch_rows, seq_len, top_k), 0, jnp.int32),
+            jnp.full((batch_rows, seq_len, top_k), 3, jnp.int32),
         ],
         axis=2,
     )
     self._assert_routing_is_load_bearing(
         cfg,
         seq_len,
-        batch_size,
         per_layer,
         per_layer[:, :, ::-1, :],
         "qwen3.5 unscanned per-layer",
@@ -609,14 +677,78 @@ class TrainerRouterReplayTest(unittest.TestCase):
         inhomogeneous_layer_cycle_interval=cycle_interval,
     )
     layer_ids = jnp.arange(layers, dtype=jnp.int32) % num_experts
-    per_layer = jnp.broadcast_to(layer_ids[None, None, :, None], (batch_size, seq_len, layers, top_k))
+    per_layer = jnp.broadcast_to(layer_ids[None, None, :, None], (_batch_rows(cfg), seq_len, layers, top_k))
     self._assert_routing_is_load_bearing(
         cfg,
         seq_len,
-        batch_size,
         per_layer,
         per_layer[:, :, ::-1, :],
         "qwen3.5 scanned per-layer",
+    )
+
+  def test_per_layer_routing_reaches_the_scan_remainder_block(self):
+    """Layers past the last whole cycle live in a separate remainder block."""
+    seq_len, batch_size, top_k, num_experts = 8, 1, 2, 4
+    cycle_interval, layers = 2, 3
+    cfg = self._qwen35_cfg(
+        seq_len,
+        batch_size,
+        num_experts,
+        top_k,
+        "test_router_replay_scan_remainder",
+        base_num_decoder_layers=layers,
+        num_decoder_layers=layers,
+        inhomogeneous_layer_cycle_interval=cycle_interval,
+    )
+    shared = jnp.zeros((_batch_rows(cfg), seq_len, layers, top_k), dtype=jnp.int32)
+    a = shared.at[:, :, -1, :].set(1)
+    b = shared.at[:, :, -1, :].set(3)
+    self._assert_routing_is_load_bearing(cfg, seq_len, a, b, "qwen3.5 scan remainder")
+
+  def test_scanned_routing_matches_unscanned_with_several_local_layers_and_a_remainder(self):
+    """Each sub-layer of a scanned block must replay its own layer's routing.
+
+    With a cycle of 3 every block scans two local layers, and 8 layers leave a
+    two-layer remainder block, so a slice sent to the wrong local layer, block
+    or remainder layer moves the loss away from the unscanned model's, which
+    gets the same weights and indexes the routing by layer directly.
+    """
+    seq_len, batch_size, top_k, num_experts = 8, 1, 2, 4
+    cycle_interval, layers = 3, 8
+    kwargs = {
+        "base_num_decoder_layers": layers,
+        "num_decoder_layers": layers,
+        "inhomogeneous_layer_cycle_interval": cycle_interval,
+    }
+    scanned_cfg = self._qwen35_cfg(
+        seq_len, batch_size, num_experts, top_k, "test_router_replay_scan_parity", scan_layers=True, **kwargs
+    )
+    unscanned_cfg = self._qwen35_cfg(
+        seq_len, batch_size, num_experts, top_k, "test_router_replay_unscan_parity", scan_layers=False, **kwargs
+    )
+    scanned_model = self._build_model(scanned_cfg)
+    unscanned_model = self._build_model(unscanned_cfg)
+    unscanned_params = nnx.state(unscanned_model, nnx.Param)
+    nnx.replace_by_pure_dict(
+        unscanned_params,
+        _unscan_qwen3_hybrid_params(
+            nnx.state(scanned_model, nnx.Param).to_pure_dict(), cycle_interval, layers, scanned_cfg.param_scan_axis
+        ),
+    )
+    nnx.update(unscanned_model, unscanned_params)
+
+    # A distinct expert pair per layer: layer l routes to experts l and l + 1 (mod num_experts).
+    layer_ids = jnp.arange(layers, dtype=jnp.int32)
+    pairs = jnp.stack([layer_ids % num_experts, (layer_ids + 1) % num_experts], axis=-1)
+    routing = jnp.broadcast_to(pairs[None, None], (_batch_rows(scanned_cfg), seq_len, layers, top_k))
+    unscanned_loss = self._loss_for_routing(unscanned_cfg, seq_len, routing, model=unscanned_model)
+    scanned_loss = self._loss_for_routing(scanned_cfg, seq_len, routing, model=scanned_model)
+    self.assertAlmostEqual(scanned_loss, unscanned_loss, places=4)
+
+    # The comparison can only catch a mix-up if swapping two local layers' routing moves the loss.
+    swapped = routing.at[:, :, [0, 1], :].set(routing[:, :, [1, 0], :])
+    self.assertNotAlmostEqual(
+        self._loss_for_routing(unscanned_cfg, seq_len, swapped, model=unscanned_model), unscanned_loss, places=4
     )
 
   def test_loss_fn_with_forced_routed_experts_gemma4(self):
@@ -649,12 +781,12 @@ class TrainerRouterReplayTest(unittest.TestCase):
         scan_layers=False,
     )
 
-    forced_experts = jnp.zeros((batch_size, seq_len, top_k), dtype=jnp.int32)
+    forced_experts = jnp.zeros((_batch_rows(cfg), seq_len, top_k), dtype=jnp.int32)
     forced_experts = forced_experts.at[:, :, 0].set(1)
     forced_experts = forced_experts.at[:, :, 1].set(3)
     forced_experts = forced_experts.at[:, -2:, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "gemma4")
+    self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "gemma4")
 
   def test_loss_fn_with_forced_routed_experts_scanned_qwen3_5(self):
     """Qwen3.5 supports forced routing together with `scan_layers=True` (see
@@ -687,11 +819,11 @@ class TrainerRouterReplayTest(unittest.TestCase):
     layer_ids = jnp.arange(num_layers, dtype=jnp.int32)
     forced_experts = jnp.broadcast_to(
         layer_ids[None, None, :, None] % num_experts,
-        (batch_size, seq_len, num_layers, top_k),
+        (_batch_rows(cfg), seq_len, num_layers, top_k),
     )
     forced_experts = forced_experts.at[:, -2:, :, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "scanned qwen3.5")
+    self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "scanned qwen3.5")
 
   def test_loss_fn_with_forced_routed_experts_scanned_mixtral(self):
     """Mixtral has no ScannableBlock wrapper: every scan iteration is exactly
@@ -728,11 +860,11 @@ class TrainerRouterReplayTest(unittest.TestCase):
     layer_ids = jnp.arange(num_layers, dtype=jnp.int32)
     forced_experts = jnp.broadcast_to(
         layer_ids[None, None, :, None] % num_experts,
-        (batch_size, seq_len, num_layers, top_k),
+        (_batch_rows(cfg), seq_len, num_layers, top_k),
     )
     forced_experts = forced_experts.at[:, -2:, :, :].set(-1)
 
-    self._assert_forced_routing_loss_finite(cfg, seq_len, batch_size, forced_experts, "scanned mixtral")
+    self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "scanned mixtral")
 
   def test_forced_routing_reproduces_unforced_output_when_all_experts_selected(
       self,
@@ -1190,7 +1322,8 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
 
   @staticmethod
   def _build_model(cfg, mesh):
-    return moe.get_routed_moe(
+    return linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,

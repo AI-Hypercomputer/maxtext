@@ -195,7 +195,15 @@ class TestCsaStreamIndexOnTpu(unittest.TestCase):
     scale = d**-0.5
     q, compressed, weights = self._inputs(b, h, s, w, d)
 
-    expected = csa_streamindex.csa_indexer_scores_jax(q, compressed, weights, softmax_scale=scale)
+    # The reference has to be pinned to HIGHEST. At the default precision its
+    # head contraction lowers to a single-pass bf16 MXU matmul, which rounds the
+    # f32 per-head scores to bf16 before summing and injects ~4e-3 relative error
+    # per term. Wherever the 16-head sum cancels, that error survives on a result
+    # near zero and no sane tolerance absorbs it. The kernel accumulates in f32
+    # throughout, so the reference is the side that needs the extra passes.
+    expected = csa_streamindex.csa_indexer_scores_jax(
+        q, compressed, weights, softmax_scale=scale, precision=jax.lax.Precision.HIGHEST
+    )
     actual = jax.jit(lambda a, c, e: csa_streamindex.csa_streamindex_score(a, c, e, scale, 128, 256, False))(
         q, compressed, weights
     ).block_until_ready()
@@ -240,7 +248,11 @@ class TestCsaStreamIndexOnTpu(unittest.TestCase):
     self.assertEqual(hlo.count("all-gather"), 0, "shard_map must not introduce all-gather")
 
     actual = jit_sharded(q, compressed, weights).block_until_ready()
-    expected = csa_streamindex.csa_indexer_scores_jax(q, compressed, weights, softmax_scale=scale)
+    # HIGHEST for the same reason as in test_parallel_dimension_semantics_accepted:
+    # the default lowers the reference's head contraction to one bf16 MXU pass.
+    expected = csa_streamindex.csa_indexer_scores_jax(
+        q, compressed, weights, softmax_scale=scale, precision=jax.lax.Precision.HIGHEST
+    )
     np.testing.assert_allclose(actual, expected, rtol=2e-2, atol=2e-2)
 
 

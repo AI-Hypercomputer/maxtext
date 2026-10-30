@@ -33,12 +33,11 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import nnx_wrappers
-from maxtext.layers import pipeline
-from maxtext.models import deepseek
 from maxtext.models import simple_layer
 from maxtext.utils import maxtext_utils
 from maxtext.trainers.pre_train.train import main as train_main
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from tests.utils import linen_wrappers
 import pytest
 
 pytestmark = [pytest.mark.integration_test, pytest.mark.tpu_only]
@@ -112,11 +111,11 @@ class PipelineParallelismTest(unittest.TestCase):
     mesh = Mesh(devices_array, config.mesh_axes)
     model_mode = MODEL_MODE_TRAIN
 
-    # `single_pipeline_stage_class` (when provided, e.g. `deepseek.DeepSeekMoELayerToLinen`
+    # `single_pipeline_stage_class` (when provided, e.g. `linen_wrappers.DeepSeekMoELayerToLinen`
     # for the deepseek test) controls BOTH the pipeline and the per-layer reference path.
     rngs = nnx.Rngs(params=0)
     if single_pipeline_stage_class is None:
-      single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
+      single_pipeline_stage = linen_wrappers.SimpleDecoderLayerToLinen(
           config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
       )
       raw_stage_class = simple_layer.SimpleDecoderLayer
@@ -155,7 +154,7 @@ class PipelineParallelismTest(unittest.TestCase):
     def stage_factory(stage_rngs):
       return raw_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=stage_rngs)
 
-    my_pipeline = pipeline.create_pipeline(config=config, layers=stage_factory, mesh=mesh)
+    my_pipeline = linen_wrappers.create_pipeline(config=config, layers=stage_factory, mesh=mesh)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
       init_pipeline_params = my_pipeline.init(
           jax.random.PRNGKey(0), inputs, inputs_segmentation, inputs_position, deterministic, model_mode
@@ -253,7 +252,7 @@ class PipelineParallelismTest(unittest.TestCase):
     """
     self.assert_pipeline_matches_sequential_output_and_grad(config, single_pipeline_stage_class)
 
-  def _assert_circular_pipeline_ag_per_repeat_core(self, core):
+  def _assert_circular_pipeline_ag_per_repeat_core(self, core, **overrides):
     """
     Assert that the pipeline implementation produces the same output and
     gradient as a sequential implementation of the same layers when using
@@ -273,6 +272,7 @@ class PipelineParallelismTest(unittest.TestCase):
           num_pipeline_microbatches=8,
           per_device_batch_size=4,
           pipeline_fsdp_ag_per_repeat=True,
+          **overrides,
       )
       self.assert_pipeline_matches_sequential_output_and_grad(config)
 
@@ -340,7 +340,7 @@ class PipelineParallelismTest(unittest.TestCase):
         shared_experts=1,
     )
     self.assert_pipeline_matches_sequential_output_and_grad(
-        config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen
+        config, single_pipeline_stage_class=linen_wrappers.DeepSeekMoELayerToLinen
     )
 
   @pytest.mark.scheduled_only
@@ -374,7 +374,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_same_output_and_grad(
         config,
-        single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen,
+        single_pipeline_stage_class=linen_wrappers.DeepSeekMoELayerToLinen,
     )
 
   def test_circular_ag_once(self):
@@ -397,8 +397,34 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_pipeline_ag_per_repeat(self):
     self._assert_circular_pipeline_ag_per_repeat_core("nnx_scan")
 
+  def test_circular_pipeline_ag_per_repeat_carry(self):
+    # pipeline_bsw_no_carry is on by default; also cover carrying the gathered slot across the repeat scan.
+    self._assert_circular_pipeline_ag_per_repeat_core("nnx_scan", pipeline_bsw_no_carry=False)
+
   def test_circular_pipeline_ag_per_repeat_jax_state_core(self):
     self._assert_circular_pipeline_ag_per_repeat_core("jax_state")
+
+  def test_circular_pipeline_ag_per_repeat_bsw_phase_split(self):
+    # 2 stages, 8 microbatches, shifted BSW schedule (prologue before the repeat scan, single-slot phase first), with
+    # the carried w_curr bound to the params by custom_vjp and with the per-repeat re-gather.
+    for bsw_no_carry in (False, True):
+      with self.subTest(pipeline_bsw_no_carry=bsw_no_carry):
+        config = pyconfig.initialize(
+            [sys.argv[0], get_test_config_path()],
+            enable_checkpointing=False,
+            enable_goodput_recording=False,
+            run_name=f"circular_bsw_phase_split_no_carry_{bsw_no_carry}",
+            max_target_length=128,
+            base_emb_dim=28,
+            ici_pipeline_parallelism=2,
+            base_num_decoder_layers=8,
+            num_pipeline_microbatches=8,
+            per_device_batch_size=4,
+            pipeline_fsdp_ag_per_repeat=True,
+            pipeline_bsw_phase_split=True,
+            pipeline_bsw_no_carry=bsw_no_carry,
+        )
+        self.assert_pipeline_matches_sequential_output_and_grad(config)
 
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches

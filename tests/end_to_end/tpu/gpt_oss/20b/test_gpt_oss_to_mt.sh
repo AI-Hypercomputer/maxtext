@@ -58,11 +58,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
 # Step 3: Test whether the forward pass logits match the original HF model
-# to get higher precision (eg. float32) run on CPU with JAX_PLATFORMS=cpu
-if [ ! -f /tmp/golden_data_gpt-oss-20b.jsonl ]; then
-  gcloud storage cp gs://maxtext-test-assets/golden_data_gpt-oss-20b.jsonl /tmp/golden_data_gpt-oss-20b.jsonl
-fi
-
+# to get higher precision (eg. float32) run on CPU with hardware=cpu
 python3 -m tests.utils.forward_pass_logit_checker \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
@@ -73,7 +69,8 @@ python3 -m tests.utils.forward_pass_logit_checker \
     max_target_length=512 \
     dtype=float32 \
     attention=dot_product \
-    --golden_logits_path=/tmp/golden_data_gpt-oss-20b.jsonl \
-    --max_kl_div=1.0 \
+    --hf_model_path="unsloth/gpt-oss-20b-BF16" \
+    --run_hf_model=true \
+    --max_kl_div=0.01 \
     hardware=cpu \
     skip_jax_distributed_system=True

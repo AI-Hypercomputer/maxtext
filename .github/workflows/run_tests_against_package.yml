@@ -28,6 +28,11 @@ on:
       device_name:
         required: true
         type: string
+      repository_name:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'maxtext-images'
       base_image:
         required: true
         type: string
@@ -90,11 +95,17 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/maxtext-images/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
+        # cpu-unit runs the hardware-agnostic bulk (every test auto-marked cpu_only), and it is the
+        # only job that runs them. On one device a test whose batch is smaller than the mesh, or that
+        # never enters an axis_rules context, passes for the wrong reason; 4 virtual devices make the
+        # sharding real so those bugs surface here instead of on accelerator runners. Also lets the
+        # tests that self-skip below 2 devices actually run.
+        XLA_FLAGS: ${{ inputs.flavor == 'cpu-unit' && '--xla_force_host_platform_device_count=4' || '' }}
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-
@@ -156,7 +167,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
-          path: .
+          path: ${{ inputs.maxtext_installed && '/deps' || '.' }}
         continue-on-error: true
       - name: Run Tests
         shell: bash
@@ -226,7 +237,18 @@ jobs:
               fi
             fi
           fi
-          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
+          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ] && [ "${INPUTS_DEVICE_TYPE}" = "tpu" ] && [[ "${INPUTS_FLAVOR}" == *-unit ]]; then
+            # TPU unit flavors: whole test classes stay on one shard (tests/utils/class_split.py), so the first
+            # test of a class pays its XLA compile in scheduled and PR runs alike. The rest keep pytest-split
+            # below: one integration class (TrainTests) takes longer than an even shard share, CPU durations
+            # are not regression-checked, and GPU has too few test classes to balance.
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations to balance the class-level split."
+            else
+              echo "Warning: .test_durations not found. The class-level split uses equal weights."
+            fi
+            SPLIT_ARGS="--class-splits=${INPUTS_TOTAL_WORKERS} --class-group=${INPUTS_WORKER_GROUP}"
+          elif [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
             if [ -f .test_durations ]; then
               echo "Using downloaded .test_durations with least_duration splitting algorithm."
@@ -241,6 +263,9 @@ jobs:
             else
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
             fi
+          elif [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-xdist
+            SPLIT_ARGS="-n auto"
           else
             SPLIT_ARGS=""
           fi
@@ -249,18 +274,25 @@ jobs:
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
           else
+            # The GofN suffix lets process_test_results.py notice a shard that left no result file.
+            JUNIT_XML="test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}of${INPUTS_TOTAL_WORKERS}.xml"
             # shellcheck disable=SC2086
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
-              --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
+              --junitxml="${JUNIT_XML}" \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
             PYTEST_EXIT_CODE=0
             wait "$PYTEST_PID" || PYTEST_EXIT_CODE=$?
+            if [ "$PYTEST_EXIT_CODE" -eq 2 ] || [ "$PYTEST_EXIT_CODE" -eq 3 ]; then
+              # An interrupted session (e.g. a collection error) still writes a result file, without the test times.
+              # Drop it so process_test_results.py counts this shard as missing instead of saving a near-zero total.
+              rm -f "${JUNIT_XML}"
+            fi
             if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
               echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
             elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then
@@ -336,7 +368,7 @@ jobs:
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: reference-hlo
-          path: tests/utils/reference_hlo_*.txt
+          path: ${{ inputs.maxtext_installed && '/deps/tests/utils/reference_hlo_*.txt' || 'tests/utils/reference_hlo_*.txt' }}
           if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
@@ -353,6 +385,6 @@ jobs:
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
-          path: test-results-*.xml
+          path: ${{ inputs.maxtext_installed && '/deps/test-results-*.xml' || 'test-results-*.xml' }}
           retention-days: 1
           if-no-files-found: ignore

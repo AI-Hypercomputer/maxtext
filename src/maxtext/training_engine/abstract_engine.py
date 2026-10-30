@@ -14,9 +14,13 @@
 
 """Trainer abstractions.
 
-Defines the core Trainer interface, republishes the data types shared with
-Tunix (WeightedMetric, LossOutput, TrainerPayload), and defines the on-device
-MetricsBuffer used by the training loop.
+Defines the core Trainer interface (`AbstractTrainingEngine`), the on-device
+`MetricsBuffer` used by the training loop, and `TrainingConfig`.
+
+The trainer data types shared with Tunix -- `WeightedMetric`, `LossOutput`,
+`TrainerPayload` and `RLTrainerPayload` -- are not declared here. They are
+imported from Tunix and re-exported through `__all__`, so that MaxText and Tunix
+name one class object per type; see the comment above those imports for why.
 
 Note: this module imports Tunix, so `training_engine` requires MaxText's
 post-training dependency bundle (`google-tunix`, declared in
@@ -59,15 +63,15 @@ import jax
 # drifts the moment Tunix changes a field.
 #
 # WeightedMetric must come from `tunix.sft.utils`, NOT from
-# `tunix.experimental.metrics.metrics` -- the latter declares a same-named class
+# `tunix.dist_rl.metrics.metrics` -- the latter declares a same-named class
 # whose `compute()` and `compute_scale()` raise NotImplementedError.
 #
 # `__all__` below declares them part of this module's public surface, which is what
 # keeps pylint from reporting them as unused imports. Do not use the redundant-alias
 # form (`X as X`) instead: MaxText's pylint config does not recognise that convention
 # and reports `C0414 useless-import-alias` for every one of them.
-from tunix.experimental.common.datatypes import RLTrainerPayload
-from tunix.experimental.common.datatypes import TrainerPayload
+from tunix.dist_rl.common.datatypes import RLTrainerPayload
+from tunix.dist_rl.common.datatypes import TrainerPayload
 from tunix.sft.utils import LossOutput
 from tunix.sft.utils import WeightedMetric
 
@@ -160,7 +164,7 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def compile(self, dummy_data: TrainerPayload) -> None:
+  def compile(self, dummy_data: TrainerPayload | None = None) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
     Args:
@@ -168,54 +172,68 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload, **kwargs: Any) -> None:
+  def fwd_bwd(self, payload: TrainerPayload) -> None:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
-      **kwargs: Implementation-specific options.
     """
 
   @abc.abstractmethod
-  def update(self, **kwargs: Any) -> int:
+  def update(self) -> int:
     """Executes a model weight update step using accumulated gradients.
-
-    Args:
-      **kwargs: Implementation-specific options.
 
     Returns:
       The train step count after the update.
     """
 
   @abc.abstractmethod
-  def eval_step(self, payload: TrainerPayload, **kwargs: Any) -> None:
+  def eval_step(self, payload: TrainerPayload) -> None:
     """Executes one evaluation step on the given payload.
 
     Args:
       payload: Packed micro-batch payload for evaluation.
-      **kwargs: Additional evaluation keyword arguments.
     """
 
   @abc.abstractmethod
-  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Read-only.
+
+    Runs a forward pass with the trainer model and caller-supplied function.
+
+    The engine owns model access and shards `args`/`kwargs` on its data axis;
+    `fn` owns the computation and must not mutate the model.
+
+    Args:
+      fn: Called as `fn(model, *args, **kwargs)`.
+      *args: Positional arguments forwarded to `fn` after sharding.
+      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+
+    Returns:
+      Whatever `fn` returns.
+    """
+
+  @abc.abstractmethod
+  def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
     """Forces the trainer to serialize its state (model + optimizer).
 
     Args:
       metadata: Checkpoint identifier or UUID metadata pytree.
-      **kwargs: Additional checkpointing keyword arguments.
+      step: Step to save under. If None, the implementation derives it.
+      force: Save even if the checkpoint policy would skip this step.
     """
 
   @abc.abstractmethod
-  def restore_checkpoint(self, **kwargs: Any) -> Any:
-    """Restores state from latest checkpoint and returns the metadata pytree.
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
+    """Restores state from a checkpoint and returns the metadata pytree.
 
     The returned metadata (e.g., global_step) matches what was stored in
     save_checkpoint.
 
     Args:
-      **kwargs: Additional restoration keyword arguments.
+      step: Checkpoint step to restore. If None, restores the latest checkpoint.
 
     Returns:
       The metadata PyTree stored with the checkpoint.
@@ -233,19 +251,23 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, **kwargs: Any) -> Any:
+  def prepare_weight_sync(self, *, sync_request: Any = None) -> Any:
     """Stages weights for transfer and returns metadata/coordinates.
 
     Args:
-      **kwargs: Weight staging configuration parameters.
+      sync_request: The round's request from Tunix's `WeightSyncCoordinator`.
 
     Returns:
       Synchronization endpoints or file coordinates for weight transfer.
     """
 
   @abc.abstractmethod
-  def release_weight_sync(self, **kwargs: Any) -> Any:
-    """Releases staged weight buffers after transfer completion."""
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
+    """Releases staged weight buffers after transfer completion.
+
+    Args:
+      sync_request: The round's request from Tunix's `WeightSyncCoordinator`.
+    """
 
   @property
   @abc.abstractmethod

@@ -73,6 +73,11 @@ def convert_entry(
   else:
     return None
 
+  if not remaining_parts:
+    return None
+  if len(remaining_parts) >= 2:
+    remaining_parts = [remaining_parts[0], ".".join(remaining_parts[1:])]
+
   new_key = f"{file_path}::" + "::".join(remaining_parts) + params
   return flavor, new_key, duration
 

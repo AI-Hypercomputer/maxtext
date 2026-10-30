@@ -43,7 +43,7 @@ To get started, you first need a MaxText-compatible checkpoint.
 
     ```
     # Example for Qwen3-Next-80B-A3B-Instruct
-    hf_transfer download Qwen/Qwen3-Next-80B-A3B-Instruct --local-dir /path/to/qwen3_next_hf_checkpoint
+    hf download Qwen/Qwen3-Next-80B-A3B-Instruct --local-dir /path/to/qwen3_next_hf_checkpoint
     ```
 
 2.  **Convert the Checkpoint**: Run the `convert_qwen3_next_scanned.py` script to convert the downloaded Hugging Face weights into the Orbax format required by MaxText.

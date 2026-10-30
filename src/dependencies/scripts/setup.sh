@@ -131,7 +131,7 @@ fi
 echo "Python version check passed. Continuing with script."
 echo "--------------------------------------------------"
 
-apt-get update && apt-get upgrade -y && apt-get install -y sudo
+apt-get update && apt-get install -y --no-install-recommends sudo
 (sudo bash || bash) <<'EOF'
 # sudo strips the exports set by the parent shell, so re-export them here to
 # keep apt-get non-interactive.
@@ -140,11 +140,14 @@ export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 apt-get update && \
 apt-get upgrade -y && \
-apt-get install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
+apt-get install -y --no-install-recommends numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool ca-certificates && \
 export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
-echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
-curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-apt-get update -y && apt-get -y install gcsfuse
+if [ "$GCSFUSE_REPO" = "gcsfuse-trixie" ]; then GCSFUSE_REPO="gcsfuse-bookworm"; fi
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-key.gpg && gpg --dearmor --yes -o /usr/share/keyrings/cloud.google.gpg /tmp/apt-key.gpg && rm /tmp/apt-key.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
+apt-get update -y && apt-get -y install gcsfuse && \
+rm -f /usr/sbin/mount.gcsfuse /usr/sbin/mount.fuse.gcsfuse /sbin/mount.gcsfuse /sbin/mount.fuse.gcsfuse && \
+(objcopy --remove-section=.go.buildinfo /usr/bin/gcsfuse 2>/dev/null || true)
 rm -rf /var/lib/apt/lists/*
 EOF
 
@@ -222,10 +225,30 @@ install_maxtext_package_without_deps() {
 
 cleanup_unneeded_build_artifacts() {
     echo "Cleaning up build artifacts that trigger security scanners..."
-    # Clean up flaxlib_src Cargo.lock / unneeded source files
-    rm -rf /usr/local/lib/python3*/site-packages/flaxlib_src
+    local py_purelib py_platlib
+    py_purelib=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))" 2>/dev/null || true)
+    py_platlib=$(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))" 2>/dev/null || true)
+    # Clean up flaxlib_src Cargo.lock / unneeded source files, unused cross-language Java Ray worker JAR,
+    # and vendored third-party .dist-info metadata inside Ray's runtime_env agent
+    if [ -n "$py_purelib" ]; then
+        rm -rf "$py_purelib/flaxlib_src"
+        rm -f "$py_purelib/ray/jars/ray_dist.jar"
+        rm -rf "$py_purelib"/ray/_private/runtime_env/agent/thirdparty_files/*.dist-info
+    fi
+    if [ -n "$py_platlib" ] && [ "$py_platlib" != "$py_purelib" ]; then
+        rm -rf "$py_platlib/flaxlib_src"
+        rm -f "$py_platlib/ray/jars/ray_dist.jar"
+        rm -rf "$py_platlib"/ray/_private/runtime_env/agent/thirdparty_files/*.dist-info
+    fi
     # Clean up embedded virtualenv seed wheels if virtualenv was installed
     find /usr/local /root -name "*.whl" -path "*/virtualenv/seed/wheels/embed/*" -delete 2>/dev/null || true
+    # Clean up unused /etc/fstab mount helper binaries from gcsfuse, strip .go.buildinfo from /usr/bin/gcsfuse,
+    # and remove optional gcloud-crc32c Go helper and bundledpythonunix .dist-info metadata
+    rm -f /usr/sbin/mount.gcsfuse /usr/sbin/mount.fuse.gcsfuse /sbin/mount.gcsfuse /sbin/mount.fuse.gcsfuse
+    (objcopy --remove-section=.go.buildinfo /usr/bin/gcsfuse 2>/dev/null || true)
+    rm -f /usr/bin/gcloud-crc32c /usr/lib/google-cloud-sdk/bin/gcloud-crc32c /usr/local/google-cloud-sdk/bin/gcloud-crc32c
+    rm -rf /usr/lib/google-cloud-sdk/platform/bundledpythonunix/lib/python*/site-packages/*.dist-info \
+           /usr/local/google-cloud-sdk/platform/bundledpythonunix/lib/python*/site-packages/*.dist-info
 }
 
 install_maxtext_with_deps() {
@@ -273,6 +296,7 @@ install_post_training_deps() {
     echo "Installing requirements from $dep_name"
     UV_TORCH_BACKEND=cpu python3 -m uv pip install --resolution=lowest -r "$dep_name"
     python3 -m src.dependencies.scripts.install_post_train_extra_deps
+    python3 -m uv pip install --no-deps "setuptools>=84.0.0"
     cleanup_unneeded_build_artifacts
 }
 
@@ -319,6 +343,7 @@ if [[ $MODE == "nightly" ]]; then
 
     # Install Flax HEAD to maintain compatibility with JAX nightly
     python3 -m uv pip install -U --no-deps git+https://github.com/google/flax.git
+    cleanup_unneeded_build_artifacts
 
     # Uninstall existing jax, jaxlib and libtpu
     python3 -m uv pip show jax && python3 -m uv pip uninstall jax

@@ -124,6 +124,8 @@ def main(argv: Sequence[str]) -> None:
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
         num_videos=getattr(processor_outputs, "num_videos", 0),
+        audio_placeholder=config.audio_placeholder,
+        num_audios=getattr(processor_outputs, "num_audios", 0),
     )
 
   metadata = engine.get_tokenizer()
@@ -131,7 +133,7 @@ def main(argv: Sequence[str]) -> None:
 
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
-    has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
+    has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)
   except AttributeError as _:
     has_chat_template = False
   is_bos = config.add_bos and not has_chat_template
@@ -149,13 +151,13 @@ def main(argv: Sequence[str]) -> None:
 
       position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
           input_ids=tokens[np.newaxis, :],  # Add batch dimension for processing
-          image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
-          video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
+          image_grid_thw=processor_outputs.pixel_grid_thw,  # pyrefly: ignore[missing-attribute]
+          video_grid_thw=processor_outputs.video_grid_thw,  # pyrefly: ignore[missing-attribute]
           attention_mask=np.ones_like(tokens)[np.newaxis, :],
           use_audio_in_video=config.use_audio and getattr(processor_outputs, "num_videos", 0) > 0,
-          audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
-          second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
-          spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
+          audio_lengths=processor_outputs.audio_lengths,  # pyrefly: ignore[missing-attribute]
+          second_per_grids=processor_outputs.video_second_per_grid,  # pyrefly: ignore[missing-attribute]
+          spatial_merge_size=config.spatial_merge_size_for_vit,
           position_id_per_seconds=config.position_id_per_seconds,
           config=config,
       )
@@ -245,8 +247,8 @@ def main(argv: Sequence[str]) -> None:
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 
-  assert output.startswith(
-      config.autoregressive_decode_assert
+  assert " ".join(output.split()).startswith(
+      " ".join(config.autoregressive_decode_assert.split())
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
   # Deactivate profiler

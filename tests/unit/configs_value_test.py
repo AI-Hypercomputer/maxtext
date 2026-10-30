@@ -20,6 +20,7 @@ import unittest.mock
 from absl.testing import absltest
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.layers import quantizations
 from maxtext.utils import globals as maxtext_globals
 import pydantic
 
@@ -96,6 +97,75 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_mtp_norm_main_hidden_state_rejects_unsupported_combinations(self):
+    """`mtp_norm_main_hidden_state` is rejected with vocab tiling or expanded mHC streams."""
+    base = ["", _BASE_CONFIG_PATH, "run_name=test", "mtp_num_layers=1", "mtp_norm_main_hidden_state=True"]
+    pyconfig.initialize(base)
+    with self.assertRaisesRegex(ValueError, "num_vocab_tiling"):
+      pyconfig.initialize(base + ["num_vocab_tiling=2"])
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate"):
+      pyconfig.initialize(base + ["mhc_expansion_rate=2"])
+
+  def test_enable_mllog_without_eval_warns(self):
+    """enable_mllog with eval_interval <= 0 is allowed (for measuring eval impact) and logs a warning."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=-1"]
+    with unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning:
+      config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+    self.assertTrue(
+        any("enable_mllog=True with eval_interval=" in str(call.args[0]) for call in mock_warning.call_args_list)
+    )
+
+  def test_splash_diag_skip_rejects_invalid_grid(self):
+    for grid in (1, 3, 6):
+      with self.subTest(grid=grid):
+        argv = ["", _BASE_CONFIG_PATH, "run_name=test", f"sa_qk_diag_grid={grid}"]
+        with self.assertRaisesRegex(pydantic.ValidationError, "sa_qk_diag_grid must be a power of 2"):
+          pyconfig.initialize(argv)
+
+  def test_splash_diag_skip_rejects_non_square_eval_blocks(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_tokamax_splash=True",
+        "sa_qk_diag_skip=True",
+        "custom_mesh_and_rule_for_eval=pure-fsdp",
+        "eval_sa_block_q=512",
+        "eval_sa_block_kv=512",
+        "eval_sa_block_kv_compute=256",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "require square eval blocks"):
+      pyconfig.initialize(argv)
+
+  def test_splash_diag_skip_warns_when_disabled(self):
+    common = ["", _BASE_CONFIG_PATH, "run_name=test", "use_tokamax_splash=True", "sa_sv_diag_skip=True"]
+    # (overrides, expected warning substring or None)
+    cases = (
+        ([], None),
+        (["attention_type=full"], "attention_type='full'"),
+        (["ici_context_parallelism=2", "context_parallel_load_balance=True"], "load-balanced all_gather"),
+        (["ici_context_parallelism=2", "context_parallel_load_balance=False"], None),
+    )
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for overrides, expected in cases:
+      with self.subTest(overrides=overrides):
+        with (
+            unittest.mock.patch("jax.devices", return_value=mock_devices),
+            unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning,
+        ):
+          pyconfig.initialize(common + overrides)
+        messages = [str(call.args[0]) for call in mock_warning.call_args_list if "sa_sv_diag_skip" in str(call.args[0])]
+        if expected is None:
+          self.assertEqual(messages, [])
+        else:
+          self.assertTrue(any(expected in m for m in messages), messages)
+
+  def test_enable_mllog_accepted_with_eval(self):
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=1"]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+
   def test_te_moe_block_rejects_unsupported_options_during_config_validation(self):
     common_config = {
         "run_name": "test",
@@ -128,6 +198,57 @@ class ConfigTest(absltest.TestCase):
         with self.assertRaises(pydantic.ValidationError) as context:
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
+
+  def test_te_moe_disable_cudnn_gmm_fusion_requires_te_moe_block(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_gmm_quantization": "te_no_quant",
+        "override_logical_axis_rules": True,
+    }
+
+    self.assertFalse(types.MaxTextConfig(**common_config).te_moe_disable_cudnn_gmm_fusion)
+    self.assertTrue(
+        types.MaxTextConfig(
+            **common_config, te_moe_block=True, te_moe_disable_cudnn_gmm_fusion=True
+        ).te_moe_disable_cudnn_gmm_fusion
+    )
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True"
+    ):
+      types.MaxTextConfig(**common_config, te_moe_disable_cudnn_gmm_fusion=True)
+
+  def test_te_moe_quantized_weight_gather_validation(self):
+    common = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_mxfp8",
+        "te_moe_quantize_before_fsdp_all_gather": True,
+        "override_logical_axis_rules": True,
+    }
+    self.assertTrue(types.MaxTextConfig(**common).te_moe_quantize_before_fsdp_all_gather)
+    self.assertFalse(
+        types.MaxTextConfig(
+            **{**common, "te_moe_quantize_before_fsdp_all_gather": False}
+        ).te_moe_quantize_before_fsdp_all_gather
+    )
+    for overrides in (
+        {"te_gmm_quantization": "te_no_quant"},
+        {"use_2d_fsdp_sharding": True},
+        {"te_moe_quantize_before_fsdp_all_gather": "invalid"},
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError):
+          types.MaxTextConfig(**{**common, **overrides})
 
   def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
     common_config = {
@@ -169,6 +290,39 @@ class ConfigTest(absltest.TestCase):
     te_ring_config = {**native_ring_config, "te_moe_block": True, "te_gmm_quantization": "te_no_quant"}
     config = types.MaxTextConfig(**te_ring_config)
     self.assertEqual(config.ragged_buffer_factor, 1.5)
+
+  def test_moe_dropless_fallback_modes(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 8,
+        "base_mlp_dim": 64,
+        "base_moe_mlp_dim": 64,
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "use_ragged_sort": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    for mode in (None, "step", "layer"):
+      with self.subTest(moe_dropless_fallback=mode):
+        config = types.MaxTextConfig(**common_config, moe_dropless_fallback=mode)
+        self.assertEqual(config.moe_dropless_fallback, mode)
+
+    # YAML/CLI "none" reaches pydantic as None, so it must mean "off".
+    for raw in ("none", "None"):
+      with self.subTest(raw=raw):
+        raw_keys = {**common_config, "moe_dropless_fallback": raw}
+        kwargs = pyconfig._prepare_for_pydantic(raw_keys)  # pylint: disable=protected-access
+        self.assertIsNone(types.MaxTextConfig(**kwargs).moe_dropless_fallback)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.MaxTextConfig(**common_config, moe_dropless_fallback="both")
+
+    # The ragged all-to-all path (no ring of experts) supports the in-layer fallback, not the step replay.
+    a2a_config = {**common_config, "use_ring_of_experts": False}
+    self.assertEqual(types.MaxTextConfig(**a2a_config, moe_dropless_fallback="layer").moe_dropless_fallback, "layer")
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**a2a_config, moe_dropless_fallback="step")
+    self.assertIn("only supported with use_ring_of_experts=True", str(context.exception))
 
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
@@ -844,6 +998,20 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.training_objective, "causal_lm")
     self.assertEqual(config.block_diffusion_mask_id, -1)
 
+  def test_cpu_hardware_disables_megablox(self):
+    """Tests that megablox is automatically disabled when hardware=cpu."""
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "hardware=cpu",
+            "megablox=True",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+    self.assertFalse(config.megablox)
+
   def test_block_diffusion_pretraining_config(self):
     config = pyconfig.initialize(
         [
@@ -899,7 +1067,6 @@ class ConfigTest(absltest.TestCase):
         ({"num_vocab_tiling": 2}, "vocabulary tiling"),
         ({"dataset_type": "grain"}, "dataset_type='hf'"),
         ({"use_dpo": True}, "DPO"),
-        ({"use_sft": True}, "pre-training only"),
         ({"use_multimodal": True}, "text-only"),
         ({"block_diffusion_logit_alignment": "shifted"}, "seed_and_mask"),
         ({"block_diffusion_canvas_policy": "seed_and_mask"}, "same_position/all_masked"),
@@ -918,6 +1085,31 @@ class ConfigTest(absltest.TestCase):
         argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
         with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
           pyconfig.initialize(argv)
+
+  def test_block_diffusion_sft_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=8",
+            "block_diffusion_mask_id=100",
+            "vocab_size=256",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "use_sft=True",
+            "sft_train_on_completion_only=True",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertTrue(config.use_sft)
+    self.assertTrue(config.sft_train_on_completion_only)
 
   def test_shifted_block_diffusion_requires_seeded_canvas(self):
     config = pyconfig.initialize(
@@ -1007,6 +1199,89 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_elastic_snapshot_mode_config(self):
+    """Snapshot mode is the default, takes an interval, and is rejected where it can't work."""
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test"])
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 10)
+    # Without elastic training the kind is inert, whatever the data pipeline.
+    pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "dataset_type=tfds"])
+    # Elastic runs outside the snapshot envelope opt out explicitly.
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "elastic_enabled=true",
+            "enable_single_controller=true",
+            "dataset_type=tfds",
+            "elastic_backup_kind=checkpoint",
+        ]
+    )
+    self.assertEqual(config.elastic_backup_kind, "checkpoint")
+
+    config = pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test", "elastic_backup_kind=snapshot", "elastic_snapshot_interval=25"]
+    )
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 25)
+
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "elastic_snapshot_interval=0"])
+
+    snapshot_argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "elastic_enabled=true",
+        "enable_single_controller=true",
+        "elastic_backup_kind=snapshot",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "not supported with DiLoCo"):
+      pyconfig.initialize(snapshot_argv + ["enable_diloco=true"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "enable_rampup_batch_size"):
+      pyconfig.initialize(
+          snapshot_argv
+          + [
+              "enable_rampup_batch_size=true",
+              "per_device_batch_size=4",
+              "per_device_batch_size_start=1",
+              "per_device_batch_size_increment=1",
+              "global_rampup_samples=100",
+          ]
+      )
+    # Synthetic data needs no iterator position; real data needs grain's ElasticIterator.
+    pyconfig.initialize(snapshot_argv + ["dataset_type=synthetic"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=tfds"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=grain", "grain_train_files=/x/*"])
+    pyconfig.initialize(
+        snapshot_argv
+        + [
+            "dataset_type=grain",
+            "grain_train_files=/x/*",
+            "grain_use_elastic_iterator=true",
+            "grain_file_type=arrayrecord",
+            "packing=false",
+            "colocated_python_data_input=true",
+        ]
+    )
+
+  def test_te_moe_dispatch_remat_location(self):
+    """Dispatch outputs participate in the custom remat policy."""
+    name = "te_moe_dispatch_remat_location"
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "remat_policy=custom"]
+    default_config = pyconfig.initialize(argv)
+    self.assertEqual(getattr(default_config, name), types.RematLocation.REMAT)
+    for location in ("remat", "device", "offload"):
+      with self.subTest(location=location):
+        config = pyconfig.initialize(argv + [f"{name}={location}"])
+        self.assertEqual(name in config.tensors_on_device, location == "device")
+        self.assertEqual(name in config.tensors_to_offload, location == "offload")
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv + [f"{name}=invalid"])
+
   def test_indexer_cutoff_threshold_remat_policy(self):
     """Tests custom remat policy and validation for indexer_cutoff_threshold."""
     # 1. Verify custom remat policy puts indexer_cutoff_threshold on device
@@ -1050,8 +1325,8 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       pyconfig.initialize(argv_invalid)
 
-  def test_sliced_mla_proj_disallows_quantization(self):
-    """Tests that use_sliced_mla_proj=True is incompatible with quantization."""
+  def test_sliced_mla_proj_disallows_non_qwix_quantization(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with module-level (non-Qwix) quantization."""
     argv = [
         "",
         _BASE_CONFIG_PATH,
@@ -1059,7 +1334,90 @@ class ConfigTest(absltest.TestCase):
         "use_sliced_mla_proj=true",
         "quantization=int8",
     ]
-    with self.assertRaises(pydantic.ValidationError):
+    with self.assertRaisesRegex(pydantic.ValidationError, "only supported via Qwix interception"):
+      pyconfig.initialize(argv)
+
+  def test_sliced_mla_proj_allows_qwix_quantization(self):
+    """Tests that use_sliced_mla_proj=True is allowed with Qwix interception quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=int8",
+        "use_qwix_quantization=true",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.use_sliced_mla_proj)
+    self.assertTrue(config.use_qwix_quantization)
+
+  def test_sliced_mla_proj_disallows_qwix_quantization_with_batch_split(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with batch-split Qwix quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=fp8_full",
+        "use_qwix_quantization=true",
+        "use_batch_split_schedule=true",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "only supported via Qwix interception"):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_accepts_valid_config(self):
+    """Tests valid serve_fp8_weight configuration."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertEqual(config.quantization, "serve_fp8_weight")
+
+  def test_serve_fp8_weight_threads_act_calibration_method(self):
+    """Tests that serve_fp8_weight picks up act_quantization_calibration_method."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "act_quantization_calibration_method=fixed,-224,224",
+    ]
+    quant = quantizations.configure_quantization(pyconfig.initialize(argv))
+    self.assertIsInstance(quant, quantizations.ServeFp8WeightQuantization)
+    self.assertEqual(quant.act_calibration_method, "fixed,-224,224")
+
+  def test_serve_fp8_weight_requires_fp8_weight_dtype(self):
+    """Tests that serve_fp8_weight requires an FP8 weight_dtype."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=bfloat16",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "requires weight_dtype to be an FP8 dtype"):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_rejects_qwix_quantization(self):
+    """Tests that serve_fp8_weight rejects use_qwix_quantization=True."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "use_qwix_quantization=true",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with use_qwix_quantization=True"):
       pyconfig.initialize(argv)
 
 

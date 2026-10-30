@@ -84,6 +84,44 @@ class EmbedTest(unittest.TestCase):
 
     self.assertEqual(outputs.shape, (batch_size, seq_len, num_embeddings))
 
+  def test_attend_on_embedding_matches_transposed_dot(self):
+    """`attend_on_embedding` contracts over the table's feature axis directly.
+
+    Expressing the transpose as dimension numbers instead of materializing
+    `table.T` is what lets the input lookup and the tied output head share one
+    bf16 cast under `shard_mode: explicit`. The contraction is the same, so the
+    logits match; the tolerance only allows a backend a different accumulation
+    order.
+    """
+    table = jax.random.normal(jax.random.PRNGKey(0), (32, 8))
+    for query_shape in ((8,), (3, 8), (2, 3, 8)):
+      with self.subTest(query_shape=query_shape):
+        query = jax.random.normal(jax.random.PRNGKey(1), query_shape)
+        expected = jnp.dot(query, jnp.asarray(table, jnp.bfloat16).T, preferred_element_type=jnp.float32)
+        got = embeddings.attend_on_embedding(query, table, jnp.float32, self.cfg)
+        self.assertEqual(got.shape, expected.shape)
+        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+  def test_attend_on_embedding_weight_gradient_in_table_order(self):
+    """The tied head's table gradient comes out in the table's own axis order.
+
+    With `table.T` the gradient is built transposed and handed back through a
+    second transpose, which under explicit sharding survives to codegen. The
+    gradient itself must be unchanged.
+    """
+    table = jax.random.normal(jax.random.PRNGKey(0), (32, 8))
+    query = jax.random.normal(jax.random.PRNGKey(1), (2, 3, 8))
+
+    def loss(t, attend):
+      return jnp.sum(jnp.sin(attend(query, t)))
+
+    got = jax.grad(loss)(table, lambda q, t: embeddings.attend_on_embedding(q, t, jnp.float32, self.cfg))
+    expected = jax.grad(loss)(
+        table, lambda q, t: jnp.dot(q, jnp.asarray(t, jnp.bfloat16).T, preferred_element_type=jnp.float32)
+    )
+    self.assertEqual(got.shape, table.shape)
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
 
 class RotaryEmbeddingTest(unittest.TestCase):
   """Tests for RotaryEmbedding."""
@@ -243,6 +281,85 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
           rngs=self.rngs,
       )
 
+  def test_dot_pairwise_requires_pairwise(self):
+    with self.assertRaises(ValueError):
+      embeddings.YarnRotaryEmbedding(
+          embedding_dims=4,
+          mesh=self.mesh,
+          max_position_embeddings=16384,
+          original_max_position_embeddings=4096,
+          interleave=True,
+          pairwise=False,
+          dot_pairwise=True,
+          rngs=self.rngs,
+      )
+
+  def test_direct_position_freqs_and_dot_pairwise_parity(self):
+    rng = jax.random.PRNGKey(42)
+    inputs = jax.random.normal(rng, (2, 8, 4, 64), dtype=jnp.bfloat16)
+    position = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, :], (2, 8))
+    cotangent = jax.random.normal(jax.random.PRNGKey(7), inputs.shape, dtype=jnp.bfloat16)
+
+    ref_layer = embeddings.YarnRotaryEmbedding(
+        embedding_dims=64,
+        mesh=self.mesh,
+        max_position_embeddings=16384,
+        original_max_position_embeddings=4096,
+        interleave=True,
+        pairwise=True,
+        fprop_dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+    ref_out, ref_vjp = jax.vjp(lambda x: ref_layer(x, position=position), inputs)
+    (ref_grad,) = ref_vjp(cotangent)
+
+    for direct_freqs, dot_pw in ((True, False), (False, True), (True, True)):
+      layer = embeddings.YarnRotaryEmbedding(
+          embedding_dims=64,
+          mesh=self.mesh,
+          max_position_embeddings=16384,
+          original_max_position_embeddings=4096,
+          interleave=True,
+          pairwise=True,
+          direct_position_freqs=direct_freqs,
+          dot_pairwise=dot_pw,
+          fprop_dtype=jnp.bfloat16,
+          rngs=self.rngs,
+      )
+      out, vjp_fn = jax.vjp(lambda x, l=layer: l(x, position=position), inputs)
+      (grad,) = vjp_fn(cotangent)
+      np.testing.assert_allclose(
+          np.asarray(out, dtype=np.float32),
+          np.asarray(ref_out, dtype=np.float32),
+          rtol=1e-2,
+          atol=1e-2,
+      )
+      np.testing.assert_allclose(
+          np.asarray(grad, dtype=np.float32),
+          np.asarray(ref_grad, dtype=np.float32),
+          rtol=1e-2,
+          atol=1e-2,
+      )
+
+  def test_direct_position_freqs_non_pairwise_parity(self):
+    inputs = jax.random.normal(jax.random.PRNGKey(42), (2, 8, 4, 64), dtype=jnp.float32)
+    position = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, :], (2, 8))
+    for interleave in (True, False):
+      outs = []
+      for direct_freqs in (False, True):
+        layer = embeddings.YarnRotaryEmbedding(
+            embedding_dims=64,
+            mesh=self.mesh,
+            max_position_embeddings=16384,
+            original_max_position_embeddings=4096,
+            interleave=interleave,
+            direct_position_freqs=direct_freqs,
+            fprop_dtype=jnp.float32,
+            rngs=self.rngs,
+        )
+        outs.append(layer(inputs, position=position))
+      np.testing.assert_allclose(outs[1], outs[0], rtol=1e-5, atol=1e-5)
+
   def test_non_interleaved_call(self):
     layer = embeddings.YarnRotaryEmbedding(
         embedding_dims=4,
@@ -294,6 +411,36 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
     )
     default_outputs = default_layer(inputs, position=position)
     np.testing.assert_allclose(outputs, default_outputs, atol=1e-5)
+
+  def test_direct_position_freqs_matches_indexing_the_table(self):
+    """`direct_position_freqs` computes the rows the table lookup would read, bit for bit.
+
+    Row `p` of `freqs_cis` is `exp(1j * p * inv_freqs)`, so for every in-range position
+    the direct computation and the table lookup agree exactly — `arange(max_position_embeddings)[p]`
+    is exactly `float(p)` for every representable position — on every rotation path.
+    """
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (1, 128, 2, 64), dtype=jnp.float32)
+    for interleave, pairwise in ((True, False), (False, False), (True, True)):
+      table_layer, direct_layer = (
+          embeddings.YarnRotaryEmbedding(
+              embedding_dims=64,
+              mesh=self.mesh,
+              max_position_embeddings=163840,
+              original_max_position_embeddings=4096,
+              interleave=interleave,
+              pairwise=pairwise,
+              direct_position_freqs=direct,
+              fprop_dtype=jnp.float32,
+              rngs=self.rngs,
+          )
+          for direct in (False, True)
+      )
+      self.assertEqual(table_layer.freqs_cis.shape, (163840, 32))
+      # Sample the bottom, the middle and the very top of the table.
+      for lo in (0, 4096, 163840 - 128):
+        with self.subTest(interleave=interleave, pairwise=pairwise, lo=lo):
+          position = jnp.arange(lo, lo + 128, dtype=jnp.int32)[jnp.newaxis, :]
+          np.testing.assert_array_equal(direct_layer(inputs, position=position), table_layer(inputs, position=position))
 
   def test_pairwise_explicit_shard_mode_call(self):
     layer = embeddings.YarnRotaryEmbedding(

@@ -40,7 +40,7 @@ permissions:
 jobs:
   check_image:
     name: Check Docker Image Existence
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     outputs:
       image_exists: ${{ steps.check.outputs.exists }}
@@ -76,6 +76,7 @@ jobs:
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: ${{ matrix.flavor }}
+      repository_name: ${{ inputs.repository_name }}
       base_image: ${{ inputs.image_name }}:${{ inputs.image_tag }}
       is_scheduled_run: true
       maxtext_installed: true
@@ -84,7 +85,7 @@ jobs:
     name: Tag Docker Image
     needs: test
     if: needs.test.result == 'success'
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker

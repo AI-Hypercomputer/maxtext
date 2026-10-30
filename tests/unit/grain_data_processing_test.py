@@ -17,6 +17,7 @@
 import sys
 import os.path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import json
@@ -30,6 +31,7 @@ from jax.experimental import mesh_utils
 
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import grain_data_processing
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
@@ -644,6 +646,60 @@ class GrainFewerFilesThanHostsTest(_GrainTFRecordSetup, GrainBaseProcessingTest,
     config = self._make_config(grain_worker_count=2)
     with self.assertRaises(ValueError):
       grain_data_processing.make_grain_train_iterator(config, self.mesh, self.process_indices)
+
+
+class _PadEqualsEosTokenizer:
+  """Hugging Face tokenizer stand-in with DeepSeek's pad == eos == 1 and `<｜▁pad▁｜>` at id 2."""
+
+  _VOCAB = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+  def __init__(self):
+    self.chat_template = None
+    self.bos_token_id = 0
+    self.eos_token_id = 1
+    self.unk_token_id = None
+    self.pad_token = "<｜end▁of▁sentence｜>"
+
+  @property
+  def pad_token_id(self):
+    return self._VOCAB[self.pad_token]
+
+  def get_vocab(self):
+    return dict(self._VOCAB)
+
+
+class GrainSftPadIdTest(unittest.TestCase):
+  """The grain SFT pipeline uses the remapped pad id for prompt masking, padding and the tokenizer."""
+
+  def test_sft_pipeline_uses_remapped_pad_id(self):
+    dataset = mock.MagicMock()
+    dataset.map.return_value = dataset
+    base_tokenizer = SimpleNamespace(tokenizer=_PadEqualsEosTokenizer(), pad_id=1)
+    config = SimpleNamespace(sft_train_on_completion_only=True, max_target_length=8, chat_template=None)
+
+    with (
+        mock.patch.object(grain_data_processing.data_processing_utils, "parse_and_keep_features", return_value=dataset),
+        mock.patch.object(
+            grain_data_processing.data_processing_utils, "get_tokenizer_and_pad_id", return_value=(base_tokenizer, 1)
+        ),
+        mock.patch.object(grain_data_processing.data_processing_utils, "validate_and_configure_sft_columns"),
+        mock.patch.object(grain_data_processing.data_processing_utils, "get_local_batch_size", return_value=1),
+        mock.patch.object(grain_data_processing.data_processing_utils, "format_and_batch", return_value=dataset) as fmt,
+        mock.patch.object(
+            grain_data_processing.data_processing_utils, "apply_multiprocessing_and_prefetch", return_value=dataset
+        ),
+    ):
+      grain_data_processing.sft_preprocessing_pipeline(
+          dataset, config, ["messages"], tokenize=True, grain_worker_count=0, grain_per_worker_buffer_size=1
+      )
+
+    masking = [
+        c.args[0] for c in dataset.map.call_args_list if isinstance(c.args[0], input_pipeline_utils.SFTPromptMasking)
+    ]
+    self.assertEqual(len(masking), 1)
+    self.assertEqual(masking[0].unk_id, 2)
+    self.assertEqual(fmt.call_args.args[3], 2)
+    self.assertEqual(base_tokenizer.pad_id, 2)
 
 
 if __name__ == "__main__":

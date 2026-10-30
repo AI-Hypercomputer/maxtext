@@ -25,10 +25,6 @@ permissions:
 jobs:
   build-wheel:
     uses: ./.github/workflows/build_package.yml
-    with:
-      device_type: tpu
-      device_name: v6e-4
-      cloud_runner: linux-x86-n2-16-buildkit
 
   run-tests:
     needs: build-wheel

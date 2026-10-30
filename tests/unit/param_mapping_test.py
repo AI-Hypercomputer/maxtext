@@ -22,8 +22,15 @@ import pytest
 pytestmark = [pytest.mark.decoupled_target]
 
 
-from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
+from maxtext.checkpoint_conversion.to_maxtext import (
+    _build_multi_axis_stacked_tensor,
+    _build_single_axis_stacked_tensor,
+)
+from maxtext.checkpoint_conversion.utils import hf_model_configs
+from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils import tensor_handling
+from maxtext.checkpoint_conversion.utils import utils
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
 
 
@@ -91,6 +98,189 @@ class ParamMappingTest(unittest.TestCase):
     mapping = param_mapping.QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-layers-pre_self_attention_layer_norm-scale", mapping)
 
+  def test_qwen3_5_dense_mapping(self):
+    """Dense Qwen3.5 maps all MLP projections without MoE parameters."""
+    config = {"text_config": {"num_hidden_layers": 8, "num_experts": 1}}
+    maxtext_config = mock.Mock(
+        num_decoder_layers=8, num_experts=1, inhomogeneous_layer_cycle_interval=4, weight_dtype="bfloat16"
+    )
+    for scanned in (False, True):
+      with self.subTest(scan_layers=scanned):
+        mapping = param_mapping.PARAM_MAPPING["qwen3.5-9b"](config, maxtext_config, scan_layers=scanned)
+        for mt_name, hf_name in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
+
+          def hf_key(layer, hf_name=hf_name):
+            return f"model.language_model.layers.{layer}.mlp.{hf_name}.weight"
+
+          if scanned:
+            # The nested block scan stacks local layers [block][local] and the global layer [block].
+            self.assertEqual(
+                mapping[f"params-decoder-layers-local_layers-mlp-{mt_name}-kernel"],
+                [[hf_key(b * 4 + p) for p in range(3)] for b in range(2)],
+            )
+            self.assertEqual(
+                mapping[f"params-decoder-layers-global_layer-mlp-{mt_name}-kernel"],
+                [hf_key(b * 4 + 3) for b in range(2)],
+            )
+          else:
+            for index in range(8):
+              self.assertEqual(mapping[f"params-decoder-layers_{index}-mlp-{mt_name}-kernel"], hf_key(index))
+        self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
+
+  def test_deepseek4_284b_mapping_unscanned(self):
+    config = {
+        "num_hidden_layers": 43,
+        "n_routed_experts": 256,
+        "num_hash_layers": 3,
+        "num_experts_per_tok": 6,
+        "compress_ratios": [0, 0, 4, 128] + [4, 128] * 19 + [0],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 256
+    maxtext_config.base_num_decoder_layers = 43
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-layers_0-self_attention-wq_a-kernel", mapping)
+
+  def test_deepseek4_284b_mapping_scanned(self):
+    config = {
+        "num_hidden_layers": 43,
+        "n_routed_experts": 256,
+        "num_hash_layers": 3,
+        "num_experts_per_tok": 6,
+        "compress_ratios": [0, 0, 4, 128] + [4, 128] * 19 + [0],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 256
+    maxtext_config.base_num_decoder_layers = 43
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-wq_a-kernel", mapping)
+
+  def test_deepseek4_1600b_mapping_unscanned(self):
+    config = hf_model_configs.deepseek4_1600b_dict
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = config["n_routed_experts"]
+    maxtext_config.base_num_decoder_layers = config["num_hidden_layers"]
+    maxtext_config.first_num_hash_layers = config.get("num_hash_layers", 3)
+    maxtext_config.mtp_num_layers = config.get("num_nextn_predict_layers", 0)
+    maxtext_config.compress_ratios = config.get("compress_ratios")
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-decoder_norm-scale", mapping)
+    self.assertIn("params-decoder-logits_dense-kernel", mapping)
+    self.assertIn("params-decoder-hc_head-hc_fn", mapping)
+    self.assertIn("params-decoder-hc_head-hc_base", mapping)
+    self.assertIn("params-decoder-hc_head-hc_scale", mapping)
+
+    for i in range(3):
+      self.assertIn(f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid", mapping)
+      self.assertNotIn(f"MoEBiasVar-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias", mapping)
+    for i in range(3, 61):
+      self.assertIn(f"MoEBiasVar-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias", mapping)
+      self.assertNotIn(f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid", mapping)
+
+    # Validate 1600B shapes
+    shapes = hf_shape.DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config)
+    self.assertEqual(shapes["embed.weight"], [129280, 7168])
+    self.assertEqual(shapes["norm.weight"], [7168])
+    self.assertEqual(shapes["head.weight"], [129280, 7168])
+    self.assertEqual(shapes["hc_head_fn"], [4, 28672])
+    self.assertEqual(shapes["hc_head_base"], [4])
+    self.assertEqual(shapes["hc_head_scale"], [1])
+    self.assertEqual(shapes["layers.0.attn.wq_a.weight"], [1536, 7168])
+    self.assertEqual(shapes["layers.0.attn.wq_b.weight"], [128 * 512, 1536])
+    self.assertEqual(shapes["layers.0.attn.wo_a.weight"], [16384, (128 * 512) // 16])
+    self.assertEqual(shapes["layers.0.attn.wo_b.weight"], [7168, 16384])
+    self.assertEqual(shapes["layers.0.ffn.gate.weight"], [384, 7168])
+    self.assertEqual(shapes["layers.0.ffn.gate.tid2eid"], [129280, 6])
+    self.assertEqual(shapes["layers.3.ffn.gate.bias"], [384])
+    self.assertEqual(shapes["layers.0.ffn.experts.0.w1.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.ffn.experts.0.w2.weight"], [7168, 3072])
+    self.assertEqual(shapes["layers.0.ffn.experts.0.w3.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.ffn.shared_experts.w1.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.ffn.shared_experts.w2.weight"], [7168, 3072])
+    self.assertEqual(shapes["layers.0.ffn.shared_experts.w3.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.attn.compressor.wgate.weight"], [512, 7168])
+    self.assertEqual(shapes["layers.2.attn.compressor.wgate.weight"], [1024, 7168])
+    self.assertEqual(shapes["layers.2.attn.indexer.compressor.wgate.weight"], [256, 7168])
+    self.assertEqual(shapes["layers.2.attn.indexer.weights_proj.weight"], [64, 7168])
+    self.assertEqual(shapes["layers.2.attn.indexer.wq_b.weight"], [8192, 1536])
+
+    # Bijective mapping verification against HF_SHAPE
+    mapped_hf_keys = []
+
+    def collect_keys(v):
+      if v is None:
+        return
+      if isinstance(v, str):
+        mapped_hf_keys.append(v)
+      elif isinstance(v, (list, tuple)):
+        for item in v:
+          collect_keys(item)
+
+    for hf_v in mapping.values():
+      collect_keys(hf_v)
+
+    mapped_set = set(mapped_hf_keys)
+    # Composite tuple keys (e.g. the MTP e_proj/h_proj pair) only serve to_huggingface.
+    hf_keys = {k for k in shapes if isinstance(k, str)}
+    self.assertEqual(mapped_set - hf_keys, set(), "Mapping contains unknown HF keys")
+    hash_bias_keys = {f"layers.{i}.ffn.gate.bias" for i in range(config["num_hash_layers"])}
+    self.assertEqual((hf_keys - mapped_set) - hash_bias_keys, set(), "HF keys not covered by mapping")
+
+  def test_deepseek4_1600b_mapping_scanned(self):
+    config = hf_model_configs.deepseek4_1600b_dict
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = config["n_routed_experts"]
+    maxtext_config.base_num_decoder_layers = config["num_hidden_layers"]
+    maxtext_config.first_num_hash_layers = config.get("num_hash_layers", 3)
+    maxtext_config.mtp_num_layers = config.get("num_nextn_predict_layers", 0)
+    maxtext_config.compress_ratios = config.get("compress_ratios")
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-decoder_norm-scale", mapping)
+    self.assertIn("params-decoder-logits_dense-kernel", mapping)
+    self.assertIn("params-decoder-hc_head-hc_fn", mapping)
+
+    for i in range(3):
+      self.assertIn(f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid", mapping)
+      self.assertNotIn(f"MoEBiasVar-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias", mapping)
+
+    self.assertIn("MoEBiasVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-gate-bias", mapping)
+    self.assertIn("MoEBiasVar-decoder-scanned_blocks-layers_1-mlp-MoeBlock_0-gate-bias", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_1-self_attention-csa_compressor-gate_proj-kernel", mapping)
+
+    # Bijective mapping verification against HF_SHAPE
+    shapes = hf_shape.DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config)
+    mapped_hf_keys = []
+
+    def collect_keys(v):
+      if v is None:
+        return
+      if isinstance(v, str):
+        mapped_hf_keys.append(v)
+      elif isinstance(v, (list, tuple)):
+        for item in v:
+          collect_keys(item)
+
+    for hf_v in mapping.values():
+      collect_keys(hf_v)
+
+    mapped_set = set(mapped_hf_keys)
+    # Composite tuple keys (e.g. the MTP e_proj/h_proj pair) only serve to_huggingface.
+    hf_keys = {k for k in shapes if isinstance(k, str)}
+    self.assertEqual(mapped_set - hf_keys, set(), "Mapping contains unknown HF keys")
+    hash_bias_keys = {f"layers.{i}.ffn.gate.bias" for i in range(config["num_hash_layers"])}
+    self.assertEqual((hf_keys - mapped_set) - hash_bias_keys, set(), "HF keys not covered by mapping")
+
   def test_qwen3_next_mapping(self):
     config = {
         "num_hidden_layers": 4,
@@ -141,6 +331,173 @@ class ParamMappingTest(unittest.TestCase):
     global_experts = mapping[f"{global_prefix}-mlp-routed_experts-wi_0"]
     self.assertEqual(len(global_experts), num_experts)
     self.assertEqual(len(global_experts[0]), num_blocks)
+
+  def test_qwen3_5_mapping_scanned(self):
+    """Qwen3.5 reuses Qwen3-Next's nested block scan, but stores its routed experts fused."""
+    num_layers, cycle = 8, 4
+    config = {"text_config": {"num_hidden_layers": num_layers}}
+    maxtext_config = mock.Mock(num_decoder_layers=num_layers, num_experts=4, weight_dtype="bfloat16")
+    maxtext_config.inhomogeneous_layer_cycle_interval = cycle
+    maxtext_config.use_multimodal = False
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+
+    num_blocks, num_local = num_layers // cycle, cycle - 1
+    local_prefix = "params-decoder-layers-local_layers"
+    global_prefix = "params-decoder-layers-global_layer"
+    self.assertIn(f"{local_prefix}-attention-in_proj_qkvz-kernel", mapping)
+    self.assertIn(f"{global_prefix}-attention-attention-query-kernel", mapping)
+    self.assertNotIn(f"{global_prefix}-attention-in_proj_qkvz-kernel", mapping)
+    self.assertNotIn(f"{local_prefix}-attention-attention-query-kernel", mapping)
+
+    local_val = mapping[f"{local_prefix}-attention-in_proj_qkvz-kernel"]
+    self.assertEqual(len(local_val), num_blocks)
+    self.assertEqual(len(local_val[0]), num_local)
+    self.assertEqual(
+        local_val[0][0],
+        (
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+            "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+        ),
+    )
+    global_val = mapping[f"{global_prefix}-attention-attention-query-kernel"]
+    self.assertEqual(len(global_val), num_blocks)
+    self.assertEqual(global_val[0], f"model.language_model.layers.{cycle - 1}.self_attn.q_proj.weight")
+
+    fused_local = mapping[(f"{local_prefix}-mlp-routed_experts-wi_0", f"{local_prefix}-mlp-routed_experts-wi_1")]
+    self.assertEqual(len(fused_local), num_blocks)
+    self.assertEqual(len(fused_local[0]), num_local)
+    self.assertEqual(fused_local[0][0], "model.language_model.layers.0.mlp.experts.gate_up_proj")
+    fused_global = mapping[(f"{global_prefix}-mlp-routed_experts-wi_0", f"{global_prefix}-mlp-routed_experts-wi_1")]
+    self.assertEqual(len(fused_global), num_blocks)
+
+  def test_qwen3_5_fp8_mapping_scanned(self):
+    """FP8 checkpoints store each routed expert separately, which nests one level deeper."""
+    num_layers, cycle, num_experts = 8, 4, 3
+    config = {"text_config": {"num_hidden_layers": num_layers, "num_experts": num_experts}}
+    maxtext_config = mock.Mock(
+        num_decoder_layers=num_layers,
+        num_experts=num_experts,
+        inhomogeneous_layer_cycle_interval=cycle,
+        weight_dtype="float8_e4m3fn",
+        use_multimodal=False,
+    )
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    linear_attn_dims = {
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 8,
+        "linear_value_head_dim": 8,
+    }
+    hooks = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        {"text_config": {**config["text_config"], **linear_attn_dims}}, maxtext_config, scan_layers=True
+    )
+
+    num_blocks, num_local = num_layers // cycle, cycle - 1
+    local_prefix = "params-decoder-layers-local_layers"
+    global_prefix = "params-decoder-layers-global_layer"
+    self.assertFalse(any("layers-layer_" in str(key) for key in mapping))
+    # [expert][block][local] on the local layers, [expert][block] on the global one.
+    local_wo_scale = mapping[f"{local_prefix}-mlp-routed_experts-wo_scale"]
+    self.assertEqual(
+        (len(local_wo_scale), len(local_wo_scale[0]), len(local_wo_scale[0][0])), (num_experts, num_blocks, num_local)
+    )
+    self.assertEqual(
+        local_wo_scale[2][1][0], f"model.language_model.layers.{cycle}.mlp.experts.2.down_proj.weight_scale_inv"
+    )
+    global_wi_0 = mapping[f"{global_prefix}-mlp-routed_experts-wi_0"]
+    self.assertEqual((len(global_wi_0), len(global_wi_0[0])), (num_experts, num_blocks))
+    self.assertEqual(global_wi_0[1][1], f"model.language_model.layers.{2 * cycle - 1}.mlp.experts.1.gate_proj.weight")
+    # Per-expert checkpoints have no fused gate_up_proj.
+    self.assertNotIn((f"{local_prefix}-mlp-routed_experts-wi_0", f"{local_prefix}-mlp-routed_experts-wi_1"), mapping)
+    # Attention and shared-expert scales follow their kernels' layout.
+    self.assertEqual(
+        mapping[f"{local_prefix}-attention-in_proj_qkvz-kernel_scale"][0][num_local - 1],
+        (
+            f"model.language_model.layers.{num_local - 1}.linear_attn.in_proj_qkv.weight_scale_inv",
+            f"model.language_model.layers.{num_local - 1}.linear_attn.in_proj_z.weight_scale_inv",
+        ),
+    )
+    self.assertEqual(
+        mapping[f"{global_prefix}-attention-attention-out-kernel_scale"],
+        [f"model.language_model.layers.{b * cycle + cycle - 1}.self_attn.o_proj.weight_scale_inv" for b in range(2)],
+    )
+    self.assertEqual(len(mapping[f"{global_prefix}-mlp-shared_expert-wo-kernel_scale"]), num_blocks)
+    # The hooks are registered under the same nested prefixes as the mapping.
+    for key in (
+        f"{local_prefix}-attention-in_proj_qkvz-kernel_scale",
+        f"{local_prefix}-mlp-routed_experts-wo_scale",
+        f"{global_prefix}-attention-attention-out-kernel_scale",
+        f"{global_prefix}-mlp-routed_experts-wi_0",
+    ):
+      self.assertIn(key, mapping)
+      self.assertIn(key, hooks)
+
+  def test_qwen3_5_composite_key_uses_the_nested_scan_axes(self):
+    """A composite (tuple) MaxText key must still be recognised as a nested block scan."""
+    cfg = mock.Mock()
+    cfg.param_scan_axis = 1
+    local_key = "params-decoder-layers-local_layers-mlp-routed_experts-wi_0"
+    self.assertEqual(
+        tensor_handling.stacked_axes((local_key, local_key.replace("wi_0", "wi_1")), cfg, depth=2),
+        tensor_handling.stacked_axes(local_key, cfg, depth=2),
+    )
+
+  def test_qwen3_hybrid_mappings_cover_the_scan_remainder(self):
+    """Layers past the last whole cycle live in `layers_remainder`, whose local layers stack [local] alone."""
+    num_layers, cycle, num_experts = 10, 4, 2
+    remainder_layers = [8, 9]
+    prefix = "params-decoder-layers_remainder-local_layers"
+
+    next_config = {"num_hidden_layers": num_layers, "num_experts": num_experts}
+    next_mt_config = mock.Mock(inhomogeneous_layer_cycle_interval=cycle)
+    mapping = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(next_config, next_mt_config, scan_layers=True)
+    self.assertEqual(
+        mapping[f"{prefix}-attention-in_proj_qkvz-kernel"],
+        [f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in remainder_layers],
+    )
+    self.assertEqual(
+        mapping[f"{prefix}-mlp-routed_experts-wo"],
+        [[f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in remainder_layers] for e in range(num_experts)],
+    )
+    # The remainder starts on a cycle boundary, so it never holds the full-attention layer.
+    self.assertNotIn(f"{prefix}-attention-attention-query-kernel", mapping)
+    hooks = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(next_config, next_mt_config, scan_layers=True)
+    for subkey in ("attention-in_proj_qkvz-kernel", "attention-conv1d-kernel", "mlp-routed_experts-wo"):
+      self.assertIn(f"{prefix}-{subkey}", mapping)
+      self.assertIn(f"{prefix}-{subkey}", hooks)
+
+    qwen3_5_config = {"text_config": {"num_hidden_layers": num_layers, "num_experts": num_experts}}
+    qwen3_5_mt_config = mock.Mock(
+        num_decoder_layers=num_layers,
+        num_experts=num_experts,
+        inhomogeneous_layer_cycle_interval=cycle,
+        weight_dtype="bfloat16",
+        use_multimodal=False,
+    )
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(qwen3_5_config, qwen3_5_mt_config, scan_layers=True)
+    hf = "model.language_model.layers"
+    self.assertEqual(
+        mapping[f"{prefix}-attention-in_proj_ba-kernel"],
+        [(f"{hf}.{i}.linear_attn.in_proj_b.weight", f"{hf}.{i}.linear_attn.in_proj_a.weight") for i in remainder_layers],
+    )
+    self.assertEqual(
+        mapping[(f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1")],
+        [f"{hf}.{i}.mlp.experts.gate_up_proj" for i in remainder_layers],
+    )
+
+    # A whole number of cycles leaves no remainder block to map.
+    qwen3_5_mt_config.num_decoder_layers = 8
+    qwen3_5_config["text_config"]["num_hidden_layers"] = 8
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(qwen3_5_config, qwen3_5_mt_config, scan_layers=True)
+    self.assertFalse(any("layers_remainder" in str(key) for key in mapping))
+
+  def test_nested_scan_expert_axes_need_a_nonzero_param_scan_axis(self):
+    """With param_scan_axis=0 the expert axis no longer leads a nested block scan's routed experts."""
+    cfg = mock.Mock(param_scan_axis=0)
+    local_key = "params-decoder-layers-local_layers-mlp-routed_experts-wi_0"
+    self.assertEqual(tensor_handling.stacked_axes(local_key, cfg, depth=2), (0, 1))
+    with self.assertRaisesRegex(ValueError, "param_scan_axis >= 1"):
+      tensor_handling.stacked_axes(local_key, cfg, depth=3)
 
   @staticmethod
   def _indices_from_name(name):
@@ -244,23 +601,42 @@ class ParamMappingTest(unittest.TestCase):
       for b in range(num_blocks):
         np.testing.assert_array_equal(stacked[e, b], value_of(e, b))
 
-  def test_cosmos3_text_mapping(self):
+  def test_qwen3_next_remainder_experts_stack_unstack_roundtrip(self):
+    """The remainder block is not inside the block scan, so its routed experts take the plain
+    scanned-MoE layout, (experts, local), even though their key names `local_layers`."""
+    num_experts, num_local = 2, 3
+    slice_shape = (4, 3)
+    cfg = self._qwen3_next_conversion_config()
+    mt_key = "params-decoder-layers_remainder-local_layers-mlp-routed_experts-wi_0"
+
+    def value_of(e, l):
+      return np.full(slice_shape, e * 100 + l, dtype=np.float32)
+
+    hf_names = [[f"e{e}_l{l}" for l in range(num_local)] for e in range(num_experts)]
+    target_shape = (num_experts, num_local, *slice_shape)
+
+    stacked = self._assert_stack_unstack_roundtrip(mt_key, hf_names, target_shape, slice_shape, value_of, cfg)
+    for e in range(num_experts):
+      for l in range(num_local):
+        np.testing.assert_array_equal(stacked[e, l], value_of(e, l))
+
+  def test_weaver_text_mapping(self):
     config = {
         "text_config": {"num_hidden_layers": 2, "hidden_size": 256},
     }
     maxtext_config = mock.Mock()
     maxtext_config.use_multimodal = False
-    mapping = param_mapping.COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+    mapping = param_mapping.WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
     self.assertIn("params-token_embedder-embedding", mapping)
     self.assertEqual(mapping["params-decoder-layers_0-self_attention-query-kernel"], "layers.0.self_attn.to_q.weight")
 
-  def test_cosmos3_text_mapping_scanned(self):
+  def test_weaver_text_mapping_scanned(self):
     config = {
         "text_config": {"num_hidden_layers": 4, "hidden_size": 256},
     }
     maxtext_config = mock.Mock()
     maxtext_config.use_multimodal = False
-    mapping = param_mapping.COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    mapping = param_mapping.WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-layers-self_attention-query-kernel", mapping)
     self.assertEqual(
         mapping["params-decoder-layers-self_attention-query-kernel"],
@@ -281,6 +657,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
     self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("MoEBiasVar-decoder-moe_layers_0-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", mapping)
 
   def test_deepseek_mapping_scanned(self):
     config = {
@@ -291,6 +668,107 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-dense_layers-self_attention-query-kernel", mapping)
+    self.assertIn("MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", mapping)
+
+  def test_deepseek_mtp_mapping(self):
+    config = {
+        "num_hidden_layers": 61,
+        "first_k_dense_replace": 3,
+        "n_routed_experts": 2,
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_decoder_layers = 4
+    maxtext_config.first_num_dense_layers = 3
+    maxtext_config.num_experts = 2
+    maxtext_config.mtp_num_layers = 1
+    mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_embedding_norm-scale"],
+        "model.layers.61.enorm.weight",
+    )
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_projection-kernel"],
+        "model.layers.61.eh_proj.weight",
+    )
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_final_norm-scale"],
+        "model.layers.61.shared_head.norm.weight",
+    )
+    self.assertEqual(
+        mapping["MoEBiasVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"],
+        "model.layers.61.mlp.gate.e_score_correction_bias",
+    )
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-wi_0"],
+        [
+            "model.layers.61.mlp.experts.0.gate_proj.weight",
+            "model.layers.61.mlp.experts.1.gate_proj.weight",
+        ],
+    )
+    hooks = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=True)
+    self.assertIn("params-mtp_block-mtp_layer_1-mtp_1_projection-kernel", hooks)
+    self.assertIn(
+        "params-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-wi_0",
+        hooks,
+    )
+
+  def test_single_axis_stack_axis_selection(self):
+    """Single-axis stacking (to_maxtext) and slicing (to_huggingface) must pick the same, correct axis.
+
+    Scanned layer weights stack on `param_scan_axis`; unscanned MoE experts (e.g. MTP, DeepSeek V4
+    prefix layers) and non-Param variable collections (`MoEBiasVar`) stack on axis 0.
+    """
+    cfg = mock.Mock()
+    cfg.scan_layers = True
+    cfg.param_scan_axis = 1
+    cfg.weight_dtype = "float32"
+
+    # num_stacked differs from every slice dim, so a wrong axis changes the stacked shape.
+    num_stacked = 5
+    cases = [
+        # (mt_key, slice_shape, expected_axis)
+        # Scanned DeepSeek MoE router gate: the bug fixed in this PR (was misclassified as unscanned MoE).
+        ("params-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel", (4, 3), 1),
+        # Scanned Mixtral router gate.
+        ("params-decoder-layers-MoeBlock_0-gate-kernel", (4, 3), 1),
+        # Scanned non-MoE weight (control).
+        ("params-decoder-dense_layers-self_attention-out-kernel", (4, 3), 1),
+        # Non-Param variable collection: stacked on axis 0 even though the stacked tensor is 2D.
+        ("MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", (3,), 0),
+        # Unscanned MTP experts (stacked on expert axis) while scan_layers=True.
+        ("params-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-wi_0", (4, 3), 0),
+        # DeepSeek V4 unrolled prefix layer experts: must not be caught by the "decoder-layers-" exclusion.
+        ("params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (4, 3), 0),
+    ]
+
+    for mt_key, slice_shape, expected_axis in cases:
+      with self.subTest(mt_key=mt_key):
+        hf_names = [f"hf_{i}" for i in range(num_stacked)]
+        base = np.arange(np.prod(slice_shape), dtype=np.float32).reshape(slice_shape)
+
+        def value_of(i, base=base):
+          return base + 100 * i
+
+        def getter(name, value_of=value_of):
+          return value_of(int(name.split("_")[1]))
+
+        target_shape = list(slice_shape)
+        target_shape.insert(expected_axis, num_stacked)
+        target_shape = tuple(target_shape)
+
+        # Forward (to_maxtext): stacked along expected_axis, each slice in its own position.
+        stacked = _build_single_axis_stacked_tensor(hf_names, getter, None, target_shape, cfg, mt_key)
+        self.assertEqual(stacked.shape, target_shape)
+        for i in range(num_stacked):
+          np.testing.assert_array_equal(np.take(stacked, i, axis=expected_axis), value_of(i))
+
+        # Backward (to_huggingface): slicing along the same axis recovers the originals.
+        param_map = {mt_key: hf_names}
+        hf_shape_map = {name: slice_shape for name in hf_names}
+        out = dict(process_maxtext_param(mt_key, stacked, param_map, {}, hf_shape_map, cfg))
+        self.assertEqual(sorted(out), sorted(hf_names))
+        for i, name in enumerate(hf_names):
+          np.testing.assert_array_equal(out[name], value_of(i))
 
   def test_gpt_oss_mapping(self):
     config = {
@@ -517,6 +995,557 @@ class ParamMappingTest(unittest.TestCase):
     self.assertEqual(
         mapping["params-vision_encoder-Qwen3VLVisionEncoder_0-patch_embed-proj-kernel"],
         "model.visual.patch_embed.proj.weight",
+    )
+
+  def test_deepseek_v4_mapping_unscanned(self):
+    config = {
+        "num_hidden_layers": 4,
+        "n_routed_experts": 8,
+        "num_hash_layers": 2,
+        "compress_ratios": [0, 0, 4, 128],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 8
+    maxtext_config.base_num_decoder_layers = 4
+    maxtext_config.first_num_hash_layers = 2
+    maxtext_config.compress_ratios = [0, 0, 4, 128]
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+
+    # Core embeddings and norms
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-decoder_norm-scale", mapping)
+    self.assertIn("params-decoder-logits_dense-kernel", mapping)
+
+    # Multi-collection MoE variables
+    self.assertIn("Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid", mapping)
+    self.assertIn("MoEBiasVar-decoder-layers_2-mlp-MoeBlock_0-gate-bias", mapping)
+
+    # Layer 0 (ratio=0) should have NO compressor keys
+    self.assertNotIn("params-decoder-layers_0-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Layer 2 (ratio=4) should have CSA compressor keys, NOT HCA
+    self.assertIn("params-decoder-layers_2-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_2-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Layer 3 (ratio=128) should have HCA compressor keys, NOT CSA
+    self.assertIn("params-decoder-layers_3-self_attention-hca_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_3-self_attention-csa_compressor-gate_proj-kernel", mapping)
+
+  def test_deepseek_v4_mapping_scanned(self):
+    config = {
+        "num_hidden_layers": 5,
+        "n_routed_experts": 8,
+        "num_hash_layers": 3,
+        "compress_ratios": [0, 0, 4, 128, 4],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 8
+    maxtext_config.base_num_decoder_layers = 5
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.compress_ratios = [0, 0, 4, 128, 4]
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+
+    # Prefix layer 0 has no compressor
+    self.assertNotIn("params-decoder-layers_0-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Prefix layer 2 has CSA compressor
+    self.assertIn("params-decoder-layers_2-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-layers_2-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+    # Scanned block 0 (HCA) and block 1 (CSA)
+    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-scanned_blocks-layers_0-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_1-self_attention-csa_compressor-gate_proj-kernel", mapping)
+    self.assertNotIn("params-decoder-scanned_blocks-layers_1-self_attention-hca_compressor-gate_proj-kernel", mapping)
+
+  def test_deepseek_v4_hook_fn(self):
+    config = {
+        "num_hidden_layers": 4,
+        "n_routed_experts": 8,
+        "num_hash_layers": 2,
+        "compress_ratios": [0, 0, 4, 128],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.base_num_decoder_layers = 4
+    maxtext_config.first_num_hash_layers = 2
+    maxtext_config.mtp_num_layers = 0
+    hooks_to_mt = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=False
+    )
+    self.assertIn("params-token_embedder-embedding", hooks_to_mt)
+    self.assertIn("params-decoder-logits_dense-kernel", hooks_to_mt)
+    self.assertIn("params-decoder-layers_0-self_attention-o_a_proj-kernel", hooks_to_mt)
+
+    hooks_to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=True
+    )
+    self.assertIn("params-token_embedder-embedding", hooks_to_hf)
+    self.assertIn("params-decoder-logits_dense-kernel", hooks_to_hf)
+
+  def _deepseek_v4_mtp_config(self):
+    """Returns a (hf_config, maxtext_config) pair for a DeepSeek V4 model with MTP enabled."""
+    config = {
+        "num_hidden_layers": 5,
+        "n_routed_experts": 8,
+        "num_hash_layers": 3,
+        "compress_ratios": [0, 0, 4, 128, 4],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 8
+    maxtext_config.base_num_decoder_layers = 5
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.compress_ratios = [0, 0, 4, 128, 4]
+    maxtext_config.mtp_num_layers = 1
+    return config, maxtext_config
+
+  def test_deepseek_v4_mtp_mapping(self):
+    """The MTP block contributes its own norms, a fused projection, a hyper-connection
+    head, and a full transformer layer. The key names below match those found in a
+    converted DeepSeek V4 MTP checkpoint."""
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    prefix = "params-mtp_block-mtp_layer_1"
+    layer = f"{prefix}-mtp_1_transformer_layer"
+
+    # MTP is outside the decoder, so it is identical in both scanned and unscanned layouts.
+    for scan_layers in (False, True):
+      mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=scan_layers)
+
+      self.assertEqual(mapping[f"{prefix}-mtp_1_embedding_norm-scale"], "mtp.0.enorm.weight")
+      self.assertEqual(mapping[f"{prefix}-mtp_1_hidden_state_norm-scale"], "mtp.0.hnorm.weight")
+      self.assertEqual(mapping[f"{prefix}-mtp_1_final_norm-scale"], "mtp.0.norm.weight")
+      # MaxText fuses the two projections into a single [2 * emb, emb] kernel.
+      self.assertEqual(
+          mapping[f"{prefix}-mtp_1_projection-kernel"],
+          ("mtp.0.e_proj.weight", "mtp.0.h_proj.weight"),
+      )
+
+      # `hc_head` is the one MTP submodule that is not renamed to `mtp_{k}_*`.
+      self.assertEqual(mapping[f"{prefix}-hc_head-hc_fn"], "mtp.0.hc_head_fn")
+      self.assertEqual(mapping[f"{prefix}-hc_head-hc_base"], "mtp.0.hc_head_base")
+      self.assertEqual(mapping[f"{prefix}-hc_head-hc_scale"], "mtp.0.hc_head_scale")
+
+      self.assertEqual(mapping[f"{layer}-self_attention-wq_a-kernel"], "mtp.0.attn.wq_a.weight")
+      self.assertEqual(mapping[f"{layer}-mhc_attention-pre_alpha"], "mtp.0.hc_attn_fn")
+      self.assertEqual(mapping[f"{layer}-mlp-MoeBlock_0-wi_0"][0], "mtp.0.ffn.experts.0.w1.weight")
+
+      # The MTP layer is built with compress_ratio=0 and is_hash_routing=False, so it
+      # carries a MoE gate bias but neither a compressor nor a hash routing table.
+      self.assertNotIn(f"{layer}-self_attention-csa_compressor-gate_proj-kernel", mapping)
+      self.assertNotIn(f"{layer}-self_attention-hca_compressor-gate_proj-kernel", mapping)
+      self.assertNotIn("Tid2EidVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-mlp-MoeBlock_0-tid2eid", mapping)
+      self.assertEqual(
+          mapping["MoEBiasVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-mlp-MoeBlock_0-gate-bias"],
+          "mtp.0.ffn.gate.bias",
+      )
+
+  def test_deepseek_v4_mtp_absent_when_disabled(self):
+    """MTP keys follow the MaxText config even when the HF config ships an MTP layer."""
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    config["num_nextn_predict_layers"] = 1
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertEqual([k for k in mapping if "mtp_block" in k], [])
+
+  def test_deepseek_v4_shape_map_covers_every_mapping_target(self):
+    """Every HF target the mapping emits must have an entry in the shape map.
+
+    `to_huggingface` looks up each target key (including composite tuple keys) in
+    `DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE` and raises `ValueError` when it is absent, so a
+    mapping entry without a matching shape breaks export. Exercising both scan layouts
+    keeps the MTP keys - which live outside the decoder - honest.
+    """
+    config = {
+        "hidden_size": 64,
+        "vocab_size": 256,
+        "num_hidden_layers": 5,
+        "q_lora_rank": 32,
+        "o_lora_rank": 8,
+        "o_groups": 2,
+        "num_attention_heads": 4,
+        "head_dim": 16,
+        "moe_intermediate_size": 32,
+        "n_routed_experts": 8,
+        "num_key_value_heads": 1,
+        "num_experts_per_tok": 2,
+        "hc_mult": 4,
+        "num_hash_layers": 3,
+        "compress_ratios": [0, 0, 4, 128, 4],
+        "num_nextn_predict_layers": 1,
+    }
+    _, maxtext_config = self._deepseek_v4_mtp_config()
+    shape_map = hf_shape.DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config)
+
+    def _targets(value):
+      """Flattens a mapping value into the key(s) the exporter looks up."""
+      if value is None:
+        return []
+      if isinstance(value, (str, tuple)):
+        return [value]
+      if isinstance(value, list):
+        return [target for item in value for target in _targets(item)]
+      return []
+
+    for scan_layers in (False, True):
+      mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=scan_layers)
+      missing = sorted(
+          {
+              f"{target} (from {mt_key})"
+              for mt_key, value in mapping.items()
+              for target in _targets(value)
+              if target not in shape_map
+          }
+      )
+      self.assertEqual(missing, [], f"scan_layers={scan_layers}: mapping targets with no shape entry: {missing[:10]}")
+
+  def test_deepseek_v4_mtp_projection_hook_roundtrip(self):
+    """The fused MaxText projection kernel must split into, and rejoin from, the
+    separate e_proj / h_proj tensors without loss."""
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    key = "params-mtp_block-mtp_layer_1-mtp_1_projection-kernel"
+
+    to_mt = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=True, saving_to_hf=False
+    )[key]
+    to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=True, saving_to_hf=True
+    )[key]
+
+    emb = 4
+    e_proj = np.arange(emb * emb, dtype=np.float32).reshape(emb, emb)
+    h_proj = e_proj + 100.0
+
+    fused = to_mt((e_proj, h_proj), None)
+    self.assertEqual(fused.shape, (2 * emb, emb))
+    # The embedding projection occupies the top half, the hidden-state one the bottom.
+    np.testing.assert_array_equal(fused[:emb], e_proj.T)
+    np.testing.assert_array_equal(fused[emb:], h_proj.T)
+
+    out_e, out_h = to_hf(fused, None)
+    np.testing.assert_array_equal(out_e, e_proj)
+    np.testing.assert_array_equal(out_h, h_proj)
+
+  def test_detect_and_extract_checkpoint_multi_collection(self):
+    fake_ckpt = {
+        "params": {
+            "params": {
+                "decoder": {"decoder_norm": {"scale": np.ones((8,))}},
+            },
+            "Tid2EidVar": {
+                "decoder": {"layers_0": {"mlp": {"MoeBlock_0": {"tid2eid": np.zeros((4, 2))}}}},
+            },
+            "MoEBiasVar": {
+                "decoder": {"layers_3": {"mlp": {"MoeBlock_0": {"gate": {"bias": np.ones((4,))}}}}},
+            },
+        }
+    }
+    extracted = utils.detect_and_extract_checkpoint(fake_ckpt)
+    self.assertIn("params-decoder-decoder_norm-scale", extracted)
+    self.assertIn("Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid", extracted)
+    self.assertIn("MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias", extracted)
+    np.testing.assert_array_equal(extracted["params-decoder-decoder_norm-scale"], np.ones((8,)))
+    np.testing.assert_array_equal(extracted["Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid"], np.zeros((4, 2)))
+    np.testing.assert_array_equal(extracted["MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias"], np.ones((4,)))
+
+  def _make_qwen3_text_config(self, num_hidden_layers=8, num_experts=2):
+    """Builds a minimal Qwen3.5/Qwen3.8 HF text config for testing."""
+    return {
+        "vocab_size": 1024,
+        "hidden_size": 128,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 16,
+        "linear_value_head_dim": 16,
+        "linear_conv_kernel_dim": 4,
+        "moe_intermediate_size": 64,
+        "shared_expert_intermediate_size": 64,
+        "num_experts": num_experts,
+        "full_attention_interval": 4,
+    }
+
+  def _make_qwen3_maxtext_config(
+      self,
+      num_experts=2,
+      cycle_interval=4,
+      weight_dtype="bfloat16",
+      use_multimodal=False,
+  ):
+    """Builds a mock MaxText config for Qwen3.5/Qwen3.8 mapping tests."""
+    maxtext_config = mock.Mock()
+    maxtext_config.num_decoder_layers = None
+    maxtext_config.weight_block_size = None
+    maxtext_config.num_experts = num_experts
+    maxtext_config.inhomogeneous_layer_cycle_interval = cycle_interval
+    maxtext_config.weight_dtype = weight_dtype
+    maxtext_config.use_multimodal = use_multimodal
+    return maxtext_config
+
+  def test_qwen3_5_regression_scanned_and_unscanned(self):
+    """Verifies Qwen3.5 mappings and shape tables across scanned/unscanned and BF16/FP8."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=8, num_experts=2)
+    wrapped_cfg = {"text_config": text_cfg}
+
+    for scan_layers in (False, True):
+      for weight_dtype in ("bfloat16", "float8_e4m3fn"):
+        mt_cfg = self._make_qwen3_maxtext_config(weight_dtype=weight_dtype)
+        mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(wrapped_cfg, mt_cfg, scan_layers=scan_layers)
+        self.assertEqual(
+            mapping["params-token_embedder-embedding"],
+            "model.language_model.embed_tokens.weight",
+        )
+        self.assertEqual(
+            mapping["params-decoder-decoder_norm-scale"],
+            "model.language_model.norm.weight",
+        )
+        self.assertEqual(
+            mapping["params-decoder-logits_dense-kernel"],
+            "lm_head.weight",
+        )
+
+        if scan_layers:
+          # Local layers stack [block][local], the global layer [block].
+          local_prefix = "params-decoder-layers-local_layers"
+          global_prefix = "params-decoder-layers-global_layer"
+          local_blocks = ([0, 1, 2], [4, 5, 6])
+          self.assertEqual(
+              mapping[f"{local_prefix}-attention-in_proj_qkvz-kernel"],
+              [
+                  [
+                      (
+                          f"model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight",
+                          f"model.language_model.layers.{i}.linear_attn.in_proj_z.weight",
+                      )
+                      for i in block
+                  ]
+                  for block in local_blocks
+              ],
+          )
+          self.assertEqual(
+              mapping[f"{global_prefix}-attention-attention-query-kernel"],
+              [
+                  "model.language_model.layers.3.self_attn.q_proj.weight",
+                  "model.language_model.layers.7.self_attn.q_proj.weight",
+              ],
+          )
+          if weight_dtype == "float8_e4m3fn":
+            self.assertEqual(
+                mapping[f"{local_prefix}-mlp-routed_experts-wo_scale"],
+                [
+                    [
+                        [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for i in block]
+                        for block in local_blocks
+                    ]
+                    for e in range(2)
+                ],
+            )
+          else:
+            self.assertEqual(
+                mapping[
+                    (
+                        f"{local_prefix}-mlp-routed_experts-wi_0",
+                        f"{local_prefix}-mlp-routed_experts-wi_1",
+                    )
+                ],
+                [[f"model.language_model.layers.{i}.mlp.experts.gate_up_proj" for i in block] for block in local_blocks],
+            )
+        else:
+          self.assertEqual(
+              mapping["params-decoder-layers_0-attention-in_proj_qkvz-kernel"],
+              (
+                  "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                  "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+              ),
+          )
+          self.assertEqual(
+              mapping["params-decoder-layers_3-attention-attention-query-kernel"],
+              "model.language_model.layers.3.self_attn.q_proj.weight",
+          )
+          if weight_dtype == "float8_e4m3fn":
+            self.assertEqual(
+                mapping["params-decoder-layers_0-mlp-routed_experts-wo_scale"],
+                [
+                    "model.language_model.layers.0.mlp.experts.0.down_proj.weight_scale_inv",
+                    "model.language_model.layers.0.mlp.experts.1.down_proj.weight_scale_inv",
+                ],
+            )
+          else:
+            self.assertEqual(
+                mapping[
+                    (
+                        "params-decoder-layers_0-mlp-routed_experts-wi_0",
+                        "params-decoder-layers_0-mlp-routed_experts-wi_1",
+                    )
+                ],
+                "model.language_model.layers.0.mlp.experts.gate_up_proj",
+            )
+
+    shapes = hf_shape.QWEN3_5_HF_WEIGHTS_TO_SHAPE(wrapped_cfg)
+    self.assertIn("model.language_model.embed_tokens.weight", shapes)
+    self.assertIn("model.language_model.norm.weight", shapes)
+    self.assertIn("lm_head.weight", shapes)
+    qkv_key = "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
+    z_key = "model.language_model.layers.0.linear_attn.in_proj_z.weight"
+    self.assertEqual(shapes[(qkv_key, z_key)], (shapes[qkv_key], shapes[z_key]))
+
+  def test_qwen3_8_naming_and_composite_destinations(self):
+    """Verifies Qwen3.8 model.* naming and composite destination ordering."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=8, num_experts=2)
+    mt_cfg_bf16 = self._make_qwen3_maxtext_config(weight_dtype="bfloat16")
+    mt_cfg_fp8 = self._make_qwen3_maxtext_config(weight_dtype="float8_e4m3fn")
+
+    mapping_unscanned = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg_bf16, scan_layers=False)
+    mapping_unscanned_fp8 = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg_fp8, scan_layers=False)
+    self.assertEqual(
+        mapping_unscanned["params-token_embedder-embedding"],
+        "model.embed_tokens.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-decoder_norm-scale"],
+        "model.norm.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-logits_dense-kernel"],
+        "lm_head.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-layers_3-attention-attention-query-kernel"],
+        "model.layers.3.self_attn.q_proj.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned_fp8["params-decoder-layers_0-mlp-routed_experts-wo"],
+        [
+            "model.layers.0.mlp.experts.0.down_proj.weight",
+            "model.layers.0.mlp.experts.1.down_proj.weight",
+        ],
+    )
+
+    # Composite GDN destinations preserve (qkv, z) and (b, a) ordering.
+    self.assertEqual(
+        mapping_unscanned["params-decoder-layers_0-attention-in_proj_qkvz-kernel"],
+        (
+            "model.layers.0.linear_attn.in_proj_qkv.weight",
+            "model.layers.0.linear_attn.in_proj_z.weight",
+        ),
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-layers_0-attention-in_proj_ba-kernel"],
+        (
+            "model.layers.0.linear_attn.in_proj_b.weight",
+            "model.layers.0.linear_attn.in_proj_a.weight",
+        ),
+    )
+
+    # Composite MaxText keys for expert gate/up projections remain unchanged.
+    unscanned_wi_key = (
+        "params-decoder-layers_0-mlp-routed_experts-wi_0",
+        "params-decoder-layers_0-mlp-routed_experts-wi_1",
+    )
+    self.assertEqual(
+        mapping_unscanned[unscanned_wi_key],
+        "model.layers.0.mlp.experts.gate_up_proj",
+    )
+
+    # Shape table atomic and composite destination lookups.
+    shapes = hf_shape.QWEN3_8_HF_WEIGHTS_TO_SHAPE(text_cfg)
+    self.assertEqual(shapes["model.embed_tokens.weight"], [1024, 128])
+    self.assertEqual(shapes["model.norm.weight"], [128])
+    self.assertEqual(shapes["lm_head.weight"], [1024, 128])
+
+    qkv_key = "model.layers.0.linear_attn.in_proj_qkv.weight"
+    z_key = "model.layers.0.linear_attn.in_proj_z.weight"
+    self.assertEqual(shapes[(qkv_key, z_key)], (shapes[qkv_key], shapes[z_key]))
+
+    b_key = "model.layers.0.linear_attn.in_proj_b.weight"
+    a_key = "model.layers.0.linear_attn.in_proj_a.weight"
+    self.assertEqual(shapes[(b_key, a_key)], (shapes[b_key], shapes[a_key]))
+
+  def test_qwen3_8_scanned_ordering(self):
+    """Verifies Qwen3.8 scanned block ordering across a four-layer cycle."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=8, num_experts=2)
+    mt_cfg = self._make_qwen3_maxtext_config(cycle_interval=4, weight_dtype="bfloat16")
+    mt_cfg_fp8 = self._make_qwen3_maxtext_config(cycle_interval=4, weight_dtype="float8_e4m3fn")
+    mapping = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg, scan_layers=True)
+    mapping_fp8 = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg_fp8, scan_layers=True)
+
+    # Layers 0-2 of each cycle are the local layers, nested [block][local];
+    # layer 3 is the global layer, flat over blocks.
+    def local_layers(suffix):
+      return [[f"model.layers.{i}.{suffix}" for i in block] for block in ([0, 1, 2], [4, 5, 6])]
+
+    def global_layer(suffix):
+      return [f"model.layers.{i}.{suffix}" for i in (3, 7)]
+
+    for prefix, stacked in (
+        ("params-decoder-layers-local_layers", local_layers),
+        ("params-decoder-layers-global_layer", global_layer),
+    ):
+      self.assertEqual(
+          mapping[f"{prefix}-input_layernorm-scale"],
+          stacked("input_layernorm.weight"),
+      )
+      scanned_wi_key = (
+          f"{prefix}-mlp-routed_experts-wi_0",
+          f"{prefix}-mlp-routed_experts-wi_1",
+      )
+      self.assertEqual(
+          mapping[scanned_wi_key],
+          stacked("mlp.experts.gate_up_proj"),
+      )
+      self.assertEqual(
+          mapping_fp8[f"{prefix}-mlp-routed_experts-wi_0"],
+          [stacked(f"mlp.experts.{e}.gate_proj.weight") for e in range(2)],
+      )
+
+  def test_qwen3_5_and_qwen3_8_namespace_boundaries_and_config_forms(self):
+    """Verifies vision namespace preservation and flat/wrapped config compatibility."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=4, num_experts=2)
+    wrapped_cfg = {
+        "text_config": text_cfg,
+        "vision_config": {"depth": 2},
+    }
+    mt_cfg_mm = self._make_qwen3_maxtext_config(use_multimodal=True)
+    mm_mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(wrapped_cfg, mt_cfg_mm, scan_layers=False)
+    self.assertEqual(
+        mm_mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"],
+        "model.visual.patch_embed.proj.weight",
+    )
+    self.assertEqual(
+        mm_mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_0-attn-attn-query-kernel"],
+        "model.visual.blocks.0.attn.qkv.weight",
+    )
+
+    # Qwen3.8 wrappers accept both flat and wrapped configs.
+    mt_cfg = self._make_qwen3_maxtext_config(use_multimodal=False)
+    for scan_layers in (False, True):
+      self.assertEqual(
+          param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg, scan_layers=scan_layers),
+          param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING({"text_config": text_cfg}, mt_cfg, scan_layers=scan_layers),
+      )
+      self.assertEqual(
+          set(
+              param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+                  text_cfg, mt_cfg, scan_layers=scan_layers, saving_to_hf=False
+              ).keys()
+          ),
+          set(
+              param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+                  {"text_config": text_cfg},
+                  mt_cfg,
+                  scan_layers=scan_layers,
+                  saving_to_hf=False,
+              ).keys()
+          ),
+      )
+    self.assertEqual(
+        hf_shape.QWEN3_8_HF_WEIGHTS_TO_SHAPE(text_cfg),
+        hf_shape.QWEN3_8_HF_WEIGHTS_TO_SHAPE({"text_config": text_cfg}),
     )
 
 

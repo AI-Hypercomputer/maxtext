@@ -68,21 +68,18 @@ jobs:
     name: Build MaxText Package
     needs: [release_approval, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/build_package.yml
     with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   run_ci_tests:
     name: Test MaxText Package
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     permissions:
@@ -102,7 +99,7 @@ jobs:
     name: Build ${{ matrix.name }} Docker Image
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     strategy:
@@ -128,6 +125,7 @@ jobs:
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -135,7 +133,7 @@ jobs:
     name: Build ${{ matrix.name }} Docker Image
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     strategy:
@@ -156,6 +154,7 @@ jobs:
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -164,7 +163,7 @@ jobs:
     needs: [build_tpu_release_candidate_images, get_maxtext_sha]
     # Ensure the SHA resolved and all image builds succeeded
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_tpu_release_candidate_images.result == 'success'
     uses: ./.github/workflows/run_e2e_tests.yml
@@ -179,7 +178,7 @@ jobs:
     name: Build Documentation
     needs: [release_approval, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/check_docs_build.yml
@@ -190,7 +189,7 @@ jobs:
     name: Check Links in Documentation
     needs: [release_approval, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     permissions:
@@ -204,9 +203,9 @@ jobs:
     name: Wait for Tests Verification
     needs: [run_ci_tests, run_e2e_tests]
     if: |
-      always() &&
+      !cancelled() &&
       needs.run_ci_tests.result == 'success' && needs.run_e2e_tests.result == 'success'
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker
@@ -245,14 +244,17 @@ jobs:
     name: Publish MaxText to PyPI
     needs: [wait_for_tests_verification, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.wait_for_tests_verification.result == 'success'
     permissions:
       id-token: write
+      attestations: write
       contents: read
     uses: ./.github/workflows/pypi_release.yml
     with:
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
       run_id: ${{ github.run_id }}
       publish: true
+    secrets:
+      READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}

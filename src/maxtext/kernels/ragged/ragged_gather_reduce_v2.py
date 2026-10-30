@@ -454,9 +454,9 @@ def main_kernel(
 
       tw = topk_weights_refs[s][...]
       if cfg.topk_dtype == jnp.bfloat16:
-        tw_f32 = plsc.bitcast(jnp.bitwise_left_shift(tw, 16), jnp.float32)
+        tw_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(tw, 16), jnp.float32)
       else:
-        tw_f32 = plsc.bitcast(tw, jnp.float32)
+        tw_f32 = jax.lax.bitcast_convert_type(tw, jnp.float32)
       tw_f32_vmem_sc[sub] = tw_f32
 
     # For each sub-chunk, the destination of the row just before it -- the
@@ -557,9 +557,9 @@ def main_kernel(
             # into the float32 sign/exponent position and clear the rest.
             shift = jnp.where(jnp.bitwise_and(src_idx_slice[row_src], 1) == 0, 16, 0)
             shifted = jnp.bitwise_and(jnp.left_shift(val_u32, shift), jnp.uint32(0xFFFF0000))
-            data_f32 = plsc.bitcast(shifted, jnp.float32)
+            data_f32 = jax.lax.bitcast_convert_type(shifted, jnp.float32)
           else:
-            data_f32 = plsc.bitcast(val_u32, jnp.float32)
+            data_f32 = jax.lax.bitcast_convert_type(val_u32, jnp.float32)
           data_f32 *= tw_slice[row_src]
 
           # Reduction: accumulate while the destination group is unchanged,
@@ -660,7 +660,7 @@ def ragged_gather_reduce(
   # Step 1: Choose the implementation (TensorCore fallback or SparseCore).
   # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
   # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
-  if enforce_fallback or jax.devices()[0].platform != "tpu":
+  if enforce_fallback or not pltpu.is_tpu_device():
     return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
   sc_info = pltpu.get_tpu_info().sparse_core
@@ -750,6 +750,7 @@ def ragged_gather_reduce(
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
+          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,

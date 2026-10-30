@@ -25,12 +25,13 @@ converters and scanned MaxText-to-MaxText state unrolling. The converters handle
 import ast
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import re
 import time
 import traceback
-from typing import Any, Optional, Tuple
+from typing import Any, NamedTuple, Optional, Tuple
 
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
@@ -92,6 +93,8 @@ def _rule_table_for(model_name: str):
   """
   if model_name == "qwen3-0.6b":
     return MODEL_TO_CONVERSION_RULES["qwen3"]
+  if model_name.startswith("qwen3.5"):
+    return None
   return _NO_RULE_TABLE
 
 
@@ -235,12 +238,15 @@ def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_block
 
 
 def validate_direct_sync_layer_coverage(source, target) -> int:
-  """Fail if an unrolled source would leave MaxText target layers untouched.
+  """Fail if a direct-sync source would leave MaxText target layers untouched.
 
   Tunix intentionally intersects direct-sync trees. For heterogeneous Qwen
   scans, a schema error can therefore skip every transformer layer without an
   exception. This check runs on the initial full-parameter load and requires
-  every unscanned target-layer parameter path to exist in the source.
+  every unscanned target-layer parameter path to be reachable from the source:
+  either directly (sources MaxText already unrolled, e.g. Gemma and Qwen) or
+  through the scanned-layer lookup of Tunix's `transfer_state_directly`, which
+  unrolls the homogeneous scans MaxText leaves stacked (e.g. Llama).
   """
 
   def to_pure_params(state):
@@ -265,21 +271,31 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   source_flat = flatten_dict(source)
   target_flat = flatten_dict(target)
 
-  def is_unscanned_layer_path(path):
-    return any(isinstance(part, str) and re.fullmatch(r"layers_\d+", part) for part in path)
+  def unscanned_layer_index(path):
+    """Position of the first `layers_N` component of `path`, or -1."""
+    for i, part in enumerate(path):
+      if isinstance(part, str) and re.fullmatch(r"layers_\d+", part):
+        return i
+    return -1
 
-  source_layer_keys = {key for key in source_flat if is_unscanned_layer_path(key)}
-  target_layer_keys = {key for key in target_flat if is_unscanned_layer_path(key)}
+  source_keys = set(source_flat)
+  target_layer_keys = {key for key in target_flat if unscanned_layer_index(key) != -1}
 
-  def source_covers(target_key):
-    if target_key in source_layer_keys:
-      return True
+  def has_split_wi(key):
     # Tunix fuses split training weights into the inference-only prefused
     # parameter before transfer. Treat the pair as coverage for target `wi`.
-    if target_key and target_key[-1] == "wi":
-      prefix = target_key[:-1]
-      return prefix + ("wi_0",) in source_layer_keys and prefix + ("wi_1",) in source_layer_keys
-    return False
+    return key[-1] == "wi" and key[:-1] + ("wi_0",) in source_keys and key[:-1] + ("wi_1",) in source_keys
+
+  def source_covers(target_key):
+    if target_key in source_keys or has_split_wi(target_key):
+      return True
+    # Mirror the fallback of Tunix's `transfer_state_directly`: a target
+    # `layers_N` is slice N of a scanned `layers` container (standard MaxText)
+    # or of an implicit stack without one. Only the former fuses split MoE.
+    idx = unscanned_layer_index(target_key)
+    scanned_key = target_key[:idx] + ("layers",) + target_key[idx + 1 :]
+    implicit_key = target_key[:idx] + target_key[idx + 1 :]
+    return scanned_key in source_keys or implicit_key in source_keys or has_split_wi(scanned_key)
 
   missing = {key for key in target_layer_keys if not source_covers(key)}
   if not target_layer_keys or missing:
@@ -297,25 +313,47 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   return len(target_layer_keys)
 
 
-def _find_qwen_scanned_layer_idx(key_tuple):
-  """Finds a Qwen scanned block path like `layers.layer_0` or `layers.moe_block`."""
+_QWEN_NESTED_LOCAL = "local_layers"
+_QWEN_NESTED_GLOBAL = "global_layer"
+
+
+class _QwenScannedRef(NamedTuple):
+  """Where a scanned Qwen parameter sits, and how it maps onto cycle slots."""
+
+  container_idx: int
+  slot_idx: Optional[int]
+  consumed: int
+  nested: bool
+  trailing: bool
+
+
+_NO_QWEN_SCAN = _QwenScannedRef(-1, -1, 0, False, False)
+
+
+def _find_qwen_scanned_layer_idx(key_tuple) -> _QwenScannedRef:
+  """Finds a Qwen scanned block path like `layers.local_layers` or `layers.layer_0`."""
   for i in range(len(key_tuple) - 1):
     if key_tuple[i] != "layers" or not isinstance(key_tuple[i + 1], str):
       continue
-    if key_tuple[i + 1].startswith("layers_"):
+    name = key_tuple[i + 1]
+    if name.startswith("layers_"):
       continue
-    match = re.fullmatch(r"layer_(\d+)", key_tuple[i + 1])
+    if name == _QWEN_NESTED_LOCAL:
+      return _QwenScannedRef(i, None, 2, True, False)
+    if name == _QWEN_NESTED_GLOBAL:
+      return _QwenScannedRef(i, None, 2, False, True)
+    match = re.fullmatch(r"layer_(\d+)", name)
     if match:
-      return i, int(match.group(1)), 2
-    return i, 0, 1
-  return -1, -1, 0
+      return _QwenScannedRef(i, int(match.group(1)), 2, False, False)
+    return _QwenScannedRef(i, 0, 1, False, False)
+  return _NO_QWEN_SCAN
 
 
 def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
   """Unroll Qwen's heterogeneous or homogeneous scanned blocks for an unscanned MaxText target.
 
-  Qwen 3 Next/3.5 training stores a repeating layer cycle as
-  `decoder.layers.layer_{slot}`, with repetitions stacked on `scan_axis`.
+  Qwen 3 Next/3.5 training nests two scans: `decoder.layers.local_layers` holds the cycle's linear-attention
+  layers with the slot on `scan_axis + 1`, and `decoder.layers.global_layer` holds the trailing full-attention layer.
   Qwen 3 base training stores homogeneous layers as `decoder.layers.*` stacked on `scan_axis`.
   The inference model stores every layer as a direct decoder attribute named
   `layers_{global_index}`. Tunix's generic direct-sync mapper cannot bridge
@@ -342,18 +380,47 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
   scanned_keys = []
   slot_indices = set()
   scan_lengths = set()
+  local_widths = set()
+  has_trailing = False
   for key, value in flat_w.items():
-    container_idx, slot_idx, consumed = _find_qwen_scanned_layer_idx(key)
-    if container_idx == -1 or "dropout" in key or "rngs" in key:
+    if "layers_remainder" in key and "dropout" not in key and "rngs" not in key:
+      # Like MaxTextToMaxTextConverter and raiden_unscan, which reject such a layer count up front.
+      raise ValueError(
+          f"Qwen scanned parameter {'.'.join(map(str, key))} is in `layers_remainder`: unrolling the layers past "
+          "the last whole cycle is not supported, so num_decoder_layers must be a multiple of the cycle."
+      )
+    ref = _find_qwen_scanned_layer_idx(key)
+    if ref.container_idx == -1 or "dropout" in key or "rngs" in key:
       continue
-    if not hasattr(value, "shape") or len(value.shape) <= scan_axis:
+    min_ndim = scan_axis + 2 if ref.nested else scan_axis + 1
+    if not hasattr(value, "shape") or len(value.shape) < min_ndim:
       raise ValueError(f"Qwen scanned parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
-    scanned_keys.append((key, value, container_idx, slot_idx, consumed))
-    slot_indices.add(slot_idx)
+    scanned_keys.append((key, value, ref))
     scan_lengths.add(value.shape[scan_axis])
+    if ref.nested:
+      local_widths.add(value.shape[scan_axis + 1])
+      slot_indices.update(range(value.shape[scan_axis + 1]))
+    elif ref.trailing:
+      has_trailing = True
+    else:
+      slot_indices.add(ref.slot_idx)
 
   if not scanned_keys:
     return weights
+
+  if len(local_widths) > 1:
+    raise ValueError(f"Qwen nested `local_layers` parameters disagree on cycle width: {sorted(local_widths)}")
+  if pattern_length is None:
+    trailing_slot = (max(slot_indices) + 1) if slot_indices else 0
+  else:
+    if local_widths and local_widths != {pattern_length - 1}:
+      raise ValueError(
+          f"Qwen nested `local_layers` hold {local_widths.pop()} cycle slots, but pattern_length {pattern_length} "
+          f"leaves {pattern_length - 1} before the global layer"
+      )
+    trailing_slot = pattern_length - 1
+  if has_trailing:
+    slot_indices.add(trailing_slot)
 
   if pattern_length is None:
     expected_slots = set(range(max(slot_indices) + 1))
@@ -368,16 +435,25 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     raise ValueError(f"Qwen scanned parameters disagree on scan length: {sorted(scan_lengths)}")
 
   scan_length = scan_lengths.pop()
-  scanned_key_paths = {key for key, _, _, _, _ in scanned_keys}
+  scanned_key_paths = {key for key, _, _ in scanned_keys}
   new_flat_w = {key: value for key, value in flat_w.items() if key not in scanned_key_paths}
 
-  for key, value, container_idx, slot_idx, consumed in scanned_keys:
-    prefix = key[:container_idx]
-    suffix = key[container_idx + consumed :]
+  for key, value, ref in scanned_keys:
+    prefix = key[: ref.container_idx]
+    suffix = key[ref.container_idx + ref.consumed :]
+    if ref.nested:
+      slots = tuple(range(value.shape[scan_axis + 1]))
+    else:
+      slots = (trailing_slot if ref.trailing else ref.slot_idx,)
     for repetition in range(scan_length):
-      global_idx = repetition * pattern_length + slot_idx
-      new_key = prefix + (f"layers_{global_idx}",) + suffix
-      new_flat_w[new_key] = jnp.take(value, repetition, axis=scan_axis)
+      block = jax.lax.index_in_dim(value, repetition, axis=scan_axis, keepdims=False)
+      for local_idx, slot_idx in enumerate(slots):
+        global_idx = repetition * pattern_length + slot_idx
+        new_key = prefix + (f"layers_{global_idx}",) + suffix
+        # Taking the block collapsed `scan_axis`, so the nested slot axis has shifted down into it.
+        new_flat_w[new_key] = (
+            jax.lax.index_in_dim(block, local_idx, axis=scan_axis, keepdims=False) if ref.nested else block
+        )
 
   logging.info(
       "MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",
@@ -477,6 +553,15 @@ def unroll_gemma_scanned_weights(weights):
   return unflatten_dict(new_flat_w)
 
 
+def _accepts_kwarg(cls: Any, name: str) -> bool:
+  """Whether `cls(...)` takes the keyword `name` (or `**kwargs`); True when its signature cannot be inspected."""
+  try:
+    params = inspect.signature(cls).parameters
+  except (ValueError, TypeError):
+    return True
+  return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _log_and_flush_traceback(msg: str) -> None:
   """Logs an error with formatted traceback and flushes all logging handlers."""
   logging.error("%s:\n%s", msg, traceback.format_exc())
@@ -508,6 +593,20 @@ class MaxTextVllmSampler(VllmSampler):
     engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
     self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
     self._is_gemma = "gemma" in str(self._model_name).lower()
+    self._is_qwen = "qwen" in str(self._model_name).lower()
+
+  def _vllm_config(self, config: VllmConfig):
+    """Builds vLLM engine arguments while preserving user-specified sharding_strategy."""
+    user_sharding_strategy = copy.deepcopy(
+        ((config.additional_config or {}).get("sharding") or {}).get("sharding_strategy") or {}
+    )
+    args = super()._vllm_config(config)
+    if user_sharding_strategy:
+      additional_config = args.setdefault("additional_config", {})
+      sharding = additional_config.setdefault("sharding", {})
+      sharding_strategy = sharding.setdefault("sharding_strategy", {})
+      sharding_strategy.update(user_sharding_strategy)
+    return args
 
   def update_params(
       self,
@@ -515,8 +614,17 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
-    if self._direct_maxtext_sync and self._is_gemma:
-      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+    converter = getattr(self, "converter", getattr(self, "_converter", None))
+    if self._direct_maxtext_sync:
+      if converter is not None:
+        updated_weights = converter.convert(updated_weights, target_state=self.transformer_state)
+        while isinstance(updated_weights, dict) and "model" in updated_weights:
+          updated_weights = updated_weights["model"]
+      elif self._is_gemma:
+        updated_weights = unroll_gemma_scanned_weights(updated_weights)
+      elif self._is_qwen:
+        updated_weights = unroll_qwen_scanned_weights(updated_weights)
+      validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
     try:
       return super().update_params(updated_weights, filter_types)
     except BaseException:
@@ -615,6 +723,19 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     )
     self._maxtext_config = maxtext_config
 
+    # Forwarded only when the installed tunix declares the option on both
+    # configs; an older tunix always frees the KV cache around a weight sync.
+    optional_vllm_config = {}
+    if hasattr(rollout_config, "rollout_vllm_free_kv_cache_during_weight_sync"):
+      if _accepts_kwarg(VllmConfig, "free_kv_cache_during_weight_sync"):
+        optional_vllm_config["free_kv_cache_during_weight_sync"] = (
+            rollout_config.rollout_vllm_free_kv_cache_during_weight_sync
+        )
+      else:
+        logging.warning(
+            "Installed tunix VllmConfig does not support free_kv_cache_during_weight_sync; the setting is ignored."
+        )
+
     self._sampler = MaxTextVllmSampler(
         tokenizer=tokenizer,
         config=VllmConfig(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
@@ -637,6 +758,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             engine_kwargs=engine_kwargs,
             additional_config=rollout_additional_config,
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
+            **optional_vllm_config,
         ),
         direct_maxtext_sync=direct_maxtext_sync,
         model_name=getattr(maxtext_config, "model_name", ""),

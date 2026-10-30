@@ -36,6 +36,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -99,10 +100,7 @@ def get_functional_train_with_signature(
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  if getattr(config, "retry_when_tokens_dropped", False) is True:
-    donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
-  else:
-    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -255,7 +253,7 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   return [], []
 
 
-def load_compiled(config, partial_train, state, execution_devices):
+def load_compiled(config, partial_train, state, execution_devices, data_sharding=None):
   """# Loading a serialized compiled train step function."""
 
   # Currently partial_train and state  are needed to reconstruct
@@ -272,7 +270,7 @@ def load_compiled(config, partial_train, state, execution_devices):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = get_shaped_batch(config)
+  shaped_batch = get_shaped_batch(config, batch_sharding=data_sharding)
   shaped_input_args = (state, shaped_batch)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
@@ -750,7 +748,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -758,7 +756,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1153,6 +1151,12 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
 
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
+  if config.use_m3_model:
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.m3 import models as m3_models
+
+    if config.model_name in m3_models.MODEL_FLOPS_REGISTRY:
+      return m3_models.calculate_tflops_per_device(config, log=log)
   # MLP flops
   is_ffn_flops_already_total = False
   if config.num_experts > 1:
@@ -1325,6 +1329,7 @@ def calculate_tflops_training_per_device(config, log=True):
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       if config.decoder_block in (
           DecoderBlockType.DEEPSEEK,
+          DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
@@ -1470,7 +1475,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> list:
+def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str, ravel: bool = True) -> list:
   """Collects intermediate leaf values whose dict-key path ends with suffix_keys.
 
   Works regardless of model architecture (scanned, scannable blocks, or standard),
@@ -1480,9 +1485,11 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
     intermediate_outputs: The intermediates dict returned by model.apply().
     *suffix_keys: One or more key names forming the expected path suffix,
       e.g. ``("moe_lb_loss",)`` or ``("self_attention", "indexer_loss")``.
+    ravel: Flatten each leaf to 1-D. Pass False for leaves that are sharded
+      across the mesh, where flattening would force a reshard collective.
 
   Returns:
-    A list of 1-D JAX arrays, one per matching leaf (already ravelled).
+    A list of JAX arrays, one per matching leaf (1-D unless ``ravel=False``).
   """
   suffix = tuple(suffix_keys)
   n = len(suffix)
@@ -1490,7 +1497,7 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
     path_keys = tuple(k.key for k in path if hasattr(k, "key"))
     if len(path_keys) >= n and path_keys[-n:] == suffix:
-      values.append(jnp.ravel(val))
+      values.append(jnp.ravel(val) if ravel else val)
   return values
 
 
@@ -1659,7 +1666,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   return state, state_mesh_annotations
 
 
-def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=None):
   is_training = True
   return setup_initial_state(
       data_iterator,
@@ -1668,6 +1675,7 @@ def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_s
       checkpoint_manager,
       init_state_fn,
       is_training,
+      snapshotter=snapshotter,
   )
 
 
@@ -1678,6 +1686,7 @@ def setup_initial_state(
     checkpoint_manager,
     init_state_fn,
     is_training=True,
+    snapshotter=None,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
@@ -1689,6 +1698,9 @@ def setup_initial_state(
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
     init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
+    snapshotter: Optional `snapshotting.Snapshotter` of an elastic run in snapshot mode. When it holds a snapshot
+      that is at least as recent as the latest checkpoint, the state and the data iterator position are restored
+      from it instead of from the checkpoint.
 
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
@@ -1704,10 +1716,11 @@ def setup_initial_state(
 
   # Initialization
   with axis_rules(config.logical_axis_rules):
+    native = lineage_adapter.is_native(config)
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
-        config.load_parameters_path,
+        "" if native else config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
@@ -1720,7 +1733,19 @@ def setup_initial_state(
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
+        snapshotter=snapshotter,
     )
+    if native and restored is None and raw_params is None and config.load_parameters_path:
+      # The Lineage-native model restores MaxText-layout params against its own abstract target.
+      raw_params = checkpointing.load_params_from_path(
+          config.load_parameters_path,
+          lineage_adapter.maxtext_restore_target(config, mesh),
+          config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_single_replica_ckpt_restoring=bool(config.enable_single_replica_ckpt_restoring),
+          colocated_python_checkpointing=bool(config.enable_single_controller and config.colocated_python_checkpointing),
+      )
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)
 
@@ -1735,7 +1760,10 @@ def setup_initial_state(
         in_shardings=None,
         out_shardings=state_mesh_shardings,
     )()
-    if raw_params:
+    if raw_params and native:
+      # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
+      lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+    elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (
           state["model"]
@@ -2041,7 +2069,17 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if num_slices > 1:
+  if getattr(config, "use_lineage", False):
+    dcn_parallelism = (
+        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+    )
+    mesh = lineage_adapter.create_device_mesh(
+        ici_parallelism,
+        devices,
+        dcn_parallelism=dcn_parallelism,
+        allow_split_physical_axes=allow_split_physical_axes,
+    )
+  elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
 

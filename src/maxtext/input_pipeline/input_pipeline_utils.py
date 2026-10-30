@@ -15,6 +15,7 @@
 """Operations used by Grain"""
 
 import dataclasses
+import re
 import warnings
 from threading import current_thread
 from typing import Any, Iterable, TYPE_CHECKING
@@ -29,6 +30,7 @@ from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, 
 from grain.experimental import TFRecordIterDataset
 from maxtext.diffusion.block_diffusion import corruption as block_diffusion_corruption
 from maxtext.input_pipeline.protos import example_pb2
+from maxtext.input_pipeline import encoding_dsv4
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
@@ -251,6 +253,46 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
+_DEEPSEEK_PAD_TOKEN = "<｜▁pad▁｜>"
+
+
+def fix_pad_token_if_needed(tokenizer_model) -> bool:
+  """Remaps pad_token to `<｜▁pad▁｜>` when the tokenizer shares one id for pad and EOS.
+
+  DeepSeek-V3, V3.2 and V4 tokenizers set pad_token == eos_token (id 1) while reserving
+  `<｜▁pad▁｜>` (id 2). SFT masks prompt targets with pad_id and drops targets equal to pad_id
+  from the loss, so a shared id also drops every completion EOS.
+
+  Args:
+    tokenizer_model: A Hugging Face tokenizer; modified in place.
+
+  Returns:
+    True if pad_token was remapped.
+  """
+  pad_id = getattr(tokenizer_model, "pad_token_id", None)
+  eos_id = getattr(tokenizer_model, "eos_token_id", None)
+  if pad_id is None or pad_id != eos_id:
+    return False
+  try:
+    if hasattr(tokenizer_model, "get_vocab"):
+      has_token = _DEEPSEEK_PAD_TOKEN in tokenizer_model.get_vocab()
+    elif hasattr(tokenizer_model, "convert_tokens_to_ids"):
+      token_id = tokenizer_model.convert_tokens_to_ids(_DEEPSEEK_PAD_TOKEN)
+      has_token = token_id is not None and token_id != getattr(tokenizer_model, "unk_token_id", None)
+    else:
+      has_token = False
+  except Exception:  # pylint: disable=broad-exception-caught
+    has_token = False
+  if not has_token:
+    return False
+  tokenizer_model.pad_token = _DEEPSEEK_PAD_TOKEN
+  max_logging.log(
+      f"Tokenizer pad_token_id == eos_token_id ({eos_id}); remapped pad_token to {_DEEPSEEK_PAD_TOKEN} "
+      f"(pad_id {tokenizer_model.pad_token_id}) so completion EOS tokens keep their loss weight."
+  )
+  return True
+
+
 def _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs):
   """Splits a conversational round (system + user + assistant) into prompt and completion formatted strings.
 
@@ -298,7 +340,89 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   return completion_str
 
 
-def apply_chat_template(example, tokenizer_model, data_column_name):
+_DS4_TURN_RE = re.compile(
+    re.escape(encoding_dsv4.ASSISTANT_SP_TOKEN)
+    + f"({re.escape(encoding_dsv4.thinking_start_token)}|"
+    + f"{re.escape(encoding_dsv4.thinking_end_token)})"
+    + f"(?:{re.escape(encoding_dsv4.DS_TASK_SP_TOKENS['action'])})?"
+    + f"(.*?{re.escape(encoding_dsv4.eos_token)})",
+    re.DOTALL,
+)
+
+
+def _is_deepseek_v4(tokenizer_model, model_name=None) -> bool:
+  """Detects DeepSeek-V4 by model or tokenizer name.
+
+  Vocabulary checks are not used: the DeepSeek-V3.2 tokenizer has the same special tokens and
+  also ships without a chat template, but uses a different encoding.
+  """
+  for name in (model_name, getattr(tokenizer_model, "model_name", None), getattr(tokenizer_model, "name_or_path", None)):
+    if name and any(x in str(name).lower() for x in ("deepseek4", "deepseek-v4", "deepseek_v4")):
+      return True
+  return False
+
+
+def _format_conversations_dsv4(example, data_column_name):
+  """Formats DeepSeek-V4 conversational data using encoding_dsv4.encode_messages."""
+  raw_messages = example[data_column_name]
+  for idx, message in enumerate(raw_messages):
+    if message.get("role") == "system" and idx != 0:
+      raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
+
+  assistants = [m for m in raw_messages if m.get("role") == "assistant"]
+  if not assistants:
+    example["is_prompt"] = []
+    example[data_column_name] = []
+    return example
+
+  last_assistant_idx = max(i for i, m in enumerate(raw_messages) if m.get("role") == "assistant")
+  messages_to_encode = list(raw_messages[: last_assistant_idx + 1])
+  if example.get("tools") and not any(m.get("tools") for m in messages_to_encode):
+    target_idx = next(
+        (i for i, m in enumerate(messages_to_encode) if m.get("role") in ("system", "developer")),
+        None,
+    )
+    if target_idx is not None:
+      messages_to_encode[target_idx] = {**messages_to_encode[target_idx], "tools": example["tools"]}
+    else:
+      messages_to_encode.insert(0, {"role": "system", "content": "", "tools": example["tools"]})
+  thinking_mode = "thinking" if any(m.get("reasoning_content") for m in messages_to_encode) else "chat"
+  has_tools = bool(example.get("tools")) or any(
+      m.get("tools") or m.get("tool_calls") or m.get("role") == "tool" for m in messages_to_encode
+  )
+  text = encoding_dsv4.encode_messages(messages_to_encode, thinking_mode=thinking_mode, drop_thinking=not has_tools)
+  matches = list(_DS4_TURN_RE.finditer(text))
+  if len(matches) != len(assistants):
+    raise ValueError(
+        f"Mismatch between number of assistant messages ({len(assistants)}) "
+        f"and encoded turns ({len(matches)}). Encoded text: {text!r}"
+    )
+
+  messages = []
+  is_prompt = []
+  cursor = 0
+  for match in matches:
+    # In thinking mode, encode_messages drops the reasoning of assistant turns before the last user
+    # message and renders them after `</think>`. Keep those turns in the prompt so that only turns
+    # with their reasoning are trained.
+    if thinking_mode == "thinking" and match.group(1) == encoding_dsv4.thinking_end_token:
+      continue
+    messages.extend([text[cursor : match.start(2)], match.group(2)])
+    is_prompt.extend([True, False])
+    cursor = match.end(2)
+
+  if cursor != len(text):
+    raise ValueError(
+        f"Encoded text length ({len(text)}) does not match final completion boundary ({cursor}); "
+        f"the final assistant turn was not matched as a trainable completion: {text[cursor:]!r}"
+    )
+
+  example["is_prompt"] = is_prompt
+  example[data_column_name] = messages
+  return example
+
+
+def apply_chat_template(example, tokenizer_model, data_column_name, model_name=None):
   """Formats conversational data by applying the tokenizer's chat template
   and identifying prompt/completion segments for SFT masking.
 
@@ -309,6 +433,8 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       which contains the specific chat template.
     data_column_name: The name of the column in the `example` dictionary
       that contains the list of messages.
+    model_name: Optional model name used as a fallback to identify models
+      that use a custom chat encoder when `tokenizer_model.chat_template` is None.
 
   Returns:
     The modified `example` dictionary.
@@ -323,6 +449,8 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
   is_prompt = []
   round_msgs = []
   try:
+    if getattr(tokenizer_model, "chat_template", None) is None and _is_deepseek_v4(tokenizer_model, model_name):
+      return _format_conversations_dsv4(example, data_column_name)
     for idx, message in enumerate(example[data_column_name]):
       if message["role"] == "system":
         if idx != 0:
@@ -360,33 +488,51 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
 @dataclasses.dataclass
 class SFTPromptMasking(grain.MapTransform):
   """Construct inputs and targets for SFT training. Concat prompt and completion to generate inputs.
-  For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
+  Causal SFT can mask prompt targets with ``unk_id``. Block diffusion keeps
+  clean same-position targets and emits role-derived completion metadata.
   """
 
-  def __init__(self, text_column_name, completion_only, max_target_length, unk_id=0):
+  def __init__(
+      self,
+      text_column_name,
+      completion_only,
+      max_target_length,
+      unk_id=0,
+      training_objective="causal_lm",
+  ):
+    if training_objective not in ("causal_lm", "block_diffusion"):
+      raise ValueError(f"Unsupported training objective: {training_objective}")
     self.text_column_name = text_column_name
     self.completion_only = completion_only
     self.max_target_length = max_target_length
     self.unk_id = unk_id
+    self.training_objective = training_objective
 
   def map(self, element):
     """
     Maps a single dataset element to an SFT training instance.
     It concatenates the prompt and completion to form the `inputs` sequence.
     For the `targets` sequence:
-    - If `self.completion_only` is `True`, the prompt portion of the
-      concatenated sequence is masked using `self.unk_id`.
+    - If `self.completion_only` is `True`, causal SFT masks the prompt portion
+      with `self.unk_id`; block-diffusion SFT keeps clean targets and records
+      completion eligibility separately.
     - If `self.completion_only` is `False`, the target sequence is
       identical to the input sequence.
     """
-    inputs, targets = [], []
+    is_block_diffusion = self.training_objective == "block_diffusion"
+    inputs, targets, completion_mask = [], [], []
     for i, text in enumerate(element[self.text_column_name]):
       inputs += text
-      targets += [self.unk_id] * len(text) if self.completion_only and element["is_prompt"][i] else text
-    return {
+      is_prompt = element["is_prompt"][i]
+      targets += [self.unk_id] * len(text) if self.completion_only and is_prompt and not is_block_diffusion else text
+      completion_mask += [not is_prompt] * len(text)
+    output = {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
     }
+    if is_block_diffusion:
+      output["completion_mask"] = np.asarray(completion_mask[: self.max_target_length], dtype=np.int32)
+    return output
 
 
 @dataclasses.dataclass
@@ -914,7 +1060,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         self.config is not None and getattr(self.config, "training_objective", "causal_lm") == "block_diffusion"
     )
     for data_column in data_columns:
-      if data_column != "images":
+      if data_column not in ("images", "completion_mask"):
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
@@ -949,7 +1095,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
         element["images"] = self._pad_image_and_mask(element["images"])  # pyrefly: ignore[bad-argument-type]
 
-      elif preserve_pad_valued_tokens and key.endswith(("_segmentation", "_position")):
+      elif key == "completion_mask" or (preserve_pad_valued_tokens and key.endswith(("_segmentation", "_position"))):
         element[key] = self._pad_text(element[key], self.max_length, 0)  # pyrefly: ignore[bad-argument-type]
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)  # pyrefly: ignore[bad-argument-type]
@@ -1380,6 +1526,7 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
   logit_alignment: str = "same_position"
   canvas_policy: str = "all_masked"
   axis: int = 1
+  completion_only: bool = False
 
   def random_map(self, element, rng: np.random.Generator):
     """Corrupts inputs while preserving clean targets and input metadata."""
@@ -1391,9 +1538,51 @@ class BlockDiffusionCorruption(grain.RandomMapTransform):
           "inputs, targets, and targets_segmentation must have identical shapes, got "
           f"{inputs.shape}, {targets.shape}, and {targets_segmentation.shape}"
       )
+    validity_mask = targets_segmentation != 0
+    raw_completion_mask = element.get("completion_mask")
+    if raw_completion_mask is None:
+      if self.completion_only:
+        if "completion_mask" not in element:
+          raise ValueError("completion-only block diffusion requires an explicit completion_mask")
+        raise ValueError("completion-only block diffusion requires a non-None completion_mask")
+      completion_mask = validity_mask
+    else:
+      completion_mask = np.asarray(raw_completion_mask) != 0
+    if completion_mask.shape != inputs.shape:
+      raise ValueError(f"completion_mask must match inputs shape; received {completion_mask.shape} and {inputs.shape}")
+    if np.any(completion_mask & ~validity_mask):
+      raise ValueError("completion_mask must be a subset of valid target positions")
+    can_validate_block_order = (
+        self.completion_only
+        and self.block_size > 0
+        and inputs.ndim > 0
+        and -inputs.ndim <= self.axis < inputs.ndim
+        and inputs.shape[self.axis % inputs.ndim] > 0
+    )
+    if can_validate_block_order:
+      axis = self.axis % inputs.ndim
+      sequence_length = inputs.shape[axis]
+      block_count = (sequence_length + self.block_size - 1) // self.block_size
+      padded_length = block_count * self.block_size
+
+      def _as_blocks(mask):
+        rows = np.moveaxis(mask, axis, -1).reshape(-1, sequence_length)
+        padded = np.pad(rows, ((0, 0), (0, padded_length - sequence_length)))
+        return padded.reshape(rows.shape[0], block_count, self.block_size)
+
+      validity_blocks = _as_blocks(validity_mask)
+      completion_blocks = _as_blocks(completion_mask)
+      seen_completion = np.maximum.accumulate(completion_blocks, axis=-1)
+      if np.any(seen_completion & validity_blocks & ~completion_blocks):
+        raise ValueError(
+            "completion-only block diffusion cannot place a prompt token after "
+            "a completion token in the same diffusion block; split the example "
+            "or align the next prompt to a block boundary"
+        )
+    supervision_mask = completion_mask if self.completion_only else validity_mask
     result = block_diffusion_corruption.corrupt_tokens(
         inputs,
-        targets_segmentation != 0,
+        supervision_mask,
         rng,
         block_size=self.block_size,
         mask_id=self.mask_id,

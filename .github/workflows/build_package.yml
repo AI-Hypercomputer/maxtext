@@ -20,15 +20,6 @@ name: Build and Upload MaxText Package
 on:
   workflow_call:
     inputs:
-      device_type:
-        required: true
-        type: string
-      device_name:
-        required: true
-        type: string
-      cloud_runner:
-        required: false
-        type: string
       maxtext_sha:
         required: false
         type: string
@@ -36,17 +27,21 @@ on:
       maxtext_sha:
         description: "MaxText short SHA used for the build"
         value: ${{ jobs.build_and_upload.outputs.maxtext_sha }}
+      image_date:
+        description: "Date (YYYY-MM-DD) used for tagging Docker images"
+        value: ${{ jobs.build_and_upload.outputs.image_date }}
 
 permissions:
   contents: read
 jobs:
   build_and_upload:
     name: Build Wheel
-    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    runs-on: linux-x86-n4-16-buildkit
     timeout-minutes: 15
-    container: python:3.12-slim-bookworm
+    container: python:3.12-slim-trixie
     outputs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      image_date: ${{ steps.vars.outputs.image_date }}
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -62,14 +57,32 @@ jobs:
           # MaxText SHA used to build the package
           MAXTEXT_SHA="$MAXTEXT_SHA_INPUT"
           echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
       - name: Install build tools
         run: |
+          apt-get update -y && apt-get install -y --no-install-recommends curl ca-certificates
           python -m pip install --upgrade pip build uv
+      - name: Set up Syft
+        id: download_syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Build maxtext wheel
         run: |
           uv build --wheel
+      - name: Generate SPDX SBOM for MaxText wheel
+        shell: bash
+        env:
+          SYFT_CMD: ${{ steps.download_syft.outputs.cmd }}
+        run: |
+          mkdir -p sbom
+          WHEEL_FILE=$(ls dist/maxtext-*.whl)
+          "${SYFT_CMD}" "${WHEEL_FILE}" -o spdx-json=sbom/maxtext-wheel.spdx.json
       - name: Upload the built maxtext wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: maxtext-wheel
           path: dist/*
+      - name: Upload the maxtext wheel SPDX SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/maxtext-wheel.spdx.json

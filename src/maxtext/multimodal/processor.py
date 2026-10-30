@@ -35,6 +35,7 @@ _MODEL_TO_BLOCKS = {
     "qwen3-vl-2b": ("qwen3_vl", "qwen3"),
     "qwen3-vl-4b": ("qwen3_vl", "qwen3"),
     "qwen3-vl-30b-a3b": ("qwen3_vl", "qwen3_moe"),
+    "qwen3.5-9b": ("qwen3_5", "qwen3_5"),
     "qwen3.5-35b-a3b": ("qwen3_5", "qwen3_5"),
     "qwen3.5-35b-a3b-fp8": ("qwen3_5", "qwen3_5"),
     "qwen3.5-35b-fp8": ("qwen3_5", "qwen3_5"),
@@ -42,9 +43,11 @@ _MODEL_TO_BLOCKS = {
     "qwen3.5-397b-a17b-fp8": ("qwen3_5", "qwen3_5"),
     # Stitched model
     "maxtext-omni-gemma3-qwen3": ("gemma3", "qwen3"),
-    # Cosmos
-    "cosmos3-nano-reasoner": ("qwen3_vl", "qwen3"),
-    "cosmos3-super-reasoner": ("qwen3_vl", "qwen3"),
+    # Weaver
+    "weaver-mini": ("qwen3_vl", "qwen3"),
+    "weaver-max": ("qwen3_vl", "qwen3"),
+    # Ming (audio-only, no vision tower)
+    "ming-3.0-audio-tiny": (None, "ming"),
 }
 
 
@@ -112,6 +115,10 @@ def preprocess_mm_data(config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
+  elif _get_decoder_block(config) in ["ming"]:
+    from maxtext.multimodal.processor_ming import preprocess_mm_data_ming  # pylint: disable=import-outside-toplevel
+
+    processor_outputs = preprocess_mm_data_ming(config)
   else:
     raise ValueError(
         f"Model {config.model_name} (vision block {vision_block}) not supported for multimodal preprocessing."
@@ -168,17 +175,29 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
+  elif decoder_block in ["ming"]:
+    from maxtext.multimodal.processor_ming import get_audio_offsets_ming  # pylint: disable=import-outside-toplevel
+
+    return get_audio_offsets_ming(processor_output)
   else:
     return 0
 
 
-def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_placeholder="<|video|>", num_videos=0):
+def reformat_prompt(
+    prompt,
+    image_placeholder,
+    model_name,
+    num_images,
+    video_placeholder="<|video|>",
+    num_videos=0,
+    audio_placeholder="<|audio|>",
+    num_audios=0,
+):
   """Reformat prompt for different models."""
   vision_block = _get_vision_block(model_name)
-  if vision_block is None:
-    return prompt
-
   decoder_block = _get_decoder_block(model_name)
+  if vision_block is None and decoder_block != "ming":
+    return prompt
 
   if decoder_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import reformat_prompt_gemma3  # pylint: disable=import-outside-toplevel
@@ -202,6 +221,10 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
         video_placeholder=video_placeholder,
         num_videos=num_videos,
     )
+  elif decoder_block in ["ming"]:
+    from maxtext.multimodal.processor_ming import reformat_prompt_ming  # pylint: disable=import-outside-toplevel
+
+    return reformat_prompt_ming(prompt, audio_placeholder=audio_placeholder, num_audios=num_audios)
   else:
     return prompt
 
@@ -209,10 +232,9 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
 def reformat_response(response, model_name):
   """Reformat response for different models."""
   vision_block = _get_vision_block(model_name)
-  if vision_block is None:
-    return response
-
   decoder_block = _get_decoder_block(model_name)
+  if vision_block is None and decoder_block != "ming":
+    return response
 
   if decoder_block in ["llama4"]:
     formatted_response = f"{response}<|eot|>"
@@ -225,6 +247,9 @@ def reformat_response(response, model_name):
     return formatted_response
   elif decoder_block in ["qwen3", "qwen3_moe", "qwen3_5"]:
     formatted_response = f"{response}<|im_end|>"
+    return formatted_response
+  elif decoder_block in ["ming"]:
+    formatted_response = f"{response}<|role_end|>"
     return formatted_response
   else:
     return response
@@ -261,6 +286,10 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
+  elif decoder_block in ["ming"]:
+    from maxtext.multimodal.processor_ming import add_extra_tokens_for_ming  # pylint: disable=import-outside-toplevel
+
+    return add_extra_tokens_for_ming(tokens, processor_output)
   else:
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) does not support multimodal inference.")
 
@@ -303,6 +332,10 @@ def get_dummy_audio_shape_for_init(config):
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_audio_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     audio_shape = get_dummy_audio_shape_for_init_qwen3_omni(config)
+  elif config.model_name.startswith("ming"):
+    from maxtext.multimodal.processor_ming import get_dummy_audio_shape_for_init_ming  # pylint: disable=import-outside-toplevel
+
+    audio_shape = get_dummy_audio_shape_for_init_ming(config)
 
   return audio_shape
 
@@ -357,6 +390,10 @@ def get_bidirectional_mask_audio(config, decoder_input_tokens):
 
     # Create bidirectional_mask for audio token merging
     bidirectional_mask_audio = decoder_input_tokens == tokens.audio_pad
+  elif config.model_name in ["ming-3.0-audio-tiny"]:
+    from maxtext.multimodal.processor_ming import AUDIO_PAD_ID  # pylint: disable=import-outside-toplevel
+
+    bidirectional_mask_audio = decoder_input_tokens == AUDIO_PAD_ID
   return bidirectional_mask_audio
 
 
@@ -364,7 +401,7 @@ def downsample_video_mask_to_tokens(video_mask, config):
   """Routes video-mask reduction to the model-specific multimodal processor."""
   if video_mask is None:
     return None
-  if config.model_name.startswith(("qwen3", "cosmos3")):
+  if config.model_name.startswith(("qwen3", "weaver")):
     from maxtext.multimodal.processor_qwen3_omni import (  # pylint: disable=import-outside-toplevel
         downsample_video_mask_to_tokens as downsample_qwen3_video_mask,
     )

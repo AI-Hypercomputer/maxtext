@@ -25,6 +25,7 @@ message during this compilation
 as you would on the target hardware.
 """
 
+import contextlib
 import functools
 import os
 from typing import Sequence
@@ -40,7 +41,6 @@ from jax.sharding import AxisType, Mesh
 from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ShardMode
 from maxtext.configs import pyconfig
-from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.pre_train import train
@@ -53,8 +53,6 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 
 # pylint: disable=too-many-positional-arguments
-
-Transformer = models.transformer_as_linen
 
 
 def validate_config(config):
@@ -172,7 +170,7 @@ def get_shaped_inputs(topology_mesh, config):
   # Collect NNX activation shardings via an abstract forward pass (must run
   # after get_abstract_state, which only traces __init__).
   if config.debug_sharding:
-    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)  # pyrefly: ignore[unbound-name]
+    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)
 
   return (
       shaped_train_args,
@@ -196,9 +194,9 @@ def jit_and_compile(
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
-  # Use both jax.set_mesh (new API) and `with mesh:` (old API) so that drjax,
-  # which reads from pxla.thread_resources.env.physical_mesh, can find the mesh.
-  with jax.set_mesh(mesh), mesh, logical_axis_rules:
+  # `with mesh:` is only needed for drjax (enable_diloco); omit it otherwise to match train.py.
+  mesh_ctx = mesh if config.enable_diloco else contextlib.nullcontext()
+  with jax.set_mesh(mesh), mesh_ctx, logical_axis_rules:
     jitted = jax.jit(
         func,
         in_shardings=in_shardings,
@@ -304,6 +302,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Parse and validate configuration
   config = pyconfig.initialize(argv)
+  jax.config.update("jax_default_prng_impl", config.prng_impl)
   validate_config(config)
 
   # Create target mesh
@@ -343,7 +342,9 @@ def main(argv: Sequence[str]) -> None:
 
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
-    train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
+    train_step_fn = diloco.build_diloco_train_step(
+        config, train_step_partial, outer_params_shardings=state_mesh_shardings.params
+    )
 
     # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
     func_to_compile = train_step_fn
@@ -402,7 +403,12 @@ def main(argv: Sequence[str]) -> None:
     print("Successfully saved compiled object as" f" {config.compiled_trainstep_file}")
   print("Finished train_compile.py successfully!", flush=True)
   print(f"Cost analysis: {compiled.cost_analysis()}")
-  print(f"Memory analysis: {compiled.memory_analysis()}")
+  memory_analysis = compiled.memory_analysis()
+  print(f"Memory analysis: {memory_analysis}")
+  # arg + out + temp - alias overstates HBM use; the compiler's peak is the number to compare against HBM capacity.
+  peak_bytes = getattr(memory_analysis, "peak_memory_in_bytes", None)
+  if peak_bytes:
+    print(f"Peak memory: {peak_bytes / 2**30:.2f} GiB")
 
   # Dump HLO if requested
   if config.dump_hlo:

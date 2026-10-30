@@ -30,7 +30,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -103,8 +103,15 @@ class QuantizationType(str, Enum):
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
+  JAX_MXFP8 = "jax_mxfp8"
+  JAX_MXFP4 = "jax_mxfp4"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+  SERVE_FP8_WEIGHT = "serve_fp8_weight"
+
+
+# The OCP MX recipes that run through jax.nn.scaled_dot_general.
+JAX_MX_QUANTIZATIONS = (QuantizationType.JAX_MXFP8.value, QuantizationType.JAX_MXFP4.value)
 
 
 class TEGroupedGemmQuantizationType(str, Enum):
@@ -247,11 +254,13 @@ ModelName = Literal[
     "deepseek3-671b",
     "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
+    "deepseek3-671b-lineage",
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
     "deepseek4-tiny",
     "deepseek4-284b",
+    "deepseek4-1600b",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -288,16 +297,21 @@ ModelName = Literal[
     "qwen3-vl-2b",
     "qwen3-vl-4b",
     "qwen3-vl-30b-a3b",
-    "cosmos3-nano-reasoner",
-    "cosmos3-super-reasoner",
+    "weaver-mini",
+    "weaver-max",
+    "weaver-mini-diffuser",
     "qwen3-next-80b-a3b",
+    "qwen3.8-flash-next",
+    "qwen3.8-flash-next-mini",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
+    "qwen3.5-9b",
     "qwen3.5-35b-a3b",
     "qwen3.5-35b-a3b-fp8",
     "qwen3.5-35b-fp8",
     "qwen3.5-397b-a17b",
     "qwen3.5-397b-a17b-fp8",
+    "qwen3.8-2.4t-a95b",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -313,6 +327,9 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "glm5.3-flash",
+    "ming-3.0-audio-tiny",
+    "hy4-preview",
 ]
 
 
@@ -328,6 +345,7 @@ class RunInfo(BaseModel):
       description="The name of the run. Checkpoints will be stored under this name.",
   )
   model_name: ModelName = Field("default", description="The name of the model configuration to use.")
+  use_m3_model: bool = Field(False, description="Use the m3 backend for a registered model.")
   override_model_config: bool = Field(False, description="If True, allows overriding model parameters via CLI.")
   override_logical_axis_rules: bool = Field(
       False,
@@ -339,6 +357,12 @@ class RunInfo(BaseModel):
   )
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
+  enable_mllog: bool = Field(False, description="If True, enables MLPerf logging (mllog).")
+  mllog_file: None | PathStr = Field(
+      "",
+      description="Optional filename or path for mllog export in base_output_directory "
+      "(defaults to 'mllog_<data_shuffle_seed>.log').",
+  )
   sharding_strategy: None | Literal["experimental"] = Field(
       None,
       description="Experimental sharding strategy used for some inference configs.",
@@ -509,6 +533,10 @@ class Quantization(BaseModel):
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
   )
+  jax_mx_gradient_mode: Literal["", "mxfp8", "mxfp4"] = Field(
+      "",
+      description="Gradient format for jax_mxfp8 / jax_mxfp4: '' (same as the operands), 'mxfp8' or 'mxfp4'.",
+  )
   unquantized_modules: list[str] = Field(
       default_factory=list,
       description=(
@@ -539,9 +567,61 @@ class Quantization(BaseModel):
           " `mtp_num_layers > 0` and `quantization=fp8_full`."
       ),
   )
+  quantize_router_proj: bool = Field(
+      True,
+      description=(
+          "If True, quantizes the MoE router (gate) projection matmul when quantization is enabled. Targets the"
+          " `GateLogit` module (matching path regex r'.*/gate$'). Default is True for backward compatibility."
+          " Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise. Distinct from"
+          " `float32_gate_logits`, which sets the gate module's compute dtype (operand casts, bias add, score"
+          " function) and does not control quantization."
+      ),
+  )
+  quantize_logits_proj: bool = Field(
+      False,
+      description=(
+          "If True, quantizes the output logits (logits_dense) projection when quantization is enabled."
+          " Targets the `logits_dense` module (matching path regex r'decoder/logits_dense.*'). Default is False."
+          " Only supported with `quantization=fp8_full`, `logits_via_embedding=False`, and `num_vocab_tiling = 1`."
+      ),
+  )
+  logits_proj_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Calibration method for the output logits (logits_dense) projection when `quantize_logits_proj=True`."
+          " If empty (default), inherits `weight_quantization_calibration_method` and"
+          " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
+  logits_proj_bwd_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Backward (gradient) calibration method for the output logits (logits_dense) projection when"
+          " `quantize_logits_proj=True`. Applies to both the activation-gradient and weight-gradient arms. If empty"
+          " (default), inherits `bwd_quantization_calibration_method` and `drhs_grad_quantization_calibration_method`."
+          " Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
+  sa_qproj_bwd_bf16: bool = Field(
+      False,
+      description=(
+          "If True, keeps the backward pass in bfloat16 (unquantized) for self-attention query projection matmuls"
+          " when `quantization=fp8_full`."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
-  quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
+  quantization_local_shard_count: int = Field(
+      -1,
+      description="AQT int8 only: number of local shards along the contraction axis of weight-gradient matmuls, each"
+      " with its own scale. -1 means jax.local_device_count(); 0 leaves the weight-gradient matmul unquantized.",
+  )
+  qwix_bwd_weight_grad_tile_count: PositiveInt = Field(
+      1,
+      description="Qwix: split the contraction axis of each weight-gradient matmul into this many tiles, each with"
+      " its own quantization scale. 1 disables tiling. Tiles are summed after the matmul, so under FSDP tiling"
+      " makes XLA all-reduce the full weight gradient instead of reduce-scattering it. fp8_full ignores it.",
+  )
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
@@ -558,6 +638,15 @@ class Quantization(BaseModel):
   bwd_quantization_calibration_method: str = Field(
       "absmax",
       description="Quantization calibration method used for gradients.",
+  )
+  drhs_grad_quantization_calibration_method: str | None = Field(
+      None,
+      description=(
+          "Calibration for the cotangent in the weight-gradient matmul only (qwix drhs_grad; dW = X^T dY). None "
+          "inherits bwd_quantization_calibration_method. With absmax, this arm's per-channel scale reduces over the "
+          "token axis and therefore across every data shard, including DCN slices; a fixed range (e.g. 'fixed,0.01') "
+          "removes that reduction. The activation-gradient arm (dX = dY W^T) is unaffected."
+      ),
   )
   weight_sparsity_n: int | None = Field(
       None,
@@ -643,6 +732,17 @@ class MTP(BaseModel):
       0,
       description="Specifies which MTP layer is used to calculate metrics.",
   )
+  mtp_reuse_input_embedding: bool = Field(
+      False,
+      description="Reuse the main decoder's token embeddings instead of a second lookup.",
+  )
+  mtp_norm_main_hidden_state: bool = Field(
+      False,
+      description=(
+          "Apply the decoder's final norm to the main hidden state before passing it to MTP, as in"
+          " Megatron-LM where `final_layernorm` precedes the MTP `hnorm`."
+      ),
+  )
 
 
 class LogitsAndLoss(BaseModel):
@@ -655,6 +755,36 @@ class LogitsAndLoss(BaseModel):
   )
   logits_dot_in_fp32: bool = Field(False, description="Use fp32 for the logits dot product for stability.")
   cast_logits_to_fp32: bool = Field(True, description="Whether to cast the final logits to fp32.")
+  tie_lm_head_cotangents: bool = Field(
+      False,
+      description=(
+          "Release the LM head's input and weight cotangents together in the backward pass (an optimization "
+          "barrier), so the [batch, length, vocab] dlogits is not kept alive until the weight-gradient matmul."
+      ),
+  )
+  lm_head_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the "
+          "transpose back into the gradient dot and the weight gradient comes out in the kernel's stored "
+          "axis order. Recovers the weight-gradient reduce-scatter that shard_mode=explicit otherwise loses, "
+          "leaving the stored kernel, its initialization and the arithmetic untouched. No effect under "
+          "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
+      ),
+  )
+  lm_head_fsdp_as_vocab_tp: bool = Field(
+      False,
+      description=(
+          "Shard the untied LM head on its vocab dimension using the FSDP axes (vocab TP over FSDP) instead of "
+          "sharding its embed dimension on FSDP, so that the per-step FSDP all-gather of the head kernel and the "
+          "reduce-scatter of its gradient move onto the hidden state -- reducing collective traffic when "
+          "fsdp*per_device_batch*length < vocab_size (small-batch regimes) -- and the weight gradient needs no "
+          "collective at all. The logits come out sharded on vocab across FSDP, so the loss builds its one-hot "
+          "targets against a vocab-sharded iota rather than gathering them. Requires an untied head without MTP, "
+          "vocab tiling, fp8 head weights, or training_objective=block_diffusion, and a vocab size divisible by "
+          "the combined tensor and FSDP axes. Defaults to False (opt-in)."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
@@ -783,6 +913,13 @@ class MlaAttention(BaseModel):
           " instead of running full projection + jnp.split."
       ),
   )
+  use_mla_absorbed_mqa: bool = Field(
+      False,
+      description=(
+          "Whether to use Absorbed-Query Latent MQA mode in MLA. Trades higher prefill/training FLOPs "
+          "for 57x smaller KV cache footprint and memory bandwidth during autoregressive decode."
+      ),
+  )
 
 
 class CompressedAttention(BaseModel):
@@ -848,6 +985,11 @@ class SplashAttention(BaseModel):
   sa_block_q: int = Field(512, description="Block size for Q in splash attention.")
   sa_block_kv: int = Field(512, description="Block size for KV in splash attention.")
   sa_block_kv_compute: int = Field(512, description="Block size for KV compute in splash attention.")
+  eval_sa_block_q: int = Field(512, description="Block size for Q in splash attention during evaluation.")
+  eval_sa_block_kv: int = Field(512, description="Block size for KV in splash attention during evaluation.")
+  eval_sa_block_kv_compute: int = Field(
+      512, description="Block size for KV compute in splash attention during evaluation."
+  )
   sa_block_q_dkv: int = Field(512, description="Block size for Q_dkv in splash attention.")
   sa_block_kv_dkv: int = Field(512, description="Block size for KV_dkv in splash attention.")
   sa_block_kv_dkv_compute: int = Field(512, description="Block size for KV_dkv compute in splash attention.")
@@ -861,6 +1003,9 @@ class SplashAttention(BaseModel):
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
+  eval_sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention during evaluation.")
+  eval_sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention during evaluation.")
+  eval_sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention during evaluation.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
   ring_scan_unroll: NonNegativeInt = Field(
       1,
@@ -871,10 +1016,22 @@ class SplashAttention(BaseModel):
   )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
+  sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
+  sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
+  sa_qk_diag_grid: int = Field(2, description="Maps to qk_diag_grid in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
   local_sa_block_kv_compute: int | None = Field(None, description="Block size for KV compute in local splash attention.")
+  eval_local_sa_block_q: int | None = Field(
+      None, description="Block size for Q in local splash attention during evaluation."
+  )
+  eval_local_sa_block_kv: int | None = Field(
+      None, description="Block size for KV in local splash attention during evaluation."
+  )
+  eval_local_sa_block_kv_compute: int | None = Field(
+      None, description="Block size for KV compute in local splash attention during evaluation."
+  )
   local_sa_block_q_dkv: int | None = Field(None, description="Block size for Q_dkv in local splash attention.")
   local_sa_block_kv_dkv: int | None = Field(None, description="Block size for KV_dkv in local splash attention.")
   local_sa_block_kv_dkv_compute: int | None = Field(
@@ -888,6 +1045,15 @@ class SplashAttention(BaseModel):
   local_sa_q_layout: str | None = Field(None, description="Layout for Q in local splash attention.")
   local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
   local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
+  eval_local_sa_q_layout: str | None = Field(
+      None, description="Layout for Q in local splash attention during evaluation."
+  )
+  eval_local_sa_k_layout: str | None = Field(
+      None, description="Layout for K in local splash attention during evaluation."
+  )
+  eval_local_sa_v_layout: str | None = Field(
+      None, description="Layout for V in local splash attention during evaluation."
+  )
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
@@ -903,6 +1069,38 @@ class SplashAttention(BaseModel):
       description=(
           "Experimental flag: If enabled, the K tensor in splash attention is"
           " quantized to jnp.float8_e4m3fn, without scaling factors."
+      ),
+  )
+  sa_dkv_reuse_scaled_q: bool = Field(
+      False,
+      description=(
+          "Experimental flag (maps to SplashConfig.dkv_reuse_scaled_q). With sa_use_base2_exp=True, the"
+          " fused dkv backward kernel normally keeps two copies of q live (LOG2E-scaled q for logits and"
+          " unscaled q for dK). When True, dkv reuses the LOG2E-scaled q for the dK matmul and divides dK"
+          " by LOG2E, keeping only one live q copy. Works with bf16 or fp8 q across all attention types."
+          " Subsumed by sa_q_prescaled_log2e; prefer sa_dkv_reuse_scaled_q when q is bf16 or on paths where"
+          " sa_q_prescaled_log2e is not supported (non-MLA or use_mla_absorbed_mqa=True)."
+      ),
+  )
+  sa_q_prescaled_log2e: bool = Field(
+      False,
+      description=(
+          "Experimental flag (maps to SplashConfig.q_prescaled_log2e). With sa_use_base2_exp=True and"
+          " experimental_sa_quant_q_fp8=True, in-kernel LOG2E scaling rounds q to fp8 a second time after"
+          " MaxText's softmax_scale cast. When True, attention_mla.py folds LOG2E into the f32"
+          " softmax_scale multiply before the fp8 cast (single fp8 rounding), and the kernel skips internal"
+          " q scaling in fwd/dq/dkv and divides dq and dk by LOG2E. Strictly subsumes sa_dkv_reuse_scaled_q"
+          " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
+      ),
+  )
+  sa_ignore_segment_ids: bool = Field(
+      False,
+      description=(
+          "Do not pass decoder segment ids to splash attention, which skips the"
+          " per-block segment mask. Only valid when every row is a single"
+          " segment: dataset_type='c4_mlperf' with stream chunking for both"
+          " train and eval. Requires attention='flash' and attention_type in"
+          " ('global', 'mla', 'local_sliding', 'chunk')."
       ),
   )
   use_max_logit_estimate: int = Field(
@@ -935,9 +1133,63 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
-  retry_when_tokens_dropped: bool = Field(
+  eval_ragged_buffer_factor: float = Field(
+      -1.0,
+      description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
+  )
+  moe_dropless_fallback: Literal["step", "layer"] | None = Field(
+      None,
+      description=(
+          "What to do when the ragged buffer (ragged_buffer_factor > 0) would drop tokens. None: drop them."
+          " 'step': roll the step's update back in-graph and replay the whole train step with a dropless buffer."
+          " 'layer': per MoE layer, calculate the overflow from the router's top-k and take a chunked dropless"
+          " branch (lax.cond) for that layer only; no step replay. 'step' requires use_ring_of_experts=True;"
+          " 'layer' also supports the ragged all-to-all path."
+      ),
+  )
+  retry_dropless_first_steps: int = Field(
+      0,
+      description=(
+          "With moe_dropless_fallback='step', run the first N steps after the loop's start step (i.e. steps with "
+          "step - start_step < N; equal to step < N when training starts at step 0) directly with the dropless "
+          "program, skipping the attempt with the normal program. 0 = off."
+      ),
+  )
+  first_phase_ragged_buffer_factor: float = Field(
+      0.0,
+      description=(
+          "With retry_dropless_first_steps=N > 0, run the first N steps with a precompiled first-phase program whose "
+          "RoutedMoE modules use this ragged buffer factor (instead of the dropless program); a first-phase step that "
+          "still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off."
+      ),
+  )
+  log_required_ragged_buffer_factor: bool = Field(
       False,
-      description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
+      description=(
+          "Probe: log per train step and per MoE layer the minimum ragged_buffer_factor that would have avoided drops "
+          "(max over shards of the tokens routed to a shard / the per-shard buffer at factor 1). Adds one scalar "
+          "max all-reduce per MoE layer and token chunk, and a device-to-host fetch per step."
+      ),
+  )
+  warmup_programs_in_init: bool = Field(
+      False,
+      description=(
+          "After the setup precompiles and before init_stop/run_start are logged, execute each precompiled train "
+          "program (normal, first-phase, dropless) and eval program (eval, eval dropless) once through its jit on a "
+          "synthetic batch (PRNG token ids, never the dataset), discard the outputs so parameters, optimizer state "
+          "and routed biases are unchanged, block on completion and run a cross-host barrier. Moves the first "
+          "execution (and the hosts' arrival skew) out of the scored window. Skipped when the programs are not "
+          "precompiled (compiled_trainstep_file or AutoPGLE)."
+      ),
+  )
+  warmup_skip_train_dropless: bool = Field(
+      False,
+      description=(
+          "Requires warmup_programs_in_init=True. Skips the train_dropless program in that warmup (other programs are "
+          "still warmed). Its warmup runs on a copy of the donated train state, so HBM holds two state copies plus "
+          "the dropless program reservation, which can OOM. Use only when that warmup OOMs: skipping moves the "
+          "dropless program's first load and execution cost into the first dropless replay, if any."
+      ),
   )
   num_moe_token_chunks: PositiveInt = Field(
       1,
@@ -947,6 +1199,67 @@ class MoEGeneral(BaseModel):
           " tokens along the sequence dimension so each chunk's EP all-gather /"
           " reduce-scatter overlaps the previous chunk's GMM compute. Requires"
           " use_ring_of_experts=True."
+      ),
+  )
+  moe_accumulate_chunk_wgrad: bool = Field(
+      False,
+      description=(
+          "With num_moe_token_chunks>1, chain the expert weights through the token chunks: chunk 0 gathers and"
+          " quantizes them once and later chunks reuse the result. In the backward pass each chunk's weight-gradient"
+          " tgmm accumulates in place onto the later chunks' gradient (tgmm_v2 partial_sum) instead of"
+          " materializing and summing one gradient per chunk. Requires use_tokamax_gmm=True, use_gmm_v2=True,"
+          " num_moe_emb_chunks=0 and prefuse_moe_weights=False."
+      ),
+  )
+  moe_accumulate_wi_dlhs: bool = Field(
+      False,
+      description=(
+          "Route the routed-MoE wi_1 GMM input through the wi_0 GMM so that in the backward pass the wi_1 DLHS"
+          " is accumulated in place into the wi_0 DLHS (gmm_v2 partial_sum) instead of summed by a separate add."
+          " Also folds per-tensor DLHS scales into the gmm_v2 kernel for all MoE GMMs. Requires"
+          " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      ),
+  )
+  moe_flat_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Store every routed-expert weight as a 2D [num_experts * rows, cols] matrix whose first dim is"
+          " sharded over (expert, fsdp) instead of the 3D [E, rows, cols] layout sharded (expert | fsdp | -)."
+          " The per-device FSDP shard is then a contiguous, tile-aligned row block at every FSDP size, the fp8"
+          " weight all-gather / weight-grad reduce-scatter run on the major dim, and the gathered weight is a free"
+          " bitcast of the [E, rows, cols] operand the gmm kernels expect (no relayout copies, no 7/8 sublane"
+          " padding). Requires shard_embed_moe_on_fsdp with fixed weight calibration (explicit QAG) and the"
+          " tokamax gmm_v2 custom-VJP path. 3D checkpoints loaded via load_parameters_path are converted to the flat"
+          " layout on load; full-state resumes must come from a flat checkpoint."
+      ),
+  )
+  moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
+      False,
+      description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
+  )
+  moe_bwd_prequant_before_unsort: bool = Field(
+      False,
+      description=(
+          "Fuse the TC unsort-reduce into the wo GMM custom VJP so backward quantization runs on the smaller"
+          " [N_tokens, D // 128, 128] cotangent before the TC unsort-gather into the expert buffer."
+          " With quantization, needs fixed weight, act and bwd calibration (per-tensor scales applied in token order)."
+      ),
+  )
+  moe_combine_bwd_direct_qarray: bool = Field(
+      False,
+      description=(
+          "With moe_bwd_prequant_before_unsort=True, fuse the EP combine psum_scatter into the wo GMM custom VJP"
+          " so backward quantizes the local cotangent once before the EP all-gather and TC unsort-gather."
+          " Incompatible with moe_quantize_combine_bwd_method. Each EP shard scales its cotangent before the all-gather, so"
+          " the fixed weight, act and bwd calibration required by moe_bwd_prequant_before_unsort must match across"
+          " shards."
+      ),
+  )
+  moe_3d_dlhs_partial_sum: bool = Field(
+      False,
+      description=(
+          "Skip redundant zero-initialization in 3D DLHS gmm_v2 when accumulating onto an existing 3D partial_sum"
+          " (e.g. wi_0 DLHS accumulating onto wi_1 DLHS)."
       ),
   )
   moe_chunk_barrier: bool = Field(
@@ -962,6 +1275,16 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_log_max_load_ratio: bool = Field(
+      False,
+      description=(
+          "Debug only. Log learning/moe_max_load_ratio{,_mean}: the max (mean) over MoE layers of"
+          " the largest (tokens routed to an expert shard) / (perfectly balanced load) over token"
+          " chunks and expert shards. A step overflows the ragged buffer iff the max exceeds"
+          " ragged_buffer_factor (up to buffer rounding). Requires sparse_matmul=True,"
+          " te_moe_block=False, use_ring_of_experts=True and use_ragged_sort=True."
+      ),
+  )
 
   moe_expert_input_dim: int = Field(
       -1,
@@ -973,9 +1296,35 @@ class MoEGeneral(BaseModel):
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  moe_use_megatron_seq_aux_loss: bool = Field(
+      False,
+      description=(
+          "When True, sigmoid and Sqrt(Softplus) routers (routed_score_func='sigmoid' or 'sqrtsoftplus', with"
+          " te_moe_block=False) use Megatron-LM's sequence-wise auxiliary load-balancing loss (fp32 per-token"
+          " normalized affinity scores,"
+          " token fractions from an unbiased, ungrouped top-k over the full sequence, summed over MoE layers)."
+          " When False (default), these routers use the Switch Transformer-style loss averaged over MoE layers."
+      ),
+  )
   use_custom_sort_vjp: bool = Field(
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
+  )
+  router_topk_matmul_vjp: bool = Field(
+      False,
+      description=(
+          "DeepSeek routing: take the top-k routing weights with a custom VJP whose backward builds the dense"
+          " [..., num_experts] gradient as a one-hot compare-select-sum over the k slots, instead of the scatter-add"
+          " that jnp.take_along_axis transposes to. Forward and gradient values are unchanged."
+      ),
+  )
+  moe_topk_before_ep_all_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts: run top-k on the local tokens and all-gather the top-k weights and expert ids"
+          " instead of the full router logits. The token sort still runs after the all-gather."
+          " Ignored with forced, hash or random routing."
+      ),
   )
   use_ring_of_experts: bool = Field(
       False,
@@ -984,6 +1333,17 @@ class MoEGeneral(BaseModel):
   te_moe_block: bool = Field(
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
+  )
+  te_moe_disable_cudnn_gmm_fusion: bool = Field(
+      False,
+      description=(
+          "Force te_moe.moe(..., use_cudnn_fusion=False). When false, MaxText does not pass use_cudnn_fusion "
+          "and uses TransformerEngine's default."
+      ),
+  )
+  te_moe_quantize_before_fsdp_all_gather: bool = Field(
+      False,
+      description="Quantize TE MoE weight shards before the FSDP all-gather; false quantizes after gathering.",
   )
   te_ep_overflow_check_every_n_steps: PositiveInt = Field(
       20,
@@ -1020,9 +1380,72 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
   )
+  moe_quantize_combine_bwd_method: str | None = Field(
+      "",
+      description=(
+          "Quantization method for Token Combine backward All-Gather. "
+          "'' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2; "
+          "'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
+      ),
+  )
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
+  moe_tc_ragged_sort: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts ragged sort/unsort on TensorCore (DMA Pallas kernels ported from lineage)"
+          " instead of the SparseCore ragged_gather / ragged_gather_reduce kernels. Requires"
+          " use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0."
+      ),
+  )
+  moe_tc_ragged_gather_block_size: int = Field(1024, description="Rows per grid step of the TC ragged gather.")
+  moe_tc_ragged_reduce_block_size: int = Field(896, description="VMEM rows per block of the TC ragged gather-reduce.")
+  moe_tc_ragged_mask_padding: bool = Field(
+      True, description="Zero TC ragged-gather buffer rows past the valid count (the kernel leaves them uninitialized)."
+  )
+  moe_tc_ragged_weights_on_activation: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort: multiply routing weights into the expert activation (buffer, mlp)"
+          " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
+      ),
+  )
+  moe_tc_ragged_flatten_block_size: int = Field(
+      0,
+      description=(
+          "If > 0, relayout (N, D/128, 128) <-> (N, D) around the TC ragged kernels with a Pallas kernel over"
+          " only the valid rows (lineage ragged_flatten), this many rows per grid step. 0 uses XLA reshapes."
+      ),
+  )
+  moe_tc_ragged_3d_gmm: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort (tokamax gmm_v2): keep the sorted token buffer in the TC kernels' 3D layout"
+          " (buffer, emb // 128, 128). The wi gmm_v2 / tgmm_v2 kernels consume it and the wo gmm_v2 produces it"
+          " directly (relayout in VMEM), removing the (N, D/128, 128) <-> (N, D) relayouts around the sorted"
+          " buffer. Embed-dim GMM tiles must be multiples of 128 that divide the embed dim; tiles that are not"
+          " multiples of 1024 (e.g. 3584 / 1792) DMA whole (emb // 128, 128) slabs and relayout the window in VMEM."
+      ),
+  )
+  moe_tc_ragged_3d_dispatch: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort and moe_tc_ragged_3d_gmm under ring of experts: reshape the local tokens to"
+          " (batch, seq, emb // 128, 128) before the expert-parallel all-gather, and keep the TC unsort output and"
+          " the combine reduce-scatter in that layout (only the local result is reshaped back). This removes the"
+          " full-size (N, D/128, 128) <-> (N, D) relayouts of the gathered tokens and of the combine output, in"
+          " both the forward and the backward pass. Raises if it cannot apply (e.g. emb not a multiple of 128)."
+      ),
+  )
+  moe_tc_window_routing: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort: keep only this shard's [start, start + cap) window of the sorted slots (so the "
+          "combine metadata sorts cap instead of N * topk slots), skip the unused inverse permutation, use uint32 "
+          "bit-packed sorts, and gather buffer row weights with unique_indices=True (no backward scatter-sort)."
+      ),
   )
   moe_use_direct_token_gather: bool = Field(
       False,
@@ -1066,6 +1489,21 @@ class MoEGeneral(BaseModel):
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
   )
+  moe_pin_sparse_core_ep_all_gathers: bool = Field(
+      False,
+      description="Pin only the ring-of-experts EP all-gathers (dispatch tokens and routing inputs) to a SparseCore"
+      " (OR-ed with moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_fsdp_all_gathers: bool = Field(
+      False,
+      description="Pin only the MoE FSDP weight all-gathers to a SparseCore (OR-ed with"
+      " moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_fsdp_all_gathers_fwd_only: bool = Field(
+      False,
+      description="When the MoE FSDP weight all-gathers are pinned, pin only the forward all-gather; its transpose"
+      " (the weight-gradient reshard) runs outside compute_on, as with the pin off.",
+  )
   moe_fsdp_all_gather_sparse_core_id: int = Field(
       0,
       description="SparseCore ID to pin MoE FSDP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
@@ -1097,13 +1535,35 @@ class MoEGeneral(BaseModel):
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
   )
+  return_routed_experts: bool = Field(
+      False,
+      description=(
+          "Record each MoE layer's routing as a `selected_experts` intermediate, returned by the "
+          "decoder as `expert_indices`. Required to capture routing from inference for router replay."
+      ),
+  )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
+      description=(
+          "Controls the accumulation precision of the MoE combine reduction after GMM (the weighted sum of expert"
+          " outputs by their routing weights). When True, casts operands to float32 before the combine"
+          " einsum and accumulates in float32 before casting back to the model dtype."
+      ),
   )
   float32_gate_logits: bool = Field(
       False,
-      description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
+      description=(
+          "Whether to run the MoE gate (router) module before GMM in fp32 for numerical stability and routing precision."
+          " This is a compute dtype, not a storage dtype: the gate kernel is still stored in `weight_dtype` and"
+          " is cast at use. When True it sets the `GateLogit` compute dtype, which (1) casts the gate input"
+          " activations and kernel before the projection matmul, (2) makes the emitted logits fp32, so downstream"
+          " consumers such as top-k selection and the load balance loss see fp32 values, and (3) applies to the"
+          " routed bias add and the score function. If a decoder block supplies separate gate inputs, those are"
+          " cast as well; for gemma4 it additionally sets the router norm dtype and the router scale cast. It"
+          " does not control quantization -- see `quantize_router_proj`, which governs whether the gate"
+          " projection matmul is quantized. Setting both is rejected at config init, because quantizing the"
+          " projection discards the fp32 operand precision."
+      ),
   )
   prefuse_moe_weights: bool = Field(
       False,
@@ -1125,7 +1585,9 @@ class MoEGeneral(BaseModel):
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
     """Ensure that only one MoE FSDP sharding strategy is active at a time."""
-    if self.moe_pin_sparse_core_all_gathers and self.moe_fsdp_use_two_stage_all_gather:
+    if (
+        self.moe_pin_sparse_core_all_gathers or self.moe_pin_sparse_core_fsdp_all_gathers
+    ) and self.moe_fsdp_use_two_stage_all_gather:
       raise ValueError(
           "SparseCore pinning for MoE all-gathers (`moe_pin_sparse_core_all_gathers=True`) "
           "is not supported with `moe_fsdp_use_two_stage_all_gather=True`."
@@ -1142,7 +1604,10 @@ class MoEGeneral(BaseModel):
 class MoEKernels(BaseModel):
   """Configuration for MoE-specific kernels like Megablox."""
 
-  megablox: bool = Field(True, description="Whether to use Megablox kernels for MoE.")
+  megablox: bool = Field(
+      True,
+      description="Whether to use Megablox kernels for MoE. Automatically disabled when hardware='cpu'.",
+  )
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
   wi_tile_fwd_batch_seq: int = Field(
       512,
@@ -1150,6 +1615,16 @@ class MoEKernels(BaseModel):
   )
   wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
   wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  eval_wi_tile_fwd_batch_seq: int = Field(
+      512,
+      description="evaluation forward pass tiling dimension for batch/sequence in GMM for wi.",
+  )
+  eval_wi_tile_fwd_embed_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for embedding in GMM for wi."
+  )
+  eval_wi_tile_fwd_mlp_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for MLP in GMM for wi."
+  )
   wi_tile_dlhs_batch_seq: int = Field(
       512,
       description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wi.",
@@ -1168,6 +1643,16 @@ class MoEKernels(BaseModel):
   )
   wo_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wo.")
   wo_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wo.")
+  eval_wo_tile_fwd_batch_seq: int = Field(
+      512,
+      description="evaluation forward pass tiling dimension for batch/sequence in GMM for wo.",
+  )
+  eval_wo_tile_fwd_embed_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for embedding in GMM for wo."
+  )
+  eval_wo_tile_fwd_mlp_dim: int = Field(
+      1024, description="evaluation forward pass tiling dimension for MLP in GMM for wo."
+  )
   wo_tile_dlhs_batch_seq: int = Field(
       512,
       description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wo.",
@@ -1198,6 +1683,16 @@ class MoEKernels(BaseModel):
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
 
+  use_te_grouped_gemm: bool = Field(
+      False,
+      description=(
+          "Whether to use TransformerEngine grouped_dense for sparse MoE grouped GEMM on GPU. "
+          "Incompatible with megablox and use_tokamax_gmm; quantization is not supported yet. "
+          "Requires one local device per process: TE v1 copies group_sizes D2H and deadlocks "
+          "in single-process multi-device shard_map."
+      ),
+  )
+
   use_gmm_v2_heuristic_tiling: bool = Field(
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
@@ -1213,7 +1708,20 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  defer_small_all_reduces: bool = Field(
+      False,
+      description="Ring-of-experts sparse_matmul only: drop the per-layer all-reduces of the routed-bias expert counts"
+      " from the scanned layer. Each MoE layer emits its local partial counts, the scan stacks them, and loss_fn"
+      " reduces the stacked array once after the layer loop (one all-reduce). Same sums as the per-layer path. (The"
+      " token-overflow flag of moe_dropless_fallback='step' is already reduced once per step without this flag.)",
+  )
   log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
+  log_step_diagnostics: bool = Field(
+      False,
+      description="Append to every training step's log line: pre-clip and post-clip global grad norm, param norm,"
+      " max |grad|, the routed-bias checksum (sum over MoE layers of sum(bias)), the number of nonzero routed-bias"
+      " update entries and the MoE overflow flag.",
+  )
   mlp_bias: bool = Field(
       False,
       description="Whether to add a learnable bias for MLP matmul, "
@@ -1233,6 +1741,61 @@ class DeepSeekMoE(BaseModel):
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
   )
+  use_lineage: bool = Field(
+      False,
+      description="Whether to use Lineage DeepSeek-V3 execution.",
+  )
+  lineage_quantization: Literal[
+      "none",
+      "fp8_full",
+      "fp8_full_splash_qk",
+      "fp8_full_splash_qk_e3",
+      "fp8_full_combine_per_hop",
+      "fp8_full_splash_qk_e3_combine_per_hop",
+  ] = Field(
+      "none",
+      description="Quantization of the Lineage sparse-layer routed experts and MLA. Only used if use_lineage is True.",
+  )
+
+  @classmethod
+  def _lineage_quantization_none(cls, v: Any) -> Any:
+    """pyconfig converts the string "none" to None; map it back."""
+    return "none" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues
+  _validate_lineage_quantization = field_validator("lineage_quantization", mode="before")(_lineage_quantization_none)
+  lineage_expert_permutation: None | Literal["lpt"] = Field(
+      None,
+      description=(
+          "Per-layer expert permutation algorithm for the Lineage sparse and MTP layers (see `dsv3.dsv3`'s"
+          " `expert_permutation`). None disables expert shuffling. 'lpt' computes each step's permutation on device"
+          " from the previous step's per-expert token counts with `dsv3_expert_shuffle.lpt_expert_permutation`; the"
+          " first step uses the identity."
+      ),
+  )
+  lineage_diag_band_skip: bool = Field(
+      True,
+      description="Enable row-band diagonal skip in Lineage Splash attention.",
+  )
+  lineage_dq_reduction_steps: int = Field(
+      1,
+      description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
+  )
+
+
+class Ming(BaseModel):
+  """Configuration specific to inclusionAI Ming (BailingMoeV3) models with Kimi Delta Attention."""
+
+  kda_lower_bound: float = Field(
+      -5.0,
+      description="Lower bound of the KDA forget gate in log space: g = lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).",
+  )
+  ming_audio_chunk_size: int = Field(
+      3000, description="Number of mel frames per independent whisper audio-encoder chunk (30 s at 100 frames/s)."
+  )
+  ming_norm_audio_embeds: bool = Field(
+      True, description="L2-normalize the projected audio embeddings (norm_query_embeds)."
+  )
 
 
 class Qwen3Next(BaseModel):
@@ -1251,7 +1814,70 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  gdn_mamba_block_size: int = Field(
+      0,
+      description=(
+          "Tokens per mamba block when serving under vLLM with mamba prefix caching "
+          '("align" mode). Set by the vLLM adapter from cache_config.mamba_block_size; '
+          "0 means the recurrent state is addressed by a resident per-request slot "
+          "instead of by block id."
+      ),
+  )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+
+
+class Qwen3_8FlashNext(BaseModel):
+  """Configuration specific to Qwen3.8-Flash-Next models."""
+
+  hc_count: int = Field(4, description="Number of streams in hyper-connections.")
+  hc_lowrank: int = Field(320, description="Bottleneck dimension in hyper-connections.")
+  index_n_heads: int = Field(4, description="Number of query heads in QSA Indexer.")
+  index_kv_heads: int = Field(1, description="Number of key/value heads in QSA Indexer.")
+  index_head_dim: int = Field(128, description="Head dimension for QSA Indexer.")
+  index_select_block_size: int = Field(4, description="Block compression size for QSA Indexer.")
+  index_select_budget: int = Field(2048, description="Token budget for QSA Indexer.")
+  gdn_output_gate_activation: str = Field(
+      "sigmoid", description="Output gate activation function for GDN linear attention."
+  )
+  gdn_chunk_inverse: Literal["solve", "block_doubling"] = Field(
+      "block_doubling",
+      description=(
+          "Qwen3.8 GDN chunk-matrix inverse. 'block_doubling' (default) builds the exact inverse from MXU matmuls"
+          " via bottom-up block doubling (TPU-friendly; stable in float32 even for correlated keys with weak decay);"
+          " 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
+      ),
+  )
+  qsa_indexer_mask: Literal["gather", "reshape"] = Field(
+      "gather",
+      description=(
+          "Qwen3.8 QSA indexer mask construction: 'gather' uses per-token take_along_axis, 'reshape' uses"
+          " broadcast/reshape expansion plus a gather-free one-hot contraction when segment ids are present."
+      ),
+  )
+  qsa_attention_kernel: Literal["dense", "flash"] = Field(
+      "dense",
+      description=(
+          "Qwen3.8 QSA attention kernel: 'dense' materializes the score matrix, 'flash' dispatches through"
+          " Tokamax Splash Attention (requires max_target_length <= index_select_budget)."
+      ),
+  )
+  use_ple_layer: bool = Field(False, description="Whether to use Per-Layer Embedding (PLE).")
+  ple_layer_id: int = Field(
+      1, description="0-indexed layer where PLE is applied (corresponds to HF 1-indexed ple_layer_ids=[2])."
+  )
+  ple_embed_dim: int = Field(
+      2560, description="Embedding dimension of the PLE layer (HF ple_embed_dim; HF defaults it to hidden_size)."
+  )
+  ple_conv_kernel_size: int = Field(4, description="Kernel size for PLE 1D convolution.")
+  ngram_size: int = Field(3, description="N-gram window size for PLE.")
+  heads_per_ngram: int = Field(8, description="Number of hash heads per n-gram in PLE.")
+  ngram_vocab_size_base: int = Field(20_000_000, description="Base n-gram vocabulary size for PLE.")
+  make_ngram_vocab_size_divisible_by: int = Field(
+      128, description="Alignment divisor for per-head n-gram vocab sizes in PLE."
+  )
+  split_ngram_parts: int = Field(128, description="Number of embedding shards for PLE.")
+  ple_seed: int = Field(1234, description="Hash seed for PLE n-gram hashing.")
+  ple_eos_token_id: int = Field(248044, description="EOS token ID used for PLE n-gram boundary resets (HF eos_token_id).")
 
 
 # ----------------------------------------------------------------------------
@@ -1306,6 +1932,13 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     # Vocab Weights
     ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
     ["embed_vocab", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # The four rules below are only used when lm_head_fsdp_as_vocab_tp is on; they rotate the
+    # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+    # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+    ["activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]],
+    ["activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]],
+    ["vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]],
+    ["embed_vocab_replicated", []],
     # ==========================================
     # Attention
     # ==========================================
@@ -1350,6 +1983,8 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["mlp_moe", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
     ["embed_moe", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
     ["embed_moe", ["fsdp", "context", "context_usp_ulysses"]],
+    ["embed_router", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
+    ["embed_router", ["fsdp", "context", "context_usp_ulysses"]],
     # ==========================================
     # Standard MLP / Dense Layers / Model Structure
     # ==========================================
@@ -1441,6 +2076,9 @@ class HardwareAndMesh(BaseModel):
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
+  prng_impl: Literal["unsafe_rbg", "rbg", "threefry2x32"] = Field(
+      "unsafe_rbg", description="JAX default PRNG implementation used for training."
+  )
   remove_size_one_mesh_axis_from_type: bool = Field(
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
@@ -1490,12 +2128,64 @@ class LayoutAndSharding(BaseModel):
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
   )
+  dense_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the per-layer attention and MLP projection dots inside a jax.sharding.auto_axes region so that "
+          "XLA folds the transpose back into the gradient dot and each weight gradient comes out in its kernel's "
+          "stored axis order. This is the in-loop counterpart of lm_head_weight_grad_in_kernel_order and, like it, "
+          "None means on wherever it can act: shard_mode=explicit, where the Sharding custom-call on every dot "
+          "output blocks that fold. Without it explicit is 0.33%-1.48% slower than auto at every measured layer "
+          "count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere "
+          "(docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels, their initialization "
+          "and the arithmetic are untouched, so gradients are bit-identical to the default rule. No effect under "
+          "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
+      ),
+  )
+  save_fsdp_gathered_weights: bool = Field(
+      False,
+      description=(
+          "Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the "
+          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: "
+          "auto and explicit get the same answer to within half a point. Whether it is a win depends on how much of "
+          "the backward pass is FSDP all-gather rather than activation traffic, so it has a sign condition: measured "
+          "on v5p with the production SparseCore libtpu flags it is worth -3% to -8% at up to 2,048 tokens per "
+          "device-step (mixtral-8x7b -8.3%, llama2-7b -5.2%, qwen3-8b -4.7%, and -6.3% at base_emb_dim 4096), but it "
+          "costs +0.5% to +1.0% above ~4,096 tokens per device-step and regresses the gemma2/gemma3 family at any "
+          "size, whose 256K-vocab logits dominate the step. See "
+          "docs/guides/optimization/shard_mode_performance.md section 4.11 for the full table and the rule. Off by "
+          "default for that reason and because the residuals grow HLO temporaries by 25%-75% (deepseek2-16b runs "
+          "without it and OOMs with it); measure both step time and peak HBM before enabling. Numerics are "
+          "unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
+      ),
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
   )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
   compile_xla_flags: str = Field("", description="Compiler options for compilation only.")
+  prefetch_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
+          " both the forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer;"
+          " gathered weights are never saved and are re-gathered for the backward pass. Has no effect when no"
+          " FSDP mesh axis spans more than one device. See docs/guides/optimization/fsdp_prefetch.md."
+      ),
+  )
+  prefetch_fsdp_defer_grad_reduce_scatter: bool = Field(
+      False,
+      description=(
+          "With prefetch_fsdp_weights and shard_mode=explicit, issue each layer's weight-gradient"
+          " reduce-scatters at the start of the next layer's backward step, tagged for XLA's FSDP scheduler,"
+          " which runs them on the SparseCore dedicated to FSDP collectives"
+          " (--xla_tpu_explicit_fsdp_dedicated_sparse_core_id) and overlaps them with that layer's backward."
+          " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they run untagged"
+          " on the other SparseCore and complete within their own layer's backward step. For inhomogeneous"
+          " blocks prefetched per sub-layer, the reduce-scatters are deferred to the next sub-layer's step."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):
@@ -1547,6 +2237,30 @@ class PipelineParallelism(BaseModel):
       False,
       description="Enable weight prefetching for circular pipeline parallelism.",
   )
+  pipeline_bsw_no_carry: bool = Field(
+      True,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: re-gather the previous repeat's weights in every repeat instead of"
+          " carrying the gathered buffer across repeats (saves num_repeats x one repeat of gathered weights in HBM,"
+          " costs one extra FSDP all-gather / reduce-scatter per repeat). Numerically identical. False carries the"
+          " buffer."
+      ),
+  )
+  pipeline_bsw_phase_split: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: run the iterations in which all stages read the current repeat's weights"
+          " without the per-iteration buffer-slot select (no weight copy, one gradient accumulator). Helps when"
+          " num_pipeline_microbatches >> num_stages. Numerically identical up to summation order."
+      ),
+  )
+  pipeline_bsw_in_compute_dtype: bool = Field(
+      False,
+      description=(
+          "With pipeline_fsdp_ag_per_repeat: hold the prefetched weights and their per-repeat gradient accumulation in"
+          " `dtype` instead of `weight_dtype`. Changes numerics; halves the prefetch all-gather bytes and memory."
+      ),
+  )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
   num_pipeline_repeats: int = Field(
       -1,
@@ -1595,9 +2309,37 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second part of a gated MLP's output.",
   )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed (post-dispatch, expert-sorted) MoE input plus its small "
+          "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
+          "does not re-run the dispatch token all-gather and ragged sort; the expert GMMs re-run "
+          "from the saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
+  moe_routing_maps: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the MoE routing maps (top-k expert ids, ragged-sort permutations, sorted token indices "
+          "and group sizes)."
+      ),
+  )
+  # TODO: Update to moe_tc_routing_weights.
+  moe_tc_routing_checkpoint: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the TC per-buffer-row routing weights (moe_tc_ragged_sort with "
+          "moe_tc_ragged_weights_on_activation); 'device' saves them so the backward skips the weight gather."
+      ),
+  )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
+  )
+  te_moe_dispatch_remat_location: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for TE EP dispatch outputs: recompute, save on device, or offload.",
   )
   moe_mlpwi_0: RematLocation = Field(
       RematLocation.REMAT,
@@ -2066,6 +2808,51 @@ class TrainingLoop(BaseModel):
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
   max_inflight_computations: int = Field(2, description="Maximum number of inflight computations on device.")
+  block_state_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: jax.block_until_ready(state), evaluate the learning-rate schedule once "
+          "(compiles its small eager ops) and run a cross-host barrier. Does not touch the dataset."
+      ),
+  )
+  warm_input_reshard_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: device_put an all-zero synthetic batch through the same host->global->input "
+          "sharding path as the data loader, so the reshard program is compiled outside the timer. No dataset access."
+      ),
+  )
+  warm_eval_input_reshard_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: device_put an all-zero synthetic eval batch through the eval loop's "
+          "host->global->eval-input sharding path (the same jax.device_put the eval loop performs), so the eval "
+          "reshard program is compiled outside the timer. No dataset access."
+      ),
+  )
+  eval_cache_prefill_in_background: bool = Field(
+      False,
+      description=(
+          "Right after run_start (inside the timed region): a daemon thread iterates the eval tf.data pipeline once "
+          "so its in-memory cache() is complete before the first eval; the eval file reads then overlap training "
+          "steps instead of being paid serially inside the first eval. tf.data (c4_mlperf) eval loaders only."
+      ),
+  )
+  train_shard_in_read: bool = Field(
+      False,
+      description=(
+          "c4_mlperf train split: shard by file in tfds (host i opens files i, i+n, ...) instead of reading the full "
+          "stream and keeping every n-th example. Needs at least as many files as data-loading hosts."
+      ),
+  )
+  train_interleave_cycle_length: int = Field(
+      -1,
+      description=(
+          "c4_mlperf train split: tfds interleave_cycle_length, i.e. number of files read concurrently per host "
+          "(-1 = tfds default of 16). With train_shard_in_read, keep this below the files per host so that "
+          "data_shuffle_seed changes which files are read first."
+      ),
+  )
 
 
 class ManifoldConstrainedHyperConnections(BaseModel):
@@ -2103,11 +2890,23 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       1024,
       description=("Feature block size for backward pass of MHC Pallas kernel."),
   )
+  te_mhc: bool = Field(
+      False,
+      description=(
+          "Use Transformer Engine's fused Triton kernels for Sinkhorn mHC on NVIDIA GPUs."
+          " Requires mhc_expansion_rate=4 and enable_mhc_lite=False."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
     if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
       raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
+    if self.te_mhc:
+      if self.mhc_expansion_rate != 4:
+        raise ValueError(f"`te_mhc=True` requires `mhc_expansion_rate=4`, got {self.mhc_expansion_rate}.")
+      if self.enable_mhc_lite or self.use_mhc_pallas_kernel:
+        raise ValueError("`te_mhc=True` requires `enable_mhc_lite=False` and `use_mhc_pallas_kernel=False`.")
     return self
 
 
@@ -2130,6 +2929,21 @@ class DilocoParams(BaseModel):
             f"num_diloco_fragments ({self.num_diloco_fragments}) must be at least 2 when enable_streaming_diloco "
             "is True (1 for non-scanned parameters, at least 1 for scanned layers)."
         )
+      if self.diloco_sync_period % self.num_diloco_fragments != 0:
+        # Mirrors fragmenter.get_streaming_schedule, which rounds the per-fragment interval.
+        steps_between_syncs = max(1, int(round(self.diloco_sync_period / self.num_diloco_fragments)))
+        max_logging.warning(
+            f"diloco_sync_period ({self.diloco_sync_period}) is not a multiple of num_diloco_fragments"
+            f" ({self.num_diloco_fragments}): streaming DiLoCo syncs a fragment every {steps_between_syncs} steps, so"
+            f" each fragment is synced every {steps_between_syncs * self.num_diloco_fragments} steps."
+        )
+    if self.diloco_bucketize_non_scanned and not self.enable_streaming_diloco:
+      raise ValueError("diloco_bucketize_non_scanned requires enable_streaming_diloco=True.")
+    if self.diloco_bucketize_non_scanned and self.num_diloco_fragments < 3:
+      raise ValueError(
+          f"diloco_bucketize_non_scanned requires num_diloco_fragments >= 3, got {self.num_diloco_fragments}: with a"
+          " single layer fragment, bucketized matrices would move whole into it."
+      )
     return self
 
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
@@ -2161,6 +2975,17 @@ class DilocoParams(BaseModel):
       ),
   )
   use_sequential_layers: bool = Field(False, description="Whether to sync layers sequentially (or interleaved).")
+  diloco_bucketize_non_scanned: bool = Field(
+      False,
+      description=(
+          "Split non-scanned matrices (ndim >= 2, e.g. embedding table, output projection) across the layer"
+          " fragments instead of syncing them whole in fragment 0, so every streaming DiLoCo step moves a similar"
+          " number of bytes. Each matrix is split along its longest unsharded axis with at least"
+          " num_diloco_fragments - 1 indices (vocab under FSDP), whatever its size; a matrix whose long axes are all"
+          " sharded (e.g. vocab under tensor parallelism) stays whole in fragment 0. Requires"
+          " num_diloco_fragments >= 3."
+      ),
+  )
   num_communication_overlapping_steps: NonNegativeInt = Field(
       0, description="Steps of communication overlap with computation. \\tau from the paper."
   )
@@ -2353,11 +3178,29 @@ class YarnRope(BaseModel):
           "and 2 represents the real/imag coordinates, returning interleaved RoPE."
       ),
   )
+  rope_direct_position_freqs: bool = Field(
+      False,
+      description=(
+          "Compute YaRN RoPE angles directly from position * inv_freqs "
+          "instead of indexing a [max_position_embeddings, half_dim] lookup table. "
+          "Outputs differ for positions >= max_position_embeddings: the table lookup clamps them "
+          "to the last row, while the direct computation uses the true angle."
+      ),
+  )
+  rope_dot_pairwise: bool = Field(
+      False,
+      description=(
+          "Keep rank-4 [batch, seq, heads, dim] tensor intact during pairwise RoPE "
+          "via a block-skew matmul on the minor dimension instead of reshaping to rank-5."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_rope_pairwise(self) -> "YarnRope":
     if self.rope_pairwise and not self.rope_interleave:
       raise ValueError("rope_pairwise=True requires rope_interleave=True.")
+    if self.rope_dot_pairwise and not self.rope_pairwise:
+      raise ValueError("rope_dot_pairwise=True requires rope_pairwise=True.")
     return self
 
 
@@ -2482,16 +3325,22 @@ class DevelopmentAndDebugging(BaseModel):
   _validate_config = field_validator("constant_bound_config", mode="before")(_clean_empty_string_for_list)
 
 
-class Profiling(BaseModel):
-  """Configuration for performance profiling."""
+class ProfilingCore(BaseModel):
+  """Profiler backend selection shared by every trainer."""
 
   profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
+
+
+class Profiling(ProfilingCore):
+  """Configuration for step-window performance profiling (`common/profiler.py`)."""
+
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
   profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
   profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
+  enable_continuous_profiling: bool = Field(False, description="If true, it will support saving profile > 2GB.")
   enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
   jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
   enable_tpu_profiling_options: bool = Field(False, description="Enable TPU advanced profiling options.")
@@ -2567,12 +3416,19 @@ class ManagedMLDiagnostics(BaseModel):
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
   managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
+  managed_mldiagnostics_metric_only_run: bool = Field(
+      False,
+      description="Whether to create a metric-only run.",
+  )
 
 
 class Goodput(BaseModel):
   """Configuration for goodput monitoring."""
 
   enable_goodput_recording: bool = Field(False, description="Enable goodput recording.")
+  goodput_job_name: str = Field(
+      "", description="Optional job name override for goodput recording and monitoring. Defaults to run_name when empty."
+  )
   monitor_goodput: bool = Field(False, description="Monitor goodput.")
   goodput_upload_interval_seconds: int = Field(30, description="Interval to upload goodput metrics.")
   enable_pathways_goodput: bool = Field(False, description="Enable goodput monitoring for Pathways.")
@@ -2580,6 +3436,12 @@ class Goodput(BaseModel):
   step_deviation_interval_seconds: int = Field(30, description="Interval to check step time deviation.")
   enable_gcp_goodput_metrics: bool = Field(True, description="Enable GCP goodput metrics.")
   enable_gcp_step_deviation_metrics: bool = Field(True, description="Enable GCP step deviation metrics.")
+  rolling_windows_seconds: list[PositiveInt] = Field(
+      [3600, 86400, 259200, 432000],
+      min_length=1,
+      description="Rolling window intervals in seconds. Must contain at least one window.",
+  )
+  enable_rolling_window_goodput: bool = Field(True, description="Enable rolling window goodput.")
 
 
 class ElasticTraining(BaseModel):
@@ -2591,7 +3453,19 @@ class ElasticTraining(BaseModel):
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
   elastic_backup_kind: str = Field(
       "snapshot",
-      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+      description=(
+          "How an attempt after an elastic event gets its train state back. 'snapshot' keeps a copy of the train"
+          " state and the data iterator position in pinned host memory every `elastic_snapshot_interval` steps, and"
+          " restores that copy when it is at least as recent as the latest checkpoint; it needs grain's"
+          " ElasticIterator (or synthetic data) and is not supported with DiLoCo or rampup batch size,"
+          " which must set 'checkpoint'. 'checkpoint' only restores the latest persistent"
+          " checkpoint. The snapshot only survives the loss of a slice for state that is replicated across slices, so"
+          " with `shard_optimizer_over_data` it falls back to the checkpoint."
+      ),
+  )
+  elastic_snapshot_interval: PositiveInt = Field(
+      10,
+      description="In snapshot mode, how often (in steps) to copy the train state to pinned host memory.",
   )
   elastic_timeout_seconds: int = Field(
       300,
@@ -2626,7 +3500,14 @@ class Tensorboard(BaseModel):
   """Configuration for Tensorboard logging."""
 
   enable_tensorboard: bool = Field(True, description="Enable Tensorboard logging.")
-  use_vertex_tensorboard: bool = Field(False, description="Set to True for GCE, False if running via XPK.")
+  use_vertex_tensorboard: bool = Field(
+      False,
+      description=(
+          "Set to True to have MaxText create (or reuse) the Vertex AI Tensorboard instance and Experiment and upload"
+          " logs. Leave False if they are created outside MaxText and UPLOAD_DATA_TO_TENSORBOARD is set in the"
+          " environment."
+      ),
+  )
   vertex_tensorboard_project: Optional[str] = Field("", description="GCP project for Vertex AI Tensorboard.")
   vertex_tensorboard_region: Optional[str] = Field("", description="Region for Vertex AI Tensorboard.")
 
@@ -2803,6 +3684,19 @@ class VLLM(BaseModel):
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
+  free_kv_cache_during_weight_sync: bool = Field(
+      True,
+      description=(
+          "Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> "
+          "VllmConfig.free_kv_cache_during_weight_sync (ignored, with a log line, while the installed tunix "
+          "predates it). The weight sync materializes a second copy of the sampler weights on HBM; freeing the KV "
+          "cache first makes room for it. False keeps the pool (hbm_utilization_vllm of each chip) allocated across "
+          "the sync and only resets its prefix-cache entries, saving the free + re-allocation (about 2 s per step "
+          "on a colocated Qwen3-0.6B run at hbm_utilization_vllm=0.3). With False the sync runs out of HBM when "
+          "that second copy does not fit next to the pool: check the headroom before disabling, colocated setups "
+          "and a large hbm_utilization_vllm have the least."
+      ),
+  )
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
   enable_expert_parallel: bool = Field(False, description="Enable expert parallelism in vLLM.")
   async_scheduling: bool = Field(False, description="Enable asynchronous scheduling in vLLM.")
@@ -2839,6 +3733,10 @@ class VLLM(BaseModel):
   rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
       "maxtext",
       description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
+  )
+  rollout_weight_dtype: str = Field(
+      "",
+      description="Target weight dtype for trainer->rollout weight conversion. When empty, defaults to weight_dtype.",
   )
   weight_sync_debug: bool = Field(
       False,
@@ -2886,6 +3784,50 @@ class VLLM(BaseModel):
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
+  # Targeted profiling of the Tunix RL roles (tunix `RLProfileConfig`). Active
+  # only with `profiler=xplane`.
+  profiler_start_invocation: int = Field(
+      2,
+      ge=0,
+      description=(
+          "Zero-based invocation index at which tracing starts for each RL"
+          " role: `update_actor` for the actor and `generate` for the rollout"
+          " engine (tunix `RLProfileConfig.start_invocation`). This counts role"
+          " function calls, not global training steps: `update_actor` runs once"
+          " per micro-batch (mini-batch x gradient accumulation x"
+          " num_iterations per step) and eval actor passes share the actor"
+          " counter. Default 2 skips JIT compilation and warm-up."
+      ),
+  )
+  profiler_num_invocations: int = Field(
+      1,
+      ge=1,
+      description=(
+          "Number of consecutive invocations traced per role once"
+          " `profiler_start_invocation` is reached (tunix"
+          " `RLProfileConfig.num_invocations`). One session is written per"
+          " invocation as `<role>_invocation_<n>`."
+      ),
+  )
+  profiler_timeout_secs: float = Field(
+      60.0,
+      gt=0,
+      description=(
+          "Seconds to wait for tunix's background trace stop and upload thread"
+          " before starting the next trace or closing the cluster (tunix"
+          " `RLProfileConfig.timeout_secs`)."
+      ),
+  )
+  profiler_max_num_hosts: PositiveInt = Field(
+      1,
+      description=(
+          "Pathways only: maximum number of worker hosts to trace with the"
+          " xplane profiler across all RL roles (trainer and sampler). Defaults"
+          " to 1 (worker 0 only). Values > 1 trace worker hosts across all"
+          " slices on the Pathways backend."
+      ),
+  )
+
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
   num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
@@ -2927,22 +3869,6 @@ class RL(BaseModel):
       description=(
           "Use rollout engine's logprobs as old_per_token_logps. "
           "False selects the step-0 re-forward path (trainer recomputes them)"
-      ),
-  )
-  force_on_policy_ratio: bool = Field(
-      False,
-      description=(
-          "Pin the PPO/GRPO surrogate ratio to exactly 1.0 by using "
-          "stop_gradient(current_logp) as old_per_token_logps. Valid only for "
-          "single-iteration on-policy training (num_iterations=1)."
-      ),
-  )
-  log_sampler_trainer_agreement: bool = Field(
-      False,
-      description=(
-          "Compute an extra trainer forward pass per step to log sampler-vs-trainer "
-          "logp agreement metrics. Costs ~1 forward pass; needed because "
-          "force_on_policy_ratio otherwise leaves no trainer logps to compare."
       ),
   )
 
@@ -3026,6 +3952,17 @@ class RLReward(BaseModel):
   math_verify_num_procs: int | None = Field(
       None,
       description=("Max worker processes for the math_verify pool. None ⇒ " "min(batch_size, cpu_count())."),
+  )
+  reward_num_workers: int = Field(
+      0,
+      description=(
+          "Worker processes tunix uses to evaluate the reward functions over the batch "
+          "(GrpoConfig.reward_num_workers). 0 = serial (default), -1 = one worker per CPU."
+      ),
+  )
+  reward_worker_timeout_seconds: float = Field(
+      180.0,
+      description="Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.",
   )
   reward_functions_path: str = Field(
       "",
@@ -3188,6 +4125,32 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 
 
+def derive_managed_mldiagnostics_dir(
+    base_output_directory: str | None,
+    run_name: str | None,
+    managed_mldiagnostics_storage_path: str | None,
+) -> str | None:
+  """Returns the managed ML Diagnostics root for a run, or None if it cannot be derived.
+
+  Layout: `<managed_mldiagnostics_storage_path or base_output_directory>/<run_name>/managed-mldiagnostics`,
+  without a trailing slash (the SDK mis-joins paths that end in one, b/454725283). The SDK appends its
+  own run identifier below this directory for profiles.
+
+  Args:
+    base_output_directory: The run's base output directory; used when no dedicated storage path is set.
+    run_name: The run name; the directory cannot be derived without it.
+    managed_mldiagnostics_storage_path: Optional dedicated storage root that takes priority over
+      `base_output_directory`.
+
+  Returns:
+    The derived directory, or None when `run_name` or both base paths are empty.
+  """
+  telemetry_base = managed_mldiagnostics_storage_path or base_output_directory
+  if telemetry_base and run_name:
+    return os.path.join(telemetry_base, run_name, "managed-mldiagnostics")
+  return None
+
+
 # Decoder blocks that support router replay (`forced_routed_experts`). All are
 # homogeneous-MoE, so a 4D layer axis is just the decoder layer index;
 # interleaved architectures (Llama4/Envy) would need a MoE-only counter.
@@ -3315,6 +4278,13 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
+def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int], mesh_axes: list[str]) -> list[int]:
+  """Per-axis parallelism list for `mesh_axes` (preserves explicit list for custom physical mesh axes)."""
+  if configured and len(configured) == len(mesh_axes) and any(axis not in axis_map for axis in mesh_axes):
+    return list(configured)
+  return [axis_map.get(axis, 1) for axis in mesh_axes]
+
+
 def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
   """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
 
@@ -3362,6 +4332,8 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Qwen3_8FlashNext,
+    Ming,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -3461,30 +4433,130 @@ class MaxTextConfig(
           f"Found other ICI axes enabled: {active}."
       )
 
-  def validate_retry_when_tokens_dropped(self):
-    """Validates prerequisites for the step-level dropless fallback retry."""
-    if self.retry_when_tokens_dropped:
-      if self.num_experts <= 1:
-        raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
-      if self.ragged_buffer_factor == -1:
-        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0 (got default -1.0).")
+  def validate_moe_dropless_fallback(self):
+    """Validates prerequisites for the step-level ('step') and in-layer ('layer') dropless fallback."""
+    mode = self.moe_dropless_fallback
+    if mode is None:
+      return
+    prefix = f"moe_dropless_fallback='{mode}'"
+    if self.num_experts <= 1:
+      raise ValueError(f"{prefix} requires num_experts > 1.")
+    if self.ragged_buffer_factor <= 0:
+      raise ValueError(f"{prefix} requires ragged_buffer_factor > 0.0.")
+    if mode == "step" and not self.use_ring_of_experts:
+      raise ValueError(f"{prefix} is currently only supported with use_ring_of_experts=True.")
+    if not self.use_ragged_sort:
+      raise ValueError(f"{prefix} requires use_ragged_sort=True.")
+    if self.num_moe_emb_chunks > 0:
+      raise ValueError(f"{prefix} does not support num_moe_emb_chunks > 0.")
+    if mode == "layer" and self.use_random_routing:
+      # The overflow check re-derives top-k outside permute(); random routing would not reproduce it.
+      raise ValueError(f"{prefix} does not support use_random_routing=True.")
+    if mode == "step":
+      if self.enable_diloco:
+        raise ValueError(f"{prefix} is not supported with enable_diloco=True.")
+      if self.compiled_trainstep_file:
+        raise ValueError(f"{prefix} is not supported with compiled_trainstep_file.")
+      if self.optimizer_memory_host_offload or self.parameter_memory_host_offload:
+        raise ValueError(
+            f"{prefix} is not supported with optimizer_memory_host_offload or parameter_memory_host_offload."
+        )
+
+  def validate_retry_dropless_first_steps_and_first_phase_buffer(self):
+    """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""
+    if self.retry_dropless_first_steps < 0:
+      raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
+    if self.retry_dropless_first_steps > 0 and self.moe_dropless_fallback != "step":
+      raise ValueError("retry_dropless_first_steps > 0 requires moe_dropless_fallback='step'.")
+    if self.first_phase_ragged_buffer_factor < 0:
+      raise ValueError(
+          f"first_phase_ragged_buffer_factor must be 0 (off) or > 0 (got {self.first_phase_ragged_buffer_factor})."
+      )
+    if self.first_phase_ragged_buffer_factor > 0:
+      if self.retry_dropless_first_steps <= 0:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
+      if self.moe_dropless_fallback != "step":
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires moe_dropless_fallback='step'.")
       if self.ragged_buffer_factor <= 0:
-        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0.")
-      if not self.use_ring_of_experts:
-        raise ValueError("retry_when_tokens_dropped=True is currently only supported with use_ring_of_experts=True.")
-      if not self.use_ragged_sort:
-        raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires ragged_buffer_factor > 0.")
+      if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
+        raise ValueError(
+            f"first_phase_ragged_buffer_factor ({self.first_phase_ragged_buffer_factor}) must be >= "
+            f"ragged_buffer_factor ({self.ragged_buffer_factor})."
+        )
+      if self.te_moe_block:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 is not supported with te_moe_block=True.")
+    if self.log_required_ragged_buffer_factor:
+      if self.te_moe_block:
+        raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
+      if not (self.use_ring_of_experts and self.use_ragged_sort):
+        raise ValueError(
+            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+        )
       if self.num_moe_emb_chunks > 0:
-        raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+        raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
+
+  def validate_moe_log_max_load_ratio(self):
+    """Validates that moe_log_max_load_ratio is used with the ring-of-experts ragged path."""
+    if self.moe_log_max_load_ratio and not (
+        self.sparse_matmul and not self.te_moe_block and self.use_ring_of_experts and self.use_ragged_sort
+    ):
+      raise ValueError(
+          "moe_log_max_load_ratio=True requires sparse_matmul=True, te_moe_block=False,"
+          " use_ring_of_experts=True and use_ragged_sort=True."
+      )
+
+  def validate_moe_tc_ragged_sort(self):
+    """Validates that moe_tc_ragged_sort is used with the truncated-buffer ring-of-experts ragged sort."""
+    if self.moe_tc_ragged_3d_dispatch and not (self.moe_tc_ragged_sort and self.moe_tc_ragged_3d_gmm):
+      # The remaining requirements of the 3D dispatch are those of moe_tc_ragged_sort / moe_tc_ragged_3d_gmm below.
+      raise ValueError("moe_tc_ragged_3d_dispatch=True requires moe_tc_ragged_sort=True and moe_tc_ragged_3d_gmm=True.")
+    # The per-buffer-row routing weights only exist (and are only tagged) on the TC path with weights on activation;
+    # otherwise a non-remat moe_tc_routing_checkpoint would be silently ignored.
+    if self.moe_tc_routing_checkpoint != RematLocation.REMAT and not (
+        self.moe_tc_ragged_sort and self.moe_tc_ragged_weights_on_activation
+    ):
+      raise ValueError(
+          f"moe_tc_routing_checkpoint={RematLocation(self.moe_tc_routing_checkpoint).value} requires"
+          " moe_tc_ragged_sort=True and moe_tc_ragged_weights_on_activation=True; use moe_tc_routing_checkpoint=remat."
+      )
+    if self.moe_tc_window_routing and not self.moe_tc_ragged_sort:
+      raise ValueError("moe_tc_window_routing=True requires moe_tc_ragged_sort=True.")
+    if not self.moe_tc_ragged_sort:
+      return
+    if not self.use_ring_of_experts:
+      raise ValueError("moe_tc_ragged_sort=True requires use_ring_of_experts=True.")
+    if not self.use_ragged_sort:
+      raise ValueError("moe_tc_ragged_sort=True requires use_ragged_sort=True.")
+    if self.ragged_buffer_factor <= 0:
+      raise ValueError("moe_tc_ragged_sort=True requires ragged_buffer_factor > 0.0.")
+    if self.moe_tc_ragged_3d_gmm:
+      if not (self.use_tokamax_gmm and self.use_gmm_v2):
+        raise ValueError("moe_tc_ragged_3d_gmm=True requires use_tokamax_gmm=True and use_gmm_v2=True.")
+      unsupported = ["mlp_bias"] if self.mlp_bias else []
+      if self.ici_tensor_parallelism > 1 or self.dcn_tensor_parallelism > 1:
+        unsupported.append("tensor parallelism")
+      if self.num_moe_emb_chunks > 0:
+        unsupported.append("num_moe_emb_chunks > 0")
+      if unsupported:
+        raise ValueError(f"moe_tc_ragged_3d_gmm=True does not support: {', '.join(unsupported)}.")
+
+  def validate_moe_topk_before_ep_all_gather(self):
+    """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
+    if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
+      raise ValueError("moe_topk_before_ep_all_gather=True requires sparse_matmul=True and use_ring_of_experts=True.")
 
   def validate_ragged_buffer_factor(self):
-    """Validates that ragged_buffer_factor is used with supported settings."""
+    """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
     if self.te_moe_block:
-      if 0 < self.ragged_buffer_factor < 1.0:
-        raise ValueError("te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity.")
+      if 0 < self.ragged_buffer_factor < 1.0 or self.eval_ragged_buffer_factor > 0:
+        raise ValueError(
+            "te_moe_block=True requires ragged_buffer_factor >= 1.0, or <= 0 for worst-case capacity, "
+            "and does not support eval_ragged_buffer_factor > 0."
+        )
       return
 
-    if self.ragged_buffer_factor <= 0:
+    if self.ragged_buffer_factor <= 0 and self.eval_ragged_buffer_factor <= 0:
       return  # Not using a ragged buffer factor
 
     if self.use_ring_of_experts and not self.use_ragged_sort:
@@ -3492,6 +4564,54 @@ class MaxTextConfig(
           "Ragged buffer factor is currently only supported with:\n"
           "  1. Ragged A2A approach (use_ring_of_experts=False)\n"
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
+      )
+
+  def _validate_te_grouped_gemm(self):
+    """Validates that use_te_grouped_gemm is not combined with unsupported backends."""
+    if not self.use_te_grouped_gemm:
+      return
+    if not self.sparse_matmul:
+      raise ValueError(
+          "use_te_grouped_gemm=True requires sparse_matmul=True; the TransformerEngine "
+          "grouped GEMM backend is only reachable from the sparse MoE path, so it would "
+          "otherwise be silently ignored. Note that some GPU model configs "
+          "(e.g. gpu/models/gpt-oss-20b.yml) set sparse_matmul=false."
+      )
+    if self.megablox:
+      raise ValueError(
+          "use_te_grouped_gemm=True is not compatible with megablox=True. "
+          "Set megablox=False to use the TransformerEngine grouped GEMM backend."
+      )
+    if self.use_tokamax_gmm:
+      raise ValueError(
+          "use_te_grouped_gemm=True is not compatible with use_tokamax_gmm=True. "
+          "Disable Tokamax GMM to use the TransformerEngine grouped GEMM backend."
+      )
+    if self.quantization:
+      raise ValueError(
+          "use_te_grouped_gemm=True does not support quantization yet "
+          f"(got quantization={self.quantization!r}). Set quantization=''."
+      )
+    if self.moe_tc_ragged_sort:
+      raise ValueError(
+          "use_te_grouped_gemm=True is not compatible with moe_tc_ragged_sort=True: the TensorCore ragged sort "
+          "applies routing weights per buffer row, which TE's per-expert grouped GEMM bias cannot carry."
+      )
+    if self.moe_flat_fsdp_weights:
+      raise ValueError(
+          "use_te_grouped_gemm=True is not compatible with moe_flat_fsdp_weights=True: the TransformerEngine "
+          "grouped GEMM takes 3D [experts, rows, cols] expert weights, not the flat 2D layout."
+      )
+    # TE v1 grouped GEMM copies group_sizes D2H and stream-syncs inside the FFI.
+    # Under a single-process multi-device shard_map that host thread never
+    # reaches the collective rendezvous, so the job hangs instead of failing.
+    # Same constraint as te_comm_gemm_overlap: one local device per process.
+    if jax.distributed.is_initialized() and jax.local_device_count() > 1:
+      raise ValueError(
+          "use_te_grouped_gemm=True requires one local device per process "
+          f"(got jax.local_device_count()={jax.local_device_count()}). "
+          "Launch with one GPU per rank (e.g. SLURM_STEP_GPUS / gpu_per_device_run.sh); "
+          "do not pass several devices to a single process."
       )
 
   def _validate_te_comm_gemm_overlap(self):
@@ -3610,6 +4730,54 @@ class MaxTextConfig(
           f"({self.num_kv_heads}) to be divisible by ici_context_usp_ulysses_parallelism ({usp_ulysses_size})."
       )
 
+  def validate_mllog(self):
+    """
+    Warns when MLPerf logging is enabled without evaluation.
+
+    The compliance checker requires at least one eval_accuracy event (REQ: AT_LEAST_ONE in
+    common.yaml), so a no-eval run is useful for measuring evaluation overhead on end-to-end
+    time but will not pass MLPerf compliance checking.
+    """
+    if self.enable_mllog and self.eval_interval <= 0:
+      max_logging.warning(
+          f"enable_mllog=True with eval_interval={self.eval_interval} (<= 0): running without "
+          "evaluation. The resulting log will not pass MLPerf compliance (which requires "
+          "at least one eval_accuracy event)."
+      )
+
+  def validate_splash_diag_skip(self):
+    """Validates Tokamax Splash diagonal sub-tile skipping and warns when it cannot take effect."""
+    if self.sa_qk_diag_grid < 2 or (self.sa_qk_diag_grid & (self.sa_qk_diag_grid - 1)) != 0:
+      raise ValueError(f"sa_qk_diag_grid must be a power of 2 and >= 2, got {self.sa_qk_diag_grid}.")
+    if not (self.use_tokamax_splash and (self.sa_qk_diag_skip or self.sa_sv_diag_skip)):
+      return
+    # Tokamax checks square training blocks when the kernel is built at startup, but `eval_sa_*` blocks are
+    # only used under custom eval rules and first traced at the first eval step, so check them here.
+    uses_eval_sa_blocks = bool(self.logical_axis_rules_for_eval) and (
+        self.logical_axis_rules_for_eval != self.logical_axis_rules
+    )
+    if uses_eval_sa_blocks and not self.eval_sa_block_q == self.eval_sa_block_kv == self.eval_sa_block_kv_compute:
+      raise ValueError(
+          "sa_qk_diag_skip/sa_sv_diag_skip with custom eval logical axis rules require square eval blocks "
+          "(eval_sa_block_q == eval_sa_block_kv == eval_sa_block_kv_compute); got "
+          f"{self.eval_sa_block_q}/{self.eval_sa_block_kv}/{self.eval_sa_block_kv_compute}."
+      )
+    # The skip only runs when the Splash kernel gets a pure `CausalMask`; otherwise it is silently disabled.
+    cp_size = self.ici_context_parallelism * self.dcn_context_parallelism
+    strategy = self.context_parallel_strategy.lower()
+    if self.attention_type not in (AttentionType.GLOBAL.value, AttentionType.MLA.value):
+      reason = f"attention_type={self.attention_type!r} (only 'global' and 'mla' are supported)"
+    elif cp_size > 1 and strategy in ("ring", "usp"):
+      reason = f"context_parallel_strategy={strategy!r} (ring/USP attention does not use the flags)"
+    elif cp_size > 1 and strategy == "all_gather" and self.context_parallel_load_balance:
+      reason = "load-balanced all_gather context parallelism (it uses LoadBalancedCausalMask)"
+    else:
+      return
+    max_logging.warning(
+        f"sa_qk_diag_skip={self.sa_qk_diag_skip}, sa_sv_diag_skip={self.sa_sv_diag_skip} have no effect with "
+        f"{reason}. Diagonal sub-tile skipping requires a pure causal mask."
+    )
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -3619,6 +4787,13 @@ class MaxTextConfig(
         raise ValueError(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
+        )
+      # The emb-chunking path (moe_emb_chunking in moe.py) routes per chunk and does not tag its routed input with
+      # checkpoint_name("moe_x_sorted"), so a non-remat moe_x_sorted would be silently ignored there.
+      if self.moe_x_sorted != RematLocation.REMAT:
+        raise ValueError(
+            f"moe_x_sorted={RematLocation(self.moe_x_sorted).value} is not supported with num_moe_emb_chunks > 0; "
+            "use moe_x_sorted=remat."
         )
 
   def validate_moe_quantize_token_all_gather(self):
@@ -3645,6 +4820,20 @@ class MaxTextConfig(
             "moe_quantize_token_all_gather=True requires quantization to be"
             " specified and act_quantization_calibration_method to be fixed"
             " (static scaling mode)."
+        )
+
+  def validate_moe_quantize_combine_bwd_method(self):
+    """Validates that moe_quantize_combine_bwd_method is only used with ring of experts."""
+    if self.moe_quantize_combine_bwd_method:
+      if not self.use_ring_of_experts:
+        raise ValueError(
+            f"moe_quantize_combine_bwd_method='{self.moe_quantize_combine_bwd_method}' requires use_ring_of_experts=True."
+        )
+      method = self.moe_quantize_combine_bwd_method
+      if not (method == "rowwise" or method.startswith("fixed")):
+        raise ValueError(
+            f"Unsupported moe_quantize_combine_bwd_method: '{method}'. "
+            "Supported options: '', 'rowwise', 'fixed,<bound>'."
         )
 
   @staticmethod
@@ -3676,6 +4865,80 @@ class MaxTextConfig(
       )
     return self
 
+  def _validate_jax_mx_quantization(self) -> None:
+    """Rejects jax_mxfp8 and jax_mxfp4 settings that would silently leave GEMMs unquantized or fail obscurely in JAX."""
+    name = QuantizationType(self.quantization).value
+    if self.use_qwix_quantization:
+      raise ValueError(f"quantization='{name}' does not support use_qwix_quantization=True.")
+    if self.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(f"quantization='{name}' does not support shard_mode='explicit'.")
+    if self.num_experts > 1:
+      raise ValueError(f"quantization='{name}' does not support MoE models (num_experts > 1).")
+    if is_fp8_dtype(self.weight_dtype):
+      raise ValueError(
+          f"quantization='{name}' quantizes the weights itself; weight_dtype must not be fp8, got"
+          f" '{DType(self.weight_dtype).value}'."
+      )
+    if self.hardware not in ("gpu", "gpu_multiprocess"):
+      logger.warning(
+          "quantization='%s' has native MX kernels on GPU only; on hardware='%s' JAX dequantizes before "
+          "each GEMM, so steps are slower than bf16.",
+          name,
+          self.hardware,
+      )
+
+  @model_validator(mode="after")
+  def resolve_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag, and reject it where it cannot be honored.
+
+    The transpose it removes only exists under explicit sharding, and on an untied
+    model removing it has been a win or a wash on every configuration measured
+    (docs/guides/optimization/shard_mode_performance.md section 5) -- on qwen3-8b it
+    is the difference between +3.25% and -0.41% against `auto`. So the default is
+    "on wherever it can do anything", and writing the flag out is only needed to
+    reproduce a measurement.
+    """
+    if self.lm_head_weight_grad_in_kernel_order is None:
+      self.lm_head_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT and not self.logits_via_embedding
+    elif self.lm_head_weight_grad_in_kernel_order and self.logits_via_embedding:
+      raise ValueError(
+          "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def resolve_dense_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the in-loop counterpart of the LM-head flag.
+
+    Same barrier, same shape of fix, same default rule: on wherever it can act.
+    The two are independent and additive -- on llama2 at 18 layers, explicit
+    costs +1.098% against auto with neither flag, +0.621% with this one alone,
+    +0.429% with the LM-head flag alone and +0.005% with both
+    (docs/guides/optimization/shard_mode_performance.md section 4.8).
+    """
+    if self.dense_weight_grad_in_kernel_order is None:
+      self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
+    return self
+
+  @model_validator(mode="after")
+  def validate_save_fsdp_gathered_weights(self) -> "MaxTextConfig":
+    """Reject the three configurations the gathered-weight residual cannot serve."""
+    if self.save_fsdp_gathered_weights and self.quantization:
+      raise ValueError("save_fsdp_gathered_weights casts kernels to config.dtype, which is not valid when quantizing.")
+    if self.save_fsdp_gathered_weights and is_fp8_dtype(self.weight_dtype):
+      # Weight-only fp8 leaves `quantization` unset, so the check above misses it. The hoisted
+      # gather casts to config.dtype, which would upcast the kernel before the all-gather -- the
+      # opposite of what fp8 weights are for -- and separate it from its kernel_scale.
+      raise ValueError(
+          "save_fsdp_gathered_weights casts kernels to config.dtype, which discards the fp8 encoding "
+          f"of weight_dtype={self.weight_dtype}."
+      )
+    if self.save_fsdp_gathered_weights and self.parameter_memory_host_offload:
+      raise ValueError(
+          "save_fsdp_gathered_weights keeps gathered kernels in HBM, which defeats parameter_memory_host_offload."
+      )
+    return self
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -3704,12 +4967,13 @@ class MaxTextConfig(
         _ep_disabled_flags = {
             "use_random_routing": False,
             "use_ragged_sort": False,
-            "retry_when_tokens_dropped": False,
+            "moe_dropless_fallback": None,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
         if not self.te_moe_block:
           _ep_disabled_flags["ragged_buffer_factor"] = -1.0
+          _ep_disabled_flags["eval_ragged_buffer_factor"] = -1.0
         for flag_name, disabled_value in _ep_disabled_flags.items():
           current = getattr(self, flag_name)
           if current != disabled_value:
@@ -3771,9 +5035,18 @@ class MaxTextConfig(
       self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
-      # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
-      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
+      self.managed_mldiagnostics_dir = derive_managed_mldiagnostics_dir(
+          self.base_output_directory,
+          self.run_name,
+          self.managed_mldiagnostics_storage_path,
+      )
+      if self.enable_mllog:
+        if not self.mllog_file:
+          self.mllog_file = os.path.join(output_dir, f"mllog_{self.data_shuffle_seed}.log")
+        elif not self.mllog_file.startswith("gs://") and not os.path.isabs(self.mllog_file):
+          self.mllog_file = os.path.join(output_dir, self.mllog_file)
+      else:
+        self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
           None,
@@ -3959,11 +5232,16 @@ class MaxTextConfig(
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
+    # Megablox Pallas Mosaic kernels are TPU-specific; automatically fall back to jax.lax.ragged_dot on CPU.
+    if self.hardware == "cpu" and self.megablox:
+      self.megablox = False
+
     # Check for AQT deprecation warning
     if self.quantization and not self.use_qwix_quantization:
       if self.quantization not in (
           "fp8",
           "nanoo_fp8",
+          *JAX_MX_QUANTIZATIONS,
       ) and not self.quantization.startswith("te_"):
         logger.warning(
             "WARNING: AQT quantization is deprecated and will be removed in a future release. "
@@ -4072,8 +5350,12 @@ class MaxTextConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
+          "moe_routing_maps",
+          "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -4122,8 +5404,22 @@ class MaxTextConfig(
         assert (
             not self.pipeline_delay_activation_forwarding
         ), "Pipeline weight prefetching does not support pipeline delay."
-        assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
+        # Qwix quantized training (qwix.QtProvider) keeps no per-layer quantization state: weights are staged through
+        # the BSW in their original dtype and quantized inside every matmul/GMM, exactly as without pipelining (verified
+        # for fp8_full). AQT and the fp8_gpu/fp8_nanoo delayed-scaling providers instead carry amax-history
+        # `_overwrite_with_gradient` variables whose "gradient" is the new history, and the BSW scan would sum it over
+        # all microbatches of a repeat, so they stay unsupported.
+        qwix_qt_types = ("int4", "int8", "fp4", "fp4_e2m1", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_full")
+        assert not self.quantization or (self.use_qwix_quantization and self.quantization in qwix_qt_types), (
+            "Pipeline weight prefetching (pipeline_fsdp_ag_per_repeat) only supports Qwix quantized training: "
+            f"use_qwix_quantization=True and quantization in {qwix_qt_types}."
+        )
+      else:
+        # pipeline_bsw_no_carry is on by default and has nothing to do without weight prefetching.
+        bsw_options = ("pipeline_bsw_phase_split", "pipeline_bsw_in_compute_dtype")
+        enabled = [name for name in bsw_options if getattr(self, name)]
+        assert not enabled, f"{enabled} only apply to pipeline weight prefetching: set pipeline_fsdp_ag_per_repeat=True."
 
       assert (num_stages * self.num_pipeline_repeats * self.num_layers_per_pipeline_stage) == (
           self.pipeline_parallel_layers
@@ -4188,13 +5484,19 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    # H. RESOLVE local_sa_* FLAGS: inherit from global sa_* if not explicitly set.
+    # H. RESOLVE local_sa_* and eval_local_sa_* FLAGS: inherit from global sa_* / eval_sa_* if not explicitly set.
     if self.local_sa_block_q is None:
       self.local_sa_block_q = self.sa_block_q
     if self.local_sa_block_kv is None:
       self.local_sa_block_kv = self.sa_block_kv
     if self.local_sa_block_kv_compute is None:
       self.local_sa_block_kv_compute = self.sa_block_kv_compute
+    if self.eval_local_sa_block_q is None:
+      self.eval_local_sa_block_q = self.eval_sa_block_q
+    if self.eval_local_sa_block_kv is None:
+      self.eval_local_sa_block_kv = self.eval_sa_block_kv
+    if self.eval_local_sa_block_kv_compute is None:
+      self.eval_local_sa_block_kv_compute = self.eval_sa_block_kv_compute
     if self.local_sa_block_q_dkv is None:
       self.local_sa_block_q_dkv = self.sa_block_q_dkv
     if self.local_sa_block_kv_dkv is None:
@@ -4213,6 +5515,12 @@ class MaxTextConfig(
       self.local_sa_k_layout = self.sa_k_layout
     if self.local_sa_v_layout is None:
       self.local_sa_v_layout = self.sa_v_layout
+    if self.eval_local_sa_q_layout is None:
+      self.eval_local_sa_q_layout = self.eval_sa_q_layout
+    if self.eval_local_sa_k_layout is None:
+      self.eval_local_sa_k_layout = self.eval_sa_k_layout
+    if self.eval_local_sa_v_layout is None:
+      self.eval_local_sa_v_layout = self.eval_sa_v_layout
     if self.local_use_splash_scheduler is None:
       self.local_use_splash_scheduler = self.use_splash_scheduler
     if self.local_sa_fuse_reciprocal is None:
@@ -4234,6 +5542,21 @@ class MaxTextConfig(
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
       )
+    if self.elastic_enabled and self.elastic_backup_kind == "snapshot":
+      if self.enable_diloco:
+        raise ValueError("elastic_backup_kind='snapshot' is not supported with DiLoCo (`enable_diloco=True`).")
+      if self.enable_rampup_batch_size:
+        # The rampup manager derives its progress from the latest checkpoint step before the state is restored,
+        # so a restore from a newer snapshot would leave it behind.
+        raise ValueError("elastic_backup_kind='snapshot' is not supported with `enable_rampup_batch_size=True`.")
+      if self.dataset_type != DatasetType.SYNTHETIC:
+        # The snapshot carries the data iterator position as the global example index of grain's ElasticIterator,
+        # which is the only iterator whose position is valid for any number of hosts.
+        if self.dataset_type != DatasetType.GRAIN or not self.grain_use_elastic_iterator:
+          raise ValueError(
+              "elastic_backup_kind='snapshot' requires `dataset_type=grain` with `grain_use_elastic_iterator=True`"
+              " (or synthetic data), so that the data iterator position can be snapshotted with the train state."
+          )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
@@ -4312,6 +5635,8 @@ class MaxTextConfig(
               "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
               "with `use_tokamax_splash=True`."
           )
+    if self.te_mhc and self.hardware not in ("gpu", "gpu_multiprocess"):
+      raise ValueError("`te_mhc=True` requires NVIDIA GPU hardware.")
     if self.mla_qk_head_chunk_size > 0:
       if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
         raise ValueError(
@@ -4387,6 +5712,29 @@ class MaxTextConfig(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
           "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
       )
+    if self.use_mla_absorbed_mqa:
+      if self.attention_type != AttentionType.MLA.value:
+        raise ValueError(
+            f"`use_mla_absorbed_mqa=True` requires `attention_type='{AttentionType.MLA.value}'`, "
+            f"but found attention_type='{self.attention_type}'."
+        )
+      if self.attention not in ("dot_product", "autoselected"):
+        raise ValueError(
+            f"`use_mla_absorbed_mqa=True` requires `attention` to be 'dot_product' or 'autoselected', "
+            f"but found attention='{self.attention}'."
+        )
+      if self.mla_naive_kvcache:
+        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with `mla_naive_kvcache=True`.")
+      has_quant = (
+          self.quantize_kvcache
+          or self.use_qwix_quantization
+          or self.use_manual_quantization
+          or self.experimental_sa_quant_q_fp8
+          or self.experimental_sa_quant_k_fp8
+          or (self.quantization and self.quantization not in (QuantizationType.NONE, QuantizationType.TE_NO_QUANT))
+      )
+      if has_quant:
+        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with quantization or FP8 options.")
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -4427,8 +5775,6 @@ class MaxTextConfig(
         raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
       if self.use_dpo:
         raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
-      if self.use_sft:
-        raise ValueError("`training_objective='block_diffusion'` currently supports pre-training only.")
       if self.use_multimodal or self.use_audio:
         raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
       valid_model_contracts = {
@@ -4445,11 +5791,56 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.mtp_reuse_input_embedding and self.use_multimodal:
+      raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
+    if self.mtp_norm_main_hidden_state:
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`mtp_norm_main_hidden_state` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode and `decoder_norm` runs later inside"
+            " `vocab_tiling_nnx_loss`, so the MTP block would still receive the un-normalized hidden state."
+        )
+      if self.mhc_expansion_rate > 1:
+        raise ValueError(
+            "`mtp_norm_main_hidden_state` is not supported with `mhc_expansion_rate > 1`: the MTP layers expect"
+            " the expanded 4D hyper-connection state, which the decoder's final norm collapses to 3D."
+        )
     if self.quantize_mtp:
       if self.mtp_num_layers <= 0:
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
+    if self.quantize_logits_proj:
+      if self.logits_via_embedding:
+        raise ValueError(
+            "`quantize_logits_proj` cannot be enabled when input and output embeddings are tied"
+            " (`logits_via_embedding=True`)."
+        )
+      if self.quantization != "fp8_full":
+        raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`quantize_logits_proj` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode, so `logits_dense` is absent from the forward"
+            " pass that `qwix.quantize_model` traces, and the projection runs later inside"
+            " `vocab_tiling_nnx_loss` on a merged model copy. Whether interception survives that path is"
+            " unverified; this combination is rejected until it is tested."
+        )
+      if self.logits_dot_in_fp32:
+        raise ValueError(
+            "`logits_dot_in_fp32=True` is rejected with `quantize_logits_proj=True`: the fp32 cast on"
+            " the logits operands is undone by requantization at the projection matmul, so the projection"
+            " remains quantized while believing you configured fp32. Set `quantize_logits_proj=False` to keep"
+            " the projection in fp32."
+        )
+    if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
+      raise ValueError(
+          "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"
+          " the gate operands is undone by requantization at the projection matmul, so the projection"
+          " remains quantized while believing you configured fp32. The flag's remaining effects (bias"
+          " add, score function, gemma4 router norm) are second-order next to the quantization error."
+          " Set `quantize_router_proj=False` to keep the projection in fp32."
+      )
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1
@@ -4467,6 +5858,8 @@ class MaxTextConfig(
         )
     if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
       raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
+    if self.te_moe_disable_cudnn_gmm_fusion and not self.te_moe_block:
+      raise ValueError("te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
@@ -4496,6 +5889,13 @@ class MaxTextConfig(
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       if self.te_moe_block and not self.sparse_matmul:
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
+      if self.te_moe_quantize_before_fsdp_all_gather:
+        if not self.te_moe_block or self.te_gmm_quantization != TEGroupedGemmQuantizationType.TE_MXFP8:
+          raise ValueError(
+              "te_moe_quantize_before_fsdp_all_gather=True requires te_moe_block=True and te_gmm_quantization=te_mxfp8."
+          )
+        if self.use_2d_fsdp_sharding:
+          raise ValueError("te_moe_quantize_before_fsdp_all_gather=True does not support 2D FSDP weight sharding.")
       if self.te_moe_block and not self.prefuse_moe_weights:
         raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
       if self.te_moe_block and self.routed_bias_update_rate > 0.0:
@@ -4514,9 +5914,18 @@ class MaxTextConfig(
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
-      self.validate_retry_when_tokens_dropped()
+      self.validate_moe_dropless_fallback()
+      self.validate_moe_log_max_load_ratio()
+      self.validate_moe_tc_ragged_sort()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_topk_before_ep_all_gather()
+    self.validate_moe_quantize_combine_bwd_method()
+    self.validate_mllog()
+    self.validate_splash_diag_skip()
+    self.validate_retry_dropless_first_steps_and_first_phase_buffer()
+    if self.warmup_skip_train_dropless and not self.warmup_programs_in_init:
+      raise ValueError("warmup_skip_train_dropless=True requires warmup_programs_in_init=True.")
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:
@@ -4528,11 +5937,15 @@ class MaxTextConfig(
               f"The number of decoder layers ({self.num_decoder_layers}) must be divisible by "
               f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
           )
+      if self.diloco_bucketize_non_scanned and self.shard_optimizer_over_data:
+        # train_compile.py derives the outer param shardings after the Zero-1 overlay, the runtime path before it,
+        # so the bucket split axes could differ between AOT and training.
+        raise ValueError("diloco_bucketize_non_scanned does not support shard_optimizer_over_data (Zero-1).")
 
-    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
+    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with scanned layers.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
-          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
@@ -4551,11 +5964,14 @@ class MaxTextConfig(
           "qwen3-vl-2b",
           "qwen3-vl-4b",
           "qwen3-vl-30b-a3b",
+          "qwen3.5-9b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
           "maxtext-omni-gemma3-qwen3",
-          "cosmos3-nano-reasoner",
-          "cosmos3-super-reasoner",
+          "weaver-mini",
+          "weaver-max",
+          "weaver-mini-diffuser",
+          "ming-3.0-audio-tiny",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -4581,7 +5997,10 @@ class MaxTextConfig(
           "simple",
           "simple_mlp",
           "llama2",
+          "llama4",
           "deepseek",
+          "gpt3",
+          "gpt_oss",
           "mistral",
           "mixtral",
           "qwen2",
@@ -4593,6 +6012,8 @@ class MaxTextConfig(
           "gemma",
           "gemma2",
           "gemma3",
+          "gemma4",
+          "gemma4_small",
       }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
@@ -4610,7 +6031,7 @@ class MaxTextConfig(
           DecoderBlockType.QWEN3_NEXT,
       ):
         decoder_name = self.decoder_block.value
-        if not self.sparse_matmul:
+        if self.num_experts > 1 and not self.sparse_matmul:
           raise ValueError(
               f"'explicit' sharding with the '{decoder_name}' decoder requires"
               " `sparse_matmul=True`; the dense matmul MoE path has not been"
@@ -4970,15 +6391,102 @@ class MaxTextConfig(
           "K quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
+    if self.sa_qproj_bwd_bf16 and not (
+        self.quantization == "fp8_full" and self.use_qwix_quantization and not self.use_batch_split_schedule
+    ):
+      raise ValueError(
+          "sa_qproj_bwd_bf16=True only takes effect with quantization='fp8_full', use_qwix_quantization=True and"
+          " use_batch_split_schedule=False."
+      )
+    if self.sa_q_prescaled_log2e:
+      if not (
+          self.experimental_sa_quant_q_fp8
+          and self.sa_use_base2_exp
+          and self.use_tokamax_splash
+          and self.attention == "flash"
+      ):
+        raise ValueError(
+            "sa_q_prescaled_log2e requires experimental_sa_quant_q_fp8=True, sa_use_base2_exp=True,"
+            " use_tokamax_splash=True and attention='flash'."
+        )
+      # The LOG2E fold is only in the MLA query path (attention_mla.py).
+      if self.attention_type != "mla":
+        raise ValueError(f"sa_q_prescaled_log2e only supports attention_type='mla'; got '{self.attention_type}'.")
+      if self.use_mla_absorbed_mqa:
+        raise ValueError("sa_q_prescaled_log2e is not supported with use_mla_absorbed_mqa=True.")
+      # Ring and USP context parallelism use MaxText's vendored splash kernel (natural exp, no
+      # q_prescaled_log2e), which would apply the LOG2E-scaled q as natural-exp logits.
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "sa_q_prescaled_log2e is not supported with context_parallel_strategy"
+            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
+        )
+      if self.sa_dkv_reuse_scaled_q:
+        raise ValueError("sa_q_prescaled_log2e subsumes sa_dkv_reuse_scaled_q; set only one of them.")
+    if self.sa_dkv_reuse_scaled_q:
+      if not (self.sa_use_base2_exp and self.use_tokamax_splash and self.attention == "flash"):
+        raise ValueError(
+            "sa_dkv_reuse_scaled_q only takes effect with sa_use_base2_exp=True, use_tokamax_splash=True and"
+            " attention='flash'."
+        )
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "sa_dkv_reuse_scaled_q is not supported with context_parallel_strategy"
+            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
+        )
+    if self.sa_ignore_segment_ids:
+      # Mirrors the use_stream_chunking=None resolution in tfds_data_processing_c4_mlperf.py: stream
+      # chunking (uniform segment ids per row) is the default for pre-tokenized data.
+      def _stream_chunked(tokenize_data: bool) -> bool:
+        return self.use_stream_chunking is True or (self.use_stream_chunking is None and not tokenize_data)
+
+      if not (
+          self.dataset_type == DatasetType.C4MLPERF
+          and _stream_chunked(self.tokenize_train_data)
+          and (self.eval_interval <= 0 or _stream_chunked(self.tokenize_eval_data))
+      ):
+        raise ValueError(
+            "sa_ignore_segment_ids requires dataset_type='c4_mlperf' with"
+            " stream chunking for train and eval (use_stream_chunking=True, or"
+            " None with pre-tokenized data); packed sequences need the segment"
+            " mask."
+        )
+      if self.attention != "flash":
+        raise ValueError("sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'.")
+      # Types whose masks come from positions only. COMPRESSED also uses segment ids (-1) to mask block padding.
+      if self.attention_type not in ("global", "mla", "local_sliding", "chunk"):
+        raise ValueError(
+            "sa_ignore_segment_ids supports attention_type in ('global',"
+            " 'mla', 'local_sliding', 'chunk'); got"
+            f" attention_type='{self.attention_type}'."
+        )
+      if self.use_lineage:
+        raise ValueError("sa_ignore_segment_ids is not supported with use_lineage=True.")
     if self.share_kv_projections and self.fused_qkv:
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
-    if self.use_sliced_mla_proj and (self.quantization or self.use_qwix_quantization):
-      raise ValueError("`use_sliced_mla_proj` is not supported with quantization.")
+    if self.use_sliced_mla_proj and self.quantization:
+      # Qwix interception still quantizes the sliced dot_general; module-level quant
+      # (AQT / Fp8 / TE / batch split) would silently fall back to the unsliced path.
+      if not self.use_qwix_quantization or self.use_batch_split_schedule:
+        raise ValueError(
+            "`use_sliced_mla_proj` with quantization is only supported via Qwix interception "
+            "(use_qwix_quantization=True, use_batch_split_schedule=False)."
+        )
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    # Validation for serve_fp8_weight (native FP8 compute without dequantization).
+    if self.quantization == QuantizationType.SERVE_FP8_WEIGHT:
+      if self.weight_dtype not in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2):
+        raise ValueError(
+            "quantization='serve_fp8_weight' requires weight_dtype to be an FP8 dtype "
+            f"('float8_e4m3fn' or 'float8_e5m2'), got weight_dtype={self.weight_dtype!r}."
+        )
+      if self.use_qwix_quantization:
+        raise ValueError("quantization='serve_fp8_weight' is not supported with use_qwix_quantization=True.")
 
     # Validation for GMM v2
     if self.use_gmm_v2:
@@ -4987,15 +6495,14 @@ class MaxTextConfig(
       if self.use_batch_split_schedule:
         raise ValueError("GMM v2 is not supported with a batch split schedule.")
 
+    self._validate_te_grouped_gemm()
+
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
-
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.mtp_num_layers > 0:
-      raise ValueError("DeepSeek4 decoder block currently does not support MTP layers.")
 
     if self.num_kv_shared_layers > 0:
       if self.fused_qkv:
@@ -5009,6 +6516,96 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+
+    if self.moe_accumulate_chunk_wgrad and not (
+        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
+    ):
+      raise ValueError(
+          "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"
+          " and prefuse_moe_weights=False."
+      )
+
+    if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
+      raise ValueError(
+          "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      )
+
+    if self.moe_bwd_prequant_before_unsort and not (
+        self.moe_tc_ragged_3d_dispatch and self.moe_tc_ragged_weights_on_activation
+    ):
+      raise ValueError(
+          "moe_bwd_prequant_before_unsort=True requires moe_tc_ragged_3d_dispatch=True and"
+          " moe_tc_ragged_weights_on_activation=True."
+      )
+    if self.moe_combine_bwd_direct_qarray and not self.moe_bwd_prequant_before_unsort:
+      raise ValueError("moe_combine_bwd_direct_qarray=True requires moe_bwd_prequant_before_unsort=True.")
+    if self.moe_bwd_prequant_before_unsort and self.quantization:
+      # The fused unsort applies the weight / act / bwd scales to the token-order cotangent, so they must be
+      # per-tensor; the config's qwix rule keeps channelwise axes, so only fixed calibration gives that. With
+      # moe_combine_bwd_direct_qarray, each EP shard also scales its cotangent before the all-gather, so a dynamic
+      # (shard-local) scale would differ across shards.
+      dynamic = [
+          f"{name}_quantization_calibration_method={method!r}"
+          for name in ("weight", "act", "bwd")
+          if not (method := getattr(self, f"{name}_quantization_calibration_method")).lower().startswith("fixed")
+      ]
+      if dynamic:
+        raise ValueError(
+            "moe_bwd_prequant_before_unsort=True with quantization requires fixed weight, act and bwd calibration,"
+            f" got {', '.join(dynamic)}."
+        )
+    if self.moe_combine_bwd_direct_qarray and self.moe_quantize_combine_bwd_method:
+      raise ValueError(
+          f"moe_quantize_combine_bwd_method={self.moe_quantize_combine_bwd_method!r} has no effect with"
+          " moe_combine_bwd_direct_qarray=True: the fused EP combine quantizes the cotangent with the gmm bwd rule."
+          " Unset moe_quantize_combine_bwd_method."
+      )
+    if self.moe_3d_dlhs_partial_sum and not (self.moe_accumulate_wi_dlhs and self.moe_tc_ragged_3d_gmm):
+      raise ValueError("moe_3d_dlhs_partial_sum=True requires moe_accumulate_wi_dlhs=True and moe_tc_ragged_3d_gmm=True.")
+
+    if self.moe_flat_fsdp_weights:
+      if not (
+          self.sparse_matmul
+          and (self.shard_embed_moe_on_fsdp or not self.quantization)
+          and ((self.use_tokamax_gmm and self.use_gmm_v2) or self.prefetch_fsdp_weights)
+          and not self.prefuse_moe_weights
+      ):
+        raise ValueError(
+            "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True or unquantized),"
+            " ((use_tokamax_gmm=True and use_gmm_v2=True) or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
+        )
+      # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
+      if (
+          self.shard_exp_on_fsdp
+          or self.use_2d_fsdp_sharding
+          or self.use_batch_split_schedule
+          or self.weight_dtype in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2)
+          or self.decoder_block == DecoderBlockType.GEMMA4
+      ):
+        raise ValueError(
+            "moe_flat_fsdp_weights=True is incompatible with shard_exp_on_fsdp, use_2d_fsdp_sharding,"
+            " use_batch_split_schedule, fp8 weight_dtype and the gemma4 decoder block."
+        )
+
+    if self.use_lineage:
+      if not self.scan_layers:
+        raise ValueError("use_lineage=True requires scan_layers=True.")
+      if self.decoder_block != DecoderBlockType.DEEPSEEK:
+        raise ValueError(f"use_lineage=True requires decoder_block='deepseek', got decoder_block={self.decoder_block!r}.")
+      if self.attention_type != "mla":
+        raise ValueError(f"use_lineage=True requires attention_type='mla', got attention_type={self.attention_type!r}.")
+      if self.rope_type != RopeType.YARN:
+        raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
+      if self.capacity_factor <= 0:
+        raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+
+    # The freqs_cis table lookup clamps positions >= max_position_embeddings to the last row, while
+    # rope_direct_position_freqs uses the true angle; keep positions in range so both settings agree.
+    if self.rope_direct_position_freqs and self.max_target_length > self.max_position_embeddings:
+      raise ValueError(
+          "rope_direct_position_freqs=True requires max_target_length <= max_position_embeddings, got "
+          f"max_target_length={self.max_target_length}, max_position_embeddings={self.max_position_embeddings}."
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
@@ -5031,7 +6628,7 @@ class MaxTextConfig(
         "dcp": (1),
         "pcp": (1),
     }
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    self.ici_parallelism = _resolve_parallelism(self.ici_parallelism, ici_map, self.mesh_axes)
 
     dcn_map = {
         "diloco": self.dcn_diloco_parallelism,
@@ -5053,7 +6650,7 @@ class MaxTextConfig(
         "dcp": (1),
         "pcp": (1),
     }
-    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
     # Zero-1 (`shard_optimizer_over_data`) shards the optimizer moments over the "data"
     # axis on top of whatever layout the parameters already have. FSDP shards the
@@ -5072,6 +6669,9 @@ class MaxTextConfig(
             "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
             "counterparts) to 1, or turn off `shard_optimizer_over_data`."
         )
+
+    if self.quantization in JAX_MX_QUANTIZATIONS:
+      self._validate_jax_mx_quantization()
 
     # Diloco params
     # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
@@ -5102,6 +6702,17 @@ class MaxTextConfig(
       )
 
     self._validate_check_vma_is_supported()
+    if self.defer_small_all_reduces:
+      if not (self.use_ring_of_experts and self.sparse_matmul):
+        raise ValueError(
+            "defer_small_all_reduces requires use_ring_of_experts=True and sparse_matmul=True (the deferral is"
+            " implemented on the ring-of-experts sparse_matmul path only)."
+        )
+      if self.moe_dropless_fallback == "layer":
+        raise ValueError(
+            "defer_small_all_reduces does not support moe_dropless_fallback='layer' (the in-layer fallback's two"
+            " branches would emit per-chunk counts of different chunkings)."
+        )
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
@@ -5127,6 +6738,10 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
+    if self.model_name == "glm5.3-flash" and not self.use_m3_model:
+      raise ValueError(
+          "glm5.3-flash requires use_m3_model=True; legacy decoder_block is not" " supported for GLM-5.3-Flash."
+      )
     return self
 
 
@@ -5155,6 +6770,8 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    Qwen3_8FlashNext,
+    Ming,
     MultimodalGeneral,
     Muon,
     FineTuning,
@@ -5298,6 +6915,42 @@ class RLConfig(
           if inner_key in data:
             nested_dict[inner_key] = data[inner_key]
 
+    # Map legacy step-based profiling flags to RL role-invocation profiling fields
+    # when the invocation fields were not explicitly overridden. Because `pyconfig`
+    # merges `post_train/rl.yml` into `data["rl"]` before constructing `RLConfig`,
+    # `rl_dict` may already contain the `RL` model defaults; query `RL.model_fields`
+    # dynamically rather than hardcoding default values.
+    rl_dict = data.get("rl")
+    if isinstance(rl_dict, dict):
+      rl_fields = getattr(RL, "model_fields")
+      default_start = rl_fields["profiler_start_invocation"].default
+      if (
+          "skip_first_n_steps_for_profiler" in data
+          and "profiler_start_invocation" not in data
+          and rl_dict.get("profiler_start_invocation", default_start) == default_start
+      ):
+        try:
+          skip_steps = int(data["skip_first_n_steps_for_profiler"])
+        except (TypeError, ValueError):
+          skip_steps = -1
+        if skip_steps >= 0:
+          rl_dict["profiler_start_invocation"] = skip_steps
+          data["profiler_start_invocation"] = skip_steps
+
+      default_num = rl_fields["profiler_num_invocations"].default
+      if (
+          "profiler_steps" in data
+          and "profiler_num_invocations" not in data
+          and rl_dict.get("profiler_num_invocations", default_num) == default_num
+      ):
+        try:
+          prof_steps = int(data["profiler_steps"])
+        except (TypeError, ValueError):
+          prof_steps = 0
+        if prof_steps >= 1:
+          rl_dict["profiler_num_invocations"] = prof_steps
+          data["profiler_num_invocations"] = prof_steps
+
     return data
 
   @model_validator(mode="after")
@@ -5368,6 +7021,42 @@ class RLConfig(
       tensorboard_dir = os.path.join(os.path.abspath("maxtext_output"), "tensorboard", "")
     object.__setattr__(self, "tensorboard_dir", tensorboard_dir)
 
+    # Managed ML Diagnostics: derive the run directory and fail at config time
+    # on combinations that would only surface mid-run.
+    object.__setattr__(
+        self,
+        "managed_mldiagnostics_dir",
+        derive_managed_mldiagnostics_dir(
+            self.base_output_directory,
+            self.run_name,
+            self.managed_mldiagnostics_storage_path,
+        ),
+    )
+    if self.managed_mldiagnostics:
+      if not self.managed_mldiagnostics_dir or not self.managed_mldiagnostics_dir.startswith("gs://"):
+        raise ValueError(
+            "managed_mldiagnostics=True requires a gs:// run directory: set"
+            " run_name and either managed_mldiagnostics_storage_path or"
+            " base_output_directory to a gs:// path (derived"
+            f" managed_mldiagnostics_dir={self.managed_mldiagnostics_dir!r})."
+        )
+      if self.profiler == ProfilerType.XPLANE and self.managed_mldiagnostics_on_demand_profiling:
+        raise ValueError(
+            "managed_mldiagnostics_on_demand_profiling=True cannot be combined"
+            " with profiler=xplane on the RL path: an on-demand capture during"
+            " a programmatic trace session fails with 'profile already"
+            " started'. Set managed_mldiagnostics_on_demand_profiling=False (or"
+            " profiler='')."
+        )
+
+    if self.rl.profiler_max_num_hosts > 1:
+      if self.profiler != ProfilerType.XPLANE:
+        raise ValueError(f"rl.profiler_max_num_hosts > 1 requires profiler=xplane, got profiler={self.profiler!r}.")
+      import pathwaysutils  # pylint: disable=import-outside-toplevel
+
+      if not pathwaysutils.is_pathways_backend_used():
+        raise ValueError("rl.profiler_max_num_hosts > 1 is only supported on the Pathways backend (JAX_PLATFORMS=proxy).")
+
     # Slice configuration
     if not (
         (self.cluster.num_trainer_slices == -1 and self.cluster.num_samplers_slices == -1)
@@ -5420,8 +7109,12 @@ class RLConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
+          "moe_routing_maps",
+          "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5462,9 +7155,9 @@ class RLConfig(
       }
 
     ici_map = get_parallelism_map("ici")
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    self.ici_parallelism = _resolve_parallelism(self.ici_parallelism, ici_map, self.mesh_axes)
 
     dcn_map = get_parallelism_map("dcn")
-    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
     return self

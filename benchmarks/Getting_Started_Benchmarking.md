@@ -1,29 +1,74 @@
-### Getting starting with benchmark running in MaxText
+### Getting started with benchmark running in MaxText
 
 Two approaches are here:
 
 1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples.
-2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with XPK workloads.
+2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with Cluster Toolkit workloads.
+
+For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
+to the cluster and configure `gcluster` before submitting:
+
+```bash
+export PROJECT_ID=<PROJECT_ID>
+export GKE_CLUSTER=<CLUSTER_NAME>
+export LOCATION=<LOCATION> # e.g. europe-west4 (region) or us-central1-a (zone)
+export RUN_NAME=<RUN_NAME>
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest"
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g. gs://my-bucket/maxtext-runs
+
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
+```
+
+Then submit the benchmark workload for the target cluster:
+
+```bash
+# Cluster Toolkit: McJAX
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --command="python3 -m benchmarks.benchmark_runner on-device --base_output_directory=${BASE_OUTPUT_DIRECTORY?} --run_name=${RUN_NAME?} --num_steps=5" \
+  --name=${RUN_NAME?} \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?}
+
+# Cluster Toolkit: Pathways
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command="python3 -m benchmarks.benchmark_runner on-device --use_pathways=true --base_output_directory=${BASE_OUTPUT_DIRECTORY?} --run_name=${RUN_NAME?} --num_steps=5"
+```
 
 - **xla_flags_library.py**: A grouping of xla flags organized by purpose with details on how they can be applied to a model.
-- **maxtext_trillium_model_config.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
-- **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like xpk with one command.
+- **maxtext_trillium_model_configs.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
+- **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like Cluster Toolkit (`ctk`) with one command.
 
 ```shell
-# McJax with XPK
+# McJax with Cluster Toolkit (ctk)
 CLUSTER=my-cluster
-ZONE=my-zone
+LOCATION=my-location
 PROJECT=my-project
-python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
+python3 -m benchmarks.benchmark_runner ctk --project ${PROJECT?} --location ${LOCATION?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
-# Pathways with XPK
+# Pathways with Cluster Toolkit (ctk)
 export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
 export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
 export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
 
-python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE?}" --pathways_proxy_server_image="${PROXY_IMAGE?}" --pathways_runner_image="${RUNNER?}"
+python3 -m benchmarks.benchmark_runner ctk --use_pathways=true --pathways_server_image="${SERVER_IMAGE?}" --pathways_proxy_server_image="${PROXY_IMAGE?}" --pathways_runner_image="${RUNNER?}" --project ${PROJECT?} --location ${LOCATION?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
@@ -32,7 +77,7 @@ python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?}
 python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name="test-run" --num_steps=5
 ```
 
-- **maxtext_xpk_runner.py**: A pythonic way to run xpk workloads! With the magic of for looping and python code, run several xpk workloads across a sweep of parameters including libtpu version, gke clusters, and maxtext parameters with one python script.
+- **maxtext_ctk_runner.py** (and backward-compatible alias **maxtext_xpk_runner.py**): Python orchestration for Cluster Toolkit (`gcluster`) workloads.
 
 ```shell
 # Loop possibilities:
@@ -71,20 +116,20 @@ for model in list_of_models:
             base_docker_image=base_docker_image,
             pathways_config=None
           )
-          command, name = generate_xpk_workload_cmd(
+          command, name = generate_workload_cmd(
             cluster_config=cluster_config,
             wl_config=wl_config
           )
 
           print(f"Name of the workload is: {name} \n")
-          xpk_workload_names.append(name)
+          workload_names.append(name)
 
-          print(f"XPK command to be used is: {command} \n")
-          xpk_workload_cmds.append(command)
+          print(f"gcluster command to be used is: {command} \n")
+          workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
-    return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
+  for workload_name, workload_cmd in zip(workload_names, workload_cmds):
+    return_code = run_command_with_updates(workload_cmd, workload_name)
     if return_code != 0:
-      print(f'Unable to run xpk workload: {xpk_workload_name}')
+      print(f'Unable to run gcluster workload: {workload_name}')
 
 ```

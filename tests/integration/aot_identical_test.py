@@ -26,7 +26,7 @@ import shutil
 import hashlib
 import re
 import jax
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path
 from maxtext.trainers.pre_train import train_compile
 from maxtext.trainers.pre_train import train
 
@@ -116,7 +116,7 @@ class AotHloIdenticalTest(AotBaseTest):
     """Builds the list of config overrides, directing XLA's HLO dump to `dump_dir`."""
     xla_flags = f"--xla_dump_to={dump_dir} --xla_dump_hlo_module_re=jit_train_step"
     return [
-        "base_output_directory=gs://runner-maxtext-logs",
+        f"base_output_directory={get_test_base_output_directory()}",
         "dataset_type=synthetic",
         "enable_checkpointing=False",
         "base_num_decoder_layers=1",
@@ -202,7 +202,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
     compile_dump_dir = os.path.join(temp_dir, "jaxpr_test_results", test_name, "aot")
 
     shared_args = [
-        "base_output_directory=gs://runner-maxtext-logs",
+        f"base_output_directory={get_test_base_output_directory()}",
         "dataset_type=synthetic",
         "steps=1",
         "enable_checkpointing=False",

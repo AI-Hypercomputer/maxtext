@@ -192,16 +192,19 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
         "exists to be traced and compiled: call `compile_kernels()`, or build a MaxTextTrainingEngine instead."
     )
 
-  def fwd_bwd(self, payload: Any, **kwargs: Any) -> None:
+  def fwd_bwd(self, payload: Any) -> None:
     raise self._cannot_run("fwd_bwd")
 
-  def update(self, **kwargs: Any) -> int:
+  def update(self) -> int:
     raise self._cannot_run("update")
 
-  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
+  def fwd_only(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    raise self._cannot_run("fwd_only")
+
+  def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
     raise self._cannot_run("save_checkpoint")
 
-  def restore_checkpoint(self, **kwargs: Any) -> Any:
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
     raise self._cannot_run("restore_checkpoint")
 
 

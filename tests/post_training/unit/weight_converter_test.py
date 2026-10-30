@@ -31,6 +31,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import types as pytypes  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
+from unittest import mock  # pylint: disable=wrong-import-position
 
 import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
@@ -38,6 +39,8 @@ import numpy as np  # pylint: disable=wrong-import-position
 import pytest  # pylint: disable=wrong-import-position
 from flax import traverse_util  # pylint: disable=wrong-import-position
 
+from maxtext.common.common_types import get_weight_dtype
+from maxtext.integration.vllm import weight_converter
 from maxtext.integration.vllm.weight_converter import (
     ConversionPlanError,
     MaxTextToMaxTextConverter,
@@ -125,6 +128,18 @@ def _source_tree(fused_moe_on_target: bool):
   }
 
 
+def _nested_source_tree(fused_moe_on_target: bool):
+  """Trainer state in the nested-scan layout `Qwen3NextScannableBlock` produces."""
+  legacy = _source_tree(fused_moe_on_target)["base"]["decoder"]["layers"]
+  local_slots = [legacy[f"layer_{slot}"] for slot in range(CYCLE - 1)]
+  tree = _source_tree(fused_moe_on_target)
+  tree["base"]["decoder"]["layers"] = {
+      "local_layers": jax.tree.map(lambda *slots: jnp.stack(slots, axis=SCAN_AXIS + 1), *local_slots),
+      "global_layer": legacy[f"layer_{CYCLE - 1}"],
+  }
+  return tree
+
+
 def _target_tree(moe_intermediate=MOE_DIM, fused=True, wo_intermediate=MOE_DIM):
   """Rollout state: unrolled `layers_{0..7}`, optionally fused MoE.
 
@@ -195,6 +210,53 @@ class ScannedToUnrolledMappingTest(unittest.TestCase):
         np.asarray(out["token_embedder"]["embedding"]),
         np.asarray(_arr(16, EMB)),
     )
+
+  def test_nested_scan_layout_converts_identically(self):
+    """The nested-scan layout converts to the same rollout weights as the per-slot layout."""
+    target = _target_tree()
+    legacy = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_source_tree(True), target))
+    nested = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_nested_source_tree(True), target))
+    self.assertEqual(set(legacy), set(nested))
+    for key, want in legacy.items():
+      np.testing.assert_array_equal(
+          np.asarray(nested[key]),
+          np.asarray(want),
+          err_msg=f"{'.'.join(map(str, key))} differs between the per-slot and nested layouts",
+      )
+
+  def test_nested_local_layers_not_matching_the_cycle_are_rejected(self):
+    """A `local_layers` axis must hold exactly the cycle's local slots, or slots would be dropped silently."""
+    for num_slots in (CYCLE - 2, CYCLE):
+      with self.subTest(num_slots=num_slots):
+        source = _nested_source_tree(True)
+        local = source["base"]["decoder"]["layers"]["local_layers"]
+        local["input_layernorm"]["scale"] = jnp.take(
+            local["input_layernorm"]["scale"], jnp.arange(num_slots) % (CYCLE - 1), axis=SCAN_AXIS + 1
+        )
+        with self.assertRaisesRegex(ConversionPlanError, "nested cycle-slot axis"):
+          MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
+
+  def test_nested_local_layers_cast_only_the_selected_slot(self):
+    """Every slot's group reads the whole `local_layers` source, so the slot must be taken before the cast."""
+    source = _nested_source_tree(True)
+    local = traverse_util.flatten_dict(source["base"]["decoder"]["layers"]["local_layers"])
+    slot_shapes = {
+        ".".join(("decoder", "layers", "local_layers") + key): value.shape[: SCAN_AXIS + 1] + value.shape[SCAN_AXIS + 2 :]
+        for key, value in local.items()
+    }
+    cast_shapes = []
+    real_cast = weight_converter._apply_dtype_cast  # pylint: disable=protected-access
+
+    def recording_cast(val, tgt_dtype, src_key):
+      if "local_layers" in src_key:
+        cast_shapes.append((src_key, val.shape))
+      return real_cast(val, tgt_dtype, src_key)
+
+    with mock.patch.object(weight_converter, "_apply_dtype_cast", side_effect=recording_cast):
+      MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
+    self.assertTrue(cast_shapes)
+    for src_key, shape in cast_shapes:
+      self.assertEqual(shape, slot_shapes[src_key], src_key)
 
   def test_plan_is_built_once_and_reused(self):
     converter = MaxTextToMaxTextConverter(_config())
@@ -647,8 +709,8 @@ class TargetFreeConversionTest(unittest.TestCase):
     conv_flat = traverse_util.flatten_dict(converter_out)
 
     self.assertEqual(set(base_flat.keys()), set(conv_flat.keys()))
-    for k in base_flat:
-      v_base = getattr(base_flat[k], "value", base_flat[k])
+    for k, base_val in base_flat.items():
+      v_base = getattr(base_val, "value", base_val)
       v_conv = getattr(conv_flat[k], "value", conv_flat[k])
       self.assertEqual(v_base.shape, v_conv.shape, f"Shape mismatch at {k}")
       self.assertEqual(v_base.dtype, v_conv.dtype, f"Dtype mismatch at {k}")
@@ -678,8 +740,8 @@ class TargetFreeConversionTest(unittest.TestCase):
 
     expected_flat = traverse_util.flatten_dict(expected_out)
     self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
-    for k in expected_flat:
-      v_exp = getattr(expected_flat[k], "value", expected_flat[k])
+    for k, exp_val in expected_flat.items():
+      v_exp = getattr(exp_val, "value", exp_val)
       v_got = getattr(merged_flat[k], "value", merged_flat[k])
       self.assertEqual(v_exp.shape, v_got.shape, f"Shape mismatch at {k}")
       self.assertEqual(v_exp.dtype, v_got.dtype, f"Dtype mismatch at {k}")
@@ -710,8 +772,8 @@ class TargetFreeConversionTest(unittest.TestCase):
         merged_flat[k] = v
 
     self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
-    for k in expected_flat:
-      v_exp = getattr(expected_flat[k], "value", expected_flat[k])
+    for k, exp_val in expected_flat.items():
+      v_exp = getattr(exp_val, "value", exp_val)
       v_got = getattr(merged_flat[k], "value", merged_flat[k])
       np.testing.assert_array_equal(np.asarray(v_exp), np.asarray(v_got))
 
@@ -783,6 +845,240 @@ class TargetFreeConversionTest(unittest.TestCase):
           rollout_backend="maxtext",
       )
     self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
+
+  def test_case_10_target_free_dtype_cast_f32_to_bf16_all_param_kinds(self):
+    cfg = _config(
+        base_num_kv_heads=2,
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        weight_dtype=jnp.float32,
+        rollout_weight_dtype=jnp.bfloat16,
+    )
+    source = _source_tree(True)
+    # Add an unscanned router/gate param, a KV kernel for replication, and a non-floating leaf.
+    source["base"]["decoder"]["layers"]["layer_3"]["self_attention"]["key"] = {"kernel": _scanned(EMB, 2, 4, offset=4600)}
+    source["base"]["decoder"]["router_gate"] = {
+        "kernel": _arr(EMB, EXPERTS, offset=9000),
+        "step_count": jnp.asarray([1, 2], dtype=jnp.int32),
+    }
+
+    converter = WeightConverter(
+        config=cfg,
+        kv_tp_size=4,
+        rollout_backend="maxtext",
+    )
+    out = converter.convert(source, target_state=None)
+    flat_out = traverse_util.flatten_dict(out)
+
+    # Check MoE gate kernel, dense query kernel, norm scales, fused wi, wo, and KV-replicated key kernel.
+    expected_bf16_paths = [
+        ("base", "token_embedder", "embedding"),
+        ("base", "decoder", "decoder_norm", "scale"),
+        ("base", "decoder", "router_gate", "kernel"),
+        ("base", "decoder", "layers_0", "input_layernorm", "scale"),
+        ("base", "decoder", "layers_0", "moe_block", "gate", "kernel"),
+        ("base", "decoder", "layers_0", "moe_block", "wi"),
+        ("base", "decoder", "layers_0", "moe_block", "wo"),
+        ("base", "decoder", "layers_3", "self_attention", "query", "kernel"),
+        ("base", "decoder", "layers_3", "self_attention", "key", "kernel"),
+    ]
+    for path in expected_bf16_paths:
+      self.assertIn(path, flat_out, f"Missing expected converted path: {path}")
+      leaf = getattr(flat_out[path], "value", flat_out[path])
+      self.assertEqual(leaf.dtype, jnp.bfloat16, f"Expected bfloat16 at {path}, got {leaf.dtype}")
+
+    # Every floating leaf across the entire output must be bfloat16; integer leaves stay int32.
+    for path, param in flat_out.items():
+      leaf = getattr(param, "value", param)
+      if path[-1] == "step_count":
+        self.assertEqual(leaf.dtype, jnp.int32)
+      else:
+        self.assertEqual(leaf.dtype, jnp.bfloat16, f"Expected bfloat16 at {path}, got {leaf.dtype}")
+
+  def test_case_11_target_free_rejects_fp8_target_dtype(self):
+    source = _source_tree(True)
+    for bad_dtype in ("float8_e4m3fn", jnp.float8_e4m3fn, "float8_e5m2", jnp.float8_e5m2):
+      with self.subTest(bad_dtype=bad_dtype):
+        cfg = _config(
+            inhomogeneous_layer_cycle_interval=CYCLE,
+            num_decoder_layers=NUM_LAYERS,
+            prefuse_moe_weights=True,
+            weight_dtype=jnp.float32,
+            rollout_weight_dtype=bad_dtype,
+        )
+        converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+        with self.assertRaisesRegex(ConversionPlanError, "Unsupported target_dtype"):
+          converter.convert(source, target_state=None)
+
+  def test_case_12_target_free_dtype_matches_rollout_per_module_rule(self):
+    """Each module is emitted in the dtype the rollout model allocates it in.
+
+    Raiden's preflight rejects any leaf whose item size differs from the rollout
+    buffer. The rollout allocates parameters via `get_weight_dtype(config, module)`
+    (decoder_norm and the attention q/k norms read `config.weight_dtype`
+    directly), which today returns `config.weight_dtype` for every non-FP8
+    config, so one cast to `rollout_weight_dtype` covers every module. The rollout
+    config sets `float32_gate_logits=True` and the tree includes the modules that
+    branches keyed on that flag store in float32 (MoE gate, norms, GDN
+    parameters, shared_expert_gate, logits_dense): if `get_weight_dtype` gains
+    such a per-module rule, this test fails until the converter mirrors it.
+    """
+    rollout_cfg = pytypes.SimpleNamespace(
+        weight_dtype=jnp.dtype(jnp.bfloat16),
+        dtype=jnp.dtype(jnp.bfloat16),
+        float32_gate_logits=True,
+    )
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        weight_dtype=jnp.float32,
+        rollout_weight_dtype=rollout_cfg.weight_dtype,
+    )
+    source = _source_tree(True)
+    decoder = source["base"]["decoder"]
+    gdn_layer = decoder["layers"]["layer_0"]
+    gdn_layer["post_attention_layernorm"] = {"scale": _scanned(EMB, offset=5000)}
+    gdn_layer["moe_block"]["gate"]["bias"] = _scanned(EXPERTS, offset=5100)
+    gdn_layer["moe_block"]["shared_expert_gate"] = {"kernel": _scanned(EMB, 1, offset=5200)}
+    gdn_layer["linear_attention"].update(
+        {
+            "in_proj_ba": {"kernel": _scanned(EMB, 4, offset=5300)},
+            "conv1d": {"kernel": _scanned(4, 1, 8, offset=5400)},
+            "A_log": _scanned(2, offset=5500),
+            "dt_bias": _scanned(2, offset=5600),
+            "norm": {"scale": _scanned(4, offset=5700)},
+        }
+    )
+    attn_slot = CYCLE - 1
+    attention = decoder["layers"][f"layer_{attn_slot}"]["self_attention"]
+    attention["query_norm"] = {"scale": _scanned(4, offset=5800)}
+    attention["key_norm"] = {"scale": _scanned(4, offset=5900)}
+    decoder["logits_dense"] = {"kernel": _arr(EMB, 16, offset=6000)}
+
+    out = WeightConverter(config=cfg, rollout_backend="maxtext").convert(source, target_state=None)
+    flat_out = traverse_util.flatten_dict(out)
+
+    # Output path -> module name the rollout passes to `get_weight_dtype`; None means
+    # the rollout reads `config.weight_dtype` directly.
+    expected = {
+        ("base", "token_embedder", "embedding"): "token_embedder",
+        ("base", "decoder", "decoder_norm", "scale"): None,
+        ("base", "decoder", "logits_dense", "kernel"): "logits_dense",
+    }
+    per_slot = {
+        0: {
+            ("input_layernorm", "scale"): "norm",
+            ("post_attention_layernorm", "scale"): "norm",
+            ("moe_block", "gate", "kernel"): "gate",
+            ("moe_block", "gate", "bias"): "gate",
+            ("moe_block", "shared_expert_gate", "kernel"): "shared_expert_gate",
+            ("linear_attention", "in_proj_ba", "kernel"): "in_proj_ba",
+            ("linear_attention", "conv1d", "kernel"): "conv1d",
+            ("linear_attention", "A_log"): "A_log",
+            ("linear_attention", "dt_bias"): "dt_bias",
+            ("linear_attention", "norm", "scale"): "norm",
+        },
+        attn_slot: {
+            ("self_attention", "query_norm", "scale"): None,
+            ("self_attention", "key_norm", "scale"): None,
+        },
+    }
+    for block in range(NUM_BLOCKS):
+      for slot, modules in per_slot.items():
+        layer_key = ("base", "decoder", f"layers_{block * CYCLE + slot}")
+        expected.update({layer_key + suffix: module for suffix, module in modules.items()})
+
+    for path, module in expected.items():
+      with self.subTest(path=".".join(path)):
+        self.assertIn(path, flat_out)
+        want = rollout_cfg.weight_dtype if module is None else get_weight_dtype(rollout_cfg, module)
+        leaf = getattr(flat_out[path], "value", flat_out[path])
+        self.assertEqual(leaf.dtype, jnp.dtype(want))
+
+  def test_case_13_dcp_moe_fusion_uses_single_shard(self):
+    """Under DCP (tp=4, kv_tp_size=4, moe_mlp_tp_size=1), MoE wi must fuse with n_shards=1."""
+    cfg = _config(prefuse_moe_weights=True)
+    source = _source_tree(True)
+    src_moe = source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+    expected_wi_0 = np.asarray(jnp.take(src_moe["wi_0"], 0, axis=SCAN_AXIS))
+    expected_wi_1 = np.asarray(jnp.take(src_moe["wi_1"], 0, axis=SCAN_AXIS))
+    expected_concat = np.concatenate([expected_wi_0, expected_wi_1], axis=-1)
+
+    # 1. Target-free DCP conversion (kv_tp_size=4, moe_mlp_tp_size=1 resolved from config when omitted)
+    converter = WeightConverter(
+        config=_config(prefuse_moe_weights=True, kv_tp_size=4, moe_mlp_tp_size=1),
+        tp=4,
+        prefuse_moe_weights=True,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter.kv_tp_size, 4)
+    self.assertEqual(converter.moe_mlp_tp_size, 1)
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+    wi_tf = getattr(
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+        "value",
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+    )
+    np.testing.assert_array_equal(np.asarray(wi_tf), expected_concat)
+
+    # 2. Target-guided DCP conversion where target wi is expert-sharded over dcp on axis 0
+    if jax.device_count() >= 4:
+      dcp_mesh = jax.sharding.Mesh(
+          np.asarray(jax.devices()[:4]).reshape(1, 2, 2),
+          ("attn_dp", "model", "dcp"),
+      )
+      target = _place(
+          _target_tree(),
+          dcp_mesh,
+          lambda key, val: (
+              jax.sharding.PartitionSpec("dcp", None, None) if key[-1] == "wi" else jax.sharding.PartitionSpec()
+          ),
+      )
+      guided_converter = WeightConverter(rules=None, config=cfg, tp=4)
+      guided_out = guided_converter.convert(source, target_state=target)
+      wi_guided = guided_out["decoder"]["layers_0"]["moe_block"]["wi"]
+      np.testing.assert_array_equal(np.asarray(wi_guided), expected_concat)
+
+  def test_case_14_nested_scan_layout_target_free(self):
+    """Target-free conversion reads the nested `Qwen3NextScannableBlock` layout to the per-slot answer.
+
+    One `local_layers` source feeds a plan group per cycle slot, so it must stay
+    available until the last of those groups has run.
+    """
+    cfg = _config(padded_base_moe_mlp_dim=MOE_DIM + 2, prefuse_moe_weights=True)
+
+    def convert(source, streaming):
+      converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
+      if streaming:
+        flat = {}
+        for piece in converter.convert_streaming(source, target_state=None, groups_per_piece=1):
+          flat.update(traverse_util.flatten_dict(piece))
+        return flat
+      return traverse_util.flatten_dict(converter.convert(source, target_state=None))
+
+    for streaming in (False, True):
+      with self.subTest(streaming=streaming):
+        legacy = convert(_source_tree(True), streaming)
+        nested = convert(_nested_source_tree(True), streaming)
+        self.assertEqual(set(legacy), set(nested))
+        for key, want in legacy.items():
+          np.testing.assert_array_equal(
+              np.asarray(getattr(nested[key], "value", nested[key])),
+              np.asarray(getattr(want, "value", want)),
+              err_msg=f"{'.'.join(map(str, key))} differs between the per-slot and nested layouts",
+          )
+
+    def to_struct(x):
+      return jax.ShapeDtypeStruct(x.shape, x.dtype)
+
+    abstract = {
+        key: getattr(value, "value", value).shape
+        for key, value in convert(jax.tree_util.tree_map(to_struct, _nested_source_tree(True)), False).items()
+    }
+    self.assertEqual(abstract, {key: getattr(value, "value", value).shape for key, value in legacy.items()})
 
 
 if __name__ == "__main__":

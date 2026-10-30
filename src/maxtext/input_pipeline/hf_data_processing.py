@@ -52,7 +52,7 @@ def _get_training_objective_transform(
     pad_id: int,
     bos_token_id: int | None,
 ) -> input_pipeline_utils.ShiftData | input_pipeline_utils.BlockDiffusionCorruption | None:
-  """Selects target preparation for causal or block-diffusion pre-training.
+  """Selects target preparation for causal or block-diffusion training.
 
   Args:
     config: Training configuration containing the objective-specific settings.
@@ -68,16 +68,15 @@ def _get_training_objective_transform(
 
   Raises:
     ValueError: If the objective is unsupported or block diffusion is combined with
-      an incompatible post-training or packing mode.
+      DPO or packing.
   """
   objective = getattr(config, "training_objective", "causal_lm")
   if objective == "block_diffusion":
-    if use_sft:
-      raise ValueError("This block-diffusion integration currently supports pre-training only.")
+    completion_only = bool(use_sft and getattr(config, "sft_train_on_completion_only", False))
     if use_dpo:
-      raise ValueError("Block-diffusion pre-training is not compatible with DPO.")
+      raise ValueError("Block-diffusion training is not compatible with DPO.")
     if packing:
-      raise ValueError("Block-diffusion pre-training requires packing=False.")
+      raise ValueError("Block-diffusion training requires packing=False.")
     return input_pipeline_utils.BlockDiffusionCorruption(
         block_size=config.causal_block_size,
         mask_id=config.block_diffusion_mask_id,
@@ -85,6 +84,7 @@ def _get_training_objective_transform(
         logit_alignment=config.block_diffusion_logit_alignment,
         canvas_policy=config.block_diffusion_canvas_policy,
         axis=1,
+        completion_only=completion_only,
     )
   if objective != "causal_lm":
     raise ValueError(f"Unsupported training objective: {objective}")
@@ -366,6 +366,7 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
 
   if use_sft:
+    input_pipeline_utils.fix_pad_token_if_needed(tokenizer)
     if not chat_template:
       chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
 
@@ -398,7 +399,11 @@ def preprocessing_pipeline(
     data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
         input_pipeline_utils.apply_chat_template,
-        fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
+        fn_kwargs={
+            "tokenizer_model": tokenizer,
+            "data_column_name": data_column_names[0],
+            "model_name": getattr(config, "model_name", None),
+        },
     )
 
   pad_id = _get_pad_id(tokenizer)
@@ -431,6 +436,7 @@ def preprocessing_pipeline(
             completion_only=sft_train_on_completion_only,
             max_target_length=max_target_length,
             unk_id=pad_id,
+            training_objective=getattr(config, "training_objective", "causal_lm"),
         )
     )
     data_column_names = ("inputs", "targets")

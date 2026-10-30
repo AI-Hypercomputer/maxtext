@@ -18,7 +18,19 @@
 name: MaxText Package Tests
 
 on:
+  # Labels change which CI runs on a PR:
+  # - `skip-ci-tests` (added to new PRs, except the ones Copybara exports or that are opened with
+  #   `scheduled-only`) skips the heavy TPU/GPU suites. Removing it runs them. auto_label_pr.yml removes
+  #   it when the PR gets the "pull ready" label (after 2 approvals), unless the full CI already passed;
+  #   Copybara imports the PR only after CI passes.
+  # - `scheduled-only` re-runs the pipeline as a scheduled run, with every suite, even with
+  #   `skip-ci-tests`.
+  # Drafts never run the heavy suites; `ready_for_review` re-runs the pipeline when a draft PR is
+  # marked ready for review. `labeled` and `unlabeled` fire for every label, so the entry jobs are
+  # gated on the label name: a run for any other label runs no tests, and All Required Tests Passed
+  # repeats the result of the newest full run on the same commit.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   workflow_call:
     inputs:
       maxtext_sha:
@@ -36,22 +48,41 @@ on:
     - cron:  '0 */4 * * *'
 
 concurrency:
-  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR) and queue overlapping scheduled runs.
+  # A run triggered by adding or removing an unrelated label (any label other than `scheduled-only` and
+  # `skip-ci-tests`, the labels that the entry jobs accept) gets its own group, so it never cancels a test
+  # run in progress.
   group: >
     ${{
-      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'pull_request' &&
+        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+          github.event.label.name == 'scheduled-only' || github.event.label.name == 'skip-ci-tests') &&
+        format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
       github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
       github.run_id
     }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read
 jobs:
   analyze_code_changes:
     name: Analyze Code Changes for Test Orchestration
+    # `labeled` and `unlabeled` fire for every label, so ignore label events other than the ones
+    # that opt the PR into a scheduled run or skip CI tests. Pushes and scheduled runs are unaffected.
+    # all_tests_passed and all_notebooks_passed treat a run where this job was skipped as a run for an
+    # unrelated label.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # Needed to list the PR's changed files via the GitHub REST API.
+      pull-requests: read
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
@@ -59,6 +90,11 @@ jobs:
       run_posttrain_tests: ${{ steps.check.outputs.run_posttrain_tests }}
       run_pathways_tests: ${{ steps.check.outputs.run_pathways_tests }}
       run_gpu_tests: ${{ steps.check.outputs.run_gpu_tests }}
+      # From the heavy-test gate in analyze_code_changes.sh; non-PR events always run the heavy suites. If the
+      # script fails, these stay empty, so the heavy suites stay skipped and All Required Tests Passed fails.
+      run_heavy_tests: ${{ steps.check.outputs.run_heavy_tests }}
+      heavy_tests_gated: ${{ steps.check.outputs.heavy_tests_gated }}
+      heavy_tests_gate_message: ${{ steps.check.outputs.heavy_tests_gate_message }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -70,42 +106,92 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # A `scheduled-only` PR mirrors a scheduled run, so run every suite
+          # regardless of which files the PR touched.
+          FORCE_ALL_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+          # Inputs of the heavy-test gate in analyze_code_changes.sh.
+          EVENT_ACTION: ${{ github.event.action }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          HAS_SKIP_CI_TESTS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'skip-ci-tests') }}
+          # add_skip_ci_tests_label.yml skips the PRs that Copybara exports; keep the author in sync.
+          IS_COPYBARA_PR: ${{ github.event.pull_request.user.login == 'copybara-service[bot]' }}
         run: |
           bash .github/scripts/analyze_code_changes.sh
 
   code_quality_check:
+    # The all_tests_passed job below matches this check name to tell full runs from runs triggered by
+    # unrelated labels, so this job must keep skipping those runs (the `if:` below).
     name: Code Quality Check
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   docs_build_check:
     name: Documentation Build Check
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
+  dev_tests:
+    name: Development Tests
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.maxtext_sha || github.sha }}
+          persist-credentials: false
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Run development tests
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python pytest
+          PYTHONPATH=. .venv/bin/python -m pytest -v --noconftest -o addopts="--import-mode=importlib --strict-markers" tests/dev
+
   build_and_upload_maxtext_package:
     name: Build MaxText Package
-    needs: [analyze_code_changes, code_quality_check, docs_build_check]
-    # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
+    needs: [analyze_code_changes, code_quality_check, docs_build_check, dev_tests]
+    # Run if either tests or notebooks need to run; on PRs, gate on code quality, docs, and dev tests passing
     if: |
-      always() &&
+      !cancelled() &&
       (needs.analyze_code_changes.outputs.run_tests == 'true' || needs.analyze_code_changes.outputs.run_notebooks == 'true') &&
-      (github.event_name != 'pull_request' || (needs.code_quality_check.result == 'success' && needs.docs_build_check.result == 'success'))
+      (github.event_name != 'pull_request' || (
+        needs.code_quality_check.result == 'success' &&
+        needs.docs_build_check.result == 'success' &&
+        needs.dev_tests.result == 'success'
+      ))
     uses: ./.github/workflows/build_package.yml
     with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
     name: Jupyter Notebook Tests
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
-      always() &&
+      !cancelled() &&
       needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success' &&
       (github.event_name != 'pull_request' ||
         (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]'))
@@ -125,7 +211,7 @@ jobs:
     name: Gate and Formalize Parameters
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
-      always() &&
+      !cancelled() &&
       needs.analyze_code_changes.outputs.run_tests == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success'
     runs-on: ubuntu-latest
@@ -143,13 +229,17 @@ jobs:
           echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
 
+  # The TPU/GPU jobs below (and maxtext_jupyter_notebooks above) also require `run_heavy_tests`
+  # from the heavy-test gate in analyze_code_changes.sh. If you add a heavy TPU/GPU job or change the
+  # flags a heavy job depends on, update the gate's "only a change that needs the heavy suites" rule too.
   tpu-pretrain-tests:
     name: TPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
+      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -158,16 +248,17 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
     name: TPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
+      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -176,16 +267,19 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
 
   tpu7x-tests:
     name: TPU7X Tests
-    needs: [gate_test_run]
+    needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
-      needs.gate_test_run.result == 'success' && github.event_name != 'pull_request'
+      !cancelled() &&
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
+      (github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -194,16 +288,17 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
     name: GPU Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_gpu_tests == 'true'
+      needs.analyze_code_changes.outputs.run_gpu_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -212,14 +307,14 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-cuda12:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
     name: CPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -230,14 +325,14 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
     name: CPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -248,16 +343,17 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
     name: TPU Pathways Unit Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -273,7 +369,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
       total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
       worker_group: ${{ matrix.group }}
@@ -282,9 +378,10 @@ jobs:
     name: TPU Pathways Integration Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
+      needs.analyze_code_changes.outputs.run_pathways_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -298,22 +395,30 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   all_tests_passed:
+    # auto_label_pr.yml and Copybara match this check name; Copybara imports a "pull ready" PR once any run of it
+    # passed on the PR's head commit. The check below matches the names of this job and of the Code Quality job in
+    # this workflow's runs; keep them in sync.
     name: All Required Tests Passed
-    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
-    if: always()
+    needs: [analyze_code_changes, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      # release_pipeline.yml, which calls this workflow, grants it too.
+      actions: read  # reads the earlier runs of this workflow on the same commit (see below)
     steps:
       - name: Check test results
         run: |
           # Check that build and all tests passed or were skipped
+          echo "Analyze Code Changes result: ${NEEDS_ANALYZE_CODE_CHANGES_RESULT}"
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
+          echo "Dev Tests result: ${NEEDS_DEV_TESTS_RESULT}"
           echo "Gate result: ${NEEDS_GATE_TEST_RUN_RESULT}"
           echo "TPU Pretrain Tests result: ${NEEDS_TPU_PRETRAIN_TESTS_RESULT}"
           echo "TPU Posttrain Tests result: ${NEEDS_TPU_POSTTRAIN_TESTS_RESULT}"
@@ -330,11 +435,82 @@ jobs:
             exit 1
           fi
 
+          # A run triggered by an unrelated label skips analyze_code_changes, Code Quality, Docs, the build and
+          # every test, so its own results prove nothing. It passes only if the newest full run of this workflow
+          # on the same commit (a run in which Code Quality ran) passed this check. Otherwise adding or removing a
+          # label could turn this check green without any test, even right after a failed run.
+          if [ "${NEEDS_ANALYZE_CODE_CHANGES_RESULT}" == "skipped" ]; then
+            if [ -z "${HEAD_SHA}" ]; then
+              echo "::error::analyze_code_changes was skipped in a run that is not for a pull request."
+              exit 1
+            fi
+            # Sets `atp` to "<status> <conclusion>" of All Required Tests Passed in the newest full run, to
+            # "missing" if that run has not created the job yet (its tests are still running), or to "none".
+            find_newest_full_run() {
+              local run_ids run_id jobs full_run_atp
+              atp="none"
+              run_ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci_pipeline.yml/runs?head_sha=${HEAD_SHA}&event=pull_request&per_page=100" \
+                --paginate --jq '.workflow_runs[].id')
+              while read -r run_id; do
+                [ -n "${run_id}" ] || continue
+                jobs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+                  --paginate --jq '.jobs[] | [.name, .status, .conclusion // "none"] | @tsv')
+                full_run_atp=$(awk -F'\t' '
+                  $1 == "Code Quality Check / Pre-commit Linters" { full_run = 1 }
+                  $1 == "All Required Tests Passed" { atp = $2 " " $3 }
+                  END { if (full_run) print (atp == "" ? "missing" : atp) }' <<< "${jobs}")
+                if [ -n "${full_run_atp}" ]; then
+                  atp="${full_run_atp}"
+                  return
+                fi
+              done < <(sort -rn <<< "${run_ids}")
+            }
+            find_newest_full_run
+            # Wait a little if that run is just finishing its own All Required Tests Passed job.
+            for _ in {1..10}; do
+              case "${atp}" in
+                "queued "* | "in_progress "* | "waiting "* | "pending "* | "requested "*) ;;
+                *) break ;;
+              esac
+              sleep 30
+              find_newest_full_run
+            done
+            case "${atp}" in
+              "completed success")
+                echo "This run was triggered by an unrelated label and ran no tests; the newest full run on this commit passed."
+                exit 0
+                ;;
+              none) reason="there is no full run on this commit" ;;
+              missing) reason="the newest full run on this commit is still running its tests" ;;
+              *) reason="All Required Tests Passed of the newest full run on this commit is '${atp}'" ;;
+            esac
+            echo "::error::This run was triggered by an unrelated label and ran no tests, so it passes only after a passing full run, but ${reason}."
+            exit 1
+          fi
+
+          # Fail if the heavy-test gate skipped TPU/GPU suites that this change needs (the PR is a draft or new,
+          # or has the `skip-ci-tests` label), or if analyze_code_changes gave missing or invalid gate outputs, so
+          # a broken gate cannot silently skip every heavy suite.
+          if [[ "${HEAVY_TESTS_GATED}" != "false" ]] ||
+            [[ "${RUN_HEAVY_TESTS}" != "true" && "${RUN_HEAVY_TESTS}" != "false" ]]; then
+            : "${GATE_MESSAGE:=The heavy-test gate produced no decision; check analyze_code_changes.sh and the outputs of analyze_code_changes.}"
+            echo "::error title=Heavy tests skipped::${GATE_MESSAGE}"
+            echo "### ${GATE_MESSAGE}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
           echo "All required tests passed successfully"
         env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_HEAVY_TESTS: ${{ needs.analyze_code_changes.outputs.run_heavy_tests }}
+          HEAVY_TESTS_GATED: ${{ needs.analyze_code_changes.outputs.heavy_tests_gated }}
+          GATE_MESSAGE: ${{ needs.analyze_code_changes.outputs.heavy_tests_gate_message }}
+          NEEDS_ANALYZE_CODE_CHANGES_RESULT: ${{ needs.analyze_code_changes.result }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
+          NEEDS_DEV_TESTS_RESULT: ${{ needs.dev_tests.result }}
           NEEDS_GATE_TEST_RUN_RESULT: ${{ needs.gate_test_run.result }}
           NEEDS_CPU_PRETRAIN_TESTS_RESULT: ${{ needs.cpu-pretrain-tests.result }}
           NEEDS_CPU_POSTTRAIN_TESTS_RESULT: ${{ needs.cpu-posttrain-tests.result }}
@@ -348,7 +524,10 @@ jobs:
   all_notebooks_passed:
     name: All Notebooks Passed
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
-    if: always()
+    # Skipped in runs for unrelated labels (analyze_code_changes was skipped): they run no notebook, and Copybara
+    # imports a "pull ready" PR once any run of this check passed. Otherwise it must fail, not skip, on cancel
+    # (see all_tests_passed); if this check ever becomes required on GitHub, repeat the full run like that job does.
+    if: always() && needs.analyze_code_changes.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -369,31 +548,41 @@ jobs:
             exit 1
           fi
 
+          # The notebooks run on TPUs, so the heavy-test gate skips them on drafts and while the PR has the
+          # `skip-ci-tests` label (see analyze_code_changes.sh). Skipped notebooks have not passed.
+          if [ "${NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_HEAVY_TESTS}" != "true" ]; then
+            echo "::error::Notebook tests were skipped because the heavy TPU/GPU tests are gated; see 'All Required Tests Passed'."
+            exit 1
+          fi
+
           echo "All required notebooks passed successfully"
         env:
           NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_NOTEBOOKS: ${{ needs.analyze_code_changes.outputs.run_notebooks }}
+          NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_HEAVY_TESTS: ${{ needs.analyze_code_changes.outputs.run_heavy_tests }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_MAXTEXT_JUPYTER_NOTEBOOKS_RESULT: ${{ needs.maxtext_jupyter_notebooks.result }}
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
-    if: ${{ always() }}
+    needs: [all_tests_passed, all_notebooks_passed]
+    if: ${{ !cancelled() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       issues: write
+    outputs:
+      issue_number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - name: Check whether one of the jobs failed
-        if: ${{ contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+        id: create_issue
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
         with:
           github-token: ${{ github.token }}
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
-    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+    needs: [notify_failure]
+    if: ${{ !cancelled() && (needs.notify_failure.result == 'success' || needs.notify_failure.result == 'failure') }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
       contents: 'read'
@@ -403,13 +592,14 @@ jobs:
       actions: 'read'
     with:
       failed_run_id: '${{ github.run_id }}'
+      tracking_issue_number: '${{ needs.notify_failure.outputs.issue_number }}'
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   track_performance:
     name: Track Test Performance
-    needs: [tpu-pretrain-tests, tpu-posttrain-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
-    if: ${{ always() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
+    needs: [tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
+    if: ${{ !cancelled() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success' || needs.tpu7x-tests.result == 'success') }}
     uses: ./.github/workflows/track_performance.yml
     permissions:
       contents: write

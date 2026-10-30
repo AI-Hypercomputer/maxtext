@@ -193,6 +193,11 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
+  # Align mode pins the mamba block size to the attention one.
+  cache_config = vllm_config.cache_config
+  if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+    overrides["gdn_mamba_block_size"] = cache_config.block_size
+
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
 
@@ -295,23 +300,10 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
 
-    # below, GDN layers don't touch block_tables — they index via
-    # ``mamba_state_indices`` — and all full-attn layers belong to the same
-    # kv_cache_group so they share one block_tables. Pick a metadata from a
-    # full-attn (non-linear_attention) layer when possible; otherwise any
-    # value works.
-    if isinstance(attention_metadata, dict):
-      hf_text_config = getattr(self.cfg, "hf_text_config", getattr(self.cfg, "hf_config", None))
-      layer_types = getattr(hf_text_config, "layer_types", None) or []
-      attention_metadata_picked = None
-      for i, lt in enumerate(layer_types):
-        if lt != "linear_attention":
-          attention_metadata_picked = attention_metadata.get(f"layer.{i}")
-          if attention_metadata_picked is not None:
-            break
-      if attention_metadata_picked is None:
-        attention_metadata_picked = next(iter(attention_metadata.values()))
-      attention_metadata = attention_metadata_picked
+    # For hybrid models, attention_metadata can arrive as a GroupedAttentionMetadata
+    # (a mapping from layer names like "layer.0" to per-group AttentionMetadata).
+    # Keep the mapping so each decoder layer (GDN or full attention) receives its
+    # own group's block tables and state indices.
 
     # Present the decoder a layer-ordered view of the physical cache list. With
     # the vLLM hybrid layout all Mamba/GDN caches precede the attention caches,
@@ -336,7 +328,11 @@ class MaxTextForCausalLM(nnx.Module):
       decoder_input_embeddings = None
       input_ids = jnp.expand_dims(input_ids, axis=1)
 
-    positions = getattr(attention_metadata, "input_positions", None)
+    if isinstance(attention_metadata, dict):
+      first_meta = next(iter(attention_metadata.values()))
+      positions = getattr(first_meta, "input_positions", None)
+    else:
+      positions = getattr(attention_metadata, "input_positions", None)
     if positions is None:
       positions = _input_positions
     input_positions = normalize_vllm_input_positions(positions)
@@ -547,6 +543,7 @@ def patch_kv_cache_manager():
       decoder_block_str = decoder_block.value
 
     if decoder_block_str in ("qwen3_next", "qwen3_5"):
+      mamba_cache_mode = getattr(self.runner.cache_config, "mamba_cache_mode", "none")
       interval = cfg.inhomogeneous_layer_cycle_interval
 
       # Qwen GDN keeps its short convolution history in BF16, but recurrence is
@@ -558,7 +555,7 @@ def patch_kv_cache_manager():
       from tpu_inference.layers.common.sharding import ShardingAxisName
       from tpu_inference import utils as common_utils
 
-      tp_axis_name = ShardingAxisName.ATTN_HEAD
+      tp_axis_name = getattr(ShardingAxisName, "KV_HEAD", ShardingAxisName.ATTN_HEAD)
       model_cnt = common_utils.get_mesh_shape_product(self.runner.mesh, tp_axis_name)
 
       model_config = self.runner.model_config
@@ -630,15 +627,23 @@ def patch_kv_cache_manager():
 
     if decoder_block_str in ("qwen3_next", "qwen3_5"):
       for i in range(cfg.base_num_decoder_layers):
+        layer_name = f"layer.{i}"
         if (i + 1) % interval != 0:
-          layer_name = f"layer.{i}"
           if layer_name in kv_cache_spec:
             kv_cache_spec[layer_name] = MambaSpec(
                 block_size=kv_cache_spec[layer_name].block_size,
                 shapes=mamba_shapes,
                 dtypes=mamba_dtypes,
                 page_size_padded=self._hybrid_uniform_page_size_bytes,
+                mamba_cache_mode=mamba_cache_mode,
             )
+        elif layer_name in kv_cache_spec:
+          kv_cache_spec[layer_name] = self._create_attention_spec(
+              kv_cache_spec[layer_name].block_size,
+              num_kv_heads,
+              head_size,
+              sliding_window=getattr(kv_cache_spec[layer_name], "sliding_window", None),
+          )
 
     return kv_cache_spec
 
@@ -649,7 +654,7 @@ def patch_kv_cache_manager():
 def patch_raiden_worker_h2d():
   """Monkey-patches TPUWorker.raiden_h2d and RaidenWorkerSync to apply Raiden weights to runner."""
   try:
-    from tunix.experimental.weight_sync.raiden_synchronizer import patch_raiden_worker_sync  # pylint: disable=import-outside-toplevel
+    from tunix.dist_rl.weight_sync.raiden_synchronizer import patch_raiden_worker_sync  # pylint: disable=import-outside-toplevel
 
     patch_raiden_worker_sync()
   except Exception as e:  # pylint: disable=broad-exception-caught

@@ -16,6 +16,7 @@
 
 import functools
 import json
+import math
 import qwix.pallas as qpl
 import re
 from typing import ClassVar, Tuple, Sequence, Callable
@@ -36,11 +37,12 @@ from qwix._src import interception as qwix_interception
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from jax.sharding import NamedSharding
 
 from flax.linen import fp8_ops
-from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 from flax import nnx
+from flax.nnx import variablelib
 # Support different packaging structures across environments even within
 # the same Qwix version identifier (imports from _src.utils vs _src).
 try:
@@ -64,7 +66,7 @@ except (NameError, AttributeError):
   pass
 from maxtext.layers import nnx_wrappers
 
-from maxtext.configs.types import TeCommGemmOverlapPolicy
+from maxtext.configs.types import JAX_MX_QUANTIZATIONS, TeCommGemmOverlapPolicy
 from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils import max_logging
@@ -123,8 +125,8 @@ def dequantize_weight(
   scale_c = jnp.asarray(scale, compute_dtype)
 
   # Per-tensor scalar scale or matching shape
-  if scale_c.ndim == 0 or scale_c.shape == w.shape:
-    return w_c * scale_c
+  if scale_c.ndim == 0 or scale_c.shape == w.shape or scale_c.size == 1:
+    return w_c * scale_c.reshape(()) if scale_c.size == 1 else w_c * scale_c
 
   # Block-wise scale (e.g. 2D for Dense, 3D for MoE)
   if scale_c.ndim == w.ndim and any(s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)):
@@ -137,7 +139,7 @@ def dequantize_weight(
     return (w_c.reshape(interleaved_shape) * scale_c.reshape(scale_shape)).reshape(w.shape)
 
   # Leading-dimension scale (e.g. per-expert (num_experts,) on (num_experts, in_dim, out_dim))
-  if scale_c.ndim < w.ndim and w.shape[: scale_c.ndim] == scale_c.shape:
+  if scale_c.ndim < w.ndim and w.ndim >= 3 and w.shape[: scale_c.ndim] == scale_c.shape:
     scale_c = scale_c.reshape(scale_c.shape + (1,) * (w.ndim - scale_c.ndim))
 
   # Standard JAX broadcasting handles per-channel or broadcastable shapes
@@ -158,6 +160,222 @@ class Quantization:
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
+
+
+class JaxBlockScaledDotGeneral(nnx.Module):
+  """Stateless OCP MX dot_general: `jax.nn.scaled_dot_general` with one config for both operands and one for the gradient.
+
+  `mode` and `gradient_mode` are `jax.nn.get_scaled_dot_general_config` names, "mxfp8" or "mxfp4" (mxfp4 needs
+  jax>=0.12.0); the matching MaxText `quantization` value is the same name with a `jax_` prefix.
+  """
+
+  def __init__(self, mode: str, gradient_mode: str | None = None):
+    gradient_mode = gradient_mode or mode
+    # Reject a mode this JAX lacks here, not at trace time.
+    for name in (mode, gradient_mode):
+      try:
+        jax.nn.get_scaled_dot_general_config(name)
+      except (AttributeError, ValueError) as e:
+        raise ValueError(
+            f"quantization=jax_{mode} needs a JAX with scaled_dot_general mode '{name}' (mxfp4: jax>=0.12.0)"
+        ) from e
+    self.mode = mode
+    self.gradient_mode = gradient_mode
+
+  def __call__(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+  ) -> jax.Array:
+    # jax.nn.scaled_dot_general takes no precision argument.
+    del precision
+    output_dtype = jnp.result_type(lhs, rhs) if preferred_element_type is None else preferred_element_type
+    config = jax.nn.get_scaled_dot_general_config(self.mode)
+    gradient_config = jax.nn.get_scaled_dot_general_config(self.gradient_mode)
+    self._check_contracting_dims(lhs, rhs, dimension_numbers, config.block_size)
+    return jax.nn.scaled_dot_general(
+        lhs, rhs, dimension_numbers, preferred_element_type=output_dtype, configs=[config, config, gradient_config]
+    )
+
+  def _check_contracting_dims(
+      self, lhs: jax.Array, rhs: jax.Array, dimension_numbers: jax.lax.DotDimensionNumbers, block: int
+  ) -> None:
+    """Checks that the contracting dims are a whole number of blocks.
+
+    Three GEMMs are checked here:
+    - forward, y = x @ W
+    - backward, dx = g @ W^T
+    - backward, dW = x^T @ g
+    """
+    (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
+    lhs_free = [d for d in range(lhs.ndim) if d not in lhs_contract and d not in lhs_batch]
+    rhs_free = [d for d in range(rhs.ndim) if d not in rhs_contract and d not in rhs_batch]
+    contracting_sizes = {
+        "forward (y = x @ W)": math.prod(lhs.shape[d] for d in lhs_contract),
+        "input gradient (dx = g @ W^T)": math.prod(rhs.shape[d] for d in rhs_free),
+        "weight gradient (dW = x^T @ g)": math.prod(lhs.shape[d] for d in lhs_free),
+    }
+    for gemm, k in contracting_sizes.items():
+      if k < block or k % block != 0:
+        raise ValueError(
+            f"quantization=jax_{self.mode}: the {gemm} GEMM contracts over {k} elements, which must be at least"
+            f" {block} and a multiple of {block}; lhs {lhs.shape}, rhs {rhs.shape}, dimension_numbers"
+            f" {dimension_numbers}."
+        )
+
+
+@dataclass
+class JaxBlockScaledQuantization(Quantization):
+  """Configures OCP MX quantization through `jax.nn.scaled_dot_general`."""
+
+  # MX scales are the per-block amax of the data; no RNG is used at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
+  quant_mode = "train"
+  mode: str
+  gradient_mode: str | None = None
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    del mesh_axes
+    return functools.partial(JaxBlockScaledDotGeneral, mode=self.mode, gradient_mode=self.gradient_mode)
+
+  def einsum(self, *args, **kwargs):
+    del args, kwargs
+    raise ValueError(f"quantization='jax_{self.mode}' does not support einsum.")
+
+
+def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
+  """Infers quantization scheme ('per_tensor', 'per_channel', or 'block_wise') from scale shape."""
+  nontrivial_axes = [i for i, s in enumerate(scale_shape) if s > 1]
+  if not nontrivial_axes:
+    return "per_tensor", None
+  if len(nontrivial_axes) == 1:
+    return "per_channel", nontrivial_axes[0]
+  return "block_wise", None
+
+
+def native_fp8_dot_general(
+    inputs: jnp.ndarray,
+    quantized_kernel: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    scale_block_size: int | Tuple[int, ...] | None,
+    axis: Tuple[int, ...],
+    contract_ind: Tuple[int, ...],
+    compute_dtype: DType = jnp.bfloat16,
+    precision: jax.lax.PrecisionLike = None,
+    out_sharding: NamedSharding | None = None,
+    act_calibration_method: str = "absmax",
+) -> jnp.ndarray:
+  """Computes dot_general with pre-quantized FP8 weights without dequantization."""
+  if len(axis) != 1 or len(contract_ind) != 1:
+    raise NotImplementedError(
+        "native_fp8_dot_general only supports a single contracted axis per "
+        f"operand, got axis={axis}, contract_ind={contract_ind}."
+    )
+  lhs_axis = axis[0]
+  rhs_axis = contract_ind[0]
+
+  # Qwix requires scale.ndim == qvalue.ndim. Determine scheme before reshaping minimal-rank scales.
+  if kernel_scale.ndim == quantized_kernel.ndim:
+    scheme, _ = infer_scale_granularity(kernel_scale.shape)
+  elif kernel_scale.size == 1:
+    scheme = "per_tensor"
+    kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
+  else:
+    # Reshape flattened per-channel scale over output axes.
+    scheme = "per_channel"
+    out_axes_shape = tuple(d for i, d in enumerate(quantized_kernel.shape) if i != rhs_axis)
+    if kernel_scale.size != math.prod(out_axes_shape):
+      raise ValueError(
+          f"kernel_scale with shape {kernel_scale.shape} does not match the "
+          f"kernel's non-contracted output shape {out_axes_shape} (kernel "
+          f"shape {quantized_kernel.shape}, contracted axis {rhs_axis})."
+      )
+    kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
+
+  rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
+  channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+  if scheme in ("per_tensor", "per_channel"):
+    tiled_axes = {}
+  else:
+    rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
+    tiled_axes = {lhs_axis: rhs_block_size}
+  if is_static_calibration(act_calibration_method):
+    channelwise_axes = []
+    tiled_axes = {}
+  lhs = qwix.quantize(
+      jnp.asarray(inputs, compute_dtype),
+      jnp.float8_e4m3fn,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes,
+      calibration_method=act_calibration_method,
+  )
+  dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
+  out = qwix.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
+  out = out.astype(compute_dtype)
+  if out_sharding is not None:
+    out = jax.lax.with_sharding_constraint(out, out_sharding)
+  return out
+
+
+@dataclass
+class ServeFp8WeightQuantization(Quantization):
+  """Marks a layer as using native FP8 compute without weight dequantization.
+
+  Weights are FP8 with static scales loaded from the checkpoint. Activations (matmul
+  inputs) are quantized to FP8 according to `act_calibration_method`:
+
+    - "absmax" (default): dynamic scale computed from the activation at runtime.
+    - "fixed,-A,A" or "fixed,A": static per-tensor scale A / 448, no runtime reduction.
+
+  The setting applies to the dense layers (`native_fp8_dot_general`) and to the routed
+  experts on the tpu-inference fused MoE path (`static_act_scale`).
+  """
+
+  quant_mode = None
+  act_calibration_method: str = "absmax"
+
+  def __post_init__(self):
+    if is_static_calibration(self.act_calibration_method):
+      # Fail at config time on e.g. an asymmetric range instead of at trace time.
+      get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+
+  def static_act_scale(self) -> jax.Array | None:
+    """Returns the static per-tensor activation scale as a float32 [1, 1] array.
+
+    Returns None when activations use dynamic scaling.
+    """
+    if not is_static_calibration(self.act_calibration_method):
+      return None
+    scale = get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+    return jnp.full((1, 1), scale, dtype=jnp.float32)
+
+
+def is_static_calibration(calibration_method: str | None) -> bool:
+  """Whether `calibration_method` is a fixed-range (static scale) calibration."""
+  return bool(calibration_method) and calibration_method.lower().startswith("fixed")
+
+
+def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:
+  """Expands a per-expert weight scale to gmm_v2's rhs_scale
+  layout: (num_experts, num_k_blocks, 1, n_dim). This kernel needs a scale per
+  output (N) channel, unlike gmm v2 elsewhere -- N-axis groups that
+  shared one value in the checkpoint are expanded by repeating it (lossless).
+  """
+  num_experts, k_dim, n_dim = kernel_shape
+  if scale.ndim == 1:
+    scale = scale.reshape(num_experts, 1, 1)
+  if scale.ndim != 3 or scale.shape[0] != num_experts:
+    raise ValueError(f"Unexpected weight scale shape {scale.shape} for kernel shape {kernel_shape}.")
+  _, k_blocks, n_blocks = scale.shape
+  if k_dim % k_blocks != 0 or n_dim % n_blocks != 0:
+    raise ValueError(f"Weight scale shape {scale.shape} does not evenly divide kernel shape {kernel_shape}.")
+  n_repeat = n_dim // n_blocks
+  scale = jnp.repeat(scale.astype(jnp.float32), n_repeat, axis=2)  # (E, k_blocks, n_dim)
+  return jnp.expand_dims(scale, axis=2)  # (E, k_blocks, 1, n_dim)
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -334,12 +552,12 @@ class QwixQuantization:
     return QwixEinsum(config=self._get_fp8_full_qwix_config())
 
 
-class QwixDotGeneral(nn.Module):
+class QwixDotGeneral(nnx.Module):
   """A callable class for Qwix dot_general."""
 
-  config: dot_general_qt.DotGeneralQtConfig
+  def __init__(self, config: dot_general_qt.DotGeneralQtConfig):
+    self.config = config
 
-  @nn.compact
   def __call__(
       self,
       lhs: jax.Array,
@@ -353,12 +571,12 @@ class QwixDotGeneral(nn.Module):
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, self.config)
 
 
-class QwixEinsum(nn.Module):
+class QwixEinsum(nnx.Module):
   """A callable class for Qwix einsum."""
 
-  config: dot_general_qt.DotGeneralQtConfig
+  def __init__(self, config: dot_general_qt.DotGeneralQtConfig):
+    self.config = config
 
-  @nn.compact
   def __call__(
       self,
       einsum_str: str,
@@ -396,92 +614,138 @@ class Fp8Quantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    return nn.Fp8DirectDotGeneralOp
+    return Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
     return _Fp8EinsumWrapper(dtype=dtype)
 
 
-class _Fp8EinsumWrapper(nn.Module):
-  """Wrapper for nn.Fp8Einsum to handle computation dtype."""
+_OVERWRITE_WITH_GRADIENT = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
 
-  dtype: DType
 
-  @nn.compact
+def _fp8_dot_inputs(*args, **kwargs):
+  """Splits dot_general arguments the way Flax's fp8 ops do: the kernel's dtype is the computation dtype."""
+  del kwargs
+  assert len(args) == 3
+  x, k, dimension_numbers = args
+  return jnp.asarray(x, k.dtype), k, dimension_numbers, k.dtype
+
+
+class _Fp8Stats(nnx.Module):
+  """The scales and amax histories of an fp8 op, kept the way Flax's `Fp8DotGeneralBase` keeps them.
+
+  They are `_overwrite_with_gradient` variables: the fp8 ops return their new values as gradients,
+  and the train step writes those back instead of applying the optimizer.
+  """
+
+  def __init__(self, amax_history_length: int = 1024):
+    self.input_amax_history = _OVERWRITE_WITH_GRADIENT(jnp.zeros((amax_history_length,), jnp.float32))
+    self.kernel_amax_history = _OVERWRITE_WITH_GRADIENT(jnp.zeros((amax_history_length,), jnp.float32))
+    self.output_grad_amax_history = _OVERWRITE_WITH_GRADIENT(jnp.zeros((amax_history_length,), jnp.float32))
+    self.input_scale = _OVERWRITE_WITH_GRADIENT(jnp.ones((1,), jnp.float32))
+    self.kernel_scale = _OVERWRITE_WITH_GRADIENT(jnp.ones((1,), jnp.float32))
+    self.output_grad_scale = _OVERWRITE_WITH_GRADIENT(jnp.ones((1,), jnp.float32))
+
+  def scaled_dot_general(self, compute_dtype: DType):
+    """Flax's `fp8_scaled_dot_general` bound to these scales and amax histories."""
+    return functools.partial(
+        fp8_ops.fp8_scaled_dot_general,
+        lhs_scale=self.input_scale[...],
+        rhs_scale=self.kernel_scale[...],
+        grad_scale=self.output_grad_scale[...],
+        lhs_amax_history=self.input_amax_history[...],
+        rhs_amax_history=self.kernel_amax_history[...],
+        grad_amax_history=self.output_grad_amax_history[...],
+        quantize_compute_type=compute_dtype,
+    )
+
+  def quantize_inputs(self, compute_dtype: DType, e4m3_dtype: DType, x, k):
+    x_qdq = fp8_ops.in_qdq(compute_dtype, e4m3_dtype, x, self.input_scale[...], self.input_amax_history[...])
+    k_qdq = fp8_ops.in_qdq(compute_dtype, e4m3_dtype, k, self.kernel_scale[...], self.kernel_amax_history[...])
+    return x_qdq, k_qdq
+
+  def quantize_output_grad(self, compute_dtype: DType, e5m2_dtype: DType, y):
+    return fp8_ops.out_qdq(compute_dtype, e5m2_dtype, y, self.output_grad_scale[...], self.output_grad_amax_history[...])
+
+
+class Fp8DirectDotGeneralOp(_Fp8Stats):
+  """Flax's `Fp8DirectDotGeneralOp` as an NNX module.
+
+  It keeps Flax's class name: layers store it as "<class name>_0", and checkpoints use that path.
+  """
+
+  def __call__(self, *args, **kwargs):
+    x, k, dimension_numbers, compute_dtype = _fp8_dot_inputs(*args, **kwargs)
+    return self.scaled_dot_general(compute_dtype)(x, k, dimension_numbers, precision=None, preferred_element_type=x.dtype)
+
+
+class NANOOFp8DotGeneralOp(_Fp8Stats):
+  """Flax's `NANOOFp8DotGeneralOp` as an NNX module, using the fnuz fp8 formats of AMD MI300/MI325."""
+
+  def __call__(self, *args, **kwargs):
+    x, k, dimension_numbers, compute_dtype = _fp8_dot_inputs(*args, **kwargs)
+    x_qdq, k_qdq = self.quantize_inputs(compute_dtype, jnp.float8_e4m3fnuz, x, k)
+    y_qdq = fp8_ops.dot_general_with_precision(x_qdq, k_qdq, dimension_numbers)
+    return self.quantize_output_grad(compute_dtype, jnp.float8_e5m2fnuz, y_qdq)
+
+
+class Fp8DirectEinsum(_Fp8Stats):
+  """Flax's `Fp8Einsum` as an NNX module. The rhs is the weight and sets the computation dtype."""
+
+  def __call__(self, eqn, lhs, rhs, precision=None, preferred_element_type=None):
+    compute_dtype = rhs.dtype
+    return jnp.einsum(
+        eqn,
+        lhs.astype(compute_dtype),
+        rhs,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        _dot_general=self.scaled_dot_general(compute_dtype),
+    )
+
+
+class _Fp8EinsumWrapper(nnx.Module):
+  """Runs `Fp8DirectEinsum` in a given computation dtype."""
+
+  def __init__(self, dtype: DType):
+    self.dtype = dtype
+    self.fp8_einsum = Fp8DirectEinsum()
+
   def __call__(self, eqn, lhs, rhs, **kwargs):
-    # nn.Fp8Einsum determines compute dtype from rhs.
-    # We cast rhs to the desired computation dtype.
-    # nn.Fp8Einsum will then cast lhs to the same dtype.
-    rhs = rhs.astype(self.dtype)
-    return nn.Fp8Einsum(name="fp8_einsum")(eqn, lhs, rhs, **kwargs)
+    # The fp8 einsum takes its computation dtype from rhs and casts lhs to it.
+    return self.fp8_einsum(eqn, lhs, rhs.astype(self.dtype), **kwargs)
 
 
-class Fp8Einsum(nn.Module):
+class Fp8Einsum(_Fp8Stats):
   """An fp8 einsum op."""
 
-  #: size of the amax history.
-  amax_history_length: int = 1024
-  #: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
-  e4m3_dtype: DType = jnp.float8_e4m3fn
-  #: e5m2 variants, e.g., e5m2, e5m2fnuz.
-  e5m2_dtype: DType = jnp.float8_e5m2
-  #: computation dtype.
-  dtype: DType = jnp.float32
-
-  def setup(self) -> None:
-    """init with input_amax_history, kernel_amax_history, output_grad_amax_history,
-    input_scale, kernel_scale, output_grad_scale"""
-    scale_args = (
-        flax_initializers.ones_init(),
-        jax.random.PRNGKey(0),
-        (1,),
-        jnp.float32,
-    )
-    amax_history_args = (
-        flax_initializers.zeros_init(),
-        jax.random.PRNGKey(0),
-        (self.amax_history_length,),
-        jnp.float32,
-    )
-
-    OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
-    self.input_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "input_amax_history", *amax_history_args)
-    self.kernel_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_amax_history", *amax_history_args)
-    self.output_grad_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_amax_history", *amax_history_args)
-
-    self.input_scale = self.variable(OVERWRITE_WITH_GRADIENT, "input_scale", *scale_args)
-    self.kernel_scale = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_scale", *scale_args)
-    self.output_grad_scale = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_scale", *scale_args)
+  def __init__(
+      self,
+      amax_history_length: int = 1024,
+      e4m3_dtype: DType = jnp.float8_e4m3fn,
+      e5m2_dtype: DType = jnp.float8_e5m2,
+      dtype: DType = jnp.float32,
+  ):
+    super().__init__(amax_history_length)
+    self.e4m3_dtype = e4m3_dtype
+    self.e5m2_dtype = e5m2_dtype
+    self.dtype = dtype
 
   def __call__(self, eqn, *args, **kwargs):
     assert len(args) == 2
-    x = args[0]
-    k = args[1]
-
     comp_dtype = self.dtype
-    k = jnp.asarray(k, comp_dtype)
-    x = jnp.asarray(x, comp_dtype)
-
-    x_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, x, self.input_scale.value, self.input_amax_history.value)
-    k_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, k, self.kernel_scale.value, self.kernel_amax_history.value)
-
+    x = jnp.asarray(args[0], comp_dtype)
+    k = jnp.asarray(args[1], comp_dtype)
+    x_qdq, k_qdq = self.quantize_inputs(comp_dtype, self.e4m3_dtype, x, k)
     y_qdq = jnp.einsum(eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision)
-
-    y = fp8_ops.out_qdq(
-        comp_dtype,
-        self.e5m2_dtype,
-        y_qdq,
-        self.output_grad_scale.value,
-        self.output_grad_amax_history.value,
-    )
-    return y
+    return self.quantize_output_grad(comp_dtype, self.e5m2_dtype, y_qdq)
 
 
 @dataclass
 class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
 
-  # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
+  # Same as Fp8Quantization: the NANOO fp8 op never draws at apply time.
   needs_apply_rngs: ClassVar[bool] = False
 
   quant_mode = "train"
@@ -489,7 +753,7 @@ class NANOOFp8Quantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    return nn.NANOOFp8DotGeneralOp
+    return NANOOFp8DotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
     """Returns an einsum using the NANOO (fnuz) fp8 formats of AMD MI300/MI325."""
@@ -716,6 +980,8 @@ def _get_quant_config(config):
   """Set quantization params based on user configuration."""
   if not config.quantization or config.quantization == "":
     return None
+  if config.quantization in JAX_MX_QUANTIZATIONS:
+    return config.quantization
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
@@ -758,6 +1024,9 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.quantization == "serve_fp8_weight":
+    return ServeFp8WeightQuantization(act_calibration_method=config.act_quantization_calibration_method)
+
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
@@ -773,7 +1042,12 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
-    if quant_cfg == "fp8":
+    if quant_cfg in JAX_MX_QUANTIZATIONS:
+      mode = quant_cfg.removeprefix("jax_")
+      if quant_mode_str != "train":
+        raise ValueError(f"quantization='jax_{mode}' supports quant_mode 'train' only, got '{quant_mode_str}'.")
+      return JaxBlockScaledQuantization(mode=mode, gradient_mode=config.jax_mx_gradient_mode or None)
+    elif quant_cfg == "fp8":
       return Fp8Quantization()
     elif quant_cfg == "nanoo_fp8":
       return NANOOFp8Quantization()
@@ -836,52 +1110,56 @@ def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
 
-def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
-  """Applies a Linen module within an NNX context."""
+def _apply_fp8_op_in_nnx(op_cls, op_id, *args, **kwargs):
+  """Applies an fp8 op for a Qwix provider, keeping its state on the NNX module Qwix intercepts."""
   try:
     parent = flax_util.get_current_module()
-    is_nnx = isinstance(parent, nnx.Module)
   except ValueError:
-    is_nnx = False
-
-  if is_nnx:
-    attr_name = f"_qwix_fp8_gpu_{op_id}"
-    if not hasattr(parent, attr_name):  # pyrefly: ignore[unbound-name]
-      rngs = getattr(parent, "qwix_rngs", None)
-      if rngs is None:
-        parent_rngs = getattr(parent, "rngs", None)
-        if parent_rngs is not None and hasattr(parent_rngs, "fork"):
-          rngs = parent_rngs.fork()
-        else:
-          rngs = nnx.Rngs(0)
-      wrapper = nnx_wrappers.ToNNX(linen_module_cls(name=op_id), rngs=rngs)
-      wrapper.lazy_init(*args, **kwargs)
-      setattr(parent, attr_name, wrapper)
-    return getattr(parent, attr_name)(*args, mutable=["_overwrite_with_gradient"], **kwargs)
-  else:
-    return linen_module_cls(name=op_id)(*args, **kwargs)
+    parent = None
+  if not isinstance(parent, nnx.Module):
+    raise ValueError(f"The fp8 op {op_id} needs an NNX module to hold its scales; got {type(parent).__name__}.")
+  attr_name = f"_qwix_fp8_gpu_{op_id}"
+  if not hasattr(parent, attr_name):
+    # Fork the parent's rngs as the bridge did, so its later draws (e.g. dropout) stay the same.
+    rngs = getattr(parent, "qwix_rngs", None)
+    if rngs is None:
+      rngs = getattr(parent, "rngs", None)
+    if hasattr(rngs, "fork"):
+      rngs.fork()
+    setattr(parent, attr_name, op_cls())
+  return getattr(parent, attr_name)(*args, **kwargs)
 
 
-def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx_wrappers.ToNNX:
-  """Creates an fp8 einsum that an `nnx.Module` can call.
+def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx.Module:
+  """Creates the fp8 einsum an MoE layer registers in `quant_einsums`.
 
-  An fp8 einsum holds its scaling factors and amax histories in Linen variables, which can
-  only be created while the module is bound to a Linen scope. The bridge into NNX therefore
-  has to happen while the parent module is being built; creating the state on the first call
-  instead would grow the module graph inside the scanned layer loop, which NNX rejects.
-
-  The state has a fixed shape, so a canonical pair of operands is enough to materialize it.
-  The returned einsum still accepts operands of any shape.
+  Its scales and amax histories live in the einsum, so it is built with the layer rather than
+  on the first call, which would grow the module graph inside the scanned layer loop.
 
   Args:
     quant: The fp8 quantization providing the einsum.
     dtype: The computation dtype of the einsum.
-    rngs: The `nnx.Rngs` of the parent module.
+    rngs: The `nnx.Rngs` of the parent module, forked as in `make_dot_general`.
   """
-  wrapper = nnx_wrappers.ToNNX(quant.einsum(dtype=dtype), rngs=rngs)  # pytype: disable=attribute-error
-  dummy_operand = jnp.zeros((1, 1), dtype=dtype)
-  wrapper.lazy_init("ab,bc->ac", dummy_operand, dummy_operand)
-  return wrapper
+  rngs.fork()
+  return quant.einsum(dtype=dtype)  # pytype: disable=attribute-error
+
+
+def make_dot_general(quant, kernel_axes: Tuple[str, ...], rngs: nnx.Rngs) -> tuple[str, nnx.Module]:
+  """Builds the quantized dot_general of an NNX layer and the attribute name the layer stores it under.
+
+  The name follows the quantizer's class, e.g. "Fp8DirectDotGeneralOp_0", and checkpoints use it.
+  Linen quantizers (AQT, Transformer Engine) are bridged into NNX and create their state on the
+  first call; the others are NNX modules and are used as they are.
+  """
+  dot_general = quant.dot_general_cls(mesh_axes=kernel_axes)()
+  name = f"{type(dot_general).__name__}_0"
+  if isinstance(dot_general, nn.Module):
+    dot_general = nnx_wrappers.ToNNX(dot_general, rngs=rngs)
+  else:
+    # The bridge forks rngs; do the same so the weights created after this one draw the same values.
+    rngs.fork()
+  return name, dot_general
 
 
 def apply_einsum_in_nnx(parent: nnx.Module, op_id: str, einsum, mutable: Sequence[str], *args):
@@ -916,20 +1194,20 @@ def apply_einsum_in_nnx(parent: nnx.Module, op_id: str, einsum, mutable: Sequenc
 
 
 class NvidaFp8Provider(qwix.QtProvider):
-  """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
+  """Runs the fp8 ops of NVIDIA GPUs through Qwix's provider interface."""
 
   def dot_general(self, *args, **kwargs):
     # Here we only check if the rule is None or not.
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return _apply_linen_module_in_nnx(nn.Fp8DirectDotGeneralOp, op_id, *args, **kwargs)
+    return _apply_fp8_op_in_nnx(Fp8DirectDotGeneralOp, op_id, *args, **kwargs)
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
     if rule is None:
       return jnp.einsum(*args, **kwargs)
-    return _apply_linen_module_in_nnx(nn.Fp8Einsum, op_id, *args, **kwargs)
+    return _apply_fp8_op_in_nnx(Fp8DirectEinsum, op_id, *args, **kwargs)
 
 
 class NANOOFp8Provider(qwix.QtProvider):
@@ -939,7 +1217,31 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
+    return _apply_fp8_op_in_nnx(NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
+
+
+def _get_router_proj_unquantized_rule() -> qwix.QtRule:
+  """Returns a Qwix rule that keeps the MoE router (gate) projection unquantized.
+
+  Setting all qtypes to None bypasses quantization, falling back to standard
+  unquantized jax.lax.dot_general for both forward and backward passes.
+
+  Note: Because Qwix rules are evaluated in a first-match way, this rule must be
+  placed before broader layer catch-all rules (e.g., 'decoder/.*layers.*').
+  """
+  return qwix.QtRule(
+      module_path=r".*/gate$",
+      weight_qtype=None,
+      act_qtype=None,
+      bwd_qtype=None,
+      op_names=("dot_general",),
+  )
+
+
+def _drhs_grad_calibration_override(config: Config) -> dict:
+  """Qwix DotGeneralQtConfig override for the weight-gradient arm's cotangent calibration (see types.py)."""
+  m = getattr(config, "drhs_grad_quantization_calibration_method", None)
+  return {"drhs_grad_calibration_method": m} if m else {}
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
@@ -953,12 +1255,55 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
 
-  if config.quantize_mtp:
-    module_path = "(decoder/.*layers.*|mtp_block/.*)"
-  else:
-    module_path = "decoder/.*layers.*"
+  rules = []
+  if not config.quantize_router_proj:
+    rules.append(_get_router_proj_unquantized_rule())
 
-  return [
+  if config.quantize_logits_proj:
+    logits_calib = config.logits_proj_quant_calibration_method or None
+    logits_bwd_calib = config.logits_proj_bwd_quant_calibration_method or None
+    # A logits-specific bwd calibration applies to both gradient arms and takes precedence over the
+    # global drhs_grad_quantization_calibration_method.
+    if logits_bwd_calib:
+      logits_drhs_override = {"drhs_grad_calibration_method": logits_bwd_calib}
+    else:
+      logits_drhs_override = _drhs_grad_calibration_override(config)
+    rules.append(
+        qwix.QtRule(
+            module_path="decoder/logits_dense.*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+            weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
+            act_calibration_method=logits_calib or config.act_quantization_calibration_method,
+            bwd_calibration_method=logits_bwd_calib or config.bwd_quantization_calibration_method,
+            additional_qt_config=logits_drhs_override or None,
+            op_names=("dot_general",),
+        )
+    )
+
+  paths = ["decoder/.*layers.*"]  # Main transformer layers
+  if config.quantize_mtp:
+    paths.append("mtp_block/.*")  # Multi-token prediction block
+  # Disjunct regex paths, e.g. "(path1|path2|...)"
+  module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
+
+  if config.sa_qproj_bwd_bf16:
+    rules.append(
+        qwix.QtRule(
+            module_path=(rf"{module_path}/(self_)?attention\w*/(query|wq_a|wq_b)"),
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=None,
+            weight_calibration_method=config.weight_quantization_calibration_method,
+            act_calibration_method=config.act_quantization_calibration_method,
+            bwd_calibration_method=config.bwd_quantization_calibration_method,
+            additional_qt_config={"sparsity_rule": sparsity_rule},
+            op_names=("dot_general",),
+        )
+    )
+
+  rules.append(
       qwix.QtRule(
           module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
@@ -967,27 +1312,34 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           weight_calibration_method=config.weight_quantization_calibration_method,
           act_calibration_method=config.act_quantization_calibration_method,
           bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule},
+          additional_qt_config={"sparsity_rule": sparsity_rule, **_drhs_grad_calibration_override(config)},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+      )
+  )
+  return rules
 
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
-    return [
+    rules = []
+    if not config.quantize_router_proj:
+      rules.append(_get_router_proj_unquantized_rule())
+    rules.append(
         qwix.QtRule(
             module_path="decoder/.*layers.*",
             weight_qtype=dtype,
             act_qtype=dtype,
             bwd_qtype=dtype,
-            bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+            bwd_weight_grad_tile_size=(
+                1 / config.qwix_bwd_weight_grad_tile_count if config.qwix_bwd_weight_grad_tile_count > 1 else None
+            ),
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
-    ]
+    )
+    return rules
 
   match config.quantization:
     case "int4":

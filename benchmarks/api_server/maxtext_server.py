@@ -59,7 +59,8 @@ from benchmarks.api_server.server_models import (
     ChatMessage,
 )
 from benchmarks.api_server import server_utils
-from benchmarks.api_server.encoding import encoding_dsv32, encoding_dsv4
+from benchmarks.api_server.encoding import encoding_dsv32
+from maxtext.input_pipeline import encoding_dsv4
 
 # ----------------------------
 # Init

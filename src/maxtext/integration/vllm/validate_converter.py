@@ -163,6 +163,7 @@ vllm_model_name_mapping = {
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B",
     "gemma4-26b": "google/gemma-4-26B-A4B",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
+    "qwen3.5-35b-a3b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
     # Add more mappings as needed
 }
 

@@ -14,14 +14,18 @@
 
 """Unit tests for MaxText scanned-weight unrolling workarounds."""
 
+import inspect
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from flax.traverse_util import unflatten_dict
 import numpy as np
 import pytest
 
 from maxtext.integration.vllm.maxtext_vllm_rollout import (
+    _create_model_converter,
     MaxTextVllmRollout,
+    MaxTextVllmSampler,
     prepare_direct_sync_additional_config,
     requires_maxtext_scanned_weight_unroll,
     unroll_gemma_scanned_weights,
@@ -29,6 +33,10 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import (
     uses_maxtext_vllm_adapter,
     validate_direct_sync_layer_coverage,
 )
+from maxtext.integration.vllm.weight_converter import WeightConverter
+
+from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+from tunix.rl.rollout import base_rollout
 
 pytestmark = pytest.mark.post_training
 
@@ -225,6 +233,99 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), 4)
 
   @pytest.mark.cpu_only
+  def test_unrolls_the_nested_local_and_global_block_scan(self):
+    """Nested `local_layers` plus `global_layer` unroll to a dense `layers_{global_idx}` run."""
+    num_blocks, num_local = 2, 3
+    cycle = num_local + 1
+    local_probe = np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)
+    global_probe = np.zeros((2, num_blocks, 1), dtype=np.float32)
+    for block in range(num_blocks):
+      for slot in range(num_local):
+        local_probe[:, block, slot, :] = block * cycle + slot
+      global_probe[:, block, :] = block * cycle + num_local
+    weights = MockWeights(
+        {
+            "base": {
+                "decoder": {
+                    "layers": {
+                        "local_layers": {"probe": local_probe},
+                        "global_layer": {"probe": global_probe},
+                    },
+                    "decoder_norm": {"scale": np.ones(2)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights)
+
+    decoder = unrolled["base"]["decoder"]
+    for layer_idx in range(num_blocks * cycle):
+      self.assertIn(f"layers_{layer_idx}", decoder)
+      np.testing.assert_array_equal(
+          decoder[f"layers_{layer_idx}"]["probe"],
+          np.full((2, 1), layer_idx, dtype=np.float32),
+      )
+    np.testing.assert_array_equal(decoder["decoder_norm"]["scale"], np.ones(2))
+    target = {
+        "model": {
+            "decoder": {
+                f"layers_{layer_idx}": {"probe": np.zeros((2, 1), dtype=np.float32)}
+                for layer_idx in range(num_blocks * cycle)
+            }
+        }
+    }
+    self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), num_blocks * cycle)
+
+  @pytest.mark.cpu_only
+  def test_nested_block_scan_honors_an_explicit_pattern_length(self):
+    """The global layer is the last slot of `pattern_length`, which `local_layers` must fill up to."""
+    num_blocks, num_local = 2, 3
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "local_layers": {"probe": np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)},
+                    "global_layer": {"probe": np.ones((2, num_blocks, 1), dtype=np.float32)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights, pattern_length=num_local + 1)
+    for block in range(num_blocks):
+      np.testing.assert_array_equal(unrolled["decoder"][f"layers_{block * 4 + 3}"]["probe"], np.ones((2, 1)))
+
+    with self.assertRaisesRegex(ValueError, "hold 3 cycle slots, but pattern_length 5"):
+      unroll_qwen_scanned_weights(weights, pattern_length=num_local + 2)
+
+  @pytest.mark.cpu_only
+  def test_rejects_the_nested_block_scan_remainder(self):
+    """Layers past the last whole cycle live in `layers_remainder`, which must not be dropped silently."""
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "local_layers": {"probe": np.zeros((2, 2, 3, 1), dtype=np.float32)},
+                    "global_layer": {"probe": np.zeros((2, 2, 1), dtype=np.float32)},
+                },
+                "layers_remainder": {"local_layers": {"probe": np.zeros((2, 2, 1), dtype=np.float32)}},
+            }
+        }
+    )
+
+    with self.assertRaisesRegex(ValueError, "layers_remainder"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
+  def test_rejects_nested_local_layers_without_a_cycle_slot_axis(self):
+    """A `local_layers` tensor missing its slot axis must not be read as flat."""
+    weights = MockWeights({"decoder": {"layers": {"local_layers": {"probe": np.ones((2, 2))}}}})
+
+    with self.assertRaisesRegex(ValueError, "has no scan axis"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
   def test_correctly_unrolls_homogeneous_scanned_weights(self):
     """Verify homogeneous scanned layers (LLaMA, Qwen Base) unroll to layers_{global_idx}."""
     # 4 layers stacked on scan_axis=1 (feature_dim=2, num_layers=4, hidden=1)
@@ -346,6 +447,81 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(source, target), 1)
 
 
+class ScannedSourceLayerCoverageTest(unittest.TestCase):
+  """Verify the coverage check accepts scanned sources that Tunix unrolls itself.
+
+  Only Gemma and Qwen are unrolled by MaxText before the direct sync; other
+  scanned models (e.g. Llama) keep `decoder.layers.*` stacked on the scan axis
+  and Tunix's `transfer_state_directly` slices layer N out for `layers_N`.
+  """
+
+  _PER_LAYER_PARAMS = (
+      ("mlp", "wi_0", "kernel"),
+      ("mlp", "wo", "kernel"),
+      ("pre_self_attention_layer_norm", "scale"),
+      ("self_attention", "query", "kernel"),
+  )
+
+  def _scanned_llama_trees(self, num_layers, drop_from_source=()):
+    """Builds a Llama-style scanned source and the matching unscanned rollout target."""
+    source_flat = {("base", "decoder", "decoder_norm", "scale"): np.ones((2,))}
+    target_flat = {("model", "decoder", "decoder_norm", "scale"): np.zeros((2,))}
+    for param in self._PER_LAYER_PARAMS:
+      if param not in drop_from_source:
+        # param_scan_axis=1: the layer axis sits after the leading feature dim.
+        source_flat[("base", "decoder", "layers") + param] = np.ones((2, num_layers, 3))
+      for i in range(num_layers):
+        target_flat[("model", "decoder", f"layers_{i}") + param] = np.zeros((2, 3))
+    return unflatten_dict(source_flat), unflatten_dict(target_flat)
+
+  @pytest.mark.cpu_only
+  def test_accepts_homogeneous_scanned_source(self):
+    source, target = self._scanned_llama_trees(num_layers=3)
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 3 * len(self._PER_LAYER_PARAMS))
+
+  @pytest.mark.cpu_only
+  def test_rejects_scanned_source_missing_a_target_parameter(self):
+    source, target = self._scanned_llama_trees(num_layers=2, drop_from_source=(("mlp", "wo", "kernel"),))
+
+    with self.assertRaisesRegex(ValueError, r"matched 6/8 target layer parameters.*decoder\.layers_0\.mlp\.wo\.kernel"):
+      validate_direct_sync_layer_coverage(source, target)
+
+  @pytest.mark.cpu_only
+  def test_accepts_implicitly_stacked_source(self):
+    source = {"base": {"decoder": {"probe": np.ones((2, 2, 3))}}}
+    target = {"model": {"decoder": {"layers_0": {"probe": np.zeros((2, 3))}, "layers_1": {"probe": np.zeros((2, 3))}}}}
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 2)
+
+  @pytest.mark.cpu_only
+  def test_accepts_scanned_split_moe_weights_for_prefused_target(self):
+    experts = {"wi_0": np.ones((4, 2, 3, 5)), "wi_1": np.ones((4, 2, 3, 5))}
+    source = {"base": {"decoder": {"layers": {"mlp": {"routed_experts": experts}}}}}
+    target = {
+        "model": {"decoder": {f"layers_{i}": {"mlp": {"routed_experts": {"wi": np.zeros((4, 3, 10))}}} for i in range(2)}}
+    }
+
+    self.assertEqual(validate_direct_sync_layer_coverage(source, target), 2)
+
+  @pytest.mark.cpu_only
+  def test_sampler_leaves_scanned_llama_weights_for_tunix(self):
+    """Regression: llama3.1-70b direct sync failed with `matched 0/720 target layer parameters`."""
+    sampler = object.__new__(MaxTextVllmSampler)
+    sampler._direct_maxtext_sync = True  # pylint: disable=protected-access
+    sampler._is_gemma = False  # pylint: disable=protected-access
+    sampler._is_qwen = False  # pylint: disable=protected-access
+    source, target = self._scanned_llama_trees(num_layers=2)
+
+    with (
+        mock.patch.object(MaxTextVllmSampler, "transformer_state", new_callable=mock.PropertyMock, return_value=target),
+        mock.patch.object(VllmSampler, "update_params") as tunix_update_params,
+    ):
+      sampler.update_params(source, filter_types=None)
+
+    tunix_update_params.assert_called_once_with(source, None)
+
+
 class DirectSyncRolloutConfigTest(unittest.TestCase):
   """Verify TP-sharded MoE rollout targets request the safe fused layout."""
 
@@ -390,13 +566,15 @@ class DirectSyncRolloutConfigTest(unittest.TestCase):
 class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
   """Verify the custom rollout preserves Tunix rollout options."""
 
-  @pytest.mark.cpu_only
-  def test_forwards_sampling_parallelism_and_capacity_options(self):
-    sampling_kwargs = {
-        "stop": ["</answer>"],
-        "detokenize": True,
-        "include_stop_str_in_output": True,
-    }
+  _SAMPLING_KWARGS = {
+      "stop": ["</answer>"],
+      "detokenize": True,
+      "include_stop_str_in_output": True,
+  }
+
+  def _build_vllm_config(self, vllm_config_cls=None, **rollout_overrides):
+    """Constructs the rollout with fakes and returns (VllmConfig it built, fake sampler)."""
+    sampling_kwargs = self._SAMPLING_KWARGS
     rollout_config = SimpleNamespace(
         kv_cache_size=1280,
         rollout_mapping_config=None,
@@ -424,6 +602,7 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
         rollout_vllm_delete_dst_buffers=True,
         rollout_vllm_reshard_chunk_size=8,
         rollout_vllm_sampling_kwargs=sampling_kwargs,
+        **rollout_overrides,
     )
     maxtext_config = SimpleNamespace(
         model_name="qwen3.5-35b-a3b",
@@ -443,7 +622,7 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
         ),
         mock.patch(
             "maxtext.integration.vllm.maxtext_vllm_rollout.VllmConfig",
-            side_effect=SimpleNamespace,
+            **({"new": vllm_config_cls} if vllm_config_cls else {"side_effect": SimpleNamespace}),
         ),
         mock.patch(
             "maxtext.integration.vllm.maxtext_vllm_rollout.MaxTextVllmSampler",
@@ -459,8 +638,13 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
           maxtext_config=maxtext_config,
       )
 
-    config = sampler_cls.call_args.kwargs["config"]
-    self.assertEqual(config.sampling_kwargs, sampling_kwargs)
+    return sampler_cls.call_args.kwargs["config"], fake_sampler
+
+  @pytest.mark.cpu_only
+  def test_forwards_sampling_parallelism_and_capacity_options(self):
+    config, fake_sampler = self._build_vllm_config()
+
+    self.assertEqual(config.sampling_kwargs, self._SAMPLING_KWARGS)
     self.assertEqual(config.expert_parallel_size, 1)
     self.assertEqual(config.return_logprobs, True)
     self.assertEqual(config.reshard_chunk_size, 8)
@@ -471,6 +655,65 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
     self.assertEqual(config.engine_kwargs["logprobs_mode"], "raw_logprobs")
     self.assertNotIn("swap_space", config.engine_kwargs)
     fake_sampler.load_checkpoint.assert_called_once_with({"base": {}})
+
+  @pytest.mark.cpu_only
+  def test_forwards_free_kv_cache_during_weight_sync(self):
+    for value in (True, False):
+      config, _ = self._build_vllm_config(rollout_vllm_free_kv_cache_during_weight_sync=value)
+      self.assertIs(config.free_kv_cache_during_weight_sync, value)
+
+  @pytest.mark.cpu_only
+  def test_omits_free_kv_cache_option_when_vllm_config_does_not_accept_it(self):
+    """A rollout config carrying the field must not break a VllmConfig that predates it."""
+
+    class StrictVllmConfig:
+      """Rejects the option, like the VllmConfig of a tunix that predates it."""
+
+      def __init__(self, *, mesh=None, **fields):
+        if "free_kv_cache_during_weight_sync" in fields:
+          raise TypeError("unexpected keyword argument 'free_kv_cache_during_weight_sync'")
+        vars(self).update(fields, mesh=mesh)
+
+    StrictVllmConfig.__signature__ = inspect.Signature(
+        [inspect.Parameter("mesh", inspect.Parameter.KEYWORD_ONLY, default=None)]
+    )
+
+    with self.assertLogs(level="WARNING") as logs:
+      config, _ = self._build_vllm_config(
+          vllm_config_cls=StrictVllmConfig, rollout_vllm_free_kv_cache_during_weight_sync=False
+      )
+
+    self.assertFalse(hasattr(config, "free_kv_cache_during_weight_sync"))
+    self.assertTrue(any("free_kv_cache_during_weight_sync" in line for line in logs.output), logs.output)
+    self.assertEqual(config.reshard_chunk_size, 8)
+
+  @pytest.mark.cpu_only
+  def test_forwards_free_kv_cache_option_when_vllm_config_signature_cannot_be_inspected(self):
+    """An uninspectable VllmConfig is treated as accepting the option, like `_kwargs_supported_by` does."""
+    with mock.patch.object(inspect, "signature", side_effect=ValueError("no signature found")):
+      config, _ = self._build_vllm_config(rollout_vllm_free_kv_cache_during_weight_sync=False)
+
+    self.assertFalse(config.free_kv_cache_during_weight_sync)
+
+  @pytest.mark.cpu_only
+  def test_free_kv_cache_option_names_match_the_installed_tunix(self):
+    """A misspelt or renamed tunix field would be dropped without an error, so pin both names."""
+
+    def fields_mentioning_free_kv_cache(cls):
+      return [name for name in inspect.signature(cls).parameters if "free_kv_cache" in name]
+
+    rollout_fields = fields_mentioning_free_kv_cache(base_rollout.RolloutConfig)
+    if not rollout_fields:
+      self.skipTest("installed tunix predates free_kv_cache_during_weight_sync")
+
+    self.assertEqual(rollout_fields, ["rollout_vllm_free_kv_cache_during_weight_sync"])
+    self.assertEqual(fields_mentioning_free_kv_cache(VllmConfig), ["free_kv_cache_during_weight_sync"])
+
+  @pytest.mark.cpu_only
+  def test_omits_free_kv_cache_option_for_a_tunix_that_predates_it(self):
+    config, _ = self._build_vllm_config()
+
+    self.assertFalse(hasattr(config, "free_kv_cache_during_weight_sync"))
 
 
 class MaxTextAdapterSelectionTest(unittest.TestCase):
@@ -494,3 +737,55 @@ class MaxTextAdapterSelectionTest(unittest.TestCase):
 
     self.assertFalse(requires_maxtext_scanned_weight_unroll(native_config))
     self.assertFalse(requires_maxtext_scanned_weight_unroll(unscanned_config))
+
+  @pytest.mark.cpu_only
+  def test_qwen35_direct_weight_converter_selection(self):
+    cfg = SimpleNamespace(
+        model_name="qwen3.5-35b-a3b",
+        rollout_tensor_parallelism=8,
+        num_decoder_layers=8,
+        inhomogeneous_layer_cycle_interval=4,
+        param_scan_axis=1,
+    )
+    conv = _create_model_converter(
+        "qwen3.5-35b-a3b",
+        config=cfg,
+        mesh=None,
+        use_hf_mapping=False,
+        use_weight_converter=True,
+    )
+    self.assertIsInstance(conv, WeightConverter)
+    self.assertIsNone(conv.rules)
+
+  @pytest.mark.cpu_only
+  def test_sampler_preserves_user_sharding_strategy(self):
+    sampler = object.__new__(MaxTextVllmSampler)
+    mesh = SimpleNamespace(
+        shape={"data": 1, "model": 8},
+        device_ids=np.arange(8).reshape(1, 8),
+    )
+    config = VllmConfig(
+        init_with_random_weights=True,
+        hbm_utilization=0.35,
+        lora_config=None,
+        mesh=mesh,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        expert_parallel_size=1,
+        enable_dp_attention=False,
+        additional_config={
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": False,
+                    "tensor_parallelism": 4,
+                    "expert_parallelism": 2,
+                }
+            }
+        },
+    )
+    args = sampler._vllm_config(config)  # pylint: disable=protected-access
+    strategy = args["additional_config"]["sharding"]["sharding_strategy"]
+    self.assertEqual(strategy["tensor_parallelism"], 4)
+    self.assertEqual(strategy["expert_parallelism"], 2)
+    self.assertFalse(strategy["enable_dp_attention"])
+    self.assertEqual(strategy["device_indexes"], list(range(8)))

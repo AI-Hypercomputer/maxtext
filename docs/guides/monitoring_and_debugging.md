@@ -67,6 +67,12 @@ Using Vertex AI TensorBoard for visualization.
 
 Profiling performance with XProf.
 :::
+:::{grid-item-card} 🔬 Treescope
+:link: monitoring_and_debugging/debug_with_treescope
+:link-type: doc
+
+Look at arrays and other large objects in a notebook.
+:::
 ::::
 
 ```{toctree}
@@ -82,4 +88,5 @@ monitoring_and_debugging/understand_logs_and_metrics.md
 monitoring_and_debugging/use_vertex_ai_tensorboard.md
 monitoring_and_debugging/xprof_user_guide.md
 monitoring_and_debugging/ml_workload_diagnostics.md
+monitoring_and_debugging/debug_with_treescope.md
 ```

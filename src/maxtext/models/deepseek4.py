@@ -14,10 +14,9 @@
 
 """DeepSeek-V4 model definition."""
 
-from typing import Optional
+from typing import Any, Optional
 
 from flax import nnx
-import flax.linen as nn
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, AttentionType
@@ -25,10 +24,54 @@ from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers import attention_compressed
 from maxtext.layers import initializers
 from maxtext.layers import moe
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import deepseek
+from maxtext.utils.sharding import with_logical_constraint
 from jax.ad_checkpoint import checkpoint_name
+import jax
+from jax.experimental import xla_metadata
+
+
+def _run_deepseek4_layer_remat(
+    layer: nnx.Module,
+    y: jax.Array,
+    *,
+    config: Config,
+    policy: Any = None,
+    prevent_cse: Optional[bool] = None,
+    **layer_kwargs,
+):
+  """Runs one DeepSeek4DecoderLayer under jax.checkpoint inside a length-1 scan.
+
+  The trip-count-one scan boundary keeps only one layer's backward working set
+  live at a time, as in Gemma4ScannableBlock._scan_global_layer. Params go in as
+  scan xs: carrying them, as Gemma4 does, multiplies the DeepSeek-V4 train-step
+  temporaries in TPU AOT. All other state, including RNG counters and variables
+  the layer creates during the call (sown aux losses, `indexer_losses`), goes
+  through xs/ys and is written back. `policy` is the decoder's resolved remat
+  policy (None means full remat).
+  """
+  params_filter = nnx.All(nnx.Param, nnx.Not(nnx.LoRAParam))
+  graphdef, params, other = nnx.split(layer, params_filter, ...)
+  params_xs = jax.tree.map(lambda x: x[None], params)
+  other_xs = jax.tree.map(lambda x: x[None], other)
+
+  def run_single_layer(carry, xs_slice):
+    params_slice, other_slice = xs_slice
+    merged_layer = nnx.merge(graphdef, params_slice, other_slice)
+    out_y, _ = merged_layer(carry, **layer_kwargs)
+    _, _, new_other = nnx.split(merged_layer, params_filter, ...)
+    return out_y, new_other
+
+  if prevent_cse is None:
+    prevent_cse = not config.scan_layers and not (
+        config.gradient_accumulation_steps > 1 and config.hardware in ("gpu", "gpu_multiprocess")
+    )
+  run_single_layer = jax.checkpoint(run_single_layer, policy=policy, prevent_cse=prevent_cse)
+  with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+    y_out, stacked_other = jax.lax.scan(run_single_layer, y, (params_xs, other_xs), length=1)
+  nnx.update(layer, jax.tree.map(lambda x: x[0], stacked_other))
+  return y_out
 
 
 class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
@@ -72,7 +115,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
 
     # DeepSeek V4 applies Hash Routing to the first `config.first_num_hash_layers` layers.
     # For the unscannable prefix layers, we can safely determine this using `layer_idx`.
-    # However, for layers inside `nn.scan` blocks, `layer_idx` is a dynamic JAX tracer
+    # However, for layers inside scanned blocks, `layer_idx` is a dynamic JAX tracer
     # and cannot be evaluated as a boolean condition. Since all scannable layers occur
     # after the hash-routed prefix, the scannable block explicitly passes
     # `is_hash_routing=False` to safely bypass this check.
@@ -176,7 +219,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
 
   DeepSeek V4 layers alternate `compress_ratio=128` (HCA) and `compress_ratio=4` (CSA)
   throughout the middle of the network. This block encapsulates one full `[128, 4]`
-  cycle so it can be perfectly scanned using JAX `nn.scan`.
+  cycle so it can be perfectly scanned using `jax.lax.scan`.
   """
 
   def __init__(
@@ -186,12 +229,17 @@ class DeepSeek4ScannableBlock(nnx.Module):
       model_mode: str,
       rngs: nnx.Rngs,
       quant: None | quantizations.AqtQuantization = None,
+      remat_policy_fn: Any = None,
+      prevent_cse_in_remat: Optional[bool] = None,
   ):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
     self.quant = quant
     self.rngs = rngs
+    # Resolved remat policy for the per-layer remat in train mode (None means full remat).
+    self.remat_policy_fn = remat_policy_fn
+    self.prevent_cse_in_remat = prevent_cse_in_remat
 
     # Layer 0 in the block: HCA (compress_ratio=128) with Standard MoE (is_hash_routing=False)
     self.layers_0 = DeepSeek4DecoderLayer(
@@ -228,45 +276,49 @@ class DeepSeek4ScannableBlock(nnx.Module):
       kv_cache=None,
       decoder_input_tokens=None,
   ):
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
-    y, _ = self.layers_0(
-        y,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk=previous_chunk,
-        slot=slot,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
-        decoder_input_tokens=decoder_input_tokens,
-    )
-
-    y, _ = self.layers_1(
-        y,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk=previous_chunk,
-        slot=slot,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
-        decoder_input_tokens=decoder_input_tokens,
-    )
+    if model_mode == "train" and bool(self.config.remat_policy) and self.config.remat_policy != "none":
+      call_kwargs = dict(  # pylint: disable=use-dict-literal
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          decoder_input_tokens=decoder_input_tokens,
+      )
+      remat_kwargs = {"config": self.config, "policy": self.remat_policy_fn, "prevent_cse": self.prevent_cse_in_remat}
+      y = _run_deepseek4_layer_remat(self.layers_0, y, **remat_kwargs, **call_kwargs)
+      y = _run_deepseek4_layer_remat(self.layers_1, y, **remat_kwargs, **call_kwargs)
+    else:
+      y, _ = self.layers_0(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          decoder_input_tokens=decoder_input_tokens,
+      )
+      y, _ = self.layers_1(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          decoder_input_tokens=decoder_input_tokens,
+      )
 
     return y, None
-
-
-DeepSeek4LayerToLinen = nnx_wrappers.to_linen_class(
-    DeepSeek4DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-DeepSeek4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    DeepSeek4ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

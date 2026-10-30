@@ -43,6 +43,10 @@ ocp_v0 = ocp
 pytestmark = [pytest.mark.decoupled_target]
 
 
+class _StopBeforeDownload(Exception):
+  """Raised by a mocked `HfFileSystem.glob` to stop a load before it downloads anything."""
+
+
 class BinaryChunkedStackTest(parameterized.TestCase):
   """Tests for the `_binary_chunked_stack` function."""
 
@@ -149,6 +153,35 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 0], tensors["expert_1.layer_0.weight"])
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
+  @parameterized.named_parameters(
+      ("single_key", "w0", (4, 4)),
+      ("single_axis_stack", ["w0", "w1"], (2, 4, 4)),
+      ("multi_axis_stack", [["w0", "w1"], ["w2", "w3"]], (2, 2, 4, 4)),
+  )
+  def test_get_hf_loading_function_returns_target_dtype(self, hf_keys, target_shape):
+    # HF checkpoints are usually bf16; every case must return the target dtype (float32 here).
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    tensors = {f"w{i}": np.full((4, 4), i + 0.5, dtype=jnp.bfloat16) for i in range(4)}
+    # The stacked cases index the spec by axis, so give it one entry per axis, as MaxText does.
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=target_shape,
+        dtype=np.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec(*([None] * len(target_shape)))),
+    )
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig())()
+
+    self.assertEqual(result.shape, target_shape)
+    self.assertEqual(result.dtype, np.float32)
+    self.assertEqual(result.sharding, target_leaf.sharding)
+    first_slice = result[(0,) * (len(target_shape) - 2)]
+    np.testing.assert_array_equal(first_slice, tensors["w0"].astype(np.float32))
+
 
 class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
@@ -240,6 +273,32 @@ class LoadDynamicTest(parameterized.TestCase):
     self.assertEqual(loaded_vars, {"params": {}})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+
+  @parameterized.named_parameters(
+      ("base", "llama3.1-8b"),
+      ("instruct_8b", "llama3.1-8b-Instruct"),
+      ("instruct_70b", "llama3.1-70b-Instruct"),
+  )
+  @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
+  def test_empty_path_resolves_repo_of_exact_model_name(self, model_name, mock_hf_fs):
+    # -Instruct variants have their own HF_IDS entries; using the base name would load the base
+    # model's weights.
+    mock_hf_fs.return_value.glob.side_effect = _StopBeforeDownload
+    config = mock.Mock(model_name=model_name, hf_access_token=None, base_output_directory="gs://dummy-bucket")
+
+    with self.assertRaises(_StopBeforeDownload):
+      load_dynamic.load_safetensors_dynamic_state("", {}, config)
+
+    expected_repo = load_dynamic.maxtext_globals.HF_IDS[model_name]
+    mock_hf_fs.return_value.glob.assert_called_once_with(f"{expected_repo}/*.safetensors")
+
+  def test_empty_path_without_hf_ids_entry_raises(self):
+    # HF_IDS has llama3.1-405b but no -Instruct entry for it, so this must raise instead of using the
+    # base repo.
+    config = mock.Mock(model_name="llama3.1-405b-Instruct", hf_access_token=None, base_output_directory="gs://b")
+
+    with self.assertRaisesRegex(ValueError, "No HF repo for model_name=llama3.1-405b-Instruct"):
+      load_dynamic.load_safetensors_dynamic_state("", {}, config)
 
 
 class SourceCheckpointLoadingTest(parameterized.TestCase):
@@ -989,6 +1048,111 @@ class FP8DequantizeOnLoadTest(parameterized.TestCase):
     moe_scale_sharding = checkpointing._scale_sharding(moe_weight_sharding, (16, 10, 16, 4))  # pylint: disable=protected-access
     self.assertIsInstance(moe_scale_sharding, jax.sharding.NamedSharding)
     self.assertEqual(moe_scale_sharding.spec, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
+
+
+class FlatMoeWeightsLoadTest(parameterized.TestCase):
+  """load_params_from_path converts 3D/4D routed-expert weights to the moe_flat_fsdp_weights layout."""
+
+  def setUp(self):
+    """Builds an (fsdp, expert=2) mesh and random 3D/4D routed-expert weights."""
+    super().setUp()
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for an (fsdp, expert=2) mesh.")
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+    devices = np.array(jax.devices()).reshape((jax.device_count() // 2, 2))
+    self.mesh = Mesh(devices, ("fsdp", "expert"))
+    self.num_experts, self.layers, self.rows, self.cols = 4, 3, 4 * jax.device_count(), 16
+    rng = np.random.RandomState(0)
+    # Scanned decoder MoE [E, L, rows, cols] and unscanned MTP MoE [E, rows, cols], as in a 3D checkpoint.
+    self.wi_0 = rng.randn(self.num_experts, self.layers, self.rows, self.cols).astype(np.float32)
+    self.wo = rng.randn(self.num_experts, self.cols, self.rows).astype(np.float32)
+
+  def _flat_target(self, shape):
+    return jax.ShapeDtypeStruct(
+        shape,
+        jnp.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec(("expert", "fsdp"), *([None] * (len(shape) - 1)))),
+    )
+
+  def _load(self, ckpt_weights, convert_flat_moe_weights, linen=False):
+    """Saves `ckpt_weights` as a checkpoint and loads it into a flat NNX (or Linen) params target."""
+    path = self.tmp_dir / f"ckpt_{convert_flat_moe_weights}"
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(path, {"params": {"params": ckpt_weights}}, force=True)
+    # NNX params state, as load_state_if_possible passes it (training is NNX-only).
+    target = nnx.State(
+        {
+            "decoder": {
+                "MoeBlock_0": {
+                    "wi_0": nnx.Param(self._flat_target((self.num_experts * self.rows, self.layers, self.cols)))
+                }
+            },
+            "mtp": {"MoeBlock_0": {"wo": nnx.Param(self._flat_target((self.num_experts * self.cols, self.rows)))}},
+        }
+    )
+    if linen:
+      # A Linen TrainState.params target is keyed by collection.
+      target = {"params": nnx.to_pure_dict(target)}
+    restored = checkpointing.load_params_from_path(
+        str(path), target, 8, convert_flat_moe_weights=convert_flat_moe_weights
+    )
+    return restored["params"] if linen else nnx.to_pure_dict(restored)
+
+  def _ckpt_3d(self):
+    return {"decoder": {"MoeBlock_0": {"wi_0": self.wi_0}}, "mtp": {"MoeBlock_0": {"wo": self.wo}}}
+
+  @parameterized.named_parameters(("nnx", False), ("linen", True))
+  def test_3d_checkpoint_converted_to_flat(self, linen):
+    restored = self._load(self._ckpt_3d(), convert_flat_moe_weights=True, linen=linen)
+    wi_0 = restored["decoder"]["MoeBlock_0"]["wi_0"]
+    wo = restored["mtp"]["MoeBlock_0"]["wo"]
+    expected_wi_0 = self.wi_0.transpose(0, 2, 1, 3).reshape((self.num_experts * self.rows, self.layers, self.cols))
+    np.testing.assert_array_equal(np.asarray(wi_0), expected_wi_0)
+    np.testing.assert_array_equal(np.asarray(wo), self.wo.reshape((self.num_experts * self.cols, self.rows)))
+    self.assertEqual(wi_0.sharding.spec, PartitionSpec(("expert", "fsdp"), None, None))
+    self.assertEqual(wo.sharding.spec, PartitionSpec(("expert", "fsdp"), None))
+
+  def test_flat_checkpoint_loads_unchanged(self):
+    flat = {
+        "decoder": {
+            "MoeBlock_0": {
+                "wi_0": self.wi_0.transpose(0, 2, 1, 3).reshape((self.num_experts * self.rows, self.layers, self.cols))
+            }
+        },
+        "mtp": {"MoeBlock_0": {"wo": self.wo.reshape((self.num_experts * self.cols, self.rows))}},
+    }
+    restored = self._load(flat, convert_flat_moe_weights=True)
+    np.testing.assert_array_equal(
+        np.asarray(restored["decoder"]["MoeBlock_0"]["wi_0"]), flat["decoder"]["MoeBlock_0"]["wi_0"]
+    )
+    np.testing.assert_array_equal(np.asarray(restored["mtp"]["MoeBlock_0"]["wo"]), flat["mtp"]["MoeBlock_0"]["wo"])
+
+  def test_no_conversion_without_flag(self):
+    """With the flag off the load path is unchanged: a 3D checkpoint into a flat target is a shape mismatch."""
+    with self.assertRaises(ValueError):
+      self._load(self._ckpt_3d(), convert_flat_moe_weights=False)
+
+  def test_convert_replicated_target(self):
+    """A replicated flat target (empty PartitionSpec) converts without indexing past the spec."""
+    x = jnp.asarray(self.wi_0)
+    target = jax.ShapeDtypeStruct(
+        (self.num_experts * self.rows, self.layers, self.cols),
+        jnp.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec()),
+    )
+    out = checkpointing._flat_moe_convert(x, target)  # pylint: disable=protected-access
+    expected = self.wi_0.transpose(0, 2, 1, 3).reshape(target.shape)
+    np.testing.assert_array_equal(np.asarray(out), expected)
+
+  def test_restore_plan_single_axis_dim0(self):
+    """With a size-one expert axis dim 0 is just "fsdp": restore with the rows dim sharded, not the expert dim."""
+    stored = jax.ShapeDtypeStruct(self.wi_0.shape, jnp.float32)
+    want = jax.ShapeDtypeStruct(
+        (self.num_experts * self.rows, self.layers, self.cols),
+        jnp.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec("fsdp", None, None)),
+    )
+    plan = checkpointing._flat_moe_restore_plan({"wi_0": want}, {"wi_0": stored})  # pylint: disable=protected-access
+    self.assertEqual(plan[("wi_0",)][1].sharding.spec, PartitionSpec(None, None, "fsdp", None))
 
 
 if __name__ == "__main__":

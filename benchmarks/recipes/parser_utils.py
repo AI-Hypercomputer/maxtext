@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,9 +34,9 @@ def str2bool(v):
   """Parses a string representation of a boolean value into a Python boolean."""
   if isinstance(v, bool):
     return v
-  if v.lower() in ("true"):
+  if v.lower() in ("true", "1", "yes"):
     return True
-  elif v.lower() in ("false"):
+  elif v.lower() in ("false", "0", "no"):
     return False
   else:
     raise argparse.ArgumentTypeError("Boolean value expected (e.g., True or False).")
@@ -54,23 +54,43 @@ def add_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--cluster_name",
       type=str,
-      default="test-v5e-32-cluster",
+      default="v6e-256-cluster",
       help="Name of the TPU cluster.",
   )
-  parser.add_argument("--project", type=str, default="cloud-tpu-cluster", help="GCP project ID.")
-  parser.add_argument("--zone", type=str, default="us-south1-a", help="GCP zone for the cluster.")
+  parser.add_argument("--project", type=str, default="tpu-prod-env-cluster", help="GCP project ID.")
+  parser.add_argument(
+      "--zone",
+      type=str,
+      default="us-east5-b",
+      help="GCP zone for the cluster (e.g., us-east5-b). For regional GKE clusters, pass the region via --location.",
+  )
+  parser.add_argument(
+      "--location",
+      type=str,
+      default=None,
+      help=(
+          "GCP location (zone or region) for the cluster (e.g., us-central2 for regional clusters or us-south1-a for"
+          " zonal clusters)."
+      ),
+  )
   parser.add_argument(
       "--device_type",
       type=str,
-      default="v5litepod-32",
-      help="Type of TPU device (e.g., v5litepod-32).",
+      default="v6e-256",
+      help="Type of TPU device (e.g., v6e-256).",
   )
   parser.add_argument(
       "--priority",
       type=str,
-      choices=["low", "medium", "high", "very high"],
+      choices=["very-low", "low", "medium", "high", "very-high"],
       default="medium",
       help="Priority of the job.",
+  )
+  parser.add_argument(
+      "--base_output_directory",
+      type=str,
+      default=None,
+      help="GCS bucket path for benchmark outputs.",
   )
 
   # Image Configuration
@@ -78,13 +98,13 @@ def add_arguments(parser: argparse.ArgumentParser):
       "--server_image",
       type=str,
       default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server",
-      help="Docker image for the proxy server.",
+      help="Docker image for the server.",
   )
   parser.add_argument(
       "--proxy_image",
       type=str,
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_serve",
-      help="Docker image for the server.",
+      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
+      help="Docker image for the proxy server.",
   )
   parser.add_argument(
       "--runner",
@@ -119,8 +139,8 @@ def add_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--selected_model_names",
       type=parse_str_list,
-      default=["llama3_1_8b_8192_v5e_256"],
-      help="List of model names (e.g., llama3_1_8b_8192_v5e_256, llama2-7b-v5e-256)",
+      default=["llama3_1_8b_8192"],
+      help="List of model names (e.g., llama3_1_8b_8192, llama2-7b-v5e-256)",
   )
   parser.add_argument(
       "--num_slices_list",
@@ -155,12 +175,17 @@ def add_arguments(parser: argparse.ArgumentParser):
       "--skip-validation",
       action="store_true",
       default=False,
-      help="Skip xpk health checks and system dependency validation during workload execution",
+      help="Skip gcluster prerequisite and dependency validation during workload execution",
   )
 
   # Other configurations
-  parser.add_argument("--xpk_path", type=str, default="~/xpk", help="Path to xpk.")
+  parser.add_argument(
+      "--xpk_path",
+      type=str,
+      default=None,
+      help="Deprecated (no-op): retained for backward compatibility.",
+  )
   parser.add_argument("--delete", action="store_true", help="Delete the cluster workload")
   parser.add_argument("--max_restarts", type=int, default=0, help="Maximum number of restarts")
   parser.add_argument("--temp_key", type=str, default=None, help="Temporary placeholder code")
-  parser.add_argument("--workload_id", type=str, default=None, help="Optional custom name for the XPK workload.")
+  parser.add_argument("--workload_id", type=str, default=None, help="Optional custom name for the workload.")

@@ -22,10 +22,11 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
+from flax.core import FrozenDict
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
+from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -34,6 +35,8 @@ from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
+from maxtext.utils import max_logging
+from maxtext.utils import sharding
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
@@ -48,12 +51,12 @@ def transformer_as_linen(
     *,
     name: str | None = None,
 ) -> nnx_wrappers.ToLinen:
-  """Constructs an NNX Transformer wrapped as a Linen module.
+  """Constructs an NNX Transformer wrapped as a Linen module. Deprecated.
 
   Returns a `TransformerLinen` that wraps the NNX-style Transformer so it can be
-  driven through the Linen init/apply API (checkpoint conversion, AOT compile,
-  the inference engine). Pure-NNX call sites build `Transformer` directly via
-  `model_creation_utils.from_config`.
+  driven through the Linen init/apply API. Nothing in MaxText needs this anymore;
+  it is kept for callers of `model_creation_utils.from_config` without `rngs`.
+  Pass `rngs` to `from_config` to get the NNX `Transformer` instead.
 
   Args:
     config (Config): The configuration object specifying model hyperparameters and options.
@@ -66,10 +69,14 @@ def transformer_as_linen(
   Returns:
     nnx_wrappers.ToLinen: An NNX Transformer wrapped as a Linen module.
   """
+  max_logging.log(
+      "WARNING: models.transformer_as_linen, and model_creation_utils.from_config without rngs, are deprecated."
+      " Please pass rngs=nnx.Rngs(...) to from_config to get the NNX Transformer."
+  )
   return TransformerLinen(
       Transformer,
       args=(),
-      kwargs=nn.FrozenDict(
+      kwargs=FrozenDict(
           {
               "mesh": mesh,
               "config": config,
@@ -129,12 +136,15 @@ class Transformer(nnx.Module):
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
         config=cfg,
         rngs=rngs,
     )
+    # Audio-only multimodal models (e.g. Ming) have no vision tower.
     self.vision_encoder = (
-        VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_multimodal", False) else None
+        VisionEncoder(config=cfg, mesh=mesh, rngs=rngs)
+        if getattr(cfg, "use_multimodal", False) and cfg.vision_encoder_block != VisionEncoderBlockType.NONE
+        else None
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
@@ -241,7 +251,7 @@ class Transformer(nnx.Module):
     video_embeddings = None
     audio_embeddings = None
     deepstack_visual_embeds = None
-    if getattr(self.config, "use_multimodal", False) and encoder_images is not None:
+    if getattr(self.config, "use_multimodal", False) and self.vision_encoder is not None and encoder_images is not None:
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_images, deterministic=not enable_dropout
       )
@@ -249,7 +259,7 @@ class Transformer(nnx.Module):
           self.config, decoder_input_tokens, is_video=False
       )
 
-    if getattr(self.config, "use_multimodal", False) and encoder_videos is not None:
+    if getattr(self.config, "use_multimodal", False) and self.vision_encoder is not None and encoder_videos is not None:
       video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos,
           input_masks=encoder_video_masks,
@@ -281,6 +291,18 @@ class Transformer(nnx.Module):
           bidirectional_mask=bidirectional_mask_image,
           bidirectional_mask_video=bidirectional_mask_video,
       )
+
+    # With mtp_reuse_input_embedding, look up the token embeddings once here; the MTP block shifts them instead of
+    # looking up the shifted tokens again, and the embedding table gets a single gradient.
+    mtp_token_embeddings = None
+    if (
+        getattr(self.config, "mtp_reuse_input_embedding", False)
+        and getattr(self.config, "mtp_num_layers", 0) > 0
+        and decoder_input_embeddings is None
+        and multimodal_input is None
+    ):
+      decoder_input_embeddings = self.decoder.embed_tokens(self.token_embedder, decoder_input_tokens, model_mode)
+      mtp_token_embeddings = decoder_input_embeddings
 
     res = self.decoder(
         shared_embedding=self.token_embedder,
@@ -324,17 +346,24 @@ class Transformer(nnx.Module):
     #      logit projection.
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
-      self.mtp_block(
-          shared_embedding=self.token_embedder,
-          main_hidden_state=hidden_state,
-          input_ids=decoder_input_tokens,
-          target_ids=decoder_target_tokens,
-          target_mask=decoder_target_mask,
-          position_ids=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=not enable_dropout,
-          model_mode=model_mode,
-      )
+      mtp_axis_rules = sharding.get_logical_axis_rules() or self.config.logical_axis_rules
+      if getattr(self.config, "using_pipeline_parallelism", False):
+        # The MTP block runs outside the pipeline. Like the non-pipelined decoder layers, let 'stage' act as
+        # data parallelism; otherwise every stage redundantly computes (and holds) the whole MTP layer.
+        mtp_axis_rules = sharding.logical_axis_rules_pp_act_as_dp(mtp_axis_rules)
+      with flax_logical_axis_rules(mtp_axis_rules):
+        self.mtp_block(
+            shared_embedding=self.token_embedder,
+            main_hidden_state=hidden_state,
+            input_ids=decoder_input_tokens,
+            target_ids=decoder_target_tokens,
+            target_mask=decoder_target_mask,
+            position_ids=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=not enable_dropout,
+            model_mode=model_mode,
+            main_token_embeddings=mtp_token_embeddings,
+        )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.

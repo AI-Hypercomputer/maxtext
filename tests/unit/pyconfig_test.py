@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import jax.numpy as jnp
 import yaml
 
 from maxtext.configs import pyconfig
@@ -48,6 +49,32 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2_heuristic_tiling=True,
           use_gmm_v2=False,
       )
+
+  def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
+    def initialize(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          model_name="mixtral-8x7b",
+          megablox=True,
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+          ragged_buffer_factor=1.0,
+          moe_dropless_fallback="step",
+          **kwargs,
+      )
+
+    self.assertEqual(initialize().moe_dropless_fallback, "step")
+    for overrides, message in (
+        ({"enable_diloco": True, "dcn_diloco_parallelism": 2}, "not supported with enable_diloco"),
+        ({"compiled_trainstep_file": "/tmp/train_step.pickle"}, "not supported with compiled_trainstep_file"),
+        ({"optimizer_memory_host_offload": True}, "not supported with optimizer_memory_host_offload"),
+        ({"parameter_memory_host_offload": True}, "or parameter_memory_host_offload"),
+    ):
+      with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
+        initialize(**overrides)
 
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
@@ -145,6 +172,24 @@ class PyconfigTest(unittest.TestCase):
         "gs://custom_base/test_run_3/managed-mldiagnostics",
     )
 
+  def test_managed_mldiagnostics_metric_only_run(self):
+    config_omitted = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_1",
+        base_output_directory="gs://base_dir1",
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config_omitted.managed_mldiagnostics_metric_only_run)
+
+    config_true = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_2",
+        base_output_directory="gs://base_dir2",
+        managed_mldiagnostics_metric_only_run=True,
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(config_true.managed_mldiagnostics_metric_only_run)
+
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
@@ -182,6 +227,20 @@ class PyconfigTest(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
+
+  def test_rope_direct_position_freqs_requires_positions_in_table(self):
+    def make_config(max_target_length):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          rope_direct_position_freqs=True,
+          max_position_embeddings=4096,
+          max_target_length=max_target_length,
+      )
+
+    self.assertTrue(make_config(4096).rope_direct_position_freqs)
+    with self.assertRaises(ValueError):
+      make_config(4097)
 
   def _zero1_config(self, **kwargs):
     return pyconfig.initialize(
@@ -318,13 +377,30 @@ class PyconfigTest(unittest.TestCase):
 
       with self.subTest(decoder_block=decoder_block):
         with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
-          initialize(sparse_matmul=False, megablox=False)
+          initialize(num_experts=2, base_mlp_dim=128, base_moe_mlp_dim=128, sparse_matmul=False, megablox=False)
+
+        config = initialize(num_experts=1, sparse_matmul=False, megablox=False)
+        self.assertEqual(config.num_experts, 1)
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_parallelism=2)
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_usp_ulysses_parallelism=2)
+
+  def test_explicit_sharding_gemma4_decoder_support(self):
+    """Both Gemma 4 decoders are accepted under explicit sharding."""
+    for decoder_block in ("gemma4", "gemma4_small"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+            # gemma4_small builds its stack in a Python loop; gemma4 accepts either.
+            scan_layers=False,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
 
   def test_explicit_sharding_mistral_decoder_support(self):
     """The Mistral-family decoders that have been onboarded to explicit sharding are accepted."""
@@ -348,6 +424,27 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertEqual(config.decoder_block.value, "qwen2")
 
+  def test_explicit_sharding_llama4_decoder_support(self):
+    """The Llama4 decoder is accepted by explicit sharding, but its vision encoder is not."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_mode="explicit",
+        decoder_block="llama4",
+    )
+    self.assertEqual(config.decoder_block.value, "llama4")
+
+    # Only the text stack is onboarded; the Llama4 vision encoder is not.
+    with self.assertRaisesRegex(Exception, "not supported with `use_multimodal`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          model_name="llama4-17b-16e",
+          override_model_config=True,
+          use_multimodal=True,
+      )
+
   def test_explicit_sharding_kimi_k2_support(self):
     """Kimi-K2 runs on the deepseek decoder block, so it is accepted under explicit sharding."""
     config = pyconfig.initialize(
@@ -357,6 +454,57 @@ class PyconfigTest(unittest.TestCase):
         model_name="kimi-k2-1t",
     )
     self.assertEqual(config.decoder_block.value, "deepseek")
+
+  def test_explicit_sharding_gpt_decoder_support(self):
+    """The GPT-family decoders that have been onboarded to explicit sharding are accepted."""
+    for decoder_block in ("gpt3", "gpt_oss"):
+      with self.subTest(decoder_block=decoder_block):
+        config = pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            shard_mode="explicit",
+            decoder_block=decoder_block,
+        )
+        self.assertEqual(config.decoder_block.value, decoder_block)
+
+  def test_lm_head_weight_grad_in_kernel_order_default(self):
+    """Left unset, the flag is on exactly where it can do something."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      ).lm_head_weight_grad_in_kernel_order
+
+    # The transpose it removes only exists under explicit sharding, on an untied head.
+    self.assertTrue(resolve(shard_mode="explicit"))
+    self.assertFalse(resolve(shard_mode="auto"))
+    self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True))
+    # Writing it out still wins over the default, in both directions.
+    self.assertFalse(resolve(shard_mode="explicit", lm_head_weight_grad_in_kernel_order=False))
+    self.assertTrue(resolve(shard_mode="auto", lm_head_weight_grad_in_kernel_order=True))
+    # But asking for it on a tied head is still a hard error, not a silent no-op.
+    with self.assertRaisesRegex(Exception, "only applies to the untied LM head"):
+      resolve(shard_mode="explicit", logits_via_embedding=True, lm_head_weight_grad_in_kernel_order=True)
+
+  def test_dense_weight_grad_in_kernel_order_default(self):
+    """The in-loop counterpart follows the same rule, minus the tied-head carve-out."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      ).dense_weight_grad_in_kernel_order
+
+    self.assertTrue(resolve(shard_mode="explicit"))
+    self.assertFalse(resolve(shard_mode="auto"))
+    # Unlike the LM head, every model has these projections, tied or not.
+    self.assertTrue(resolve(shard_mode="explicit", logits_via_embedding=True))
+    # Writing it out still wins over the default, in both directions.
+    self.assertFalse(resolve(shard_mode="explicit", dense_weight_grad_in_kernel_order=False))
+    self.assertTrue(resolve(shard_mode="auto", dense_weight_grad_in_kernel_order=True))
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
@@ -374,6 +522,19 @@ class PyconfigTest(unittest.TestCase):
         self.assertEqual(result, os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml"))
       finally:
         os.chdir(orig)
+
+  def test_resolve_or_infer_config_accepts_yaml_suffix(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for suffix in (".yml", ".yaml", ".YAML"):
+        with self.subTest(suffix=suffix):
+          config_path = os.path.join(tmpdir, f"model{suffix}")
+          with open(config_path, "w", encoding="utf-8") as f:
+            f.write("steps: 1\n")
+          resolved, remaining = pyconfig._resolve_or_infer_config(  # pylint: disable=protected-access
+              ["train.py", config_path, "steps=2"]
+          )
+          self.assertEqual(resolved, config_path)
+          self.assertEqual(remaining, ["steps=2"])
 
   def test_config_file_mapping(self):
     for module, relative_path in _CONFIG_FILE_MAPPING.items():
@@ -588,6 +749,43 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(config.local_sa_v_layout, "SEQ_MINOR")
     self.assertFalse(config.local_use_splash_scheduler)
 
+  def test_sa_and_gmm_eval_flags_inherit_and_override(self):
+    """eval_sa_* and eval_wi/wo_tile_fwd_* use base.yml defaults; eval_local_sa_* inherits from eval_sa_* when unset."""
+    cfg = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=256,
+        sa_block_kv=512,
+        local_sa_block_q=64,
+        sa_q_layout="SEQ_MINOR",
+        local_sa_q_layout="HEAD_DIM_MINOR",
+        wi_tile_fwd_batch_seq=256,
+        wo_tile_fwd_embed_dim=2048,
+    )
+    self.assertEqual((cfg.eval_sa_block_q, cfg.eval_sa_block_kv, cfg.eval_local_sa_block_q), (512, 512, 512))
+    self.assertEqual((cfg.eval_sa_q_layout, cfg.eval_local_sa_q_layout), ("HEAD_DIM_MINOR", "HEAD_DIM_MINOR"))
+    self.assertEqual((cfg.eval_wi_tile_fwd_batch_seq, cfg.eval_wo_tile_fwd_embed_dim), (512, 1024))
+
+    cfg_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=256,
+        eval_sa_block_q=1024,
+        eval_sa_block_kv=2048,
+        eval_local_sa_block_q=128,
+        sa_q_layout="HEAD_DIM_MINOR",
+        eval_sa_q_layout="SEQ_MINOR",
+        wi_tile_fwd_batch_seq=256,
+        eval_wi_tile_fwd_batch_seq=1024,
+        eval_wo_tile_fwd_mlp_dim=4096,
+    )
+    self.assertEqual(
+        (cfg_override.eval_sa_block_q, cfg_override.eval_local_sa_block_q, cfg_override.eval_local_sa_block_kv),
+        (1024, 128, 2048),
+    )
+    self.assertEqual((cfg_override.eval_sa_q_layout, cfg_override.eval_local_sa_q_layout), ("SEQ_MINOR", "SEQ_MINOR"))
+    self.assertEqual((cfg_override.eval_wi_tile_fwd_batch_seq, cfg_override.eval_wo_tile_fwd_mlp_dim), (1024, 4096))
+
   def test_eval_start_step_config(self):
     """Verifies that eval_start_step defaults to 0 and can be overridden via pyconfig."""
     config_default = pyconfig.initialize(
@@ -653,6 +851,7 @@ assert train._TF_AVAILABLE is False
         "use_random_routing": (False, True),
         "use_ragged_sort": (False, True),
         "ragged_buffer_factor": (-1.0, 2.0),
+        "eval_ragged_buffer_factor": (-1.0, 2.0),
         "use_ring_of_experts": (False, True),
         "num_moe_emb_chunks": (0, 2),
     }
@@ -772,6 +971,24 @@ assert train._TF_AVAILABLE is False
           val_yaml,
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
+
+  def test_rollout_weight_dtype_defaults_to_weight_dtype_and_accepts_override(self):
+    cfg_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        weight_dtype="float32",
+    )
+    self.assertEqual(cfg_default.weight_dtype, jnp.float32)
+    self.assertEqual(cfg_default.rollout_weight_dtype, jnp.float32)
+
+    cfg_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        weight_dtype="float32",
+        rollout_weight_dtype="bfloat16",
+    )
+    self.assertEqual(cfg_override.weight_dtype, jnp.float32)
+    self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
 
 
 if __name__ == "__main__":

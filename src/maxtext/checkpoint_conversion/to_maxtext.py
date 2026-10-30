@@ -59,20 +59,18 @@ import time
 from typing import Any, Callable, List, Sequence
 import absl
 import ml_dtypes
-import flax.linen as nn
+from flax import nnx
+from flax.nnx import variablelib
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
 from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
-from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
-from maxtext.layers import quantizations
-from maxtext.models import models
-from maxtext.utils import max_logging, max_utils, maxtext_utils
+from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
@@ -146,6 +144,29 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
       return tensor.astype(np.float32)
     return tensor
   return np.asarray(tensor)
+
+
+# Router state bf16 cannot hold exactly: the fp32 routing bias and integer
+# token-to-expert ids (bf16 rounds integers above 256).
+_FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+_FULL_PRECISION_SUBSTRINGS = (
+    "-attn_hc-",
+    "-ffn_hc-",
+    "-hc_head-",
+    "-self_attention-sinks",
+    "-self_attention-indexer-k_norm-",
+    "-self_attention-indexer-weights_proj-",
+)
+
+
+def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
+  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
+  if save_dtype not in ("bfloat16", DType.BFLOAT16):
+    return save_dtype
+  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
+  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
+    return "float32"
+  return save_dtype
 
 
 class LazyHFLoader:
@@ -228,7 +249,7 @@ class LazyHFLoader:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
 
-  def get_tensor(self, key: str) -> np.ndarray:
+  def get_tensor(self, key: str, dtype: str | None = None) -> np.ndarray:
     """
     Retrieves a specific tensor by name, lazily loading its shard if necessary.
 
@@ -272,7 +293,7 @@ class LazyHFLoader:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
         t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, self.save_dtype)
+        return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
 
 
 class LazyTensor:
@@ -389,31 +410,30 @@ def get_maxtext_model_info(config):
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
   max_logging.log("Initializing MaxText abstract model...")
-  quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  # Lay the variables out the way the checkpoint stores them: one collection per variable type
+  # (e.g. 'params', 'Tid2EidVar'), then the module path with Linen-style names ("layers_0").
+  abstract_params_tree = {}
+  for path, variable in nnx.to_flat_state(nnx.state(abstract_model)):
+    if isinstance(variable, nnx.RngState):
+      continue
+    node = abstract_params_tree.setdefault(variablelib.variable_name_from_type(type(variable), allow_register=True), {})
+    *parents, name = param_key_parts_from_path(path)
+    for part in parents:
+      node = node.setdefault(part, {})
+    node[name] = variable.get_value()
 
-  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
-      abstract_params_tree,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
-  )
+  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
 
   max_logging.log("MaxText abstract model and state initialized.")
 
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
-    if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
-      mt_target_shape = abstract_leaf_value.value.shape
-    else:
-      mt_target_shape = abstract_leaf_value.shape
-    maxtext_abstract_dict[mt_param_key] = (mt_target_idx, mt_target_shape)
+    mt_param_key = "-".join(param_key_parts_from_path(path_tuple))
+    maxtext_abstract_dict[mt_param_key] = (mt_target_idx, abstract_leaf_value.shape)
 
   return maxtext_abstract_dict, abstract_params_treedef
 
@@ -424,7 +444,7 @@ def _build_multi_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
-    mt_key: str = "",
+    mt_key: str | tuple[str, ...] = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along several axes.
 
@@ -481,6 +501,7 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    mt_key: str = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -499,12 +520,19 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
+  axis_to_stack = 0
   if config.scan_layers:
-    # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
-    # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
-    # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
-    # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
-    axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
+    key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
+    is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
+    is_unscanned_moe = "MoeBlock" in key_str and not any(
+        s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
+    )
+    if not (is_var_collection or is_unscanned_moe):
+      # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
+      # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
+      # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
+      # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
+      axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
   else:
     # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
@@ -545,6 +573,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
@@ -567,6 +597,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        mt_key,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -898,8 +929,8 @@ def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revisi
 
   original_getter = tensor_getter
 
-  def _merged_getter(key):
-    base_w = original_getter(key)
+  def _merged_getter(key, **kwargs):
+    base_w = original_getter(key, **kwargs)
     if key in base_to_lora:
       lora_dict = base_to_lora[key]
       if "A" in lora_dict and "B" in lora_dict:
@@ -1022,6 +1053,7 @@ def main(
     jax_weights = convert_lora_to_maxtext_adapter(config, lora_weights, save_dtype)
     adapter_name = os.path.basename(os.path.normpath(hf_lora_adapter_path))
     output_directory = os.path.join(output_directory, model_name_for_path, adapter_name)
+    state_params = jax_weights
   else:
 
     if lazy_load_tensors and config.use_multimodal:
@@ -1092,13 +1124,15 @@ def main(
               for k, v in hf_state_dict_numpy.items()
           }
 
-      def _eager_getter(key):
+      def _eager_getter(key, dtype=None):
+        if key is None:
+          return None
         resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
         if resolved_key not in hf_state_dict_numpy:
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]
-        return _convert_tensor_to_numpy(v, save_dtype)
+        return _convert_tensor_to_numpy(v, dtype or save_dtype)
 
       tensor_getter = _eager_getter
 
@@ -1154,9 +1188,11 @@ def main(
 
       # Step 2: Determine the loading function for hf key
       # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
+      param_save_dtype = _param_save_dtype(mt_param_key_or_keys, save_dtype)
+      getter = tensor_getter if param_save_dtype == save_dtype else partial(tensor_getter, dtype=param_save_dtype)
       load_fn = _get_hf_loading_function(
           hf_source_keys_or_key,
-          tensor_getter,
+          getter,
           hook_fn,
           mt_target_shape_or_shapes,
           config,
@@ -1171,7 +1207,7 @@ def main(
           mt_target_shape_or_shapes,
           mt_param_key_or_keys,
           final_mt_weights,
-          save_dtype,
+          param_save_dtype,
           lazy_load_tensors,
       )
 
@@ -1180,11 +1216,19 @@ def main(
     max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
     print_ram_usage("Before creating full JAX tree")
 
-    # Create final MaxText parameters tree
+    max_logging.log(f"Length of final_mt_weights: {len(final_mt_weights)}")
+    max_logging.log(f"Treedef num_leaves: {abstract_params_treedef.num_leaves}")
+    # Create final MaxText parameters tree containing all collections
     jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
     del final_mt_weights, abstract_params_treedef
 
+    state_params = jax_weights
+
   print_ram_usage("Before saving")
+  leaves = jax.tree_util.tree_leaves(state_params)
+  max_logging.log(f"Length of state_params leaves: {len(leaves)}")
+  if leaves:
+    max_logging.log(f"Type of first leaf before saving: {type(leaves[0])}")
   if lazy_load_tensors and not is_adapter_only:
     max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
   else:
@@ -1195,7 +1239,7 @@ def main(
   # and sharded across virtual devices.
   save_weights_to_checkpoint(
       output_directory,
-      jax_weights,
+      state_params,
       simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
