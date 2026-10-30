@@ -345,7 +345,10 @@ class RunInfo(BaseModel):
       description="The name of the run. Checkpoints will be stored under this name.",
   )
   model_name: ModelName = Field("default", description="The name of the model configuration to use.")
-  use_m3_model: bool = Field(False, description="Use the m3 backend for a registered model.")
+  use_m3_model: bool | Literal["auto"] = Field(
+      False,
+      description="Use the m3 backend for a registered model ('auto' resolves via DEFAULT_M3_MODELS).",
+  )
   override_model_config: bool = Field(False, description="If True, allows overriding model parameters via CLI.")
   override_logical_axis_rules: bool = Field(
       False,
@@ -6738,6 +6741,10 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
+    if isinstance(self.use_m3_model, str):
+      from maxtext.m3.models.registry import resolve_use_m3_model  # pylint: disable=import-outside-toplevel
+
+      self.use_m3_model = resolve_use_m3_model(self.use_m3_model, str(self.model_name))
     if self.model_name == "glm5.3-flash" and not self.use_m3_model:
       raise ValueError(
           "glm5.3-flash requires use_m3_model=True; legacy decoder_block is not" " supported for GLM-5.3-Flash."
@@ -7073,7 +7080,7 @@ class RLConfig(
     )
 
     # Set learning_rate_schedule_steps based on train_steps if not explicitly provided.
-    if self.learning_rate_schedule_steps == -1:
+    if self.learning_rate_schedule_steps == -1:  # pylint: disable=access-member-before-definition
       self.learning_rate_schedule_steps = self.train_steps
 
     # Rollout parallelism checks
