@@ -2523,39 +2523,20 @@ class AttentionOp(nnx.Module):
           # divide the sequence lengths the kernel sees exactly.
           block_q = math.gcd(sa_config.block_q, query.shape[2])
           block_kv = math.gcd(sa_config.block_kv, key.shape[2])
-          if record_max_logits:
-            attention_output, stats = jax_flash_attention.flash_attention_block_masked(
-                query,
-                key,
-                value,
-                decoder_segment_ids_tuple,
-                block_kv=block_kv,
-                block_q=block_q,
-                mask=indexer_mask,
-                mask_value=DEFAULT_MASK_VALUE,
-                cap=attn_logits_soft_cap,
-                save_residuals=True,
-                logits_dtype=query.dtype,
-                loop_unroll=False,
-                fuse_logits=False,
-            )
-            return attention_output, stats["max_logits"]
-
-          attention_output = jax_flash_attention.flash_attention_block_masked(
+          # The custom VJP recomputes attention tiles in the backward pass so
+          # autodiff does not save every block-loop intermediate.
+          attention_output, stats = jax_flash_attention.flash_attention_block_masked_custom_vjp(
               query,
               key,
               value,
               decoder_segment_ids_tuple,
-              block_kv=block_kv,
-              block_q=block_q,
-              mask=indexer_mask,
-              mask_value=DEFAULT_MASK_VALUE,
-              cap=attn_logits_soft_cap,
-              logits_dtype=query.dtype,
-              loop_unroll=False,
-              fuse_logits=False,
+              indexer_mask,
+              block_q,
+              block_kv,
+              DEFAULT_MASK_VALUE,
+              attn_logits_soft_cap,
           )
-          return attention_output, None
+          return attention_output, (stats["max_logits"] if record_max_logits else None)
 
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
