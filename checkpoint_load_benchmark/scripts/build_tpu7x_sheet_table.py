@@ -50,7 +50,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_tpu7x_tables import Logs, build_rows  # pylint: disable=wrong-import-position
+from build_tpu7x_tables import Logs, build_rows, failure_reason  # pylint: disable=wrong-import-position
 
 # The label shown next to each model name, in sheet order.
 P2_MODELS = {
@@ -283,30 +283,110 @@ def skipped_pair(model: str, scan: str, slices: str, text: str) -> list[list[str
   ]
 
 
-def multihost_pair(rec: dict, cold_s1: float) -> list[list[str]]:
-  """The rows of one multi-host run: `to_maxtext` was not run there."""
+def _multihost_cfg(rec: dict) -> str:
+  """The harness's result directory of a multi-host run: `<scan>[_slices<N>]_hosts<hosts per slice>`."""
+  n = int(rec["layout"].split(" ")[0])
+  return f"{rec['scan_mode']}{f'_slices{n}' if n > 1 else ''}_hosts{int(rec['hosts']) // n}"
+
+
+def _mh_st_tail(rec: dict, cold_s1: float, tm_total: float = 0.0, tm_no1: float = 0.0) -> list[str]:
+  """Step 3 to speedup cells of a multi-host safetensors_dynamic run (a row of tpu7x_multihost_results.csv)."""
+  if rec["status"] != "OK":
+    return [rec["note"].replace("`", ""), "N/A", "N/A", "N/A"]
+  total = float(rec["total_s"])
+  cell = _st_cell(total, float(rec["load_s"]), float(rec["transform_s"]), float(rec["peak_host_ram_gb"]))
+  speedup = (
+      f"{tm_total / (cold_s1 + total):.2f}x / {tm_no1 / total:.2f}x"
+      if tm_total
+      else "N/A (to_maxtext not run on multi-host)"
+  )
+  return [cell, _fmt(total), _fmt(cold_s1 + total), speedup]
+
+
+def multihost_pair(rec: dict, cold_s1: float, logs: Logs | None = None, tm_ref: dict | None = None) -> list[list[str]]:
+  """The rows of one multi-host run.
+
+  The to_maxtext row has values when the harness loaded the model's converted checkpoint on the same layout (an
+  Orbax load result in the run dirs of `logs`, from a run with a `run_dir` in MESAKH_MH_RUNS); its conversion
+  (Steps 1-2) is the one of `tm_ref`, the model's P1 row for the scan mode.
+  """
   model, scan = rec["model"], rec["scan_mode"]
   label, slices = f"{model} ({MODELS[model]})", f"{rec['layout'].split(' ')[0]} ({rec['devices']})"
-  tm = [label, scan, slices, "to_maxtext", "—", "Not run (to_maxtext was not run on multi-host slices)", "—"]
-  tm += ["N/A", "N/A", "N/A"]
-  if rec["status"] == "OK":
-    total = float(rec["total_s"])
-    cell = _st_cell(total, float(rec["load_s"]), float(rec["transform_s"]), float(rec["peak_host_ram_gb"]))
-    st_tail = [cell, _fmt(total), _fmt(cold_s1 + total), "N/A (to_maxtext not run on multi-host)"]
+  tm3 = logs.load(model, _multihost_cfg(rec), "to_maxtext_step3")[0] if logs else None
+  s2 = tm_ref["to_maxtext_2_convert_to_orbax_s"] if tm_ref else 0.0
+  tm_total = tm_no1 = 0.0
+  if tm3 is None or not s2:
+    tm = [label, scan, slices, "to_maxtext", "—", "Not run (to_maxtext was not run on multi-host slices)", "—"]
+    tm += ["N/A", "N/A", "N/A"]
   else:
-    st_tail = [rec["note"].replace("`", ""), "N/A", "N/A", "N/A"]
-  return [tm, ["↳", scan, slices, "safetensor", _s1(model, cold_s1), "—"] + st_tail]
+    s1 = tm_ref["to_maxtext_1_hf_to_gcs_s"]
+    head = [label, scan, slices, "to_maxtext", _s1(model, s1), f"{_fmt(s2)} (shared with 1 (8))"]
+    if tm3.get("status") == "FAILED":
+      reason = _cap(failure_reason(tm3, logs.load(model, _multihost_cfg(rec), "to_maxtext_step3")[1]))
+      tm = head + [reason, "N/A", "N/A", "N/A"]
+    else:
+      load = float(tm3["load_orbax_s"])
+      tm_no1, tm_total = s2 + load, s1 + s2 + load
+      tm = head + [f"{_fmt(load)} (Load Orbax)", _fmt(tm_no1), _fmt(tm_total), "1.00x (baseline)"]
+  st = ["↳", scan, slices, "safetensor", _s1(model, cold_s1), "—"] + _mh_st_tail(rec, cold_s1, tm_total, tm_no1)
+  return [tm, st]
 
 
-def build(suite: str, roots: list[str], overrides: dict[str, float], multihost_csv: str | None) -> list[list[str]]:
-  """Table rows in sheet order: per model and scan mode, the run configurations, then the multi-host runs."""
+def variant_row(rec: dict, cold_s1: float, label: str) -> list[str]:
+  """One extra safetensor row for a multi-host run of a fix variant (a CSV row whose note names the variant)."""
+  model, scan = rec["model"], rec["scan_mode"]
+  slices = f"{rec['layout'].split(' ')[0]} ({rec['devices']})"
+  return ["↳", scan, slices, f"safetensor ({label})", _s1(model, cold_s1), "—"] + _mh_st_tail(rec, cold_s1)
+
+
+def variant_config_row(row: dict, logs: Logs, label: str) -> list[str] | None:
+  """One extra safetensor row for a single-host configuration of a fix variant (a result in the variant's mirror)."""
+  model, scan, n = row["model"], row["scan_mode"], row["num_slices"]
+  rec, log_path = logs.load(model, scan if n == 1 else f"{scan}_slices{n}", "safetensors_dynamic")
+  if rec is None:
+    return None
+  slices = f"{n} ({row['global_devices']})"
+  cold_s1 = row["safetensor_1_hf_to_gcs_s"]
+  if rec.get("status") == "FAILED":
+    text = _hbm_oom(log_path) or _cap(failure_reason(rec, log_path))
+    tail = [text, "N/A", "N/A", "N/A"]
+  else:
+    total = float(rec["safetensors_and_convert_s"])
+    peak = float(rec.get("peak_host_ram_gb", 0.0) or 0.0)
+    cell = _st_cell(total, float(rec["load_sharded_hf_s"]), float(rec["transform_hf_to_mt_s"]), peak)
+    tm_ok = row["to_maxtext_status"] == "OK"
+    tm_no1 = row["to_maxtext_2_convert_to_orbax_s"] + row["to_maxtext_3_load_orbax_s"]
+    speedup = (
+        f"{row['to_maxtext_total_s'] / (cold_s1 + total):.2f}x / {tm_no1 / total:.2f}x"
+        if tm_ok
+        else "Only safetensor loads this config"
+    )
+    tail = [cell, _fmt(total), _fmt(cold_s1 + total), speedup]
+  return ["↳", scan, slices, f"safetensor ({label})", _s1(model, cold_s1), "—"] + tail
+
+
+def build(
+    suite: str,
+    roots: list[str],
+    overrides: dict[str, float],
+    multihost_csv: str | None,
+    variants: list[tuple[str, str]] = (),
+) -> list[list[str]]:
+  """Table rows in sheet order: per model and scan mode, the run configurations, then the multi-host runs.
+
+  Multi-host runs are the rows of `multihost_csv` on multi-host slices (not the 2x2x1 P1 rows it lists for
+  comparison). A row whose note starts with a variant label, and a result in a variant's mirror (`variants`:
+  (label, root) pairs), add a `safetensor (<label>)` row after the configuration's pair.
+  """
   models = SUITES[suite]["models"]
   logs = Logs(roots)
+  variant_logs = [(label, Logs([root])) for label, root in variants]
   runs = [r for r in build_rows(roots, overrides) if r["model"] in models]
   mh = []
   if multihost_csv:
     with open(multihost_csv, encoding="utf-8") as f:
-      mh = [r for r in csv.DictReader(f) if r["source"] == "lance" and r["model"] in models]
+      mh = [r for r in csv.DictReader(f) if r["model"] in models and not r["layout"].endswith("2x2x1")]
+  labels = [label for label, _ in variants]
   out = []
   for model in models:
     rows = [r for r in runs if r["model"] == model]
@@ -314,11 +394,22 @@ def build(suite: str, roots: list[str], overrides: dict[str, float], multihost_c
     for scan in ("scanned", "unscanned"):
       if (model, scan) in SKIPPED:
         out += skipped_pair(model, scan, *SKIPPED[(model, scan)])
-      for r in sorted((r for r in rows if r["scan_mode"] == scan), key=lambda r: r["num_slices"]):
+      scan_rows = sorted((r for r in rows if r["scan_mode"] == scan), key=lambda r: r["num_slices"])
+      for r in scan_rows:
         out += config_pairs(logs, r)
+        for label, vlogs in variant_logs:
+          extra = variant_config_row(r, vlogs, label)
+          if extra:
+            out.append(extra)
+      tm_ref = scan_rows[0] if scan_rows else None
       model_mh = [r for r in mh if r["model"] == model and r["scan_mode"] == scan]
-      for r in sorted(model_mh, key=lambda r: (int(r["devices"]), int(r["layout"].split(" ")[0]))):
-        out += multihost_pair(r, cold_s1)
+      base = [r for r in model_mh if not any(r.get("note", "").startswith(label) for label in labels)]
+      for r in sorted(base, key=lambda r: (int(r["devices"]), int(r["layout"].split(" ")[0]))):
+        out += multihost_pair(r, cold_s1, logs, tm_ref)
+        for v in model_mh:
+          label = next((label for label in labels if v.get("note", "").startswith(label)), None)
+          if label and v["layout"] == r["layout"]:
+            out.append(variant_row(v, cold_s1, label))
   return out
 
 
@@ -351,6 +442,12 @@ def main() -> None:
   p.add_argument("--suite", required=True, choices=sorted(SUITES), help="p1: >200B models; p2: models up to 120B")
   p.add_argument("--cold-s1", action="append", default=[], help="MODEL=SECONDS cold HF->GCS override")
   p.add_argument("--multihost-csv", help="reports/tpu7x_multihost_results.csv (adds the multi-host rows to p1)")
+  p.add_argument(
+      "--variant",
+      action="append",
+      default=[],
+      help="LABEL=ROOT: a local mirror of a fix variant's run dir; its results add `safetensor (LABEL)` rows",
+  )
   p.add_argument("--md", help="Output markdown path")
   p.add_argument(
       "--md-into",
@@ -360,7 +457,8 @@ def main() -> None:
   )
   args = p.parse_args()
   overrides = {k: float(v) for k, v in (o.split("=", 1) for o in args.cold_s1)}
-  rows = build(args.suite, args.roots, overrides, args.multihost_csv)
+  variants = [tuple(v.split("=", 1)) for v in args.variant]
+  rows = build(args.suite, args.roots, overrides, args.multihost_csv, variants)
   text = markdown(args.suite, rows)
   if args.md:
     with open(args.md, "w", encoding="utf-8") as f:
