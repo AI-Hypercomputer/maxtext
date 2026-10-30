@@ -66,8 +66,8 @@ deepseek4-284b,unscanned,2,16,0.45,0.25,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,
 qwen3.5-397b-a17b,scanned,1,8,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,S2: source must be staged in RAM next to the converted state; exceeds host RAM,TPU HBM OOM
 qwen3.5-397b-a17b,scanned,2,16,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,S2: source must be staged in RAM next to the converted state; exceeds host RAM,TPU HBM OOM
 qwen3.5-397b-a17b,scanned,4,32,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,814.53,0.00,0.21,1399.68,0.00,260.01,1139.07,2214.21,0.00,0.00,S2: source must be staged in RAM next to the converted state; exceeds host RAM,OK
-qwen3.5-397b-a17b,unscanned,1,8,814.53,1.28,0.00,0.00,0.00,0.00,0.00,0.00,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,S2: host OOM-killed,not run
-qwen3.5-397b-a17b,unscanned,2,16,814.53,1.28,0.00,0.00,0.00,0.00,0.00,0.00,814.53,0.00,0.23,1311.85,0.00,515.91,795.72,2126.38,0.00,0.00,S2: host OOM-killed,OK
+qwen3.5-397b-a17b,unscanned,1,8,814.53,1.23,8096.53,16.37,6642.79,1431.96,0.00,0.00,814.53,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,S3: not run,not run
+qwen3.5-397b-a17b,unscanned,2,16,814.53,1.23,8096.53,16.37,6642.79,1431.96,2025.76,10936.83,814.53,0.00,0.23,1311.85,0.00,515.91,795.72,2126.38,5.14,-713.91,OK,OK
 qwen3-480b-a35b,scanned,1,8,1135.50,1.15,0.00,0.00,0.00,0.00,0.00,0.00,1046.14,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,S2: source must be staged in RAM next to the converted state; exceeds host RAM,TPU HBM OOM
 qwen3-480b-a35b,scanned,2,16,1135.50,1.15,0.00,0.00,0.00,0.00,0.00,0.00,1046.14,0.00,0.30,1067.86,0.01,941.98,125.78,2114.00,0.00,0.00,S2: source must be staged in RAM next to the converted state; exceeds host RAM,OK
 qwen3-480b-a35b,unscanned,1,8,1135.50,1.15,0.00,0.00,0.00,0.00,0.00,0.00,1046.14,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,S2: converted state exceeds host RAM,not run
