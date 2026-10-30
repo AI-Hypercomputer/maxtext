@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Unit tests for MaxText training engine."""
+
 # pylint: disable=protected-access
 
 import dataclasses
@@ -28,7 +29,9 @@ from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.configs import types as config_types
 from maxtext.training_engine import abstract_engine
+from maxtext.training_engine import checkpointing
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import maxtext_utils
@@ -79,7 +82,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     """Sets up test dependencies and mocks."""
     super().setUp()
     self.mock_config = self.setup_config()
-    dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+    dummy_mesh = jax.sharding.Mesh(
+        maxtext_utils.create_device_mesh(self.mock_config),
+        self.mock_config.mesh_axes,
+    )
     dummy_model = DummyNNXModel()
     # `create_training_optimizer` returns `(schedule, tx)` where `tx` is a raw optax
     # GradientTransformation; the engine wraps it in an nnx.Optimizer itself. Returning
@@ -186,7 +192,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     `_publish_state`). Two steps rather than one, because the interesting failure is the
     second step reading a stale or wrongly-partitioned cache written by the first.
     """
-    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+    mesh = jax.sharding.Mesh(
+        maxtext_utils.create_device_mesh(self.mock_config),
+        self.mock_config.mesh_axes,
+    )
     self.mock_from_pretrained.return_value = (DummyStatefulNNXModel(), mesh)
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
 
@@ -235,7 +244,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # against a denominator of 8.0 -> [0.25, 0.25], whose l2 norm is sqrt(2 * 0.25**2).
     t.with_loss_fn(
         lambda model, *_args, **_kwargs: (
-            abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights.value), denominator=jnp.array(4.0)),
+            abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights.value),
+                denominator=jnp.array(4.0),
+            ),
             {},
         )
     )
@@ -266,6 +278,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
             save_interval_steps=mock_config.checkpoint_period,
             max_to_keep=mock_config.max_num_checkpoints_to_keep,
             enable_async_checkpointing=mock_config.async_checkpointing,
+            async_options=ocp.AsyncOptions(timeout_secs=mock_config.async_checkpointing_timeout_secs),
         ),
         item_handlers={
             "model_params": mock_handler.return_value,
@@ -308,19 +321,95 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch(
+      "orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler",
+      return_value=type("CloudPathwaysArrayHandler", (), {})(),
+  )
   @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
-  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
+  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers, _):
     import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
-    from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
 
-    checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
-    checkpointing_module._maybe_register_pathways_persistence()
+    checkpointing._maybe_register_pathways_persistence()
 
     mock_register_type_handlers.assert_called_once()
     self.assertEqual(
         mock_register_type_handlers.call_args.kwargs["checkpointing_impl"],
         ocp_pathways.CheckpointingImpl.PERSISTENCE,
     )
+    # Latched on success: a second call does not register again.
+    self.assertTrue(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+    checkpointing._maybe_register_pathways_persistence()
+    mock_register_type_handlers.assert_called_once()
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch(
+      "orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler",
+      return_value=type("ArrayHandler", (), {})(),
+  )
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_pathways_persistence_fallback_handler_raises_and_does_not_latch(self, mock_register_type_handlers, _):
+    """An explicit request that ends with the controller-side handler fails loudly, every time."""
+    for _ in range(2):
+      with self.assertRaisesRegex(checkpointing.PathwaysCheckpointingUnavailableError, "ArrayHandler"):
+        checkpointing._maybe_register_pathways_persistence()
+      self.assertFalse(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+    self.assertEqual(mock_register_type_handlers.call_count, 2)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers", side_effect=NotImplementedError("no pathways"))
+  def test_pathways_persistence_registration_failure_raises(self, _):
+    with self.assertRaisesRegex(checkpointing.PathwaysCheckpointingUnavailableError, "no pathways") as cm:
+      checkpointing._maybe_register_pathways_persistence()
+    self.assertIsInstance(cm.exception.__cause__, NotImplementedError)
+    self.assertFalse(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": ""})
+  @mock.patch.object(checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", False)
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_pathways_persistence_not_requested_is_a_no_op(self, mock_register_type_handlers):
+    checkpointing._maybe_register_pathways_persistence()
+    mock_register_type_handlers.assert_not_called()
+    self.assertFalse(checkpointing._PATHWAYS_PERSISTENCE_REGISTERED)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
+  def test_pathways_persistence_requires_a_gcs_checkpoint_dir(self, mock_register_type_handlers):
+    with self.assertRaisesRegex(ValueError, "gs://"):
+      checkpointing.CheckpointManager(self.create_tempdir().full_path, self.setup_config(enable_checkpointing=True))
+    mock_register_type_handlers.assert_not_called()
+
+  def test_checkpoint_dir_derived_unless_set(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        skip_jax_distributed_system=True,
+        base_output_directory="gs://bucket/out",
+        run_name="run",
+    )
+    self.assertEqual(cfg.checkpoint_dir, "gs://bucket/out/run/checkpoints/")
+    self.assertEqual(cfg.metrics_dir, "gs://bucket/out/run/metrics/")
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        skip_jax_distributed_system=True,
+        base_output_directory="gs://bucket/out",
+        run_name="run",
+        checkpoint_dir="/gcs/ckpt/run/",
+    )
+    self.assertEqual(cfg.checkpoint_dir, "/gcs/ckpt/run/")
+    self.assertEqual(cfg.metrics_dir, "gs://bucket/out/run/metrics/")
+    rl_cfg = config_types.RLConfig(model_name="gemma4-26b", checkpoint_dir="/gcs/ckpt/run/")
+    self.assertEqual(rl_cfg.checkpoint_dir, "/gcs/ckpt/run/")
+
+  def test_checkpoint_manager_wait_until_finished_raises_on_failure(self):
+    cfg = self.setup_config(enable_checkpointing=True)
+    mgr = checkpointing.CheckpointManager(self.create_tempdir().full_path, cfg)
+    mgr._checkpoint_manager.wait_until_finished = mock.MagicMock(side_effect=TimeoutError("Background save timed out."))
+    mgr._in_flight_step = 10
+    with self.assertRaisesRegex(TimeoutError, "Background save timed out."):
+      mgr.wait_until_finished()
+    self.assertIsNone(mgr._in_flight_step)
 
   def test_save_checkpoint_called_after_update(self):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -354,7 +443,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.save_checkpoint(metadata=None)
 
     mock_orbax_mgr.save.assert_called_once()
-    self.assertEqual(set(mock_orbax_mgr.save.call_args.kwargs["args"].keys()), {"model_params", "optimizer_state"})
+    self.assertEqual(
+        set(mock_orbax_mgr.save.call_args.kwargs["args"].keys()),
+        {"model_params", "optimizer_state"},
+    )
 
   def test_save_checkpoint_skips_if_already_saved(self):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -409,7 +501,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
 
         with self.assertRaisesRegex(
-            ValueError, r"Mid-step checkpointing is not supported; micro_step_count must be 0, got 1"
+            ValueError,
+            r"Mid-step checkpointing is not supported; micro_step_count must be 0, got 1",
         ):
           t.save_checkpoint(metadata=None, force=True)
         mock_orbax_mgr.save.assert_not_called()
@@ -503,6 +596,205 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIsNone(t._accumulated_denominator)
     self.assertEmpty(t._cached_losses)
     self.assertEmpty(t._metrics_recorder.get_metrics_history(clear_cache=False))
+
+  def test_save_restore_metadata_is_a_black_box(self):
+    """Falsy orchestrator metadata (`{}`, `0`) round-trips as given instead of becoming None."""
+    for metadata in ({}, 0, {"step": 3, "nested": {"k": [1, 2]}}):
+      t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+      mock_orbax_mgr = self._mock_orbax_manager(t)
+      t.save_checkpoint(metadata=metadata, step=3)
+      custom_metadata = mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]
+      self.assertIn("additional_metadata", custom_metadata)
+      self.assertEqual(custom_metadata["additional_metadata"], metadata)
+
+      t2 = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+      mock_orbax_mgr2 = self._mock_orbax_manager(t2, latest_step=3)
+      saved_metadata = mock.MagicMock()
+      saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+      saved_metadata.custom_metadata = custom_metadata
+      mock_orbax_mgr2.metadata.return_value = saved_metadata
+      mock_orbax_mgr2.restore.return_value = {
+          "model_params": nnx.state(t2.model),
+          "optimizer_state": nnx.state(t2.optimizer, nnx.optimizer.OptState),
+      }
+      restored = t2.restore_checkpoint(step=3)
+      self.assertEqual(restored, metadata)
+      self.assertEqual(type(restored), type(metadata))
+
+    # No metadata at all records none.
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    t.save_checkpoint(metadata=None, step=3)
+    self.assertNotIn(
+        "additional_metadata",
+        mock_orbax_mgr.save.call_args.kwargs["custom_metadata"],
+    )
+
+  def test_checkpoint_manager_does_not_mutate_caller_metadata(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    caller_metadata = {"origin": "caller"}
+    t._checkpoint_manager.save_checkpoint(
+        step=1,
+        checkpoint_state=checkpointing.CheckpointState(model=t.model),
+        custom_metadata=caller_metadata,
+    )
+    saved = mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]
+    self.assertEqual(saved, {"origin": "caller"})
+    self.assertIsNot(saved, caller_metadata)
+
+  def test_checkpoint_manager_waits_for_the_previous_save_only_when_saving(self):
+    """A step the save-interval policy declines neither blocks on nor saves over the in-flight save."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    state = checkpointing.CheckpointState(model=t.model)
+
+    mock_orbax_mgr.should_save.return_value = False
+    mock_orbax_mgr.save.return_value = False
+    self.assertFalse(t._checkpoint_manager.save_checkpoint(step=1, checkpoint_state=state))
+    mock_orbax_mgr.wait_until_finished.assert_not_called()
+
+    mock_orbax_mgr.should_save.return_value = True
+    mock_orbax_mgr.save.return_value = True
+    self.assertTrue(t._checkpoint_manager.save_checkpoint(step=2, checkpoint_state=state))
+    mock_orbax_mgr.wait_until_finished.assert_called_once()
+
+    # `force` bypasses the policy, so it waits too.
+    mock_orbax_mgr.reset_mock()
+    mock_orbax_mgr.should_save.return_value = False
+    t._checkpoint_manager.save_checkpoint(step=3, checkpoint_state=state, force=True)
+    mock_orbax_mgr.wait_until_finished.assert_called_once()
+    self.assertTrue(mock_orbax_mgr.save.call_args.kwargs["force"])
+
+  def test_checkpoint_manager_close_waits_for_the_in_flight_save(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    calls = []
+    mock_orbax_mgr.wait_until_finished.side_effect = lambda: calls.append("wait")
+    mock_orbax_mgr.close.side_effect = lambda: calls.append("close")
+
+    t._checkpoint_manager.close()
+
+    self.assertEqual(calls, ["wait", "close"])
+
+  def test_restore_checkpoint_raises_when_an_existing_checkpoint_fails_to_restore(
+      self,
+  ):
+    """A checkpoint that exists but cannot be read must not look like a fresh start."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    mock_orbax_mgr.restore.side_effect = OSError("corrupt shard")
+    t.train_step = 3
+
+    with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "step 7.*corrupt shard") as cm:
+      t.restore_checkpoint()
+    self.assertIsInstance(cm.exception.__cause__, OSError)
+    self.assertEqual(t.train_step, 3)
+
+  def test_restore_checkpoint_raises_when_the_optimizer_state_is_missing(self):
+    """Resuming with a freshly initialized optimizer would silently change the run."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+
+    with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "no optimizer state"):
+      t.restore_checkpoint(step=7)
+    mock_orbax_mgr.restore.assert_not_called()
+
+    # Without an optimizer, a params-only checkpoint restores normally.
+    mock_orbax_mgr.restore.return_value = {"model_params": nnx.state(t.model)}
+    restored_step, _, _ = t._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpointing.CheckpointState(model=t.model, optimizer=None),
+        step=7,
+    )
+    self.assertEqual(restored_step, 7)
+    self.assertNotIn(
+        "optimizer_state",
+        dict(mock_orbax_mgr.restore.call_args.kwargs["args"].items()),
+    )
+
+  def test_restore_checkpoint_is_a_no_op_when_disabled_or_absent(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)  # Checkpointing disabled.
+    self.assertIsNone(t.restore_checkpoint())
+
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=None)
+    self.assertIsNone(t.restore_checkpoint())
+    mock_orbax_mgr.metadata.assert_not_called()
+    mock_orbax_mgr.restore.assert_not_called()
+
+  def test_restore_targets_device_memory_for_host_offloaded_optimizer_state(self):
+    """A `pinned_host` optimizer leaf is restored into device memory with the same sharding otherwise."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    mock_orbax_mgr.restore.return_value = {}
+
+    # Move every optimizer array leaf to pinned host memory, as optimizer offload leaves them.
+    opt_state = nnx.state(t.optimizer, nnx.optimizer.OptState)
+    offloaded = jax.tree.map(
+        lambda x: jax.device_put(x, x.sharding.with_memory_kind("pinned_host")) if hasattr(x, "sharding") else x,
+        opt_state,
+    )
+    nnx.update(t.optimizer, offloaded)
+    self.assertTrue(
+        any(
+            getattr(getattr(x, "sharding", None), "memory_kind", None) == "pinned_host"
+            for x in jax.tree.leaves(offloaded)
+        )
+    )
+
+    t._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpointing.CheckpointState(model=t.model, optimizer=t.optimizer),
+        step=7,
+    )
+
+    targets = jax.tree.leaves(mock_orbax_mgr.restore.call_args.kwargs["args"]["optimizer_state"].item)
+    self.assertNotEmpty(targets)
+    for target, source in zip(targets, jax.tree.leaves(offloaded)):
+      if getattr(source.sharding, "memory_kind", None) == "pinned_host":
+        self.assertIsInstance(target, jax.ShapeDtypeStruct)
+        self.assertEqual(target.sharding.memory_kind, "device")
+        self.assertEqual((target.shape, target.dtype), (source.shape, source.dtype))
+
+  def test_step_boundary_checkpoint_round_trips_through_real_orbax(self):
+    """Through real Orbax: the trained state and falsy caller metadata come back at the saved step."""
+
+    def loss_fn(*args, **kwargs):
+      del args, kwargs
+      return (
+          abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)),
+          {},
+      )
+
+    cfg = self.setup_config(enable_checkpointing=True)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(loss_fn)
+    t.fwd_bwd(payload)
+    t.update()
+    saved_params = jax.tree.map(np.asarray, nnx.state(t.model, nnx.Param))
+    t.save_checkpoint(metadata={})
+    t._checkpoint_manager.wait_until_finished()
+
+    t2 = maxtext_engine.MaxTextTrainingEngine(cfg)
+    self.assertEqual(t2.restore_checkpoint(), {})
+    self.assertEqual((t2.train_step, t2.micro_step_count), (1, 0))
+    for got, want in zip(
+        jax.tree.leaves(nnx.state(t2.model, nnx.Param)),
+        jax.tree.leaves(saved_params),
+    ):
+      np.testing.assert_array_equal(np.asarray(got), want)
 
   def test_record_and_get_metrics(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
@@ -690,20 +982,32 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   def test_buffer_metrics_validates_metric_types_and_shapes(self):
     """buffer_metrics eagerly rejects non-numeric types and malformed WeightedMetrics."""
     recorder = metrics_module.MetricsRecorder()
-    with self.assertRaisesRegex(TypeError, r"must be a JAX/NumPy array, numeric scalar, or WeightedMetric; got object"):
+    with self.assertRaisesRegex(
+        TypeError,
+        r"must be a JAX/NumPy array, numeric scalar, or WeightedMetric; got object",
+    ):
       recorder.buffer_metrics(train_step=0, name="bad_obj", metric=object())
 
-    with self.assertRaisesRegex(TypeError, r"must be a JAX/NumPy array, numeric scalar, or WeightedMetric; got str"):
+    with self.assertRaisesRegex(
+        TypeError,
+        r"must be a JAX/NumPy array, numeric scalar, or WeightedMetric; got str",
+    ):
       recorder.buffer_metrics(train_step=0, name="bad_str", metric="non_numeric")
 
-    with self.assertRaisesRegex(TypeError, r"unreduced_sum must be a JAX/NumPy array or numeric scalar, got str"):
+    with self.assertRaisesRegex(
+        TypeError,
+        r"unreduced_sum must be a JAX/NumPy array or numeric scalar, got str",
+    ):
       recorder.buffer_metrics(
           train_step=0,
           name="bad_wm_sum",
           metric=abstract_engine.WeightedMetric(unreduced_sum="bad", denominator=1.0),
       )
 
-    with self.assertRaisesRegex(ValueError, r"unreduced_sum shape .* and denominator shape .* are incompatible"):
+    with self.assertRaisesRegex(
+        ValueError,
+        r"unreduced_sum shape .* and denominator shape .* are incompatible",
+    ):
       recorder.buffer_metrics(
           train_step=0,
           name="bad_wm_shape",
@@ -773,7 +1077,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     del recorder._pending_scalar[id(buffer)]["bad"]
     np.testing.assert_array_equal(recorder.get_step_metrics(0).scalar_metrics["grad_norm"], [1.5])
 
-  def test_metrics_recorder_flushes_one_scalar_per_microbatch_with_a_single_stack(self):
+  def test_metrics_recorder_flushes_one_scalar_per_microbatch_with_a_single_stack(
+      self,
+  ):
     """Each metric list of per-microbatch scalars is materialized by one stack, not a ravel per item."""
     recorder = metrics_module.MetricsRecorder()
     for mb in range(3):
@@ -843,7 +1149,13 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     payload = DummyPayload()
 
     def _loss_fn(model, *args, **kwargs):
-      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(1.0)), {}
+      return (
+          abstract_engine.WeightedMetric(
+              unreduced_sum=jnp.sum(model.weights[...]),
+              denominator=jnp.array(1.0),
+          ),
+          {},
+      )
 
     t.with_loss_fn(_loss_fn)
     t.fwd_bwd(payload)
@@ -920,7 +1232,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     def _loss_fn(model, *args, **kwargs):
       return abstract_engine.LossOutput(
           primary_loss=abstract_engine.WeightedMetric(
-              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+              denominator=jnp.array(4.0),
           ),
           aux_metrics={
               "metric_a": abstract_engine.WeightedMetric(unreduced_sum=jnp.array(12.0), denominator=jnp.array(3.0)),
@@ -989,7 +1302,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     def _loss_fn(model, **kwargs):
       seen.update(kwargs)
-      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+          denominator=jnp.array(4.0),
+      )
 
     t.with_loss_fn(_loss_fn)
     t.with_gen_model_input_fn(lambda payload: {"alpha": jnp.array(1.0), "beta": jnp.array(2.0)})
@@ -1005,8 +1321,17 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     seen = {}
 
     def _loss_fn(model, config, data, dropout_rng, params, is_train=True):
-      seen.update(config=config, data=data, dropout_rng=dropout_rng, params=params, is_train=is_train)
-      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+      seen.update(
+          config=config,
+          data=data,
+          dropout_rng=dropout_rng,
+          params=params,
+          is_train=is_train,
+      )
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+          denominator=jnp.array(4.0),
+      )
 
     t.with_loss_fn(_loss_fn)
     t.fwd_bwd(DummyPayload())
@@ -1068,7 +1393,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   def test_prepare_batch_prevents_recompilation_on_metadata_change(self):
     """Payload metadata changes must not alter the Treedef or trigger recompilation."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    t.with_loss_fn(lambda model, **kwargs: (abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)), {}))
+    t.with_loss_fn(
+        lambda model, **kwargs: (
+            abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)),
+            {},
+        )
+    )
     # Mirrors tunix algorithm_adapter._algo_model_input which passes the payload through.
     t.with_gen_model_input_fn(lambda payload: {"train_example": payload})
 
@@ -1098,7 +1428,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     dummy1 = DummyPayload(token_ids=jnp.ones((2, 2)), metadata={"step": 0})
     dummy2 = DummyPayload(token_ids=jnp.ones((2, 2)), metadata={"step": 1})
     t_dummy = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    t_dummy.with_loss_fn(lambda model, **kwargs: (abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)), {}))
+    t_dummy.with_loss_fn(
+        lambda model, **kwargs: (
+            abstract_engine.WeightedMetric(jnp.array(1.0), jnp.array(1.0)),
+            {},
+        )
+    )
     t_dummy.with_gen_model_input_fn(lambda payload: {"train_example": payload})
     with mock.patch.object(t_dummy, "_compile_for_batch", wraps=t_dummy._compile_for_batch) as mock_dummy_compile:
       t_dummy.compile(dummy1)
@@ -1124,7 +1459,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     def _loss_fn(model, tokens, algo_config, pad_id, eos_id):
       del tokens, algo_config, pad_id, eos_id
-      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+          denominator=jnp.array(4.0),
+      )
 
     t.with_loss_fn(_loss_fn)
     t.with_gen_model_input_fn(
@@ -1155,7 +1493,11 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(compiled._compiled)
     compiled.fwd_bwd(DummyPayload())
 
-    np.testing.assert_allclose(compiled._accumulated_grads["weights"], eager._accumulated_grads["weights"], rtol=1e-5)
+    np.testing.assert_allclose(
+        compiled._accumulated_grads["weights"],
+        eager._accumulated_grads["weights"],
+        rtol=1e-5,
+    )
     np.testing.assert_allclose(compiled._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
 
   def test_compile_without_dummy_data_defers_to_first_fwd_bwd(self):
@@ -1260,7 +1602,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     def _loss_fn(model, tokens, algo_config):
       del tokens, algo_config
-      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+          denominator=jnp.array(4.0),
+      )
 
     t.with_loss_fn(_loss_fn)
     # A fresh object per call holding an array: equality compares elementwise, so bool()
@@ -1363,7 +1708,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     tunix_metric = sft_utils.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0))
     self.assertIsInstance(tunix_metric, abstract_engine.WeightedMetric)
-    self.assertIsInstance(sft_utils.LossOutput(primary_loss=tunix_metric, aux_metrics={}), abstract_engine.LossOutput)
+    self.assertIsInstance(
+        sft_utils.LossOutput(primary_loss=tunix_metric, aux_metrics={}),
+        abstract_engine.LossOutput,
+    )
 
     # Must be the sft.utils class, not the same-named one in tunix.dist_rl.metrics
     # whose compute()/compute_scale() raise NotImplementedError -- importing that one
@@ -1405,7 +1753,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     def _loss_fn(model, *args, **kwargs):
       return sft_utils.LossOutput(
           primary_loss=sft_utils.WeightedMetric(
-              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+              denominator=jnp.array(4.0),
           ),
           aux_metrics={
               "kl": sft_utils.WeightedMetric(unreduced_sum=jnp.array(6.0), denominator=jnp.array(3.0)),
@@ -1619,7 +1968,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     payload = DummyPayload()
 
     def _loss_fn(model, *args, **kwargs):
-      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0))
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+          denominator=jnp.array(4.0),
+      )
 
     t.with_loss_fn(_loss_fn)
     t.fwd_bwd(payload)
@@ -1645,7 +1997,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     def _tunix_loss_fn(model, *args, **kwargs):
       return sft_utils.LossOutput(
           primary_loss=sft_utils.WeightedMetric(
-              unreduced_sum=jnp.sum(model.weights[...]) * 8.0, denominator=jnp.array(4.0)
+              unreduced_sum=jnp.sum(model.weights[...]) * 8.0,
+              denominator=jnp.array(4.0),
           ),
           aux_metrics={
               "metric_a": sft_utils.WeightedMetric(unreduced_sum=jnp.array(12.0), denominator=jnp.array(3.0)),
@@ -1686,7 +2039,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_gradient_norm_is_recorded_every_step(self):
     cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
-    self.assertFalse(cfg.skip_step_on_spikes, "this test covers the default, spike-detection-off path")
+    self.assertFalse(
+        cfg.skip_step_on_spikes,
+        "this test covers the default, spike-detection-off path",
+    )
 
     t = maxtext_engine.MaxTextTrainingEngine(cfg)
     t.with_loss_fn(self._weighted_loss_fn)
@@ -1733,7 +2089,11 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     batch = {"a": jnp.zeros((1, 4)), "b": jnp.zeros((1, 4))}
 
     # Batch dim 1 against a 2-wide axis: indivisible, so the dim must be replicated.
-    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+    with mock.patch.object(
+        maxtext_engine.sharding,
+        "get_input_data_sharding",
+        return_value=self._sharded_batch_spec(t),
+    ):
       with mock.patch.object(type(t), "_batch_axis_size", return_value=2):
         with self.assertLogs(level="WARNING") as logs:
           shardings = t._batch_data_shardings(batch)  # pylint: disable=protected-access
@@ -1752,7 +2112,11 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     """The normal case must neither replicate nor warn."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
 
-    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+    with mock.patch.object(
+        maxtext_engine.sharding,
+        "get_input_data_sharding",
+        return_value=self._sharded_batch_spec(t),
+    ):
       with mock.patch.object(type(t), "_batch_axis_size", return_value=2):
         shardings = t._batch_data_shardings({"a": jnp.zeros((4, 4))})  # pylint: disable=protected-access
 
@@ -1801,8 +2165,17 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     def fn(_, tokens, prompt, *, mask):
       return tokens, prompt, mask
 
-    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
-      tokens, prompt, mask = t.fwd_only(fn, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32))
+    with mock.patch.object(
+        maxtext_engine.sharding,
+        "get_input_data_sharding",
+        return_value=self._sharded_batch_spec(t),
+    ):
+      tokens, prompt, mask = t.fwd_only(
+          fn,
+          np.ones((2, 4), np.int32),
+          empty_prompt,
+          mask=np.ones((2,), np.int32),
+      )
 
     self.assertEqual(tokens.sharding.spec, jax.sharding.PartitionSpec("data", None))
     # A rank-1 leaf absorbs only the leading entry of the `[batch, sequence]` spec.
@@ -1997,7 +2370,10 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
               dtype=np.int32,
           ),
           advantages=np.array(
-              [[0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+              [
+                  [0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                  [0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+              ],
               dtype=np.float32,
           ),
           old_per_token_logps=np.full((2, 8), -0.5, dtype=np.float32),
@@ -2030,7 +2406,11 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
     self.assertTrue(
         any(
             not np.allclose(a, b)
-            for a, b in zip(jax.tree.leaves(params_before), jax.tree.leaves(params_after), strict=True)
+            for a, b in zip(
+                jax.tree.leaves(params_before),
+                jax.tree.leaves(params_after),
+                strict=True,
+            )
         )
     )
 
