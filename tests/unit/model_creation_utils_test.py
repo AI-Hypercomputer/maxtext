@@ -35,6 +35,7 @@ from maxtext.utils.model_creation_utils import (
     _align_checkpoint_to_model_shapes,
     _fix_restore_args_for_shape_mismatch,
     _fuse_moe_weights,
+    _logical_partition_specs,
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
 )
@@ -481,7 +482,7 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     _, abstract_state = nnx.split(module)
     specs = nnx.get_partition_spec(abstract_state)
 
-    # Mirror the unwrap done in from_pretrained.
+    # Mirror the unwrap done in _logical_partition_specs.
     logical_axes_tree = jax.tree.map(
         lambda v: v.get_value(),
         specs,
@@ -502,6 +503,101 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     self.assertEqual(out_np.shape, (2, 6, 4))
     np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
     np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+
+
+class TestLogicalSpecsIgnoreAmbientRules(unittest.TestCase):
+  """``_logical_partition_specs`` must return logical names even under a caller's active rules.
+
+  ``nnx.get_partition_spec`` rewrites ``out_sharding`` through the ambient
+  ``flax.core.spmd`` rules. Callers of ``from_pretrained`` that hold rules open
+  (the vLLM adapter, Tunix) would turn ``"mlp_moe"`` into mesh axes, and the
+  zero-pad dispatch in ``_align_checkpoint_to_model_shapes`` would fall back
+  to divisibility-based repeat (silent k-fold duplication) or raise.
+  """
+
+  _TRAINER_RULES = (("exp", None), ("mlp_moe", "x"), ("embed_moe", None))
+
+  def setUp(self):
+    super().setUp()
+
+    class _TinyMoE(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wo = nnx.Param(
+            jax.random.normal(rngs.params(), (2, 4, 4), dtype=jnp.float32),
+            sharding=("exp", "mlp_moe", "embed_moe"),
+        )
+
+    devices = jax.local_devices()[:1]
+    self.mesh = jax.sharding.Mesh(devices, ("x",), axis_types=(jax.sharding.AxisType.Explicit,))
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      module = nnx.eval_shape(lambda: _TinyMoE(nnx.Rngs(params=0)))
+    _, self.abstract_state = nnx.split(module)
+
+  def _specs_under_trainer_rules(self):
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      return _logical_partition_specs(self.abstract_state)
+
+  def test_specs_are_logical_under_trainer_rules(self):
+    # Negative control: the raw flax call rewrites mlp_moe into the mesh axis.
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      raw = nnx.get_partition_spec(self.abstract_state)["wo"].get_value()
+    self.assertEqual(tuple(raw), (None, "x", None))
+
+    specs = self._specs_under_trainer_rules()
+    wo_axes = specs["wo"]
+    self.assertIsInstance(wo_axes, jax.sharding.PartitionSpec)
+    self.assertNotIsInstance(wo_axes, nnx.Variable)
+    self.assertEqual(tuple(wo_axes), ("exp", "mlp_moe", "embed_moe"))
+
+  def test_specs_match_no_rules_path(self):
+    with jax.sharding.set_mesh(self.mesh):
+      baseline = _logical_partition_specs(self.abstract_state)
+    self.assertEqual(tuple(self._specs_under_trainer_rules()["wo"]), tuple(baseline["wo"]))
+
+  def test_specs_ignore_per_variable_sharding_rules(self):
+    # flax also honours Variable-local rules even when no ambient rules are active.
+    local_rules = self._TRAINER_RULES
+
+    class _LocalRulesMoE(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wo = nnx.Param(
+            jax.random.normal(rngs.params(), (2, 4, 4), dtype=jnp.float32),
+            sharding=("exp", "mlp_moe", "embed_moe"),
+            sharding_rules=local_rules,
+        )
+
+    with jax.sharding.set_mesh(self.mesh):
+      module = nnx.eval_shape(lambda: _LocalRulesMoE(nnx.Rngs(params=0)))
+      _, state = nnx.split(module)
+      self.assertEqual(tuple(nnx.get_partition_spec(state)["wo"].get_value()), (None, "x", None))
+      self.assertEqual(tuple(_logical_partition_specs(state)["wo"]), ("exp", "mlp_moe", "embed_moe"))
+
+  def test_exact_multiple_zero_pads_instead_of_repeating_under_rules(self):
+    # 4 -> 8 is the silent case: a repeat would also produce the right shape.
+    wo_axes = self._specs_under_trainer_rules()["wo"]
+    ckpt = jnp.ones((2, 4, 4), dtype=jnp.float32)
+    model = jnp.zeros((2, 8, 4), dtype=jnp.float32)
+    out_np = np.asarray(_align_checkpoint_to_model_shapes(ckpt, model, wo_axes))
+    self.assertEqual(out_np.shape, (2, 8, 4))
+    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 4, 4), dtype=np.float32))
+
+  def test_non_multiple_zero_pads_instead_of_raising_under_rules(self):
+    wo_axes = self._specs_under_trainer_rules()["wo"]
+    ckpt = jnp.ones((2, 4, 4), dtype=jnp.float32)
+    model = jnp.zeros((2, 6, 4), dtype=jnp.float32)
+    out_np = np.asarray(_align_checkpoint_to_model_shapes(ckpt, model, wo_axes))
+    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+
+  def test_physical_mesh_tuple_is_not_a_registered_axis(self):
+    # Physical mesh tuples are not logical names and must hit the unregistered-axis error.
+    ckpt = jnp.ones((3,), dtype=jnp.float32)
+    model = jnp.zeros((4,), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, "not registered in _VLLM_REPEAT_AXES"):
+      _align_checkpoint_to_model_shapes(ckpt, model, (("attn_dp", "model"),))
 
 
 class TestGetTransformerModel(unittest.TestCase):
