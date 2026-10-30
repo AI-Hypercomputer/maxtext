@@ -522,7 +522,7 @@ def _params(engine):
 def _grads_after(engine, payload):
   """The whole accumulated gradient tree from one micro-batch, as a flat list."""
   engine.fwd_bwd(payload)
-  grads = engine._reduced_accumulated_grads()  # pylint: disable=protected-access
+  grads = engine._accumulated_grads  # pylint: disable=protected-access
   return [np.asarray(leaf, np.float64) for leaf in jax.tree.leaves(grads)]
 
 
@@ -795,8 +795,8 @@ class PackedDenominatorPartitionsTest(unittest.TestCase):
   def _accumulate(self, cfg, mesh, build, tokens, advantages, sizes, *, offset=0):
     """Feeds one micro-batch per entry of `sizes` and returns `(Σg, Σdenom)`.
 
-    `Σg` is undivided. `_reduced_accumulated_grads` reduces over *devices*, not
-    over the denominator -- the single division by `Σdenom` happens later, in
+    `Σg` is undivided. Gradients in `engine._accumulated_grads` are the unnormalized
+    sum over micro-batches; the single division by `Σdenom` happens later, in
     `_update_kernel`. So the identity under test here is between sums, and the
     denominator is checked as its own number rather than folded in.
 
@@ -819,7 +819,7 @@ class PackedDenominatorPartitionsTest(unittest.TestCase):
       stop = start + size
       engine.fwd_bwd(build(tokens[start:stop], advantages[start:stop], size, block_lens[start:stop]))
       start = stop
-    grads = [np.asarray(leaf, np.float64) for leaf in jax.tree.leaves(engine._reduced_accumulated_grads())]  # pylint: disable=protected-access
+    grads = [np.asarray(leaf, np.float64) for leaf in jax.tree.leaves(engine._accumulated_grads)]  # pylint: disable=protected-access
     return grads, float(np.asarray(engine._accumulated_denominator))  # pylint: disable=protected-access
 
   def test_any_partition_into_packed_micro_batches_gives_the_full_batch_gradient(self):
