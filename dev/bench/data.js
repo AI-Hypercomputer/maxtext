@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793335344587,
+  "lastUpdate": 1793349705979,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -60240,6 +60240,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4138.381,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "6bd0c6834aea8deebd892be9280ef1babc7a96c8",
+          "message": "Training engine: remove mid-step checkpointing and require step-boundary saves\n\nCheckpoints are now taken only between optimizer steps. Mid-step\ncheckpointing will be redesigned around incremental checkpoints during\ngradient accumulation; until then the engine does not save or resume a\npartially accumulated step.\n\n- save_checkpoint raises ValueError when micro-batches have been accumulated\n  that update() has not applied yet, whether or not checkpointing is enabled.\n  It saves at train_step (or the caller's step) and writes only the model and\n  optimizer state.\n- restore_checkpoint sets train_step to the restored step and discards the\n  engine's in-progress metrics, loss cache and gradient accumulator.\n- close() logs a warning and skips the final checkpoint when called mid-step.\n- Removed: CheckpointState's accumulated_metrics, accumulated_grads and\n  micro_step_count; the accumulated_metrics and accumulated_grads Orbax items;\n  micro_step_count and accumulated_denominator in the checkpoint metadata;\n  get_saved_micro_step_count and the superseding of an intra-step checkpoint\n  at the same step; the restore of intra-step metrics, gradients and loss\n  cache; and the extra save update() made after a mid-step resume.\n- The data-parallel lifecycle test now round-trips a step-boundary Zero-1\n  checkpoint and checks that a mid-step save is rejected.\n\n# Tests\n\n```bash\ncd tests/post_training/unit\npython -m pytest maxtext_engine_test.py maxtext_engine_packing_test.py maxtext_engine_data_parallel_test.py -q\n```\nResult: All unit tests passed. Pre-commit (codespell, pylint, pyink) passed.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1010162741",
+          "timestamp": "2026-10-30T02:50:00Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/6bd0c6834aea8deebd892be9280ef1babc7a96c8"
+        },
+        "date": 1793349705324,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 259.63399999999984,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 65.406,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2066.721,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 99.671,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 154.324,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 77,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4482.712,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1479.04,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.87,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 77,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4146.752,
             "unit": "sec"
           },
           {
