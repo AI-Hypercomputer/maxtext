@@ -86,6 +86,26 @@ class LoadDurationsTest(unittest.TestCase):
     self.assertEqual(durations, {"tests/a_test.py::T::test_a": 12.5})
     self.assertEqual(warning, "")
 
+  def test_nan_infinite_negative_and_boolean_values_are_skipped(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      path = os.path.join(tmpdir, ".test_durations")
+      with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "t::ok": 2.0,
+                "t::zero": 0,
+                "t::text_number": "3.5",
+                "t::nan": float("nan"),
+                "t::inf": float("inf"),
+                "t::negative": -1.0,
+                "t::bool": True,
+            },
+            f,
+        )
+      durations, warning = load_durations(path)
+    self.assertEqual(durations, {"t::ok": 2.0, "t::zero": 0.0, "t::text_number": 3.5})
+    self.assertEqual(warning, "")
+
   def test_unreadable_json_gives_empty_durations_and_a_warning(self):
     with tempfile.TemporaryDirectory() as tmpdir:
       path = os.path.join(tmpdir, ".test_durations")
@@ -259,6 +279,20 @@ class ClassSplitPluginTest(unittest.TestCase):
 
     self.assertIn("2 tests in 2 classes, 0 with a recorded duration", out.getvalue())
 
+  def test_with_a_terminal_reporter_the_lines_wait_for_the_collection_summary(self):
+    config = _fake_config(1, 1, [])
+    config.pluginmanager = types.SimpleNamespace(get_plugin=lambda name: object())
+    plugin = ClassSplitPlugin(config, durations_path="/nonexistent/.test_durations")
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+      plugin.pytest_collection_modifyitems(config, [_fake_item("tests/a_test.py::A::t")])
+
+    self.assertEqual(out.getvalue(), "")
+    lines = plugin.pytest_report_collectionfinish()
+    self.assertEqual(len(lines), 2)
+    self.assertIn("[class-split] warning: durations file", lines[0])
+    self.assertEqual(lines[1], "[class-split] Running group 1/1: 1 tests in 1 classes, 0 with a recorded duration")
+
 
 # With no .test_durations file every test weighs 1. Once `-m "not integration_test"` has removed TestHeavy, TestA
 # and TestB weigh 2 each and get one group each. Dealt before `-m`, TestHeavy would take group 1 and leave it empty.
@@ -288,8 +322,8 @@ class ClassSplitEndToEndTest(unittest.TestCase):
   and `-c pytest.ini` brings the repo's markers and --strict-markers, as in CI.
   """
 
-  def _collect(self, workdir, *args):
-    """Returns the nodeids that `pytest --collect-only` keeps from the sample module."""
+  def _run_pytest(self, workdir, *args):
+    """Runs `pytest --collect-only` on the sample module and returns its standard output."""
     out = io.StringIO()
     err = io.StringIO()
     sys.modules.pop("sample_test", None)
@@ -303,7 +337,6 @@ class ClassSplitEndToEndTest(unittest.TestCase):
         returncode = pytest.main(
             [
                 "--collect-only",
-                "-q",
                 "-s",
                 "-p",
                 "no:cacheprovider",
@@ -320,7 +353,12 @@ class ClassSplitEndToEndTest(unittest.TestCase):
     finally:
       sys.modules.pop("sample_test", None)
     self.assertEqual(int(returncode), 0, out.getvalue() + err.getvalue())
-    return [line for line in out.getvalue().splitlines() if line.startswith("sample_test.py::")]
+    return out.getvalue()
+
+  def _collect(self, workdir, *args):
+    """Returns the nodeids that `pytest --collect-only -q` keeps from the sample module."""
+    output = self._run_pytest(workdir, "-q", *args)
+    return [line for line in output.splitlines() if line.startswith("sample_test.py::")]
 
   def test_options_register_and_the_split_runs_after_marker_deselection(self):
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -334,6 +372,19 @@ class ClassSplitEndToEndTest(unittest.TestCase):
     self.assertCountEqual(first + second, unsplit)
     self.assertEqual({nodeid.split("::")[1] for nodeid in first}, {"TestA"})
     self.assertEqual({nodeid.split("::")[1] for nodeid in second}, {"TestB"})
+
+  def test_status_lines_are_printed_on_their_own_lines(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      workdir = pathlib.Path(tmpdir).resolve()
+      (workdir / "sample_test.py").write_text(SAMPLE_MODULE, encoding="utf-8")
+      # With -v and an output that is not a terminal (as in CI), pytest leaves "collecting ... " unterminated.
+      output = self._run_pytest(workdir, "-v", "--class-splits=2", "--class-group=1")
+
+    lines = [line for line in output.splitlines() if "[class-split]" in line]
+    self.assertEqual(len(lines), 2, output)  # the missing-durations warning and the status line
+    for line in lines:
+      self.assertTrue(line.startswith("[class-split]"), line)
+    self.assertEqual(lines[1], "[class-split] Running group 1/2: 2 tests in 1 classes, 0 with a recorded duration")
 
 
 if __name__ == "__main__":
