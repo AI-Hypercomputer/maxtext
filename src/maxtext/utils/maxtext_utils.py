@@ -33,6 +33,7 @@ from maxtext.common.common_types import (
     DecoderBlockType,
     ReorderStrategy,
     ShardMode,
+    VisionEncoderBlockType,
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
@@ -973,6 +974,74 @@ def calculate_engram_tflops(config):
   return learnable_tflops, attention_tflops
 
 
+def calculate_deepseek41_vision_tflops(
+    config: types.MaxTextConfig,
+) -> tuple[float, float, float]:
+  """Calculates DeepSeek-V4.1 ViT and 3x3 spatial Aligner training TFLOPs per device.
+
+  Counts dense matmul FLOPs (2 FLOPs per MAC) and full P x P bidirectional
+  self-attention FLOPs across `max(1, config.max_num_images_per_example)` images
+  per sequence. When `config.freeze_vision_encoder_params` is True, the ViT runs
+  behind `jax.lax.stop_gradient` (1x forward-only) while the Aligner runs forward
+  and backward (3x); when False, both ViT and Aligner use the 3x training
+  multiplier.
+
+  Args:
+    config: Initialized MaxText configuration.
+
+  Returns:
+    Tuple of `(total_tflops, learnable_weight_tflops, attention_tflops)` per
+    device per step (before `gradient_accumulation_steps` scaling).
+
+  Raises:
+    ValueError: If `ds41_vision_grid` or `ds41_vision_downsample_ratio` is
+      non-positive or malformed.
+  """
+  grid = config.ds41_vision_grid
+  if len(grid) != 2 or grid[0] <= 0 or grid[1] <= 0:
+    raise ValueError(f"ds41_vision_grid must be [n_vit_h, n_vit_w] of positive ints, got {grid!r}.")
+  downsample_ratio = int(config.ds41_vision_downsample_ratio)
+  if downsample_ratio <= 0:
+    raise ValueError(f"ds41_vision_downsample_ratio must be positive, got {downsample_ratio!r}.")
+
+  n_vit_h, n_vit_w = int(grid[0]), int(grid[1])
+  num_patches = n_vit_h * n_vit_w
+  patch_in_dim = int(config.num_channels_for_vit) * (int(config.patch_size_for_vit) ** 2)
+  vit_dim = int(config.hidden_size_for_vit)
+  vit_inter_dim = int(config.intermediate_size_for_vit)
+  vit_layers = int(config.num_hidden_layers_for_vit)
+
+  # 1. ViT per-image forward FLOPs: PatchEmbed + L_vit * (wqkv + full P x P attn + wo + SwiGLU w1/w2).
+  patch_embed_flops = 2 * num_patches * patch_in_dim * vit_dim
+  qkv_flops_per_layer = 2 * num_patches * vit_dim * (3 * vit_dim)
+  attn_flops_per_layer = 4 * (num_patches**2) * vit_dim
+  proj_flops_per_layer = 2 * num_patches * vit_dim * vit_dim
+  mlp_flops_per_layer = 2 * num_patches * vit_dim * (2 * vit_inter_dim) + 2 * num_patches * vit_inter_dim * vit_dim
+  vit_weight_flops = patch_embed_flops + vit_layers * (qkv_flops_per_layer + proj_flops_per_layer + mlp_flops_per_layer)
+  vit_attn_flops = vit_layers * attn_flops_per_layer
+
+  # 2. Aligner per-image forward FLOPs on padded unfolded grid tokens K = ceil(H/r) * ceil(W/r).
+  n_llm_h = (n_vit_h + (-n_vit_h) % downsample_ratio) // downsample_ratio
+  n_llm_w = (n_vit_w + (-n_vit_w) % downsample_ratio) // downsample_ratio
+  num_aligned_tokens = n_llm_h * n_llm_w
+  aligner_in_dim = (downsample_ratio**2) * vit_dim
+  emb_dim = int(config.emb_dim)
+  aligner_flops = 2 * num_aligned_tokens * aligner_in_dim * emb_dim + 2 * num_aligned_tokens * emb_dim * emb_dim
+
+  # 3. Training multipliers: frozen ViT runs forward only (1x); trainable layers run 1x fwd + 2x bwd (3x).
+  vit_multiplier = 1 if config.freeze_vision_encoder_params else 3
+  aligner_multiplier = 3
+  per_image_weight_flops = vit_multiplier * vit_weight_flops + aligner_multiplier * aligner_flops
+  per_image_attn_flops = vit_multiplier * vit_attn_flops
+
+  num_images = max(1, int(config.max_num_images_per_example))
+  images_per_device = config.per_device_batch_size * num_images
+  learnable_weight_tflops = (images_per_device * per_image_weight_flops) / 1e12
+  attention_tflops = (images_per_device * per_image_attn_flops) / 1e12
+  total_tflops = learnable_weight_tflops + attention_tflops
+  return total_tflops, learnable_weight_tflops, attention_tflops
+
+
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
   if config.model_name.startswith("gemma3"):
@@ -983,6 +1052,8 @@ def calculate_vision_encoder_tflops(config):
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_llama4_vision_layers_tflops_per_device(
         config
     )
+  elif config.vision_encoder_block == VisionEncoderBlockType.DEEPSEEK41:
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_deepseek41_vision_tflops(config)
   else:
     max_logging.log(
         f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now."
