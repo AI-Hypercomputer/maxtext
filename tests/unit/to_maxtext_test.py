@@ -14,7 +14,9 @@
 
 """Tests for to_maxtext.py"""
 
+from types import SimpleNamespace
 import unittest
+import unittest.mock
 import ml_dtypes
 import numpy as np
 import pytest
@@ -32,6 +34,7 @@ from maxtext.checkpoint_conversion.to_maxtext import (
     _param_save_dtype,
     resolve_scale_key,
 )
+from maxtext.checkpoint_conversion.utils import utils as conv_utils
 
 
 class ResolveScaleKeyTest(unittest.TestCase):
@@ -163,6 +166,41 @@ class ExtractConversionArgsTest(unittest.TestCase):
     self.assertEqual(extracted["eager_load_method"], "safetensors")
     self.assertEqual(extracted["simulated_cpu_devices_count"], 4)
     self.assertEqual(remaining, ["base.yml", "model_name=qwen3.5-35b-a3b-fp8", "steps=10"])
+
+
+class SaveWeightsToCheckpointTest(unittest.TestCase):
+  """Tests that save_weights_to_checkpoint sizes the Orbax save buffers from the config."""
+
+  def _save(self, config):
+    """Runs save_weights_to_checkpoint with Orbax mocked out and returns the checkpoint manager kwargs."""
+    with (
+        unittest.mock.patch.object(conv_utils.checkpointing, "create_orbax_checkpoint_manager", autospec=True) as create,
+        unittest.mock.patch.object(conv_utils.checkpointing, "save_checkpoint", autospec=True, return_value=True),
+        unittest.mock.patch.object(conv_utils.checkpointing, "wait_until_finished", autospec=True),
+    ):
+      conv_utils.save_weights_to_checkpoint(
+          "/tmp/unused_checkpoint_dir",
+          {"w": np.zeros((2, 2), dtype=np.float32)},
+          device_count=1,
+          use_ocdbt=True,
+          use_zarr3=True,
+          config=config,
+      )
+    return create.call_args.kwargs
+
+  def test_passes_checkpoint_storage_concurrent_gb_from_config(self):
+    kwargs = self._save(SimpleNamespace(checkpoint_storage_concurrent_gb=40))
+    self.assertEqual(kwargs["checkpoint_storage_concurrent_gb"], 40)
+
+  def test_passes_zero_checkpoint_storage_concurrent_gb_from_config(self):
+    kwargs = self._save(SimpleNamespace(checkpoint_storage_concurrent_gb=0))
+    self.assertEqual(kwargs["checkpoint_storage_concurrent_gb"], 0)
+
+  def test_keeps_the_manager_default_without_config(self):
+    for config in (None, SimpleNamespace()):
+      with self.subTest(config=config):
+        kwargs = self._save(config)
+        self.assertNotIn("checkpoint_storage_concurrent_gb", kwargs)
 
 
 if __name__ == "__main__":
