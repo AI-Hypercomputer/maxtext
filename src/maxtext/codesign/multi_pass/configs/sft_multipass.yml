@@ -1,0 +1,136 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SFT (Supervised Fine-Tuning) with Dtype-Agnostic Multi-Pass Precision Emulation
+base_config: "../../../src/maxtext/configs/post_train/sft.yml"
+
+# -----------------------------------------------------------------------------
+# Master Switch & Named Algorithm Preset
+# -----------------------------------------------------------------------------
+# emulate_multipass_enabled: Master boolean switch enabling multi-pass emulation.
+emulate_multipass_enabled: True
+
+# emulate_multipass_preset: Optional named preset from the XLA:TPU RFC / literature:
+#   - "F8E4M3_F8E4M3_F32_X1" : 1-pass FP8 E4M3 x E4M3 -> FP32
+#   - "F8E4M3_F8E4M3_F32_X2" : 2-pass asymmetric FP8 E4M3 (hh + hl) -> FP32
+#   - "F8E4M3_F8E4M3_F32_X3" : 3-pass symmetric triangular FP8 E4M3 (hh + hl + lh) -> FP32
+#   - "F8E4M3_F8E4M3_F32_X4" : 4-pass full cross-product FP8 E4M3 (hh + hl + lh + ll) -> FP32
+#   - "F8E5M2_F8E5M2_F32_X3" : 3-pass symmetric triangular FP8 E5M2 -> FP32
+#   - "BF16_BF16_F32_X2"     : 2-pass asymmetric FP32 -> BF16
+#   - "BF16_BF16_F32_X3"     : 3-pass Henry et al. FP32 -> [BF16, BF16] triangular
+#   - "BF16_BF16_F32_X6"     : 6-pass Henry et al. FP32 -> [BF16, BF16, BF16] triangular
+#   - "INT8_INT4_INT32_X2"   : 2-pass asymmetric INT8 x INT4 via INT4 slices -> INT32
+#   - "INT8_INT8_INT32_X3"   : 3-pass Karatsuba INT8 x INT8 via INT4 slices -> INT32
+#   - "INT8_INT8_INT32_X4"   : 4-pass full INT8 x INT8 via INT4 slices -> INT32
+emulate_multipass_preset: "F8E4M3_F8E4M3_F32_X3"
+
+# -----------------------------------------------------------------------------
+# Source Dtype, Number of Passes, and Per-Pass Target Dtypes [B, C, D, ...]
+# -----------------------------------------------------------------------------
+# emulate_src_dtype: Source dtype 'A' into which each operand is cast before pass slicing
+#   ('bf16', 'fp32', 'fp16', 'int8', 'auto', or custom 'eXmY'). Leave "" to use preset default.
+emulate_src_dtype: "bf16"
+
+# emulate_num_passes: Number of sequential residual passes K per operand (-1 uses preset or len(pass_dtypes)).
+emulate_num_passes: 2
+
+# emulate_pass_dtypes: Target dtype(s) '[B, C, D, ...]' for Pass 0 .. K-1.
+#   Can be a single dtype ('fp8_e4m3') repeated K times, or a comma-separated / YAML list
+#   of heterogeneous dtypes (e.g. 'fp8_e4m3,fp8_e4m3' or 'fp8_e5m2,fp8_e4m3,fp4_e2m1').
+#   Supports standard floats ('bf16', 'fp16', 'fp8_e4m3', 'fp8_e5m2', 'fp4_e2m1'),
+#   integers ('int8', 'int4', 'uint4', 'int2'), and arbitrary parametric 'eXmY' / 'intB'.
+emulate_pass_dtypes: "fp8_e4m3,fp8_e4m3"
+
+# Optional per-operand (LHS activation vs RHS weight) overrides:
+emulate_multipass_lhs: True            # Whether to slice LHS (activation) operand into passes
+emulate_multipass_rhs: True            # Whether to slice RHS (weight) operand into passes
+emulate_lhs_src_dtype: ""              # Optional override for LHS source dtype
+emulate_lhs_num_passes: -1             # Optional override for LHS pass count K_A
+emulate_lhs_pass_dtypes: ""            # Optional override for LHS pass dtypes '[B_0, B_1, ...]'
+emulate_lhs_scale_mode: ""             # Optional override for LHS residual scaling mode
+emulate_rhs_src_dtype: ""              # Optional override for RHS source dtype
+emulate_rhs_num_passes: -1             # Optional override for RHS pass count K_B
+emulate_rhs_pass_dtypes: ""            # Optional override for RHS pass dtypes '[C_0, C_1, ...]'
+emulate_rhs_scale_mode: ""             # Optional override for RHS residual scaling mode
+
+# -----------------------------------------------------------------------------
+# Residual Scaling, Block Size, and Rounding Mode
+# -----------------------------------------------------------------------------
+# emulate_scale_mode: How each residual r_k is scaled into pass_dtypes[k]:
+#   'per_tensor_pow2' | 'per_tensor_amax' | 'per_channel_pow2' | 'per_channel_amax' |
+#   'per_block_pow2'  | 'per_block_amax'  | 'bit_shift'        | 'none'
+emulate_scale_mode: "per_tensor_pow2"
+
+# emulate_block_size: Block size along contracting dimension for 'per_block_*' scaling (default: 128).
+emulate_block_size: 128
+
+# emulate_rounding_mode: Quantization rounding mode per pass ('rne' | 'stochastic' | 'truncate').
+emulate_rounding_mode: "rne"
+
+# emulate_flush_subnormals: If True, flushes values below min normal of pass_dtypes[k] to zero.
+emulate_flush_subnormals: False
+
+# -----------------------------------------------------------------------------
+# Cross-Term Pass Selection, Accumulator Dtype, and Backward Pass Mode
+# -----------------------------------------------------------------------------
+# emulate_cross_term_mode: Which (i, j) pass pairs are multiplied and summed:
+#   - 'triangular'     : all (i, j) with i + j <= max_pass_degree (e.g. X3 'hh+hl+lh' for K=2)
+#   - 'full'           : all K_A x K_B cross-terms (e.g. X4 'hh+hl+lh+ll' for K=2)
+#   - 'asymmetric_lhs' : X2 where LHS uses K_A passes and RHS uses 1 pass
+#   - 'asymmetric_rhs' : X2 where LHS uses 1 pass and RHS uses K_B passes
+#   - 'karatsuba'      : 3-pass Karatsuba recombination for 2-pass decomposition
+#   - 'custom'         : explicit pass pairs specified in 'emulate_active_passes'
+emulate_cross_term_mode: "triangular"
+
+# emulate_max_pass_degree: Max pass index sum (i + j) in 'triangular' mode (-1 = max(K_A-1, K_B-1)).
+emulate_max_pass_degree: -1
+
+# emulate_active_passes: Explicit comma-separated '(i:j)' pairs when cross_term_mode='custom' (e.g. '0:0,0:1,1:0').
+emulate_active_passes: ""
+
+# emulate_acc_dtype: Accumulator dtype for summing pass dot products ('fp32', 'bf16', 'int32', or 'eXmY').
+emulate_acc_dtype: "fp32"
+
+# emulate_out_dtype: Output dtype cast after accumulation ('auto', 'bf16', 'fp32', etc.).
+emulate_out_dtype: "auto"
+
+# emulate_bwd_mode: Backward pass mode ('multipass_bwd' for custom VJP or 'ste' for Straight-Through Estimator).
+emulate_bwd_mode: "multipass_bwd"
+emulate_fwd: True                      # Apply multi-pass emulation on forward pass GEMM (fprop)
+emulate_dlhs: False                    # Apply multi-pass emulation on activation gradient GEMM (dgrad: dy @ w^T)
+emulate_drhs: False                    # Apply multi-pass emulation on weight gradient GEMM (wgrad: x^T @ dy)
+emulate_dlhs_cross_term_mode: ""       # Optional cross-term mode override for backward dlhs GEMM
+emulate_drhs_cross_term_mode: ""       # Optional cross-term mode override for backward drhs GEMM
+
+# -----------------------------------------------------------------------------
+# Module / Layer Targeting & Step Schedule
+# -----------------------------------------------------------------------------
+# emulate_target_preset:
+#   'all_linears' | 'mlp' | 'attn' | 'qkv' | 'attn_out' | 'moe' | 'moe_router' | 'all_including_attn_scores'
+emulate_target_preset: "all_linears"
+emulate_module_path: ".*"
+emulate_exclude_path: "(^|/)(token_embedder|embed|logits_dense|norm|scale)(/|$)"
+emulate_layers: ""                     # Optional decoder layer filter, e.g. "14" or "0-7,15"
+emulate_exclude_layers: ""             # Optional excluded decoder layers, e.g. "0,27"
+emulate_op_names: ["dot_general", "gmm", "ragged_dot"]
+
+# Dynamic training step schedule (activations/deactivations happen inside JIT without recompilation):
+emulate_start_step: 0                  # Step (inclusive) at which multi-pass emulation activates
+emulate_end_step: -1                   # Step (inclusive) after which multi-pass emulation deactivates (-1 = never)
+
+# Checkpoint & logging options:
+emulate_bake_weight_multipass_on_save: False
+emulate_apply_weight_multipass_on_load: False
+emulate_log_diagnostics: True
+emulate_rules: []
