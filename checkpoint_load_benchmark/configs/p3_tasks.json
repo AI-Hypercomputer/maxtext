@@ -319,44 +319,6 @@
         "SHARED_HF_CACHE_BASE_DIR": "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/safetensors_dynamic"
       },
       "csv": "p3_fix_397b_unscanned_s2.csv"
-    },
-    {
-      "id": "tmfix_397b_unscanned_s2",
-      "slices": 2,
-      "tree": "/tmp/maxtext_fix",
-      "args": [
-        "--models",
-        "qwen3.5-397b-a17b",
-        "--scan-modes",
-        "unscanned",
-        "--num-slices-list",
-        "2",
-        "--skip-safetensors",
-        "--gcs-base",
-        "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs",
-        "--run-id",
-        "tpu7x_200b_tmfix",
-        "--local-work-dir",
-        "/tmp/p1_tmfix",
-        "--devices-per-slice",
-        "8",
-        "--hardware",
-        "tpu",
-        "--reuse-model-hf-cache",
-        "--skip-completed",
-        "--allow-step-failure"
-      ],
-      "env": {
-        "KEEP_HF_CACHE": "1",
-        "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
-        "HF_HOME": "/ramdisk/hf_cache",
-        "TMPDIR": "/ramdisk/tmp",
-        "SHARED_HF_CACHE_BASE_DIR": "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/safetensors_dynamic"
-      },
-      "csv": "p3_tmfix_397b_unscanned_s2.csv",
-      "depends_on": [
-        "tmfix_397b_unscanned_conv"
-      ]
     }
   ]
 }
