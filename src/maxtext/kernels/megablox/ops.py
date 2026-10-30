@@ -92,6 +92,7 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    out_3d_fwd: bool = False,
     return_rhs: bool = False,
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
@@ -158,7 +159,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 26),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -178,6 +179,7 @@ def gmm(
       rhs_vma_axes,
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
+      out_3d_fwd,
       partial_sum,
       return_rhs,
       return_lhs,
@@ -240,6 +242,7 @@ def _gmm_fwd(
     rhs_vma_axes: tuple = tuple(),
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
+    out_3d_fwd: bool = False,
     partial_sum: jnp.ndarray | None = None,
     return_rhs: bool = False,
     return_lhs: bool = False,
@@ -343,6 +346,7 @@ def _gmm_fwd(
         existing_out,
         interpret,
         lhs_vma_axes,
+        out_3d_fwd=out_3d_fwd,
     )
 
   if tc_unsort_cfg is not None:
@@ -589,6 +593,8 @@ def _fwd_run_megablox(
     existing_out: jnp.ndarray | None,
     interpret: bool,
     lhs_vma_axes: tuple,
+    out_3d_fwd: bool = False,
+    fast_store: bool = False,
 ) -> jnp.ndarray:
   """Executes the Megablox backend fallback for forward pass."""
   out = backend.gmm(
@@ -600,6 +606,8 @@ def _fwd_run_megablox(
       group_offset,
       existing_out,
       interpret=interpret,
+      out_3d=out_3d_fwd,
+      fast_store=fast_store,
   )
   for axis in lhs_vma_axes:
     out = jax.lax.pcast(out, axis_name=axis, to="varying")
@@ -625,6 +633,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    out_3d_fwd: bool,
     return_rhs: bool,
     return_lhs: bool,
     fuse_dlhs_scale: bool,
@@ -686,6 +695,8 @@ def _gmm_bwd(
     if tc_unsort_cfg.combine_rs_cfg is not None:
       # The fused forward returned the local [batch, seq, D] combine; go back to the TC token layout.
       grad = grad.reshape(-1, grad.shape[-1] // 128, 128)
+  if out_3d_fwd and grad.ndim == 3:
+    grad = grad.reshape(grad.shape[0], -1)
   del out_is_3d  # grad.ndim carries it.
 
   # Jargon used here:
@@ -755,6 +766,7 @@ def _gmm_bwd(
       use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
       dlhs_is_3d=lhs_is_3d,
       fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+      fast_store=out_3d_fwd,
   )
 
   # 4. DRHS Gradient Execution
@@ -776,6 +788,7 @@ def _gmm_bwd(
       use_gmm_v2_heuristic_tiling,
       partial_sum=drhs_partial_sum,
       flat_rhs_shard=flat_fsdp_shard is not None,
+      single_operand_mask=out_3d_fwd,
   )
 
   # 5. Output Formatting
@@ -978,6 +991,7 @@ def _compute_dlhs(
     use_dlhs_transpose_rhs: bool = False,
     dlhs_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    fast_store: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices.
 
@@ -1010,7 +1024,17 @@ def _compute_dlhs(
         fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
     )
   else:
-    dlhs = _dlhs_run_megablox(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, interpret, lhs_vma_axes)
+    dlhs = _dlhs_run_megablox(
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        group_offset,
+        lhs_dtype,
+        tiling,
+        interpret,
+        lhs_vma_axes,
+        fast_store=fast_store,
+    )
     return dlhs, False
 
 
@@ -1157,6 +1181,7 @@ def _dlhs_run_megablox(
     tiling: tuple,
     interpret: bool,
     lhs_vma_axes: tuple,
+    fast_store: bool = False,
 ) -> jnp.ndarray:
   """Executes Megablox fallback for DLHS."""
   return backend.gmm(
@@ -1169,6 +1194,7 @@ def _dlhs_run_megablox(
       transpose_rhs=True,
       interpret=interpret,
       varying_axes=lhs_vma_axes,
+      fast_store=fast_store,
   )
 
 
@@ -1195,6 +1221,7 @@ def _compute_drhs(
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
     flat_rhs_shard: bool = False,
+    single_operand_mask: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -1213,7 +1240,16 @@ def _compute_drhs(
     )
   else:
     drhs = _drhs_run_megablox(
-        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, interpret, rhs_vma_axes
+        drhs_dout,
+        lhs,
+        group_sizes,
+        group_offset,
+        num_actual_groups,
+        rhs_dtype,
+        tiling,
+        interpret,
+        rhs_vma_axes,
+        single_operand_mask=single_operand_mask,
     )
 
   if use_tokamax_backend and quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
@@ -1330,6 +1366,7 @@ def _drhs_run_megablox(
     tiling: tuple,
     interpret: bool,
     rhs_vma_axes: tuple,
+    single_operand_mask: bool = False,
 ) -> jnp.ndarray:
   """Executes Megablox fallback for DRHS."""
   return backend.tgmm(
@@ -1342,4 +1379,163 @@ def _drhs_run_megablox(
       num_actual_groups,
       interpret=interpret,
       varying_axes=rhs_vma_axes,
+      single_operand_mask=single_operand_mask,
   )
+
+
+def gmm_dual_up(
+    lhs: jnp.ndarray,
+    rhs0: jnp.ndarray,
+    rhs1: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+    ),
+    group_offset: jnp.ndarray | None = None,
+    interpret: bool = False,
+    lhs_vma_axes: tuple = tuple(),
+    rhs_vma_axes: tuple = tuple(),
+    out_3d_dlhs: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Fused dual up-projection GMM (w0, w1) with in-place DLHS accumulation in backward."""
+  fn = lambda *args: _gmm_dual_up_fwd(*args)[0]  # pylint: disable=C3001
+  fn = jax.custom_vjp(fn, nondiff_argnums=(4, 5, 7, 8, 9, 10))
+  fn.defvjp(_gmm_dual_up_fwd, functools.partial(_gmm_dual_up_bwd, lhs.dtype, rhs0.dtype))
+  return fn(
+      lhs,
+      rhs0,
+      rhs1,
+      group_sizes,
+      preferred_element_type,
+      tiling,
+      group_offset,
+      interpret,
+      lhs_vma_axes,
+      rhs_vma_axes,
+      out_3d_dlhs,
+  )
+
+
+def _gmm_dual_up_fwd(
+    lhs: jnp.ndarray,
+    rhs0: jnp.ndarray,
+    rhs1: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    group_offset: jnp.ndarray | None,
+    interpret: bool,
+    lhs_vma_axes: tuple,
+    rhs_vma_axes: tuple,
+    out_3d_dlhs: bool,
+):
+  """Forward pass for custom_vjp of dual grouped matrix multiplication."""
+  del rhs_vma_axes, out_3d_dlhs
+  out0 = _fwd_run_megablox(
+      lhs,
+      rhs0,
+      group_sizes,
+      preferred_element_type,
+      tiling,
+      group_offset,
+      None,
+      interpret,
+      lhs_vma_axes,
+      fast_store=True,
+  )
+  out1 = _fwd_run_megablox(
+      lhs,
+      rhs1,
+      group_sizes,
+      preferred_element_type,
+      tiling,
+      group_offset,
+      None,
+      interpret,
+      lhs_vma_axes,
+      fast_store=True,
+  )
+  return (out0, out1), (lhs, rhs0, rhs1, group_sizes, group_offset)
+
+
+def _gmm_dual_up_bwd(
+    lhs_dtype: jax.typing.DTypeLike,
+    rhs_dtype: jax.typing.DTypeLike,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    interpret: bool,
+    lhs_vma_axes: tuple,
+    rhs_vma_axes: tuple,
+    out_3d_dlhs: bool,
+    residual,
+    grads,
+):
+  """Backward function for dual up-projection GMM with in-place DLHS accumulation."""
+  del preferred_element_type
+  lhs, rhs0, rhs1, group_sizes, group_offset = residual
+  dy0, dy1 = grads
+  num_actual_groups = rhs0.shape[0]
+  dx0 = backend.gmm(
+      dy0,
+      rhs0,
+      group_sizes,
+      lhs_dtype,
+      tiling[3:6],
+      group_offset,
+      transpose_rhs=True,
+      interpret=interpret,
+      varying_axes=lhs_vma_axes,
+      out_3d=out_3d_dlhs,
+      fast_store=True,
+  )
+  dx = backend.gmm(
+      dy1,
+      rhs1,
+      group_sizes,
+      lhs_dtype,
+      tiling[3:6],
+      group_offset,
+      existing_out=dx0,
+      transpose_rhs=True,
+      interpret=interpret,
+      varying_axes=lhs_vma_axes,
+      accumulate_out=True,
+      out_3d=out_3d_dlhs,
+      fast_store=True,
+  )
+  if out_3d_dlhs:
+    dx = dx.reshape(lhs.shape)
+  drhs0 = _drhs_run_megablox(
+      dy0,
+      lhs,
+      group_sizes,
+      group_offset,
+      num_actual_groups,
+      rhs_dtype,
+      tiling,
+      interpret,
+      rhs_vma_axes,
+      single_operand_mask=True,
+  )
+  drhs1 = _drhs_run_megablox(
+      dy1,
+      lhs,
+      group_sizes,
+      group_offset,
+      num_actual_groups,
+      rhs_dtype,
+      tiling,
+      interpret,
+      rhs_vma_axes,
+      single_operand_mask=True,
+  )
+  return dx, drhs0, drhs1, None, None
