@@ -28,8 +28,10 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
+from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
+    _gather_in_slices,
     get_hf_loading_function,
 )
 from maxtext.common import checkpointing
@@ -110,6 +112,30 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[0], tensors["layer_0.weight"])
     np.testing.assert_allclose(result[1], tensors["layer_1.weight"])
 
+  @parameterized.named_parameters(
+      ("unscanned_moe_layer", "params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (3, 4, 6), 0),
+      ("tid2eid_collection", "Tid2EidVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-tid2eid", (3, 4, 6), 0),
+      ("scanned_layers", "params-decoder-layers-mlp-wi_0", (4, 3, 6), 1),
+  )
+  def test_single_axis_stack_axis_follows_mt_key(self, mt_key, target_shape, axis):
+    # With scan_layers, MoE layers outside the scanned stack (e.g. DeepSeek-V4 prefix layers) still stack
+    # experts along axis 0, as in to_maxtext.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {f"w{i}": np.full((4, 6), i, dtype=np.float32) for i in range(3)}
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=target_shape, dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec(None, None, None))
+    )
+
+    result = get_hf_loading_function(list(tensors), tensors.__getitem__, None, target_leaf, MockConfig(), mt_key)()
+
+    self.assertEqual(result.shape, target_shape)
+    np.testing.assert_array_equal(np.take(np.asarray(result), 2, axis=axis), tensors["w2"])
+
   def test_get_hf_loading_function_case_4_multi_axis(self):
     # Tests Case 4, line 190, 73, and gets loader for multi-axis stacked
     class MockConfig:
@@ -153,6 +179,203 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 0], tensors["expert_1.layer_0.weight"])
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
+  @parameterized.product(
+      layout=["single_axis", "expert_stack", "nested_scan"],
+      spec=[(), ("x",)],
+  )
+  def test_get_hf_loading_function_accepts_short_spec(self, layout, spec):
+    # A PartitionSpec may have fewer entries than the array rank; the rest are replicated.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {f"w{i}": np.full((4, 4), i, dtype=np.float32) for i in range(4)}
+    mt_key = ""
+    if layout == "single_axis":
+      hf_keys = ["w0", "w1"]
+      expected = np.stack([tensors["w0"], tensors["w1"]], axis=1)
+    else:
+      hf_keys = [["w0", "w1"], ["w2", "w3"]]
+      expected = np.stack([np.stack([tensors[k] for k in row]) for row in hf_keys])
+      if layout == "nested_scan":
+        mt_key = "params-decoder-layers-local_layers-mlp-kernel"
+        expected = np.moveaxis(expected, (0, 1), (1, 2))
+    sharding = NamedSharding(self.mesh, PartitionSpec(*spec))
+    target_leaf = jax.ShapeDtypeStruct(shape=expected.shape, dtype=np.float32, sharding=sharding)
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig(), mt_key)()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, sharding)
+
+  @parameterized.named_parameters(
+      ("single_key", ("a", "b"), (4, 8)),
+      ("stacked", [("a", "b"), ("c", "d")], (4, 2, 8)),
+  )
+  def test_get_hf_loading_function_accepts_composite_hf_key(self, hf_keys, target_shape):
+    # A tuple of HF keys is fetched together and fused into one leaf by the hook.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {k: np.full((4, 4), i, dtype=np.float32) for i, k in enumerate("abcd")}
+
+    def concat(weights, target_shape):
+      del target_shape
+      return np.concatenate(weights, axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    target_leaf = jax.ShapeDtypeStruct(shape=target_shape, dtype=np.float32, sharding=sharding)
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, concat, target_leaf, MockConfig())()
+
+    self.assertEqual(result.shape, target_shape)
+    np.testing.assert_array_equal(result[..., :4] if len(target_shape) == 2 else result[:, 0, :4], tensors["a"])
+    np.testing.assert_array_equal(result[..., 4:] if len(target_shape) == 2 else result[:, 0, 4:], tensors["b"])
+
+  def test_hook_gathers_weight_spanning_other_hosts(self):
+    # A NumPy hook cannot read a weight with shards on other hosts; the loader gathers it and retries.
+    def numpy_only_hook(weight, target_shape):
+      del target_shape
+      if isinstance(weight, jax.Array):
+        raise RuntimeError("Fetching value for `jax.Array` that spans non-addressable devices is not possible.")
+      return weight * 2
+
+    weight = jnp.ones((4, 4), dtype=jnp.float32)
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    with (
+        mock.patch.object(tensor_handling, "_spans_other_hosts", return_value=True),
+        mock.patch.object(tensor_handling, "_gather_to_host", side_effect=np.asarray) as gather,
+    ):
+      result = get_hf_loading_function("w", {"w": weight}.__getitem__, numpy_only_hook, target_leaf, None)()
+
+    gather.assert_called_once()
+    np.testing.assert_array_equal(result, np.full((4, 4), 2, dtype=np.float32))
+
+  def test_host_array_is_placed_per_shard_on_multi_host(self):
+    # A host result (e.g. after the gather fallback) must not go through jax.device_put, which all-gathers it
+    # across hosts on device to compare the copies.
+    host_array = np.arange(16, dtype=np.float32).reshape(4, 4)
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    with (
+        mock.patch.object(type(sharding), "is_fully_addressable", new_callable=mock.PropertyMock, return_value=False),
+        mock.patch.object(
+            tensor_handling.jax, "make_array_from_callback", wraps=jax.make_array_from_callback
+        ) as per_shard,
+        mock.patch.object(tensor_handling.jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._device_put(host_array, sharding)  # pylint: disable=protected-access
+
+    per_shard.assert_called_once()
+    device_put.assert_not_called()
+    np.testing.assert_array_equal(result, host_array)
+
+  def test_hook_error_on_local_weight_is_raised(self):
+    def failing_hook(weight, target_shape):
+      raise RuntimeError("hook bug")
+
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    load_fn = get_hf_loading_function("w", {"w": jnp.ones((4, 4))}.__getitem__, failing_hook, target_leaf, None)
+    with self.assertRaisesRegex(RuntimeError, "hook bug"):
+      load_fn()
+
+  def test_transform_reuses_hf_tensor_for_several_leaves(self):
+    # gemma4 maps one HF tensor to two MaxText leaves, each hook taking one half.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = False
+
+    hf_state = {"gate_up": np.arange(32, dtype=np.float32).reshape(4, 8)}
+    expected = hf_state["gate_up"].copy()
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=sharding)
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state,
+        {"wi_0": leaf, "wi_1": leaf},
+        {"params-wi_0": "gate_up", "params-wi_1": "gate_up"},
+        {"params-wi_0": lambda x, shape: x[:, :4], "params-wi_1": lambda x, shape: x[:, 4:]},
+        MockConfig(),
+    )["params"]
+
+    np.testing.assert_array_equal(restored["wi_0"], expected[:, :4])
+    np.testing.assert_array_equal(restored["wi_1"], expected[:, 4:])
+    self.assertEmpty(hf_state)
+
+  def test_transform_loads_variable_collections(self):
+    # DeepSeek maps the MoE gate bias and the hash-routing table into the MoEBiasVar and Tid2EidVar
+    # collections, whose leaves the weights state holds without the collection name. DeepSeek-V3 also
+    # maps the gate bias as a weight; the collection key is used, and stacks the layers along axis 0.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    biases = [np.full((4,), i, dtype=np.float32) for i in range(3)]
+    tid2eid = np.arange(6, dtype=np.int32).reshape(2, 3)
+    hf_state = {f"layers.{i}.gate.bias": b for i, b in enumerate(biases)}
+    hf_state["layers.0.gate.tid2eid"] = tid2eid
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    target = {
+        "decoder": {
+            "layers": {"gate": {"bias": jax.ShapeDtypeStruct((3, 4), np.float32, sharding=sharding)}},
+            "layers_0": {"tid2eid": jax.ShapeDtypeStruct((2, 3), np.int32, sharding=sharding)},
+        }
+    }
+    bias_keys = [f"layers.{i}.gate.bias" for i in range(3)]
+    mapping = {
+        "params-decoder-layers-gate-bias": bias_keys,
+        "MoEBiasVar-decoder-layers-gate-bias": bias_keys,
+        "Tid2EidVar-decoder-layers_0-tid2eid": "layers.0.gate.tid2eid",
+    }
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target, mapping, {}, MockConfig())["params"]
+
+    np.testing.assert_array_equal(restored["decoder"]["layers"]["gate"]["bias"], np.stack(biases))
+    np.testing.assert_array_equal(restored["decoder"]["layers_0"]["tid2eid"], tid2eid)
+    self.assertEmpty(hf_state)
+
+  @parameterized.named_parameters(
+      ("single_key", "gate_up", (4, 8)),
+      ("stacked", ["gate_up_0", "gate_up_1"], (4, 2, 8)),
+  )
+  def test_transform_splits_composite_mt_key(self, hf_source, leaf_shape):
+    # A tuple of MaxText keys gets one HF tensor that the hook splits along a new last axis.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    hf_keys = [hf_source] if isinstance(hf_source, str) else hf_source
+    hf_state = {k: np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i for i, k in enumerate(hf_keys)}
+    expected = {k: v.copy() for k, v in hf_state.items()}
+
+    def split(weight, target_shape):
+      self.assertEqual(target_shape, [leaf_shape[:1] + leaf_shape[-1:]] * 2)
+      return np.stack([weight[:, :8], weight[:, 8:]], axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding)
+    target_tree = {"mlp": {"wi_0": leaf, "wi_1": leaf}}
+    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state, target_tree, {mt_key: hf_source}, {mt_key: split}, MockConfig()
+    )["params"]["mlp"]
+
+    for i, k in enumerate(hf_keys):
+      index = (Ellipsis,) if isinstance(hf_source, str) else (slice(None), i)
+      np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
+      np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
+    self.assertEqual(restored["wi_0"].sharding, sharding)
+
   @parameterized.named_parameters(
       ("single_key", "w0", (4, 4)),
       ("single_axis_stack", ["w0", "w1"], (2, 4, 4)),
@@ -181,6 +404,48 @@ class TensorHandlingTest(parameterized.TestCase):
     self.assertEqual(result.sharding, target_leaf.sharding)
     first_slice = result[(0,) * (len(target_shape) - 2)]
     np.testing.assert_array_equal(first_slice, tensors["w0"].astype(np.float32))
+
+  @parameterized.named_parameters(
+      ("sliced", 40, 4),  # 10 rows of 12 bytes, 3 rows per slice: slices of 3, 3, 3 and 1 rows.
+      ("whole", 1000, 1),
+  )
+  def test_gather_in_slices_bounds_each_gather(self, max_bytes, num_gathers):
+    weight = jnp.arange(30, dtype=jnp.float32).reshape(10, 3)
+    gathered = []
+
+    def gather_fn(piece):
+      gathered.append(piece.nbytes)
+      return np.asarray(piece)
+
+    result = _gather_in_slices(weight, gather_fn, max_bytes=max_bytes)
+
+    np.testing.assert_array_equal(result, np.asarray(weight))
+    self.assertLen(gathered, num_gathers)
+    self.assertLessEqual(max(gathered), max(max_bytes, 12))
+
+  def test_get_hf_loading_function_without_hf_key_uses_hook(self):
+    # A leaf with no HF tensor (None key, e.g. DeepSeek-V4 mHC norm scales) is built by its hook alone.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    def getter(key):
+      raise AssertionError(f"No HF tensor should be read, got {key}.")
+
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=(4,), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec(None))
+    )
+
+    def ones_hook(weight, target_shape):
+      del weight
+      return np.ones(target_shape, dtype=np.float32)
+
+    result = get_hf_loading_function(None, getter, ones_hook, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, np.ones(4, dtype=np.float32))
+    self.assertEqual(result.sharding, target_leaf.sharding)
 
 
 class LoadDynamicTest(parameterized.TestCase):
@@ -313,6 +578,39 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     self.safetensors_ckpt_dir = self.tmp_dir / "hf_safetensors"
     self.safetensors_ckpt_dir.mkdir(parents=True, exist_ok=True)
     self.safetensors_ckpt_path = self.safetensors_ckpt_dir / "model.safetensors"
+
+  def test_rename_legacy_hf_keys(self):
+    # google/gemma-3-*-it stores the text model under `language_model.model.`; the mapping uses the names
+    # transformers gives after loading.
+    hf_state = {
+        "language_model.model.embed_tokens.weight": 0,
+        "language_model.lm_head.weight": 1,
+        "vision_tower.vision_model.post_layernorm.weight": 2,
+        "multi_modal_projector.mm_soft_emb_norm.weight": 3,
+        "model.norm.weight": 4,
+        "vision_tower.unmapped.weight": 5,
+    }
+    mapping = {
+        "params-a": "model.language_model.embed_tokens.weight",
+        "params-b": ["lm_head.weight"],
+        "params-c": "model.vision_tower.vision_model.post_layernorm.weight",
+        "params-d": ("model.multi_modal_projector.mm_soft_emb_norm.weight",),
+        "params-e": "model.norm.weight",
+    }
+
+    renamed = load_dynamic.rename_legacy_hf_keys(hf_state, mapping)
+
+    self.assertEqual(
+        renamed,
+        {
+            "model.language_model.embed_tokens.weight": 0,
+            "lm_head.weight": 1,
+            "model.vision_tower.vision_model.post_layernorm.weight": 2,
+            "model.multi_modal_projector.mm_soft_emb_norm.weight": 3,
+            "model.norm.weight": 4,
+            "vision_tower.unmapped.weight": 5,
+        },
+    )
 
   def test_load_safetensors_dynamic_single_key(self):
     if os.getenv("JAX_PLATFORMS") == "proxy":

@@ -65,6 +65,7 @@ Note:
   - The Pathways backend is not supported.
 """
 
+import collections
 import concurrent.futures
 import multiprocessing
 import os
@@ -92,6 +93,7 @@ storage = gcs_storage()
 
 HF_MODEL_CONFIGS = hf_model_configs.HF_MODEL_CONFIGS
 get_hf_loading_function = tensor_handling.get_hf_loading_function
+_VARIABLE_COLLECTIONS = tensor_handling.VARIABLE_COLLECTIONS
 
 
 def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
@@ -193,12 +195,51 @@ def load_sharded_hf_state(path):
     return hf_state
 
 
+# Prefix renames from the older multimodal checkpoint layout (e.g. `google/gemma-3-4b-it`) to the names
+# transformers uses after loading, which the param mappings use. Same as transformers' llava renames.
+_LEGACY_HF_PREFIXES = (
+    ("language_model.model.", "model.language_model."),
+    ("language_model.lm_head.", "lm_head."),
+    ("vision_tower.", "model.vision_tower."),
+    ("multi_modal_projector.", "model.multi_modal_projector."),
+)
+
+
+def _hf_keys_in(hf_source):
+  """Yields every HF key in a (possibly nested) list or tuple of HF keys."""
+  if isinstance(hf_source, (list, tuple)):
+    for item in hf_source:
+      yield from _hf_keys_in(item)
+  else:
+    yield hf_source
+
+
+def rename_legacy_hf_keys(hf_state, param_map_mt_to_hf):
+  """Renames HF tensors stored under a legacy prefix to the names the mapping uses.
+
+  A tensor is renamed only if the mapping does not use its stored name but uses the renamed one, so
+  checkpoints already in the mapping's layout are unchanged.
+  """
+  mapped = set(_hf_keys_in(list(param_map_mt_to_hf.values())))
+  for key in [k for k in hf_state if k not in mapped]:
+    for old, new in _LEGACY_HF_PREFIXES:
+      if key.startswith(old) and new + key[len(old) :] in mapped:
+        hf_state[new + key[len(old) :]] = hf_state.pop(key)
+        break
+  return hf_state
+
+
 def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
   """Transforms HF state into MaxText state by applying param mappings and mathematical hooks."""
   t0 = time.time()
 
+  # An HF tensor may feed several MaxText leaves (gemma4 maps `experts.gate_up_proj` to both `wi_0`
+  # and `wi_1`), so each tensor is dropped only after its last use.
+  remaining_uses = collections.Counter(_hf_keys_in(list(param_map_mt_to_hf.values())))
+
   def tensor_getter(key):
-    return hf_state.pop(key)
+    remaining_uses[key] -= 1
+    return hf_state.pop(key) if remaining_uses[key] <= 0 else hf_state[key]
 
   flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored = flat_target.copy()
@@ -207,23 +248,48 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   keys_missed = []
   max_logging.log("Starting fast in-memory Distributed Transformations...")
 
-  for mt_key, hf_source in param_map_mt_to_hf.items():
+  def target_name(mt_key):
     mt_name = mt_key.replace("params-", "").replace("-", ".")
+    candidates = [mt_name, f"params.{mt_name}", mt_key.replace("-", ".")]
+    # A key of another variable collection (DeepSeek `MoEBiasVar-...`, `Tid2EidVar-...`) names a
+    # leaf that the weights state holds without the collection.
+    collection, _, rest = mt_key.partition("-")
+    if collection in _VARIABLE_COLLECTIONS:
+      candidates.append(rest.replace("-", "."))
+    return next((name for name in candidates if name in flat_target), None)
 
-    # Determine the correct key in flat_target
-    check_name = mt_name
-    if check_name not in flat_target:
-      if f"params.{mt_name}" in flat_target:
-        check_name = f"params.{mt_name}"
-      elif mt_key.replace("-", ".") in flat_target:
-        check_name = mt_key.replace("-", ".")
+  # DeepSeek-V3 maps its gate bias both as a weight (`params-...`) and in `MoEBiasVar`, and both keys
+  # name the same leaf. The collection key stacks it along the right axis, so the other is skipped.
+  collection_targets = {
+      target_name(k)
+      for k in param_map_mt_to_hf
+      if not isinstance(k, tuple) and k.partition("-")[0] in _VARIABLE_COLLECTIONS
+  }
 
-    if check_name not in flat_target:
-      keys_missed.append(mt_name)
+  for mt_key, hf_source in param_map_mt_to_hf.items():
+    # A tuple of MaxText keys is a composite key: one HF source split into several leaves.
+    mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
+    check_names = [target_name(k) for k in mt_keys]
+    if None in check_names:
+      keys_missed.extend(k.replace("params-", "").replace("-", ".") for k, n in zip(mt_keys, check_names) if n is None)
+      continue
+    if (
+        not isinstance(mt_key, tuple)
+        and mt_key.partition("-")[0] not in _VARIABLE_COLLECTIONS
+        and check_names[0] in collection_targets
+    ):
+      for key in _hf_keys_in([hf_source]):
+        if key is not None:
+          tensor_getter(key)
       continue
 
-    target_leaf = flat_target[check_name]
+    leaves = [flat_target[name] for name in check_names]
     hook_fn = hook_fn_map_mt.get(mt_key)
+    if isinstance(mt_key, tuple):
+      target_leaf = tensor_handling.composite_target_leaf(leaves)
+      hook_fn = tensor_handling.composite_hook_fn(hook_fn, len(leaves))
+    else:
+      target_leaf = leaves[0]
 
     load_fn = get_hf_loading_function(
         hf_source,
@@ -231,14 +297,20 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
         hook_fn,
         target_leaf,
         maxtext_config,
-        mt_key,
+        mt_keys[0],
     )
 
     # Execute transformation and assign to flat_restored
     t_layer = time.time()
-    flat_restored[check_name] = load_fn()
+    loaded = load_fn()
+    if isinstance(mt_key, tuple):
+      for i, (name, leaf) in enumerate(zip(check_names, leaves)):
+        part = loaded[..., i]
+        flat_restored[name] = jax.device_put(part, leaf.sharding) if hasattr(leaf, "sharding") else part
+    else:
+      flat_restored[check_names[0]] = loaded
 
-    max_logging.log(f"Transformed {check_name} from {hf_source} in {time.time() - t_layer:.4f}s")
+    max_logging.log(f"Transformed {', '.join(check_names)} from {hf_source} in {time.time() - t_layer:.4f}s")
     mapped_count += 1
 
   if mapped_count == 0:
@@ -374,7 +446,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
   t1 = time.time()
-  hf_state = load_sharded_hf_state(path)
+  hf_state = rename_legacy_hf_keys(load_sharded_hf_state(path), param_map_mt_to_hf)
   max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
 
   t2 = time.time()
