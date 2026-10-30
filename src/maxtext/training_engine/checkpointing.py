@@ -14,6 +14,7 @@
 
 """Checkpointing utilities for MaxText training engine."""
 
+import copy
 import dataclasses
 import os
 from typing import Any
@@ -21,8 +22,9 @@ from typing import Any
 from absl import logging
 from flax import nnx
 import jax
+from maxtext.common import checkpoint_context
 from maxtext.configs import pyconfig
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 
 
 @dataclasses.dataclass
@@ -41,66 +43,79 @@ class CheckpointRestoreError(RuntimeError):
   """A checkpoint exists but cannot be restored by this engine."""
 
 
-_PATHWAYS_PERSISTENCE_REGISTERED = False
+# Handler that dispatches writes from the TPU workers directly to storage. Anything else means
+# Orbax would use the controller-side handler, which stages every shard through host RAM.
+_PATHWAYS_PERSISTENCE_HANDLERS = ("CloudPathwaysArrayHandler",)
 
 
-def _maybe_register_pathways_persistence() -> None:
-  """Registers Orbax Pathways persistence array handler, if applicable.
+class PathwaysCheckpointingUnavailableError(RuntimeError):
+  """Pathways persistence checkpointing was explicitly requested but is not available."""
 
-  When ENABLE_PATHWAYS_PERSISTENCE=1, delegates checkpoint saving directly
-  from TPU workers to storage (GCS), bypassing host RAM staging.
+
+def _pathways_persistence_requested() -> bool:
+  """Returns whether ENABLE_PATHWAYS_PERSISTENCE=1 asks for Pathways persistence checkpointing."""
+  # Upstream Orbax reads the same environment variable in
+  # `orbax.checkpoint._src.multihost.multihost.is_cloud_pathways_persistence_enabled()`,
+  # called from `orbax.checkpoint._src.serialization.pathways_handler_registry`.
+  return os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1"
+
+
+def _resolve_array_handler(context: ocp.Context) -> Any:
+  """Returns the array handler Orbax will save and restore `jax.Array` leaves with under `context`."""
+  # pylint: disable-next=g-import-not-at-top,import-outside-toplevel
+  from orbax.checkpoint.experimental.v1._src.serialization import registration
+
+  return registration.get_array_handler(context)
+
+
+def _verify_pathways_persistence(context: ocp.Context) -> None:
+  """Checks that `context` resolves to a Pathways persistence array handler.
+
+  With ENABLE_PATHWAYS_PERSISTENCE=1, checkpoint writes go from the TPU workers directly to
+  storage (GCS), bypassing host RAM staging. Orbax picks the array handler from the context when
+  it saves; off a Pathways backend it silently uses the controller-side handler instead.
+
+  Setting the environment variable is an explicit request, so a handler that cannot be resolved,
+  or is not a persistence handler, raises here, at construction, rather than degrading. The
+  silent fallback is controller-side host staging, which can exhaust the controller's memory for
+  large models, and it would surface only once the first save is attempted -- long after the run
+  looks healthy.
+
+  Args:
+    context: The Orbax context the checkpointer saves and restores with.
+
+  Raises:
+    PathwaysCheckpointingUnavailableError: If `context` does not resolve to a Pathways
+      persistence handler.
   """
-  global _PATHWAYS_PERSISTENCE_REGISTERED
-  if _PATHWAYS_PERSISTENCE_REGISTERED:
-    return
-  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
-    return
-
-  _PATHWAYS_PERSISTENCE_REGISTERED = True
   try:
-    # pylint: disable=g-import-not-at-top,import-outside-toplevel
-    import orbax.checkpoint.pathways as ocp_pathways
-    from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
-    from orbax.checkpoint._src.serialization import type_handler_registry
+    handler = _resolve_array_handler(context)
+  except (ImportError, AttributeError, NotImplementedError) as e:
+    raise PathwaysCheckpointingUnavailableError(
+        "ENABLE_PATHWAYS_PERSISTENCE=1 explicitly requested Pathways persistence checkpointing, but "
+        f"resolving the Orbax array handler failed ({type(e).__name__}: {e}). Refusing to fall back "
+        "to controller-side host-staged checkpointing. Unset ENABLE_PATHWAYS_PERSISTENCE to run "
+        "without Pathways persistence."
+    ) from e
 
-    # pylint: enable=g-import-not-at-top,import-outside-toplevel
-
-    ocp_pathways.register_type_handlers(
-        use_single_replica_array_handler=False,
-        checkpointing_impl=ocp_pathways.CheckpointingImpl.PERSISTENCE,
-        # Preserve array metadata store required for pytrees with typed PRNG keys.
-        array_metadata_store=array_metadata_store_lib.Store(),
+  handler_name = type(handler).__name__
+  if handler_name not in _PATHWAYS_PERSISTENCE_HANDLERS:
+    raise PathwaysCheckpointingUnavailableError(
+        "ENABLE_PATHWAYS_PERSISTENCE=1 explicitly requested Pathways persistence checkpointing, but "
+        f"jax.Array would be handled by {handler_name}, not one of {_PATHWAYS_PERSISTENCE_HANDLERS}. "
+        "Aborting before the first save rather than staging every shard through controller host memory."
     )
 
-    handler = type_handler_registry.get_type_handler(jax.Array)
-    handler_name = type(handler).__name__
-    store = getattr(handler, "_array_metadata_store", None)
-    if handler_name in ("CloudPathwaysArrayHandler", "PathwaysPersistenceArrayHandler"):
-      if store is None:
-        logging.error(
-            "Registered %s but array metadata store is None; saving may fail on typed PRNG keys.",
-            handler_name,
-        )
-      else:
-        logging.info(
-            "Registered Pathways persistence array handler (%s, store=%s); TPUs will write directly to storage.",
-            handler_name,
-            type(store).__name__,
-        )
-    else:
-      logging.warning(
-          "Pathways persistence registration fell back: jax.Array is handled by %s, not a persistence handler.",
-          handler_name,
-      )
-  except (ImportError, AttributeError, ModuleNotFoundError, NotImplementedError) as e:
-    logging.warning(
-        "Pathways persistence requested but unavailable on this backend (%s). Falling back to host-staged checkpointing.",
-        e,
-    )
+  store = getattr(handler, "_array_metadata_store", None)
+  logging.info(
+      "Using Pathways persistence array handler (%s, store=%s); TPUs will write directly to storage.",
+      handler_name,
+      type(store).__name__,
+  )
 
 
 class CheckpointManager:
-  """CheckpointManager wrapper for MaxText training engine."""
+  """Orbax `training.Checkpointer` wrapper for MaxText training engine."""
 
   def __init__(
       self,
@@ -110,45 +125,81 @@ class CheckpointManager:
     """Initializes the CheckpointManager.
 
     Args:
-      checkpoint_dir: The root directory for saving checkpoints.
+      checkpoint_dir: The root directory for saving checkpoints. Empty disables checkpointing.
       config: The training configuration.
+
+    Raises:
+      ValueError: If ENABLE_PATHWAYS_PERSISTENCE=1 and `checkpoint_dir` is not a gs:// URI.
+      PathwaysCheckpointingUnavailableError: If ENABLE_PATHWAYS_PERSISTENCE=1 but no Pathways
+        persistence handler is available.
     """
-    self._checkpoint_manager: ocp.CheckpointManager | None = None
-    if checkpoint_dir:
-      _maybe_register_pathways_persistence()
+    self._checkpoint_manager: ocp.training.Checkpointer | None = None
+    self._use_async = bool(config.async_checkpointing)
+    # The step of the save most recently handed to Orbax, so a failure that surfaces later can
+    # be attributed to it.
+    self._in_flight_step: int | None = None
+    if not checkpoint_dir:
+      return
 
-      # Use configured array format (e.g. use_ocdbt=False for Pathways).
-      # Build a fresh handler per item as Orbax handlers carry per-item state.
-      def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
-        return ocp.PyTreeCheckpointHandler(
-            use_ocdbt=config.checkpoint_storage_use_ocdbt,
-            use_zarr3=config.checkpoint_storage_use_zarr3,
-            save_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
-        )
-
-      self._checkpoint_manager = ocp.CheckpointManager(
-          directory=checkpoint_dir,
-          options=ocp.CheckpointManagerOptions(
-              save_interval_steps=config.checkpoint_period,
-              max_to_keep=config.max_num_checkpoints_to_keep,
-              enable_async_checkpointing=config.async_checkpointing,
-          ),
-          item_handlers={
-              "model_params": _pytree_handler(),
-              "optimizer_state": _pytree_handler(),
-          },
+    enable_pathways_persistence = _pathways_persistence_requested()
+    if enable_pathways_persistence and not str(checkpoint_dir).startswith("gs://"):
+      raise ValueError(
+          "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
+          f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
       )
+    context = checkpoint_context.build_context(
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+        checkpoint_storage_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
+        # Deadline for the background half of a save (storage writes and finalization).
+        async_checkpointing_timeout_secs=config.async_checkpointing_timeout_secs,
+        enable_pathways_persistence=enable_pathways_persistence,
+    )
+    if enable_pathways_persistence:
+      _verify_pathways_persistence(context)
+    policies = ocp.training.save_decision_policies
+    save_policies = [
+        policies.FixedIntervalPolicy(config.checkpoint_period),
+        policies.PreemptionCheckpointingPolicy(),
+    ]
+    if config.save_checkpoint_on_start:
+      save_policies.append(policies.InitialSavePolicy())
+    self._checkpoint_manager = ocp.training.Checkpointer(
+        checkpoint_dir,
+        context=context,
+        # Saves every `checkpoint_period` steps, on a step where Orbax has detected a preemption,
+        # and (when `save_checkpoint_on_start` is True) on the first step of a run with no checkpoint.
+        save_decision_policy=policies.AnySavePolicy(save_policies),
+        preservation_policy=checkpoint_context.build_preservation_policy(
+            max_to_keep=config.max_num_checkpoints_to_keep,
+        ),
+    )
 
   def get_latest_step(self) -> int | None:
     """Returns the latest checkpoint step."""
-    if self._checkpoint_manager:
-      return self._checkpoint_manager.latest_step()
-    return None
+    if self._checkpoint_manager is None:
+      return None
+    latest = self._checkpoint_manager.latest
+    return latest.step if latest is not None else None
 
   def wait_until_finished(self) -> None:
-    """Waits for any ongoing async checkpoint saves to finish."""
-    if self._checkpoint_manager:
-      self._checkpoint_manager.wait_until_finished()
+    """Waits for any ongoing async checkpoint save, attributing any failure to its step."""
+    if self._checkpoint_manager is None:
+      return
+    step = self._in_flight_step
+    try:
+      self._checkpoint_manager.wait()
+    except Exception as e:
+      self._in_flight_step = None
+      if step is not None:
+        logging.error(
+            "The background half of the checkpoint save at step %s failed with %s: %s; re-raising it.",
+            step,
+            type(e).__name__,
+            e,
+        )
+      raise
+    self._in_flight_step = None
 
   def save_checkpoint(
       self,
@@ -163,108 +214,136 @@ class CheckpointManager:
       step: The step to save the params for.
       checkpoint_state: CheckpointState object containing model and optimizer.
       custom_metadata: Custom metadata to save with the checkpoint.
-      force: Save even if Orbax's save-interval policy would skip this step.
+      force: Save even if the save-interval policy would skip this step.
 
     Returns:
-      Whether the checkpoint was saved.
+      Whether the checkpoint was saved (or, for an async save, started).
     """
     if self._checkpoint_manager is None:
       logging.info("Checkpointing is disabled, skipping save.")
       return False
 
+    # Decide before anything else whether this step is saved at all, so a step the interval
+    # policy declines neither blocks on the in-flight save nor waits for the state to be ready.
+    if not force and not self._checkpoint_manager.should_save(step):
+      return False
+    # Surfaces a failed previous save before this one starts, and finalizes it so the step
+    # listing below includes it.
+    self.wait_until_finished()
     # Checkpoints are taken between steps only, so one already saved at this step holds the
-    # same state.
-    if self.get_latest_step() == step:
+    # same state. This includes a step before the latest, e.g. after resuming from it.
+    if any(checkpoint.step == step for checkpoint in self._checkpoint_manager.checkpoints):
       logging.info("Checkpoint already saved at step %d, skipping save.", step)
       return False
 
     params = nnx.state(checkpoint_state.model)
     jax.block_until_ready(params)
-    model_cp_args = ocp.args.PyTreeSave(
-        item=params,
-        save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
-    )
-    save_args = {"model_params": model_cp_args}
-
-    if checkpoint_state.optimizer:
+    checkpointables: dict[str, Any] = {"model_params": params}
+    if checkpoint_state.optimizer is not None:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
       jax.block_until_ready(optimizer_state)
-      optimizer_cp_args = ocp.args.PyTreeSave(
-          item=optimizer_state,
-          save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
-      )
-      save_args["optimizer_state"] = optimizer_cp_args
+      checkpointables["optimizer_state"] = optimizer_state
 
-    return self._checkpoint_manager.save(
-        step=step,
-        args=ocp.args.Composite(**save_args),
-        custom_metadata=custom_metadata,
-        force=force,
-    )
+    custom_metadata_payload = copy.deepcopy(custom_metadata)
+    if self._use_async:
+      saved = (
+          self._checkpoint_manager.save_checkpointables_async(
+              step, checkpointables, custom_metadata=custom_metadata_payload, force=True
+          )
+          is not None
+      )
+      if saved:
+        self._in_flight_step = step
+    else:
+      saved = self._checkpoint_manager.save_checkpointables(
+          step, checkpointables, custom_metadata=custom_metadata_payload, force=True
+      )
+    return saved
 
   def restore_checkpoint(
       self,
       checkpoint_state: CheckpointState,
       step: int | None = None,
-  ) -> tuple[int | None, CheckpointState, Any]:
-    """Restores items from the checkpoint at the given step.
+  ) -> tuple[int | None, Any]:
+    """Restores items from the checkpoint at the given step into `checkpoint_state`.
 
     Args:
-      checkpoint_state: CheckpointState object containing model and optimizer.
+      checkpoint_state: CheckpointState object containing model and optimizer, mutated in place.
       step: Optional step index to restore from.
 
     Returns:
-      A tuple of (step, checkpoint_state, custom metadata).
+      A tuple of (step, custom metadata), or (None, None) when checkpointing is disabled or no
+      checkpoint exists.
+
+    Raises:
+      CheckpointRestoreError: If a checkpoint exists at `step` but cannot be restored, or when
+        an optimizer is supplied but the checkpoint holds no optimizer state.
     """
     if self._checkpoint_manager is None:
       logging.info("Checkpointing is disabled, skipping restore.")
-      return None, checkpoint_state, None
+      return None, None
 
     if step is None:
       step = self.get_latest_step()
       if step is None:
         logging.info("No checkpoint found, skipping restore.")
-        return None, checkpoint_state, None
-
-    metadata = self._checkpoint_manager.metadata(step)
-    restore_args: dict[str, Any] = {}
-
-    abstract_params = nnx.state(checkpoint_state.model)
-    restore_args["model_params"] = ocp.args.PyTreeRestore(
-        item=abstract_params,
-        restore_args=ocp.checkpoint_utils.construct_restore_args(target=abstract_params),
-    )
-
-    if checkpoint_state.optimizer is not None and "optimizer_state" in metadata.item_metadata:
-      optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-      restore_args["optimizer_state"] = ocp.args.PyTreeRestore(
-          item=optimizer_state,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-          ),
-      )
-
-    custom_metadata = None
-    if metadata and hasattr(metadata, "custom_metadata"):
-      custom_metadata = metadata.custom_metadata
+        return None, None
 
     try:
-      restored_items = self._checkpoint_manager.restore(
-          step=step,
-          args=ocp.args.Composite(**restore_args),
-      )
-    except Exception as e:  # pylint: disable=broad-except
-      logging.exception("Failed to restore checkpoint: %s", e)
-      return None, None, None
+      metadata = self._checkpoint_manager.checkpointables_metadata(step)
+    except Exception as e:
+      raise CheckpointRestoreError(
+          f"Checkpoint at step {step} exists but its metadata could not be read; refusing to silently "
+          f"start a fresh run over it. {type(e).__name__}: {e}"
+      ) from e
+    # The names of the checkpointables saved at `step`, e.g. "model_params" and "optimizer_state".
+    saved_checkpointables = metadata.metadata or {}
 
-    if "model_params" in restored_items:
-      nnx.update(checkpoint_state.model, restored_items["model_params"])
-    if checkpoint_state.optimizer is not None and "optimizer_state" in restored_items:
+    if checkpoint_state.optimizer is not None and "optimizer_state" not in saved_checkpointables:
+      # Resuming training with a freshly initialized optimizer would silently change the run.
+      raise CheckpointRestoreError(
+          f"Checkpoint at step {step} has no optimizer state; restore it with optimizer=None, or "
+          "resume from a step that has the optimizer state."
+      )
+
+    # Each target leaf carries the shape, dtype and sharding the restored array is placed with.
+    abstract_checkpointables: dict[str, Any] = {"model_params": nnx.state(checkpoint_state.model)}
+    if checkpoint_state.optimizer is not None:
+      optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+
+      # The Pathways array handler ignores `memory_kind="pinned_host"` for physical placement
+      # (allocating restored buffers in device HBM) while keeping `pinned_host` on the returned
+      # array's sharding metadata. Request `device` placement explicitly so the restored sharding
+      # matches physical placement; the engine moves host-offloaded state back after restoring.
+      def _device_restore_target(leaf: Any) -> Any:
+        sharding = getattr(leaf, "sharding", None)
+        if getattr(sharding, "memory_kind", None) == "pinned_host":
+          return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device"))
+        return leaf
+
+      abstract_checkpointables["optimizer_state"] = jax.tree.map(_device_restore_target, optimizer_state)
+
+    try:
+      restored_items = self._checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+    except Exception as e:
+      # Returning "no checkpoint" here would make the caller start a fresh run from the base
+      # weights while the checkpoint it failed to read is still on disk.
+      raise CheckpointRestoreError(
+          f"Checkpoint at step {step} exists but could not be restored; refusing to silently start a "
+          f"fresh run over it. {type(e).__name__}: {e}"
+      ) from e
+
+    nnx.update(checkpoint_state.model, restored_items["model_params"])
+    if checkpoint_state.optimizer is not None:
       nnx.update(checkpoint_state.optimizer, restored_items["optimizer_state"])
 
-    return step, checkpoint_state, custom_metadata
+    return step, metadata.custom_metadata
 
   def close(self) -> None:
-    """Closes the checkpoint manager."""
-    if self._checkpoint_manager:
+    """Closes the checkpoint manager once the in-flight save, if any, has finished."""
+    if self._checkpoint_manager is None:
+      return
+    try:
+      self.wait_until_finished()
+    finally:
       self._checkpoint_manager.close()

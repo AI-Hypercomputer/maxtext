@@ -759,7 +759,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _checkpoint_dir(self) -> str:
     """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
-    return self._config.checkpoint_dir
+    return self._config.checkpoint_dir if self._config.enable_checkpointing else ""
 
   @property
   def total_micro_steps(self) -> int:
@@ -2019,7 +2019,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return out
 
   def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
-    """Forces asynchronous Orbax checkpoint serialization.
+    """Saves a checkpoint at a step boundary via Orbax.
 
     Args:
       metadata: Checkpoint metadata payload from Orchestrator.
@@ -2034,12 +2034,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       raise ValueError(
           f"Mid-step checkpointing is not supported; micro_step_count must be 0, got {self._micro_step_count}."
       )
-    if not self._config.enable_checkpointing or not self._checkpoint_dir():
+    if not self._checkpoint_dir():
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
       return
 
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
+    # Settle uncompiled state onto the mesh before Orbax serializes it. `_place_state_on_mesh()`
+    # commits uncommitted or single-device 0-D optimizer leaves (`count`, `step`) onto the full
+    # mesh; `_shard_optimizer_state_over_data()` shards parameter-shaped moments over the data
+    # axis for Zero-1 and leaves scalar leaves untouched. A compiled engine has already done both.
+    if self._state is None or not self._compiled:
+      self._refresh_pure_state()
+      self._place_state_on_mesh()
+      self._shard_optimizer_state_over_data()
+      if not self._compiled:
+        # An uncompiled engine re-splits the module graph on every step; a cache left behind
+        # here would go stale as soon as the live variables change.
+        self._invalidate_pure_state()
 
     if step is None and isinstance(metadata, Mapping):
       step = metadata.get("step")
@@ -2048,8 +2060,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     logging.info("Saving checkpoint at step %d.", step)
 
     custom_metadata = {}
-    if metadata:
-      # Metadata from Orchestrator
+    # Metadata from the orchestrator is a black box: stored as given, so falsy values such as
+    # `{}` or `0` round-trip too.
+    if metadata is not None:
       custom_metadata["additional_metadata"] = metadata
 
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
@@ -2062,25 +2075,57 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       logging.info("Checkpoint saved at step %d.", step)
 
   def restore_checkpoint(self, *, step: int | None = None) -> Any:
-    """Restores a Multi-Tier Checkpoint and returns its metadata.
+    """Restores a checkpoint via Orbax and returns its metadata.
 
     Args:
       step: Checkpoint step to restore. If None, restores the latest checkpoint.
 
     Returns:
-      The metadata PyTree of the restored checkpoint.
+      The metadata PyTree of the restored checkpoint, or None if checkpointing is disabled or
+      there is no checkpoint to restore.
+
+    Raises:
+      checkpointing.CheckpointRestoreError: If a checkpoint exists at `step` but cannot be
+        restored.
     """
-    restored_step, _, restored_metadata = self._checkpoint_manager.restore_checkpoint(
-        checkpoint_state=checkpointing.CheckpointState(model=self.model, optimizer=self.optimizer),
-        step=step,
-    )
+    if not self._checkpoint_dir():
+      return None
+    if step is None:
+      step = self._checkpoint_manager.get_latest_step()
+    if step is None:
+      return None
+
+    # The restore target is read off the live state, and the Pathways array handler only restores
+    # into a NamedSharding. An engine that has not compiled yet -- e.g. resumed before its first
+    # step -- still holds optax's `count` and the optimizer's `step` uncommitted on one device.
+    # Commit them here, as `_compile_for_batch` does.
+    self._refresh_pure_state()
+    self._place_state_on_mesh()
+    self._shard_optimizer_state_over_data()
+    try:
+      restored_step, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+          checkpoint_state=checkpointing.CheckpointState(model=self.model, optimizer=self.optimizer),
+          step=step,
+      )
+    except Exception:
+      if not self._compiled:
+        self._invalidate_pure_state()
+      raise
     if restored_step is None:
+      if not self._compiled:
+        self._invalidate_pure_state()
       return None
 
     logging.info("Checkpoint restored from step %d.", restored_step)
     # Orbax has just written new arrays into the live NNX variables, so the cache is wrong
-    # rather than merely old.
+    # rather than merely old. Re-place them, since the restored arrays carry whatever placement
+    # Orbax gave them; an uncompiled engine re-reads its state at compile time anyway.
     self._invalidate_pure_state()
+    self._refresh_pure_state()
+    self._place_state_on_mesh()
+    self._shard_optimizer_state_over_data()
+    if not self._compiled:
+      self._invalidate_pure_state()
     self.train_step = restored_step
     # Whatever this engine accumulated before the restore belongs to a different run: the
     # checkpoint is at a step boundary, so the restored step starts with nothing accumulated.
@@ -2322,17 +2367,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._last_staged_step = None
     self._staged_metadata = None
 
-    if self._config.enable_checkpointing and self._checkpoint_dir() and self._checkpoint_manager:
-      if self._micro_step_count > 0:
-        # Checkpoints are taken between optimizer steps only; the partial step is lost.
-        logging.warning("Closing mid-step (micro_step_count=%d); skipping the final checkpoint.", self._micro_step_count)
-      else:
-        self.save_checkpoint(metadata=None, force=True)
-      self._checkpoint_manager.close()
-
-    # Write the metrics and cleanup metrics logger resources
-    self._throttler.cleanup()
-
-    # Cleanup metrics recorder resources after the final checkpoint and the throttler drain above.
-    self._metrics_recorder.cleanup()
-    self._metrics_logger.cleanup()
+    try:
+      if self._checkpoint_dir():
+        try:
+          if self._config.save_checkpoint_on_completion:
+            if self._micro_step_count > 0:
+              # Checkpoints are taken between optimizer steps only; the partial step is lost.
+              logging.warning(
+                  "Closing mid-step (micro_step_count=%d); skipping the final checkpoint.", self._micro_step_count
+              )
+            else:
+              self.save_checkpoint(metadata=None, force=True)
+        finally:
+          self._checkpoint_manager.close()
+    finally:
+      try:
+        self._throttler.cleanup()
+      finally:
+        try:
+          self._metrics_recorder.cleanup()
+        finally:
+          self._metrics_logger.cleanup()

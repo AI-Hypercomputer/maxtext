@@ -548,6 +548,7 @@ def create_orbax_checkpoint_manager(
     todelete_full_path: str | None = None,
     ocdbt_target_data_file_size_bytes: int | None = None,
     colocated_python_checkpointing: bool = False,
+    async_checkpointing_timeout_secs: int | None = None,
 ):
   """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -579,6 +580,7 @@ def create_orbax_checkpoint_manager(
       todelete_subdir=todelete_subdir,
       partial_load=True,
       colocated_python_checkpointing=colocated_python_checkpointing,
+      async_checkpointing_timeout_secs=async_checkpointing_timeout_secs,
   )
 
   manager = ocp.training.Checkpointer(

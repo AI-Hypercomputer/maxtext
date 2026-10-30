@@ -55,6 +55,9 @@ enable_checkpointing: true
 save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
+# Deadline (seconds) for the background half of an async save: storage writes and
+# finalization. None uses Orbax's default (or 3600s when enable_continuous_checkpointing is true).
+async_checkpointing_timeout_secs: None
 checkpoint_period: 10_000
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false
