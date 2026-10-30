@@ -275,13 +275,15 @@ class Gmm3dTest(parameterized.TestCase):
 
     outs2, (dx2, dw02, dw12, dwo2) = run(xq2, False)
     outs3, (dx3, dw03, dw13, dwo3) = run(xq3, True)
+    # Rows past sum(group_sizes) are padding that the gmm may leave unwritten (garbage), so compare valid rows.
+    valid = int(GROUP_SIZES.sum())
     for out3, out2 in zip(outs3, outs2):
       self.assertEqual(out3.shape, (M, D // 128, 128))
-      _assert_close_chunked_k(out3.reshape(M, D), out2)
+      _assert_close_chunked_k(out3.reshape(M, D)[:valid], out2[:valid])
     # The wi fwd (tile_k 7168, fp8 x fp8) takes the chunked path; its rounding propagates to all outputs.
     dx3_deq = dx3.qvalue.reshape(M, D).astype(jnp.float32) * dx3.scale
     dx2_deq = dx2.qvalue.astype(jnp.float32) * dx2.scale
-    _assert_close_chunked_k(dx3_deq, dx2_deq, rtol=0.15)  # fp8 qvalue: ~1 e4m3 ulp.
+    _assert_close_chunked_k(dx3_deq[:valid], dx2_deq[:valid], rtol=0.15)  # fp8 qvalue: ~1 e4m3 ulp.
     _assert_close_chunked_k(dw03, dw02)
     _assert_close_chunked_k(dw13, dw12)
     _assert_close_chunked_k(dwo3, dwo2)
