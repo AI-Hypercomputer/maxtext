@@ -198,6 +198,13 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
   `gs://mesa-maxtext/<owner>_tpu7x_bench/`, so the `mesakh_tpu7x_bench` code dir that queue workers sync from is
   never overwritten. The runs read the existing P1/P2 HF caches through `SHARED_HF_CACHE_BASE_DIR`.
 - **Results**: [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md).
+  [`scripts/collect_multihost_results.py`](scripts/collect_multihost_results.py) appends the result JSONs of a
+  multi-host run dir to [`reports/tpu7x_multihost_results.csv`](reports/tpu7x_multihost_results.csv) (one row per new
+  model, scan mode, layout and `--source`; existing rows are never changed).
+- **`to_maxtext` on multi-host slices** (`MESAKH_MH_RUNS`, `BENCH_OWNER=mesakh`): a run can set `pipelines`
+  (`safetensors`, `to_maxtext` or `both`), `run_dir` (the P1/P2 run dir whose converted Orbax checkpoint Step 3
+  loads, with `--skip-completed`) and `tree` (e.g. `/tmp/maxtext_fix`). Step 3 results land in that run dir under
+  `<scan_mode>[_slices<N>]_hosts<H>`, where the sheet-table generator finds them.
 - **v5p**: `--platform v5p` deploys `V5P_MH_RUNS` on `bodaborg-v5p-nap` (reservation capacity, 4 devices per host, no
   Kueue TAS). Their results go to the `v5p_multihost` run id, apart from the tpu7x results.
 
@@ -209,7 +216,25 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --platform v5p --run v5p-smoke-2s
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --status
 ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --cleanup     # this owner's JobSets only
+# 10-30 runs (BENCH_OWNER=mesakh): smoke-tm-2s, 480b-2s, ds32-4h (1 x 2x2x4), 1600b-8h (1 x 2x4x4),
+# 235b-tm / 235b-tm-2s, 397b-fix, 397b-tm / 397b-tm-4h / 397b-tm-2s
+BENCH_OWNER=mesakh ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run smoke-tm-2s
 ```
+
+#### Fix validation runs (queue `p3`)
+- **Tasks**: [`configs/p3_tasks.json`](configs/p3_tasks.json), uploaded to
+  `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p3/tasks.json`: BEFORE 397B scanned on 4 slices, the validations and
+  regression checks of the two HBM-peak fixes (issues U-1, U-6), and the `to_maxtext` conversions with the capped
+  Orbax save buffers (U-8: a `llama3.1-70b` check, then 397B unscanned and its Orbax loads).
+- **Fix tree** `/tmp/maxtext_fix`: [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py) (`stage_fix_tree`) copies
+  `/tmp/maxtext` and replaces `load_dynamic.py`, `tensor_handling.py` and `utils.py` with this branch's `src/`
+  versions, which `run_tpu7x_cluster.sh` uploads to `<code dir>/fix/`. The fix runs write to their own run ids
+  (`tpu7x_200b_fix`, `tpu7x_16m_fix`, `tpu7x_200b_tmfix`, `tpu7x_16m_tmfix`), so every other row keeps its code.
+- **Workers**: `generate_tpu7x_manifests.py` writes `tpu7x_p3_group_p.yaml` (4-slice group), `tpu7x_p3_pair_q.yaml`
+  (2-slice pair, `--min-slices 2`) and `tpu7x_p3_single_t{1,2,3}.yaml`. A preempted worker is re-created with
+  `kubectl apply -f`; its lock is taken over after 20 min.
+- **Tables**: `build_tpu7x_sheet_table.py --variant "with fix=<local mirror of a fix run dir>"` adds a
+  `safetensor (with fix)` row after each configuration that the fix run dir has a result for.
 
 ### 5.2 Run a Single-Slice Benchmark (`num_slices=1`)
 ```bash

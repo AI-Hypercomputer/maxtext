@@ -1,6 +1,6 @@
 {
   "description": "10-30 queue on bodaborg-tpu7x-nap (spot 2x2x1 single-host slices): BEFORE qwen3.5-397b-a17b scanned on 4 slices, fix validations and to_maxtext save-memory runs. See reports/tpu7x_priority1_progress.md.",
-  "notes": "before_397b_scanned_s4 is the only scanned 397B configuration that loads with Lance's PRs (1,399.7 s on 4 slices), so it gives scanned 397B a BEFORE (origin/main) point, with the 1800 s watchdog of the other BEFORE re-runs. The fix_* tasks run safetensors_dynamic from /tmp/maxtext_fix (this branch's load_dynamic.py and tensor_handling.py: each leaf of a stacked composite key is stacked on its own, and reshard slices are joined two at a time) into the run ids tpu7x_200b_fix and tpu7x_16m_fix. The tmfix_* tasks run to_maxtext with this branch's utils.py, whose Orbax save honours checkpoint_storage_concurrent_gb (the harness passes 24 for unscanned) instead of buffering up to 96 GB: tmfix_llama70b_unscanned_conv measures the save-phase peak against the P2 run (403.6 GB), and tmfix_397b_unscanned_conv retries the conversion that was OOM-killed when its save started.",
+  "notes": "before_397b_scanned_s4 is the only scanned 397B configuration that loads with Lance's PRs (1,399.7 s on 4 slices), so it gives scanned 397B a BEFORE (origin/main) point, with the 1800 s watchdog of the other BEFORE re-runs. The fix_* tasks run safetensors_dynamic from /tmp/maxtext_fix (this branch's load_dynamic.py and tensor_handling.py: each leaf of a stacked composite key is stacked on its own, and reshard slices are joined two at a time) into the run ids tpu7x_200b_fix and tpu7x_16m_fix. The tmfix_* tasks run to_maxtext with this branch's utils.py, whose Orbax save honours checkpoint_storage_concurrent_gb (the harness passes 24 for unscanned) instead of buffering up to 96 GB: tmfix_llama70b_unscanned_conv measures the save-phase peak against the P2 run (403.6 GB), and tmfix_397b_unscanned_conv retries the conversion that was OOM-killed when its save started. tmfix_397b_unscanned_s2 loads the converted 397B checkpoint on 2 slices; it is added to the queue once the conversion has finished, because a 2-slice worker would otherwise hold its nodes while waiting for the dependency.",
   "tasks": [
     {
       "id": "before_397b_scanned_s4",
@@ -319,6 +319,44 @@
         "SHARED_HF_CACHE_BASE_DIR": "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/safetensors_dynamic"
       },
       "csv": "p3_fix_397b_unscanned_s2.csv"
+    },
+    {
+      "id": "tmfix_397b_unscanned_s2",
+      "slices": 2,
+      "tree": "/tmp/maxtext_fix",
+      "args": [
+        "--models",
+        "qwen3.5-397b-a17b",
+        "--scan-modes",
+        "unscanned",
+        "--num-slices-list",
+        "2",
+        "--skip-safetensors",
+        "--gcs-base",
+        "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs",
+        "--run-id",
+        "tpu7x_200b_tmfix",
+        "--local-work-dir",
+        "/tmp/p1_tmfix",
+        "--devices-per-slice",
+        "8",
+        "--hardware",
+        "tpu",
+        "--reuse-model-hf-cache",
+        "--skip-completed",
+        "--allow-step-failure"
+      ],
+      "env": {
+        "KEEP_HF_CACHE": "1",
+        "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+        "HF_HOME": "/ramdisk/hf_cache",
+        "TMPDIR": "/ramdisk/tmp",
+        "SHARED_HF_CACHE_BASE_DIR": "gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/safetensors_dynamic"
+      },
+      "csv": "p3_tmfix_397b_unscanned_s2.csv",
+      "depends_on": [
+        "tmfix_397b_unscanned_conv"
+      ]
     }
   ]
 }

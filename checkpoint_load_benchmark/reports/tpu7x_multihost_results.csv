@@ -38,3 +38,8 @@ deepseek3.2-671b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,672.46,493.25,178.7
 deepseek3.2-671b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,569.71,459.39,109.96,690.93,,lance
 deepseek4-1600b,scanned,4 × 2x2x2,8,64,6510.4,ICI + DCN,OK,1047.93,757.75,289.55,696.11,,lance
 deepseek4-1600b,unscanned,4 × 2x2x2,8,64,6510.4,ICI + DCN,OK,1008.62,771.74,236.49,675.96,,lance
+qwen3.5-397b-a17b,scanned,1 × 2x2x2,2,16,1627.6,ICI,OK,1475.17,483.50,991.62,63.80,with fix (this branch's U-1/U-6 fixes),mesakh
+qwen3-0.6b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,20.08,9.41,10.57,72.26,,mesakh
+qwen3-0.6b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,16.29,10.18,6.00,72.25,,mesakh
+qwen3-480b-a35b,scanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,757.70,644.22,111.22,244.93,,mesakh
+qwen3-480b-a35b,unscanned,2 × 2x2x2,4,32,3255.2,ICI + DCN,OK,718.65,642.10,76.42,244.62,,mesakh

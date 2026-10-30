@@ -125,3 +125,35 @@
   1 or 2. The runner (`--slice-id 0`) writes the result JSON, so the results are not affected.
 - **Where the data is.** Result CSVs: `gs://mesa-maxtext/wanglance_tpu7x_bench/results/<run>.csv`. Per-phase result
   JSONs: `gs://mesa-maxtext/wanglance_tpu7x_bench/lance_prs/run_tpu7x_multihost/logs/<model>/<scan_mode>[_slices<N>]_hosts<H>/`.
+
+## 2026-10-30 Multi-Host Runs (`mesakh`)
+
+After the Kyverno `owner-only-exec-stamp-creator` admission policy on `bodaborg-tpu7x-nap` was fixed, we ran the
+remaining multi-host `safetensors_dynamic` configurations (`MESAKH_MH_RUNS` in
+[`generate_tpu7x_manifests.py`](../generate_tpu7x_manifests.py)), the multi-host `safetensor (with fix)` validation for
+`qwen3.5-397b-a17b` scanned on 1 × `2x2x2`, and multi-host `to_maxtext` Step 3 (Load Orbax) runs reusing the converted
+single-host Orbax checkpoints.
+
+### `safetensors_dynamic` (`source=mesakh` in [`tpu7x_multihost_results.csv`](tpu7x_multihost_results.csv))
+
+| Model | Scan mode | Layout | Hosts | Devices | Link | Total (s) | Load (s) | Transform (s) | Peak host RAM (GB) | Run / Note |
+| :--- | :--- | :--- | ---: | ---: | :--- | ---: | ---: | ---: | ---: | :--- |
+| `qwen3-0.6b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **20.08** | 9.41 | 10.57 | 72.3 | `smoke-tm-2s` |
+| `qwen3-0.6b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **16.29** | 10.18 | 6.00 | 72.3 | `smoke-tm-2s` |
+| `qwen3.5-397b-a17b` | scanned | 1 × 2x2x2 | 2 | 16 | ICI | **1,475.17** | 483.50 | 991.62 | 63.8 | `397b-fix` (`with fix`: U-1/U-6 HBM-peak fixes; was HBM OOM) |
+| `qwen3-480b-a35b` | scanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **757.70** | 644.22 | 111.22 | 244.9 | `480b-2s` |
+| `qwen3-480b-a35b` | unscanned | 2 × 2x2x2 | 4 | 32 | ICI + DCN | **718.65** | 642.10 | 76.42 | 244.6 | `480b-2s` |
+
+### `to_maxtext` Step 3 (Load Orbax) on Multi-Host Slices (`source=mesakh`)
+
+Each run loads the Orbax checkpoint written by the single-host (`1 (8)`) conversion (`--skip-to-maxtext-step1-and-2`),
+comparing against `safetensors_dynamic` on the same multi-host layout:
+
+| Model | Scan mode | Layout | Hosts | Devices | Step 1 HF→GCS (s) | Step 2 Convert (s) | Step 3 Load Orbax (s) | `to_maxtext` Total (No Step 1 / E2E) (s) | `safetensor` Total (No Step 1 / E2E) (s) | Speedup (E2E / No Step 1) | Run |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| `qwen3-0.6b` | scanned | 2 × 2x2x2 | 4 | 32 | 15.98 | 19.40 | **2.94** (peak 59.0 GB) | 22.35 / 38.33 | 19.34 / 35.32 | **1.09× / 1.16×** | `smoke-tm-2s` |
+| `qwen3-0.6b` | unscanned | 2 × 2x2x2 | 4 | 32 | 15.98 | 66.78 | **4.03** (peak 59.1 GB) | 70.81 / 86.79 | 11.50 / 27.48 | **3.16× / 6.16×** | `smoke-tm-2s` |
+| `qwen3-235b-a22b` | unscanned | 1 × 2x2x2 | 2 | 16 | 583.32 | 2,625.50 | **841.12** (peak 54.9 GB) | 3,466.62 / 4,049.94 | 817.59 / 1,400.91 | **2.89× / 4.24×** | `235b-tm` |
+| `qwen3-235b-a22b` | unscanned | 2 × 2x2x2 | 4 | 32 | 583.32 | 2,625.50 | **682.05** (peak 90.4 GB) | 3,307.56 / 3,890.87 | 788.66 / 1,371.98 | **2.84× / 4.19×** | `235b-tm-2s` |
+| `qwen3.5-397b-a17b` | unscanned | 1 × 2x2x2 | 2 | 16 | 814.53 | 8,096.53 | **1,838.26** (peak 58.5 GB) | 9,934.79 / 10,749.32 | 1,150.92 / 1,965.45 | **5.47× / 8.63×** | `397b-tm` |
+
