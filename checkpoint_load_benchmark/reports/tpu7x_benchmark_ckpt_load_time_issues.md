@@ -187,6 +187,12 @@ on 2 (`p2_gptoss120b_unscanned_st`).
       **1,311.9 s** (**7.72×** speedup; E2E **10,936.8 s** vs **2,126.4 s** = **5.14×**).
     - 1 × `2x2x2` (`1 (16)`): **1,838.3 s** (peak host RAM 58.5 GB); Total (No Step 1) **9,934.8 s** vs `safetensor`
       **1,150.9 s** (**8.63×** speedup; E2E **10,749.3 s** vs **1,965.5 s** = **5.47×**).
+    - 2 × `2x2x2` (`2 (32)`): on 4 hosts (`397b-tm-2s`), `ocp.load` timed out after **2,306 s** (31.5 s init + 2,274.6 s
+      restore; peak host RAM 95.2 GB) with `TimeoutError: DEADLINE_EXCEEDED: Barrier timed out. Id: [op=1] _load_impl::0`
+      (`# of tasks that reached the barrier: 3/4`). In Orbax v1, `multihost.coordination_timeout()` returns a hardcoded
+      `_DEFAULT_BARRIER_TIMEOUT = 300` s (5 min), so when 4 hosts read thousands of unscanned Zarr3 layer chunks over
+      ~33–38 min, a ~15% (>5 min) GCS completion-time skew between the fastest host (Task 3, ~32.9 min) and slowest host
+      (Task 2, >37.9 min) triggers the 5-minute barrier timeout. Re-running with `_DEFAULT_BARRIER_TIMEOUT = 1800` s.
 
 ---
 

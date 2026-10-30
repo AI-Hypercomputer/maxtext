@@ -177,26 +177,15 @@ TM_S2_NOTES = {
 # Step 3 text of a configuration whose conversion worked but whose Orbax load was not run, keyed by (model, scan, n).
 TM_S3_NOTES = {
     ("qwen3.5-397b-a17b", "unscanned", 1): "Not run (the 795.5 GB checkpoint fills 98% of the 813.8 GB HBM)",
-    ("qwen3.5-397b-a17b", "unscanned", 2): (
-        "⏳ In progress (loading the converted Orbax checkpoint on 2 × 2x2x1)"
-    ),
 }
 # Step 3 text of a multi-host `to_maxtext` Orbax load that is currently running or queued on the cluster.
 TM_MH_PENDING = {
-    ("qwen3.5-397b-a17b", "unscanned", "1 × 2x2x2"): (
-        "⏳ In progress (loading the converted Orbax checkpoint on 1 × 2x2x2)"
-    ),
-    ("qwen3.5-397b-a17b", "unscanned", "2 × 2x2x2"): (
-        "⏳ In progress (loading the converted Orbax checkpoint on 2 × 2x2x2)"
-    ),
     ("qwen3.5-397b-a17b", "unscanned", "1 × 2x2x4"): (
         "⏳ Queued (waiting for 1 × 2x2x4 spot slice to load the converted Orbax checkpoint)"
     ),
 }
 # Multi-host `safetensors_dynamic` runs currently running or queued that don't have a CSV row yet.
 PENDING_MULTIHOST = [
-    ("qwen3-480b-a35b", "scanned", "2 × 2x2x2", 4, 32, "⏳ In progress (running on 2 × 2x2x2)"),
-    ("qwen3-480b-a35b", "unscanned", "2 × 2x2x2", 4, 32, "⏳ In progress (running on 2 × 2x2x2)"),
     ("deepseek3.2-671b", "scanned", "1 × 2x2x4", 4, 32, "⏳ Queued (waiting for 1 × 2x2x4 spot slice)"),
     ("deepseek3.2-671b", "unscanned", "1 × 2x2x4", 4, 32, "⏳ Queued (waiting for 1 × 2x2x4 spot slice)"),
     ("deepseek4-1600b", "scanned", "1 × 2x4x4", 8, 64, "⏳ Queued (waiting for 1 × 2x4x4 spot slice)"),
@@ -420,11 +409,12 @@ def multihost_pair(rec: dict, cold_s1: float, logs: Logs | None = None, tm_ref: 
       log_path = logs.load(model, _multihost_cfg(rec), "to_maxtext_step3")[1] if logs else ""
       reason = _cap(failure_reason(tm3, log_path))
       tm = head + [reason, "N/A", "N/A", "N/A"]
+      no_tm = "Only safetensor loads this config"
     else:
       load = float(tm3["load_orbax_s"])
       tm_no1, tm_total = s2 + load, s1 + s2 + load
       tm = head + [f"{_fmt(load)} (Load Orbax)", _fmt(tm_no1), _fmt(tm_total), "1.00x (baseline)"]
-    no_tm = "N/A (to_maxtext not run on this layout)" if _tm_converted(tm_ref) else "Only safetensor loads this config"
+      no_tm = "N/A (to_maxtext not run on this layout)" if _tm_converted(tm_ref) else "Only safetensor loads this config"
   st = ["↳", scan, slices, "safetensor", _s1(model, cold_s1), "—"]
   st += _mh_st_tail(rec, cold_s1, tm_total, tm_no1, no_tm)
   return [tm, st]
