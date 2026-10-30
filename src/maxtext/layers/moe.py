@@ -831,8 +831,11 @@ def _log_a2a_drops(global_group_sizes, buffer_size, expert_axis, mesh):
 
   def _print(is_first, d, t, r, b):
     if bool(is_first):
-      print(f"A2A_DROPS dropped={int(d)} total={int(t)} frac={float(d) / max(float(t), 1.0):.6f} "
-            f"max_load_ratio={float(r):.4f} buffer={int(b)}", flush=True)
+      print(
+          f"A2A_DROPS dropped={int(d)} total={int(t)} frac={float(d) / max(float(t), 1.0):.6f} "
+          f"max_load_ratio={float(r):.4f} buffer={int(b)}",
+          flush=True,
+      )
 
   jax.debug.callback(_print, first, dropped, total, max_ratio, jnp.int32(buffer_size))
 

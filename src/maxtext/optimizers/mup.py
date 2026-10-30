@@ -141,7 +141,11 @@ def mup_adamw(learning_rate, config, base_config, mask=None):
     decay = optax_wrappers.masked(decay, mask)
   return optax.chain(
       optax.scale_by_adam(
-          b1=config.adam_b1, b2=config.adam_b2, eps=config.adam_eps, eps_root=config.adam_eps_root, mu_dtype=config.mu_dtype
+          b1=config.adam_b1,
+          b2=config.adam_b2,
+          eps=config.adam_eps,
+          eps_root=config.adam_eps_root,
+          mu_dtype=config.mu_dtype,
       ),
       decay,
       _scale_by_learning_rate_and_multiplier(learning_rate, multipliers_fn),

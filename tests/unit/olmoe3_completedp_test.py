@@ -35,7 +35,7 @@ from maxtext.models import olmoe3_roles as roles
 from maxtext.optimizers import completedp
 from maxtext.optimizers import optimizers
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
-import olmoe3_test as t
+from tests.unit import olmoe3_test as t
 
 BASE = "olmo35-tiny-e256k8-sh2x"
 TARGET = "olmo35-small-e256k8-sh2x"
@@ -85,7 +85,9 @@ class CompletedPGoldenTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    with open(os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_completedp_olmo_core.json"), encoding="utf-8") as f:
+    with open(
+        os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_completedp_olmo_core.json"), encoding="utf-8"
+    ) as f:
       cls.golden = json.load(f)
 
   def _check(self, model, alpha):
@@ -95,8 +97,12 @@ class CompletedPGoldenTest(unittest.TestCase):
       cfg = _config(model, extra=(f"completedp_alpha={alpha}", *_case_extra(cfg, case)))
       base = roles.load_base_config(BASE)
       params = _params(cfg)
-      got_roles = {_name(p): r.role for p, r in jax.tree_util.tree_flatten_with_path(
-          roles.classify_tree(cfg, params), is_leaf=lambda x: isinstance(x, roles.ParamRole))[0]}
+      got_roles = {
+          _name(p): r.role
+          for p, r in jax.tree_util.tree_flatten_with_path(
+              roles.classify_tree(cfg, params), is_leaf=lambda x: isinstance(x, roles.ParamRole)
+          )[0]
+      }
       self.assertEqual(sorted(got_roles), sorted(golden["params"]))
       lr, eps, wd = (
           {_name(p): m for p, m in jax.tree_util.tree_flatten_with_path(tree)[0]}
@@ -143,13 +149,16 @@ class CompletedPModelTest(unittest.TestCase):
 
   def test_init_stds(self):
     # Every parameter of a reduced small-sh2x: 0.02 x its golden init factor (truncated), vectors as usual.
-    with open(os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_completedp_olmo_core.json"), encoding="utf-8") as f:
+    with open(
+        os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_completedp_olmo_core.json"), encoding="utf-8"
+    ) as f:
       golden = json.load(f)["models"][f"{TARGET}@1.0"]["params"]
     cfg = _config(TARGET, extra=REDUCED)
     for path, w in jax.tree_util.tree_flatten_with_path(_params(cfg, init=True))[0]:
       name = _name(path)
       for reduced, full in REDUCED_LAYER.items():
         name = name.replace(f"decoder/{reduced}", f"decoder/{full}")
+      name_factor = None
       if name == "token_embedder/embedding":
         name_factor = 1.0
       elif name in golden:
@@ -190,7 +199,9 @@ class CompletedPModelTest(unittest.TestCase):
     out = layer(x, seg, jnp.arange(64)[None], deterministic=True, model_mode="train")
     out = out[0] if isinstance(out, tuple) else out
     c = layer.residual_multiplier
-    np.testing.assert_allclose(out, x + c * branches["attn_out_norm"] + c * branches["ffn_out_norm"], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        out, x + c * branches["attn_out_norm"] + c * branches["ffn_out_norm"], rtol=1e-5, atol=1e-5
+    )
 
   def test_rejects_unsupported_runs(self):
     for extra, match in (
@@ -213,8 +224,14 @@ class CompletedPOptimizerTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    extra = (*REDUCED, "adamw_mask=['token_embedder/embedding']", f"adam_weight_decay={cls.WD}", "adam_b1=0.9",
-             "adam_b2=0.95", f"adam_eps={cls.EPS}")
+    extra = (
+        *REDUCED,
+        "adamw_mask=['token_embedder/embedding']",
+        f"adam_weight_decay={cls.WD}",
+        "adam_b1=0.9",
+        "adam_b2=0.95",
+        f"adam_eps={cls.EPS}",
+    )
     cfg = _config(TARGET, extra=extra)
     # m_B = 2, m_D = 4: betas (0.95, 0.975), and every multiplier also carries s = sqrt(1/2).
     cls.cfg = _config(TARGET, extra=(*extra, *_case_extra(cfg, {"batch_ratio": 2.0, "duration_ratio": 4.0})))
@@ -235,15 +252,34 @@ class CompletedPOptimizerTest(unittest.TestCase):
   def test_all_ones_is_optax_adamw_bitwise(self):
     # The base as its own model (full depth, so m_L = 1) and no batch/duration change: every multiplier is 1, so
     # completedp_adamw must be exactly optax.adamw, state included. Params are small constants (no init needed).
-    cfg = _config(BASE, extra=("override_model_config=True", "num_experts=8", "num_experts_per_tok=2", "vocab_size=1024",
-                               "emo_enabled=False", "adamw_mask=['token_embedder/embedding']"))
+    cfg = _config(
+        BASE,
+        extra=(
+            "override_model_config=True",
+            "num_experts=8",
+            "num_experts_per_tok=2",
+            "vocab_size=1024",
+            "emo_enabled=False",
+            "adamw_mask=['token_embedder/embedding']",
+        ),
+    )
     base = roles.load_base_config(BASE)
     params = jax.tree.map(lambda x: jnp.full(x.shape, 0.01, x.dtype), _params(cfg))
-    self.assertEqual({m for tree in completedp.multipliers(cfg, base, params) for m in jax.tree_util.tree_leaves(tree)}, {1.0})
+    self.assertEqual(
+        {m for tree in completedp.multipliers(cfg, base, params) for m in jax.tree_util.tree_leaves(tree)}, {1.0}
+    )
     grads = jax.tree.map(lambda p: jax.random.normal(jax.random.PRNGKey(7), p.shape, p.dtype), params)
     mask = optimizers.get_adamw_mask(cfg)
-    reference = optax.adamw(self.LR, b1=cfg.adam_b1, b2=cfg.adam_b2, eps=cfg.adam_eps, eps_root=cfg.adam_eps_root,
-                            weight_decay=cfg.adam_weight_decay, mu_dtype=cfg.mu_dtype, mask=mask)
+    reference = optax.adamw(
+        self.LR,
+        b1=cfg.adam_b1,
+        b2=cfg.adam_b2,
+        eps=cfg.adam_eps,
+        eps_root=cfg.adam_eps_root,
+        weight_decay=cfg.adam_weight_decay,
+        mu_dtype=cfg.mu_dtype,
+        mask=mask,
+    )
     tx = completedp.completedp_adamw(self.LR, cfg, base, mask=mask)
     states = [tx.init(params), reference.init(params)]
     self.assertEqual(jax.tree.structure(states[0]), jax.tree.structure(states[1]))
@@ -307,8 +343,10 @@ class HeadDimTransferTest(unittest.TestCase):
     return {_name(p): r.role for p, r in flat}
 
   def _mults(self, cfg):
-    return [{_name(p): m for p, m in jax.tree_util.tree_flatten_with_path(tree)[0]}
-            for tree in completedp.multipliers(cfg, self.base, self.params)]
+    return [
+        {_name(p): m for p, m in jax.tree_util.tree_flatten_with_path(tree)[0]}
+        for tree in completedp.multipliers(cfg, self.base, self.params)
+    ]
 
   def test_off_by_default(self):
     from maxtext.models import olmoe3  # pylint: disable=import-outside-toplevel
@@ -375,8 +413,12 @@ class HeadDimTransferTest(unittest.TestCase):
   def test_init_factors(self):
     # sqrt(base fan-in / fan-in) for a hidden matrix, base fan-in / fan-in for a readout: 1024 / 1536 for both here.
     ratio = 1024 / 1536
-    for sub, off, on in (("mixer/f_proj_1/kernel", ratio, ratio**0.5), ("mixer/w_b/kernel", ratio**0.5, ratio),
-                         ("moe_block/gate/kernel", ratio, ratio), ("mixer/w_q/kernel", ratio**0.5, ratio**0.5)):
+    for sub, off, on in (
+        ("mixer/f_proj_1/kernel", ratio, ratio**0.5),
+        ("mixer/w_b/kernel", ratio**0.5, ratio),
+        ("moe_block/gate/kernel", ratio, ratio),
+        ("mixer/w_q/kernel", ratio**0.5, ratio**0.5),
+    ):
       self.assertAlmostEqual(roles.completedp_init_factor(self.off, self.base, sub), off, places=12, msg=sub)
       self.assertAlmostEqual(roles.completedp_init_factor(self.on, self.base, sub), on, places=12, msg=sub)
 

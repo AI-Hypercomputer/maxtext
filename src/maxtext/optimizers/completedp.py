@@ -29,9 +29,10 @@ tokens per step and the training tokens. Per parameter role (`olmoe3_roles`), mu
 
 and both betas become ``1 - (1 - beta) m_B / m_D``. Under `head_dim_transfer`, a head-shared vector's eps is also
 multiplied by ``(H / H_base) / m_N`` (H: the heads it is shared across), which is 1 when width grows by heads alone,
-and readout matrices are the matrices whose output width is the base model's (`olmoe3_roles.is_readout`). The model side (residual multipliers ``m_L^-a`` and the init
-scaling) is in models/olmoe3.py. Reference: OLMo-core ``tanushy/parameterization-ladders`` (``optim/completedp.py``,
-``nn/transformer/completedp.py``, docs/COMPLETEDP_HANDOFF.md).
+and readout matrices are the matrices whose output width is the base model's (`olmoe3_roles.is_readout`). The model
+side (residual multipliers ``m_L^-a`` and the init scaling) is in models/olmoe3.py. Reference: OLMo-core
+``tanushy/parameterization-ladders`` (``optim/completedp.py``, ``nn/transformer/completedp.py``,
+docs/COMPLETEDP_HANDOFF.md).
 """
 
 import dataclasses
@@ -155,11 +156,15 @@ def multipliers(config, base_config, params):
 
   tree = roles.classify_tree(config, params, base_config=base_config)
   triples = jax.tree.map(of, tree, is_leaf=lambda x: isinstance(x, roles.ParamRole))
-  is_triple = lambda x: isinstance(x, tuple) and len(x) == 3 and all(isinstance(v, float) for v in x)
+
+  def is_triple(x):
+    return isinstance(x, tuple) and len(x) == 3 and all(isinstance(v, float) for v in x)
+
   return tuple(jax.tree.map(lambda t, i=i: t[i], triples, is_leaf=is_triple) for i in range(3))
 
 
 def _log(config, base_config, params, lr, eps, wd):
+  """Logs CompletedP's ratios and the per-parameter lr / eps / wd multipliers."""
   rt = ratios(config, base_config)
   max_logging.log(
       f"CompletedP vs {config.completedp_base_model_name}: m_N {rt.m_n:.6g}, m_L {rt.m_l:.6g}, m_B {rt.batch:.6g},"
@@ -168,7 +173,9 @@ def _log(config, base_config, params, lr, eps, wd):
   )
   groups = {}
   leaves = zip(
-      jax.tree_util.tree_flatten_with_path(lr)[0], jax.tree_util.tree_leaves(eps), jax.tree_util.tree_leaves(wd),
+      jax.tree_util.tree_flatten_with_path(lr)[0],
+      jax.tree_util.tree_leaves(eps),
+      jax.tree_util.tree_leaves(wd),
       jax.tree_util.tree_leaves(params),
   )
   for (path, m_lr), m_eps, m_wd, leaf in leaves:

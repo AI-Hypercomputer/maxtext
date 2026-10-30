@@ -1226,7 +1226,7 @@ class MoEGeneral(BaseModel):
   )
   moe_log_a2a_drops: bool = Field(
       False,
-      description="Debug probe: print A2A_DROPS lines (rows the expert-major all-to-all drops) per MoE call from one device.",
+      description="Debug probe: print A2A_DROPS (rows the expert-major all-to-all drops) per MoE call from one device.",
   )
   log_required_ragged_buffer_factor: bool = Field(
       False,
@@ -3499,7 +3499,9 @@ class AdamW(BaseModel):
           " at every width. False keeps adam_weight_decay (decay lr * multiplier * wd, OLMo-core's default)."
       ),
   )
-  mup_embedding_lr_multiplier: float = Field(1.0, description="Under muP, the token embedding's learning-rate multiplier.")
+  mup_embedding_lr_multiplier: float = Field(
+      1.0, description="Under muP, the token embedding's learning-rate multiplier."
+  )
   completedp_base_model_name: str = Field(
       "",
       description=(

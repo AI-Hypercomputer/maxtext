@@ -219,7 +219,9 @@ def olmoe3_lm_head_init(config):
   """The untied LM head's init: the block weights', times CompletedP's base emb_dim / emb_dim when it's on."""
   base = _completedp_base(config)
   init = olmoe3_kernel_init(config)
-  return init if base is None else _scaled(init, olmoe3_roles.completedp_init_factor(config, base, olmoe3_roles.LM_HEAD_KEY))
+  return (
+      init if base is None else _scaled(init, olmoe3_roles.completedp_init_factor(config, base, olmoe3_roles.LM_HEAD_KEY))
+  )
 
 
 def _dense(config, in_features, out_features, kernel_axes, quant, rngs, use_bias=False, mesh=None, kernel_init=None):
@@ -299,9 +301,36 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     value_width = self.num_heads * self.head_v_dim
     conv_size = cfg.gdn_conv_kernel_dim
 
-    self.w_q = _dense(cfg, cfg.emb_dim, key_width, ("embed", "mlp"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/w_q/kernel"))
-    self.w_k = _dense(cfg, cfg.emb_dim, key_width, ("embed", "mlp"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/w_k/kernel"))
-    self.w_v = _dense(cfg, cfg.emb_dim, value_width, ("embed", "mlp"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/w_v/kernel"))
+    self.w_q = _dense(
+        cfg,
+        cfg.emb_dim,
+        key_width,
+        ("embed", "mlp"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/w_q/kernel"),
+    )
+    self.w_k = _dense(
+        cfg,
+        cfg.emb_dim,
+        key_width,
+        ("embed", "mlp"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/w_k/kernel"),
+    )
+    self.w_v = _dense(
+        cfg,
+        cfg.emb_dim,
+        value_width,
+        ("embed", "mlp"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/w_v/kernel"),
+    )
 
     # Under "nanochat" each depthwise conv is a square conv_size -> conv_size map per channel.
     conv_std = nanochat_std(conv_size, conv_size) if cfg.olmo_init_method == "nanochat" else _INIT_STD
@@ -311,16 +340,52 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     self.v_conv = nnx.Param(conv_init(rngs.params(), (value_width, conv_size), cfg.weight_dtype))
 
     # Low-rank decay projection: emb -> head_v_dim -> key_width.
-    self.f_proj_1 = _dense(cfg, cfg.emb_dim, self.head_v_dim, ("embed", "mlp"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/f_proj_1/kernel"))
-    self.f_proj_2 = _dense(cfg, self.head_v_dim, key_width, ("mlp", "embed"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/f_proj_2/kernel"))
-    self.w_b = _dense(cfg, cfg.emb_dim, self.num_heads, ("embed", None), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/w_b/kernel"))
+    self.f_proj_1 = _dense(
+        cfg,
+        cfg.emb_dim,
+        self.head_v_dim,
+        ("embed", "mlp"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/f_proj_1/kernel"),
+    )
+    self.f_proj_2 = _dense(
+        cfg,
+        self.head_v_dim,
+        key_width,
+        ("mlp", "embed"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/f_proj_2/kernel"),
+    )
+    self.w_b = _dense(
+        cfg,
+        cfg.emb_dim,
+        self.num_heads,
+        ("embed", None),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/w_b/kernel"),
+    )
 
     a_log_init = nnx.initializers.uniform(scale=15.0)  # U[1, 16) after the +1 below
     self.A_log = nnx.Param(jnp.log(1.0 + a_log_init(rngs.params(), (self.num_heads,), jnp.float32)))
     self.dt_bias = nnx.Param(jnp.zeros((key_width,), jnp.float32))
 
     # Low-rank output gate: emb -> head_v_dim -> value_width (this one has a bias).
-    self.g_proj_1 = _dense(cfg, cfg.emb_dim, self.head_v_dim, ("embed", "mlp"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/g_proj_1/kernel"))
+    self.g_proj_1 = _dense(
+        cfg,
+        cfg.emb_dim,
+        self.head_v_dim,
+        ("embed", "mlp"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/g_proj_1/kernel"),
+    )
     self.g_proj_2 = _dense(
         cfg,
         self.head_v_dim,
@@ -342,7 +407,14 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         rngs=rngs,
     )
     self.w_out = _dense(
-        cfg, value_width, cfg.emb_dim, ("mlp", "embed"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "mixer/w_out/kernel")
+        cfg,
+        value_width,
+        cfg.emb_dim,
+        ("mlp", "embed"),
+        quant,
+        rngs,
+        mesh=mesh,
+        kernel_init=_matrix_init(cfg, "mixer/w_out/kernel"),
     )
     # Quantized kernels go through DenseGeneral's own dot_general, so they stay separate.
     self.fused_input_proj = bool(cfg.kda_fused_input_proj) and quant is None
@@ -1608,7 +1680,9 @@ class OLMoE3DecoderLayer(nnx.Module):
     )
     if base is not None and (cfg.moe_mlp_dim == cfg.moe_expert_input_dim or cfg.shared_expert_mlp_dim == cfg.emb_dim):
       # The MoE and shared-FFN inits tell their matrices apart by shape.
-      raise NotImplementedError("CompletedP needs moe_mlp_dim != moe_expert_input_dim and a shared expert width != emb_dim.")
+      raise NotImplementedError(
+          "CompletedP needs moe_mlp_dim != moe_expert_input_dim and a shared expert width != emb_dim."
+      )
     if cfg.olmo_init_method == "nanochat" and (cfg.fused_mlp or cfg.prefuse_moe_weights):
       # Both store gate and up as one kernel, whose fan-out would count both halves.
       raise ValueError("olmo_init_method=nanochat does not support fused_mlp or prefuse_moe_weights.")
@@ -1665,17 +1739,32 @@ class OLMoE3DecoderLayer(nnx.Module):
       if latent_dim <= 0:
         raise ValueError("olmoe3 requires moe_expert_input_dim > 0 (the routed-expert latent width).")
       self.latent_down = _dense(
-          cfg, cfg.emb_dim, latent_dim, ("embed", "mlp"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "latent_down/kernel")
+          cfg,
+          cfg.emb_dim,
+          latent_dim,
+          ("embed", "mlp"),
+          quant,
+          rngs,
+          mesh=mesh,
+          kernel_init=_matrix_init(cfg, "latent_down/kernel"),
       )
       self.latent_up = _dense(
-          cfg, latent_dim, cfg.emb_dim, ("mlp", "embed"), quant, rngs, mesh=mesh, kernel_init=_matrix_init(cfg, "latent_up/kernel")
+          cfg,
+          latent_dim,
+          cfg.emb_dim,
+          ("mlp", "embed"),
+          quant,
+          rngs,
+          mesh=mesh,
+          kernel_init=_matrix_init(cfg, "latent_up/kernel"),
       )
       self.moe_block = OLMoE3LatentRoutedMoE(
           config=cfg,
           num_experts=cfg.num_experts,
           num_experts_per_tok=cfg.num_experts_per_tok,
           mesh=mesh,
-          # The router is [emb, experts]; the experts' wi_0 / wi_1 are [experts, latent, hidden], wo [experts, hidden, latent].
+          # The router is [emb, experts]; the experts' wi_0 / wi_1 are [experts, latent, hidden], wo
+          # [experts, hidden, latent].
           kernel_init=_matrix_init_by_shape(
               cfg,
               lambda shape: "moe_block/gate/kernel"

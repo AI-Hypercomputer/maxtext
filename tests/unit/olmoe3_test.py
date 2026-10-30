@@ -1383,7 +1383,12 @@ class OLMoE3NanochatInitTest(unittest.TestCase):
 
   def test_nanochat_std(self):
     # OLMo-core's test_nanochat_std cases.
-    for fan_in, fan_out, expected in ((256, 256, 1 / 16), (256, 1024, 1 / 16), (1024, 256, 1 / 64), (1024, 8, 8**0.5 / 1024)):
+    for fan_in, fan_out, expected in (
+        (256, 256, 1 / 16),
+        (256, 1024, 1 / 16),
+        (1024, 256, 1 / 64),
+        (1024, 8, 8**0.5 / 1024),
+    ):
       self.assertAlmostEqual(olmoe3_module().nanochat_std(fan_in, fan_out), expected, places=12)
 
   def test_nanochat_init_follows_the_reference_rules(self):
@@ -1417,7 +1422,9 @@ class OLMoE3NanochatInitTest(unittest.TestCase):
     OLMo-core's code applied; see its _source. Values can't match bitwise (different RNGs), so this checks the
     distribution: kind, std, truncation, and that both models have exactly the same parameters and shapes.
     """
-    with open(os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_nanochat_init_olmo_core.json"), encoding="utf-8") as f:
+    with open(
+        os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_nanochat_init_olmo_core.json"), encoding="utf-8"
+    ) as f:
       golden = json.load(f)["params"]
     cfg = _config(
         "olmo35-tiny",

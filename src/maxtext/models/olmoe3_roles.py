@@ -85,6 +85,8 @@ def head_count(config, sub):
   if re.search(_HEAD_SHARED, sub):
     return config.gdn_num_value_heads
   return config.num_query_heads if "query_norm" in sub else config.num_kv_heads
+
+
 # In-layer element-wise parameters, whatever their rank: norm gains (2-D for per-head QK norms), biases, KDA's
 # decay parameters and depthwise short convs, and the SSMax gains.
 _LAYER_VECTORS = r"(/scale|/bias|ssmax_scale|A_log|dt_bias|_conv)$"
@@ -218,5 +220,5 @@ def completedp_init_factor(config, base_config, sub, dense=False):
   for pattern, fan_in, readout in LAYER_MATRICES:
     if re.fullmatch(pattern, sub):
       ratio = fan_in(base_config, dense) / fan_in(config, dense)
-      return ratio if is_readout(config, base_config, sub, dense, readout) else ratio**0.5
+      return ratio if is_readout(config, base_config, sub, dense, readout) else ratio ** 0.5
   raise NotImplementedError(f"no parametrization rule for matrix {sub}")

@@ -23,6 +23,7 @@ import datetime
 import re
 import functools
 import gc
+import math
 import os
 import time
 
@@ -165,8 +166,9 @@ def _static_loss_cotangent(config, is_train):
 
 
 def _static_loss_scale(config):
-  """The static loss scale of `static_loss_cotangent` and manual GA: 1 / (global batch * sequence length)."""
-  return 1.0 / float(config.global_batch_size_to_train_on * config.max_target_length)
+  """The static loss scale of `static_loss_cotangent`: 1 / (global batch * sequence length), rounded down to a power
+  of two so it is exact in bf16 at any batch shape (2^-24 for 2048 x 8192)."""
+  return 2.0 ** -math.ceil(math.log2(config.global_batch_size_to_train_on * config.max_target_length))
 
 
 def olmo_core_loss_denominator(targets_segmentation, total_weights):
@@ -1220,8 +1222,9 @@ def build_ppl_eval_graphdef(config, jit_model, state):
   row overflows a buffer sized for packed training rows, which would change the CE.
 
   Every RoutedMoE (OLMoE3's subclass included) gets ragged_buffer_factor_override = eval_ragged_buffer_factor when that
-  is > 0 (a buffer the user sized for eval), else force_dropless. The training graphdef itself when it is already
-  dropless (ragged_buffer_factor <= 0).
+  is > 0 (a buffer the user sized for eval), else force_dropless plus an override at the worst-case factor
+  min(EP, experts / top_k): force_dropless only reaches the ring-of-experts path, and the all-to-all paths size their
+  buffer from the factor alone. The training graphdef itself when it is already dropless (ragged_buffer_factor <= 0).
   """
   if config.ragged_buffer_factor <= 0 and config.eval_ragged_buffer_factor <= 0:
     return jit_model
@@ -1233,11 +1236,13 @@ def build_ppl_eval_graphdef(config, jit_model, state):
         module.ragged_buffer_factor_override = float(config.eval_ragged_buffer_factor)
       else:
         module.force_dropless = True
+        worst_case = min(module.get_expert_parallelism_size(), module.num_experts / module.num_experts_per_tok)
+        module.ragged_buffer_factor_override = float(worst_case)
       n_moe += 1
   how = (
       f"ragged_buffer_factor_override={config.eval_ragged_buffer_factor}"
       if config.eval_ragged_buffer_factor > 0
-      else "force_dropless"
+      else "force_dropless and the worst-case ragged_buffer_factor_override"
   )
   max_logging.log(f"olmo_ppl_eval graphdef: {how} on {n_moe} RoutedMoE")
   jit_model_ppl, _ = nnx.split(reconstructed)

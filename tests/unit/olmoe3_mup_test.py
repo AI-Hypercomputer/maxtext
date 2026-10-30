@@ -34,7 +34,7 @@ import optax
 from maxtext.optimizers import mup
 from maxtext.optimizers import optimizers
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
-import olmoe3_test as t
+from tests.unit import olmoe3_test as t
 
 BASE = "olmo35-tiny-e256k8-sh2x"
 TARGET = "olmo35-small-e256k8-sh2x"
@@ -73,7 +73,9 @@ class MuPMultiplierTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    with open(os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_mup_multipliers_olmo_core.json"), encoding="utf-8") as f:
+    with open(
+        os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "olmoe3_mup_multipliers_olmo_core.json"), encoding="utf-8"
+    ) as f:
       cls.golden = json.load(f)
 
   def _check_against_olmo_core(self, model):
@@ -108,9 +110,22 @@ class MuPMultiplierTest(unittest.TestCase):
     # A base whose layers are all KDA: the target's attention layers have no base role.
     base = mup.load_base_config(cfg)
     no_attention = collections.namedtuple("Base", ["inhomogeneous_layer_cycle_interval"])(10_000)
-    fields = {k: getattr(base, k) for k in ("emb_dim", "gdn_value_head_dim", "gdn_num_value_heads", "num_query_heads",
-                                            "head_dim", "moe_expert_input_dim", "moe_mlp_dim", "mlp_dim",
-                                            "shared_expert_mlp_dim", "first_num_dense_layers", "num_decoder_layers")}
+    fields = {
+        k: getattr(base, k)
+        for k in (
+            "emb_dim",
+            "gdn_value_head_dim",
+            "gdn_num_value_heads",
+            "num_query_heads",
+            "head_dim",
+            "moe_expert_input_dim",
+            "moe_mlp_dim",
+            "mlp_dim",
+            "shared_expert_mlp_dim",
+            "first_num_dense_layers",
+            "num_decoder_layers",
+        )
+    }
     base = collections.namedtuple("Base", [*fields, "inhomogeneous_layer_cycle_interval"])(
         **fields, inhomogeneous_layer_cycle_interval=no_attention.inhomogeneous_layer_cycle_interval
     )
@@ -120,7 +135,9 @@ class MuPMultiplierTest(unittest.TestCase):
   def test_rejects_parameters_without_a_rule(self):
     cfg = _config(TARGET)
     with self.assertRaisesRegex(NotImplementedError, "no parametrization rule"):
-      mup.lr_multipliers(cfg, mup.load_base_config(cfg), {"decoder": {"layers_1": {"mixer": {"w_new": {"kernel": jnp.zeros((4, 4))}}}}})
+      mup.lr_multipliers(
+          cfg, mup.load_base_config(cfg), {"decoder": {"layers_1": {"mixer": {"w_new": {"kernel": jnp.zeros((4, 4))}}}}}
+      )
 
   def test_rejects_a_kernel_whose_shape_disagrees(self):
     cfg = _config(TARGET)
@@ -144,8 +161,15 @@ class MuPOptimizerTest(unittest.TestCase):
   def setUpClass(cls):
     cls.cfg = {}
     for scaled in (True, False):
-      extra = (*REDUCED, f"mup_scale_weight_decay={scaled}", "adamw_mask=['token_embedder/embedding']",
-               f"adam_weight_decay={cls.WD}", "adam_b1=0.9", "adam_b2=0.95", "adam_eps=1e-8")
+      extra = (
+          *REDUCED,
+          f"mup_scale_weight_decay={scaled}",
+          "adamw_mask=['token_embedder/embedding']",
+          f"adam_weight_decay={cls.WD}",
+          "adam_b1=0.9",
+          "adam_b2=0.95",
+          "adam_eps=1e-8",
+      )
       cls.cfg[scaled] = _config(TARGET, extra=extra)
     cls.base = mup.load_base_config(cls.cfg[True])
     cls.params = _params(cls.cfg[True], init=True)
@@ -174,11 +198,20 @@ class MuPOptimizerTest(unittest.TestCase):
     params = _params(cfg, init=True)
     grads = jax.tree.map(lambda p: jax.random.normal(jax.random.PRNGKey(7), p.shape, p.dtype), params)
     mask = optimizers.get_adamw_mask(cfg)
-    reference = optax.adamw(self.LR, b1=cfg.adam_b1, b2=cfg.adam_b2, eps=cfg.adam_eps, eps_root=cfg.adam_eps_root,
-                            weight_decay=cfg.adam_weight_decay, mu_dtype=cfg.mu_dtype, mask=mask)
+    reference = optax.adamw(
+        self.LR,
+        b1=cfg.adam_b1,
+        b2=cfg.adam_b2,
+        eps=cfg.adam_eps,
+        eps_root=cfg.adam_eps_root,
+        weight_decay=cfg.adam_weight_decay,
+        mu_dtype=cfg.mu_dtype,
+        mask=mask,
+    )
     for scaled in (True, False):
-      cfg_s = _config(BASE, base=BASE, extra=(*REDUCED, "adamw_mask=['token_embedder/embedding']",
-                                                  f"mup_scale_weight_decay={scaled}"))
+      cfg_s = _config(
+          BASE, base=BASE, extra=(*REDUCED, "adamw_mask=['token_embedder/embedding']", f"mup_scale_weight_decay={scaled}")
+      )
       tx = mup.mup_adamw(self.LR, cfg_s, own_base, mask=mask)
       states = [tx.init(params), reference.init(params)]
       self.assertEqual(jax.tree.structure(states[0]), jax.tree.structure(states[1]))
@@ -223,8 +256,16 @@ class MuPOptimizerTest(unittest.TestCase):
     cfg = self.cfg[False]
     mask = optimizers.get_adamw_mask(cfg)
     tx = mup.mup_adamw(schedule, cfg, self.base, mask=mask)
-    reference = optax.adamw(schedule, b1=cfg.adam_b1, b2=cfg.adam_b2, eps=cfg.adam_eps, eps_root=cfg.adam_eps_root,
-                            weight_decay=cfg.adam_weight_decay, mu_dtype=cfg.mu_dtype, mask=mask)
+    reference = optax.adamw(
+        schedule,
+        b1=cfg.adam_b1,
+        b2=cfg.adam_b2,
+        eps=cfg.adam_eps,
+        eps_root=cfg.adam_eps_root,
+        weight_decay=cfg.adam_weight_decay,
+        mu_dtype=cfg.mu_dtype,
+        mask=mask,
+    )
     grads = jax.tree.map(lambda p: jax.random.normal(jax.random.PRNGKey(5), p.shape, p.dtype), self.params)
     s_mup, s_ref = tx.init(self.params), reference.init(self.params)
     for _ in range(4):
