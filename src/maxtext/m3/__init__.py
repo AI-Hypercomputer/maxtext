@@ -44,6 +44,7 @@ if TYPE_CHECKING:
       TransformConfig,
   )
   from maxtext.m3.models.registry import ModelConfig
+  from maxtext.m3.train.trainer import M3Trainer
 
 __all__ = [
     "configs",
@@ -55,7 +56,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-  """Lazily exposes top-level m3 SDK symbols without triggering eager JAX imports."""
+  """Lazily exposes top-level m3 SDK symbols without triggering eager trainer or JAX imports."""
   if name in ("DataPipelineConfig", "MeshConfig", "TrainingConfig", "TransformConfig"):
     from maxtext.m3.configs import training_config  # pylint: disable=import-outside-toplevel
 
@@ -64,4 +65,8 @@ def __getattr__(name: str):
     from maxtext.m3.models.registry import ModelConfig  # pylint: disable=import-outside-toplevel
 
     return ModelConfig
+  if name == "M3Trainer":
+    from maxtext.m3.train.trainer import M3Trainer  # pylint: disable=import-outside-toplevel
+
+    return M3Trainer
   raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -304,6 +304,11 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   jax.config.update("jax_default_prng_impl", config.prng_impl)
   validate_config(config)
+  if config.use_m3_model:
+    from maxtext.m3.train import trainer as m3_trainer  # pylint: disable=import-outside-toplevel
+
+    if m3_trainer.maybe_compile_from_pyconfig(config):
+      return
 
   # Create target mesh
   topology_mesh = get_topology_mesh(config)

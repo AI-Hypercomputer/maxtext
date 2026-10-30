@@ -56,6 +56,8 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.infra import remat as m3_remat
+from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 
@@ -70,6 +72,26 @@ def make_optimizer(config) -> optax.GradientTransformation:
   if config.gradient_clipping_threshold > 0:
     return optax.chain(optax.clip_by_global_norm(config.gradient_clipping_threshold), tx)
   return tx
+
+
+def setup_model(
+    config,
+    mesh: Mesh,
+    *,
+    tx: optax.GradientTransformation | None = None,
+) -> tuple[nnx.Module, nnx.Optimizer]:
+  """Constructs an m3 model, applies `remat` and `scan` transforms, and builds `nnx.Optimizer`.
+
+  Shared infrastructure composition site (`construct -> remat -> scan -> optimizer`) used by both
+  `train_loop` and `M3Trainer`. Must be called inside `with jax.set_mesh(mesh):`.
+  """
+  seed = int(getattr(config, "seed", getattr(config, "init_weights_seed", 0)))
+  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(seed))
+  model = m3_remat.maybe_apply_remat(model, config)
+  model = m3_scan.maybe_apply_scan(model, config)
+  opt_tx = make_optimizer(config) if tx is None else tx
+  optimizer = nnx.Optimizer(model, opt_tx, wrt=nnx.Param)
+  return model, optimizer
 
 
 @functools.lru_cache(maxsize=32)
@@ -147,8 +169,7 @@ def train_loop(config) -> float:
     )
 
   with jax.set_mesh(mesh):
-    model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
-    optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
+    model, optimizer = setup_model(config, mesh)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
     tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length

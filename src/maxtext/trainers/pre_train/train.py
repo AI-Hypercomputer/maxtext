@@ -1715,6 +1715,11 @@ def get_train_func(config, recorder, argv):
 
 def main(argv: Sequence[str]) -> None:
   config, recorder = initialize(argv)
+  if config.use_m3_model:
+    from maxtext.m3.train import trainer as m3_trainer  # pylint: disable=import-outside-toplevel
+
+    if m3_trainer.maybe_train_from_pyconfig(config, recorder):
+      return
   record_goodput(recorder, RECORD_JOB_START_TIME)
   train_func = get_train_func(config, recorder, argv)
   with maybe_monitor_goodput(config):
