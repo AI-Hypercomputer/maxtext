@@ -44,6 +44,9 @@ larger ones `dcn_fsdp_parallelism`.
 - **Code on the pods** ([`bootstrap_tpu7x.py`](../bootstrap_tpu7x.py)):
   - Lance's PRs, plus single-GET HF→GCS streaming (Step 1 only).
   - Two Step 2 HBM-peak patches: free reshard/stack intermediates, and split composite leaves before the reshard.
+  - **`safetensor (with fix)` rows** come from a separate code tree (`/tmp/maxtext_fix`) with this branch's two MaxText
+    fixes (issues U-1 and U-6): the leaves of a stacked composite key are stacked one by one, and `_reshard` joins its
+    slices two at a time. Their results are in their own run dir (`run_tpu7x_16m_fix`).
 - **Tables and CSV:** generated from the result JSONs: the CSV by
   [`scripts/build_tpu7x_tables.py`](../scripts/build_tpu7x_tables.py), the row-by-row tables by
   [`scripts/build_tpu7x_sheet_table.py`](../scripts/build_tpu7x_sheet_table.py). The repeated `qwen3-14b` and
@@ -75,19 +78,28 @@ TPU v7x (bodaborg-tpu7x-nap), models up to 120B: to_maxtext vs safetensor (safet
 - Col 1 (HF -> GCS): to_maxtext Step 1 vs safetensor Step 1, a cold download of the .safetensors shards, measured once and shared by the configurations that reuse it.
 - Col 2 (Convert to Orbax): to_maxtext Step 2, a CPU conversion on one host that every slice count shares. safetensor has no conversion step (—).
 - Col 3 (Load into MaxText): to_maxtext Step 3 (Load Orbax) vs safetensor Step 2 (Safetensors+Convert = load_sharded_hf_state + transform_hf_state_to_mt_state). Peak host RAM is the runner host's.
-- Slices (Devices): a tpu7x host has 4 chips = 8 TPU cores, 813.8 GB HBM and 1,014.5 GB RAM. 1 (8) = 1 slice (2x2x1, one host); 2 (16) = 2 slices over DCN.
+- Slices (Devices): a tpu7x host has 4 chips = 8 TPU cores, 813.8 GB HBM and 1,014.5 GB RAM. 1 (8) = 1 slice (2x2x1, one host); 2 (16) = 2 slices over DCN; 1 (16) = 1 × 2x2x2, 2 (32) = 2 × 2x2x2 multi-host slices (smoke test).
 - Speedup: to_maxtext total / safetensor total, end-to-end / without Step 1. N/A: no total because a step failed or was not run.
+- safetensor (with fix): the same configuration re-run with this branch's MaxText fixes for two HBM peaks (composite leaves stacked one by one; reshard slices joined in pairs), from a separate code tree. The plain safetensor rows don't include these fixes.
 
 | Model | Scan Mode | Slices (Devices) | Pipeline | 1. HF -> GCS (s) | 2. Convert to Orbax (s) | 3. Load into MaxText (s) | Total (No Step 1) (s) | Total (End-to-End) (s) | Speedup (E2E / No Step 1) |
 | :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | qwen3-0.6b (1.5 GB Dense) | scanned | 1 (8) | to_maxtext | 15.98 | 19.40 | 2.54 (Load Orbax) | 21.94 | 37.92 | 1.00x (baseline) |
 | ↳ | scanned | 1 (8) | safetensor | 15.98 | — | 16.14 (Safetensors+Convert: load 4.47 + transform 11.67; peak host RAM 26.8 GB) | 16.14 | 32.12 | 1.18x / 1.36x |
+| qwen3-0.6b (1.5 GB Dense) | scanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A |
+| ↳ | scanned | 1 (16) | safetensor | 15.98 | — | 18.03 (Safetensors+Convert: load 8.99 + transform 9.00; peak host RAM 38.2 GB) | 18.03 | 34.01 | N/A (to_maxtext not run on this layout) |
 | qwen3-0.6b (1.5 GB Dense) | scanned | 2 (16) | to_maxtext | 15.98 | 19.40 | 3.28 (Load Orbax) | 22.68 | 38.66 | 1.00x (baseline) |
 | ↳ | scanned | 2 (16) | safetensor | 15.98 | — | 16.13 (Safetensors+Convert: load 7.01 + transform 9.08; peak host RAM 73.6 GB) | 16.13 | 32.11 | 1.20x / 1.41x |
+| qwen3-0.6b (1.5 GB Dense) | scanned | 2 (32) | to_maxtext | 15.98 | 19.40 (shared with 1 (8)) | 2.94 (Load Orbax) | 22.35 | 38.33 | 1.00x (baseline) |
+| ↳ | scanned | 2 (32) | safetensor | 15.98 | — | 19.34 (Safetensors+Convert: load 8.66 + transform 10.67; peak host RAM 78.3 GB) | 19.34 | 35.32 | 1.09x / 1.16x |
 | qwen3-0.6b (1.5 GB Dense) | unscanned | 1 (8) | to_maxtext | 15.98 | 66.78 | 3.33 (Load Orbax) | 70.11 | 86.09 | 1.00x (baseline) |
 | ↳ | unscanned | 1 (8) | safetensor | 15.98 | — | 6.49 (Safetensors+Convert: load 3.73 + transform 2.75; peak host RAM 26.8 GB) | 6.49 | 22.47 | 3.83x / 10.80x |
+| qwen3-0.6b (1.5 GB Dense) | unscanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A |
+| ↳ | unscanned | 1 (16) | safetensor | 15.98 | — | 9.61 (Safetensors+Convert: load 6.32 + transform 3.28; peak host RAM 38.0 GB) | 9.61 | 25.59 | N/A (to_maxtext not run on this layout) |
 | qwen3-0.6b (1.5 GB Dense) | unscanned | 2 (16) | to_maxtext | 15.98 | 66.78 | 3.38 (Load Orbax) | 70.16 | 86.14 | 1.00x (baseline) |
 | ↳ | unscanned | 2 (16) | safetensor | 15.98 | — | 9.46 (Safetensors+Convert: load 4.96 + transform 4.47; peak host RAM 73.4 GB) | 9.46 | 25.44 | 3.39x / 7.42x |
+| qwen3-0.6b (1.5 GB Dense) | unscanned | 2 (32) | to_maxtext | 15.98 | 66.78 (shared with 1 (8)) | 4.03 (Load Orbax) | 70.81 | 86.79 | 1.00x (baseline) |
+| ↳ | unscanned | 2 (32) | safetensor | 15.98 | — | 11.50 (Safetensors+Convert: load 5.50 + transform 5.95; peak host RAM 78.1 GB) | 11.50 | 27.48 | 3.16x / 6.16x |
 | gemma2-2b (10.5 GB Dense, FP32 checkpoint) | scanned | 1 (8) | to_maxtext | 169.39 | 54.41 | 5.26 (Load Orbax) | 59.67 | 229.06 | 1.00x (baseline) |
 | ↳ | scanned | 1 (8) | safetensor | 169.39 | — | 27.98 (Safetensors+Convert: load 15.15 + transform 12.82; peak host RAM 35.4 GB) | 27.98 | 197.37 | 1.16x / 2.13x |
 | gemma2-2b (10.5 GB Dense, FP32 checkpoint) | scanned | 2 (16) | to_maxtext | 169.39 | 54.41 | 6.68 (Load Orbax) | 61.09 | 230.48 | 1.00x (baseline) |
@@ -154,10 +166,12 @@ TPU v7x (bodaborg-tpu7x-nap), models up to 120B: to_maxtext vs safetensor (safet
 | ↳ | unscanned | 2 (16) | safetensor | 137.26 | — | 115.00 (Safetensors+Convert: load 102.40 + transform 12.58; peak host RAM 116.7 GB) | 115.00 | 252.25 | 1.20x / 1.43x |
 | gpt-oss-20b (41.8 GB MoE) | scanned | 1 (8) | to_maxtext | 93.12 | 102.63 | 63.35 (Load Orbax) | 165.98 | 259.10 | 1.00x (baseline) |
 | ↳ | scanned | 1 (8) | safetensor | 93.12 | — | 127.47 (Safetensors+Convert: load 48.79 + transform 78.68; peak host RAM 39.2 GB) | 127.47 | 220.59 | 1.17x / 1.30x |
+| ↳ | scanned | 1 (8) | safetensor (with fix) | 93.12 | — | 127.90 (Safetensors+Convert: load 52.06 + transform 75.83; peak host RAM 36.2 GB) | 127.90 | 221.02 | 1.17x / 1.30x |
 | gpt-oss-20b (41.8 GB MoE) | scanned | 2 (16) | to_maxtext | 93.12 | 102.63 | 58.31 (Load Orbax) | 160.94 | 254.06 | 1.00x (baseline) |
 | ↳ | scanned | 2 (16) | safetensor | 93.12 | — | 111.90 (Safetensors+Convert: load 25.63 + transform 86.24; peak host RAM 67.1 GB) | 111.90 | 205.02 | 1.24x / 1.44x |
 | gpt-oss-20b (41.8 GB MoE) | unscanned | 1 (8) | to_maxtext | 93.12 | 185.80 | 12.63 (Load Orbax) | 198.43 | 291.55 | 1.00x (baseline) |
 | ↳ | unscanned | 1 (8) | safetensor | 93.12 | — | 78.26 (Safetensors+Convert: load 48.34 + transform 29.90; peak host RAM 37.2 GB) | 78.26 | 171.38 | 1.70x / 2.54x |
+| ↳ | unscanned | 1 (8) | safetensor (with fix) | 93.12 | — | 147.78 (Safetensors+Convert: load 79.02 + transform 68.75; peak host RAM 39.8 GB) | 147.78 | 240.91 | 1.21x / 1.34x |
 | gpt-oss-20b (41.8 GB MoE) | unscanned | 2 (16) | to_maxtext | 93.12 | 185.80 | 12.23 (Load Orbax) | 198.03 | 291.15 | 1.00x (baseline) |
 | ↳ | unscanned | 2 (16) | safetensor | 93.12 | — | 104.55 (Safetensors+Convert: load 32.48 + transform 72.02; peak host RAM 68.3 GB) | 104.55 | 197.67 | 1.47x / 1.89x |
 | qwen3-30b-a3b (61.1 GB MoE) | scanned | 1 (8) | to_maxtext | 78.82 | 151.57 | 386.06 (Load Orbax) | 537.62 | 616.45 | 1.00x (baseline) |
@@ -186,8 +200,10 @@ TPU v7x (bodaborg-tpu7x-nap), models up to 120B: to_maxtext vs safetensor (safet
 | ↳ | unscanned | 2 (16) | safetensor | 197.80 | — | 113.96 (Safetensors+Convert: load 100.40 + transform 13.52; peak host RAM 73.7 GB) | 113.96 | 311.76 | 1.96x / 3.87x |
 | gpt-oss-120b (233.7 GB MoE) | scanned | 1 (8) | to_maxtext | 350.33 | 581.39 | 839.25 (Load Orbax) | 1,420.65 | 1,770.97 | 1.00x (baseline) |
 | ↳ | scanned | 1 (8) | safetensor | 350.33 | — | HBM OOM in transform (load 253.62 s; 200.32 GiB of HLO temporaries per device, 94.74 GiB available) | N/A | N/A | Only to_maxtext loads this config |
+| ↳ | scanned | 1 (8) | safetensor (with fix) | 350.33 | — | 504.92 (Safetensors+Convert: load 260.44 + transform 244.47; peak host RAM 44.6 GB) | 504.92 | 855.24 | 2.07x / 2.81x |
 | gpt-oss-120b (233.7 GB MoE) | scanned | 2 (16) | to_maxtext | 350.33 | 581.39 | 893.97 (Load Orbax) | 1,475.36 | 1,825.69 | 1.00x (baseline) |
 | ↳ | scanned | 2 (16) | safetensor | 350.33 | — | HBM OOM in transform (load 126.92 s; 100.21 GiB of HLO temporaries per device, 94.74 GiB available) | N/A | N/A | Only to_maxtext loads this config |
+| ↳ | scanned | 2 (16) | safetensor (with fix) | 350.33 | — | 429.98 (Safetensors+Convert: load 127.52 + transform 302.46; peak host RAM 71.4 GB) | 429.98 | 780.31 | 2.34x / 3.43x |
 | gpt-oss-120b (233.7 GB MoE) | unscanned | 1 (8) | to_maxtext | 350.33 | 617.84 | 110.61 (Load Orbax) | 728.46 | 1,078.78 | 1.00x (baseline) |
 | ↳ | unscanned | 1 (8) | safetensor | 350.33 | — | 446.71 (Safetensors+Convert: load 250.76 + transform 195.93; peak host RAM 306.0 GB) | 446.71 | 797.04 | 1.35x / 1.63x |
 | gpt-oss-120b (233.7 GB MoE) | unscanned | 2 (16) | to_maxtext | 350.33 | 617.84 | 115.05 (Load Orbax) | 732.90 | 1,083.22 | 1.00x (baseline) |
@@ -203,18 +219,27 @@ For each (Model, Scan Mode, Slices) configuration, to_maxtext and safetensor are
 Col 1 (HF -> GCS): to_maxtext Step 1 vs safetensor Step 1, a cold download of the .safetensors shards, measured once and shared by the configurations that reuse it.
 Col 2 (Convert to Orbax): to_maxtext Step 2, a CPU conversion on one host that every slice count shares. safetensor has no conversion step (—).
 Col 3 (Load into MaxText): to_maxtext Step 3 (Load Orbax) vs safetensor Step 2 (Safetensors+Convert = load_sharded_hf_state + transform_hf_state_to_mt_state). Peak host RAM is the runner host's.
-Slices (Devices): a tpu7x host has 4 chips = 8 TPU cores, 813.8 GB HBM and 1,014.5 GB RAM. 1 (8) = 1 slice (2x2x1, one host); 2 (16) = 2 slices over DCN.
+Slices (Devices): a tpu7x host has 4 chips = 8 TPU cores, 813.8 GB HBM and 1,014.5 GB RAM. 1 (8) = 1 slice (2x2x1, one host); 2 (16) = 2 slices over DCN; 1 (16) = 1 × 2x2x2, 2 (32) = 2 × 2x2x2 multi-host slices (smoke test).
 Speedup: to_maxtext total / safetensor total, end-to-end / without Step 1. N/A: no total because a step failed or was not run.
+safetensor (with fix): the same configuration re-run with this branch's MaxText fixes for two HBM peaks (composite leaves stacked one by one; reshard slices joined in pairs), from a separate code tree. The plain safetensor rows don't include these fixes.
 
 Model	Scan Mode	Slices (Devices)	Pipeline	1. HF -> GCS (s)	2. Convert to Orbax (s)	3. Load into MaxText (s)	Total (No Step 1) (s)	Total (End-to-End) (s)	Speedup (E2E / No Step 1)
 qwen3-0.6b (1.5 GB Dense)	scanned	1 (8)	to_maxtext	15.98	19.40	2.54 (Load Orbax)	21.94	37.92	1.00x (baseline)
 ↳	scanned	1 (8)	safetensor	15.98	—	16.14 (Safetensors+Convert: load 4.47 + transform 11.67; peak host RAM 26.8 GB)	16.14	32.12	1.18x / 1.36x
+qwen3-0.6b (1.5 GB Dense)	scanned	1 (16)	to_maxtext	—	Not run on multi-host slices	—	N/A	N/A	N/A
+↳	scanned	1 (16)	safetensor	15.98	—	18.03 (Safetensors+Convert: load 8.99 + transform 9.00; peak host RAM 38.2 GB)	18.03	34.01	N/A (to_maxtext not run on this layout)
 qwen3-0.6b (1.5 GB Dense)	scanned	2 (16)	to_maxtext	15.98	19.40	3.28 (Load Orbax)	22.68	38.66	1.00x (baseline)
 ↳	scanned	2 (16)	safetensor	15.98	—	16.13 (Safetensors+Convert: load 7.01 + transform 9.08; peak host RAM 73.6 GB)	16.13	32.11	1.20x / 1.41x
+qwen3-0.6b (1.5 GB Dense)	scanned	2 (32)	to_maxtext	15.98	19.40 (shared with 1 (8))	2.94 (Load Orbax)	22.35	38.33	1.00x (baseline)
+↳	scanned	2 (32)	safetensor	15.98	—	19.34 (Safetensors+Convert: load 8.66 + transform 10.67; peak host RAM 78.3 GB)	19.34	35.32	1.09x / 1.16x
 qwen3-0.6b (1.5 GB Dense)	unscanned	1 (8)	to_maxtext	15.98	66.78	3.33 (Load Orbax)	70.11	86.09	1.00x (baseline)
 ↳	unscanned	1 (8)	safetensor	15.98	—	6.49 (Safetensors+Convert: load 3.73 + transform 2.75; peak host RAM 26.8 GB)	6.49	22.47	3.83x / 10.80x
+qwen3-0.6b (1.5 GB Dense)	unscanned	1 (16)	to_maxtext	—	Not run on multi-host slices	—	N/A	N/A	N/A
+↳	unscanned	1 (16)	safetensor	15.98	—	9.61 (Safetensors+Convert: load 6.32 + transform 3.28; peak host RAM 38.0 GB)	9.61	25.59	N/A (to_maxtext not run on this layout)
 qwen3-0.6b (1.5 GB Dense)	unscanned	2 (16)	to_maxtext	15.98	66.78	3.38 (Load Orbax)	70.16	86.14	1.00x (baseline)
 ↳	unscanned	2 (16)	safetensor	15.98	—	9.46 (Safetensors+Convert: load 4.96 + transform 4.47; peak host RAM 73.4 GB)	9.46	25.44	3.39x / 7.42x
+qwen3-0.6b (1.5 GB Dense)	unscanned	2 (32)	to_maxtext	15.98	66.78 (shared with 1 (8))	4.03 (Load Orbax)	70.81	86.79	1.00x (baseline)
+↳	unscanned	2 (32)	safetensor	15.98	—	11.50 (Safetensors+Convert: load 5.50 + transform 5.95; peak host RAM 78.1 GB)	11.50	27.48	3.16x / 6.16x
 gemma2-2b (10.5 GB Dense, FP32 checkpoint)	scanned	1 (8)	to_maxtext	169.39	54.41	5.26 (Load Orbax)	59.67	229.06	1.00x (baseline)
 ↳	scanned	1 (8)	safetensor	169.39	—	27.98 (Safetensors+Convert: load 15.15 + transform 12.82; peak host RAM 35.4 GB)	27.98	197.37	1.16x / 2.13x
 gemma2-2b (10.5 GB Dense, FP32 checkpoint)	scanned	2 (16)	to_maxtext	169.39	54.41	6.68 (Load Orbax)	61.09	230.48	1.00x (baseline)
@@ -281,10 +306,12 @@ deepseek2-16b (31.4 GB MoE)	unscanned	2 (16)	to_maxtext	137.26	147.18	17.59 (Loa
 ↳	unscanned	2 (16)	safetensor	137.26	—	115.00 (Safetensors+Convert: load 102.40 + transform 12.58; peak host RAM 116.7 GB)	115.00	252.25	1.20x / 1.43x
 gpt-oss-20b (41.8 GB MoE)	scanned	1 (8)	to_maxtext	93.12	102.63	63.35 (Load Orbax)	165.98	259.10	1.00x (baseline)
 ↳	scanned	1 (8)	safetensor	93.12	—	127.47 (Safetensors+Convert: load 48.79 + transform 78.68; peak host RAM 39.2 GB)	127.47	220.59	1.17x / 1.30x
+↳	scanned	1 (8)	safetensor (with fix)	93.12	—	127.90 (Safetensors+Convert: load 52.06 + transform 75.83; peak host RAM 36.2 GB)	127.90	221.02	1.17x / 1.30x
 gpt-oss-20b (41.8 GB MoE)	scanned	2 (16)	to_maxtext	93.12	102.63	58.31 (Load Orbax)	160.94	254.06	1.00x (baseline)
 ↳	scanned	2 (16)	safetensor	93.12	—	111.90 (Safetensors+Convert: load 25.63 + transform 86.24; peak host RAM 67.1 GB)	111.90	205.02	1.24x / 1.44x
 gpt-oss-20b (41.8 GB MoE)	unscanned	1 (8)	to_maxtext	93.12	185.80	12.63 (Load Orbax)	198.43	291.55	1.00x (baseline)
 ↳	unscanned	1 (8)	safetensor	93.12	—	78.26 (Safetensors+Convert: load 48.34 + transform 29.90; peak host RAM 37.2 GB)	78.26	171.38	1.70x / 2.54x
+↳	unscanned	1 (8)	safetensor (with fix)	93.12	—	147.78 (Safetensors+Convert: load 79.02 + transform 68.75; peak host RAM 39.8 GB)	147.78	240.91	1.21x / 1.34x
 gpt-oss-20b (41.8 GB MoE)	unscanned	2 (16)	to_maxtext	93.12	185.80	12.23 (Load Orbax)	198.03	291.15	1.00x (baseline)
 ↳	unscanned	2 (16)	safetensor	93.12	—	104.55 (Safetensors+Convert: load 32.48 + transform 72.02; peak host RAM 68.3 GB)	104.55	197.67	1.47x / 1.89x
 qwen3-30b-a3b (61.1 GB MoE)	scanned	1 (8)	to_maxtext	78.82	151.57	386.06 (Load Orbax)	537.62	616.45	1.00x (baseline)
@@ -313,8 +340,10 @@ llama3.1-70b (141.1 GB Dense)	unscanned	2 (16)	to_maxtext	171.23	398.09	42.48 (L
 ↳	unscanned	2 (16)	safetensor	197.80	—	113.96 (Safetensors+Convert: load 100.40 + transform 13.52; peak host RAM 73.7 GB)	113.96	311.76	1.96x / 3.87x
 gpt-oss-120b (233.7 GB MoE)	scanned	1 (8)	to_maxtext	350.33	581.39	839.25 (Load Orbax)	1,420.65	1,770.97	1.00x (baseline)
 ↳	scanned	1 (8)	safetensor	350.33	—	HBM OOM in transform (load 253.62 s; 200.32 GiB of HLO temporaries per device, 94.74 GiB available)	N/A	N/A	Only to_maxtext loads this config
+↳	scanned	1 (8)	safetensor (with fix)	350.33	—	504.92 (Safetensors+Convert: load 260.44 + transform 244.47; peak host RAM 44.6 GB)	504.92	855.24	2.07x / 2.81x
 gpt-oss-120b (233.7 GB MoE)	scanned	2 (16)	to_maxtext	350.33	581.39	893.97 (Load Orbax)	1,475.36	1,825.69	1.00x (baseline)
 ↳	scanned	2 (16)	safetensor	350.33	—	HBM OOM in transform (load 126.92 s; 100.21 GiB of HLO temporaries per device, 94.74 GiB available)	N/A	N/A	Only to_maxtext loads this config
+↳	scanned	2 (16)	safetensor (with fix)	350.33	—	429.98 (Safetensors+Convert: load 127.52 + transform 302.46; peak host RAM 71.4 GB)	429.98	780.31	2.34x / 3.43x
 gpt-oss-120b (233.7 GB MoE)	unscanned	1 (8)	to_maxtext	350.33	617.84	110.61 (Load Orbax)	728.46	1,078.78	1.00x (baseline)
 ↳	unscanned	1 (8)	safetensor	350.33	—	446.71 (Safetensors+Convert: load 250.76 + transform 195.93; peak host RAM 306.0 GB)	446.71	797.04	1.35x / 1.63x
 gpt-oss-120b (233.7 GB MoE)	unscanned	2 (16)	to_maxtext	350.33	617.84	115.05 (Load Orbax)	732.90	1,083.22	1.00x (baseline)
@@ -325,7 +354,8 @@ gpt-oss-120b (233.7 GB MoE)	unscanned	2 (16)	to_maxtext	350.33	617.84	115.05 (Lo
 <!-- SHEET TABLE END -->
 
 The text between the `SHEET TABLE` markers is generated by
-[`scripts/build_tpu7x_sheet_table.py`](../scripts/build_tpu7x_sheet_table.py) (`--suite p2`) from the result JSONs.
+[`scripts/build_tpu7x_sheet_table.py`](../scripts/build_tpu7x_sheet_table.py) (`--suite p2`, plus
+`--variant "with fix=<run_tpu7x_16m_fix logs>"` for the `safetensor (with fix)` rows) from the result JSONs.
 A failed step shows its reason in that step's column.
 
 ### 3.2 >200B models (Priority 1)
@@ -352,9 +382,11 @@ The >200B table, with Lance Wang's multi-host runs, is in the same format in the
 4. **Two configurations favor `to_maxtext`** (see the issues report):
    - `qwen3-14b` scanned · 1 slice (0.65×): its `safetensor` transform takes ~290 s, reproduced in a re-run.
    - `qwen3-30b-a3b` unscanned · 2 slices (0.78×): its 2-slice `safetensor` load takes 333 s, vs 96 s on 1 slice.
-5. **`gpt-oss-120b` scanned loads only with `to_maxtext`.** The `safetensor` transform runs out of HBM in a jitted
-   expert transform: 200 GB of temporaries per device on 1 slice, 100 GB on 2. Unscanned `safetensor` works: 446.7 s
-   on 1 slice and 390.7 s on 2.
+5. **`gpt-oss-120b` scanned needs this branch's fix for `safetensor`.** With Lance's PRs, the transform runs out of
+   HBM: one jitted concatenate of up to 128 reshard slices asks for 200 GB of temporaries per device on 1 slice
+   (100 GB on 2). Joining the slices two at a time (issue U-6) fixes it: 505.1 s on 1 slice and 430.2 s on 2, so
+   `safetensor` is 2.07× and 2.34× faster end-to-end than `to_maxtext` there too (the `safetensor (with fix)` rows).
+   Unscanned `safetensor` works without the fix: 446.7 s and 390.7 s.
 6. **Lance's PRs are required on tpu7x for >200B models.** Without them, `origin/main` either has no mapping (480B)
    or doesn't finish loading within 1800 s.
 
@@ -369,5 +401,6 @@ The >200B table, with Lance Wang's multi-host runs, is in the same format in the
 ## 6. Issues found and fixed
 
 See [`tpu7x_benchmark_ckpt_load_time_issues.md`](tpu7x_benchmark_ckpt_load_time_issues.md):
-- **T-1 … T-15:** harness, infrastructure and capacity issues, all resolved.
-- **U-1 … U-7:** MaxText issues and capacity limits. Two are open MaxText bugs: the `qwen3.5-397b-a17b` composite-split HBM peak and the `gpt-oss-120b` jitted transform temporaries.
+- **T-1 … T-17:** harness, infrastructure and capacity issues.
+- **U-1 … U-8:** MaxText issues and capacity limits. Two MaxText bugs are fixed on this branch and validated on
+  tpu7x: the `qwen3.5-397b-a17b` composite-split HBM peak (U-1) and the `gpt-oss-120b` reshard temporaries (U-6).

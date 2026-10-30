@@ -109,9 +109,12 @@ SUITES = {
             _COL2,
             _COL3,
             f"Slices (Devices): {_HOST} 1 (8), 2 (16), 4 (32) = 1, 2, 4 × 2x2x1 single-host slices (P1 runs). "
-            "1 (16) = 1 × 2x2x2, 1 (32) = 1 × 2x2x4, 2 (32) = 2 × 2x2x2, 4 (64) = 4 × 2x2x2 multi-host slices "
-            "(Lance Wang's runs, safetensor only).",
+            "1 (16) = 1 × 2x2x2, 1 (32) = 1 × 2x2x4, 2 (32) = 2 × 2x2x2, 4 (64) = 4 × 2x2x2, 1 (64) = 1 × 2x4x4 "
+            "multi-host slices (safetensor: Lance Wang's runs and the 10-30 runs; to_maxtext: Orbax loads of the "
+            "checkpoint that the single-host conversion wrote, so Steps 1-2 are the ones of 1 (8)).",
             _SPEEDUP,
+            "Status symbols: ⏳ In progress = currently running on the cluster; ⏳ Queued = queued in Kueue waiting "
+            "for spot slice capacity.",
         ],
     },
     "p2": {
@@ -122,7 +125,8 @@ SUITES = {
             _COL1,
             _COL2,
             _COL3,
-            f"Slices (Devices): {_HOST} 1 (8) = 1 slice (2x2x1, one host); 2 (16) = 2 slices over DCN.",
+            f"Slices (Devices): {_HOST} 1 (8) = 1 slice (2x2x1, one host); 2 (16) = 2 slices over DCN; "
+            "1 (16) = 1 × 2x2x2, 2 (32) = 2 × 2x2x2 multi-host slices (smoke test).",
             _SPEEDUP,
         ],
     },
@@ -160,9 +164,52 @@ NOTES = {
         "Killed (-9) on slice 0 at 742.1 GB sampled peak host RAM; loads on 4 slices"
     ),
     ("deepseek3-671b", None, None, "to_maxtext"): "Not run (1.34 TB can't be converted on one host)",
+    ("deepseek3.2-671b", None, None, "to_maxtext"): "Not run (1.37 TB can't be converted on one host)",
+    ("deepseek4-1600b", None, None, "to_maxtext"): "Not run (3.2 TB can't be converted on one host)",
 }
 # Extra text after a successful `to_maxtext` Step 2 time, keyed by (model, scan mode); the 2-slice row says "shared".
-TM_S2_NOTES = {("qwen3-235b-a22b", "unscanned"): "16 parallel shard reads; single stream: 5,150.13"}
+TM_S2_NOTES = {
+    ("qwen3-235b-a22b", "unscanned"): "16 parallel shard reads; single stream: 5,150.13",
+    ("qwen3.5-397b-a17b", "unscanned"): (
+        "with this branch's Orbax save-buffer cap, OOM-killed at the save without it; 16 parallel shard reads"
+    ),
+}
+# Step 3 text of a configuration whose conversion worked but whose Orbax load was not run, keyed by (model, scan, n).
+TM_S3_NOTES = {
+    ("qwen3.5-397b-a17b", "unscanned", 1): "Not run (the 795.5 GB checkpoint fills 98% of the 813.8 GB HBM)",
+    ("qwen3.5-397b-a17b", "unscanned", 2): (
+        "⏳ In progress (loading the converted Orbax checkpoint on 2 × 2x2x1)"
+    ),
+}
+# Step 3 text of a multi-host `to_maxtext` Orbax load that is currently running or queued on the cluster.
+TM_MH_PENDING = {
+    ("qwen3.5-397b-a17b", "unscanned", "1 × 2x2x2"): (
+        "⏳ In progress (loading the converted Orbax checkpoint on 1 × 2x2x2)"
+    ),
+    ("qwen3.5-397b-a17b", "unscanned", "2 × 2x2x2"): (
+        "⏳ In progress (loading the converted Orbax checkpoint on 2 × 2x2x2)"
+    ),
+    ("qwen3.5-397b-a17b", "unscanned", "1 × 2x2x4"): (
+        "⏳ Queued (waiting for 1 × 2x2x4 spot slice to load the converted Orbax checkpoint)"
+    ),
+}
+# Multi-host `safetensors_dynamic` runs currently running or queued that don't have a CSV row yet.
+PENDING_MULTIHOST = [
+    ("qwen3-480b-a35b", "scanned", "2 × 2x2x2", 4, 32, "⏳ In progress (running on 2 × 2x2x2)"),
+    ("qwen3-480b-a35b", "unscanned", "2 × 2x2x2", 4, 32, "⏳ In progress (running on 2 × 2x2x2)"),
+    ("deepseek3.2-671b", "scanned", "1 × 2x2x4", 4, 32, "⏳ Queued (waiting for 1 × 2x2x4 spot slice)"),
+    ("deepseek3.2-671b", "unscanned", "1 × 2x2x4", 4, 32, "⏳ Queued (waiting for 1 × 2x2x4 spot slice)"),
+    ("deepseek4-1600b", "scanned", "1 × 2x4x4", 8, 64, "⏳ Queued (waiting for 1 × 2x4x4 spot slice)"),
+    ("deepseek4-1600b", "unscanned", "1 × 2x4x4", 8, 64, "⏳ Queued (waiting for 1 × 2x4x4 spot slice)"),
+]
+# Legend line for the `safetensor (<label>)` rows of a fix variant (`--variant`), added when the table has such rows.
+VARIANT_LEGEND = {
+    "with fix": (
+        "safetensor (with fix): the same configuration re-run with this branch's MaxText fixes for two HBM peaks "
+        "(composite leaves stacked one by one; reshard slices joined in pairs), from a separate code tree. The plain "
+        "safetensor rows don't include these fixes."
+    ),
+}
 # Short forms of build_tpu7x_tables.failure_reason() for `to_maxtext` Step 2.
 TM_REASONS = {
     "source must be staged in RAM next to the converted state; exceeds host RAM": (
@@ -236,19 +283,33 @@ def config_pairs(logs: Logs, row: dict) -> list[list[str]]:
 
   if tm_status == "not run":
     tm = ["—", _note(model, scan, n, "to_maxtext") or "Not run", "—", "N/A", "N/A", "N/A"]
-  elif tm_ok:
+  elif tm_ok or tm_status.startswith("S3: "):
     s2_note = TM_S2_NOTES.get((model, scan))
     s2 = _fmt(row["to_maxtext_2_convert_to_orbax_s"])
     if s2_note:
       s2 += f" ({s2_note})" if n == 1 else " (shared with 1 (8))"
-    tm = [
-        _s1(model, row["to_maxtext_1_hf_to_gcs_s"]),
-        s2,
-        f"{_fmt(row['to_maxtext_3_load_orbax_s'])} (Load Orbax)",
-        _fmt(tm_no1),
-        _fmt(row["to_maxtext_total_s"]),
-        "1.00x (baseline)",
-    ]
+    if tm_ok:
+      tm = [
+          _s1(model, row["to_maxtext_1_hf_to_gcs_s"]),
+          s2,
+          f"{_fmt(row['to_maxtext_3_load_orbax_s'])} (Load Orbax)",
+          _fmt(tm_no1),
+          _fmt(row["to_maxtext_total_s"]),
+          "1.00x (baseline)",
+      ]
+    else:
+      # The conversion worked; only the Orbax load of this configuration is missing or failed.
+      reason = tm_status.removeprefix("S3: ")
+      s3 = TM_S3_NOTES.get((model, scan, n)) or ("Not run" if reason == "not run" else _cap(reason))
+      pending = s3.startswith("⏳")
+      tm = [
+          _s1(model, row["to_maxtext_1_hf_to_gcs_s"]),
+          s2,
+          s3,
+          "⏳" if pending else "N/A",
+          "⏳" if pending else "N/A",
+          "⏳ In progress" if pending else "N/A",
+      ]
   else:
     reason = tm_status.removeprefix("S2: ").removeprefix("S3: ")
     text = _note(model, scan, n, "to_maxtext") or TM_REASONS.get(reason) or _cap(reason)
@@ -257,8 +318,13 @@ def config_pairs(logs: Logs, row: dict) -> list[list[str]]:
   rec, log_path = logs.load(model, cfg, "safetensors_dynamic")
   if st_ok:
     peak = float((rec or {}).get("peak_host_ram_gb", 0.0) or 0.0)
+    s3_note = TM_S3_NOTES.get((model, scan, n), "")
     if tm_ok:
       speedup = f"{row['to_maxtext_total_s'] / row['safetensor_total_s']:.2f}x / {tm_no1 / st_no1:.2f}x"
+    elif tm_status == "S3: not run" and s3_note.startswith("⏳"):
+      speedup = "⏳ In progress (waiting for to_maxtext Step 3)"
+    elif tm_status == "S3: not run":
+      speedup = "N/A (to_maxtext load not run)"
     else:
       speedup = "Only safetensor loads this config"
     st = [
@@ -289,18 +355,41 @@ def _multihost_cfg(rec: dict) -> str:
   return f"{rec['scan_mode']}{f'_slices{n}' if n > 1 else ''}_hosts{int(rec['hosts']) // n}"
 
 
-def _mh_st_tail(rec: dict, cold_s1: float, tm_total: float = 0.0, tm_no1: float = 0.0) -> list[str]:
-  """Step 3 to speedup cells of a multi-host safetensors_dynamic run (a row of tpu7x_multihost_results.csv)."""
+def _mh_st_tail(
+    rec: dict,
+    cold_s1: float,
+    tm_total: float = 0.0,
+    tm_no1: float = 0.0,
+    no_tm: str = "N/A (to_maxtext not run on multi-host)",
+) -> list[str]:
+  """Step 3 to speedup cells of a multi-host safetensors_dynamic run (a row of tpu7x_multihost_results.csv).
+
+  `no_tm` is the speedup text when there is no to_maxtext total to compare with.
+  """
+  if rec["status"] == "PENDING":
+    tag = "⏳ In progress" if "In progress" in rec["note"] else "⏳ Queued"
+    return [rec["note"], "⏳", "⏳", tag]
   if rec["status"] != "OK":
     return [rec["note"].replace("`", ""), "N/A", "N/A", "N/A"]
   total = float(rec["total_s"])
   cell = _st_cell(total, float(rec["load_s"]), float(rec["transform_s"]), float(rec["peak_host_ram_gb"]))
-  speedup = (
-      f"{tm_total / (cold_s1 + total):.2f}x / {tm_no1 / total:.2f}x"
-      if tm_total
-      else "N/A (to_maxtext not run on multi-host)"
-  )
+  speedup = f"{tm_total / (cold_s1 + total):.2f}x / {tm_no1 / total:.2f}x" if tm_total else no_tm
   return [cell, _fmt(total), _fmt(cold_s1 + total), speedup]
+
+
+def _tm_converted(row: dict | None) -> bool:
+  """True if the `to_maxtext` conversion (Steps 1-2) of a build_rows() row worked, whatever its Orbax load did."""
+  return bool(row) and (row["to_maxtext_status"] == "OK" or row["to_maxtext_status"].startswith("S3: "))
+
+
+def _mh_tm_missing(model: str, scan: str, tm_ref: dict | None) -> str:
+  """The Step 2 text of a multi-host to_maxtext row without an Orbax load result."""
+  note = _note(model, scan, 0, "to_maxtext")
+  if _tm_converted(tm_ref):
+    return "Not run on multi-host slices"
+  if tm_ref is None or tm_ref["to_maxtext_status"] == "not run":
+    return note or "Not run (no single-host conversion)"
+  return "No checkpoint to load (the single-host conversion fails, see 1 (8))"
 
 
 def multihost_pair(rec: dict, cold_s1: float, logs: Logs | None = None, tm_ref: dict | None = None) -> list[list[str]]:
@@ -313,30 +402,41 @@ def multihost_pair(rec: dict, cold_s1: float, logs: Logs | None = None, tm_ref: 
   model, scan = rec["model"], rec["scan_mode"]
   label, slices = f"{model} ({MODELS[model]})", f"{rec['layout'].split(' ')[0]} ({rec['devices']})"
   tm3 = logs.load(model, _multihost_cfg(rec), "to_maxtext_step3")[0] if logs else None
-  s2 = tm_ref["to_maxtext_2_convert_to_orbax_s"] if tm_ref else 0.0
+  s2 = tm_ref["to_maxtext_2_convert_to_orbax_s"] if _tm_converted(tm_ref) else 0.0
+  tm_pending = TM_MH_PENDING.get((model, scan, rec["layout"]))
   tm_total = tm_no1 = 0.0
-  if tm3 is None or not s2:
-    tm = [label, scan, slices, "to_maxtext", "—", "Not run (to_maxtext was not run on multi-host slices)", "—"]
-    tm += ["N/A", "N/A", "N/A"]
+  if tm3 is None and tm_pending and s2 and tm_ref is not None:
+    s1 = tm_ref["to_maxtext_1_hf_to_gcs_s"]
+    tag = "⏳ In progress" if "In progress" in tm_pending else "⏳ Queued"
+    tm = [label, scan, slices, "to_maxtext", _s1(model, s1), f"{_fmt(s2)} (shared with 1 (8))", tm_pending, "⏳", "⏳", tag]
+    no_tm = f"{tag} (waiting for to_maxtext Step 3)"
+  elif tm3 is None or not s2 or tm_ref is None:
+    tm = [label, scan, slices, "to_maxtext", "—", _mh_tm_missing(model, scan, tm_ref), "—", "N/A", "N/A", "N/A"]
+    no_tm = "N/A (to_maxtext not run on this layout)" if _tm_converted(tm_ref) else "Only safetensor loads this config"
   else:
     s1 = tm_ref["to_maxtext_1_hf_to_gcs_s"]
     head = [label, scan, slices, "to_maxtext", _s1(model, s1), f"{_fmt(s2)} (shared with 1 (8))"]
     if tm3.get("status") == "FAILED":
-      reason = _cap(failure_reason(tm3, logs.load(model, _multihost_cfg(rec), "to_maxtext_step3")[1]))
+      log_path = logs.load(model, _multihost_cfg(rec), "to_maxtext_step3")[1] if logs else ""
+      reason = _cap(failure_reason(tm3, log_path))
       tm = head + [reason, "N/A", "N/A", "N/A"]
     else:
       load = float(tm3["load_orbax_s"])
       tm_no1, tm_total = s2 + load, s1 + s2 + load
       tm = head + [f"{_fmt(load)} (Load Orbax)", _fmt(tm_no1), _fmt(tm_total), "1.00x (baseline)"]
-  st = ["↳", scan, slices, "safetensor", _s1(model, cold_s1), "—"] + _mh_st_tail(rec, cold_s1, tm_total, tm_no1)
+    no_tm = "N/A (to_maxtext not run on this layout)" if _tm_converted(tm_ref) else "Only safetensor loads this config"
+  st = ["↳", scan, slices, "safetensor", _s1(model, cold_s1), "—"]
+  st += _mh_st_tail(rec, cold_s1, tm_total, tm_no1, no_tm)
   return [tm, st]
 
 
-def variant_row(rec: dict, cold_s1: float, label: str) -> list[str]:
+def variant_row(rec: dict, cold_s1: float, label: str, tm_ref: dict | None = None) -> list[str]:
   """One extra safetensor row for a multi-host run of a fix variant (a CSV row whose note names the variant)."""
   model, scan = rec["model"], rec["scan_mode"]
   slices = f"{rec['layout'].split(' ')[0]} ({rec['devices']})"
-  return ["↳", scan, slices, f"safetensor ({label})", _s1(model, cold_s1), "—"] + _mh_st_tail(rec, cold_s1)
+  no_tm = "N/A (to_maxtext not run on this layout)" if _tm_converted(tm_ref) else "Only safetensor loads this config"
+  head = ["↳", scan, slices, f"safetensor ({label})", _s1(model, cold_s1), "—"]
+  return head + _mh_st_tail(rec, cold_s1, no_tm=no_tm)
 
 
 def variant_config_row(row: dict, logs: Logs, label: str) -> list[str] | None:
@@ -356,9 +456,14 @@ def variant_config_row(row: dict, logs: Logs, label: str) -> list[str] | None:
     cell = _st_cell(total, float(rec["load_sharded_hf_s"]), float(rec["transform_hf_to_mt_s"]), peak)
     tm_ok = row["to_maxtext_status"] == "OK"
     tm_no1 = row["to_maxtext_2_convert_to_orbax_s"] + row["to_maxtext_3_load_orbax_s"]
+    s3_note = TM_S3_NOTES.get((model, scan, n), "")
     speedup = (
         f"{row['to_maxtext_total_s'] / (cold_s1 + total):.2f}x / {tm_no1 / total:.2f}x"
         if tm_ok
+        else "⏳ In progress (waiting for to_maxtext Step 3)"
+        if row["to_maxtext_status"] == "S3: not run" and s3_note.startswith("⏳")
+        else "N/A (to_maxtext load not run)"
+        if row["to_maxtext_status"] == "S3: not run"
         else "Only safetensor loads this config"
     )
     tail = [cell, _fmt(total), _fmt(cold_s1 + total), speedup]
@@ -392,30 +497,53 @@ def build(
     rows = [r for r in runs if r["model"] == model]
     cold_s1 = rows[0]["safetensor_1_hf_to_gcs_s"] if rows else 0.0
     for scan in ("scanned", "unscanned"):
+      blocks = []
       if (model, scan) in SKIPPED:
-        out += skipped_pair(model, scan, *SKIPPED[(model, scan)])
+        blocks.append(((0, 0), skipped_pair(model, scan, *SKIPPED[(model, scan)])))
       scan_rows = sorted((r for r in rows if r["scan_mode"] == scan), key=lambda r: r["num_slices"])
       for r in scan_rows:
-        out += config_pairs(logs, r)
+        blk = config_pairs(logs, r)
         for label, vlogs in variant_logs:
           extra = variant_config_row(r, vlogs, label)
           if extra:
-            out.append(extra)
+            blk.append(extra)
+        blocks.append(((int(r["global_devices"]), int(r["num_slices"])), blk))
       tm_ref = scan_rows[0] if scan_rows else None
       model_mh = [r for r in mh if r["model"] == model and r["scan_mode"] == scan]
-      base = [r for r in model_mh if not any(r.get("note", "").startswith(label) for label in labels)]
-      for r in sorted(base, key=lambda r: (int(r["devices"]), int(r["layout"].split(" ")[0]))):
-        out += multihost_pair(r, cold_s1, logs, tm_ref)
+      have_layouts = set()
+      base = []
+      for r in model_mh:
+        if not any(r.get("note", "").startswith(label) for label in labels) and r["layout"] not in have_layouts:
+          have_layouts.add(r["layout"])
+          base.append(r)
+      for p_model, p_scan, p_layout, p_hosts, p_devices, p_note in PENDING_MULTIHOST:
+        if p_model == model and p_scan == scan and p_layout not in have_layouts:
+          base.append({
+              "model": model,
+              "scan_mode": scan,
+              "layout": p_layout,
+              "hosts": str(p_hosts),
+              "devices": str(p_devices),
+              "status": "PENDING",
+              "note": p_note,
+          })
+      for r in base:
+        blk = multihost_pair(r, cold_s1, logs, tm_ref)
         for v in model_mh:
           label = next((label for label in labels if v.get("note", "").startswith(label)), None)
           if label and v["layout"] == r["layout"]:
-            out.append(variant_row(v, cold_s1, label))
+            blk.append(variant_row(v, cold_s1, label, tm_ref))
+        blocks.append(((int(r["devices"]), int(r["layout"].split(" ")[0])), blk))
+      for _, blk in sorted(blocks, key=lambda item: item[0]):
+        out += blk
   return out
 
 
 def markdown(suite: str, rows: list[list[str]]) -> str:
   """Title, legend and table as markdown, then the same lines as tab-separated text in a collapsed block."""
-  title, legend = SUITES[suite]["title"], SUITES[suite]["legend"]
+  title, legend = SUITES[suite]["title"], list(SUITES[suite]["legend"])
+  shown = {r[3].removeprefix("safetensor (").removesuffix(")") for r in rows if r[3].startswith("safetensor (")}
+  legend += [VARIANT_LEGEND[label] for label in VARIANT_LEGEND if label in shown]
   lines = [title, ""] + [f"- {line}" for line in legend] + [""]
   lines.append("| " + " | ".join(HEADER) + " |")
   # Same alignment as the tabs: a rendered table's cell alignment carries over when it is pasted into Sheets.
