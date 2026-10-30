@@ -2030,6 +2030,13 @@ class RoutedMoE(nnx.Module):
     else:
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
+      if ragged_buffer_factor > 0.0:
+        valid_count = jnp.sum(local_group_size)
+        expert_indices = jnp.where(
+            jnp.arange(inputs.shape[0]) < valid_count,
+            expert_indices,
+            local_expert_size,
+        )
 
     sorted_indices = jnp.argsort(expert_indices)
     if use_ragged_sort:
@@ -3079,7 +3086,8 @@ class RoutedMoE(nnx.Module):
               buffer_size=buffer_size,
           )
 
-          output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
+          buffer_init = jnp.zeros if self.get_ragged_buffer_factor() > 0.0 else jax.lax.empty
+          output_shape = buffer_init((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           x = jax.lax.ragged_all_to_all(
               x,
