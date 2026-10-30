@@ -531,6 +531,7 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
   if model_name != "default":
     model_config_path, is_deprecated_model = resolve_model_config_path(config_path, model_name)
 
+    model_loaded_cfg = None
     if os.path.exists(model_config_path):
       if is_deprecated_model:
         warnings.warn(
@@ -545,6 +546,16 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
             model_config_path,
         )
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
+    else:
+      from maxtext.m3.models import registry as m3_registry  # pylint: disable=import-outside-toplevel
+
+      m3_model_dict = m3_registry.get_pyconfig_model_dict(model_name)
+      if m3_model_dict is not None:
+        model_loaded_cfg = omegaconf.OmegaConf.create(m3_model_dict)
+      else:
+        logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
+
+    if model_loaded_cfg is not None:
       # if override_model_config=True, only apply model configs for keys not present in overrides.
       if temp_cfg.get("override_model_config"):
         model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
@@ -552,8 +563,6 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs
         validate_no_keys_overridden_twice(model_loaded_cfg, overrides_cfg)
-    else:
-      logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
       # Finally merge (base, model, then overrides)
   model_cfg_oc = omegaconf.OmegaConf.create(model_cfg)

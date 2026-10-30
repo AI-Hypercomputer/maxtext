@@ -28,6 +28,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.configs import pyconfig
+from maxtext.m3.configs.pyconfig_bridge import from_pyconfig
 from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import quantization
 from maxtext.m3.train import loop
@@ -78,7 +79,8 @@ class TrainLoopTest(absltest.TestCase):
 
   def test_synthetic_batch_targets_are_shifted_inputs(self):
     config = _tiny_config(self.output_dir)
-    batch = loop.make_synthetic_batch(config, create_mesh(), jax.random.key(0))
+    model_cfg, train_cfg = from_pyconfig(config)
+    batch = loop.make_synthetic_batch(model_cfg, train_cfg, create_mesh(), jax.random.key(0))
     inputs, targets = np.asarray(batch["inputs"]), np.asarray(batch["targets"])
     self.assertEqual(inputs.shape, (config.global_batch_size_to_train_on, config.max_target_length))
     np.testing.assert_array_equal(inputs[:, 1:], targets[:, :-1])
@@ -97,10 +99,11 @@ class TrainLoopTest(absltest.TestCase):
     for overrides in ({}, {"quantization": "int8", "use_qwix_quantization": "true"}):
       with self.subTest(**overrides):
         config = _tiny_config(self.output_dir, **overrides)
+        model_cfg, train_cfg = from_pyconfig(config)
         mesh = create_mesh()
         with jax.set_mesh(mesh):
-          model, optimizer = loop.setup_model(config, mesh)
-          batch = loop.make_synthetic_batch(config, mesh, jax.random.key(0))
+          model, optimizer = loop.setup_model(model_cfg, train_cfg, mesh)
+          batch = loop.make_synthetic_batch(model_cfg, train_cfg, mesh, jax.random.key(0))
           hlo = loop.train_step.lower(model, optimizer, batch).compile().as_text()
           if overrides:
             # Scopes go on after qwix; its matmuls must stay quantized.
