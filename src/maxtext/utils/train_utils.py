@@ -264,12 +264,14 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
       )
     max_logging.log("Loaded compiled function!")
   else:
+    compiler_options = max_utils.parse_libtpu_flags_to_dict(getattr(config, "compile_xla_flags", ""))
     p_train_step = jax.jit(
         functional_train,
         in_shardings=in_shardings,
         out_shardings=out_shardings,
         static_argnums=static_argnums,
         donate_argnums=donate_argnums,
+        compiler_options=compiler_options or None,
     )
 
   return p_train_step
@@ -287,15 +289,26 @@ def jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
 
   p_eval_step = None
   if config.compiled_trainstep_file == "":
+    compiler_options = max_utils.parse_libtpu_flags_to_dict(getattr(config, "compile_xla_flags", ""))
     p_eval_step = jax.jit(
         functional_eval,
         in_shardings=in_shardings,
         out_shardings=out_shardings,
         static_argnums=static_argnums,
         donate_argnums=donate_argnums,
+        compiler_options=compiler_options or None,
     )
 
   return p_eval_step
+
+
+def aot_compile_step(p_step, lower_args, compiler_options=None, prefix=""):
+  """Lowers and compiles p_step ahead of time (warms the executable cache) and prints its memory stats."""
+  jit_compiler_options = getattr(getattr(p_step, "_jit_info", None), "compiler_options_kvs", ())
+  compile_options = None if (not compiler_options or jit_compiler_options) else compiler_options
+  compiled = p_step.lower(*lower_args).compile(compiler_options=compile_options)
+  max_utils.print_compiled_memory_stats(compiled.memory_analysis(), prefix=prefix)
+  return compiled
 
 
 def jit_train_and_eval_step(
