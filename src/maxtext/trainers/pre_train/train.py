@@ -121,11 +121,15 @@ def get_first_step(model, state):
 _OLMOE3_ROUTER_Z_LOSS_WEIGHT = 1e-5
 
 
-def _collect_olmoe3_router_metrics(intermediate_outputs):
-  """``[moe_layers, 4]`` router metrics sown by OLMoE3 layers (lb, router z, load imbalance, global imbalance).
+def _olmoe3_router_metric_rows(intermediate_outputs, cycle_interval):
+  """``[(global layer index, [1, 4] row)]`` of the router metrics sown by OLMoE3 layers, sorted by layer.
 
-  Leaves come back in pytree (key) order, where ``layers_10`` sorts before ``layers_2``, so they are reordered by
-  the layer index in their path. Returns None if no layer sowed them.
+  Leaves come back in pytree (key) order, where ``layers_10`` sorts before ``layers_2``, so every row is placed by its
+  global layer index, read from its path:
+    unscanned:  ``layers_<i>``                    -> layer i
+    scanned:    ``layers_0/layer_<j>``            -> layer j (the unrolled first cycle)
+                ``scanned_blocks/layer_<j>``      -> one row per scanned cycle c: layer cycle_interval * (c + 1) + j
+                ``layers/layer_<j>`` (no peeled cycle) -> layer cycle_interval * c + j
   """
   found = []
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
@@ -133,12 +137,36 @@ def _collect_olmoe3_router_metrics(intermediate_outputs):
     keys = [str(k.key) if hasattr(k, "key") else str(k.name) for k in path if hasattr(k, "key") or hasattr(k, "name")]
     if not keys or keys[-1] != "olmoe3_router_metrics":
       continue
-    index = next((int(k.rsplit("_", 1)[1]) for k in reversed(keys) if re.fullmatch(r"layers_\d+", k)), len(found))
-    found.append((index, jnp.reshape(val, (-1, 4))))
+    rows = jnp.reshape(val, (-1, 4))
+    block = next((int(k.rsplit("_", 1)[1]) for k in reversed(keys) if re.fullmatch(r"layers_\d+", k)), None)
+    sub = next((int(k.rsplit("_", 1)[1]) for k in reversed(keys) if re.fullmatch(r"layer_\d+", k)), None)
+    if sub is None:  # unscanned: layers_<i> is the layer
+      found.append((len(found) if block is None else block, rows))
+      continue
+    # Scanned: one row per scanned cycle, sublayer `sub` of each.
+    first = cycle_interval if "scanned_blocks" in keys else (block or 0) * cycle_interval
+    for c in range(rows.shape[0]):
+      found.append((first + c * cycle_interval + sub, rows[c : c + 1]))
+  return sorted(found, key=lambda item: item[0])
+
+
+def _collect_olmoe3_router_metrics(intermediate_outputs, cycle_interval):
+  """``[moe_layers, 4]`` router metrics sown by OLMoE3 layers (lb, router z, load imbalance, global imbalance), one
+  row per MoE layer in layer order (`_olmoe3_router_metric_rows`). Returns None if no layer sowed them."""
+  found = _olmoe3_router_metric_rows(intermediate_outputs, cycle_interval)
   if not found:
     return None
-  found.sort(key=lambda item: item[0])
   return jnp.concatenate([v for _, v in found], axis=0)
+
+
+def _static_loss_cotangent(config, is_train):
+  """`static_loss_cotangent` applies: a train step without gradient accumulation (GA > 1 always works this way)."""
+  return is_train and config.gradient_accumulation_steps == 1 and getattr(config, "static_loss_cotangent", False)
+
+
+def _static_loss_scale(config):
+  """The static loss scale of `static_loss_cotangent` and manual GA: 1 / (global batch * sequence length)."""
+  return 1.0 / float(config.global_batch_size_to_train_on * config.max_target_length)
 
 
 def olmo_core_loss_denominator(targets_segmentation, total_weights):
@@ -327,13 +355,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  manual_gradient_accumulation = config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
+  manual_gradient_accumulation = (
+      config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
+  ) or _static_loss_cotangent(config, is_train)
   olmo_divisor = getattr(config, "olmo_loss_denominator_counts_masked_instances", False) and not is_block_diffusion
   if olmo_divisor and config.use_tunix_gradient_accumulation:
     raise ValueError("olmo_loss_denominator_counts_masked_instances doesn't support use_tunix_gradient_accumulation")
   # The count the gradient is normalized by: OLMo-core's (filtered instances counted) or the trained tokens. Under
   # manual GA, gradient_accumulation divides the accumulated gradient by its sum over micro-batches.
-  grad_weights = olmo_core_loss_denominator(data["targets_segmentation"], total_weights) if olmo_divisor else total_weights
+  grad_weights = (
+      olmo_core_loss_denominator(data["targets_segmentation"], total_weights) if olmo_divisor else total_weights
+  )
   if manual_gradient_accumulation:
     loss = xent_sum
   elif olmo_divisor:
@@ -418,10 +450,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     intermediate_outputs["logits"] = logits
 
   router_metrics = None
+  masked_instance_fraction = None
   if getattr(config, "olmoe3_router_metrics", False) and is_train:
-    router_metrics = _collect_olmoe3_router_metrics(intermediate_outputs)
-  # OLMo-core's "masked instances (%)" (a fraction): rows the repetition filter masked out entirely.
-  masked_instance_fraction = jnp.mean(jnp.all(data["targets_segmentation"] == 0, axis=-1).astype(jnp.float32))
+    router_metrics = _collect_olmoe3_router_metrics(intermediate_outputs, config.inhomogeneous_layer_cycle_interval)
+    # OLMo-core's "masked instances (%)" (a fraction): rows the repetition filter masked out entirely.
+    masked_instance_fraction = jnp.mean(jnp.all(data["targets_segmentation"] == 0, axis=-1).astype(jnp.float32))
 
   aux = {
       "intermediate_outputs": intermediate_outputs,
@@ -639,11 +672,17 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       )
       nnx.update(state.model, curr_params)
 
+    static_cotangent = _static_loss_cotangent(config, True)
+
     def diff_wrapper(curr_params, custom_params, rest, config, data):
       if config.cast_params_to_compute_dtype:
         curr_params = _cast_params_for_compute(curr_params, config.dtype)
       local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
       loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
+      if static_cotangent:
+        # loss_fn returned the unnormalized objective (the token-loss sum, aux losses weighted by the divisor), as
+        # under manual GA; a static power-of-two scale keeps the backward's cotangent exact in bf16.
+        loss = loss * _static_loss_scale(config)
       # Exclude parameters, custom-gradient state, and intermediates. Custom-
       # gradient state is updated separately, so stale values must not overwrite
       # `custom_grads`.
@@ -656,6 +695,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
     (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
     nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
+    if static_cotangent:
+      # Divide by the real loss divisor in f32, after the backward (as gradient_accumulation does after its loop).
+      divisor = jnp.maximum(jnp.asarray(aux["grad_weights"], jnp.float32), 1.0) * _static_loss_scale(config)
+      raw_grads = jax.tree_util.tree_map(lambda g: (g / divisor).astype(g.dtype), raw_grads)
+      loss = loss / divisor
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -769,14 +813,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   lm_loss = xent_sum / (total_weights + EPS)
   extra_metrics = {}
-  # lm_loss includes the z-loss (cross_entropy_with_logits adds it to every token's loss); OLMo-core logs CE alone.
-  ce_loss = lm_loss - z_loss
-  extra_metrics["learning/ce_loss"] = ce_loss
-  extra_metrics["learning/ce_perplexity"] = jnp.exp(ce_loss)
-  if config.z_loss_multiplier > 0:
-    extra_metrics["learning/z_loss_unscaled"] = z_loss / config.z_loss_multiplier
-  if "masked_instance_fraction" in aux:
-    extra_metrics["learning/masked_instance_fraction"] = aux["masked_instance_fraction"]
+  if getattr(config, "olmoe3_router_metrics", False):
+    # OLMo-core's metrics beyond the router's, behind the same flag so other models' train steps are unchanged.
+    # lm_loss includes the z-loss (cross_entropy_with_logits adds it to every token's loss); OLMo-core logs CE alone.
+    ce_loss = lm_loss - z_loss
+    extra_metrics["learning/ce_loss"] = ce_loss
+    extra_metrics["learning/ce_perplexity"] = jnp.exp(ce_loss)
+    if config.z_loss_multiplier > 0:
+      extra_metrics["learning/z_loss_unscaled"] = z_loss / config.z_loss_multiplier
+    if aux.get("masked_instance_fraction") is not None:
+      extra_metrics["learning/masked_instance_fraction"] = aux["masked_instance_fraction"]
   router_metrics = aux.get("router_metrics")
   if router_metrics is not None:
     lb_weight = config.load_balance_loss_weight
@@ -791,7 +837,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     extra_metrics["learning/load_imbalance"] = jnp.max(imbalance)
     extra_metrics["learning/global_load_imbalance"] = jnp.sum(global_imbalance)
     for i in range(router_metrics.shape[0]):
-      block = f"learning/block_{i + 1:02d}"
+      # Named by the layer's global index: the MoE layers follow the first_num_dense_layers dense ones.
+      block = f"learning/block_{i + config.first_num_dense_layers:02d}"
       extra_metrics[f"{block}/load_balancing_loss"] = lb[i]
       if lb_weight > 0:
         extra_metrics[f"{block}/load_balancing_loss_unscaled"] = lb[i] / lb_weight
@@ -1034,7 +1081,8 @@ def training_loop_iteration(
   metrics["scalar"]["perf/data_loading_seconds"] = data_load_seconds
   step_seconds = step_time_delta.total_seconds()
   metrics["scalar"]["perf/data_loading_percent"] = 100.0 * data_load_seconds / step_seconds if step_seconds > 0 else 0.0
-  if config.enable_checkpointing and config.checkpoint_period > 0 and step % config.checkpoint_period == 0:
+  checkpoint_period = getattr(config, "checkpoint_period", 0)
+  if getattr(config, "enable_checkpointing", False) and checkpoint_period > 0 and step % checkpoint_period == 0:
     # Blocking part of the save (async_checkpointing writes the rest in the background).
     metrics["scalar"]["checkpoint/save_duration_s"] = save_seconds
 
@@ -1165,6 +1213,37 @@ def build_eval_graphdef(config, jit_model, state):
   del reconstructed, _
   gc.collect()
   return jit_model_eval
+
+
+def build_ppl_eval_graphdef(config, jit_model, state):
+  """Graphdef of OLMo-core's perplexity-eval program, whose MoE layers must not drop tokens: one padded document per
+  row overflows a buffer sized for packed training rows, which would change the CE.
+
+  Every RoutedMoE (OLMoE3's subclass included) gets ragged_buffer_factor_override = eval_ragged_buffer_factor when that
+  is > 0 (a buffer the user sized for eval), else force_dropless. The training graphdef itself when it is already
+  dropless (ragged_buffer_factor <= 0).
+  """
+  if config.ragged_buffer_factor <= 0 and config.eval_ragged_buffer_factor <= 0:
+    return jit_model
+  reconstructed = nnx.merge(jit_model, state)
+  n_moe = 0
+  for _, module in nnx.iter_graph(reconstructed):
+    if isinstance(module, moe.RoutedMoE):
+      if config.eval_ragged_buffer_factor > 0:
+        module.ragged_buffer_factor_override = float(config.eval_ragged_buffer_factor)
+      else:
+        module.force_dropless = True
+      n_moe += 1
+  how = (
+      f"ragged_buffer_factor_override={config.eval_ragged_buffer_factor}"
+      if config.eval_ragged_buffer_factor > 0
+      else "force_dropless"
+  )
+  max_logging.log(f"olmo_ppl_eval graphdef: {how} on {n_moe} RoutedMoE")
+  jit_model_ppl, _ = nnx.split(reconstructed)
+  del reconstructed, _
+  gc.collect()
+  return jit_model_ppl
 
 
 def build_first_phase_graphdef(config, jit_model, state):
@@ -1391,8 +1470,9 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
   ppl_eval = None
   if getattr(config, "olmo_ppl_eval_interval", 0) > 0:
     ppl_eval_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+    jit_model_ppl = jit_model if config.enable_diloco else build_ppl_eval_graphdef(config, jit_model, state)
     p_ppl_eval_step = train_utils.jit_eval_step(
-        config, jit_model, state_mesh_shardings, ppl_eval_sharding, olmo_ppl_eval.ppl_eval_step(eval_step)
+        config, jit_model_ppl, state_mesh_shardings, ppl_eval_sharding, olmo_ppl_eval.ppl_eval_step(eval_step)
     )
     ppl_eval = (olmo_ppl_eval.OlmoPplEval(config), ppl_eval_sharding)
 

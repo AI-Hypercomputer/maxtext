@@ -134,7 +134,6 @@ class OLMoE3GlobalLoadBalancingTest(unittest.TestCase):
     expected = 0.01 * NUM_EXPERTS / (TOP_K * tokens) * counts / tokens
     np.testing.assert_allclose(np.asarray(grad), np.broadcast_to(expected, probs.shape), rtol=1e-5)
 
-
   def test_router_metrics_match_whole_batch(self):
     """``olmoe3_router_metrics``: [lb, load imbalance, global load imbalance] from inside the sharded MoE.
 

@@ -373,6 +373,53 @@ class TestLossFnNNX(unittest.TestCase):
     self.assertAlmostEqual(float(loss), float(loss_without_indexer) + expected_indexer_loss, places=5)
 
 
+class TestStaticLossCotangent(unittest.TestCase):
+  """static_loss_cotangent: the default's loss and update (exactly so in f32), with the gradient of the token-loss sum
+  times a static 1 / (batch * seq len) divided by the loss divisor after the backward."""
+
+  def _step(self, static, olmo_divisor):
+    """One train step on a 7-token batch, with or without the flag and OLMo-core's divisor."""
+    cfg, ts = _build_state()
+    cfg.static_loss_cotangent = static
+    cfg.olmo_loss_denominator_counts_masked_instances = olmo_divisor
+    cfg.global_batch_size_to_train_on, cfg.max_target_length = 2, 4
+    cfg.cast_params_to_compute_dtype, cfg.norm_metrics = False, "all"  # not on _Cfg; train_step reads them
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_data(batch=2, seq=4, vocab=cfg.vocab_size)
+    data["targets"] = jnp.array([[1, 2, 3, 4], [5, 6, 7, 0]], jnp.int32) % cfg.vocab_size
+    data["targets_segmentation"] = jnp.array([[1, 1, 1, 0], [1, 1, 1, 1]], jnp.int32)  # 7 tokens: not a power of 2
+    return pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+
+  def test_loss_fn_returns_the_unnormalized_objective(self):
+    # Under the flag a train step's loss_fn objective is the token-loss sum (the train step divides afterwards);
+    # eval and the default keep the loss divided by the token count.
+    cfg, ts = _build_state()
+    data = _make_data(batch=2, seq=4, vocab=cfg.vocab_size)
+    data["targets_segmentation"] = jnp.array([[1, 1, 1, 0], [1, 1, 1, 1]], jnp.int32)
+    default, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    cfg.static_loss_cotangent = True
+    summed, _ = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    evaluated, _ = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=False)
+    np.testing.assert_allclose(float(summed), float(aux["xent_sum"]), rtol=1e-6)
+    np.testing.assert_allclose(float(summed), 7 * float(default), rtol=1e-5)
+    np.testing.assert_allclose(float(evaluated), float(default), rtol=1e-6)
+
+  def test_same_loss_and_update_as_default(self):
+    for olmo_divisor in (False, True):
+      ref_state, ref_metrics = self._step(False, olmo_divisor)
+      state, metrics = self._step(True, olmo_divisor)
+      np.testing.assert_allclose(
+          float(metrics["scalar"]["learning/loss"]), float(ref_metrics["scalar"]["learning/loss"]), rtol=1e-6
+      )
+      np.testing.assert_allclose(
+          float(metrics["scalar"]["learning/grad_norm"]), float(ref_metrics["scalar"]["learning/grad_norm"]), rtol=1e-5
+      )
+      for got, want in zip(jax.tree_util.tree_leaves(state.model), jax.tree_util.tree_leaves(ref_state.model)):
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-6, atol=1e-7)
+
+
 class TestTrainStepNNX(unittest.TestCase):
   """Cover the NNX branch of train_step (the diff_wrapper / nnx.update path)."""
 

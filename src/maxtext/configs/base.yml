@@ -321,8 +321,13 @@ emo_threshold_by_bisection: false
 # OLMoE3: attention/KDA mixers ignore segment ids (whole-instance, as OLMo-core); only EMo uses them.
 olmoe3_segments_for_emo_only: false
 moe_global_load_balancing: false # OLMo-core global_load_balancing: LB counts averaged over the whole batch, not per device
+# Without gradient accumulation, take the gradient of the token-loss sum times a static 1 / (batch * seq len) and
+# divide the f32 gradients by the loss divisor afterwards (as manual GA does), instead of the gradient of the loss
+# divided by it: 1 / divisor rounds in the bf16 backward (the fused CE kernel's cotangent), a batch-dependent bias.
+static_loss_cotangent: false
 # Log OLMo-core's router metrics per OLMoE3 MoE layer and in total: load balancing and router z losses (scaled and
-# unscaled), load imbalance and global load imbalance (learning/block_NN/... and learning/...).
+# unscaled), load imbalance and global load imbalance (learning/block_NN/..., NN the layer's index, and learning/...);
+# and its other training metrics: ce_loss, ce_perplexity, z_loss_unscaled and masked_instance_fraction.
 olmoe3_router_metrics: false
 # Sequences per group for the local load imbalance: OLMo-core reports it per GPU, which is 16 sequences for the
 # hero (2048 on 128 GPUs). 0 = the whole batch.

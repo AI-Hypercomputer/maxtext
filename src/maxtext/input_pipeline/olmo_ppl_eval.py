@@ -81,7 +81,11 @@ class OlmoPplEval:
   def __init__(self, config):
     self.interval = int(config.olmo_ppl_eval_interval)
     self.seq_len = int(config.max_target_length)
-    self.rows_per_batch = int(config.global_batch_size_to_load_eval)
+    # The eval step scores only the first micro_batch_size_to_eval_on rows of a batch (fewer than it loads when
+    # eval_per_device_batch_size < 1 or expansion_factor_real_data > 1), so documents go only in those rows; the
+    # arrays keep the loaded size, which the input sharding needs, with weightless padding rows after them.
+    self.rows_per_batch = int(config.micro_batch_size_to_eval_on)
+    self.rows_loaded = int(config.global_batch_size_to_load_eval)
     self.eos = int(config.olmo_ppl_eval_eos_token_id)
     self.pad = int(config.olmo_ppl_eval_pad_token_id)
     # [(label, [(batch arrays, number of documents in it)], denominator tokens)]
@@ -94,14 +98,14 @@ class OlmoPplEval:
       for start in range(0, len(docs), self.rows_per_batch):
         chunk = docs[start : start + self.rows_per_batch]
         rows = build_rows(chunk, self.seq_len, self.pad)
-        if len(chunk) < self.rows_per_batch:  # pad the last batch with weightless rows
-          fill = self.rows_per_batch - len(chunk)
+        if len(chunk) < self.rows_loaded:  # weightless padding rows: the last batch's, and any the step doesn't score
+          fill = self.rows_loaded - len(chunk)
           rows = {k: np.concatenate([v, np.zeros((fill,) + v.shape[1:], v.dtype)]) for k, v in rows.items()}
         batches.append(rows)
       self.sets.append((f"{name}-validation", batches, denominator))
       max_logging.log(
           f"olmo_ppl_eval: {name}: {len(docs)} documents, {denominator} tokens, {len(batches)} batches of"
-          f" {self.rows_per_batch} rows"
+          f" {self.rows_per_batch} documents ({self.rows_loaded} rows loaded)"
       )
 
   def due(self, step: int) -> bool:
