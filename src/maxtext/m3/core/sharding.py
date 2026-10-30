@@ -40,6 +40,7 @@ import abc
 import enum
 import math
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import jax
 from jax.experimental import mesh_utils
@@ -211,11 +212,31 @@ class Sharding(abc.ABC):
     mesh `with_sharding_constraint` is an assertion, not a constraint, and
     fails on anything not already sharded as asked; `reshard` is the operation
     that moves data there.
+
+    With no mesh in scope there is nothing to constrain against, so the call
+    returns `x` unchanged -- a model built under a mesh can still be called
+    eagerly outside one. Construction is where a missing mesh is an error.
     """
+    if jax.sharding.get_abstract_mesh().empty:
+      return x
     spec = self(tensor_name, axes, TensorType.ACTIVATION)
     if _ambient_mesh_is_explicit():
       return jax.sharding.reshard(x, spec)
     return jax.lax.with_sharding_constraint(x, spec)
+
+
+def param_metadata(sharding: Sharding, tensor_name: str, axes: Sequence[str | None]) -> dict[str, Any]:
+  """The `*_metadata=` for one parameter: its resolved spec, placed at construction.
+
+  `eager_sharding=True` makes Flax apply `out_sharding` when the variable is
+  created, under the mesh in scope, for this variable regardless of the
+  process-global switch (`flax_always_shard_variable`). That switch is turned
+  off at import by legacy MaxText (`layers/nnx_wrappers.py`), and with it off
+  the metadata is stored but never applied: every parameter comes out
+  replicated, with nothing to say so. Declaring it per parameter keeps the
+  model's placement independent of what else the process imported.
+  """
+  return {"out_sharding": sharding(tensor_name, axes), "eager_sharding": True}
 
 
 class DefaultSharding(Sharding):
@@ -358,6 +379,7 @@ def create_mesh(
     dcn: Mapping[str, int] | None = None,
     devices: Sequence[jax.Device] | None = None,
     axis_names: Sequence[str] = MESH_AXIS_NAMES,
+    explicit: bool = False,
 ) -> Mesh:
   """Builds the device mesh over `axis_names` (by default `MESH_AXIS_NAMES`).
 
@@ -408,6 +430,10 @@ def create_mesh(
     axis_names: The mesh axes, in mesh order. A model whose strategy needs other
       axes (Wan's `context`, say) passes its own; the `ici` / `dcn` defaults then
       apply only if `fsdp` / `data` are among them, otherwise both must be given.
+    explicit: Give every axis `AxisType.Explicit`, so shardings are part of
+      array types and `constrain` reshards instead of hinting. Legacy's
+      `shard_mode=explicit`, and what the training engine's Zero-1 and deferred
+      gradient all-reduce require.
 
   Returns:
     A `Mesh` over `axis_names`.
@@ -441,4 +467,64 @@ def create_mesh(
     # devices do not, so it raises rather than degrading to the ICI-only case.
     device_array = mesh_utils.create_device_mesh(ici_shape, devices)
 
-  return Mesh(device_array, axis_names)
+  axis_types = (jax.sharding.AxisType.Explicit,) * len(axis_names) if explicit else None
+  return Mesh(device_array, axis_names, axis_types=axis_types)
+
+
+# Legacy parallelism axes the m3 mesh does not carry. A config that sets one
+# of them asks for a layout m3 cannot build, so `mesh_from_config` refuses it
+# rather than silently running a different one.
+_UNSUPPORTED_PARALLELISM_AXES = (
+    "diloco",
+    "fsdp_transpose",
+    "sequence",
+    "context",
+    "context_usp_ulysses",
+    "context_autoregressive",
+    "tensor_sequence",
+    "pipeline",
+    "autoregressive",
+)
+# Legacy mesh-layout knobs `create_mesh` does not implement, with the value
+# that means "off".
+_UNSUPPORTED_MESH_FIELDS = {"custom_mesh": "", "allow_split_physical_axes": False, "optimize_mesh_for_tpu_v6e": False}
+
+
+def unsupported_mesh_settings(config) -> dict[str, Any]:
+  """The legacy mesh settings `config` turns on that m3 does not implement, with their values."""
+  unsupported = {}
+  for network in ("ici", "dcn"):
+    for axis in _UNSUPPORTED_PARALLELISM_AXES:
+      field = f"{network}_{axis}_parallelism"
+      if getattr(config, field, 1) != 1:
+        unsupported[field] = getattr(config, field)
+  for field, off in _UNSUPPORTED_MESH_FIELDS.items():
+    if getattr(config, field, off) not in (off, None):
+      unsupported[field] = getattr(config, field)
+  return unsupported
+
+
+def mesh_from_config(config, devices: Sequence[jax.Device] | None = None) -> Mesh:
+  """Builds the mesh a config describes, over `MESH_AXIS_NAMES`.
+
+  Reads legacy's field names so the knobs users already know keep working:
+  `ici_<axis>_parallelism` / `dcn_<axis>_parallelism` for `data`, `fsdp`,
+  `tensor` and `expert`, and `shard_mode` (`auto` / `explicit`). Legacy's
+  defaults (`ici_fsdp_parallelism=-1`, `dcn_data_parallelism=-1`) are
+  `create_mesh`'s, so a slim config without the fields gets the same mesh.
+  Any other parallelism axis set to something other than 1, or a custom mesh
+  layout, is refused with the field named.
+  """
+  unsupported = unsupported_mesh_settings(config)
+  if unsupported:
+    raise ValueError(
+        f"m3 builds its mesh over {MESH_AXIS_NAMES} with the default device layout; "
+        f"it does not implement {unsupported} (see m3/README.md)."
+    )
+  ici = {axis: getattr(config, f"ici_{axis}_parallelism", -1 if axis == "fsdp" else 1) for axis in MESH_AXIS_NAMES}
+  dcn = {axis: getattr(config, f"dcn_{axis}_parallelism", -1 if axis == "data" else 1) for axis in MESH_AXIS_NAMES}
+  shard_mode = getattr(config, "shard_mode", "auto")
+  shard_mode = getattr(shard_mode, "value", shard_mode)  # pyconfig hands over a `str` Enum
+  if shard_mode not in ("auto", "explicit"):
+    raise ValueError(f"shard_mode must be 'auto' or 'explicit'; got {shard_mode!r}.")
+  return create_mesh(ici=ici, dcn=dcn, devices=devices, explicit=shard_mode == "explicit")

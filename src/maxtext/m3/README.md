@@ -58,6 +58,46 @@ There is no `layers/` directory: NNX *is* the layer library.
 6. **Readability is a feature.** A model file should read top to bottom without jumping through a
    shared decoder.
 
+## Sharding
+
+Rule 3 end to end. A model declares sharding once, in logical axis names, at construction; a
+`Sharding` strategy resolves them; the mesh decides which axes are live. Nothing is decided by
+path regexes or heuristics, and nothing re-shards a parameter after it is created.
+
+| Concern | Where | Config |
+| :---- | :---- | :---- |
+| Which logical axis each tensor dimension carries | the model, as `*_metadata={"out_sharding": s(name, axes)}` on every parameter and `s.constrain(x, name, axes)` on key activations | — |
+| Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (FSDP over `embed`; tensor over `heads`, `kv_heads`, `mlp`, `vocab`; batch over `data` × `fsdp` × `expert`) | — |
+| Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,fsdp,tensor,expert}_parallelism`, `dcn_*`; legacy's names and defaults |
+| Auto vs explicit sharding | `create_mesh(explicit=)`; `constrain` dispatches on the mesh in scope | `shard_mode` (`auto`, the default, or `explicit`) |
+| Input batch layout | the driver asks the strategy (`train/loop.py::batch_spec`) | — |
+
+Parameters are placed by Flax from their metadata the moment they are created, under whatever mesh
+is in scope, so single-device tests and an 8-chip run construct the same way. That placement is
+declared per parameter (`core.sharding.param_metadata` sets `eager_sharding=True` next to
+`out_sharding`) rather than left to Flax's process-global switch, which legacy MaxText turns off at
+import (`layers/nnx_wrappers.py`) and which would otherwise leave every m3 parameter replicated
+without a word. Both drivers (the m3 loop and the training engine) read placement off the arrays.
+The loop logs the fraction of parameters each device holds; `100%` means replicated, which is what
+an unannotated model gets.
+
+`shard_mode=explicit` builds an Explicit-typed mesh and parameters place under it, but the forward
+pass does not run yet: `nnx.Embed`'s gather has no `out_sharding` under an explicit mesh (a JAX
+`ShardingTypeError`). A strict `xfail` in `model_sharding_test.py` flips when upstream fixes it;
+until then the training engine's Zero-1 and deferred all-reduce, which require explicit mode, are
+not available to m3 models.
+
+A model with a novel axis subclasses `DefaultSharding` and delegates the rest; a driver that wants
+another scheme passes `sharding=` to `create_model`. m3 does not read `logical_axis_rules`: the
+strategy class is the rule table, typed and conflict-checked. Legacy parallelism axes the mesh does
+not carry (`sequence`, `context*`, `pipeline`, `autoregressive`, `fsdp_transpose`, `tensor_sequence`,
+`diloco`) and custom mesh layouts (`custom_mesh`, `allow_split_physical_axes`,
+`optimize_mesh_for_tpu_v6e`) are refused with the field named rather than ignored.
+
+Today `qwen3` is fully annotated; Qwen3-VL inherits the decoder and MLP annotations but its
+hand-rolled attention is not yet sharded; GLM-5.3-Flash and Wan carry their own `Sharding`
+subclasses and mesh construction, which should converge on `DefaultSharding` and `mesh_from_config`.
+
 ## Invariants for the training-engine and RL path
 
 m3 models must be drivable both by `m3/train/loop.py` and by the existing

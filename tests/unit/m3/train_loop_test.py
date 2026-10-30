@@ -25,7 +25,7 @@ import jax
 import numpy as np
 
 from maxtext.configs import pyconfig
-from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.core.sharding import DefaultSharding, create_mesh
 from maxtext.m3.train import loop
 from tests.utils.test_helpers import get_test_config_path
 
@@ -74,7 +74,7 @@ class TrainLoopTest(absltest.TestCase):
 
   def test_synthetic_batch_targets_are_shifted_inputs(self):
     config = _tiny_config(self.output_dir)
-    batch = loop.make_synthetic_batch(config, create_mesh(), jax.random.key(0))
+    batch = loop.make_synthetic_batch(config, create_mesh(), DefaultSharding(), jax.random.key(0))
     inputs, targets = np.asarray(batch["inputs"]), np.asarray(batch["targets"])
     self.assertEqual(inputs.shape, (config.global_batch_size_to_train_on, config.max_target_length))
     np.testing.assert_array_equal(inputs[:, 1:], targets[:, :-1])
