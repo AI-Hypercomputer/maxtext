@@ -446,6 +446,8 @@ def make_multihost_runner_script(
       "to_maxtext": "to_maxtext (Orbax load of the converted checkpoint)",
       "both": "to_maxtext and safetensors_dynamic",
   }[pipelines]
+  if tree != "/tmp/maxtext":
+    title += f" from {tree}"
   return f"""set -e
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0 KEEP_HF_CACHE=1 HF_HOME=/ramdisk/hf_cache TMPDIR=/ramdisk/tmp
 export SHARED_HF_CACHE_BASE_DIR="{hf_cache}"
@@ -680,6 +682,38 @@ MESAKH_MH_RUNS = [
         "hf_cache": P1_HF_CACHE,
         "extra_exports": SPARSE,
     },
+    # The fix validation for one multi-host slice: qwen3.5-397b-a17b scanned on 1 x 2x2x2 (16 devices) ran out of HBM
+    # in `397b`. It runs from /tmp/maxtext_fix into its own run id.
+    {
+        "run_id": "397b-fix",
+        "topology": "2x2x2",
+        "num_slices": 1,
+        "models_str": "qwen3.5-397b-a17b",
+        "scan_modes": "scanned",
+        "hf_cache": P1_HF_CACHE,
+        "tree": "/tmp/maxtext_fix",
+        "run_dir": (f"{MH_BASE}/lance_prs", "tpu7x_multihost_fix"),
+    },
+    # Orbax loads of the qwen3.5-397b-a17b unscanned checkpoint converted with the to_maxtext save-buffer cap
+    # (queue task tmfix_397b_unscanned_conv), on the multi-host layouts that `397b-u`, `397b-4h` and `397b-2s` used.
+    *[
+        {
+            "run_id": run_id,
+            "topology": topology,
+            "num_slices": num_slices,
+            "models_str": "qwen3.5-397b-a17b",
+            "scan_modes": "unscanned",
+            "hf_cache": P1_HF_CACHE,
+            "pipelines": "to_maxtext",
+            "tree": "/tmp/maxtext_fix",
+            "run_dir": ("gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs", "tpu7x_200b_tmfix"),
+        }
+        for run_id, topology, num_slices in (
+            ("397b-tm", "2x2x2", 1),
+            ("397b-tm-4h", "2x2x4", 1),
+            ("397b-tm-2s", "2x2x2", 2),
+        )
+    ],
 ]
 
 # bodaborg-v5p-nap runs for the DeepSeek checklist of the v5p sheet (single slice and multi slice, multi host), in the
