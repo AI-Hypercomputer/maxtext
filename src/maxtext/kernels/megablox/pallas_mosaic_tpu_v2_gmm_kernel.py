@@ -330,9 +330,10 @@ TileFn = Callable[[Dimensions, InputConfigs, InputConfigs, int | None, str | Non
 class IndexMaps:
   """Index maps for GMM kernel."""
 
-  def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs):
+  def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs, num_gm: jax.Array):
     self.metadata_ref = metadata_ref
     self.cfgs = cfgs
+    self.num_gm = num_gm
 
   def lhs_index_map(self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array):
     """Block index of the lhs tile (rows of the group tile, K block; 3D lhs blocks K along D0)."""
@@ -378,7 +379,7 @@ class IndexMaps:
 
   def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
     """Calculates index map for the output tensor."""
-    is_last_gm = gm_id == (pl.num_programs(self.cfgs.gm_axis) - 1)
+    is_last_gm = gm_id == (self.num_gm - 1)
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -407,11 +408,11 @@ class IndexMaps:
 
 
 def generate_block_specs(
-    metadata_ref: MetadataRef, cfgs: GmmConfigs
+    metadata_ref: MetadataRef, cfgs: GmmConfigs, num_gm: jax.Array
 ) -> Tuple[Tuple[LhsRef, WeightsRef, pl.BlockSpec | None], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
 
-  index_map = IndexMaps(metadata_ref, cfgs)
+  index_map = IndexMaps(metadata_ref, cfgs, num_gm)
   bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
 
   num_lanes = pltpu.get_tpu_info().num_lanes
@@ -503,6 +504,7 @@ def generate_block_specs(
 
 
 def inner_kernel(
+    step: pltpu.PipelineStep,
     # In
     tiled_lhs_ref: LhsRef,
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
@@ -519,6 +521,7 @@ def inner_kernel(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
+    num_k: int,
 ):
   """Inner kernel invoked by emit_pipeline to perform matmul.
 
@@ -529,15 +532,18 @@ def inner_kernel(
   invalid data and needs to be masked out.
 
   Args:
+    step: PipelineStep containing current iteration indices.
     tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
     tiled_rhs_ref: Contains the rhs tile for g_id. The tile is [tile_k, tile_n]
       normally and [tile_n, tile_k] when transpose_rhs is enabled.
+    tiled_ps_ref: Optional reference to the tiled partial sum buffer.
     tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
     partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
       Will be initialized to zero if this is first tile for grid[n_id, :, :].
     acc_ref: Reference to the accumulator.
     metadata_ref: Reference to the metadata.
     cfgs: GmmConfigs.
+    num_k: Total number of K tiles along grid axis 2.
   """
 
   def _matmul(is_first_k_step: bool, is_last_k_step: bool):
@@ -550,7 +556,10 @@ def inner_kernel(
       # Block is [tile_m // sublane, sublane, D0, 128]; relayout the K window
       # k_id of the full-D0 slab into [tile_m, tile_k].
       tiled_lhs = relayout.load_3d_window_as_2d(
-          tiled_lhs_ref.value, cfgs.tiles.tile_m, cfgs.lhs_tile_d0, pl.program_id(2)
+          tiled_lhs_ref.value,
+          cfgs.tiles.tile_m,
+          cfgs.lhs_tile_d0,
+          step.index[2],
       )
     elif lhs_chunk_d0 is not None:
       tiled_lhs: Any = None  # Relayouted chunk by chunk in the matmul loop below.
@@ -768,7 +777,10 @@ def inner_kernel(
       if cfgs.has_partial_sum:
         if cfgs.out_window:
           ps_tile = relayout.load_3d_window_as_2d(
-              tiled_ps_ref, cfgs.tiles.tile_m, cfgs.out_tile_d0, pl.program_id(cfgs.n_axis)
+              tiled_ps_ref,
+              cfgs.tiles.tile_m,
+              cfgs.out_tile_d0,
+              step.index[cfgs.n_axis],
           )
         elif cfgs.out_is_3d:
           ps_tile = relayout.load_3d_as_2d(tiled_ps_ref, cfgs.tiles.tile_m, cfgs.out_tile_d0)
@@ -778,7 +790,7 @@ def inner_kernel(
 
       acc = apply_act_fn(acc, cfgs.fuse_act)
 
-      gm_id = pl.program_id(cfgs.gm_axis)
+      gm_id = step.index[cfgs.gm_axis]
 
       # Mask out rows that does not belong to the current group.
       m_start = metadata_ref.gm_id_to_m_offset[gm_id]
@@ -797,7 +809,7 @@ def inner_kernel(
         # Full-D0 out slab resident across the N tiles of this gm tile. The
         # cross-gm partial-row carry is kept per N tile, in the 2D domain.
         sub = cfgs.dims.size_lhs_sublane
-        n_id = pl.program_id(cfgs.n_axis)
+        n_id = step.index[cfgs.n_axis]
         out2d = acc_masked.astype(tiled_out_ref.dtype)
         prev = partial_out_ref[n_id]
         prev = jnp.where(gm_id == 0, jnp.zeros_like(prev), prev)
@@ -863,8 +875,7 @@ def inner_kernel(
     _matmul(is_first_k_step=False, is_last_k_step=True)
 
   # Select and execute matmul function based on the current step.
-  num_k = pl.num_programs(2)
-  k_id = pl.program_id(2)
+  k_id = step.index[2]
 
   is_first_k_step = k_id == 0
   is_last_k_step = k_id == (num_k - 1)
@@ -1136,7 +1147,7 @@ def kernel_main(
         dims=cfgs.dims,
     )
 
-  (lhs_spec, rhs_spec, ps_spec), out_spec = generate_block_specs(metadata_ref, cfgs)
+  (lhs_spec, rhs_spec, ps_spec), out_spec = generate_block_specs(metadata_ref, cfgs, num_gm)
 
   if cfgs.fuse_act is not None:
     if cfgs.transpose_rhs:
@@ -1155,10 +1166,11 @@ def kernel_main(
 
   # Execute the inner kernel.
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(inner_kernel, cfgs=cfgs),
+      functools.partial(inner_kernel, cfgs=cfgs, num_k=num_k),
       grid=(num_gm, num_n, num_k) if cfgs.out_window else (num_n, num_gm, num_k),
       in_specs=(lhs_spec, rhs_spec, ps_spec),
       out_specs=out_spec,
+      _explicit_indices=True,
   )
 
   # Bounded slice requires second last dim to be aligned to the sublane size.

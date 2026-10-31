@@ -85,11 +85,10 @@ def main_kernel(
       grid=(num_blocks, num_cores, num_cols),
       core_axis_name=(core_axis_name, subcore_axis_name),
       dimension_semantics=(pltpu.ARBITRARY, pltpu.PARALLEL, pltpu.ARBITRARY),
+      _explicit_indices=True,
   )
-  def inner_kernel():
-    block_id = pl.program_id(0)
-    core_id = pl.program_id(1)
-    col_id = pl.program_id(2)
+  def inner_kernel(step: pltpu.PipelineStep):
+    block_id, core_id, col_id = step.index
 
     row_tile_start = aligned_start + block_id * block_size + core_id * num_simd_lanes
     col_tile_start = col_id * col_size

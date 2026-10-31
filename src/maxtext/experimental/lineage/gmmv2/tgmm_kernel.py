@@ -396,6 +396,7 @@ def make_tgmm_configs(
 
 
 def tgmm_inner_kernel(
+    step: pltpu.PipelineStep,
     tiled_lhs_ref: OperandRef,
     # .value: [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
     # .scale: [1, 1] (static quantization scale) or None
@@ -409,6 +410,7 @@ def tgmm_inner_kernel(
     acc_in_sem: jax.Array | None = None,
     *,
     cfgs: gmm_v2.GmmConfigs,
+    num_gm: jax.Array,
 ):
   """Inner kernel for TGMM computation.
 
@@ -417,6 +419,7 @@ def tgmm_inner_kernel(
   and accumulation across different group-major tiles.
 
   Args:
+    step: PipelineStep containing current iteration indices.
     tiled_lhs_ref: OperandRef bundling the tiled LHS data ('.value') and its
       optional per-tensor static quantization scale ('.scale').
     tiled_rhs_ref: OperandRef bundling the tiled RHS data ('.value') and its
@@ -430,6 +433,7 @@ def tgmm_inner_kernel(
       needs no VMEM of its own.
     acc_in_sem: DMA semaphore for the `acc_in_ref` copies.
     cfgs: GmmConfigs object containing kernel configurations.
+    num_gm: Total number of group-major tiles along grid axis 2.
   """
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
@@ -451,7 +455,7 @@ def tgmm_inner_kernel(
       return relayout.load_3d_as_2d(tiled_rhs_value_ref, bucket_m, tile_n // num_lanes)
     return tiled_rhs_value_ref.reshape(-1, tile_n)[:bucket_m]
 
-  gm_id = pl.program_id(2)
+  gm_id = step.index[2]
 
   # Mask out invalid rows in the LHS/RHS tiles.
   # The DMA loads tiles aligned to sublane boundaries, but the actual group
@@ -466,13 +470,13 @@ def tgmm_inner_kernel(
     # The acc tile of this step's output block; the last N block may be
     # partial, like in the pipeline's own output DMA.
     assert acc_in_ref is not None and acc_in_sem is not None
-    n_start = pl.program_id(0) * tile_n
+    n_start = step.index[0] * tile_n
     size_n = jnp.minimum(tile_n, acc_in_ref.shape[2] - n_start)
     size_n = pl.multiple_of(size_n, num_lanes)
     return pltpu.make_async_copy(
         acc_in_ref.at[
             cur_group_id,
-            pl.ds(pl.program_id(1) * tile_k, tile_k),
+            pl.ds(step.index[1] * tile_k, tile_k),
             pl.ds(n_start, size_n),
         ],
         tiled_out_ref.at[:, pl.ds(0, size_n)],
@@ -573,7 +577,7 @@ def tgmm_inner_kernel(
   group_id_changed = metadata_ref.gm_id_to_group_id[gm_id] != metadata_ref.gm_id_to_group_id[prev_gm_id]
   new_group = jnp.logical_or(is_first_gm, group_id_changed)
 
-  is_last_gm = gm_id == (pl.num_programs(2) - 1)
+  is_last_gm = gm_id == (num_gm - 1)
   next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
   next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
   cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
@@ -863,12 +867,13 @@ def tgmm_kernel_main(
   core_axis_name = None if cfgs.disable_multi_core_mode else "core"
   dimension_semantics = None if cfgs.disable_multi_core_mode else (pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY)
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(tgmm_inner_kernel, cfgs=cfgs),
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
       core_axis_name=core_axis_name,
       dimension_semantics=dimension_semantics,
+      _explicit_indices=True,
   )
   # [M, S] -> [M // sub, sub, S]; [M, D0, 128] -> [.., sub, D0, 128].
   sublane = cfgs.dims.size_lhs_sublane

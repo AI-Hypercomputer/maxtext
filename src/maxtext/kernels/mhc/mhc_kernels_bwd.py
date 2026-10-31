@@ -35,6 +35,7 @@ def _post_apply_bwd(
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
   def pipeline_body(
+      step: pltpu.PipelineStep,
       x_ref,
       layer_output_ref,
       h_post_ref,
@@ -45,7 +46,7 @@ def _post_apply_bwd(
       d_h_post_ref,
       d_residual_ref,
   ):
-    feature_block = pl.program_id(1)
+    feature_block = step.index[1]
 
     d_x, d_layer_output = common.post_apply_bwd_pointwise(
         d_output_ref[...],
@@ -115,6 +116,7 @@ def _post_apply_bwd(
           spec_residual,
       ),
       dimension_semantics=common.POST_BWD_DIMENSION_SEMANTICS,
+      _explicit_indices=True,
   )
 
   with common.tpu_mesh_context():
@@ -148,7 +150,16 @@ def _pre_apply_bwd(
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def pipeline_body(x_ref, h_pre_ref, d_layer_input_ref, d_x_acc_ref, d_x_ref, d_h_pre_ref):
+  def pipeline_body(
+      step: pltpu.PipelineStep,
+      x_ref,
+      h_pre_ref,
+      d_layer_input_ref,
+      d_x_acc_ref,
+      d_x_ref,
+      d_h_pre_ref,
+  ):
+    del step  # Unused.
     _, vjp = jax.vjp(common.pre_apply, x_ref[...], h_pre_ref[...])
     d_x, d_h_pre = vjp(d_layer_input_ref[...])
     d_x_ref[...] = (d_x.astype(jnp.float32) + d_x_acc_ref[...].astype(jnp.float32)).astype(d_x_ref.dtype)
@@ -172,6 +183,7 @@ def _pre_apply_bwd(
           spec_h_pre,
       ),
       dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+      _explicit_indices=True,
   )
 
   with common.tpu_mesh_context():
@@ -212,8 +224,8 @@ def _coeff_bwd(
   num_params = len(jax.tree.leaves(coeff_params))
   num_outputs = len(jax.tree.leaves(d_outputs))
 
-  def pipeline_body(x_ref, *refs):
-    program_id = pl.program_id(0)
+  def pipeline_body(step: pltpu.PipelineStep, x_ref, *refs):
+    program_id = step.index[0]
 
     ref_iter = iter(refs)
     param_refs = common.MhcCoeffParams(*(next(ref_iter) for _ in range(num_params)))
@@ -277,6 +289,7 @@ def _coeff_bwd(
           *jax.tree.leaves(param_specs),
       ),
       dimension_semantics=common.SEQUENTIAL_DIMENSION_SEMANTICS,
+      _explicit_indices=True,
   )
 
   in_specs = common.hbm_specs(1 + num_params + 1 + num_outputs + 1)
