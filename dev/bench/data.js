@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793408056511,
+  "lastUpdate": 1793423256136,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -60790,6 +60790,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4141.425,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "647d4531bdaee0ae4233416a6066759049a01abd",
+          "message": "PR #6017: Training engine: buffer metrics on the host\n\nImported from GitHub PR https://github.com/AI-Hypercomputer/maxtext/pull/6017\n\n# Description\n\nChanges the training engine's `MetricsRecorder` from appending to JAX arrays on every micro-batch to buffering metrics in host-side Python lists and building the arrays once per step, at flush.\n\nWhy: the eager `jnp.append` path dispatched one device op per metric per micro-batch (about 100 metrics for GRPO). The new flush is one `jnp.stack` per metric per step, independent of the micro-batch count.\n\nChanges:\n- `MetricsRecorder` keeps each step's metrics in Python lists and materializes them into 1D arrays once, at flush. The flush is all-or-nothing, and pending items are keyed by buffer identity and dropped on eviction and cleanup.\n- `buffer_metrics` eagerly validates metric types and shapes host-side without dispatching device operations, preventing malformed metrics from entering pending buffers.\n- `record_metrics` skips `intermediate_outputs` and tuple/list aux values.\n- Adds documentation rule in `AGENTS.md` requiring comments and docstrings to explain current code state from first principles rather than comparing against deleted or legacy implementations.\n\n## Differences from `atwigg/mlperf`\n- Checkpoints are taken only between steps (PR 0), so the metrics are never checkpointed: `MetricsRecorder.restore_buffers`, `weighted_metric_bounds` and the `metric_bounds` checkpoint metadata, the engine's `_restore_metrics_buffer` and the intra-step loss-cache rebuild are not ported, nor are the tests for them.\n- MLPerf's `update(self, **kwargs)` is not adopted.\n- Added `_validate_metric` to eagerly validate metric types and shapes host-side in `MetricsRecorder.buffer_metrics`, rather than deferring failures to flush time.\n\n## Attribution\nPorted from Param Bole's #5568 on `atwigg/mlperf`.\n\nCo-authored-by: Param Bole <parambole@google.com>\n\nFixes #6017\n\n# Tests\n\n```bash\ncd tests/post_training/unit\npython -m pytest maxtext_engine_test.py -q\n```\nResult: 71 passed. Covers Python-list buffering, eager host-side type/shape validation, the flush layout (including more micro-batches after a mid-step flush), same-id buffers kept apart, all-or-nothing flush, eviction and cleanup of pending items, and the single-stack flush. Pre-commit (codespell, pylint, pyink) passed.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1010823516",
+          "timestamp": "2026-10-30T22:08:40Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/647d4531bdaee0ae4233416a6066759049a01abd"
+        },
+        "date": 1793423255326,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 259.47999999999985,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 64.479,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2041.608,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 102.94300000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.34,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 77,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4485.216999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1493.995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 104,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 198.302,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 77,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4134.816000000001,
             "unit": "sec"
           },
           {
