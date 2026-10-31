@@ -525,7 +525,8 @@ class ShortConv(nnx.Module):
     # Flatten branches into channel: [B, S, G, D] -> [B, S, G * D]
     x_flat = x.reshape(B, S, G * D)
     # Depthwise Convolution to mix temporal dimension S only. [B, S, G * D] shape stays
-    if load_balanced_cp_size > 1:
+    # A width-1 kernel (halo_size 0) reads no history, so the token order does not matter to it.
+    if load_balanced_cp_size > 1 and self.halo_size > 0:
       y = self._load_balanced_conv(x_flat, load_balanced_cp_size)
     else:
       y = self.conv(x_flat)
