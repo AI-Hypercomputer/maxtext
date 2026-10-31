@@ -16,7 +16,6 @@
 """Utils that are only interesting to MaxText."""
 
 import functools
-import math
 import os
 from typing import Sequence
 
@@ -2371,7 +2370,8 @@ def wsds_stages(config):
   """``[(end step, peak LR multiplier)]`` of the stepped WSD-S schedule (``lr_schedule_type=wsds``).
 
   Stage k ends at Chinchilla multiple c_k = wsds_first_multiple * 2^k (1xC = wsds_chinchilla_tokens tokens) and peaks at
-  learning_rate / sqrt(c_k) (wsds_stepped; else at learning_rate): the LR-vs-duration rule of OLMo-core's
+  learning_rate * c_k ** -wsds_lr_exponent (wsds_stepped; else at learning_rate; exponent 0.5 is OLMo-core's
+  1/sqrt(c)): the LR-vs-duration rule of OLMo-core's
   WSDSChinchillaRunConfigurator (stepped_schedule), so only learning_rate (optimal at 1xC) is tuned. The last stage ends
   at learning_rate_schedule_steps and takes its own end multiple (the doubling's, when it ends on one).
   """
@@ -2387,7 +2387,8 @@ def wsds_stages(config):
       break
     stages.append((end, multiple))
     multiple *= 2
-  return [(end, 1.0 / math.sqrt(c) if config.wsds_stepped else 1.0) for end, c in stages]
+  exponent = getattr(config, "wsds_lr_exponent", 0.5)
+  return [(end, c**-exponent if config.wsds_stepped else 1.0) for end, c in stages]
 
 
 def wsds_decay_windows(config):

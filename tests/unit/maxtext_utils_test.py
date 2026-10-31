@@ -996,6 +996,15 @@ class TestWsdsSchedule(unittest.TestCase):
     stages, _ = self._schedule(400, wsds_stepped=False)
     self.assertEqual({m for _, m in stages}, {1.0})
 
+  def test_lr_exponent(self):
+    # wsds_lr_exponent=0.28: peaks at c ** -0.28 (1, 0.82, 0.68 for 1x, 2x, 4x); stage 0 is the same for any exponent.
+    stages, sched = self._schedule(400, wsds_lr_exponent=0.28)
+    np.testing.assert_allclose([m for _, m in stages], [1.0, 2**-0.28, 4**-0.28])
+    _, default = self._schedule(400)
+    for step in range(100):
+      self.assertAlmostEqual(self._lr(sched, step), self._lr(default, step), places=12, msg=f"step {step}")
+    self.assertAlmostEqual(self._lr(sched, 150), self.LR * 2**-0.28, places=9)
+
   def test_trunk_holds_each_peak(self):
     # wsds_in_run_decays=False: the WSD trunk steps down at each doubling and never decays.
     _, sched = self._schedule(400, wsds_in_run_decays=False)

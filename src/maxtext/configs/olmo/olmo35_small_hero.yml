@@ -42,9 +42,9 @@ shard_optimizer_over_data: true  # Zero-1 over the 48 data-parallel ranks
 
 # --- Training recipe (OLMo-core hero, LR as a function of duration) ------------------------------------------------
 # One epoch of Dolma 3.5: 1,708,983,195 sequences = 556,309 full steps (14.0T tokens, 176.4 x Chinchilla).
-# LR: the trunk of WSD with OLMo-core's stepped peaks (WSDSChinchillaRunConfigurator, stepped_schedule), the decays run
-# as separate branches. Stages end at 1, 2, 4, ..., 128 x C and at the epoch's end; stage k holds learning_rate /
-# sqrt(c_k) to its end with no decay (wsds_in_run_decays: false). A decay branch for doubling k resumes from this run's
+# LR: the trunk of WSD with stepped peaks (the stages of OLMo-core's WSDSChinchillaRunConfigurator), the decays run
+# as separate branches. Stages end at 1, 2, 4, ..., 128 x C and at the epoch's end; stage k holds learning_rate *
+# c_k ** -0.28 to its end with no decay (wsds_in_run_decays: false). A decay branch for doubling k resumes from this run's
 # checkpoint at stage k's fork (saved: wsds_save_forks) with steps = stage k's end, learning_rate_schedule_steps =
 # 556309 and wsds_decay_stage = k: linear decay to 0 over the stage's last 10%. learning_rate is the 1xC optimum and
 # the only LR to tune: the 1xC base_lr runs are this config's stage-0 branch. 1xC = 20 x 3,969,230,656 active
@@ -57,6 +57,9 @@ wsds_chinchilla_tokens: 79384613120
 wsds_first_multiple: 1.0
 wsds_decay_steps_fraction: 0.1
 wsds_stepped: true
+# Peaks at learning_rate * c_k ** -0.28, not OLMo-core's 1/sqrt(c): the best LR falls more slowly with duration in OLMo's
+# ladder sweeps (oe-planning#29's Cx1/Cx2/Cx4 shift checks; Tanush's fit, 0.28) and Bjorck et al. (~0.32).
+wsds_lr_exponent: 0.28
 wsds_in_run_decays: false
 wsds_save_forks: true  # labels 2838, 5992, 11986, ...: where each doubling's decay branch resumes
 learning_rate_final_fraction: 0.0

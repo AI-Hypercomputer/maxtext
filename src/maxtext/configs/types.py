@@ -3472,9 +3472,18 @@ class Optimizer(BaseModel):
   wsds_stepped: bool = Field(
       True,
       description=(
-          "lr_schedule_type=wsds: stage k peaks at learning_rate / sqrt(c_k), c_k its end Chinchilla multiple (OLMo-core's"
-          " stepped_schedule: the LR falls as 1/sqrt(D), so learning_rate is the 1xC optimum); False keeps every peak at"
-          " learning_rate."
+          "lr_schedule_type=wsds: stage k peaks at learning_rate * c_k ** -wsds_lr_exponent, c_k its end Chinchilla"
+          " multiple (OLMo-core's stepped_schedule, exponent 0.5: learning_rate is the 1xC optimum); False keeps every"
+          " peak at learning_rate."
+      ),
+  )
+  wsds_lr_exponent: float = Field(
+      0.5,
+      ge=0.0,
+      description=(
+          "lr_schedule_type=wsds with wsds_stepped: stage k peaks at learning_rate * c_k ** -wsds_lr_exponent. 0.5 is"
+          " OLMo-core's stepped_schedule (1/sqrt(c)); the best LR falls more slowly with duration in OLMo's own sweeps"
+          " (about 0.28) and Bjorck et al. (about 0.32)."
       ),
   )
   wsds_in_run_decays: bool = Field(

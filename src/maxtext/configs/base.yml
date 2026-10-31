@@ -1175,6 +1175,8 @@ wsds_chinchilla_tokens: 0
 wsds_first_multiple: 1.0
 wsds_decay_steps_fraction: 0.1
 wsds_stepped: true
+# Stage k peaks at learning_rate * c_k ** -wsds_lr_exponent (0.5: OLMo-core's 1/sqrt(c)).
+wsds_lr_exponent: 0.5
 # False: the trunk of WSD with separate decay branches (each stage holds its peak, no decays); a branch sets
 # wsds_decay_stage=k (the trunk's schedule up to stage k's fork, then its decay; steps = stage k's end).
 wsds_in_run_decays: true
