@@ -40,31 +40,28 @@ shard_exp_on_fsdp: false
 allow_split_physical_axes: true
 shard_optimizer_over_data: true  # Zero-1 over the 48 data-parallel ranks
 
-# --- Training recipe (OLMo-core hero, LR as a function of duration) ------------------------------------------------
+# --- Training recipe (OLMo-core hero; LR from Tanush's duration fit) ------------------------------------------------
 # One epoch of Dolma 3.5: 1,708,983,195 sequences = 556,309 full steps (14.0T tokens, 176.4 x Chinchilla).
-# LR: the trunk of WSD with stepped peaks (the stages of OLMo-core's WSDSChinchillaRunConfigurator), the decays run
-# as separate branches. Stages end at 1, 2, 4, ..., 128 x C and at the epoch's end; stage k holds learning_rate *
-# c_k ** -0.28 to its end with no decay (wsds_in_run_decays: false). A decay branch for doubling k resumes from this run's
-# checkpoint at stage k's fork (saved: wsds_save_forks) with steps = stage k's end, learning_rate_schedule_steps =
-# 556309 and wsds_decay_stage = k: linear decay to 0 over the stage's last 10%. learning_rate is the 1xC optimum and
-# the only LR to tune: the 1xC base_lr runs are this config's stage-0 branch. 1xC = 20 x 3,969,230,656 active
-# non-embedding parameters = 79,384,613,120 tokens = 3,154.5 steps.
+# LR: a constant WSD trunk at one LR for the whole epoch, with the decays as separate branches, as OLMo-core's small
+# hero (constant-after-warmup trunk, decays appended: 14T + 200B, ...). The LR follows Tanush's ladder fit
+# (scaling-ladders ladders/mainline/generate.py, CompletedP alpha-1.0 sweep of 275M-1.4B at Cx1-Cx4):
+#   lr ~ D^-0.281 * B^0.5, D the run's tokens and B its tokens per step.
+# Same batch here, so the hero's LR is the best 1xC LR (base_lr sweep: k8s/hero/runs/1xc-lr*, 3,154 steps = 79.37B
+# tokens, 158-step warmup, 10% decay to 0) times (13.99997T / 79.37B)^-0.281 = 176.38^-0.281 = 0.23375.
+# 1xC = 20 x 3,969,230,656 active non-embedding parameters = 79,384,613,120 tokens.
+# A decay branch at trunk checkpoint label F resumes from it with steps = F + 1 + N, learning_rate_schedule_steps
+# equal to it, wsd_decay_steps_fraction = N / steps and warmup_steps_fraction = 2000 / steps (both rounded up so the
+# int() step counts are exact): the trunk to step F, then a linear decay to 0 over the N appended steps.
 # The schedule is baked into the LR curve: set once, never change it on a resume.
 steps: 556309
-learning_rate: 1.1e-3  # base LR at 1xC: to be tuned on small at 1xC
-lr_schedule_type: "wsds"
-wsds_chinchilla_tokens: 79384613120
-wsds_first_multiple: 1.0
-wsds_decay_steps_fraction: 0.1
-wsds_stepped: true
-# Peaks at learning_rate * c_k ** -0.28, not OLMo-core's 1/sqrt(c): the best LR falls more slowly with duration in OLMo's
-# ladder sweeps (oe-planning#29's Cx1/Cx2/Cx4 shift checks; Tanush's fit, 0.28) and Bjorck et al. (~0.32).
-wsds_lr_exponent: 0.28
-wsds_in_run_decays: false
-wsds_save_forks: true  # labels 2838, 5992, 11986, ...: where each doubling's decay branch resumes
+learning_rate: 2.5712e-4  # PLACEHOLDER: 1.1e-3 x 0.23375. Set to (best 1xC LR) x 0.23375 once the sweep picks it.
+lr_schedule_type: "wsd"
+wsd_decay_steps_fraction: 0.0  # the trunk never decays; the decays are branches
+wsd_decay_style: "linear"
 learning_rate_final_fraction: 0.0
-# Warmup 1 token per parameter (OLMo-core's WSDSChinchillaRunConfigurator): 3.97B tokens = 158 steps, 5% of 1xC.
-warmup_steps_fraction: 0.000284016  # 158 / 556,309, rounded up so int(steps * fraction) is 158
+# Warmup 2,000 steps, as OLMo-core's hero and Tanush's ladder runs (the 1xC sweep keeps its 1-token-per-parameter
+# 158 steps).
+warmup_steps_fraction: 0.003595125  # 2,000 / 556,309, rounded up so int(steps * fraction) is 2,000
 warmup_step_offset: 1
 opt_type: "adamw"
 adam_b1: 0.9
