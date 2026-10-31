@@ -586,13 +586,11 @@ class MuonDimensionTest(parameterized.TestCase):
   """
 
   @parameterized.named_parameters(
-      ("deepseek2-16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
+      ("deepseek3-test", "deepseek3-test", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek3-671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek4-284b", "deepseek4-284b", DEEPSEEK4_DIMENSION_NUMBER),
       ("deepseek4-1600b", "deepseek4-1600b", DEEPSEEK4_1600B_DIMENSION_NUMBER),
       ("kimi-k2-1t", "kimi-k2-1t", DEEPSEEK3_DIMENSION_NUMBER),
-      ("llama2-7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
-      ("llama3-8b", "llama3-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.1-8b", "llama3.1-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.3-70b", "llama3.3-70b", LLAMA2_DIMENSION_NUMBER),
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
@@ -1048,7 +1046,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=maxtext_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
         "muon_use_all_to_all=False",
     ]
     config_no_a2a = pyconfig.initialize(argv_no_a2a)
@@ -1073,7 +1071,7 @@ class TestMuonLogic(unittest.TestCase):
         get_test_config_path(),
         "run_name=test",
         "opt_type=muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_default = pyconfig.initialize(argv_default)
 
@@ -1098,7 +1096,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=optax_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_optax = pyconfig.initialize(argv_optax)
 
@@ -1123,7 +1121,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=optax_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
         "muon_use_all_to_all=True",
     ]
     config_optax_a2a = pyconfig.initialize(argv_optax_a2a)
@@ -1137,7 +1135,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=invalid_type",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_invalid = pyconfig.initialize(argv_invalid)
     with self.assertRaises(ValueError):
@@ -1166,7 +1164,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=maxtext_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config = pyconfig.initialize(argv)
 

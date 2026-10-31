@@ -21,6 +21,7 @@ import math
 import os
 import sys
 import datetime
+import warnings
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
@@ -893,12 +894,39 @@ class _HyperParameters:
     updated_keys = []
     if raw_keys["model_name"] != "default":
       model_name = raw_keys["model_name"]
+      is_deprecated_model = False
+      dir_path = os.path.dirname(os.path.realpath(__file__))
       # First look at the model configs next to the base_config_path, and
       # fallback to the python codebase if the config cannot be found.
       file_path = os.path.join(os.path.dirname(base_config_path), "models", f"{model_name}.yml")
       if not os.path.isfile(file_path):
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
+        file_path = os.path.join(os.path.dirname(os.path.dirname(base_config_path)), "models", f"{model_name}.yml")
+      if not os.path.isfile(file_path):
+        file_path = os.path.join(dir_path, "models", f"{model_name}.yml")
+      if not os.path.isfile(file_path):
+        deprecated_candidates = [
+            os.path.join(os.path.dirname(base_config_path), "models", "deprecated", f"{model_name}.yml"),
+            os.path.join(
+                os.path.dirname(os.path.dirname(base_config_path)), "models", "deprecated", f"{model_name}.yml"
+            ),
+            os.path.join(dir_path, "models", "deprecated", f"{model_name}.yml"),
+        ]
+        for candidate in deprecated_candidates:
+          if os.path.isfile(candidate):
+            file_path = candidate
+            is_deprecated_model = True
+            break
+      if is_deprecated_model:
+        warnings.warn(
+            f"Model config '{model_name}' is deprecated under the MaxText Model Lifecycle Policy and will be removed in"
+            " the next release cut. Pin the prior release tag if you rely on this model.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        max_logging.log(
+            f"WARNING: Model config '{model_name}' is loaded from deprecated/ ({file_path}) and will be removed in the"
+            " next release cut."
+        )
       # Use omegaconf.OmegaConf to load the model-specific configuration.
       model_vars = omegaconf.OmegaConf.load(file_path)
       model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)
