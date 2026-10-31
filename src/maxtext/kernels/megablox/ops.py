@@ -2004,7 +2004,7 @@ _LHS_QUANT_MODES: dict[str, dict] = {
 
 
 def _lhs_quant_kwargs(lhs_quant_mode: str) -> dict:
-  """gmm_v2's in-kernel lhs quantization kwargs for a fp8_moe_native_fwd_lhs_quant mode."""
+  """gmm_v2's in-kernel lhs quantization kwargs for an lhs_quant_mode (fp8_moe_native_fwd uses "fullk_f32")."""
   if lhs_quant_mode not in _LHS_QUANT_MODES:
     raise ValueError(f"Unknown lhs_quant_mode {lhs_quant_mode!r}; expected one of {list(_LHS_QUANT_MODES)}.")
   return _LHS_QUANT_MODES[lhs_quant_mode]
@@ -2035,7 +2035,7 @@ def gmm_silu_fp8(
   gate_up.
 
   acc_dtype: gmm_v2's accumulator across K blocks (None: the kernel default). lhs_quant_mode: the in-kernel lhs
-  quantization scheme, a key of _LHS_QUANT_MODES (fp8_moe_native_fwd_lhs_quant). native_bwd_dlhs
+  quantization scheme, a key of _LHS_QUANT_MODES (fp8_moe_native_fwd passes "fullk_f32"). native_bwd_dlhs
   (fp8_moe_native_bwd_dlhs): the backward DLHS dequantizes the codes inside the kernel (same values). The other
   arguments are gmm_silu's.
   """

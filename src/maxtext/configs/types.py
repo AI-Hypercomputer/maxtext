@@ -1943,40 +1943,12 @@ class MoEGeneral(BaseModel):
           "Native FP8 forward for the routed experts. With fp8_moe_fake_quant and fp8_fake_quant_hoist=gather8,"
           " the wi and wo forward GMMs run on the MXU in float8_e4m3fn: the gathered weight codes and their"
           " per-channel scales feed gmm_v2 directly (no dequantization), and gmm_v2 quantizes the bf16 activation"
-          " in the kernel with a dynamic per-row absmax scale (see fp8_moe_native_fwd_lhs_quant). The backward runs"
+          " in the kernel with one dynamic float32 absmax scale per row over the full K dim (the rollout FP8 MoE kernel's"
+          " decode scheme) and accumulates in float32. The backward runs"
           " bf16 DLHS / TGMM at the dequantized weight (straight-through weight gradient), unless"
           " fp8_moe_native_bwd_dlhs moves the DLHS dequantization into the kernel. Runs only inside the decoder's"
           " layer scan, where gather8's absmax is attached; a RoutedMoE call outside it (unscanned layers, KV-cache"
           " decode) raises instead of silently running fake QAT."
-      ),
-  )
-  fp8_moe_native_fwd_acc_dtype: Literal["", "bfloat16", "float32"] = Field(
-      "",
-      description=(
-          "fp8_moe_native_fwd: gmm_v2's accumulator across K blocks. '' keeps the kernel default (bfloat16 when the"
-          " lhs is quantized in the kernel, as in the rollout's kernel); 'float32' accumulates in float32."
-      ),
-  )
-  fp8_moe_native_fwd_lhs_quant: Literal[
-      "",
-      "block512_bf16",
-      "block512_bf16_rhs1",
-      "block512_f32",
-      "block512_f32_hoist",
-      "fullk_bf16",
-      "fullk_bf16_hoist",
-      "fullk_f32",
-      "fullk_f32_hoist",
-  ] = Field(
-      "",
-      description=(
-          "fp8_moe_native_fwd: in-kernel lhs (activation) quantization scheme. 'block512_*': one scale per row and"
-          " 512-column block ('' / 'block512_bf16' is gmm_v2's default); 'fullk_*': one scale per row over the full"
-          " K dim. '*_bf16': bf16 absmax and reciprocal; '*_f32': float32 max(absmax, 1e-12) / 448 and a true"
-          " division (with fullk, the rollout's FP8 MoE kernel's scheme). 'block512_bf16_rhs1': the weight scale is"
-          " applied to the block accumulator before the activation scale. '*_hoist': each lhs block is quantized once"
-          " per tile instead of per mxu-wide n slice; same values and, since the compiler deduplicates the repeated"
-          " quantization, the same speed."
       ),
   )
   fp8_moe_native_bwd_dlhs: bool = Field(
@@ -1994,8 +1966,8 @@ class MoEGeneral(BaseModel):
   def validate_fp8_moe_native_fwd(self) -> "MoEGeneral":
     """Rejects fp8_moe_native_fwd / fp8_moe_native_bwd_dlhs without the config they require.
 
-    The FP8 GMMs replace the gather8 dequantization on the fused gmm_v2 SwiGLU / dSwiGLU path only, and the
-    in-kernel DLHS dequantization needs the transposed DLHS rhs and fixed tiles.
+    The FP8 GMMs replace the gather8 dequantization on the fused gmm_v2 SwiGLU / dSwiGLU path only and need fixed
+    tiles (float32 accumulator); the in-kernel DLHS dequantization also needs the transposed DLHS rhs.
     """
     if self.fp8_moe_native_fwd:
       _reject_unless(
@@ -2007,6 +1979,9 @@ class MoEGeneral(BaseModel):
               (self.use_tokamax_gmm and self.use_gmm_v2, "use_tokamax_gmm=True and use_gmm_v2=True"),
               (self.moe_wi_gmm_fused_swiglu, "moe_wi_gmm_fused_swiglu=True"),
               (self.moe_wo_gmm_fused_dswiglu, "moe_wo_gmm_fused_dswiglu=True"),
+              # gmm_v2's heuristic tiling budgets a bfloat16 accumulator when the lhs is quantized in the kernel,
+              # but the native forward accumulates in float32, so heuristic tiles could exceed VMEM.
+              (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
           ],
       )
     if self.fp8_moe_native_bwd_dlhs:

@@ -1166,8 +1166,12 @@ def _rhs_cache_miss(
 ) -> jax.Array:
   """rhs_contract_dequant: whether the cache tile holds another rhs block than this step's.
 
-  The rhs block index is (group, n tile, k tile), so with a single n and k tile (the MoE DLHS tiles) the cache is
-  filled once per group and every m tile of the group reuses it. Side effect: records this step's block key in the
+  The rhs block index is (group, n tile, k tile), and k is the innermost grid axis. With a single k tile (the MoE
+  DLHS tiles) the cache is filled once per (group, n tile) and every m tile of the group reuses it, for any number
+  of n tiles (the DLHS grid is (n, gm, k)). With two or more k tiles consecutive steps need different blocks, so the
+  cache never hits and every step dequantizes its block inside the matmul; outputs are unchanged, and it still beats
+  dequantizing the whole weight in XLA first (TPU7x, production DLHS shapes, 2-4 k tiles: 0.84-0.91x its time),
+  because the kernel reads 1-byte codes instead of a bf16 copy. Side effect: records this step's block key in the
   SMEM key, since the step that misses fills the cache tile.
   """
   assert rhs_cache_refs is not None

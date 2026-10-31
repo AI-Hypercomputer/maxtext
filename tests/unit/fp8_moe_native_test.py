@@ -11,12 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""fp8_moe_native_fwd / fp8_moe_native_bwd_dlhs on CPU: config validation, the outside-layer-scan guard, and the
-dequantization and lhs-quant-mode contracts the native path relies on.
+"""fp8_moe_native_fwd / fp8_moe_native_bwd_dlhs on CPU: config validation, the outside-layer-scan guard, the
+dequantization contract the native path relies on, and the fixed activation-quantization / accumulator settings.
 """
 
 import sys
-import typing
 
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -29,6 +28,7 @@ import pytest
 from maxtext.configs import pyconfig
 from maxtext.configs import types as config_types
 from maxtext.kernels.megablox import ops as megablox_ops
+from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
@@ -108,22 +108,14 @@ def _cfg(**overrides):
 
 
 def test_flags_are_defined_and_off_by_default():
-  for key in (
-      "fp8_moe_native_fwd",
-      "fp8_moe_native_fwd_acc_dtype",
-      "fp8_moe_native_fwd_lhs_quant",
-      "fp8_moe_native_bwd_dlhs",
-  ):
+  for key in ("fp8_moe_native_fwd", "fp8_moe_native_bwd_dlhs"):
     assert key in set(config_types.MoEGeneral.model_fields), key
   cfg = _cfg()
   assert not cfg.fp8_moe_native_fwd and not cfg.fp8_moe_native_bwd_dlhs
-  assert cfg.fp8_moe_native_fwd_acc_dtype == "" and cfg.fp8_moe_native_fwd_lhs_quant == ""
 
 
 def test_native_config_is_accepted():
-  cfg = _cfg(
-      **_NATIVE, **_NATIVE_BWD_DLHS, fp8_moe_native_fwd_lhs_quant="fullk_f32", fp8_moe_native_fwd_acc_dtype="float32"
-  )
+  cfg = _cfg(**_NATIVE, **_NATIVE_BWD_DLHS)
   assert cfg.fp8_moe_native_fwd and cfg.fp8_moe_native_bwd_dlhs
 
 
@@ -133,6 +125,8 @@ def test_native_config_is_accepted():
         ({"fp8_moe_fake_quant": False}, "fp8_moe_fake_quant=True"),
         ({"fp8_fake_quant_hoist": "absmax"}, "fp8_fake_quant_hoist=gather8"),
         ({"use_gmm_v2": False}, "use_tokamax_gmm=True and use_gmm_v2=True"),
+        # The heuristic tiling budgets a bf16 accumulator; the native forward accumulates in f32.
+        ({"use_gmm_v2_heuristic_tiling": True}, "use_gmm_v2_heuristic_tiling=False"),
     ],
 )
 def test_native_fwd_requirement_is_enforced(override, requirement):
@@ -197,8 +191,11 @@ def test_dequantize_fp8_codes_matches_the_gather8_dequantization():
   np.testing.assert_array_equal(np.asarray(native).view(np.uint16), np.asarray(gather8).view(np.uint16))
 
 
-def test_lhs_quant_modes_match_the_config_values():
-  # A value the config accepts but ops does not know would fail only at trace time.
-  field = dict(config_types.MoEGeneral.model_fields)["fp8_moe_native_fwd_lhs_quant"]
-  config_values = set(typing.get_args(field.annotation))
-  assert config_values == set(megablox_ops._LHS_QUANT_MODES)  # pylint: disable=protected-access
+def test_native_fwd_uses_full_k_f32_activation_quant_and_f32_accumulation():
+  # One float32 absmax scale per row over the full K dim and a float32 accumulator, with no config knob: the plain
+  # fp8_moe_native_fwd=True must get the numerics closest to the rollout's FP8 MoE kernel.
+  kwargs = moe.fp8_native_fwd_kwargs(_cfg(**_NATIVE))
+  assert kwargs["lhs_quant_mode"] == "fullk_f32"
+  assert kwargs["lhs_quant_mode"] in megablox_ops._LHS_QUANT_MODES  # pylint: disable=protected-access
+  assert kwargs["acc_dtype"] == jnp.float32
+  assert not kwargs["native_bwd_dlhs"]

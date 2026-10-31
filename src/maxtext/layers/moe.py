@@ -924,18 +924,16 @@ class Fp8NativeWeight:
 jax.tree_util.register_dataclass(Fp8NativeWeight, data_fields=["anchor", "codes", "scale"], meta_fields=[])
 
 
-def fp8_native_fwd_acc_dtype(config) -> jnp.dtype | None:
-  """fp8_moe_native_fwd_acc_dtype as a dtype, or None for gmm_v2's default."""
-  name = getattr(config, "fp8_moe_native_fwd_acc_dtype", "")
-  return jnp.dtype(name) if name else None
+# fp8_moe_native_fwd's in-kernel activation quantization and accumulator: one float32 absmax scale per row over the
+# full K dim, float32 accumulation. Closest to the rollout's FP8 MoE kernel and fastest of the measured gmm_v2
+# variants; the others stay selectable as ops-level arguments for benchmarks and tests.
+_FP8_NATIVE_FWD_LHS_QUANT_MODE = "fullk_f32"
+_FP8_NATIVE_FWD_ACC_DTYPE = jnp.dtype(jnp.float32)
 
 
 def fp8_native_fwd_kwargs(config, with_bwd_dlhs: bool = True) -> dict:
-  """The FP8 GMM ops' kwargs from the fp8_moe_native_fwd_* (and, with_bwd_dlhs, fp8_moe_native_bwd_dlhs) config."""
-  kwargs = {
-      "acc_dtype": fp8_native_fwd_acc_dtype(config),
-      "lhs_quant_mode": getattr(config, "fp8_moe_native_fwd_lhs_quant", ""),
-  }
+  """The FP8 GMM ops' kwargs for fp8_moe_native_fwd (and, with_bwd_dlhs, fp8_moe_native_bwd_dlhs)."""
+  kwargs = {"acc_dtype": _FP8_NATIVE_FWD_ACC_DTYPE, "lhs_quant_mode": _FP8_NATIVE_FWD_LHS_QUANT_MODE}
   if with_bwd_dlhs:
     kwargs["native_bwd_dlhs"] = getattr(config, "fp8_moe_native_bwd_dlhs", False)
   return kwargs
