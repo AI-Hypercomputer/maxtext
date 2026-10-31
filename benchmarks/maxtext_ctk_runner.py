@@ -25,10 +25,12 @@ import logging
 import os
 import queue
 import random
+import shlex
 import string
 import subprocess
 import threading
 import time
+from typing import Any
 
 import omegaconf
 
@@ -137,6 +139,10 @@ class WorkloadConfig:
   xpk_storage: None | list[str] = None
   hlo_dump: None | bool = None
   skip_validation: bool = False
+  # MaxText `key=value` overrides applied on top of model.tuning_params and
+  # pathways_tuning_params. A value of None removes the key so the base.yml
+  # default applies (e.g. {"profiler": None} turns off a model's "xplane").
+  extra_tuning_params: dict[str, Any] | None = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice, topology, and compute_type from device_type."""
@@ -278,18 +284,21 @@ def wait_for_workloads_completion_async(
 wait_for_xpk_workloads_completion_async = wait_for_workloads_completion_async
 
 
-def _get_config_tuning_params(wl_config: WorkloadConfig):
-  """Get config tuning parameters for the workload.
+def _resolve_tuning_params(wl_config: WorkloadConfig) -> dict[str, Any]:
+  """Resolves the effective MaxText tuning params for the workload.
+
+  Precedence (lowest to highest): model.tuning_params, pathways_tuning_params,
+  extra_tuning_params. An extra_tuning_params value of None removes the key so
+  the base.yml default applies.
 
   Args:
     wl_config: Workload configuration.
 
   Returns:
-    A string of config tuning parameters.
+    A dict of resolved tuning parameters.
   """
   is_pw_enabled = wl_config.pathways_config is not None
 
-  config_tuning_params = ""
   unified_tuning_params = wl_config.model.tuning_params.copy()  # Create a copy
 
   # Overwrite the tuning params with pathways specific tuning params if present.
@@ -324,9 +333,46 @@ def _get_config_tuning_params(wl_config: WorkloadConfig):
     for key, value in wl_config.model.pathways_tuning_params.items():
       unified_tuning_params[key] = value
 
-  print(f"Unified tuning params for model are:" f" {unified_tuning_params}")
+  # Apply caller-provided overrides last; None means "drop the key".
+  for key, value in (wl_config.extra_tuning_params or {}).items():
+    if value is None:
+      unified_tuning_params.pop(key, None)
+    else:
+      unified_tuning_params[key] = value
 
-  for key, value in unified_tuning_params.items():
+  print(f"Unified tuning params for model are:" f" {unified_tuning_params}")
+  return unified_tuning_params
+
+
+# Characters that would break out of the `--command="..."` wrapper built in
+# generate_workload_cmd (`$` is already escaped there).
+_UNSAFE_OVERRIDE_CHARS = ('"', "'", "`", "\\")
+
+
+def _quote_override_value(key: str, value: Any) -> str:
+  """Renders an override value so the in-container shell passes it to MaxText as-is."""
+  text = str(value)  # bool -> "True"/"False", int -> "10"
+  bad = [c for c in _UNSAFE_OVERRIDE_CHARS if c in text]
+  if bad:
+    raise ValueError(f"Override {key}={text!r} contains unsupported characters {bad}.")
+  return shlex.quote(text)  # no-op for plain values; single-quotes globs/spaces
+
+
+def _get_config_tuning_params(wl_config: WorkloadConfig):
+  """Get config tuning parameters for the workload.
+
+  Args:
+    wl_config: Workload configuration.
+
+  Returns:
+    A string of config tuning parameters.
+  """
+  overrides = wl_config.extra_tuning_params or {}
+  config_tuning_params = ""
+
+  for key, value in _resolve_tuning_params(wl_config).items():
+    if key in overrides:
+      value = _quote_override_value(key, value)
     config_tuning_params += f"{key}={value} "
 
   return config_tuning_params
@@ -346,49 +392,50 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
     A dictionary of arguments for the metrics upload script.
   """
   base_config = omegaconf.OmegaConf.load(wl_config.base_config)
+  params = _resolve_tuning_params(wl_config)
 
   # Extract per_device_batch_size arg
-  if "per_device_batch_size" not in wl_config.model.tuning_params:
+  if "per_device_batch_size" not in params:
     per_device_batch_size = base_config.per_device_batch_size
   else:
-    per_device_batch_size = wl_config.model.tuning_params["per_device_batch_size"]
+    per_device_batch_size = params["per_device_batch_size"]
 
   # Extract precision arg
-  if "matmul_precision" not in wl_config.model.tuning_params:
+  if "matmul_precision" not in params:
     precision = base_config.matmul_precision
   else:
-    precision = wl_config.model.tuning_params["matmul_precision"]
+    precision = params["matmul_precision"]
 
   # Extract optimizer arg
-  if "opt_type" not in wl_config.model.tuning_params:
+  if "opt_type" not in params:
     optimizer = base_config.opt_type
   else:
-    optimizer = wl_config.model.tuning_params["opt_type"]
+    optimizer = params["opt_type"]
 
   # Extract sequence_length arg
-  if "max_target_length" not in wl_config.model.tuning_params:
+  if "max_target_length" not in params:
     sequence_length = base_config.max_target_length
   else:
-    sequence_length = wl_config.model.tuning_params["max_target_length"]
+    sequence_length = params["max_target_length"]
 
   # Extract dataset arg
-  if "dataset_type" not in wl_config.model.tuning_params:
+  if "dataset_type" not in params:
     dataset = base_config.dataset_type
   else:
-    dataset = wl_config.model.tuning_params["dataset_type"]
+    dataset = params["dataset_type"]
 
   # Extract xla_flags arg
   xla_flags_str = wl_config.model.xla_flags.strip().replace(" ", ",")
 
   # Extract tuning_params arg
-  tuning_params_str = json.dumps(wl_config.model.tuning_params)
+  tuning_params_str = json.dumps(params)  # resolved params actually used by the run
 
   num_steps = wl_config.num_steps  # default case
 
   if (
-      "steps" in wl_config.model.tuning_params and wl_config.num_steps == -1
+      "steps" in params and wl_config.num_steps == -1
   ):  # replace num_step for not provided num_steps and configuration exist in tuning_params.
-    num_steps = wl_config.model.tuning_params["steps"]
+    num_steps = params["steps"]
     log.info("using steps=(%d) in model convergence test setup", num_steps)
 
   container_image_name = (

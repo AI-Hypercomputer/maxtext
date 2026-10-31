@@ -21,12 +21,14 @@ execution parameters for running benchmarks with Cluster Toolkit (gcluster). The
 modified for custom runs.
 """
 
+import argparse
 import dataclasses
 from typing import Any
 
 from benchmarks import maxtext_trillium_model_configs as v6e_model_configs
 from benchmarks import maxtext_v5e_model_configs as v5e_model_configs
 from benchmarks import maxtext_v5p_model_configs as v5p_model_configs
+from benchmarks.recipes import parser_utils
 from benchmarks.recipes.pw_utils import build_user_models, get_cluster_config, get_pathways_config
 
 
@@ -82,6 +84,29 @@ class UserConfig:
   workload_id: str = None
   skip_validation: bool = False
 
+  # MaxText training overrides (None = not set). Must match parser_utils.MAXTEXT_FLAG_SPECS.
+  # Elastic training
+  elastic_enabled: bool | None = None
+  enable_single_controller: bool | None = None
+  elastic_min_slice_count: int | None = None
+  # Goodput
+  enable_pathways_goodput: bool | None = None
+  enable_goodput_recording: bool | None = None
+  goodput_upload_interval_seconds: int | None = None
+  monitor_goodput: bool | None = None
+  # Checkpointing
+  enable_checkpointing: bool | None = None
+  async_checkpointing: bool | None = None
+  enable_checkpoint_cloud_logger: bool | None = None
+  checkpoint_period: int | None = None
+  # Colocated Python data input / dataset
+  colocated_python_data_input: bool | None = None
+  tokenizer_path: str | None = None
+  dataset_type: str | None = None
+  grain_train_files: str | None = None
+  # Generic MaxText key=value overrides (value None = remove key from the model config).
+  maxtext_overrides: dict[str, Any] = dataclasses.field(default_factory=dict)
+
   # Derived attributes initialized in __post_init__
   cluster_config: Any = dataclasses.field(init=False, default=None)
   region: str = dataclasses.field(init=False, default="")
@@ -124,6 +149,37 @@ class UserConfig:
         AVAILABLE_MODELS_FRAMEWORKS,
         AVAILABLE_MODELS,
     )
+    # Fail fast on conflicting overrides, before any cluster interaction.
+    self.tuning_param_overrides()
+
+  def tuning_param_overrides(self) -> dict[str, Any]:
+    """Returns MaxText overrides: --maxtext_override entries plus the typed flags that are set."""
+    typed = {name: getattr(self, name) for name in parser_utils.MAXTEXT_FLAG_NAMES if getattr(self, name) is not None}
+    conflicts = sorted(
+        k
+        for k in typed.keys() & self.maxtext_overrides.keys()
+        if typed[k] != _parse_override_like_flag(k, self.maxtext_overrides[k])
+    )
+    if conflicts:
+      raise ValueError(f"Conflicting values for {conflicts} between typed flags and --maxtext_override.")
+    return {**self.maxtext_overrides, **typed}
+
+
+_FLAG_TYPES = {name: arg_type for name, arg_type, _ in parser_utils.MAXTEXT_FLAG_SPECS}
+
+
+def _parse_override_like_flag(key: str, value: Any) -> Any:
+  """Parses a --maxtext_override value with the matching typed flag's parser, so equal values compare equal.
+
+  For example `--maxtext_override enable_checkpointing=true` parses to True like `--enable_checkpointing=true`.
+  Unset (None) and unparsable values are returned unchanged, so they still differ from any typed value.
+  """
+  if value is None:
+    return None
+  try:
+    return _FLAG_TYPES[key](value)
+  except (argparse.ArgumentTypeError, TypeError, ValueError):
+    return value
 
 
 # Define the required configuration here

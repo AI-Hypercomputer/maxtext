@@ -74,6 +74,7 @@ def _create_workload_config(  # pylint: disable=too-many-positional-arguments
       "db_project": user_config.bq_db_project,
       "db_dataset": user_config.bq_db_dataset,
       "skip_validation": user_config.skip_validation,
+      "extra_tuning_params": user_config.tuning_param_overrides() or None,
   }
   # Add any extra arguments, like disruption_configs, if they exist
   config_args.update(kwargs)
