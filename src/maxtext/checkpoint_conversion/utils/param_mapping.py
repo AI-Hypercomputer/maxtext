@@ -1553,6 +1553,221 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   return hooks
 
 
+def _qwen3_omni_talker_param_mapping(config):
+  """MaxText -> HF weight paths for the Qwen3-Omni speech stack (`talker.*`, `talker.code_predictor.*`, `code2wav.*`).
+
+  Layout follows `maxtext.models.qwen3_omni_audio` (`Transformer.talker` / `Transformer.code2wav`); unscanned only.
+
+  Args:
+    config (dict): HF `Qwen3OmniMoeConfig.to_dict()`.
+  """
+  talker_cfg = config["talker_config"]
+  text_cfg = talker_cfg["text_config"]
+  cp_cfg = talker_cfg["code_predictor_config"]
+  c2w_cfg = config["code2wav_config"]
+  n_layers = text_cfg["num_hidden_layers"]
+  num_experts = text_cfg.get("num_experts", text_cfg.get("num_local_experts", 0))
+  n_cp_layers = cp_cfg["num_hidden_layers"]
+  n_groups = talker_cfg["num_code_groups"]
+  n_c2w_layers = c2w_cfg["num_hidden_layers"]
+  n_upsample = len(c2w_cfg["upsampling_ratios"])
+  n_decoder_blocks = len(c2w_cfg["upsample_rates"])
+
+  mapping = {
+      "params-talker-codec_embedding-embedding": "talker.model.codec_embedding.weight",
+      "params-talker-decoder_norm-scale": "talker.model.norm.weight",
+      "params-talker-codec_head-kernel": "talker.codec_head.weight",
+      "params-talker-text_projection-linear_fc1-kernel": "talker.text_projection.linear_fc1.weight",
+      "params-talker-text_projection-linear_fc1-bias": "talker.text_projection.linear_fc1.bias",
+      "params-talker-text_projection-linear_fc2-kernel": "talker.text_projection.linear_fc2.weight",
+      "params-talker-text_projection-linear_fc2-bias": "talker.text_projection.linear_fc2.bias",
+      "params-talker-hidden_projection-linear_fc1-kernel": "talker.hidden_projection.linear_fc1.weight",
+      "params-talker-hidden_projection-linear_fc1-bias": "talker.hidden_projection.linear_fc1.bias",
+      "params-talker-hidden_projection-linear_fc2-kernel": "talker.hidden_projection.linear_fc2.weight",
+      "params-talker-hidden_projection-linear_fc2-bias": "talker.hidden_projection.linear_fc2.bias",
+      "params-talker-code_predictor-decoder_norm-scale": "talker.code_predictor.model.norm.weight",
+      "params-code2wav-code_embedding": "code2wav.code_embedding.weight",
+      "params-code2wav-pre_transformer-norm": "code2wav.pre_transformer.norm.weight",
+  }
+
+  def attention_mapping(prefix, hf_prefix):
+    # pylint: disable=line-too-long
+    return {
+        f"{prefix}-pre_self_attention_layer_norm-scale": f"{hf_prefix}.input_layernorm.weight",
+        f"{prefix}-self_attention-query-kernel": f"{hf_prefix}.self_attn.q_proj.weight",
+        f"{prefix}-self_attention-key-kernel": f"{hf_prefix}.self_attn.k_proj.weight",
+        f"{prefix}-self_attention-value-kernel": f"{hf_prefix}.self_attn.v_proj.weight",
+        f"{prefix}-self_attention-out-kernel": f"{hf_prefix}.self_attn.o_proj.weight",
+        f"{prefix}-self_attention-query_norm-scale": f"{hf_prefix}.self_attn.q_norm.weight",
+        f"{prefix}-self_attention-key_norm-scale": f"{hf_prefix}.self_attn.k_norm.weight",
+        f"{prefix}-post_self_attention_layer_norm-scale": f"{hf_prefix}.post_attention_layernorm.weight",
+    }
+
+  # Talker MoE decoder layers.
+  for i in range(n_layers):
+    prefix = f"params-talker-layers_{i}"
+    hf_prefix = f"talker.model.layers.{i}"
+    mapping.update(attention_mapping(prefix, hf_prefix))
+    mapping.update(  # pyrefly: ignore[no-matching-overload]
+        {
+            f"{prefix}-moe_block-gate-kernel": f"{hf_prefix}.mlp.gate.weight",
+            f"{prefix}-moe_block-wi_0": [f"{hf_prefix}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)],
+            f"{prefix}-moe_block-wi_1": [f"{hf_prefix}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)],
+            f"{prefix}-moe_block-wo": [f"{hf_prefix}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)],
+            f"{prefix}-shared_expert-wi_0-kernel": f"{hf_prefix}.mlp.shared_expert.gate_proj.weight",
+            f"{prefix}-shared_expert-wi_1-kernel": f"{hf_prefix}.mlp.shared_expert.up_proj.weight",
+            f"{prefix}-shared_expert-wo-kernel": f"{hf_prefix}.mlp.shared_expert.down_proj.weight",
+            f"{prefix}-shared_expert_gate-kernel": f"{hf_prefix}.mlp.shared_expert_gate.weight",
+        }
+    )
+
+  # Code predictor.
+  for g in range(n_groups - 1):
+    mapping[f"params-talker-code_predictor-codec_embedding_{g}-embedding"] = (
+        f"talker.code_predictor.model.codec_embedding.{g}.weight"
+    )
+    mapping[f"params-talker-code_predictor-lm_head_{g}-kernel"] = f"talker.code_predictor.lm_head.{g}.weight"
+  for i in range(n_cp_layers):
+    prefix = f"params-talker-code_predictor-layers_{i}"
+    hf_prefix = f"talker.code_predictor.model.layers.{i}"
+    mapping.update(attention_mapping(prefix, hf_prefix))
+    mapping.update(
+        {
+            f"{prefix}-mlp-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight",
+            f"{prefix}-mlp-wi_1-kernel": f"{hf_prefix}.mlp.up_proj.weight",
+            f"{prefix}-mlp-wo-kernel": f"{hf_prefix}.mlp.down_proj.weight",
+        }
+    )
+
+  # Code2Wav: parameters keep the PyTorch layout, so names map 1:1.
+  for i in range(n_c2w_layers):
+    prefix = f"params-code2wav-pre_transformer-layers_{i}"
+    hf_prefix = f"code2wav.pre_transformer.layers.{i}"
+    mapping.update(
+        {
+            f"{prefix}-input_layernorm": f"{hf_prefix}.input_layernorm.weight",
+            f"{prefix}-post_attention_layernorm": f"{hf_prefix}.post_attention_layernorm.weight",
+            f"{prefix}-self_attn_layer_scale": f"{hf_prefix}.self_attn_layer_scale.scale",
+            f"{prefix}-mlp_layer_scale": f"{hf_prefix}.mlp_layer_scale.scale",
+            f"{prefix}-self_attn-q_proj": f"{hf_prefix}.self_attn.q_proj.weight",
+            f"{prefix}-self_attn-k_proj": f"{hf_prefix}.self_attn.k_proj.weight",
+            f"{prefix}-self_attn-v_proj": f"{hf_prefix}.self_attn.v_proj.weight",
+            f"{prefix}-self_attn-o_proj": f"{hf_prefix}.self_attn.o_proj.weight",
+            f"{prefix}-mlp-gate_proj": f"{hf_prefix}.mlp.gate_proj.weight",
+            f"{prefix}-mlp-up_proj": f"{hf_prefix}.mlp.up_proj.weight",
+            f"{prefix}-mlp-down_proj": f"{hf_prefix}.mlp.down_proj.weight",
+        }
+    )
+  for i in range(n_upsample):
+    mapping.update(
+        {
+            f"params-code2wav-upsample_{i}_0-conv-weight": f"code2wav.upsample.{i}.0.conv.weight",
+            f"params-code2wav-upsample_{i}_0-conv-bias": f"code2wav.upsample.{i}.0.conv.bias",
+            f"params-code2wav-upsample_{i}_1-dwconv-conv-weight": f"code2wav.upsample.{i}.1.dwconv.conv.weight",
+            f"params-code2wav-upsample_{i}_1-dwconv-conv-bias": f"code2wav.upsample.{i}.1.dwconv.conv.bias",
+            f"params-code2wav-upsample_{i}_1-norm-weight": f"code2wav.upsample.{i}.1.norm.weight",
+            f"params-code2wav-upsample_{i}_1-norm-bias": f"code2wav.upsample.{i}.1.norm.bias",
+            f"params-code2wav-upsample_{i}_1-pwconv1-weight": f"code2wav.upsample.{i}.1.pwconv1.weight",
+            f"params-code2wav-upsample_{i}_1-pwconv1-bias": f"code2wav.upsample.{i}.1.pwconv1.bias",
+            f"params-code2wav-upsample_{i}_1-pwconv2-weight": f"code2wav.upsample.{i}.1.pwconv2.weight",
+            f"params-code2wav-upsample_{i}_1-pwconv2-bias": f"code2wav.upsample.{i}.1.pwconv2.bias",
+            f"params-code2wav-upsample_{i}_1-gamma": f"code2wav.upsample.{i}.1.gamma",
+        }
+    )
+  # decoder_0: input conv; decoder_1..n: upsampling blocks; then SnakeBeta and the output conv.
+  mapping["params-code2wav-decoder_0-conv-weight"] = "code2wav.decoder.0.conv.weight"
+  mapping["params-code2wav-decoder_0-conv-bias"] = "code2wav.decoder.0.conv.bias"
+  for b in range(n_decoder_blocks):
+    d = b + 1
+    prefix = f"params-code2wav-decoder_{d}"
+    hf_prefix = f"code2wav.decoder.{d}.block"
+    mapping.update(
+        {
+            f"{prefix}-block_0-alpha": f"{hf_prefix}.0.alpha",
+            f"{prefix}-block_0-beta": f"{hf_prefix}.0.beta",
+            f"{prefix}-block_1-conv-weight": f"{hf_prefix}.1.conv.weight",
+            f"{prefix}-block_1-conv-bias": f"{hf_prefix}.1.conv.bias",
+        }
+    )
+    for r in range(2, 5):
+      mapping.update(
+          {
+              f"{prefix}-block_{r}-act1-alpha": f"{hf_prefix}.{r}.act1.alpha",
+              f"{prefix}-block_{r}-act1-beta": f"{hf_prefix}.{r}.act1.beta",
+              f"{prefix}-block_{r}-conv1-conv-weight": f"{hf_prefix}.{r}.conv1.conv.weight",
+              f"{prefix}-block_{r}-conv1-conv-bias": f"{hf_prefix}.{r}.conv1.conv.bias",
+              f"{prefix}-block_{r}-act2-alpha": f"{hf_prefix}.{r}.act2.alpha",
+              f"{prefix}-block_{r}-act2-beta": f"{hf_prefix}.{r}.act2.beta",
+              f"{prefix}-block_{r}-conv2-conv-weight": f"{hf_prefix}.{r}.conv2.conv.weight",
+              f"{prefix}-block_{r}-conv2-conv-bias": f"{hf_prefix}.{r}.conv2.conv.bias",
+          }
+      )
+  snake_idx = n_decoder_blocks + 1
+  out_idx = n_decoder_blocks + 2
+  mapping[f"params-code2wav-decoder_{snake_idx}-alpha"] = f"code2wav.decoder.{snake_idx}.alpha"
+  mapping[f"params-code2wav-decoder_{snake_idx}-beta"] = f"code2wav.decoder.{snake_idx}.beta"
+  mapping[f"params-code2wav-decoder_{out_idx}-conv-weight"] = f"code2wav.decoder.{out_idx}.conv.weight"
+  mapping[f"params-code2wav-decoder_{out_idx}-conv-bias"] = f"code2wav.decoder.{out_idx}.conv.bias"
+  return mapping
+
+
+def _qwen3_omni_talker_param_hook_fn(config, saving_to_hf=False):
+  """Transformation hooks for the Qwen3-Omni speech stack (see `_qwen3_omni_talker_param_mapping`).
+
+  Dense kernels are transposed/reshaped from PyTorch `(out, in)` to MaxText `(in, ..., out)`; stacked MoE expert
+  kernels are transposed per expert; code2wav parameters keep the PyTorch layout and need no hook.
+  """
+  talker_cfg = config["talker_config"]
+  n_layers = talker_cfg["text_config"]["num_hidden_layers"]
+  n_cp_layers = talker_cfg["code_predictor_config"]["num_hidden_layers"]
+  n_groups = talker_cfg["num_code_groups"]
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def reshape_expert_kernel(input_tensor, target_shape=None):
+    if input_tensor.ndim == 3:
+      return input_tensor.transpose(0, 2, 1)
+    return input_tensor.transpose(1, 0)
+
+  mapping = {
+      "params-talker-codec_head-kernel": reshape_kernel,
+      "params-talker-text_projection-linear_fc1-kernel": reshape_kernel,
+      "params-talker-text_projection-linear_fc2-kernel": reshape_kernel,
+      "params-talker-hidden_projection-linear_fc1-kernel": reshape_kernel,
+      "params-talker-hidden_projection-linear_fc2-kernel": reshape_kernel,
+  }
+  attention_kernels = [
+      "self_attention-query-kernel",
+      "self_attention-key-kernel",
+      "self_attention-value-kernel",
+      "self_attention-out-kernel",
+  ]
+  for i in range(n_layers):
+    prefix = f"params-talker-layers_{i}"
+    for key in attention_kernels + [
+        "moe_block-gate-kernel",
+        "shared_expert-wi_0-kernel",
+        "shared_expert-wi_1-kernel",
+        "shared_expert-wo-kernel",
+        "shared_expert_gate-kernel",
+    ]:
+      mapping[f"{prefix}-{key}"] = reshape_kernel
+    for key in ["moe_block-wi_0", "moe_block-wi_1", "moe_block-wo"]:
+      mapping[f"{prefix}-{key}"] = reshape_expert_kernel
+  for g in range(n_groups - 1):
+    mapping[f"params-talker-code_predictor-lm_head_{g}-kernel"] = reshape_kernel
+  for i in range(n_cp_layers):
+    prefix = f"params-talker-code_predictor-layers_{i}"
+    for key in attention_kernels + ["mlp-wi_0-kernel", "mlp-wi_1-kernel", "mlp-wo-kernel"]:
+      mapping[f"{prefix}-{key}"] = reshape_kernel
+  return mapping
+
+
 def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """
   Returns mapping from MaxText to HuggingFace Qwen3-Next weight paths.
@@ -2361,6 +2576,10 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_laye
   mapping["params-audio_encoder-Qwen3OmniAudioProjector_0-proj2-kernel"] = "thinker.audio_tower.proj2.weight"
   mapping["params-audio_encoder-Qwen3OmniAudioProjector_0-proj2-bias"] = "thinker.audio_tower.proj2.bias"
 
+  # Speech output stack (talker + code predictor + code2wav), present only with enable_audio_output=true.
+  if getattr(maxtext_config, "enable_audio_output", False):
+    mapping.update(_qwen3_omni_talker_param_mapping(config))
+
   return mapping
 
 
@@ -2619,6 +2838,9 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_laye
   # Audio projector
   mapping["params-audio_encoder-Qwen3OmniAudioProjector_0-proj1-kernel"] = reshape_kernel_audio
   mapping["params-audio_encoder-Qwen3OmniAudioProjector_0-proj2-kernel"] = reshape_kernel_audio
+
+  if getattr(maxtext_config, "enable_audio_output", False):
+    mapping.update(_qwen3_omni_talker_param_hook_fn(config, saving_to_hf=saving_to_hf))
 
   return mapping
 

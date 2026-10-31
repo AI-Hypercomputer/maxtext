@@ -1610,6 +1610,12 @@ use_mrope: false
 mrope_section: [24, 20, 20]
 position_id_per_seconds: 25
 
+# Shared audio-output controls. Architecture settings belong in model YAML.
+enable_audio_output: false
+audio_output_type: "auto"
+audio_output_config: {}
+audio_output_path: "audio_output.wav"
+
 # Subslice shape in the form of "x,y,z" when using pathways (single controller).
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""

@@ -28,6 +28,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from maxtext.common.decoder_features import DecoderFeatureSpec
 from maxtext.common.common_types import (
     Config,
     DecoderBlockType,
@@ -576,8 +577,11 @@ class NNXDecoder(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       *,
       rngs: nnx.Rngs,
+      feature_spec: DecoderFeatureSpec = DecoderFeatureSpec(),
   ):
     self.config = config
+    self.feature_spec = feature_spec
+    feature_spec.validate(num_layers=config.num_decoder_layers, scan_layers=config.scan_layers)
     self.mesh = mesh
     self.quant = quant
     self.model_mode = model_mode
@@ -2122,6 +2126,10 @@ class NNXDecoder(nnx.Module):
         decoder_input_embeddings=decoder_input_embeddings,
     )
 
+    capture_features = model_mode == MODEL_MODE_PREFILL
+    if capture_features and self.feature_spec.input_embeddings:
+      self.sow(nnx.Intermediate, "input_embeddings", y)
+
     if hasattr(cfg, "mhc_expansion_rate"):
       mhc_expand, _ = mhc.get_functions(cfg.mhc_expansion_rate)
       if cfg.mhc_expansion_rate > 1:
@@ -2583,6 +2591,9 @@ class NNXDecoder(nnx.Module):
             visual_embeds = deepstack_visual_embeds[lyr]
             if bidirectional_mask is not None and visual_embeds is not None:
               y = deepstack_process(y, bidirectional_mask, visual_embeds)
+
+          if capture_features and lyr + 1 in self.feature_spec.hidden_layers:
+            self.sow(nnx.Intermediate, f"hidden_states_{lyr + 1}", y)
 
     assert isinstance(y, jax.Array)
 
