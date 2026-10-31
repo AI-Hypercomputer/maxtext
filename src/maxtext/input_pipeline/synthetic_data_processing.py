@@ -103,6 +103,9 @@ class SyntheticDataIterator:
       )
     else:
       segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
+    if logical_batch_size := getattr(config, "logical_global_batch_size_to_load", None):
+      # With `elastic_keep_global_batch_size`, mask out the rows beyond the logical global batch.
+      segmentation = segmentation.at[logical_batch_size:].set(0)
     self.data = (tokens, batch_positions, segmentation)
 
   def reset(self):

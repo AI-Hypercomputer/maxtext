@@ -1420,6 +1420,65 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with use_qwix_quantization=True"):
       pyconfig.initialize(argv)
 
+  def _elastic_config(self, *extra_argv, num_live_devices=16):
+    """Initializes an elastic config on five 4-device slices, by default with one of them down."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "enable_single_controller=true"]
+    all_devices = [unittest.mock.MagicMock(slice_index=i // 4) for i in range(20)]
+    with (
+        unittest.mock.patch("jax.devices", return_value=all_devices),
+        unittest.mock.patch.object(types.elastic_utils, "ensure_elastic_manager_initialized"),
+        unittest.mock.patch.object(types.elastic_utils, "live_devices", return_value=all_devices[:num_live_devices]),
+    ):
+      return pyconfig.initialize(argv + ["elastic_enabled=true", *extra_argv])
+
+  def test_elastic_keep_global_batch_size_pads_the_batch_of_all_devices(self):
+    # A per-device batch of 5 on 20 devices is 100 rows: 7 per live device, so 112 with 12 padded.
+    for per_device_batch_size, logical, physical in ((5, 100, 112), (4, 80, 80)):
+      with self.subTest(per_device_batch_size=per_device_batch_size):
+        config = self._elastic_config(
+            "elastic_keep_global_batch_size=true", f"per_device_batch_size={per_device_batch_size}"
+        )
+        self.assertEqual(config.logical_global_batch_size_to_load, logical)
+        self.assertEqual(config.global_batch_size_to_load, physical)
+        self.assertEqual(config.per_device_batch_size, physical / 16)
+
+  def test_elastic_keep_global_batch_size_allows_no_live_slice(self):
+    # The first `initialize` runs before `elastic_retry` waits for the slices, so none may be live yet.
+    config = self._elastic_config("elastic_keep_global_batch_size=true", "per_device_batch_size=5", num_live_devices=0)
+
+    self.assertEqual(config.logical_global_batch_size_to_load, 100)
+    self.assertEqual(config.per_device_batch_size, 5)
+
+  def test_elastic_global_batch_size_follows_the_live_devices_by_default(self):
+    config = self._elastic_config("per_device_batch_size=5")
+
+    self.assertIsNone(config.logical_global_batch_size_to_load)
+    self.assertEqual(config.global_batch_size_to_load, 80)
+
+  def test_elastic_keep_global_batch_size_rejects_unsupported_configs(self):
+    keep = ["elastic_backup_kind=checkpoint", "elastic_keep_global_batch_size=true"]
+    grain_elastic_iterator = [
+        "dataset_type=grain",
+        "grain_train_files=/x/*",
+        "grain_use_elastic_iterator=true",
+        "grain_file_type=arrayrecord",
+        "packing=false",
+    ]
+    for extra_argv, error_regex in (
+        (["per_device_batch_size=0.5"], "requires `per_device_batch_size >= 1.0`"),
+        (["dataset_type=tfds"], "requires synthetic data"),
+        (["dataset_type=grain", "grain_train_files=/x/*"], "requires synthetic data"),
+        (grain_elastic_iterator + ["colocated_python_data_input=true"], "requires synthetic data"),
+    ):
+      with (
+          self.subTest(extra_argv=extra_argv),
+          self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex),
+      ):
+        self._elastic_config(*keep, *extra_argv)
+
+    config = self._elastic_config(*keep, *grain_elastic_iterator, "per_device_batch_size=5")
+    self.assertEqual(config.global_batch_size_to_load, 112)
+
 
 class MMapDatasetConfigTest(absltest.TestCase):
   """Tests for mmap-specific configuration defaults and accepted values."""

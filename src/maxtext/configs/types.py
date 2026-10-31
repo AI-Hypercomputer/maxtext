@@ -3482,6 +3482,13 @@ class ElasticTraining(BaseModel):
       -1,
       description="The minimum number of slices to wait for before starting training. -1 means wait for all slices.",
   )
+  elastic_keep_global_batch_size: bool = Field(
+      False,
+      description=(
+          "Whether to keep the global batch size of all slices while some are down, by rounding up"
+          " `per_device_batch_size` and padding the extra rows, which the loss masks out."
+      ),
+  )
 
 
 class GcpMonitoring(BaseModel):
@@ -4073,6 +4080,13 @@ class DerivedValues(BaseModel):
   global_batch_size_to_load: None | int = Field(
       None,
       description="The global batch size for the training dataloader, potentially scaled by `expansion_factor_real_data`.",
+  )
+  logical_global_batch_size_to_load: None | int = Field(
+      None,
+      description=(
+          "With `elastic_keep_global_batch_size`, the global batch size for the training dataloader before it is padded"
+          " up to `global_batch_size_to_load`: the batch size for all devices of the job."
+      ),
   )
   global_batch_size_to_load_eval: None | int = Field(
       None,
@@ -4939,6 +4953,10 @@ class MaxTextConfig(
       )
     return self
 
+  def _scale_up_per_device_batch_size(self, scale: float) -> None:
+    """Scales `per_device_batch_size` by `scale` and rounds it up, for `elastic_keep_global_batch_size`."""
+    self.per_device_batch_size = float(math.ceil(self.per_device_batch_size * scale))
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -5274,6 +5292,22 @@ class MaxTextConfig(
       global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
       return global_batch_to_load, global_batch_to_train, micro_batch_to_train
 
+    # With `elastic_keep_global_batch_size`, the logical global batch is sized for all devices of the job, including
+    # those of slices that are down, and `per_device_batch_size` is rounded up so that the live devices cover it. The
+    # data pipeline pads the extra rows with segmentation 0, which the loss masks out. A fractional
+    # `per_device_batch_size` is rejected below.
+    if self.elastic_enabled and self.elastic_keep_global_batch_size and self.per_device_batch_size >= 1.0:
+      try:
+        job_devices = len(jax.devices())
+      except (RuntimeError, IndexError):  # JAX isn't initialized, as for `num_target_devices` above.
+        job_devices = self.num_target_devices
+      self.logical_global_batch_size_to_load, _, _ = calculate_global_batch_sizes(
+          self.per_device_batch_size, self.expansion_factor_real_data, job_devices, self.gradient_accumulation_steps
+      )
+      # No slice may be live yet in the first `initialize`, before `elastic_retry` waits for them.
+      if job_devices > self.num_target_devices > 0:
+        self._scale_up_per_device_batch_size(job_devices / self.num_target_devices)
+
     # Calculate final training batch sizes.
     (
         self.global_batch_size_to_load,
@@ -5538,6 +5572,17 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_enabled and self.elastic_keep_global_batch_size:
+      if self.per_device_batch_size < 1.0:
+        raise ValueError("`elastic_keep_global_batch_size=True` requires `per_device_batch_size >= 1.0`.")
+      # Other data pipelines would load the padded batch rather than the logical one, and the colocated hosts left after
+      # a slice goes down need not split the logical batch evenly.
+      uses_elastic_iterator = self.dataset_type == DatasetType.GRAIN and self.grain_use_elastic_iterator
+      if self.dataset_type != DatasetType.SYNTHETIC and (not uses_elastic_iterator or self.colocated_python_data_input):
+        raise ValueError(
+            "`elastic_keep_global_batch_size=True` requires synthetic data, or grain's `ElasticIterator`"
+            " (`grain_use_elastic_iterator=True`) without `colocated_python_data_input`."
+        )
     if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."

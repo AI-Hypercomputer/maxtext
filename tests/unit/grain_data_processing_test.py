@@ -24,6 +24,7 @@ import json
 import numpy as np
 
 import jax
+import grain.python as grain
 import pytest
 from unittest.mock import patch
 from jax.sharding import Mesh
@@ -57,6 +58,27 @@ class TestTfdsTfrecordPathFallback:
 
     with pytest.raises(FileNotFoundError, match=r"No files found matching pattern: .*\*-train\.tfrecord-\*"):
       grain_data_processing.find_data_files(pattern)
+
+
+class MakeElasticIteratorLogicalBatchSizeTest(unittest.TestCase):
+  """Tests that `_make_elastic_iterator` advances by the logical batch of `elastic_keep_global_batch_size`."""
+
+  def test_advances_by_logical_global_batch_size(self):
+    config = mock.Mock(
+        global_batch_size_to_load=16,
+        logical_global_batch_size_to_load=12,
+        grain_num_threads=1,
+        grain_prefetch_buffer_size=1,
+    )
+    dataset = grain.MapDataset.range(100).map(lambda i: {"inputs": np.full((4,), i, dtype=np.int32)})
+    elastic_iterator = grain_data_processing._make_elastic_iterator(  # pylint: disable=protected-access
+        dataset, config, lambda dataset: dataset, shard_index=0, shard_count=2
+    )
+
+    batch = next(iter(elastic_iterator))
+
+    self.assertEqual(batch["inputs"].shape, (6, 4))
+    self.assertEqual(elastic_iterator.get_state(), {"global_next_index": 12})
 
 
 class GrainBaseProcessingTest:

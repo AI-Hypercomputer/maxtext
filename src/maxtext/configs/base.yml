@@ -1742,3 +1742,4 @@ elastic_snapshot_interval: 10
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+elastic_keep_global_batch_size: false
