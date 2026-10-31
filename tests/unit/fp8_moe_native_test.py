@@ -16,6 +16,8 @@ dequantization contract the native path relies on, and the fixed activation-quan
 """
 
 import sys
+import types
+from unittest import mock
 
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -28,6 +30,7 @@ import pytest
 from maxtext.configs import pyconfig
 from maxtext.configs import types as config_types
 from maxtext.kernels.megablox import ops as megablox_ops
+from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.utils import maxtext_utils
@@ -37,6 +40,7 @@ from tests.utils.test_helpers import get_test_config_path
 
 pytestmark = pytest.mark.cpu_only
 
+_EMB = 256
 _MOE_MLP = 128
 _SEQ = 64
 _VOCAB = 512
@@ -48,7 +52,7 @@ _MODEL = {
     "model_name": "qwen3.5-397b-a17b",
     "override_model_config": True,
     "base_num_decoder_layers": 4,
-    "base_emb_dim": 256,
+    "base_emb_dim": _EMB,
     "base_num_query_heads": 4,
     "base_num_kv_heads": 2,
     "head_dim": 64,
@@ -89,6 +93,8 @@ _NATIVE = {
     "use_gmm_v2": True,
     "moe_wi_gmm_fused_swiglu": True,
     "moe_wo_gmm_fused_dswiglu": True,
+    "wi_tile_fwd_embed_dim": _EMB,
+    "wo_tile_fwd_mlp_dim": _MOE_MLP,
     "wo_tile_dlhs_mlp_dim": _MOE_MLP,
 }
 
@@ -117,6 +123,13 @@ def test_flags_are_defined_and_off_by_default():
 def test_native_config_is_accepted():
   cfg = _cfg(**_NATIVE, **_NATIVE_BWD_DLHS)
   assert cfg.fp8_moe_native_fwd and cfg.fp8_moe_native_bwd_dlhs
+  eval_cfg = _cfg(
+      **_NATIVE,
+      custom_mesh_and_rule_for_eval="pure-fsdp",
+      eval_wi_tile_fwd_embed_dim=_EMB,
+      eval_wo_tile_fwd_mlp_dim=_MOE_MLP,
+  )
+  assert eval_cfg.fp8_moe_native_fwd
 
 
 @pytest.mark.parametrize(
@@ -127,6 +140,22 @@ def test_native_config_is_accepted():
         ({"use_gmm_v2": False}, "use_tokamax_gmm=True and use_gmm_v2=True"),
         # The heuristic tiling budgets a bf16 accumulator; the native forward accumulates in f32.
         ({"use_gmm_v2_heuristic_tiling": True}, "use_gmm_v2_heuristic_tiling=False"),
+        # Full-K dynamic lhs quantization requires one K tile (tile_k == size_k) in wi, wo and separate-rule eval.
+        ({"base_emb_dim": 4096, "wi_tile_fwd_embed_dim": 1024}, "wi_tile_fwd_embed_dim=4096"),
+        ({"wi_tile_fwd_embed_dim": 2 * _EMB}, f"wi_tile_fwd_embed_dim={_EMB}"),
+        ({"wo_tile_fwd_mlp_dim": _MOE_MLP // 2}, f"wo_tile_fwd_mlp_dim={_MOE_MLP}"),
+        (
+            {"ici_expert_parallelism": 2, "custom_mesh_and_rule_for_eval": "ep-as-cp"},
+            f"eval_wi_tile_fwd_embed_dim={_EMB}",
+        ),
+        (
+            {
+                "ici_expert_parallelism": 2,
+                "custom_mesh_and_rule_for_eval": "ep-as-cp",
+                "eval_wi_tile_fwd_embed_dim": _EMB,
+            },
+            f"eval_wo_tile_fwd_mlp_dim={_MOE_MLP}",
+        ),
     ],
 )
 def test_native_fwd_requirement_is_enforced(override, requirement):
@@ -199,3 +228,41 @@ def test_native_fwd_uses_full_k_f32_activation_quant_and_f32_accumulation():
   assert kwargs["lhs_quant_mode"] in megablox_ops._LHS_QUANT_MODES  # pylint: disable=protected-access
   assert kwargs["acc_dtype"] == jnp.float32
   assert not kwargs["native_bwd_dlhs"]
+
+
+def test_gmm_v2_full_k_lhs_quant_requires_single_k_tile():
+  # lhs_quant_block_size=0 means one dynamic scale per row over all size_k columns; inner_kernel slices one tile_k at a
+  # time, so make_gmm_configs must reject tile_k != size_k instead of computing per-tile scales.
+  lhs = jnp.zeros((512, 4096), jnp.bfloat16)
+  rhs = jnp.zeros((4, 4096, 2048), jnp.float8_e4m3fn)
+  rhs_scale = jnp.ones((4, 1, 1, 2048), jnp.float32)
+  group_sizes = jnp.array([128, 128, 128, 128], jnp.int32)
+  group_offset = jnp.array([0], jnp.int32)
+  fake_tpu = types.SimpleNamespace(
+      fp8_ops_per_second=1, int8_ops_per_second=1, num_lanes=128, mxu_column_size=256, get_sublane_tiling=lambda _: 8
+  )
+
+  def make(tile_k):
+    return gmm_v2.make_gmm_configs(
+        lhs,
+        rhs,
+        rhs_scale,
+        None,
+        None,
+        group_sizes,
+        group_offset,
+        tile_info=gmm_v2.TileSizes(tile_m=512, tile_k=tile_k, tile_n=1024),
+        vmem_limit_bytes=None,
+        out_dtype=jnp.bfloat16,
+        acc_dtype=jnp.float32,
+        maybe_quantize_lhs=True,
+        zero_initialize=True,
+        lhs_quant_block_size=0,
+        lhs_f32_scale=True,
+    )
+
+  with mock.patch.object(gmm_v2.pltpu, "get_tpu_info", return_value=fake_tpu):
+    assert make(4096).lhs_cfgs.quant_block_size == 4096
+    for bad_tile_k in (1024, 8192):
+      with pytest.raises(NotImplementedError, match="tile_k == size_k"):
+        make(bad_tile_k)

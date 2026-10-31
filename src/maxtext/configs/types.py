@@ -1982,7 +1982,8 @@ class MoEGeneral(BaseModel):
               # gmm_v2's heuristic tiling budgets a bfloat16 accumulator when the lhs is quantized in the kernel,
               # but the native forward accumulates in float32, so heuristic tiles could exceed VMEM.
               (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
-          ],
+          ]
+          + self._fp8_moe_native_fwd_tile_requirements(),
       )
     if self.fp8_moe_native_bwd_dlhs:
       _reject_unless(
@@ -2155,6 +2156,81 @@ class MoEGeneral(BaseModel):
     if base <= 0 or scale <= 0 or scale & (scale - 1):
       return None
     return 2 ** get_individual_scales(scale)[2] * base
+
+  def _moe_emb_dim_if_unsharded(self) -> int | None:
+    """The routed experts' input dim (wi's K dim) if no mesh axis shards it in the sparse_matmul GMMs, else None."""
+    if self.use_2d_fsdp_sharding or getattr(self, "num_moe_emb_chunks", 0) > 0:
+      return None
+    axes = {"tensor"}
+    axes.update(axes_for_logical(self.logical_axis_rules or [], "activation_embed_moe"))
+    for axis in axes:
+      if getattr(self, f"ici_{axis}_parallelism", None) != 1 or getattr(self, f"dcn_{axis}_parallelism", None) != 1:
+        return None
+    if self.moe_expert_input_dim > 0:
+      return self.moe_expert_input_dim
+    base, scale = self.base_emb_dim, self.global_parameter_scale
+    if base <= 0 or scale <= 0 or scale & (scale - 1):
+      return None
+    return 2 ** get_individual_scales(scale)[0] * base
+
+  def _fp8_moe_native_fwd_tile_requirements(self) -> list[tuple[bool, str]]:
+    """Tile rules for fp8_moe_native_fwd's full-K (lhs_quant_block_size=0) forward GMMs, checked at config time.
+
+    gmm_v2 quantizes one [tile_m, tile_k] lhs slice per K step, so full-K dynamic scaling needs tile_k == size_k in
+    both forward GMMs (wi contracts emb_dim, wo contracts the MoE MLP dim); make_gmm_configs enforces the same rule
+    when traced. When separate eval logical axis rules are set, RoutedMoE's fwd_tile reads eval_wi_tile_fwd_embed_dim
+    and eval_wo_tile_fwd_mlp_dim in eval_step, so those are checked too.
+    """
+    if self.use_gmm_v2_heuristic_tiling:
+      return []
+    eval_rule = getattr(self, "custom_mesh_and_rule_for_eval", CustomRule.DEFAULT)
+    eval_axis_rules = getattr(self, "logical_axis_rules_for_eval", None)
+    separate_eval_rules = eval_rule not in (
+        CustomRule.DEFAULT,
+        getattr(self, "custom_mesh_and_rule", CustomRule.DEFAULT),
+    ) or bool(eval_axis_rules and eval_axis_rules != self.logical_axis_rules)
+    reqs: list[tuple[bool, str]] = []
+    emb = self._moe_emb_dim_if_unsharded()
+    if emb is not None:
+      reqs.append(
+          (
+              self.wi_tile_fwd_embed_dim == emb,
+              f"wi_tile_fwd_embed_dim={emb}, the embed dim (one K tile for full-K activation quantization;"
+              f" got {self.wi_tile_fwd_embed_dim})",
+          )
+      )
+      if separate_eval_rules and all(
+          getattr(self, f"ici_{ax}_parallelism", None) == 1 and getattr(self, f"dcn_{ax}_parallelism", None) == 1
+          for ax in axes_for_logical(eval_axis_rules or [], "activation_embed_moe")
+      ):
+        reqs.append(
+            (
+                self.eval_wi_tile_fwd_embed_dim == emb,
+                f"eval_wi_tile_fwd_embed_dim={emb} when evaluation uses separate logical axis rules"
+                f" (got {self.eval_wi_tile_fwd_embed_dim})",
+            )
+        )
+    n = self._moe_mlp_dim_if_unsharded()
+    if n is not None:
+      reqs.append(
+          (
+              self.wo_tile_fwd_mlp_dim == n,
+              f"wo_tile_fwd_mlp_dim={n}, the MoE MLP dim (one K tile for full-K activation quantization;"
+              f" got {self.wo_tile_fwd_mlp_dim})",
+          )
+      )
+      if separate_eval_rules and all(
+          getattr(self, f"ici_{ax}_parallelism", None) == 1 and getattr(self, f"dcn_{ax}_parallelism", None) == 1
+          for ax in axes_for_logical(eval_axis_rules or [], "mlp_no_fsdp")
+      ):
+        reqs.append(
+            (
+                self.eval_wo_tile_fwd_mlp_dim == n,
+                f"eval_wo_tile_fwd_mlp_dim={n} when evaluation uses separate logical axis rules"
+                f" (got {self.eval_wo_tile_fwd_mlp_dim})",
+            )
+        )
+    return reqs
 
   @model_validator(mode="after")
   def validate_moe_roe_packed_routing_gather(self) -> "MoEGeneral":

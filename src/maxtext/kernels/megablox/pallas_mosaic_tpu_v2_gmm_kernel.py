@@ -2079,6 +2079,15 @@ def make_gmm_configs(
   else:
     tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act, partial_sum is not None)
 
+  if not has_lhs_scale and lhs_cfgs.quant_dtype is not None and lhs_quant_block_size == 0 and tiles.tile_k != dims.size_k:
+    # inner_kernel quantizes one [tile_m, tile_k] lhs tile per K step in blocks of min(tile_k, size_k): tile_k < size_k
+    # would compute one scale per K tile instead of one over size_k, and tile_k > size_k would step past size_k and read
+    # out-of-bounds rhs_scale blocks.
+    raise NotImplementedError(
+        "lhs_quant_block_size=0 (full-K dynamic lhs quantization) requires a single K tile (tile_k == size_k);"
+        f" got {tiles=}, {dims=}."
+    )
+
   num_lanes = pltpu.get_tpu_info().num_lanes
   if lhs_cfgs.is_3d:
     if tiles.tile_k % num_lanes or dims.size_k % tiles.tile_k:
@@ -2375,7 +2384,7 @@ def gmm_v2(
       boundaries. The values are unchanged.
     lhs_quant_block_size: With in-kernel lhs quantization, the k block that
       gets one scale per row: None for the default (512), 0 for the whole K
-      dim, or a positive int.
+      dim (requires tile_k == size_k), or a positive int.
     lhs_f32_scale: With in-kernel lhs quantization, compute each block scale
       in float32 as max(absmax, 1e-12) / dtype_max and divide by it, instead
       of the bf16 absmax and reciprocal.
