@@ -56,7 +56,8 @@ wsds_first_multiple: 1.0
 wsds_decay_steps_fraction: 0.1
 wsds_stepped: true
 learning_rate_final_fraction: 0.0
-warmup_steps_fraction: 0.003595125  # 2,000 / 556,309, rounded up so int(steps * fraction) is 2,000
+# Warmup 1 token per parameter (OLMo-core's WSDSChinchillaRunConfigurator): 3.97B tokens = 158 steps, 5% of 1xC.
+warmup_steps_fraction: 0.000284016  # 158 / 556,309, rounded up so int(steps * fraction) is 158
 warmup_step_offset: 1
 opt_type: "adamw"
 adam_b1: 0.9
