@@ -16,6 +16,7 @@
 
 import dataclasses
 import math
+import os
 from typing import Any
 
 import jax
@@ -26,6 +27,7 @@ from jax.sharding import Mesh, NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, get_weight_dtype
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.layers.initializers import Initializer, default_embed_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -55,6 +57,78 @@ def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> A
     max_logging.log("embeddings.py: Moving embedding parameter to device")
     return jax.device_put(embedding_table, max_utils.device_space())
   return embedding_table
+
+
+# Decode-time embedding lookup in whole 16-row tiles. Env-gated (MAXTEXT_EMBED_BLOCK_LOOKUP), default OFF.
+#
+# In the decode loop of a small dense model served data-parallel (one token per core, replicated logits) the
+# one-row `embedding.at[ids].get()` can be fused into the first decoder layer with the table taken as T(8,128), so
+# XLA re-tiles the whole table from its native T(16,128) layout on every decode step. The block lookup views the
+# table as [V/16, 16, D] (a bitcast under the 16-row tiling), gathers whole tiles at id // 16 and picks row id % 16
+# with a mask and an integer sum over the raw bits, so no single-row slice of the table remains. Only
+# MODEL_MODE_AUTOREGRESSIVE (rollout / decode) is rerouted; the integer pick has no gradient. Calls above
+# MAXTEXT_EMBED_BLOCK_LOOKUP_MAX_TOK static tokens per device keep the stock lookup. The cap is a precaution: the
+# block path is meant for small decode batches, and large (prefill-sized) per-device token counts are left on the
+# stock lookup.
+EMBED_BLOCK_LOOKUP_ENV = "MAXTEXT_EMBED_BLOCK_LOOKUP"
+EMBED_BLOCK_LOOKUP_MAX_TOK_ENV = "MAXTEXT_EMBED_BLOCK_LOOKUP_MAX_TOK"
+EMBED_BLOCK_LOOKUP_DEFAULT_MAX_TOK = 4096
+_EMBED_BLOCK_ROWS = 16
+# Mesh axes the vLLM runner shards token ids over. A missing axis counts as 1; that can only over-estimate the
+# tokens per device, which moves a call to the stock path, never onto the block path.
+_EMBED_BLOCK_TOKEN_AXES = ("data", "attn_dp", "attn_dp_expert")
+_EMBED_BLOCK_UINT = {2: jnp.uint16, 4: jnp.uint32}
+_embed_block_log_counts: dict[str, int] = {}
+
+
+def embed_block_lookup_enabled() -> bool:
+  """Block-lookup gate: True iff MAXTEXT_EMBED_BLOCK_LOOKUP is "1" or "true". Read at trace time; default OFF."""
+  return (os.environ.get(EMBED_BLOCK_LOOKUP_ENV, "0") or "0").strip().lower() in ("1", "true")
+
+
+def embed_block_lookup_max_tokens() -> int:
+  """Static tokens-per-device cap for the block path (MAXTEXT_EMBED_BLOCK_LOOKUP_MAX_TOK, default 4096)."""
+  raw = (os.environ.get(EMBED_BLOCK_LOOKUP_MAX_TOK_ENV, "") or "").strip()
+  return int(raw) if raw else EMBED_BLOCK_LOOKUP_DEFAULT_MAX_TOK
+
+
+def _embed_block_log(key: str, limit: int, message: str, every: int = 0) -> None:
+  """Logs the first `limit` occurrences of `key` (and every `every`-th one after that, if set)."""
+  count = _embed_block_log_counts.get(key, 0) + 1
+  _embed_block_log_counts[key] = count
+  if count <= limit or (every and count % every == 0):
+    max_logging.log(message)
+
+
+def _embed_block_tokens_per_device(inputs: Array, mesh: Mesh | None) -> tuple[int, int]:
+  """Returns (static tokens per device, token shards) for a lookup of `inputs` on `mesh`."""
+  shape = getattr(mesh, "shape", None)
+  shape = dict(shape.items()) if hasattr(shape, "items") else {}
+  shards = 1
+  for axis in _EMBED_BLOCK_TOKEN_AXES:
+    shards *= int(shape.get(axis, 1))
+  shards = max(1, shards)
+  num_global = math.prod(int(dim) for dim in inputs.shape)
+  return -(-num_global // shards), shards
+
+
+def embed_block_lookup(embedding: Array, inputs: Array) -> Array:
+  """Bit-exact `embedding.at[inputs].get()` that gathers whole 16-row tiles of a [V, D] table.
+
+  Requires V % 16 == 0 and a 2- or 4-byte table dtype. Negative ids wrap and out-of-range ids clamp, exactly
+  as the stock gather does, so the result is bit-identical to the stock lookup for every integer id.
+  """
+  num_rows, num_features = embedding.shape
+  ids = jnp.where(inputs < 0, inputs + num_rows, inputs)
+  ids = jnp.clip(ids, 0, num_rows - 1)
+  tiles = embedding.reshape(num_rows // _EMBED_BLOCK_ROWS, _EMBED_BLOCK_ROWS, num_features)
+  blocks = jnp.take(tiles, ids // _EMBED_BLOCK_ROWS, axis=0, mode="clip")  # [..., 16, D]
+  select = jnp.arange(_EMBED_BLOCK_ROWS, dtype=ids.dtype) == (ids % _EMBED_BLOCK_ROWS)[..., None]  # [..., 16]
+  # Pick on the raw bits: a float sum would turn a -0.0 row into +0.0 (the reduction starts at +0.0), while an
+  # integer sum of one nonzero term is exact for every bit pattern.
+  utype = _EMBED_BLOCK_UINT[embedding.dtype.itemsize]
+  bits = jnp.where(select[..., None], lax.bitcast_convert_type(blocks, utype), jnp.zeros((), utype))
+  return lax.bitcast_convert_type(jnp.sum(bits, axis=-2, dtype=utype), embedding.dtype)
 
 
 class Embed(nnx.Module):
@@ -149,8 +223,54 @@ class Embed(nnx.Module):
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
     else:
-      output = embedding.at[inputs].get(out_sharding=out_sharding)
+      output = None
+      if embed_block_lookup_enabled():  # env MAXTEXT_EMBED_BLOCK_LOOKUP (default OFF)
+        output = self._maybe_embed_block_lookup(embedding, inputs, model_mode)
+      if output is None:
+        output = embedding.at[inputs].get(out_sharding=out_sharding)
 
+    return output
+
+  def _maybe_embed_block_lookup(self, embedding: Array, inputs: Array, model_mode: str) -> Array | None:
+    """Returns the 16-row tile lookup, or None to keep the stock lookup.
+
+    Only called with MAXTEXT_EMBED_BLOCK_LOOKUP on. Train/prefill modes, `shard_mode: explicit`, host-offloaded
+    parameters, tables whose row count is not a multiple of 16, 1-byte dtypes and calls above
+    MAXTEXT_EMBED_BLOCK_LOOKUP_MAX_TOK static tokens per device keep the stock lookup.
+    """
+    cfg = self.config
+    if model_mode != MODEL_MODE_AUTOREGRESSIVE:
+      why = f"model_mode={model_mode}"
+    elif cfg.shard_mode == ShardMode.EXPLICIT:
+      why = "shard_mode=EXPLICIT"
+    elif cfg.parameter_memory_host_offload:
+      why = "parameter_memory_host_offload"
+    elif embedding.ndim != 2 or embedding.shape[0] % _EMBED_BLOCK_ROWS:
+      why = f"table shape={tuple(embedding.shape)}"
+    elif embedding.dtype.itemsize not in _EMBED_BLOCK_UINT:
+      why = f"dtype={embedding.dtype}"
+    else:
+      why = None
+    if why is None:
+      max_tok = embed_block_lookup_max_tokens()
+      tok_per_dev, shards = _embed_block_tokens_per_device(inputs, self.mesh)
+      if tok_per_dev > max_tok:
+        why = f"tokens_per_device={tok_per_dev}>max_tok={max_tok}"
+      max_logging.log(
+          f"[EMBED-BLOCK-GUARD] ids={tuple(inputs.shape)} shards={shards} tok_per_dev={tok_per_dev} "
+          f"max_tok={max_tok} path={'block' if why is None else 'stock'}"
+      )
+    if why is not None:
+      _embed_block_log(f"stock:{why}", 2, f"[EMBED-BLOCK] stock lookup kept ({why}) ids={tuple(inputs.shape)}")
+      return None
+    output = embed_block_lookup(embedding, inputs)
+    _embed_block_log(
+        "traced",
+        3,
+        f"[EMBED-BLOCK] traced block lookup mode={model_mode} table={tuple(embedding.shape)} "
+        f"ids={tuple(inputs.shape)} out={tuple(output.shape)}",
+        every=50,
+    )
     return output
 
   def embed_single_token(self, token_id: int) -> Array:
