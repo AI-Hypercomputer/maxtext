@@ -320,15 +320,16 @@ class DeepSeekGenericLayer(nnx.Module):
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
     return hidden_states, intermediate_inputs
 
-  def engram_op(self, x, decoder_input_tokens):
+  def engram_op(self, x, decoder_input_tokens, model_mode):
     """Engram memory lookup for this layer, added to the residual stream by the caller."""
     normed_x = self.engram_layer_norm(x)  # pyrefly: ignore[not-callable]
     # Under context_parallel_load_balance the training input pipeline (`setup_train_loop`) hands the
     # model every sequence in DUAL_CHUNK_SWAP order (see max_utils.reorder_sequence). The n-gram
     # history and the causal convolution are the two places Engram looks at neighbouring tokens;
     # both take the permutation into account. Inference (prefill / autoregressive) never reorders.
+    # Use the call-time model_mode: one model object serves train and inference calls.
     load_balanced_cp_size = 1
-    if self.model_mode == MODEL_MODE_TRAIN:
+    if model_mode == MODEL_MODE_TRAIN:
       load_balanced_cp_size = max_utils.reordered_cp_size(self.config, self.mesh)
     if load_balanced_cp_size > 1:
       reorder_strategy = max_utils.resolve_reorder_strategy(self.config)
@@ -392,7 +393,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
     x = checkpoint_name(x, "decoder_layer_input")
 
     if self.is_engram_enabled:
-      engram_output = self.engram_op(x, decoder_input_tokens)
+      engram_output = self.engram_op(x, decoder_input_tokens, model_mode)
       x = x + engram_output
 
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
@@ -602,7 +603,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     x = checkpoint_name(x, "decoder_layer_input")
 
     if self.is_engram_enabled:
-      engram_output = self.engram_op(x, decoder_input_tokens)
+      engram_output = self.engram_op(x, decoder_input_tokens, model_mode)
       x = x + engram_output
 
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
