@@ -30,6 +30,7 @@ from flax import nnx
 from flax.nnx import variablelib
 import jax
 import jax.numpy as jnp
+from maxtext.layers import moe
 from maxtext.layers import nnx_scan
 import numpy as np
 from maxtext.common import train_state_nnx
@@ -77,6 +78,13 @@ class _Cfg:
   debug_sharding: bool = False
   weight_sparsity_n: int = 0
   weight_sparsity_m: int = 0
+  cast_params_to_compute_dtype: bool = False
+  norm_metrics: str = "all"
+  olmoe3_router_metrics: bool = False
+  olmoe3_router_metrics_interval: int = 0
+  load_balance_loss_weight: float = 0.01
+  first_num_dense_layers: int = 1
+  inhomogeneous_layer_cycle_interval: int = 1
 
 
 class _TinyDecoder(nnx.Module):
@@ -158,6 +166,18 @@ class _TinyDecoderMoEBias(_TinyDecoder):
   def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
     self.decoder()
+    return out
+
+
+class _TinyDecoderRouterMetrics(_TinyDecoder):
+  """`_TinyDecoder` sowing one MoE layer's router metrics row, its imbalances 3.0 unless moe.ROUTER_IMBALANCE_ON is
+  False (as an OLMoE3 layer computes them under lax.cond)."""
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    on = moe.ROUTER_IMBALANCE_ON.get()
+    imbalance = jnp.float32(3.0) if on is None else jnp.where(on, 3.0, 0.0).astype(jnp.float32)
+    self.sow(nnx.Intermediate, "olmoe3_router_metrics", jnp.stack([jnp.float32(0.01), jnp.float32(1e-5), imbalance, imbalance]))
     return out
 
 
@@ -448,6 +468,40 @@ class TestTrainStepNNX(unittest.TestCase):
         state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
     )
     self.assertEqual(int(new_state.optimizer.step.get_value()), pre_step + 1)
+
+  def test_router_metrics_interval(self):
+    """olmoe3_router_metrics_interval=2: steps 0 and 2 log the load imbalance, step 1 doesn't; the losses every step.
+    Jitted, as in training: the step's flag is traced from the optimizer step, one program for every step."""
+    cfg = _Cfg(olmoe3_router_metrics=True, olmoe3_router_metrics_interval=2)
+    model = _TinyDecoderRouterMetrics(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    ts = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param))
+    state_graphdef, state = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    p_train = jax.jit(functools.partial(pre_train.train_step, state_graphdef, cfg, None, None))
+    for step in range(3):
+      state, metrics = p_train(state, data)
+      self.assertIsNone(moe.ROUTER_IMBALANCE_ON.get())  # reset after the step
+      written = metric_logger.drop_uncomputed_router_imbalance(metrics)["scalar"]
+      self.assertNotIn(metric_logger.ROUTER_IMBALANCE_COMPUTED_KEY, written)
+      self.assertIn("learning/load_balancing_loss", written)
+      self.assertIn("learning/block_01/router_z_loss", written)
+      if step % 2 == 0:
+        self.assertEqual(float(written["learning/load_imbalance"]), 3.0)
+        self.assertEqual(float(written["learning/block_01/global_load_imbalance"]), 3.0)
+      else:
+        self.assertFalse([k for k in written if k.endswith("load_imbalance")])
+
+  def test_router_metrics_every_step_by_default(self):
+    cfg = _Cfg(olmoe3_router_metrics=True)
+    model = _TinyDecoderRouterMetrics(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    ts = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param))
+    state_graphdef, state = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state, data=data
+    )
+    self.assertNotIn(metric_logger.ROUTER_IMBALANCE_COMPUTED_KEY, metrics["scalar"])
+    self.assertEqual(float(metrics["scalar"]["learning/load_imbalance"]), 3.0)
 
   def test_train_step_with_gradient_clipping(self):
     """The clipping branch (gradient_clipping_threshold > 0) must run without raising."""

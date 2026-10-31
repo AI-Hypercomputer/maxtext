@@ -76,6 +76,10 @@ import tokamax
 # mapped away, such as "stage" or "diloco"); None outside the shard_map.
 LB_REDUCE_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_lb_reduce_axes", default=None)
 
+# A traced boolean, set around a train step's forward pass when the router load-imbalance metrics are computed on some
+# steps only (olmoe3_router_metrics_interval): a model computes them under lax.cond on it. None computes them always.
+ROUTER_IMBALANCE_ON: contextvars.ContextVar = contextvars.ContextVar("moe_router_imbalance_on", default=None)
+
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 

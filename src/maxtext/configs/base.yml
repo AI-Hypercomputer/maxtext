@@ -329,6 +329,10 @@ static_loss_cotangent: false
 # unscaled), load imbalance and global load imbalance (learning/block_NN/..., NN the layer's index, and learning/...);
 # and its other training metrics: ce_loss, ce_perplexity, z_loss_unscaled and masked_instance_fraction.
 olmoe3_router_metrics: false
+# Compute the load imbalance metrics only every this many steps (0 = every step); the losses are logged every step.
+olmoe3_router_metrics_interval: 0
+# Count each sequence's routed experts with a scatter-add instead of a one-hot mask (same values).
+olmoe3_router_metrics_scatter_counts: false
 # Sequences per group for the local load imbalance: OLMo-core reports it per GPU, which is 16 sequences for the
 # hero (2048 on 128 GPUs). 0 = the whole batch.
 router_metrics_group_seqs: 16

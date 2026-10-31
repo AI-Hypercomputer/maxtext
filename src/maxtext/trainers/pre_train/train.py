@@ -615,6 +615,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
   loss_model, loss_params, loss_rng = state.model, None, None
 
+  # olmoe3_router_metrics_interval: the router load-imbalance metrics only on steps that are a multiple of it (the
+  # MoE layers read moe.ROUTER_IMBALANCE_ON while this step's forward pass is traced; reset after the gradients).
+  router_imbalance_on = None
+  if getattr(config, "olmoe3_router_metrics", False) and getattr(config, "olmoe3_router_metrics_interval", 0) > 0:
+    router_imbalance_on = state.optimizer.step.get_value() % config.olmoe3_router_metrics_interval == 0
+  router_imbalance_token = moe.ROUTER_IMBALANCE_ON.set(router_imbalance_on)
+
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
@@ -701,6 +708,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       raw_grads = jax.tree_util.tree_map(lambda g: (g / divisor).astype(g.dtype), raw_grads)
       loss = loss / divisor
 
+  moe.ROUTER_IMBALANCE_ON.reset(router_imbalance_token)
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
       raw_grads,
@@ -836,6 +844,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     extra_metrics["learning/router_z_loss_unscaled"] = jnp.sum(router_z) / _OLMOE3_ROUTER_Z_LOSS_WEIGHT
     extra_metrics["learning/load_imbalance"] = jnp.max(imbalance)
     extra_metrics["learning/global_load_imbalance"] = jnp.sum(global_imbalance)
+    if router_imbalance_on is not None:  # the logger drops the imbalance metrics on steps that didn't compute them
+      extra_metrics[metric_logger.ROUTER_IMBALANCE_COMPUTED_KEY] = router_imbalance_on.astype(jnp.float32)
     for i in range(router_metrics.shape[0]):
       # Named by the layer's global index: the MoE layers follow the first_num_dense_layers dense ones.
       block = f"learning/block_{i + config.first_num_dense_layers:02d}"

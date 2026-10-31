@@ -1472,6 +1472,21 @@ class MoEGeneral(BaseModel):
   )
   olmo_ppl_eval_eos_token_id: int = Field(100257, description="olmo_ppl_eval: EOS ending each document.")
   olmo_ppl_eval_pad_token_id: int = Field(100277, description="olmo_ppl_eval: padding token.")
+  olmoe3_router_metrics_interval: NonNegativeInt = Field(
+      0,
+      description=(
+          "olmoe3_router_metrics: compute load_imbalance and global_load_imbalance only on train steps that are a"
+          " multiple of this (under lax.cond; the logger drops them on other steps). The losses are logged every step."
+          " 0 computes them on every step."
+      ),
+  )
+  olmoe3_router_metrics_scatter_counts: bool = Field(
+      False,
+      description=(
+          "olmoe3_router_metrics: count each sequence's routed experts with a scatter-add instead of a one-hot mask"
+          " over [batch, sequence, top_k, experts]. Same values."
+      ),
+  )
   router_metrics_group_seqs: int = Field(
       16,
       description=(
