@@ -933,6 +933,27 @@ class ParamMappingTest(unittest.TestCase):
     expected_output = np.array([1, 3, 2, 4], dtype=np.float32)
     np.testing.assert_allclose(output, expected_output)
 
+  def test_llama3_key_hook_rope_layout(self):
+    """Tests that only llama3.1 reorders q/k into the interleaved RoPE layout."""
+    config = {"num_hidden_layers": 1, "head_dim": 4}
+    hf_key = np.arange(16, dtype=np.float32).reshape(4, 4)  # [kv_heads * head_dim, hidden]
+    target_shape = (4, 1, 4)  # [hidden, kv_heads, head_dim]
+    key = "params-decoder-layers_0-self_attention-key-kernel"
+
+    def to_maxtext(model_name):
+      maxtext_config = mock.Mock(model_name=model_name, rope_type="default")
+      hooks = param_mapping.LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+          config, maxtext_config, scan_layers=False, saving_to_hf=False
+      )
+      out = hf_key
+      for hook in hooks[key]:
+        out = hook(out, target_shape)
+      return np.asarray(out)
+
+    half_split = hf_key.T.reshape(target_shape)
+    np.testing.assert_array_equal(to_maxtext("llama3-8b"), half_split)
+    np.testing.assert_array_equal(to_maxtext("llama3.1-8b"), half_split[..., [0, 2, 1, 3]])
+
   def test_qwen3_vl_fused_moe_hook(self):
     config = {
         "text_config": {"num_hidden_layers": 1, "num_local_experts": 2},
