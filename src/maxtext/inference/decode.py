@@ -26,6 +26,7 @@ from maxtext.configs import pyconfig
 from maxtext.common import profiler
 from maxtext.common.gcloud_stub import jetstream
 from maxtext.inference.maxengine import maxengine
+from maxtext.inference import audio_generation
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_utils
@@ -107,6 +108,11 @@ def main(argv: Sequence[str]) -> None:
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
+  audio_generator = (
+      audio_generation.create_audio_generator(config, engine.get_generation_context(params))
+      if config.enable_audio_output
+      else None
+  )
   prof = profiler.Profiler(config)
 
   text = config.prompt
@@ -174,6 +180,7 @@ def main(argv: Sequence[str]) -> None:
   ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
 
   prefill_result_list = []
+  decoder_features_list = []
   first_token_list = []
   sampled_tokens_list = []
 
@@ -183,7 +190,7 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
-      prefill_result, first_token = engine.prefill(
+      prefill_result, first_token, decoder_features = engine.prefill(
           params=params,
           padded_tokens=tokens,
           positions=position_ids,  # pyrefly: ignore[bad-argument-type]
@@ -200,7 +207,9 @@ def main(argv: Sequence[str]) -> None:
           true_length=true_length,
           rng=rng_prefill,
           slot=i,
+          return_features=True,
       )
+    decoder_features_list.append(decoder_features)
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
 
@@ -246,6 +255,16 @@ def main(argv: Sequence[str]) -> None:
 
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
+    if audio_generator is not None:
+      audio_generator.generate(
+          audio_generation.AudioGenerationRequest(
+              prompt_ids=np.asarray(tokens)[:true_length],
+              generated_ids=results,
+              features=decoder_features_list[i],
+              processor_outputs=processor_outputs,
+              output_path=config.audio_output_path if _NUM_STREAMS == 1 else f"{config.audio_output_path}.stream{i}.wav",
+          )
+      )
 
   assert " ".join(output.split()).startswith(
       " ".join(config.autoregressive_decode_assert.split())
@@ -263,6 +282,7 @@ def _validate_config(config):
       "Decode doesn't operate on full states! Convert to parameter checkpoint first."
       "Using generate_param_only_checkpoint."
   )
+  audio_generation.validate_audio_generation(config)
 
 
 if __name__ == "__main__":
