@@ -303,13 +303,100 @@ def _intersect_with_metadata(target, meta_tree):
   return out
 
 
-def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
+# Attention types whose MoE layers run through tpu-inference's fused MoE kernel
+# (`RoutedMoE.fused_moe_matmul`).
+_VLLM_FUSED_MOE_ATTENTION = ("vllm_rpa", "vllm_batched_rpa")
+# Mesh axes that `RoutedMoE` multiplies into its expert parallelism size on that path. It adds "dcp" only when
+# its size is > 1, which a product over the axis sizes already accounts for.
+_VLLM_EXPERT_PARALLELISM_AXES = ("attn_dp_expert", "expert", "dcp")
+
+
+def _fused_moe_kernel_uses_ep(config, mesh) -> bool:
+  """Whether tpu-inference's fused MoE kernel runs expert-parallel for this config and mesh.
+
+  Mirrors `use_ep = self.get_expert_parallelism_size() > 1` in `RoutedMoE.fused_moe_matmul`.
+  """
+  if config is None or mesh is None or getattr(config, "attention", None) not in _VLLM_FUSED_MOE_ATTENTION:
+    return False
+  return math.prod(mesh.shape.get(axis, 1) for axis in _VLLM_EXPERT_PARALLELISM_AXES) > 1
+
+
+# `_fuse_moe_halves_concatenated` builds the fused wi in this many slices of the embed axis.
+_FUSE_MOE_NUM_EMBED_SLICES = 8
+
+
+@partial(jax.jit, static_argnames=("shape", "dtype", "out_sharding"))
+def _sharded_zeros(shape, dtype, out_sharding):
+  return jax.lax.with_sharding_constraint(jnp.zeros(shape, dtype), out_sharding)
+
+
+@partial(jax.jit, donate_argnums=0)
+def _write_embed_slice(fused, part, start):
+  """Writes `part` into `fused` at `start` along the embed (second-to-last) axis, reusing `fused`'s buffer."""
+  return jax.lax.dynamic_update_slice_in_dim(fused, part, start, axis=fused.ndim - 2)
+
+
+@partial(jax.jit, static_argnames=("n_shards", "half_dim", "out_sharding"))
+def _concat_halves_padded_per_shard(wi_0, wi_1, n_shards, half_dim, out_sharding):
+  """Returns [wi_0 | wi_1] along the last axis, each half zero-padded to `half_dim` at the tail of each shard."""
+
+  def _pad(arr):
+    chunk = arr.shape[-1] // n_shards
+    arr = arr.reshape(*arr.shape[:-1], n_shards, chunk)
+    arr = jnp.pad(arr, [(0, 0)] * (arr.ndim - 1) + [(0, half_dim // n_shards - chunk)])
+    return arr.reshape(*arr.shape[:-2], half_dim)
+
+  return jax.lax.with_sharding_constraint(jnp.concatenate([_pad(wi_0), _pad(wi_1)], axis=-1), out_sharding)
+
+
+def _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards, num_slices=_FUSE_MOE_NUM_EMBED_SLICES):
+  """Fuses wi_0/wi_1 into a [gate | up] wi with `wi_model`'s shape and NamedSharding.
+
+  Each half keeps the per-shard padding of the interleaved layout, but the halves now land on other shards of
+  the fused axis than they come from. That data movement needs temporary buffers, so the result is built in
+  slices of the embed axis, each written into the result buffer in place, to bound the extra memory.
+  """
+  wi_sharding = wi_model.sharding
+  embed_axis = wi_model.ndim - 2
+  embed_dim = wi_model.shape[embed_axis]
+  if embed_axis < len(wi_sharding.spec) and wi_sharding.spec[embed_axis] is not None:
+    num_slices = 1  # Slices of a sharded embed axis would not match `wi_sharding`.
+  fused = _sharded_zeros(wi_model.shape, jnp.dtype(wi_0.dtype), wi_sharding)
+  step = -(-embed_dim // num_slices)
+  for start in range(0, embed_dim, step):
+    stop = min(start + step, embed_dim)
+    part = _concat_halves_padded_per_shard(
+        jax.lax.slice_in_dim(wi_0, start, stop, axis=embed_axis),
+        jax.lax.slice_in_dim(wi_1, start, stop, axis=embed_axis),
+        n_shards=n_shards,
+        half_dim=wi_model.shape[-1] // 2,
+        out_sharding=wi_sharding,
+    )
+    fused = _write_embed_slice(fused, part, start)
+  return fused
+
+
+def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
   This properly interleaves the gate and up projections based on the target tensor
   parallelism (TP) sharding, ensuring that each device receives its respective
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
+
+  The per-shard interleave is the layout tpu-inference's TP fused MoE kernel
+  expects: it shards the fused axis and splits each shard into gate/up. When
+  that kernel runs expert-parallel instead (vLLM attention with an expert
+  parallelism size > 1), it does not shard the fused axis and splits the whole
+  axis in half (`gate = wi[..., :H]`, `up = wi[..., H:]`), so the gate and up
+  halves are concatenated rather than interleaved. Each half still keeps the
+  per-shard padding, which matches how `wo` is padded along the MLP dim.
+
+  Args:
+    ckpt_tree: Restored checkpoint tree, possibly holding wi_0/wi_1 pairs.
+    model_arrays_tree: Model arrays tree; a fused model holds `wi` instead.
+    config: Model config, used to detect the expert-parallel fused MoE kernel.
+      When None, the per-shard interleaved layout is used.
   """
 
   def _is_fusion_site(node):
@@ -353,11 +440,13 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
 
     # Determine the number of shards (TP degree) along the concatenated axis
     n_shards = 1
+    use_ep = False
     wi_sharding = getattr(wi_model, "sharding", None)
     if isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
+      use_ep = _fused_moe_kernel_uses_ep(config, wi_sharding.mesh)
 
     # Target size for a single half (wi_0 or wi_1) AFTER padding
     target_half_dim = wi_model.shape[-1] // 2
@@ -382,6 +471,12 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
         arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
 
       return arr_reshaped
+
+    # Expert-parallel kernel: [gate | up] instead of the per-shard interleave below.
+    if use_ep:
+      new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
+      new_node["wi"] = _fuse_moe_halves_concatenated(ckpt_node["wi_0"], ckpt_node["wi_1"], wi_model, n_shards)
+      return new_node
 
     # Apply per-shard padding and chunking
     padded_chunked_wi_0 = _pad_and_chunk(ckpt_node["wi_0"], target_half_dim)
@@ -1355,7 +1450,7 @@ def from_pretrained(
         checkpoint = to_dict(checkpoint)
         logical_axes_tree = to_dict(logical_axes_tree)
 
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays, config)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
         # This prevents the replicated intermediate copies from persisting until function return.
         del restored
