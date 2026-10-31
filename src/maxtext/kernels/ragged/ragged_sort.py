@@ -85,6 +85,18 @@ def _local_slot_positions(topk_indices_local, num_experts, shard_idx, ep_size, b
   return pos.reshape(-1)
 
 
+def _clamp_masked_indices(indices, valid_rows_mask, clamp):
+  """Sets the masked rows' gather indices to 0 when ``clamp`` is True (``index_math="count"``).
+
+  With ``index_math="count"``, the inverse permutation is -1 on other shards' slots. The SparseCore gather-reduce
+  kernel reads the input at the index of every lane of its last partial row block, masked lanes included, without
+  bounds checks, so -1 is an out-of-bounds read. The masked lanes are discarded, so the output is unchanged. With
+  ``index_math="sort"`` (``clamp=False``), the inverse permutation is already in ``[0, n)``, so no ``jnp.where`` is
+  emitted.
+  """
+  return jnp.where(valid_rows_mask, indices, 0) if clamp else indices
+
+
 def ring_ragged_sort(
     hidden_states_local,
     topk_indices_local,
@@ -295,7 +307,7 @@ def ring_ragged_sort(
       # `topk_weights` is set to ones because this op has no per-row weighting.
       grad_hidden_states = ragged_gather_reduce(
           g_x,
-          topk_argsort_revert_indices,
+          _clamp_masked_indices(topk_argsort_revert_indices, valid_rows_mask, packed_preprocess),
           topk_weights=jnp.ones((n,), dtype=jnp.float32),
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
@@ -411,7 +423,9 @@ def _ring_unsort_combine(
     )
     return ragged_gather_reduce(
         sorted_tokens_local,
-        topk_argsort_revert_indices,
+        _clamp_masked_indices(
+            topk_argsort_revert_indices, valid_rows_mask, gather_reduce_kwargs.get("packed_preprocess", False)
+        ),
         topk_weights=topk_weights_flat,
         valid_rows_mask=valid_rows_mask,
         reduce_group_size=topk,
