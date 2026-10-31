@@ -347,6 +347,17 @@ fp8_moe_fake_quant: false
 # once for the scanned layer stack, before the scan. gather8: also all-gather the fp8 codes and dequantize after the
 # gather. Env PARAMBOLE_FQ_HOIST (0, absmax, 1 = gather8) selects a mode while this is off.
 fp8_fake_quant_hoist: "off"
+# With fp8_moe_fake_quant and fp8_fake_quant_hoist=gather8, run the routed-expert wi/wo forward GMMs in FP8 (gathered
+# codes + per-channel scales into gmm_v2; the activation is quantized in the kernel with one float32 absmax scale per
+# row over the full K dim, and accumulated in float32). Backward: bf16 DLHS / TGMM at the dequantized weight, unless
+# fp8_moe_native_bwd_dlhs dequantizes it inside the DLHS kernel.
+# Needs sparse_matmul, moe_wi_gmm_fused_swiglu, moe_wo_gmm_fused_dswiglu, use_tokamax_gmm, use_gmm_v2 and fixed tiles
+# (use_gmm_v2_heuristic_tiling=false), and runs only inside the decoder's layer scan (where gather8's absmax is
+# attached): a routed-MoE call outside it raises.
+fp8_moe_native_fwd: false
+# fp8_moe_native_fwd: the backward DLHS GMMs read the fp8 weight codes and dequantize them in VMEM inside gmm_v2
+# (bit-identical; no XLA dequantization of the expert weights). Needs moe_gmm_v2_dlhs_transpose_rhs and fixed tiles.
+fp8_moe_native_bwd_dlhs: false
 # Trainer side: the rollout serves fp8_moe experts, so weight sync quantizes them (and emits their scales).
 rollout_fp8_moe: false
 load_balance_loss_weight: 0.0 # weight for the load balance loss

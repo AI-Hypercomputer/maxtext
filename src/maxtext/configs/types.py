@@ -1937,6 +1937,65 @@ class MoEGeneral(BaseModel):
       _off_for_false_fp8_fake_quant_hoist
   )
 
+  fp8_moe_native_fwd: bool = Field(
+      False,
+      description=(
+          "Native FP8 forward for the routed experts. With fp8_moe_fake_quant and fp8_fake_quant_hoist=gather8,"
+          " the wi and wo forward GMMs run on the MXU in float8_e4m3fn: the gathered weight codes and their"
+          " per-channel scales feed gmm_v2 directly (no dequantization), and gmm_v2 quantizes the bf16 activation"
+          " in the kernel with one dynamic float32 absmax scale per row over the full K dim (the rollout FP8 MoE kernel's"
+          " decode scheme) and accumulates in float32. The backward runs"
+          " bf16 DLHS / TGMM at the dequantized weight (straight-through weight gradient), unless"
+          " fp8_moe_native_bwd_dlhs moves the DLHS dequantization into the kernel. Runs only inside the decoder's"
+          " layer scan, where gather8's absmax is attached; a RoutedMoE call outside it (unscanned layers, KV-cache"
+          " decode) raises instead of silently running fake QAT."
+      ),
+  )
+  fp8_moe_native_bwd_dlhs: bool = Field(
+      False,
+      description=(
+          "fp8_moe_native_fwd: the backward DLHS GMMs (wi, and wo's fused-dSwiGLU DLHS, including the ring-of-experts"
+          " one) read the float8 weight codes and dequantize each weight block in VMEM inside gmm_v2, with the same"
+          " expression (codes.astype(float32) * scale).astype(bf16), instead of an XLA dequantization of every"
+          " expert weight before the kernel. Bit-identical results; the weight-gradient TGMMs are unchanged. Needs"
+          " moe_gmm_v2_dlhs_transpose_rhs and fixed tiles (use_gmm_v2_heuristic_tiling=False)."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_fp8_moe_native_fwd(self) -> "MoEGeneral":
+    """Rejects fp8_moe_native_fwd / fp8_moe_native_bwd_dlhs without the config they require.
+
+    The FP8 GMMs replace the gather8 dequantization on the fused gmm_v2 SwiGLU / dSwiGLU path only and need fixed
+    tiles (float32 accumulator); the in-kernel DLHS dequantization also needs the transposed DLHS rhs.
+    """
+    if self.fp8_moe_native_fwd:
+      _reject_unless(
+          "fp8_moe_native_fwd=True",
+          [
+              (self.fp8_moe_fake_quant, "fp8_moe_fake_quant=True"),
+              (self.fp8_fake_quant_hoist == "gather8", "fp8_fake_quant_hoist=gather8"),
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (self.use_tokamax_gmm and self.use_gmm_v2, "use_tokamax_gmm=True and use_gmm_v2=True"),
+              (self.moe_wi_gmm_fused_swiglu, "moe_wi_gmm_fused_swiglu=True"),
+              (self.moe_wo_gmm_fused_dswiglu, "moe_wo_gmm_fused_dswiglu=True"),
+              # gmm_v2's heuristic tiling budgets a bfloat16 accumulator when the lhs is quantized in the kernel,
+              # but the native forward accumulates in float32, so heuristic tiles could exceed VMEM.
+              (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
+          ]
+          + self._fp8_moe_native_fwd_tile_requirements(),
+      )
+    if self.fp8_moe_native_bwd_dlhs:
+      _reject_unless(
+          "fp8_moe_native_bwd_dlhs=True",
+          [
+              (self.fp8_moe_native_fwd, "fp8_moe_native_fwd=True"),
+              (self.moe_gmm_v2_dlhs_transpose_rhs, "moe_gmm_v2_dlhs_transpose_rhs=True"),
+              (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
+          ],
+      )
+    return self
+
   rollout_fp8_moe: bool = Field(
       False,
       description=(
@@ -2097,6 +2156,81 @@ class MoEGeneral(BaseModel):
     if base <= 0 or scale <= 0 or scale & (scale - 1):
       return None
     return 2 ** get_individual_scales(scale)[2] * base
+
+  def _moe_emb_dim_if_unsharded(self) -> int | None:
+    """The routed experts' input dim (wi's K dim) if no mesh axis shards it in the sparse_matmul GMMs, else None."""
+    if self.use_2d_fsdp_sharding or getattr(self, "num_moe_emb_chunks", 0) > 0:
+      return None
+    axes = {"tensor"}
+    axes.update(axes_for_logical(self.logical_axis_rules or [], "activation_embed_moe"))
+    for axis in axes:
+      if getattr(self, f"ici_{axis}_parallelism", None) != 1 or getattr(self, f"dcn_{axis}_parallelism", None) != 1:
+        return None
+    if self.moe_expert_input_dim > 0:
+      return self.moe_expert_input_dim
+    base, scale = self.base_emb_dim, self.global_parameter_scale
+    if base <= 0 or scale <= 0 or scale & (scale - 1):
+      return None
+    return 2 ** get_individual_scales(scale)[0] * base
+
+  def _fp8_moe_native_fwd_tile_requirements(self) -> list[tuple[bool, str]]:
+    """Tile rules for fp8_moe_native_fwd's full-K (lhs_quant_block_size=0) forward GMMs, checked at config time.
+
+    gmm_v2 quantizes one [tile_m, tile_k] lhs slice per K step, so full-K dynamic scaling needs tile_k == size_k in
+    both forward GMMs (wi contracts emb_dim, wo contracts the MoE MLP dim); make_gmm_configs enforces the same rule
+    when traced. When separate eval logical axis rules are set, RoutedMoE's fwd_tile reads eval_wi_tile_fwd_embed_dim
+    and eval_wo_tile_fwd_mlp_dim in eval_step, so those are checked too.
+    """
+    if self.use_gmm_v2_heuristic_tiling:
+      return []
+    eval_rule = getattr(self, "custom_mesh_and_rule_for_eval", CustomRule.DEFAULT)
+    eval_axis_rules = getattr(self, "logical_axis_rules_for_eval", None)
+    separate_eval_rules = eval_rule not in (
+        CustomRule.DEFAULT,
+        getattr(self, "custom_mesh_and_rule", CustomRule.DEFAULT),
+    ) or bool(eval_axis_rules and eval_axis_rules != self.logical_axis_rules)
+    reqs: list[tuple[bool, str]] = []
+    emb = self._moe_emb_dim_if_unsharded()
+    if emb is not None:
+      reqs.append(
+          (
+              self.wi_tile_fwd_embed_dim == emb,
+              f"wi_tile_fwd_embed_dim={emb}, the embed dim (one K tile for full-K activation quantization;"
+              f" got {self.wi_tile_fwd_embed_dim})",
+          )
+      )
+      if separate_eval_rules and all(
+          getattr(self, f"ici_{ax}_parallelism", None) == 1 and getattr(self, f"dcn_{ax}_parallelism", None) == 1
+          for ax in axes_for_logical(eval_axis_rules or [], "activation_embed_moe")
+      ):
+        reqs.append(
+            (
+                self.eval_wi_tile_fwd_embed_dim == emb,
+                f"eval_wi_tile_fwd_embed_dim={emb} when evaluation uses separate logical axis rules"
+                f" (got {self.eval_wi_tile_fwd_embed_dim})",
+            )
+        )
+    n = self._moe_mlp_dim_if_unsharded()
+    if n is not None:
+      reqs.append(
+          (
+              self.wo_tile_fwd_mlp_dim == n,
+              f"wo_tile_fwd_mlp_dim={n}, the MoE MLP dim (one K tile for full-K activation quantization;"
+              f" got {self.wo_tile_fwd_mlp_dim})",
+          )
+      )
+      if separate_eval_rules and all(
+          getattr(self, f"ici_{ax}_parallelism", None) == 1 and getattr(self, f"dcn_{ax}_parallelism", None) == 1
+          for ax in axes_for_logical(eval_axis_rules or [], "mlp_no_fsdp")
+      ):
+        reqs.append(
+            (
+                self.eval_wo_tile_fwd_mlp_dim == n,
+                f"eval_wo_tile_fwd_mlp_dim={n} when evaluation uses separate logical axis rules"
+                f" (got {self.eval_wo_tile_fwd_mlp_dim})",
+            )
+        )
+    return reqs
 
   @model_validator(mode="after")
   def validate_moe_roe_packed_routing_gather(self) -> "MoEGeneral":

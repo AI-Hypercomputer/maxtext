@@ -888,6 +888,57 @@ class Fp8HoistedAbsmax(nnx.Variable):
   """One layer's per-channel absmax of its routed-expert weights, computed for the whole scanned stack at once."""
 
 
+@dataclasses.dataclass(frozen=True)
+class Fp8NativeWeight:
+  """One gathered routed-expert weight as the native FP8 GMMs take it (fp8_moe_native_fwd).
+
+  Attributes:
+    anchor: the bf16 weight the gather8 path would multiply by (dequantize_weight_codes_ste's output). The FP8 GMMs
+      never read its value, so XLA removes its computation; they return the weight gradient as its cotangent, and
+      dequantize_weight_codes_ste carries it to the master weight (straight-through).
+    codes: the float8_e4m3fn weight codes [g, k, n].
+    scale: the float32 per-(expert, output channel) scale [g, 1, n].
+  """
+
+  anchor: jax.Array
+  codes: jax.Array
+  scale: jax.Array
+
+  @classmethod
+  def pspec(cls, weight_pspec):
+    """The shard_map in_spec of an Fp8NativeWeight whose anchor and codes are laid out as `weight_pspec`."""
+    if weight_pspec is None:
+      return None
+    return cls(weight_pspec, weight_pspec, P(weight_pspec[0], None, weight_pspec[2]))
+
+  @classmethod
+  def concat_last(cls, first, second):
+    """[first | second] along the output channel (the prefused wi), for split w0 / w1."""
+    return cls(
+        jnp.concatenate([first.anchor, second.anchor], axis=-1),
+        jnp.concatenate([first.codes, second.codes], axis=-1),
+        jnp.concatenate([first.scale, second.scale], axis=-1),
+    )
+
+
+jax.tree_util.register_dataclass(Fp8NativeWeight, data_fields=["anchor", "codes", "scale"], meta_fields=[])
+
+
+# fp8_moe_native_fwd's in-kernel activation quantization and accumulator: one float32 absmax scale per row over the
+# full K dim, float32 accumulation. Closest to the rollout's FP8 MoE kernel and fastest of the measured gmm_v2
+# variants; the others stay selectable as ops-level arguments for benchmarks and tests.
+_FP8_NATIVE_FWD_LHS_QUANT_MODE = "fullk_f32"
+_FP8_NATIVE_FWD_ACC_DTYPE = jnp.dtype(jnp.float32)
+
+
+def fp8_native_fwd_kwargs(config, with_bwd_dlhs: bool = True) -> dict:
+  """The FP8 GMM ops' kwargs for fp8_moe_native_fwd (and, with_bwd_dlhs, fp8_moe_native_bwd_dlhs)."""
+  kwargs = {"acc_dtype": _FP8_NATIVE_FWD_ACC_DTYPE, "lhs_quant_mode": _FP8_NATIVE_FWD_LHS_QUANT_MODE}
+  if with_bwd_dlhs:
+    kwargs["native_bwd_dlhs"] = getattr(config, "fp8_moe_native_bwd_dlhs", False)
+  return kwargs
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -4052,12 +4103,38 @@ class RoutedMoE(nnx.Module):
       inputs, padding_amount = max_utils.maybe_pad(x, fwd_tile("wi_tile_fwd_batch_seq"))
       # Weights are stored as (G,K,2N): w0/w1 are adjacent slices (the same concatenate as gmm_up), or w0 is already
       # the whole [w0 | w1] (moe_unsplit_prefused_wi).
-      w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
+      if w1 is None:
+        w_fused = w0
+      elif isinstance(w0, Fp8NativeWeight):
+        w_fused = Fp8NativeWeight.concat_last(w0, w1)
+      else:
+        w_fused = jnp.concatenate([w0, w1], axis=-1)
       # wi_tile_fwd_rhs_buffer_count: the fused forward kernel's weight pipeline depth, applied only when that GMM
       # runs one K tile (its weight block then changes only at expert and n-tile boundaries); otherwise, e.g. with
       # the eval tiles, the kernel's default buffering.
       rhs_buffers = self.config.wi_tile_fwd_rhs_buffer_count
       one_k_tile = not self.config.use_gmm_v2_heuristic_tiling and wi_tile_size[1] >= inputs.shape[-1]
+      if isinstance(w_fused, Fp8NativeWeight):
+        # fp8_moe_native_fwd: the FP8 forward of the same fused GMM (the validator requires fuse_dswiglu_in_wo_gmm).
+        if not fuse_dswiglu_in_wo_gmm:
+          raise NotImplementedError("fp8_moe_native_fwd requires moe_wo_gmm_fused_dswiglu=True.")
+        act, gate_up = mblx.gmm_silu_fp8(
+            inputs.astype(self.dtype),
+            w_fused.anchor.astype(self.dtype),
+            w_fused.codes,
+            w_fused.scale,
+            gmm_operands["group_sizes"],
+            preferred_element_type=self.dtype,
+            tiling=wi_tile_size,
+            group_offset=gmm_operands["group_offset"],
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+            fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
+            fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+            fwd_rhs_buffer_count=rhs_buffers if rhs_buffers and one_k_tile else None,
+            **fp8_native_fwd_kwargs(self.config),
+        )
+        return (act[: x.shape[0]], gate_up[: x.shape[0]]) if padding_amount else (act, gate_up)
       out = mblx.gmm_silu(
           inputs.astype(self.dtype),
           w_fused.astype(self.dtype),
@@ -4133,6 +4210,24 @@ class RoutedMoE(nnx.Module):
         raise NotImplementedError(f"moe_wo_gmm_fused_dswiglu does not support {', '.join(unsupported)}.")
       padded_h, padding_amount = max_utils.maybe_pad(intermediate_layer, fwd_tile("wo_tile_fwd_batch_seq"))
       padded_gate_up = jnp.pad(gate_up, ((0, padding_amount), (0, 0))) if padding_amount > 0 else gate_up
+      if isinstance(wo, Fp8NativeWeight):
+        # fp8_moe_native_fwd: the FP8 forward of the same GMM; the backward is gmm_dswiglu's.
+        out = mblx.gmm_dswiglu_fp8(
+            padded_h.astype(self.dtype),
+            padded_gate_up.astype(self.dtype),
+            wo.anchor.astype(self.dtype),
+            wo.codes,
+            wo.scale,
+            gmm_fn.keywords["group_sizes"],
+            preferred_element_type=self.dtype,
+            tiling=wo_tile_size,
+            group_offset=gmm_fn.keywords["group_offset"],
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+            dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(gate_up),
+            **fp8_native_fwd_kwargs(self.config),
+        )
+        return out[: intermediate_layer.shape[0]] if padding_amount > 0 else out
       out = mblx.gmm_dswiglu(
           padded_h.astype(self.dtype),
           padded_gate_up.astype(self.dtype),
@@ -4491,6 +4586,24 @@ class RoutedMoE(nnx.Module):
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
 
       def down_projection(h, kernel, group_sizes, expert_assignments, group_offset):
+        if isinstance(kernel, Fp8NativeWeight):
+          # fp8_moe_native_fwd: the FP8 forward. No VJP needed: ring_ragged_unsort_down_projection owns the
+          # backward (down_projection_bwd_dswiglu below). Rows padded to the forward tile, as gmm() pads them.
+          del expert_assignments
+          num_rows = h.shape[0]
+          h, padding_amount = max_utils.maybe_pad(h, fwd_tile("wo_tile_fwd_batch_seq"))
+          out = mblx.gmm_fp8_forward(
+              h.astype(self.dtype),
+              kernel.codes,
+              kernel.scale,
+              group_sizes,
+              preferred_element_type=self.dtype,
+              tiling=wo_tile_size,
+              group_offset=group_offset,
+              use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+              **fp8_native_fwd_kwargs(self.config, with_bwd_dlhs=False),
+          )
+          return out[:num_rows] if padding_amount > 0 else out
         return gmm(
             h,
             kernel,
@@ -4508,6 +4621,16 @@ class RoutedMoE(nnx.Module):
         with the SwiGLU backward in the DLHS epilogue (megablox gmm_dswiglu_bwd): (d[gate | up], <u, h>, dwo).
         """
         del expert_assignments
+        fp8_kernel = kernel if isinstance(kernel, Fp8NativeWeight) else None
+        use_fp8_dlhs = fp8_kernel is not None and getattr(self.config, "fp8_moe_native_bwd_dlhs", False)
+        fp8_dlhs = {}
+        if use_fp8_dlhs:
+          # fp8_moe_native_bwd_dlhs: the codes go to the backward, whose DLHS dequantizes them in VMEM (same values).
+          kernel = fp8_kernel.codes
+          fp8_dlhs = {"rhs_fp8_scale": fp8_kernel.scale, "rhs_dtype": self.dtype}
+        elif fp8_kernel is not None:
+          # fp8_moe_native_fwd: the bf16 backward at the dequantized weight (bit-identical to the gather8 one).
+          kernel = mblx.dequantize_fp8_codes(fp8_kernel.codes, fp8_kernel.scale, self.dtype)
         num_rows = gathered.shape[0]
         # Rows padded to the forward tile, as gmm() pads them; the padding is in no group.
         gathered, padding_amount = max_utils.maybe_pad(gathered, fwd_tile("wo_tile_fwd_batch_seq"))
@@ -4518,7 +4641,7 @@ class RoutedMoE(nnx.Module):
         d_gate_up, dot, grad_wo = mblx.gmm_dswiglu_bwd(
             gathered.astype(self.dtype),
             weighted_h.astype(self.dtype),
-            kernel.astype(self.dtype),
+            kernel if use_fp8_dlhs else kernel.astype(self.dtype),
             group_sizes,
             group_offset,
             self.dtype,
@@ -4529,10 +4652,18 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(dact_gate_up),
+            **fp8_dlhs,
         )
         if padding_amount > 0:
           # dot is an array here (return_dact_dot=True).
           d_gate_up, dot = d_gate_up[:num_rows], dot[:num_rows]  # pylint: disable=unsubscriptable-object
+        if fp8_kernel is not None:
+          # The cotangent of the Fp8NativeWeight: the weight gradient to the anchor; the codes and the scale get none.
+          grad_wo = Fp8NativeWeight(
+              grad_wo.astype(fp8_kernel.anchor.dtype),
+              jnp.zeros_like(fp8_kernel.codes),
+              jnp.zeros_like(fp8_kernel.scale),
+          )
         return d_gate_up, dot, grad_wo
 
       operands = get_gmm_operands_for_local_experts(intermediate_layer, routing, route_metadata)
@@ -4907,6 +5038,16 @@ class RoutedMoE(nnx.Module):
     # Not every mesh axis: shard_map rejects axes an enclosing vmap mapped away ("stage", "diloco").
     input_mesh_axes = {axis for spec in in_specs if spec is not None for dim in spec for axis in mesh_axes_for_dim(dim)}
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
+    # fp8_moe_native_fwd: the expert weights enter as Fp8NativeWeight (anchor, codes, scale); see below.
+    use_fp8_native_fwd = getattr(self.config, "fp8_moe_native_fwd", False) and fp8_fake_quant_at_gather is not None
+    if use_fp8_native_fwd:
+      weight_specs = slice(3, 6)  # w0_pspec, w1_pspec, wo_pspec in in_specs above
+      assert in_specs[weight_specs] == (w0_pspec, w1_pspec, wo_pspec), "in_specs order changed"
+      native_weight_specs = tuple(
+          spec if kernel is None else Fp8NativeWeight.pspec(spec)
+          for kernel, spec in ((w0_kernel, w0_pspec), (w1_kernel, w1_pspec), (wo_kernel, wo_pspec))
+      )
+      in_specs = in_specs[: weight_specs.start] + native_weight_specs + in_specs[weight_specs.stop :]
 
     @functools.partial(
         jax.shard_map,
@@ -5537,13 +5678,21 @@ class RoutedMoE(nnx.Module):
     if fp8_dequantize_after_gather is not None:
       # After the barrier, so the barrier orders the (cheaper) code gathers and the dequantization can fuse
       # into the GEMM operand prologue.
+      def _after_gather(codes, deq):
+        if deq is None:
+          return None
+        master_weight, scale, grad_pspec = deq
+        w_deq = quantizations.dequantize_weight_codes_ste(
+            master_weight, codes, scale, grad_transform=functools.partial(self._maybe_shard_with_pspec, pspec=grad_pspec)
+        )
+        if not use_fp8_native_fwd:
+          return w_deq
+        # fp8_moe_native_fwd: the GMMs read the codes and the scale; w_deq is only the gradient anchor (its value is
+        # never read, so XLA removes the dequantization from the forward).
+        return Fp8NativeWeight(w_deq, codes, scale)
+
       w0_kernel, w1_kernel, wo_kernel = (
-          None
-          if deq is None
-          else quantizations.dequantize_weight_codes_ste(
-              deq[0], codes, deq[1], grad_transform=functools.partial(self._maybe_shard_with_pspec, pspec=deq[2])
-          )
-          for codes, deq in zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather)
+          _after_gather(codes, deq) for codes, deq in zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather)
       )
 
     route_and_compute_outputs = sparse_matmul_route_and_compute(
@@ -6664,6 +6813,14 @@ class RoutedMoE(nnx.Module):
       if wo_absmax is not None and cfg.sparse_matmul and fp8_fake_quant_hoist_mode(cfg) == "gather8":
         fp8_fake_quant_at_gather = (w0_absmax, w1_absmax, wo_absmax)
       else:
+        if getattr(cfg, "fp8_moe_native_fwd", False):
+          # The validator guarantees gather8 and sparse_matmul, so the absmax is missing: this call is outside the
+          # decoder's layer scan. Without the codes, sparse_matmul would quietly run fake QAT.
+          raise ValueError(
+              "fp8_moe_native_fwd=True needs the gather8 absmax that the decoder's layer scan attaches"
+              " (stacked_fp8_fake_quant_absmax); this RoutedMoE call has none (unscanned layers, KV-cache decode,"
+              " or a Qwix-intercepted call), so it would silently run fake QAT instead of the FP8 forward."
+          )
         w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel, absmax=w0_absmax)
         if w1_kernel is not None:  # None: moe_unsplit_prefused_wi, and the line above rounded both halves at once
           w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel, absmax=w1_absmax)

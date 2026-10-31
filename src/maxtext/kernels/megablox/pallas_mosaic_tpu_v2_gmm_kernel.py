@@ -386,6 +386,20 @@ class GmmConfigs:
   # starts one grid step before its first use instead of two, and one weight tile
   # of VMEM is freed (with fuse_act, a gate and an up tile). Values are unchanged.
   rhs_buffer_count: int | None = None
+  # In-kernel lhs quantization: compute the per-row block scale in float32 as max(absmax, eps) / dtype_max and divide
+  # by it, instead of the bf16 absmax and reciprocal.
+  lhs_f32_scale: bool = False
+  # In-kernel lhs quantization: quantize each lhs k block once per tile, before the n loop, instead of inside it.
+  lhs_hoist_quant: bool = False
+  # Quantized matmul: apply the rhs (sub-channel) scale to the block accumulator before the lhs scale.
+  rhs_scale_first: bool = False
+  # rhs_contract_scale (fp8_moe_native_bwd_dlhs): rhs holds float8 codes [size_group, size_n, size_k]
+  # (transpose_rhs) whose scale varies along the contraction dim K ([size_group, 1, size_k] float32, read in
+  # the rhs scale slot). Each rhs block is dequantized in VMEM to rhs_dequant_dtype with
+  # (codes.astype(float32) * scale).astype(rhs_dequant_dtype) into a scratch tile, cached across the grid
+  # steps that read the same block (the m tiles of a group), and the unquantized matmul reads that tile.
+  rhs_contract_dequant: bool = False
+  rhs_dequant_dtype: jnp.dtype | None = None
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -516,6 +530,12 @@ class IndexMaps:
     b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
     return (group_id, b_tile_id, 0, n_id)
 
+  def rhs_contract_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array):
+    """rhs_contract_dequant: the [1, tile_k] block of the group's [size_group, 1, size_k] contraction scale."""
+    del n_id
+    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+    return (group_id, 0, k_id)
+
   def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
     """Calculates index map for the output tensor."""
     is_last_gm = gm_id == (pl.num_programs(self.cfgs.gm_axis) - 1)
@@ -609,6 +629,12 @@ def generate_block_specs(
         (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
         _ordered(index_map.rhs_scale_index_map),
     )
+  elif cfgs.rhs_contract_dequant:
+    # The contraction scale rides in the rhs scale slot (has_scale is False: nothing else reads it).
+    rhs_scale_block_spec = pl.BlockSpec(
+        (None, 1, cfgs.tiles.tile_k),
+        _ordered(index_map.rhs_contract_scale_index_map),
+    )
 
   if cfgs.has_partial_sum and cfgs.out_is_3d:
     ps_d0 = cfgs.out_size_n // num_lanes if cfgs.out_window else cfgs.out_tile_d0
@@ -673,6 +699,7 @@ def inner_kernel(
     partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
     acc_ref: jax.Array,  # [tile_m, tile_n]
     metadata_ref: MetadataRef,
+    rhs_cache_refs: tuple[jax.Array, jax.Array] | None = None,
     *,
     cfgs: GmmConfigs,
 ):
@@ -701,6 +728,9 @@ def inner_kernel(
   the activation is applied. With cfgs.fuse_dact, tiled_ps_ref is a
   DactInputRef and the accumulator becomes [d_gate | d_up] before the regular
   store path; with cfgs.return_dact_dot the out refs are (out, dot) pairs.
+  With cfgs.rhs_contract_dequant, rhs_cache_refs is (the [tile_n, tile_k]
+  dequantized weight tile, the SMEM key of the block it holds); see
+  _rhs_cache_miss.
   """
 
   pre_act_refs = ()
@@ -708,7 +738,7 @@ def inner_kernel(
     (tiled_out_ref, *tiled_pre_act_refs), (partial_out_ref, *partial_pre_act_refs) = tiled_out_ref, partial_out_ref
     pre_act_refs = tuple(zip(tiled_pre_act_refs, partial_pre_act_refs))
 
-  def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+  def _matmul(is_first_k_step: bool, is_last_k_step: bool, rhs_fill: bool = False):
     tpu_info = pltpu.get_tpu_info()
     mxu_size = tpu_info.mxu_column_size
 
@@ -728,13 +758,28 @@ def inner_kernel(
       tiled_lhs = relayout.load_3d_as_2d(tiled_lhs_ref.value, cfgs.tiles.tile_m, cfgs.lhs_tile_d0)
     else:
       tiled_lhs = tiled_lhs_ref.get_value().reshape(-1, cfgs.tiles.tile_k)[...]
-    tiled_rhs = tiled_rhs_ref.get_weight(transpose_rhs=cfgs.transpose_rhs)
+    rhs_fill_refs = None
+    if cfgs.rhs_contract_dequant and rhs_fill:
+      # The first grid step of this weight block: rhs_block dequantizes each [mxu, tile_k] piece
+      # of the codes right before its matmul (so the VPU work can overlap the MXU work of the previous piece)
+      # and stores it in the cache tile, which the later steps of the block read.
+      rhs_fill_refs = (tiled_rhs_ref.weight, tiled_rhs_ref.scale, rhs_cache_refs[0])  # pyrefly: ignore
+      tiled_rhs = None
+    elif cfgs.rhs_contract_dequant:
+      # This block's weight, dequantized in VMEM by the block's first step: the same bf16 tile the bf16 path DMAs,
+      # so the matmul below is that path's.
+      tiled_rhs = rhs_cache_refs[0][...]  # pyrefly: ignore[unsupported-operation]
+    else:
+      tiled_rhs = tiled_rhs_ref.get_weight(transpose_rhs=cfgs.transpose_rhs)
     # When rhs is packed (quantized dtype packed into uint32), unpack it
     # back to the original dtype using pltpu.bitcast which operates on K
     # axis. This expands the K dimension back to tile_k.
     if cfgs.rhs_cfgs.should_bitcast:
       tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.dtype)
-    rhs_tile_n = tiled_rhs.shape[0 if cfgs.transpose_rhs else 1]
+    if tiled_rhs is None:
+      rhs_tile_n = cfgs.tiles.tile_n
+    else:
+      rhs_tile_n = tiled_rhs.shape[0 if cfgs.transpose_rhs else 1]
 
     # This should only be taken in the case where we don't requantize
     # the scales and thus we need to dequantize inside VMEM to avoid small
@@ -765,6 +810,15 @@ def inner_kernel(
         tiled_lhs = jnp.where(mask_lhs, tiled_lhs, 0)
 
     def rhs_block(start_k: int, end_k: int, start_n: int, end_n: int):
+      if rhs_fill_refs is not None:
+        # rhs_contract_dequant (transpose_rhs) fill step: dequantize this piece, keep it for the block's later steps.
+        codes_ref, scale_ref, cache_ref = rhs_fill_refs
+        end_k = min(end_k, cfgs.tiles.tile_k)
+        block = dequantize_fp8_codes(
+            codes_ref[start_n:end_n, start_k:end_k], scale_ref[:, start_k:end_k], cache_ref.dtype
+        )
+        cache_ref[start_n:end_n, start_k:end_k] = block
+        return block
       if cfgs.transpose_rhs:
         return tiled_rhs[start_n:end_n, start_k:end_k]
       return tiled_rhs[start_k:end_k, start_n:end_n]
@@ -852,45 +906,57 @@ def inner_kernel(
         lhs_scale = tiled_lhs_ref.get_scale().astype(acc_ref.dtype)
         lhs_scale_inv = 1.0 / lhs_scale
 
-      # Without n outer loop, result of quantized matmul becomes available only
-      # at the last iteration of the loop. This means [tile_m, tile_n] value
-      # needs to be stored until the last iteration. By adding n outer loop,
-      # result of [tile_m, mxu_size] becomes available at the end of every k
-      # inner loop which can be used to pipeline subsequent VPU or VST ops with
-      # MXU ops for the next [tile_m, mxu_size].
+      def _quantize_lhs_block(block_lhs):
+        """Quantizes one [tile_m, k block] of lhs: (quantized block, its [tile_m, 1] or [1, 1] scale)."""
+        if should_use_external_scale:
+          assert lhs_scale is not None
+          assert lhs_scale_inv is not None
+          return jnp.clip(block_lhs * lhs_scale_inv, -dtype_max, dtype_max).astype(lhs_q_dtype), lhs_scale
+        if cfgs.lhs_f32_scale:
+          x_f32 = block_lhs.astype(jnp.float32)
+          block_abs_max = jnp.max(jnp.abs(x_f32), axis=1, keepdims=True)
+          block_scale = jnp.maximum(block_abs_max, _LHS_F32_SCALE_EPS) / dtype_max
+          return (x_f32 / block_scale).astype(lhs_q_dtype), block_scale
+        block_abs_max = jnp.max(jnp.abs(block_lhs), axis=1, keepdims=True)
+        block_scale = block_abs_max / dtype_max
+        # If block_scale=0, 1 / block_scale is NaN or Inf, which breaks the downcast to the quantized dtype; use 0.
+        block_scale_inv = jnp.where(block_scale == 0, 0, 1 / block_scale)
+        return (block_lhs * block_scale_inv).astype(lhs_q_dtype), block_scale
+
+      k_ranges = [
+          (start_k, min(cfgs.tiles.tile_k, start_k + q_block_size))  # pyrefly: ignore[unsupported-operation]
+          for start_k in range(0, cfgs.tiles.tile_k, q_block_size)  # pyrefly: ignore[bad-argument-type]
+      ]
+      hoisted_lhs_blocks = None
+      if cfgs.lhs_hoist_quant:
+        hoisted_lhs_blocks = [_quantize_lhs_block(tiled_lhs[:, start_k:end_k]) for start_k, end_k in k_ranges]
+
+      def _apply_rhs_scale(acc, start_k, start_n, end_n):
+        """Applies the rhs sub-channel scale of the quant block at start_k, if it is applied after the matmul."""
+        if not cfgs.rhs_cfgs.should_dequantize_after_matmul:
+          return acc
+        b_id = start_k // cfgs.rhs_cfgs.quant_block_size  # pyrefly: ignore[unsupported-operation]
+        rhs_scale_slice = tiled_rhs_ref.get_scale()
+        return acc * rhs_scale_slice[b_id, :, start_n:end_n].astype(acc_ref.dtype)
+
+      # Without the n outer loop, the quantized matmul's result is available only at the last k iteration, so the
+      # whole [tile_m, tile_n] value is kept until then. With it, each [tile_m, mxu_size] result is ready at the end
+      # of its k loop, and the following VPU / VST work pipelines with the MXU work of the next one.
       for start_n in range(0, rhs_tile_n, mxu_size):
         end_n = min(rhs_tile_n, start_n + mxu_size)
         col_size = end_n - start_n
 
         acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
-        for start_k in range(0, cfgs.tiles.tile_k, q_block_size):  # pyrefly: ignore[bad-argument-type]
-          end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)  # pyrefly: ignore[unsupported-operation]
-
-          block_lhs = tiled_lhs[:, start_k:end_k]
+        for k_index, (start_k, end_k) in enumerate(k_ranges):
           block_rhs = rhs_block(start_k, end_k, start_n, end_n)
-
-          # Perform lhs quantization. Note that for every block_lhs,
-          # same computation will be performed tiles_n//mxu_size times.
-          # But we can let compiler perform CSE and avoid recomputation.
-          if should_use_external_scale:
-            assert lhs_scale is not None
-            assert lhs_scale_inv is not None
-            block_lhs_q = jnp.clip(block_lhs * lhs_scale_inv, -dtype_max, dtype_max).astype(lhs_q_dtype)
-            block_scale = lhs_scale  # [1, 1]
+          if hoisted_lhs_blocks is not None:
+            block_lhs_q, block_scale = hoisted_lhs_blocks[k_index]
           else:
-            block_abs_max = jnp.max(jnp.abs(block_lhs), axis=1, keepdims=True)
-            block_scale = block_abs_max / dtype_max
+            # The same block is quantized for every n iteration; the compiler's CSE removes the recomputation.
+            block_lhs_q, block_scale = _quantize_lhs_block(tiled_lhs[:, start_k:end_k])
 
-            # If block_scale=0, it will cause division by zero and return either
-            # NaN or Inf. Since this can cause numeric issue when downcasting to
-            # quantized value, we convert them into 0.
-            block_scale_inv = jnp.where(block_scale == 0, 0, 1 / block_scale)
-            # Convert lhs into quantized dtype.
-            block_lhs_q = (block_lhs * block_scale_inv).astype(lhs_q_dtype)
-
-          # Unlike unquantized path, compiler may not perform implicit type
-          # conversion due to numeric concerns. As this can cause unsupported
-          # matmul error, explicit type conversion is performed.
+          # Unlike the unquantized path, the compiler may not convert the operand types implicitly (numerics), which
+          # gives an unsupported-matmul error, so the conversion is explicit.
           if not tpu_info.is_matmul_supported(lhs_q_dtype, block_rhs.dtype):
             block_rhs = block_rhs.astype(lhs_q_dtype)
 
@@ -908,13 +974,10 @@ def inner_kernel(
                 preferred_element_type=preferred_element_type,
             ).astype(acc_ref.dtype)
 
-          block_acc *= block_scale.astype(acc_ref.dtype)
-
-          # Apply rhs subchannel scale per quant block.
-          if cfgs.rhs_cfgs.should_dequantize_after_matmul:
-            b_id = start_k // cfgs.rhs_cfgs.quant_block_size  # pyrefly: ignore[unsupported-operation]
-            rhs_scale_slice = tiled_rhs_ref.get_scale()
-            block_acc *= rhs_scale_slice[b_id, :, start_n:end_n].astype(acc_ref.dtype)
+          if cfgs.rhs_scale_first:
+            block_acc = _apply_rhs_scale(block_acc, start_k, start_n, end_n) * block_scale.astype(acc_ref.dtype)
+          else:
+            block_acc = _apply_rhs_scale(block_acc * block_scale.astype(acc_ref.dtype), start_k, start_n, end_n)
 
           acc_n += block_acc
         acc_list.append(acc_n)
@@ -1031,6 +1094,32 @@ def inner_kernel(
   num_k = pl.num_programs(2)
   k_id = pl.program_id(2)
 
+  if cfgs.rhs_contract_dequant:
+    # The first step of each weight block dequantizes it piece by piece inside its matmul, so the VPU work overlaps
+    # the MXU work (see _matmul's rhs_fill); the other steps read the cache tile.
+    cache_miss = _rhs_cache_miss(rhs_cache_refs, metadata_ref, cfgs)
+    is_first = k_id == 0
+    is_last = k_id == (num_k - 1)
+
+    def _variants(fill: bool):
+      suffix = "_rhs_fill" if fill else ""
+      return [
+          jax.named_scope(name + suffix)(functools.partial(_matmul, first, last, rhs_fill=fill))
+          for name, first, last in (
+              ("matmul_first_last", True, True),
+              ("matmul_first", True, False),
+              ("matmul_last", False, True),
+              ("matmul", False, False),
+          )
+      ]
+
+    def _dispatch(fill: bool):
+      first_last, first, last, mid = _variants(fill)
+      lax.cond(is_first, lambda: lax.cond(is_last, first_last, first), lambda: lax.cond(is_last, last, mid))
+
+    lax.cond(cache_miss, lambda: _dispatch(True), lambda: _dispatch(False))
+    return
+
   is_first_k_step = k_id == 0
   is_last_k_step = k_id == (num_k - 1)
 
@@ -1047,6 +1136,50 @@ def inner_kernel(
           matmul,
       ),
   )
+
+
+# The default k block of the in-kernel lhs quantization (one scale per row and block).
+_DEFAULT_LHS_QUANT_BLOCK_SIZE = 512
+# lhs_f32_scale: the floor of a row block's absmax, so an all-zero block gets a finite scale.
+_LHS_F32_SCALE_EPS = 1e-12
+
+
+def dequantize_fp8_codes(codes: jax.Array, scale: jax.Array, dtype: jnp.dtype) -> jax.Array:
+  """The weight of float8 `codes` in `dtype`: (codes.astype(float32) * scale).astype(dtype).
+
+  dequantize_weight_codes_ste's forward expression. ops.dequantize_fp8_codes calls it on whole weights and the
+  rhs_contract_dequant path on pieces of an rhs block (codes [r, c], scale [1, c]), so both are bit-identical.
+  """
+  return (codes.astype(jnp.float32) * scale).astype(dtype)
+
+
+def _rhs_block_key(metadata_ref: MetadataRef, cfgs: GmmConfigs) -> jax.Array:
+  """rhs_contract_dequant: an int32 id of this grid step's rhs block (group, n tile, k tile)."""
+  num_n = pl.num_programs(cfgs.n_axis)
+  num_k = pl.num_programs(2)
+  group_id = metadata_ref.gm_id_to_group_id[pl.program_id(cfgs.gm_axis)]
+  return (group_id * num_n + pl.program_id(cfgs.n_axis)) * num_k + pl.program_id(2)
+
+
+def _rhs_cache_miss(
+    rhs_cache_refs: tuple[jax.Array, jax.Array] | None, metadata_ref: MetadataRef, cfgs: GmmConfigs
+) -> jax.Array:
+  """rhs_contract_dequant: whether the cache tile holds another rhs block than this step's.
+
+  The rhs block index is (group, n tile, k tile), and k is the innermost grid axis. With a single k tile (the MoE
+  DLHS tiles) the cache is filled once per (group, n tile) and every m tile of the group reuses it, for any number
+  of n tiles (the DLHS grid is (n, gm, k)). With two or more k tiles consecutive steps need different blocks, so the
+  cache never hits and every step dequantizes its block inside the matmul; outputs are unchanged, and it still beats
+  dequantizing the whole weight in XLA first (TPU7x, production DLHS shapes, 2-4 k tiles: 0.84-0.91x its time),
+  because the kernel reads 1-byte codes instead of a bf16 copy. Side effect: records this step's block key in the
+  SMEM key, since the step that misses fills the cache tile.
+  """
+  assert rhs_cache_refs is not None
+  key_ref = rhs_cache_refs[1]
+  key = _rhs_block_key(metadata_ref, cfgs)
+  miss = key != key_ref[0]
+  key_ref[0] = key
+  return miss
 
 
 def _mask_group_rows(acc: jax.Array, metadata_ref: MetadataRef, cfgs: GmmConfigs):
@@ -1323,6 +1456,8 @@ def kernel_main(
     pre_act_partial_refs: tuple[jax.Array, ...] = (),  # return_pre_act: their partial-row scratch
     # Per extra output, the VMEM zero buffer of its zero-init DMAs when its dtype is not out_ref's (None: zero_ref).
     extra_zero_refs: tuple[jax.Array | None, ...] = (),
+    # rhs_contract_dequant: (the dequantized weight tile [tile_n, tile_k], its SMEM block key int32[1]).
+    rhs_cache_refs: tuple[jax.Array, jax.Array] | None = None,
 ):
   """Entry point for GMM kernel.
 
@@ -1459,6 +1594,10 @@ def kernel_main(
   if pre_act_out_refs:
     out_in = (out_in, *(r.reshape(-1, cfgs.dims.size_lhs_sublane, *r.shape[1:]) for r in pre_act_out_refs))
     scratches[0] = (partial_out_ref, *pre_act_partial_refs)
+  if cfgs.rhs_contract_dequant:
+    assert rhs_cache_refs is not None
+    rhs_cache_refs[1][0] = jnp.int32(-1)  # no block dequantized yet
+    scratches.append(rhs_cache_refs)
   pipeline_fn(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
 
   if cfgs.zero_init:
@@ -1486,6 +1625,7 @@ def kernel_main_pre_act(
     partial_up_ref: jax.Array,  # [size_lhs_sublane, tile_n]
     *,
     cfgs: GmmConfigs,
+    rhs_cache_refs: tuple[jax.Array, jax.Array] | None = None,
 ):
   """kernel_main for return_pre_act: pallas_call passes the gate and up outputs right after act."""
   kernel_main(
@@ -1503,6 +1643,7 @@ def kernel_main_pre_act(
       cfgs=cfgs,
       pre_act_out_refs=(gate_out_ref, up_out_ref),
       pre_act_partial_refs=(partial_gate_ref, partial_up_ref),
+      rhs_cache_refs=rhs_cache_refs,
   )
 
 
@@ -1523,6 +1664,7 @@ def kernel_main_single_extra_out(
     extra_zero_ref: jax.Array | None,
     *,
     cfgs: GmmConfigs,
+    rhs_cache_refs: tuple[jax.Array, jax.Array] | None = None,
 ):
   """kernel_main for one extra output: [gate | up] (return_pre_act="concat") or the dot (return_dact_dot).
 
@@ -1545,6 +1687,7 @@ def kernel_main_single_extra_out(
       pre_act_out_refs=(extra_out_ref,),
       pre_act_partial_refs=(partial_extra_ref,),
       extra_zero_refs=(extra_zero_ref,),
+      rhs_cache_refs=rhs_cache_refs,
   )
 
 
@@ -1797,6 +1940,16 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
       scope_name += f"-preact_tn_{cfgs.dact_pre_act_tile_n}"
   if cfgs.rhs_buffer_count is not None:
     scope_name += f"-rhsbuf_{cfgs.rhs_buffer_count}"
+  if cfgs.lhs_cfgs.quant_dtype is not None and cfgs.lhs_cfgs.quant_block_size != _DEFAULT_LHS_QUANT_BLOCK_SIZE:
+    scope_name += f"-lqbs_{cfgs.lhs_cfgs.quant_block_size}"
+  if cfgs.lhs_f32_scale:
+    scope_name += "-lf32s"
+  if cfgs.lhs_hoist_quant:
+    scope_name += "-lhoist"
+  if cfgs.rhs_scale_first:
+    scope_name += "-rhs1"
+  if cfgs.rhs_contract_dequant:
+    scope_name += "-rhs_cdq"
   return scope_name
 
 
@@ -1826,8 +1979,17 @@ def make_gmm_configs(
     return_dact_dot: bool = False,
     dact_pre_act_tile_n: int | None = None,
     rhs_buffer_count: int | None = None,
+    lhs_quant_block_size: int | None = None,
+    lhs_f32_scale: bool = False,
+    lhs_hoist_quant: bool = False,
+    rhs_scale_first: bool = False,
+    rhs_contract_scale: jax.Array | None = None,
+    rhs_dequant_dtype: jnp.dtype | None = None,
 ):
   """Fills the GMM config for the GMM kernel."""
+  if lhs_quant_block_size is not None and (not isinstance(lhs_quant_block_size, int) or lhs_quant_block_size < 0):
+    # A negative block size would make the quantized k loop empty (an all-zero output).
+    raise ValueError(f"lhs_quant_block_size must be None or an int >= 0; got {lhs_quant_block_size!r}.")
 
   dims = validate_inputs(
       lhs,
@@ -1892,7 +2054,9 @@ def make_gmm_configs(
       # scale value. Since this operation is very memory intensive, we use a
       # block size that is small enough to minimize memory overhead but large
       # enough to minimize compute overhead of quantization.
-      quant_block_size=512,
+      quant_block_size=(
+          dims.size_k if lhs_quant_block_size == 0 else (lhs_quant_block_size or _DEFAULT_LHS_QUANT_BLOCK_SIZE)
+      ),
       dtype=lhs.dtype,
       has_scale=has_lhs_scale,
       is_3d=lhs.ndim == 3,
@@ -1914,6 +2078,15 @@ def make_gmm_configs(
     tiles = tile_info
   else:
     tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act, partial_sum is not None)
+
+  if not has_lhs_scale and lhs_cfgs.quant_dtype is not None and lhs_quant_block_size == 0 and tiles.tile_k != dims.size_k:
+    # inner_kernel quantizes one [tile_m, tile_k] lhs tile per K step in blocks of min(tile_k, size_k): tile_k < size_k
+    # would compute one scale per K tile instead of one over size_k, and tile_k > size_k would step past size_k and read
+    # out-of-bounds rhs_scale blocks.
+    raise NotImplementedError(
+        "lhs_quant_block_size=0 (full-K dynamic lhs quantization) requires a single K tile (tile_k == size_k);"
+        f" got {tiles=}, {dims=}."
+    )
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   if lhs_cfgs.is_3d:
@@ -2002,6 +2175,29 @@ def make_gmm_configs(
   if rhs_buffer_count is not None and (not isinstance(rhs_buffer_count, int) or rhs_buffer_count < 2):
     # One buffer would serialize every weight DMA with the matmul that reads it.
     raise ValueError(f"rhs_buffer_count must be None or an int >= 2; got {rhs_buffer_count!r}.")
+  rhs_contract_dequant = rhs_contract_scale is not None
+  if rhs_contract_dequant:
+    # The rhs is float8 codes dequantized in VMEM before an unquantized matmul (see GmmConfigs).
+    if not transpose_rhs or rhs_scale is not None or rhs_bias is not None or fuse_act is not None:
+      raise NotImplementedError("rhs_contract_scale needs transpose_rhs and no rhs_scale, rhs_bias or fuse_act.")
+    if lhs_cfgs.is_3d or lhs_scale is not None or lhs_cfgs.quant_dtype is not None:
+      raise NotImplementedError("rhs_contract_scale needs a 2D, unscaled, unquantized lhs.")
+    if jax.dtypes.itemsize_bits(rhs.dtype) != 8 or not jnp.issubdtype(rhs.dtype, jnp.floating):
+      raise ValueError(f"rhs_contract_scale needs float8 rhs codes; got {rhs.dtype}.")
+    if rhs_contract_scale.shape != (dims.size_group, 1, dims.size_k):
+      raise ValueError(
+          f"rhs_contract_scale must have shape {(dims.size_group, 1, dims.size_k)}; got {rhs_contract_scale.shape}."
+      )
+    if tiles.tile_n % 32 or tiles.tile_k % num_lanes or dims.size_n % tiles.tile_n or dims.size_k % tiles.tile_k:
+      # 32: a float8 sublane tile (the dequantization runs on 32-row pieces); whole tiles only, so every scale and
+      # code block is in bounds.
+      raise NotImplementedError(
+          f"rhs_contract_scale needs tile_n % 32 == 0, tile_k % {num_lanes} == 0 and tiles that divide size_n and"
+          f" size_k; got {tiles=}, {dims=}."
+      )
+    rhs_dequant_dtype = jnp.dtype(lhs.dtype if rhs_dequant_dtype is None else rhs_dequant_dtype)
+  elif rhs_dequant_dtype is not None:
+    raise ValueError("rhs_dequant_dtype requires rhs_contract_scale.")
 
   return GmmConfigs(
       dims=dims,
@@ -2021,6 +2217,11 @@ def make_gmm_configs(
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
       rhs_buffer_count=rhs_buffer_count,
+      lhs_f32_scale=lhs_f32_scale,
+      lhs_hoist_quant=lhs_hoist_quant,
+      rhs_scale_first=rhs_scale_first,
+      rhs_contract_dequant=rhs_contract_dequant,
+      rhs_dequant_dtype=rhs_dequant_dtype,
   )
 
 
@@ -2037,6 +2238,15 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     del cfgs_dict["dact_pre_act_tile_n"]  # the contiguous [gate | up] reader keeps its metadata too
   if cfgs.rhs_buffer_count is None:
     del cfgs_dict["rhs_buffer_count"]  # the default rhs buffering keeps its metadata too
+  if not cfgs.lhs_f32_scale:
+    del cfgs_dict["lhs_f32_scale"]
+  if not cfgs.lhs_hoist_quant:
+    del cfgs_dict["lhs_hoist_quant"]
+  if not cfgs.rhs_scale_first:
+    del cfgs_dict["rhs_scale_first"]
+  if not cfgs.rhs_contract_dequant:
+    del cfgs_dict["rhs_contract_dequant"]
+    del cfgs_dict["rhs_dequant_dtype"]
   ret = {}
   for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
     key = jax.tree_util.keystr(path, simple=True, separator=".")
@@ -2063,6 +2273,11 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "return_dact_dot",
         "dact_pre_act_tile_n",
         "rhs_buffer_count",
+        "lhs_quant_block_size",
+        "lhs_f32_scale",
+        "lhs_hoist_quant",
+        "rhs_scale_first",
+        "rhs_dequant_dtype",
     ]
 )
 def gmm_v2(
@@ -2092,6 +2307,12 @@ def gmm_v2(
     return_dact_dot: bool = False,
     dact_pre_act_tile_n: int | None = None,
     rhs_buffer_count: int | None = None,
+    lhs_quant_block_size: int | None = None,
+    lhs_f32_scale: bool = False,
+    lhs_hoist_quant: bool = False,
+    rhs_scale_first: bool = False,
+    rhs_contract_scale: jax.Array | None = None,  # [size_group, 1, size_k]
+    rhs_dequant_dtype: jnp.dtype | None = None,
 ) -> jax.Array | tuple[jax.Array, ...]:
   """GMM kernel implemented with emit_pipeline.
 
@@ -2161,6 +2382,28 @@ def gmm_v2(
       weight block's DMA one grid step ahead instead of two. With a single K
       tile (tile_k == size_k) the weight block changes only at group and n-tile
       boundaries. The values are unchanged.
+    lhs_quant_block_size: With in-kernel lhs quantization, the k block that
+      gets one scale per row: None for the default (512), 0 for the whole K
+      dim (requires tile_k == size_k), or a positive int.
+    lhs_f32_scale: With in-kernel lhs quantization, compute each block scale
+      in float32 as max(absmax, 1e-12) / dtype_max and divide by it, instead
+      of the bf16 absmax and reciprocal.
+    lhs_hoist_quant: With in-kernel lhs quantization, quantize each lhs block
+      once per tile instead of per mxu-wide n slice. The values are unchanged.
+    rhs_scale_first: With a quantized matmul, apply the rhs sub-channel scale
+      to the block accumulator before the lhs scale.
+    rhs_contract_scale: Optional. With transpose_rhs, rhs holds float8 codes
+      whose scale varies along the contraction dim: [size_group, 1, size_k]
+      (a per-output-channel weight scale, read by the DLHS of a weight-codes
+      forward). Each rhs block is dequantized in VMEM,
+      (codes.astype(float32) * scale).astype(rhs_dequant_dtype), into a
+      scratch tile that is reused while the block index is unchanged (with
+      one n and k tile, every m tile of a group), and the matmul is the
+      unquantized one on that tile: the output is bit-identical to passing
+      the dequantized weight. No rhs_scale, rhs_bias, fuse_act, lhs_scale or
+      3D lhs; tile_n % 32 == 0, tile_k % 128 == 0, whole tiles.
+    rhs_dequant_dtype: With rhs_contract_scale, the dtype of the dequantized
+      weight (None: lhs.dtype).
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]); with
@@ -2208,6 +2451,12 @@ def gmm_v2(
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
       rhs_buffer_count=rhs_buffer_count,
+      lhs_quant_block_size=lhs_quant_block_size,
+      lhs_f32_scale=lhs_f32_scale,
+      lhs_hoist_quant=lhs_hoist_quant,
+      rhs_scale_first=rhs_scale_first,
+      rhs_contract_scale=rhs_contract_scale,
+      rhs_dequant_dtype=rhs_dequant_dtype,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
@@ -2228,6 +2477,11 @@ def gmm_v2(
   if rhs_bias is not None:
     rhs_bias = rhs_bias.astype(jnp.float32)
     rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+  if cfgs.rhs_contract_dequant:
+    # The contraction scale rides in the rhs scale slot (see generate_block_specs).
+    assert rhs_contract_scale is not None and rhs_scale is None
+    rhs_scale = rhs_contract_scale.astype(jnp.float32)
+    rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
   # Initialize scratch shapes.
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
@@ -2303,6 +2557,12 @@ def gmm_v2(
     )
     dot_zero_scratch = pltpu.VMEM((dot_zero_tile_m, num_lanes), cfgs.acc_dtype) if cfgs.zero_init else None
     scratch_shapes += [pltpu.VMEM((dims.size_lhs_sublane, num_lanes), cfgs.acc_dtype), dot_zero_scratch]
+  if cfgs.rhs_contract_dequant:
+    # Last: the dequantized weight tile and the SMEM key of the rhs block it holds (kernel_body peels them off).
+    scratch_shapes += [
+        pltpu.VMEM((tiles.tile_n, tiles.tile_k), cfgs.rhs_dequant_dtype),
+        pltpu.SMEM((1,), jnp.int32),
+    ]
 
   aligned_n = align_to(cfgs.out_size_n, num_lanes)
   if cfgs.out_is_3d:
@@ -2358,8 +2618,18 @@ def gmm_v2(
     pallas_out_shape = out_init
     pallas_out_specs = out_spec
 
+  kernel_body = functools.partial(kernel_fn, cfgs=cfgs)
+  if cfgs.rhs_contract_dequant:
+    base_kernel_body = kernel_body
+
+    def kernel_body_with_rhs_cache(*refs):
+      *refs, rhs_cache_ref, rhs_cache_key_ref = refs
+      base_kernel_body(*refs, rhs_cache_refs=(rhs_cache_ref, rhs_cache_key_ref))
+
+    kernel_body = kernel_body_with_rhs_cache
+
   out = pl.pallas_call(
-      functools.partial(kernel_fn, cfgs=cfgs),
+      kernel_body,
       out_shape=pallas_out_shape,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
