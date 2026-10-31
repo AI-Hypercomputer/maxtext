@@ -390,6 +390,13 @@ class Checkpointing(BaseModel):
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
+  async_checkpointing_timeout_secs: PositiveInt = Field(
+      1200,
+      description=(
+          "Deadline in seconds for the background half of an async checkpoint save (storage writes and"
+          " finalization). A save that outlives it fails. 1200 is Orbax's own default. Training engine only."
+      ),
+  )
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
   enable_single_replica_ckpt_restoring: bool = Field(
@@ -4091,7 +4098,8 @@ class DerivedValues(BaseModel):
 
   checkpoint_dir: None | str = Field(
       None,
-      description="The full path to the checkpoint directory, derived from `run_name`.",
+      description="The full path to the checkpoint directory. Derived from `base_output_directory` and"
+      " `run_name` unless set explicitly, e.g. to a GCSFuse mount of a Rapid bucket that only checkpoints use.",
   )
   metrics_dir: None | str = Field(
       None,
@@ -5032,7 +5040,8 @@ class MaxTextConfig(
     # Construct full paths for output directories based on the base directory and run name.
     if self.run_name and self.base_output_directory:
       output_dir = os.path.join(self.base_output_directory, self.run_name)
-      self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
+      if not self.checkpoint_dir:  # pylint: disable=access-member-before-definition
+        self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       self.managed_mldiagnostics_dir = derive_managed_mldiagnostics_dir(
@@ -5049,7 +5058,7 @@ class MaxTextConfig(
         self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
-          None,
+          self.checkpoint_dir or None,
           None,
           None,
       )
@@ -7007,8 +7016,10 @@ class RLConfig(
           f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
       )
 
-    # Set checkpoint_dir based on run_name and base_output_directory.
-    if self.run_name and self.base_output_directory:
+    # Set checkpoint_dir based on run_name and base_output_directory, unless set explicitly.
+    if self.checkpoint_dir:
+      checkpoint_dir = self.checkpoint_dir
+    elif self.run_name and self.base_output_directory:
       checkpoint_dir = os.path.join(self.base_output_directory, self.run_name, "checkpoints", "")
     else:
       checkpoint_dir = os.path.join(os.path.abspath("maxtext_output"), "checkpoints", "")
