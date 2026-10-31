@@ -42,11 +42,13 @@ shard_optimizer_over_data: true  # Zero-1 over the 48 data-parallel ranks
 
 # --- Training recipe (OLMo-core hero, LR as a function of duration) ------------------------------------------------
 # One epoch of Dolma 3.5: 1,708,983,195 sequences = 556,309 full steps (14.0T tokens, 176.4 x Chinchilla).
-# LR: stepped WSD-S (OLMo-core's WSDSChinchillaRunConfigurator, stepped_schedule). Stages end at 1, 2, 4, ..., 128 x C
-# and at the epoch's end; stage k holds learning_rate / sqrt(c_k) and decays linearly to 0 over its last 10%, so every
-# Chinchilla doubling has a decayed checkpoint. learning_rate is the 1xC optimum and the only LR to tune: a 1xC run
-# with this schedule (steps: 3154) is exactly this run's first stage. 1xC = 20 x 3,969,230,656 active non-embedding
-# parameters = 79,384,613,120 tokens = 3,154.5 steps. Warmup 2,000 steps (OLMo-core hero's), inside the first stage.
+# LR: the trunk of WSD with OLMo-core's stepped peaks (WSDSChinchillaRunConfigurator, stepped_schedule), the decays run
+# as separate branches. Stages end at 1, 2, 4, ..., 128 x C and at the epoch's end; stage k holds learning_rate /
+# sqrt(c_k) to its end with no decay (wsds_in_run_decays: false). A decay branch for doubling k resumes from this run's
+# checkpoint at stage k's fork (saved: wsds_save_forks) with steps = stage k's end, learning_rate_schedule_steps =
+# 556309 and wsds_decay_stage = k: linear decay to 0 over the stage's last 10%. learning_rate is the 1xC optimum and
+# the only LR to tune: the 1xC base_lr runs are this config's stage-0 branch. 1xC = 20 x 3,969,230,656 active
+# non-embedding parameters = 79,384,613,120 tokens = 3,154.5 steps.
 # The schedule is baked into the LR curve: set once, never change it on a resume.
 steps: 556309
 learning_rate: 1.1e-3  # base LR at 1xC: to be tuned on small at 1xC
@@ -55,6 +57,8 @@ wsds_chinchilla_tokens: 79384613120
 wsds_first_multiple: 1.0
 wsds_decay_steps_fraction: 0.1
 wsds_stepped: true
+wsds_in_run_decays: false
+wsds_save_forks: true  # labels 2838, 5992, 11986, ...: where each doubling's decay branch resumes
 learning_rate_final_fraction: 0.0
 # Warmup 1 token per parameter (OLMo-core's WSDSChinchillaRunConfigurator): 3.97B tokens = 158 steps, 5% of 1xC.
 warmup_steps_fraction: 0.000284016  # 158 / 556,309, rounded up so int(steps * fraction) is 158
@@ -94,6 +98,8 @@ save_checkpoint_on_completion: true
 log_period: 100
 norm_metrics: "grad"
 olmoe3_router_metrics: true  # OLMo-core's per-layer router metrics, CE and masked-instance fraction
+olmoe3_router_metrics_interval: 100  # the load imbalances on the logged steps only (every step costs ~0.27 s)
+olmoe3_router_metrics_scatter_counts: true
 router_metrics_group_seqs: 16  # OLMo-core's per-GPU batch for the local load imbalance
 olmo_ppl_eval_interval: 1000
 olmo_ppl_eval_dir: "/mnt/olmo-3p5-maxtext/eval-data/perplexity/v3_small_dolma2-tokenizer"

@@ -3477,6 +3477,29 @@ class Optimizer(BaseModel):
           " learning_rate."
       ),
   )
+  wsds_in_run_decays: bool = Field(
+      True,
+      description=(
+          "lr_schedule_type=wsds: every stage ends in its decay within the run (WSD-S). False is the trunk of WSD with"
+          " separate decay branches: each stage holds its peak to its end, with no decay."
+      ),
+  )
+  wsds_decay_stage: int = Field(
+      -1,
+      ge=-1,
+      description=(
+          "lr_schedule_type=wsds: a decay branch of the trunk (wsds_in_run_decays=False): the trunk's schedule up to"
+          " stage k's fork (its end minus its decay), then stage k's decay. steps must be stage k's end; resume it from"
+          " the trunk's checkpoint at the fork (wsds_save_forks). -1: not a branch."
+      ),
+  )
+  wsds_save_forks: bool = Field(
+      False,
+      description=(
+          "lr_schedule_type=wsds: also checkpoint at every stage's fork (the label before its first decay step), so a"
+          " decay branch (wsds_decay_stage) can resume from the trunk there."
+      ),
+  )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
   warmup_step_offset: int = Field(
       0,

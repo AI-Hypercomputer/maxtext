@@ -1175,6 +1175,12 @@ wsds_chinchilla_tokens: 0
 wsds_first_multiple: 1.0
 wsds_decay_steps_fraction: 0.1
 wsds_stepped: true
+# False: the trunk of WSD with separate decay branches (each stage holds its peak, no decays); a branch sets
+# wsds_decay_stage=k (the trunk's schedule up to stage k's fork, then its decay; steps = stage k's end).
+wsds_in_run_decays: true
+wsds_decay_stage: -1
+# Also checkpoint at every stage's fork (the label before its first decay step), where the branches resume.
+wsds_save_forks: false
 warmup_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for warmup phase (applies to both schedules)
 warmup_step_offset: 0  # Warmup position of step 0: step i trains at learning_rate * (i + offset) / warmup_steps. 1 = OLMo-core's one-based warmup.
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.

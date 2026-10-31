@@ -34,6 +34,7 @@ from maxtext.configs import pyconfig
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.inference import inference_utils
 from maxtext.utils import max_utils
+from maxtext.common import checkpointing
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
@@ -994,6 +995,45 @@ class TestWsdsSchedule(unittest.TestCase):
     self.assertAlmostEqual(self._lr(sched, 20), self.LR * 2**0.5, places=9)
     stages, _ = self._schedule(400, wsds_stepped=False)
     self.assertEqual({m for _, m in stages}, {1.0})
+
+  def test_trunk_holds_each_peak(self):
+    # wsds_in_run_decays=False: the WSD trunk steps down at each doubling and never decays.
+    _, sched = self._schedule(400, wsds_in_run_decays=False)
+    lr = self.LR
+    for step, want in ((20, lr), (99, lr), (100, lr / 2**0.5), (199, lr / 2**0.5), (200, lr / 2), (399, lr / 2)):
+      self.assertAlmostEqual(self._lr(sched, step), want, places=9, msg=f"step {step}")
+
+  def test_decay_branch_is_the_trunk_then_its_stage_decay(self):
+    # Stage 1's branch (steps = its end, 200) follows the trunk to its fork (190) and then decays as WSD-S's stage 1
+    # does; the fork saves (wsds_save_forks) are the labels before each decay: 89, 189, 379.
+    long = {"learning_rate_schedule_steps": 400, "warmup_steps_fraction": 20 / 400}
+    _, trunk = self._schedule(400, wsds_in_run_decays=False)
+    _, wsds = self._schedule(400)
+    _, branch = self._schedule(200, wsds_in_run_decays=False, wsds_decay_stage=1, **long)
+    for step in range(190):
+      self.assertAlmostEqual(self._lr(branch, step), self._lr(trunk, step), places=12, msg=f"step {step}")
+    for step in range(190, 200):
+      self.assertAlmostEqual(self._lr(branch, step), self._lr(wsds, step), places=12, msg=f"step {step}")
+    # Stage 0's branch on the long schedule is the 1xC run: WSD-S's first stage.
+    _, branch0 = self._schedule(100, wsds_decay_stage=0, **long)
+    for step in range(100):
+      self.assertAlmostEqual(self._lr(branch0, step), self._lr(wsds, step), places=12, msg=f"step {step}")
+    stages, _ = self._schedule(400)
+    base = {"enable_checkpointing": False, "learning_rate": self.LR, "steps": 400, "lr_schedule_type": "wsds",
+            "warmup_steps_fraction": 0.05, "wsds_save_forks": True}
+    cfg = pyconfig.initialize([None, get_test_config_path()], **base, wsds_chinchilla_tokens=1)
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        **base,
+        wsds_chinchilla_tokens=100 * cfg.global_batch_size_to_train_on * cfg.max_target_length,
+    )
+    self.assertEqual([e for e, _ in stages], [100, 200, 400])
+    self.assertEqual(maxtext_utils.wsds_decay_windows(cfg), [(90, 100), (190, 200), (380, 400)])
+    self.assertEqual(checkpointing._wsds_fork_save_steps(cfg), {89, 189, 379})  # pylint: disable=protected-access
+
+  def test_decay_branch_steps_must_end_its_stage(self):
+    with self.assertRaisesRegex(ValueError, "must be its end"):
+      self._schedule(190, wsds_decay_stage=1, learning_rate_schedule_steps=400, warmup_steps_fraction=20 / 400)
 
   def test_requires_chinchilla_tokens_and_warmup_in_first_stage(self):
     with self.assertRaisesRegex(ValueError, "wsds_chinchilla_tokens"):
