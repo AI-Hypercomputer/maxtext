@@ -54,6 +54,7 @@ class OlmoPplEvalRowsTest(unittest.TestCase):
         np.array(tokens, dtype=np.uint32).tofile(os.path.join(d, name, "val", "part-0-00000.npy"))
       cfg = types.SimpleNamespace(
           olmo_ppl_eval_interval=1000,
+          steps=3154,
           max_target_length=4,
           global_batch_size_to_load_eval=loaded,
           micro_batch_size_to_eval_on=scored,
@@ -74,6 +75,7 @@ class OlmoPplEvalRowsTest(unittest.TestCase):
     self.assertEqual((len(batches_b), denom_b), (1, 2))
     np.testing.assert_array_equal(batches_a[1]["targets_segmentation"][1], [0, 0, 0, 0])  # fill row
     self.assertTrue(ev.due(999) and not ev.due(1000) and ev.due(1999))
+    self.assertTrue(ev.due(3153) and not ev.due(3152))  # the last step of a run that isn't a multiple
 
   def test_documents_only_in_scored_rows(self):
     """With fewer rows scored than loaded, documents fill only the scored rows, so the denominator counts only

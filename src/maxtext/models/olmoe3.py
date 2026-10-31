@@ -1583,12 +1583,22 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     # olmoe3_router_metrics: [lb, load imbalance, global load imbalance] instead of the scalar; the decoder layer
     # splits it, so the loss term is unchanged. The vector rides the scalar's path out of the routed MoE's
     # shard_map (out_specs P(): every device computes the same values from the gathered counts). The per-sequence
-    # counts need the one-hot mask, built here only (the loss above uses bincount).
-    expert_mask = jax.nn.one_hot(jax.lax.stop_gradient(top_k_indices), num_classes=self.num_experts, dtype=jnp.float32)
-    local_imbalance, global_imbalance = self._router_load_imbalance(expert_mask)
+    # counts are built here only (the loss above uses bincount). With olmoe3_router_metrics_interval the train step
+    # sets moe.ROUTER_IMBALANCE_ON, and steps it's False for skip the imbalance (zeros; the logger drops them).
+    top_k = jax.lax.stop_gradient(top_k_indices)
+    imbalance_on = moe.ROUTER_IMBALANCE_ON.get()
+    if imbalance_on is None:
+      local_imbalance, global_imbalance = self._router_load_imbalance(top_k)
+    else:
+      local_imbalance, global_imbalance = jax.lax.cond(
+          imbalance_on,
+          self._router_load_imbalance,
+          lambda _: (jnp.zeros((), jnp.float32), jnp.zeros((), jnp.float32)),
+          top_k,
+      )
     return jnp.stack([lb, local_imbalance, global_imbalance])
 
-  def _router_load_imbalance(self, expert_mask):
+  def _router_load_imbalance(self, top_k_indices):
     """OLMo-core's per-layer "load imbalance" and "global load imbalance" (max / mean tokens per expert).
 
     OLMo-core counts each rank's routed tokens per expert over the step (all micro-batches) and reports the
@@ -1600,7 +1610,17 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     and gathered over the batch axes, so every device holds the whole batch's counts.
     """
     cfg = self.config
-    seq_counts = jax.lax.stop_gradient(expert_mask.sum(axis=(1, 2)))  # [batch, experts]
+    if getattr(cfg, "olmoe3_router_metrics_scatter_counts", False):
+      # Scatter-add each sequence's routed experts, instead of a [batch, seq, top_k, experts] one-hot mask.
+      batch = top_k_indices.shape[0]
+      seq_counts = (
+          jnp.zeros((batch, self.num_experts), jnp.float32)
+          .at[jnp.arange(batch)[:, None], top_k_indices.reshape(batch, -1)]
+          .add(1.0)
+      )
+    else:
+      expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.float32)
+      seq_counts = expert_mask.sum(axis=(1, 2))  # [batch, experts]
     if moe.LB_REDUCE_AXES.get() is not None:  # inside the sparse routed MoE's shard_map
       spec = self._logical_to_mesh_axes(("activation_batch", "activation_norm_length", None))
       batch_axes = tuple(mesh_axes_for_dim(spec[0])) if spec and spec[0] is not None else ()

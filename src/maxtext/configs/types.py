@@ -169,6 +169,7 @@ class LearningRateScheduleType(str, Enum):
 
   COSINE = "cosine"
   WSD = "wsd"
+  WSDS = "wsds"
 
 
 class WsdDecayStyle(str, Enum):
@@ -1471,6 +1472,21 @@ class MoEGeneral(BaseModel):
   )
   olmo_ppl_eval_eos_token_id: int = Field(100257, description="olmo_ppl_eval: EOS ending each document.")
   olmo_ppl_eval_pad_token_id: int = Field(100277, description="olmo_ppl_eval: padding token.")
+  olmoe3_router_metrics_interval: NonNegativeInt = Field(
+      0,
+      description=(
+          "olmoe3_router_metrics: compute load_imbalance and global_load_imbalance only on train steps that are a"
+          " multiple of this (under lax.cond; the logger drops them on other steps). The losses are logged every step."
+          " 0 computes them on every step."
+      ),
+  )
+  olmoe3_router_metrics_scatter_counts: bool = Field(
+      False,
+      description=(
+          "olmoe3_router_metrics: count each sequence's routed experts with a scatter-add instead of a one-hot mask"
+          " over [batch, sequence, top_k, experts]. Same values."
+      ),
+  )
   router_metrics_group_seqs: int = Field(
       16,
       description=(
@@ -3434,6 +3450,65 @@ class Optimizer(BaseModel):
       WsdDecayStyle.LINEAR,
       description="The decay style for WSD schedule ('linear' or 'cosine').",
   )
+  wsds_chinchilla_tokens: int = Field(
+      0,
+      ge=0,
+      description=(
+          "lr_schedule_type=wsds: the tokens of one Chinchilla duration (1xC, e.g. 20 x active non-embedding"
+          " parameters); stages end at its doublings."
+      ),
+  )
+  wsds_first_multiple: float = Field(
+      1.0,
+      gt=0.0,
+      description="lr_schedule_type=wsds: the Chinchilla multiple the first stage ends at (0.5 in OLMo-core).",
+  )
+  wsds_decay_steps_fraction: float = Field(
+      0.1,
+      ge=0.0,
+      lt=0.5,
+      description="lr_schedule_type=wsds: the fraction of each stage that decays linearly at its end.",
+  )
+  wsds_stepped: bool = Field(
+      True,
+      description=(
+          "lr_schedule_type=wsds: stage k peaks at learning_rate * c_k ** -wsds_lr_exponent, c_k its end Chinchilla"
+          " multiple (OLMo-core's stepped_schedule, exponent 0.5: learning_rate is the 1xC optimum); False keeps every"
+          " peak at learning_rate."
+      ),
+  )
+  wsds_lr_exponent: float = Field(
+      0.5,
+      ge=0.0,
+      description=(
+          "lr_schedule_type=wsds with wsds_stepped: stage k peaks at learning_rate * c_k ** -wsds_lr_exponent. 0.5 is"
+          " OLMo-core's stepped_schedule (1/sqrt(c)); the best LR falls more slowly with duration in OLMo's own sweeps"
+          " (about 0.28) and Bjorck et al. (about 0.32)."
+      ),
+  )
+  wsds_in_run_decays: bool = Field(
+      True,
+      description=(
+          "lr_schedule_type=wsds: every stage ends in its decay within the run (WSD-S). False is the trunk of WSD with"
+          " separate decay branches: each stage holds its peak to its end, with no decay."
+      ),
+  )
+  wsds_decay_stage: int = Field(
+      -1,
+      ge=-1,
+      description=(
+          "lr_schedule_type=wsds: a decay branch of the trunk (wsds_in_run_decays=False): the trunk's schedule up to"
+          " stage k's fork (its end minus its decay), then stage k's decay. steps must be stage k's end; resume it from"
+          " the trunk's checkpoint at the fork (wsds_save_forks). -1: not a branch."
+      ),
+  )
+  wsds_save_forks: bool = Field(
+      False,
+      description=(
+          "lr_schedule_type=wsds: also checkpoint at every stage's fork (the label before its first decay step), so a"
+          " decay branch (wsds_decay_stage) can resume from the trunk there."
+      ),
+  )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
   warmup_step_offset: int = Field(
       0,
@@ -5396,6 +5471,8 @@ class MaxTextConfig(
           "Set scan_layers=False in your config to use deepstack features."
       )
 
+    if self.lr_schedule_type == LearningRateScheduleType.WSDS and self.wsds_chinchilla_tokens <= 0:
+      raise ValueError("lr_schedule_type=wsds needs wsds_chinchilla_tokens > 0 (the tokens of 1xC).")
     # Validate WSD learning rate schedule fractions
     if self.lr_schedule_type == LearningRateScheduleType.WSD:
       total_fraction = self.warmup_steps_fraction + self.wsd_decay_steps_fraction
