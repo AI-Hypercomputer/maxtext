@@ -70,11 +70,20 @@ MODEL_NAME_TO_PIPELINE = {
 
 
 def _get_output_filename(config, filename_prefix: str, idx: int) -> str:
-  """Output video filename, e.g. `wan2.1_output_<seed>_<idx>.mp4`."""
+  """Output video path, e.g. `wan2.1_output_<seed>_<idx>.mp4`.
+
+  Written under a local `output_dir` (created if needed); for a `gs://` output_dir the video is written to the working
+  directory and uploaded.
+  """
   output_pattern = getattr(config, "output_filename_pattern", None)
   if output_pattern:
     return output_pattern.format(prefix=filename_prefix, seed=config.seed, index=idx)
-  return f"{filename_prefix}{config.model_name}_output_{config.seed}_{idx}.mp4"
+  filename = f"{filename_prefix}{config.model_name}_output_{config.seed}_{idx}.mp4"
+  output_dir = getattr(config, "output_dir", "")
+  if output_dir and not output_dir.startswith("gs://"):
+    os.makedirs(output_dir, exist_ok=True)
+    return os.path.join(output_dir, filename)
+  return filename
 
 
 def get_pipeline_class(config):
