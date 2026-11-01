@@ -1,0 +1,168 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LingBot-World-Fast (robbyant/lingbot-world-fast): causal few-step image + camera-trajectory -> video world model.
+
+# Model identity. The DiT comes from the Fast repo; the Wan 2.1 VAE, Wan's umt5-xxl encoder and its tokenizer from the
+# Base (Cam) repo. Either may be a local directory.
+pretrained_model_name_or_path: 'robbyant/lingbot-world-fast'
+base_model_name_or_path: 'robbyant/lingbot-world-base-cam'
+tokenizer_path: ''  # default: base_model_name_or_path
+tokenizer_subfolder: 'google/umt5-xxl'
+model_name: lingbot-world-fast
+model_type: 'I2V'
+
+# Model dtypes (the reference runs the DiT and the T5 encoder in bf16, the VAE in fp32).
+weights_dtype: 'bfloat16'
+activations_dtype: 'bfloat16'
+text_encoder_dtype: 'bfloat16'
+max_sequence_length: 512
+vae_weights_dtype: 'float32'
+vae_dtype: 'float32'
+replicate_vae: False
+vae_decode_chunk: 1
+vae_encode_chunk: 4
+vae_spatial: -1
+
+# Inputs: prompt + first frame + action sequence (camera trajectory: poses.npy [N, 4, 4] c2w, intrinsics.npy [N, 4]).
+prompt: "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped mountains under a bright blue sky with drifting white clouds — gentle ripples reflect the tree and sky, creating a tranquil, meditative atmosphere."
+negative_prompt: ""
+prompt_file: ""
+image_path: ""
+action_path: ""
+camera_motion_scale: 1.0
+height: 480
+width: 832
+num_frames: 81
+fps: 16
+seed: 42
+
+# Distilled causal sampler (WanI2VFast): 4 timesteps of a shift-10 flow schedule, chunks of 3 latent frames.
+flow_shift: 10.0
+num_train_timesteps: 1000
+timesteps_index: [0, 179, 358, 679]
+num_inference_steps: 4
+chunk_size: 3
+guidance_scale: 1.0
+do_classifier_free_guidance: False
+scheduler_dtype: 'float32'
+use_experimental_scheduler: True
+prediction_type: "flow_prediction"
+guidance_rescale: 0.0
+use_cfg_cache: False
+use_magcache: False
+use_kv_cache: False
+
+# Execution & attention. `attention`: 'flash' (Tokamax Splash, TPU) or 'dot_product' (XLA).
+precision: "DEFAULT"
+scan_layers: True
+attention: 'flash'
+use_base2_exp: False
+flash_min_seq_length: 0
+dropout: 0.0
+mask_padding_tokens: True
+enable_jax_named_scopes: False
+use_batched_text_encoder: False
+quantization: ''
+flash_block_sizes:
+  block_q: 512
+  block_kv_compute: 512
+  block_kv: 512
+  block_q_dkv: 512
+  block_kv_dkv: 512
+  block_kv_dkv_compute: 512
+  block_q_dq: 512
+  block_kv_dq: 512
+  use_fused_bwd_kernel: False
+
+# Device mesh: tensor parallel (heads / mlp) over all chips by default.
+hardware: 'tpu'
+skip_jax_distributed_system: False
+jax_cache_dir: ''
+mesh_axes: ['data', 'fsdp', 'context', 'tensor']
+logical_axis_rules: [
+  ['batch', ['data', 'fsdp']],
+  ['activation_batch', ['data', 'fsdp']],
+  ['activation_self_attn_heads', ['context', 'tensor']],
+  ['activation_self_attn_q_length', null],
+  ['activation_self_attn_kv_length', null],
+  ['activation_cross_attn_heads', ['context', 'tensor']],
+  ['activation_cross_attn_q_length', null],
+  ['activation_cross_attn_kv_length', null],
+  ['activation_length', null],
+  ['activation_kv_length', null],
+  ['activation_heads', null],
+  ['activation_kv', null],
+  ['activation_embed', null],
+  ['mlp', ['context', 'tensor']],
+  ['embed', ['fsdp']],
+  ['heads', ['context', 'tensor']],
+  ['norm', null],
+  ['conv_batch', ['data', 'fsdp']],
+  ['out_channels', null],
+  ['conv_out', null],
+]
+vae_logical_axis_rules: [
+  ['activation_batch', 'redundant'],
+  ['activation_length', 'vae_spatial'],
+  ['activation_heads', null],
+  ['activation_kv_length', null],
+  ['embed', null],
+  ['heads', null],
+  ['norm', null],
+  ['conv_batch', 'redundant'],
+  ['out_channels', 'vae_spatial'],
+  ['conv_out', 'vae_spatial'],
+  ['conv_in', 'vae_spatial'],
+]
+text_encoder_logical_axis_rules: [
+  ['vocab', ['data', 'fsdp', 'context', 'tensor']],
+  ['heads', ['data', 'fsdp', 'context', 'tensor']],
+  ['mlp', ['data', 'fsdp', 'context', 'tensor']],
+  ['activation_heads', ['data', 'fsdp', 'context', 'tensor']],
+  ['activation_mlp', ['data', 'fsdp', 'context', 'tensor']],
+  ['embed', null],
+  ['norm', null],
+  ['activation_batch', null],
+  ['activation_length', null],
+  ['activation_embed', null],
+]
+data_sharding: [['data', 'fsdp', 'context', 'tensor']]
+dcn_data_parallelism: 1
+dcn_fsdp_parallelism: 1
+dcn_context_parallelism: 1
+dcn_tensor_parallelism: -1
+ici_data_parallelism: 1
+ici_fsdp_parallelism: 1
+ici_context_parallelism: 1
+ici_tensor_parallelism: -1
+allow_split_physical_axes: False
+compile_topology_num_slices: -1
+num_slices: 1
+per_device_batch_size: 0.25
+
+# Checkpoint & paths
+run_name: ''
+base_output_directory: ""
+checkpoint_directory: ""
+output_dir: ""
+checkpoint_dir: ""
+save_config_to_gcs: False
+aot_cache_dir: ""
+revision: ""
+
+# Profiling
+enable_profiler: False
+skip_first_n_steps_for_profiler: 1
+profiler_steps: 1

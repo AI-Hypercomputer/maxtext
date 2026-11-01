@@ -61,9 +61,11 @@ def call_pipeline(config, pipeline, prompt, negative_prompt, num_inference_steps
 
 
 # model_name (from the model YAML) -> "<module>.<PipelineClass>" under
-# `maxtext.m3.diffuser_pipelines`, imported on demand. Register new models here.
+# `maxtext.m3.diffuser_pipelines` (or a fully qualified "maxtext.<...>.<PipelineClass>" for model families that keep
+# their pipeline in their own m3 model folder), imported on demand. Register new models here.
 MODEL_NAME_TO_PIPELINE = {
     "wan2.1": "wan_pipeline.WanPipeline2_1",
+    "lingbot-world-fast": "maxtext.m3.models.lingbot.pipeline_lingbot.LingBotWorldPipeline",
 }
 
 
@@ -83,7 +85,9 @@ def get_pipeline_class(config):
         f" Registered: {sorted(MODEL_NAME_TO_PIPELINE)}."
     )
   module_name, class_name = MODEL_NAME_TO_PIPELINE[config.model_name].rsplit(".", 1)
-  module = importlib.import_module(f"maxtext.m3.diffuser_pipelines.{module_name}")
+  if not module_name.startswith("maxtext."):
+    module_name = f"maxtext.m3.diffuser_pipelines.{module_name}"
+  module = importlib.import_module(module_name)
   return getattr(module, class_name)
 
 

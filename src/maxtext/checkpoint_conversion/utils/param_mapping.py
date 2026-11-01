@@ -5562,7 +5562,144 @@ VLLM_HOOK_FNS = {
 }
 
 
+# -----------------------------------------------------------------------------
+# LingBot-World-Fast (original Wan repo layout): HF -> MaxText parameter mapping.
+# -----------------------------------------------------------------------------
+
+
+class LINGBOT_WORLD_FAST_HF_TO_MAXTEXT:
+  """Parameter mapping for LingBot-World-Fast (`robbyant/lingbot-world-fast` + `robbyant/lingbot-world-base-cam`).
+
+  The checkpoints use the original Wan repo layout rather than diffusers sub-folders, so `COMPONENT_SOURCES` tells
+  to_maxtext_diffusers.py where each component lives (`repo` names the config field holding the HF repo id or local
+  directory):
+
+  - transformer: `pretrained_model_name_or_path` (sharded safetensors + `config.json` at the repo root), original Wan
+    key names (`blocks.0.self_attn.q`, `head.modulation`, ...) plus the camera-control layers.
+  - vae: `Wan2.1_VAE.pth` of `base_model_name_or_path`, renamed to diffusers keys by diffusers' single-file converter.
+  - text_encoder: `models_t5_umt5-xxl-enc-bf16.pth` of `base_model_name_or_path` (Wan's own T5), renamed to Hugging
+    Face `UMT5EncoderModel` keys.
+
+  The MaxText models reuse the Wan 2.1 parameter names, so after the key renaming every mapping is the Wan 2.1 one; the
+  transformer adds the camera layers.
+  """
+
+  COMPONENTS = {
+      "transformer": "maxtext.m3.models.lingbot.transformer_lingbot.LingBotWorldModel",
+      "vae": "maxtext.m3.models.wan.autoencoder_kl_wan.AutoencoderKLWan",
+      "text_encoder": "maxtext.m3.models.wan.text_encoder_wan.UMT5EncoderModel",
+  }
+  COMPONENT_SOURCES = {
+      "transformer": {
+          "repo": "pretrained_model_name_or_path",
+          "subfolder": "",
+          "allow_patterns": ["*.json", "*.safetensors"],
+      },
+      "vae": {
+          "repo": "base_model_name_or_path",
+          "subfolder": "",
+          "allow_patterns": ["Wan2.1_VAE.pth"],
+          "weights": "Wan2.1_VAE.pth",
+          "key_converter": "diffusers.loaders.single_file_utils.convert_wan_vae_to_diffusers",
+          "config": "maxtext.m3.models.lingbot.checkpoint_lingbot.WAN21_VAE_CONFIG",
+      },
+      "text_encoder": {
+          "repo": "base_model_name_or_path",
+          "subfolder": "",
+          # The tokenizer is downloaded with the encoder weights (read at inference time by `AutoTokenizer`).
+          "allow_patterns": ["models_t5_umt5-xxl-enc-bf16.pth", "google/umt5-xxl/*"],
+          "weights": "models_t5_umt5-xxl-enc-bf16.pth",
+          "key_converter": "maxtext.m3.models.lingbot.checkpoint_lingbot.convert_wan_t5_to_hf",
+          "config": "maxtext.m3.models.lingbot.checkpoint_lingbot.UMT5_XXL_CONFIG",
+      },
+  }
+  FP32_PARAM_KEYWORDS = WAN2_1_HF_TO_MAXTEXT.FP32_PARAM_KEYWORDS
+  # Diffusers (Wan 2.1 mapping) name -> original Wan name, applied in order. Block keys start with "blocks.".
+  DIFFUSERS_TO_ORIGINAL = (
+      ("condition_embedder.time_embedder.linear_1", "time_embedding.0"),
+      ("condition_embedder.time_embedder.linear_2", "time_embedding.2"),
+      ("condition_embedder.time_proj", "time_projection.1"),
+      ("condition_embedder.text_embedder.linear_1", "text_embedding.0"),
+      ("condition_embedder.text_embedder.linear_2", "text_embedding.2"),
+      (".attn1.", ".self_attn."),
+      (".attn2.", ".cross_attn."),
+      (".to_q.", ".q."),
+      (".to_k.", ".k."),
+      (".to_v.", ".v."),
+      (".to_out.0.", ".o."),
+      (".ffn.net.0.proj.", ".ffn.0."),
+      (".ffn.net.2.", ".ffn.2."),
+      (".norm2.", ".norm3."),  # Affine cross-attention norm.
+      (".scale_shift_table", ".modulation"),  # Block AdaLN table.
+  )
+  CAMERA_BLOCK_LINEARS = ("cam_injector_layer1", "cam_injector_layer2", "cam_scale_layer", "cam_shift_layer")
+  CAMERA_LINEARS = ("patch_embedding_wancamctrl", "c2ws_hidden_states_layer1", "c2ws_hidden_states_layer2")
+
+  @staticmethod
+  def original_key(diffusers_key):
+    """Wan 2.1 diffusers key -> original Wan / LingBot checkpoint key."""
+    if diffusers_key.startswith("proj_out."):
+      return diffusers_key.replace("proj_out.", "head.head.", 1)
+    if diffusers_key == "scale_shift_table":
+      return "head.modulation"
+    key = diffusers_key
+    for old, new in LINGBOT_WORLD_FAST_HF_TO_MAXTEXT.DIFFUSERS_TO_ORIGINAL:
+      key = key.replace(old, new)
+    return key
+
+  @staticmethod
+  def param_mapping(component, hf_config, scan_layers=False):
+    """Returns `{maxtext_key: hf_key | [hf_key per layer]}` for one component."""
+    return LINGBOT_WORLD_FAST_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)[0]
+
+  @staticmethod
+  def hook_fns(component, hf_config, scan_layers=False):
+    """Returns `{maxtext_key: hook(weight, target_shape)}` for one component."""
+    return LINGBOT_WORLD_FAST_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)[1]
+
+  @staticmethod
+  def param_dtype(component, maxtext_key, weights_dtype):
+    """Same storage dtypes as Wan 2.1 (transformer -> `weights_dtype` except norms / embedders / AdaLN tables)."""
+    return WAN2_1_HF_TO_MAXTEXT.param_dtype(component, maxtext_key, weights_dtype)
+
+  @staticmethod
+  def _build(component, hf_config, scan_layers):
+    """Builds (param_mapping, hook_fns): the Wan 2.1 ones, transformer keys renamed + camera layers."""
+    if component != "transformer":
+      return WAN2_1_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)  # pylint: disable=protected-access
+    cls = LINGBOT_WORLD_FAST_HF_TO_MAXTEXT
+    wan_mapping, hooks = WAN2_1_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)  # pylint: disable=protected-access
+    mapping = {
+        mt: [cls.original_key(k) for k in hf] if isinstance(hf, list) else cls.original_key(hf)
+        for mt, hf in wan_mapping.items()
+    }
+
+    def transpose(x, target_shape):
+      return x.T
+
+    num_layers = hf_config["num_layers"]
+    for name in cls.CAMERA_BLOCK_LINEARS:
+      for param, hf_param, hook in (("kernel", "weight", transpose), ("bias", "bias", None)):
+        if scan_layers:
+          mt = f"blocks-{name}-{param}"
+          mapping[mt] = [f"blocks.{i}.{name}.{hf_param}" for i in range(num_layers)]
+          if hook is not None:
+            hooks[mt] = hook
+        else:
+          for i in range(num_layers):
+            mt = f"blocks-{i}-{name}-{param}"
+            mapping[mt] = f"blocks.{i}.{name}.{hf_param}"
+            if hook is not None:
+              hooks[mt] = hook
+    for name in cls.CAMERA_LINEARS:
+      mapping[f"{name}-kernel"] = f"{name}.weight"
+      hooks[f"{name}-kernel"] = transpose
+      mapping[f"{name}-bias"] = f"{name}.bias"
+    return mapping, hooks
+
+
 # Diffusers models (multi-component checkpoints), keyed by `model_name`; used by to_maxtext_diffusers.py.
 DIFFUSERS_PARAM_MAPPING = {
     "wan2.1": WAN2_1_HF_TO_MAXTEXT,
+    "lingbot-world-fast": LINGBOT_WORLD_FAST_HF_TO_MAXTEXT,
 }

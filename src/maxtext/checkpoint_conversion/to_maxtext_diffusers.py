@@ -258,14 +258,44 @@ class _SafetensorsReader:
       raise KeyError(f"Hugging Face key '{key}' not found in checkpoint.")
     with safe_open(self.key_to_file[key], framework="pt") as f:
       tensor = f.get_tensor(key)
-    if tensor.dtype == torch.bfloat16:  # No native numpy bfloat16: reinterpret the bits.
-      return tensor.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
-    return tensor.numpy()
+    return _torch_to_numpy(tensor)
+
+
+def _torch_to_numpy(tensor) -> np.ndarray:
+  if tensor.dtype == torch.bfloat16:  # No native numpy bfloat16: reinterpret the bits.
+    return tensor.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
+  return tensor.numpy()
+
+
+class _TorchStateDictReader:
+  """Reads single tensors (as numpy) from a raw PyTorch `.pth` state dict (original, non-diffusers repo layouts).
+
+  `key_converter` (a `{key: tensor} -> {key: tensor}` function) renames the source keys to the names the mapping
+  class expects, e.g. diffusers' `convert_wan_vae_to_diffusers` for the original Wan 2.1 VAE.
+  """
+
+  def __init__(self, path: str, key_converter=None):
+    if torch is None:
+      raise ImportError("Reading .pth checkpoints needs torch.")
+    state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    if key_converter is not None:
+      state_dict = key_converter(state_dict)
+    self.state_dict = state_dict
+
+  def get(self, key: str) -> np.ndarray:
+    if key not in self.state_dict:
+      raise KeyError(f"Key '{key}' not found in checkpoint.")
+    return _torch_to_numpy(self.state_dict[key].contiguous())
 
 
 def _import_class(path: str):
   module_name, class_name = path.rsplit(".", 1)
   return getattr(importlib.import_module(module_name), class_name)
+
+
+def _component_source(mapping_cls, component: str) -> dict:
+  """The component's `COMPONENT_SOURCES` entry (non-diffusers layouts), or {} for a diffusers `<component>/` folder."""
+  return dict(getattr(mapping_cls, "COMPONENT_SOURCES", {}).get(component, {}))
 
 
 def model_init_config(model_cls, hf_config: dict) -> dict:
@@ -307,20 +337,37 @@ def convert_diffusers_component(
 ) -> Tuple[dict, dict]:
   """Converts one diffusers component folder into a nested MaxText param tree.
 
+  Components listed in the mapping class's `COMPONENT_SOURCES` (non-diffusers layouts) are read from
+  `<repo_dir>/<subfolder>` instead of `<repo_dir>/<component>`, from a raw `.pth` file when `weights` is set (keys
+  renamed by `key_converter`), with `config` (a dict or the dotted path of one) when the folder has no `config.json`.
+
   Returns:
     (state, model_config): the param tree (string keys, numpy leaves) and the model config to store.
   """
   start = time.perf_counter()
-  component_dir = os.path.join(repo_dir, component)
+  source = _component_source(mapping_cls, component)
+  component_dir = os.path.join(repo_dir, source.get("subfolder", component))
   model_cls = _import_class(mapping_cls.COMPONENTS[component])
-  with open(os.path.join(component_dir, "config.json"), "r", encoding="utf-8") as f:
-    model_config = model_init_config(model_cls, json.load(f))
+  config_path = os.path.join(component_dir, "config.json")
+  if "config" in source:
+    hf_config = source["config"]
+    hf_config = dict(_import_class(hf_config) if isinstance(hf_config, str) else hf_config)
+  elif os.path.isfile(config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
+      hf_config = json.load(f)
+  else:
+    raise FileNotFoundError(f"No config.json for {component} in {component_dir}.")
+  model_config = model_init_config(model_cls, hf_config)
   target_shapes = _abstract_param_shapes(model_cls, model_config, scan_layers)
 
   param_map = mapping_cls.param_mapping(component, model_config, scan_layers)
   hook_fns = mapping_cls.hook_fns(component, model_config, scan_layers)
   maxtext_keys = validate_and_filter_param_map_keys(param_map.keys(), set(target_shapes))
-  reader = _SafetensorsReader(component_dir)
+  if source.get("weights"):
+    key_converter = _import_class(source["key_converter"]) if source.get("key_converter") else None
+    reader = _TorchStateDictReader(os.path.join(component_dir, source["weights"]), key_converter)
+  else:
+    reader = _SafetensorsReader(component_dir)
 
   def convert(maxtext_key):
     hf_keys, shape = param_map[maxtext_key], target_shapes[maxtext_key]
@@ -377,24 +424,57 @@ def convert_diffusers_states(config) -> dict:
     )
   mapping_cls = DIFFUSERS_PARAM_MAPPING[model_name]
   token = getattr(config, "hf_access_token", None) or os.environ.get("HF_TOKEN")
-  repo_dir = download_diffusers_components(
-      config.pretrained_model_name_or_path,
-      components=list(mapping_cls.COMPONENTS),
-      token=token,
-      cache_dir=_hf_cache_dir(),
-  )
+  repo_dirs = _download_component_repos(config, mapping_cls, token)
   weights_dtype = np.dtype(jnp.dtype(getattr(config, "weights_dtype", "bfloat16")))
   scan_layers = bool(getattr(config, "scan_layers", False))
   outputs = {}
   for component in mapping_cls.COMPONENTS:
-    state, model_config = convert_diffusers_component(repo_dir, component, mapping_cls, scan_layers, weights_dtype)
+    state, model_config = convert_diffusers_component(
+        repo_dirs[component], component, mapping_cls, scan_layers, weights_dtype
+    )
     outputs[f"{component}_state"], outputs[f"{component}_config"] = state, model_config
+  repo_dir = repo_dirs[next(iter(mapping_cls.COMPONENTS))]
   for component, config_file in _CONFIG_ONLY_COMPONENTS.items():
     config_path = os.path.join(repo_dir, component, config_file)
     if os.path.isfile(config_path):
       with open(config_path, "r", encoding="utf-8") as f:
         outputs[f"{component}_config"] = json.load(f)
   return outputs
+
+
+def _download_component_repos(config, mapping_cls, token) -> dict:
+  """`{component: local repo dir}`: one diffusers repo, or the per-component repos of `COMPONENT_SOURCES`."""
+  sources = getattr(mapping_cls, "COMPONENT_SOURCES", None)
+  if not sources:
+    repo_dir = download_diffusers_components(
+        config.pretrained_model_name_or_path,
+        components=list(mapping_cls.COMPONENTS),
+        token=token,
+        cache_dir=_hf_cache_dir(),
+    )
+    return {component: repo_dir for component in mapping_cls.COMPONENTS}
+
+  patterns_by_repo = {}
+  for component in mapping_cls.COMPONENTS:
+    source = sources[component]
+    repo_id = getattr(config, source["repo"], None)
+    if not repo_id:
+      raise ValueError(f"`{source['repo']}` (the {component} repo) must be set in the config or on the CLI.")
+    patterns_by_repo.setdefault(repo_id, []).extend(source.get("allow_patterns", ["*"]))
+  local_dirs = {}
+  for repo_id, patterns in patterns_by_repo.items():
+    if os.path.isdir(repo_id):
+      local_dirs[repo_id] = repo_id
+      continue
+    max_logging.log(f"Downloading/verifying '{repo_id}' (patterns: {patterns})...")
+    kwargs = {"repo_id": repo_id, "token": token, "cache_dir": _hf_cache_dir(), "allow_patterns": patterns}
+    try:
+      local_dirs[repo_id] = snapshot_download(**kwargs)
+    except Exception as e:  # pylint: disable=broad-except
+      max_logging.log(f"Online download failed ({e}), attempting local cache fallback...")
+      local_dirs[repo_id] = snapshot_download(**kwargs, local_files_only=True)
+  print_ram_usage("Post-Component Download")
+  return {component: local_dirs[getattr(config, sources[component]["repo"])] for component in mapping_cls.COMPONENTS}
 
 
 def convert_diffusers_checkpoint(config, output_dir: str) -> str:
