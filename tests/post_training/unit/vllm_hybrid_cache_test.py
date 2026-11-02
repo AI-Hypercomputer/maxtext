@@ -222,6 +222,40 @@ class LayerOrderedKvCachesTest(unittest.TestCase):
     self.assertEqual(scattered, ["c0'", "c1''"])
 
   @pytest.mark.cpu_only
+  def test_unchanged_sharing_layers_do_not_clobber_the_donor_update(self):
+    # KV-sharing with the donor updated and the sharing layer only reading:
+    # layer 2 redirects to layer 1's cache and leaves its gathered entry as-is.
+    kv_caches = [object(), object()]
+    index_map = {"layer.0": 0, "layer.1": 1, "layer.2": 1}
+
+    physical_indices = resolve_layer_kv_cache_indices(index_map, len(kv_caches))
+    layer_view = gather_layer_kv_caches(kv_caches, physical_indices)
+    updated_c0, updated_c1 = object(), object()
+    updated_view = [updated_c0, updated_c1, layer_view[2]]  # layer 2 untouched
+    scattered = scatter_layer_kv_caches(kv_caches, updated_view, physical_indices)
+
+    self.assertIs(scattered[0], updated_c0)
+    self.assertIs(scattered[1], updated_c1)
+
+  @pytest.mark.cpu_only
+  def test_gemma4_e2b_kv_sharing_round_trip_keeps_every_donor_update(self):
+    # gemma4-e2b: 35 layers, the last 20 share the caches of layers 13
+    # (sliding) and 14 (global); tpu-inference allocates 15 physical caches.
+    # The gemma4 decoder writes the 15 donor slots and never the shared ones.
+    num_layers, num_physical = 35, 15
+    donor = {lyr: (14 if (lyr + 1) % 5 == 0 else 13) for lyr in range(num_physical, num_layers)}
+    index_map = {f"layer.{lyr}": (donor.get(lyr, lyr)) for lyr in range(num_layers)}
+    kv_caches = [f"c{i}" for i in range(num_physical)]
+
+    physical_indices = resolve_layer_kv_cache_indices(index_map, num_physical)
+    layer_view = gather_layer_kv_caches(kv_caches, physical_indices)
+    for slot in range(num_physical):
+      layer_view[slot] = f"c{slot}'"
+    scattered = scatter_layer_kv_caches(kv_caches, layer_view, physical_indices)
+
+    self.assertEqual(scattered, [f"c{i}'" for i in range(num_physical)])
+
+  @pytest.mark.cpu_only
   def test_missing_map_keeps_positional_indexing(self):
     kv_caches = ["c0", "c1"]
 

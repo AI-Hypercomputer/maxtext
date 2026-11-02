@@ -182,8 +182,13 @@ def scatter_layer_kv_caches(
 
   The returned list has the same length and order as the physical list the
   runner handed us, which is what its donation / out_shardings expect. Physical
-  caches no decoder layer maps to are passed through unchanged. If several
-  layers share one physical cache, the highest-numbered layer's update wins.
+  caches no decoder layer maps to are passed through unchanged.
+
+  With KV sharing several layers map to one physical cache, but only the donor
+  layer replaces its entry; the sharing layers' entries are still the gathered
+  input object. Those are skipped, otherwise they would overwrite the donor's
+  update (gemma4-e2b: layers 15-34 share the caches of layers 13/14). Among
+  replaced entries the highest-numbered layer wins.
   """
   if physical_indices is None:
     return layer_kv_caches
@@ -193,5 +198,8 @@ def scatter_layer_kv_caches(
     )
   updated = list(kv_caches)
   for lyr, idx in enumerate(physical_indices):
+    if layer_kv_caches[lyr] is kv_caches[idx]:
+      # Not updated by this layer; writing it back would clobber the donor's update.
+      continue
     updated[idx] = layer_kv_caches[lyr]
   return updated
