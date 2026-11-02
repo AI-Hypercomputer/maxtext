@@ -107,6 +107,49 @@ class MaxEngineConfig:
 _BaseEngine = engine_api.Engine if (not is_decoupled() and hasattr(engine_api, "Engine")) else object
 
 
+def build_hf_tokenizer(metadata: Any):
+  """Returns JetStream's `HuggingFaceTokenizer` with its chat-template path fixed for transformers >= 5.
+
+  JetStream is archived, and its `HuggingFaceTokenizer.encode` tokenizes a chat prompt with
+  `apply_chat_template(..., return_tensors="np").squeeze()`. transformers 5 changed
+  `apply_chat_template` to return a `BatchEncoding` by default (`return_dict=True`), which has no
+  `.squeeze()`, so decoding with `use_chat_template=True` died with an AttributeError. Passing
+  `return_dict=False` gives the plain id array on transformers 4 and 5 alike; the rest of `encode`
+  (padding to the prefill length) is JetStream's own. The subclass is created here rather than at
+  module level because `token_utils` is a stub when JetStream is not installed.
+  """
+
+  class _HuggingFaceTokenizer(token_utils.HuggingFaceTokenizer):  # pyrefly: ignore[missing-attribute]
+    """`token_utils.HuggingFaceTokenizer` whose chat-template encode works on transformers >= 5."""
+
+    def encode(self, s: str, **kwargs):
+      if not getattr(self.metadata, "use_chat_template", False):
+        return super().encode(s, **kwargs)
+      is_bos = kwargs.pop("is_bos", True)
+      prefill_lengths = kwargs.pop("prefill_lengths", None)
+      max_prefill_length = kwargs.pop("max_prefill_length", None)
+      jax_padding = kwargs.pop("jax_padding", True)
+      tokens = self.tokenizer.apply_chat_template(
+          [{"role": "user", "content": s}],
+          add_generation_prompt=True,
+          return_tensors="np",
+          return_dict=False,
+      ).squeeze()
+      if is_bos:
+        max_logging.log("Overriding is_bos to False because use_chat_template is set to True.")
+      return token_utils.pad_tokens(  # pyrefly: ignore[missing-attribute]
+          tokens,
+          self.bos_id,
+          self.pad_id,
+          is_bos=False,
+          prefill_lengths=prefill_lengths,
+          max_prefill_length=max_prefill_length,
+          jax_padding=jax_padding,
+      )
+
+  return _HuggingFaceTokenizer(metadata)
+
+
 class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
   """The computational core of the generative model server.
 
@@ -1723,7 +1766,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
-      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      tokenizer_model = build_hf_tokenizer(metadata)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:
           tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
