@@ -14,7 +14,7 @@
 
 """Builds the plain-text `to_maxtext` vs `safetensor` tables for the tpu7x tabs of the benchmark Google Sheet.
 
-Each table has the tabs' 10 columns, with a `to_maxtext` row and a `safetensor` row per (model, scan mode, slices):
+Each table has the tabs' 11 columns, with a `to_maxtext` row and a `safetensor` row per (model, scan mode, slices):
   * `--suite p1`, the "tpu-v7x" tab: the >200B models. It combines the P1 runs on single-host 2x2x1 slices
     (`1 (8)`, `2 (16)`, `4 (32)`) with Lance Wang's runs on multi-host slices (`1 (16)` = 1 x 2x2x2,
     `1 (32)` = 1 x 2x2x4, `2 (32)` = 2 x 2x2x2, `4 (64)` = 4 x 2x2x2; `safetensors_dynamic` only), read from
@@ -142,7 +142,30 @@ HEADER = [
     "Total (No Step 1) (s)",
     "Total (End-to-End) (s)",
     "Speedup (E2E / No Step 1)",
+    "log",
 ]
+
+# Running-log gpaste URLs for failed or problematic experiments, keyed by (model, scan mode, slices, pipeline);
+# a None slices entry matches every slice layout of that (model, scan mode, pipeline).
+LOG_URLS = {
+    ("qwen3-235b-a22b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565961",
+    ("deepseek4-284b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565962",
+    ("deepseek4-284b", "unscanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565964",
+    ("qwen3.5-397b-a17b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565965",
+    ("qwen3.5-397b-a17b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565967",
+    ("qwen3.5-397b-a17b", "scanned", "1 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565968",
+    ("qwen3.5-397b-a17b", "scanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565970",
+    ("qwen3.5-397b-a17b", "unscanned", "1 (8)", "to_maxtext"): "https://paste.googleplex.com/6755399436565971",
+    ("qwen3-480b-a35b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565972",
+    ("qwen3-480b-a35b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565973",
+    ("qwen3-480b-a35b", "unscanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565976",
+    ("deepseek3-671b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565977",
+    ("deepseek3-671b", "scanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565979",
+    ("gpt-oss-120b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565980",
+    ("gpt-oss-120b", "scanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565981",
+    ("qwen3-14b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565982",
+    ("qwen3-30b-a3b", "unscanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565998",
+}
 
 # Failure and not-run texts that the result JSONs and logs don't give in full; each was checked against the phase
 # logs. Keyed by (model, scan mode, slices, pipeline); a None entry matches any value.
@@ -210,6 +233,10 @@ def _note(model: str, scan: str, n: int, pipeline: str) -> str | None:
     if key in NOTES:
       return NOTES[key]
   return None
+
+
+def _log_url(model: str, scan: str, slices: str, pipeline: str) -> str:
+  return LOG_URLS.get((model, scan, slices, pipeline)) or LOG_URLS.get((model, scan, None, pipeline)) or "—"
 
 
 def _s1(model: str, seconds: float) -> str:
@@ -516,7 +543,8 @@ def build(
             blk.append(variant_row(v, cold_s1, label, tm_ref))
         blocks.append(((int(r["devices"]), int(r["layout"].split(" ")[0])), blk))
       for _, blk in sorted(blocks, key=lambda item: item[0]):
-        out += blk
+        for row_cells in blk:
+          out.append(row_cells + [_log_url(model, scan, row_cells[2], row_cells[3])])
   return out
 
 
