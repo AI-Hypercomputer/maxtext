@@ -16,8 +16,7 @@
 
 Compares the CFM DiT (with classifier-free guidance), the full Euler sampler, the aggregator and the
 AudioVAE decoder (sliding-window Qwen2 backbone + ISTFT head) with small random weights on CPU in float32.
-The talker LLM is MaxText's regular Qwen2 decoder and is covered by the end-to-end parity check
-(`tests/utils/ming_reference/talker_parity.py`).
+The talker LLM is MaxText's regular Qwen2 decoder and is covered by a separate end-to-end HF parity check.
 
 The reference modules are imported from a local copy of the HF snapshot's `talker/` directory
 (`MING_TALKER_HF_PATH`); they need `x-transformers` and `diffusers` (`MING_TALKER_EXTRA_PATH` may point at a
