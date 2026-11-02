@@ -156,6 +156,14 @@ def test_native_config_is_accepted():
             },
             f"eval_wo_tile_fwd_mlp_dim={_MOE_MLP}",
         ),
+        # One activation scale per row over the whole K: no mesh axis or emb chunking may split wi's or wo's K.
+        # (moe_unsplit_prefused_wi rejects a sharded MLP dim and emb chunks on its own; off, so only this check fires.)
+        (
+            {"ici_tensor_sequence_parallelism": 2, "moe_unsplit_prefused_wi": False},
+            "an unsplit MoE MLP dim, wo's K",
+        ),
+        ({"ici_tensor_parallelism": 2, "moe_unsplit_prefused_wi": False}, "an unsplit embed dim, wi's K"),
+        ({"num_moe_emb_chunks": 2, "moe_unsplit_prefused_wi": False}, "num_moe_emb_chunks=0"),
     ],
 )
 def test_native_fwd_requirement_is_enforced(override, requirement):
@@ -206,6 +214,29 @@ def test_native_fwd_outside_the_layer_scan_raises():
 def test_fake_quant_gather8_outside_the_layer_scan_still_lowers():
   # Control: the same unscanned model without fp8_moe_native_fwd lowers (fake QAT rounds the weights in the layer).
   _lower_forward(_cfg(scan_layers=False))
+
+
+def test_native_fwd_k_splits_reads_the_weight_k_dim():
+  # Dim 1 of the [experts, K, N] weights is K (wi: embed, wo: MoE MLP); size-1 mesh axes split nothing.
+  spec = jax.sharding.PartitionSpec
+  mesh_shape = {"expert": 4, "fsdp": 2, "tensor": 2, "tensor_sequence": 1}
+  wi, wo = spec("expert", None, "tensor"), spec("expert", "tensor", None)
+  assert moe.fp8_native_fwd_k_splits(mesh_shape, wi, wo, 0) == ["wo's K (MoE MLP dim) sharded 2-way over ('tensor',)"]
+  assert moe.fp8_native_fwd_k_splits(
+      mesh_shape, spec("expert", ("tensor_sequence", "tensor", "fsdp"), None), spec("expert", "tensor_sequence", None), 2
+  ) == [
+      "wi's K (embed dim) sharded 4-way over ('tensor', 'fsdp')",
+      "wi's K in num_moe_emb_chunks=2 chunks",
+  ]
+  assert not moe.fp8_native_fwd_k_splits({**mesh_shape, "tensor": 1}, wi, wo, 0)
+
+
+def test_native_fwd_k_split_guard_runs_before_the_gmms():
+  # custom_mesh_and_rule and parallelism -1 are only resolved in the layer, so RoutedMoE checks the traced specs.
+  with mock.patch.object(moe, "fp8_native_fwd_k_splits", return_value=["wo's K split for the test"]) as k_splits:
+    with pytest.raises(ValueError, match="one scale over the whole K dim.*wo's K split for the test"):
+      _lower_forward(_cfg(**_NATIVE))
+  assert k_splits.called
 
 
 def test_dequantize_fp8_codes_matches_the_gather8_dequantization():

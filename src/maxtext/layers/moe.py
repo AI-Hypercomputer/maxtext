@@ -939,6 +939,25 @@ def fp8_native_fwd_kwargs(config, with_bwd_dlhs: bool = True) -> dict:
   return kwargs
 
 
+def fp8_native_fwd_k_splits(mesh_shape, wi_pspec, wo_pspec, num_moe_emb_chunks: int) -> list[str]:
+  """What splits the K dim of the native FP8 forward GMMs, as seen by the expert shard_map (empty: nothing).
+
+  fp8_moe_native_fwd quantizes each activation row with one scale over K: dim 1 of the [experts, K, N] weights (wi:
+  the embed dim, wo: the MoE MLP dim; the tokens enter the shard_map with the embed dim unsharded). A split K would
+  give each shard or chunk its own scale, and gmm_v2 only sees the local size_k. The config validator rejects the
+  splits it can see; this checks the traced partition specs (custom_mesh_and_rule, parallelism -1).
+  """
+  splits = []
+  for name, dim, pspec in (("wi", "embed", wi_pspec), ("wo", "MoE MLP", wo_pspec)):
+    axes = [axis for axis in mesh_axes_for_dim(pspec[1]) if mesh_shape.get(axis, 1) > 1] if pspec is not None else []
+    if axes:
+      degree = math.prod(mesh_shape[axis] for axis in axes)
+      splits.append(f"{name}'s K ({dim} dim) sharded {degree}-way over {tuple(axes)}")
+  if num_moe_emb_chunks > 0:
+    splits.append(f"wi's K in num_moe_emb_chunks={num_moe_emb_chunks} chunks")
+  return splits
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -5041,6 +5060,12 @@ class RoutedMoE(nnx.Module):
     # fp8_moe_native_fwd: the expert weights enter as Fp8NativeWeight (anchor, codes, scale); see below.
     use_fp8_native_fwd = getattr(self.config, "fp8_moe_native_fwd", False) and fp8_fake_quant_at_gather is not None
     if use_fp8_native_fwd:
+      k_splits = fp8_native_fwd_k_splits(self.mesh.shape, w0_pspec, wo_pspec, self.config.num_moe_emb_chunks)
+      if k_splits:
+        raise ValueError(
+            "fp8_moe_native_fwd=True quantizes each activation row with one scale over the whole K dim of the forward"
+            f" GMMs, but here: {'; '.join(k_splits)}."
+        )
       weight_specs = slice(3, 6)  # w0_pspec, w1_pspec, wo_pspec in in_specs above
       assert in_specs[weight_specs] == (w0_pspec, w1_pspec, wo_pspec), "in_specs order changed"
       native_weight_specs = tuple(

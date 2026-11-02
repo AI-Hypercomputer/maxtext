@@ -396,10 +396,24 @@ class GmmConfigs:
   # rhs_contract_scale (fp8_moe_native_bwd_dlhs): rhs holds float8 codes [size_group, size_n, size_k]
   # (transpose_rhs) whose scale varies along the contraction dim K ([size_group, 1, size_k] float32, read in
   # the rhs scale slot). Each rhs block is dequantized in VMEM to rhs_dequant_dtype with
-  # (codes.astype(float32) * scale).astype(rhs_dequant_dtype) into a scratch tile, cached across the grid
-  # steps that read the same block (the m tiles of a group), and the unquantized matmul reads that tile.
+  # (codes.astype(float32) * scale).astype(rhs_dequant_dtype) inside the unquantized matmul that reads it. With a
+  # single K tile it is also kept in a scratch tile for the later grid steps that read the same block (the m tiles of
+  # a group); see rhs_dequant_cache.
   rhs_contract_dequant: bool = False
   rhs_dequant_dtype: jnp.dtype | None = None
+
+  @property
+  def rhs_dequant_cache(self) -> bool:
+    """rhs_contract_dequant with one K tile: the dequantized rhs block is cached in VMEM across its m tiles.
+
+    The rhs block index is (group, n tile, k tile), and k is the innermost grid axis. With one K tile, consecutive
+    m tiles of a group read the same block, so it is dequantized once per (group, n tile). With two or more K tiles,
+    consecutive steps read different blocks, a cache would never hit, and every step dequantizes its block inside the
+    matmul with no cache tile (make_gmm_configs requires tile_k to divide size_k). That still beats an XLA
+    dequantization of the whole weight first, because the kernel reads 1-byte codes instead of a bf16 copy (TPU7x,
+    production DLHS shapes, 2-4 k tiles: 0.84-0.91x its time, measured when these steps also wrote an unused cache tile).
+    """
+    return self.rhs_contract_dequant and self.tiles.tile_k == self.dims.size_k
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -728,7 +742,7 @@ def inner_kernel(
   the activation is applied. With cfgs.fuse_dact, tiled_ps_ref is a
   DactInputRef and the accumulator becomes [d_gate | d_up] before the regular
   store path; with cfgs.return_dact_dot the out refs are (out, dot) pairs.
-  With cfgs.rhs_contract_dequant, rhs_cache_refs is (the [tile_n, tile_k]
+  With cfgs.rhs_dequant_cache, rhs_cache_refs is (the [tile_n, tile_k]
   dequantized weight tile, the SMEM key of the block it holds); see
   _rhs_cache_miss.
   """
@@ -760,14 +774,15 @@ def inner_kernel(
       tiled_lhs = tiled_lhs_ref.get_value().reshape(-1, cfgs.tiles.tile_k)[...]
     rhs_fill_refs = None
     if cfgs.rhs_contract_dequant and rhs_fill:
-      # The first grid step of this weight block: rhs_block dequantizes each [mxu, tile_k] piece
-      # of the codes right before its matmul (so the VPU work can overlap the MXU work of the previous piece)
-      # and stores it in the cache tile, which the later steps of the block read.
-      rhs_fill_refs = (tiled_rhs_ref.weight, tiled_rhs_ref.scale, rhs_cache_refs[0])  # pyrefly: ignore
+      # This step dequantizes its weight block: rhs_block dequantizes each [mxu, tile_k] piece of the codes right
+      # before its matmul (so the VPU work can overlap the MXU work of the previous piece). With rhs_dequant_cache it
+      # also stores the piece in the cache tile, which the later steps of the block read.
+      cache_ref = rhs_cache_refs[0] if cfgs.rhs_dequant_cache else None  # pyrefly: ignore[unsupported-operation]
+      rhs_fill_refs = (tiled_rhs_ref.weight, tiled_rhs_ref.scale, cache_ref)  # pyrefly: ignore
       tiled_rhs = None
     elif cfgs.rhs_contract_dequant:
-      # This block's weight, dequantized in VMEM by the block's first step: the same bf16 tile the bf16 path DMAs,
-      # so the matmul below is that path's.
+      # rhs_dequant_cache hit: this block's weight, dequantized in VMEM by the block's first step: the same bf16 tile
+      # the bf16 path DMAs, so the matmul below is that path's.
       tiled_rhs = rhs_cache_refs[0][...]  # pyrefly: ignore[unsupported-operation]
     else:
       tiled_rhs = tiled_rhs_ref.get_weight(transpose_rhs=cfgs.transpose_rhs)
@@ -811,13 +826,15 @@ def inner_kernel(
 
     def rhs_block(start_k: int, end_k: int, start_n: int, end_n: int):
       if rhs_fill_refs is not None:
-        # rhs_contract_dequant (transpose_rhs) fill step: dequantize this piece, keep it for the block's later steps.
+        # rhs_contract_dequant (transpose_rhs) fill step: dequantize this piece; with the cache, keep it for the
+        # block's later steps.
         codes_ref, scale_ref, cache_ref = rhs_fill_refs
         end_k = min(end_k, cfgs.tiles.tile_k)
         block = dequantize_fp8_codes(
-            codes_ref[start_n:end_n, start_k:end_k], scale_ref[:, start_k:end_k], cache_ref.dtype
+            codes_ref[start_n:end_n, start_k:end_k], scale_ref[:, start_k:end_k], cfgs.rhs_dequant_dtype
         )
-        cache_ref[start_n:end_n, start_k:end_k] = block
+        if cache_ref is not None:
+          cache_ref[start_n:end_n, start_k:end_k] = block
         return block
       if cfgs.transpose_rhs:
         return tiled_rhs[start_n:end_n, start_k:end_k]
@@ -1095,29 +1112,26 @@ def inner_kernel(
   k_id = pl.program_id(2)
 
   if cfgs.rhs_contract_dequant:
-    # The first step of each weight block dequantizes it piece by piece inside its matmul, so the VPU work overlaps
-    # the MXU work (see _matmul's rhs_fill); the other steps read the cache tile.
-    cache_miss = _rhs_cache_miss(rhs_cache_refs, metadata_ref, cfgs)
-    is_first = k_id == 0
-    is_last = k_id == (num_k - 1)
-
-    def _variants(fill: bool):
-      suffix = "_rhs_fill" if fill else ""
-      return [
-          jax.named_scope(name + suffix)(functools.partial(_matmul, first, last, rhs_fill=fill))
-          for name, first, last in (
-              ("matmul_first_last", True, True),
-              ("matmul_first", True, False),
-              ("matmul_last", False, True),
-              ("matmul", False, False),
-          )
-      ]
-
-    def _dispatch(fill: bool):
-      first_last, first, last, mid = _variants(fill)
-      lax.cond(is_first, lambda: lax.cond(is_last, first_last, first), lambda: lax.cond(is_last, last, mid))
-
-    lax.cond(cache_miss, lambda: _dispatch(True), lambda: _dispatch(False))
+    # Every step that dequantizes a weight block does it piece by piece inside its matmul, so the VPU work overlaps
+    # the MXU work (see _matmul's rhs_fill).
+    if cfgs.rhs_dequant_cache:
+      # One K tile: every step is the first and the last K step. The step that starts a block fills the cache tile;
+      # the block's later m tiles read it.
+      fill = jax.named_scope("matmul_first_last_rhs_fill")(functools.partial(_matmul, True, True, rhs_fill=True))
+      cached = jax.named_scope("matmul_first_last")(functools.partial(_matmul, True, True))
+      lax.cond(_rhs_cache_miss(rhs_cache_refs, metadata_ref, cfgs), fill, cached)
+      return
+    # Two or more K tiles: consecutive steps read different blocks, so every step dequantizes its own (no cache), and
+    # no step is both the first and the last K step.
+    first, last, mid = (
+        jax.named_scope(name + "_rhs_fill")(functools.partial(_matmul, first_k, last_k, rhs_fill=True))
+        for name, first_k, last_k in (
+            ("matmul_first", True, False),
+            ("matmul_last", False, True),
+            ("matmul", False, False),
+        )
+    )
+    lax.cond(k_id == 0, first, lambda: lax.cond(k_id == (num_k - 1), last, mid))
     return
 
   is_first_k_step = k_id == 0
@@ -1154,27 +1168,22 @@ def dequantize_fp8_codes(codes: jax.Array, scale: jax.Array, dtype: jnp.dtype) -
 
 
 def _rhs_block_key(metadata_ref: MetadataRef, cfgs: GmmConfigs) -> jax.Array:
-  """rhs_contract_dequant: an int32 id of this grid step's rhs block (group, n tile, k tile)."""
+  """rhs_dequant_cache: an int32 id of this grid step's rhs block (group, n tile); there is one k tile."""
   num_n = pl.num_programs(cfgs.n_axis)
-  num_k = pl.num_programs(2)
   group_id = metadata_ref.gm_id_to_group_id[pl.program_id(cfgs.gm_axis)]
-  return (group_id * num_n + pl.program_id(cfgs.n_axis)) * num_k + pl.program_id(2)
+  return group_id * num_n + pl.program_id(cfgs.n_axis)
 
 
 def _rhs_cache_miss(
     rhs_cache_refs: tuple[jax.Array, jax.Array] | None, metadata_ref: MetadataRef, cfgs: GmmConfigs
 ) -> jax.Array:
-  """rhs_contract_dequant: whether the cache tile holds another rhs block than this step's.
+  """rhs_dequant_cache: whether the cache tile holds another rhs block than this step's.
 
-  The rhs block index is (group, n tile, k tile), and k is the innermost grid axis. With a single k tile (the MoE
-  DLHS tiles) the cache is filled once per (group, n tile) and every m tile of the group reuses it, for any number
-  of n tiles (the DLHS grid is (n, gm, k)). With two or more k tiles consecutive steps need different blocks, so the
-  cache never hits and every step dequantizes its block inside the matmul; outputs are unchanged, and it still beats
-  dequantizing the whole weight in XLA first (TPU7x, production DLHS shapes, 2-4 k tiles: 0.84-0.91x its time),
-  because the kernel reads 1-byte codes instead of a bf16 copy. Side effect: records this step's block key in the
-  SMEM key, since the step that misses fills the cache tile.
+  The cache is filled once per (group, n tile) and every m tile of the group reuses it, for any number of n tiles (the
+  DLHS grid is (n, gm, k)). Side effect: records this step's block key in the SMEM key, since the step that misses
+  fills the cache tile.
   """
-  assert rhs_cache_refs is not None
+  assert cfgs.rhs_dequant_cache and rhs_cache_refs is not None
   key_ref = rhs_cache_refs[1]
   key = _rhs_block_key(metadata_ref, cfgs)
   miss = key != key_ref[0]
@@ -1456,7 +1465,7 @@ def kernel_main(
     pre_act_partial_refs: tuple[jax.Array, ...] = (),  # return_pre_act: their partial-row scratch
     # Per extra output, the VMEM zero buffer of its zero-init DMAs when its dtype is not out_ref's (None: zero_ref).
     extra_zero_refs: tuple[jax.Array | None, ...] = (),
-    # rhs_contract_dequant: (the dequantized weight tile [tile_n, tile_k], its SMEM block key int32[1]).
+    # rhs_dequant_cache: (the dequantized weight tile [tile_n, tile_k], its SMEM block key int32[1]).
     rhs_cache_refs: tuple[jax.Array, jax.Array] | None = None,
 ):
   """Entry point for GMM kernel.
@@ -1594,7 +1603,7 @@ def kernel_main(
   if pre_act_out_refs:
     out_in = (out_in, *(r.reshape(-1, cfgs.dims.size_lhs_sublane, *r.shape[1:]) for r in pre_act_out_refs))
     scratches[0] = (partial_out_ref, *pre_act_partial_refs)
-  if cfgs.rhs_contract_dequant:
+  if cfgs.rhs_dequant_cache:
     assert rhs_cache_refs is not None
     rhs_cache_refs[1][0] = jnp.int32(-1)  # no block dequantized yet
     scratches.append(rhs_cache_refs)
@@ -2557,7 +2566,7 @@ def gmm_v2(
     )
     dot_zero_scratch = pltpu.VMEM((dot_zero_tile_m, num_lanes), cfgs.acc_dtype) if cfgs.zero_init else None
     scratch_shapes += [pltpu.VMEM((dims.size_lhs_sublane, num_lanes), cfgs.acc_dtype), dot_zero_scratch]
-  if cfgs.rhs_contract_dequant:
+  if cfgs.rhs_dequant_cache:
     # Last: the dequantized weight tile and the SMEM key of the rhs block it holds (kernel_body peels them off).
     scratch_shapes += [
         pltpu.VMEM((tiles.tile_n, tiles.tile_k), cfgs.rhs_dequant_dtype),
@@ -2619,7 +2628,7 @@ def gmm_v2(
     pallas_out_specs = out_spec
 
   kernel_body = functools.partial(kernel_fn, cfgs=cfgs)
-  if cfgs.rhs_contract_dequant:
+  if cfgs.rhs_dequant_cache:
     base_kernel_body = kernel_body
 
     def kernel_body_with_rhs_cache(*refs):

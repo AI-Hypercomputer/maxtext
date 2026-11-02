@@ -1983,6 +1983,7 @@ class MoEGeneral(BaseModel):
               # but the native forward accumulates in float32, so heuristic tiles could exceed VMEM.
               (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
           ]
+          + self._fp8_moe_native_fwd_unsplit_k_requirements()
           + self._fp8_moe_native_fwd_tile_requirements(),
       )
     if self.fp8_moe_native_bwd_dlhs:
@@ -2172,6 +2173,40 @@ class MoEGeneral(BaseModel):
     if base <= 0 or scale <= 0 or scale & (scale - 1):
       return None
     return 2 ** get_individual_scales(scale)[0] * base
+
+  def _fp8_moe_native_fwd_unsplit_k_requirements(self) -> list[tuple[bool, str]]:
+    """fp8_moe_native_fwd scales each activation row over the whole K dim, so neither forward GMM may see a K slice.
+
+    wi contracts the embed dim and wo the MoE MLP dim. A mesh axis that splits one of them in the expert shard_map, or
+    num_moe_emb_chunks, would make each shard or chunk quantize its slice with its own scale, and make_gmm_configs
+    cannot tell: it only sees the local size_k. The axes are the ones _moe_emb_dim_if_unsharded and
+    _moe_mlp_dim_if_unsharded read, under the training rules and separate eval rules. Parallelism -1 is filled in from
+    the device count later and custom_mesh_and_rule replaces logical_axis_rules after this validator, so RoutedMoE
+    checks the traced weight partition specs too.
+    """
+    rules = [self.logical_axis_rules or []]
+    eval_axis_rules = getattr(self, "logical_axis_rules_for_eval", None)
+    if eval_axis_rules:
+      rules.append(eval_axis_rules)
+
+    def split_by(axes: set[str], logical: str) -> list[str]:
+      for rule in rules:
+        axes = axes | set(axes_for_logical(rule, logical))
+      return [
+          f"{kind}_{axis}_parallelism={degree}"
+          for axis in sorted(axes)
+          for kind in ("ici", "dcn")
+          if (degree := getattr(self, f"{kind}_{axis}_parallelism", None)) is not None and degree > 1
+      ]
+
+    emb_split = split_by({"tensor"}, "activation_embed_moe")
+    mlp_split = split_by({"tensor", "tensor_sequence", "autoregressive"}, "mlp_no_fsdp")
+    emb_chunks = getattr(self, "num_moe_emb_chunks", 0)
+    return [
+        (not emb_split, f"an unsplit embed dim, wi's K (got {', '.join(emb_split)})"),
+        (not mlp_split, f"an unsplit MoE MLP dim, wo's K (got {', '.join(mlp_split)})"),
+        (emb_chunks <= 0, f"num_moe_emb_chunks=0, an unchunked wi K (got {emb_chunks})"),
+    ]
 
   def _fp8_moe_native_fwd_tile_requirements(self) -> list[tuple[bool, str]]:
     """Tile rules for fp8_moe_native_fwd's full-K (lhs_quant_block_size=0) forward GMMs, checked at config time.
