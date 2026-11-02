@@ -13,14 +13,17 @@
 # limitations under the License.
 
 # This workflow builds and pushes TPU MaxText images.
-# It runs automatically daily at 12am UTC, or manually via Workflow Dispatch.
+# It runs automatically daily at 19:00 Pacific time, or manually via Workflow Dispatch.
 
 name: TPU Docker Images Pipeline
 
 on:
   schedule:
-    # Run the job daily at 12AM UTC
-    - cron: '0 0 * * *'
+    # Run daily at 19:00 Pacific time, one hour before the daily 20:00-24:00
+    # Pacific TPU quota window of the queue that runs the E2E tests, so the TPU
+    # jobs are submitted when the window opens.
+    - cron: '0 19 * * *'
+      timezone: 'America/Los_Angeles'
   workflow_dispatch:
     inputs:
       repository_name:
