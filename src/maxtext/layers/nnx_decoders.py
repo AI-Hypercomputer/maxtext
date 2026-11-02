@@ -65,6 +65,7 @@ from maxtext.models import (
     ming,
     mistral,
     mixtral,
+    muse_spark,
     olmo3,
     qwen2,
     qwen3,
@@ -582,6 +583,7 @@ class NNXDecoder(nnx.Module):
     self.quant = quant
     self.model_mode = model_mode
     self.rngs = rngs
+    self.is_muse_spark = config.decoder_block == DecoderBlockType.MUSE_SPARK
 
     decoder_block_classes = self.get_decoder_layers()
 
@@ -598,6 +600,17 @@ class NNXDecoder(nnx.Module):
 
     self.dropout = linears.Dropout(rate=config.dropout_rate, rngs=rngs, broadcast_dims=(-2,))
     self.positional_embedding = PositionalEmbedding(embedding_dims=config.base_emb_dim)
+
+    if self.is_muse_spark:
+      self.embed_norm = normalizations.MuseSparkRMSNorm(
+          config.emb_dim,
+          epsilon=config.normalization_layer_epsilon,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
+          with_scale=False,
+          rngs=rngs,
+      )
 
     self.decoder_norm = self.get_norm_layer(num_features=config.emb_dim, rngs=rngs)(
         dtype=config.dtype,
@@ -755,6 +768,11 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_ming(rngs)
     elif self.is_hy4:
       self._init_scanned_hy4(rngs)
+    elif self.is_muse_spark:
+      raise NotImplementedError(
+          f"Muse Spark scanned layers (scan_layers={self.config.scan_layers}) are not yet implemented for"
+          f" decoder_block={self.config.decoder_block.value}; use scan_layers=False until MuseSparkScannableBlock."
+      )
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -1085,6 +1103,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.MING,
           DecoderBlockType.HY4,
+          DecoderBlockType.MUSE_SPARK,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1511,6 +1530,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
         DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
         DecoderBlockType.HY4: get_scannable(hy4.Hy4DecoderLayer, hy4.Hy4ScannableBlock),
+        DecoderBlockType.MUSE_SPARK: [muse_spark.MuseSparkDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1701,6 +1721,14 @@ class NNXDecoder(nnx.Module):
           shard_mode=self.config.shard_mode,
           rngs=rngs,
       )
+    elif self.config.decoder_block == DecoderBlockType.MUSE_SPARK:
+      return functools.partial(
+          normalizations.MuseSparkRMSNorm,
+          num_features=num_features,
+          shard_mode=self.config.shard_mode,
+          with_scale=True,
+          rngs=rngs,
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -1821,6 +1849,15 @@ class NNXDecoder(nnx.Module):
 
   def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
     """Looks up the token embeddings, before dropout and positional embeddings."""
+    if self.is_muse_spark:
+      mm_tokens = (
+          (decoder_input_tokens == self.config.image_token_id)
+          | (decoder_input_tokens == self.config.video_token_id)
+          | (decoder_input_tokens == self.config.audio_token_id)
+      )
+      clamped_tokens = jnp.where(mm_tokens, 0, decoder_input_tokens)
+      text_embeds = shared_embedding(clamped_tokens.astype("int32"), model_mode=model_mode)
+      return self.embed_norm(text_embeds)
     return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
   def _reduce_mhc_streams(self, y):
@@ -1916,9 +1953,6 @@ class NNXDecoder(nnx.Module):
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
-      if cfg.final_logits_soft_cap:
-        logits = logits / cfg.final_logits_soft_cap
-        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
       if head_in_axes is not None:
         # Gather the hidden state off the FSDP axes; the kernel stays put.
@@ -1934,8 +1968,14 @@ class NNXDecoder(nnx.Module):
       else:
         logits = self.logits_dense(y, out_sharding=out_sharding)
 
+    if self.is_muse_spark and cfg.output_multiplier != 1.0:
+      logits = logits * cfg.output_multiplier
+    if cfg.final_logits_soft_cap:
+      logits = logits / cfg.final_logits_soft_cap
+      logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+
     if self.config.cast_logits_to_fp32:
-      logits = logits.astype(jnp.float32)
+      logits = logits.astype(jnp.promote_types(logits.dtype, jnp.float32))
 
     return logits
 

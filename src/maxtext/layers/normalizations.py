@@ -14,7 +14,7 @@
 
 """Normalization Layers."""
 
-from typing import Any
+from typing import Any, Callable, ClassVar
 
 from flax import nnx
 import jax
@@ -268,3 +268,90 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
   inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
   return x * inv_norm
+
+
+class _MuseSparkNormBase(nnx.Module):
+  """Shared pure-NNX parameter and sharding initializer matching RMSNorm."""
+
+  _SCALE_INIT: ClassVar[Callable[..., jax.Array]] = staticmethod(jax.nn.initializers.ones)
+
+  def __init__(
+      self,
+      num_features: int,
+      epsilon: float = 1e-5,
+      dtype: Any = jnp.float32,
+      weight_dtype: Any = jnp.float32,
+      kernel_axes: tuple[None | str, ...] = ("norm",),
+      with_scale: bool = True,
+      shard_mode: ShardMode = ShardMode.AUTO,
+      parameter_memory_host_offload: bool = False,
+      *,
+      rngs: nnx.Rngs,
+  ) -> None:
+    self.num_features, self.epsilon, self.dtype = num_features, epsilon, dtype
+    self.weight_dtype = dtype if is_fp8_dtype(weight_dtype) else weight_dtype
+    self.kernel_axes, self.with_scale, self.shard_mode = (kernel_axes, with_scale, shard_mode)
+    self.parameter_memory_host_offload = parameter_memory_host_offload
+    self.scale = (
+        nnx.Param(self._SCALE_INIT(rngs.params(), (num_features,), self.weight_dtype), out_sharding=kernel_axes)
+        if with_scale
+        else None
+    )
+
+  def _load_scale(self, compute_dtype: Any, ref_y: jax.Array, offset: float = 0.0) -> jax.Array:
+    scale = self.scale.get_value()
+    if self.parameter_memory_host_offload:
+      scale = jax.device_put(scale, max_utils.device_space())
+    if offset:
+      scale = jnp.asarray(offset, dtype=scale.dtype) + scale
+    w = jnp.asarray(scale, compute_dtype)
+    return align_scale_with_normalized_axis(w, ref_y) if self.shard_mode == ShardMode.EXPLICIT else w
+
+  def _finalize_out(self, y: jax.Array, out_dtype: Any, out_sharding: NamedSharding | None) -> jax.Array:
+    y = jnp.asarray(y, out_dtype)
+    if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
+      return jax.sharding.reshard(y, truncate_out_sharding(out_sharding, y.ndim))
+    return y
+
+
+class MuseSparkRMSNorm(_MuseSparkNormBase):
+  """Muse Spark RMSNorm: y = (x * (mean(x^2) + eps)^(-0.5)) * w."""
+
+  def __call__(self, x: jax.Array, out_sharding: NamedSharding | None = None) -> jax.Array:
+    c = jnp.promote_types(x.dtype, jnp.float32)
+    xc = jnp.asarray(x, c)
+    y = xc * jnp.power(jnp.mean(lax.square(xc), axis=-1, keepdims=True) + self.epsilon, -0.5)
+    if self.with_scale and self.scale is not None:
+      y = y * self._load_scale(c, y)
+    return self._finalize_out(y, x.dtype, out_sharding)
+
+
+class CenteredRMSNorm(_MuseSparkNormBase):
+  """Centered RMSNorm: y = (x * rsqrt(mean(x^2) + eps)) * (1.0 + w)."""
+
+  _SCALE_INIT: ClassVar[Callable[..., jax.Array]] = staticmethod(jax.nn.initializers.zeros)
+
+  def __call__(self, x: jax.Array, out_sharding: NamedSharding | None = None) -> jax.Array:
+    c = jnp.promote_types(x.dtype, jnp.float32)
+    xc = jnp.asarray(x, c)
+    y = xc * lax.rsqrt(jnp.mean(lax.square(xc), axis=-1, keepdims=True) + self.epsilon)
+    if self.with_scale and self.scale is not None:
+      y = y * self._load_scale(c, y, offset=1.0)
+    return self._finalize_out(y, x.dtype, out_sharding)
+
+
+class InputScaledRMSNorm(_MuseSparkNormBase):
+  """InputScaledRMSNorm: scales x by (1 + w), rounds to x.dtype, then normalizes."""
+
+  _SCALE_INIT: ClassVar[Callable[..., jax.Array]] = staticmethod(jax.nn.initializers.zeros)
+
+  def __call__(self, x: jax.Array, out_sharding: NamedSharding | None = None) -> jax.Array:
+    c = jnp.promote_types(x.dtype, jnp.float32)
+    scaled = (
+        jnp.asarray(jnp.asarray(x, c) * self._load_scale(c, x, offset=1.0), x.dtype)
+        if (self.with_scale and self.scale is not None)
+        else x
+    )
+    sc = jnp.asarray(scaled, c)
+    y = sc * lax.rsqrt(jnp.mean(lax.square(sc), axis=-1, keepdims=True) + self.epsilon)
+    return self._finalize_out(y, x.dtype, out_sharding)

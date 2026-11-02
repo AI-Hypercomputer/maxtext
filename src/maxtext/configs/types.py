@@ -718,6 +718,9 @@ class ModelArchitecture(BaseModel):
       True,
       description="Whether to apply scale on value normalization (default True).",
   )
+  output_multiplier: float = Field(1.0, description="Pre-sigmoid router and pre-softcap lm_head logit multiplier.")
+  post_norm_eps: float = Field(1e-8, description="Epsilon for post-attention, post-ffn, and post-expert normalizations.")
+  residual_gate_temperature: float = Field(0.3, description="Temperature parameter for residual gate.")
 
 
 class MTP(BaseModel):
@@ -3536,6 +3539,9 @@ class MultimodalGeneral(BaseModel):
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
   video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
   audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
+  image_token_id: int = Field(200092, description="Special token ID for image patches.")
+  video_token_id: int = Field(200091, description="Special token ID for video patches.")
+  audio_token_id: int = Field(200038, description="Special token ID for audio placeholders.")
   use_audio_in_video: bool = Field(False, description="Extract and use audio from video files.")
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
@@ -5873,8 +5879,8 @@ class MaxTextConfig(
           self.base_mlp_dim = self.base_moe_mlp_dim
           _, _, mlp_dim_scale, _ = get_individual_scales(self.global_parameter_scale)
           self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
-        elif self.decoder_block != DecoderBlockType.GEMMA4:
-          # Allow Gemma 4 to keep distinct shared and routed MLP dimensions
+        elif self.decoder_block not in (DecoderBlockType.GEMMA4, DecoderBlockType.MUSE_SPARK):
+          # Allow Gemma 4 and Muse Spark to keep distinct shared and routed MLP dimensions
           raise ValueError(
               "For a fully MoE model, base_mlp_dim must equal base_moe_mlp_dim. "
               f"Got base_mlp_dim={self.base_mlp_dim}, base_moe_mlp_dim={self.base_moe_mlp_dim}."
