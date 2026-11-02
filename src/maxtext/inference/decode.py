@@ -246,6 +246,11 @@ def main(argv: Sequence[str]) -> None:
 
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
+    if config.use_multimodal:
+      # Vision-language-action models emit action tokens, whose text decoding is meaningless.
+      action_summary = mm_processor.format_generated_actions(config, results)
+      if action_summary is not None:
+        print(action_summary)
 
   assert " ".join(output.split()).startswith(
       " ".join(config.autoregressive_decode_assert.split())

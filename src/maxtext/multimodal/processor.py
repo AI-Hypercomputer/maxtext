@@ -48,6 +48,8 @@ _MODEL_TO_BLOCKS = {
     "weaver-max": ("qwen3_vl", "qwen3"),
     # Ming (audio-only, no vision tower)
     "ming-3.0-audio-tiny": (None, "ming"),
+    # OpenVLA (fused DINOv2 + SigLIP vision backbone, Llama-2 decoder)
+    "openvla-7b": ("openvla", "llama2"),
 }
 
 
@@ -115,6 +117,11 @@ def preprocess_mm_data(config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
+  elif vision_block in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import preprocess_mm_data_openvla  # pylint: disable=import-outside-toplevel
+
+    images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
+    processor_outputs = preprocess_mm_data_openvla(images)
   elif _get_decoder_block(config) in ["ming"]:
     from maxtext.multimodal.processor_ming import preprocess_mm_data_ming  # pylint: disable=import-outside-toplevel
 
@@ -146,6 +153,10 @@ def preprocess_image_for_training(image, config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_qwen3_omni_for_training(image, config)
+  elif vision_block in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import preprocess_mm_data_openvla  # pylint: disable=import-outside-toplevel
+
+    return preprocess_mm_data_openvla(image)
   else:
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) not supported for image preprocessing.")
 
@@ -175,6 +186,10 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
+  elif vision_block in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import get_image_offsets_openvla  # pylint: disable=import-outside-toplevel
+
+    return get_image_offsets_openvla(processor_output)
   elif decoder_block in ["ming"]:
     from maxtext.multimodal.processor_ming import get_audio_offsets_ming  # pylint: disable=import-outside-toplevel
 
@@ -199,7 +214,11 @@ def reformat_prompt(
   if vision_block is None and decoder_block != "ming":
     return prompt
 
-  if decoder_block in ["gemma3"]:
+  if vision_block in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import reformat_prompt_openvla  # pylint: disable=import-outside-toplevel
+
+    return reformat_prompt_openvla(prompt, image_placeholder, num_images)
+  elif decoder_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import reformat_prompt_gemma3  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_gemma3(prompt, image_placeholder, num_images)
@@ -286,12 +305,30 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
+  elif vision_block in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import add_extra_tokens_for_images_openvla  # pylint: disable=import-outside-toplevel
+
+    return add_extra_tokens_for_images_openvla(
+        tokens, max_num_images=processor_output.num_images  # pyrefly: ignore[missing-attribute]
+    )
   elif decoder_block in ["ming"]:
     from maxtext.multimodal.processor_ming import add_extra_tokens_for_ming  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_ming(tokens, processor_output)
   else:
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) does not support multimodal inference.")
+
+
+def format_generated_actions(config, token_ids):
+  """For vision-language-action models, decodes generated action tokens into a printable action.
+
+  Returns None for models whose output is plain text.
+  """
+  if _get_vision_block(config) in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import format_actions_openvla  # pylint: disable=import-outside-toplevel
+
+    return format_actions_openvla(token_ids, config)
+  return None
 
 
 def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1):
@@ -314,6 +351,10 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
+  elif vision_block in ["openvla"]:
+    from maxtext.multimodal.processor_openvla import get_dummy_image_shape_for_init_openvla  # pylint: disable=import-outside-toplevel
+
+    image_shape = get_dummy_image_shape_for_init_openvla(batch_size, num_image_per_sequence)
   return image_shape
 
 
@@ -356,6 +397,11 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
     bidirectional_mask_vision = processor_maxtext_omni.get_bidirectional_mask_vision_omni(
         vision_block, decoder_block, decoder_input_tokens
     )
+  elif vision_block in ["openvla"]:
+    # Marks the image soft-token positions for embedding merging only; the Llama-2 decoder stays causal.
+    from maxtext.multimodal.processor_openvla import OPENVLA_IMAGE_PLACEHOLDER  # pylint: disable=import-outside-toplevel
+
+    bidirectional_mask_vision = decoder_input_tokens == OPENVLA_IMAGE_PLACEHOLDER
   elif decoder_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import GEMMA_TOKEN_PLACEHOLDER  # pylint: disable=import-outside-toplevel
 

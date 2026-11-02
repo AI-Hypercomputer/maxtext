@@ -1763,6 +1763,7 @@ class NNXDecoder(nnx.Module):
             "maxtext-omni-gemma3-qwen3",
             "weaver-mini",
             "weaver-max",
+            "openvla-7b",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,

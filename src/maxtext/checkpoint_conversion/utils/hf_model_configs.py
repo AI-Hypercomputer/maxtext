@@ -2544,6 +2544,41 @@ ming_3_0_audio_tiny_dict = {
 }
 ming_3_0_audio_tiny_config = PTConfig(**ming_3_0_audio_tiny_dict)
 
+# from https://huggingface.co/openvla/openvla-7b/blob/main/config.json (norm_stats omitted).
+# `text_config` only overrides vocab/pad in the HF repo; the remaining fields are the `LlamaConfig`
+# defaults used by OpenVLA (note rms_norm_eps=1e-6, unlike Llama-2-7b-hf's 1e-5).
+openvla_7b_dict = {
+    "architectures": ["OpenVLAForActionPrediction"],
+    "model_type": "openvla",
+    "arch_specifier": "no-align+fused-gelu-mlp",
+    "vision_backbone_id": "dinosiglip-vit-so-224px",
+    "llm_backbone_id": "llama2-7b-pure",
+    "timm_model_ids": ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_so400m_patch14_siglip_224"],
+    "image_sizes": [224, 224],
+    "image_resize_strategy": "resize-naive",
+    "use_fused_vision_backbone": True,
+    "n_action_bins": 256,
+    "pad_to_multiple_of": 64,
+    "pad_token_id": 32000,
+    "torch_dtype": "bfloat16",
+    "text_config": {
+        "model_type": "llama",
+        "hidden_size": 4096,
+        "intermediate_size": 11008,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 32,
+        "hidden_act": "silu",
+        "max_position_embeddings": 2048,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 10000.0,
+        "tie_word_embeddings": False,
+        "pad_token_id": 32000,
+        "vocab_size": 32064,
+    },
+}
+openvla_7b_config = PTConfig(**openvla_7b_dict)
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -2608,4 +2643,5 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
     "ming-3.0-audio-tiny": ming_3_0_audio_tiny_config,
+    "openvla-7b": openvla_7b_config,
 }

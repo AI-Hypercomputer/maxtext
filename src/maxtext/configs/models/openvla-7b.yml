@@ -1,0 +1,41 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# openvla/openvla-7b: Prismatic VLA = fused DINOv2-L/14 (reg4) + SigLIP-So400m/14 vision backbone at 224px,
+# 3-layer GELU MLP projector, and a Llama-2-7B decoder. Image + instruction -> 7 action tokens.
+
+# Llama-2-7B decoder
+base_emb_dim: 4096
+base_num_query_heads: 32
+base_num_kv_heads: 32
+base_mlp_dim: 11008
+base_num_decoder_layers: 32
+head_dim: 128
+mlp_activations: ["silu","linear"]
+# Llama-2 vocab (32000) + <PAD> padded to a multiple of 64; the last 256 text tokens are the action bins.
+vocab_size: 32064
+enable_dropout: false
+logits_via_embedding: false
+# OpenVLA's text_config keeps the LlamaConfig default rms_norm_eps=1e-6 (Llama-2-7b-hf uses 1e-5).
+normalization_layer_epsilon: 1.0e-6
+rope_max_timescale: 10_000
+decoder_block: "llama2"
+logical_axis_rules: [['norm', 'fsdp']]
+
+# Multimodal flags (need to set use_multimodal=true)
+vision_encoder_block: "openvla"
+image_size_for_vit: 224
+num_channels_for_vit: 6  # channel-stacked [DINOv2-normalized RGB | SigLIP-normalized RGB]
+patch_size_for_vit: 14
+conv_stride_for_vit: 14

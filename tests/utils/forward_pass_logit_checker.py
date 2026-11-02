@@ -297,6 +297,9 @@ def get_data(golden_data_point, config):
         pixel_values = np.transpose(pixel_values, (1, 2, 0))
     elif model_prefix in ["llama4"]:
       pixel_values = pixel_values[None, :]
+    elif model_prefix in ["openvla"]:
+      # HF channel-stacked (6, H, W) [DINOv2 | SigLIP] -> (H, W, 6)
+      pixel_values = np.transpose(pixel_values, (1, 2, 0))
     elif model_prefix in ["qwen3"]:
       grid_thw = np.asarray(golden_data_point["image_grid_thw"])
       if grid_thw.ndim == 2:

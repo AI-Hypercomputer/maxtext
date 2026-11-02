@@ -104,6 +104,7 @@ HF_IDS = {
     "glm5.3-flash": "zai-org/GLM-5.3-Flash",
     "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",
     "hy4-preview": "tencent/Hy4-preview",
+    "openvla-7b": "openvla/openvla-7b",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }
