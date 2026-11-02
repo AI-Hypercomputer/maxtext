@@ -4850,6 +4850,10 @@ class RoutedMoE(nnx.Module):
                   output.shape[3],
               ),
           )
+        # combine_mask carries the routing weights, which stay float32 under
+        # float32_weight_sum. Return activations in self.dtype, as the
+        # capacity_factor <= 0 branch does.
+        output = output.astype(self.dtype)
       return output, lb_loss, bias_updates
     else:
       inputs = self._maybe_shard_with_logical(
