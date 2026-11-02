@@ -5011,7 +5011,8 @@ class DerivedValues(BaseModel):
 
   checkpoint_dir: None | str = Field(
       None,
-      description="The full path to the checkpoint directory, derived from `run_name`.",
+      description="The full path to the checkpoint directory. Derived from `base_output_directory` and"
+      " `run_name` unless set explicitly, e.g. to a GCSFuse mount of a Rapid bucket that only checkpoints use.",
   )
   metrics_dir: None | str = Field(
       None,
@@ -6293,7 +6294,8 @@ class MaxTextConfig(
     # Construct full paths for output directories based on the base directory and run name.
     if self.run_name and self.base_output_directory:
       output_dir = os.path.join(self.base_output_directory, self.run_name)
-      self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
+      if not self.checkpoint_dir:  # pylint: disable=access-member-before-definition
+        self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
@@ -6308,7 +6310,7 @@ class MaxTextConfig(
         self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
-          None,
+          self.checkpoint_dir or None,
           None,
           None,
       )
@@ -8110,8 +8112,10 @@ class RLConfig(
           f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
       )
 
-    # Set checkpoint_dir based on run_name and base_output_directory.
-    if self.run_name and self.base_output_directory:
+    # Set checkpoint_dir based on run_name and base_output_directory, unless set explicitly.
+    if self.checkpoint_dir:
+      checkpoint_dir = self.checkpoint_dir
+    elif self.run_name and self.base_output_directory:
       checkpoint_dir = os.path.join(self.base_output_directory, self.run_name, "checkpoints", "")
     else:
       checkpoint_dir = os.path.join(os.path.abspath("maxtext_output"), "checkpoints", "")

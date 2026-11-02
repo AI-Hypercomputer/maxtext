@@ -85,6 +85,16 @@ class ConfigsColocatedValidationTest(unittest.TestCase):
     self.assertEqual(cfg.pathways_checkpointing_impl, "persistence")
     self.assertIsNone(cfg.checkpoint_storage_device_host_concurrent_gb)
 
+  def test_checkpoint_dir_derived_unless_set(self):
+    cfg = self._init_config(base_output_directory="gs://bucket/out", run_name="run")
+    self.assertEqual(cfg.checkpoint_dir, "gs://bucket/out/run/checkpoints/")
+    self.assertEqual(cfg.metrics_dir, "gs://bucket/out/run/metrics/")
+    cfg = self._init_config(base_output_directory="gs://bucket/out", run_name="run", checkpoint_dir="/gcs/ckpt/run/")
+    self.assertEqual(cfg.checkpoint_dir, "/gcs/ckpt/run/")
+    self.assertEqual(cfg.metrics_dir, "gs://bucket/out/run/metrics/")
+    rl_cfg = types.RLConfig(model_name="gemma4-26b", checkpoint_dir="/gcs/ckpt/run/")
+    self.assertEqual(rl_cfg.checkpoint_dir, "/gcs/ckpt/run/")
+
   def test_rl_config_colocated_python_none_or_nonpositive_raises(self):
     for invalid_val in (None, 0, -4):
       with self.subTest(invalid_val=invalid_val):
