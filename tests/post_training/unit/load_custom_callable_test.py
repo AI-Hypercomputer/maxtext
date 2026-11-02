@@ -24,12 +24,10 @@ import pytest
 
 from maxtext.trainers.post_train.rl.utils_rl import load_custom_callable
 
-
 pytestmark = [pytest.mark.post_training]
 
 
-_USER_PROCESS_DATA_SOURCE = textwrap.dedent(
-    """
+_USER_PROCESS_DATA_SOURCE = textwrap.dedent("""
     # Simulated user-provided dataset processor file.
     def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):
       # Minimal stand-in for utils_rl.process_data: returns a dict shaped like
@@ -45,8 +43,7 @@ _USER_PROCESS_DATA_SOURCE = textwrap.dedent(
 
     def another_helper(x):
       return x * 2
-    """
-).strip()
+    """).strip()
 
 
 def _write_user_file(tmpdir):
@@ -118,6 +115,39 @@ class LoadCustomCallableTest(unittest.TestCase):
       # The helper uses '_user_module_<function_name>' as the synthetic module
       # name, not the file's basename - so 'user_processor' should NOT exist.
       self.assertNotIn("user_processor", sys.modules)
+
+  def test_loads_dotted_module_with_function_name(self):
+    """Dotted module path with explicit function_name imports module and returns attribute."""
+    fn = load_custom_callable("maxtext.trainers.post_train.rl.utils_rl", "boxed")
+    self.assertEqual(fn("42"), "\\boxed{42}")
+
+  def test_loads_dotted_attribute_path_without_function_name(self):
+    """Full dotted path 'pkg.mod.Attr' without function_name splits and imports attribute."""
+    cls_or_fn = load_custom_callable("maxtext.trainers.post_train.rl.utils_rl.MaxTextChatParser")
+    self.assertTrue(callable(cls_or_fn))
+
+  def test_loads_file_colon_attr_spec(self):
+    """Supports '/path/to/file.py:AttrName' syntax when function_name is omitted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      user_file = _write_user_file(tmpdir)
+      fn = load_custom_callable(f"{user_file}:another_helper")
+      self.assertEqual(fn(7), 14)
+
+  def test_raises_on_invalid_dotted_module(self):
+    """Nonexistent dotted module raises ValueError."""
+    with self.assertRaises(ValueError):
+      load_custom_callable("nonexistent_pkg_xyz.submodule.MyClass")
+
+  def test_raises_when_attribute_is_not_callable(self):
+    """Resolved non-callable attributes (both dotted and file paths) raise ValueError."""
+    with self.assertRaisesRegex(ValueError, "is not callable"):
+      load_custom_callable("math.pi")
+    with tempfile.TemporaryDirectory() as tmpdir:
+      path = os.path.join(tmpdir, "const_mod.py")
+      with open(path, "w", encoding="utf-8") as f:
+        f.write("NOT_A_CALLABLE = 123\n")
+      with self.assertRaisesRegex(ValueError, "is not callable"):
+        load_custom_callable(f"{path}:NOT_A_CALLABLE")
 
 
 if __name__ == "__main__":

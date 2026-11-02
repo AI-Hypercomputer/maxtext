@@ -97,7 +97,7 @@ from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelis
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
 
 
-def rollout_prefix_caching_enabled(trainer_config: Any) -> bool:
+def rollout_prefix_caching_enabled(trainer_config: types.RLConfig) -> bool:
   """Returns whether vLLM prefix caching is safe for this rollout model.
 
   The MaxText vLLM adapter stores Qwen3-Next/Qwen3.5 GDN state in a
@@ -118,17 +118,22 @@ def rollout_prefix_caching_enabled(trainer_config: Any) -> bool:
 
 
 def get_dataset(
-    tmvp_config: Any,
+    tmvp_config: types.RLConfig,
     split: str = "train",
-    data_files: Optional[str] = None,
+    data_files: Optional[str | Sequence[str]] = None,
     dataset_name: Optional[str] = None,
 ) -> grain.MapDataset:
   """Download data"""
-  if data_files is None:
+  if not data_files:
     data = datasets.load_dataset(dataset_name, name=tmvp_config.hf_subset, split=split)
-  else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
+  else:  # data_files have been provided, useful for using slices of large datasets or curated JSONL files
+    first_file = data_files if isinstance(data_files, str) else next(iter(data_files), "")
+    if str(dataset_name).lower() in ("json", "jsonl") or str(first_file).lower().endswith((".json", ".jsonl")):
+      builder_name = "json"
+    else:
+      builder_name = "parquet"
     data = datasets.load_dataset(
-        "parquet",
+        builder_name,
         data_files={split: data_files},
         split=split,
     )
@@ -139,7 +144,7 @@ def get_dataset(
 
 
 def prepare_train_and_eval_dataset(
-    trainer_config: Any,
+    trainer_config: types.RLConfig,
     test_size: float = 0.05,
 ) -> dict[str, datasets.Dataset]:
   """Load and split the dataset into train and validation sets using HF's train_test_split."""
@@ -168,12 +173,17 @@ def prepare_train_and_eval_dataset(
 
 
 def prepare_datasets(
-    trainer_config: Any,
+    trainer_config: types.RLConfig,
     model_tokenizer: AutoTokenizer,
 ) -> tuple[grain.IterDataset, grain.IterDataset | None]:
   """Setup and return train and test datasets."""
-  template_config = load_data_template_from_file(trainer_config.data_template_path)
-  if template_config is None:
+  _custom_processor_path = getattr(trainer_config, "dataset_processor_path", "") or ""
+  template_config = (
+      load_data_template_from_file(trainer_config.data_template_path)
+      if getattr(trainer_config, "data_template_path", "")
+      else None
+  )
+  if template_config is None and not _custom_processor_path:
     raise ValueError(
         f"Data template is required for processing dataset but failed to load from {trainer_config.data_template_path}"
     )
@@ -182,7 +192,6 @@ def prepare_datasets(
   # When `dataset_processor_path` is set in config, load that file's `process_data`
   # and use it instead of the built-in utils_rl.process_data. Lets users adapt
   # custom datasets (with non-standard answer columns / cleaning) without editing maxtext.
-  _custom_processor_path = getattr(trainer_config, "dataset_processor_path", "") or ""
   if _custom_processor_path:
     _process_data = utils_rl.load_custom_callable(_custom_processor_path, "process_data")
     max_logging.log(f"prepare_datasets: using custom process_data from {_custom_processor_path}")
@@ -252,10 +261,12 @@ def prepare_datasets(
   train_dataset = train_dataset.filter(_filter_long_prompts)
 
   # AgenticGRPOLearner uses a built in chat parser that expects raw prompts
-  if getattr(trainer_config.rl, "use_agentic_rollout", False):
+  # unless a custom multi-turn environment (`env_class_path`) is configured.
+  if trainer_config.rl.use_agentic_rollout and not getattr(trainer_config.rl, "env_class_path", ""):
 
     def _use_raw_prompt(x):
-      x["prompts"] = x["question"]
+      if "question" in x:
+        x["prompts"] = x["question"]
       return x
 
     train_dataset = train_dataset.map(_use_raw_prompt)
@@ -287,13 +298,16 @@ def prepare_datasets(
   return train_dataset, test_dataset
 
 
-def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
+def build_reward_fns(trainer_config: types.RLConfig, make_reward_fn: Callable[..., Any]) -> list[Any]:
   """Build the reward-function stack for the RL trainer.
 
   `reward_functions_path` is a filesystem path to a Python file and
   `reward_functions` is a comma-separated list of function names to import from
   it. When both are set, the built-in stack is REPLACED entirely by the
   user-provided callables (so users have full control over their reward stack).
+  When a custom agentic environment (`rl.env_class_path`) is configured without
+  custom reward functions, uses `trajectory_reward_passthrough` so rewards from
+  the environment / group postprocessor flow directly to advantage estimation.
   Otherwise the default
   (`match_format_exactly`, `match_format_approximately`, `check_numbers`) stack
   is used. Every reward function is wrapped via `make_reward_fn`.
@@ -307,6 +321,9 @@ def build_reward_fns(trainer_config: Any, make_reward_fn: Callable) -> list:
     ]
     max_logging.log(f"reward_fns: using {len(reward_fns)} custom reward function(s) {names} from {custom_rewards_path}")
     return reward_fns
+  rl_cfg = getattr(trainer_config, "rl", None)
+  if rl_cfg is not None and getattr(rl_cfg, "env_class_path", ""):
+    return [make_reward_fn(utils_rl.trajectory_reward_passthrough)]
   return [
       make_reward_fn(utils_rl.match_format_exactly),
       make_reward_fn(utils_rl.match_format_approximately),
@@ -327,7 +344,7 @@ class _RewardFn:
   for its logs and per-fn bookkeeping.
   """
 
-  def __init__(self, fn: Callable, tmvp_config: Any):
+  def __init__(self, fn: Callable[..., Any], tmvp_config: Any):
     functools.update_wrapper(self, fn)
     self.fn = fn
     self.tmvp_config = tmvp_config
@@ -396,17 +413,240 @@ def build_rl_profiler_config(
   )
 
 
+def _resolve_mini_batch_size(trainer_config: types.RLConfig) -> int:
+  """Resolves the effective policy-update mini-batch size for a rollout batch."""
+  return int(trainer_config.rl.mini_batch_size or trainer_config.batch_size)
+
+
+def _build_mimo_config(trainer_config: types.RLConfig) -> Any:
+  """Converts MaxText `rl.mimo` config into Tunix `MimoAdvantageConfig` if present."""
+  mimo_raw = trainer_config.rl.mimo
+  if mimo_raw is None:
+    return None
+  mimo_dict = mimo_raw.model_dump() if isinstance(mimo_raw, types.MimoConfig) else dict(mimo_raw)
+  try:
+    from tunix.rl.algorithm_config import MimoAdvantageConfig  # pylint: disable=import-outside-toplevel
+
+    return MimoAdvantageConfig(**_kwargs_supported_by(MimoAdvantageConfig, **mimo_dict))
+  except ImportError:
+    return mimo_dict
+
+
+def _resolve_env_class(trainer_config: types.RLConfig) -> tuple[Any, dict[str, Any] | None]:
+  """Resolves `rl.env_class_path` and `rl.env_kwargs` when configured."""
+  env_class_path = trainer_config.rl.env_class_path
+  if not env_class_path:
+    return None, None
+  env_class = utils_rl.load_custom_callable(env_class_path)
+  env_kwargs = dict(trainer_config.rl.env_kwargs)
+  try:
+    env_params = inspect.signature(env_class).parameters
+  except (ValueError, TypeError):
+    env_params = {}
+  accepts_enable_thinking = "enable_thinking" in env_params or any(
+      p.kind == inspect.Parameter.VAR_KEYWORD for p in env_params.values()
+  )
+  if "enable_thinking" not in env_kwargs and (accepts_enable_thinking or trainer_config.rl.enable_thinking):
+    env_kwargs["enable_thinking"] = trainer_config.rl.enable_thinking
+  return env_class, env_kwargs
+
+
+def _is_multi_turn_code_env(trainer_config: types.RLConfig) -> bool:
+  """Returns whether a custom multi-turn agentic environment is configured."""
+  return bool(trainer_config.rl.use_agentic_rollout and trainer_config.rl.env_class_path)
+
+
+def _build_group_postprocessor(
+    trainer_config: types.RLConfig,
+    model_tokenizer: Any = None,
+    mimo_cfg: Any = None,
+) -> Any:
+  """Resolves and instantiates `rl.group_postprocessor_path` when configured."""
+  rl_cfg = trainer_config.rl
+  if not rl_cfg.group_postprocessor_path:
+    return None
+  target = utils_rl.load_custom_callable(rl_cfg.group_postprocessor_path)
+  if hasattr(target, "process_group") and not isinstance(target, type):
+    return target
+
+  if mimo_cfg is None:
+    mimo_cfg = _build_mimo_config(trainer_config)
+  judge_base_url = rl_cfg.judge_base_url
+  judge_max_concurrency = max(64, int(rl_cfg.judge_max_concurrency))
+  gar_rank_rho = rl_cfg.mimo.gar_rank_rho if rl_cfg.mimo is not None else 0.5
+  max_flagged_ratio = (
+      rl_cfg.mimo.max_flagged_token_ratio_per_turn
+      if (
+          rl_cfg.max_flagged_token_ratio_per_turn == 0.35
+          and rl_cfg.mimo is not None
+          and rl_cfg.mimo.max_flagged_token_ratio_per_turn != 0.35
+      )
+      else rl_cfg.max_flagged_token_ratio_per_turn
+  )
+
+  candidate_kwargs: dict[str, Any] = {
+      "tokenizer": model_tokenizer,
+      "mimo_config": mimo_cfg,
+      "judge_base_url": judge_base_url,
+      "judge_model": rl_cfg.judge_model,
+      "local_rules_only": not bool(judge_base_url),
+      "gar_rank_rho": gar_rank_rho,
+      "max_faulty_segments_per_turn": rl_cfg.judge_max_flagged_segments_per_turn,
+      "max_flagged_token_ratio_per_turn": max_flagged_ratio,
+      "audit_only": rl_cfg.judge_audit_only,
+      "max_concurrency": judge_max_concurrency,
+  }
+  try:
+    params = inspect.signature(target).parameters
+  except (ValueError, TypeError):
+    params = {}
+  if "judge_client" in params or "client" in params:
+    try:
+      from tunix.rl.agentic.environments.code import judge_client as jc_mod  # pylint: disable=import-outside-toplevel
+
+      if judge_base_url:
+        client = jc_mod.OpenAICompatJudgeClient(
+            **_kwargs_supported_by(
+                jc_mod.OpenAICompatJudgeClient,
+                base_url=judge_base_url,
+                model=rl_cfg.judge_model,
+                timeout_s=rl_cfg.judge_timeout_s,
+                max_concurrency=judge_max_concurrency,
+                enable_thinking=rl_cfg.enable_thinking,
+            )
+        )
+      else:
+        client = jc_mod.MockJudgeClient()
+      candidate_kwargs["judge_client"] = client
+      if "client" in params and "judge_client" not in params:
+        candidate_kwargs["client"] = client
+    except ImportError:
+      pass
+  return target(**_kwargs_supported_by(target, **candidate_kwargs))
+
+
+def _build_common_grpo_kwargs(
+    trainer_config: types.RLConfig,
+    mimo_cfg: Any,
+) -> dict[str, Any]:
+  """Returns the common kwargs shared by AgenticGrpoConfig and GrpoConfig."""
+  rl_cfg = trainer_config.rl
+  return {
+      "num_generations": rl_cfg.num_generations,
+      "num_iterations": rl_cfg.num_iterations,
+      "beta": rl_cfg.grpo_beta,
+      "epsilon": rl_cfg.grpo_epsilon,
+      "loss_algo": rl_cfg.loss_algo,
+      "loss_agg_mode": rl_cfg.loss_agg_mode,
+      "epsilon_high": rl_cfg.epsilon_high,
+      "use_rollout_logps": rl_cfg.use_rollout_logps,
+      "gspo_pool_mode": rl_cfg.gspo_pool_mode,
+      "reward_num_workers": trainer_config.reward_num_workers,
+      "reward_worker_timeout_seconds": trainer_config.reward_worker_timeout_seconds,
+      "advantage_estimator": rl_cfg.advantage_estimator,
+      "clip_mode": rl_cfg.clip_mode,
+      "epsilon_neg": rl_cfg.epsilon_neg,
+      "epsilon_neg_high": rl_cfg.epsilon_neg_high,
+      "token_advantage_mode": rl_cfg.token_advantage_mode,
+      "mimo": mimo_cfg,
+      "exact_token_continuity": rl_cfg.exact_token_continuity,
+      "sampler_is": rl_cfg.sampler_is,
+      "sampler_is_threshold": rl_cfg.sampler_is_threshold,
+      "sampler_rs": rl_cfg.sampler_rs,
+      "sampler_rs_min": rl_cfg.sampler_rs_min,
+      "sampler_rs_max": rl_cfg.sampler_rs_max,
+      "seq_logprob_error_threshold": rl_cfg.seq_logprob_error_threshold,
+      "audit_only": rl_cfg.judge_audit_only,
+      "enable_thinking": rl_cfg.enable_thinking,
+      "forward_only_old_logps": rl_cfg.forward_only_old_logps,
+      "max_flagged_token_ratio_per_turn": rl_cfg.max_flagged_token_ratio_per_turn,
+      "gspo_length_adaptive_clipping": rl_cfg.gspo_length_adaptive_clipping,
+      "gspo_ref_length": rl_cfg.gspo_ref_length,
+      "gspo_clip_min": rl_cfg.gspo_clip_min,
+      "gspo_clip_max": rl_cfg.gspo_clip_max,
+      "min_seq_len_norm": rl_cfg.min_seq_len_norm,
+  }
+
+
+def build_tunix_rl_configs(
+    trainer_config: types.RLConfig,
+    *,
+    optimizer: Any = None,
+    metrics_logging_options: Any = None,
+    profiler_options: Any = None,
+    rl_profiler_config: Any = None,
+    checkpoint_dir: str | None = None,
+    checkpointing_options: Any = None,
+) -> tuple[rl_cluster_lib.RLTrainingConfig, Any]:
+  """Construct and validate Tunix RLTrainingConfig and GrpoConfig / AgenticGrpoConfig from MaxText RLConfig."""
+  train_micro_batch_size = None if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
+  rollout_micro_batch_size = (
+      None if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
+  )
+  configured_compute_logps_mbs = trainer_config.rl.compute_logps_micro_batch_size
+  if configured_compute_logps_mbs == -1:
+    configured_compute_logps_mbs = None
+  compute_logps_micro_batch_size = (
+      configured_compute_logps_mbs if configured_compute_logps_mbs is not None else train_micro_batch_size
+  )
+  effective_mini_batch_size = _resolve_mini_batch_size(trainer_config)
+
+  training_config = rl_cluster_lib.RLTrainingConfig(
+      actor_optimizer=optimizer,
+      eval_every_n_steps=trainer_config.eval_interval,
+      max_steps=trainer_config.train_steps,
+      mini_batch_size=effective_mini_batch_size,
+      train_micro_batch_size=train_micro_batch_size,
+      rollout_micro_batch_size=rollout_micro_batch_size,
+      max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
+      metrics_logging_options=metrics_logging_options,
+      profiler_options=profiler_options,
+      checkpoint_root_directory=checkpoint_dir,
+      checkpointing_options=checkpointing_options,
+      **_kwargs_supported_by(
+          rl_cluster_lib.RLTrainingConfig,
+          rl_profiler_config=rl_profiler_config,
+          compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+          compute_logps_chunk_size=trainer_config.rl.compute_logps_chunk_size,
+      ),
+  )
+
+  mimo_cfg = _build_mimo_config(trainer_config)
+  common_grpo_kwargs = _build_common_grpo_kwargs(trainer_config, mimo_cfg)
+  if trainer_config.rl.use_agentic_rollout:
+    try:
+      from tunix.rl.agentic.agentic_grpo_learner import GrpoConfig as AgenticGrpoConfig  # pylint: disable=import-outside-toplevel
+    except ImportError as e:
+      raise ValueError(
+          "tunix.rl.agentic dependencies are not installed! "
+          "Please install tunix with agentic support to use 'use_agentic_rollout'."
+      ) from e
+    grpo_config = AgenticGrpoConfig(
+        max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
+        max_concurrency=trainer_config.rl.max_concurrency,
+        off_policy_steps=trainer_config.rl.off_policy_steps,
+        system_prompt=trainer_config.rl.system_prompt,
+        **_kwargs_supported_by(AgenticGrpoConfig, **common_grpo_kwargs),
+    )
+  else:
+    grpo_config = GrpoConfig(
+        **_kwargs_supported_by(GrpoConfig, **common_grpo_kwargs),
+    )
+
+  return training_config, grpo_config
+
+
 def create_rl_components(  # pylint: disable=too-many-positional-arguments
-    trainer_config,
-    sampler_config,
-    sampler_devices,
-    actor_model,
-    actor_mesh,
-    reference_model,
-    reference_mesh,
-    rollout_mesh,
-    model_tokenizer,
-):
+    trainer_config: types.RLConfig,
+    sampler_config: types.RLConfig,
+    sampler_devices: Sequence[Any],
+    actor_model: Any,
+    actor_mesh: Any,
+    reference_model: Any,
+    reference_mesh: Any,
+    rollout_mesh: Any,
+    model_tokenizer: Any,
+) -> tuple[Any, Any, Any, list[Any]]:
   """Setup RL cluster, trainer, and optimizer."""
   # Setup optimizer
   optimizer = utils_rl.get_optimizer(trainer_config)
@@ -421,17 +661,21 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
     checkpointing_options = None
     checkpoint_dir = None
 
-  # Set up micro batching
-  train_micro_batch_size = None if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
-  rollout_micro_batch_size = (
-      None if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
-  )
-
   # Setup metrics logging and targeted RL profiling. `profiler_options` stays
   # None: tunix `RLTrainingConfig` forbids combining the SFT step profiler with
   # `rl_profiler_config`, and only the latter traces the rollout role.
   metrics_logging_options = build_metrics_logging_options(trainer_config)
   rl_profiler_config = build_rl_profiler_config(trainer_config)
+
+  training_config, grpo_config = build_tunix_rl_configs(
+      trainer_config,
+      optimizer=optimizer,
+      metrics_logging_options=metrics_logging_options,
+      profiler_options=None,
+      rl_profiler_config=rl_profiler_config,
+      checkpoint_dir=checkpoint_dir,
+      checkpointing_options=checkpointing_options,
+  )
 
   # Parse vllm_additional_config
   rollout_additional_config = None
@@ -463,44 +707,39 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
     # engine shape, so unrelated engine changes can move it.
     rollout_vllm_kwargs["block_size"] = trainer_config.vllm_block_size
 
+  effective_top_k = trainer_config.decode_sampling_top_k if trainer_config.decode_sampling_top_k > 0 else None
+
+  # When grpo_beta == 0.0, create_models_and_meshes skips reference model creation and returns
+  # reference_mesh=None, while Tunix's PerfMetricsExport and RLEngine still require a non-None
+  # Mesh entry for Role.REFERENCE to register device timelines.
+  role_to_mesh = {
+      rl_cluster_lib.Role.ACTOR: actor_mesh,
+      rl_cluster_lib.Role.REFERENCE: reference_mesh if reference_mesh is not None else actor_mesh,
+      rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+  }
+  role_to_logical_axis_rule = {
+      rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
+      rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
+      rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
+  }
+
   cluster_config = rl_cluster_lib.ClusterConfig(
-      role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: actor_mesh,
-          rl_cluster_lib.Role.REFERENCE: reference_mesh,
-          rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
-      },
-      role_to_logical_axis_rule={
-          rl_cluster_lib.Role.ACTOR: trainer_config.logical_axis_rules,
-          rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
-          rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
-      },
+      role_to_mesh=role_to_mesh,
+      role_to_logical_axis_rule=role_to_logical_axis_rule,
       rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
       **_kwargs_supported_by(
           rl_cluster_lib.ClusterConfig,
           gc_collect_after_weight_sync=trainer_config.gc_collect_after_weight_sync,
       ),
-      training_config=rl_cluster_lib.RLTrainingConfig(
-          actor_optimizer=optimizer,
-          eval_every_n_steps=trainer_config.eval_interval,
-          max_steps=trainer_config.train_steps,
-          mini_batch_size=trainer_config.batch_size,
-          train_micro_batch_size=train_micro_batch_size,
-          rollout_micro_batch_size=rollout_micro_batch_size,
-          max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
-          metrics_logging_options=metrics_logging_options,
-          profiler_options=None,
-          rl_profiler_config=rl_profiler_config,
-          checkpoint_root_directory=checkpoint_dir,
-          checkpointing_options=checkpointing_options,
-      ),
+      training_config=training_config,
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
           max_prompt_length=trainer_config.max_prefill_predict_length,
           kv_cache_size=trainer_config.max_target_length + trainer_config.kv_cache_buffer,
           temperature=trainer_config.decode_sampling_temperature,
           top_p=trainer_config.decode_sampling_nucleus_p,
-          top_k=trainer_config.decode_sampling_top_k,
+          top_k=effective_top_k,
           rollout_vllm_model_version=trainer_config.tokenizer_path,
           rollout_vllm_hbm_utilization=trainer_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type=getattr(
@@ -568,79 +807,61 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
   # the user-provided callables. Each function must accept `prompts`,
   # `completions`, `tmvp_config`, and `**kwargs` and return a list of floats.
   reward_fns = build_reward_fns(trainer_config, make_reward_fn)
+  mimo_cfg = getattr(grpo_config, "mimo", None) or _build_mimo_config(trainer_config)
 
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
+  max_logging.log(
+      "GRPO config resolved:\n" + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
+  )
   if trainer_config.rl.use_agentic_rollout:
     max_logging.log("Using AgenticGRPOLearner with async online rollouts.")
-    # TODO: Remove this try-except once the dependency on tunix is fixed.
-    try:
-      from tunix.rl.agentic.agentic_grpo_learner import GrpoConfig as AgenticGrpoConfig  # pylint: disable=import-outside-toplevel
-      from tunix.rl.agentic.agentic_grpo_learner import GrpoLearner as AgenticGrpoLearner  # pylint: disable=import-outside-toplevel
-    except ImportError as e:
-      raise ValueError(
-          "tunix.rl.agentic dependencies are not installed! "
-          "Please install tunix with agentic support to use 'use_agentic_rollout'."
-      ) from e
-    grpo_config = AgenticGrpoConfig(
-        num_generations=trainer_config.rl.num_generations,
-        num_iterations=trainer_config.rl.num_iterations,
-        beta=trainer_config.rl.grpo_beta,
-        epsilon=trainer_config.rl.grpo_epsilon,
-        loss_algo=trainer_config.rl.loss_algo,
-        loss_agg_mode=trainer_config.rl.loss_agg_mode,
-        max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
-        max_concurrency=trainer_config.rl.max_concurrency,
-        off_policy_steps=trainer_config.rl.off_policy_steps,
-        system_prompt=trainer_config.rl.system_prompt,
-        epsilon_high=trainer_config.rl.epsilon_high,
-        use_rollout_logps=trainer_config.rl.use_rollout_logps,
-        **_kwargs_supported_by(
-            AgenticGrpoConfig,
-            reward_num_workers=trainer_config.reward_num_workers,
-            reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
-        ),
-    )
-    max_logging.log(
-        "GRPO config resolved:\n"
-        + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
-    )
-    # Instantiate the custom MaxText chat parser
-    template_config = load_data_template_from_file(trainer_config.data_template_path)
-    if template_config is None:
-      raise ValueError(
-          f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}"
+    from tunix.rl.agentic.agentic_grpo_learner import GrpoLearner as AgenticGrpoLearner  # pylint: disable=import-outside-toplevel
+
+    if _is_multi_turn_code_env(trainer_config):
+      from maxtext.trainers.post_train.rl.code_rl.metrics import get_code_rl_metrics  # pylint: disable=import-outside-toplevel
+
+      env_class, env_kwargs = _resolve_env_class(trainer_config)
+      chat_parser = None
+      max_resp_len = int(trainer_config.max_target_length - trainer_config.max_prefill_predict_length)
+      metric_fns = [functools.partial(get_code_rl_metrics, max_response_length=max_resp_len)]
+    else:
+      env_class = None
+      env_kwargs = None
+      # Instantiate the custom MaxText chat parser
+      template_config = load_data_template_from_file(trainer_config.data_template_path)
+      if template_config is None:
+        raise ValueError(
+            f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}"
+        )
+      chat_parser = utils_rl.MaxTextChatParser(
+          model_tokenizer=model_tokenizer, template_config=template_config, tmvp_config=trainer_config
       )
-    chat_parser = utils_rl.MaxTextChatParser(
-        model_tokenizer=model_tokenizer, template_config=template_config, tmvp_config=trainer_config
-    )
+      metric_fns = [utils_rl.get_correctness_metrics]
+
+    group_postprocessor = _build_group_postprocessor(trainer_config, model_tokenizer, mimo_cfg=mimo_cfg)
+    learner_extra_kwargs: dict[str, Any] = {}
+    if env_class is not None:
+      learner_extra_kwargs["env_class"] = env_class
+      learner_extra_kwargs["env_kwargs"] = env_kwargs
+    if group_postprocessor is not None:
+      learner_extra_kwargs["group_postprocessor"] = group_postprocessor
+      if trainer_config.rl.judge_max_in_flight_groups is not None:
+        learner_extra_kwargs["group_max_in_flight"] = trainer_config.rl.judge_max_in_flight_groups
+      if trainer_config.rl.judge_timeout_s is not None:
+        learner_extra_kwargs["group_stage_timeout_s"] = trainer_config.rl.judge_timeout_s
+
     rl_trainer = AgenticGrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         algo_config=grpo_config,
         chat_parser=chat_parser,
-        metric_fns=[utils_rl.get_correctness_metrics],
+        metric_fns=metric_fns,
+        **_kwargs_supported_by(AgenticGrpoLearner, **learner_extra_kwargs),
     )
   else:
     max_logging.log("Using standard GRPOLearner with offline rollouts.")
-    grpo_config = GrpoConfig(
-        num_generations=trainer_config.rl.num_generations,
-        num_iterations=trainer_config.rl.num_iterations,
-        beta=trainer_config.rl.grpo_beta,
-        epsilon=trainer_config.rl.grpo_epsilon,
-        loss_algo=trainer_config.rl.loss_algo,
-        loss_agg_mode=trainer_config.rl.loss_agg_mode,
-        **_kwargs_supported_by(
-            GrpoConfig,
-            reward_num_workers=trainer_config.reward_num_workers,
-            reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
-        ),
-    )
-    max_logging.log(
-        "GRPO config resolved:\n"
-        + "\n".join(f"  {k} = {v!r}" for k, v in sorted(dataclasses.asdict(grpo_config).items()))
-    )
-    rl_trainer = GrpoLearner(
+    rl_trainer = GrpoLearner(  # pylint: disable=no-value-for-parameter
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         algo_config=grpo_config,
@@ -649,7 +870,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
   return rl_cluster, rl_trainer, optimizer, reward_fns
 
 
-def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any) -> None:
+def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: types.RLConfig) -> None:
   """Populates the tokenizer's chat_template from config if missing."""
   if getattr(model_tokenizer, "chat_template", None) is None:
     if getattr(trainer_config, "chat_template", None):
@@ -671,7 +892,7 @@ def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any)
       )
 
 
-def rl_train(argv: Sequence[str], kwargs: dict):
+def rl_train(argv: Sequence[str], kwargs: dict[str, Any]) -> None:
   """
   Run RL training with the provided configuration.
 
@@ -761,9 +982,10 @@ def _rl_train_impl(
         pprint(ele)
 
   if trainer_config.debug:
-    max_logging.log("Reference Model initialized successfully")
-    nnx.display(reference_model)
-    max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
+    if reference_model is not None and reference_mesh is not None:
+      max_logging.log("Reference Model initialized successfully")
+      nnx.display(reference_model)
+      max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
     max_logging.log("Policy Model initialized successfully")
     nnx.display(actor_model)
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
@@ -807,7 +1029,7 @@ def _rl_train_impl(
     )
 
   # Start training
-  if trainer_config.load_checkpoint_only_once:
+  if trainer_config.load_checkpoint_only_once and reference_model is not None:
     max_logging.log("Capturing reference model state before training.")
     ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
 
@@ -818,7 +1040,7 @@ def _rl_train_impl(
   max_logging.warning("Starting RL training...")
   rl_trainer.train(train_dataset)
 
-  if trainer_config.load_checkpoint_only_once:
+  if trainer_config.load_checkpoint_only_once and reference_model is not None:
     max_logging.log("Checking if reference model state changed during training.")
     ref_state_after = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
     check = jax.tree_util.tree_map(jax.numpy.array_equal, ref_state_before, ref_state_after)

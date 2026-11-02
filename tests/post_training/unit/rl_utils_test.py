@@ -331,6 +331,41 @@ class TestGetOptimizer(unittest.TestCase):
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)
 
+  def test_cosine_learning_rate_final_fraction_override(self):
+    """cosine_learning_rate_final_fraction sets end_value = learning_rate * fraction."""
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    config = self._make_optimizer_config(gradient_clipping_threshold=1.0)
+    config.cosine_learning_rate_final_fraction = 1.0
+    opt = utils_rl.get_optimizer(config)
+    params = {"w": jnp.ones(3)}
+    state = opt.init(params)
+    grads = {"w": jnp.ones(3)}
+    for _ in range(config.train_steps):
+      _, state = opt.update(grads, state, params)
+    self.assertAlmostEqual(float(state.hyperparams["learning_rate"]), 1e-4, places=7)
+
+
+class TestTrajectoryRewardPassthrough(unittest.TestCase):
+  """Tests for utils_rl.trajectory_reward_passthrough."""
+
+  def test_returns_trajectory_rewards_and_coerces_none_to_zero(self):
+    """Returns float trajectory_rewards and replaces None entries with 0.0."""
+    out = utils_rl.trajectory_reward_passthrough(
+        prompts=["p1", "p2", "p3"],
+        completions=["c1", "c2", "c3"],
+        trajectory_rewards=[1.0, None, 0.5],
+    )
+    self.assertEqual(out, [1.0, 0.0, 0.5])
+
+  def test_defaults_to_zeros_when_trajectory_rewards_omitted(self):
+    """Returns a list of 0.0 matching len(prompts) when trajectory_rewards is None."""
+    out = utils_rl.trajectory_reward_passthrough(
+        prompts=["p1", "p2"],
+        completions=["c1", "c2"],
+    )
+    self.assertEqual(out, [0.0, 0.0])
+
 
 class TestFormatMaxTextMessages(unittest.TestCase):
   """Tests for utils_rl.format_maxtext_messages."""

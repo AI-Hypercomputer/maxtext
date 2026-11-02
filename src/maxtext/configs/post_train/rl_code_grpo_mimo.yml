@@ -1,0 +1,28 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optimal On-Policy & Length-Normalized GRPO-MiMo.
+
+base_config: "rl_code_gspo_mimo.yml"
+
+rl:
+  loss_algo: "grpo"
+  clip_mode: "ppo"
+  grpo_epsilon: 0.20
+  epsilon_high: 0.28
+  epsilon_neg: 0.20
+  epsilon_neg_high: 0.28
+  loss_agg_mode: "sequence-mean-token-mean"
+  min_seq_len_norm: 128
+  max_flagged_token_ratio_per_turn: 0.35

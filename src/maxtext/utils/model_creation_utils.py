@@ -780,6 +780,22 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   TunixMaxTextAdapter so it can synthesize segment_ids that mask pad positions
   from attention (otherwise trainer attends to pad tokens, corrupting log-probs).
   """
+  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
+  rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
+
+  rl_cfg = getattr(trainer_config, "rl", None)
+  grpo_beta = getattr(rl_cfg, "grpo_beta", getattr(trainer_config, "grpo_beta", 0.08))
+  if grpo_beta == 0.0:
+    max_logging.log("grpo_beta == 0.0: skipping reference model creation to save HBM and startup time.")
+    reference_model, reference_mesh = None, None
+    actor_model, actor_mesh = from_pretrained(
+        trainer_config,
+        devices=trainer_devices,
+        wrap_with_tunix_adapter=True,
+        tokenizer_pad_id=tokenizer_pad_id,
+    )
+    return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
+
   max_logging.log("Creating reference model and also meshes for reference and rollout")
   reference_model, reference_mesh = from_pretrained(
       trainer_config,
@@ -787,8 +803,6 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
       wrap_with_tunix_adapter=True,
       tokenizer_pad_id=tokenizer_pad_id,
   )
-  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
-  rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
 
   if trainer_config.load_checkpoint_only_once:
     max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
