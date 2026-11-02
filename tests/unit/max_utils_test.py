@@ -16,6 +16,7 @@
 import os
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from flax import linen as nn
@@ -829,6 +830,31 @@ class TestReorderSequence(unittest.TestCase):
     np.testing.assert_array_equal(
         reordered["targets_loss_mask"],
         max_utils.reorder_sequence(targets_loss_mask, 2),
+    )
+
+
+class TestResolveReorderStrategy(unittest.TestCase):
+  """Tests for resolve_reorder_strategy in max_utils.py"""
+
+  def test_resolve_reorder_strategy(self):
+    def config(**overrides):
+      defaults = {
+          "context_parallel_reorder_strategy": ReorderStrategy.AUTO,
+          "packing": True,
+          "context_parallel_strategy": "ring",
+          "hardware": "gpu",
+      }
+      return SimpleNamespace(**{**defaults, **overrides})
+
+    resolve = max_utils.resolve_reorder_strategy
+    # AUTO means STRIPED only for packed ring attention on GPU, and DUAL_CHUNK_SWAP otherwise.
+    self.assertEqual(resolve(config()), ReorderStrategy.STRIPED)
+    self.assertEqual(resolve(config(hardware="tpu")), ReorderStrategy.DUAL_CHUNK_SWAP)
+    self.assertEqual(resolve(config(packing=False)), ReorderStrategy.DUAL_CHUNK_SWAP)
+    # An explicit strategy is returned as is.
+    self.assertEqual(
+        resolve(config(context_parallel_reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP)),
+        ReorderStrategy.DUAL_CHUNK_SWAP,
     )
 
 

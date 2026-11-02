@@ -48,7 +48,7 @@ from maxtext.utils import elastic_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE, StubSummaryWriter
 from maxtext.utils import max_logging
-from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, ReorderStrategy
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
@@ -998,8 +998,6 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
   See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
   """
   # pylint: disable=import-outside-toplevel
-  from maxtext.common.common_types import ReorderStrategy
-
   _reorder_keys = {
       "inputs",
       "targets",
@@ -1067,6 +1065,30 @@ def reordered_cp_size(config, mesh) -> int:
   if mesh is None or not getattr(config, "context_parallel_load_balance", False):
     return 1
   return mesh.shape.get(config.context_sharding, 1)
+
+
+def resolve_reorder_strategy(config):
+  """The permutation the input pipeline applies when `reordered_cp_size(config, mesh) > 1`.
+
+  Resolves `context_parallel_reorder_strategy=AUTO` the way `setup_train_loop` does: STRIPED
+  (a Transformer Engine feature) for packed ring attention on GPU, DUAL_CHUNK_SWAP otherwise.
+
+  Returns:
+    A `ReorderStrategy` other than AUTO.
+  """
+  strategy = getattr(config, "context_parallel_reorder_strategy", None)
+  if strategy is None:
+    # Configs that predate the field only have the DUAL_CHUNK_SWAP permutation.
+    return ReorderStrategy.DUAL_CHUNK_SWAP
+  if strategy != ReorderStrategy.AUTO:
+    return strategy
+  if (
+      config.packing
+      and config.context_parallel_strategy.lower() == "ring"
+      and config.hardware in ("gpu", "gpu_multiprocess")
+  ):
+    return ReorderStrategy.STRIPED
+  return ReorderStrategy.DUAL_CHUNK_SWAP
 
 
 @staticmethod

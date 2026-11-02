@@ -32,7 +32,6 @@ from flax.core.spmd import logical_axis_rules
 from maxtext.common import checkpointing
 from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
-from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.input_pipeline import multihost_dataloading
@@ -445,21 +444,8 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
     reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
     with jax.set_mesh(mesh):
       if reorder_cp_size > 1:
-
-        # Determine load balancing reorder strategy.
-        if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
-          reorder_strategy = (
-              ReorderStrategy.STRIPED
-              if (
-                  config.packing
-                  and context_parallel_strategy == "ring"
-                  and config.hardware in ("gpu", "gpu_multiprocess")
-              )
-              else ReorderStrategy.DUAL_CHUNK_SWAP
-          )
-        else:
-          reorder_strategy = config.context_parallel_reorder_strategy
-
+        # Determine load balancing reorder strategy (resolves AUTO).
+        reorder_strategy = max_utils.resolve_reorder_strategy(config)
         reorder_fn = maxtext_utils.get_reorder_callable(
             reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
         )
