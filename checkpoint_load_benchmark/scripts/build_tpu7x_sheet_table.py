@@ -145,9 +145,15 @@ HEADER = [
     "log",
 ]
 
-# Running-log gpaste URLs for failed or problematic experiments, keyed by (model, scan mode, slices, pipeline);
-# a None slices entry matches every slice layout of that (model, scan mode, pipeline).
+# Running-log gpaste URLs and not-run explanations for failed, problematic, or skipped experiments,
+# keyed by (model, scan mode, slices, pipeline); a None entry matches any value of that field.
 LOG_URLS = {
+    ("qwen3-0.6b", "scanned", "1 (16)", "to_maxtext"): (
+        "Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32))"
+    ),
+    ("qwen3-0.6b", "unscanned", "1 (16)", "to_maxtext"): (
+        "Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32))"
+    ),
     ("qwen3-235b-a22b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565961",
     ("deepseek4-284b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565962",
     ("deepseek4-284b", "unscanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565964",
@@ -156,11 +162,29 @@ LOG_URLS = {
     ("qwen3.5-397b-a17b", "scanned", "1 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565968",
     ("qwen3.5-397b-a17b", "scanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565970",
     ("qwen3.5-397b-a17b", "unscanned", "1 (8)", "to_maxtext"): "https://paste.googleplex.com/6755399436565971",
+    ("qwen3.5-397b-a17b", "unscanned", "1 (8)", "safetensor"): (
+        "https://paste.googleplex.com/6755399436565967 (Not run: 795.5 GB fills 98% of 1-host HBM; see scanned 1 (8) HBM OOM)"
+    ),
     ("qwen3-480b-a35b", "scanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565972",
     ("qwen3-480b-a35b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565973",
     ("qwen3-480b-a35b", "unscanned", None, "to_maxtext"): "https://paste.googleplex.com/6755399436565976",
+    ("qwen3-480b-a35b", "unscanned", "1 (8)", "safetensor"): (
+        "https://paste.googleplex.com/6755399436565973 (Not run: 961.0 GB > 813.8 GB 1-host HBM; see scanned 1 (8) HBM OOM)"
+    ),
     ("deepseek3-671b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565977",
     ("deepseek3-671b", "scanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565979",
+    ("deepseek3-671b", "unscanned", "1 (8) / 2 (16)", "safetensor"): (
+        "https://paste.googleplex.com/6755399436565979 (Skipped: same 1-host HBM & 2-host RAM OOM limits as scanned)"
+    ),
+    ("deepseek3-671b", None, None, "to_maxtext"): (
+        "Not run: 1,342.4 GB checkpoint exceeds single-host 1,014.5 GB RAM limit for CPU to_maxtext Step 2"
+    ),
+    ("deepseek3.2-671b", None, None, "to_maxtext"): (
+        "Not run: 1,367.0 GB checkpoint exceeds single-host 1,014.5 GB RAM limit for CPU to_maxtext Step 2"
+    ),
+    ("deepseek4-1600b", None, None, "to_maxtext"): (
+        "Not run: 3,197.7 GB checkpoint exceeds single-host 1,014.5 GB RAM limit for CPU to_maxtext Step 2"
+    ),
     ("gpt-oss-120b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565980",
     ("gpt-oss-120b", "scanned", "2 (16)", "safetensor"): "https://paste.googleplex.com/6755399436565981",
     ("qwen3-14b", "scanned", "1 (8)", "safetensor"): "https://paste.googleplex.com/6755399436565982",
@@ -236,7 +260,14 @@ def _note(model: str, scan: str, n: int, pipeline: str) -> str | None:
 
 
 def _log_url(model: str, scan: str, slices: str, pipeline: str) -> str:
-  return LOG_URLS.get((model, scan, slices, pipeline)) or LOG_URLS.get((model, scan, None, pipeline)) or "—"
+  for key in (
+      (model, scan, slices, pipeline),
+      (model, scan, None, pipeline),
+      (model, None, None, pipeline),
+  ):
+    if key in LOG_URLS:
+      return LOG_URLS[key]
+  return "—"
 
 
 def _s1(model: str, seconds: float) -> str:
