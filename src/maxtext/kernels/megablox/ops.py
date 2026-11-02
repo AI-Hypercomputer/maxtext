@@ -1249,10 +1249,11 @@ def _drhs_run_tokamax_v1(
   """Executes standard Tokamax ragged_dot for DRHS."""
   drhs_kwargs = {}
   if use_manual_quantization:
-    drhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(
-        varying=frozenset(["expert"]), unreduced=frozenset(["data", "fsdp"])
-    )
-  return tokamax.ragged_dot_general(
+    # The per-device result is a partial sum over the data/fsdp axes. Declare the kernel
+    # output as varying and cast it to unreduced afterwards: declaring a `pallas_call`
+    # output unreduced directly is not handled by JAX's HiJAX lowering (b/580985845).
+    drhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
+  drhs = tokamax.ragged_dot_general(
       lhs=lhs,
       rhs=drhs_dout,
       group_sizes=group_sizes,
@@ -1264,6 +1265,9 @@ def _drhs_run_tokamax_v1(
       implementation="mosaic",
       **drhs_kwargs,
   )
+  if use_manual_quantization:
+    drhs = jax.lax.pcast(drhs, ("data", "fsdp"), to="unreduced")
+  return drhs
 
 
 def _drhs_prepare_bwd_scale(drhs_dout: qpl.QArray) -> jnp.ndarray:

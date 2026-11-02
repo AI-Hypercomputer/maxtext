@@ -1480,11 +1480,21 @@ def without_qwix_interception(fn: Callable) -> Callable:
 
 
 def _cast_reduced_from(arr, reduced_arr):
+  """Casts `arr` to be reduced along the same mesh axes as `reduced_arr`.
+
+  Inside shard_map this uses `pcast(..., to="reduced")`; outside it reshards to
+  `reduced_arr`'s sharding. Axes `arr` is already reduced along are skipped, as
+  `pcast` rejects a reduced -> reduced cast.
+  """
   aval = jax.typeof(reduced_arr)
   # In shard map
   if aval.sharding.mesh.axis_types[0] == jax.sharding.AxisType.Manual:
+    # With JAX's unreduced (HiJAX) lowering, `jnp.full_like(reduced_arr, ...)`
+    # already carries the reduced axes.
+    already_reduced = jax.typeof(arr).mat.reduced
     for axis in aval.mat.reduced:
-      arr = jax.lax.pcast(arr, axis, to="reduced")
+      if axis not in already_reduced:
+        arr = jax.lax.pcast(arr, axis, to="reduced")
     return arr
   # Outside shard map
   return jax.reshard(arr, aval.sharding)
