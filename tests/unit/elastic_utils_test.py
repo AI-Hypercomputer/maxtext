@@ -16,6 +16,7 @@
 
 import unittest
 from unittest.mock import Mock, create_autospec
+from absl import flags
 from absl.testing import parameterized
 from maxtext.common import checkpointing
 from maxtext.utils import elastic_utils
@@ -89,6 +90,7 @@ class ElasticUtilsTest(parameterized.TestCase):
         1: [FakeDevice()],
     }
     self.fake_jax.process_index.return_value = 0
+    self.fake_jax.config.jax_platforms = None
 
     # Inject fakes into elastic_utils namespace
     elastic_utils.pathwaysutils = self.fake_pathwaysutils
@@ -147,6 +149,41 @@ class ElasticUtilsTest(parameterized.TestCase):
     config.elastic_enabled = True
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
     self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def _set_elastic_backends(self, backends):
+    """Sets `--elastic_backends` for the rest of the test."""
+    flag = flags.FLAGS["elastic_backends"]
+    original_value = flag.value
+    flag.value = backends
+    self.addCleanup(setattr, flag, "value", original_value)
+
+  def test_elastic_enabled_on_listed_backend(self):
+    """`--elastic_backends` allows elastic training on backends other than Pathways."""
+    config = FakeConfig()
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+    self.fake_jax.config.jax_platforms = "other,cpu"
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+    self._set_elastic_backends(["proxy", "other"])
+    self.assertTrue(elastic_utils.elastic_enabled(config))
+
+  def test_elastic_enabled_on_pathways_not_listed(self):
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self._set_elastic_backends(["other"])
+    self.assertFalse(elastic_utils.elastic_enabled(FakeConfig()))
+
+  def test_record_slice_state_on_listed_backend(self):
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+    self.fake_jax.config.jax_platforms = "other"
+    self._set_elastic_backends(["other"])
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0, 1}
+    self.fake_elastic.get_active_slice_indices.return_value = {0, 1}
+    fake_recorder = Mock()
+
+    elastic_utils.record_slice_state(fake_recorder)
+
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=2, total_slices=2)
 
   def test_clean_up_checkpoints_no_checkpoints(self):
     self.fake_gcs_utils.gcs_list_directories.return_value = []

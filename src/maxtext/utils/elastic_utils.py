@@ -20,12 +20,19 @@ import functools
 from types import SimpleNamespace
 from typing import Any, Callable
 
+from absl import flags
 import jax
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 import pathwaysutils
 from pathwaysutils.elastic import elastic
 from pathwaysutils.elastic import manager
+
+_ELASTIC_BACKENDS = flags.DEFINE_list(
+    "elastic_backends",
+    ["pathways"],
+    "JAX platforms (as in JAX_PLATFORMS) that support elastic training.",
+)
 
 elastic_manager: manager.Manager | None = None
 pending_reinit_recorder = None
@@ -37,7 +44,7 @@ def record_slice_state(recorder, active_slices_override: int | None = None) -> N
   if (
       recorder is None
       or not hasattr(recorder, "record_elastic_slice_counts")
-      or not pathwaysutils.is_pathways_backend_used()
+      or not _elastic_backend_supported()
       or elastic_manager is None
   ):
     return
@@ -97,9 +104,23 @@ def record_elastic_reinit_end() -> None:
   pending_reinit_recorder = None
 
 
+def _elastic_backends() -> list[str]:
+  """Returns `--elastic_backends`, or its default if flags aren't parsed, as when MaxText is used as a library."""
+  return flags.FLAGS[_ELASTIC_BACKENDS.name].value
+
+
+def _elastic_backend_supported() -> bool:
+  """Returns whether elastic training can run on JAX's backend: whether it's one of `--elastic_backends`."""
+  backends = set(_elastic_backends())
+  if "pathways" in backends and pathwaysutils.is_pathways_backend_used():
+    return True
+  platforms = jax.config.jax_platforms
+  return bool(platforms) and not backends.isdisjoint(platforms.split(","))
+
+
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
-  return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+  return _elastic_backend_supported() and config.elastic_enabled
 
 
 def elastic_snapshot(config) -> bool:
@@ -385,7 +406,8 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
         "Elastic training requires the Pathways backend, and elastic_enabled"
         " must be set to True: current config.elastic_enabled:"
         f" {config.elastic_enabled}, pathways backend used:"
-        f" {pathwaysutils.is_pathways_backend_used()}"
+        f" {pathwaysutils.is_pathways_backend_used()}, --elastic_backends: {','.join(_elastic_backends())},"
+        f" JAX platforms: {jax.config.jax_platforms}"
     )
     raise ValueError(msg)
 
