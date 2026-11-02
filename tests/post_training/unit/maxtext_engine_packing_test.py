@@ -73,6 +73,7 @@ from maxtext.configs import pyconfig
 from maxtext.integration.tunix import tunix_adapter as tunix_adapter_module
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.models import models
+from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -142,38 +143,92 @@ _EOS_ID = -1
 _LIVE_LR = {"learning_rate": 0.1, "warmup_steps_fraction": 0.0}
 
 
-def _tiny_cfg(seq_len, run_name, **overrides):
-  """A CPU-sized, single-layer Qwen3 with a real (random) parameter tree.
+# The model this suite stands in for is Qwen3.5-35B-A3B, `decoder_block:
+# qwen3_5`, where `inhomogeneous_layer_cycle_interval: 4` makes three of every
+# four layers a GatedDeltaNet: a recurrence over the row plus a depthwise causal
+# convolution. Neither is masked by the attention mask that isolates segments in
+# a `qwen3` layer -- a GDN layer keeps a boundary by resetting its own recurrent
+# state and by dropping conv taps that reach across it. Running the equivalence
+# tests on `qwen3` alone therefore says nothing about the operator that carries
+# most of the production layers, which is how the cross-sequence state bleed
+# fixed in #5351 survived a green copy of this file. Both blocks now run.
+_DECODER_BLOCKS = ("qwen3", "qwen3_5")
 
-  `overrides` go straight to `pyconfig.initialize`, for the one test that needs a
-  learning rate that actually moves a weight -- see `_LIVE_LR`.
+# Four layers, not the one a `qwen3` fixture needs.
+# `qwen3_5.py::Qwen3_5DecoderLayer.__init__` makes a layer full attention when
+# `(layer_idx + 1) % inhomogeneous_layer_cycle_interval == 0`, so this is three
+# GatedDeltaNet layers under one attention layer -- the production 3:1 mix, and
+# a stack where a boundary defect in either operator is in scope. A shorter
+# stack is not an option either way: `WeightConverter` rejects a layer count
+# that is not a multiple of the cycle interval.
+# `test_the_qwen3_5_fixture_is_a_gated_delta_net_stack` pins the mix, without
+# which a change to the cycle rule would quietly turn this into more attention
+# runs.
+_QWEN3_5_OVERRIDES = {
+    "base_num_decoder_layers": 4,
+    "num_decoder_layers": 4,
+    "inhomogeneous_layer_cycle_interval": 4,
+    "gdn_conv_kernel_dim": 4,
+    "gdn_key_head_dim": 16,
+    "gdn_value_head_dim": 16,
+    "gdn_num_key_heads": 2,
+    "gdn_num_value_heads": 4,
+    # Half the packed row, so one boundary (position 4) lands inside a chunk and
+    # one (position 8) on a chunk seam. At the production 64 the whole fixture
+    # row is a single chunk and the inter-chunk state carry never runs.
+    "gdn_chunk_size": 8,
+    # Every qwen3_5 layer is MoE. Two experts, top-1, one shared: the smallest
+    # configuration that still routes.
+    "base_moe_mlp_dim": 64,
+    "num_experts": 2,
+    "num_experts_per_tok": 1,
+    "shared_experts": 1,
+}
+
+
+def _tiny_cfg(seq_len, run_name, decoder_block="qwen3", **overrides):
+  """A CPU-sized model with a real (random) parameter tree.
+
+  `decoder_block` selects the architecture: `qwen3`, one layer whose only
+  cross-token mixing is attention, or `qwen3_5`, four layers of which three are
+  GatedDeltaNet over a MoE MLP. See `_DECODER_BLOCKS`.
+
+  `overrides` go straight to `pyconfig.initialize` and win over both sets of
+  defaults below, for the one test that needs a learning rate that actually
+  moves a weight -- see `_LIVE_LR`.
   """
+  settings = {
+      "model_name": _MODEL_NAME,
+      "base_emb_dim": 64,
+      "base_num_query_heads": 2,
+      "base_num_kv_heads": 2,
+      "head_dim": 32,
+      "base_mlp_dim": 64,
+      "base_num_decoder_layers": 1,
+      "num_decoder_layers": 1,
+      "scan_layers": False,
+      "vocab_size": 64,
+      "max_target_length": seq_len,
+      "max_prefill_predict_length": seq_len,
+      "per_device_batch_size": 1.0,
+      # float32 throughout: the packed-vs-unpacked comparison is an exact
+      # algebraic identity, so bf16 rounding would only blur the signal.
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "enable_checkpointing": False,
+      "log_config": False,
+      "skip_jax_distributed_system": True,
+      "run_name": run_name,
+      "profiler_steps": 0,
+  }
+  if decoder_block == "qwen3_5":
+    settings.update(_QWEN3_5_OVERRIDES)
+  settings.update(overrides)
   return pyconfig.initialize(
       [sys.argv[0], get_test_config_path(), "attention=dot_product"],
       override_model_config=True,
-      **overrides,
-      model_name=_MODEL_NAME,
-      base_emb_dim=64,
-      base_num_query_heads=2,
-      base_num_kv_heads=2,
-      head_dim=32,
-      base_mlp_dim=64,
-      base_num_decoder_layers=1,
-      num_decoder_layers=1,
-      scan_layers=False,
-      vocab_size=64,
-      max_target_length=seq_len,
-      max_prefill_predict_length=seq_len,
-      per_device_batch_size=1.0,
-      # float32 throughout: the packed-vs-unpacked comparison is an exact
-      # algebraic identity, so bf16 rounding would only blur the signal.
-      dtype="float32",
-      weight_dtype="float32",
-      enable_checkpointing=False,
-      log_config=False,
-      skip_jax_distributed_system=True,
-      run_name=run_name,
-      profiler_steps=0,
+      decoder_block=decoder_block,
+      **settings,
   )
 
 
@@ -227,6 +282,10 @@ class PackedVersusUnpackedLogpsTest(unittest.TestCase):
   is the whole point: tunix's own packing suite uses a toy whose `__call__`
   names its parameter `segment_ids`, so the toy passes the gate by construction
   and the suite stays green against an adapter that does not.
+
+  Run for every block in `_DECODER_BLOCKS`, because "no sequence sees another"
+  is a claim about whichever operator mixes tokens across positions, and that is
+  attention in `qwen3` but a recurrence and a convolution in `qwen3_5`.
   """
 
   def setUp(self):
@@ -234,30 +293,31 @@ class PackedVersusUnpackedLogpsTest(unittest.TestCase):
     os.environ["NEW_MODEL_DESIGN"] = "1"
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-    cfg = _tiny_cfg(_PACKED_LEN, "maxtext_engine_packing_test")
+  def _adapter(self, decoder_block):
+    cfg = _tiny_cfg(_PACKED_LEN, "maxtext_engine_packing_test", decoder_block=decoder_block)
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     base = models.Transformer(config=cfg, mesh=mesh, quant=None, model_mode="train", rngs=nnx.Rngs(0))
 
     # pad_id=None so the adapter never synthesizes segment ids of its own; the
     # only boundaries in play are the ones the caller passes, which is what
     # makes a failure unambiguous.
-    adapter = TunixMaxTextAdapter(base_model=base, pad_id=None)
-    self.graphdef, self.state = nnx.split(adapter)
+    return nnx.split(TunixMaxTextAdapter(base_model=base, pad_id=None))
 
-  def _logps(self, tokens, segment_ids, segment_positions):
+  def _logps(self, adapter, tokens, segment_ids, segment_positions):
     """Per-token log-probs for an already-packed buffer.
 
     `prompt_tokens` is `[B, 0]` on both paths: under packing tunix collapses the
     prompt/completion split and hands everything over as one stream. Passing
     `segment_ids` on the unpacked path too (all ones, one segment per row) keeps
     both sides on the same code path in `compute_per_token_logps`, so the
-    comparison isolates attention rather than the packed/unpacked plumbing.
+    comparison isolates the model rather than the packed/unpacked plumbing.
     """
+    graphdef, state = adapter
     tokens = jnp.asarray(tokens, jnp.int32)
     return np.asarray(
         rl_common.compute_per_token_logps(
-            self.graphdef,
-            self.state,
+            graphdef,
+            state,
             jnp.zeros((tokens.shape[0], 0), jnp.int32),
             tokens,
             pad_id=0,
@@ -267,32 +327,63 @@ class PackedVersusUnpackedLogpsTest(unittest.TestCase):
         )
     )
 
+  def test_the_qwen3_5_fixture_is_a_gated_delta_net_stack(self):
+    """The `qwen3_5` arm must actually build the operator it exists to cover.
+
+    `_QWEN3_5_OVERRIDES` reaches the GatedDeltaNet branch only through the
+    arithmetic `(layer_idx + 1) % inhomogeneous_layer_cycle_interval == 0`
+    evaluating false. Should that rule change, or should the override stop being
+    applied, the parameterization would silently degrade into running attention
+    twice -- every packing test still green, and the recurrent path uncovered
+    again.
+    """
+    cfg = _tiny_cfg(_PACKED_LEN, "maxtext_engine_packing_fixture", decoder_block="qwen3_5")
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = models.Transformer(config=cfg, mesh=mesh, quant=None, model_mode="train", rngs=nnx.Rngs(0))
+
+    kinds = [type(getattr(model.decoder, f"layers_{i}").attention) for i in range(4)]
+    self.assertTrue(
+        all(issubclass(k, Qwen3NextGatedDeltaNet) for k in kinds[:3]),
+        f"layers 0-2 should be GatedDeltaNet, got {[k.__name__ for k in kinds]}",
+    )
+    self.assertFalse(
+        issubclass(kinds[3], Qwen3NextGatedDeltaNet),
+        f"layer 3 should be full attention, got {kinds[3].__name__}",
+    )
+
   def test_packed_logps_match_unpacked_per_segment(self):
     # Token ids start at 1: 0 is pad_id, and a pad token in the middle of a
     # packed row would confound "boundaries were honoured" with "padding was
     # masked".
     tokens = np.random.default_rng(7).integers(1, 64, size=(_NUM_SEQ, _SEQ_LEN)).astype(np.int32)
 
-    unpacked = self._logps(
-        tokens,
-        np.ones((_NUM_SEQ, _SEQ_LEN), np.int32),
-        np.broadcast_to(np.arange(_SEQ_LEN, dtype=np.int32), (_NUM_SEQ, _SEQ_LEN)),
-    )
+    for decoder_block in _DECODER_BLOCKS:
+      with self.subTest(decoder_block=decoder_block):
+        adapter = self._adapter(decoder_block)
 
-    # One row, _NUM_SEQ segments. Segment ids are 1-based; 0 is the padding
-    # bucket. Positions restart at every boundary.
-    packed = self._logps(
-        tokens.reshape(1, -1),
-        np.concatenate([np.full(_SEQ_LEN, i + 1, np.int32) for i in range(_NUM_SEQ)])[None, :],
-        np.concatenate([np.arange(_SEQ_LEN, dtype=np.int32) for _ in range(_NUM_SEQ)])[None, :],
-    ).reshape(_NUM_SEQ, _SEQ_LEN)
+        unpacked = self._logps(
+            adapter,
+            tokens,
+            np.ones((_NUM_SEQ, _SEQ_LEN), np.int32),
+            np.broadcast_to(np.arange(_SEQ_LEN, dtype=np.int32), (_NUM_SEQ, _SEQ_LEN)),
+        )
 
-    # Column 0 is skipped on both sides. Under packing `compute_per_token_logps`
-    # drops the first prediction of the row and front-pads the result with 0.0
-    # to restore the full width, so position 0 of every segment is either that
-    # pad or a cross-boundary prediction that `completion_mask` discards
-    # downstream. Comparing it would assert on a value neither path defines.
-    np.testing.assert_allclose(packed[:, 1:], unpacked[:, 1:], atol=1e-4, rtol=1e-4)
+        # One row, _NUM_SEQ segments. Segment ids are 1-based; 0 is the padding
+        # bucket. Positions restart at every boundary.
+        packed = self._logps(
+            adapter,
+            tokens.reshape(1, -1),
+            np.concatenate([np.full(_SEQ_LEN, i + 1, np.int32) for i in range(_NUM_SEQ)])[None, :],
+            np.concatenate([np.arange(_SEQ_LEN, dtype=np.int32) for _ in range(_NUM_SEQ)])[None, :],
+        ).reshape(_NUM_SEQ, _SEQ_LEN)
+
+        # Column 0 is skipped on both sides. Under packing
+        # `compute_per_token_logps` drops the first prediction of the row and
+        # front-pads the result with 0.0 to restore the full width, so position 0
+        # of every segment is either that pad or a cross-boundary prediction that
+        # `completion_mask` discards downstream. Comparing it would assert on a
+        # value neither path defines.
+        np.testing.assert_allclose(packed[:, 1:], unpacked[:, 1:], atol=1e-4, rtol=1e-4)
 
   def test_segment_positions_matter_only_up_to_a_per_segment_offset(self):
     """What a packer must guarantee about `segment_positions`, and what it need not.
@@ -311,7 +402,14 @@ class PackedVersusUnpackedLogpsTest(unittest.TestCase):
     absolute embedding, and it says nothing about ordering *within* a segment --
     asserted below, so this test cannot pass by the model ignoring positions
     altogether.
+
+    `qwen3` only. The claim is about RoPE, and a GatedDeltaNet layer takes no
+    `positions` at all -- order reaches it through the recurrence itself. On the
+    `qwen3_5` fixture the invariance would hold vacuously and the control below
+    would fail, which is the fixture reporting the architecture correctly rather
+    than a defect.
     """
+    adapter = self._adapter("qwen3")
     tokens = np.random.default_rng(7).integers(1, 64, size=(1, _PACKED_LEN)).astype(np.int32)
     seg_ids = np.repeat(np.arange(1, _NUM_SEQ + 1), _SEQ_LEN)[None, :].astype(np.int32)
 
@@ -320,13 +418,13 @@ class PackedVersusUnpackedLogpsTest(unittest.TestCase):
     # A within-segment permutation, which no constant offset can produce.
     scrambled = np.tile(np.array([0, 2, 1, 3]), _NUM_SEQ)[None, :].astype(np.int32)
 
-    base = self._logps(tokens, seg_ids, restart)
-    np.testing.assert_allclose(self._logps(tokens, seg_ids, running), base, atol=1e-4, rtol=1e-4)
+    base = self._logps(adapter, tokens, seg_ids, restart)
+    np.testing.assert_allclose(self._logps(adapter, tokens, seg_ids, running), base, atol=1e-4, rtol=1e-4)
 
     # The control. Without it, a model that ignored `positions` entirely
     # would satisfy the assertion above and this test would prove nothing.
     self.assertGreater(
-        float(np.max(np.abs(self._logps(tokens, seg_ids, scrambled) - base))),
+        float(np.max(np.abs(self._logps(adapter, tokens, seg_ids, scrambled) - base))),
         1e-2,
         "reordering positions within a segment changed nothing, so `positions` is being ignored "
         "and the invariance asserted above is vacuous",
@@ -550,50 +648,61 @@ class PackedVersusUnpackedGradientsTest(unittest.TestCase):
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
     self.algo_config = _GrpoConfig()
 
-  def _fresh_engine(self):
-    cfg = _tiny_cfg(_PACKED_LEN, "maxtext_engine_packed_grads_test")
+  def _fresh_engine(self, decoder_block="qwen3"):
+    cfg = _tiny_cfg(_PACKED_LEN, "maxtext_engine_packed_grads_test", decoder_block=decoder_block)
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     return _engine(cfg, mesh, self.algo_config)
 
   def test_packed_gradients_match_unpacked_over_the_whole_tree(self):
+    """Run for both blocks: the forward and the backward can disagree.
+
+    A boundary treatment that the forward applies and the backward does not
+    (or the reverse) leaves the gradient something other than the vector-Jacobian
+    product of the forward, and `PackedVersusUnpackedLogpsTest` cannot see it.
+    The two other tests in this class are about the engine's accumulation
+    arithmetic, which is architecture-independent, and stay on `qwen3`.
+    """
     tokens, advantages = _sequences()
 
-    # Two engines rather than one reset between runs: nothing in the engine's
-    # public surface clears an accumulator without also applying it, and reaching
-    # into `_accumulated_grads` to zero it would be testing a state this code
-    # path never actually occupies.
-    unpacked_engine = self._fresh_engine()
-    packed_engine = self._fresh_engine()
+    for decoder_block in _DECODER_BLOCKS:
+      with self.subTest(decoder_block=decoder_block):
+        # Two engines rather than one reset between runs: nothing in the engine's
+        # public surface clears an accumulator without also applying it, and
+        # reaching into `_accumulated_grads` to zero it would be testing a state
+        # this code path never actually occupies.
+        unpacked_engine = self._fresh_engine(decoder_block)
+        packed_engine = self._fresh_engine(decoder_block)
 
-    # The comparison is only meaningful if both engines started from identical
-    # weights. `init_weights_seed` should guarantee it; asserted rather than
-    # assumed, because if it ever stops holding this test would fail in a way
-    # that looks exactly like a packing bug.
-    before_unpacked = jax.tree.leaves(nnx.to_pure_dict(nnx.state(unpacked_engine.model, nnx.Param)))
-    before_packed = jax.tree.leaves(nnx.to_pure_dict(nnx.state(packed_engine.model, nnx.Param)))
-    for a, b in zip(before_unpacked, before_packed):
-      np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        # The comparison is only meaningful if both engines started from
+        # identical weights. `init_weights_seed` should guarantee it; asserted
+        # rather than assumed, because if it ever stops holding this test would
+        # fail in a way that looks exactly like a packing bug.
+        before_unpacked = jax.tree.leaves(nnx.to_pure_dict(nnx.state(unpacked_engine.model, nnx.Param)))
+        before_packed = jax.tree.leaves(nnx.to_pure_dict(nnx.state(packed_engine.model, nnx.Param)))
+        for a, b in zip(before_unpacked, before_packed):
+          np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
-    unpacked = _grads_after(unpacked_engine, _unpacked_example(tokens, advantages))
-    packed = _grads_after(packed_engine, _packed_example(tokens, advantages))
+        unpacked = _grads_after(unpacked_engine, _unpacked_example(tokens, advantages))
+        packed = _grads_after(packed_engine, _packed_example(tokens, advantages))
 
-    self.assertEqual(len(packed), len(unpacked))
-    self.assertTrue(all(np.all(np.isfinite(g)) for g in packed), "packed gradients are not finite")
-    # A tree of zeros would satisfy every comparison below while meaning that no
-    # gradient was computed at all.
-    self.assertGreater(sum(float(np.sum(np.abs(g))) for g in unpacked), 0.0, "unpacked gradients are all zero")
+        self.assertEqual(len(packed), len(unpacked))
+        self.assertTrue(all(np.all(np.isfinite(g)) for g in packed), "packed gradients are not finite")
+        # A tree of zeros would satisfy every comparison below while meaning that
+        # no gradient was computed at all.
+        self.assertGreater(sum(float(np.sum(np.abs(g))) for g in unpacked), 0.0, "unpacked gradients are all zero")
 
-    # Whole tree, not a sample. Recorded from a prior investigation on this same
-    # stack: three sampled tensors matched their source exactly and the aggregate
-    # over all 310 showed the transfer delivering under one percent. Sampling did
-    # not merely miss the defect, it pointed the work the wrong way for three runs.
-    for i, (p, u) in enumerate(zip(packed, unpacked)):
-      np.testing.assert_allclose(p, u, atol=2e-4, rtol=2e-4, err_msg=f"gradient leaf {i} of {len(packed)} differs")
+        # Whole tree, not a sample. Recorded from a prior investigation on this
+        # same stack: three sampled tensors matched their source exactly and the
+        # aggregate over all 310 showed the transfer delivering under one percent.
+        # Sampling did not merely miss the defect, it pointed the work the wrong
+        # way for three runs.
+        for i, (p, u) in enumerate(zip(packed, unpacked)):
+          np.testing.assert_allclose(p, u, atol=2e-4, rtol=2e-4, err_msg=f"gradient leaf {i} of {len(packed)} differs")
 
-    # The per-leaf check above is tolerant near zero, where most leaves live.
-    # This one is not: a uniform small bias across the tree passes elementwise and
-    # fails here.
-    self.assertLess(_rel_l2(packed, unpacked), 1e-3)
+        # The per-leaf check above is tolerant near zero, where most leaves live.
+        # This one is not: a uniform small bias across the tree passes elementwise
+        # and fails here.
+        self.assertLess(_rel_l2(packed, unpacked), 1e-3)
 
   def test_packed_denominator_counts_segments_not_rows(self):
     """The accumulator's denominator must see three sequences, not one row.
