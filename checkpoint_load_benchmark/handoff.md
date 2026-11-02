@@ -37,19 +37,20 @@
 | :--- | :--- | :--- |
 | `origin/main` | `f596f5369` | Baseline for the BEFORE runs |
 | `origin/fix/safetensors-dynamic-lance-prs` | `335d5e880` | `origin/main` plus Lance's PRs: `df2eacf0d` (#5706: composite keys, multi-host hooks, legacy keys), `1a89e9dfc` (#5705: `safetensors_dynamic` outside the training restore), `1f06b304d` + `335d5e880` (#5828: leading-axis sharded reads, inner MoE stacks kept in the read layout) |
-| `origin/docs/checkpoint-load-benchmark` | `ef8488fec` | The above plus this benchmark suite (pushed) |
+| `origin/docs/checkpoint-load-benchmark` | `5581543f5` (HEAD) | The above plus this benchmark suite (`ef8488fec`), the `safetensors_dynamic` HBM-peak fixes (`1dd7ba3a9`: single-leaf composite build for U-1 + pairwise non-contiguous reshard slice concat for U-6), `to_maxtext` Orbax save-buffer cap (`27dec98be` for U-8), Orbax 1,800 s multi-host barrier timeout (`7f3394d94`), and the 11-column Google Sheet tables with `gpaste` URLs (`5581543f5`) |
 
 **On this branch** (on top of `ef8488fec`; the pods run the GCS copies uploaded by `run_tpu7x_cluster.sh`):
 
 | Path | Contents |
 | :--- | :--- |
-| `benchmark_ckpt_load_time.py` | tpu7x support, zlib-compressed remote payload, env filtering that keeps `VBAR_CONTROL_SERVICE_URL`, SIGABRT teardown tolerance, phase watchdog with `TIMEOUT` labels, `--skip-safetensors`, `--tm-convert-only`, RAM-aware staging and fail-fast RAM checks for `to_maxtext` (§7.15, §7.16), shared-cache reuse when all shards are present (§7.17) |
-| `bootstrap_tpu7x.py`, `generate_tpu7x_manifests.py`, `scripts/run_tpu7x_cluster.sh` | Pod bootstrap (trees: Lance's PRs, `origin/main`, `hbmfix`), manifests (P1/P2 pairs, P1-completion pair `g`, daemon controllers, recovery), launcher |
-| `scripts/tpu7x_task_queue.py`, `scripts/tpu7x_daemon_controller.py`, `configs/p1_completion_tasks.json` | P1 completion queue (README "Finishing Priority 1"); workers sync the harness before each task, and tasks can be limited to newer pods with the `/tmp/maxtext_stagefix` tree (§7.16) |
+| `benchmark_ckpt_load_time.py` | tpu7x support, zlib-compressed remote payload, env filtering that keeps `VBAR_CONTROL_SERVICE_URL`, SIGABRT teardown tolerance, phase watchdog with `TIMEOUT` labels, `--skip-safetensors`, `--tm-convert-only`, RAM-aware staging and fail-fast RAM checks for `to_maxtext` (§7.15, §7.16), shared-cache reuse when all shards are present (§7.17), parallel shard range-reads (`TM_STREAM_DOWNLOAD_WORKERS`, §7.21), and Orbax 1,800 s multi-host barrier timeout (§7.22) |
+| `bootstrap_tpu7x.py`, `generate_tpu7x_manifests.py`, `scripts/run_tpu7x_cluster.sh` | Pod bootstrap (trees: Lance's PRs, `origin/main`, `hbmfix`, `fix`), manifests (P1/P2 pairs, P1-completion pair `g`, daemon controllers, recovery), launcher |
+| `scripts/tpu7x_task_queue.py`, `scripts/tpu7x_daemon_controller.py`, `configs/p1_completion_tasks.json`, `configs/p3_tasks.json`, `scripts/run_tpu7x_multihost.sh` | P1 completion queue (`queue/p1/`), P3 fixes queue (`queue/p3/`), and multi-host JobSet launcher (`2x2x2`, `2x2x4`, `2x4x4`) |
 | `scripts/summarize_tpu7x_results.py` | Status matrix from per-phase result JSONs |
-| `scripts/build_tpu7x_tables.py`, `scripts/build_tpu7x_sheet_table.py` | Summary CSV; the plain-text row-by-row tables for the sheet tabs (`--suite p1`: >200B models plus Lance's multi-host rows; `--suite p2`: models up to 120B) |
-| `patches/hbmfix.patch`, `patches/hbmfix/src/...` | HBM-peak fix for composite keys (§7.6). Same 63 passing and 13 failing unit tests as HEAD in a local CPU venv (the 13 failures are from the old local JAX); `src/` itself stays equal to Lance's PRs |
-| Not committed: `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md` | Unrelated to this work |
+| `scripts/build_tpu7x_tables.py`, `scripts/build_tpu7x_sheet_table.py` | Summary CSV; the 11-column row-by-row tables for the Google Sheet tabs (`--suite p1`: >200B models plus multi-host rows; `--suite p2`: models up to 120B; includes `LOG_URLS` mapping to `gpaste` URLs and not-run explanations) |
+| `src/maxtext/checkpoint_conversion/{load_dynamic.py,utils/tensor_handling.py,utils/utils.py}` | Production fixes on this branch: single-leaf composite build (U-1, `1dd7ba3a9`), pairwise slice concatenation (U-6, `1dd7ba3a9`), and `MAXTEXT_ORBAX_SAVE_CONCURRENT_GB` cap + `hf_state` release before Orbax save (U-8, `27dec98be`) |
+| `patches/hbmfix.patch`, `patches/hbmfix/src/...` | Earlier intermediate HBM-peak patch (§7.6, superseded by `1dd7ba3a9` in `src/`) |
+| Not committed: `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md` | Unrelated to this work (never stage) |
 
 Code bundles verified against git: `code/maxtext_lance_prs.tar.gz` `src/` = this branch's `src/` (`ef8488fec`); `code/checkpoint_conversion_origin_main.tar.gz` = `f596f5369:src/maxtext/checkpoint_conversion`.
 
@@ -130,23 +131,23 @@ Code bundles verified against git: `code/maxtext_lance_prs.tar.gz` `src/` = this
 The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safetensor` table, and all tests) are kept current in
 [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). Highlights are in §0. Each P1 model's cold Step 1 time is 583.3 s (235B), 814.5 s (397B), 1,046.1 s (480B, `to_maxtext` S1 measured separately: 1,135.5 s), or 0 for the synthetic DeepSeek files.
 
-### 5.3 P2 · 16-model suite (WITH PRs)
+### 5.3 P2 · 16-model suite (WITH PRs + `safetensor (with fix)`)
 
 ✅ Complete. All configurations are in [`reports/tpu7x_benchmark_ckpt_load_time_summary.md`](reports/tpu7x_benchmark_ckpt_load_time_summary.md) (row by row, §3.1) and the summary CSV. Points to know:
-- `gpt-oss-120b` scanned `safetensors_dynamic` runs out of HBM (U-6); unscanned works.
-- The `llama3.1-70b` scanned 2-slice Orbax load needed `checkpoint_storage_concurrent_gb=38` (T-13).
+- `gpt-oss-120b` scanned `safetensors_dynamic` ran out of HBM on the initial Lance-PRs branch (U-6); with commit `1dd7ba3a9` (`safetensor (with fix)`, pairwise slice concatenation), it succeeds on 1 slice (**504.92 s**) and 2 slices (**429.98 s**).
+- The `llama3.1-70b` scanned 2-slice Orbax load needed `checkpoint_storage_concurrent_gb=38` (T-13); with commit `27dec98be` (`MAXTEXT_ORBAX_SAVE_CONCURRENT_GB=40`), `llama3.1-70b` unscanned S2 peak host RAM drops from 403.61 GB to **351.92 GB** (U-8).
 - `qwen3-14b` and `qwen3-32b` scanned 1-slice outliers were re-run (U-7, `run_tpu7x_16m_rerun`).
 
-### 5.4 Not run
+### 5.4 Not run (and why)
 
-- `deepseek3.2-671b` and `deepseek4-1600b`: v5p-only capacity tests, not in the tpu7x lists for single-host slices. Lance's multi-host runs loaded both with `safetensors_dynamic` (2 × `2x2x2` and 4 × `2x2x2`; [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md)).
-- `deepseek3-671b` unscanned on 1–2 slices and `to_maxtext`; 397B/480B unscanned on 1 slice for `safetensors_dynamic`; BEFORE unscanned after a scanned timeout.
+- `deepseek3-671b` (`1,342.4 GB`), `deepseek3.2-671b` (`1,357.8 GB`), and `deepseek4-1600b` (`3,200.0 GB`) `to_maxtext`: not run because `to_maxtext` Step 2 is a single-host CPU script and even the converted state alone (`1.34–3.20 TB`) exceeds the **1,014.5 GB** host RAM of one `tpu7x` node. All three are benchmarked with `safetensors_dynamic` across 4 or 8 hosts (`4 × 2x2x1`, `1 × 2x2x4`, `2 × 2x2x2`, `1 × 2x4x4`, `4 × 2x2x2`; [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md)).
+- `deepseek3-671b` unscanned on 1–2 slices (`1,342.4 GB` > 813.8 GB HBM on 1 slice and host-OOMs on 2 slices; scanned already failed on both), `qwen3.5-397b-a17b` unscanned `safetensors_dynamic` on 1 slice (scanned failed HBM OOM at 97.7% capacity), `qwen3-480b-a35b` unscanned `safetensors_dynamic` on 1 slice (961.0 GB > 813.8 GB HBM), and `qwen3-0.6b` `to_maxtext` (only in the `safetensors_dynamic` multi-host smoke suite on `2x2x2`). Every non-executed row has an explicit explanation in Column K (`log`) of the Google Sheet.
 
 ---
 
 ## 6. Live cluster state (at snapshot)
 
-**Cleaned up at 10:28 UTC on 10-29.** No `mesakh-*` pods or services remain. Every queue task in `queue/p1/` is done or closed (`tm_397b_unscanned_*` are closed with notes). All results are in GCS and the reports.
+**Cleaned up on 10-30 after all P1, P2, P3 (`queue/p3/`), and multi-host JobSets finished.** No `mesakh-*` pods, services, or JobSets remain. Every queue task in `queue/p1/` and `queue/p3/` (10/10 tasks) is completed. All results are in GCS, committed to git, and synced to the Google Sheet.
 
 ---
 
@@ -250,14 +251,17 @@ python3 checkpoint_load_benchmark/scripts/summarize_tpu7x_results.py /tmp/tpu7x_
 | What | Location |
 | :--- | :--- |
 | Harness | [`benchmark_ckpt_load_time.py`](benchmark_ckpt_load_time.py) (the pods run the copy in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`) |
-| Pod bootstrap / manifests / launcher | [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py), [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py), [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) |
+| Pod bootstrap / manifests / launcher | [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py), [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py), [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh), [`scripts/run_tpu7x_multihost.sh`](scripts/run_tpu7x_multihost.sh) |
 | Code tarballs used by the bootstrap | `gs://mesa-maxtext/mesakh_tpu7x_bench/code/{maxtext_lance_prs,checkpoint_conversion_origin_main,site_packages_overlay}.tar.gz` |
 | P1 WITH PRs (HF cache, Orbax checkpoints, logs) | `gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b/{safetensors_dynamic,to_maxtext,logs}/` |
+| P1 parallel-stream & fix runs (`pstream`, `fix`, `tmfix`) | `gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b_{pstream,fix,tmfix}/logs/` |
 | P1 BEFORE (`origin/main`) | `gs://mesa-maxtext/mesakh_tpu7x_bench/p1_origin_main/run_tpu7x_200b/logs/` (360 s watchdog, inconclusive) and `.../p1_origin_main/run_tpu7x_200b_t1800/logs/` (1800 s re-runs) |
-| P1 WITH PRs + `hbmfix` | `gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b_hbmfix/logs/` |
-| P1 completion queue | `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/{tasks.json,locks/,done/,attempts/}` |
-| P2 | `gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs/run_tpu7x_16m/{safetensors_dynamic,to_maxtext,logs}/` |
+| P1 WITH PRs + `hbmfix` (earlier intermediate patch) | `gs://mesa-maxtext/mesakh_tpu7x_bench/p1_lance_prs/run_tpu7x_200b_hbmfix/logs/` |
+| Task queues (`p1` and `p3`) | `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/{p1,p3}/{tasks.json,locks/,done/,attempts/}` |
+| P2 & P2 reruns / fixes (`rerun`, `fix`, `tmfix`) | `gs://mesa-maxtext/mesakh_tpu7x_bench/p2_lance_prs/run_tpu7x_16m/{safetensors_dynamic,to_maxtext,logs}/` and `.../run_tpu7x_16m_{rerun,fix,tmfix}/logs/` |
+| Multi-host runs (`2x2x2`, `2x2x4`, `2x4x4`) | `gs://mesa-maxtext/mesakh_tpu7x_bench/lance_prs/run_tpu7x_multihost/logs/` and `gs://mesa-maxtext/wanglance_tpu7x_bench/lance_prs/run_tpu7x_multihost/logs/` (summarized in [`reports/tpu7x_multihost_results.csv`](reports/tpu7x_multihost_results.csv)) |
 | Per-phase result JSON | `<run dir>/logs/<model>/<scanned\|unscanned>[_slices2\|_slices4]/<phase>_result.json` (+ `<phase>.log`, `<phase>_slice1.log`) |
 | Result CSVs | `gs://mesa-maxtext/mesakh_tpu7x_bench/results/{p1_st_lance_*,p1_origin_main_*,p1_full_*,p2_full_*}.csv` |
+| Google Sheet (synced from `build_tpu7x_sheet_table.py`) | [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) — tab `tpu-v7x(Large models > 200B)` (`sheetId=635831153`, `--suite p1`) and tab `tpu-v7x (Smaller models)` (`sheetId=1294150880`, `--suite p2`); `gpaste` URLs and not-run explanations in `LOG_URLS` inside [`scripts/build_tpu7x_sheet_table.py`](scripts/build_tpu7x_sheet_table.py) |
 | v5p reports (keep untouched) | [`reports/benchmark_ckpt_load_time_*`](reports/) |
-| tpu7x reports (to write) | `reports/tpu7x_*` |
+| tpu7x reports | [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md), [`reports/tpu7x_large_model_200b_experiment_report.md`](reports/tpu7x_large_model_200b_experiment_report.md), [`reports/tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`](reports/), [`reports/tpu7x_multihost_results.{csv,md}`](reports/) |
