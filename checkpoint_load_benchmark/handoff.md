@@ -1,8 +1,8 @@
 # Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-10-30 ~10:36 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
+> **Snapshot:** 2026-11-02 ~03:20 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
 >
-> The numbers below come from the per-phase result JSONs in GCS. All planned single-host and multi-host runs are finished and the cluster is cleaned up (§6). **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). To refresh the status tables, run
+> The numbers below come from the per-phase result JSONs in GCS. All planned single-host and multi-host runs are finished and the cluster is cleaned up (§6). **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). **Google Sheet:** [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) (tabs `tpu-v7x(Large models > 200B)` [`gid=635831153`] and `tpu-v7x (Smaller models)` [`gid=1294150880`], 11 columns including the `log` column with `gpaste` URLs and not-run explanations). To refresh the status tables, run
 > [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py) (see §9).
 
 ---
@@ -202,16 +202,23 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
     - **235B unscanned:** S2 2,625.5 s (569 GB downloaded in 1,538 s), S3 545.5 s / 659.1 s on 1 / 2 slices.
     - **397B unscanned:** the transform finished in 6,860 s, then the pod was OOM-killed when the Orbax save started. The ~807 GB converted state plus save buffers exceed the ~944 GB a pod can use. Its `to_maxtext_step2_result.json` in the pstream run dir was written from the pod log (`recorded_by`).
     - **Capacity:** spot capacity was scarce on 10-29 (3–16 single-host spot nodes, frequent taint evictions). Two 397B attempts and three pair pods were lost before the last attempt ran.
+22. **HBM-peak fixes (`1dd7ba3a9`), `to_maxtext` Orbax save-buffer cap (`27dec98be`), and Orbax 1,800 s barrier timeout (`7f3394d94`):**
+    - **U-1 (`qwen3.5-397b-a17b` scanned composite `(wi_0, wi_1)` HBM OOM):** `load_dynamic.py` now builds and reshards one composite target leaf at a time instead of stacking the `(wi_0, wi_1)` pair and slicing it in HBM. Validated on `2 × 2x2x1` (**1,608.32 s**) and `1 × 2x2x2` (**1,475.17 s**).
+    - **U-6 (`gpt-oss-120b` scanned HLO temporaries HBM OOM):** `tensor_handling.py` now concatenates non-contiguous reshard slices pairwise instead of in a single N-way `jnp.concatenate` that materialized ~7× the leaf in XLA temporaries (200.32 GiB / 100.21 GiB per device). Validated on `1 × 2x2x1` (**504.92 s**) and `2 × 2x2x1` (**429.98 s**).
+    - **U-8 (`to_maxtext` Step 2 Orbax save host OOM):** `checkpoint_conversion/utils/utils.py` caps Orbax save concurrency (`MAXTEXT_ORBAX_SAVE_CONCURRENT_GB`, default 40 GB) and drops `hf_state` before saving. Reduced `llama3.1-70b` unscanned S2 peak host RAM from 403.61 GB to **351.92 GB**, and enabled `qwen3.5-397b-a17b` unscanned S2 to complete on one host in **8,096.53 s** (peak **884.23 GB** RAM).
+    - **Orbax v1 multi-host barrier timeout:** `orbax.checkpoint.experimental.v1._src.synchronization.multihost._DEFAULT_BARRIER_TIMEOUT` defaults to 300 s, which timed out during `qwen3.5-397b-a17b` unscanned S3 on `2 × 2x2x2` when one host finished reading GCS >5 min after the others. `benchmark_ckpt_load_time.py` raises `_DEFAULT_BARRIER_TIMEOUT` to 1,800 s, allowing all four multi-slice/multi-host 397B Orbax loads (`2 (16)` **2,025.76 s**, `1 (16)` **1,838.26 s**, `1 (32)` **2,233.01 s**, `2 (32)` **2,157.89 s**) to succeed.
+23. **Google Sheet 11th column (`log`) with `gpaste` URLs (`5581543f5`):**
+    - `scripts/build_tpu7x_sheet_table.py` outputs an 11th column (`log`) containing public `paste.googleplex.com` URLs for all 17 failed or slow-outlier experiments across both tabs (`tpu-v7x(Large models > 200B)` and `tpu-v7x (Smaller models)`) and explicit `Not run` / `Skipped` explanations for all 22 non-executed rows (`LOG_URLS`).
 
 ---
 
 ## 8. Next steps (in order)
 
-All planned runs are finished and documented; the cluster is cleaned up. Optional follow-ups:
-1. Leaf-level `(wi_0, wi_1)` split for `qwen3.5-397b-a17b` scanned on 2 slices (§7.19, issue U-1), as its own patch and run.
-2. Find out why the `gpt-oss-120b` scanned `safetensors_dynamic` transform needs ~7× the leaf in HBM temporaries (issue U-6).
-3. Profile the slow scanned MoE Orbax restores on tpu7x versus v5p (report §5).
-4. Rebuild the tables after any new run: the CSV with `scripts/build_tpu7x_tables.py <p2> <p2_rerun> <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --csv reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md <scratch.md>`, and the row-by-row tables with `scripts/build_tpu7x_sheet_table.py --suite p1 <p1> <p1_pstream> --cold-s1 qwen3.5-397b-a17b=814.53 --multihost-csv reports/tpu7x_multihost_results.csv --md-into reports/tpu7x_priority1_progress.md` and `scripts/build_tpu7x_sheet_table.py --suite p2 <p2> <p2_rerun> --md-into reports/tpu7x_benchmark_ckpt_load_time_summary.md`.
+All planned runs, fixes, reports, and Google Sheet tables (with `gpaste` logs in Column K) are finished and pushed; the cluster is cleaned up. To rebuild the tables from local mirrors:
+- **Summary CSV:** `scripts/build_tpu7x_tables.py <p2> <p2_rerun> <p1> <p1_pstream> <p1_tmfix> --cold-s1 qwen3.5-397b-a17b=814.53 --csv reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md <scratch.md>`
+- **Sheet tables (11 columns with `log`):**
+  - `scripts/build_tpu7x_sheet_table.py --suite p1 <p1> <p1_pstream> <p1_tmfix> --cold-s1 qwen3.5-397b-a17b=814.53 --multihost-csv reports/tpu7x_multihost_results.csv --variant "with fix=<p1_fix>" --md-into reports/tpu7x_priority1_progress.md`
+  - `scripts/build_tpu7x_sheet_table.py --suite p2 <p2> <p2_rerun> --multihost-csv reports/tpu7x_multihost_results.csv --variant "with fix=<p2_fix>" --md-into reports/tpu7x_benchmark_ckpt_load_time_summary.md`
 
 ## 9. Command cheat sheet
 
