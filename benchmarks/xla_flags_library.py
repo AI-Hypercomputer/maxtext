@@ -44,6 +44,16 @@ CF_FOR_ALL_GATHER = (
     " --xla_enable_async_all_gather=true"
 )
 
+# Async All Gather overlapped with TensorCore compute, without Continuation Fusion.
+# Use on platforms where libtpu rejects CF (e.g. v5p rejects CF for both All Gather and
+# All Reduce: "Continuation fusion for ... is enabled on platform viperfish ... not
+# supported"), so CF is disabled globally as libtpu recommends.
+ASYNC_ALL_GATHER_OVERLAP = (
+    " --xla_tpu_enable_async_collective_fusion=false"
+    " --xla_tpu_overlap_compute_collective_tc=true"
+    " --xla_enable_async_all_gather=true"
+)
+
 # Continuation Fusion (CF) for All Reduce Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_REDUCE = (
