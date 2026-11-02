@@ -33,6 +33,8 @@ In-process checks:
     that repeat an expert.
   - `topk_indices_by_argmax` equals `jax.lax.top_k`'s indices, ties included.
   - `_preprocess(packed=True)` equals `_preprocess(packed=False)`, every output.
+  - Full-buffer gather-reduces under "count" clamp other shards' -1 slots into `[0, n)` before
+    `ragged_gather_reduce`, leave outputs bit-identical to "sort", and add no `select_n` under "sort".
   - The config validator rejects "count" off the ring-of-experts ragged sort, one case per requirement.
 
 The layer check runs as a subprocess, so the forced device count takes effect before JAX initializes: the shrunk
@@ -178,6 +180,187 @@ class PackedPreprocessTest(parameterized.TestCase):
       for name, a, b in zip(("sorted_by_validity", "rows_per_partition", "group_mask"), want, got):
         self.assertEqual(a.dtype, b.dtype, name)
         np.testing.assert_array_equal(np.asarray(b), np.asarray(a), err_msg=f"{name} {density=}")
+
+
+_FULL_BUFFER_HIDDEN = 64
+_FULL_BUFFER_GATHER_REDUCE_KWARGS = {
+    "enforce_fallback": True,
+    "flops_override": -1,
+    "bytes_accessed_override": -1,
+    "use_single_sparsecore": False,
+}
+
+
+def _full_buffer_bits_equal(a, b):
+  a, b = np.asarray(a), np.asarray(b)
+  if a.shape != b.shape or a.dtype != b.dtype:
+    return False
+  return bool(np.array_equal(a.reshape(-1).view(np.uint8), b.reshape(-1).view(np.uint8)))
+
+
+def _full_buffer_routing(seed, tokens, experts, topk):
+  k = jax.random.split(jax.random.PRNGKey(seed), 3)
+  ids = jax.lax.top_k(jax.random.normal(k[0], (tokens, experts)), topk)[1].astype(jnp.int32)
+  w = jax.random.uniform(k[1], (tokens * topk,), jnp.float32, 0.25, 0.3)
+  return ids, w, k[2]
+
+
+def _full_buffer_maps(ids, experts, ep, shard, index_math):
+  """This shard's window and the inverse permutation ring_ragged_sort builds for `index_math`."""
+  flat = ids.reshape(-1)
+  local = experts // ep
+  offs = jnp.concatenate([jnp.zeros((1,), jnp.int32), jnp.cumsum(jax.nn.one_hot(flat, experts, dtype=jnp.int32).sum(0))])
+  start, end = offs[shard * local], offs[(shard + 1) * local]
+  if index_math == "count":
+    pos = ragged_sort._local_slot_positions(ids, experts, shard, ep)  # pylint: disable=protected-access
+    revert = jnp.where(pos >= 0, start + pos, -1).astype(jnp.int32)
+  else:
+    revert = jnp.argsort(jnp.argsort(flat, stable=True)).astype(jnp.int32)
+  return start, end, revert
+
+
+class _GatherReduceBoundsSpy:
+  """Wraps ragged_sort.ragged_gather_reduce; records (min index, max index, rows) of every call at run time."""
+
+  def __init__(self, declamp=False):
+    self.calls = []
+    self.declamp = declamp
+    self.real = ragged_sort.ragged_gather_reduce
+
+  def __call__(self, x, indices, *args, **kwargs):
+    if self.declamp:
+      # The arguments before the fix: masked lanes of a full buffer carry the raw inverse (-1 under "count").
+      indices = jnp.where(kwargs["valid_rows_mask"], indices, -1)
+    rows = x.shape[0]
+    # Include valid_rows_mask[0] so vmap runs the callback per shard even when 'sort' leaves indices unbatched.
+    jax.debug.callback(
+        lambda lo, hi, _: self.calls.append((int(lo), int(hi), rows)),
+        jnp.min(indices),
+        jnp.max(indices),
+        kwargs["valid_rows_mask"][0],
+    )
+    return self.real(x, indices, *args, **kwargs)
+
+  def out_of_bounds(self):
+    return [c for c in self.calls if c[0] < 0 or c[1] >= c[2]]
+
+
+def _full_buffer_op_fn(ep, index_math, ids, tokens=128, topk=4):
+  """Returns the vmapped (x, w, cot) -> (out, dx, dw) full-buffer sort+unsort forward and VJP function."""
+  experts = 2 * ep
+  local = experts // ep
+
+  def per_shard(x, w, cot):
+    def f(x, w):
+      sorted_x, gs, revert, perm = ragged_sort.ring_ragged_sort(
+          x, ids, experts, topk, "ep", ep, buffer_size=None, index_math=index_math
+      )
+      assert sorted_x.shape[0] == tokens * topk  # the full buffer
+      return ragged_sort.ring_ragged_unsort(
+          sorted_x * 2, gs, revert, topk, local, "ep", w, topk_argsort_indices=perm, index_math=index_math
+      )
+
+    out, vjp = jax.vjp(f, x, w)
+    dx, dw = vjp(cot)
+    return out, dx, dw
+
+  return jax.vmap(per_shard, in_axes=(None, None, 0), axis_name="ep")
+
+
+def _full_buffer_op(ep, index_math, tokens=128, topk=4, seed=0):
+  """ring_ragged_sort (full buffer) -> ring_ragged_unsort per shard, vmapped over 'ep': (out, dx, dw)."""
+  experts = 2 * ep
+  ids, w, key = _full_buffer_routing(seed, tokens, experts, topk)
+  k = jax.random.split(key, 2)
+  x = jax.random.normal(k[0], (tokens, _FULL_BUFFER_HIDDEN), jnp.float32).astype(jnp.bfloat16)
+  cot = jax.random.normal(k[1], (ep, tokens, _FULL_BUFFER_HIDDEN), jnp.float32).astype(jnp.bfloat16)
+  return jax.jit(_full_buffer_op_fn(ep, index_math, ids, tokens=tokens, topk=topk))(x, w, cot)
+
+
+@pytest.mark.cpu_only
+class FullBufferMaskedIndicesTest(parameterized.TestCase):
+  """Full-buffer (dropless) ring gather-reduces clamp -1 under 'count' and leave 'sort' unchanged."""
+
+  @parameterized.named_parameters(*((f"ep{ep}_{mode}", ep, mode) for ep in (4, 8) for mode in ("count", "sort")))
+  def test_combine_in_bounds_and_unchanged(self, ep, index_math):
+    tokens, experts, topk = 256, 2 * ep, 4
+    n = tokens * topk
+    gr_kwargs = {**_FULL_BUFFER_GATHER_REDUCE_KWARGS, "packed_preprocess": index_math == "count"}
+    for seed in range(3):
+      ids, w, key = _full_buffer_routing(seed, tokens, experts, topk)
+      x = jax.random.normal(key, (n, _FULL_BUFFER_HIDDEN), jnp.float32).astype(jnp.bfloat16)
+      for shard in range(ep):
+        start, end, revert = _full_buffer_maps(ids, experts, ep, shard, index_math)
+        if index_math == "count":
+          self.assertGreater(int(jnp.sum(revert < 0)), 0)
+        spy = _GatherReduceBoundsSpy()
+        with mock.patch.object(ragged_sort, "ragged_gather_reduce", spy):
+          out = jax.jit(
+              lambda x, r, w, s, e: ragged_sort._ring_unsort_combine(  # pylint: disable=protected-access
+                  x, r, w, s, e, topk, gr_kwargs
+              )
+          )(x, revert, w, start, end)
+          out.block_until_ready()
+        jax.effects_barrier()
+        self.assertLen(spy.calls, 1)
+        self.assertEmpty(spy.out_of_bounds(), f"seed{seed} shard{shard}: {spy.calls}")
+        valid = (revert >= start) & (revert < end)
+        before = ragged_gather_reduce_v2.ragged_gather_reduce(
+            x=x,
+            indices=revert,
+            topk_weights=w,
+            valid_rows_mask=valid,
+            reduce_group_size=topk,
+            enforce_fallback=True,
+        )
+        self.assertTrue(_full_buffer_bits_equal(out, before), f"seed{seed} shard{shard}: output changed")
+        x_np, revert_np, w_np, valid_np = (np.asarray(a) for a in (x.astype(jnp.float32), revert, w, valid))
+        gathered = x_np[np.where(valid_np, revert_np, 0)] * w_np[:, None]
+        ref = np.where(valid_np[:, None], gathered, 0.0).reshape((tokens, topk, _FULL_BUFFER_HIDDEN)).sum(1)
+        np.testing.assert_allclose(np.asarray(out, np.float32), ref, rtol=2e-2, atol=2e-2)
+
+  @parameterized.named_parameters(("ep4", 4), ("ep8", 8))
+  def test_op_in_bounds_and_count_matches_sort(self, ep):
+    results = {}
+    for index_math in ("count", "sort"):
+      spy = _GatherReduceBoundsSpy()
+      with mock.patch.object(ragged_sort, "ragged_gather_reduce", spy):
+        results[index_math] = jax.block_until_ready(_full_buffer_op(ep, index_math))
+      jax.effects_barrier()
+      self.assertLen(spy.calls, 2 * ep)
+      self.assertEmpty(spy.out_of_bounds(), f"{index_math}: {spy.out_of_bounds()}")
+    for name, a, b in zip(("out", "dx", "dw"), results["count"], results["sort"]):
+      self.assertTrue(_full_buffer_bits_equal(a, b), f"ep{ep}: {name} differs between count and sort")
+
+  def test_sort_emits_no_extra_select_n(self):
+    """index_math='sort' emits identical select_n count to base; unconditional clamping adds two."""
+    ep, tokens, topk = 4, 128, 4
+    ids, w, key = _full_buffer_routing(0, tokens, 2 * ep, topk)
+    k = jax.random.split(key, 2)
+    x = jax.random.normal(k[0], (tokens, _FULL_BUFFER_HIDDEN), jnp.float32).astype(jnp.bfloat16)
+    cot = jax.random.normal(k[1], (ep, tokens, _FULL_BUFFER_HIDDEN), jnp.float32).astype(jnp.bfloat16)
+
+    def trace_selects():
+      fn = _full_buffer_op_fn(ep, "sort", ids, tokens=tokens, topk=topk)
+      return _count(jax.make_jaxpr(fn)(x, w, cot).jaxpr, "select_n")
+
+    selects_gated = trace_selects()
+    with mock.patch.object(ragged_sort, "_clamp_masked_indices", lambda indices, *_: indices):
+      selects_noop = trace_selects()
+    with mock.patch.object(ragged_sort, "_clamp_masked_indices", lambda indices, mask, *_: jnp.where(mask, indices, 0)):
+      selects_unconditional = trace_selects()
+    self.assertEqual(selects_gated, selects_noop)
+    self.assertEqual(selects_unconditional, selects_noop + 2)
+
+  def test_unclamped_indices_are_flagged(self):
+    """Positive control: raw -1 masked indices under 'count' fail bounds checks at both call sites."""
+    ep = 4
+    spy = _GatherReduceBoundsSpy(declamp=True)
+    with mock.patch.object(ragged_sort, "ragged_gather_reduce", spy):
+      jax.block_until_ready(_full_buffer_op(ep, "count"))
+    jax.effects_barrier()
+    self.assertLen(spy.calls, 2 * ep)
+    self.assertLen(spy.out_of_bounds(), 2 * ep)
 
 
 class RoutingIndexMathConfigTest(parameterized.TestCase):
