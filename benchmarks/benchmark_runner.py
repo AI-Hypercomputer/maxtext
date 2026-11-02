@@ -25,16 +25,17 @@ import os
 import time
 
 from benchmarks.benchmark_utils import str2bool
-from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
-from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
-from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
 from benchmarks.convergence.c4_exp import c4_pretrain_model_dict
+from benchmarks.ctk_configs import ClusterConfig
+from benchmarks.maxtext_ctk_runner import ctk_benchmark_runner
+from benchmarks.maxtext_ctk_runner import LibTpuType
+from benchmarks.maxtext_ctk_runner import on_device_benchmark_runner
 from benchmarks.maxtext_ctk_runner import PathwaysConfig
 from benchmarks.maxtext_ctk_runner import WorkloadConfig
-from benchmarks.maxtext_ctk_runner import ctk_benchmark_runner
-from benchmarks.maxtext_ctk_runner import on_device_benchmark_runner
-from benchmarks.ctk_configs import ClusterConfig
-from benchmarks.maxtext_ctk_runner import LibTpuType
+from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
+from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
+from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
+from benchmarks.maxtext_v7x_model_configs import v7x_model_dict
 
 
 def add_pathways_arguments(parser: argparse.ArgumentParser):
@@ -155,6 +156,7 @@ def add_ctk_runner_arguments(custom_parser: argparse.ArgumentParser):
       choices=list(trillium_model_dict.keys())
       + list(v5p_model_dict.keys())
       + list(v5e_model_dict.keys())
+      + list(v7x_model_dict.keys())
       + list(c4_pretrain_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
       help="model to be benchmarked, supported models are the command choices.",
@@ -258,9 +260,10 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
       choices=list(trillium_model_dict.keys())
       + list(v5p_model_dict.keys())
       + list(v5e_model_dict.keys())
+      + list(v7x_model_dict.keys())
       + list(c4_pretrain_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
-      help=("model to be benchmarked, supported models are the command choices."),
+      help="model to be benchmarked, supported models are the command choices.",
   )
   custom_parser.add_argument(
       "--libtpu_version",
@@ -338,18 +341,26 @@ def main() -> None:
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs
-  duplicates = trillium_model_dict.keys() & v5p_model_dict.keys() & v5e_model_dict.keys() & c4_pretrain_model_dict.keys()
+  duplicates = (
+      trillium_model_dict.keys()
+      & v5p_model_dict.keys()
+      & v5e_model_dict.keys()
+      & v7x_model_dict.keys()
+      & c4_pretrain_model_dict.keys()
+  )
   assert len(duplicates) == 0, f"Found duplicate model config {duplicates}"
   libtpu_type = None
   model = None
 
   if options.runner != "healthscan":
-    model = (
-        trillium_model_dict.get(options.model_name)
-        or v5e_model_dict.get(options.model_name)
-        or v5p_model_dict.get(options.model_name)
-        or c4_pretrain_model_dict.get(options.model_name)
+    all_models = (
+        c4_pretrain_model_dict
+        | v5p_model_dict
+        | v5e_model_dict
+        | trillium_model_dict
+        | v7x_model_dict
     )
+    model = all_models[options.model_name]
     match options.libtpu_type:
       case LibTpuType.NIGHTLY.value:
         libtpu_type = LibTpuType.NIGHTLY
@@ -360,7 +371,7 @@ def main() -> None:
 
   # Set up pathways configs
   pw_config = None
-  if getattr(options, "use_pathways", False):
+  if options.runner != "healthscan" and options.use_pathways:
     pw_config = PathwaysConfig(
         server_image=options.pathways_server_image,
         proxy_server_image=options.pathways_proxy_server_image,
@@ -374,7 +385,7 @@ def main() -> None:
     cluster_config = ClusterConfig(
         cluster_name=options.cluster_name,
         project=options.project,
-        zone=options.zone or "",
+        zone=options.zone if options.zone else "",
         location=options.location,
         device_type=options.device_type,
         compute_type=options.compute_type,
