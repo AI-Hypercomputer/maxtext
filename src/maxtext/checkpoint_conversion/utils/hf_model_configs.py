@@ -2544,6 +2544,40 @@ ming_3_0_audio_tiny_dict = {
 }
 ming_3_0_audio_tiny_config = PTConfig(**ming_3_0_audio_tiny_dict)
 
+granite_3_0_1b_a400m_dict = {
+    "architectures": ["GraniteMoeForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "attention_multiplier": 0.015625,
+    "bos_token_id": 0,
+    "embedding_multiplier": 12.0,
+    "eos_token_id": 0,
+    "hidden_act": "silu",
+    "hidden_size": 1024,
+    "initializer_range": 0.02,
+    "intermediate_size": 512,
+    "logits_scaling": 6.0,
+    "max_position_embeddings": 4096,
+    "model_type": "granitemoe",
+    "num_attention_heads": 16,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 24,
+    "num_key_value_heads": 8,
+    "num_local_experts": 32,
+    "output_router_logits": False,
+    "pad_token_id": 0,
+    "position_embedding_type": "rope",
+    "residual_multiplier": 0.22,
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": None,
+    "rope_theta": 10000.0,
+    "router_aux_loss_coef": 0.0,
+    "tie_word_embeddings": True,
+    "use_cache": True,
+    "vocab_size": 49155,
+}
+granite_3_0_1b_a400m_config = PTConfig(**granite_3_0_1b_a400m_dict)
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -2608,4 +2642,5 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
     "ming-3.0-audio-tiny": ming_3_0_audio_tiny_config,
+    "granite-3.0-1b-a400m": granite_3_0_1b_a400m_config,
 }

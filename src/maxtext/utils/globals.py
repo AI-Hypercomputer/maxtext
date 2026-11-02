@@ -102,6 +102,7 @@ HF_IDS = {
     "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
     "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
     "glm5.3-flash": "zai-org/GLM-5.3-Flash",
+    "granite-3.0-1b-a400m": "ibm-granite/granite-3.0-1b-a400m-instruct",
     "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",
     "hy4-preview": "tencent/Hy4-preview",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path

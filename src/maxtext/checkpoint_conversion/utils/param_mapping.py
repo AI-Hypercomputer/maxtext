@@ -56,6 +56,7 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
+from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -5290,6 +5291,7 @@ PARAM_MAPPING = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -5357,6 +5359,7 @@ HOOK_FNS = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {
