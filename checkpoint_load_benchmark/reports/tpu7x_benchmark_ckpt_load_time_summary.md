@@ -86,7 +86,7 @@ TPU v7x (bodaborg-tpu7x-nap), models up to 120B: to_maxtext vs safetensor (safet
 | :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | qwen3-0.6b (1.5 GB Dense) | scanned | 1 (8) | to_maxtext | 15.98 | 19.40 | 2.54 (Load Orbax) | 21.94 | 37.92 | 1.00x (baseline) | — |
 | ↳ | scanned | 1 (8) | safetensor | 15.98 | — | 16.14 (Safetensors+Convert: load 4.47 + transform 11.67; peak host RAM 26.8 GB) | 16.14 | 32.12 | 1.18x / 1.36x | — |
-| qwen3-0.6b (1.5 GB Dense) | scanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A | — |
+| qwen3-0.6b (1.5 GB Dense) | scanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A | Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32)) |
 | ↳ | scanned | 1 (16) | safetensor | 15.98 | — | 18.03 (Safetensors+Convert: load 8.99 + transform 9.00; peak host RAM 38.2 GB) | 18.03 | 34.01 | N/A (to_maxtext not run on this layout) | — |
 | qwen3-0.6b (1.5 GB Dense) | scanned | 2 (16) | to_maxtext | 15.98 | 19.40 | 3.28 (Load Orbax) | 22.68 | 38.66 | 1.00x (baseline) | — |
 | ↳ | scanned | 2 (16) | safetensor | 15.98 | — | 16.13 (Safetensors+Convert: load 7.01 + transform 9.08; peak host RAM 73.6 GB) | 16.13 | 32.11 | 1.20x / 1.41x | — |
@@ -94,7 +94,7 @@ TPU v7x (bodaborg-tpu7x-nap), models up to 120B: to_maxtext vs safetensor (safet
 | ↳ | scanned | 2 (32) | safetensor | 15.98 | — | 19.34 (Safetensors+Convert: load 8.66 + transform 10.67; peak host RAM 78.3 GB) | 19.34 | 35.32 | 1.09x / 1.16x | — |
 | qwen3-0.6b (1.5 GB Dense) | unscanned | 1 (8) | to_maxtext | 15.98 | 66.78 | 3.33 (Load Orbax) | 70.11 | 86.09 | 1.00x (baseline) | — |
 | ↳ | unscanned | 1 (8) | safetensor | 15.98 | — | 6.49 (Safetensors+Convert: load 3.73 + transform 2.75; peak host RAM 26.8 GB) | 6.49 | 22.47 | 3.83x / 10.80x | — |
-| qwen3-0.6b (1.5 GB Dense) | unscanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A | — |
+| qwen3-0.6b (1.5 GB Dense) | unscanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A | Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32)) |
 | ↳ | unscanned | 1 (16) | safetensor | 15.98 | — | 9.61 (Safetensors+Convert: load 6.32 + transform 3.28; peak host RAM 38.0 GB) | 9.61 | 25.59 | N/A (to_maxtext not run on this layout) | — |
 | qwen3-0.6b (1.5 GB Dense) | unscanned | 2 (16) | to_maxtext | 15.98 | 66.78 | 3.38 (Load Orbax) | 70.16 | 86.14 | 1.00x (baseline) | — |
 | ↳ | unscanned | 2 (16) | safetensor | 15.98 | — | 9.46 (Safetensors+Convert: load 4.96 + transform 4.47; peak host RAM 73.4 GB) | 9.46 | 25.44 | 3.39x / 7.42x | — |
@@ -226,7 +226,7 @@ safetensor (with fix): the same configuration re-run with this branch's MaxText 
 Model	Scan Mode	Slices (Devices)	Pipeline	1. HF -> GCS (s)	2. Convert to Orbax (s)	3. Load into MaxText (s)	Total (No Step 1) (s)	Total (End-to-End) (s)	Speedup (E2E / No Step 1)	log
 qwen3-0.6b (1.5 GB Dense)	scanned	1 (8)	to_maxtext	15.98	19.40	2.54 (Load Orbax)	21.94	37.92	1.00x (baseline)	—
 ↳	scanned	1 (8)	safetensor	15.98	—	16.14 (Safetensors+Convert: load 4.47 + transform 11.67; peak host RAM 26.8 GB)	16.14	32.12	1.18x / 1.36x	—
-qwen3-0.6b (1.5 GB Dense)	scanned	1 (16)	to_maxtext	—	Not run on multi-host slices	—	N/A	N/A	N/A	—
+qwen3-0.6b (1.5 GB Dense)	scanned	1 (16)	to_maxtext	—	Not run on multi-host slices	—	N/A	N/A	N/A	Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32))
 ↳	scanned	1 (16)	safetensor	15.98	—	18.03 (Safetensors+Convert: load 8.99 + transform 9.00; peak host RAM 38.2 GB)	18.03	34.01	N/A (to_maxtext not run on this layout)	—
 qwen3-0.6b (1.5 GB Dense)	scanned	2 (16)	to_maxtext	15.98	19.40	3.28 (Load Orbax)	22.68	38.66	1.00x (baseline)	—
 ↳	scanned	2 (16)	safetensor	15.98	—	16.13 (Safetensors+Convert: load 7.01 + transform 9.08; peak host RAM 73.6 GB)	16.13	32.11	1.20x / 1.41x	—
@@ -234,7 +234,7 @@ qwen3-0.6b (1.5 GB Dense)	scanned	2 (32)	to_maxtext	15.98	19.40 (shared with 1 (
 ↳	scanned	2 (32)	safetensor	15.98	—	19.34 (Safetensors+Convert: load 8.66 + transform 10.67; peak host RAM 78.3 GB)	19.34	35.32	1.09x / 1.16x	—
 qwen3-0.6b (1.5 GB Dense)	unscanned	1 (8)	to_maxtext	15.98	66.78	3.33 (Load Orbax)	70.11	86.09	1.00x (baseline)	—
 ↳	unscanned	1 (8)	safetensor	15.98	—	6.49 (Safetensors+Convert: load 3.73 + transform 2.75; peak host RAM 26.8 GB)	6.49	22.47	3.83x / 10.80x	—
-qwen3-0.6b (1.5 GB Dense)	unscanned	1 (16)	to_maxtext	—	Not run on multi-host slices	—	N/A	N/A	N/A	—
+qwen3-0.6b (1.5 GB Dense)	unscanned	1 (16)	to_maxtext	—	Not run on multi-host slices	—	N/A	N/A	N/A	Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32))
 ↳	unscanned	1 (16)	safetensor	15.98	—	9.61 (Safetensors+Convert: load 6.32 + transform 3.28; peak host RAM 38.0 GB)	9.61	25.59	N/A (to_maxtext not run on this layout)	—
 qwen3-0.6b (1.5 GB Dense)	unscanned	2 (16)	to_maxtext	15.98	66.78	3.38 (Load Orbax)	70.16	86.14	1.00x (baseline)	—
 ↳	unscanned	2 (16)	safetensor	15.98	—	9.46 (Safetensors+Convert: load 4.96 + transform 4.47; peak host RAM 73.4 GB)	9.46	25.44	3.39x / 7.42x	—
