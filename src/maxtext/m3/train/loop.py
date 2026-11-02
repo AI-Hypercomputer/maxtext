@@ -34,10 +34,11 @@ mesh are rejected rather than emulated.
 `setup_model` is where infrastructure is composed, in the order every m3
 driver follows:
 
-    construct -> quantize -> optimizer
+    construct -> quantize -> named scopes -> optimizer
 
-Each transform is a function from `maxtext.m3.infra` that reads one config
-field and is a no-op when that field is off. Models never see any of it.
+Each transform is a function from `maxtext.m3.infra`. Named scopes always
+apply; the others read one config field and are a no-op when that field is
+off. Models never see any of it.
 
 Precision follows legacy MaxText: `weight_dtype` (float32 master weights)
 and `dtype` (bfloat16 compute) are applied by the model at construction;
@@ -76,6 +77,7 @@ from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
+from maxtext.m3.infra.named_scopes import add_named_scopes
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 
@@ -97,12 +99,14 @@ def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
 
   Must run inside `jax.set_mesh(mesh)`. Scan comes before quantization, which
   records module paths and so must see the final structure; quantization
-  traces one forward pass of the training shape and comes before the
-  optimizer, which must see the final model.
+  traces one forward pass of the training shape. Named scopes come after both:
+  they only label ops, and scan needs identical layer classes. The optimizer
+  comes last, as it must see the final model.
   """
   model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
   model = m3_scan.maybe_apply_scan(model, config)
   model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
+  model = add_named_scopes(model)
   optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
   return model, optimizer
 
@@ -138,15 +142,17 @@ def make_synthetic_batch(config, mesh: Mesh, key: jax.Array) -> dict[str, jax.Ar
 def loss_fn(model: nnx.Module, batch: dict[str, jax.Array]) -> jax.Array:
   """Mean next-token cross entropy, computed in float32."""
   logits = model(batch["inputs"], batch["positions"])
-  losses = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), batch["targets"])
-  return jnp.mean(losses)
+  with jax.named_scope("cross_entropy"):
+    losses = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), batch["targets"])
+    return jnp.mean(losses)
 
 
 @nnx.jit(donate_argnums=(0, 1))
 def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict[str, jax.Array]) -> jax.Array:
   """One forward/backward/update. Mutates `model` and `optimizer` in place."""
   loss, grads = nnx.value_and_grad(loss_fn)(model, batch)
-  optimizer.update(model, grads)
+  with jax.named_scope("optimizer"):
+    optimizer.update(model, grads)
   return loss
 
 
