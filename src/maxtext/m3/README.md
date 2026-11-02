@@ -35,6 +35,7 @@ m3/
   configs/   # slim Pydantic config types, model configs (e.g. glm5_3_flash_config) + base.yml
   models/    # one directory per model family + create_model dispatch
   train/     # m3's own training loop (one of two supported drivers)
+  diffuser_pipelines/  # diffusion model inference pipelines: checkpoint loading, denoising loop, VAE decode; driven by inference/sample.py
 ```
 
 There is no `layers/` directory: NNX *is* the layer library.
