@@ -150,6 +150,7 @@ class DecodeTests(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_tpu_base(self):
+    # Live CI check of PR #5215: this line touches the test (do not merge).
     decode_main(DecodeTests.CONFIGS["base"])
 
   @pytest.mark.gpu_only
