@@ -75,7 +75,6 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, logical_to_spec, maybe_shard_with_pspec, with_logical_constraint
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
-from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
 
 try:  # pragma: no cover
   from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_kernel
@@ -162,6 +161,21 @@ def validate_gpu_flash_attention(
     )
   if record_max_logits:
     raise NotImplementedError("record_max_logits (QK-Clip) is not supported for GPU flash attention kernels yet.")
+
+
+def _tokamax_gpu_flash_attention():
+  """Returns the Tokamax FlashAttention op for GPU."""
+  # Imported lazily, since the jax-triton kernel needs Triton, which only ships
+  # with tokamax[cuda].
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  try:
+    from tokamax._src.ops.attention import triton as tokamax_triton
+  except ImportError:  # pragma: no cover
+    # TODO(b/532554266): Remove the fallback once the MaxText GPU environment uses tokamax>=0.0.18.
+    from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+
+    return tokamax_pallas_triton.PallasTritonFlashAttention()
+  return tokamax_triton.TritonFlashAttention()
 
 
 def _sinks_to_te_softmax_offset(sinks: Array, num_query_heads: int) -> Array:
@@ -1784,7 +1798,7 @@ class AttentionOp(nnx.Module):
           if decoder_segment_ids is not None:
             seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
             mask = mask & tokamax_attention_base.Mask(seg_mask[:, None, :, :])
-          gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+          gpu_flash_attn = _tokamax_gpu_flash_attention()
           out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
@@ -1860,7 +1874,7 @@ class AttentionOp(nnx.Module):
       mask = tokamax_attention_base.Mask(
           k_end=lengths[..., None],
       )
-      gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+      gpu_flash_attn = _tokamax_gpu_flash_attention()
       local_out, (local_max, local_sum) = gpu_flash_attn(
           q,
           k,
