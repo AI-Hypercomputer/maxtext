@@ -973,9 +973,62 @@ def calculate_engram_tflops(config):
   return learnable_tflops, attention_tflops
 
 
+def calculate_openvla_vision_layers_tflops_per_device(config):
+  """
+  Estimate TFLOPs for the OpenVLA (Prismatic) fused DINOv2 + SigLIP vision backbone and its MLP projector.
+
+  Both timm ViT towers run on the same 224x224 image (one image per example) and are truncated to the
+  second-to-last block (DINOv2 ViT-L/14-reg4: 23 of 24 blocks, 256 patches + cls + 4 registers;
+  SigLIP So400m/14: 26 of 27 blocks, 256 patches). The 256 patch tokens are concatenated on the feature axis
+  (1024 + 1152 = 2176) and projected 2176 -> 8704 -> emb_dim -> emb_dim.
+
+  Returns:
+      total_tflops: Total TFLOPs (fwd + bwd for trainable parts; fwd only for a frozen backbone)
+      learnable_weight_tflops: TFLOPs from weight matmuls (patch embedding, qkv, out proj, MLP, projector)
+      attention_tflops: TFLOPs from attention score / value multiplications
+  """
+  from maxtext.models.openvla_vision import DINOV2_SPEC, SIGLIP_SPEC, OPENVLA_VISION_DIM  # pylint: disable=import-outside-toplevel
+
+  B = config.per_device_batch_size
+  num_patches = DINOV2_SPEC.num_patches  # 256; both towers use the same patch grid
+
+  encoder_weight_flops = 0
+  encoder_attn_flops = 0
+  for spec in (DINOV2_SPEC, SIGLIP_SPEC):
+    seq_len = spec.num_patches + spec.num_prefix_tokens  # 261 (DINOv2) / 256 (SigLIP)
+    d, m = spec.hidden_size, spec.mlp_dim
+    patch_embed_flops = 2 * B * spec.num_patches * (spec.num_channels * spec.patch_size**2) * d
+    qkv_flops = 3 * (2 * B * seq_len * d * d)
+    out_proj_flops = 2 * B * seq_len * d * d
+    mlp_flops = 2 * (2 * B * seq_len * d * m)  # fc1 + fc2 (GELU MLP)
+    attn_flops = 4 * B * seq_len * seq_len * d  # QK^T and AV, non-causal
+    encoder_weight_flops += patch_embed_flops + (qkv_flops + out_proj_flops + mlp_flops) * spec.num_layers
+    encoder_attn_flops += attn_flops * spec.num_layers
+
+  proj_dims = (OPENVLA_VISION_DIM, 4 * OPENVLA_VISION_DIM, config.emb_dim, config.emb_dim)
+  projector_flops = sum(2 * B * num_patches * proj_dims[i] * proj_dims[i + 1] for i in range(3))
+
+  if config.freeze_vision_encoder_params:
+    # Backbone runs forward only (stop_gradient on its output); the projector is trained: fwd + bwd (2x).
+    learnable_weight_flops = encoder_weight_flops + 3 * projector_flops
+    total_attn_flops = encoder_attn_flops
+  else:
+    learnable_weight_flops = 3 * (encoder_weight_flops + projector_flops)
+    total_attn_flops = 3 * encoder_attn_flops
+
+  learnable_weight_tflops = learnable_weight_flops / 1e12
+  total_attn_tflops = total_attn_flops / 1e12
+  total_tflops = learnable_weight_tflops + total_attn_tflops
+  return total_tflops, learnable_weight_tflops, total_attn_tflops
+
+
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
-  if config.model_name.startswith("gemma3"):
+  if config.model_name.startswith("openvla"):
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_openvla_vision_layers_tflops_per_device(
+        config
+    )
+  elif config.model_name.startswith("gemma3"):
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_gemma3_vision_layers_tflops_per_device(
         config
     )

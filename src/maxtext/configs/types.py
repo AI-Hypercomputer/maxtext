@@ -330,6 +330,7 @@ ModelName = Literal[
     "glm5.3-flash",
     "ming-3.0-audio-tiny",
     "hy4-preview",
+    "openvla-7b",
 ]
 
 
@@ -3527,6 +3528,16 @@ class MultimodalGeneral(BaseModel):
   image_size_for_vit: int | list[int] | None = Field(896, description="Input image size for the Vision Transformer.")
   image_path: PathStr = Field("", description="Path to an image for decoding.")
   image_placeholder: str = Field("<|image|>", description="Placeholder string for images in text prompts.")
+  action_unnorm_key: str = Field(
+      "bridge_orig",
+      description="VLA models (e.g. OpenVLA): dataset key of the action normalization statistics used to"
+      " un-normalize decoded action tokens.",
+  )
+  action_norm_stats_path: PathStr = Field(
+      "",
+      description="VLA models: path to a JSON file (or HF model dir with config.json) holding `norm_stats`."
+      " Defaults to `<tokenizer_path>/config.json`.",
+  )
   posemb_type_for_vit: str = Field("learn", description="Positional embedding type for the vision encoder.")
   max_num_images_per_example: int = Field(
       -1,
@@ -5972,6 +5983,7 @@ class MaxTextConfig(
           "weaver-max",
           "weaver-mini-diffuser",
           "ming-3.0-audio-tiny",
+          "openvla-7b",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")

@@ -85,6 +85,13 @@ class VisionEncoder(nnx.Module):
           self, encoder_name, qwen3_vl_vision.Qwen3VLVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
+    elif self.vision_encoder_block == VisionEncoderBlockType.OPENVLA:
+      from maxtext.models import openvla_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "OpenVLAVisionEncoder_0"
+      projector_name = "OpenVLAProjector_0"
+      setattr(self, encoder_name, openvla_vision.OpenVLAVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs))
+      setattr(self, projector_name, openvla_vision.OpenVLAProjector(config=self.config, mesh=self.mesh, rngs=self.rngs))
     else:
       supported_blocks = [block.value for block in VisionEncoderBlockType if block != VisionEncoderBlockType.NONE]
       raise ValueError(

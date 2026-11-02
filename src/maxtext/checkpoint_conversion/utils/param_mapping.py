@@ -5227,6 +5227,138 @@ def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
   return hooks
 
 
+# OpenVLA vision towers: (MaxText module name, HF prefix, number of used blocks, has cls/reg tokens + LayerScale).
+# Prismatic only uses the second-to-last block output, so the last block, the final norm and the SigLIP
+# attention-pool head of the HF checkpoint are intentionally not mapped.
+_OPENVLA_VISION_TOWERS = (
+    ("featurizer", "vision_backbone.featurizer", 23, True),  # DINOv2 ViT-L/14 (24 blocks) + 4 registers
+    ("fused_featurizer", "vision_backbone.fused_featurizer", 26, False),  # SigLIP So400m/14 (27 blocks)
+)
+_OPENVLA_VISION_PREFIX = "params-vision_encoder-OpenVLAVisionEncoder_0"
+_OPENVLA_PROJECTOR_PREFIX = "params-vision_encoder-OpenVLAProjector_0"
+
+
+def OPENVLA_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter names to HF `OpenVLAForActionPrediction` (openvla/openvla-7b) names.
+
+  The Llama-2 decoder reuses the LLaMA mapping with the HF `language_model.` prefix; the vision
+  towers and projector map 1:1 onto `vision_backbone.*` / `projector.*`.
+
+  Args:
+    config (dict): HF OpenVLA config dict (with `text_config`).
+    maxtext_config: MaxText config; `num_decoder_layers` sets the decoder depth (allows mini subsets).
+    scan_layers (bool): whether the MaxText decoder layers are stacked.
+
+  Returns:
+    dict: `atomic_mt_key` -> HF key (unscanned) or list of HF keys (scanned decoder layers).
+  """
+  n_layers = (
+      maxtext_config.num_decoder_layers if maxtext_config is not None else config["text_config"]["num_hidden_layers"]
+  )
+  llama_mapping = LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING({"num_hidden_layers": n_layers}, maxtext_config, scan_layers)
+
+  def _add_prefix(hf_key):
+    return f"language_model.{hf_key}"
+
+  mapping = {
+      mt_key: ([_add_prefix(k) for k in hf_keys] if isinstance(hf_keys, list) else _add_prefix(hf_keys))
+      for mt_key, hf_keys in llama_mapping.items()
+  }
+
+  block_params = [
+      ("norm1-scale", "norm1.weight"),
+      ("norm1-bias", "norm1.bias"),
+      ("attn-qkv-kernel", "attn.qkv.weight"),
+      ("attn-qkv-bias", "attn.qkv.bias"),
+      ("attn-proj-kernel", "attn.proj.weight"),
+      ("attn-proj-bias", "attn.proj.bias"),
+      ("norm2-scale", "norm2.weight"),
+      ("norm2-bias", "norm2.bias"),
+      ("mlp-fc1-kernel", "mlp.fc1.weight"),
+      ("mlp-fc1-bias", "mlp.fc1.bias"),
+      ("mlp-fc2-kernel", "mlp.fc2.weight"),
+      ("mlp-fc2-bias", "mlp.fc2.bias"),
+  ]
+  for mt_tower, hf_tower, n_blocks, is_dino in _OPENVLA_VISION_TOWERS:
+    mt = f"{_OPENVLA_VISION_PREFIX}-{mt_tower}"
+    mapping[f"{mt}-patch_embed-kernel"] = f"{hf_tower}.patch_embed.proj.weight"
+    mapping[f"{mt}-patch_embed-bias"] = f"{hf_tower}.patch_embed.proj.bias"
+    mapping[f"{mt}-pos_embed"] = f"{hf_tower}.pos_embed"
+    if is_dino:
+      mapping[f"{mt}-cls_token"] = f"{hf_tower}.cls_token"
+      mapping[f"{mt}-reg_token"] = f"{hf_tower}.reg_token"
+    for i in range(n_blocks):
+      for mt_name, hf_name in block_params:
+        mapping[f"{mt}-blocks_{i}-{mt_name}"] = f"{hf_tower}.blocks.{i}.{hf_name}"
+      if is_dino:
+        mapping[f"{mt}-blocks_{i}-ls1"] = f"{hf_tower}.blocks.{i}.ls1.scale_factor"
+        mapping[f"{mt}-blocks_{i}-ls2"] = f"{hf_tower}.blocks.{i}.ls2.scale_factor"
+
+  for k in (1, 2, 3):
+    mapping[f"{_OPENVLA_PROJECTOR_PREFIX}-fc{k}-kernel"] = f"projector.fc{k}.weight"
+    mapping[f"{_OPENVLA_PROJECTOR_PREFIX}-fc{k}-bias"] = f"projector.fc{k}.bias"
+  return mapping
+
+
+def OPENVLA_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Bi-directional weight transforms for OpenVLA.
+
+  * Linear kernels: PyTorch (out, in) <-> MaxText (in, out), reshaped to MaxText's head layout
+    (e.g. fused qkv (3*D, D) <-> (D, 3, heads, head_dim), attn proj (D, D) <-> (heads, head_dim, D)).
+  * Llama query kernels are pre-scaled by 1/sqrt(head_dim) (MaxText folds the attention scale into
+    the query weights). No RoPE permutation: MaxText's default `RotaryEmbedding` uses the same
+    rotate-half layout as HF Llama.
+  * Patch-embedding conv: (D, C, kh, kw) <-> (kh, kw, C, D).
+  """
+  n_layers = (
+      maxtext_config.num_decoder_layers if maxtext_config is not None else config["text_config"]["num_hidden_layers"]
+  )
+  head_dim = maxtext_config.head_dim if maxtext_config is not None else 128
+
+  def reshape_kernel(x, target_shape):
+    if saving_to_hf:
+      return x.reshape(np.flip(np.array(target_shape))).T
+    return x.T.reshape(target_shape)
+
+  def scale_query(x, target_shape):
+    del target_shape
+    scale = np.float32(np.sqrt(head_dim)) if saving_to_hf else np.float32(1.0 / np.sqrt(head_dim))
+    return (x.astype(np.float32) * scale).astype(x.dtype)
+
+  def reshape_bias(x, target_shape):
+    return x.reshape(target_shape)
+
+  def patch_kernel(x, target_shape):
+    del target_shape
+    return x.transpose(3, 2, 0, 1) if saving_to_hf else x.transpose(2, 3, 1, 0)
+
+  # to_huggingface applies the chain in order, to_maxtext in reverse.
+  query_chain = [scale_query, reshape_kernel]
+  if not saving_to_hf:
+    query_chain.reverse()
+
+  hooks = {"params-decoder-logits_dense-kernel": reshape_kernel}
+  layer_prefixes = ["params-decoder-layers-"] if scan_layers else [f"params-decoder-layers_{i}-" for i in range(n_layers)]
+  for pref in layer_prefixes:
+    hooks[pref + "self_attention-query-kernel"] = query_chain
+    for name in ("key", "value", "out"):
+      hooks[pref + f"self_attention-{name}-kernel"] = reshape_kernel
+    for name in ("wi_0", "wi_1", "wo"):
+      hooks[pref + f"mlp-{name}-kernel"] = reshape_kernel
+
+  for mt_tower, _, n_blocks, _ in _OPENVLA_VISION_TOWERS:
+    mt = f"{_OPENVLA_VISION_PREFIX}-{mt_tower}"
+    hooks[f"{mt}-patch_embed-kernel"] = patch_kernel
+    for i in range(n_blocks):
+      blk = f"{mt}-blocks_{i}-"
+      for name in ("attn-qkv", "attn-proj", "mlp-fc1", "mlp-fc2"):
+        hooks[blk + f"{name}-kernel"] = reshape_kernel
+      hooks[blk + "attn-qkv-bias"] = reshape_bias
+  for k in (1, 2, 3):
+    hooks[f"{_OPENVLA_PROJECTOR_PREFIX}-fc{k}-kernel"] = reshape_kernel
+  return hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5290,6 +5422,7 @@ PARAM_MAPPING = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "openvla-7b": OPENVLA_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -5357,6 +5490,7 @@ HOOK_FNS = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "openvla-7b": OPENVLA_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {
