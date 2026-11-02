@@ -17,11 +17,13 @@
 
 import collections
 from collections.abc import Iterable
+import contextlib
 import inspect  # for debugging only
 from pathlib import Path
 
 from flax import nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 import jax
 from jax.core import Tracer
 import jax.numpy as jnp
@@ -256,7 +258,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   if spec is None:
     return None
   new_spec = []  # type: ignore
-  for s in spec:
+  for s in spec.partitions:  # a spec carrying reduced/unreduced axes refuses iteration
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
@@ -315,7 +317,7 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   if spec is None or mesh is None or not shape:
     return spec
   new_spec = []
-  for i, s in enumerate(spec):
+  for i, s in enumerate(spec.partitions):  # a tagged spec refuses iteration
     if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)
     else:
@@ -610,7 +612,10 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
     A set of strings, where each string is a mesh axis name used by the
     tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
-  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
+  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')). Read `.partitions`: a spec
+  # carrying reduced/unreduced axes refuses iteration.
+  if isinstance(tensor_sharding_spec, P):
+    tensor_sharding_spec = tensor_sharding_spec.partitions
   tensor_sharding_spec = sum(
       [
           [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
@@ -1077,6 +1082,18 @@ def logical_axis_rules_pp_act_as_dp(logical_rules):
       new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
     new_rules.append((key, new_physical_axes))
   return tuple(new_rules)
+
+
+def pp_act_as_dp_construction_rules(config):
+  """Context to construct the modules that run outside the pipeline, under the PP-as-DP rules they run with.
+
+  Under explicit sharding modules resolve some activation shardings once, at construction (e.g. the RoPE frequency
+  sharding), so a module called under `logical_axis_rules_pp_act_as_dp` must be built under it too. Auto mode leaves
+  those shardings unset (None): no-op.
+  """
+  if config.shard_mode != ShardMode.EXPLICIT or not getattr(config, "using_pipeline_parallelism", False):
+    return contextlib.nullcontext()
+  return flax_logical_axis_rules(logical_axis_rules_pp_act_as_dp(config.logical_axis_rules))
 
 
 def get_formatted_sharding_annotations(params, mesh=None):
