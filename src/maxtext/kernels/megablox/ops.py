@@ -19,6 +19,7 @@
 import dataclasses
 import functools
 from typing import List, Literal, NamedTuple, Tuple
+from absl import logging
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
@@ -1716,6 +1717,8 @@ def gmm_dswiglu_bwd(
     use_gmm_v2_heuristic_tiling: bool = False,
     use_dlhs_transpose_rhs: bool = False,
     dact_pre_act_tile_n: int | None = None,
+    rhs_fp8_scale: jnp.ndarray | None = None,
+    rhs_dtype: jnp.dtype | None = None,
 ):
   """The backward of `lhs_act @ rhs` (per group), lhs_act = silu(gate) * up, with the SwiGLU backward fused.
 
@@ -1728,11 +1731,25 @@ def gmm_dswiglu_bwd(
   gate_up of gmm_silu(fuse_bwd_dswiglu=True), gmm_silu_pre_act_tile_n(its tiling, 2n): the epilogue then reads
   it in that kernel's per-tile [gate_j | up_j] layout. d[gate | up] is contiguous either way.
 
-  Only the bf16 tokamax gmm_v2 path, as gmm_silu: no quantization, partial sums or explicit weight gathers.
+  Only the tokamax gmm_v2 path, as gmm_silu: no quantized activations, partial sums or explicit weight gathers. The
+  weight is bf16, or FP8 codes with rhs_fp8_scale:
+
+  rhs_fp8_scale (fp8_moe_native_bwd_dlhs): rhs is float8_e4m3fn codes with this per-channel [g, 1, n] scale, i.e.
+  the weight dequantize_fp8_codes(rhs, rhs_fp8_scale, rhs_dtype). With use_dlhs_transpose_rhs and fixed tiles the
+  DLHS kernel dequantizes it in VMEM (_dlhs_fp8_native_kwargs); otherwise it is dequantized here first. The results
+  are bit-identical to passing the dequantized weight; drhs is in rhs_dtype.
 
   Returns:
     (d_gate_up, dot, drhs); dot is None without return_dact_dot.
   """
+  native_dlhs = {}
+  if rhs_fp8_scale is not None:
+    rhs_dtype = jnp.dtype(preferred_element_type if rhs_dtype is None else rhs_dtype)
+    if _use_fp8_native_dlhs(use_dlhs_transpose_rhs, use_gmm_v2_heuristic_tiling, tiling, rhs.shape):
+      native_dlhs = _dlhs_fp8_native_kwargs(rhs_fp8_scale, rhs_dtype)
+    else:
+      rhs = dequantize_fp8_codes(rhs, rhs_fp8_scale, rhs_dtype)
+  drhs_dtype = rhs_dtype if rhs_fp8_scale is not None else rhs.dtype
   if use_gmm_v2_heuristic_tiling:
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
@@ -1763,6 +1780,7 @@ def gmm_dswiglu_bwd(
       dact_row_scale=dact_row_scale,
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
+      **native_dlhs,
   )
   drhs = _drhs_run_tokamax_v2(
       dout,
@@ -1770,7 +1788,7 @@ def gmm_dswiglu_bwd(
       group_sizes,
       group_offset,
       rhs.shape[0],
-      rhs.dtype,
+      drhs_dtype,
       tiling,
       use_gmm_v2_heuristic_tiling,
       partial_sum=None,
@@ -1874,3 +1892,589 @@ def _gmm_dswiglu_bwd(preferred_element_type, tiling, heuristic, dlhs_transpose, 
 
 
 _gmm_dswiglu.defvjp(_gmm_dswiglu_fwd, _gmm_dswiglu_bwd)
+
+
+# ==============================================================================
+# fp8_moe_native_fwd: native FP8 forward for the routed experts
+# ==============================================================================
+#
+# With fp8_moe_fake_quant + fp8_fake_quant_hoist=gather8 the trainer gathers each routed-expert weight as
+# float8_e4m3fn codes with a per-(expert, output channel) float32 scale, dequantizes them to bf16 and runs the
+# GMMs in bf16. The ops below take the codes and the scale instead and run the forward GMMs on the MXU in FP8, as
+# the FP8 rollout does: the weight stays in FP8 (its scale is applied to the block accumulator, whose dtype is
+# acc_dtype) and the bf16 activation is quantized to float8_e4m3fn inside the kernel with a dynamic per-row absmax
+# scale (per 512-column block by default; lhs_quant_mode selects other schemes).
+#
+# The backward runs the same bf16 DLHS / TGMM as gmm_silu(fuse_bwd_dswiglu=True) and gmm_dswiglu, at the weight
+# dequantized with dequantize_weight_codes_ste's expression, (codes.astype(float32) * scale).astype(bf16), which is
+# bit-identical to the bf16 weight the bf16 path multiplies by. With native_bwd_dlhs the DLHS dequantizes the codes
+# inside the kernel instead (see below). Only the codes and the scale are saved for the backward (1 byte per weight
+# element instead of 2).
+#
+# `rhs` is the gradient anchor: the bf16 weight the bf16 path would multiply by (in the trainer, the output of
+# dequantize_weight_codes_ste). Its value is not read, so XLA removes the forward dequantization; the weight
+# gradient is returned as its cotangent, and dequantize_weight_codes_ste carries it to the master weight
+# (straight-through, as today). `rhs_codes` and `rhs_scale` get no gradient.
+
+
+def _check_per_channel_scale(scale: jnp.ndarray, name: str):
+  """Raises unless `scale` is a per-(expert, output channel) [g, 1, n] weight scale."""
+  if scale.ndim != 3 or scale.shape[1] != 1:
+    raise ValueError(f"{name}: expected a per-channel [g, 1, n] scale, got {scale.shape}.")
+
+
+def _fp8_rhs_scale(scale: jnp.ndarray) -> jnp.ndarray:
+  """quantize_weight_codes_per_channel's [g, 1, n] scale as gmm_v2's rhs_scale [g, 1, 1, n] (one K block)."""
+  _check_per_channel_scale(scale, "fp8_moe_native_fwd")
+  return scale.astype(jnp.float32)[:, :, None, :]
+
+
+def dequantize_fp8_codes(codes: jnp.ndarray, scale: jnp.ndarray, dtype: jnp.dtype) -> jnp.ndarray:
+  """The weight of `codes` in `dtype`: dequantize_weight_codes_ste's forward expression (also used in the kernel)."""
+  return gmm_v2.dequantize_fp8_codes(codes, scale, dtype)
+
+
+# fp8_moe_native_bwd_dlhs: the backward DLHS (dout @ W^T) reads the codes and dequantizes them inside gmm_v2
+# (rhs_contract_scale): per weight block, in VMEM, with dequantize_fp8_codes' expression, cached across the m tiles
+# of an expert. The matmul is the same bf16 one, so the DLHS is bit-identical to the one at the dequantized weight,
+# without the XLA dequantization of every expert weight (and its bf16 copy in HBM). The TGMM (weight gradient) does
+# not read the weight and is unchanged. Only with the DLHS rhs transpose (the codes' [g, k, n] layout is the
+# kernel's transposed [g, size_n, size_k] rhs, the scale varying along its contraction dim) and fixed tiles (the
+# heuristic tiling would size its tiles for an fp8 rhs).
+
+
+def _use_fp8_native_dlhs(dlhs_transpose: bool, heuristic: bool, tiling, rhs_shape) -> bool:
+  """Whether the DLHS can dequantize the [g, size_n, size_k] codes in the kernel; otherwise they are dequantized first.
+
+  Besides the rhs transpose and fixed tiles, gmm_v2's rhs_contract_scale needs whole [tile_n, tile_k] weight blocks
+  with tile_n % 32 == 0 and tile_k % 128 == 0 (tiling[4], tiling[5] are the DLHS tile_k, tile_n). Called only when
+  fp8_moe_native_bwd_dlhs is requested, so a fallback is logged.
+  """
+  if not dlhs_transpose or heuristic:
+    supported = False
+  else:
+    tile_k, tile_n = tiling[4], tiling[5]
+    size_n, size_k = rhs_shape[1], rhs_shape[2]
+    supported = tile_n % 32 == 0 and tile_k % 128 == 0 and size_n % tile_n == 0 and size_k % tile_k == 0
+  if not supported:
+    logging.warning(
+        "fp8_moe_native_bwd_dlhs: the DLHS falls back to an XLA weight dequantization (dlhs_transpose=%s,"
+        " heuristic_tiling=%s, tiling=%s, rhs_shape=%s); it needs the DLHS rhs transpose, fixed tiles and whole"
+        " [tile_n, tile_k] blocks with tile_n %% 32 == 0 and tile_k %% 128 == 0.",
+        dlhs_transpose,
+        heuristic,
+        tiling,
+        rhs_shape,
+    )
+  return supported
+
+
+def _dlhs_fp8_native_kwargs(rhs_scale: jnp.ndarray, rhs_dtype) -> dict:
+  """gmm_v2 kwargs of a transpose_rhs DLHS whose rhs is the codes of the per-channel [g, 1, n] rhs_scale."""
+  _check_per_channel_scale(rhs_scale, "fp8_moe_native_bwd_dlhs")
+  return {"rhs_contract_scale": rhs_scale, "rhs_dequant_dtype": jnp.dtype(rhs_dtype)}
+
+
+def _check_fp8_rhs(rhs, rhs_codes, rhs_scale, name):
+  """Raises unless rhs_codes are float8_e4m3fn of the anchor's shape with a matching [g, 1, n] scale."""
+  if rhs.shape != rhs_codes.shape:
+    raise ValueError(f"{name}: anchor {rhs.shape} and codes {rhs_codes.shape} must have the same shape.")
+  if rhs_codes.dtype != jnp.float8_e4m3fn:
+    raise ValueError(f"{name}: rhs_codes must be float8_e4m3fn, got {rhs_codes.dtype}.")
+  if rhs_scale.shape != (rhs_codes.shape[0], 1, rhs_codes.shape[2]):
+    raise ValueError(f"{name}: rhs_scale must be [g, 1, n] = {(rhs_codes.shape[0], 1, rhs_codes.shape[2])}.")
+
+
+def _acc_kwargs(acc_dtype):
+  """gmm_v2's acc_dtype kwarg, passed only when set: None keeps its default (bf16 when lhs is quantized)."""
+  return {} if acc_dtype is None else {"acc_dtype": jnp.dtype(acc_dtype)}
+
+
+_LHS_QUANT_MODES: dict[str, dict] = {
+    "": {},
+    "block512_bf16": {},
+    "block512_bf16_rhs1": {"rhs_scale_first": True},
+    "block512_f32": {"lhs_f32_scale": True},
+    "block512_f32_hoist": {"lhs_f32_scale": True, "lhs_hoist_quant": True},
+    "fullk_bf16": {"lhs_quant_block_size": 0},
+    "fullk_bf16_hoist": {"lhs_quant_block_size": 0, "lhs_hoist_quant": True},
+    "fullk_f32": {"lhs_quant_block_size": 0, "lhs_f32_scale": True},
+    "fullk_f32_hoist": {"lhs_quant_block_size": 0, "lhs_f32_scale": True, "lhs_hoist_quant": True},
+}
+
+
+def _lhs_quant_kwargs(lhs_quant_mode: str) -> dict:
+  """gmm_v2's in-kernel lhs quantization kwargs for an lhs_quant_mode (fp8_moe_native_fwd uses "fullk_f32")."""
+  if lhs_quant_mode not in _LHS_QUANT_MODES:
+    raise ValueError(f"Unknown lhs_quant_mode {lhs_quant_mode!r}; expected one of {list(_LHS_QUANT_MODES)}.")
+  return _LHS_QUANT_MODES[lhs_quant_mode]
+
+
+def gmm_silu_fp8(
+    lhs: jnp.ndarray,
+    rhs: jnp.ndarray,
+    rhs_codes: jnp.ndarray,
+    rhs_scale: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    group_offset: jnp.ndarray | int | None = None,
+    use_gmm_v2_heuristic_tiling: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
+    fuse_dlhs_scale: bool = False,
+    fuse_3d_dlhs_ps: bool = False,
+    fwd_rhs_buffer_count: int | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    lhs_quant_mode: str = "",
+    native_bwd_dlhs: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """gmm_silu(fuse_bwd_dswiglu=True) with an FP8 forward: returns (act, gate_up).
+
+  rhs: the bf16 [g, k, 2n] gradient anchor (not read); rhs_codes: its float8_e4m3fn codes; rhs_scale: [g, 1, 2n].
+  Same contract as gmm_silu(fuse_bwd_dswiglu=True): the caller stops act's gradient and routes it through
+  gate_up.
+
+  acc_dtype: gmm_v2's accumulator across K blocks (None: the kernel default). lhs_quant_mode: the in-kernel lhs
+  quantization scheme, a key of _LHS_QUANT_MODES (fp8_moe_native_fwd passes "fullk_f32"). native_bwd_dlhs
+  (fp8_moe_native_bwd_dlhs): the backward DLHS dequantizes the codes inside the kernel (same values). The other
+  arguments are gmm_silu's.
+  """
+  if isinstance(lhs, qpl.QArray) or lhs.ndim != 2 or rhs.ndim != 3:
+    raise NotImplementedError("gmm_silu_fp8: plain 2D lhs and [g, k, 2n] rhs only.")
+  _check_fp8_rhs(rhs, rhs_codes, rhs_scale, "gmm_silu_fp8")
+  return _gmm_silu_fp8(
+      lhs,
+      rhs,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tuple(tiling),
+      use_gmm_v2_heuristic_tiling,
+      use_dlhs_transpose_rhs,
+      fuse_dlhs_scale,
+      fuse_3d_dlhs_ps,
+      fwd_rhs_buffer_count,
+      None if acc_dtype is None else jnp.dtype(acc_dtype),
+      jnp.dtype(rhs.dtype),
+      lhs_quant_mode,
+      bool(native_bwd_dlhs),
+  )
+
+
+def _gmm_silu_fp8_kernel(
+    lhs,
+    rhs_codes,
+    rhs_scale,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    return_pre_act,
+    rhs_buffer_count,
+    acc_dtype,
+    lhs_quant_mode="",
+):
+  """_gmm_silu_kernel with FP8 weights (codes + per-channel scale) and in-kernel FP8 lhs quantization."""
+  if heuristic:
+    tile_info = gmm_v2.calculate_tiling
+  else:
+    tile_n = gmm_silu_pre_act_tile_n(tiling, rhs_codes.shape[-1])
+    tile_info = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tile_n)
+  buffering = {} if rhs_buffer_count is None else {"rhs_buffer_count": rhs_buffer_count}
+  return gmm_v2.gmm_v2(
+      lhs=lhs,
+      rhs=rhs_codes,
+      group_sizes=group_sizes,
+      rhs_scale=_fp8_rhs_scale(rhs_scale),
+      tile_info=tile_info,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+      maybe_quantize_lhs=True,
+      fuse_act="silu",
+      return_pre_act=return_pre_act,
+      **buffering,
+      **_acc_kwargs(acc_dtype),
+      **_lhs_quant_kwargs(lhs_quant_mode),
+  )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
+def _gmm_silu_fp8(
+    lhs,
+    rhs,
+    rhs_codes,
+    rhs_scale,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    fuse_scale,
+    fuse_3d,
+    fwd_rhs_buffer_count,
+    acc_dtype,
+    rhs_dtype,
+    lhs_quant_mode,
+    native_bwd_dlhs,
+):
+  """gmm_silu_fp8 when not differentiated: the activation, and a zero gate_up placeholder XLA removes."""
+  del rhs, dlhs_transpose, fuse_scale, fuse_3d, rhs_dtype, native_bwd_dlhs
+  act = _gmm_silu_fp8_kernel(
+      lhs,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tiling,
+      heuristic,
+      return_pre_act=False,
+      rhs_buffer_count=fwd_rhs_buffer_count,
+      acc_dtype=acc_dtype,
+      lhs_quant_mode=lhs_quant_mode,
+  )
+  return act, jnp.zeros((lhs.shape[0], rhs_codes.shape[-1]), dtype=preferred_element_type)
+
+
+def _gmm_silu_fp8_fwd(
+    lhs,
+    rhs,
+    rhs_codes,
+    rhs_scale,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    fuse_scale,
+    fuse_3d,
+    fwd_rhs_buffer_count,
+    acc_dtype,
+    rhs_dtype,
+    lhs_quant_mode,
+    native_bwd_dlhs,
+):
+  """Differentiated: (act, gate_up) from the FP8 kernel; saves the codes and scale, not the bf16 weight."""
+  del rhs, dlhs_transpose, fuse_scale, fuse_3d, rhs_dtype, native_bwd_dlhs
+  act, gate_up = _gmm_silu_fp8_kernel(
+      lhs,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tiling,
+      heuristic,
+      return_pre_act="concat",
+      rhs_buffer_count=fwd_rhs_buffer_count,
+      acc_dtype=acc_dtype,
+      lhs_quant_mode=lhs_quant_mode,
+  )
+  return (act, gate_up), (lhs, rhs_codes, rhs_scale, group_sizes, group_offset)
+
+
+def _gmm_silu_fp8_bwd(
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    fuse_scale,
+    fuse_3d,
+    fwd_rhs_buffer_count,
+    acc_dtype,
+    rhs_dtype,
+    lhs_quant_mode,
+    native_bwd_dlhs,
+    residual,
+    grad_out,
+):
+  """_gmm_silu_dswiglu_bwd at the dequantized bf16 weight; the weight gradient goes to the anchor."""
+  del acc_dtype, lhs_quant_mode
+  lhs, rhs_codes, rhs_scale, group_sizes, group_offset = residual
+  if native_bwd_dlhs and _use_fp8_native_dlhs(dlhs_transpose, heuristic, tiling, rhs_codes.shape):
+    # fp8_moe_native_bwd_dlhs: _gmm_silu_dswiglu_bwd's _gmm_bwd (no quantization, partial sums or 3D layouts:
+    # _dlhs_run_tokamax_v2 and _compute_drhs reduce to these two calls) with the codes dequantized in the DLHS.
+    _, d_gate_up = grad_out
+    grad = d_gate_up.astype(preferred_element_type)
+    dlhs = gmm_v2.gmm_v2(
+        lhs=grad,
+        rhs=rhs_codes,
+        group_sizes=group_sizes,
+        rhs_scale=None,
+        partial_sum=None,
+        tile_info=gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5]),
+        preferred_element_type=lhs.dtype,
+        group_offset=group_offset,
+        lhs_scale=None,
+        transpose_rhs=True,
+        maybe_quantize_lhs=True,
+        zero_initialize=True,
+        out_is_3d=False,
+        **_dlhs_fp8_native_kwargs(rhs_scale, rhs_dtype),
+    )
+    drhs = _drhs_run_tokamax_v2(
+        grad,
+        lhs,
+        group_sizes,
+        group_offset,
+        rhs_codes.shape[0],
+        rhs_dtype,
+        tiling,
+        heuristic,
+        partial_sum=None,
+    )
+    return dlhs, drhs, None, None, None, None
+  rhs = dequantize_fp8_codes(rhs_codes, rhs_scale, rhs_dtype)
+  dlhs, drhs, _, _ = _gmm_silu_dswiglu_bwd(
+      preferred_element_type,
+      tiling,
+      heuristic,
+      dlhs_transpose,
+      fuse_scale,
+      fuse_3d,
+      fwd_rhs_buffer_count,
+      (lhs, rhs, group_sizes, group_offset),
+      grad_out,
+  )
+  return dlhs, drhs, None, None, None, None
+
+
+_gmm_silu_fp8.defvjp(_gmm_silu_fp8_fwd, _gmm_silu_fp8_bwd)
+
+
+def gmm_dswiglu_fp8(
+    lhs_act: jnp.ndarray,
+    gate_up: jnp.ndarray,
+    rhs: jnp.ndarray,
+    rhs_codes: jnp.ndarray,
+    rhs_scale: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    group_offset: jnp.ndarray | int | None = None,
+    use_gmm_v2_heuristic_tiling: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
+    dact_pre_act_tile_n: int | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    lhs_quant_mode: str = "",
+    native_bwd_dlhs: bool = False,
+) -> jnp.ndarray:
+  """gmm_dswiglu with an FP8 forward. rhs: the bf16 [g, k, n] anchor (not read); rhs_codes / rhs_scale [g, 1, n].
+
+  Same contract as gmm_dswiglu: the backward returns d[gate | up] and a zero cotangent for lhs_act.
+
+  acc_dtype, lhs_quant_mode and native_bwd_dlhs: as in gmm_silu_fp8. The other arguments are gmm_dswiglu's.
+  """
+  _check_fp8_rhs(rhs, rhs_codes, rhs_scale, "gmm_dswiglu_fp8")
+  return _gmm_dswiglu_fp8(
+      lhs_act,
+      gate_up,
+      rhs,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tuple(tiling),
+      use_gmm_v2_heuristic_tiling,
+      use_dlhs_transpose_rhs,
+      dact_pre_act_tile_n,
+      None if acc_dtype is None else jnp.dtype(acc_dtype),
+      jnp.dtype(rhs.dtype),
+      lhs_quant_mode,
+      bool(native_bwd_dlhs),
+  )
+
+
+def _gmm_fp8_fwd_kernel(
+    lhs,
+    rhs_codes,
+    rhs_scale,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    acc_dtype,
+    lhs_quant_mode="",
+    rhs_buffer_count=None,
+):
+  """gmm's tokamax gmm_v2 forward with FP8 weights and in-kernel FP8 lhs quantization."""
+  if heuristic:
+    tile_info = gmm_v2.calculate_tiling
+  else:
+    tile_info = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
+  buffering = {} if rhs_buffer_count is None else {"rhs_buffer_count": rhs_buffer_count}
+  return gmm_v2.gmm_v2(
+      lhs=lhs,
+      rhs=rhs_codes,
+      group_sizes=group_sizes,
+      rhs_scale=_fp8_rhs_scale(rhs_scale),
+      tile_info=tile_info,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+      maybe_quantize_lhs=True,
+      **buffering,
+      **_acc_kwargs(acc_dtype),
+      **_lhs_quant_kwargs(lhs_quant_mode),
+  )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15))
+def _gmm_dswiglu_fp8(
+    lhs_act,
+    gate_up,
+    rhs,
+    rhs_codes,
+    rhs_scale,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    pre_act_tile_n,
+    acc_dtype,
+    rhs_dtype,
+    lhs_quant_mode,
+    native_bwd_dlhs,
+):
+  """gmm_dswiglu_fp8 when not differentiated: the FP8 forward."""
+  del gate_up, rhs, dlhs_transpose, pre_act_tile_n, rhs_dtype, native_bwd_dlhs
+  return _gmm_fp8_fwd_kernel(
+      lhs_act,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tiling,
+      heuristic,
+      acc_dtype,
+      lhs_quant_mode,
+  )
+
+
+def _gmm_dswiglu_fp8_fwd(
+    lhs_act,
+    gate_up,
+    rhs,
+    rhs_codes,
+    rhs_scale,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    pre_act_tile_n,
+    acc_dtype,
+    rhs_dtype,
+    lhs_quant_mode,
+    native_bwd_dlhs,
+):
+  """Differentiated: the FP8 forward; saves the FP8 weight and scale (not a bf16 copy) for the backward."""
+  del rhs, dlhs_transpose, pre_act_tile_n, rhs_dtype, native_bwd_dlhs
+  out = _gmm_fp8_fwd_kernel(
+      lhs_act,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tiling,
+      heuristic,
+      acc_dtype,
+      lhs_quant_mode,
+  )
+  return out, (lhs_act, gate_up, rhs_codes, rhs_scale, group_sizes, group_offset)
+
+
+def _gmm_dswiglu_fp8_bwd(
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    pre_act_tile_n,
+    acc_dtype,
+    rhs_dtype,
+    lhs_quant_mode,
+    native_bwd_dlhs,
+    residual,
+    grad,
+):
+  """_gmm_dswiglu_bwd at the dequantized bf16 weight; the weight gradient goes to the anchor."""
+  del acc_dtype, lhs_quant_mode
+  lhs_act, gate_up, rhs_codes, rhs_scale, group_sizes, group_offset = residual
+  if native_bwd_dlhs:
+    # fp8_moe_native_bwd_dlhs: _gmm_dswiglu_bwd with the codes (gmm_dswiglu_bwd dequantizes them in the DLHS).
+    d_gate_up, _, drhs = gmm_dswiglu_bwd(
+        grad,
+        lhs_act,
+        rhs_codes,
+        group_sizes,
+        group_offset,
+        preferred_element_type,
+        tiling,
+        gate_up,
+        use_gmm_v2_heuristic_tiling=heuristic,
+        use_dlhs_transpose_rhs=dlhs_transpose,
+        dact_pre_act_tile_n=pre_act_tile_n,
+        rhs_fp8_scale=rhs_scale,
+        rhs_dtype=rhs_dtype,
+    )
+    return jnp.zeros_like(lhs_act), d_gate_up, drhs, None, None, None, None
+  rhs = dequantize_fp8_codes(rhs_codes, rhs_scale, rhs_dtype)
+  d_lhs_act, d_gate_up, drhs, _, _ = _gmm_dswiglu_bwd(
+      preferred_element_type,
+      tiling,
+      heuristic,
+      dlhs_transpose,
+      pre_act_tile_n,
+      (lhs_act, gate_up, rhs, group_sizes, group_offset),
+      grad,
+  )
+  return d_lhs_act, d_gate_up, drhs, None, None, None, None
+
+
+_gmm_dswiglu_fp8.defvjp(_gmm_dswiglu_fp8_fwd, _gmm_dswiglu_fp8_bwd)
+
+
+def gmm_fp8_forward(
+    lhs: jnp.ndarray,
+    rhs_codes: jnp.ndarray,
+    rhs_scale: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    group_offset: jnp.ndarray | int | None = None,
+    use_gmm_v2_heuristic_tiling: bool = False,
+    acc_dtype: jnp.dtype | None = None,
+    lhs_quant_mode: str = "",
+    fwd_rhs_buffer_count: int | None = None,
+) -> jnp.ndarray:
+  """The FP8 forward of gmm (no VJP): for callers that own the backward (ring_ragged_unsort_down_projection).
+
+  rhs_codes: float8_e4m3fn [g, k, n]; rhs_scale: [g, 1, n]. acc_dtype and lhs_quant_mode: as in gmm_silu_fp8;
+  fwd_rhs_buffer_count: gmm_v2's rhs_buffer_count. The other arguments are gmm's.
+  """
+  if rhs_codes.dtype != jnp.float8_e4m3fn:
+    raise ValueError(f"gmm_fp8_forward: rhs_codes must be float8_e4m3fn, got {rhs_codes.dtype}.")
+  return _gmm_fp8_fwd_kernel(
+      lhs,
+      rhs_codes,
+      rhs_scale,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tuple(tiling),
+      use_gmm_v2_heuristic_tiling,
+      None if acc_dtype is None else jnp.dtype(acc_dtype),
+      lhs_quant_mode,
+      fwd_rhs_buffer_count,
+  )
