@@ -20,6 +20,7 @@ import unittest
 from unittest import mock
 
 from benchmarks import benchmark_runner
+from benchmarks import maxtext_ctk_runner
 from benchmarks import maxtext_trillium_model_configs as trillium_configs
 from benchmarks import maxtext_v5p_model_configs as v5p_configs
 from benchmarks.ctk_configs import ClusterConfig
@@ -28,6 +29,7 @@ from benchmarks.maxtext_ctk_runner import (
     PathwaysConfig,
     WorkloadConfig,
     generate_workload_cmd,
+    generate_workload_command,
     wait_for_workload_completion,
 )
 from benchmarks.recipes import args_helper
@@ -318,7 +320,9 @@ class CtkRunnerTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "Invalid mount specification 'legacy_storage_name'"):
       generate_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
-  @mock.patch("benchmarks.maxtext_ctk_runner.run_command_with_updates", return_value=0)
+  @mock.patch.object(
+      maxtext_ctk_runner, "run_command_with_updates", return_value=0
+  )
   def test_wait_for_workload_completion(self, mock_run_cmd):
     cluster_config = ClusterConfig(
         cluster_name="v6e-cluster",
@@ -370,8 +374,8 @@ class CtkRunnerTest(unittest.TestCase):
     self.assertEqual(options.location, "us-central2")
     self.assertEqual(options.pathways_runner_image, "us-docker.pkg.dev/path/to/runner")
 
-  @mock.patch("benchmarks.recipes.args_helper.subprocess.check_output")
-  @mock.patch("benchmarks.recipes.args_helper.os.system", return_value=0)
+  @mock.patch.object(args_helper.subprocess, "check_output")
+  @mock.patch.object(args_helper.os, "system", return_value=0)
   def test_args_helper_delete_uses_gcluster_cancel(self, mock_system, mock_check_output):
     cluster_config = ClusterConfig(
         cluster_name="v6e-cluster",
@@ -402,6 +406,187 @@ class CtkRunnerTest(unittest.TestCase):
     ret = args_helper._handle_delete(cluster_config, user="alice")  # pylint: disable=protected-access
     self.assertEqual(ret, 1)
     mock_system.assert_not_called()
+
+  def test_workload_config_tpu7x_by_topology(self):
+    cluster_config = ClusterConfig(
+        cluster_name="tpu7x-cluster",
+        project="my-project",
+        zone="us-central1-a",
+        device_type="tpu7x-4x8x8",
+    )
+    wl_config = WorkloadConfig(
+        model=trillium_configs.llama2_70b_4096,
+        num_slices=1,
+        device_type="tpu7x-4x8x8",
+        base_output_directory="gs://my-bucket/tpu7x",
+        base_docker_image="gcr.io/my-project/runner:latest",
+        libtpu_type=LibTpuType.MAXTEXT,
+        generate_metrics_and_upload_to_big_query=False,
+    )
+    self.assertEqual(wl_config.topology, "4x8x8")
+    self.assertEqual(wl_config.num_devices_per_slice, 512)
+    self.assertEqual(wl_config.compute_type, "tpu7x-8")
+    self.assertEqual(wl_config.hardware_id, "tpu7x")
+
+    self.assertIs(generate_workload_command, generate_workload_cmd)
+    cmd, _ = generate_workload_command(
+        cluster_config=cluster_config,
+        wl_config=wl_config,
+        workload_name="tpu7x-job",
+    )
+    self.assertIn("--compute-type=tpu7x-8", cmd)
+    self.assertIn("--topology=4x8x8", cmd)
+
+  def test_workload_config_tpu7x_by_size(self):
+    cluster_config = ClusterConfig(
+        cluster_name="tpu7x-cluster",
+        project="my-project",
+        zone="us-central1-a",
+        device_type="tpu7x-512",
+    )
+    wl_config = WorkloadConfig(
+        model=trillium_configs.llama2_70b_4096,
+        num_slices=1,
+        device_type="tpu7x-512",
+        base_output_directory="gs://my-bucket/tpu7x",
+        base_docker_image="gcr.io/my-project/runner:latest",
+        libtpu_type=LibTpuType.MAXTEXT,
+        generate_metrics_and_upload_to_big_query=False,
+    )
+    self.assertEqual(wl_config.topology, "4x8x8")
+    self.assertEqual(wl_config.num_devices_per_slice, 512)
+    self.assertEqual(wl_config.compute_type, "tpu7x-8")
+    self.assertEqual(wl_config.hardware_id, "tpu7x")
+
+    cmd, _ = generate_workload_cmd(
+        cluster_config=cluster_config,
+        wl_config=wl_config,
+        workload_name="tpu7x-job",
+    )
+    self.assertIn("--compute-type=tpu7x-8", cmd)
+    self.assertIn("--topology=4x8x8", cmd)
+
+  def test_workload_config_tpu7x_global_batch_size_metrics(self):
+    custom_model = trillium_configs.MaxTextModel(
+        model_name="custom-model",
+        model_type="custom",
+        tuning_params={"per_device_batch_size": 16},
+        xla_flags="",
+    )
+    wl_config = WorkloadConfig(
+        model=custom_model,
+        num_slices=1,
+        device_type="tpu7x-512",
+        base_output_directory="gs://my-bucket/tpu7x",
+        base_docker_image="gcr.io/my-project/runner:latest",
+        libtpu_type=LibTpuType.MAXTEXT,
+        generate_metrics_and_upload_to_big_query=True,
+    )
+    cluster_config = ClusterConfig(
+        cluster_name="tpu7x-cluster",
+        project="my-project",
+        zone="us-central1-a",
+        device_type="tpu7x-512",
+    )
+    cmd, _ = generate_workload_cmd(
+        cluster_config=cluster_config, wl_config=wl_config
+    )
+    self.assertIn("--global_batch_size=8192", cmd)
+    self.assertIn("--number_of_chips=512", cmd)
+
+  def test_workload_config_tpu7x_validation_errors(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported tpu7x size: 999"):
+      WorkloadConfig(
+          model=trillium_configs.llama2_70b_4096,
+          num_slices=1,
+          device_type="tpu7x-999",
+          base_output_directory="gs://my-bucket/tpu7x",
+          base_docker_image="gcr.io/my-project/runner:latest",
+          libtpu_type=LibTpuType.MAXTEXT,
+          generate_metrics_and_upload_to_big_query=False,
+      )
+
+    with self.assertRaisesRegex(
+        ValueError, "Unsupported tpu7x device_type: tpu7x-invalid"
+    ):
+      WorkloadConfig(
+          model=trillium_configs.llama2_70b_4096,
+          num_slices=1,
+          device_type="tpu7x-invalid",
+          base_output_directory="gs://my-bucket/tpu7x",
+          base_docker_image="gcr.io/my-project/runner:latest",
+          libtpu_type=LibTpuType.MAXTEXT,
+          generate_metrics_and_upload_to_big_query=False,
+      )
+
+  def test_generate_workload_cmd_reservation(self):
+    cluster_config_with_res = ClusterConfig(
+        cluster_name="v6e-cluster",
+        project="my-project",
+        location="us-east5",
+        device_type="v6e-256",
+        reservation="my-reservation-name",
+    )
+    wl_config = WorkloadConfig(
+        model=trillium_configs.llama2_70b_4096,
+        num_slices=1,
+        device_type="v6e-256",
+        base_output_directory="gs://my-bucket/outputs",
+        base_docker_image="gcr.io/my-project/runner:latest",
+        libtpu_type=LibTpuType.MAXTEXT,
+        generate_metrics_and_upload_to_big_query=False,
+    )
+    cmd_with_res, _ = generate_workload_cmd(
+        cluster_config=cluster_config_with_res,
+        wl_config=wl_config,
+    )
+    self.assertIn("--reservation=my-reservation-name", cmd_with_res)
+
+    cluster_config_no_res = ClusterConfig(
+        cluster_name="v6e-cluster",
+        project="my-project",
+        location="us-east5",
+        device_type="v6e-256",
+        reservation=None,
+    )
+    cmd_no_res, _ = generate_workload_cmd(
+        cluster_config=cluster_config_no_res,
+        wl_config=wl_config,
+    )
+    self.assertNotIn("--reservation", cmd_no_res)
+
+  def test_generate_workload_cmd_prefix_preservation(self):
+    cluster_config = ClusterConfig(
+        cluster_name="v6e-cluster",
+        project="my-project",
+        location="us-east5",
+        device_type="v6e-256",
+    )
+    wl_config = WorkloadConfig(
+        model=trillium_configs.llama2_70b_4096,
+        num_slices=1,
+        device_type="v6e-256",
+        base_output_directory="gs://my-bucket/outputs",
+        base_docker_image="gcr.io/my-project/runner:latest",
+        libtpu_type=LibTpuType.MAXTEXT,
+        generate_metrics_and_upload_to_big_query=False,
+    )
+    _, name_ranran = generate_workload_cmd(
+        cluster_config=cluster_config,
+        wl_config=wl_config,
+        user="ranran",
+        temp_key="k1",
+    )
+    self.assertTrue(name_ranran.startswith("ranran-"))
+
+    _, name_standard = generate_workload_cmd(
+        cluster_config=cluster_config,
+        wl_config=wl_config,
+        user="testuser",
+        temp_key="k2",
+    )
+    self.assertTrue(name_standard.startswith("tes-"))
+    self.assertFalse(name_standard.startswith("testuser-"))
 
 
 if __name__ == "__main__":

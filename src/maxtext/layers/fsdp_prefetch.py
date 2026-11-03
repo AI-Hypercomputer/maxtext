@@ -44,12 +44,15 @@ from maxtext.common.common_types import ShardMode
 from maxtext.utils import max_logging, maxtext_utils_nnx, sharding
 
 
-def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
+def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False, s=None):
   """All-gathers `w` over the FSDP mesh axes by resharding it to its FSDP-stripped sharding.
 
   Leaves without a NamedSharding are returned unchanged.
   """
   w_sharding = getattr(jax.typeof(w), "sharding", None) or getattr(w, "sharding", None)
+  has_spec = isinstance(w_sharding, NamedSharding)
+  has_spec = has_spec and w_sharding.spec is not None and any(w_sharding.spec)
+  w_sharding = s if s is not None and not has_spec else w_sharding
   if not isinstance(w_sharding, NamedSharding) or w_sharding.spec is None:
     return w
   src_sharding = NamedSharding(mesh, w_sharding.spec)
@@ -241,7 +244,9 @@ _PrefetchCtx = collections.namedtuple(
         "remat_policy",
         "prevent_cse",
         "defer_grad_reduce_scatter",
+        "capture_intermediates",
     ],
+    defaults=(False,),
 )
 
 # Primitives that pass their (single) operand through unchanged. A remat residual produced only by a
@@ -375,7 +380,15 @@ def _log_saved_residuals(layout, w):
     )
 
 
-def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx):
+def _prefetch_setup(
+    graphdef,
+    params_leaves,
+    state_leaves,
+    diff_args_leaves,
+    diff_kwargs_leaves,
+    ctx,
+    capture_intermediates: bool = False,
+):
   """Rebuilds params/state and returns (params, state, gather_fn, rs_fn, layout_fn, fwd_layer, layer_vjp_fn).
 
   `layout_fn(y, w, layer_state)` returns the `_ResidualLayout` of one layer (None for full remat).
@@ -384,6 +397,7 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   layer_state, g, saved, layout) -> (dy, dw)` differentiates one layer in the backward pass from
   those activations and the gathered weights `w`, recomputing everything else.
   """
+  orig_params = jax.tree_util.tree_unflatten(ctx.params_treedef, params_leaves)
   if ctx.scan_axis != 0:
     params_leaves = [
         jnp.moveaxis(p, ctx.scan_axis, 0) if getattr(p, "ndim", 0) > ctx.scan_axis else p for p in params_leaves
@@ -391,6 +405,16 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   params = jax.tree_util.tree_unflatten(ctx.params_treedef, params_leaves)
   state = jax.tree_util.tree_unflatten(ctx.state_treedef, state_leaves)
   layer_shardings = [_per_layer_sharding(p, ctx.mesh) for p in params_leaves]
+  if mesh_uses_fsdp(ctx.mesh):
+    ns_tree = sharding.nnx_construct_named_sharding(orig_params, ctx.mesh)
+    items = zip(params_leaves, layer_shardings, jax.tree.leaves(ns_tree))
+    for i, (p, s, ns) in enumerate(items):
+      has_s = s is not None and s.spec is not None and any(s.spec)
+      if not has_s and isinstance(ns, NamedSharding) and any(ns.spec):
+        spec = tuple(ns.spec)
+        ax = ctx.scan_axis if p.ndim > ctx.scan_axis else 0
+        pspec = jax.sharding.PartitionSpec(*(spec[:ax] + spec[ax + 1 :]))
+        layer_shardings[i] = NamedSharding(ctx.mesh, pspec)
   consts = (tuple(diff_args_leaves), tuple(diff_kwargs_leaves))
 
   pin_layout_flags = [_needs_minor_dim_layout_pin(p, s, ctx.mesh) for p, s in zip(params_leaves, layer_shardings)]
@@ -399,8 +423,9 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
     """All-gathers one layer's FSDP-sharded params (bf16[E, D/fsdp, F] -> bf16[E, D, F])."""
     leaves, treedef = jax.tree_util.tree_flatten(layer_params)
     out = []
-    for x, pin in zip(leaves, pin_layout_flags):
-      x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding)
+    for x, s, pin in zip(leaves, layer_shardings, pin_layout_flags):
+      dbg = ctx.debug_sharding
+      x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, dbg, s)
       if pin:
         # 3D+ weights gathered on their minor-most dimension (e.g. [E, F, D/fsdp] where D/fsdp is not a
         # multiple of 128) exit all-gather in layout {1, 0, 2}. Pinning only those weights to default
@@ -422,7 +447,10 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
     layer_weights, layer_state = maxtext_utils_nnx.nnx_remove_scan_axis((layer_weights, layer_state), "layers")
     layer = nnx.merge(graphdef, layer_weights, layer_state)
     out = layer(y, *args_tuple, **kwargs)
-    return out[0] if isinstance(out, tuple) else out
+    y_out = out[0] if isinstance(out, tuple) else out
+    if capture_intermediates:
+      return y_out, nnx.state(layer, nnx.Intermediate)
+    return y_out
 
   def layer_fn(y, layer_weights, layer_state):
     return layer_pure(y, layer_weights, layer_state, consts)
@@ -486,12 +514,12 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
     out, vjp_fn = jax.vjp(lambda y_, w_: remat_layer(y_, w_, layer_state, consts), y, w)
     return out, _split_residuals(vjp_fn, layout)
 
-  def layer_vjp_fn(y_in, w, layer_state, g_y, saved, layout):
+  def layer_vjp_fn(y_in, w, layer_state, g_out, saved, layout):
     if remat_layer is None:
       _, vjp_fn = jax.vjp(lambda y_, w_: layer_fn(y_, w_, layer_state), y_in, w)
     else:
       vjp_fn = _rebuild_vjp(layout, saved, y_in, w, layer_state, consts)
-    return vjp_fn(g_y)  # (dy_in, dW gathered)
+    return vjp_fn(g_out)  # (dy_in, dW gathered)
 
   return params, state, gather_fn, rs_fn, layout_fn, fwd_layer, layer_vjp_fn
 
@@ -508,6 +536,29 @@ def _slice_range(tree, start, end):
 
 def _expand0(tree):
   return jax.tree.map(lambda x: jnp.expand_dims(x, 0), tree)
+
+
+def _stack_intermediates(i0, imid, ilast, length):
+  """Stacks per-layer intermediates along axis 0 into a single pytree."""
+  if length == 1:
+    return _expand0(i0)
+  if length == 2:
+    return jax.tree.map(lambda a, b: jnp.stack([a, b], axis=0), i0, ilast)
+  return jax.tree.map(
+      lambda a, m, b: jnp.concatenate([a[None], m, b[None]], axis=0),
+      i0,
+      imid,
+      ilast,
+  )
+
+
+def _wrap_intermediates(tree):
+  """Wraps array leaves in nnx.Intermediate, keeping Variable wrappers."""
+  return jax.tree.map(
+      lambda x: x if isinstance(x, nnx.Variable) else nnx.Intermediate(x),
+      tree,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0, 6, 7))
@@ -539,15 +590,24 @@ def _custom_vjp_prefetch_pipeline_fwd(
     graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
 ):
   """Forward pass: AG(k+1) is issued while layer k computes; the gathered weights ride in the carry."""
+  capture_intermediates = ctx.capture_intermediates
   params, state, gather_fn, _, layout_fn, fwd_layer, _ = _prefetch_setup(
-      graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx
+      graphdef,
+      params_leaves,
+      state_leaves,
+      diff_args_leaves,
+      diff_kwargs_leaves,
+      ctx,
+      capture_intermediates=capture_intermediates,
   )
   w_0 = gather_fn(_slice_at(params, 0))
   layout = layout_fn(x_in, w_0, _slice_at(state, 0))
   w_curr = gather_fn(_slice_at(params, 1)) if length > 1 else None  # AG(1) || fwd(0).
-  y, saved_0 = fwd_layer(x_in, w_0, _slice_at(state, 0), layout)
+  fwd_out_0, saved_0 = fwd_layer(x_in, w_0, _slice_at(state, 0), layout)
+  y, interms_0 = fwd_out_0 if capture_intermediates else (fwd_out_0, None)
   ys_mid = None  # Inputs of layers 1 .. length-2 (residuals for the backward pass).
   saved_mid = None  # Remat-policy residuals of layers 1 .. length-2.
+  interms_mid = None
   if length > 2:
     # Only order within the unrolled loop when the unroll=2 while-loop has >= 2 trips; XLA unrolls
     # single-trip while-loops into the parent computation, where FSDP gathers must not depend on
@@ -563,21 +623,32 @@ def _custom_vjp_prefetch_pipeline_fwd(
         # so W(k) is dead before AG(k+2) starts and AG(k+2) can reuse W(k)'s buffer.
         y_k, params_next = jax.lax.optimization_barrier((y_k, params_next))
       w_next = gather_fn(params_next)  # AG(k+1) || layer k.
-      y_out, saved_k = fwd_layer(y_k, w_k, state_k, layout)
-      return (y_out, w_next), (y_k, saved_k)
+      fwd_out_k, saved_k = fwd_layer(y_k, w_k, state_k, layout)
+      if capture_intermediates:
+        y_out, interms_k = fwd_out_k
+        return (y_out, w_next), (y_k, interms_k, saved_k)
+      return (fwd_out_k, w_next), (y_k, saved_k)
 
     # Iterates k = 1 .. length-2; element j of xs has state[j+1] and next_idx = j + 2.
-    (y, w_curr), (ys_mid, saved_mid) = jax.lax.scan(
-        body,
-        (y, w_curr),
-        (_slice_range(state, 1, length - 1), jnp.arange(2, length, dtype=jnp.int32)),
-        unroll=2,
+    scan_xs = (
+        _slice_range(state, 1, length - 1),
+        jnp.arange(2, length, dtype=jnp.int32),
     )
+    (y, w_curr), scan_outs = jax.lax.scan(body, (y, w_curr), scan_xs, unroll=2)
+    if capture_intermediates:
+      ys_mid, interms_mid, saved_mid = scan_outs
+    else:
+      ys_mid, saved_mid = scan_outs
   y_last_in = y if length > 1 else x_in
   if length > 1:
-    final_y, saved_last = fwd_layer(y_last_in, w_curr, _slice_at(state, length - 1), layout)
+    state_last = _slice_at(state, length - 1)
+    fwd_out_last, saved_last = fwd_layer(y_last_in, w_curr, state_last, layout)
+    if capture_intermediates:
+      final_y, interms_last = fwd_out_last
+    else:
+      final_y, interms_last = fwd_out_last, None
   else:
-    final_y, saved_last = y, saved_0
+    final_y, interms_last, saved_last = y, interms_0, saved_0
   residuals = (
       x_in,
       ys_mid,
@@ -588,6 +659,9 @@ def _custom_vjp_prefetch_pipeline_fwd(
       diff_args_leaves,
       diff_kwargs_leaves,
   )
+  if capture_intermediates:
+    stacked = _stack_intermediates(interms_0, interms_mid, interms_last, length)
+    return (final_y, stacked), residuals
   return (final_y, state), residuals
 
 
@@ -595,9 +669,16 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
   """Backward pass: AG(k-1) is issued while layer k is rematerialized and differentiated."""
   x_in, ys_mid, y_last_in, saved, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves = res
   saved_0, saved_mid, saved_last = saved
-  g, _ = g_out  # Non-parameter layer state is not differentiated.
+  capture_intermediates = ctx.capture_intermediates
+  g, g_interms = g_out if capture_intermediates else (g_out[0], None)
   params, state, gather_fn, rs_fn, layout_fn, _, layer_vjp_fn = _prefetch_setup(
-      graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx
+      graphdef,
+      params_leaves,
+      state_leaves,
+      diff_args_leaves,
+      diff_kwargs_leaves,
+      ctx,
+      capture_intermediates=capture_intermediates,
   )
 
   last = length - 1
@@ -611,9 +692,11 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
   else:
     g, params_last = jax.lax.optimization_barrier((g, params_last))
   w_last = gather_fn(params_last)
-  layout = layout_fn(y_last_in, w_last, _slice_at(state, last))
+  s_last = _slice_at(state, last)
+  layout = layout_fn(y_last_in, w_last, s_last)
   w_prev = gather_fn(params_prev_init) if length > 1 else None  # AG(L-2) || bwd(L-1).
-  g, dw = layer_vjp_fn(y_last_in, w_last, _slice_at(state, last), g, saved_last, layout)
+  g_last = (g, _slice_at(g_interms, last)) if capture_intermediates else g
+  g, dw = layer_vjp_fn(y_last_in, w_last, s_last, g_last, saved_last, layout)
 
   def write(d_acc, dw_tree, idx, which):
     """Writes the `which` ("tagged"/"untagged"/"all") leaves of one layer's reduced dW into row `idx`."""
@@ -648,7 +731,8 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
 
       def body(carry, xs):
         g_k, w_k, d_acc, pending = carry
-        y_k, saved_k, state_k, k_idx = xs
+        y_k, saved_k, state_k, *g_int_k, k_idx = xs
+        g_interms_k = g_int_k[0] if g_int_k else None
         params_prev = _slice_at(params, k_idx - 1)
         if ordered:
           # In the 2nd unrolled step of each iteration, waits for the 1st step's g_k (which is
@@ -656,7 +740,8 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
           g_k, y_k, saved_k, params_prev = jax.lax.optimization_barrier((g_k, y_k, saved_k, params_prev))
         d_acc = write(d_acc, rs_fn(pending, "tagged"), k_idx + 1, "tagged")  # RS(k+1) || bwd(k).
         w_km1 = gather_fn(params_prev)  # AG(k-1) || bwd(k).
-        g_km1, dw_k = layer_vjp_fn(y_k, w_k, state_k, g_k, saved_k, layout)
+        g_in_k = (g_k, g_interms_k) if capture_intermediates else g_k
+        g_km1, dw_k = layer_vjp_fn(y_k, w_k, state_k, g_in_k, saved_k, layout)
         dw_k = rs_fn(dw_k, "untagged")
         if ordered:
           g_km1, dw_k = jax.lax.optimization_barrier((g_km1, dw_k))
@@ -664,15 +749,24 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
         return (g_km1, w_km1, d_acc, deferred(dw_k)), None
 
       # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1.
+      state_mid = _slice_range(state, 1, length - 1)
+      k_idxs = jnp.arange(1, length - 1, dtype=jnp.int32)
+      if capture_intermediates:
+        g_interms_mid = _slice_range(g_interms, 1, length - 1)
+        xs_scan = (ys_mid, saved_mid, state_mid, g_interms_mid, k_idxs)
+      else:
+        xs_scan = (ys_mid, saved_mid, state_mid, k_idxs)
       (g, w_prev, d_params, pending), _ = jax.lax.scan(
           body,
           (g, w_prev, d_params, pending),
-          (ys_mid, saved_mid, _slice_range(state, 1, length - 1), jnp.arange(1, length - 1, dtype=jnp.int32)),
+          xs_scan,
           reverse=True,
           unroll=2,
       )
     d_params = write(d_params, rs_fn(pending, "tagged"), 1, "tagged")  # RS(1) || bwd(0).
-    g, dw0 = layer_vjp_fn(x_in, w_prev, _slice_at(state, 0), g, saved_0, layout)
+    g_0 = (g, _slice_at(g_interms, 0)) if capture_intermediates else g
+    state_0 = _slice_at(state, 0)
+    g, dw0 = layer_vjp_fn(x_in, w_prev, state_0, g_0, saved_0, layout)
     d_params = write(d_params, rs_fn(dw0), 0, "all")
 
   params_bar_leaves = jax.tree_util.tree_leaves(d_params)
@@ -730,7 +824,18 @@ def _layer_major(params, state, scan_axis, length, move_scan_axis=True):
   return params, state
 
 
-def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_policy, prevent_cse):
+def _prepare_prefetch_call(
+    layers,
+    args,
+    kwargs,
+    *,
+    length,
+    mesh,
+    config,
+    remat_policy,
+    prevent_cse,
+    capture_intermediates: bool = False,
+):
   """Splits a scanned layer stack and its call arguments for `jax.custom_vjp`.
 
   Returns (graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx), with
@@ -779,6 +884,8 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       prevent_cse=prevent_cse,
       defer_grad_reduce_scatter=bool(getattr(config, "prefetch_fsdp_defer_grad_reduce_scatter", False)),
   )
+  if capture_intermediates:
+    ctx = ctx._replace(capture_intermediates=True)
   return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 
 
@@ -792,6 +899,7 @@ def apply_layers_with_fsdp_prefetch(
     remat_policy=None,
     prevent_cse: bool = False,
     skip_block_remat: bool = False,
+    capture_intermediates: bool = True,
     **kwargs,
 ):
   """Runs a scanned NNX layer stack with FSDP weight prefetching in the forward and backward pass.
@@ -825,10 +933,22 @@ def apply_layers_with_fsdp_prefetch(
     return x_in, layers, None
   if skip_block_remat:
     remat_policy = _also_save_sublayer_inputs(remat_policy)
-  graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx = _prepare_prefetch_call(
-      layers, args, kwargs, length=length, mesh=mesh, config=config, remat_policy=remat_policy, prevent_cse=prevent_cse
+    capture_intermediates = False
+  gdef, p_leaves, s_leaves, d_args, d_kwargs, ctx = _prepare_prefetch_call(
+      layers,
+      args,
+      kwargs,
+      length=length,
+      mesh=mesh,
+      config=config,
+      remat_policy=remat_policy,
+      prevent_cse=prevent_cse,
+      capture_intermediates=capture_intermediates,
   )
-  final_y, _ = _custom_vjp_prefetch_pipeline(
-      graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
-  )
+  p_args = (gdef, x_in, p_leaves, s_leaves, d_args, d_kwargs, length, ctx)
+  final_y, stacked_interms = _custom_vjp_prefetch_pipeline(*p_args)
+  if capture_intermediates:
+    add_axis = maxtext_utils_nnx.nnx_add_and_sync_scan_axis
+    stacked_interms = add_axis(_wrap_intermediates(stacked_interms), "layers")
+    nnx.update(layers, stacked_interms)
   return final_y, layers, None
