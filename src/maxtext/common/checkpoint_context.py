@@ -85,7 +85,7 @@ def build_context(
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
     ocdbt_target_data_file_size_bytes: int | None = None,
-    checkpoint_storage_concurrent_gb: int | None = None,
+    checkpoint_storage_concurrent_gb: float | None = None,
     enable_continuous_checkpointing: bool = False,
     todelete_full_path: str | None = None,
     todelete_subdir: str | None = None,
@@ -94,6 +94,8 @@ def build_context(
     colocated_python_checkpointing: bool = False,
     partial_load: bool = False,
     checkpoint_layout: ocp.options.CheckpointLayout | None = None,
+    checkpointables_registry: ocp.handlers.CheckpointableHandlerRegistry | None = None,
+    async_timeout_secs: int | None = None,
 ) -> ocp.Context:
   """Builds an Orbax v1 ``Context`` from MaxText checkpoint flags.
 
@@ -106,8 +108,9 @@ def build_context(
     use_zarr3: Use Zarr3 storage format.
     ocdbt_target_data_file_size_bytes: Target OCDBT data-file size; also used as
       the per-array ``chunk_byte_size`` (matching the v0 ``SaveArgs`` value).
-    checkpoint_storage_concurrent_gb: Concurrent IO budget in GB; applied to
-      both write and read as a byte limit (v0 used one value for both).
+    checkpoint_storage_concurrent_gb: Concurrent IO budget in GB (may be
+      fractional; rounded to whole bytes); applied to both write and read as a
+      byte limit (v0 used one value for both).
     enable_continuous_checkpointing: If true, set a 60-minute async timeout.
     todelete_full_path: GCS soft-delete path.
     todelete_subdir: Subdirectory renaming hook for deletions.
@@ -119,6 +122,11 @@ def build_context(
       equivalent of v0 ``partial_restore=True``).
     checkpoint_layout: On-disk layout (``ORBAX`` or ``SAFETENSORS``) for
       loading.
+    checkpointables_registry: Optional checkpointable-handler registry, e.g. to
+      override the handler for one checkpointable name. Defaults to Orbax's
+      global registry.
+    async_timeout_secs: If set, the deadline for a save's whole background commit
+      (overrides the 60-minute value set by ``enable_continuous_checkpointing``).
 
   Returns:
     A configured, unfrozen ``ocp_v1.Context``.
@@ -134,12 +142,17 @@ def build_context(
 
   # Concurrent IO budget: v0 GB -> v1 bytes, applied to both directions.
   if checkpoint_storage_concurrent_gb is not None:
-    concurrent_bytes = checkpoint_storage_concurrent_gb * _BYTES_PER_GB
+    concurrent_bytes = int(checkpoint_storage_concurrent_gb * _BYTES_PER_GB)
     ctx.memory.write_concurrent_bytes = concurrent_bytes
     ctx.memory.read_concurrent_bytes = concurrent_bytes
 
+  if checkpointables_registry is not None:
+    ctx.checkpointables.registry = checkpointables_registry
+
   if enable_continuous_checkpointing:
     ctx.asynchronous.timeout_secs = int(datetime.timedelta(minutes=60).total_seconds())
+  if async_timeout_secs is not None:
+    ctx.asynchronous.timeout_secs = int(async_timeout_secs)
 
   if todelete_full_path is not None:
     ctx.deletion.gcs_deletion_options.todelete_full_path = todelete_full_path

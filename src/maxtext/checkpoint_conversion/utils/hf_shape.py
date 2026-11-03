@@ -1662,6 +1662,131 @@ def HY4_HF_WEIGHTS_TO_SHAPE(config):
               f"{pfx}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
           }
       )
+
+  return mapping
+
+
+def KIMI_K3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns the HF weight name -> shape map for the released moonshotai/Kimi-K3 language model.
+
+  Keys carry the `language_model.` prefix of the released `KimiK3ForConditionalGeneration`
+  checkpoint, matching `param_mapping.KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING`. Accepts the flat
+  `text_config` dict, the nested released `config.json` dict, or a `PretrainedConfig`.
+  """
+  # Imported here so this module stays free of the jax import that `param_mapping` pulls in.
+  from maxtext.checkpoint_conversion.utils.param_mapping import (  # pylint: disable=import-outside-toplevel
+      _kimi_k3_require,
+      _kimi_k3_text_config,
+      _resolve_kimi_k3_full_attn_layers,
+  )
+
+  config = _kimi_k3_text_config(config)
+
+  def req(key):
+    return int(_kimi_k3_require(config, key))
+
+  hidden = req("hidden_size")
+  vocab = req("vocab_size")
+  num_layers = req("num_hidden_layers")
+  first_dense = req("first_k_dense_replace")
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+  linear_cfg = config.get("linear_attn_config") or {}
+
+  lm = "language_model.model"
+  mapping = {
+      f"{lm}.embed_tokens.weight": [vocab, hidden],
+      f"{lm}.norm.weight": [hidden],
+      "language_model.lm_head.weight": [vocab, hidden],
+      f"{lm}.output_attn_res_norm.weight": [hidden],
+      f"{lm}.output_attn_res_proj.weight": [1, hidden],
+  }
+
+  for i in range(num_layers):
+    p = f"{lm}.layers.{i}"
+    mapping.update(
+        {
+            f"{p}.input_layernorm.weight": [hidden],
+            f"{p}.post_attention_layernorm.weight": [hidden],
+            f"{p}.self_attention_res_norm.weight": [hidden],
+            f"{p}.self_attention_res_proj.weight": [1, hidden],
+            f"{p}.mlp_res_norm.weight": [hidden],
+            f"{p}.mlp_res_proj.weight": [1, hidden],
+        }
+    )
+    a = f"{p}.self_attn"
+    if i in full_attn_layers:
+      heads = req("num_attention_heads")
+      q_lora, kv_lora = req("q_lora_rank"), req("kv_lora_rank")
+      nope, rope, v_dim = req("qk_nope_head_dim"), req("qk_rope_head_dim"), req("v_head_dim")
+      mapping.update(
+          {
+              f"{a}.q_a_proj.weight": [q_lora, hidden],
+              f"{a}.q_a_layernorm.weight": [q_lora],
+              f"{a}.q_b_proj.weight": [heads * (nope + rope), q_lora],
+              f"{a}.kv_a_proj_with_mqa.weight": [kv_lora + rope, hidden],
+              f"{a}.kv_a_layernorm.weight": [kv_lora],
+              f"{a}.kv_b_proj.weight": [heads * (nope + v_dim), kv_lora],
+              f"{a}.g_proj.weight": [heads * v_dim, hidden],
+              f"{a}.o_proj.weight": [hidden, heads * v_dim],
+          }
+      )
+    else:
+      kda_heads = int(_kimi_k3_require(linear_cfg, "num_heads"))
+      head_dim = int(_kimi_k3_require(linear_cfg, "head_dim"))
+      conv = int(_kimi_k3_require(linear_cfg, "short_conv_kernel_size"))
+      proj = kda_heads * head_dim
+      mapping.update(
+          {
+              f"{a}.q_proj.weight": [proj, hidden],
+              f"{a}.k_proj.weight": [proj, hidden],
+              f"{a}.v_proj.weight": [proj, hidden],
+              f"{a}.q_conv1d.weight": [proj, 1, conv],
+              f"{a}.k_conv1d.weight": [proj, 1, conv],
+              f"{a}.v_conv1d.weight": [proj, 1, conv],
+              # The release stores A_log as [head_dim]: num_heads log-decays then zero padding.
+              f"{a}.A_log": [max(head_dim, kda_heads)],
+              f"{a}.f_a_proj.weight": [head_dim, hidden],
+              f"{a}.f_b_proj.weight": [proj, head_dim],
+              f"{a}.dt_bias": [proj],
+              f"{a}.b_proj.weight": [kda_heads, hidden],
+              f"{a}.g_proj.weight": [proj, hidden],
+              f"{a}.o_norm.weight": [head_dim],
+              f"{a}.o_proj.weight": [hidden, proj],
+          }
+      )
+
+    if i < first_dense:
+      inter = req("intermediate_size")
+      mapping.update(
+          {
+              f"{p}.mlp.gate_proj.weight": [inter, hidden],
+              f"{p}.mlp.up_proj.weight": [inter, hidden],
+              f"{p}.mlp.down_proj.weight": [hidden, inter],
+          }
+      )
+    else:
+      num_experts = req("num_experts")
+      moe_inter = req("moe_intermediate_size")
+      moe_hidden = req("routed_expert_hidden_size")
+      shared_inter = moe_inter * req("num_shared_experts")
+      m = f"{p}.block_sparse_moe"
+      mapping.update(
+          {
+              f"{m}.gate.weight": [num_experts, hidden],
+              f"{m}.gate.e_score_correction_bias": [num_experts],
+              f"{m}.routed_expert_down_proj.weight": [moe_hidden, hidden],
+              f"{m}.routed_expert_norm.weight": [moe_hidden],
+              f"{m}.routed_expert_up_proj.weight": [hidden, moe_hidden],
+              f"{m}.shared_experts.gate_proj.weight": [shared_inter, hidden],
+              f"{m}.shared_experts.up_proj.weight": [shared_inter, hidden],
+              f"{m}.shared_experts.down_proj.weight": [hidden, shared_inter],
+          }
+      )
+      for e in range(num_experts):
+        mapping[f"{m}.experts.{e}.w1.weight"] = [moe_inter, moe_hidden]
+        mapping[f"{m}.experts.{e}.w3.weight"] = [moe_inter, moe_hidden]
+        mapping[f"{m}.experts.{e}.w2.weight"] = [moe_hidden, moe_inter]
+
   return mapping
 
 
@@ -1702,6 +1827,7 @@ HF_SHAPE = {
     "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-1600b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "hy4-preview": HY4_HF_WEIGHTS_TO_SHAPE,
+    "kimi-k3": KIMI_K3_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
