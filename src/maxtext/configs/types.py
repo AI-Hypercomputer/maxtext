@@ -2208,13 +2208,29 @@ class MoEGeneral(BaseModel):
         (emb_chunks <= 0, f"num_moe_emb_chunks=0, an unchunked wi K (got {emb_chunks})"),
     ]
 
+  def _uses_deferred_fp8_token_dispatch(self) -> bool:
+    """Whether fp8_moe_native_fwd reuses ep_fp8_token_all_gather's FP8 tokens and full-K f32 row scales directly."""
+    return (
+        self.fp8_moe_native_fwd
+        and self.moe_fp8_token_all_gather
+        and self.moe_wi_gmm_fused_swiglu
+        and self.use_ring_of_experts
+        and self.use_ragged_sort
+        and not getattr(self, "moe_tc_ragged_sort", False)
+        and not getattr(self, "moe_tc_ragged_3d_dispatch", False)
+        and getattr(self, "num_moe_emb_chunks", 0) <= 0
+        and self.decoder_block != DecoderBlockType.LLAMA4
+    )
+
   def _fp8_moe_native_fwd_tile_requirements(self) -> list[tuple[bool, str]]:
     """Tile rules for fp8_moe_native_fwd's full-K (lhs_quant_block_size=0) forward GMMs, checked at config time.
 
     gmm_v2 quantizes one [tile_m, tile_k] lhs slice per K step, so full-K dynamic scaling needs tile_k == size_k in
-    both forward GMMs (wi contracts emb_dim, wo contracts the MoE MLP dim); make_gmm_configs enforces the same rule
-    when traced. When separate eval logical axis rules are set, RoutedMoE's fwd_tile reads eval_wi_tile_fwd_embed_dim
-    and eval_wo_tile_fwd_mlp_dim in eval_step, so those are checked too.
+    in-kernel quantized forward GMMs (wi contracts emb_dim when moe_fp8_token_all_gather is off, wo contracts the MoE
+    MLP dim); when _uses_deferred_fp8_token_dispatch() is active, wi consumes pre-quantized FP8 tokens with precomputed
+    full-K f32 row scales and supports multi-K-tile division of emb_dim. When separate eval logical axis rules are set,
+    RoutedMoE's fwd_tile reads eval_wi_tile_fwd_embed_dim and eval_wo_tile_fwd_mlp_dim in eval_step, so those are
+    checked too.
     """
     if self.use_gmm_v2_heuristic_tiling:
       return []
@@ -2226,25 +2242,46 @@ class MoEGeneral(BaseModel):
     ) or bool(eval_axis_rules and eval_axis_rules != self.logical_axis_rules)
     reqs: list[tuple[bool, str]] = []
     emb = self._moe_emb_dim_if_unsharded()
+    deferred_wi_fp8 = self._uses_deferred_fp8_token_dispatch()
     if emb is not None:
-      reqs.append(
-          (
-              self.wi_tile_fwd_embed_dim == emb,
-              f"wi_tile_fwd_embed_dim={emb}, the embed dim (one K tile for full-K activation quantization;"
-              f" got {self.wi_tile_fwd_embed_dim})",
-          )
-      )
+      if deferred_wi_fp8:
+        wi_tile = self.wi_tile_fwd_embed_dim
+        reqs.append(
+            (
+                wi_tile > 0 and emb % wi_tile == 0 and (wi_tile == emb or wi_tile % 128 == 0),
+                f"wi_tile_fwd_embed_dim dividing {emb} (and a multiple of 128) for pre-quantized FP8 token dispatch"
+                f" (got {wi_tile})",
+            )
+        )
+      else:
+        reqs.append(
+            (
+                self.wi_tile_fwd_embed_dim == emb,
+                f"wi_tile_fwd_embed_dim={emb}, the embed dim (one K tile for full-K activation quantization;"
+                f" got {self.wi_tile_fwd_embed_dim})",
+            )
+        )
       if separate_eval_rules and all(
           getattr(self, f"ici_{ax}_parallelism", None) == 1 and getattr(self, f"dcn_{ax}_parallelism", None) == 1
           for ax in axes_for_logical(eval_axis_rules or [], "activation_embed_moe")
       ):
-        reqs.append(
-            (
-                self.eval_wi_tile_fwd_embed_dim == emb,
-                f"eval_wi_tile_fwd_embed_dim={emb} when evaluation uses separate logical axis rules"
-                f" (got {self.eval_wi_tile_fwd_embed_dim})",
-            )
-        )
+        if deferred_wi_fp8:
+          eval_wi_tile = self.eval_wi_tile_fwd_embed_dim
+          reqs.append(
+              (
+                  eval_wi_tile > 0 and emb % eval_wi_tile == 0 and (eval_wi_tile == emb or eval_wi_tile % 128 == 0),
+                  f"eval_wi_tile_fwd_embed_dim dividing {emb} (and a multiple of 128) when evaluation uses separate"
+                  f" logical axis rules (got {eval_wi_tile})",
+              )
+          )
+        else:
+          reqs.append(
+              (
+                  self.eval_wi_tile_fwd_embed_dim == emb,
+                  f"eval_wi_tile_fwd_embed_dim={emb} when evaluation uses separate logical axis rules"
+                  f" (got {self.eval_wi_tile_fwd_embed_dim})",
+              )
+          )
     n = self._moe_mlp_dim_if_unsharded()
     if n is not None:
       reqs.append(

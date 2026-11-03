@@ -15,6 +15,7 @@
 dequantization contract the native path relies on, and the fixed activation-quantization / accumulator settings.
 """
 
+import re
 import sys
 import types
 from unittest import mock
@@ -31,6 +32,8 @@ from maxtext.configs import pyconfig
 from maxtext.configs import types as config_types
 from maxtext.kernels.megablox import ops as megablox_ops
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
+from maxtext.kernels.ragged import ragged_gather
+from maxtext.kernels.ragged import ragged_sort
 from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.utils import maxtext_utils
@@ -297,3 +300,246 @@ def test_gmm_v2_full_k_lhs_quant_requires_single_k_tile():
     for bad_tile_k in (1024, 8192):
       with pytest.raises(NotImplementedError, match="tile_k == size_k"):
         make(bad_tile_k)
+
+
+def test_deferred_fp8_token_dispatch_config_allows_multi_k_tile_wi():
+  # With moe_fp8_token_all_gather=True on the ring-of-experts SparseCore ragged-sort path, wi consumes pre-quantized
+  # FP8 tokens + precomputed full-K f32 row scales, so wi_tile_fwd_embed_dim may split K into multiple 128-aligned tiles.
+  deferred_overrides = {
+      **_NATIVE,
+      "ici_expert_parallelism": 2,
+      "use_ring_of_experts": True,
+      "use_ragged_sort": True,
+      "moe_fp8_token_all_gather": True,
+  }
+  cfg = _cfg(**{**deferred_overrides, "wi_tile_fwd_embed_dim": _EMB // 2})
+  assert cfg.wi_tile_fwd_embed_dim == _EMB // 2
+  with pytest.raises(Exception, match="wi_tile_fwd_embed_dim dividing"):
+    _cfg(**{**deferred_overrides, "wi_tile_fwd_embed_dim": 192})
+  with pytest.raises(Exception, match=f"wo_tile_fwd_mlp_dim={_MOE_MLP}"):
+    _cfg(**{**deferred_overrides, "wo_tile_fwd_mlp_dim": _MOE_MLP // 2})
+
+
+@pytest.mark.parametrize("index_math", ["sort", "count"])
+@pytest.mark.parametrize("buffer_size", [None, 20])
+def test_ring_ragged_sort_fp8_ste_tokens_matches_dequant_path(index_math, buffer_size):
+  # Deferred FP8 token dispatch gathers 1-byte codes + 1D scales through ring_ragged_sort and carries bf16 cotangents
+  # back via x_ste; forward dequantization and backward cotangents must match sorting bf16 tokens bit for bit.
+  rng = np.random.default_rng(7)
+  tokens = jnp.asarray(rng.standard_normal((16, 128)) * 0.5, jnp.bfloat16)
+  topk_ids = jnp.asarray(rng.integers(0, 4, size=(16, 2), dtype=np.int32))
+  upstream = jnp.asarray(rng.standard_normal((buffer_size or 32, 128)) * 0.25, jnp.bfloat16)
+  qcodes, qscale = moe.quantize_rows_fp8(tokens, jnp.float8_e4m3fn)
+  tokens_deq = moe.dequantize_rows_fp8(qcodes, qscale, jnp.bfloat16)
+  mesh = jax.make_mesh((1,), ("expert",))
+
+  @jax.jit
+  def run_ste(x):
+    q, s = moe.quantize_rows_fp8(x, jnp.float8_e4m3fn)
+    ste = quantizations.Fp8SteTokens(x_ste=x, codes=q, scale=s)
+
+    def body(tok_in):
+      sorted_ste, *_ = ragged_sort.ring_ragged_sort(
+          tok_in,
+          topk_ids,
+          num_experts=4,
+          topk=2,
+          ep_name="expert",
+          ep_size=1,
+          buffer_size=buffer_size,
+          enforce_gather_fallback=True,
+          enforce_gather_reduce_fallback=True,
+          index_math=index_math,
+      )
+      val = sorted_ste.dequantize(jnp.bfloat16)
+      # Route backward cotangent through sorted_ste.x_ste, matching gmm_silu_fp8_bwd.
+      return jax.lax.stop_gradient(val) + (sorted_ste.x_ste - jax.lax.stop_gradient(sorted_ste.x_ste))
+
+    out = jax.shard_map(
+        body,
+        mesh=mesh,
+        in_specs=(
+            quantizations.Fp8SteTokens(
+                jax.sharding.PartitionSpec(), jax.sharding.PartitionSpec(), jax.sharding.PartitionSpec()
+            ),
+        ),
+        out_specs=jax.sharding.PartitionSpec(),
+        check_vma=False,
+    )(ste)
+    return jnp.sum(out.astype(jnp.float32) * upstream.astype(jnp.float32)), out
+
+  @jax.jit
+  def run_ref(x):
+    def body(tok_in):
+      sorted_bf16, *_ = ragged_sort.ring_ragged_sort(
+          tok_in,
+          topk_ids,
+          num_experts=4,
+          topk=2,
+          ep_name="expert",
+          ep_size=1,
+          buffer_size=buffer_size,
+          enforce_gather_fallback=True,
+          enforce_gather_reduce_fallback=True,
+          index_math=index_math,
+      )
+      return sorted_bf16
+
+    out = jax.shard_map(
+        body,
+        mesh=mesh,
+        in_specs=(jax.sharding.PartitionSpec(),),
+        out_specs=jax.sharding.PartitionSpec(),
+        check_vma=False,
+    )(x)
+    return jnp.sum(out.astype(jnp.float32) * upstream.astype(jnp.float32)), out
+
+  (_, out_ste_fwd), grad_ste = jax.value_and_grad(run_ste, has_aux=True)(tokens)
+  (_, out_ref_fwd), grad_ref = jax.value_and_grad(run_ref, has_aux=True)(tokens_deq)
+  np.testing.assert_array_equal(np.asarray(out_ste_fwd).view(np.uint16), np.asarray(out_ref_fwd).view(np.uint16))
+  np.testing.assert_array_equal(np.asarray(grad_ste).view(np.uint16), np.asarray(grad_ref).view(np.uint16))
+
+
+def test_gmm_v2_prequantized_row_scale_and_subtile_m_configs():
+  lhs = jnp.zeros((512, 4096), jnp.float8_e4m3fn)
+  lhs_scale = jnp.ones((512, 1), jnp.float32)
+  rhs = jnp.zeros((4, 4096, 2048), jnp.float8_e4m3fn)
+  rhs_scale = jnp.ones((4, 1, 1, 2048), jnp.float32)
+  group_sizes = jnp.array([128, 128, 128, 128], jnp.int32)
+  group_offset = jnp.array([0], jnp.int32)
+  fake_tpu = types.SimpleNamespace(
+      fp8_ops_per_second=1, int8_ops_per_second=1, num_lanes=128, mxu_column_size=256, get_sublane_tiling=lambda _: 8
+  )
+  with mock.patch.object(gmm_v2.pltpu, "get_tpu_info", return_value=fake_tpu):
+    cfgs = gmm_v2.make_gmm_configs(
+        lhs,
+        rhs,
+        rhs_scale,
+        None,
+        None,
+        group_sizes,
+        group_offset,
+        tile_info=gmm_v2.TileSizes(tile_m=512, tile_k=2048, tile_n=1024),
+        vmem_limit_bytes=None,
+        out_dtype=jnp.bfloat16,
+        acc_dtype=jnp.float32,
+        maybe_quantize_lhs=False,
+        zero_initialize=True,
+        lhs_scale=lhs_scale,
+        enable_subtile_m=True,
+    )
+    meta = gmm_v2.get_metadata(cfgs)
+  assert cfgs.lhs_cfgs.has_scale and cfgs.lhs_cfgs.is_row_scale and cfgs.lhs_cfgs.quant_dtype is None
+  assert cfgs.enable_subtile_m
+  assert meta["enable_subtile_m"] == 1
+  assert meta["lhs_cfgs.is_row_scale"] == 1
+
+
+def test_transposed_wo_drhs_ste_vjp_and_fp8_native_weight_pspec():
+  rng = np.random.default_rng(3)
+  w = jnp.asarray(rng.standard_normal((4, 64, 32)) * 0.02, jnp.bfloat16)
+  codes, scale = quantizations.quantize_weight_codes_per_channel(w)
+  cotangent_t = jnp.asarray(rng.standard_normal((4, 32, 64)), jnp.bfloat16)
+
+  anchor_t, vjp_fn = jax.vjp(
+      lambda weight: quantizations.dequantize_weight_codes_ste(
+          weight, codes, scale, transposed_anchor=True, transposed_grad_transform=lambda g: g * 2.0
+      ),
+      w,
+  )
+  assert anchor_t.shape == (4, 32, 64)
+  (grad_w,) = vjp_fn(cotangent_t)
+  expected = jnp.swapaxes(cotangent_t * 2.0, 1, 2)
+  np.testing.assert_array_equal(np.asarray(grad_w).view(np.uint16), np.asarray(expected).view(np.uint16))
+
+  spec = jax.sharding.PartitionSpec("expert", None, "fsdp")
+  pspec_t = moe.Fp8NativeWeight.pspec(spec, transpose_anchor=True)
+  assert pspec_t.transpose_anchor is True
+  assert pspec_t.anchor == jax.sharding.PartitionSpec("expert", "fsdp", None)
+  assert pspec_t.codes == spec
+
+
+def test_tpu7x_lowering_for_deferred_fp8_subtile_m_and_transposed_wo_drhs():
+  tpu_dev = jax.sharding.AbstractDevice(device_kind="TPU7x", num_cores=1, platform="tpu")
+  single_mesh = jax.sharding.AbstractMesh((), (), abstract_device=tpu_dev)
+  with jax.sharding.use_abstract_mesh(single_mesh):
+    x_fp8 = jax.ShapeDtypeStruct((256, 256), jnp.float8_e4m3fn)
+    idx = jax.ShapeDtypeStruct((512,), jnp.int32)
+    rg_mlir = (
+        jax.jit(lambda x, i: ragged_gather.ragged_gather(x, i, jnp.array(0), jnp.array(256)))
+        .trace(x_fp8, idx)
+        .lower(lowering_platforms=("tpu",))
+        .as_text()
+    )
+    assert "sc_ragged_gather" in rg_mlir and "ui8" in rg_mlir
+
+    ste_lhs = quantizations.Fp8SteTokens(
+        x_ste=jax.ShapeDtypeStruct((512, 256), jnp.bfloat16),
+        codes=jax.ShapeDtypeStruct((512, 256), jnp.float8_e4m3fn),
+        scale=jax.ShapeDtypeStruct((512, 1), jnp.float32),
+    )
+    wi_anchor = jax.ShapeDtypeStruct((4, 256, 512), jnp.bfloat16)
+    wi_codes = jax.ShapeDtypeStruct((4, 256, 512), jnp.float8_e4m3fn)
+    wi_scale = jax.ShapeDtypeStruct((4, 1, 512), jnp.float32)
+    gs = jax.ShapeDtypeStruct((4,), jnp.int32)
+    wi_tiling = (256, 128, 256, 256, 256, 256, 256, 256, 256)
+
+    def wi_loss(ste, anchor, c, s, g):
+      act, gate_up = megablox_ops.gmm_silu_fp8(
+          ste,
+          anchor,
+          c,
+          s,
+          g,
+          jnp.bfloat16,
+          wi_tiling,
+          use_dlhs_transpose_rhs=True,
+          acc_dtype=jnp.float32,
+          lhs_quant_mode="fullk_f32",
+          native_bwd_dlhs=True,
+      )
+      return jnp.sum(jax.lax.stop_gradient(act).astype(jnp.float32)) + jnp.sum(gate_up.astype(jnp.float32))
+
+    wi_mlir = (
+        jax.jit(jax.value_and_grad(wi_loss, argnums=(0, 1)))
+        .trace(ste_lhs, wi_anchor, wi_codes, wi_scale, gs)
+        .lower(lowering_platforms=("tpu",))
+        .as_text()
+    )
+    wi_kernels = re.findall(r'kernel_name = "([^"]+)"', wi_mlir)
+    assert any("tk_128" in k and "pre_act_concat" in k for k in wi_kernels), wi_kernels
+    assert any("rhs_cdq" in k for k in wi_kernels), wi_kernels
+
+    lhs_act = jax.ShapeDtypeStruct((512, 128), jnp.bfloat16)
+    gate_up = jax.ShapeDtypeStruct((512, 256), jnp.bfloat16)
+    wo_anc_t = jax.ShapeDtypeStruct((4, 256, 128), jnp.bfloat16)
+    wo_codes = jax.ShapeDtypeStruct((4, 128, 256), jnp.float8_e4m3fn)
+    wo_scale = jax.ShapeDtypeStruct((4, 1, 256), jnp.float32)
+    wo_tiling = (256, 128, 256, 256, 256, 128, 256, 128, 256)
+
+    def wo_loss(h, gu, anc_t, c, s, g):
+      out = megablox_ops.gmm_dswiglu_fp8(
+          h,
+          gu,
+          anc_t,
+          c,
+          s,
+          g,
+          jnp.bfloat16,
+          wo_tiling,
+          use_dlhs_transpose_rhs=True,
+          dact_pre_act_tile_n=128,
+          acc_dtype=jnp.float32,
+          lhs_quant_mode="fullk_f32",
+          native_bwd_dlhs=True,
+          transpose_drhs=True,
+      )
+      return jnp.sum(out.astype(jnp.float32))
+
+    wo_traced = jax.jit(jax.value_and_grad(wo_loss, argnums=(1, 2))).trace(
+        lhs_act, gate_up, wo_anc_t, wo_codes, wo_scale, gs
+    )
+    assert [x.shape for x in wo_traced.out_info[1]] == [(512, 256), (4, 256, 128)]
+    wo_mlir = wo_traced.lower(lowering_platforms=("tpu",)).as_text()
+    wo_kernels = re.findall(r'kernel_name = "([^"]+)"', wo_mlir)
+    assert any("tgmm_v2-g_4-m_512-k_256-act_None-n_128" in k for k in wo_kernels), wo_kernels
