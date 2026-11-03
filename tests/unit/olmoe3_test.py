@@ -53,7 +53,11 @@ CANONICAL_COUNTS = {
     "olmo35-tiny-e256k8": (12_492_409_472, 790_301_312),
     "olmo35-tiny-e256k8-sh2x": (12_539_595_392, 837_487_232),
     "olmo35-tiny-e256k8-sh4x": (12_633_967_232, 931_859_072),
+    "olmo35-small": (72_237_847_936, 3_780_515_200),
     "olmo35-small-e256k8-sh2x": (72_580_704_064, 4_123_371_328),
+    "olmo35-medium": (322_601_566_720, 15_421_227_520),
+    "olmo35-medium-e256k8-sh2x": (324_002_723_584, 16_822_384_384),
+    "olmo35-large": (1_310_163_554_560, 62_133_719_296),
     "olmo35-gagik-fixed-e256k8-sh2x": (63_130_193_648, 3_741_994_736),
 }
 
@@ -157,6 +161,11 @@ class OLMoE3ParameterCountTest(unittest.TestCase):
 
   def test_small_e256k8_sh2x_total_parameters(self):
     self._assert_total("olmo35-small-e256k8-sh2x")
+
+  def test_medium_and_e256k8_sh2x_total_parameters(self):
+    for name in ("olmo35-small", "olmo35-medium", "olmo35-medium-e256k8-sh2x"):
+      self._assert_total(name)
+    self._assert_total("olmo35-large", scan_layers=True)
 
   def test_gagik_fixed_e256k8_sh2x_total_parameters(self):
     self._assert_total("olmo35-gagik-fixed-e256k8-sh2x")
