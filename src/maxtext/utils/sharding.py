@@ -1043,6 +1043,57 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   return input_state
 
 
+def _reshard_across_processes(state, state_mesh_shardings):
+  """Reshards a train state whose shardings span several JAX processes.
+
+  With more than one process, `jax.device_put` of a typed PRNG key array fails
+  unless the target sharding is identical to the key's current sharding; even an
+  equivalent one is rejected ("device_put's second argument must be a Device or a
+  Sharding which represents addressable devices"). The RNG streams that
+  `scan_layers` stacks along the layer axis are laid out `P(None,)`, while their
+  target from the NNX sharding rules is the equivalent `P()`. Plain arrays do not
+  have this problem.
+
+  So leaves already laid out as requested are kept as is (no copy), typed keys
+  that do need to move are moved through their raw `key_data`, and the remaining
+  leaves go through a single batched `jax.device_put`.
+
+  Args:
+    state: PyTree of train state arrays to reshard.
+    state_mesh_shardings: Target PyTree of `NamedSharding` specs matching
+      `state`.
+
+  Returns:
+    The resharded train state PyTree. Each array is laid out as its target
+    sharding; leaves that already were keep their original array.
+  """
+  leaves, treedef = jax.tree.flatten(state)
+  targets = treedef.flatten_up_to(state_mesh_shardings)
+  out = list(leaves)
+  move_indices, move_values, move_targets, key_impls = [], [], [], {}
+  for i, (leaf, target) in enumerate(zip(leaves, targets)):
+    if isinstance(leaf, jax.Array):
+      if leaf.sharding.is_equivalent_to(target, leaf.ndim):
+        continue
+      if jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key) and isinstance(target, NamedSharding):
+        key_impls[i] = jax.random.key_impl(leaf)
+        leaf = jax.random.key_data(leaf)
+        # key_data appends trailing dims for the raw key words; leave them unsharded.
+        target = NamedSharding(
+            target.mesh,
+            P(*target.spec, *([None] * (leaf.ndim - len(target.spec)))),
+            memory_kind=target.memory_kind,
+        )
+    move_indices.append(i)
+    move_values.append(leaf)
+    move_targets.append(target)
+  if move_values:
+    moved = jax.device_put(move_values, move_targets)
+    for i, value in zip(move_indices, moved):
+      out[i] = jax.random.wrap_key_data(value, impl=key_impls[i]) if i in key_impls else value
+  return jax.tree.unflatten(treedef, out)
+
+
 def reshard_train_state(state, state_mesh_shardings, enable_single_controller: bool):
   """Reshards a train state to `state_mesh_shardings`.
 
@@ -1050,7 +1101,9 @@ def reshard_train_state(state, state_mesh_shardings, enable_single_controller: b
   to a new sharding can stage the data through the controller host (at 3,072 TPU
   v4 chips the controller RSS grew past 187 GB before compilation). A jitted
   identity with `out_shardings` performs the same reshard on the accelerators.
-  Multi-controller runs keep `jax.device_put`.
+  Multi-controller runs with several processes use `_reshard_across_processes`,
+  which avoids a `jax.device_put` limitation on typed PRNG keys. Single-process
+  runs keep `jax.device_put`.
 
   Args:
     state: PyTree of train state arrays to reshard.
@@ -1063,6 +1116,8 @@ def reshard_train_state(state, state_mesh_shardings, enable_single_controller: b
   """
   if enable_single_controller:
     return jax.jit(lambda s: s, out_shardings=state_mesh_shardings)(state)
+  if jax.process_count() > 1:
+    return _reshard_across_processes(state, state_mesh_shardings)
   return jax.device_put(state, state_mesh_shardings)
 
 
