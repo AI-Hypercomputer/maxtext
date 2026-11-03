@@ -803,7 +803,7 @@ def _conv_input_in_qkv_dtype_scoped(fn):
 
 
 @functools.partial(
-    jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)
+    jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)
 )
 @_conv_input_in_qkv_dtype_scoped
 def gdn_decoupled_conv1d(
@@ -836,6 +836,7 @@ def gdn_decoupled_conv1d(
     bwd_natural_layout: bool | str = False,
     conv_natural_layout: bool = False,
     fwd_head_group_size: int = 0,
+    bwd_2pass_bf16: bool = False,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
   """Decoupled Conv1D + GDN with Pallas backward pass and optional sequence-sharded CP.
 
@@ -875,8 +876,13 @@ def gdn_decoupled_conv1d(
   compute_conv1d.natural_causal_conv1d) instead of through the per-token compact float32 scratch; needs
   `pass1_states_and_bf16_qkv`. `fwd_head_group_size` (config gdn_fwd_kernel_head_group_size, 0 = default) sets those
   kernels' kq-head group size (compute_gdn.chunked_gdn_per_seq). Same values; the backward rule never runs them.
+
+  `bwd_2pass_bf16` (config gdn_bwd_2pass_bf16) makes the backward rule run the Pallas backward kernel with its
+  precise intra-chunk matmuls as 2 MXU dots of bf16 operands instead of `Precision.HIGH`
+  (`pallas_gdn_bwd_kernel(two_pass_bf16=True)`); bf16 activations only. Not bit-identical: one operand of each of
+  those matmuls is rounded to bf16. The forward and the sequence-CP chunk scans (dh_scan) are unchanged.
   """
-  del cp_dh_scan, bwd_natural_layout
+  del cp_dh_scan, bwd_natural_layout, bwd_2pass_bf16
   if _is_cp_active(cp_axis_name):
     (out, states), _, _, _, _, _ = _run_cp_gdn_decoupled_fwd_impl(
         qkv,
@@ -981,9 +987,10 @@ def _gdn_decoupled_conv1d_fwd(
     bwd_natural_layout: bool = False,
     conv_natural_layout: bool = False,
     fwd_head_group_size: int = 0,
+    bwd_2pass_bf16: bool = False,
 ):
   """Forward rule for custom_vjp registration of gdn_decoupled_conv1d."""
-  del cp_dh_scan, bwd_natural_layout
+  del cp_dh_scan, bwd_natural_layout, bwd_2pass_bf16
   (
       qkv,
       b,
@@ -1134,12 +1141,13 @@ def _gdn_decoupled_conv1d_bwd(
     bwd_natural_layout: bool = False,
     conv_natural_layout: bool = False,
     fwd_head_group_size: int = 0,
+    bwd_2pass_bf16: bool = False,
     residuals: tuple[Any, ...] | None = None,
     cotangents: tuple[Any, ...] | None = None,
 ):
   """Backward rule for custom_vjp registration of gdn_decoupled_conv1d."""
-  # Support positional calls that omit the trailing nondiff arguments (10..20 positional args).
-  # jax.custom_vjp itself always passes all 19 nondiff arguments plus residuals and cotangents (21 args).
+  # Support positional calls that omit the trailing nondiff arguments (10..21 positional args).
+  # jax.custom_vjp itself always passes all 20 nondiff arguments plus residuals and cotangents (22 args).
   if residuals is None and cotangents is None and isinstance(cp_axis_name, tuple) and len(cp_axis_name) >= 10:
     residuals, cotangents = cp_axis_name, cp_matmul_precision
     cp_axis_name, cp_matmul_precision = None, cp_gdn.DEFAULT_PRECISION
@@ -1202,9 +1210,17 @@ def _gdn_decoupled_conv1d_bwd(
   ):
     residuals, cotangents = conv_natural_layout, fwd_head_group_size
     conv_natural_layout, fwd_head_group_size = False, 0
-  elif cotangents is None and isinstance(fwd_head_group_size, tuple) and len(fwd_head_group_size) >= 10:
-    residuals, cotangents = fwd_head_group_size, residuals
-    fwd_head_group_size = 0
+  elif (
+      residuals is None
+      and cotangents is None
+      and isinstance(fwd_head_group_size, tuple)
+      and len(fwd_head_group_size) >= 10
+  ):
+    residuals, cotangents = fwd_head_group_size, bwd_2pass_bf16
+    fwd_head_group_size, bwd_2pass_bf16 = 0, False
+  elif cotangents is None and isinstance(bwd_2pass_bf16, tuple) and len(bwd_2pass_bf16) >= 10:
+    residuals, cotangents = bwd_2pass_bf16, residuals
+    bwd_2pass_bf16 = False
   # The backward rule recomputes the Conv1D with JAX ops; it never runs the Pallas forward kernel or m_scan.
   del conv_dense_token_stack, cp_m_scan, pass1_states_and_bf16_qkv, conv_natural_layout, fwd_head_group_size
 
@@ -1225,6 +1241,7 @@ def _gdn_decoupled_conv1d_bwd(
         cp_dh_scan=cp_dh_scan,
         cp_fast_state_passing=cp_fast_state_passing,
         bwd_natural_layout=bwd_natural_layout,
+        bwd_2pass_bf16=bwd_2pass_bf16,
     )
 
 
@@ -1245,6 +1262,7 @@ def _gdn_decoupled_conv1d_bwd_impl(
     cp_dh_scan: bool = False,
     cp_fast_state_passing: bool = False,
     bwd_natural_layout: bool = False,
+    bwd_2pass_bf16: bool = False,
 ):
   """_gdn_decoupled_conv1d_bwd after its argument shim, traced inside its conv_input_in_qkv_dtype scope."""
   m_local_fwd = None
@@ -1499,6 +1517,7 @@ def _gdn_decoupled_conv1d_bwd_impl(
         return_dh0=need_dh0,
         recompute_t_inv=recompute_t_inv_in_kernel,
         natural_layout=bwd_natural_layout,
+        two_pass_bf16=bwd_2pass_bf16,
     )
     if need_dh0:
       dy_conv, d_b, d_a, d_a_log, d_dt_bias, dh0_local = bwd_out
@@ -1586,6 +1605,7 @@ def _gdn_decoupled_conv1d_bwd_impl(
       return_dh0=need_dh0,
       recompute_t_inv=recompute_t_inv_in_kernel,
       natural_layout=bwd_natural_layout,
+      two_pass_bf16=bwd_2pass_bf16,
   )
   # pylint: disable=unbalanced-tuple-unpacking
   if need_dh0:
