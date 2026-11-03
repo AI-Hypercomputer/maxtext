@@ -142,7 +142,6 @@ class TokenDroppingTest(unittest.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=False,
         sparse_matmul=False,
         max_target_length=80,
         per_device_batch_size=1,
@@ -266,7 +265,6 @@ class MlpBlockTest(unittest.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=False,
         sparse_matmul=False,
         max_target_length=80,
         per_device_batch_size=1,
@@ -998,44 +996,13 @@ class RoutedMoeTest(parameterized.TestCase):
     return output
 
   @pytest.mark.tpu_only
-  def test_megablox(self):
+  def test_gmm(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="moe_block_megablox_test",
+        run_name="moe_block_gmm_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
-        sparse_matmul=True,
-        per_device_batch_size=1,
-        max_target_length=128,
-        float32_gate_logits=True,
-    )
-
-    rng = jax.random.PRNGKey(1234)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
-        dtype=cfg.dtype,
-    )
-
-    devices_array = maxtext_utils.create_device_mesh(cfg)
-    mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
-    actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    assert_moe_close(actual_output, expected_output, cfg.dtype)
-
-  @pytest.mark.tpu_only
-  def test_ragged_dot(self):
-    cfg = pyconfig.initialize(
-        [None, get_test_config_path()],
-        run_name="moe_block_ragged_dot_test",
-        enable_checkpointing=False,
-        model_name="mixtral-8x7b",
-        dtype="bfloat16",
-        megablox=False,
         sparse_matmul=True,
         per_device_batch_size=1,
         max_target_length=128,
@@ -1076,7 +1043,6 @@ class RoutedMoeTest(parameterized.TestCase):
           hardware="gpu",
           override_model_config=True,
           dtype="bfloat16",
-          megablox=False,
           sparse_matmul=True,
           use_te_grouped_gemm=use_te_grouped_gemm,
           per_device_batch_size=2,
@@ -1103,7 +1069,7 @@ class RoutedMoeTest(parameterized.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg_te)
     mesh = Mesh(devices_array, cfg_te.mesh_axes)
 
-    # Forward against the same dense per-expert loop used by test_ragged_dot / test_megablox.
+    # Forward against the same dense per-expert loop used by test_gmm.
     with nn_partitioning.axis_rules(cfg_te.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg_te, mesh)
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg_te, mesh)
@@ -1141,7 +1107,7 @@ class RoutedMoeTest(parameterized.TestCase):
       (_, out_te), (grads_te, dx_te) = loss_and_grad(model_te, stacked, hidden_states)
 
     # Isolates the GEMM: same sparse MoE, TE vs jax.lax.ragged_dot. GPU bf16 is looser than
-    # the TPU megablox vs dense threshold in test_gmm_grad_equivalence.
+    # the TPU gmm_v2 vs dense threshold in test_gmm_grad_equivalence.
     diff_summary = compare_tree(
         {"output": out_ragged, "state_grad": dx_ragged, "var_grad": grads_ragged},
         {"output": out_te, "state_grad": dx_te, "var_grad": grads_te},
@@ -1189,7 +1155,6 @@ class RoutedMoeTest(parameterized.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="float32",
-        megablox=False,
         sparse_matmul=False,
         per_device_batch_size=1,
         max_target_length=128,
@@ -1220,10 +1185,7 @@ class RoutedMoeTest(parameterized.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         weight_dtype="bfloat16",
-        megablox=False,
         sparse_matmul=True,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         num_moe_emb_chunks=4,
         use_ring_of_experts=True,
         ici_expert_parallelism=4,
@@ -1241,10 +1203,7 @@ class RoutedMoeTest(parameterized.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         weight_dtype="bfloat16",
-        megablox=False,
         sparse_matmul=True,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         num_moe_emb_chunks=0,
         ici_expert_parallelism=4,
         use_ring_of_experts=True,
@@ -1309,10 +1268,7 @@ class RoutedMoeTest(parameterized.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         weight_dtype="bfloat16",
-        megablox=False,
         sparse_matmul=True,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         ici_expert_parallelism=4,
         num_moe_emb_chunks=4,
         use_ring_of_experts=True,
@@ -1339,14 +1295,13 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
-  def test_megablox_expert_parallelism(self):
+  def test_gmm_expert_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="moe_block_megablox_ep_test",
+        run_name="moe_block_gmm_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=4,
@@ -1378,7 +1333,6 @@ class RoutedMoeTest(parameterized.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=2,
@@ -1434,7 +1388,6 @@ class RoutedMoeTest(parameterized.TestCase):
           base_mlp_dim=256,
           base_moe_mlp_dim=256,
           dtype="bfloat16",
-          megablox=True,
           sparse_matmul=True,
           per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
           ici_expert_parallelism=2,
@@ -1571,7 +1524,6 @@ class RoutedMoeTest(parameterized.TestCase):
           base_mlp_dim=256,
           base_moe_mlp_dim=256,
           dtype="bfloat16",
-          megablox=True,
           sparse_matmul=True,
           per_device_batch_size=4,
           ici_expert_parallelism=2,
@@ -1721,7 +1673,6 @@ class RoutedMoeTest(parameterized.TestCase):
           "base_moe_mlp_dim": 256,
           "dtype": "bfloat16",
           "weight_dtype": "float32",
-          "megablox": False,
           "sparse_matmul": True,
           "per_device_batch_size": 4,
           "ici_expert_parallelism": 2,
@@ -1806,7 +1757,6 @@ class RoutedMoeTest(parameterized.TestCase):
         base_emb_dim=2048,
         dtype="bfloat16",
         weight_dtype="bfloat16",
-        megablox=True,
         ragged_buffer_factor=-1.0,
         ragged_gather_fallback=False,
         ragged_gather_reduce_fallback=False,
@@ -1823,7 +1773,6 @@ class RoutedMoeTest(parameterized.TestCase):
         "base_moe_mlp_dim": 256,
         "dtype": "bfloat16",
         "weight_dtype": "float32",
-        "megablox": False,
         "sparse_matmul": True,
         "per_device_batch_size": 4,
         "ici_expert_parallelism": 2,
@@ -2004,7 +1953,7 @@ class RoutedMoeTest(parameterized.TestCase):
     """moe_tc_ragged_3d_gmm (3D-layout gmm_v2 / tgmm_v2) matches the TC sort with the 2D gmm_v2 kernels."""
     self._run_tc_ragged_sort_loss_and_grad(
         ragged_buffer_factor=ragged_buffer_factor,
-        common_overrides={**_GMM_V2_SMALL_MLP_TILES, "use_tokamax_gmm": True, "use_gmm_v2": True},
+        common_overrides=_GMM_V2_SMALL_MLP_TILES,
         ref_overrides={"moe_tc_ragged_sort": True, **extra},
         moe_tc_ragged_3d_gmm=True,
         **extra,
@@ -2026,8 +1975,6 @@ class RoutedMoeTest(parameterized.TestCase):
     """moe_tc_ragged_3d_dispatch (3D-layout token all-gather / combine) matches the 2D dispatch."""
     common = {
         **_GMM_V2_SMALL_MLP_TILES,
-        "use_tokamax_gmm": True,
-        "use_gmm_v2": True,
         "moe_tc_ragged_sort": True,
         "moe_tc_ragged_3d_gmm": True,
     }
@@ -2064,8 +2011,6 @@ class RoutedMoeTest(parameterized.TestCase):
     """The fused TC unsort / EP combine backward and the 3D DLHS partial_sum match the unfused 3D dispatch."""
     common = {
         **_GMM_V2_SMALL_MLP_TILES,
-        "use_tokamax_gmm": True,
-        "use_gmm_v2": True,
         "moe_tc_ragged_sort": True,
         "moe_tc_ragged_3d_gmm": True,
         "moe_tc_ragged_3d_dispatch": True,
@@ -2104,8 +2049,6 @@ class RoutedMoeTest(parameterized.TestCase):
     """3D TC dispatch overrides plus an fp8 qwix rule (fixed weight / bwd scales) for the fused-unsort tests."""
     common = {
         **_GMM_V2_SMALL_MLP_TILES,
-        "use_tokamax_gmm": True,
-        "use_gmm_v2": True,
         "moe_tc_ragged_sort": True,
         "moe_tc_ragged_3d_gmm": True,
         "moe_tc_ragged_3d_dispatch": True,
@@ -2229,7 +2172,6 @@ class RoutedMoeTest(parameterized.TestCase):
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_expert_parallelism=2,
@@ -2309,7 +2251,6 @@ class RoutedMoeTest(parameterized.TestCase):
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_expert_parallelism=2,
@@ -2569,11 +2510,10 @@ class RoutedMoeTest(parameterized.TestCase):
 
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="moe_block_megablox_ep_test",
+        run_name="moe_block_gmm_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_fsdp_parallelism=2,
@@ -2610,10 +2550,7 @@ class RoutedMoeTest(parameterized.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         per_device_batch_size=4,
         ici_fsdp_parallelism=4,
         shard_embed_moe_on_fsdp=True,
@@ -2682,14 +2619,13 @@ class RoutedMoeTest(parameterized.TestCase):
       self.assertEqual(output_qag.shape, expected_output.shape)
 
   @pytest.mark.tpu_only
-  def test_megablox_context_parallelism(self):
+  def test_gmm_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="moe_block_megablox_cp_test",
+        run_name="moe_block_gmm_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=1,
         ici_context_parallelism=4,
@@ -2714,14 +2650,13 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
-  def test_megablox_expert_context_parallelism(self):
+  def test_gmm_expert_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="moe_block_megablox_ep_cp_test",
+        run_name="moe_block_gmm_ep_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_context_parallelism=2,
@@ -2748,14 +2683,13 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
   @pytest.mark.tpu_only
-  def test_megablox_expert_tensor_parallelism(self):
+  def test_gmm_expert_tensor_parallelism(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="moe_block_megablox_ep_tp_test",
+        run_name="moe_block_gmm_ep_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_tensor_parallelism=2,
@@ -3176,7 +3110,7 @@ class TeGroupedGemmTest(unittest.TestCase):
         base_moe_mlp_dim=64,
         mlp_bias=mlp_bias,
         float32_gate_logits=True,
-        **{"megablox": False, **overrides},
+        **overrides,
     )
 
   def _run_te_vs_ragged_dot(self, expert_parallelism, mlp_bias=False, ref_overrides=None, **overrides):
@@ -3246,7 +3180,7 @@ class TeGroupedGemmTest(unittest.TestCase):
       _assert_te_bf16_close(f"d{key}", _unwrap(params_te[key]), _unwrap(params_ref[key]))
 
   def test_mlp_bias(self):
-    """Bias is added after GEMM, same as tokamax/megablox/ragged_dot."""
+    """Bias is added after GEMM, same as gmm_v2/ragged_dot."""
     self._run_te_vs_ragged_dot(1, mlp_bias=True)
 
   def test_ep2(self):
@@ -3268,14 +3202,12 @@ class TeGroupedGemmTest(unittest.TestCase):
 
     When the ragged buffer holds every routed row (EP=2 here), ring_ragged_sort keeps rows at their
     global positions and gmm gets the global group sizes with a non-zero group_offset on every shard
-    but the first. jax_ragged_dot_gmm ignores group_offset, so the reference runs the same path on
-    megablox.
+    but the first, which jax_ragged_dot_gmm honours like gmm_v2.
     """
     if jax.device_count() < 2:
       self.skipTest(f"use_ragged_sort needs EP > 1, got {jax.device_count()} devices")
     self._run_te_vs_ragged_dot(
         jax.device_count(),
-        ref_overrides={"megablox": True},
         use_ring_of_experts=True,
         use_ragged_sort=True,
         capacity_factor=3.0,
@@ -3331,7 +3263,6 @@ class TeGroupedGemmConfigTest(parameterized.TestCase):
       "run_name": "te_gmm_config_test",
       "enable_checkpointing": False,
       "model_name": "default",
-      "megablox": False,
       "use_te_grouped_gemm": True,
       "sparse_matmul": True,
   }
@@ -3342,8 +3273,6 @@ class TeGroupedGemmConfigTest(parameterized.TestCase):
   @parameterized.named_parameters(
       # The TE backend is unreachable from the dense path, so it must not be silently ignored.
       ("dense", {"sparse_matmul": False}, "requires sparse_matmul=True"),
-      ("megablox", {"megablox": True, "use_tokamax_gmm": False}, "is not compatible with megablox"),
-      ("tokamax", {"hardware": "tpu", "use_tokamax_gmm": True}, "is not compatible with use_tokamax_gmm"),
       ("quantization", {"quantization": "fp8", "use_qwix_quantization": True}, "does not support quantization"),
       (
           "tc_ragged_sort",
@@ -3463,8 +3392,6 @@ class QuantizedMoeTest(parameterized.TestCase):
       {
           "testcase_name": f"{base_name}_ep{ici_expert_parallelism}" + ("_qag" if shard_embed_moe_on_fsdp else ""),
           "quantization": quantization,
-          "use_tokamax_gmm": use_tokamax_gmm,
-          "use_gmm_v2": use_gmm_v2,
           "wa_static": wa_static,
           "ici_expert_parallelism": ici_expert_parallelism,
           "shard_embed_moe_on_fsdp": shard_embed_moe_on_fsdp,
@@ -3472,18 +3399,13 @@ class QuantizedMoeTest(parameterized.TestCase):
       for (
           base_name,
           quantization,
-          use_tokamax_gmm,
-          use_gmm_v2,
           wa_static,
           ici_expert_parallelism,
           shard_embed_moe_on_fsdp,
       ) in [
-          ("megablox_bf16", "", False, False, False, 1, False),
-          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1, False),
-          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1, False),
-          ("tokamax_v2_bf16", "", True, True, False, 1, False),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4, False),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True),
+          ("bf16", "", False, 1, False),
+          ("fp8_dynamic", "fp8_full", False, 4, False),
+          ("fp8_static", "fp8_full", True, 1, True),
       ]
   )
   @pytest.mark.skip_on_tpu7x  # TODO(b/543017989): Investigate correctness failures
@@ -3491,8 +3413,6 @@ class QuantizedMoeTest(parameterized.TestCase):
   def test_gmm_grad_equivalence(
       self,
       quantization: str,
-      use_tokamax_gmm: bool,
-      use_gmm_v2: bool,
       wa_static: bool,
       ici_expert_parallelism: int,
       shard_embed_moe_on_fsdp: bool = False,
@@ -3505,9 +3425,6 @@ class QuantizedMoeTest(parameterized.TestCase):
         sparse_matmul,
         quantization,
         ici_expert_parallelism,
-        megablox=True,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         shard_embed_moe_on_fsdp=False,
     ):
       return pyconfig.initialize(
@@ -3527,9 +3444,6 @@ class QuantizedMoeTest(parameterized.TestCase):
           quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=sparse_matmul,
-          megablox=megablox,
-          use_tokamax_gmm=use_tokamax_gmm,
-          use_gmm_v2=use_gmm_v2,
           shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
           quantization=quantization,
           use_qwix_quantization=True,
@@ -3554,9 +3468,6 @@ class QuantizedMoeTest(parameterized.TestCase):
         sparse_matmul=False,
         quantization="",
         ici_expert_parallelism=1,
-        megablox=False,
-        use_tokamax_gmm=False,
-        use_gmm_v2=False,
     )
     cache_attr = "_gmm_grad_equivalence_ref_cache"
     ref_cache = getattr(self.__class__, cache_attr, {})
@@ -3583,9 +3494,6 @@ class QuantizedMoeTest(parameterized.TestCase):
         sparse_matmul=True,
         quantization=quantization,
         ici_expert_parallelism=ici_expert_parallelism,
-        megablox=True,
-        use_tokamax_gmm=use_tokamax_gmm,
-        use_gmm_v2=use_gmm_v2,
         shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
     )
     tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
@@ -3627,9 +3535,6 @@ class QuantizedMoeTest(parameterized.TestCase):
           quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=True,
-          megablox=False,
-          use_tokamax_gmm=True,
-          use_gmm_v2=True,
           use_ring_of_experts=True,
           use_ragged_sort=use_ragged_sort,
           mlp_bias=True,
@@ -3699,9 +3604,6 @@ class QuantizedMoeTest(parameterized.TestCase):
           quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=True,
-          megablox=False,
-          use_tokamax_gmm=True,
-          use_gmm_v2=True,
           use_ring_of_experts=True,
           use_ragged_sort=True,
           mlp_bias=True,
@@ -3768,7 +3670,7 @@ class TcRaggedSortConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, re.escape("moe_tc_ragged_sort=True " + msg)):
       maxtext_types.MaxTextConfig(**{**self._CONFIG, **overrides}, moe_tc_ragged_sort=True)
 
-  _CONFIG_3D = {**_CONFIG, "moe_tc_ragged_sort": True, "use_tokamax_gmm": True, "use_gmm_v2": True}
+  _CONFIG_3D = {**_CONFIG, "moe_tc_ragged_sort": True}
 
   def test_accepts_3d_gmm(self):
     self.assertTrue(maxtext_types.MaxTextConfig(**self._CONFIG_3D, moe_tc_ragged_3d_gmm=True).moe_tc_ragged_3d_gmm)
@@ -3784,7 +3686,6 @@ class TcRaggedSortConfigTest(parameterized.TestCase):
     self.assertTrue(cfg.moe_tc_ragged_3d_gmm)
 
   @parameterized.named_parameters(
-      ("no_gmm_v2", {"use_gmm_v2": False}, "requires use_tokamax_gmm=True and use_gmm_v2=True"),
       ("mlp_bias", {"mlp_bias": True}, "does not support: mlp_bias"),
       ("emb_chunks", {"num_moe_emb_chunks": 2}, "does not support: num_moe_emb_chunks > 0"),
   )
@@ -3970,7 +3871,6 @@ class GetEinsumTest(parameterized.TestCase):
         base_moe_mlp_dim=32,
         dtype="float32",
         weight_dtype="float32",
-        megablox=False,
         sparse_matmul=False,
         max_target_length=8,
         per_device_batch_size=1,
@@ -4070,6 +3970,7 @@ class SparseMatmulQuantizationTest(parameterized.TestCase):
       ("fp8_under_qwix", "fp8", True, None),
       ("int8_under_qwix", "int8", True, None),
   )
+  @pytest.mark.tpu_only  # Off TPU the MoE layer runs jax.lax.ragged_dot, so mblx.gmm is never called.
   def test_gmm_quantize_dtypes(self, quantization, use_qwix_quantization, expected_dtype):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -4084,7 +3985,6 @@ class SparseMatmulQuantizationTest(parameterized.TestCase):
         dtype="float32",
         weight_dtype="float32",
         sparse_matmul=True,
-        megablox=True,
         max_target_length=8,
         per_device_batch_size=1,
         quantization=quantization,
@@ -4181,7 +4081,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=False,
-        megablox=False,
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
         max_target_length=self._S,
@@ -4236,7 +4135,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=True,
-        megablox=True,
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
         max_target_length=self._S,
@@ -4281,7 +4179,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=False,
-        megablox=False,
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
         norm_topk_prob=True,
@@ -4363,7 +4260,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=True,
-        megablox=True,
         ici_expert_parallelism=jax.device_count(),
         max_target_length=self._S,
         per_device_batch_size=self._B,
@@ -4434,9 +4330,6 @@ class SparseMoeNativeGmmPerChannelAxisTest(unittest.TestCase):
         weight_block_size=block_size,
         quantization="serve_fp8_weight",
         sparse_matmul=True,
-        use_gmm_v2=True,
-        use_tokamax_gmm=True,
-        megablox=True,
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
         max_target_length=16,
@@ -4504,9 +4397,6 @@ class SparseMoeNativeGmmPerTensorTest(unittest.TestCase):
         weight_block_size=None,
         quantization="serve_fp8_weight",
         sparse_matmul=True,
-        use_gmm_v2=True,
-        use_tokamax_gmm=True,
-        megablox=True,
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
         max_target_length=16,
@@ -4696,16 +4586,13 @@ class FusedMoeNativeFp8Test(unittest.TestCase):
     self.assertLess(relerr, 0.1, f"native vs dequantize relerr={relerr:.3e}")
 
   def test_sparse_matmul_gmm_v2_flags_dont_crash_under_vllm_rpa(self):
-    """Regression test: sparse_matmul=True + use_gmm_v2=True with
+    """Regression test: sparse_matmul=True with
     attention=vllm_rpa used to wrap kernels in a QArray that crashed
     fused_moe_matmul's jnp.concatenate. vllm_rpa always wins the dispatch,
     so this should behave like sparse_matmul=False."""
     cfg, block_size = self._make_config(
         "fused_moe_sparse_matmul_guard",
         sparse_matmul=True,
-        use_gmm_v2=True,
-        use_tokamax_gmm=True,
-        megablox=True,
     )
     model, _ = self._make_model(cfg)
     embed = self._assign_synthetic_fp8_weights(model, block_size)
@@ -4783,7 +4670,6 @@ def test_moe_dispatch_no_expert_sharding_dense_forward():
       enable_checkpointing=False,
       model_name="mixtral-8x7b",
       dtype="bfloat16",
-      megablox=False,
       sparse_matmul=False,
       capacity_factor=1.0,
       moe_dispatch_no_expert_sharding=True,
@@ -4822,7 +4708,6 @@ class FusedMlpMoETest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=True,
-        megablox=True,
         prefuse_moe_weights=False,
         ici_expert_parallelism=jax.device_count(),
         max_target_length=self._S,
@@ -4844,7 +4729,6 @@ class FusedMlpMoETest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=True,
-        megablox=True,
         prefuse_moe_weights=True,
         ici_expert_parallelism=jax.device_count(),
         max_target_length=self._S,
@@ -4856,8 +4740,10 @@ class FusedMlpMoETest(unittest.TestCase):
     copy_weights_prefused(self.ref_model, fused_model)
 
     inputs = self._inputs()
-    ref_out, _, _ = self.ref_model(inputs)
-    fused_out, _, _ = fused_model(inputs)
+    with nn_partitioning.axis_rules(self.ref_cfg.logical_axis_rules):
+      ref_out, _, _ = self.ref_model(inputs)
+    with nn_partitioning.axis_rules(fused_cfg.logical_axis_rules):
+      fused_out, _, _ = fused_model(inputs)
 
     np.testing.assert_allclose(
         np.array(ref_out, dtype=np.float32),
@@ -4903,7 +4789,6 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=True,
-        megablox=True,
         moe_pin_sparse_core_all_gathers=True,
         moe_fsdp_all_gather_sparse_core_id=0,
         moe_ep_all_gather_sparse_core_id=1,
@@ -4926,9 +4811,6 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         sparse_matmul=True,
-        megablox=False,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         ici_expert_parallelism=4,
         use_ring_of_experts=True,
         quantization="fp8_full",
@@ -4968,7 +4850,6 @@ class RoutedMoEFp8Test(parameterized.TestCase):
         num_experts_per_tok=2,
         prefuse_moe_weights=prefuse_moe_weights,
         weight_block_size=weight_block_size,
-        megablox=False,
         sparse_matmul=False,
         per_device_batch_size=1,
         max_target_length=8,
@@ -5246,13 +5127,11 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
 
 
 def _flat_fsdp_config(**overrides):
-  """Tiny DeepSeek config on the tokamax gmm_v2 fp8 path with the explicit weight all-gather over FSDP."""
+  """Tiny DeepSeek config on the gmm_v2 fp8 path with the explicit weight all-gather over FSDP."""
   defaults = {
       "ici_expert_parallelism": 2,
       "ici_fsdp_parallelism": jax.device_count() // 2,
       "shard_embed_moe_on_fsdp": True,
-      "use_tokamax_gmm": True,
-      "use_gmm_v2": True,
       "quantization": "fp8_full",
       "use_qwix_quantization": True,
       "weight_quantization_calibration_method": "fixed,-224,224",
@@ -5318,8 +5197,6 @@ class FlatFsdpWeightsGraphTest(unittest.TestCase):
         quantization="",
         use_qwix_quantization=False,
         shard_embed_moe_on_fsdp=False,
-        use_tokamax_gmm=False,
-        use_gmm_v2=False,
     )
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):

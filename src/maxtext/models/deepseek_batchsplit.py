@@ -36,6 +36,7 @@ import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 
 from maxtext.kernels import attention, sort_activations, megablox
+from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
 
 
@@ -2070,22 +2071,27 @@ ragged_dot_with_mask.defvjp(ragged_dot_with_mask_fwd, ragged_dot_with_mask_bwd)
 # TODO(b/517203548): After integrating with the GMMv2 kernel and `zero_initialize` is set,
 # we will not need to mask the GMM token output explicitly in the fwd or bwd passes.
 # At that point, we can delete this custom ragged dot function.
-@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4))
-def megablox_gmm_with_mask(x, ws, group_sizes, dtype, qwix_rule):
-  return megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule)[0]
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
+def megablox_gmm_with_mask(x, ws, group_sizes, dtype, qwix_rule, tiling):
+  return megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule, tiling)[0]
 
 
-def megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule):
+def megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule, tiling):
   """Performs Megablox GMM and masks unprocessed tokens."""
   out, megablox_gmm_bwd = jax.vjp(
       functools.partial(
           megablox.gmm,
           preferred_element_type=dtype,
+          tiling=tiling,
           use_qwix_quantization=True,
-          use_tokamax_backend=True,
           qwix_rule=qwix_rule,
           use_manual_quantization=True,
           group_sizes=group_sizes,
+          # Kernel output types in the check_vma moe shard_map: the weights are reduced over (data, fsdp), so
+          # their gradient is unreduced over those axes.
+          lhs_vma_axes=("data", "fsdp", "expert"),
+          rhs_vma_axes=("expert",),
+          rhs_reduced_axes=("data", "fsdp"),
       ),
       x,
       ws,
@@ -2095,7 +2101,7 @@ def megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule):
   return out, (mask, megablox_gmm_bwd)
 
 
-def megablox_gmm_with_mask_bwd(dtype, qwix_rule, res, grad):
+def megablox_gmm_with_mask_bwd(dtype, qwix_rule, tiling, res, grad):
   """Dual of Megablox GMM and masks gradients of unprocessed tokens."""
   mask, megablox_gmm_bwd = res
   x_grad, ws_grad = megablox_gmm_bwd(grad)
@@ -2112,6 +2118,7 @@ def gmm(
     group_sizes,
     preferred_element_type,
     config,
+    tiling,
 ):
   """Performs a Grouped Matrix Multiplication (GMM).
 
@@ -2125,6 +2132,7 @@ def gmm(
     preferred_element_type: The preferred element type for the computation.
     config: Configuration object containing model settings, including
       `use_qwix_quantization` and `merge_gating_gmm`.
+    tiling: The Megablox GMM tile sizes.
 
   Returns:
     The result of the grouped matrix multiplication.
@@ -2136,6 +2144,7 @@ def gmm(
         group_sizes=group_sizes,
         dtype=preferred_element_type,
         qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[-1],
+        tiling=tiling,
     )
   else:
     output = ragged_dot_with_mask(
@@ -2154,6 +2163,7 @@ def compute_gating(x, w0, w1, group_sizes, *, dtype, config):
       group_sizes=group_sizes,
       preferred_element_type=dtype,
       config=config,
+      tiling=moe_lib.get_gmm_tiling(config)[0],
   )
   if config.merge_gating_gmm:
     w01 = jnp.concatenate([w0, w1], axis=-1)
@@ -2175,6 +2185,7 @@ def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, confi
       group_sizes=group_sizes,
       preferred_element_type=dtype,
       config=config,
+      tiling=moe_lib.get_gmm_tiling(config)[1],
   )
   layer_wo = gmm_fn(
       intermediate_layer,

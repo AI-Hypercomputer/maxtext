@@ -35,5 +35,4 @@ use_qk_norm: true
 use_post_ffw_norm: true
 interleave_moe_layer_step: 2
 inhomogeneous_layer_cycle_interval: 2
-megablox: false
 sparse_matmul: false

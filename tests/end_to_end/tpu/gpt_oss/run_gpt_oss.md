@@ -70,7 +70,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     enable_checkpointing=false \
     attention=flash \
     sparse_matmul=True \
-    megablox=True \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     per_device_batch_size=4 \
@@ -101,7 +100,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     scan_layers=True \
     attention=flash \
     sparse_matmul=True \
-    megablox=True \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     per_device_batch_size=4 \
@@ -127,7 +125,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_native src/maxtext/configs/
     scan_layers=True \
     attention=flash \
     sparse_matmul=True \
-    megablox=True \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     per_device_batch_size=4 \
@@ -152,7 +149,6 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     scan_layers=False \
     attention=dot_product \
     sparse_matmul=True \
-    megablox=True \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     per_device_batch_size=1 \
@@ -194,7 +190,6 @@ python3 -m tests.utils.forward_pass_logit_checker \
     scan_layers=false \
     attention=dot_product \
     sparse_matmul=True \
-    megablox=True \
     per_device_batch_size=1 \
     max_target_length=4 \
     max_prefill_predict_length=4 \
@@ -209,8 +204,7 @@ This is to check unscanned checkpoint. To check scanned checkpoint, you can use 
 ## Supported MoE strategy
 
 * Dropless
-  * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
-  * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
+  * Grouped matmul with flag `sparse_matmul=True`: the GMM v2 Pallas kernel on TPU, [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) on CPU and GPU.
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
 
 

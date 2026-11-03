@@ -1552,7 +1552,10 @@ def make_gmm_configs(
     has_scale = True
     rhs_quant_dtype = rhs.dtype
     num_blocks = rhs_scale.shape[1]
-    block_size = dims.size_k // num_blocks
+    if num_blocks == 1:
+      block_size = align_to(dims.size_k, pltpu.get_tpu_info().num_lanes)
+    else:
+      block_size = dims.size_k // num_blocks
   else:
     has_scale = False
     rhs_quant_dtype = None
@@ -1712,6 +1715,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
         "transpose_rhs",
         "out_is_3d",
+        "out_manual_axis_type",
     ]
 )
 def gmm_v2(
@@ -1734,6 +1738,7 @@ def gmm_v2(
     fuse_act: str | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    out_manual_axis_type: jax.sharding.ManualAxisType | None = None,
 ) -> jax.Array:
   """GMM kernel implemented with emit_pipeline.
 
@@ -1772,6 +1777,8 @@ def gmm_v2(
       Both require tile_k / tile_n to be a multiple of 128 that divides the
       dim. Tiles whose D0 (tile // 128) is not a multiple of 8 use full-D0
       blocks and relayout the tile window in VMEM.
+    out_manual_axis_type: Optional manual axis type (e.g. varying axes) of the
+      output inside a `shard_map` with check_vma=True.
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]).
@@ -1889,9 +1896,10 @@ def gmm_v2(
 
   aligned_n = align_to(cfgs.out_size_n, num_lanes)
   if cfgs.out_is_3d:
-    out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n // num_lanes, num_lanes), cfgs.out_dtype)
+    out_init_shape = (dims.size_m, aligned_n // num_lanes, num_lanes)
   else:
-    out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
+    out_init_shape = (dims.size_m, aligned_n)
+  out_init = jax.ShapeDtypeStruct(out_init_shape, cfgs.out_dtype, manual_axis_type=out_manual_axis_type)
   lhs_in = LhsRef(value=lhs, scale=lhs_scale)
   rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
   partial_sum_spec = None

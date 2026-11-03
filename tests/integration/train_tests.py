@@ -63,7 +63,6 @@ _GEMMA4_MODELS = {
         # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet (a gap it
         # shares with mixtral and qwen3_moe), so exercise the sparse_matmul path.
         "sparse_matmul=True",
-        "megablox=True",
         "shared_experts=1",
     ]
     + _MOE_OVERRIDES,
@@ -87,7 +86,6 @@ _MISTRAL_MODELS = {
         # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet (a gap it
         # shares with qwen3_moe), so exercise the sparse_matmul path.
         "sparse_matmul=True",
-        "megablox=True",
     ]
     + _MOE_OVERRIDES,
 }
@@ -96,7 +94,6 @@ _GPT_OSS = [
     "model_name=gpt-oss-20b",
     # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
     "sparse_matmul=True",
-    "megablox=True",
 ] + _MOE_OVERRIDES
 
 # One tiny model per GPT-family decoder block that supports explicit sharding.
@@ -140,14 +137,12 @@ class TrainTests(unittest.TestCase):
   # ragged kernels are unavailable.
   _moe_model_overrides = _moe_expert_overrides + [
       "sparse_matmul=False",
-      "megablox=False",
   ]
 
   # The sparse_matmul path, where megablox builds and uses the gmm quantization rule for real
   # rather than falling back to ragged_dot.
   _moe_sparse_model_overrides = _moe_expert_overrides + [
       "sparse_matmul=True",
-      "megablox=True",
   ]
 
   # Every operand has to divide into its tile, and the default tiles are far larger than a
@@ -290,7 +285,6 @@ class TrainTests(unittest.TestCase):
       # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet, so exercise the
       # sparse_matmul path.
       "sparse_matmul=True",
-      "megablox=True",
       # Kimi-K2 defaults to a HuggingFace tokenizer that is not vendored in the repo.
       "tokenizer_type=tiktoken",
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
@@ -319,7 +313,6 @@ class TrainTests(unittest.TestCase):
       "max_target_length=256",
       # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
       "sparse_matmul=True",
-      "megablox=True",
       # The Qwen3.5 model configs default to a HuggingFace tokenizer that is not
       # vendored in the repo; use the checked-in tiktoken asset instead.
       "tokenizer_type=tiktoken",
@@ -347,7 +340,6 @@ class TrainTests(unittest.TestCase):
       "vocab_size=2048",
       "max_target_length=256",
       "sparse_matmul=True",
-      "megablox=True",
   ]
 
   _QWEN3_HYBRID_MODELS = {
@@ -727,7 +719,6 @@ class TrainTests(unittest.TestCase):
             "shared_experts=1",
             "base_moe_mlp_dim=32",
             "sparse_matmul=True",
-            "megablox=False",
             "prefuse_moe_weights=True",
             "te_moe_block=True",
             "te_gmm_quantization=te_no_quant",

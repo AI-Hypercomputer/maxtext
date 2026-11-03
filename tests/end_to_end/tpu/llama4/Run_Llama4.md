@@ -57,7 +57,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     sparse_matmul=False \
-    megablox=False \
     dataset_type=synthetic
 ```
 
@@ -76,7 +75,6 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     scan_layers=false \
     attention=dot_product \
     sparse_matmul=false \
-    megablox=false \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     per_device_batch_size=1 \
@@ -88,5 +86,4 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
 ## Supported MoE strategy
 * Dropless
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
-  * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
-  * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
+  * Grouped matmul with flag `sparse_matmul=True`: the GMM v2 Pallas kernel on TPU, [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) on CPU and GPU.

@@ -121,8 +121,6 @@ _GPT_OSS = {
     "num_experts_per_tok": 2,
     "base_moe_mlp_dim": 64,
     "sparse_matmul": True,
-    "megablox": False,
-    "use_tokamax_gmm": False,
 }
 
 # Layers onboarded to explicit sharding, as (name, layer class, config, ctor kwargs).

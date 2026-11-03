@@ -1383,7 +1383,6 @@ class DeepSeekV4HyperHeadTest(unittest.TestCase):
         "mhc_expansion_rate": self.hc_mult,
         "base_emb_dim": self.hidden_dim,
         "emb_dim": self.hidden_dim,
-        "megablox": False,
         "sparse_matmul": False,
         "normalization_layer_epsilon": 1e-6,
         "skip_jax_distributed_system": True,

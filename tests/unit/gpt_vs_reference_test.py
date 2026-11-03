@@ -304,7 +304,6 @@ class GptOssMLPTest(unittest.TestCase):
         model_name="default",
         dtype="float32",
         weight_dtype="float32",
-        megablox=False,
         sparse_matmul=True,
         per_device_batch_size=1,
         max_target_length=seq_len,

@@ -2365,8 +2365,8 @@ ______________________________________________________________________
 | `P.UNCONSTRAINED`                                | **illegal** when no axis is Auto; the pipeline substitutes `None`, which means *replicate*, the opposite        | `pipeline.py` placeholder swap                                 |
 | partial adoption                                 | **impossible** — mesh axis types are all-or-nothing (`maxtext_utils.py:2263-2268`)                              |                                                                |
 
-`check_vma` is the most consequential: it gates the varying-manual-axes fast path in megablox
-(`ops.py:860`, `ops.py:1008`, `backend.py:528`, `backend.py:789`) on exactly the MoE models that are
+`check_vma` is the most consequential: it gates the varying-manual-axes typing of the gmm_v2 kernel
+outputs (`megablox/ops.py`, `_manual_axis_type`) on exactly the MoE models that are
 on the explicit whitelist. Note the validator is also incomplete — `pipeline.py:385`, `:392`, `:1186`
 hardcode `check_vma=True` regardless of config, and nothing forbids
 `ici_pipeline_parallelism > 1` with explicit.

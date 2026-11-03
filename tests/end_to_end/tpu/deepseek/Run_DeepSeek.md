@@ -125,7 +125,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     attention=dot_product \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
     dataset_type=grain \
     grain_file_type=tfrecord \
@@ -156,7 +155,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     attention=flash \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
     enable_checkpointing=true \
     ici_expert_parallelism=128 \
@@ -213,7 +211,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_native src/maxtext/configs/
     attention=flash \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
     enable_checkpointing=true \
     ici_expert_parallelism=128 \
@@ -246,7 +243,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     attention=flash \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=True \
     sparse_matmul=True \
     dataset_type=synthetic \
     # Indexer training specific flags
@@ -273,7 +269,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     attention=flash \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=True \
     sparse_matmul=True \
     dataset_type=synthetic \
     # Indexer training specific flags
@@ -383,7 +378,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dcn_fsdp_parallelism=1 \
     dcn_data_parallelism=1 \
     ragged_buffer_factor=2.0 \
-    megablox=False \
     sparse_matmul=True \
     remat_policy=full \
     opt_type=sgd \
@@ -420,7 +414,6 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     attention=dot_product \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
     ici_tensor_parallelism=128 \
     ici_fsdp_parallelism=1 \
@@ -519,7 +512,6 @@ python3 -m tests.utils.forward_pass_logit_checker \
     indexer_topk=512 \
     max_target_length=512 \
     sparse_matmul=True \
-    megablox=False \
     ici_fsdp_parallelism=1 \
     ici_expert_parallelism=-1 \
     weight_dtype=bfloat16 \
@@ -555,7 +547,6 @@ python3 -m tests.utils.forward_pass_logit_checker \
     float32_logits=false \
     float32_qk_product=false \
     sparse_matmul=True \
-    megablox=False \
     ici_fsdp_parallelism=-1 \
     dcn_fsdp_parallelism=-1 \
     dcn_data_parallelism=1 \
@@ -604,8 +595,7 @@ To optimize YaRN Rotary Position Embedding (RoPE) performance, you can enable pa
 
 ## Supported MoE strategy
 * Dropless
-  * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
-  * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
+  * Grouped matmul with flag `sparse_matmul=True`: the GMM v2 Pallas kernel on TPU, [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) on CPU and GPU.
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
 * Dropping implementation with flag `sparse_matmul=False` and reasonable `capacity_factor`, commonly used from 1 to 1.25.
 

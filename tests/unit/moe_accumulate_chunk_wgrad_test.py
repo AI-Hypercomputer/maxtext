@@ -39,8 +39,6 @@ class AccumulateChunkWgradParityTest(unittest.TestCase):
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
         num_moe_token_chunks=2,
-        use_tokamax_gmm=True,
-        use_gmm_v2=True,
         **overrides,
     )
     return _run_routed_moe(cfg, params)

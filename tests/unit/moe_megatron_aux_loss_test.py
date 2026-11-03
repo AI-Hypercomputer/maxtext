@@ -204,8 +204,7 @@ def _tiny_deepseek_config(run_name, **overrides):
       "weight_dtype": "float32",
       "matmul_precision": "highest",
       "float32_gate_logits": True,
-      # megablox runs its Pallas kernels in interpret mode off-TPU.
-      "megablox": True,
+      # The gmm_v2 Pallas kernels run on TPU; off TPU the sparse path uses jax.lax.ragged_dot.
       "sparse_matmul": True,
       "per_device_batch_size": 2,
       "max_target_length": 16,
@@ -523,8 +522,7 @@ def _tiny_v4_config(run_name, **overrides):
       "weight_dtype": "float32",
       "matmul_precision": "highest",
       "float32_gate_logits": True,
-      # megablox runs its Pallas kernels in interpret mode off-TPU.
-      "megablox": True,
+      # The gmm_v2 Pallas kernels run on TPU; off TPU the sparse path uses jax.lax.ragged_dot.
       "sparse_matmul": True,
       "per_device_batch_size": 2,
       "max_target_length": 16,

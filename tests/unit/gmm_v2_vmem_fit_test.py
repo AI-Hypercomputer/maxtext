@@ -15,6 +15,8 @@
 """Tests for shrinking explicit gmm_v2 / tgmm_v2 tile sizes to the VMEM limit."""
 
 import functools
+import types
+from unittest import mock
 
 from absl.testing import absltest
 import jax.numpy as jnp
@@ -91,6 +93,42 @@ class AvoidSlowLargeTilesTest(absltest.TestCase):
   def test_unchanged_on_256_wide_mxu(self):
     tiles = gmm_v2.TileSizes(256, 4096, 1280)
     self.assertEqual(tgmm_v2.avoid_slow_large_tiles(tiles, mxu_column_size=256), tiles)
+
+
+class SmallKPerChannelScaleTest(absltest.TestCase):
+
+  def test_per_channel_rhs_scale_with_unaligned_small_k_aligns_block_size(self):
+    lhs = jnp.ones((8, 6), dtype=jnp.float32)
+    rhs = jnp.ones((2, 6, 4), dtype=jnp.int8)
+    rhs_scale = jnp.ones((2, 1, 1, 4), dtype=jnp.float32)
+    group_sizes = jnp.array([3, 5], dtype=jnp.int32)
+    group_offset = jnp.array([0], dtype=jnp.int32)
+
+    fake_tpu = types.SimpleNamespace(
+        num_lanes=128,
+        mxu_column_size=256,
+        fp8_ops_per_second=1,
+        int8_ops_per_second=1,
+        get_sublane_tiling=lambda _: 8,
+    )
+    with mock.patch.object(gmm_v2.pltpu, "get_tpu_info", return_value=fake_tpu):
+      cfg = gmm_v2.make_gmm_configs(
+          lhs,
+          rhs,
+          rhs_scale,
+          None,
+          None,
+          group_sizes,
+          group_offset,
+          tile_info=gmm_v2.TileSizes(128, 128, 128),
+          vmem_limit_bytes=64 * MIB,
+          out_dtype=jnp.float32,
+          acc_dtype=None,
+          maybe_quantize_lhs=True,
+          zero_initialize=True,
+      )
+      self.assertEqual(cfg.rhs_cfgs.quant_block_size, 128)
+      self.assertEqual(cfg.num_quant_blocks_per_tile_k, 1)
 
 
 if __name__ == "__main__":

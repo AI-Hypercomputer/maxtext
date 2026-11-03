@@ -1309,7 +1309,6 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_expert_parallelism=2,

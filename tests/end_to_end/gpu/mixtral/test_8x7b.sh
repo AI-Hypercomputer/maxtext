@@ -30,7 +30,7 @@ python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_RE
     run_name=dropping_pre_training async_checkpointing=false \
     attention=cudnn_flash_te capacity_factor=1.25 dtype=bfloat16 \
     enable_checkpointing=false ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \
-    max_target_length=1024 megablox=False per_device_batch_size=1 \
+    max_target_length=1024 per_device_batch_size=1 \
     reuse_example_batch=1 steps=5 tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.mistral-v1 \
     weight_dtype=bfloat16 sparse_matmul=False packing=False
 echo "Finished pre-training"
@@ -42,7 +42,7 @@ python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_RE
     run_name=dropping_pre_training async_checkpointing=true \
     attention=cudnn_flash_te capacity_factor=1.25 dtype=bfloat16 \
     ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \
-    max_target_length=1024 megablox=False per_device_batch_size=1 \
+    max_target_length=1024 per_device_batch_size=1 \
     reuse_example_batch=1 steps=5 tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.mistral-v1 \
     weight_dtype=bfloat16 sparse_matmul=False packing=False
 echo "Finished fine-tuning"
@@ -53,7 +53,7 @@ echo "Finished fine-tuning"
 #     run_name=unscanned_decoding load_parameters_path=${UNSCANNED_CKPT_PATH} \
 #     async_checkpointing=false attention=dot_product capacity_factor=0.1 \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 max_prefill_predict_length=11 \
-#     max_target_length=24 megablox=False per_device_batch_size=1 \
+#     max_target_length=24 per_device_batch_size=1 \
 #     prompt='"[INST] I love to [/INST]"' scan_layers=false \
 #     tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/tokenizer.mistral-v1
 # echo "Finished decoding"

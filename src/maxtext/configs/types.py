@@ -1207,8 +1207,8 @@ class MoEGeneral(BaseModel):
           "With num_moe_token_chunks>1, chain the expert weights through the token chunks: chunk 0 gathers and"
           " quantizes them once and later chunks reuse the result. In the backward pass each chunk's weight-gradient"
           " tgmm accumulates in place onto the later chunks' gradient (tgmm_v2 partial_sum) instead of"
-          " materializing and summing one gradient per chunk. Requires use_tokamax_gmm=True, use_gmm_v2=True,"
-          " num_moe_emb_chunks=0 and prefuse_moe_weights=False."
+          " materializing and summing one gradient per chunk. Requires hardware='tpu', num_moe_emb_chunks=0 and"
+          " prefuse_moe_weights=False."
       ),
   )
   moe_accumulate_wi_dlhs: bool = Field(
@@ -1217,7 +1217,7 @@ class MoEGeneral(BaseModel):
           "Route the routed-MoE wi_1 GMM input through the wi_0 GMM so that in the backward pass the wi_1 DLHS"
           " is accumulated in place into the wi_0 DLHS (gmm_v2 partial_sum) instead of summed by a separate add."
           " Also folds per-tensor DLHS scales into the gmm_v2 kernel for all MoE GMMs. Requires"
-          " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+          " hardware='tpu' and prefuse_moe_weights=False."
       ),
   )
   moe_flat_fsdp_weights: bool = Field(
@@ -1229,12 +1229,12 @@ class MoEGeneral(BaseModel):
           " weight all-gather / weight-grad reduce-scatter run on the major dim, and the gathered weight is a free"
           " bitcast of the [E, rows, cols] operand the gmm kernels expect (no relayout copies, no 7/8 sublane"
           " padding). Requires shard_embed_moe_on_fsdp with fixed weight calibration (explicit QAG) and the"
-          " tokamax gmm_v2 custom-VJP path. 3D checkpoints loaded via load_parameters_path are converted to the flat"
+          " gmm_v2 custom-VJP path (TPU). 3D checkpoints loaded via load_parameters_path are converted to the flat"
           " layout on load; full-state resumes must come from a flat checkpoint."
       ),
   )
   moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
-      False,
+      True,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
   moe_bwd_prequant_before_unsort: bool = Field(
@@ -1364,8 +1364,8 @@ class MoEGeneral(BaseModel):
           " shards in Ring of Experts, reducing inter-chip token traffic"
           " proportionally to the quantized width (2x for FP8 vs BF16)."
           " Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens"
-          " stay quantized end to end. Requires use_ring_of_experts=True,"
-          " use_gmm_v2=True, and quantization with fixed act calibration."
+          " stay quantized end to end. Requires hardware='tpu',"
+          " use_ring_of_experts=True, and quantization with fixed act calibration."
       ),
   )
 
@@ -1422,7 +1422,7 @@ class MoEGeneral(BaseModel):
   moe_tc_ragged_3d_gmm: bool = Field(
       False,
       description=(
-          "With moe_tc_ragged_sort (tokamax gmm_v2): keep the sorted token buffer in the TC kernels' 3D layout"
+          "With moe_tc_ragged_sort (gmm_v2): keep the sorted token buffer in the TC kernels' 3D layout"
           " (buffer, emb // 128, 128). The wi gmm_v2 / tgmm_v2 kernels consume it and the wo gmm_v2 produces it"
           " directly (relayout in VMEM), removing the (N, D/128, 128) <-> (N, D) relayouts around the sorted"
           " buffer. Embed-dim GMM tiles must be multiples of 128 that divide the embed dim; tiles that are not"
@@ -1602,11 +1602,12 @@ class MoEGeneral(BaseModel):
 
 
 class MoEKernels(BaseModel):
-  """Configuration for MoE-specific kernels like Megablox."""
+  """Configuration for MoE-specific kernels like gmm_v2."""
 
-  megablox: bool = Field(
-      True,
-      description="Whether to use Megablox kernels for MoE. Automatically disabled when hardware='cpu'.",
+  # TODO: b/576367358 - Remove the deprecated megablox, use_tokamax_gmm and use_gmm_v2 settings.
+  megablox: None | bool = Field(
+      None,
+      description="DEPRECATED, ignored: MoE uses the gmm_v2 kernel on TPU and jax.lax.ragged_dot on other hardware.",
   )
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
   wi_tile_fwd_batch_seq: int = Field(
@@ -1672,22 +1673,15 @@ class MoEKernels(BaseModel):
       0, description="Number of chunks for overlapping token all-gather and GMM computation along embedding dimension."
   )
 
-  # tokamax gmm
-  use_tokamax_gmm: bool = Field(
-      False,
-      description="Whether to use the Tokamax library for GMM kernel implementation.",
-  )
+  use_tokamax_gmm: None | bool = Field(None, description="DEPRECATED, ignored: see megablox.")
 
-  use_gmm_v2: bool = Field(
-      False,
-      description="Whether to use Tokamax GMM v2 for MoE kernel.",
-  )
+  use_gmm_v2: None | bool = Field(None, description="DEPRECATED, ignored: see megablox.")
 
   use_te_grouped_gemm: bool = Field(
       False,
       description=(
           "Whether to use TransformerEngine grouped_dense for sparse MoE grouped GEMM on GPU. "
-          "Incompatible with megablox and use_tokamax_gmm; quantization is not supported yet. "
+          "Quantization is not supported yet. "
           "Requires one local device per process: TE v1 copies group_sizes D2H and deadlocks "
           "in single-process multi-device shard_map."
       ),
@@ -1695,7 +1689,7 @@ class MoEKernels(BaseModel):
 
   use_gmm_v2_heuristic_tiling: bool = Field(
       False,
-      description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
+      description="Whether to use the heuristic tiling of the gmm_v2 kernel instead of the wi_tile_* / wo_tile_* sizes.",
   )
 
 
@@ -2121,7 +2115,7 @@ class LayoutAndSharding(BaseModel):
   check_vma: bool = Field(
       False,
       description="Enabled check_vma flag in shard_map calls. Recommended for improved performance but only supported "
-      "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
+      "with auto sharding and EP / FSDP parallelisms.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
   dense_fsdp_use_two_stage_all_gather: bool = Field(
@@ -4419,8 +4413,8 @@ class MaxTextConfig(
       return
     if self.shard_mode != ShardMode.AUTO:
       raise ValueError(f"check_vma requires shard_mode='auto', got shard_mode='{self.shard_mode.value}'.")
-    if self.use_tokamax_gmm:
-      raise ValueError("check_vma is not yet supported with tokamax gmm kernel.")
+    if self.quantization and self.sparse_matmul:
+      raise ValueError("check_vma does not support quantization with the gmm kernel yet.")
     if self.use_ragged_sort:
       raise ValueError("check_vma is not yet supported with ragged sort kernel.")
     if self.use_ring_of_experts:
@@ -4531,8 +4525,6 @@ class MaxTextConfig(
     if self.ragged_buffer_factor <= 0:
       raise ValueError("moe_tc_ragged_sort=True requires ragged_buffer_factor > 0.0.")
     if self.moe_tc_ragged_3d_gmm:
-      if not (self.use_tokamax_gmm and self.use_gmm_v2):
-        raise ValueError("moe_tc_ragged_3d_gmm=True requires use_tokamax_gmm=True and use_gmm_v2=True.")
       unsupported = ["mlp_bias"] if self.mlp_bias else []
       if self.ici_tensor_parallelism > 1 or self.dcn_tensor_parallelism > 1:
         unsupported.append("tensor parallelism")
@@ -4576,16 +4568,6 @@ class MaxTextConfig(
           "grouped GEMM backend is only reachable from the sparse MoE path, so it would "
           "otherwise be silently ignored. Note that some GPU model configs "
           "(e.g. gpu/models/gpt-oss-20b.yml) set sparse_matmul=false."
-      )
-    if self.megablox:
-      raise ValueError(
-          "use_te_grouped_gemm=True is not compatible with megablox=True. "
-          "Set megablox=False to use the TransformerEngine grouped GEMM backend."
-      )
-    if self.use_tokamax_gmm:
-      raise ValueError(
-          "use_te_grouped_gemm=True is not compatible with use_tokamax_gmm=True. "
-          "Disable Tokamax GMM to use the TransformerEngine grouped GEMM backend."
       )
     if self.quantization:
       raise ValueError(
@@ -4783,10 +4765,10 @@ class MaxTextConfig(
     Validates that num_moe_emb_chunks is used with supported settings.
     """
     if self.num_moe_emb_chunks > 0:
-      if not self.use_gmm_v2 or not self.use_ring_of_experts:
+      if self.hardware != "tpu" or not self.use_ring_of_experts:
         raise ValueError(
-            f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
-            f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
+            f"num_moe_emb_chunks > 0 requires hardware='tpu' and use_ring_of_experts=True. "
+            f"Got hardware={self.hardware!r}, use_ring_of_experts={self.use_ring_of_experts}."
         )
       # The emb-chunking path (moe_emb_chunking in moe.py) routes per chunk and does not tag its routed input with
       # checkpoint_name("moe_x_sorted"), so a non-remat moe_x_sorted would be silently ignored there.
@@ -4805,10 +4787,10 @@ class MaxTextConfig(
       # standard EP uses ragged all-to-all where no token all-gather occurs.
       if not self.use_ring_of_experts:
         raise ValueError("moe_quantize_token_all_gather=True requires use_ring_of_experts=True.")
-      # Only Tokamax GMM v2 accepts QArray lhs (unwraps .qvalue and rescales
-      # output with .scale); other backends crash or drop activation scales.
-      if not self.use_gmm_v2:
-        raise ValueError("moe_quantize_token_all_gather=True requires use_gmm_v2=True.")
+      # Only the TPU gmm_v2 path accepts QArray lhs (unwraps .qvalue and rescales
+      # output with .scale); jax.lax.ragged_dot crashes or drops activation scales.
+      if self.hardware != "tpu":
+        raise ValueError("moe_quantize_token_all_gather=True requires hardware='tpu'.")
       # Embedding chunking slices along the contracting dimension and re-executes
       # routing collectives per chunk; not supported with token quantization.
       if self.num_moe_emb_chunks > 0:
@@ -5232,10 +5214,6 @@ class MaxTextConfig(
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
-    # Megablox Pallas Mosaic kernels are TPU-specific; automatically fall back to jax.lax.ragged_dot on CPU.
-    if self.hardware == "cpu" and self.megablox:
-      self.megablox = False
-
     # Check for AQT deprecation warning
     if self.quantization and not self.use_qwix_quantization:
       if self.quantization not in (
@@ -5254,6 +5232,12 @@ class MaxTextConfig(
           "WARNING: enable_orbax_v1 is deprecated and ignored — Orbax v1 is now always used for "
           "checkpointing. Remove the flag from your config; it will be deleted in a future release."
       )
+    for flag in ("megablox", "use_tokamax_gmm", "use_gmm_v2"):
+      if getattr(self, flag) is not None:
+        max_logging.log(
+            f"WARNING: {flag} is deprecated and ignored — MoE uses the gmm_v2 kernel on TPU and jax.lax.ragged_dot "
+            "on other hardware. Remove the flag from your config; it will be deleted in a future release."
+        )
 
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
@@ -6488,17 +6472,7 @@ class MaxTextConfig(
       if self.use_qwix_quantization:
         raise ValueError("quantization='serve_fp8_weight' is not supported with use_qwix_quantization=True.")
 
-    # Validation for GMM v2
-    if self.use_gmm_v2:
-      if not self.use_tokamax_gmm:
-        raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
-      if self.use_batch_split_schedule:
-        raise ValueError("GMM v2 is not supported with a batch split schedule.")
-
     self._validate_te_grouped_gemm()
-
-    if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
-      raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:
@@ -6518,17 +6492,14 @@ class MaxTextConfig(
         )
 
     if self.moe_accumulate_chunk_wgrad and not (
-        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
+        self.hardware == "tpu" and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
     ):
       raise ValueError(
-          "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"
-          " and prefuse_moe_weights=False."
+          "moe_accumulate_chunk_wgrad=True requires hardware='tpu', num_moe_emb_chunks=0 and prefuse_moe_weights=False."
       )
 
-    if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
-      raise ValueError(
-          "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
-      )
+    if self.moe_accumulate_wi_dlhs and not (self.hardware == "tpu" and not self.prefuse_moe_weights):
+      raise ValueError("moe_accumulate_wi_dlhs=True requires hardware='tpu' and prefuse_moe_weights=False.")
 
     if self.moe_bwd_prequant_before_unsort and not (
         self.moe_tc_ragged_3d_dispatch and self.moe_tc_ragged_weights_on_activation
@@ -6567,12 +6538,12 @@ class MaxTextConfig(
       if not (
           self.sparse_matmul
           and (self.shard_embed_moe_on_fsdp or not self.quantization)
-          and ((self.use_tokamax_gmm and self.use_gmm_v2) or self.prefetch_fsdp_weights)
+          and (self.hardware == "tpu" or self.prefetch_fsdp_weights)
           and not self.prefuse_moe_weights
       ):
         raise ValueError(
             "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True or unquantized),"
-            " ((use_tokamax_gmm=True and use_gmm_v2=True) or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
+            " (hardware='tpu' or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
         )
       # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
       if (
@@ -6688,18 +6659,6 @@ class MaxTextConfig(
       diloco_idx = self.dcn_parallelism.index(-1)
       self.dcn_parallelism[diloco_idx] = self.dcn_diloco_parallelism
     self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
-
-    # (b/496973624) use_tokamax_gmm is incompatible with enable_diloco: drjax.map_fn wraps
-    # the train step in jax.vmap over the diloco axis, which causes JAX to batch through
-    # lax.scan (layer scan).
-    # Tokamax's vmap_rule then tries to reconstruct GroupSizes with a batched 2-D value, but
-    # GroupSizes.__post_init__ requires exactly a 1-D shape.
-    if self.enable_diloco and self.use_tokamax_gmm:
-      raise ValueError(
-          "use_tokamax_gmm=True is not compatible with enable_diloco=True due to a known "
-          "incompatibility between tokamax's GroupSizes vmap_rule and JAX's scan batching. "
-          "Please set use_tokamax_gmm=False."
-      )
 
     self._validate_check_vma_is_supported()
     if self.defer_small_all_reduces:

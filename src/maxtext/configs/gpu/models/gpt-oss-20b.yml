@@ -18,7 +18,6 @@ mlpwo: "device"
 moe_mlpwo: "device"
 
 # not supported at GPU
-megablox: false
 # less memory usage, faster training
 sparse_matmul: false
 

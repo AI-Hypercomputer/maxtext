@@ -43,7 +43,6 @@ echo "Against original HF model: ${HF_MODEL_PATH}"
 JAX_PLATFORMS=cpu python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
   tokenizer_type=huggingface \
   tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"/qwen3-tokenizer \
-  megablox=False \
   sparse_matmul=False \
   load_parameters_path=${MAXTEXT_CHECKPOINT_PATH} \
   model_name=qwen3-235b-a22b \

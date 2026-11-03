@@ -70,7 +70,6 @@ _QWEN3_CONFIG = {
     "gdn_value_head_dim": 16,
     "gdn_chunk_size": 4,
     "sparse_matmul": True,
-    "megablox": False,
     "dtype": "float32",
     "weight_dtype": "float32",
 }

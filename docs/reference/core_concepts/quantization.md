@@ -179,7 +179,7 @@ To improve the performance of DeepSeek V3 fine-tuning, we developed a custom rec
 
 To realize these gains, the recipe employs a w8a8g8 (8-bit weights, activations and gradients) strategy targeting three primary areas:
 
-- Megablox Kernels: Specifically the `gmm` and `tgmm` operations.
+- Grouped matmul kernels: Specifically the GMM v2 `gmm` and `tgmm` operations.
 
 - Attention Projections: Utilizing convolution fusion.
 
@@ -246,7 +246,7 @@ quantize token -> EP all-gather -> sort -> GMM
 1. **Quantize Token**: Activations are quantized from the model dtype (e.g. BF16) to the quantized dtype (e.g. FP8).
 2. **EP All-Gather**: Gathers the quantized byte payloads across the EP mesh axis, shrinking inter-chip bandwidth by the compression ratio.
 3. **Sort**: Token sorting (default or ragged sort) operates directly on the raw quantized payloads without dequantizing to float.
-4. **GMM**: Tokamax GMM v2 computes directly on the quantized activations and weights, and scales accumulated outputs back to model dtype.
+4. **GMM**: GMM v2 computes directly on the quantized activations and weights, and scales accumulated outputs back to model dtype.
 5. **Backward TGMM**: Receives cached pre-quantized activations directly from the forward pass, avoiding re-quantization.
 
 ### Usage & Requirements
@@ -256,5 +256,5 @@ Flag: `moe_quantize_token_all_gather=true`
 Requirements:
 
 - `use_ring_of_experts=True`: Inherent architectural requirements.
-- `use_gmm_v2=True`: Tokamax GMM v2 grouped GEMM backend.
+- TPU: only the GMM v2 kernel accepts quantized activations.
 - Static calibration for activations: e.g. `act_quantization_calibration_method="fixed,-224,224"` (dynamic calibration is for future work).

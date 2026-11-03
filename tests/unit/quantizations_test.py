@@ -530,8 +530,8 @@ class QuantTest(unittest.TestCase):
 @pytest.mark.parametrize(
     "group_sizes,k,n,tiling,dtype",
     [
-        # m = sum(group_sizes) must be divisible by tm (first element of tiling)
-        ([3, 5], 6, 4, (1, 1, 1), jnp.int8),  # m = 8, tm = 8
+        # m = sum(group_sizes) must be divisible by the sublane tiling (8)
+        ([3, 5], 6, 4, (128,) * 9, jnp.int8),
     ],
 )
 @pytest.mark.tpu_only
@@ -557,8 +557,7 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
       lhs,
       rhs,
       group_sizes,
-      tiling=tiling,  # small tiles so the shapes above work
-      interpret=True,  # avoids device-specific compilation in CI
+      tiling=tiling,
       lhs_quantize_dtype=None,
       rhs_quantize_dtype=None,
   ).block_until_ready()
@@ -567,8 +566,7 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
       lhs,
       rhs,
       group_sizes,
-      tiling=tiling,  # small tiles so the shapes above work
-      interpret=True,  # avoids device-specific compilation in CI
+      tiling=tiling,
       lhs_quantize_dtype=dtype,
       rhs_quantize_dtype=dtype,
   ).block_until_ready()

@@ -622,8 +622,6 @@ class MoENativeFp8PerChannelTest(unittest.TestCase):
         group_sizes=group_sizes,
         group_offset=group_offset,
         preferred_element_type=jnp.bfloat16,
-        use_gmm_v2=True,
-        use_tokamax_backend=True,
     )
 
     rhs_deq = (rhs_fp8.astype(jnp.float32) * scale_3d).astype(jnp.bfloat16)
@@ -633,8 +631,6 @@ class MoENativeFp8PerChannelTest(unittest.TestCase):
         group_sizes=group_sizes,
         group_offset=group_offset,
         preferred_element_type=jnp.bfloat16,
-        use_gmm_v2=True,
-        use_tokamax_backend=True,
     )
 
     relerr = float(jnp.max(jnp.abs(out_native - out_baseline)) / (jnp.max(jnp.abs(out_baseline)) + 1e-12))

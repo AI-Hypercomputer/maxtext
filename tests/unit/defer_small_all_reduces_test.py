@@ -302,7 +302,6 @@ class DeferredMeshTest(unittest.TestCase):
           base_moe_mlp_dim=128,
           dtype="float32",
           weight_dtype="float32",
-          megablox=True,
           sparse_matmul=True,
           per_device_batch_size=2,
           ici_expert_parallelism=2,

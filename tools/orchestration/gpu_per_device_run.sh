@@ -21,7 +21,7 @@
 # Example:
 #   tools/orchestration/gpu_per_device_run.sh \
 #     src/maxtext/configs/gpu/models/gpt-oss-20b.yml \
-#     steps=10 sparse_matmul=true megablox=false use_te_grouped_gemm=true \
+#     steps=10 sparse_matmul=true use_te_grouped_gemm=true \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 \
 #     run_name=te_gmm_ep8 base_output_directory=/tmp/te_gmm_ep8_out
 #

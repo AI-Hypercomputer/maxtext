@@ -64,7 +64,6 @@ _QWEN3_5_OVERRIDES = {
     # MRoPE sections must cover rotary_dim / 2, which is 4 here, not the shipped [11, 11, 10].
     "mrope_section": [2, 1, 1],
     "sparse_matmul": True,
-    "megablox": False,
     "attention": "dot_product",
 }
 

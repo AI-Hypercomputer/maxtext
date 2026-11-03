@@ -58,7 +58,6 @@ class Train(parameterized.TestCase):
             # Enable sparse_matmul.
             "sparse_matmul=True",
             # Enable ragged_dot.
-            "megablox=False",
             f'quantization="{quantization}"',
             "use_qwix_quantization=True",
             "sharding_tolerance=0.15",

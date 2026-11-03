@@ -46,7 +46,6 @@ _V4_SMALL = {
     "scan_layers": True,
     "attention": "dot_product",
     "sparse_matmul": False,
-    "megablox": False,
     "dtype": "float32",
     "weight_dtype": "float32",
     "matmul_precision": "highest",

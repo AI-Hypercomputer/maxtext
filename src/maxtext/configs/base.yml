@@ -284,13 +284,12 @@ mtp_norm_main_hidden_state: false
 # mixture of experts (moe)
 num_experts: 1
 num_experts_per_tok: 1
-megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
-moe_accumulate_chunk_wgrad: false # with num_moe_token_chunks>1, gather/quantize MoE weights once and accumulate their gradients in place across chunks via tgmm_v2 partial_sum. requires use_tokamax_gmm=true, use_gmm_v2=true, num_moe_emb_chunks=0, prefuse_moe_weights=false.
-moe_accumulate_wi_dlhs: false # accumulate the MoE wi_1 backward DLHS into the wi_0 DLHS in place (gmm_v2 partial_sum) and fold per-tensor DLHS scales into the kernel. Requires use_tokamax_gmm=True, use_gmm_v2=True, prefuse_moe_weights=False.
-moe_gmm_v2_dlhs_transpose_rhs: false # use native transpose_rhs in GMM v2 backward DLHS; false keeps the explicit RHS transpose
+moe_accumulate_chunk_wgrad: false # with num_moe_token_chunks>1, gather/quantize MoE weights once and accumulate their gradients in place across chunks via tgmm_v2 partial_sum. requires hardware=tpu, num_moe_emb_chunks=0, prefuse_moe_weights=false.
+moe_accumulate_wi_dlhs: false # accumulate the MoE wi_1 backward DLHS into the wi_0 DLHS in place (gmm_v2 partial_sum) and fold per-tensor DLHS scales into the kernel. Requires hardware=tpu, prefuse_moe_weights=False.
+moe_gmm_v2_dlhs_transpose_rhs: true # use native transpose_rhs in GMM v2 backward DLHS; false keeps the explicit RHS transpose
 moe_flat_fsdp_weights: false # store routed-expert weights as 2D [num_experts * rows, cols] sharded (expert, fsdp) on dim 0 to eliminate FSDP all-gather / reduce-scatter relayout copies.
 moe_bwd_prequant_before_unsort: false # fuse TC unsort-reduce into the wo GMM custom VJP so backward quantization runs on the smaller [N_tokens, D // 128, 128] cotangent before the TC unsort-gather into the expert buffer. With quantization, needs fixed weight, act and bwd calibration.
 moe_combine_bwd_direct_qarray: false # with moe_bwd_prequant_before_unsort, fuse the EP combine psum_scatter into the wo GMM custom VJP so backward quantizes the local cotangent once before the EP all-gather and TC unsort-gather. Incompatible with moe_quantize_combine_bwd_method.
@@ -331,7 +330,7 @@ te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available option
 # Whether to quantize token activations before the All-Gather across EP shards in Ring-of-Experts forward pass
 # Reduces inter-chip token traffic proportionally to the quantized width (2x for FP8 vs BF16).
 # Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens stay quantized end to end.
-# Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed act calibration.
+# Requires hardware=tpu, use_ring_of_experts=true, and quantization with fixed act calibration.
 moe_quantize_token_all_gather: false
 # Quantization method for output gradients before the All-Gather across EP shards in Ring-of-Experts backward pass (Token Combine)
 # Value: "" = unquantized BF16; "rowwise" = dynamic token-wise FP8 E5M2; "fixed,<bound>" = static per-tensor FP8 E5M2
@@ -351,7 +350,7 @@ moe_tc_ragged_reduce_block_size: 896 # moe_tc_ragged_sort: VMEM rows per block o
 moe_tc_ragged_mask_padding: true # moe_tc_ragged_sort: zero the gather buffer rows past the valid count (left uninitialized otherwise).
 moe_tc_ragged_weights_on_activation: false # moe_tc_ragged_sort: apply routing weights on the (buffer, mlp) activation before wo instead of on the expert output before the unsort.
 moe_tc_ragged_flatten_block_size: 0 # moe_tc_ragged_sort: if > 0, Pallas (N, D/128, 128) <-> (N, D) relayout over the valid rows, this many rows per grid step; 0 uses XLA reshapes.
-moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the sorted buffer in the (buffer, emb // 128, 128) layout through the GMMs.
+moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with gmm_v2: keep the sorted buffer in the (buffer, emb // 128, 128) layout through the GMMs.
 moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.
 moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
@@ -375,9 +374,7 @@ moe_pin_sparse_core_fsdp_all_gathers: false
 moe_pin_sparse_core_fsdp_all_gathers_fwd_only: false
 moe_fsdp_all_gather_sparse_core_id: 0
 moe_ep_all_gather_sparse_core_id: 1
-# tunable tiling dimensions used for mlp gmm
-# megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
-# tokamax ragged dot - supports all 18 configs
+# tunable tiling dimensions used for mlp gmm (the TPU gmm_v2 kernel uses all of them)
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
@@ -406,11 +403,7 @@ wo_tile_drhs_mlp_dim: 1024
 
 merge_gating_gmm: false
 
-# Use tokamax library for gmm kernel implementation
-use_tokamax_gmm: false
-# Whether to use Tokamax GMM v2 for MoE kernel. Requires use_tokamax_gmm=true.
-use_gmm_v2: false
-# Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
+# Whether to use the heuristic tiling function of the gmm_v2 kernel.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
 
@@ -896,7 +889,7 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
-# Enabling check_vma is recommended for improved performance. Only supported for EP / FSDP ICI parallelisms, shard_mode: "auto", use_ragged_sort: False, use_ring_of_experts: False, and use_tokamax_gmm=False.
+# Enabling check_vma is recommended for improved performance. Only supported for EP / FSDP ICI parallelisms, shard_mode: "auto", use_ragged_sort: False, and use_ring_of_experts: False.
 check_vma: False
 
 # Enable ZeRO-1 optimizer sharding over data axis

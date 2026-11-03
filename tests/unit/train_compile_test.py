@@ -327,7 +327,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "ici_expert_parallelism=8",
             "model_name=mixtral-8x7b",
-            "megablox=False",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=4",
@@ -383,9 +382,9 @@ class TrainCompile(parameterized.TestCase):
     )
 
   # TODO(b/388572320): Add int8 quantization test once this bug is fixed.
-  def test_moe_megablox_bf16(self):
+  def test_moe_gmm_bf16(self):
     temp_dir = gettempdir()
-    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_bf16.pickle")
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_gmm_bf16.pickle")
     train_compile_main(
         (
             "",
@@ -396,7 +395,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
             "sparse_matmul=True",
-            "megablox=True",
             "per_device_batch_size=4",
             "max_target_length=1024",
             "attention=flash",
@@ -404,9 +402,9 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  def test_moe_megablox_ring_ep_random(self):
+  def test_moe_gmm_ring_ep_random(self):
     temp_dir = gettempdir()
-    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_ring_ep_random.pickle")
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_gmm_ring_ep_random.pickle")
     train_compile_main(
         (
             "",
@@ -418,7 +416,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=deepseek3-test",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
-            "megablox=True",
             "per_device_batch_size=4",
             "max_target_length=128",
             "use_ring_of_experts=True",
@@ -443,7 +440,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=deepseek3-test",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
-            "megablox=True",
             "per_device_batch_size=4",
             "max_target_length=128",
             "use_ring_of_experts=True",
@@ -471,9 +467,6 @@ class TrainCompile(parameterized.TestCase):
               "model_name=deepseek3-test",
               "ici_expert_parallelism=4",
               "sparse_matmul=True",
-              "megablox=False",
-              "use_tokamax_gmm=True",
-              "use_gmm_v2=True",
               "num_moe_emb_chunks=7",
               "use_ring_of_experts=True",
               "per_device_batch_size=2",
@@ -486,27 +479,6 @@ class TrainCompile(parameterized.TestCase):
               "moe_x_sorted=device",
           )
       )
-
-  def test_moe_ragged_dot_bf16(self):
-    temp_dir = gettempdir()
-    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
-            "use_iota_embed=true",
-            "compile_topology_num_slices=1",
-            "model_name=mixtral-8x7b",
-            "sparse_matmul=True",
-            "megablox=False",
-            "per_device_batch_size=4",
-            "max_target_length=1024",
-            "attention=flash",
-            "dtype=bfloat16",
-        )
-    )
 
   def test_moe_dense_bf16(self):
     temp_dir = gettempdir()
@@ -589,7 +561,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
             "sparse_matmul=True",
-            "megablox=False",
             "per_device_batch_size=2",
             "max_target_length=1024",
             "attention=flash",
@@ -613,7 +584,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "model_name=deepseek3-tiny",
             "sparse_matmul=True",
-            "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=128",
             "attention=flash",
@@ -622,6 +592,48 @@ class TrainCompile(parameterized.TestCase):
             "scan_layers=True",
             "prefetch_fsdp_weights=True",
         )
+    )
+
+  @parameterized.named_parameters(
+      ("bf16", ()),
+      ("fp8_manual", ("quantization=fp8_full", "use_qwix_quantization=True", "use_manual_quantization=True")),
+  )
+  def test_moe_deepseek_batch_split(self, quantization_args):
+    """AOT test for the DeepSeek batch-split schedule (check_vma moe shard_map); with fp8 the MoE runs gmm_v2."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_batch_split.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-16",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b-batchsplit",
+            "override_model_config=True",
+            "base_emb_dim=512",
+            "base_mlp_dim=1024",
+            "base_moe_mlp_dim=512",
+            "base_num_decoder_layers=5",
+            "first_num_dense_layers=1",
+            "num_experts=16",
+            "ici_fsdp_parallelism=4",
+            "ici_expert_parallelism=4",
+            "per_device_batch_size=2",
+            "batch_split_factor=2",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "weight_quantization_calibration_method=fixed,-224,224",
+            "act_quantization_calibration_method=fixed,-224,224",
+            # The batch-split schedule's scheduling annotations trip the latency-hiding scheduler of some libtpu
+            # versions (unsupported annotation groups, RET_CHECK on async ops); this test only checks that it compiles.
+            "compile_xla_flags=--xla_tpu_scheduling_annotation_deannotate_unsupported_groups=true"
+            " --xla_tpu_enable_latency_hiding_scheduler=false",
+        )
+        + quantization_args
     )
 
   def test_moe_emb_chunking(self):
@@ -638,9 +650,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=deepseek3-test",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
-            "megablox=False",
-            "use_tokamax_gmm=True",
-            "use_gmm_v2=True",
             "num_moe_emb_chunks=7",
             "use_ring_of_experts=True",
             "per_device_batch_size=2",
@@ -666,9 +675,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=deepseek3-test",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
-            "megablox=False",
-            "use_tokamax_gmm=True",
-            "use_gmm_v2=True",
             "num_moe_emb_chunks=7",
             "use_ring_of_experts=True",
             "mlp_bias=True",
@@ -694,7 +700,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
             "sparse_matmul=True",
-            "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "attention=flash",
@@ -716,7 +721,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
             "sparse_matmul=True",
-            "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "attention=flash",
@@ -739,7 +743,6 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
             "model_name=deepseek3-test",
-            "megablox=True",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=1",
@@ -806,7 +809,6 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
             "scan_layers=True",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
         )
     )
@@ -853,7 +855,6 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
             "scan_layers=True",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "shard_mode=explicit",
             "ici_fsdp_parallelism=1",
@@ -939,9 +940,7 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3.2-671b",
-            # megablox
             "sparse_matmul=True",
-            "megablox=True",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "attention=flash",
@@ -1156,8 +1155,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=deepseek3-tiny",
             "scan_layers=True",
             "sparse_matmul=True",
-            "megablox=True",
-            "use_tokamax_gmm=False",
             "max_target_length=128",
             "per_device_batch_size=1",
             "dtype=bfloat16",
@@ -1188,8 +1185,6 @@ class TrainCompile(parameterized.TestCase):
             "model_name=deepseek3-tiny",
             "scan_layers=True",
             "sparse_matmul=True",
-            "megablox=True",
-            "use_tokamax_gmm=False",
             "max_target_length=128",
             "per_device_batch_size=1",
             "dtype=bfloat16",
@@ -1237,7 +1232,6 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
         )
@@ -1263,7 +1257,6 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
         )
@@ -1292,7 +1285,6 @@ class TrainCompile(parameterized.TestCase):
             "ici_fsdp_parallelism=32",
             "ici_expert_parallelism=8",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
             "shard_mode=explicit",
@@ -1315,7 +1307,6 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
             "shard_mode=explicit",
@@ -1349,7 +1340,6 @@ class TrainCompile(parameterized.TestCase):
             "ici_fsdp_parallelism=32",
             "ici_expert_parallelism=8",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
             "shard_mode=explicit",
@@ -1386,7 +1376,6 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
             "shard_mode=explicit",
@@ -1538,7 +1527,6 @@ class TrainCompile(parameterized.TestCase):
             "ici_expert_parallelism=8",
             # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "shard_mode=explicit",
             "tokenizer_type=sentencepiece",
@@ -1596,7 +1584,6 @@ class TrainCompile(parameterized.TestCase):
             "ici_fsdp_parallelism=64",
             "ici_expert_parallelism=8",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "shard_mode=explicit",
             # Kimi-K2 defaults to a HuggingFace tokenizer that is not vendored.
@@ -1668,7 +1655,6 @@ class TrainCompile(parameterized.TestCase):
             "ici_fsdp_parallelism=64",
             "ici_expert_parallelism=8",
             "sparse_matmul=True",
-            "megablox=True",
             "attention=flash",
             "shard_mode=explicit",
             # The Llama4 configs default to a HuggingFace tokenizer that is not vendored.
