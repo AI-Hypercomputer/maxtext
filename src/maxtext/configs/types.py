@@ -3068,6 +3068,13 @@ class Optimizer(BaseModel):
           "example: ['.*indexer.*']. If empty (default), all parameters are trained."
       ),
   )
+  frozen_parameters_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to freeze (exclude from differentiation, gradient clipping, "
+          "and optimizer updates/state). Takes precedence over `trainable_parameters_mask`."
+      ),
+  )
 
 
 class AdamW(BaseModel):

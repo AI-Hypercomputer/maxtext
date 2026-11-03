@@ -1257,6 +1257,10 @@ skip_step_scaling_factor: 6.0
 # If empty (default), all parameters are trained.
 trainable_parameters_mask: []
 
+# List of parameter names/patterns to freeze (exclude from differentiation, grad norm, and optimizer).
+# Takes precedence over `trainable_parameters_mask`.
+frozen_parameters_mask: []
+
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.

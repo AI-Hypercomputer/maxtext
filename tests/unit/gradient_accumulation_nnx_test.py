@@ -417,6 +417,32 @@ class TestGradientAccumulationNNX(unittest.TestCase):
             self.assertTrue(jnp.all(jnp.isfinite(gradient)))
             self.assertTrue(jnp.all(gradient == 0))
 
+  def test_frozen_parameters_excluded_from_backward_and_ga_buffer(self):
+    """When frozen_parameters_mask is set, frozen params are not differentiated or accumulated in raw_grads."""
+    self.cfg.frozen_parameters_mask = ["bias"]
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+
+    def direct_loss(kernel):
+      predictions = self.data["inputs"] @ kernel + bias
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    expected_loss, expected_kernel_grad = jax.value_and_grad(direct_loss)(kernel)
+    loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _fake_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
+    self.assertIn("kernel", raw_grads["linear"])
+    self.assertNotIn("bias", raw_grads["linear"])
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_kernel_grad, rtol=1e-6)
+
 
 if __name__ == "__main__":
   unittest.main()

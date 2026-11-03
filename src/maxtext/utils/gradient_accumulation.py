@@ -23,6 +23,7 @@ from flax import nnx
 
 from maxtext.common.common_types import ShardMode
 from maxtext.layers.moe import load_balance_updates_from_counts
+from maxtext.optimizers import optimizers
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_name
 
@@ -124,8 +125,11 @@ def gradient_accumulation_loss_and_grad(
     return loss * loss_scale, aux
 
   if is_nnx:
-    grad_func = nnx.value_and_grad(_scaled_loss_fn, argnums=0, has_aux=True)
+    trainable_filter = optimizers.get_trainable_param_filter(config)
+    trainable_ga_params = nnx.state(ga_params, trainable_filter)
+    grad_func = nnx.value_and_grad(_scaled_loss_fn, argnums=nnx.DiffState(0, trainable_filter), has_aux=True)
   else:
+    trainable_ga_params = ga_params
     grad_func = jax.value_and_grad(_scaled_loss_fn, argnums=4, has_aux=True)
 
   def accumulate_gradient(acc_grad_and_loss, data):
@@ -163,8 +167,18 @@ def gradient_accumulation_loss_and_grad(
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
   data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-  init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
-  init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
+  trainable_params_shardings = (
+      optimizers.filter_shardings_for_trainable(params_shardings, trainable_ga_params)
+      if is_nnx and params_shardings is not None
+      else params_shardings
+  )
+  trainable_grad_shardings = (
+      optimizers.filter_shardings_for_trainable(grad_shardings, trainable_ga_params)
+      if is_nnx and grad_shardings is not None
+      else grad_shardings
+  )
+  init_grad = jax.tree_util.tree_map(jnp.zeros_like, trainable_ga_params)
+  init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, trainable_grad_shardings)
   init_grad_and_loss = {
       "loss": 0.0,  # accumulates xent_sum across microbatches
       "grad": init_grad,
@@ -194,9 +208,9 @@ def gradient_accumulation_loss_and_grad(
     # Mark the gradients unreduced over the "data" axis now that we're outside the
     # scan; this triggers the cross-replica all-reduce. The annotation can't live in
     # the scan carry (see above), so it's applied here instead.
-    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
+    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, trainable_params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
-  raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
+  raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, trainable_params_shardings)
   divisor = config.gradient_accumulation_steps if use_tunix_ga else denominator * loss_scale
   raw_grads = jax.tree_util.tree_map(
       lambda arr: jnp.where(has_weights, (arr / divisor).astype(arr.dtype), jnp.zeros_like(arr)),
