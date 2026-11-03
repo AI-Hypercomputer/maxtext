@@ -244,11 +244,56 @@ def quantize_weight_codes_per_channel(
   return q, scale
 
 
+@functools.partial(
+    jax.tree_util.register_dataclass,
+    data_fields=["x_ste", "codes", "scale"],
+    meta_fields=[],
+)
+@dataclass
+class Fp8SteTokens:
+  """Pre-quantized FP8 tokens + per-row f32 scale + zero-broadcast STE carrier for bf16 backward cotangents."""
+
+  x_ste: Any
+  codes: Any
+  scale: Any
+
+  @property
+  def shape(self):
+    return self.codes.shape
+
+  @property
+  def dtype(self):
+    return jnp.bfloat16 if self.x_ste is None else self.x_ste.dtype
+
+  @property
+  def ndim(self):
+    return self.codes.ndim
+
+  def astype(self, dtype):
+    if self.x_ste is None:
+      return self
+    target = jnp.dtype(dtype)
+    if target == self.x_ste.dtype:
+      return self
+    return Fp8SteTokens(x_ste=self.x_ste.astype(target), codes=self.codes, scale=self.scale)
+
+  def dequantize(self, dtype=None):
+    target_dtype = self.dtype if dtype is None else jnp.dtype(dtype)
+    return (self.codes.astype(jnp.float32) * self.scale.astype(jnp.float32)).astype(target_dtype)
+
+  def __getitem__(self, idx):
+    x_ste_sub = None if self.x_ste is None else self.x_ste[idx]
+    return Fp8SteTokens(x_ste=x_ste_sub, codes=self.codes[idx], scale=self.scale[idx])
+
+
 def dequantize_weight_codes_ste(
     w: Array,
     codes: Array,
     scale: Array,
     grad_transform: Callable[[Array], Array] | None = None,
+    *,
+    transposed_anchor: bool = False,
+    transposed_grad_transform: Callable[[Array], Array] | None = None,
 ) -> Array:
   """Dequantizes `quantize_weight_codes_per_channel` codes, with a straight-through gradient into `w`.
 
@@ -257,8 +302,33 @@ def dequantize_weight_codes_ste(
   e.g. the sharding constraint that the transpose of a gather would apply), like the straight-through
   `w_q + (w - stop_gradient(w))`; the codes and the scale get no gradient. `codes` and `scale` may be
   all-gathered copies of the ones computed from the shard `w`.
+
+  When `transposed_anchor=True` (for `Fp8NativeWeight`, which never reads the forward anchor), the returned
+  anchor has transposed shape `[g, n, k]` so `tgmm_v2` can emit `dW^T` directly, `transposed_grad_transform`
+  runs the FSDP reduce-scatter along axis 1 (`n`) with zero pre-scatter HBM copy, and `swapaxes(1, 2)` restores
+  `[g, k, n]` on the post-reduce-scatter shard.
   """
   dtype = w.dtype
+  if transposed_anchor and codes.ndim == 3:
+    ste_shape = (codes.shape[0], codes.shape[2], codes.shape[1])
+
+    @jax.custom_vjp
+    def _transposed_anchor_ste(w, codes, scale):
+      del w, codes, scale
+      return jax.lax.broadcast(jnp.zeros((), dtype=dtype), ste_shape)
+
+    def _transposed_anchor_fwd(w, codes, scale):
+      return _transposed_anchor_ste(w, codes, scale), None
+
+    def _transposed_anchor_bwd(_, g):
+      g_w = g if grad_transform is None else grad_transform(g)
+      if transposed_grad_transform is not None:
+        g_w = transposed_grad_transform(g_w)
+        g_w = jax.lax.optimization_barrier(g_w)
+      return jnp.swapaxes(g_w, 1, 2), None, None
+
+    _transposed_anchor_ste.defvjp(_transposed_anchor_fwd, _transposed_anchor_bwd)
+    return _transposed_anchor_ste(w, codes, scale)
 
   def _value(codes, scale):
     return (codes.astype(jnp.float32) * scale).astype(dtype)

@@ -1411,11 +1411,28 @@ def maybe_pad(inputs, tile_size):
   padding_amount = 0
   if inputs_dim % tile_size:
     padding_amount = tile_size - inputs_dim % tile_size
-    inputs = jax.lax.pad(
-        inputs,
-        jnp.array(0.0, dtype=inputs.dtype),
-        [(0, padding_amount, 0)] + [(0, 0, 0)] * (inputs.ndim - 1),
-    )
+    if hasattr(inputs, "x_ste") and hasattr(inputs, "codes") and hasattr(inputs, "scale"):
+
+      def pad_arr(arr):
+        if arr is None:
+          return None
+        return jax.lax.pad(
+            arr,
+            jnp.array(0, dtype=arr.dtype),
+            [(0, padding_amount, 0)] + [(0, 0, 0)] * (arr.ndim - 1),
+        )
+
+      inputs = type(inputs)(
+          x_ste=pad_arr(inputs.x_ste),
+          codes=pad_arr(inputs.codes),
+          scale=pad_arr(inputs.scale),
+      )
+    else:
+      inputs = jax.lax.pad(
+          inputs,
+          jnp.array(0.0, dtype=inputs.dtype),
+          [(0, padding_amount, 0)] + [(0, 0, 0)] * (inputs.ndim - 1),
+      )
   return inputs, padding_amount
 
 

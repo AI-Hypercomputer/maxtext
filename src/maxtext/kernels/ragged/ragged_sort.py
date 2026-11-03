@@ -206,6 +206,23 @@ def ring_ragged_sort(
         for t in (topk_argsort_indices, token_indices_sorted, group_sizes_local, topk_argsort_revert_indices)
     )
 
+  outer_is_ste_tokens = (
+      hasattr(hidden_states_local, "x_ste")
+      and hasattr(hidden_states_local, "codes")
+      and hasattr(hidden_states_local, "scale")
+  )
+  outer_ste_meta = (
+      (
+          type(hidden_states_local),
+          hidden_states_local.codes.shape,
+          hidden_states_local.codes.dtype,
+          hidden_states_local.scale.shape,
+          hidden_states_local.scale.dtype,
+      )
+      if outer_is_ste_tokens
+      else None
+  )
+
   @jax.custom_vjp
   def _ring_ragged_sort(hidden_states_local, token_indices_sorted, group_sizes_local, topk_argsort_revert_indices):
     """Gather activations to different EP shards."""
@@ -216,8 +233,14 @@ def ring_ragged_sort(
   @jax.named_scope("ragged-sort-fwd")
   def _ring_ragged_sort_fwd(hidden_states_local, token_indices_sorted, group_sizes_local, topk_argsort_revert_indices):
     """Gather activations forward pass."""
+    is_ste_tokens = (
+        hasattr(hidden_states_local, "x_ste")
+        and hasattr(hidden_states_local, "codes")
+        and hasattr(hidden_states_local, "scale")
+    )
+    payload_local = hidden_states_local.codes if is_ste_tokens else hidden_states_local
 
-    num_tokens_local = hidden_states_local.shape[0]
+    num_tokens_local = payload_local.shape[0]
     shard_idx = jax.lax.axis_index(ep_name)
 
     local_num_experts = num_experts // ep_size
@@ -227,10 +250,11 @@ def ring_ragged_sort(
     shard_output_start = group_offsets[experts_start]
     shard_output_end = group_offsets[experts_end]
 
+    scale_sorted = None
     if buffer_size is None or buffer_size >= num_tokens_local * topk:
       local_buffer_size = num_tokens_local * topk
-      x = ragged_gather(
-          hidden_states_local,
+      x_payload = ragged_gather(
+          payload_local,
           token_indices_sorted,
           shard_output_start[None],
           shard_output_end[None],
@@ -239,6 +263,12 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
       )
+      if is_ste_tokens:
+        slot_iota = jnp.arange(local_buffer_size, dtype=jnp.int32)
+        valid_slot = (slot_iota >= shard_output_start) & (slot_iota < shard_output_end)
+        safe_tok = jnp.where(valid_slot, token_indices_sorted, 0)
+        scale_1d = jax.lax.optimization_barrier(jnp.where(valid_slot, hidden_states_local.scale.reshape(-1)[safe_tok], 0))
+        scale_sorted = scale_1d[:, None]
     else:
       local_buffer_size = buffer_size
       # We only gather up to the available buffer size or the actual number of
@@ -253,8 +283,8 @@ def ring_ragged_sort(
           local_buffer_size,
           axis=0,
       )
-      x = ragged_gather(
-          hidden_states_local,
+      x_payload = ragged_gather(
+          payload_local,
           sliced_indices,
           jnp.int32(0)[None],
           gather_end[None],
@@ -263,13 +293,24 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
       )
+      if is_ste_tokens:
+        valid_slot = jnp.arange(local_buffer_size, dtype=jnp.int32) < gather_end
+        safe_tok = jnp.where(valid_slot, sliced_indices, 0)
+        scale_1d = jax.lax.optimization_barrier(jnp.where(valid_slot, hidden_states_local.scale.reshape(-1)[safe_tok], 0))
+        scale_sorted = scale_1d[:, None]
+
+    if is_ste_tokens:
+      ste_cls = type(hidden_states_local)
+      x_ste_out = jax.lax.broadcast(jnp.zeros((), dtype=hidden_states_local.dtype), x_payload.shape)
+      x = ste_cls(x_ste=x_ste_out, codes=x_payload, scale=scale_sorted)
+    else:
+      x = x_payload
 
     res = (
         topk_argsort_revert_indices,
         shard_output_start,
         shard_output_end,
         local_buffer_size,
-        hidden_states_local.shape,
     )
 
     return x, res
@@ -288,9 +329,8 @@ def ring_ragged_sort(
         shard_output_start,
         shard_output_end,
         local_buffer_size,
-        _,
     ) = res
-    g_x = g_out
+    g_x = g_out.x_ste if outer_ste_meta is not None else g_out
     # Restrict to the [start, end) source range via a validity bitmask. The
     # ragged kernel packs valid rows to the front of each row-partition and
     # only iterates over the populated prefix, so we hand it the mask directly
@@ -345,6 +385,13 @@ def ring_ragged_sort(
           use_single_sparsecore=use_single_sparsecore,
           packed_preprocess=packed_preprocess,
           unique_pair_argsort=unique_pair_preprocess,
+      )
+    if outer_ste_meta is not None:
+      ste_cls, codes_shape, codes_dtype, scale_shape, scale_dtype = outer_ste_meta
+      grad_hidden_states = ste_cls(
+          x_ste=grad_hidden_states,
+          codes=jnp.zeros(codes_shape, dtype=codes_dtype),
+          scale=jnp.zeros(scale_shape, dtype=scale_dtype),
       )
     return grad_hidden_states, None, None, None
 

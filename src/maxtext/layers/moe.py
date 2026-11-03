@@ -893,27 +893,38 @@ class Fp8NativeWeight:
   """One gathered routed-expert weight as the native FP8 GMMs take it (fp8_moe_native_fwd).
 
   Attributes:
-    anchor: the bf16 weight the gather8 path would multiply by (dequantize_weight_codes_ste's output). The FP8 GMMs
-      never read its value, so XLA removes its computation; they return the weight gradient as its cotangent, and
-      dequantize_weight_codes_ste carries it to the master weight (straight-through).
+    anchor: the bf16 weight the gather8 path would multiply by (dequantize_weight_codes_ste's output), or a zero
+      anchor of transposed shape [g, n, k] when transpose_anchor=True. The FP8 GMMs never read its value, so XLA
+      removes its computation; they return the weight gradient as its cotangent, and dequantize_weight_codes_ste
+      carries it to the master weight (straight-through).
     codes: the float8_e4m3fn weight codes [g, k, n].
     scale: the float32 per-(expert, output channel) scale [g, 1, n].
+    transpose_anchor: whether anchor and its cotangent use transposed [g, n, k] layout so tgmm_v2 emits dW^T directly.
   """
 
   anchor: jax.Array
   codes: jax.Array
   scale: jax.Array
+  transpose_anchor: bool = False
 
   @classmethod
-  def pspec(cls, weight_pspec):
-    """The shard_map in_spec of an Fp8NativeWeight whose anchor and codes are laid out as `weight_pspec`."""
+  def pspec(cls, weight_pspec, *, transpose_anchor: bool = False):
+    """The shard_map in_spec of an Fp8NativeWeight whose codes are laid out as `weight_pspec`."""
     if weight_pspec is None:
       return None
-    return cls(weight_pspec, weight_pspec, P(weight_pspec[0], None, weight_pspec[2]))
+    anchor_pspec = P(weight_pspec[0], weight_pspec[2], weight_pspec[1]) if transpose_anchor else weight_pspec
+    return cls(
+        anchor_pspec,
+        weight_pspec,
+        P(weight_pspec[0], None, weight_pspec[2]),
+        transpose_anchor=transpose_anchor,
+    )
 
   @classmethod
   def concat_last(cls, first, second):
     """[first | second] along the output channel (the prefused wi), for split w0 / w1."""
+    if first.transpose_anchor or second.transpose_anchor:
+      raise NotImplementedError("Fp8NativeWeight.concat_last does not support transpose_anchor=True.")
     return cls(
         jnp.concatenate([first.anchor, second.anchor], axis=-1),
         jnp.concatenate([first.codes, second.codes], axis=-1),
@@ -921,7 +932,9 @@ class Fp8NativeWeight:
     )
 
 
-jax.tree_util.register_dataclass(Fp8NativeWeight, data_fields=["anchor", "codes", "scale"], meta_fields=[])
+jax.tree_util.register_dataclass(
+    Fp8NativeWeight, data_fields=["anchor", "codes", "scale"], meta_fields=["transpose_anchor"]
+)
 
 
 # fp8_moe_native_fwd's in-kernel activation quantization and accumulator: one float32 absmax scale per row over the
@@ -1312,16 +1325,42 @@ def ep_combine_reduce_scatter(
   return _combine(x)
 
 
-def ep_fp8_token_all_gather(x: jax.Array, axis_name, all_gather_fn, qtype=jnp.float8_e4m3fn) -> jax.Array:
+def ep_fp8_token_all_gather(
+    x: jax.Array,
+    axis_name,
+    all_gather_fn,
+    qtype=jnp.float8_e4m3fn,
+    *,
+    defer_dequant: bool = False,
+) -> jax.Array | quantizations.Fp8SteTokens:
   """Ring-of-experts dispatch (moe_fp8_token_all_gather): the token all-gather over the EP axis with an fp8 payload.
 
   Each shard quantizes its tokens per row (last axis, one f32 absmax scale per row: quantize_rows_fp8), gathers the
-  fp8 codes and the scales with `all_gather_fn` (a tiled all-gather on dim 0), and dequantizes the gathered rows back
-  to x.dtype, so every reader of the result sees the same dtype and shape as after the plain all-gather. This changes
-  the forward values (one fp8 rounding per element). The backward treats the quantization as identity
-  (straight-through): the tiled reduce-scatter of the cotangent over the EP axis, in the cotangent's dtype, which is
-  the transpose of the plain tiled all-gather.
+  fp8 codes and the scales with `all_gather_fn` (a tiled all-gather on dim 0), and either dequantizes the gathered rows
+  back to x.dtype (`defer_dequant=False`) or returns an `Fp8SteTokens` carrier (`defer_dequant=True`) so SparseCore
+  ragged gather moves 8-bit codes directly and `gmm_v2` consumes FP8 LHS + FP8 RHS on the FP8 MXU. The backward treats
+  the quantization as identity (straight-through): the tiled reduce-scatter of the cotangent over the EP axis, in the
+  cotangent's dtype, which is the transpose of the plain tiled all-gather.
   """
+  if defer_dequant:
+
+    @jax.custom_vjp
+    def _gather_deferred(z):
+      qvalue, scale = quantize_rows_fp8(z, qtype)
+      ag_codes = all_gather_fn(qvalue)
+      ag_scale = all_gather_fn(scale)
+      x_ste = jax.lax.broadcast(jnp.zeros((), dtype=z.dtype), ag_codes.shape)
+      return quantizations.Fp8SteTokens(x_ste=x_ste, codes=ag_codes, scale=ag_scale)
+
+    def _gather_deferred_fwd(z):
+      return _gather_deferred(z), None
+
+    def _gather_deferred_bwd(_, g):
+      g_arr = g.x_ste if isinstance(g, quantizations.Fp8SteTokens) else g
+      return (jax.lax.psum_scatter(g_arr, axis_name, scatter_dimension=0, tiled=True),)
+
+    _gather_deferred.defvjp(_gather_deferred_fwd, _gather_deferred_bwd)
+    return _gather_deferred(x)
 
   @jax.custom_vjp
   def _gather(z):
@@ -2247,12 +2286,23 @@ class RoutedMoE(nnx.Module):
         used for the load-balance loss instead of recomputing them from the logits.
     """
     is_qarray = isinstance(inputs, qpl.QArray)
-    raw_inputs = inputs.qvalue if is_qarray else inputs
-    # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
-    inputs_shape = raw_inputs.shape
-    bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
-    # moe_tc_ragged_3d_dispatch: inputs arrive as (batch, seq, emb // 128, 128) and stay 3D for the TC sort.
-    inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, *inputs_shape[2:]))
+    is_ste_tokens = isinstance(inputs, quantizations.Fp8SteTokens)
+    if is_ste_tokens:
+      inputs_shape = inputs.codes.shape
+      bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
+      x_ste_2d = jnp.reshape(inputs.x_ste, (bsz_times_seq_len, *inputs_shape[2:])) if inputs.x_ste is not None else None
+      inputs_2d = quantizations.Fp8SteTokens(
+          x_ste=x_ste_2d,
+          codes=jnp.reshape(inputs.codes, (bsz_times_seq_len, *inputs_shape[2:])),
+          scale=jnp.reshape(inputs.scale, (bsz_times_seq_len, 1)),
+      )
+    else:
+      raw_inputs = inputs.qvalue if is_qarray else inputs
+      # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
+      inputs_shape = raw_inputs.shape
+      bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
+      # moe_tc_ragged_3d_dispatch: inputs arrive as (batch, seq, emb // 128, 128) and stay 3D for the TC sort.
+      inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, *inputs_shape[2:]))
     if topk is not None:
       weights, selected_experts, lb_loss = topk
     else:
@@ -3566,10 +3616,24 @@ class RoutedMoE(nnx.Module):
             all_gather_fn=token_all_gather,
         )
       elif self.config.moe_fp8_token_all_gather:
-        # fp8 payload with a per-row f32 scale, dequantized right after the gather: the readers below see the same
-        # bf16 token buffer as with the plain gather. The config validator rules out the TC 3D dispatch layout and
-        # SparseCore-pinned gathers here.
-        x = ep_fp8_token_all_gather(x, self._expert_parallelism_name, token_all_gather)
+        # fp8 payload with a per-row f32 scale; when fp8_moe_native_fwd is active on the SparseCore ragged-sort +
+        # fused wi SwiGLU path, keep the FP8 codes and per-row f32 scales in an Fp8SteTokens carrier so SparseCore
+        # gathers 1-byte rows directly and gmm_silu_fp8 skips both token dequantization and in-kernel re-quantization.
+        defer_fp8_dequant = (
+            getattr(self.config, "fp8_moe_native_fwd", False)
+            and os.environ.get("MAXTEXT_DISABLE_DEFERRED_FP8_TOKEN_DEQUANT", "") != "1"
+            and self.config.moe_wi_gmm_fused_swiglu
+            and self.config.use_ragged_sort
+            and self.config.use_ring_of_experts
+            and not getattr(self.config, "moe_tc_ragged_sort", False)
+            and not getattr(self.config, "moe_tc_ragged_3d_dispatch", False)
+            and self.config.num_moe_emb_chunks <= 0
+            and self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4
+        )
+        if defer_fp8_dequant:
+          x = ep_fp8_token_all_gather(x, self._expert_parallelism_name, token_all_gather, defer_dequant=True)
+        else:
+          x = ep_fp8_token_all_gather(x, self._expert_parallelism_name, token_all_gather)
       else:
         x = token_all_gather(x)
 
@@ -4244,6 +4308,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(gate_up),
+            transpose_drhs=wo.transpose_anchor,
             **fp8_native_fwd_kwargs(self.config),
         )
         return out[: intermediate_layer.shape[0]] if padding_amount > 0 else out
@@ -4671,6 +4736,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(dact_gate_up),
+            emit_transposed_drhs=bool(fp8_kernel is not None and fp8_kernel.transpose_anchor),
             **fp8_dlhs,
         )
         if padding_amount > 0:
@@ -4682,6 +4748,7 @@ class RoutedMoE(nnx.Module):
               grad_wo.astype(fp8_kernel.anchor.dtype),
               jnp.zeros_like(fp8_kernel.codes),
               jnp.zeros_like(fp8_kernel.scale),
+              transpose_anchor=fp8_kernel.transpose_anchor,
           )
         return d_gate_up, dot, grad_wo
 
@@ -5059,6 +5126,20 @@ class RoutedMoE(nnx.Module):
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
     # fp8_moe_native_fwd: the expert weights enter as Fp8NativeWeight (anchor, codes, scale); see below.
     use_fp8_native_fwd = getattr(self.config, "fp8_moe_native_fwd", False) and fp8_fake_quant_at_gather is not None
+    wo_param_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes) if use_fp8_native_fwd else None
+    enable_transposed_wo_drhs = (
+        use_fp8_native_fwd
+        and os.environ.get("MAXTEXT_DISABLE_TRANSPOSED_WO_DRHS", "") != "1"
+        and not self.config.moe_accumulate_chunk_wgrad
+        and wo_pspec is not None
+        and len(wo_pspec) == 3
+        and wo_pspec[1] is None
+        and wo_pspec[2] is None
+        and wo_param_pspec is not None
+        and len(wo_param_pspec) == 3
+        and wo_param_pspec[1] is None
+        and any(self.mesh.shape.get(ax, 1) > 1 for ax in mesh_axes_for_dim(wo_param_pspec[2]))
+    )
     if use_fp8_native_fwd:
       k_splits = fp8_native_fwd_k_splits(self.mesh.shape, w0_pspec, wo_pspec, self.config.num_moe_emb_chunks)
       if k_splits:
@@ -5069,8 +5150,10 @@ class RoutedMoE(nnx.Module):
       weight_specs = slice(3, 6)  # w0_pspec, w1_pspec, wo_pspec in in_specs above
       assert in_specs[weight_specs] == (w0_pspec, w1_pspec, wo_pspec), "in_specs order changed"
       native_weight_specs = tuple(
-          spec if kernel is None else Fp8NativeWeight.pspec(spec)
-          for kernel, spec in ((w0_kernel, w0_pspec), (w1_kernel, w1_pspec), (wo_kernel, wo_pspec))
+          spec
+          if kernel is None
+          else Fp8NativeWeight.pspec(spec, transpose_anchor=(idx == 2 and enable_transposed_wo_drhs))
+          for idx, (kernel, spec) in enumerate(((w0_kernel, w0_pspec), (w1_kernel, w1_pspec), (wo_kernel, wo_pspec)))
       )
       in_specs = in_specs[: weight_specs.start] + native_weight_specs + in_specs[weight_specs.stop :]
 
@@ -5703,21 +5786,35 @@ class RoutedMoE(nnx.Module):
     if fp8_dequantize_after_gather is not None:
       # After the barrier, so the barrier orders the (cheaper) code gathers and the dequantization can fuse
       # into the GEMM operand prologue.
-      def _after_gather(codes, deq):
+      wo_transposed_param_pspec = (
+          P(wo_param_pspec[0], wo_param_pspec[2], wo_param_pspec[1]) if enable_transposed_wo_drhs else None
+      )
+
+      def _after_gather(idx, codes, deq):
         if deq is None:
           return None
         master_weight, scale, grad_pspec = deq
+        transpose_wo = idx == 2 and enable_transposed_wo_drhs
+        anchor_grad_pspec = P(grad_pspec[0], grad_pspec[2], grad_pspec[1]) if transpose_wo else grad_pspec
         w_deq = quantizations.dequantize_weight_codes_ste(
-            master_weight, codes, scale, grad_transform=functools.partial(self._maybe_shard_with_pspec, pspec=grad_pspec)
+            master_weight,
+            codes,
+            scale,
+            grad_transform=functools.partial(self._maybe_shard_with_pspec, pspec=anchor_grad_pspec),
+            transposed_anchor=transpose_wo,
+            transposed_grad_transform=(
+                functools.partial(self._maybe_shard_with_pspec, pspec=wo_transposed_param_pspec) if transpose_wo else None
+            ),
         )
         if not use_fp8_native_fwd:
           return w_deq
         # fp8_moe_native_fwd: the GMMs read the codes and the scale; w_deq is only the gradient anchor (its value is
         # never read, so XLA removes the dequantization from the forward).
-        return Fp8NativeWeight(w_deq, codes, scale)
+        return Fp8NativeWeight(w_deq, codes, scale, transpose_anchor=transpose_wo)
 
       w0_kernel, w1_kernel, wo_kernel = (
-          _after_gather(codes, deq) for codes, deq in zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather)
+          _after_gather(idx, codes, deq)
+          for idx, (codes, deq) in enumerate(zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather))
       )
 
     route_and_compute_outputs = sparse_matmul_route_and_compute(

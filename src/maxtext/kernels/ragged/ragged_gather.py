@@ -134,8 +134,11 @@ def main_kernel(
             recv_sem,
         ).start()
 
+    rshifts = [(indices[r] % packing) * dtype_bits for r in range(num_simd_lanes)] if packing > 1 else []
+    mask_u32 = jnp.uint32((1 << dtype_bits) - 1) if packing > 1 else jnp.uint32(0)
+
     # VMEM to HBM transfer.
-    # Use dynamic loop to minimize register spills.
+    # Use dynamic loop to minimize register spills while overlapping chunked read DMAs with vector packing & write DMAs.
     @pl.loop(0, col_size, step=num_lanes)
     @jax.named_scope("dma_write_loop")
     def dma_write_loop(col_vmem_start):
@@ -160,27 +163,19 @@ def main_kernel(
 
           out = None
           for row_src in range(num_simd_lanes):
-            row_src_pack = indices[row_src] % packing
             row_dst_pack = row_src % packing
-
-            rightshift_bits = row_src_pack * dtype_bits
-            leftshift_bits = row_dst_pack * dtype_bits
 
             # Load data from vmem.
             data = out_vmem_ref[row_src, col_slice]
 
-            # Right shift to make first n bits stores target data.
-            data = jnp.bitwise_right_shift(data, rightshift_bits)
-            # Mask out unwanted bits.
-            data = jnp.bitwise_and(data, 2**dtype_bits - 1)
-            # Left shift data into the target bit location.
-            data = jnp.bitwise_left_shift(data, leftshift_bits)
+            # Right shift to make first n bits stores target data and mask out unwanted bits.
+            data = jnp.bitwise_and(jnp.bitwise_right_shift(data, rshifts[row_src]), mask_u32)
 
             if row_dst_pack == 0:
               out = data
             else:
               assert out is not None
-              out = jnp.bitwise_or(out, data)
+              out = jnp.bitwise_or(out, jnp.bitwise_left_shift(data, row_dst_pack * dtype_bits))
 
             if row_dst_pack == packing - 1:
               # Store packed data into correct position.
@@ -439,20 +434,31 @@ def ragged_gather(
 
   aligned_hidden_size = pl.cdiv(hidden_size, col_size) * col_size
 
+  # SparseCore TC-tiled bitcast to uint32 supports 8-bit payloads cleanly via uint8 reinterpretation.
+  dtype_bits = jax.dtypes.itemsize_bits(dtype)
+  use_u8_bitcast = dtype_bits == 8 and not has_weights and dtype != jnp.uint8
+  kernel_dtype = jnp.uint8 if use_u8_bitcast else dtype
+  x_in = jax.lax.bitcast_convert_type(x, jnp.uint8) if use_u8_bitcast else x
+  if dtype_bits == 8:
+    # Ensure input leading dim is a multiple of 32 (4-way packing * 8 sublanes) for 32-bit memref bitcast.
+    in_pad = (-x_in.shape[0]) % 32
+    if in_pad:
+      x_in = jnp.pad(x_in, ((0, in_pad), (0, 0)))
+
   vector_mesh = plsc.VectorSubcoreMesh(
       num_cores=num_sc_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
-  return pl.kernel(
+  out = pl.kernel(
       functools.partial(
           main_kernel,
           core_axis_name=vector_mesh.core_axis_name,
           subcore_axis_name=vector_mesh.subcore_axis_name,
           has_weights=has_weights,
       ),
-      out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+      out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), kernel_dtype),
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
@@ -460,7 +466,7 @@ def ragged_gather(
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,
           hidden_size=aligned_hidden_size,
-          dtype_bytes=jax.dtypes.itemsize_bits(dtype) // 8,
+          dtype_bytes=dtype_bits // 8,
           has_weights=has_weights,
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
@@ -475,4 +481,7 @@ def ragged_gather(
       ],
       mesh=vector_mesh,
       name="sc_ragged_gather",
-  )(start, end, x, indices, weights)[:out_size, :hidden_size]
+  )(start, end, x_in, indices, weights)[:out_size, :hidden_size]
+  if use_u8_bitcast:
+    out = jax.lax.bitcast_convert_type(out, dtype)
+  return out

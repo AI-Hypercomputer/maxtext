@@ -18,6 +18,7 @@
 
 import dataclasses
 import functools
+import os
 from typing import List, Literal, NamedTuple, Tuple
 from absl import logging
 import jax
@@ -208,6 +209,11 @@ def _scale_like(scale: jnp.ndarray, x: jnp.ndarray, dtype) -> jnp.ndarray:
     # Per-row scale whose rank may differ from x (3D [m, 1, 1] vs 2D [m, k] or vice versa).
     return scale.reshape(scale.shape[0], *([1] * (x.ndim - 1))).astype(dtype)
   return scale.astype(dtype)
+
+
+def _subtile_m_enabled(lhs: jnp.ndarray) -> bool:
+  """Enables dynamic M-tail subtiling on 2D gmm_v2 calls unless explicitly disabled."""
+  return lhs.ndim == 2 and os.environ.get("MAXTEXT_DISABLE_GMM_SUBTILE_M", "") != "1"
 
 
 # ==============================================================================
@@ -590,6 +596,7 @@ def _fwd_run_tokamax_v2(
       lhs_scale=lhs_scale,
       maybe_quantize_lhs=maybe_quantize_lhs,
       out_is_3d=out_is_3d,
+      enable_subtile_m=not out_is_3d and _subtile_m_enabled(lhs_operand),
   )
 
   # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
@@ -1185,6 +1192,7 @@ def _dlhs_run_tokamax_v2(
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
       zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
+      enable_subtile_m=not out_is_3d and _subtile_m_enabled(dlhs_lhs),
   )
 
   if not can_fuse_scale:
@@ -1501,6 +1509,7 @@ def _gmm_silu_kernel(
       group_offset=group_offset,
       fuse_act="silu",
       return_pre_act=return_pre_act,
+      enable_subtile_m=_subtile_m_enabled(lhs),
       **buffering,
   )
 
@@ -1719,6 +1728,7 @@ def gmm_dswiglu_bwd(
     dact_pre_act_tile_n: int | None = None,
     rhs_fp8_scale: jnp.ndarray | None = None,
     rhs_dtype: jnp.dtype | None = None,
+    emit_transposed_drhs: bool = False,
 ):
   """The backward of `lhs_act @ rhs` (per group), lhs_act = silu(gate) * up, with the SwiGLU backward fused.
 
@@ -1780,16 +1790,20 @@ def gmm_dswiglu_bwd(
       dact_row_scale=dact_row_scale,
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
+      enable_subtile_m=_subtile_m_enabled(dout),
       **native_dlhs,
   )
+  drhs_dout_arg = lhs_act if emit_transposed_drhs else dout
+  drhs_lhs_arg = dout if emit_transposed_drhs else lhs_act
+  drhs_tiling_arg = (*tiling[:7], tiling[8], tiling[7]) if emit_transposed_drhs else tiling
   drhs = _drhs_run_tokamax_v2(
-      dout,
-      lhs_act,
+      drhs_dout_arg,
+      drhs_lhs_arg,
       group_sizes,
       group_offset,
       rhs.shape[0],
       drhs_dtype,
-      tiling,
+      drhs_tiling_arg,
       use_gmm_v2_heuristic_tiling,
       partial_sum=None,
   )
@@ -1975,10 +1989,15 @@ def _dlhs_fp8_native_kwargs(rhs_scale: jnp.ndarray, rhs_dtype) -> dict:
   return {"rhs_contract_scale": rhs_scale, "rhs_dequant_dtype": jnp.dtype(rhs_dtype)}
 
 
-def _check_fp8_rhs(rhs, rhs_codes, rhs_scale, name):
-  """Raises unless rhs_codes are float8_e4m3fn of the anchor's shape with a matching [g, 1, n] scale."""
-  if rhs.shape != rhs_codes.shape:
-    raise ValueError(f"{name}: anchor {rhs.shape} and codes {rhs_codes.shape} must have the same shape.")
+def _check_fp8_rhs(rhs, rhs_codes, rhs_scale, name, *, transpose_anchor: bool = False):
+  """Raises unless rhs_codes are float8_e4m3fn matching the anchor's shape with a [g, 1, n] scale."""
+  expected_anchor_shape = (
+      (rhs_codes.shape[0], rhs_codes.shape[2], rhs_codes.shape[1]) if transpose_anchor else rhs_codes.shape
+  )
+  if rhs.shape != expected_anchor_shape:
+    raise ValueError(
+        f"{name}: anchor {rhs.shape} and expected shape {expected_anchor_shape} (codes {rhs_codes.shape}) must match."
+    )
   if rhs_codes.dtype != jnp.float8_e4m3fn:
     raise ValueError(f"{name}: rhs_codes must be float8_e4m3fn, got {rhs_codes.dtype}.")
   if rhs_scale.shape != (rhs_codes.shape[0], 1, rhs_codes.shape[2]):
@@ -2011,7 +2030,7 @@ def _lhs_quant_kwargs(lhs_quant_mode: str) -> dict:
 
 
 def gmm_silu_fp8(
-    lhs: jnp.ndarray,
+    lhs: jnp.ndarray | quantizations.Fp8SteTokens,
     rhs: jnp.ndarray,
     rhs_codes: jnp.ndarray,
     rhs_scale: jnp.ndarray,
@@ -2031,6 +2050,8 @@ def gmm_silu_fp8(
   """gmm_silu(fuse_bwd_dswiglu=True) with an FP8 forward: returns (act, gate_up).
 
   rhs: the bf16 [g, k, 2n] gradient anchor (not read); rhs_codes: its float8_e4m3fn codes; rhs_scale: [g, 1, 2n].
+  lhs may also be an Fp8SteTokens carrier from ep_fp8_token_all_gather(defer_dequant=True), in which case its
+  pre-quantized float8_e4m3fn codes and per-row float32 scales feed gmm_v2 directly without in-kernel re-quantization.
   Same contract as gmm_silu(fuse_bwd_dswiglu=True): the caller stops act's gradient and routes it through
   gate_up.
 
@@ -2040,7 +2061,7 @@ def gmm_silu_fp8(
   arguments are gmm_silu's.
   """
   if isinstance(lhs, qpl.QArray) or lhs.ndim != 2 or rhs.ndim != 3:
-    raise NotImplementedError("gmm_silu_fp8: plain 2D lhs and [g, k, 2n] rhs only.")
+    raise NotImplementedError("gmm_silu_fp8: 2D lhs (plain or Fp8SteTokens) and [g, k, 2n] rhs only.")
   _check_fp8_rhs(rhs, rhs_codes, rhs_scale, "gmm_silu_fp8")
   return _gmm_silu_fp8(
       lhs,
@@ -2077,13 +2098,30 @@ def _gmm_silu_fp8_kernel(
     acc_dtype,
     lhs_quant_mode="",
 ):
-  """_gmm_silu_kernel with FP8 weights (codes + per-channel scale) and in-kernel FP8 lhs quantization."""
+  """_gmm_silu_kernel with FP8 weights (codes + per-channel scale) and pre-quantized or in-kernel FP8 lhs."""
   if heuristic:
     tile_info = gmm_v2.calculate_tiling
   else:
     tile_n = gmm_silu_pre_act_tile_n(tiling, rhs_codes.shape[-1])
     tile_info = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tile_n)
   buffering = {} if rhs_buffer_count is None else {"rhs_buffer_count": rhs_buffer_count}
+  if isinstance(lhs, quantizations.Fp8SteTokens):
+    return gmm_v2.gmm_v2(
+        lhs=lhs.codes,
+        rhs=rhs_codes,
+        group_sizes=group_sizes,
+        rhs_scale=_fp8_rhs_scale(rhs_scale),
+        lhs_scale=lhs.scale,
+        tile_info=tile_info,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
+        maybe_quantize_lhs=False,
+        fuse_act="silu",
+        return_pre_act=return_pre_act,
+        enable_subtile_m=_subtile_m_enabled(lhs.codes),
+        **buffering,
+        **_acc_kwargs(acc_dtype),
+    )
   return gmm_v2.gmm_v2(
       lhs=lhs,
       rhs=rhs_codes,
@@ -2095,6 +2133,7 @@ def _gmm_silu_fp8_kernel(
       maybe_quantize_lhs=True,
       fuse_act="silu",
       return_pre_act=return_pre_act,
+      enable_subtile_m=_subtile_m_enabled(lhs),
       **buffering,
       **_acc_kwargs(acc_dtype),
       **_lhs_quant_kwargs(lhs_quant_mode),
@@ -2175,7 +2214,8 @@ def _gmm_silu_fp8_fwd(
       acc_dtype=acc_dtype,
       lhs_quant_mode=lhs_quant_mode,
   )
-  return (act, gate_up), (lhs, rhs_codes, rhs_scale, group_sizes, group_offset)
+  lhs_res = dataclasses.replace(lhs, x_ste=None) if isinstance(lhs, quantizations.Fp8SteTokens) else lhs
+  return (act, gate_up), (lhs_res, rhs_codes, rhs_scale, group_sizes, group_offset)
 
 
 def _gmm_silu_fp8_bwd(
@@ -2196,6 +2236,8 @@ def _gmm_silu_fp8_bwd(
   """_gmm_silu_dswiglu_bwd at the dequantized bf16 weight; the weight gradient goes to the anchor."""
   del acc_dtype, lhs_quant_mode
   lhs, rhs_codes, rhs_scale, group_sizes, group_offset = residual
+  is_ste_lhs = isinstance(lhs, quantizations.Fp8SteTokens)
+  lhs_val = lhs.dequantize(preferred_element_type) if is_ste_lhs else lhs
   if native_bwd_dlhs and _use_fp8_native_dlhs(dlhs_transpose, heuristic, tiling, rhs_codes.shape):
     # fp8_moe_native_bwd_dlhs: _gmm_silu_dswiglu_bwd's _gmm_bwd (no quantization, partial sums or 3D layouts:
     # _dlhs_run_tokamax_v2 and _compute_drhs reduce to these two calls) with the codes dequantized in the DLHS.
@@ -2208,18 +2250,19 @@ def _gmm_silu_fp8_bwd(
         rhs_scale=None,
         partial_sum=None,
         tile_info=gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5]),
-        preferred_element_type=lhs.dtype,
+        preferred_element_type=lhs_val.dtype,
         group_offset=group_offset,
         lhs_scale=None,
         transpose_rhs=True,
         maybe_quantize_lhs=True,
         zero_initialize=True,
         out_is_3d=False,
+        enable_subtile_m=_subtile_m_enabled(grad),
         **_dlhs_fp8_native_kwargs(rhs_scale, rhs_dtype),
     )
     drhs = _drhs_run_tokamax_v2(
         grad,
-        lhs,
+        lhs_val,
         group_sizes,
         group_offset,
         rhs_codes.shape[0],
@@ -2228,6 +2271,12 @@ def _gmm_silu_fp8_bwd(
         heuristic,
         partial_sum=None,
     )
+    if is_ste_lhs:
+      dlhs = quantizations.Fp8SteTokens(
+          x_ste=dlhs,
+          codes=jnp.zeros_like(lhs.codes),
+          scale=jnp.zeros_like(lhs.scale),
+      )
     return dlhs, drhs, None, None, None, None
   rhs = dequantize_fp8_codes(rhs_codes, rhs_scale, rhs_dtype)
   dlhs, drhs, _, _ = _gmm_silu_dswiglu_bwd(
@@ -2238,9 +2287,15 @@ def _gmm_silu_fp8_bwd(
       fuse_scale,
       fuse_3d,
       fwd_rhs_buffer_count,
-      (lhs, rhs, group_sizes, group_offset),
+      (lhs_val, rhs, group_sizes, group_offset),
       grad_out,
   )
+  if is_ste_lhs:
+    dlhs = quantizations.Fp8SteTokens(
+        x_ste=dlhs,
+        codes=jnp.zeros_like(lhs.codes),
+        scale=jnp.zeros_like(lhs.scale),
+    )
   return dlhs, drhs, None, None, None, None
 
 
@@ -2263,14 +2318,15 @@ def gmm_dswiglu_fp8(
     acc_dtype: jnp.dtype | None = None,
     lhs_quant_mode: str = "",
     native_bwd_dlhs: bool = False,
+    transpose_drhs: bool = False,
 ) -> jnp.ndarray:
-  """gmm_dswiglu with an FP8 forward. rhs: the bf16 [g, k, n] anchor (not read); rhs_codes / rhs_scale [g, 1, n].
+  """gmm_dswiglu with an FP8 forward. rhs: the bf16 [g, k, n] anchor (or [g, n, k] when transpose_drhs=True).
 
   Same contract as gmm_dswiglu: the backward returns d[gate | up] and a zero cotangent for lhs_act.
 
   acc_dtype, lhs_quant_mode and native_bwd_dlhs: as in gmm_silu_fp8. The other arguments are gmm_dswiglu's.
   """
-  _check_fp8_rhs(rhs, rhs_codes, rhs_scale, "gmm_dswiglu_fp8")
+  _check_fp8_rhs(rhs, rhs_codes, rhs_scale, "gmm_dswiglu_fp8", transpose_anchor=transpose_drhs)
   return _gmm_dswiglu_fp8(
       lhs_act,
       gate_up,
@@ -2288,6 +2344,7 @@ def gmm_dswiglu_fp8(
       jnp.dtype(rhs.dtype),
       lhs_quant_mode,
       bool(native_bwd_dlhs),
+      bool(transpose_drhs),
   )
 
 
@@ -2319,13 +2376,14 @@ def _gmm_fp8_fwd_kernel(
       preferred_element_type=preferred_element_type,
       group_offset=group_offset,
       maybe_quantize_lhs=True,
+      enable_subtile_m=_subtile_m_enabled(lhs),
       **buffering,
       **_acc_kwargs(acc_dtype),
       **_lhs_quant_kwargs(lhs_quant_mode),
   )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
 def _gmm_dswiglu_fp8(
     lhs_act,
     gate_up,
@@ -2343,9 +2401,10 @@ def _gmm_dswiglu_fp8(
     rhs_dtype,
     lhs_quant_mode,
     native_bwd_dlhs,
+    transpose_drhs,
 ):
   """gmm_dswiglu_fp8 when not differentiated: the FP8 forward."""
-  del gate_up, rhs, dlhs_transpose, pre_act_tile_n, rhs_dtype, native_bwd_dlhs
+  del gate_up, rhs, dlhs_transpose, pre_act_tile_n, rhs_dtype, native_bwd_dlhs, transpose_drhs
   return _gmm_fp8_fwd_kernel(
       lhs_act,
       rhs_codes,
@@ -2377,9 +2436,10 @@ def _gmm_dswiglu_fp8_fwd(
     rhs_dtype,
     lhs_quant_mode,
     native_bwd_dlhs,
+    transpose_drhs,
 ):
   """Differentiated: the FP8 forward; saves the FP8 weight and scale (not a bf16 copy) for the backward."""
-  del rhs, dlhs_transpose, pre_act_tile_n, rhs_dtype, native_bwd_dlhs
+  del rhs, dlhs_transpose, pre_act_tile_n, rhs_dtype, native_bwd_dlhs, transpose_drhs
   out = _gmm_fp8_fwd_kernel(
       lhs_act,
       rhs_codes,
@@ -2405,6 +2465,7 @@ def _gmm_dswiglu_fp8_bwd(
     rhs_dtype,
     lhs_quant_mode,
     native_bwd_dlhs,
+    transpose_drhs,
     residual,
     grad,
 ):
@@ -2427,19 +2488,25 @@ def _gmm_dswiglu_fp8_bwd(
         dact_pre_act_tile_n=pre_act_tile_n,
         rhs_fp8_scale=rhs_scale,
         rhs_dtype=rhs_dtype,
+        emit_transposed_drhs=transpose_drhs,
     )
     return jnp.zeros_like(lhs_act), d_gate_up, drhs, None, None, None, None
   rhs = dequantize_fp8_codes(rhs_codes, rhs_scale, rhs_dtype)
-  d_lhs_act, d_gate_up, drhs, _, _ = _gmm_dswiglu_bwd(
+  d_gate_up, _, drhs = gmm_dswiglu_bwd(
+      grad,
+      lhs_act,
+      rhs,
+      group_sizes,
+      group_offset,
       preferred_element_type,
       tiling,
-      heuristic,
-      dlhs_transpose,
-      pre_act_tile_n,
-      (lhs_act, gate_up, rhs, group_sizes, group_offset),
-      grad,
+      gate_up,
+      use_gmm_v2_heuristic_tiling=heuristic,
+      use_dlhs_transpose_rhs=dlhs_transpose,
+      dact_pre_act_tile_n=pre_act_tile_n,
+      emit_transposed_drhs=transpose_drhs,
   )
-  return d_lhs_act, d_gate_up, drhs, None, None, None, None
+  return jnp.zeros_like(lhs_act), d_gate_up, drhs, None, None, None, None
 
 
 _gmm_dswiglu_fp8.defvjp(_gmm_dswiglu_fp8_fwd, _gmm_dswiglu_fp8_bwd)
