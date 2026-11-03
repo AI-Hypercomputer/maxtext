@@ -58,6 +58,19 @@ def natural_layout_mode(natural_layout: bool | str) -> str:
 
 _SUPPORTS_PALLAS_PRECISION_HIGH = jax.__version_info__ >= (0, 11, 1)
 
+# `_gdn_matmul(..., precise=True, split=...)` for bf16 activations: how a precise matmul's two f32 operands are
+# decomposed into bf16 MXU dots (config gdn_bwd_2pass_bf16). None keeps both operands f32 under `Precision.HIGH`
+# (Mosaic `contract_precision<bf16x3>`). "lhs" splits lhs into bf16 hi + lo halves against bf16(rhs) and "rhs"
+# splits rhs against bf16(lhs), 2 dots of bf16 operands each; "both" is the explicit 3-dot decomposition.
+MATMUL_SPLITS = (None, "lhs", "rhs", "both")
+
+
+def _split_bf16(x: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """(hi, lo) bf16 halves of x with hi + lo = x to about 16 mantissa bits."""
+  x_f32 = x.astype(jnp.float32)
+  hi = x_f32.astype(jnp.bfloat16)
+  return hi, (x_f32 - hi.astype(jnp.float32)).astype(jnp.bfloat16)
+
 
 def _gdn_matmul(
     lhs: jax.Array,
@@ -65,6 +78,7 @@ def _gdn_matmul(
     compute_dtype: jnp.dtype = jnp.bfloat16,
     keep_lhs_fp32: bool = False,
     precise: bool = False,
+    split: Optional[str] = None,
 ) -> jax.Array:
   """Batched MXU matmul with FP32 accumulation for the GDN backward kernel.
 
@@ -77,16 +91,24 @@ def _gdn_matmul(
   direction (cosine ~0.3 against an fp32 reference). For f32 activations every
   matmul runs at `Precision.HIGHEST`.
 
+  `split` (precise bf16 matmuls only, see MATMUL_SPLITS) replaces `Precision.HIGH` by dots of bf16 operands: "lhs"
+  keeps lhs at about 16 mantissa bits (hi + lo) and rounds rhs to bf16, "rhs" the other way round, "both" keeps
+  both (3 dots). An operand that is already bf16-exact (e.g. the bf16 `do` cotangent) loses nothing when it is
+  the rounded one.
+
   Args:
     lhs: Left-hand side operand tensor.
     rhs: Right-hand side operand tensor.
     compute_dtype: Activation dtype (`bfloat16` or `float32`).
     keep_lhs_fp32: Whether to keep `lhs` in `float32` when `precise=False`.
     precise: Whether to use 3-pass bf16 precision for `bfloat16` activations.
+    split: None for `Precision.HIGH`, or the bf16 decomposition of a precise matmul ("lhs", "rhs", "both").
 
   Returns:
     The batched matrix product accumulated in `float32`.
   """
+  if split not in MATMUL_SPLITS:
+    raise ValueError(f"split must be one of {MATMUL_SPLITS}, got {split!r}.")
   dimension_numbers = (
       ((lhs.ndim - 1,), (rhs.ndim - 2,)),
       (tuple(range(lhs.ndim - 2)), tuple(range(rhs.ndim - 2))),
@@ -101,9 +123,24 @@ def _gdn_matmul(
           precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=jnp.float32,
       )
+    dot_bf16 = functools.partial(
+        jax.lax.dot_general,
+        dimension_numbers=dimension_numbers,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=jnp.float32,
+    )
+    # The small cross terms are summed first, then the hi x hi term, as in the 3-pass decomposition below.
+    if split == "lhs":
+      lhs_hi, lhs_lo = _split_bf16(lhs)
+      rhs_hi = rhs.astype(jnp.bfloat16)
+      return dot_bf16(lhs_lo, rhs_hi) + dot_bf16(lhs_hi, rhs_hi)
+    if split == "rhs":
+      rhs_hi, rhs_lo = _split_bf16(rhs)
+      lhs_hi = lhs.astype(jnp.bfloat16)
+      return dot_bf16(lhs_hi, rhs_lo) + dot_bf16(lhs_hi, rhs_hi)
     lhs_f32 = lhs.astype(jnp.float32)
     rhs_f32 = rhs.astype(jnp.float32)
-    if _SUPPORTS_PALLAS_PRECISION_HIGH:
+    if _SUPPORTS_PALLAS_PRECISION_HIGH and split is None:
       return jax.lax.dot_general(
           lhs_f32,
           rhs_f32,
@@ -111,16 +148,8 @@ def _gdn_matmul(
           precision=jax.lax.Precision.HIGH,
           preferred_element_type=jnp.float32,
       )
-    lhs_hi = lhs_f32.astype(jnp.bfloat16)
-    lhs_lo = (lhs_f32 - lhs_hi.astype(jnp.float32)).astype(jnp.bfloat16)
-    rhs_hi = rhs_f32.astype(jnp.bfloat16)
-    rhs_lo = (rhs_f32 - rhs_hi.astype(jnp.float32)).astype(jnp.bfloat16)
-    dot_bf16 = functools.partial(
-        jax.lax.dot_general,
-        dimension_numbers=dimension_numbers,
-        precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=jnp.float32,
-    )
+    lhs_hi, lhs_lo = _split_bf16(lhs_f32)
+    rhs_hi, rhs_lo = _split_bf16(rhs_f32)
     return (dot_bf16(lhs_hi, rhs_lo) + dot_bf16(lhs_lo, rhs_hi)) + dot_bf16(lhs_hi, rhs_hi)
   return jnp.matmul(
       lhs.astype(jnp.float32),
@@ -152,6 +181,9 @@ class GDNBackwardConfig:
   # writes dq / dk / dv to three refs (windows of dy_conv [B, S, dim]). Every other block has the same VMEM shape either way.
   split_qkv_in: bool = False
   split_qkv_out: bool = False
+  # Precise (intra-chunk) matmuls as 2 dots of bf16 operands instead of `Precision.HIGH` (`_gdn_matmul(split=...)`,
+  # config gdn_bwd_2pass_bf16); bf16 activations only.
+  two_pass_bf16: bool = False
 
   @property
   def repeats(self) -> int:
@@ -359,12 +391,21 @@ def _bwd_gdn_pipeline_body(
 
   k_beta = k_h * beta_h[:, :, None]
   k_kq_T = jnp.swapaxes(k_kq, -1, -2)
+  # gdn_bwd_2pass_bf16 (`_gdn_matmul` split): each precise matmul keeps one f32 operand at about 16 mantissa bits
+  # (bf16 hi + lo) and rounds the other one to bf16. The t_inv / Gram / attention products and their adjoints split
+  # lhs. The products with the keys and queries that feed the closed-form gating adjoint (`d_cumsum_h` sums
+  # q * dq - k * dk over terms that nearly cancel) split the keys / queries (rhs) and round the masked adjoint
+  # matrices instead: a rounded adjoint matrix enters both cancelling sums the same way, rounded keys do not (lhs
+  # splits there leave dA_log / dt_bias with 3-9x the error of `Precision.HIGH` against an f32 reference on TPU 8i,
+  # rhs splits match it). d_attn splits v_new (rhs) because its lhs, the bf16 `do`, is exact in bf16.
+  lhs_split = "lhs" if cfg.two_pass_bf16 else None
+  rhs_split = "rhs" if cfg.two_pass_bf16 else None
 
   if cfg.recompute_t_inv:
     # Rebuild T = I + strictly_lower(beta_i k_i.k_j exp(g_i - g_j)) and invert it here
     # instead of reading the forward kernel's t_inv from HBM. Compute both q @ k^T and
     # k @ k^T at num_kq_heads (4x fewer 3-pass bf16 matmuls) before repeating to num_v_heads.
-    kk_kq = _gdn_matmul(k_kq, k_kq_T, compute_dtype, precise=True)
+    kk_kq = _gdn_matmul(k_kq, k_kq_T, compute_dtype, precise=True, split=lhs_split)
     t_lower = jnp.repeat(kk_kq, repeats, axis=0) * (beta_h[:, :, None] * g_mat_strict)
     t_rows = jax.lax.broadcasted_iota(jnp.int32, t_lower.shape, 1)
     t_cols = jax.lax.broadcasted_iota(jnp.int32, t_lower.shape, 2)
@@ -392,21 +433,22 @@ def _bwd_gdn_pipeline_body(
       compute_dtype,
       keep_lhs_fp32=True,
       precise=True,
+      split=lhs_split,
   )
 
   q_g = q_h * gating_forward
-  attn_kq = _gdn_matmul(q_kq, k_kq_T, compute_dtype, precise=True)
+  attn_kq = _gdn_matmul(q_kq, k_kq_T, compute_dtype, precise=True, split=lhs_split)
   attn_unmasked = jnp.repeat(attn_kq, repeats, axis=0)
   attn = attn_unmasked * g_mat_causal
 
   k_scaled_bwd = k_h * gating_backward
 
-  dv_attn = _gdn_matmul(jnp.swapaxes(attn, -1, -2), do_h, compute_dtype, precise=True)
+  dv_attn = _gdn_matmul(jnp.swapaxes(attn, -1, -2), do_h, compute_dtype, precise=True, split=lhs_split)
   dv_new = dv_attn + _gdn_matmul(k_scaled_bwd, d_state, compute_dtype)
-  d_attn = _gdn_matmul(do_h, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True)
+  d_attn = _gdn_matmul(do_h, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True, split=rhs_split)
 
   A_T = jnp.swapaxes(A, -1, -2)
-  d_v_beta = _gdn_matmul(A_T, dv_new, compute_dtype, keep_lhs_fp32=True, precise=True)
+  d_v_beta = _gdn_matmul(A_T, dv_new, compute_dtype, keep_lhs_fp32=True, precise=True, split=lhs_split)
 
   # Packed weight-stationary GEMM: computes [-d_k_beta_g, d_q_g] in one matmul
   neg_d_k_beta_g, d_q_g = jnp.split(
@@ -429,7 +471,7 @@ def _bwd_gdn_pipeline_body(
 
   # Single-GEMM Gram adjoint dS (replaces 4 GEMMs and eliminates dw and dA)
   dS = jnp.tril(
-      -_gdn_matmul(d_v_beta, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True),
+      -_gdn_matmul(d_v_beta, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True, split=lhs_split),
       k=-1,
   )
 
@@ -442,11 +484,12 @@ def _bwd_gdn_pipeline_body(
       k_h,
       compute_dtype,
       precise=True,
+      split=rhs_split,
   )
   d_k_beta_from_S, d_q_h_from_attn = jnp.split(packed_from_k_h, 2, axis=1)
 
-  d_k_h_from_S = _gdn_matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta, compute_dtype, precise=True)
-  d_k_h_from_attn = _gdn_matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h, compute_dtype, precise=True)
+  d_k_h_from_S = _gdn_matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta, compute_dtype, precise=True, split=rhs_split)
+  d_k_h_from_attn = _gdn_matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h, compute_dtype, precise=True, split=rhs_split)
 
   d_k_beta = d_k_beta_g * gating_forward + d_k_beta_from_S
 
@@ -589,6 +632,7 @@ def _pallas_gdn_bwd_kernel_single_group(
       name=name,
       recompute_t_inv=cfg.recompute_t_inv,
       tri_inv_algo=cfg.tri_inv_algo,
+      two_pass_bf16=cfg.two_pass_bf16,
   )
 
 
@@ -618,6 +662,7 @@ def pallas_gdn_bwd_kernel(
     recompute_t_inv: bool = False,
     tri_inv_algo: str = local_compute_gdn.DEFAULT_TRI_INV_ALGO,
     natural_layout: bool | str = False,
+    two_pass_bf16: bool = False,
 ):
   """Executes the Pallas reverse-chunk GDNv3 backward kernel using emit_pipeline.
 
@@ -634,6 +679,11 @@ def pallas_gdn_bwd_kernel(
   read / written in place). Same values (every VMEM block holds the same data; only the HBM index maps change). Shapes
   whose q / k / v channel offsets are not whole blocks keep the relayout path. The kernel name gets the mode's suffix
   (`_nat` for "all", `_nat_s` for "states").
+
+  With `two_pass_bf16` (config gdn_bwd_2pass_bf16) and bf16 activations, every precise intra-chunk matmul runs as
+  2 MXU dots of bf16 operands that keep one f32 operand split into bf16 hi + lo halves (`_gdn_matmul` split "lhs"
+  or "rhs", chosen per call site) instead of `Precision.HIGH` on two f32 operands. The kernel name gets the suffix
+  `_2pass`. No effect for f32 activations (every matmul is `HIGHEST` there).
   """
   mode = natural_layout_mode(natural_layout)
   if t_inv is None and not recompute_t_inv:
@@ -725,6 +775,7 @@ def pallas_gdn_bwd_kernel(
       tri_inv_algo=tri_inv_algo,
       split_qkv_in=nat_qkv,
       split_qkv_out=nat_dy,
+      two_pass_bf16=two_pass_bf16 and jnp.dtype(qkv_conv.dtype) == jnp.bfloat16,
   )
 
   padded_tile_v_heads = cfg.padded_num_v_heads
@@ -966,6 +1017,8 @@ def pallas_gdn_bwd_kernel(
     name = f"gdn_bwd_kernel_recompute_{tri_inv_algo}"
   if natural_layout and name.startswith("gdn_bwd_kernel"):
     name = f"{name}{natural_suffix}"
+  if cfg.two_pass_bf16 and name.startswith("gdn_bwd_kernel"):
+    name = f"{name}_2pass"
 
   out_shapes_list = [
       dy_out_shape,

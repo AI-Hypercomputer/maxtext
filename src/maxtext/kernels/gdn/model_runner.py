@@ -640,6 +640,9 @@ def run_gdn_kernel_layer(
   # attributes: a config without the keys raises instead of silently running the compact path.
   conv_natural_layout = cfg.gdn_conv1d_natural_layout
   fwd_head_group_size = cfg.gdn_fwd_kernel_head_group_size
+  # Backward kernel's precise intra-chunk matmuls as 2 dots of bf16 operands instead of Precision.HIGH
+  # (gdn_bwd/pallas_mosaic_tpu_bwd.py _gdn_matmul). bf16 activations only; not bit-identical.
+  bwd_2pass_bf16 = bool(getattr(cfg, "gdn_bwd_2pass_bf16", False))
 
   if qkv_precomputed is not None:
     if use_head_sharded_cp:
@@ -929,6 +932,7 @@ def run_gdn_kernel_layer(
             bwd_natural_layout=bwd_natural_layout,
             conv_natural_layout=conv_natural_layout,
             fwd_head_group_size=fwd_head_group_size,
+            bwd_2pass_bf16=bwd_2pass_bf16,
         )
 
         if next_cs is not None:
@@ -977,6 +981,7 @@ def run_gdn_kernel_layer(
           bwd_natural_layout=bwd_natural_layout,
           conv_natural_layout=conv_natural_layout,
           fwd_head_group_size=fwd_head_group_size,
+          bwd_2pass_bf16=bwd_2pass_bf16,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -1025,6 +1030,7 @@ def run_gdn_kernel_layer(
         bwd_natural_layout=bwd_natural_layout,
         conv_natural_layout=conv_natural_layout,
         fwd_head_group_size=fwd_head_group_size,
+        bwd_2pass_bf16=bwd_2pass_bf16,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

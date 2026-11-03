@@ -2866,6 +2866,39 @@ class Qwen3Next(BaseModel):
           " vLLM paged-state path."
       ),
   )
+  gdn_bwd_2pass_bf16: bool = Field(
+      False,
+      description=(
+          "GDN kernel path, bfloat16 activations: run the precise intra-chunk matmuls of the Pallas GDN backward"
+          " kernel (kernels/gdn/gdn_bwd/pallas_mosaic_tpu_bwd.py _gdn_matmul) as 2 MXU dots of bfloat16 operands"
+          " instead of Precision.HIGH on two float32 operands. Each of them keeps one operand at about 16 mantissa"
+          " bits (bfloat16 hi + lo halves) and rounds the other to bfloat16; the split operand is chosen per call"
+          " site (the keys and queries where they feed the A_log / dt_bias gating adjoint, which sums nearly"
+          " cancelling terms). Not bit-identical to False. The forward and the sequence-CP chunk scans"
+          " (gdn_cp_m_scan / gdn_cp_dh_scan) are unchanged, and float32 activations keep HIGHEST. Requires"
+          " use_gdn_kernel=True."
+      ),
+  )
+  gdn_fp8_projections: bool = Field(
+      False,
+      description=(
+          "GDN kernel path, training: run the GatedDeltaNet in_proj_qkvz (both the gdn_in_proj_kernel_order path and"
+          " the plain path) and out_proj as FP8 matmuls with dynamic absmax scaling (kernels/gdn/fp8_projections.py):"
+          " E4M3 inputs and kernels, E5M2 gradients, every scale on a non-contracting dimension and applied once to"
+          " the float32 accumulator. Forward: inputs per token, kernel per output channel. Input gradient: the"
+          " kernel's output-channel scale is folded into the per-token quantization of the output gradient, so the"
+          " forward's FP8 kernel is reused. Kernel gradient: a per-token scale of one operand is folded into the"
+          " other, narrower operand, which is re-quantized per channel and written transposed by a Pallas"
+          " transpose-quantize kernel (in_proj_qkvz: the input with the gradient's scale; out_proj: the gradient"
+          " with the forward input's scale), so no per-channel pass runs over the wide tensor. The [qkv | z]"
+          " outputs of gdn_in_proj_kernel_order share one quantized input and keep separate per-token gradient"
+          " scales (no concatenated gradient). The kernel is gathered once in the forward and once in the backward,"
+          " as for the bfloat16 projections, and quantized after each gather. in_proj_ba, the Conv1D, A_log, dt_bias"
+          " and the norms are unchanged. Not bit-identical to False. Requires use_gdn_kernel=True, a decoder with"
+          " Gated DeltaNet layers, auto shard mode and unquantized in_proj_qkvz / out_proj kernels without bias. No"
+          " effect outside training or on the vLLM paged-state path."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -6100,6 +6133,8 @@ class MaxTextConfig(
           f"gdn_fwd_kernel_head_group_size={fwd_head_group_size} must divide gdn_num_key_heads={cfg.gdn_num_key_heads}."
       )
     in_proj_kernel_order = cfg.gdn_in_proj_kernel_order
+    fp8_projections = getattr(cfg, "gdn_fp8_projections", False)
+    bwd_2pass_bf16 = getattr(cfg, "gdn_bwd_2pass_bf16", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(
@@ -6134,6 +6169,16 @@ class MaxTextConfig(
       if in_proj_kernel_order:
         raise ValueError(
             "gdn_in_proj_kernel_order=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if fp8_projections:
+        raise ValueError(
+            "gdn_fp8_projections=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if bwd_2pass_bf16:
+        raise ValueError(
+            "gdn_bwd_2pass_bf16=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
       return
@@ -6186,7 +6231,22 @@ class MaxTextConfig(
             "gdn_in_proj_kernel_order=True requires use_gdn_kernel=True: only the Pallas GDN kernel path reads the"
             " kernel-order qkv it produces (kernels/gdn/model_runner.py)."
         )
+      if fp8_projections:
+        raise ValueError(
+            "gdn_fp8_projections=True requires use_gdn_kernel=True: the FP8 in_proj_qkvz / out_proj projections are"
+            " wired into the GDN kernel path of Qwen3NextGatedDeltaNet only."
+        )
+      if bwd_2pass_bf16:
+        raise ValueError(
+            "gdn_bwd_2pass_bf16=True requires use_gdn_kernel=True: only the Pallas GDN backward kernel"
+            " (kernels/gdn/gdn_bwd/pallas_mosaic_tpu_bwd.py) runs the matmuls it decomposes."
+        )
       return
+    if fp8_projections and getattr(cfg, "shard_mode", ShardMode.AUTO) == ShardMode.EXPLICIT:
+      raise ValueError(
+          "gdn_fp8_projections=True requires shard_mode='auto': the FP8 projections gather the kernel with a sharding"
+          " constraint and leave the activation shardings to GSPMD."
+      )
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
           "use_gdn_kernel=True does not support tensor parallelism: the kernel's shard_map does not shard over "

@@ -1763,6 +1763,18 @@ gdn_fwd_kernel_head_group_size: 0
 # parameter gradients; the input gradient matches up to float32 summation order. Requires use_gdn_kernel: true and
 # sequence-sharded GDN context parallelism.
 gdn_in_proj_kernel_order: false
+# GDN kernel path, bfloat16 activations: run the precise intra-chunk matmuls of the Pallas GDN backward kernel as 2 MXU
+# dots of bfloat16 operands (one float32 operand split into bfloat16 hi + lo halves, the other rounded to bfloat16)
+# instead of Precision.HIGH on two float32 operands (kernels/gdn/gdn_bwd/pallas_mosaic_tpu_bwd.py _gdn_matmul). Not
+# bit-identical; the forward and the CP chunk scans are unchanged. Requires use_gdn_kernel: true.
+gdn_bwd_2pass_bf16: false
+# GDN kernel path, training: run the GatedDeltaNet in_proj_qkvz (kernel-order and plain paths) and out_proj as FP8
+# matmuls with dynamic absmax scaling (kernels/gdn/fp8_projections.py): E4M3 inputs / kernels, E5M2 gradients, scales on
+# the non-contracting dimensions. The input gradient reuses the forward's per-output-channel FP8 kernel; the kernel
+# gradient folds a per-token scale into the narrower operand, written transposed by a Pallas transpose-quantize kernel.
+# in_proj_ba, the Conv1D, A_log, dt_bias and the norms stay in the compute dtype. Requires use_gdn_kernel: true and
+# shard_mode: auto.
+gdn_fp8_projections: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

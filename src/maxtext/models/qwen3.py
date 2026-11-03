@@ -48,6 +48,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.inference import kvcache
 from maxtext.kernels.attention import gdn_cp
+from maxtext.kernels.gdn import fp8_projections
 from maxtext.kernels.gdn import model_runner as gdn_kernel_runner
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
@@ -263,6 +264,9 @@ def _gdn_in_proj_kernel_order_dot_bwd(num_qkv, precision, gathered_sharding, res
 
 
 _gdn_in_proj_kernel_order_dot.defvjp(_gdn_in_proj_kernel_order_dot_fwd, _gdn_in_proj_kernel_order_dot_bwd)
+
+
+_GDN_FP8_LOGGED = set()
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -967,10 +971,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         _sharding((KV_BATCH, gdn_head_axis, None, None)),
     )
 
-  def _in_proj_qkvz_kernel_order(self, hidden_states: Array, head_sharding) -> tuple[Array, Array]:
-    """gdn_in_proj_kernel_order: in_proj_qkvz as qkv (B, S, 2 * K_dim + V_dim) in the Pallas kernel's [q | k | v]
-    order and z (B, S, H_v, D_v), from the same kernel and the same input as the split path."""
-    dense = self.in_proj_qkvz
+  @staticmethod
+  def _custom_vjp_dense_kernel(dense: DenseGeneral, option: str, name: str) -> Array:
+    """The kernel of `dense` as DenseGeneral.__call__ reads it, cast to the compute dtype (linears.py).
+
+    For the projections that bypass DenseGeneral.__call__ under a custom VJP (gdn_in_proj_kernel_order,
+    gdn_fp8_projections), which support only a plain 2-D kernel contracted with the last input dimension.
+    """
     if (
         dense.quant is not None
         or dense.kernel_scale is not None
@@ -979,12 +986,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         or dense.use_two_stage_all_gather
         or dense.gathered_kernel_axes is not None
         or dense.shard_mode == ShardMode.EXPLICIT
+        or len(dense.in_features_shape) != 1
+        or len(dense.out_features_shape) != 1
     ):
       raise ValueError(
-          "gdn_in_proj_kernel_order=True supports only an unquantized in_proj_qkvz kernel without bias, kept on device,"
+          f"{option}=True supports only an unquantized {name} kernel without bias, kept on device,"
           " without the two-stage or gather-once kernel all-gather, in auto shard mode."
       )
-    # The kernel as DenseGeneral.__call__ reads it and casts it to the compute dtype (linears.py).
     if hasattr(dense.kernel, "get_value"):
       kernel = dense.kernel.get_value()
     elif isinstance(dense.kernel, (dict, nnx.State)) and "value" in dense.kernel:
@@ -993,19 +1001,76 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       kernel = getattr(dense.kernel, "value", dense.kernel)
     if hasattr(kernel, "value"):
       kernel = kernel.value
-    kernel = jnp.asarray(kernel, dense.dtype)
+    return jnp.asarray(kernel, dense.dtype)
+
+  def _gathered_kernel_sharding(self, ndim: int):
+    """The sharding a projection kernel is gathered to before its matmul: replicated, or None without a mesh."""
+    return None if self.mesh is None else jax.sharding.NamedSharding(self.mesh, P(*((None,) * ndim)))
+
+  def _fp8_projection_layout(self, batch: int) -> fp8_projections.ProjectionLayout:
+    """gdn_fp8_projections: the kernel gather sharding and the token sharding of a (B, S, *) projection input.
+
+    The token dims are sharded as the GDN kernel's shard_map shards qkv (kernels/gdn/model_runner.py): batch on
+    KV_BATCH, the sequence on the GDN context axes when they are active.
+    """
+    if self.mesh is None:
+      return fp8_projections.ProjectionLayout()
+    logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
+        self.config, self.mesh, get_logical_axis_rules, gdn_context_axes
+    )
+    token_spec = logical_to_mesh_axes((KV_BATCH, cp_len), mesh=self.mesh, rules=logical_rules)
+    if cp_axes_active and token_spec[1] is None:
+      token_spec = P(token_spec[0], cp_axis_for_pspec)
+    # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
+    token_spec = remove_incompatible_mesh_axes_from_partition_spec(
+        token_spec, (batch, 1), self.mesh, dims=(0,), allow_remove_axes=True
+    )
+    return fp8_projections.ProjectionLayout(
+        gathered_sharding=self._gathered_kernel_sharding(2), mesh=self.mesh, token_spec=token_spec
+    )
+
+  def _fp8_projection(self, dense: DenseGeneral, inputs: Array, name: str) -> Array:
+    """gdn_fp8_projections: `dense(inputs)` as an FP8 matmul (kernels/gdn/fp8_projections.py), for in_proj_qkvz
+    (plain path) and out_proj.
+
+    Reads the kernel as DenseGeneral.__call__ does (compute dtype, `route_dense_weight_grad`); it is gathered once in
+    the forward and once in the backward to the replicated sharding, as the kernel-order in_proj_qkvz does.
+    """
+    kernel = self._custom_vjp_dense_kernel(dense, "gdn_fp8_projections", name)
+    if inputs.shape[-1] != kernel.shape[0]:
+      raise ValueError(f"{name}: input dimension {inputs.shape[-1]} does not match the kernel's {kernel.shape[0]}.")
+    kernel = route_dense_weight_grad(kernel, dense.kernel_axes)
+    x = jnp.asarray(inputs, dense.dtype)
+    (output,) = fp8_projections.fp8_projection(x, kernel, (), self._fp8_projection_layout(x.shape[0]))
+    if name not in _GDN_FP8_LOGGED:
+      _GDN_FP8_LOGGED.add(name)
+      max_logging.log(
+          f"[gdn_fp8_projections] {name} {x.shape} x {kernel.shape} -> {output.shape}: FP8 matmuls (fwd E4M3 x E4M3,"
+          " dgrad E5M2 x E4M3 reusing the forward kernel, wgrad with folded per-token scales)"
+      )
+    return output
+
+  def _in_proj_qkvz_kernel_order(self, hidden_states: Array, head_sharding, fp8: bool = False) -> tuple[Array, Array]:
+    """gdn_in_proj_kernel_order: in_proj_qkvz as qkv (B, S, 2 * K_dim + V_dim) in the Pallas kernel's [q | k | v]
+    order and z (B, S, H_v, D_v), from the same kernel and the same input as the split path. With `fp8`
+    (gdn_fp8_projections) the two matmuls run in FP8 from one quantized input (fp8_projections.fp8_projection)."""
+    dense = self.in_proj_qkvz
+    kernel = self._custom_vjp_dense_kernel(dense, "gdn_in_proj_kernel_order", "in_proj_qkvz")
     v_dim_per_k_head = self.v_heads_per_k_head * self.head_v_dim
     kernel = _gdn_in_proj_kernel_order_columns(kernel, self.num_k_heads, self.head_k_dim, v_dim_per_k_head)
     kernel = route_dense_weight_grad(kernel, dense.kernel_axes)
     num_qkv = 2 * self.key_dim + self.value_dim
-    gathered_sharding = None if self.mesh is None else jax.sharding.NamedSharding(self.mesh, P(*((None,) * kernel.ndim)))
+    gathered_sharding = self._gathered_kernel_sharding(kernel.ndim)
     x = jnp.asarray(hidden_states, dense.dtype)
-    qkv, z = _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, lax.Precision(dense.matmul_precision), gathered_sharding)
+    if fp8:
+      qkv, z = fp8_projections.fp8_projection(x, kernel, (num_qkv,), self._fp8_projection_layout(x.shape[0]))
+    else:
+      qkv, z = _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, lax.Precision(dense.matmul_precision), gathered_sharding)
     if "logged" not in _GDN_IN_PROJ_KERNEL_ORDER_LOGGED:
       _GDN_IN_PROJ_KERNEL_ORDER_LOGGED.add("logged")
       max_logging.log(
           f"[gdn_in_proj_kernel_order] in_proj_qkvz -> qkv {qkv.shape} in kernel order + z {z.shape}: one gathered"
-          " kernel, float32-sum input gradient"
+          " kernel, float32-sum input gradient" + (" (FP8 matmuls, gdn_fp8_projections)" if fp8 else "")
       )
     qkv = checkpoint_name(qkv, "qkv_proj")
     z = checkpoint_name(z, "qkv_proj")
@@ -1115,16 +1180,27 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     in_proj_kernel_order = (
         cfg.gdn_in_proj_kernel_order and model_mode == MODEL_MODE_TRAIN and use_gdn_kernel and not use_paged_state
     )
+    # gdn_fp8_projections: in_proj_qkvz (either path) and out_proj as FP8 matmuls in training (validate_gdn_config
+    # requires use_gdn_kernel=True for it); in_proj_ba stays in the compute dtype.
+    use_fp8_projections = (
+        getattr(cfg, "gdn_fp8_projections", False)
+        and model_mode == MODEL_MODE_TRAIN
+        and use_gdn_kernel
+        and not use_paged_state
+    )
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
     qkv_kernel_order = None
     if in_proj_kernel_order:
-      qkv_kernel_order, z = self._in_proj_qkvz_kernel_order(hidden_states, head_sharding)
+      qkv_kernel_order, z = self._in_proj_qkvz_kernel_order(hidden_states, head_sharding, fp8=use_fp8_projections)
       query = key = value = value_raw = None
     else:
       # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-      qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+      if use_fp8_projections:
+        qkvz = self._fp8_projection(self.in_proj_qkvz, hidden_states, "in_proj_qkvz")
+      else:
+        qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
       if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
         qkvz = _pin_row_major_layout(qkvz)
       if use_gdn_kernel:
@@ -1685,7 +1761,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       gated_output = moe._forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)
-    output = self.out_proj(gated_output, out_sharding=out_sharding)
+    if use_fp8_projections:
+      output = self._fp8_projection(self.out_proj, gated_output, "out_proj")
+    else:
+      output = self.out_proj(gated_output, out_sharding=out_sharding)
     if use_gdn_kernel:
       output = checkpoint_name(output, "out_proj")
     if decoder_segment_ids is not None:
