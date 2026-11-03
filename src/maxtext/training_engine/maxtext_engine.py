@@ -1099,6 +1099,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     kv_tp = self._config.kv_tp_size or rollout_tp
     moe_tp = self._config.moe_mlp_tp_size or rollout_tp
     prefuse_moe = resolve_prefuse_moe_weights(self._config)
+    # PyTorch vLLM (vllm-torchtpu) sampler: the trainer emits vLLM-named tensors in
+    # the sampler's stored (fused, transposed, rank-major) layout; see
+    # maxtext.integration.tunix.weight_mapping.qwen3_5_vllm_torch.
+    self._vllm_torch_layout = None
+    if self._rollout_backend == "vllm_torch":
+      self._use_weight_converter = False
+      self._vllm_torch_sampler_tp = rollout_tp
     if self._use_weight_converter:
       from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
@@ -3945,7 +3952,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       t_convert = time.monotonic()
       params_state = self._get_trainable_params_state()
 
-      if self._use_weight_converter:
+      if self._rollout_backend == "vllm_torch":
+        if self._vllm_torch_layout is None:
+          from maxtext.integration.tunix.weight_mapping import qwen3_5_vllm_torch  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+          if self._config.decoder_block.value != "qwen3_5":
+            raise NotImplementedError(
+                f"rollout_backend=vllm_torch is only implemented for decoder_block=qwen3_5 (got {self._config.decoder_block.value})"
+            )
+          self._vllm_torch_layout = qwen3_5_vllm_torch.Qwen35VllmTorchLayout(
+              self._config, self._mesh, self._vllm_torch_sampler_tp
+          )
+        converted_state = self._vllm_torch_layout.convert(params_state)
+      elif self._use_weight_converter:
         converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
       else:
         # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
