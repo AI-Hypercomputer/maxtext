@@ -393,7 +393,7 @@ class EngineAotParityTest(parameterized.TestCase):
 
     `nnx.Optimizer` builds optax's `count` and its own `step` with `jnp.zeros` under no mesh, so
     they reach the first update uncommitted and come back from it committed -- a second argument
-    signature, and a second compile of the largest kernel in the engine. `_place_state_on_mesh`
+    signature, and a second compile of the largest kernel in the engine. `_settle_state`
     settles them up front; this pins it.
     """
     cfg, mesh = _config_and_mesh()
