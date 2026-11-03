@@ -24,6 +24,8 @@ from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
 import functools
+import gc
+import time
 from typing import Any, Optional
 
 from absl import logging
@@ -651,6 +653,41 @@ def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., An
     return wrapper
 
   return decorator
+
+
+def _traced(name: str) -> Callable[..., Any]:
+  """Decorator factory that wraps an instance method in `jax.profiler.TraceAnnotation(name)`."""
+
+  def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(method)
+    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
+      with jax.profiler.TraceAnnotation(name):
+        return method(self, *args, **kwargs)
+
+    return wrapper
+
+  return decorator
+
+
+class _StepTimer:
+  """Records elapsed monotonic durations (in seconds) for named sub-steps."""
+
+  def __init__(self) -> None:
+    self._start = time.monotonic()
+    self.timings: dict[str, float] = {}
+
+  @contextlib.contextmanager
+  def measure(self, name: str):
+    """Measures the wall-clock duration of a block and stores it under `name`."""
+    t0 = time.monotonic()
+    try:
+      yield
+    finally:
+      self.timings[name] = time.monotonic() - t0
+
+  def elapsed(self) -> float:
+    """Returns total elapsed seconds since this timer was created."""
+    return time.monotonic() - self._start
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -2345,6 +2382,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     return out
 
+  @_traced("save_checkpoint")
   def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
     """Saves a checkpoint at a step boundary via Orbax.
 
@@ -2552,6 +2590,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
     del sync_request
+    timer = _StepTimer()
     if staging_transport == "raiden":
       try:
         from tunix.dist_rl.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -2572,77 +2611,112 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           and self._last_staged_step == self.train_step
           and self._staged_metadata is not None
       ):
+        total_variables = sum(len(m.variables) for m in self._staged_metadata)
         logging.info(
-            "Trainer reusing staged weight sync for step %d (%d variables)",
+            "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%d transport=%s reused=True"
+            " total_s=%.3f work_units=%d variables=%d",
             self.train_step,
-            sum(len(m.variables) for m in self._staged_metadata),
+            staging_transport,
+            timer.elapsed(),
+            len(self._staged_metadata),
+            total_variables,
         )
         return self._staged_metadata
 
-      # 1. Drain all in-flight TPU computations to ensure weights are fully updated
-      self._throttler.wait_for_all()
+      with jax.profiler.TraceAnnotation("prepare_weight_sync"):
+        # 1. Drain in-flight TPU computations so the weights are fully updated, and drop the
+        # previous round's converted tree before converting again, so at most one converted
+        # tree is alive at a time. Async checkpoint persistence is not waited for: it overlaps
+        # with the conversion and transfer.
+        with timer.measure("throttler_wait_s"):
+          self._throttler.wait_for_all()
 
-      # 2. Extract clean trainable parameters
-      params_state = self._get_trainable_params_state()
+        with timer.measure("purge_buffers_s"):
+          self._purge_raiden_buffers()
 
-      if self._use_weight_converter:
-        converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
-      else:
-        # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
-        # on-device (HBM, not host RAM) full materialization -- a different
-        # memory pool than the host OOM this plan addresses. Candidate
-        # fast-follow: fold into unscan_layers_streaming's per-piece slicing.
-        params_state = jax.tree_util.tree_map(
-            lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
-            params_state,
+        # 2. Extract clean trainable parameters
+        with timer.measure("convert_s"):
+          params_state = self._get_trainable_params_state()
+
+          if self._use_weight_converter:
+            converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
+          else:
+            # UNCHANGED, deliberately out of scope: this fp32->bf16 cast is an
+            # on-device (HBM, not host RAM) full materialization -- a different
+            # memory pool than the host OOM this plan addresses. Candidate
+            # fast-follow: fold into unscan_layers_streaming's per-piece slicing.
+            params_state = jax.tree_util.tree_map(
+                lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
+                params_state,
+            )
+            if self._config.scan_layers:
+              converted_state = raiden_unscan.unscan_layers(
+                  params_state,
+                  num_layers=self._config.num_decoder_layers,
+                  scan_axis=self._config.param_scan_axis,
+                  cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
+              )
+            else:
+              converted_state = params_state
+
+          del params_state
+
+        # 3. Bind parameters to the Raiden transport. Construct the synchronizer
+        # once, matching the persistent-instance-per-cycle pattern the rebind
+        # optimization depends on.
+        with timer.measure("bind_s"):
+          if self._raiden_sync is None:
+            self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
+                job_name="trainer",
+                worker_index=jax.process_index(),
+                auto_h2d=False,
+                parallelism=4,
+            )
+
+          self._raiden_sync.bind(converted_state)
+          del converted_state
+
+        # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
+        with timer.measure("d2h_s"):
+          if self._raiden_sync.active:
+            self._raiden_sync.d2h()
+
+        timer.timings["checksum_s"] = 0.0
+        if is_verify_weights_enabled():
+          with timer.measure("checksum_s"):
+            logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
+
+        with timer.measure("metadata_s"):
+          all_metadata = self._raiden_sync.work_unit_metadata_all()
+        total_variables = sum(len(m.variables) for m in all_metadata)
+
+        logging.info(
+            "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
+            self.train_step,
+            len(all_metadata),
+            total_variables,
+            all_metadata[0].mesh_axes if all_metadata else (),
         )
-        if self._config.scan_layers:
-          converted_state = raiden_unscan.unscan_layers(
-              params_state,
-              num_layers=self._config.num_decoder_layers,
-              scan_axis=self._config.param_scan_axis,
-              cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
-          )
-        else:
-          converted_state = params_state
-
-      del params_state
-
-      # 3. Bind parameters to the Raiden transport. Construct the synchronizer
-      # once, matching the persistent-instance-per-cycle pattern the rebind
-      # optimization depends on.
-      if self._raiden_sync is None:
-        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
-            job_name="trainer",
-            worker_index=jax.process_index(),
-            auto_h2d=False,
-            parallelism=4,
+        logging.info(
+            "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%d transport=%s"
+            " throttler_wait_s=%.3f purge_buffers_s=%.3f convert_s=%.3f bind_s=%.3f d2h_s=%.3f"
+            " checksum_s=%.3f metadata_s=%.3f total_s=%.3f work_units=%d variables=%d",
+            self.train_step,
+            staging_transport,
+            timer.timings["throttler_wait_s"],
+            timer.timings["purge_buffers_s"],
+            timer.timings["convert_s"],
+            timer.timings["bind_s"],
+            timer.timings["d2h_s"],
+            timer.timings["checksum_s"],
+            timer.timings["metadata_s"],
+            timer.elapsed(),
+            len(all_metadata),
+            total_variables,
         )
-
-      self._raiden_sync.bind(converted_state)
-      del converted_state
-
-      # 4. Initiate Device-to-Host transfer to stage weights for network transfer.
-      if self._raiden_sync.active:
-        self._raiden_sync.d2h()
-
-      verify_weights = is_verify_weights_enabled()
-      if verify_weights:
-        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
-
-      all_metadata = self._raiden_sync.work_unit_metadata_all()
-      total_variables = sum(len(m.variables) for m in all_metadata)
-
-      logging.info(
-          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
-          self.train_step,
-          len(all_metadata),
-          total_variables,
-          all_metadata[0].mesh_axes if all_metadata else (),
-      )
-      self._last_staged_step = self.train_step
-      self._staged_metadata = all_metadata
-      return all_metadata
+        self._last_staged_step = self.train_step
+        self._staged_metadata = all_metadata
+        return all_metadata
 
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
@@ -2656,10 +2730,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       sync_request: The round's request, forwarded by Tunix's `TrainerWorker`. Unused.
     """
     del sync_request
+    timer = _StepTimer()
     self._last_staged_step = None
     self._staged_metadata = None
+    timer.timings["purge_buffers_s"] = 0.0
+    purged_leaves = 0
     if self._raiden_sync:
+      # Read while the converted tree is still bound; releasing it resets what the metrics describe.
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+      with timer.measure("purge_buffers_s"):
+        purged_leaves = self._purge_raiden_buffers()
+    logging.info(
+        "TRAINER_WEIGHT_SYNC_TIMING step=release_weight_sync train_step=%d purge_buffers_s=%.3f"
+        " purged_leaves=%d total_s=%.3f",
+        self.train_step,
+        timer.timings["purge_buffers_s"],
+        purged_leaves,
+        timer.elapsed(),
+    )
     return True
 
   def disable_step_profiler(self) -> None:
@@ -2670,6 +2758,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def wait_for_inflight(self) -> None:
     """Blocks until all in-flight device computations and pending metric flushes complete."""
     self._throttler.wait_for_all()
+
+  def _purge_raiden_buffers(self) -> int:
+    """Drops the converted tree bound to the Raiden synchronizer from the last round.
+
+    `bind()` keeps references to the converted arrays until the next `bind()`, so without this
+    the previous round's tree stays alive while the next one is converted.
+
+    Returns:
+      The number of array references released.
+    """
+    if self._raiden_sync is None or not hasattr(self._raiden_sync, "release_buffers"):
+      return 0
+    released = self._raiden_sync.release_buffers()
+    if released:
+      gc.collect()
+    return released
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
