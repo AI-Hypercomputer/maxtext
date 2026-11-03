@@ -143,12 +143,12 @@ def _checkpoint_uses_value_wrapper(meta_tree: Any, param_state: Any) -> bool:
 
 # Logical axis names whose padding semantics are "replicate the existing values"
 # (e.g. KV-head replication for GQA with TP > num_kv_heads).
-_VLLM_REPEAT_AXES = frozenset({"kv_heads", ("expert", "model")})
+_VLLM_REPEAT_AXES = frozenset({"kv_heads"})
 
 # Logical axis names whose padding semantics are "append zeros at the end"
 # (e.g. MoE MLP-dim padding to satisfy the GMM_v2 kernel's per-shard size
 # constraint, set in src/maxtext/integration/vllm/maxtext_vllm_adapter/adapter.py).
-_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "activation_mlp", ("attn_dp", "model")})
+_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "activation_mlp"})
 
 
 def _normalize_logical_axes(axes):
@@ -166,6 +166,23 @@ def _normalize_logical_axes(axes):
   if isinstance(axes, (tuple, list)):
     return tuple(axes)
   return None
+
+
+def _logical_partition_specs(abstract_state):
+  """Returns a nested dict of logical-name PartitionSpecs, one per Variable in ``abstract_state``.
+
+  ``nnx.get_partition_spec`` rewrites each Variable's ``out_sharding`` through the ambient
+  ``flax.core.spmd`` rules and any per-Variable ``sharding_rules``. Callers of
+  ``from_pretrained`` (the vLLM adapter, Tunix) hold their rules open, which would turn
+  ``"mlp_moe"`` into mesh axes and defeat the zero-pad dispatch in
+  ``_align_checkpoint_to_model_shapes``. Reading ``out_sharding`` directly is immune to both.
+  """
+
+  def _spec(v):
+    axes = v.get_metadata().get("out_sharding")
+    return jax.sharding.PartitionSpec(*axes) if axes else None
+
+  return nnx.to_pure_dict(abstract_state, extract_fn=_spec)
 
 
 def _zero_pad_axis(arr, axis, extra):
@@ -1077,7 +1094,7 @@ def from_pretrained(
       config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
   )
   _, _abs_state_for_specs = nnx.split(abstract_model)
-  specs = nnx.get_partition_spec(_abs_state_for_specs)
+  specs = _logical_partition_specs(_abs_state_for_specs)
 
   model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
   # TODO: print debug_sharding info
@@ -1333,18 +1350,6 @@ def from_pretrained(
             sharded_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
-        # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
-        # is the source of truth for logical axis names — it's the input to
-        # the logical-to-mesh sharding conversion.  Each leaf is a PartitionSpec whose entries are
-        # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
-        # dispatch in _align_checkpoint_to_model_shapes.
-        # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
-        # unwrap to raw PartitionSpecs so _normalize_logical_axes can read them.
-        logical_axes_tree = jax.tree.map(
-            lambda v: v.get_value(),
-            specs,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
-        )
 
         def to_dict(tree):
           if hasattr(tree, "items"):
@@ -1353,7 +1358,6 @@ def from_pretrained(
 
         model_arrays = to_dict(model_arrays)
         checkpoint = to_dict(checkpoint)
-        logical_axes_tree = to_dict(logical_axes_tree)
 
         checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
@@ -1386,7 +1390,7 @@ def from_pretrained(
             return ckpt
           return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
 
-        checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
+        checkpoint = _walk_align(checkpoint, model_arrays, specs)
         nnx.update(model, checkpoint)
         unrestored = [
             jax.tree_util.keystr(path)
