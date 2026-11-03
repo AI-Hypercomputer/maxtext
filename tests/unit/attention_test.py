@@ -3254,6 +3254,13 @@ class AttentionTest(parameterized.TestCase):
     cp_attn = types.ModuleType("tpu_inference.layers.common.cp_attention")
     attn_iface.sharded_ragged_paged_attention = mock_rpa_ops or mock.MagicMock()
     cp_attn.dcp_forward = mock_dcp_forward or mock.MagicMock()
+
+    def _default_attention(kv_cache, q, k, v, md, mesh, **kwargs):
+      if mesh is not None and hasattr(mesh, "shape") and "dcp" in mesh.shape and mesh.shape["dcp"] > 1:
+        return cp_attn.dcp_forward(mesh, q, k, v, kv_cache, md, **kwargs)
+      return (kv_cache, mock_rpa_ops(mesh, q, k, v, kv_cache, md.seq_lens, md.block_tables, md.query_start_loc, md.request_distribution, None, 1.0, None, None, None, None)[0])
+
+    attn_iface.attention = mock.MagicMock(side_effect=_default_attention)
     return {
         "tpu_inference": pkg,
         "tpu_inference.layers": layers,
