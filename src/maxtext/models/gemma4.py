@@ -156,6 +156,9 @@ class Gemma4MoE(nnx.Module):
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
     )
+    # Remat tag (custom policy, moe_routed_output): saving the post-combine routed output lets the
+    # backward skip replaying the wo GMM, unsort and top-k combine for this norm's VJP.
+    routed_experts = checkpoint_name(routed_experts, "moe_routed_output")
     routed_experts = self.post_feedforward_layernorm_2(routed_experts, out_sharding=out_sharding)
 
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
