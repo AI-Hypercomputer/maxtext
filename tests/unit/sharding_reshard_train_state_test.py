@@ -14,6 +14,11 @@
 
 """Unit tests for sharding.reshard_train_state (Zero-1 reshard before compile)."""
 
+import os
+import socket
+import subprocess
+import sys
+import textwrap
 from unittest import mock
 
 from absl.testing import absltest
@@ -180,6 +185,103 @@ class ReshardTrainStateTest(parameterized.TestCase):
     twice = sharding.reshard_train_state(once, targets, enable_single_controller)
     self.assert_resharded(state, once, targets)
     self.assert_resharded(once, twice, targets)
+
+  def test_multi_process_uses_jit_with_out_shardings(self):
+    state, targets = _train_state_and_shardings(self.mesh)
+    with (
+        mock.patch.object(jax, "process_count", return_value=2),
+        mock.patch.object(jax, "jit", wraps=jax.jit) as jit_spy,
+        mock.patch.object(jax, "device_put", autospec=True, side_effect=AssertionError("device_put must not be called")),
+    ):
+      out = sharding.reshard_train_state(state, targets, enable_single_controller=False)
+    jit_spy.assert_called_once()
+    self.assertIs(jit_spy.call_args.kwargs["out_shardings"], targets)
+    self.assert_resharded(state, out, targets)
+
+
+# Runs in each of the two JAX processes started by ReshardTrainStateTwoProcessTest.
+_TWO_PROCESS_WORKER = textwrap.dedent(
+    """
+    import os
+    import jax
+    import numpy as np
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+    from maxtext.utils import sharding
+
+    jax.distributed.initialize(
+        coordinator_address=os.environ["COORDINATOR_ADDRESS"],
+        num_processes=2,
+        process_id=int(os.environ["PROCESS_ID"]),
+        initialization_timeout=60,
+    )
+    try:
+      mesh = Mesh(np.array(jax.devices()).reshape(2, 2), ("data", "expert"))
+      num_layers = 4
+      key_bits = np.stack([np.array([0, 17, 0, layer], dtype=np.uint32) for layer in range(num_layers)])
+      raw = jax.make_array_from_callback(key_bits.shape, NamedSharding(mesh, P(None, None)), lambda i: key_bits[i])
+      stacked_key = jax.random.wrap_key_data(raw, impl="unsafe_rbg")  # laid out P(None,), as scan_layers does
+      kernel = np.arange(8 * 4, dtype=np.float32).reshape(8, 4)
+      replicated_kernel = jax.make_array_from_callback(kernel.shape, NamedSharding(mesh, P()), lambda i: kernel[i])
+      state = {"stacked_key": stacked_key, "moved_key": stacked_key, "kernel": replicated_kernel}
+      targets = {
+          "stacked_key": NamedSharding(mesh, P()),
+          "moved_key": NamedSharding(mesh, P("data")),
+          "kernel": NamedSharding(mesh, P("data", "expert")),
+      }
+      out = sharding.reshard_train_state(state, targets, enable_single_controller=False)
+      jax.block_until_ready(out)
+      for name, target in targets.items():
+        assert out[name].sharding.is_equivalent_to(target, out[name].ndim), (name, out[name].sharding)
+      for name in ("stacked_key", "moved_key"):
+        assert out[name].dtype == stacked_key.dtype, name
+        assert jax.random.key_impl(out[name]) == jax.random.key_impl(stacked_key), name
+        for shard in jax.random.key_data(out[name]).addressable_shards:
+          np.testing.assert_array_equal(np.asarray(shard.data), key_bits[shard.index])
+      for shard in out["kernel"].addressable_shards:
+        np.testing.assert_array_equal(np.asarray(shard.data), kernel[shard.index])
+      print("RESHARD_OK", flush=True)
+    finally:
+      jax.distributed.shutdown()
+    """
+)
+
+
+class ReshardTrainStateTwoProcessTest(absltest.TestCase):
+  """reshard_train_state across two real JAX CPU processes (2 devices each), as on a 2-host slice."""
+
+  def test_scanned_typed_keys_across_processes(self):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("JAX_", "TPU_", "LIBTPU_"))}
+    env.update(
+        {
+            "JAX_PLATFORMS": "cpu",
+            "JAX_CPU_COLLECTIVES_IMPLEMENTATION": "gloo",
+            "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+            "PYTHONPATH": os.pathsep.join(sys.path),
+        }
+    )
+    with socket.socket() as listener:
+      listener.bind(("127.0.0.1", 0))
+      env["COORDINATOR_ADDRESS"] = f"127.0.0.1:{listener.getsockname()[1]}"
+    workers = [
+        subprocess.Popen(  # pylint: disable=consider-using-with
+            [sys.executable, "-c", _TWO_PROCESS_WORKER],
+            env={**env, "PROCESS_ID": str(process_id)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for process_id in range(2)
+    ]
+    try:
+      outputs = [worker.communicate(timeout=300)[0] for worker in workers]
+    finally:
+      for worker in workers:
+        if worker.poll() is None:
+          worker.kill()
+          worker.wait()
+    for process_id, (worker, output) in enumerate(zip(workers, outputs)):
+      self.assertEqual(worker.returncode, 0, f"process {process_id} failed:\n{output}")
+      self.assertIn("RESHARD_OK", output, f"process {process_id}:\n{output}")
 
 
 if __name__ == "__main__":

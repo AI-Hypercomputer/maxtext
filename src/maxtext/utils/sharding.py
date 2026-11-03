@@ -1050,7 +1050,14 @@ def reshard_train_state(state, state_mesh_shardings, enable_single_controller: b
   to a new sharding can stage the data through the controller host (at 3,072 TPU
   v4 chips the controller RSS grew past 187 GB before compilation). A jitted
   identity with `out_shardings` performs the same reshard on the accelerators.
-  Multi-controller runs keep `jax.device_put`.
+
+  Multi-controller runs with several JAX processes use the jitted identity too:
+  there `jax.device_put` rejects a typed PRNG key array unless its target
+  sharding is identical to its current one ("device_put's second argument must
+  be a Device or a Sharding which represents addressable devices"), and the RNG
+  streams `scan_layers` stacks along the layer axis are laid out `P(None,)`
+  while their target is the equivalent `P()`. Every process must make this
+  call. Single-process runs keep `jax.device_put`.
 
   Args:
     state: PyTree of train state arrays to reshard.
@@ -1061,7 +1068,7 @@ def reshard_train_state(state, state_mesh_shardings, enable_single_controller: b
   Returns:
     The resharded train state PyTree matching `state_mesh_shardings`.
   """
-  if enable_single_controller:
+  if enable_single_controller or jax.process_count() > 1:
     return jax.jit(lambda s: s, out_shardings=state_mesh_shardings)(state)
   return jax.device_put(state, state_mesh_shardings)
 
