@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793724721690,
+  "lastUpdate": 1793742079691,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -63239,6 +63239,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
             "value": 79,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Anisha Mazumder",
+            "username": "A9isha",
+            "email": "mazumdera@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "7c16833736579d5c5ae26d7f2af419e6b3382b8c",
+          "message": "Fix two fp8 MoE training failures under JAX's HiJAX unreduced lowering.\n\n1. `layers/quantizations.py:_cast_reduced_from` now only `pcast`s axes the\n   input is not already reduced along. The scale tensor built by\n   `jnp.full_like(reduced_arr, ...)` already carries the reduced axes, so the\n   unconditional `pcast(..., to=\"reduced\")` failed with\n   `ValueError: Unsupported pcast from=reduced, to='reduced'`.\n2. `kernels/megablox/ops.py:_drhs_run_tokamax_v1` declares the TGMM kernel\n   output as varying and casts it to unreduced afterwards instead of declaring\n   the `pallas_call` output unreduced directly, which JAX's lowering does not\n   yet handle (`pallas_call`'s `is_high` rule ignores unreduced operand/output\n   types and the result is never registered as a high value, leading to\n   `assert not x.aval.is_high` in `partial_eval.lower_jaxpr`). The resulting\n   type is identical for downstream consumers.\n\nPiperOrigin-RevId: 1013205554",
+          "timestamp": "2026-11-03T20:24:42Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/7c16833736579d5c5ae26d7f2af419e6b3382b8c"
+        },
+        "date": 1793742069406,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 250.63899999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 65.631,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2107.818,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 107.521,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.48199999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4574.446,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1537.252,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 198.07500000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4147.0689999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 314,
             "unit": "count"
           }
         ]
