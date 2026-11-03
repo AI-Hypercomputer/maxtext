@@ -196,6 +196,14 @@ def _load_costs_from_fdo(fdo_bytes: bytes) -> dict[str, float]:
   return {c.name: c.cost_us for c in profiled.costs}
 
 
+def _log_costs(source: str, costs: dict[str, float]) -> None:
+  """Debug-log every (instruction, cost) pair, most expensive first."""
+  if not _logger.isEnabledFor(logging.DEBUG):
+    return
+  for name, cost_us in sorted(costs.items(), key=lambda kv: (-kv[1], kv[0])):
+    _logger.debug("gpu_collective_overlap_pass: profile cost [%s] %s = %.2f us", source, name, cost_us)
+
+
 def _update_profile(fdo_bytes: bytes) -> None:
   """Merge an FDO profile chunk into the pooled per-instruction costs."""
   if not fdo_bytes:
@@ -204,6 +212,7 @@ def _update_profile(fdo_bytes: bytes) -> None:
     costs = _load_costs_from_fdo(fdo_bytes)
     if not costs:
       return
+    _log_costs("pgle", costs)
     _profile_costs.update(costs)
     # PGLE's own te_ep entries are underestimates; keep the live corrections.
     _profile_costs.update(_te_ep_overrides)
@@ -393,6 +402,17 @@ _ASYNC_START_OPCODES = frozenset(
     }
 )
 
+# High-priority collectives: profile-key prefixes of the collectives the pass
+# must hide as much as it can. They get strict rules instead of being traded
+# for total exposure: no relocation or async placement may increase one's
+# exposure.
+# COLLECTIVE_OVERLAP_PRIORITY_PREFIXES overrides it (comma-separated).
+_PRIORITY_COLLECTIVE_PREFIXES = tuple(
+    p.strip()
+    for p in os.environ.get("COLLECTIVE_OVERLAP_PRIORITY_PREFIXES", "all-gather,reduce-scatter,all-reduce").split(",")
+    if p.strip()
+)
+
 # COLLECTIVE_OVERLAP_WHILE_BODY_ONLY=1 skips the entry computation, which is by
 # far the largest sequence and dominates compile time.
 # Trades its overlap away for faster compiles.
@@ -417,6 +437,9 @@ _ASYNC_STREAM_TOL_US = float(os.environ.get("COLLECTIVE_OVERLAP_ASYNC_STREAM_TOL
 # COLLECTIVE_OVERLAP_SM_GATE_MIN_US are ignored.
 _SM_GATE = os.environ.get("COLLECTIVE_OVERLAP_SM_GATE", "1") != "0"
 _SM_GATE_MIN_US = float(os.environ.get("COLLECTIVE_OVERLAP_SM_GATE_MIN_US", "1000"))
+# COLLECTIVE_OVERLAP_GUARD_DONE_CONSUMERS=0 disables the done-consumer guard in
+# _fill_exposed_collectives_with_heavy_compute (see _done_consumer_headroom_loss).
+_GUARD_DONE_CONSUMERS = os.environ.get("COLLECTIVE_OVERLAP_GUARD_DONE_CONSUMERS", "1") != "0"
 
 
 def _opcode_str(inst) -> str:
@@ -840,6 +863,26 @@ def _total_exposed_us(
   return total
 
 
+def _priority_exposures(start_of_done: dict, seq: list, comp_by_name: dict) -> dict:
+  """Exposed us per high-priority collective (by start name) on `seq`."""
+  positions = {inst: i for i, inst in enumerate(seq)}
+  prefix = _prefix_costs_excluding(seq, (), comp_by_name)
+  out = {}
+  for async_done, async_start in start_of_done.items():
+    if async_start not in positions or async_done not in positions:
+      continue
+    key = _resolve_profile_key(async_start, comp_by_name)
+    if not key.startswith(_PRIORITY_COLLECTIVE_PREFIXES):
+      continue
+    latency = _profile_costs.get(key)
+    if latency is None or latency <= 0:
+      continue
+    s, d = positions[async_start], positions[async_done]
+    overlap = prefix[d] - prefix[s + 1] if d > s + 1 else 0.0
+    out[async_start.name] = max(0.0, latency - overlap)
+  return out
+
+
 def _earliest_legal_pos(
     async_start,
     positions: dict,
@@ -1174,7 +1217,26 @@ def _try_relocate_blocker_earlier(
 
   if target is None:
     return None
-  return _commit_sequence(schedule, comp, _reinsert(seq, chain, target, blocker))
+  new_seq = _reinsert(seq, chain, target, blocker)
+  # Strict rule: neither gate may pay for a gain elsewhere with a
+  # high-priority collective's overlap.
+  before = _priority_exposures(start_of_done, seq, comp_by_name)
+  after = _priority_exposures(start_of_done, new_seq, comp_by_name)
+  for name, exposed in after.items():
+    if exposed > before.get(name, 0.0) + 1e-6:
+      _logger.debug(
+          "gpu_collective_overlap_pass [%s]: TRC %s: pos %d -> %d rejected, priority collective %s "
+          "exposure %.1f -> %.1f us.",
+          module_name,
+          blocker.name,
+          blocker_pos,
+          target + len(chain),
+          name,
+          before.get(name, 0.0),
+          exposed,
+      )
+      return None
+  return _commit_sequence(schedule, comp, new_seq)
 
 
 def _chase_async_start_blocker_toward_heavy_compute(
@@ -1381,6 +1443,83 @@ def _chase_heavy_compute_blocker_chain(
   return changed, seq, positions, name_to_pos, floor, chain, blocker
 
 
+def _real_consumers_by_done(start_of_done: dict, comp_by_name: dict) -> tuple[dict, dict]:
+  """Real (non-trivial) consumers of every async done, both ways.
+
+  Returns (dones_of, consumers_of): dones_of maps a consumer to the dones it
+  consumes, consumers_of maps a done to its consumers. Looks through trivially
+  movable users (get-tuple-element, bitcast, ...), so for a combined collective
+  whose tuple elements feed different fusions, each of those fusions is a
+  consumer of the done.
+  """
+  dones_of: dict = {}
+  consumers_of: dict = {}
+  for async_done in start_of_done:
+    seen: set = set()
+    stack = list(async_done.users())
+    while stack:
+      user = stack.pop()
+      if user in seen:
+        continue
+      seen.add(user)
+      if _is_trivially_movable_inst(user, comp_by_name):
+        stack.extend(user.users())
+      else:
+        dones_of.setdefault(user, []).append(async_done)
+        consumers_of.setdefault(async_done, []).append(user)
+  return dones_of, consumers_of
+
+
+def _done_consumer_headroom_loss(
+    inst,
+    target: int,
+    dones_of: dict,
+    consumers_of: dict,
+    start_of_done: dict,
+    positions: dict,
+    prefix: list,
+    comp_by_name: dict,
+    window_start,
+) -> tuple[float, object]:
+  """Overlap (us) another collective loses if `inst` is moved to `target`.
+
+  A done can sink as far as its first real consumer, and that is where the
+  comm-stream model and _relocate_async_done_before_te_ep put it when the
+  collective is under-hidden. Moving a real consumer of a done earlier caps
+  that sinking, so the collective's reachable overlap shrinks even though its
+  current overlap, which _compute_position_margins looks at, is unchanged.
+  Reachable overlap is capped at the collective's latency: shrinking a window
+  that stays fully hidable costs nothing.
+
+  Returns (worst loss, the collective's start), or (0.0, None) if `inst`
+  consumes no other collective's done or none loses overlap.
+  """
+
+  def reachable(bound: int, start_pos: int, latency: float) -> float:
+    done_pos = bound - 1
+    return min(latency, prefix[done_pos] - prefix[start_pos + 1]) if done_pos > start_pos + 1 else 0.0
+
+  worst, worst_start = 0.0, None
+  for async_done in dones_of.get(inst, ()):
+    async_start = start_of_done[async_done]
+    if async_start is window_start or async_start not in positions or async_done not in positions:
+      continue
+    latency = _profile_costs.get(_resolve_profile_key(async_start, comp_by_name))
+    if latency is None or latency <= 0:
+      continue
+    start_pos = positions[async_start]
+    others = [positions[c] for c in consumers_of[async_done] if c is not inst and c in positions]
+    bound_before = min(others + [positions[inst]])
+    bound_after = min(others + [target])
+    if bound_after >= bound_before:
+      continue
+
+    loss = reachable(bound_before, start_pos, latency) - reachable(bound_after, start_pos, latency)
+    if loss > worst:
+      worst, worst_start = loss, async_start
+  return worst, worst_start
+
+
 def _compute_position_margins(
     start_of_done: dict,
     positions: dict,
@@ -1497,7 +1636,9 @@ def _fill_exposed_collectives_with_heavy_compute(
   its producer). Candidates are restricted to those whose cost fits within
   the slack of the collectives covering their position
   (_compute_position_margins), so a direct placement can never push another
-  collective below its latency. A candidate whose floor lies past `done` goes
+  collective below its latency. A candidate that consumes another collective's
+  done is also skipped when placing it would cap that done's reachable overlap
+  (_done_consumer_headroom_loss). A candidate whose floor lies past `done` goes
   to the chase fallbacks instead (see _chase_blocked).
 
   The deficit is recomputed from the real prefix sums on every iteration. An
@@ -1596,6 +1737,35 @@ def _fill_exposed_collectives_with_heavy_compute(
         return True
     return False
 
+  def _pins_other_done(inst, floor, window, start_pos, iter_prefix, dones_of, consumers_of) -> bool:
+    """True if moving `inst` to its target would cap how far another
+    collective's done can sink and lose that collective reachable overlap."""
+    if not dones_of:
+      return False
+    loss, hurt = _done_consumer_headroom_loss(
+        inst,
+        max(floor, start_pos + 1),
+        dones_of,
+        consumers_of,
+        start_of_done,
+        positions,
+        iter_prefix,
+        comp_by_name,
+        window["start"],
+    )
+    if hurt is None:
+      return False
+    _logger.debug(
+        "gpu_collective_overlap_pass [%s]: window %s: not placing %s: it consumes the done of %s and "
+        "would cap its reachable overlap (loss %.1f us).",
+        module_name,
+        window["start"].name,
+        inst.name,
+        hurt.name,
+        loss,
+    )
+    return True
+
   for _fp_iter in range(_MAX_FILL_FIXED_POINT_ITERS):
     pass_changed = False
 
@@ -1637,6 +1807,7 @@ def _fill_exposed_collectives_with_heavy_compute(
     # Only genuinely under-hidden collectives are chase targets, so
     # adequately overlapped ones aren't disturbed.
     exposed_dones = {w["done"] for w in windows}
+    dones_of, consumers_of = _real_consumers_by_done(start_of_done, comp_by_name) if _GUARD_DONE_CONSUMERS else ({}, {})
 
     # Windows can overlap in time; an instruction placed in a shared
     # zone counts toward both, so such placements are preferred. Best-effort
@@ -1707,6 +1878,8 @@ def _fill_exposed_collectives_with_heavy_compute(
                 restart = True
                 break
               continue
+            if _pins_other_done(inst, floor, window, start_pos, iter_prefix, dones_of, consumers_of):
+              continue
             if best_floor is None or floor < best_floor:
               best_floor = floor
               candidate = inst
@@ -1735,6 +1908,8 @@ def _fill_exposed_collectives_with_heavy_compute(
               if _chase_blocked(inst, floor, blocker, window, start_pos, done_pos, exposed_dones):
                 restart = True
                 break
+              continue
+            if _pins_other_done(inst, floor, window, start_pos, iter_prefix, dones_of, consumers_of):
               continue
             legal_candidates.append((inst, floor, chain, cost))
           if restart:
@@ -2111,10 +2286,11 @@ def _best_async_placement(
   equal; among them the earliest start wins, then the latest done (largest
   window; a later done never adds a stall in the sim).
 
-  `protect` is an optional set of dones (the async-class ones): a candidate is
-  dropped if it raises their combined stall by more than the tolerance, so
-  trading one async collective's exposure for another's or a te_ep stall never
-  counts as a gain.
+  `protect` is an optional set of dones (the priority-class ones). A candidate
+  is dropped if it raises ANY one's simulated stall or its own static exposure, and
+  among the rest only those with the lowest combined priority stall compete on
+  simulated total, so a priority collective is never traded for a non-critical stall
+  or for another priority collective.
 
   Returns ((total, done_moved, base_idx), moved_chain, start_idx, done_idx, base)
   or None; indices are into `base` (seq without the moved instructions).
@@ -2130,10 +2306,17 @@ def _best_async_placement(
       [user_pos] + [positions[x] for x in ctrl_succs.get(async_start.name, []) if x in positions and x is not async_done]
   )
   cands = []
-  protected_now = 0.0
+  stalls_now: dict = {}
   if protect:
     _, stalls_now = _simulate_comm_stream(seq, cost, lat, done_start, gate)
-    protected_now = sum(stalls_now.get(d, 0.0) for d in protect)
+  # Static exposure of this start (compute between start and done vs latency).
+  # The simulator can call a window hidden only because compute was stalled on
+  # another collective in it; a priority collective must also not lose the
+  # overlap it has in compute alone.
+  is_priority = bool(protect) and async_done in protect and lat.get(async_start, 0.0) > 0
+  static_now = 0.0
+  if is_priority:
+    static_now = max(0.0, lat[async_start] - sum(cost.get(seq[j], 0.0) for j in range(start_pos + 1, done_pos)))
   chain = sorted(to_move, key=lambda x: positions[x])
   chain_pos = [positions[x] for x in chain]
   prepared: dict = {}
@@ -2174,18 +2357,32 @@ def _best_async_placement(
           continue
         order = base[:pb] + moved + [async_start] + base[pb:q] + [async_done] + base[q:]
         total, stalls = _simulate_comm_stream(order, cost, lat, done_start, gate)
-        if protect and sum(stalls.get(d, 0.0) for d in protect) > protected_now + _ASYNC_STREAM_TOL_US:
+        static_new = 0.0
+        if is_priority:
+          ps = pb + len(moved)
+          pd = ps + 1 + (q - pb)
+          static_new = max(0.0, lat[async_start] - sum(cost.get(x, 0.0) for x in order[ps + 1 : pd]))
+        if (protect and any(stalls.get(d, 0.0) > stalls_now.get(d, 0.0) + 1e-6 for d in protect)) or (
+            static_new > static_now + 1e-6
+        ):
           if diag is not None:
             diag.append((total, i, True))
           continue
         if diag is not None:
           diag.append((total, i, False))
-        cands.append((total, q != q_cur, pb, k, q, moved, base))
+        pstall = sum(stalls.get(d, 0.0) for d in protect) if protect else 0.0
+        cands.append((total, q != q_cur, pb, k, q, moved, base, pstall))
   if not cands:
     return None
+  # Priority collectives first: only candidates within tolerance of the lowest
+  # combined priority stall compete on simulated total.
+  pbest = min(c[7] for c in cands)
+  cands = [c for c in cands if c[7] <= pbest + 1e-6]
   limit = min(c[0] for c in cands) + _ASYNC_STREAM_TOL_US
-  total, _moved, pb, _, q, moved, base = min((c for c in cands if c[0] <= limit), key=lambda c: (c[2], -c[4]))
-  return ((round(total, 1), _moved, pb), moved, pb, q, base)
+  total, _moved, pb, _, q, moved, base, _ = min((c for c in cands if c[0] <= limit), key=lambda c: (c[2], -c[4]))
+  # key[3]: the chosen placement lowers the priority collectives' combined stall.
+  pnow = sum(stalls_now.get(d, 0.0) for d in protect) if protect else 0.0
+  return ((round(total, 1), _moved, pb, pbest + 1e-6 < pnow), moved, pb, q, base)
 
 
 # Recursion bound when hoisting a control-predecessor whose own latest operand
@@ -2273,7 +2470,7 @@ def _hoist_async_starts_to_floor(
         sim_lat[s_inst] = _collective_overrides.get(key_s) or _profile_costs.get(key_s, 0.0) or 0.0
         if key_s in _collective_overrides:
           n_lat_overridden += 1
-        if key_s.startswith(_ASYNC_COLLECTIVE_PREFIXES):
+        if key_s.startswith(_PRIORITY_COLLECTIVE_PREFIXES):
           async_dones.add(d_inst)
       except Exception:
         sim_lat[s_inst] = 0.0
@@ -2370,7 +2567,7 @@ def _hoist_async_starts_to_floor(
       )
       if best is not None:
         key, moved, pb, q, base = best
-        if key[0] <= before + _ASYNC_STREAM_TOL_US:
+        if key[0] <= before + _ASYNC_STREAM_TOL_US or key[3]:
           done_pos_old = positions[async_done]
           new_seq = base[:pb] + list(moved) + [async_start] + base[pb:q] + [async_done] + base[q:]
           if len(new_seq) == len(seq) and set(new_seq) == set(seq) and new_seq != seq:
@@ -2707,6 +2904,16 @@ def _hoist_host_offload_copy_starts(module, schedule, module_name: str) -> bool:
   return changed
 
 
+def _schedule_signature(module, schedule) -> tuple:
+  """The instruction order of every scheduled computation, as names."""
+  signature = []
+  for comp in module.make_nonfusion_computations():
+    seq = schedule.sequence(comp)
+    if seq is not None:
+      signature.append((comp.name, tuple(inst.name for inst in seq)))
+  return tuple(signature)
+
+
 def _reorder_to_fixed_point(module, schedule, module_name: str) -> bool:
   """Run _reorder_collectives to a fixed point; returns True if anything changed.
 
@@ -2719,13 +2926,28 @@ def _reorder_to_fixed_point(module, schedule, module_name: str) -> bool:
   global _fill_strategy_cache
   _fill_strategy_cache = {}
   changed = False
+  # _reorder_collectives reports True whenever it moved anything, but two of its
+  # steps can undo each other: the hoist-to-floor step moves a start to its
+  # floor and the stream model then places it back. The iteration moves things
+  # and ends where it began, so "moved" never goes False and the loop runs to
+  # the cap. Stop when the schedule itself repeats.
+  seen = {_schedule_signature(module, schedule)}
   for _ in range(_MAX_REORDER_ITERS):
     if not _reorder_collectives(module, schedule, module_name):
       break
-    changed = True
     schedule.update()
     schedule.verify()
     module.set_schedule(schedule)
+    signature = _schedule_signature(module, schedule)
+    if signature in seen:
+      _logger.debug(
+          "gpu_collective_overlap_pass [%s]: reorder iteration left the schedule unchanged or repeated an earlier one; "
+          "stopping.",
+          module_name,
+      )
+      break
+    seen.add(signature)
+    changed = True
   else:
     # Cap reached: the last update() was never rechecked, so run one more pass.
     _logger.warning(
@@ -2963,6 +3185,9 @@ def _patch_pgle_profiler() -> None:
       te_ep_costs = {k: v for k, v in all_costs.items() if k.startswith(_TE_EP_PREFIX)}
       gemm_costs = {k: v for k, v in all_costs.items() if k.startswith(_GEMM_COST_PREFIXES)}
       coll_costs = {k: v for k, v in all_costs.items() if k.startswith(_COLLECTIVE_COST_PREFIXES)}
+      _log_costs("live te_ep", te_ep_costs)
+      _log_costs("live gemm", gemm_costs)
+      _log_costs("live collective", coll_costs)
       _gemm_overrides.update(gemm_costs)
       _collective_overrides.update(coll_costs)
       _te_ep_overrides.update(te_ep_costs)
