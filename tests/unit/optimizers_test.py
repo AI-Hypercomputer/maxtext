@@ -833,6 +833,150 @@ class TrainableParametersMaskTest(parameterized.TestCase):
     # When no trainable mask is provided, nothing is frozen by this mechanism
     self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
 
+  def test_get_optimizer_with_frozen_parameters_mask(self):
+    """Test get_optimizer with frozen_parameters_mask (blacklist) and AdamW weight decay."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_with_frozen_mask",
+        "frozen_parameters_mask=['.*embed.*', 'layer3/.*']",
+        "adam_weight_decay=0.1",
+    ]
+    config = pyconfig.initialize(argv)
+
+    opt = optimizers.get_optimizer(config, lambda step: 1.0)
+    params = {
+        "embed": {"embedding": jax.numpy.ones((2, 2))},
+        "layer1": {"kernel": jax.numpy.ones((2, 2))},
+        "layer3": {"ln": {"scale": jax.numpy.ones((2, 2))}},
+    }
+    grads = jax.tree_util.tree_map(lambda x: jax.numpy.ones_like(x) * 0.5, params)
+
+    opt_state = opt.init(params)
+    updates, _ = opt.update(grads, opt_state, params)
+
+    self.assertTrue(jax.numpy.all(updates["embed"]["embedding"] == 0))
+    self.assertTrue(jax.numpy.all(updates["layer3"]["ln"]["scale"] == 0))
+    self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
+
+  def test_get_optimizer_with_combined_trainable_and_frozen_masks(self):
+    """Test combining trainable_parameters_mask (whitelist) and frozen_parameters_mask (blacklist)."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_combined_masks",
+        "trainable_parameters_mask=['layer1/.*', 'layer2/.*']",
+        "frozen_parameters_mask=['.*bias.*']",
+    ]
+    config = pyconfig.initialize(argv)
+    opt = optimizers.get_optimizer(config, lambda step: 1.0)
+
+    params = {
+        "layer1": {"kernel": jax.numpy.ones((2, 2)), "bias": jax.numpy.ones((2,))},
+        "layer2": {"kernel": jax.numpy.ones((2, 2))},
+        "layer3": {"kernel": jax.numpy.ones((2, 2))},
+    }
+    grads = jax.tree_util.tree_map(lambda x: jax.numpy.ones_like(x) * 0.5, params)
+    opt_state = opt.init(params)
+    updates, _ = opt.update(grads, opt_state, params)
+
+    # Whitelisted and not blacklisted -> trained
+    self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
+    self.assertFalse(jax.numpy.all(updates["layer2"]["kernel"] == 0))
+    # Whitelisted by layer1/.* but overridden by frozen_parameters_mask -> frozen
+    self.assertTrue(jax.numpy.all(updates["layer1"]["bias"] == 0))
+    # Not in whitelist -> frozen
+    self.assertTrue(jax.numpy.all(updates["layer3"]["kernel"] == 0))
+
+  def test_nnx_optimizer_with_trainable_param_filter_avoids_partition_state(self):
+    """When nnx.Optimizer uses wrt=get_trainable_param_filter(config), opt_state has no PartitionState wrapper."""
+
+    class _TwoLayerModule(nnx.Module):
+
+      def __init__(self):
+        self.frozen_linear = nnx.Linear(2, 2, rngs=nnx.Rngs(0))
+        self.trainable_linear = nnx.Linear(2, 2, rngs=nnx.Rngs(1))
+
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_nnx_wrt_filter",
+        "frozen_parameters_mask=['frozen_linear']",
+        "adam_weight_decay=0.1",
+    ]
+    config = pyconfig.initialize(argv)
+    model = _TwoLayerModule()
+    tx = optimizers.get_optimizer(config, lambda step: 0.1)
+    wrt = optimizers.get_trainable_param_filter(config)
+    nnx_opt = nnx.Optimizer(model, tx, wrt=wrt)
+
+    # Because wrt pre-filtered out frozen_linear, opt_state should be a direct AdamW tuple, not PartitionState.
+    self.assertNotIsInstance(nnx_opt.opt_state, optax.transforms.PartitionState)
+    opt_state_pure = nnx.as_pure(nnx_opt.opt_state)
+    # mu is in opt_state_pure[0].mu and should only contain 'trainable_linear'
+    self.assertIn("trainable_linear", opt_state_pure[0].mu)
+    self.assertNotIn("frozen_linear", opt_state_pure[0].mu)
+
+    frozen_before = model.frozen_linear.kernel.get_value().copy()
+    trainable_before = model.trainable_linear.kernel.get_value().copy()
+    grads = jax.tree_util.tree_map(lambda x: jnp.ones_like(x) * 0.5, nnx.state(model, wrt))
+    nnx_opt.update(model, grads)
+
+    np.testing.assert_array_equal(model.frozen_linear.kernel.get_value(), frozen_before)
+    self.assertFalse(jnp.allclose(model.trainable_linear.kernel.get_value(), trainable_before))
+
+  def test_multimodal_freeze_vision_encoder_flag(self):
+    """Legacy freeze_vision_encoder_params flag freezes VisionEncoderLayer_0 while keeping projectors trainable."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_mm_freeze",
+        "model_name=gemma3-4b",
+        "use_multimodal=True",
+        "freeze_vision_encoder_params=True",
+    ]
+    config = pyconfig.initialize(argv)
+    mask_fn = optimizers.get_freeze_mask_fn(config)
+    self.assertIsNotNone(mask_fn)
+
+    dummy_params = {
+        "vision_encoder": {
+            "Gemma3VisionEncoderLayer_0": {"kernel": jnp.ones((1,))},
+            "VisionEmbedder_0": {"mm_input_projection": jnp.ones((1,))},
+        },
+        "decoder": {"layers": {"kernel": jnp.ones((1,))}},
+    }
+    frozen_tree = mask_fn(dummy_params)
+    self.assertTrue(frozen_tree["vision_encoder"]["Gemma3VisionEncoderLayer_0"]["kernel"])
+    self.assertFalse(frozen_tree["vision_encoder"]["VisionEmbedder_0"]["mm_input_projection"])
+    self.assertFalse(frozen_tree["decoder"]["layers"]["kernel"])
+
+  def test_multimodal_freeze_audio_encoder_flag(self):
+    """Legacy freeze_audio_encoder_params flag freezes AudioEncoder_0 while keeping projectors trainable."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_audio_freeze",
+        "model_name=qwen3-omni-30b-a3b",
+        "use_audio=True",
+        "freeze_audio_encoder_params=True",
+    ]
+    config = pyconfig.initialize(argv)
+    mask_fn = optimizers.get_freeze_mask_fn(config)
+    self.assertIsNotNone(mask_fn)
+
+    dummy_params = {
+        "audio_encoder": {
+            "Qwen3OmniAudioEncoder_0": {"kernel": jnp.ones((1,))},
+            "Qwen3OmniAudioProjector_0": {"kernel": jnp.ones((1,))},
+        },
+        "decoder": {"layers": {"kernel": jnp.ones((1,))}},
+    }
+    frozen_tree = mask_fn(dummy_params)
+    self.assertTrue(frozen_tree["audio_encoder"]["Qwen3OmniAudioEncoder_0"]["kernel"])
+    self.assertFalse(frozen_tree["audio_encoder"]["Qwen3OmniAudioProjector_0"]["kernel"])
+    self.assertFalse(frozen_tree["decoder"]["layers"]["kernel"])
+
 
 class SkipStepOnSpikesTest(parameterized.TestCase):
   """Tests for the skip_step_on_spikes optimizer wrapper."""

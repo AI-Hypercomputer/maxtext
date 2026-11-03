@@ -416,11 +416,7 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
     # The train state is wrapped in the TrainStateNNX module.
     def create_train_state_fn():
       model = _create_model_partial()
-      wrt = (
-          getattr(nnx, "LoRAParam", nnx.Param)
-          if getattr(getattr(config, "lora", None), "enable_lora", False)
-          else nnx.Param
-      )
+      wrt = optimizers.get_trainable_param_filter(config)
       optimizer = nnx.Optimizer(model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(model, optimizer)
 
