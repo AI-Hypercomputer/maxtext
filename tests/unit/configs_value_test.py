@@ -1420,6 +1420,18 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with use_qwix_quantization=True"):
       pyconfig.initialize(argv)
 
+  def test_load_mesh_config_from_package_resources_when_not_on_disk(self):
+    """Tests custom_mesh_and_rule falls back to pkgutil.get_data in archives."""
+    # pylint: disable=protected-access
+    with unittest.mock.patch("os.path.exists", return_value=False):
+      mesh_cfg = types.MaxTextConfig._load_mesh_config_from_yaml("ep-as-dp")
+      self.assertEqual(
+          mesh_cfg.get("mesh_axes"),
+          ["data", "fsdp", "fsdp_transpose", "expert"],
+      )
+      with self.assertRaisesRegex(ValueError, "Custom mesh config file not found"):
+        types.MaxTextConfig._load_mesh_config_from_yaml("nonexistent-rule")
+
 
 class MMapDatasetConfigTest(absltest.TestCase):
   """Tests for mmap-specific configuration defaults and accepted values."""

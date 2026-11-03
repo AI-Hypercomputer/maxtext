@@ -25,6 +25,7 @@ import logging
 import math
 from math import prod
 import os
+import pkgutil
 from tempfile import gettempdir
 import yaml
 from typing import Any, Literal, NewType, Optional
@@ -4855,6 +4856,13 @@ class MaxTextConfig(
     )
 
     if not os.path.exists(custom_mesh_path):
+      if __package__:
+        try:
+          data = pkgutil.get_data(__package__, f"custom_mesh_and_rule/{rule_value}.yml")
+        except OSError:
+          data = None
+        if data is not None:
+          return yaml.safe_load(data.decode("utf-8")) or {}
       # ValueError is more semantically correct for validation errors than NotImplementedError
       raise ValueError(f"Custom mesh config file not found at {custom_mesh_path}")
 
