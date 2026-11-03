@@ -73,11 +73,11 @@ def _validate_metric(name: str, metric: Any) -> None:
           f"got {type(denom_val).__name__}"
       )
     if hasattr(sum_val, "dtype") and not (
-        np.issubdtype(sum_val.dtype, np.number) or np.issubdtype(sum_val.dtype, np.bool_)
+        jnp.issubdtype(sum_val.dtype, jnp.number) or jnp.issubdtype(sum_val.dtype, jnp.bool_)
     ):
       raise TypeError(f"WeightedMetric '{name}' unreduced_sum has non-numeric dtype: {sum_val.dtype}")
     if hasattr(denom_val, "dtype") and not (
-        np.issubdtype(denom_val.dtype, np.number) or np.issubdtype(denom_val.dtype, np.bool_)
+        jnp.issubdtype(denom_val.dtype, jnp.number) or jnp.issubdtype(denom_val.dtype, jnp.bool_)
     ):
       raise TypeError(f"WeightedMetric '{name}' denominator has non-numeric dtype: {denom_val.dtype}")
     if hasattr(sum_val, "shape") and hasattr(denom_val, "shape"):
@@ -96,7 +96,9 @@ def _validate_metric(name: str, metric: Any) -> None:
         f"Metric '{name}' must be a JAX/NumPy array, numeric scalar, or WeightedMetric; " f"got {type(metric).__name__}"
     )
 
-  if hasattr(metric, "dtype") and not (np.issubdtype(metric.dtype, np.number) or np.issubdtype(metric.dtype, np.bool_)):
+  if hasattr(metric, "dtype") and not (
+      jnp.issubdtype(metric.dtype, jnp.number) or jnp.issubdtype(metric.dtype, jnp.bool_)
+  ):
     raise TypeError(f"Metric '{name}' has non-numeric dtype: {metric.dtype}")
 
 
