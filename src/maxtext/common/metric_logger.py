@@ -55,6 +55,24 @@ _METRICS_TO_MANAGED = {
     # "latency", "mfu"
 }
 
+# Set by the train step under olmoe3_router_metrics_interval: 1 on the steps that computed the router load imbalance.
+# write_metrics drops it, and on the other steps the (zero) load imbalance metrics.
+ROUTER_IMBALANCE_COMPUTED_KEY = "learning/router_imbalance_computed"
+
+
+def drop_uncomputed_router_imbalance(metrics):
+  """The metrics without ROUTER_IMBALANCE_COMPUTED_KEY, and without the load imbalance ones if it is 0."""
+  scalar = (metrics or {}).get("scalar")
+  if not scalar or ROUTER_IMBALANCE_COMPUTED_KEY not in scalar:
+    return metrics
+  computed = float(scalar[ROUTER_IMBALANCE_COMPUTED_KEY]) > 0
+  kept = {
+      k: v
+      for k, v in scalar.items()
+      if k != ROUTER_IMBALANCE_COMPUTED_KEY and (computed or not k.endswith("load_imbalance"))
+  }
+  return {**metrics, "scalar": kept}
+
 
 STEP_DIAGNOSTICS_KEYS = (
     ("raw_grad_norm", "learning/raw_grad_norm"),
@@ -156,6 +174,8 @@ class MetricLogger:
 
   def write_metrics(self, metrics, step, metric_type="train"):
     """Entry point for all metrics writing. metric_type is one of 'train', 'eval', 'running_eval'."""
+    if metric_type == "train":
+      metrics = drop_uncomputed_router_imbalance(metrics)
     if metrics:
       self.log_metrics(metrics, step, metric_type)
 
