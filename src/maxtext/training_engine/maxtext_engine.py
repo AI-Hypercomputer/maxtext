@@ -61,10 +61,10 @@ EMPTY_METRICS_BUFFER_ID = -1
 
 # Where `nnx.split(TrainStateNNX(...))` puts the model's own state; verified, not assumed,
 # by `_check_pure_state_reusable`.
-_MODEL_STATE_KEY = "model"
+MODEL_STATE_KEY = "model"
 
 # Where the same split puts the `nnx.Optimizer`, including the optax state Zero-1 shards.
-_OPTIMIZER_STATE_KEY = "optimizer"
+OPTIMIZER_STATE_KEY = "optimizer"
 
 # Memory kinds for `optimizer_memory_host_offload`: as in `train.py`, the optimizer state stays
 # in pinned host memory between updates and is moved to the device only inside `_update_kernel`.
@@ -437,7 +437,7 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
   )
 
 
-def _to_aval(value: Any) -> Any:
+def to_aval(value: Any) -> Any:
   """Returns `value` as a `jax.ShapeDtypeStruct` on the sharding it carries, or unchanged if it has no shape."""
   if not hasattr(value, "shape") or not hasattr(value, "dtype"):
     return value
@@ -949,8 +949,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def state(self, new_state: Any) -> None:
     """Sets the current train state."""
     self._state = new_state
-    self._model = getattr(new_state, _MODEL_STATE_KEY, None) if new_state is not None else None
-    self._optimizer = getattr(new_state, _OPTIMIZER_STATE_KEY, None) if new_state is not None else None
+    self._model = getattr(new_state, MODEL_STATE_KEY, None) if new_state is not None else None
+    self._optimizer = getattr(new_state, OPTIMIZER_STATE_KEY, None) if new_state is not None else None
     self._reset_compiled_state(reset_model=True)
 
   @property
@@ -1059,7 +1059,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     `State` on `__getitem__`, and rebuilding from those views gives an equal-valued but
     deeper pytree that `jax.jit` rejects as an `in_shardings` prefix mismatch.
     """
-    return nnx.State({**state_pure.raw_mapping, _MODEL_STATE_KEY: model_pure.raw_mapping})
+    return nnx.State({**state_pure.raw_mapping, MODEL_STATE_KEY: model_pure.raw_mapping})
 
   @staticmethod
   def _with_optimizer_state(state_pure: Any, optimizer_pure: Any) -> Any:
@@ -1067,7 +1067,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     Through `raw_mapping`, for the same reason as `_with_model_state`.
     """
-    return nnx.State({**state_pure.raw_mapping, _OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping})
+    return nnx.State({**state_pure.raw_mapping, OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping})
 
   def _check_pure_state_reusable(self, state_pure: Any, params_pure: Any, rest_pure: Any) -> str | None:
     """Returns why the pure state cannot be carried across steps, or None if it can.
@@ -1081,13 +1081,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       `None` when the fast path is safe, else a short phrase naming what did not line up.
     """
-    if not isinstance(state_pure, nnx.State) or _MODEL_STATE_KEY not in state_pure:
-      return f"the train state's pure form has no {_MODEL_STATE_KEY!r} entry"
+    if not isinstance(state_pure, nnx.State) or MODEL_STATE_KEY not in state_pure:
+      return f"the train state's pure form has no {MODEL_STATE_KEY!r} entry"
     if not hasattr(state_pure, "raw_mapping"):
       return "this version of flax.nnx.State does not expose raw_mapping"
     rebuilt = self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
     if jax.tree.structure(rebuilt) != jax.tree.structure(state_pure):
-      return f"state[{_MODEL_STATE_KEY!r}] is not the model's own state"
+      return f"state[{MODEL_STATE_KEY!r}] is not the model's own state"
     return None
 
   def _refresh_pure_state(self) -> None:
@@ -1101,7 +1101,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    model = getattr(self._state, MODEL_STATE_KEY, self._model)
     self._state_graphdef, state_pure = nnx.split(self._state)
     self._model_graphdef, params_pure, rest_pure = nnx.split(model, nnx.Param, ...)
 
@@ -1151,10 +1151,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if self._params_pure is None:
       return
-    if not isinstance(new_state_pure, nnx.State) or _MODEL_STATE_KEY not in new_state_pure:
+    if not isinstance(new_state_pure, nnx.State) or MODEL_STATE_KEY not in new_state_pure:
       self._disable_pure_state("the update kernel returned a state with no model entry")
       return
-    params_pure, rest_pure = nnx.split_state(new_state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    params_pure, rest_pure = nnx.split_state(new_state_pure[MODEL_STATE_KEY], nnx.Param, ...)
     if jax.tree.structure(params_pure) != jax.tree.structure(self._params_pure):
       self._disable_pure_state("the update kernel's output does not partition into the same parameters")
       return
@@ -1224,10 +1224,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       moved = True
       return self._place_leaf(leaf, target)
 
-    if isinstance(state_pure, nnx.State) and _OPTIMIZER_STATE_KEY in state_pure:
+    if isinstance(state_pure, nnx.State) and OPTIMIZER_STATE_KEY in state_pure:
       placed = nnx.State(
           {
-              key: jax.tree.map(functools.partial(place, is_optimizer=key == _OPTIMIZER_STATE_KEY), subtree)
+              key: jax.tree.map(functools.partial(place, is_optimizer=key == OPTIMIZER_STATE_KEY), subtree)
               for key, subtree in state_pure.raw_mapping.items()
           }
       )
@@ -1247,7 +1247,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     operands. Each leaf keeps its own sharding and only the memory kind changes, so this does not
     depend on the shardings the last compile saw.
     """
-    if _OPTIMIZER_STATE_KEY not in state_pure:
+    if OPTIMIZER_STATE_KEY not in state_pure:
       return state_pure
 
     def to_device(leaf):
@@ -1256,7 +1256,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         return leaf
       return jax.device_put(leaf, leaf_sharding.with_memory_kind(_DEVICE_MEMORY_KIND))
 
-    return self._with_optimizer_state(state_pure, jax.tree.map(to_device, state_pure[_OPTIMIZER_STATE_KEY]))
+    return self._with_optimizer_state(state_pure, jax.tree.map(to_device, state_pure[OPTIMIZER_STATE_KEY]))
 
   def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
     """Returns `state_pure` with its `nnx.Param` leaves moved onto `params_shardings`.
@@ -1267,7 +1267,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     already where it belongs, and the rngs and batch statistics alongside it have no
     Zero-1 layout to speak of.
     """
-    params_pure, rest_pure = nnx.split_state(state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
+    params_pure, rest_pure = nnx.split_state(state_pure[MODEL_STATE_KEY], nnx.Param, ...)
     params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
     return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
 
@@ -1458,7 +1458,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # First, so everything below sees device arrays only.
         state_pure = self._with_optimizer_state(
             state_pure,
-            jax.device_put(state_pure[_OPTIMIZER_STATE_KEY], optimizer_device_shardings),
+            jax.device_put(state_pure[OPTIMIZER_STATE_KEY], optimizer_device_shardings),
         )
       # Where the gradients have to land before the optimizer can use them. Under Zero-1
       # that is the sharded layout the moments live on; otherwise the plain parameter one.
@@ -1519,8 +1519,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         else:
           local_state.apply_gradients(grads)
       _, new_state_pure = nnx.split(local_state)
-      if self._config.skip_step_on_spikes and _OPTIMIZER_STATE_KEY in new_state_pure:
-        opt_state = nnx.to_pure_dict(new_state_pure[_OPTIMIZER_STATE_KEY]).get("opt_state", {})
+      if self._config.skip_step_on_spikes and OPTIMIZER_STATE_KEY in new_state_pure:
+        opt_state = nnx.to_pure_dict(new_state_pure[OPTIMIZER_STATE_KEY]).get("opt_state", {})
         is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
         if is_skipped is not None:
           is_skipped_val = is_skipped.astype(jnp.float32)
@@ -1714,7 +1714,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._settle_state()
     self._refresh_pure_state()
     state_pure = self._read_state_pure()
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_pure, rest_pure = self._read_model_pure(getattr(self._state, MODEL_STATE_KEY, self._model))
     self._freeze_mask_for(params_pure)
 
     def fwd_bwd(params, rest, dynamic):
@@ -1783,10 +1783,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # state onto the same shardings in device memory, and `update_out_shardings` returns the new
       # state to the host inside the same executable.
       self._optimizer_device_shardings = None
-      if self._optimizer_offload_enabled() and _OPTIMIZER_STATE_KEY in state_mesh_shardings:
+      if self._optimizer_offload_enabled() and OPTIMIZER_STATE_KEY in state_mesh_shardings:
         self._optimizer_device_shardings = jax.tree.map(
             lambda s: s.with_memory_kind(_DEVICE_MEMORY_KIND),
-            state_mesh_shardings[_OPTIMIZER_STATE_KEY],
+            state_mesh_shardings[OPTIMIZER_STATE_KEY],
         )
       # A live accumulator predates this compile -- a recompile can flip the deferral on or
       # off -- so it may not be on the shardings the kernels were just built for. `jax.jit`
@@ -1959,7 +1959,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _xla_options(self, compiler_options: dict[str, Any] | None) -> dict[str, Any] | None:
     """Returns the XLA options to compile with: the caller's, or `config.compile_xla_flags`."""
-    if compiler_options is None and getattr(self._config, "compile_xla_flags", ""):
+    if compiler_options is None and self._config.compile_xla_flags:
       return max_utils.parse_libtpu_flags_to_dict(self._config.compile_xla_flags)
     return compiler_options
 
@@ -1973,14 +1973,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
     self._compile_eval_for_batch(dynamic_batch, static_batch)
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_pure, rest_pure = self._read_model_pure(getattr(self._state, MODEL_STATE_KEY, self._model))
     with self._sharding_ctx():
       # `_compile_eval_for_batch` leaves the jitted wrapper here; lowering it replaces it with
       # what it compiles to, which is what `eval_step` then dispatches through.
       self._compiled_eval = self._compiled_eval.lower(
-          jax.tree.map(_to_aval, params_pure),
-          jax.tree.map(_to_aval, rest_pure),
-          jax.tree.map(_to_aval, dynamic_batch),
+          jax.tree.map(to_aval, params_pure),
+          jax.tree.map(to_aval, rest_pure),
+          jax.tree.map(to_aval, dynamic_batch),
       ).compile(compiler_options=self._xla_options(compiler_options))
 
   def _lower_kernels(self, dummy_data: abstract_engine.TrainerPayload) -> dict[str, jax.stages.Lowered]:
@@ -2011,11 +2011,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
     self._compile_for_batch(dynamic_batch, static_batch)
 
-    state_aval = jax.tree.map(_to_aval, self._read_state_pure())
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
-    params_aval = jax.tree.map(_to_aval, params_pure)
-    rest_aval = jax.tree.map(_to_aval, rest_pure)
-    batch_aval = jax.tree.map(_to_aval, dynamic_batch)
+    state_aval = jax.tree.map(to_aval, self._read_state_pure())
+    params_pure, rest_pure = self._read_model_pure(getattr(self._state, MODEL_STATE_KEY, self._model))
+    params_aval = jax.tree.map(to_aval, params_pure)
+    rest_aval = jax.tree.map(to_aval, rest_pure)
+    batch_aval = jax.tree.map(to_aval, dynamic_batch)
     mean_loss_aval = jax.ShapeDtypeStruct((), jnp.float32) if self._config.skip_step_on_spikes else None
 
     with self._sharding_ctx():
@@ -2058,7 +2058,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    model = getattr(self._state, MODEL_STATE_KEY, self._model)
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
@@ -2326,7 +2326,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     # Off the train state, not `self._model`: a restore or the `state` setter can rebind
     # the model, and `fwd_bwd`/`eval_step` read it from here for the same reason.
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    model = getattr(self._state, MODEL_STATE_KEY, self._model)
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
@@ -2661,6 +2661,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._raiden_sync:
       logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
     return True
+
+  def disable_step_profiler(self) -> None:
+    """Disables the engine's internal micro-step profiler when an outer loop manages profiling."""
+    if self._profiler is not None:
+      self._profiler.do_not_profile = True
+
+  def wait_for_inflight(self) -> None:
+    """Blocks until all in-flight device computations and pending metric flushes complete."""
+    self._throttler.wait_for_all()
 
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
