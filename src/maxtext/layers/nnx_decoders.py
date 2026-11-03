@@ -1821,7 +1821,12 @@ class NNXDecoder(nnx.Module):
 
   def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
     """Looks up the token embeddings, before dropout and positional embeddings."""
-    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    lookup_fn = None
+    if self.config.prefetch_fsdp_weights and self.config.shard_mode == ShardMode.EXPLICIT:
+      # `token_embedder` is outside the scanned decoder loop; wrap `.at[inputs].get(...)` so its
+      # backward FSDP gradient reduction uses an explicit SparseCore `reduce-scatter`.
+      lookup_fn = functools.partial(fsdp_prefetch.explicit_fsdp_embed_lookup, mesh=self.mesh)
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode, lookup_fn=lookup_fn)
 
   def _reduce_mhc_streams(self, y):
     """Collapses a 4D mHC hidden state down to 3D.
@@ -1925,14 +1930,21 @@ class NNXDecoder(nnx.Module):
         y = sharding.maybe_shard_with_logical(
             y, head_in_axes, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
         )
+      kernel_all_gather_fn = None
+      if head_in_axes is None and cfg.prefetch_fsdp_weights and cfg.shard_mode == ShardMode.EXPLICIT:
+        # `logits_dense` is outside the scanned decoder loop; wrap its FSDP all-gather so the
+        # backward weight gradient uses an explicit SparseCore `reduce-scatter`.
+        kernel_all_gather_fn = functools.partial(fsdp_prefetch.explicit_fsdp_weight, mesh=self.mesh)
       # Release the head's input and weight cotangents together, so the backward pass does not keep
       # the [batch, length, vocab] dlogits alive until the weight-gradient matmul (see max_utils.tie_cotangents).
       if cfg.tie_lm_head_cotangents:
         head_graphdef, head_state = nnx.split(self.logits_dense)
         y_head, head_state = max_utils.tie_cotangents(y, head_state)
-        logits = nnx.merge(head_graphdef, head_state)(y_head, out_sharding=out_sharding)
+        logits = nnx.merge(head_graphdef, head_state)(
+            y_head, out_sharding=out_sharding, kernel_all_gather_fn=kernel_all_gather_fn
+        )
       else:
-        logits = self.logits_dense(y, out_sharding=out_sharding)
+        logits = self.logits_dense(y, out_sharding=out_sharding, kernel_all_gather_fn=kernel_all_gather_fn)
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)

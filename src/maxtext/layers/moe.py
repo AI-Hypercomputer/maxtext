@@ -1892,15 +1892,16 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
       )
     else:
+      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok)).T
+      revert_indices = jnp.reshape(jnp.argsort(sorted_selected_experts), (-1, self.num_experts_per_tok)).T.reshape(-1)
       unsort_intermediate = _sort_activations(
           intermediate,
-          jnp.argsort(sorted_selected_experts),
+          revert_indices,
           use_custom_sort_vjp,
       )
-      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
       reshaped_intermediate = jnp.reshape(
           unsort_intermediate,
-          (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
+          (self.num_experts_per_tok, reshaped_weights.shape[1], -1),
       )
       with jax.named_scope("weight_sum"):
         matmul_precision = jax.lax.Precision(self.config.matmul_precision)
@@ -1911,7 +1912,7 @@ class RoutedMoE(nnx.Module):
           reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
           reshaped_weights = reshaped_weights.astype(jnp.float32)
         output = jnp.einsum(
-            "BKE,BK -> BE",
+            "KBE,KB -> BE",
             reshaped_intermediate,
             reshaped_weights,
             precision=matmul_precision,
@@ -4106,7 +4107,7 @@ class RoutedMoE(nnx.Module):
 
     # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
     # with `moe_fsdp_use_two_stage_all_gather` (enforced via validation in types.py).
-    if self.config.moe_fsdp_use_two_stage_all_gather:
+    if self.config.moe_fsdp_use_two_stage_all_gather and not _reduced_axes(w0_kernel):
       # Unshard on fsdp axis
       w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp"))
       w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp"))

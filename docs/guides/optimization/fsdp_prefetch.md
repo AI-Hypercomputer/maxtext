@@ -101,10 +101,14 @@ the policy from the forward pass to the backward pass alongside the layer inputs
 rebuilds each layer's VJP from those saved activations and the re-gathered weights instead of
 recomputing the entire layer.
 
-With `remat_policy=full`, only each layer's input activation is saved. Gathered weights are never
-saved regardless of policy: if a policy saves a residual whose shape matches a gathered weight, a
-warning is logged. The number and size (in MiB) of residuals saved per layer are logged at trace
-time.
+With `remat_policy=full`, only each layer's input activation is saved. When `decoder_layer_input=offload`
+is set under `remat_policy=custom`, the prefetch pipelines (`fsdp_prefetch` and
+`fsdp_prefetch_inhomogeneous`) stream each scanned layer's (or sub-layer's) input activation into a
+pre-allocated `pinned_host` buffer via async DMA (`dynamic_update_slice` in forward, `dynamic_slice`
+in backward) rather than offloading a duplicate copy inside the per-layer `jax.checkpoint`. Gathered
+weights are never saved regardless of policy: if a policy saves a residual whose shape matches a
+gathered weight, a warning is logged. The number and size (in MiB) of residuals saved per layer are
+logged at trace time.
 
 ## Expert and context parallelism
 
@@ -189,8 +193,9 @@ chips (4x4x4) with Tokamax `gmm_v2`:
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ---------- | -------------------- | -------------------- | ------------ |
 | **DeepSeek-V3 (FSDP only, 15L, 128E)** (`pdbs=2`, `seq=4096`)            | Baseline (`prefetch_fsdp_weights=False`)                                                                                                                                                                    | 2702.9 ms     | —          | 380.2 ms             | 393.0 ms             | 38.2 GiB     |
 | **DeepSeek-V3 (FSDP only, 15L, 128E)** (`pdbs=2`, `seq=4096`)            | **Best prefetch** (`prefetch_fsdp_weights` + `moe_flat_fsdp_weights` + `prefetch_fsdp_defer_grad_reduce_scatter` + `moe_gmm_v2_dlhs_transpose_rhs` + `moe_use_direct_token_gather`)                         | **1779.0 ms** | **−34.2%** | **14.9 ms**          | **7.8 ms**           | **70.8 GiB** |
-| **DeepSeek-V3 (`EP=4`, 15L, 256E)** (`pdbs=1`, `seq=4096`)               | Baseline (`prefetch_fsdp_weights=False`)                                                                                                                                                                    | 1916.6 ms     | —          | 302.6 ms             | 266.9 ms             | 26.5 GiB     |
-| **DeepSeek-V3 (`EP=4`, 15L, 256E)** (`pdbs=1`, `seq=4096`)               | **Best prefetch** (`prefetch_fsdp_weights` + `moe_flat_fsdp_weights` + `prefetch_fsdp_defer_grad_reduce_scatter` + `moe_gmm_v2_dlhs_transpose_rhs` + `moe_use_direct_token_gather` + `use_ring_of_experts`) | **1185.5 ms** | **−38.1%** | **26.0 ms**          | **3.2 ms**           | **45.6 GiB** |
+| **DeepSeek-V3 (`EP=4`, 15L, 256E)** (`pdbs=1`, `seq=4096`)               | Baseline (`prefetch_fsdp_weights=False`)                                                                                                                                                                    | 1894.2 ms     | —          | 302.6 ms             | 266.9 ms             | 22.8 GiB     |
+| **DeepSeek-V3 (`EP=4`, 15L, 256E)** (`pdbs=1`, `seq=4096`)               | **Best prefetch** (`prefetch_fsdp_weights` + `moe_flat_fsdp_weights` + `prefetch_fsdp_defer_grad_reduce_scatter` + `moe_gmm_v2_dlhs_transpose_rhs` + `moe_use_direct_token_gather` + `use_ring_of_experts`) | **1132.8 ms** | **−40.2%** | **26.0 ms**          | **3.2 ms**           | **35.2 GiB** |
+| **DeepSeek-V3 (`EP=4`, 15L, 256E)** (`pdbs=1`, `seq=4096`)               | **Best prefetch + `decoder_layer_input=offload`**                                                                                                                                                           | **1134.2 ms** | **−40.1%** | **26.0 ms**          | **3.2 ms**           | **28.8 GiB** |
 | **Qwen3.5-35B-A3B (nested scan, 3 GDN + 1 attn)** (`pdbs=1`, `seq=1024`) | Baseline (`prefetch_fsdp_weights=False`)                                                                                                                                                                    | 1303.2 ms     | —          | 116.1 ms             | 439.8 ms             | 7.8 GiB      |
 | **Qwen3.5-35B-A3B (nested scan, 3 GDN + 1 attn)** (`pdbs=1`, `seq=1024`) | **Best prefetch** (`prefetch_fsdp_weights` + `moe_flat_fsdp_weights` + `prefetch_fsdp_defer_grad_reduce_scatter`)                                                                                           | **976.2 ms**  | **−25.1%** | **120.0 ms**         | **184.8 ms**         | **14.8 GiB** |
 
@@ -233,8 +238,9 @@ With Tokamax `gmm_v2` (`use_tokamax_gmm=True use_gmm_v2=True`) and the full reco
 
 | Configuration                                                                                                                                                                                                             | Mean step time | Speedup    | Exposed FSDP AG wait | Exposed FSDP RS wait | Peak HBM     |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------- | -------------------- | -------------------- | ------------ |
-| Baseline (`prefetch_fsdp_weights=False`, `use_gmm_v2=True`)                                                                                                                                                               | 1916.6 ms      | —          | 302.6 ms/step        | 266.9 ms/step        | 26.5 GiB     |
-| **`prefetch_fsdp_weights=True` + `moe_flat_fsdp_weights=True` + `prefetch_fsdp_defer_grad_reduce_scatter=True` + `moe_gmm_v2_dlhs_transpose_rhs=True` + `moe_use_direct_token_gather=True` + `use_ring_of_experts=True`** | **1185.5 ms**  | **−38.1%** | **26.0 ms/step**     | **3.2 ms/step**      | **45.6 GiB** |
+| Baseline (`prefetch_fsdp_weights=False`, `use_gmm_v2=True`)                                                                                                                                                               | 1894.2 ms      | —          | 302.6 ms/step        | 266.9 ms/step        | 22.8 GiB     |
+| **`prefetch_fsdp_weights=True` + `moe_flat_fsdp_weights=True` + `prefetch_fsdp_defer_grad_reduce_scatter=True` + `moe_gmm_v2_dlhs_transpose_rhs=True` + `moe_use_direct_token_gather=True` + `use_ring_of_experts=True`** | **1132.8 ms**  | **−40.2%** | **26.0 ms/step**     | **3.2 ms/step**      | **35.2 GiB** |
+| **+ `decoder_layer_input=offload`**                                                                                                                                                                                       | **1134.2 ms**  | **−40.1%** | **26.0 ms/step**     | **3.2 ms/step**      | **28.8 GiB** |
 
 Ablating the EP sharding and collective modes (`EP_AS_FSDP`, `EP_AS_DP`, and
 `use_ring_of_experts=True`) with 3D routed-expert weights (`use_gmm_v2=False`):
