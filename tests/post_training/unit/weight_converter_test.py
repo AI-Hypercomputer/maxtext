@@ -29,9 +29,9 @@ import resource
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+from unittest import mock
 import types as pytypes  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
-from unittest import mock  # pylint: disable=wrong-import-position
 
 import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
@@ -48,6 +48,7 @@ from maxtext.integration.vllm.weight_converter import (
     Rule,
     WeightConverter,
     MODEL_TO_CONVERSION_RULES,
+    _group_plan,
 )
 
 pytestmark = pytest.mark.post_training
@@ -71,6 +72,11 @@ def _config(**overrides):
       param_scan_axis=SCAN_AXIS,
       model_name="test_model",
       decoder_block="default",
+      dtype="bfloat16",
+      fp8_moe=False,
+      rollout_fp8_moe=False,
+      kv_tp_size=1,
+      moe_mlp_tp_size=1,
   )
   for key, value in overrides.items():
     setattr(cfg, key, value)
@@ -517,6 +523,11 @@ def _profile_conversion_worker(is_streaming, result_queue):
   blocks = num_layers // cycle
 
   cfg = pytypes.SimpleNamespace(
+      kv_tp_size=1,
+      moe_mlp_tp_size=1,
+      dtype="bfloat16",
+      fp8_moe=False,
+      rollout_fp8_moe=False,
       inhomogeneous_layer_cycle_interval=cycle,
       num_decoder_layers=num_layers,
       param_scan_axis=1,
@@ -680,6 +691,11 @@ class TargetFreeConversionTest(unittest.TestCase):
     from maxtext.integration.tunix.weight_mapping import raiden_unscan  # pylint: disable=import-outside-toplevel
 
     cfg = pytypes.SimpleNamespace(
+        kv_tp_size=1,
+        moe_mlp_tp_size=1,
+        dtype="bfloat16",
+        fp8_moe=False,
+        rollout_fp8_moe=False,
         num_decoder_layers=4,
         inhomogeneous_layer_cycle_interval=1,
         param_scan_axis=1,
@@ -925,6 +941,10 @@ class TargetFreeConversionTest(unittest.TestCase):
     such a per-module rule, this test fails until the converter mirrors it.
     """
     rollout_cfg = pytypes.SimpleNamespace(
+        kv_tp_size=1,
+        moe_mlp_tp_size=1,
+        fp8_moe=False,
+        rollout_fp8_moe=False,
         weight_dtype=jnp.dtype(jnp.bfloat16),
         dtype=jnp.dtype(jnp.bfloat16),
         float32_gate_logits=True,
@@ -1079,6 +1099,423 @@ class TargetFreeConversionTest(unittest.TestCase):
         for key, value in convert(jax.tree_util.tree_map(to_struct, _nested_source_tree(True)), False).items()
     }
     self.assertEqual(abstract, {key: getattr(value, "value", value).shape for key, value in legacy.items()})
+
+  def test_case_10_moe_fp8_weight_sync(self):
+    """Verifies BF16 trainer -> MoE FP8 sampler weight sync with per-channel scales."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    target = _target_tree(fused=True)
+    # Convert target MoE layers to float8 and add scale tensors
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(source, target_state=target)
+
+    for layer in range(NUM_LAYERS):
+      moe_out = out["decoder"][f"layers_{layer}"]["moe_block"]
+      wi = getattr(moe_out["wi"], "value", moe_out["wi"])
+      wi_scale = getattr(moe_out["wi_scale"], "value", moe_out["wi_scale"])
+      wo = getattr(moe_out["wo"], "value", moe_out["wo"])
+      wo_scale = getattr(moe_out["wo_scale"], "value", moe_out["wo_scale"])
+
+      self.assertEqual(wi.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(wi.shape, (EXPERTS, EMB, MOE_DIM * 2))
+      self.assertEqual(wi_scale.dtype, jnp.float32)
+      self.assertEqual(wi_scale.shape, (EXPERTS, 1, MOE_DIM * 2))
+
+      self.assertEqual(wo.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(wo.shape, (EXPERTS, MOE_DIM, EMB))
+      self.assertEqual(wo_scale.dtype, jnp.float32)
+      self.assertEqual(wo_scale.shape, (EXPERTS, 1, EMB))
+
+      # Scales should be positive non-zero floats
+      self.assertTrue(bool(jnp.all(wi_scale > 0)))
+      self.assertTrue(bool(jnp.all(wo_scale > 0)))
+
+  def test_case_11_moe_fp8_weight_sync_unfused(self):
+    """prefuse_moe_weights=false: the rollout keeps wi_0/wi_1, and each gets its own per-channel scale."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=False,
+    )
+    source = _source_tree(True)
+    target = _target_tree(fused=False)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      for name, out_dim in (("wi_0", MOE_DIM), ("wi_1", MOE_DIM), ("wo", EMB)):
+        moe[name] = moe[name].astype(jnp.float8_e4m3fn)
+        moe[f"{name}_scale"] = jnp.ones((EXPERTS, 1, out_dim), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(source, target_state=target)
+
+    for layer in range(NUM_LAYERS):
+      slot, block = layer % CYCLE, layer // CYCLE
+      src_moe = source["base"]["decoder"]["layers"][f"layer_{slot}"]["moe_block"]
+      moe_out = out["decoder"][f"layers_{layer}"]["moe_block"]
+      for name, out_dim in (("wi_0", MOE_DIM), ("wi_1", MOE_DIM), ("wo", EMB)):
+        q = getattr(moe_out[name], "value", moe_out[name])
+        scale = getattr(moe_out[f"{name}_scale"], "value", moe_out[f"{name}_scale"])
+        self.assertEqual(q.dtype, jnp.float8_e4m3fn, name)
+        self.assertEqual(scale.shape, (EXPERTS, 1, out_dim), name)
+        want = jnp.take(src_moe[name], block, axis=SCAN_AXIS).astype(jnp.float32)
+        got = q.astype(jnp.float32) * scale
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=0.07, atol=0, err_msg=name)
+
+  def test_case_12_fp8_scale_target_without_fp8_moe_raises(self):
+    """A rollout with FP8 scales but a converter that does not quantize fails at plan time."""
+    cfg = _config(inhomogeneous_layer_cycle_interval=CYCLE, num_decoder_layers=NUM_LAYERS, prefuse_moe_weights=True)
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=False)
+    with self.assertRaisesRegex(weight_converter.ConversionPlanError, "FP8 scale"):
+      converter.convert(_source_tree(True), target_state=target)
+
+  def test_case_13_moe_fp8_scale_target_listed_first(self):
+    """An FP8 group whose first target is the (E, 1, out) scale still aligns the weight to the weight target."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    want = converter.convert(_source_tree(True), target_state=target)
+
+    # Targets are sorted by slice index only, so reversing the plan puts each scale ahead of its weight.
+    direct = converter._direct  # pylint: disable=protected-access
+    direct._plan = list(reversed(direct._plan))  # pylint: disable=protected-access
+    src_flat = traverse_util.flatten_dict(weight_converter._to_pure_dict(_source_tree(True)))  # pylint: disable=protected-access
+    src_flat = {k[1:]: v for k, v in src_flat.items() if k and k[0] == "base"}
+    direct._groups = _group_plan(direct._plan, fp8_moe=True, src_flat=src_flat)  # pylint: disable=protected-access
+    fp8_groups = [g for g in direct._groups if g.quantize_to_fp8]  # pylint: disable=protected-access
+    self.assertTrue(fp8_groups)
+    self.assertTrue(all(str(g.targets[0][1][-1]).endswith("_scale") for g in fp8_groups))
+    got = converter.convert(_source_tree(True), target_state=target)
+
+    for layer in range(NUM_LAYERS):
+      for name in ("wi", "wi_scale", "wo", "wo_scale"):
+        g = got["decoder"][f"layers_{layer}"]["moe_block"][name]
+        w = want["decoder"][f"layers_{layer}"]["moe_block"][name]
+        g, w = getattr(g, "value", g), getattr(w, "value", w)
+        np.testing.assert_array_equal(np.asarray(g, np.float32), np.asarray(w, np.float32), err_msg=name)
+
+  def test_case_14_moe_fp8_quantizes_each_block_once(self):
+    """A block feeds both a weight and a scale target; it is quantized once, not once per target."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    with mock.patch.object(
+        weight_converter, "quantize_weight_per_channel", wraps=weight_converter.quantize_weight_per_channel
+    ) as quantize:
+      converter.convert(_source_tree(True), target_state=target)
+
+    fp8_groups = [g for g in converter._direct._groups if g.quantize_to_fp8]  # pylint: disable=protected-access
+    num_targets = sum(len(g.targets) for g in fp8_groups)
+    num_blocks = sum(len({idx for idx, _ in g.targets}) for g in fp8_groups)
+    self.assertEqual(num_targets, 2 * num_blocks)  # a weight and a scale per block
+    self.assertEqual(quantize.call_count, num_blocks)
+
+  def test_case_15_gpt_oss_path_fuses_and_gets_fp8_scales(self):
+    """GptOssMlp has no 'moe' or 'expert' in its name, but rank 4 (unrolled rank 3) identifies it as MoE."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    for slot in range(CYCLE):
+      block = source["base"]["decoder"]["layers"][f"layer_{slot}"]
+      block["GptOssMlp"] = block.pop("moe_block")
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+
+    for layer in range(NUM_LAYERS):
+      gpt_mlp = out_root["decoder"][f"layers_{layer}"]["GptOssMlp"]
+      self.assertIn("wi", gpt_mlp)
+      self.assertIn("wi_scale", gpt_mlp)
+      self.assertIn("wo", gpt_mlp)
+      self.assertIn("wo_scale", gpt_mlp)
+      self.assertEqual(getattr(gpt_mlp["wi"], "value", gpt_mlp["wi"]).dtype, jnp.float8_e4m3fn)
+      self.assertEqual(getattr(gpt_mlp["wi_scale"], "value", gpt_mlp["wi_scale"]).dtype, jnp.float32)
+
+  def test_case_16_dense_mlp_and_shared_experts_get_no_fp8_scales(self):
+    """Dense mlp and shared_experts have unrolled rank 2, so fp8_moe=True does not quantize or add scales."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    for slot in range(CYCLE):
+      block = source["base"]["decoder"]["layers"][f"layer_{slot}"]
+      block["mlp"] = {
+          "wi_0": _scanned(EMB, MOE_DIM, offset=1000),
+          "wi_1": _scanned(EMB, MOE_DIM, offset=2000),
+          "wo": _scanned(MOE_DIM, EMB, offset=3000),
+      }
+      block["shared_experts"] = {
+          "wi_0": _scanned(EMB, MOE_DIM, offset=4000),
+          "wi_1": _scanned(EMB, MOE_DIM, offset=5000),
+          "wo": _scanned(MOE_DIM, EMB, offset=6000),
+      }
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+
+    for layer in range(NUM_LAYERS):
+      for mod in ("mlp", "shared_experts"):
+        sub = out_root["decoder"][f"layers_{layer}"][mod]
+        self.assertNotIn("wi_scale", sub)
+        self.assertNotIn("wo_scale", sub)
+        self.assertNotIn("wi_0_scale", sub)
+        self.assertNotIn("wi_1_scale", sub)
+        for key in sub:
+          self.assertNotEqual(getattr(sub[key], "value", sub[key]).dtype, jnp.float8_e4m3fn)
+          self.assertEqual(getattr(sub[key], "value", sub[key]).dtype, jnp.float32)
+
+  def test_case_17_nested_scan_target_free_fp8(self):
+    """Verifies target-free FP8 MoE conversion on the production nested scan layout."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    nested_source = _nested_source_tree(True)
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(nested_source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+
+    converter_unquantized = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=False)
+    ref_out = converter_unquantized.convert(nested_source, target_state=None)
+    ref_root = ref_out["base"] if "base" in ref_out else ref_out
+
+    for layer in range(NUM_LAYERS):
+      moe = out_root["decoder"][f"layers_{layer}"]["moe_block"]
+      ref_moe = ref_root["decoder"][f"layers_{layer}"]["moe_block"]
+      self.assertIn("wi", moe)
+      self.assertIn("wi_scale", moe)
+      self.assertIn("wo", moe)
+      self.assertIn("wo_scale", moe)
+
+      wi = getattr(moe["wi"], "value", moe["wi"])
+      wi_scale = getattr(moe["wi_scale"], "value", moe["wi_scale"])
+      wo = getattr(moe["wo"], "value", moe["wo"])
+      wo_scale = getattr(moe["wo_scale"], "value", moe["wo_scale"])
+
+      self.assertEqual(wi.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(wi.shape, (EXPERTS, EMB, MOE_DIM * 2))
+      self.assertEqual(wi_scale.dtype, jnp.float32)
+      self.assertEqual(wi_scale.shape, (EXPERTS, 1, MOE_DIM * 2))
+
+      self.assertEqual(wo.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(wo.shape, (EXPERTS, MOE_DIM, EMB))
+      self.assertEqual(wo_scale.dtype, jnp.float32)
+      self.assertEqual(wo_scale.shape, (EXPERTS, 1, EMB))
+
+      self.assertTrue(bool(jnp.all(wi_scale > 0)))
+      self.assertTrue(bool(jnp.all(wo_scale > 0)))
+
+      ref_wi = getattr(ref_moe["wi"], "value", ref_moe["wi"])
+      ref_wo = getattr(ref_moe["wo"], "value", ref_moe["wo"])
+      wi_dequant = jnp.asarray(wi, dtype=jnp.float32) * wi_scale
+      wo_dequant = jnp.asarray(wo, dtype=jnp.float32) * wo_scale
+      np.testing.assert_allclose(np.asarray(wi_dequant), np.asarray(ref_wi), rtol=0.07, atol=0.05)
+      np.testing.assert_allclose(np.asarray(wo_dequant), np.asarray(ref_wo), rtol=0.07, atol=0.05)
+
+  def test_case_18_target_dtype_none_preserves_exact_dtypes(self):
+    """When target_dtype=None (as set by Tunix RL orchestrator), leaves preserve exact trainer dtypes."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source = _source_tree(True)
+    # Give gate float32 dtype and attention bfloat16 dtype
+    source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]["gate"]["kernel"] = jnp.ones(
+        source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]["gate"]["kernel"].shape,
+        dtype=jnp.float32,
+    )
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", target_dtype=None)
+    converter._direct.target_dtype = None  # pylint: disable=protected-access
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+
+    gate_kernel = out_root["decoder"]["layers_0"]["moe_block"]["gate"]["kernel"]
+    self.assertEqual(getattr(gate_kernel, "value", gate_kernel).dtype, jnp.float32)
+
+  def test_case_19_moe_tp_size_1_uses_single_shard_even_when_kv_tp_1(self):
+    """For an unsharded source, moe_mlp_tp_size=1 must produce n_shards=1 even when kv_tp_size=1 and tp=1."""
+    cfg = _config(prefuse_moe_weights=True, kv_tp_size=1, moe_mlp_tp_size=1)
+    source = _source_tree(True)
+    src_moe = source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+    expected_wi_0 = np.asarray(jnp.take(src_moe["wi_0"], 0, axis=SCAN_AXIS))
+    expected_wi_1 = np.asarray(jnp.take(src_moe["wi_1"], 0, axis=SCAN_AXIS))
+    expected_concat = np.concatenate([expected_wi_0, expected_wi_1], axis=-1)
+
+    converter = weight_converter.WeightConverter(config=cfg, tp=1, rollout_backend="maxtext")
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+    wi_tf = getattr(
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+        "value",
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+    )
+    np.testing.assert_allclose(np.asarray(wi_tf), expected_concat)
+
+  def test_case_20_default_tp_rollout_uses_tp_shards(self):
+    """Under default TP rollout (tp=2, kv_tp_size=1, moe_mlp_tp_size=1), n_shards falls back to tp=2."""
+    cfg = _config(prefuse_moe_weights=True, kv_tp_size=1, moe_mlp_tp_size=1)
+    source = _source_tree(True)
+    converter = weight_converter.WeightConverter(config=cfg, tp=2, rollout_backend="maxtext")
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+    wi_tf = getattr(
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+        "value",
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+    )
+    src_moe = source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+    expected_wi_0 = np.asarray(jnp.take(src_moe["wi_0"], 0, axis=SCAN_AXIS))
+    expected_wi_1 = np.asarray(jnp.take(src_moe["wi_1"], 0, axis=SCAN_AXIS))
+    plain_concat = np.concatenate([expected_wi_0, expected_wi_1], axis=-1)
+    self.assertFalse(np.allclose(np.asarray(wi_tf), plain_concat))
+
+  def test_case_21_fp8_moe_without_scale_target_raises(self):
+    """Target-based conversion with fp8_moe=True into a rollout tree without scales raises ConversionPlanError."""
+    cfg = _config(inhomogeneous_layer_cycle_interval=CYCLE, num_decoder_layers=NUM_LAYERS, prefuse_moe_weights=True)
+    source = _source_tree(True)
+    target = _target_tree(fused=True)  # target has no _scale leaves
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    with self.assertRaisesRegex(weight_converter.ConversionPlanError, "has no corresponding FP8 scale"):
+      converter.convert(source, target_state=target)
+
+  def test_case_22_target_free_fp8_quantizes_from_bf16(self):
+    """In target-free mode with float32 trainer weights and target_dtype=None, FP8 quantizes from bfloat16."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+    )
+    source_f32 = _source_tree(True)
+    moe = source_f32["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+    moe["wi_0"] = moe["wi_0"].astype(jnp.float32)
+    moe["wi_1"] = moe["wi_1"].astype(jnp.float32)
+    moe["wo"] = moe["wo"].astype(jnp.float32)
+
+    source_bf16 = _source_tree(True)
+    moe_bf16 = source_bf16["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+    moe_bf16["wi_0"] = moe["wi_0"].astype(jnp.bfloat16)
+    moe_bf16["wi_1"] = moe["wi_1"].astype(jnp.bfloat16)
+    moe_bf16["wo"] = moe["wo"].astype(jnp.bfloat16)
+
+    converter_f32 = weight_converter.WeightConverter(
+        config=cfg, rollout_backend="maxtext", fp8_moe=True, target_dtype=None
+    )
+    converter_f32._direct.target_dtype = None  # pylint: disable=protected-access
+    out_f32 = converter_f32.convert(source_f32, target_state=None)
+
+    converter_bf16 = weight_converter.WeightConverter(
+        config=cfg, rollout_backend="maxtext", fp8_moe=True, target_dtype=None
+    )
+    converter_bf16._direct.target_dtype = None  # pylint: disable=protected-access
+    out_bf16 = converter_bf16.convert(source_bf16, target_state=None)
+
+    out_root_f32 = out_f32["base"] if "base" in out_f32 else out_f32
+    out_root_bf16 = out_bf16["base"] if "base" in out_bf16 else out_bf16
+    wi_f32 = getattr(
+        out_root_f32["decoder"]["layers_0"]["moe_block"]["wi"],
+        "value",
+        out_root_f32["decoder"]["layers_0"]["moe_block"]["wi"],
+    )
+    wi_bf16 = getattr(
+        out_root_bf16["decoder"]["layers_0"]["moe_block"]["wi"],
+        "value",
+        out_root_bf16["decoder"]["layers_0"]["moe_block"]["wi"],
+    )
+    wi_scale_f32 = getattr(
+        out_root_f32["decoder"]["layers_0"]["moe_block"]["wi_scale"],
+        "value",
+        out_root_f32["decoder"]["layers_0"]["moe_block"]["wi_scale"],
+    )
+    wi_scale_bf16 = getattr(
+        out_root_bf16["decoder"]["layers_0"]["moe_block"]["wi_scale"],
+        "value",
+        out_root_bf16["decoder"]["layers_0"]["moe_block"]["wi_scale"],
+    )
+    np.testing.assert_array_equal(np.asarray(wi_f32), np.asarray(wi_bf16))
+    np.testing.assert_array_equal(np.asarray(wi_scale_f32), np.asarray(wi_scale_bf16))
+
+  def test_case_23_fp8_moe_without_src_flat_raises(self):
+    """Grouping an FP8 plan without src_flat fails loudly rather than misreporting fp8_moe."""
+    cfg = _config(inhomogeneous_layer_cycle_interval=CYCLE, num_decoder_layers=NUM_LAYERS, prefuse_moe_weights=True)
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    converter.convert(_source_tree(True), target_state=target)
+    direct = converter._direct  # pylint: disable=protected-access
+    with self.assertRaisesRegex(weight_converter.ConversionPlanError, "without src_flat"):
+      _group_plan(direct._plan, fp8_moe=True)  # pylint: disable=protected-access
+
+  def test_case_24_fp8_scale_on_non_expert_target_raises(self):
+    """Rollout target having a scale leaf on a non-expert tensor raises ConversionPlanError."""
+    cfg = _config(inhomogeneous_layer_cycle_interval=CYCLE, num_decoder_layers=NUM_LAYERS, prefuse_moe_weights=True)
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+      # Non-expert 2D gate kernel unexpectedly having a scale in target
+      moe["gate"]["kernel_scale"] = jnp.ones((1, EXPERTS), dtype=jnp.float32)
+
+    converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    with self.assertRaisesRegex(weight_converter.ConversionPlanError, "not an FP8-quantized MoE expert weight"):
+      converter.convert(_source_tree(True), target_state=target)
 
 
 if __name__ == "__main__":

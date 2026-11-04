@@ -320,7 +320,7 @@ def _intersect_with_metadata(target, meta_tree):
   return out
 
 
-def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
+def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
   This properly interleaves the gate and up projections based on the target tensor
@@ -328,6 +328,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
   """
+  is_vllm_rpa = config.attention in ("vllm_rpa", "vllm_batched_rpa")
 
   def _is_fusion_site(node):
     """A ckpt-side dict that holds wi_0/wi_1 leaf siblings — the parent of a fusion."""
@@ -371,7 +372,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
     # Determine the number of shards (TP degree) along the concatenated axis
     n_shards = 1
     wi_sharding = getattr(wi_model, "sharding", None)
-    if isinstance(wi_sharding, jax.sharding.NamedSharding):
+    if is_vllm_rpa and isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
@@ -1359,7 +1360,7 @@ def from_pretrained(
         model_arrays = to_dict(model_arrays)
         checkpoint = to_dict(checkpoint)
 
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays, config=config)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
         # This prevents the replicated intermediate copies from persisting until function return.
         del restored

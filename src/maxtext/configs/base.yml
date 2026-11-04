@@ -284,6 +284,8 @@ mtp_norm_main_hidden_state: false
 # mixture of experts (moe)
 num_experts: 1
 num_experts_per_tok: 1
+fp8_moe: false
+fp8_moe_fake_quant: false
 megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
@@ -1668,6 +1670,9 @@ weight_sync_debug: false
 use_raiden_ffi: null
 # Weight load format for vLLM in converter validation
 vllm_load_format: "dummy"
+# Enable FP8 MoE for the rollout
+rollout_fp8_moe: false
+
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 

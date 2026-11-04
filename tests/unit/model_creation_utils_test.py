@@ -321,11 +321,15 @@ class TestFuseMoeWeights(unittest.TestCase):
   Otherwise zeros land between wi_0's data and wi_1's data, corrupting the boundary.
   """
 
+  def setUp(self):
+    super().setUp()
+    self.config = unittest.mock.MagicMock(attention="dot_product")
+
   def test_no_op_when_model_has_unfused_wi(self):
     """If model has wi_0/wi_1 (not fused), the helper returns the ckpt tree unchanged."""
     ckpt = {"wi_0": np.ones((2, 4, 3), dtype=np.float32), "wi_1": 2 * np.ones((2, 4, 3), dtype=np.float32)}
     model = {"wi_0": np.zeros((2, 4, 3), dtype=np.float32), "wi_1": np.zeros((2, 4, 3), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertIn("wi_0", out)
     self.assertIn("wi_1", out)
     self.assertNotIn("wi", out)
@@ -337,7 +341,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     ckpt = {"wi_0": wi_0, "wi_1": wi_1}
     # Model has fused wi of last-dim 6 = 2 * 3 (no MLP padding).
     model = {"wi": np.zeros((2, 4, 6), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
     np.testing.assert_array_equal(out["wi"][..., 3:], wi_1)
@@ -353,7 +357,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     ckpt = {"wi_0": wi_0, "wi_1": wi_1}
     # Model has fused wi of last-dim 8 = 2 * 4 (each half padded from 3 → 4).
     model = {"wi": np.zeros((2, 4, 8), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["wi"].shape, (2, 4, 8))
     # First half: wi_0_data (3 cols) then 1 col of zeros.
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
@@ -369,7 +373,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     other = np.full((2, 4), 7.0, dtype=np.float32)
     ckpt = {"layers": {"0": {"moe": {"wi_0": wi_0, "wi_1": wi_1}, "other": other}}}
     model = {"layers": {"0": {"moe": {"wi": np.zeros((2, 4, 6), dtype=np.float32)}, "other": other}}}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["layers"]["0"]["moe"]["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["layers"]["0"]["other"], other)
 

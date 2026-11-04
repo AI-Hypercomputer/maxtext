@@ -746,6 +746,11 @@ class MaxTextAdapterSelectionTest(unittest.TestCase):
         num_decoder_layers=8,
         inhomogeneous_layer_cycle_interval=4,
         param_scan_axis=1,
+        kv_tp_size=1,
+        moe_mlp_tp_size=1,
+        fp8_moe=False,
+        rollout_fp8_moe=False,
+        dtype="bfloat16",
     )
     conv = _create_model_converter(
         "qwen3.5-35b-a3b",

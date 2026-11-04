@@ -289,6 +289,8 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   def source_covers(target_key):
     if target_key in source_keys or has_split_wi(target_key):
       return True
+    if target_key and str(target_key[-1]).endswith("_scale"):
+      return source_covers(target_key[:-1] + (str(target_key[-1])[:-6],))
     # Mirror the fallback of Tunix's `transfer_state_directly`: a target
     # `layers_N` is slice N of a scanned `layers` container (standard MaxText)
     # or of an implicit stack without one. Only the former fuses split MoE.

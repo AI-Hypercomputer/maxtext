@@ -940,6 +940,8 @@ class RoutedMoE(nnx.Module):
     """
     if weight_quant is not None:
       weight_dtype = weight_quant.weight_dtype
+    elif config and config.fp8_moe:
+      weight_dtype = jnp.float8_e4m3fn
     elif ctypes.is_module_unquantized(config, "routed_experts"):
       weight_dtype = ctypes.get_weight_dtype(config, "routed_experts")
       quant = ctypes.get_quant(config, "routed_experts", quant)
@@ -1215,7 +1217,21 @@ class RoutedMoE(nnx.Module):
       #   For prefused weights (wi), the out_dim is doubled (moe_intermediate_dim * 2).
       # - Per-expert / per-tensor scaling (weight_block_size is None): a 1D scale tensor
       #   with shape (num_experts,) containing one scalar scale per expert.
-      if block_size is not None:
+      if self.config.fp8_moe and block_size is None:
+        fused_out_dim = moe_intermediate_dim * 2 if self.config.prefuse_moe_weights else moe_intermediate_dim
+        wi_scale_shape = (num_experts, 1, fused_out_dim)
+        wo_scale_shape = (self.num_experts, 1, self.moe_expert_input_dim)
+        wi_scale_sharding = (
+            self.wi_kernel_axes[0],
+            None,
+            self.wi_kernel_axes[2] if len(self.wi_kernel_axes) > 2 else self.wi_kernel_axes[-1],
+        )
+        wo_scale_sharding = (
+            self.wo_kernel_axes[0],
+            None,
+            self.wo_kernel_axes[2] if len(self.wo_kernel_axes) > 2 else self.wo_kernel_axes[-1],
+        )
+      elif block_size is not None:
         if isinstance(block_size, (list, tuple)):
           b_in = block_size[0]
           b_out = block_size[1] if len(block_size) > 1 else block_size[0]
@@ -1232,17 +1248,19 @@ class RoutedMoE(nnx.Module):
         else:
           wi_scale_shape = (num_experts, in_blocks, out_blocks)
           wo_scale_shape = (self.num_experts, out_blocks, in_blocks)
+        wi_scale_sharding = self.wi_kernel_axes
+        wo_scale_sharding = self.wo_kernel_axes
       else:
         wi_scale_shape = (num_experts,)
         wo_scale_shape = (self.num_experts,)
+        wi_scale_sharding = (self.wi_kernel_axes[0],)
+        wo_scale_sharding = (self.wo_kernel_axes[0],)
 
       # Phase 2: Resolve scale mesh sharding
       # - 3D block scale grids inherit full 3D kernel axes ("exp", "embed_moe", "mlp_moe")
       #   to partition synchronously with the weight tensors across expert and tensor meshes.
       # - 1D per-expert scales (num_experts,) only span the expert axis, so sharding must
       #   use (self.wi_kernel_axes[0],) to prevent a rank mismatch with the 3D kernel axes.
-      wi_scale_sharding = self.wi_kernel_axes if block_size is not None else (self.wi_kernel_axes[0],)
-      wo_scale_sharding = self.wo_kernel_axes if block_size is not None else (self.wo_kernel_axes[0],)
       self.wi_scale_axes = wi_scale_sharding
       self.wo_scale_axes = wo_scale_sharding
 
@@ -5218,7 +5236,9 @@ class RoutedMoE(nnx.Module):
         and cfg.use_gmm_v2
         and not is_fused_moe_path
     )
-    is_kernel_quantized = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and is_fused_moe_path
+    is_kernel_quantized = (
+        isinstance(self.quant, quantizations.ServeFp8WeightQuantization) or (cfg and cfg.fp8_moe)
+    ) and is_fused_moe_path
 
     def _maybe_native_gmm_weight(kernel, scale):
       """Non-fused (gmm_v2) path: a qpl.QArray wrapping kernel+scale when
@@ -5273,6 +5293,13 @@ class RoutedMoE(nnx.Module):
       else:
         w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
         w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
+
+    if cfg.fp8_moe_fake_quant and not is_fused_moe_path:
+      # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
+      # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
+      w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
+      w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
+      wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because

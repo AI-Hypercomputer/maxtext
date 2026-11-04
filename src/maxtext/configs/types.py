@@ -1127,6 +1127,8 @@ class SplashAttention(BaseModel):
 class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
+  fp8_moe: bool = Field(False, description="Store MoE weights in fp8 with per-channel scale.")
+  fp8_moe_fake_quant: bool = Field(False, description="Train dense MoE weights with fp8 per-channel fake quantization.")
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
@@ -3691,6 +3693,7 @@ class RLCluster(BaseModel):
 class VLLM(BaseModel):
   """vLLM-specific configuration for rollouts."""
 
+  rollout_fp8_moe: bool = Field(False, description="Enable FP8 MoE for the rollout.")
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
@@ -5925,6 +5928,14 @@ class MaxTextConfig(
           raise ValueError("te_moe_quantize_before_fsdp_all_gather=True does not support 2D FSDP weight sharding.")
       if self.te_moe_block and not self.prefuse_moe_weights:
         raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
+      if self.fp8_moe_fake_quant:
+        if self.fp8_moe or self.weight_block_size is not None:
+          raise ValueError(
+              "fp8_moe_fake_quant applies rollout quantize_weight_per_channel directly in bf16 forward; "
+              "requires fp8_moe=False and weight_block_size=None."
+          )
+      if (self.fp8_moe or self.rollout_fp8_moe) and self.weight_block_size is not None:
+        raise ValueError("fp8_moe / rollout_fp8_moe requires weight_block_size=None (per-channel scaling).")
       if self.te_moe_block and self.routed_bias_update_rate > 0.0:
         raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
       if self.te_moe_block and self.norm_topk_prob:
