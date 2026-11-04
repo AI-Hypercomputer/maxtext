@@ -28,10 +28,32 @@ that order and `configs/types.py` rejects the combination.
 from __future__ import annotations
 
 import jax
-import jax.numpy as jnp
 from jax import lax
+from jax.ad_checkpoint import checkpoint_name
+import jax.numpy as jnp
 
 _PREC = jax.lax.Precision.HIGHEST
+
+
+def halo_exchange_for_conv(
+    qkv: jax.Array,
+    cp_axis: str | tuple[str, ...],
+    halo_len: int,
+) -> jax.Array:
+  """Exchanges the trailing `halo_len` tokens from rank `i` to `i + 1` along `cp_axis`.
+
+  Rank 0 receives zeros. Tagged with `checkpoint_name(..., "gdn_cp_conv_halo")`
+  so `gdn_cp_state` under `remat_policy='custom'` can save or offload the halo
+  instead of repeating the neighbor `ppermute` in the backward pass.
+  """
+  if halo_len <= 0:
+    return qkv[:, :0, :]
+  num_ranks = lax.axis_size(cp_axis)
+  rank_idx = lax.axis_index(cp_axis)
+  perm = [(i, i + 1) for i in range(num_ranks - 1)]
+  halo = lax.ppermute(qkv[:, -halo_len:, :], axis_name=cp_axis, perm=perm)
+  halo = jnp.where(rank_idx == 0, jnp.zeros_like(halo), halo)
+  return checkpoint_name(halo, "gdn_cp_conv_halo")
 
 
 def gather_cp_segment_metadata(
@@ -126,7 +148,7 @@ def compose_local(w, u, k, g, m_out=None, m_keep=None):
   )
   scan_inputs = (w, u, k, g, m_out, m_keep) if (m_out is not None and m_keep is not None) else (w, u, k, g)
   (A_loc, B_loc), _ = lax.scan(body, init, scan_inputs)
-  return A_loc, B_loc
+  return checkpoint_name(A_loc, "gdn_cp_m_local"), checkpoint_name(B_loc, "gdn_cp_m_local")
 
 
 def incoming_state(A_loc, B_loc, h_init, cp_axis):
@@ -167,7 +189,7 @@ def incoming_state(A_loc, B_loc, h_init, cp_axis):
   a_ex = lax.ppermute(a_run, cp_axis, shift1)
   b_ex = lax.ppermute(b_run, cp_axis, shift1)
   carried = jnp.matmul(a_ex, h_init, precision=_PREC) + b_ex
-  h_in = jnp.where(idx == 0, h_init, carried)
+  h_in = checkpoint_name(jnp.where(idx == 0, h_init, carried), "gdn_cp_s_in")
 
   # The final state is the last device's inclusive prefix, broadcast with a
   # masked psum rather than a gather so this stays O(1) in D too.

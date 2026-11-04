@@ -28,7 +28,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import xla_metadata
 import jax.nn
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import (
     Array,
     AttentionType,
@@ -86,11 +86,63 @@ def gdn_context_axes(cfg) -> tuple[str, ...]:
   return tuple(
       name
       for name, size in (
-          ("context", cfg.ici_context_parallelism),
-          ("context_usp_ulysses", getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)),
+          ("context", getattr(cfg, "ici_context_parallelism", 1) * getattr(cfg, "dcn_context_parallelism", 1)),
+          (
+              "context_usp_ulysses",
+              getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)
+              * getattr(cfg, "dcn_context_usp_ulysses_parallelism", 1),
+          ),
       )
       if size > 1
   )
+
+
+def get_gdn_cp_sharding_info(
+    cfg: Config,
+    mesh: Mesh | None,
+) -> tuple[Any, tuple[str, ...], str | tuple[str, ...] | None, str | None]:
+  """Returns `(logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len)` for GDN CP sharding."""
+  logical_rules = get_logical_axis_rules() or getattr(cfg, "logical_axis_rules", ())
+  cp_axes_active = tuple(
+      ax for ax in gdn_context_axes(cfg) if mesh is not None and ax in mesh.axis_names and mesh.shape[ax] > 1
+  )
+  cp_axis_for_pspec = cp_axes_active[0] if len(cp_axes_active) == 1 else (cp_axes_active if cp_axes_active else None)
+  cp_len = LENGTH if cp_axes_active else None
+  return logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len
+
+
+def resolve_gdn_cp_mode(
+    cfg: Config,
+    cp_size: int,
+    num_k_heads: int,
+    model_mode: str = MODEL_MODE_TRAIN,
+    *,
+    prefer_head_cp: bool = False,
+) -> tuple[bool, bool]:
+  """Resolves `(use_head_sharded_cp, use_seq_sharded_cp)` and validates CP constraints."""
+  gdn_cp_mode = getattr(cfg, "gdn_cp_mode", "auto")
+  if gdn_cp_mode == "head":
+    if cp_size > 1 and (cp_size > num_k_heads or num_k_heads % cp_size != 0):
+      raise ValueError(
+          f"GDN head-sharded CP requires num_k_heads ({num_k_heads}) to be divisible by cp_size ({cp_size})."
+      )
+    use_head_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE
+  elif gdn_cp_mode == "auto":
+    use_head_sharded_cp = (
+        prefer_head_cp
+        and 1 < cp_size <= min(2, num_k_heads)
+        and (num_k_heads % cp_size == 0)
+        and model_mode != MODEL_MODE_AUTOREGRESSIVE
+    )
+  elif gdn_cp_mode == "seq":
+    use_head_sharded_cp = False
+  else:
+    raise ValueError(f"Invalid gdn_cp_mode={gdn_cp_mode!r}; must be one of ('auto', 'seq', 'head').")
+
+  use_seq_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE and not use_head_sharded_cp
+  if (use_head_sharded_cp or use_seq_sharded_cp) and getattr(cfg, "context_parallel_load_balance", False):
+    raise ValueError("GDN does not support context_parallel_load_balance.")
+  return use_head_sharded_cp, use_seq_sharded_cp
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -385,16 +437,17 @@ def jax_chunk_gated_delta_rule(
     identity = jnp.eye(chunk_size, dtype=jnp.float32)
     identity_broadcasted = jnp.broadcast_to(identity, S.shape)
     A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  A = checkpoint_name(A, "gdn_t_inv")
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
   u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
-  u_chunks = u_chunks.astype(compute_dtype)
+  u_chunks = checkpoint_name(u_chunks.astype(compute_dtype), "gdn_chunk_states")
 
   g_fwd_factor = jnp.exp(g_cumsum) * m_in if m_in is not None else jnp.exp(g_cumsum)
   k_beta_g = k_beta.astype(jnp.float32) * g_fwd_factor[..., None]
   w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
-  w_chunks = w_chunks.astype(compute_dtype)
+  w_chunks = checkpoint_name(w_chunks.astype(compute_dtype), "gdn_chunk_states")
 
   # =========================================================================
   # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
@@ -893,7 +946,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # STEP A: Input Projections
     # =========================================================================
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-    qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+    qkvz = checkpoint_name(self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding), "qkv_proj")
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
@@ -981,9 +1034,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     b_raw, a_raw = jnp.split(mixed_ba, split_indices_ba, axis=3)
 
     # b: (B, S, H_v)
-    b = jnp.reshape(b_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
+    b = checkpoint_name(jnp.reshape(b_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding), "gdn_b")
     # a: (B, S, H_v)
-    a = jnp.reshape(a_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
+    a = checkpoint_name(jnp.reshape(a_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding), "gdn_a")
 
     if use_paged_state:
       # =========================================================================
@@ -997,7 +1050,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             truncate_sharded_tensor,
         )
         from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-        from jax.sharding import PartitionSpec as P_spec  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
       except ImportError as e:
         raise ImportError(
             "GDN attention kernel require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
@@ -1020,8 +1072,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       mixed_qkv = jax.shard_map(
           lambda q, k, v: jnp.concatenate([q, k, v], axis=-1),
           mesh=self.mesh,
-          in_specs=(P_spec(attn_data, attn_head),) * 3,
-          out_specs=P_spec(attn_data, attn_head),
+          in_specs=(P(attn_data, attn_head),) * 3,
+          out_specs=P(attn_data, attn_head),
           check_vma=False,
       )(q_flat, k_flat, v_flat)
 
@@ -1128,6 +1180,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # across the left-padding boundary into the first 3 real tokens, corrupting
       # the recurrent state S_t across the sequence.
       qkv = jnp.where((decoder_segment_ids != 0)[..., None], qkv, 0.0)
+    qkv = checkpoint_name(qkv, "gdn_qkv")
     batch, seq_len, _ = qkv.shape
     conv_kernel_size = self.config.gdn_conv_kernel_dim
     # With packing=False in training, each row holds a single sequence whose padding
@@ -1138,10 +1191,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         model_mode != MODEL_MODE_TRAIN or getattr(cfg, "packing", True)
     )
     packed_segment_ids = decoder_segment_ids if use_packed_segments else None
+    _, cp_axes_active_conv, _, _ = get_gdn_cp_sharding_info(cfg, self.mesh)
 
     conv_state = None
     recurrent_state = None
     next_conv_state = None
+    conv_input = None
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       recurrent_state, conv_state = active_cache.get_gdn_states()
       orig_cache_batch = conv_state.shape[0]
@@ -1178,12 +1233,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         ).astype(conv_input.dtype)
       else:
         next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
-    else:
+    elif packed_segment_ids is None and not (
+        cp_axes_active_conv and self.mesh is not None and model_mode != MODEL_MODE_AUTOREGRESSIVE
+    ):
       conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
 
     # Perform the convolution.
+    conv_bias_val = self.conv1d.bias[...] if getattr(self.conv1d, "bias", None) is not None else None
     if packed_segment_ids is not None:
-      conv_bias_val = self.conv1d.bias[...] if getattr(self.conv1d, "bias", None) is not None else None
       conv_out = gdn_packing.segmented_causal_depthwise_conv1d(
           qkv=qkv,
           conv_weight=self.conv1d.kernel[...],
@@ -1193,7 +1250,21 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           conv_state=conv_state,
           dtype=cfg.dtype,
           mesh=self.mesh,
-          cp_axes=gdn_context_axes(cfg) if self.mesh is not None else (),
+          cp_axes=cp_axes_active_conv,
+          shard_mode=cfg.shard_mode,
+          gdn_head_axis=gdn_head_axis,
+      )
+      if flat_sharding is not None:
+        conv_out = jax.sharding.reshard(conv_out, flat_sharding)
+    elif cp_axes_active_conv and self.mesh is not None and conv_state is None and model_mode != MODEL_MODE_AUTOREGRESSIVE:
+      conv_out = gdn_packing.cp_causal_depthwise_conv1d(
+          qkv=qkv,
+          conv_weight=self.conv1d.kernel[...],
+          conv_bias=conv_bias_val,
+          kernel_size=conv_kernel_size,
+          dtype=cfg.dtype,
+          mesh=self.mesh,
+          cp_axes=cp_axes_active_conv,
           shard_mode=cfg.shard_mode,
           gdn_head_axis=gdn_head_axis,
       )
@@ -1272,7 +1343,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           compute_dtype=cfg.dtype,
       )
     elif self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
+      logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = get_gdn_cp_sharding_info(cfg, self.mesh)
+      cp_size = math.prod(self.mesh.shape[ax] for ax in cp_axes_active) if cp_axes_active else 1
+      use_head_cp, _ = resolve_gdn_cp_mode(cfg, cp_size, self.num_k_heads, model_mode, prefer_head_cp=False)
+      if use_head_cp and seq_len % cp_size != 0:
+        raise ValueError(
+            f"GDN head-sharded CP requires sequence length ({seq_len}) to be divisible by cp_size ({cp_size})."
+        )
       has_initial_state = recurrent_state is not None
       recurrent_state_arg = (
           recurrent_state
@@ -1283,26 +1360,54 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               out_sharding=state_sharding,
           )
       )
-      # LENGTH, not None. The sequence axis was hardcoded to replicated, so
-      # ici_context_parallelism could never shard the GDN sequence while still
-      # consuming the context axis from the mesh -- which is why raising ctx
-      # made memory worse instead of better. The scan handles a sharded
-      # sequence via the two-pass affine composition in kernels/attention/gdn_cp.py.
-      # Either context axis can carry the sequence. LENGTH maps to both in the
-      # logical rules, so this is correct whichever one is configured.
-      cp_axes = gdn_context_axes(cfg)
-      cp_len = LENGTH if cp_axes else None
-      qkv_pspec = logical_to_mesh_axes(
-          (KV_BATCH, cp_len, gdn_head_axis, None),
-          mesh=self.mesh,
-          rules=logical_rules,
-      )
-      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis), mesh=self.mesh, rules=logical_rules)
-      state_pspec = logical_to_mesh_axes(
-          (KV_BATCH, gdn_head_axis, None, None),
-          mesh=self.mesh,
-          rules=logical_rules,
-      )
+      if use_head_cp:
+        base_qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
+        mesh_batch = base_qkv_pspec[0]
+        mesh_head = base_qkv_pspec[2]
+        head_axes: list[str] = []
+        if mesh_head is not None:
+          head_axes.extend((mesh_head,) if isinstance(mesh_head, str) else mesh_head)
+        for ax in cp_axes_active:
+          if ax not in head_axes:
+            head_axes.append(ax)
+        head_shards = math.prod(self.mesh.shape[ax] for ax in head_axes) if head_axes else 1
+        if self.num_k_heads % head_shards != 0:
+          raise ValueError(
+              f"GDN head-sharded CP requires num_k_heads ({self.num_k_heads}) to be divisible by total head shards "
+              f"({head_shards}) across {tuple(head_axes)}."
+          )
+        head_spec = head_axes[0] if len(head_axes) == 1 else (tuple(head_axes) if head_axes else None)
+        qkv_pspec = P(mesh_batch, None, head_spec, None)
+        g_beta_pspec = P(mesh_batch, None, head_spec)
+        state_pspec = P(mesh_batch, head_spec, None, None)
+        out_qkv_pspec = P(mesh_batch, cp_axis_for_pspec, mesh_head, None)
+        out_state_pspec = P(mesh_batch, mesh_head, None, None) if has_initial_state else state_pspec
+        cp_axes_for_scan = None
+      else:
+        # LENGTH, not None. The sequence axis was hardcoded to replicated, so
+        # ici_context_parallelism could never shard the GDN sequence while still
+        # consuming the context axis from the mesh -- which is why raising ctx
+        # made memory worse instead of better. The scan handles a sharded
+        # sequence via the two-pass affine composition in kernels/attention/gdn_cp.py.
+        # Either context axis can carry the sequence. LENGTH maps to both in the
+        # logical rules, so this is correct whichever one is configured.
+        qkv_pspec = logical_to_mesh_axes(
+            (KV_BATCH, cp_len, gdn_head_axis, None),
+            mesh=self.mesh,
+            rules=logical_rules,
+        )
+        g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis), mesh=self.mesh, rules=logical_rules)
+        state_pspec = logical_to_mesh_axes(
+            (KV_BATCH, gdn_head_axis, None, None),
+            mesh=self.mesh,
+            rules=logical_rules,
+        )
+        if cp_axes_active:
+          if qkv_pspec[1] is None:
+            qkv_pspec = P(qkv_pspec[0], cp_axis_for_pspec, *qkv_pspec[2:])
+          if g_beta_pspec[1] is None:
+            g_beta_pspec = P(g_beta_pspec[0], cp_axis_for_pspec, *g_beta_pspec[2:])
+        cp_axes_for_scan = cp_axes_active or None
       # Keep every shard_map input/output batch spec consistent when replication is required.
       qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
           qkv_pspec,
@@ -1325,6 +1430,24 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           dims=(0,),
           allow_remove_axes=True,
       )
+      if use_head_cp:
+        out_qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            out_qkv_pspec,
+            value.shape,
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
+        )
+        out_state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            out_state_pspec,
+            recurrent_state_arg.shape,
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
+        )
+      else:
+        out_qkv_pspec = qkv_pspec
+        out_state_pspec = state_pspec
       if packed_segment_ids is not None:
         seg_pspec = remove_incompatible_mesh_axes_from_partition_spec(
             jax.sharding.PartitionSpec(qkv_pspec[0], qkv_pspec[1]),
@@ -1362,13 +1485,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
               seg_pspec,  # segment_ids
           ),
           out_specs=(
-              qkv_pspec,  # core_attn_out
-              state_pspec,  # final_state
+              out_qkv_pspec,  # core_attn_out
+              out_state_pspec,  # final_state
           ),
           check_vma=False,
       )
       def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h, seg_val):
-        return jax_chunk_gated_delta_rule(
+        out, next_state = jax_chunk_gated_delta_rule(
             query=q,
             key=k,
             value=v,
@@ -1378,15 +1501,22 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             initial_state=init_h,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
-            cp_axis=cp_axes or None,
+            cp_axis=cp_axes_for_scan,
             segment_ids=seg_val,
             has_initial_state=has_initial_state,
             chunk_inverse=chunk_inverse,
         )
+        if use_head_cp:
+          out = jax.lax.all_to_all(out, axis_name=cp_axis_for_pspec, split_axis=1, concat_axis=2, tiled=True)
+          if has_initial_state and next_state is not None:
+            next_state = jax.lax.all_gather(next_state, axis_name=cp_axis_for_pspec, axis=1, tiled=True)
+        return out, next_state
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(
           query, key, value, g, beta, recurrent_state_arg, packed_segment_ids
       )
+      if cfg.shard_mode == ShardMode.EXPLICIT and head_sharding is not None:
+        core_attn_out = jax.sharding.reshard(core_attn_out, head_sharding)
     else:
       core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
           query,
@@ -1401,6 +1531,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           segment_ids=packed_segment_ids,
           chunk_inverse=chunk_inverse,
       )
+
+    core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")
 
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       assert next_conv_state is not None
@@ -1442,7 +1574,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
 
     # Final output shape: (B, S, E)
-    output = self.out_proj(gated_output, out_sharding=out_sharding)
+    output = checkpoint_name(self.out_proj(gated_output, out_sharding=out_sharding), "out_proj")
 
     return output, active_cache
 
