@@ -553,6 +553,81 @@ class Qwen3_5MTPTest(unittest.TestCase):
     np.testing.assert_allclose(wo_val[0, :12, :], 1.0)
     np.testing.assert_allclose(wo_val[0, 12:16, :], 0.0)
 
+  def test_from_pretrained_restores_legacy_cycle_slot_scanned_checkpoint(self):
+    """from_pretrained loads legacy layer_0..layer_{k-1} scanned checkpoints into local_layers/global_layer."""
+    import tempfile
+    from orbax import checkpoint as ocp
+
+    cfg = _make_dummy_cfg()
+    cfg.scan_layers = True
+    cfg.prefuse_moe_weights = True
+    cfg.mtp_num_layers = 0
+    cfg.base_num_decoder_layers = 8
+    cfg.num_decoder_layers = 8
+    cfg.inhomogeneous_layer_cycle_interval = 4
+    cfg.param_scan_axis = 1
+    cfg.checkpoint_storage_concurrent_gb = 1
+    cfg.checkpoint_storage_use_ocdbt = False
+    cfg.checkpoint_storage_use_zarr3 = False
+    cfg.convert_checkpoint_if_possible = False
+
+    ref_model = adapter.model_creation_utils.from_config(cfg, mesh=self.mesh, rngs=nnx.Rngs(params=42, dropout=1, gating=2))
+
+    def _to_pure(tree):
+      if isinstance(tree, nnx.Variable):
+        return jnp.asarray(tree.get_value())
+      if hasattr(tree, "items"):
+        return {k: _to_pure(v) for k, v in tree.items()}
+      return tree
+
+    pure = _to_pure(nnx.state(ref_model, nnx.Param))
+
+    def _split_wi(node):
+      if isinstance(node, dict):
+        if "wi" in node:
+          wi = node["wi"]
+          half = wi.shape[-1] // 2
+          out = {k: _split_wi(v) for k, v in node.items() if k != "wi"}
+          out["wi_0"] = wi[..., :half]
+          out["wi_1"] = wi[..., half:]
+          return out
+        return {k: _split_wi(v) for k, v in node.items()}
+      return node
+
+    legacy_layers = {}
+    for slot in range(3):
+      slot_tree = jax.tree.map(lambda x, s=slot: jnp.take(x, s, axis=2), pure["decoder"]["layers"]["local_layers"])
+      legacy_layers[f"layer_{slot}"] = _split_wi(slot_tree)
+    legacy_layers["layer_3"] = _split_wi(pure["decoder"]["layers"]["global_layer"])
+    legacy_ckpt = {
+        "params": {
+            "params": {
+                "token_embedder": pure["token_embedder"],
+                "decoder": {
+                    "decoder_norm": pure["decoder"]["decoder_norm"],
+                    "logits_dense": pure["decoder"]["logits_dense"],
+                    "layers": legacy_layers,
+                },
+            }
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      ckpt_dir = str(Path(tmpdir) / "0" / "items")
+      ckptr = ocp.Checkpointer(ocp.PyTreeCheckpointHandler(use_ocdbt=False, use_zarr3=False))
+      ckptr.save(ckpt_dir, legacy_ckpt)
+      cfg.load_parameters_path = ckpt_dir
+      with mock.patch.object(adapter.model_creation_utils, "verify_and_sync_scan_layers", side_effect=lambda c: c):
+        loaded_model = adapter.model_creation_utils.from_pretrained(cfg, mesh=self.mesh)
+
+    loaded_pure = _to_pure(nnx.state(loaded_model, nnx.Param))
+    ref_leaves = jax.tree_util.tree_leaves_with_path(pure)
+    loaded_leaves = jax.tree_util.tree_leaves_with_path(loaded_pure)
+    self.assertEqual(len(ref_leaves), len(loaded_leaves))
+    for (p1, v1), (p2, v2) in zip(ref_leaves, loaded_leaves):
+      self.assertEqual(p1, p2)
+      np.testing.assert_allclose(np.asarray(v1), np.asarray(v2), err_msg=str(p1))
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -1021,6 +1021,99 @@ def from_pretrained(
             "Please check your load_parameters_path."
         )
 
+      def _expand_target_for_legacy_cycle_slot_layers(target, meta_tree, is_nnx, scan_axis: int = 1):
+        """Expands nested `local_layers`/`global_layer` restore target into legacy `layer_0..layer_{k-1}` keys."""
+        if not hasattr(target, "items") or not hasattr(meta_tree, "items"):
+          return target, 0
+        target_decoder = target["decoder"] if "decoder" in target else None
+        meta_decoder = meta_tree["decoder"] if "decoder" in meta_tree else None
+        if not hasattr(target_decoder, "items") or not hasattr(meta_decoder, "items"):
+          return target, 0
+        target_layers = target_decoder["layers"] if "layers" in target_decoder else None
+        meta_layers = meta_decoder["layers"] if "layers" in meta_decoder else None
+        if not hasattr(target_layers, "items") or not hasattr(meta_layers, "items"):
+          return target, 0
+        if (
+            "local_layers" not in target_layers
+            or "global_layer" not in target_layers
+            or "local_layers" in meta_layers
+            or "layer_0" not in meta_layers
+        ):
+          return target, 0
+
+        def _is_leaf(node):
+          if is_nnx:
+            return isinstance(node, dict) and "value" in node and hasattr(node["value"], "shape")
+          return hasattr(node, "shape")
+
+        local_leaves = jax.tree_util.tree_leaves(target_layers["local_layers"], is_leaf=_is_leaf)
+        if not local_leaves:
+          return target, 0
+        sample_arr = local_leaves[0]["value"] if is_nnx else local_leaves[0]
+        if sample_arr.ndim <= scan_axis + 1:
+          return target, 0
+        num_local = int(sample_arr.shape[scan_axis + 1])
+        cycle_interval = num_local + 1
+        if not all(f"layer_{slot}" in meta_layers for slot in range(cycle_interval)):
+          return target, 0
+
+        def _drop_local_slot_axis(leaf):
+          arr = leaf["value"] if is_nnx else leaf
+          new_shape = arr.shape[: scan_axis + 1] + arr.shape[scan_axis + 2 :]
+          arr_sharding = getattr(arr, "sharding", None)
+          if isinstance(arr_sharding, jax.sharding.NamedSharding) and len(arr_sharding.spec) > scan_axis + 1:
+            spec_tuple = tuple(arr_sharding.spec)
+            new_spec = jax.sharding.PartitionSpec(*(spec_tuple[: scan_axis + 1] + spec_tuple[scan_axis + 2 :]))
+            new_sharding = jax.sharding.NamedSharding(arr_sharding.mesh, new_spec)
+          else:
+            new_sharding = arr_sharding
+          struct = jax.ShapeDtypeStruct(shape=new_shape, dtype=arr.dtype, sharding=new_sharding)
+          return {"value": struct} if is_nnx else struct
+
+        new_layers = {}
+        for k, v in target_layers.items():
+          if k == "local_layers":
+            for slot in range(num_local):
+              new_layers[f"layer_{slot}"] = jax.tree.map(_drop_local_slot_axis, v, is_leaf=_is_leaf)
+          elif k == "global_layer":
+            new_layers[f"layer_{num_local}"] = v
+          else:
+            new_layers[k] = v
+
+        new_decoder = {k: (new_layers if k == "layers" else v) for k, v in target_decoder.items()}
+        new_target = {k: (new_decoder if k == "decoder" else v) for k, v in target.items()}
+        return new_target, cycle_interval
+
+      def _collapse_legacy_cycle_slot_layers(ckpt_tree, cycle_interval: int, scan_axis: int = 1):
+        """Collapses legacy `layer_0..layer_{k-1}` restored arrays into `local_layers` and `global_layer`."""
+        if cycle_interval <= 1 or not isinstance(ckpt_tree, dict):
+          return ckpt_tree
+        decoder = ckpt_tree.get("decoder")
+        if not isinstance(decoder, dict):
+          return ckpt_tree
+        layers = decoder.get("layers")
+        if not isinstance(layers, dict):
+          return ckpt_tree
+        num_local = cycle_interval - 1
+        if not all(f"layer_{slot}" in layers for slot in range(cycle_interval)):
+          return ckpt_tree
+
+        local_trees = [layers.pop(f"layer_{slot}") for slot in range(num_local)]
+        global_tree = layers.pop(f"layer_{num_local}")
+
+        def _stack_local(*xs):
+          stacked = jnp.stack(xs, axis=scan_axis + 1)
+          if isinstance(stacked, jax.Array):
+            stacked.block_until_ready()
+          for x in xs:
+            if isinstance(x, jax.Array) and x is not stacked and not x.is_deleted():
+              x.delete()
+          return stacked
+
+        layers["local_layers"] = jax.tree.map(_stack_local, *local_trees)
+        layers["global_layer"] = global_tree
+        return ckpt_tree
+
       def _adjust_target_for_moe_fusion(target, meta_tree, is_nnx):
         if not hasattr(target, "items") or not hasattr(meta_tree, "items"):
           return target
@@ -1067,6 +1160,8 @@ def from_pretrained(
       )
       is_nnx_checkpoint = True
       mtp_in_ckpt = True
+      scan_axis = int(getattr(config, "param_scan_axis", 1))
+      legacy_cycle_interval = 0
       if (
           "params" in metadata.item_metadata.tree.keys()
           and "params" in metadata.item_metadata.tree.get("params", {}).keys()
@@ -1081,6 +1176,9 @@ def from_pretrained(
 
         meta_params = metadata.item_metadata.tree["params"]["params"]
         mtp_in_ckpt = "mtp_block" in meta_params
+        target_for_restore, legacy_cycle_interval = _expand_target_for_legacy_cycle_slot_layers(
+            target_for_restore, meta_params, False, scan_axis=scan_axis
+        )
         target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_params, False)
         if not mtp_in_ckpt and isinstance(target_for_restore, dict):
           target_for_restore.pop("mtp_block", None)
@@ -1150,6 +1248,9 @@ def from_pretrained(
         has_base_key = "base" in metadata.item_metadata.tree
         meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
         mtp_in_ckpt = "mtp_block" in meta_tree_for_params
+        target_for_restore, legacy_cycle_interval = _expand_target_for_legacy_cycle_slot_layers(
+            target_for_restore, meta_tree_for_params, True, scan_axis=scan_axis
+        )
         target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_tree_for_params, True)
         if not mtp_in_ckpt and isinstance(target_for_restore, dict):
           target_for_restore.pop("mtp_block", None)
@@ -1245,6 +1346,10 @@ def from_pretrained(
         logical_axes_tree = to_dict(logical_axes_tree)
 
         del restored
+        if legacy_cycle_interval > 0:
+          checkpoint = _collapse_legacy_cycle_slot_layers(
+              checkpoint, legacy_cycle_interval, scan_axis=scan_axis
+          )
         checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
 
         def _filter_to_model_keys(ckpt, model):

@@ -236,6 +236,11 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   if getattr(spec_config, "method", None) == "mtp":
     overrides.setdefault("mtp_num_layers", 1)
 
+  # Propagate vLLM's --enable_return_routed_experts flag to MaxText's MoE router capture.
+  aux_output_config = getattr(vllm_config, "aux_output_config", None)
+  if getattr(aux_output_config, "enable_return_routed_experts", False):
+    overrides.setdefault("return_routed_experts", True)
+
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
 
@@ -410,6 +415,10 @@ class MaxTextForCausalLM(nnx.Module):
 
       if isinstance(res, tuple) and len(res) == 3:
         hidden, layer_kv_caches, expert_indices = res
+        if expert_indices is not None and isinstance(self.mesh, Mesh):
+          expert_indices = jax.lax.with_sharding_constraint(
+              expert_indices, jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec())
+          )
       else:
         hidden, layer_kv_caches = res
 
