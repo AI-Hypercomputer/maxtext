@@ -123,6 +123,17 @@ class ConfigTest(absltest.TestCase):
         with self.assertRaisesRegex(pydantic.ValidationError, "sa_qk_diag_grid must be a power of 2"):
           pyconfig.initialize(argv)
 
+  def test_splash_dkv_diag_skip_requires_qk_diag_skip(self):
+    cases = (
+        (["sa_dkv_diag_skip=True"], "sa_dkv_diag_skip requires sa_qk_diag_skip"),
+        (["sa_qk_diag_skip=True", "sa_dkv_diag_skip_dq=True"], "sa_dkv_diag_skip_dq requires sa_dkv_diag_skip"),
+    )
+    for extra, message in cases:
+      with self.subTest(extra=extra):
+        argv = ["", _BASE_CONFIG_PATH, "run_name=test", "use_tokamax_splash=True", *extra]
+        with self.assertRaisesRegex(pydantic.ValidationError, message):
+          pyconfig.initialize(argv)
+
   def test_splash_diag_skip_rejects_non_square_eval_blocks(self):
     argv = [
         "",
