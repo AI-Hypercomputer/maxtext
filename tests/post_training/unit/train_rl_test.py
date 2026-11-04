@@ -403,6 +403,63 @@ class TrainRLTest(unittest.TestCase):
     # what it accepts, so it must pass everything through.
     self.assertEqual(train_rl._kwargs_supported_by(type, unknown=3), {"unknown": 3})
 
+  def test_build_rl_profiler_config_returns_none_when_not_xplane(self):
+    """build_rl_profiler_config returns None unless profiler='xplane'."""
+    config = types.RLConfig(model_name="qwen3-0.6b")
+    self.assertIsNone(train_rl.build_rl_profiler_config(config))
+
+  def _profile_config_kwargs_from_build_rl_profiler_config(self, profile_config_fields, **config_overrides):
+    """Runs build_rl_profiler_config with a signature-enforcing RLProfileConfig fake."""
+    received = {}
+
+    class FakeRLProfileConfig:
+
+      def __init__(self, **fields):
+        unknown = sorted(set(fields) - set(profile_config_fields))
+        if unknown:
+          raise TypeError(f"unexpected keyword arguments {unknown}")
+        received.update(fields)
+
+    FakeRLProfileConfig.__signature__ = inspect.Signature(
+        [inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None) for name in sorted(profile_config_fields)]
+    )
+    trainer_config = types.RLConfig(
+        model_name="qwen3-0.6b",
+        profiler="xplane",
+        base_output_directory="/tmp/tb",
+        run_name="run1",
+        **config_overrides,
+    )
+    with mock.patch.object(train_rl.rl_cluster_lib, "RLProfileConfig", FakeRLProfileConfig):
+      prof_cfg = train_rl.build_rl_profiler_config(trainer_config)
+    self.assertIsInstance(prof_cfg, FakeRLProfileConfig)
+    return received
+
+  def test_build_rl_profiler_config_forwards_enable_continuous_profiling(self):
+    """enable_continuous_profiling on RLConfig reaches RLProfileConfig when supported."""
+    field = "enable_continuous_profiling"
+    declared = set(inspect.signature(train_rl.rl_cluster_lib.RLProfileConfig).parameters) | {field}
+    expected_tb_dir = "/tmp/tb/run1/tensorboard/"
+
+    for overrides, expected in (({}, False), ({"enable_continuous_profiling": True}, True)):
+      with self.subTest(overrides=overrides):
+        received = self._profile_config_kwargs_from_build_rl_profiler_config(declared, **overrides)
+        self.assertIs(received[field], expected)
+        self.assertNotIn("mldiagnostics_dir", received)
+        self.assertEqual(received["output_dir"], expected_tb_dir)
+
+  def test_build_rl_profiler_config_drops_enable_continuous_profiling_for_older_tunix(self):
+    """An older tunix RLProfileConfig must not receive (and choke on) the unknown kwarg."""
+    field = "enable_continuous_profiling"
+    declared = set(inspect.signature(train_rl.rl_cluster_lib.RLProfileConfig).parameters) - {field}
+    expected_tb_dir = "/tmp/tb/run1/tensorboard/"
+
+    for value in (False, True):
+      with self.subTest(enable_continuous_profiling=value):
+        received = self._profile_config_kwargs_from_build_rl_profiler_config(declared, enable_continuous_profiling=value)
+        self.assertNotIn(field, received)
+        self.assertEqual(received["output_dir"], expected_tb_dir)
+
   def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
     """A packed row must hold prompt cap + generation cap (= max_target_length)."""
     with self.assertRaisesRegex(ValueError, "max_seq_token_per_tpu"):
