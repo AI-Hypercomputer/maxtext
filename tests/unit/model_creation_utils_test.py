@@ -177,6 +177,7 @@ class FixRestoreArgsRankGuardTest(unittest.TestCase):
 
   def test_same_shape_no_modification(self):
     """Identical shapes: arg must be unchanged."""
+    # Live CI check of PR #5215: this line touches the test (do not merge).
     shape = (4096, 4, 128)
     fixed = self._run_fix(shape, shape)
     arg = fixed["kernel"]
