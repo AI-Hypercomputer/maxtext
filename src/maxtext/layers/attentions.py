@@ -822,6 +822,9 @@ class Attention(nnx.Module):
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           use_scale=rope_use_scale,
+          scale_factor=self.config.rope_scaling_factor,
+          low_freq_factor=self.config.rope_low_freq_factor,
+          high_freq_factor=self.config.rope_high_freq_factor,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )

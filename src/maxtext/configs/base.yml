@@ -1290,6 +1290,9 @@ trainable_position_size: -1  # enable gpt3 position embedding with a positive tr
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_linear_scaling_factor: 1.0 # linear scaling factor for "default" RoPE (see class `RotaryEmbedding` for more)
 rope_use_scale: true # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
+rope_scaling_factor: 8.0 # llama3.1-style rope scaling: factor applied to the low frequencies
+rope_low_freq_factor: 1.0 # llama3.1-style rope scaling: low frequency factor
+rope_high_freq_factor: 4.0 # llama3.1-style rope scaling: high frequency factor
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
