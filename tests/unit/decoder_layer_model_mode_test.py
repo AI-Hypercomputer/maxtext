@@ -58,6 +58,7 @@ from maxtext.configs import pyconfig
 from maxtext.layers import attention_mla, attentions
 from maxtext.models import deepseek, gemma, gemma2, gemma3, gpt3, gpt_oss, llama2, mistral, qwen2, qwen3
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
 
 # pylint: enable=wrong-import-position
@@ -125,6 +126,29 @@ _GPT_OSS = {
     "use_tokamax_gmm": False,
 }
 
+# Qwen3-Next interleaves GatedDeltaNet layers with one full-attention layer per cycle,
+# each followed by a routed MoE with a gated shared expert. Tensor parallelism next to
+# fsdp puts the residual stream's `embed` on `tensor` while the MoE weights keep `embed`
+# on `fsdp`, so every contraction in the block needs an explicit out_sharding; the
+# default fsdp-only mesh never exercises that. With the TPU kernels off the sparse path
+# lowers to ragged_dot, which runs on CPU.
+_QWEN3_NEXT_TP = {
+    "model_name": "qwen3-next-80b-a3b",
+    "override_model_config": True,
+    "head_dim": 16,
+    "base_moe_mlp_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "gdn_num_key_heads": 2,
+    "gdn_num_value_heads": 4,
+    "gdn_key_head_dim": 16,
+    "gdn_value_head_dim": 16,
+    "sparse_matmul": True,
+    "megablox": False,
+    "use_tokamax_gmm": False,
+    "ici_tensor_parallelism": 2,
+}
+
 # Layers onboarded to explicit sharding, as (name, layer class, config, ctor kwargs).
 _SHARD_MODE_LAYERS = [
     ("gemma", gemma.GemmaDecoderLayer, {"decoder_block": "gemma"}, {}),
@@ -135,6 +159,9 @@ _SHARD_MODE_LAYERS = [
     ("gpt3_fused_qkv", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": True}, {}),
     ("gpt_oss", gpt_oss.GptOssDecoderLayer, _GPT_OSS, {"attention_type": attentions.AttentionType.GLOBAL}),
     ("gpt_oss_scannable_block", gpt_oss.GptOssScannableBlock, _GPT_OSS, {}),
+    # Layer 0 is a GatedDeltaNet layer and layer 3 closes the 4-layer cycle with full attention.
+    ("qwen3_next_linear_attention_tp", qwen3.Qwen3NextDecoderLayer, _QWEN3_NEXT_TP, {"layer_idx": 0, "quant": None}),
+    ("qwen3_next_full_attention_tp", qwen3.Qwen3NextDecoderLayer, _QWEN3_NEXT_TP, {"layer_idx": 3, "quant": None}),
 ]
 
 
@@ -283,6 +310,12 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
           rngs=nnx.Rngs(params=0, dropout=0),
           **ctor_kwargs,
       )
+      # Lay the parameters out by their logical axes, as training does. Construction
+      # alone leaves them replicated, which hides any clash between a weight's sharding
+      # and the activation it is contracted with.
+      graphdef, state = nnx.split(layer)
+      state = jax.tree.map(jax.device_put, state, sharding.nnx_construct_named_sharding(state, mesh))
+      layer = nnx.merge(graphdef, state)
       batch = cfg.micro_batch_size_to_train_on
       length = cfg.max_target_length
       inputs = jnp.reshape(
