@@ -136,6 +136,19 @@ class TensorHandlingTest(parameterized.TestCase):
     self.assertEqual(result.shape, target_shape)
     np.testing.assert_array_equal(np.take(np.asarray(result), 2, axis=axis), tensors["w2"])
 
+  @parameterized.named_parameters(
+      ("not_scanned", False, "params-decoder-layers_0-mlp-wi_0", (4, 3, 6), 0),
+      ("scanned_layers", True, "params-decoder-layers-mlp-wi_0", (4, 3, 6), 1),
+      ("per_layer_scale", True, "params-decoder-layers-mlp-wi_0-kernel_scale", (4,), 0),
+      ("unscanned_moe_layer", True, "params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (3, 4, 6), 0),
+      ("moe_bias_collection", True, "MoEBiasVar-decoder-layers-mlp-MoeBlock_0-gate-bias", (4, 3), 0),
+      ("composite_key", True, ("params-decoder-layers-mlp-wi_0", "params-decoder-layers-mlp-wi_1"), (4, 3, 6), 1),
+  )
+  def test_single_stack_axis(self, scan_layers, mt_key, target_shape, axis):
+    # One rule for the dynamic loader, to_maxtext and the conversion back to HF.
+    config = mock.Mock(scan_layers=scan_layers, param_scan_axis=1)
+    self.assertEqual(tensor_handling.single_stack_axis(mt_key, config, target_shape), axis)
+
   def test_get_hf_loading_function_case_4_multi_axis(self):
     # Tests Case 4, line 190, 73, and gets loader for multi-axis stacked
     class MockConfig:

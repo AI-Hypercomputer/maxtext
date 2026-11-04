@@ -93,7 +93,6 @@ storage = gcs_storage()
 
 HF_MODEL_CONFIGS = hf_model_configs.HF_MODEL_CONFIGS
 get_hf_loading_function = tensor_handling.get_hf_loading_function
-_VARIABLE_COLLECTIONS = tensor_handling.VARIABLE_COLLECTIONS
 
 
 def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
@@ -253,9 +252,8 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
     candidates = [mt_name, f"params.{mt_name}", mt_key.replace("-", ".")]
     # A key of another variable collection (DeepSeek `MoEBiasVar-...`, `Tid2EidVar-...`) names a
     # leaf that the weights state holds without the collection.
-    collection, _, rest = mt_key.partition("-")
-    if collection in _VARIABLE_COLLECTIONS:
-      candidates.append(rest.replace("-", "."))
+    if tensor_handling.is_variable_collection_key(mt_key):
+      candidates.append(mt_key.partition("-")[2].replace("-", "."))
     return next((name for name in candidates if name in flat_target), None)
 
   # DeepSeek-V3 maps its gate bias both as a weight (`params-...`) and in `MoEBiasVar`, and both keys
@@ -263,7 +261,7 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   collection_targets = {
       target_name(k)
       for k in param_map_mt_to_hf
-      if not isinstance(k, tuple) and k.partition("-")[0] in _VARIABLE_COLLECTIONS
+      if not isinstance(k, tuple) and tensor_handling.is_variable_collection_key(k)
   }
 
   for mt_key, hf_source in param_map_mt_to_hf.items():
@@ -275,7 +273,7 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
       continue
     if (
         not isinstance(mt_key, tuple)
-        and mt_key.partition("-")[0] not in _VARIABLE_COLLECTIONS
+        and not tensor_handling.is_variable_collection_key(mt_key)
         and check_names[0] in collection_targets
     ):
       for key in _hf_keys_in([hf_source]):

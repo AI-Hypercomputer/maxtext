@@ -33,6 +33,34 @@ _NON_ADDRESSABLE_ERROR = "non-addressable"
 VARIABLE_COLLECTIONS = ("MoEBiasVar", "Tid2EidVar")
 
 
+def is_variable_collection_key(mt_key) -> bool:
+  """Returns True if a MaxText key, or the first key of a composite key, names a leaf of `VARIABLE_COLLECTIONS`."""
+  key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
+  return key_str.partition("-")[0] in VARIABLE_COLLECTIONS
+
+
+def single_stack_axis(mt_key, config, target_shape) -> int:
+  """Returns the axis of a MaxText weight along which a 1D list of HF tensors is stacked.
+
+  With `scan_layers`, layers are stacked along `param_scan_axis`, or along axis 0 if the weight has no such
+  axis (e.g. the Llama 3.1 FP8 per-layer `kernel_scale`, shape `(num_layers,)`). Experts are stacked along
+  axis 0: those of an unscanned MoE layer, including one outside the scanned stack (e.g. the DeepSeek-V4
+  prefix layers `layers_0`..), and those of `VARIABLE_COLLECTIONS`.
+
+  Args:
+    mt_key: The MaxText key, or a tuple of keys for a composite key.
+    config: The MaxText config.
+    target_shape: The shape of the stacked MaxText weight.
+  """
+  key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
+  is_unscanned_moe = "MoeBlock" in key_str and not any(
+      s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
+  )
+  if not config.scan_layers or is_unscanned_moe or is_variable_collection_key(mt_key):
+    return 0
+  return config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
+
+
 def apply_hook_fns(weight, target_shape, hook_fns):
   """Apply hook functions, essential for to_maxtext and to_huggingface"""
   # If hook is unsepecified, use identity
@@ -305,22 +333,7 @@ def _build_single_axis_stacked_tensor(
     target_sharding = None
     target_dtype = target_leaf.dtype if hasattr(target_leaf, "dtype") else np.float32
 
-  # Same rule as to_maxtext: with scan_layers, an MoE layer outside the scanned stack (e.g. the DeepSeek-V4
-  # prefix layers `layers_0`..) and the MoE bias and tid2eid collections still stack experts along axis 0.
-  key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
-  is_var_collection = any(collection in key_str for collection in VARIABLE_COLLECTIONS)
-  is_unscanned_moe = "MoeBlock" in key_str and not any(
-      s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
-  )
-  if config.scan_layers and not (is_var_collection or is_unscanned_moe):
-    # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
-    # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
-    # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
-    # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
-    axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
-  else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
-    axis_to_stack = 0
+  axis_to_stack = single_stack_axis(mt_key, config, target_shape)
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
@@ -368,13 +381,13 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str), or a tuple of keys that the hook fuses into one leaf
     def _loader(getter, key, leaf, hook):
-      if hasattr(leaf, "sharding"):
-        array = _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf.shape, hook)
-        # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
-        # even when weight_dtype is float32.
-        return _device_put(array.astype(leaf.dtype), leaf.sharding)
-      else:
-        return _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf, hook)
+      has_sharding = hasattr(leaf, "sharding")
+      array = _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf.shape if has_sharding else leaf, hook)
+      if not has_sharding:
+        return array
+      # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
+      # even when weight_dtype is float32.
+      return _device_put(array.astype(leaf.dtype), leaf.sharding)
 
     return partial(
         _loader,
