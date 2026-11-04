@@ -136,6 +136,17 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `prefuse_moe_weights`: If enabled alongside `sparse_matmul=True`, fuses the two FFN1 grouped GEMMs (wi_0 and wi_1) into a single grouped GEMM call. Expert weights are stored in a concatenated `(num_experts, embed_dim, 2 * mlp_dim)` shape, so input activations are loaded from HBM once per forward pass instead of twice. Backend-agnostic (works with Megablox, JAX Ragged Dot, and Tokamax). When used with `attention=vllm_rpa`, the fused weight tensor is passed directly to the vLLM-TPU serving kernel without splitting.
 
+`moe_combine_kernel` (default: `"xla"`): Implementation of the MoE combine (unpermute + Top-K weighted sum of the expert outputs) in the sparse matmul path without expert parallelism. `"xla"` gathers the expert outputs back into token order and contracts them with the routing weights in an einsum. `"tc"` uses a fused TensorCore Pallas kernel (`kernels/moe_combine_tc.py`) with f32 accumulation (the same arithmetic as `float32_weight_sum=True`) that never materializes the `[tokens * top_k, emb]` unsorted copy and provides a custom VJP; it processes tokens in blocks and DMAs one contiguous row window per (block, expert) because the expert sort is stable. Requires `sparse_matmul=True`, `use_ring_of_experts=False` and `use_ragged_sort=False`; falls back to `"xla"` at runtime with expert parallelism, Llama4 routing or shapes the kernel does not support (see `kernel_supported`).
+
+`moe_combine_block_tokens` (default: `256`): Tokens per grid step for `moe_combine_kernel="tc"` (power of two `>= 128`). Automatically stepped down by powers of two (`>= 128`) to divide the token count and fit within `moe_tc_vmem_limit_mib`.
+
+`moe_permute_kernel` (default: `"xla"`): Implementation of the MoE token permute (the gather of the `[tokens, emb]` activations into expert-sorted `[tokens * top_k, emb]` order) when `moe_use_direct_token_gather=True`. `"xla"` uses an XLA gather. `"tc"` uses the fused TensorCore Pallas kernel `permute` from `kernels/moe_combine_tc.py`, which shares the combine kernel's block / row-window DMA scheme: the forward is a one-hot MXU selection per token block and the backward (`dx[t]` = sum of the `top_k` rows of token `t`) is the combine forward with unit weights. Requires `moe_use_direct_token_gather=True` and `use_ring_of_experts=False`; falls back to `"xla"` at runtime with expert parallelism, quantized activations or unsupported shapes.
+
+`moe_permute_block_tokens` (default: `512`): Tokens per grid step for `moe_permute_kernel="tc"` (power of two `>= 128`). Automatically stepped down by powers of two (`>= 128`) to divide the token count and fit within `moe_tc_vmem_limit_mib`.
+
+`moe_tc_vmem_limit_mib` (default: `120`): Maximum per-kernel VMEM footprint in MiB (`>= 16`) for `moe_combine_kernel="tc"` and `moe_permute_kernel="tc"`. Block size is stepped down to fit within this limit; shapes that still exceed it fall back to `"xla"`.
+
+
 `use_batch_split_schedule` (experimental): If enabled, split batch into micro-batches to hide communications that yields performance benefits.
 
 #### TransformerEngine MoEBlock
