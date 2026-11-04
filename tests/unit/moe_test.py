@@ -37,6 +37,7 @@ from maxtext.configs import pyconfig
 from maxtext.configs import types as maxtext_types
 from maxtext.kernels.megablox import ops as mblx_ops
 from maxtext.layers import linears
+from maxtext.kernels import sort_activations
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
@@ -1182,6 +1183,28 @@ class RoutedMoeTest(parameterized.TestCase):
           self.assertIsNone(actual_value)
         else:
           np.testing.assert_array_equal(actual_value, expected_value)
+
+  @parameterized.parameters(2, 6, 8)
+  def test_sc_topk_gather_and_combine_match_reference(self, k):
+    """The SparseCore top-k ops (TensorCore fallback off-TPU) match the repeat-and-sort reference for any top-k."""
+    tokens = jax.random.normal(jax.random.PRNGKey(0), (16, 64), dtype=jnp.float32).astype(jnp.bfloat16)
+    experts = jax.random.randint(jax.random.PRNGKey(1), (16 * k,), 0, 4)
+    sort_indices = jnp.argsort(experts)
+    rows = jax.random.normal(jax.random.PRNGKey(2), (16 * k, 64), dtype=jnp.float32).astype(jnp.bfloat16)
+
+    def ref_gather(x):
+      return jnp.repeat(x, k, axis=0)[sort_indices]
+
+    def ref_combine(y):
+      unsorted = y[jnp.argsort(sort_indices)].astype(jnp.float32)
+      return jnp.sum(unsorted.reshape(-1, k, y.shape[1]), axis=1).astype(jnp.bfloat16)
+
+    np.testing.assert_array_equal(sort_activations.gather_topk_rows(tokens, sort_indices, k), ref_gather(tokens))
+    np.testing.assert_array_equal(sort_activations.unsort_and_sum(rows, sort_indices, k), ref_combine(rows))
+    cot = jax.random.normal(jax.random.PRNGKey(3), (16 * k, 64), dtype=jnp.float32)
+    grad = jax.grad(lambda x: jnp.sum(sort_activations.gather_topk_rows(x, sort_indices, k).astype(jnp.float32) * cot))
+    ref = jax.grad(lambda x: jnp.sum(ref_gather(x).astype(jnp.float32) * cot))
+    np.testing.assert_allclose(grad(tokens).astype(jnp.float32), ref(tokens).astype(jnp.float32), rtol=2e-2, atol=2e-2)
 
   def get_expected_output(self, rng, hidden_states, cfg, mesh):
     """Retrieve expected output from Routed Mixture of Experts."""
