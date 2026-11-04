@@ -230,6 +230,13 @@ class ProfilerType(str, Enum):
   NSYS = "nsys"
 
 
+class ElasticGlobalBatchSizeMode(str, Enum):
+  """Global batch size strategies across elastic slice resizes."""
+
+  SCALED = "scaled"
+  CONSTANT_PADDED = "constant_padded"
+
+
 # ----------------------------------------------------------------------------
 # Pydantic models for configuration
 # ----------------------------------------------------------------------------
@@ -3499,6 +3506,15 @@ class ElasticTraining(BaseModel):
       -1,
       description="The minimum number of slices to wait for before starting training. -1 means wait for all slices.",
   )
+  elastic_global_batch_size_mode: ElasticGlobalBatchSizeMode = Field(
+      ElasticGlobalBatchSizeMode.SCALED,
+      description=(
+          "How the global batch size behaves when some slices of the job are down. 'scaled' keeps"
+          " `per_device_batch_size` fixed so the global batch scales with the live slice count. 'constant_padded' keeps"
+          " the global batch size of all slices of the job by rounding up `per_device_batch_size` and padding the extra"
+          " rows with zero segmentation, which the loss masks out."
+      ),
+  )
 
 
 class GcpMonitoring(BaseModel):
@@ -4091,6 +4107,14 @@ class DerivedValues(BaseModel):
       None,
       description="The global batch size for the training dataloader, potentially scaled by `expansion_factor_real_data`.",
   )
+  logical_global_batch_size_to_train_on: None | int = Field(
+      None,
+      description="Unpadded global training batch size across all job devices in `constant_padded` elastic mode.",
+  )
+  logical_global_batch_size_to_load: None | int = Field(
+      None,
+      description="Unpadded global dataloader batch size across all job devices in `constant_padded` elastic mode.",
+  )
   global_batch_size_to_load_eval: None | int = Field(
       None,
       description="The global batch size for the evaluation dataloader, potentially scaled by `expansion_factor_real_data`.",
@@ -4302,6 +4326,20 @@ def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int],
   return [axis_map.get(axis, 1) for axis in mesh_axes]
 
 
+def _resolved_axis_product(
+    mesh_axes: list[str],
+    parallelism: list[int],
+    num_devices: int,
+    target_axes: tuple[str, ...] | list[str],
+) -> int:
+  """Combined size of `target_axes`, resolving a `-1` entry the way mesh creation will."""
+  specified = prod(size for size in parallelism if size != -1)
+  leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
+  sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
+  target_set = set(target_axes)
+  return prod(max(sizes.get(axis, 1), 1) for axis in mesh_axes if axis in target_set)
+
+
 def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
   """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
 
@@ -4310,10 +4348,7 @@ def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_device
   really get. A -1 that cannot be resolved here (an unknown device count, say) counts as 1;
   mesh creation raises on its own if it is still unresolvable there.
   """
-  specified = prod(size for size in parallelism if size != -1)
-  leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
-  sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
-  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
+  return _resolved_axis_product(mesh_axes, parallelism, num_devices, ("fsdp", "fsdp_transpose"))
 
 
 # ----------------------------------------------------------------------------
@@ -5140,7 +5175,7 @@ class MaxTextConfig(
 
     # If eval_per_device_batch_size is not set, it defaults to the training per_device_batch_size.
     if getattr(self, "eval_per_device_batch_size", 0.0) == 0.0:
-      self.eval_per_device_batch_size = self.per_device_batch_size
+      self.eval_per_device_batch_size = self.per_device_batch_size  # pylint: disable=access-member-before-definition
     # The mu_dtype for the AdamW optimizer defaults to the weight_dtype if not specified.
     if not self.mu_dtype:
       self.mu_dtype = self.weight_dtype
@@ -5297,6 +5332,98 @@ class MaxTextConfig(
       global_batch_to_load = int(micro_batch_to_load * grad_accum_steps)
       global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
       return global_batch_to_load, global_batch_to_train, micro_batch_to_train
+
+    # With `elastic_global_batch_size_mode='constant_padded'`, keep the logical global batch sized for all job devices
+    # and round `per_device_batch_size` up across live devices (preserving vocab-tiling and pipeline divisibility).
+    # pylint: disable=access-member-before-definition
+    eval_tracks_train_batch = self.eval_per_device_batch_size == self.per_device_batch_size
+    if (
+        self.elastic_enabled
+        and self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_PADDED
+        and self.per_device_batch_size >= 1.0
+        and float(self.per_device_batch_size).is_integer()
+    ):
+
+      def _devices_and_slices(get_devs):
+        try:
+          devs = [d for d in get_devs() if d is not None]
+          return len(devs), max(len({getattr(d, "slice_index", 0) for d in devs}), 1)
+        except (RuntimeError, IndexError):
+          return self.num_target_devices, max(self.num_slices, 1)
+
+      if self.internal_compile or self.compile_topology or self.subslice_shape:
+        job_devices, job_slices = self.num_target_devices, max(self.num_slices, 1)
+        live_slices = job_slices
+      else:
+        job_devices, job_slices = _devices_and_slices(jax.devices)
+        _, live_slices = _devices_and_slices(lambda: elastic_utils.live_devices(config=self))
+      if (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0:
+        raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
+      pipeline_microbatches, live_non_batch_devices = 0, 1
+      if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
+        num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
+        pipeline_microbatches = self.num_pipeline_microbatches
+        if pipeline_microbatches == -1:
+          pipeline_microbatches = 2 * num_stages if self.pipeline_delay_activation_forwarding else num_stages
+        batch_axes = axes_for_logical(self.logical_axis_rules, "activation_batch") or (
+            "data",
+            "fsdp",
+            "fsdp_transpose",
+            "expert",
+        )
+        alias = {"stage": "pipeline", "model": "tensor"}
+
+        def _axis_parallelism(prefix: str) -> list[int]:
+          axis_map = {"attn_dp": 1, "attn_dp_expert": 1, "dcp": 1, "pcp": 1}
+          for axis in self.mesh_axes:
+            attr = f"{prefix}_{alias.get(axis, axis)}_parallelism"
+            if hasattr(self, attr):
+              axis_map[axis] = getattr(self, attr)
+          return _resolve_parallelism(getattr(self, f"{prefix}_parallelism"), axis_map, self.mesh_axes)
+
+        ici_par, dcn_par = _axis_parallelism("ici"), _axis_parallelism("dcn")
+
+        def _non_batch_devices(num_devices: int, num_slices: int) -> int:
+          slices = num_slices if num_slices > 1 and num_devices % num_slices == 0 else 1
+          batch_devs = _resolved_axis_product(self.mesh_axes, ici_par, max(num_devices // slices, 1), batch_axes)
+          if slices > 1:
+            batch_devs *= _resolved_axis_product(self.mesh_axes, dcn_par, slices, batch_axes)
+          return max(num_devices // max(batch_devs, 1), 1)
+
+        job_non_batch_devices = _non_batch_devices(job_devices, job_slices)
+        if (
+            pipeline_microbatches > 0
+            and job_devices > 0
+            and (job_non_batch_devices * int(self.per_device_batch_size)) % pipeline_microbatches != 0
+        ):
+          raise ValueError(
+              f"Pipeline batch size ({int(job_devices * self.per_device_batch_size)}) on {job_devices} job devices "
+              f"with {pipeline_microbatches} microbatches must be divisible by the activation_batch sharding size "
+              f"({max(job_devices // job_non_batch_devices, 1)})."
+          )
+        if self.num_target_devices > 0:
+          live_non_batch_devices = _non_batch_devices(self.num_target_devices, live_slices)
+      (
+          self.logical_global_batch_size_to_load,
+          self.logical_global_batch_size_to_train_on,
+          _,
+      ) = calculate_global_batch_sizes(
+          self.per_device_batch_size, self.expansion_factor_real_data, job_devices, self.gradient_accumulation_steps
+      )
+      # No slice may be live yet in the first `initialize`, before `elastic_retry` waits for them.
+      if job_devices > self.num_target_devices > 0:
+        vocab_step = self.num_vocab_tiling // math.gcd(self.max_target_length, self.num_vocab_tiling)
+        pipeline_step = (
+            pipeline_microbatches // math.gcd(live_non_batch_devices, pipeline_microbatches)
+            if pipeline_microbatches > 0
+            else 1
+        )
+        step = math.lcm(vocab_step, pipeline_step)
+        scaled = math.ceil(self.per_device_batch_size * job_devices / self.num_target_devices)
+        self.per_device_batch_size = float(((scaled + step - 1) // step) * step)
+        if pipeline_microbatches > 0 and eval_tracks_train_batch:
+          self.eval_per_device_batch_size = self.per_device_batch_size
+    # pylint: enable=access-member-before-definition
 
     # Calculate final training batch sizes.
     (
@@ -5572,6 +5699,40 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_enabled and self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_PADDED:
+      uses_elastic_iterator = self.dataset_type == DatasetType.GRAIN and self.grain_use_elastic_iterator
+      for invalid, reason in (
+          (
+              self.per_device_batch_size < 1.0 or not float(self.per_device_batch_size).is_integer(),
+              f"requires an integer `per_device_batch_size >= 1`, got {self.per_device_batch_size}",
+          ),
+          (
+              self.dataset_type != DatasetType.SYNTHETIC and not uses_elastic_iterator,
+              "requires synthetic data, or grain's `ElasticIterator` (`grain_use_elastic_iterator=True`)",
+          ),
+          (bool(self.subslice_shape), "is not supported with `subslice_shape`"),
+          (
+              self.expansion_factor_real_data > 0 and self.expansion_factor_real_data != 1,
+              f"requires `expansion_factor_real_data` to be -1 or 1, got {self.expansion_factor_real_data}",
+          ),
+          (
+              self.using_pipeline_parallelism and self.eval_interval > 0 and not eval_tracks_train_batch,
+              "requires `eval_per_device_batch_size` to match `per_device_batch_size` when pipeline parallelism and"
+              " evaluation are enabled",
+          ),
+          (self.enable_rampup_batch_size, "is not supported with `enable_rampup_batch_size=True`"),
+          (self.enable_diloco, "is not supported with DiLoCo (`enable_diloco=True`)"),
+          (self.use_dpo, "is not supported with DPO (`use_dpo=True`)"),
+          (self.num_experts > 1, "is not supported with MoE (`num_experts > 1`)"),
+          (self.indexer_loss_scaling_factor > 0.0, "is not supported with `indexer_loss_scaling_factor > 0`"),
+          (self.use_qk_clip, "is not supported with QK-Clip (`use_qk_clip=True`)"),
+          (
+              self.use_tunix_gradient_accumulation and self.gradient_accumulation_steps > 1,
+              "is not supported with `use_tunix_gradient_accumulation=True` when `gradient_accumulation_steps > 1`",
+          ),
+      ):
+        if invalid:
+          raise ValueError(f"`elastic_global_batch_size_mode='constant_padded'` {reason}.")
     if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."

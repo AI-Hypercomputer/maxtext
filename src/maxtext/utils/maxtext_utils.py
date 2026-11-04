@@ -280,6 +280,10 @@ def load_compiled(config, partial_train, state, execution_devices, data_sharding
 
 def calculate_tokens_training_per_device(config):
   """Calculate training Tokens per device"""
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  num_devices = getattr(config, "num_target_devices", None)
+  if isinstance(logical_batch, int) and isinstance(num_devices, int) and num_devices > 0:
+    return config.max_target_length * logical_batch / num_devices
   return config.max_target_length * config.per_device_batch_size * config.gradient_accumulation_steps
 
 

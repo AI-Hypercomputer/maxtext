@@ -1436,6 +1436,159 @@ class ConfigTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "Custom mesh config file not found"):
         types.MaxTextConfig._load_mesh_config_from_yaml("nonexistent-rule")
 
+  def _elastic_config(self, *extra_argv, num_live_devices=16):
+    """Initializes an elastic config on five 4-device slices, by default with one of them down."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "enable_single_controller=true"]
+    all_devices = [unittest.mock.MagicMock(slice_index=i // 4) for i in range(20)]
+    with (
+        unittest.mock.patch("jax.devices", return_value=all_devices),
+        unittest.mock.patch.object(types.elastic_utils, "ensure_elastic_manager_initialized"),
+        unittest.mock.patch.object(types.elastic_utils, "live_devices", return_value=all_devices[:num_live_devices]),
+    ):
+      return pyconfig.initialize(argv + ["elastic_enabled=true", *extra_argv])
+
+  def test_elastic_constant_padded_mode_scaling_and_rounding(self):
+    for pdbs, logical, physical in ((5, 100, 112), (4, 80, 80)):
+      with self.subTest(per_device_batch_size=pdbs):
+        cfg = self._elastic_config("elastic_global_batch_size_mode=constant_padded", f"per_device_batch_size={pdbs}")
+        self.assertEqual(
+            (
+                cfg.logical_global_batch_size_to_load,
+                cfg.logical_global_batch_size_to_train_on,
+                cfg.global_batch_size_to_load,
+                cfg.global_batch_size_to_train_on,
+                cfg.eval_per_device_batch_size,
+                cfg.global_batch_size_to_load_eval,
+            ),
+            (logical, logical, physical, physical, pdbs, 16 * pdbs),
+        )
+
+    # Plain ceil(3 * 20 / 16) = 4 fails (4 * 16) % 6 == 0; vocab step=3 rounds per_device_batch_size up to 6.
+    vocab_cfg = self._elastic_config(
+        "elastic_global_batch_size_mode=constant_padded",
+        "per_device_batch_size=3",
+        "max_target_length=16",
+        "num_vocab_tiling=6",
+    )
+    self.assertEqual((vocab_cfg.logical_global_batch_size_to_train_on, vocab_cfg.per_device_batch_size), (60, 6.0))
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "divisible by the number of vocab tiles"):
+      self._elastic_config(
+          "elastic_global_batch_size_mode=constant_padded",
+          "per_device_batch_size=5",
+          "max_target_length=16",
+          "num_vocab_tiling=6",
+      )
+
+    # Pipeline step=2 from non_batch_devices=4 rounds 5 -> 6 on 16 live devices (stage=4, data=4) and 7 -> 8 on 12 live
+    # devices, while keeping eval_per_device_batch_size synchronized.
+    pp_flags = (
+        "elastic_global_batch_size_mode=constant_padded",
+        "per_device_batch_size=4",
+        "ici_pipeline_parallelism=4",
+        "pipeline_delay_activation_forwarding=true",
+        "base_num_decoder_layers=8",
+        "eval_interval=5",
+    )
+    for live_devs, expected_pdbs in ((16, 6.0), (12, 8.0)):
+      pp_cfg = self._elastic_config(*pp_flags, num_live_devices=live_devs)
+      self.assertEqual(
+          (
+              pp_cfg.logical_global_batch_size_to_train_on,
+              pp_cfg.per_device_batch_size,
+              pp_cfg.eval_per_device_batch_size,
+              pp_cfg.micro_batch_size_to_train_on,
+              pp_cfg.micro_batch_size_to_eval_on,
+          ),
+          (80, expected_pdbs, expected_pdbs, 96, 96),
+      )
+
+    # 20 job devices (stage=4, data=5) with per_device_batch_size=1 and 5 microbatches cannot shard over data=5.
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError), "must be divisible by the activation_batch sharding size"
+    ):
+      self._elastic_config(
+          "elastic_global_batch_size_mode=constant_padded",
+          "per_device_batch_size=1",
+          "ici_pipeline_parallelism=4",
+          "num_pipeline_microbatches=5",
+          "base_num_decoder_layers=8",
+      )
+
+  def test_elastic_constant_padded_mode_default_no_live_slice_and_aot_compile(self):
+    default_cfg = self._elastic_config("per_device_batch_size=5")
+    self.assertEqual(
+        (
+            default_cfg.elastic_global_batch_size_mode,
+            default_cfg.logical_global_batch_size_to_load,
+            default_cfg.global_batch_size_to_load,
+        ),
+        (types.ElasticGlobalBatchSizeMode.SCALED, None, 80),
+    )
+    with self.assertRaises(pydantic.ValidationError):
+      self._elastic_config("elastic_global_batch_size_mode=invalid_mode")
+
+    no_live = self._elastic_config(
+        "elastic_global_batch_size_mode=constant_padded", "per_device_batch_size=5", num_live_devices=0
+    )
+    self.assertEqual((no_live.logical_global_batch_size_to_load, no_live.per_device_batch_size), (100, 5))
+
+    for aot_flags in (
+        ("compile_topology=v5e-32", "compile_topology_num_slices=2"),
+        ("internal_compile=true", "internal_compile_num_devices=64"),
+    ):
+      aot = self._elastic_config("elastic_global_batch_size_mode=constant_padded", "per_device_batch_size=5", *aot_flags)
+      self.assertEqual(
+          (aot.num_target_devices, aot.logical_global_batch_size_to_load, aot.global_batch_size_to_load),
+          (64, 320, 320),
+      )
+
+  def test_elastic_constant_padded_mode_rejects_unsupported_configs(self):
+    keep = ("elastic_backup_kind=checkpoint", "elastic_global_batch_size_mode=constant_padded")
+    for extra, error_regex in (
+        ("per_device_batch_size=0.5", "requires an integer `per_device_batch_size >= 1`"),
+        ("per_device_batch_size=1.5", "requires an integer `per_device_batch_size >= 1`"),
+        ("dataset_type=tfds", "requires synthetic data"),
+        ("dataset_type=grain grain_train_files=/x/*", "requires synthetic data"),
+        ("subslice_shape=2,2", "not supported with `subslice_shape`"),
+        ("expansion_factor_real_data=2", "requires `expansion_factor_real_data` to be -1 or 1"),
+        ("expansion_factor_real_data=0.5", "requires `expansion_factor_real_data` to be -1 or 1"),
+        (
+            "ici_pipeline_parallelism=4 base_num_decoder_layers=8 eval_interval=5"
+            " per_device_batch_size=4 eval_per_device_batch_size=6",
+            "requires `eval_per_device_batch_size` to match `per_device_batch_size`",
+        ),
+        (
+            "enable_rampup_batch_size=true per_device_batch_size=4 per_device_batch_size_start=1"
+            " per_device_batch_size_increment=1 global_rampup_samples=100",
+            "not supported with `enable_rampup_batch_size=True`",
+        ),
+        ("enable_diloco=true", "not supported with DiLoCo"),
+        ("use_dpo=true packing=false", "not supported with DPO"),
+        ("num_experts=4", "not supported with MoE"),
+        (
+            "use_indexer=true attention_type=mla q_lora_rank=1536 attention=dot_product"
+            " indexer_topk=8 max_target_length=64 indexer_loss_scaling_factor=0.1",
+            "not supported with `indexer_loss_scaling_factor > 0`",
+        ),
+        ("use_qk_clip=true attention_type=mla decoder_block=deepseek", "not supported with QK-Clip"),
+        (
+            "use_tunix_gradient_accumulation=true gradient_accumulation_steps=2",
+            "not supported with `use_tunix_gradient_accumulation=True` when `gradient_accumulation_steps > 1`",
+        ),
+    ):
+      with self.subTest(extra=extra), self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+        self._elastic_config(*keep, *extra.split())
+
+    for extra in (
+        "use_tunix_gradient_accumulation=true gradient_accumulation_steps=1 per_device_batch_size=5",
+        "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
+        " packing=false colocated_python_data_input=false per_device_batch_size=5",
+        "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
+        " packing=false colocated_python_data_input=true per_device_batch_size=5",
+    ):
+      cfg = self._elastic_config(*keep, *extra.split())
+      self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
+
 
 class MMapDatasetConfigTest(absltest.TestCase):
   """Tests for mmap-specific configuration defaults and accepted values."""

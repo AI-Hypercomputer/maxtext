@@ -1749,3 +1749,7 @@ elastic_snapshot_interval: 10
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+# How the global batch size behaves when training on fewer than all slices of the job: "scaled" keeps
+# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_padded" keeps the global
+# batch size of all slices by rounding up per_device_batch_size and padding the extra rows with zero segmentation.
+elastic_global_batch_size_mode: "scaled"

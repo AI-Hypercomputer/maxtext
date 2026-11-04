@@ -14,8 +14,10 @@
 
 """Tests for grain data processing."""
 
+import functools
+import os
+import subprocess
 import sys
-import os.path
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -23,7 +25,10 @@ from unittest import mock
 import json
 import numpy as np
 
+from absl.testing import absltest
 import jax
+import jax.numpy as jnp
+import grain.python as grain
 import pytest
 from unittest.mock import patch
 from jax.sharding import Mesh
@@ -33,9 +38,12 @@ from maxtext.configs import pyconfig
 from maxtext.input_pipeline import grain_data_processing
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import multihost_dataloading
+from maxtext.utils import elastic_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
+from tests.utils.test_helpers import get_test_local_output_directory
 
 
 class TestTfdsTfrecordPathFallback:
@@ -57,6 +65,172 @@ class TestTfdsTfrecordPathFallback:
 
     with pytest.raises(FileNotFoundError, match=r"No files found matching pattern: .*\*-train\.tfrecord-\*"):
       grain_data_processing.find_data_files(pattern)
+
+
+class MakeElasticIteratorLogicalBatchSizeTest(unittest.TestCase):
+  """Tests logical-to-physical batch padding and state checkpointing in `_make_elastic_iterator`."""
+
+  def _dataset(self):
+    return (
+        grain.MapDataset.range(1000)
+        .map(lambda i: {"inputs": np.full((4,), i + 1, np.int32), "inputs_segmentation": np.ones((4,), np.int32)})
+        .repeat(None)
+    )
+
+  @staticmethod
+  def _cfg(physical, logical):
+    return SimpleNamespace(
+        global_batch_size_to_load=physical,
+        logical_global_batch_size_to_load=logical,
+        grain_num_threads=1,
+        grain_prefetch_buffer_size=1,
+    )
+
+  @staticmethod
+  def _read_step(shards):
+    """Reads one batch from each shard and separates real from zero-segmentation rows."""
+    batches = [next(it) for it in shards]
+    rows = [(int(r[0]), bool(np.any(s != 0))) for b in batches for r, s in zip(b["inputs"], b["inputs_segmentation"])]
+    return batches, sorted(val for val, is_real in rows if is_real), sum(not is_real for _, is_real in rows)
+
+  def test_non_divisible_colocated_shards_and_resize_state_round_trip(self):
+    # Simulates 4 x v5e-32 (32 hosts, L=P=128) <-> 3 x v5e-32 (24 hosts, L=128, P=192; 128 % 24 == 8 != 0).
+    def make_shards(physical, count):
+      make_it = functools.partial(
+          grain_data_processing._make_elastic_iterator,  # pylint: disable=protected-access
+          self._dataset(),
+          self._cfg(physical, 128),
+          lambda dataset: dataset,
+          shard_count=count,
+      )
+      return [iter(make_it(shard_index=h)) for h in range(count)]
+
+    shards_24, shards_32 = make_shards(192, 24), make_shards(128, 32)
+    self.addCleanup(lambda: [it.close() for it in shards_24 + shards_32])
+
+    for step in range(2):
+      batches, real_ids, zero_rows = self._read_step(shards_24)
+      self.assertTrue(all(b["inputs"].shape == (8, 4) for b in batches))
+      self.assertEqual((real_ids, zero_rows), (list(range(step * 128 + 1, (step + 1) * 128 + 1)), 64))
+      self.assertTrue(all(it.get_state() == {"global_next_index": (step + 1) * 128} for it in shards_24))
+
+    # Scale up to 32 hosts (plain `ElasticIterator` fast path), then scale down to 24 hosts + non-multiple offset.
+    for it in shards_32:
+      it.set_state(shards_24[0].get_state())
+    _, real_ids_32, zero_rows_32 = self._read_step(shards_32)
+    self.assertEqual((real_ids_32, zero_rows_32), (list(range(257, 385)), 0))
+    self.assertEqual(shards_32[0].get_state(), {"global_next_index": 384})
+
+    for start_index in (384, 10):
+      for it in shards_24:
+        it.set_state({"global_next_index": start_index})
+      _, real_ids, zero_rows = self._read_step(shards_24)
+      self.assertEqual((real_ids, zero_rows), (list(range(start_index + 1, start_index + 129)), 64))
+      self.assertEqual(shards_24[0].get_state(), {"global_next_index": start_index + 128})
+
+  def test_remote_iterator_with_non_divisible_colocated_shards(self):
+    preprocessing_fn = functools.partial(
+        grain_data_processing._make_elastic_iterator,  # pylint: disable=protected-access
+        config=self._cfg(18, 16),
+        preprocessing_fn=lambda dataset: dataset,
+    )
+    devices = [mock.Mock(process_index=p) for p in (1, 2, 3, 1, 2, 3)]
+    remote_iterators = []
+    for local_process in (1, 2, 3):
+      remote_it = multihost_dataloading.RemoteIterator(
+          get_ds_fn=lambda dataloading_host_index, dataloading_host_count: self._dataset(),
+          preprocessing_fn=preprocessing_fn,
+          global_shape=(18, 4),
+          checkpoint_path="",
+          elastic=True,
+      )
+      sharding = SimpleNamespace(
+          device_set=set(devices), addressable_devices={d for d in devices if d.process_index == local_process}
+      )
+      remote_it.build(SimpleNamespace(sharding=sharding))
+      remote_iterators.append(remote_it)
+    self.addCleanup(lambda: [it.close() for it in remote_iterators])
+
+    batches, real_ids, zero_rows = self._read_step([it.iterator for it in remote_iterators])
+    self.assertTrue(all(b["inputs"].shape == (6, 4) for b in batches))
+    self.assertEqual((real_ids, zero_rows), (list(range(1, 17)), 2))
+    self.assertTrue(all(it.iterator.get_state() == {"global_next_index": 16} for it in remote_iterators))
+
+  def test_make_grain_train_iterator_end_to_end_constant_padded_mode(self):
+    live_devices = list(jax.devices())
+    num_live = len(live_devices)
+    if num_live < 2:
+      if not sys.executable:
+        self.skipTest("Needs >= 2 devices.")
+      self.assertNotEqual(os.environ.get("_MAXTEXT_CONSTANT_PADDED_SUBPROC"), "1")
+      env = {
+          **os.environ,
+          "_MAXTEXT_CONSTANT_PADDED_SUBPROC": "1",
+          "JAX_PLATFORMS": "cpu",
+          "XLA_FLAGS": f"{os.environ.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count=2".strip(),
+          "PYTHONPATH": os.pathsep.join(filter(None, [*sys.path, os.environ.get("PYTHONPATH", "")])),
+      }
+      cmd = [sys.executable, os.path.abspath(__file__), f"{type(self).__name__}.{self._testMethodName}"]
+      res = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+      self.assertEqual(res.returncode, 0, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
+      return
+
+    ar_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-00000-of-00008",
+    )
+    all_devices = live_devices + [mock.MagicMock(slice_index=99)]
+    with (
+        mock.patch("jax.devices", return_value=all_devices),
+        mock.patch.object(elastic_utils, "ensure_elastic_manager_initialized"),
+        mock.patch.object(elastic_utils, "live_devices", return_value=live_devices),
+    ):
+      config = pyconfig.initialize(
+          [sys.argv[0], get_test_config_path()],
+          run_name="test_constant_padded_grain",
+          base_output_directory=get_test_local_output_directory(),
+          enable_checkpointing=False,
+          enable_single_controller=True,
+          elastic_enabled=True,
+          elastic_global_batch_size_mode="constant_padded",
+          per_device_batch_size=1.0,
+          dataset_type="grain",
+          grain_file_type="arrayrecord",
+          grain_train_files=ar_path,
+          grain_use_elastic_iterator=True,
+          grain_worker_count=0,
+          enable_data_shuffling=False,
+          packing=False,
+          tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+          max_target_length=16,
+          mesh_axes=["data"],
+          logical_axis_rules=[["batch", "data"]],
+          data_sharding=["data"],
+      )
+
+    self.assertGreater(config.global_batch_size_to_load, config.logical_global_batch_size_to_load)
+    mesh = Mesh(mesh_utils.create_device_mesh((num_live,), live_devices), config.mesh_axes)
+    process_indices = input_pipeline_interface.get_process_loading_real_data(
+        config.data_sharding,
+        config.global_batch_size_to_load,
+        config.global_batch_size_to_train_on,
+        config.max_target_length,
+        mesh,
+    )
+    with mock.patch.object(elastic_utils, "live_devices", return_value=live_devices):
+      train_iter = grain_data_processing.make_grain_train_iterator(config, mesh, process_indices)
+    self.addCleanup(train_iter.close)
+
+    batch = next(train_iter)
+    self.assertEqual(batch["inputs"].shape, (config.global_batch_size_to_load, config.max_target_length))
+    in_zero = jnp.all(batch["inputs_segmentation"] == 0, axis=-1)
+    tgt_zero = jnp.all(batch["targets_segmentation"] == 0, axis=-1)
+    self.assertEqual(int(jnp.sum(~in_zero)), config.logical_global_batch_size_to_load)
+    self.assertEqual(int(jnp.sum(in_zero)), config.global_batch_size_to_load - config.logical_global_batch_size_to_load)
+    self.assertTrue(bool(jnp.array_equal(in_zero, tgt_zero)))
+    self.assertEqual(
+        train_iter.local_iterator.get_state(), {"global_next_index": config.logical_global_batch_size_to_load}
+    )
 
 
 class GrainBaseProcessingTest:
@@ -703,4 +877,4 @@ class GrainSftPadIdTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

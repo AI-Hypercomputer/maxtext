@@ -1599,7 +1599,8 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     metric_logger_instance.flush_metrics_and_cleanup()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
-      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      train_batch_size = config.logical_global_batch_size_to_train_on or config.global_batch_size_to_train_on
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * train_batch_size
       # Only reached when eval never hit target_eval_loss; a converged run already
       # logged RUN_STOP with status "success" from eval_stop.
       mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])

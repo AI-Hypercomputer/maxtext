@@ -17,6 +17,7 @@
 import math
 import glob
 import re
+import sys
 from pathlib import Path
 import functools
 import ml_collections
@@ -24,6 +25,7 @@ from concurrent import futures
 import json
 
 import jax
+import numpy as np
 
 import grain.python as grain
 from grain.experimental import ElasticIterator
@@ -753,24 +755,79 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
-def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
-  """Applies preprocessing_fn then wraps the result with ElasticIterator.
+class _PaddedBatchMapDataset(grain.MapDataset):
+  """Pads each `logical_batch_size` step with zero-filled elements up to `physical_batch_size`."""
 
-  When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
-  """
+  _MUTATES_ELEMENT_SPEC = False
+
+  def __init__(self, parent: grain.MapDataset, logical_batch_size: int, physical_batch_size: int):
+    super().__init__(parent)
+    self._logical_batch_size = logical_batch_size
+    self._physical_batch_size = physical_batch_size
+    self.offset = 0
+    self._pad = None
+
+  def __len__(self) -> int:
+    parent_steps = max(0, (len(self._parent) - self.offset) // self._logical_batch_size)
+    return min(parent_steps, sys.maxsize // self._physical_batch_size) * self._physical_batch_size
+
+  def __getitem__(self, index):
+    if isinstance(index, slice):
+      return self.slice(index)
+    step, rem = divmod(index, self._physical_batch_size)
+    if rem < self._logical_batch_size:
+      return self._parent[self.offset + step * self._logical_batch_size + rem]
+    if self._pad is None:
+      self._pad = jax.tree.map(np.zeros_like, self._parent[0])
+    return jax.tree.map(np.copy, self._pad)
+
+
+class _PaddedElasticIterator(ElasticIterator):
+  """`ElasticIterator` that pads `logical_batch_size` steps up to `physical_batch_size`."""
+
+  def __init__(self, ds: grain.MapDataset, *, logical_batch_size: int, physical_batch_size: int, **kwargs):
+    self._logical_batch_size = logical_batch_size
+    self._padded_ds = _PaddedBatchMapDataset(ds, logical_batch_size, physical_batch_size)
+    super().__init__(self._padded_ds, global_batch_size=physical_batch_size, **kwargs)
+
+  def __iter__(self):  # pylint: disable=non-iterator-returned
+    # OSS Grain 0.2.x returns `_default_iterator` from `__iter__`, which would bypass `get_state`/`set_state`.
+    return self
+
+  def close(self) -> None:
+    for attr in ("base_iterator", "_default_iterator"):
+      if (it := self.__dict__.pop(attr, None)) is not None:
+        it.close()
+
+  def get_state(self) -> dict[str, int]:
+    steps = super().get_state()["global_next_index"] // self._global_batch_size
+    return {"global_next_index": self._padded_ds.offset + steps * self._logical_batch_size}
+
+  def set_state(self, state: dict[str, int]) -> None:
+    steps, self._padded_ds.offset = divmod(state["global_next_index"], self._logical_batch_size)
+    super().set_state({"global_next_index": steps * self._global_batch_size})
+
+
+def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
+  """Applies `preprocessing_fn` and wraps the result in `ElasticIterator` (padding to physical batch if needed)."""
   ds = preprocessing_fn(dataset=dataset)
-  return ElasticIterator(
-      ds,
-      global_batch_size=config.global_batch_size_to_load,
-      shard_options=grain.ShardOptions(
+  physical_batch_size = config.global_batch_size_to_load
+  logical_batch_size = config.logical_global_batch_size_to_load or physical_batch_size
+  common_kwargs = {
+      "shard_options": grain.ShardOptions(
           shard_index=shard_index if shard_index is not None else jax.process_index(),
           shard_count=shard_count if shard_count is not None else jax.process_count(),
       ),
-      read_options=grain.ReadOptions(
+      "read_options": grain.ReadOptions(
           num_threads=config.grain_num_threads,
           prefetch_buffer_size=config.grain_prefetch_buffer_size,
       ),
-      multiprocessing_options=mp_opts,
+      "multiprocessing_options": mp_opts,
+  }
+  if logical_batch_size == physical_batch_size:
+    return ElasticIterator(ds, global_batch_size=physical_batch_size, **common_kwargs)
+  return _PaddedElasticIterator(
+      ds, logical_batch_size=logical_batch_size, physical_batch_size=physical_batch_size, **common_kwargs
   )
 
 
