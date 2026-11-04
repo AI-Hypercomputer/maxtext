@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests for check_vma in megablox MoE training."""
+"""Integration tests for check_vma in gmm_v2 MoE training."""
 
 import os
 
@@ -44,7 +44,6 @@ _BASE_ARGS = (
     "num_experts=16",
     "override_model_config=True",
     "sparse_matmul=True",
-    "megablox=True",
     "use_ring_of_experts=false",
     "use_random_routing=false",
     "per_device_batch_size=4",
@@ -59,7 +58,7 @@ _BASE_ARGS = (
 
 @pytest.mark.tpu_backend
 class CheckVmaTest(absltest.TestCase):
-  """Tests that megablox MoE compiles under different check_vma / shard_mode settings."""
+  """Tests that gmm_v2 MoE compiles under different check_vma / shard_mode settings."""
 
   def test_check_vma(self):
     """check_vma=True with fsdp and expert parallelism."""
@@ -127,19 +126,34 @@ class CheckVmaTest(absltest.TestCase):
           )
       )
 
-  def test_check_vma_error_tokamax_gmm(self):
-    """check_vma=True must raise ValueError when use_tokamax_gmm=True."""
+  def test_check_vma_error_quantization(self):
+    """check_vma=True must raise ValueError with a quantized gmm."""
     with self.assertRaises(ValueError):
       train_compile_main(
           _BASE_ARGS
           + (
-              f"compiled_trainstep_file={os.path.join(gettempdir(), 'check_vma_tokamax.pickle')}",
+              f"compiled_trainstep_file={os.path.join(gettempdir(), 'check_vma_quantization.pickle')}",
               "check_vma=True",
               "ici_fsdp_parallelism=4",
               "ici_expert_parallelism=-1",
-              "use_tokamax_gmm=True",
+              "quantization=fp8_full",
+              "use_qwix_quantization=True",
           )
       )
+
+  def test_check_vma_accumulate_wi_dlhs(self):
+    """check_vma=True with gmm_v2 partial_sum (moe_accumulate_wi_dlhs)."""
+    temp_dir = gettempdir()
+    train_compile_main(
+        _BASE_ARGS
+        + (
+            f"compiled_trainstep_file={os.path.join(temp_dir, 'check_vma_accumulate_wi_dlhs.pickle')}",
+            "check_vma=True",
+            "ici_fsdp_parallelism=4",
+            "ici_expert_parallelism=-1",
+            "moe_accumulate_wi_dlhs=True",
+        )
+    )
 
   def test_explicit_shard_mode(self):
     """shard_mode=explicit should compile correctly without check_vma (check_vma not supported here)."""

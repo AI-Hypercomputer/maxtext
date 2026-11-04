@@ -803,6 +803,7 @@ def validate_tgmm_inputs(
         "precision",
         "preferred_element_type",
         "acc_dtype",
+        "out_manual_axis_type",
     ],
 )
 def tgmm_v2(
@@ -819,6 +820,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    out_manual_axis_type: jax.sharding.ManualAxisType | None = None,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -839,6 +841,8 @@ def tgmm_v2(
     precision: Unused. Exists for compatibility reasons.
     preferred_element_type: Optional jnp.dtype for the output matrix.
     acc_dtype: Optional jnp.dtype for the accumulator.
+    out_manual_axis_type: Optional manual axis type (e.g. varying or unreduced
+      axes) of the output inside a `shard_map` with check_vma=True.
 
   Returns:
     The result of the transposed grouped matrix multiplication, with shape
@@ -881,7 +885,9 @@ def tgmm_v2(
   # clips the last, partial k-tile. Padding to a tile_k multiple would make the final [:, :size_k] slice copy all of
   # drhs whenever tile_k doesn't divide size_k.
   aligned_k = gmm_v2.align_to(dims.size_k, pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype))
-  out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
+  out_init = jax.ShapeDtypeStruct(
+      (num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype, manual_axis_type=out_manual_axis_type
+  )
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
       # acc_ref
@@ -896,7 +902,7 @@ def tgmm_v2(
   # Prepare zero initializing the drhs[i, :, :] where the group_size[i] is 0.
   out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
   tile_zero_k = target_zero_ref_bytes // num_lanes // out_bytes
-  tile_zero_k = min(tile_zero_k, dims.size_k)
+  tile_zero_k = min(tile_zero_k, aligned_k)
   size_out_sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
   tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
   assert tile_zero_k > 0

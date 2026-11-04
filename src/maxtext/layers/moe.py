@@ -65,7 +65,6 @@ import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
-import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -271,6 +270,49 @@ def get_batchsplit_init_kernel_axes():
       ("expert_only", "embed_moe", None),
       ("expert_only", None, "embed_moe"),
   )
+
+
+def get_gmm_tiling(config):
+  """Returns the (wi, wo) `megablox.gmm` tile sizes; the forward tiles are the `eval_*` ones under eval axis rules."""
+  if max_utils.is_eval(config):
+    wi_tile_fwd_batch_seq = config.eval_wi_tile_fwd_batch_seq
+    wi_tile_fwd_embed_dim = config.eval_wi_tile_fwd_embed_dim
+    wi_tile_fwd_mlp_dim = config.eval_wi_tile_fwd_mlp_dim
+    wo_tile_fwd_batch_seq = config.eval_wo_tile_fwd_batch_seq
+    wo_tile_fwd_embed_dim = config.eval_wo_tile_fwd_embed_dim
+    wo_tile_fwd_mlp_dim = config.eval_wo_tile_fwd_mlp_dim
+  else:
+    wi_tile_fwd_batch_seq = config.wi_tile_fwd_batch_seq
+    wi_tile_fwd_embed_dim = config.wi_tile_fwd_embed_dim
+    wi_tile_fwd_mlp_dim = config.wi_tile_fwd_mlp_dim
+    wo_tile_fwd_batch_seq = config.wo_tile_fwd_batch_seq
+    wo_tile_fwd_embed_dim = config.wo_tile_fwd_embed_dim
+    wo_tile_fwd_mlp_dim = config.wo_tile_fwd_mlp_dim
+
+  wi_tile_size = (
+      wi_tile_fwd_batch_seq,  # m (LHS batch)
+      wi_tile_fwd_embed_dim,  # k  (contracting)
+      wi_tile_fwd_mlp_dim,  # n (RHS batch)
+      config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
+      config.wi_tile_dlhs_mlp_dim,  # k (contracting)
+      config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
+      config.wi_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
+      config.wi_tile_drhs_embed_dim,  # Called k in megablox, but this is LHS batch dim
+      config.wi_tile_drhs_mlp_dim,  # Called n in megablox, and indeed is the RHS batch dim
+  )
+
+  wo_tile_size = (
+      wo_tile_fwd_batch_seq,  # m (LHS batch)
+      wo_tile_fwd_mlp_dim,  # k (contracting)
+      wo_tile_fwd_embed_dim,  # n (RHS batch)
+      config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
+      config.wo_tile_dlhs_embed_dim,  # k (contracting)
+      config.wo_tile_dlhs_mlp_dim,  # n (RHS)
+      config.wo_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
+      config.wo_tile_drhs_mlp_dim,  # Called k in megablox, but this is LHS batch dim
+      config.wo_tile_drhs_embed_dim,  # Called n in megablox, and indeed is the RHS batch dim
+  )
+  return wi_tile_size, wo_tile_size
 
 
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
@@ -2329,7 +2371,7 @@ class RoutedMoE(nnx.Module):
       """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
       return getattr(self.config, f"eval_{name}" if max_utils.is_eval(self.config) else name)
 
-    def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
+    def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount, group_offset):
       """Execute jax.lax.ragged_dot, with potential quantization"""
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       # Clamps the tile size using the minimum
@@ -2343,6 +2385,16 @@ class RoutedMoE(nnx.Module):
         if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
           raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
         rhs_inputs = kernel.qvalue
+      num_groups, num_rhs_groups = group_sizes.shape[0], rhs_inputs.shape[0]
+      if group_offset is not None or num_rhs_groups != num_groups:
+        # As in gmm_v2, rhs holds groups [group_offset, group_offset + num_rhs_groups) of group_sizes and the rows of
+        # the other groups come out as zeros. ragged_dot has no group offset, so give it one rhs per group.
+        rhs_idx = jnp.arange(num_groups) - (0 if group_offset is None else group_offset)
+        rhs_inputs = jnp.where(
+            ((rhs_idx >= 0) & (rhs_idx < num_rhs_groups))[:, None, None],
+            jnp.take(rhs_inputs, jnp.clip(rhs_idx, 0, num_rhs_groups - 1), axis=0),
+            0,
+        )
       if self.config.quantization and self.config.use_qwix_quantization:
         # Use full contraction for QWIX quantization to allow quantization
         # fusion (max reduce over contracting dimension).
@@ -2372,17 +2424,6 @@ class RoutedMoE(nnx.Module):
           )
         output *= scales
       return output
-
-    def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
-      if self.config.quantization and self.config.use_qwix_quantization:
-        return group_sizes
-      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
-        return group_sizes
-      else:
-        return tokamax.RaggedDotGroupSizes(
-            group_sizes,
-            inputs.shape[0],
-        )
 
     def get_quantization_dtypes():
       # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
@@ -2415,7 +2456,7 @@ class RoutedMoE(nnx.Module):
       start = 0 if group_offset is None else group_offset
       te_group_sizes = jax.lax.dynamic_slice_in_dim(group_sizes, start, num_local_experts)
       # With a group_offset the local groups' rows follow those of groups [0, group_offset), as in
-      # megablox. TE has no group offset and reads from row 0, so rotate those rows to the front.
+      # gmm_v2. TE has no group offset and reads from row 0, so rotate those rows to the front.
       row_start = None
       if not (isinstance(start, int) and start == 0):
         row_start = jnp.sum(jnp.where(jnp.arange(group_sizes.shape[0]) < start, group_sizes, 0))
@@ -2478,7 +2519,7 @@ class RoutedMoE(nnx.Module):
         return tuple()
 
       is_native_kernel = isinstance(kernel, qpl.QArray)
-      if self.config.megablox and not self.config.use_tokamax_gmm and not self.config.moe_quantize_token_all_gather:
+      if self.config.check_vma and not self.config.moe_quantize_token_all_gather:
         lhs_vma_axes = extract_vma(inputs)
         rhs_vma_axes = extract_vma(kernel.qvalue if is_native_kernel else kernel)
       else:
@@ -2493,7 +2534,7 @@ class RoutedMoE(nnx.Module):
               "use_te_grouped_gemm does not support return_lhs, return_rhs, out_is_3d or a fused TC unsort "
               f"(got {return_lhs=}, {return_rhs=}, {out_is_3d=}, tc_unsort={tc_unsort_cfg is not None})."
           )
-        # Highest priority when the flag is on. Skip megablox/tokamax tile padding:
+        # Highest priority when the flag is on. Skip the gmm_v2 tile padding:
         # TE v1 walks only sum(group_sizes) rows and zeros the leftover.
         # Dtype unification (f32 acts vs bf16 weights) happens inside te_grouped_dense_gmm.
         output = te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias)
@@ -2501,7 +2542,6 @@ class RoutedMoE(nnx.Module):
           output = output + partial_sum
         return output
 
-      tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
       # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
       if isinstance(inputs, qpl.QArray):
@@ -2517,61 +2557,30 @@ class RoutedMoE(nnx.Module):
         kernel = kernel.astype(self.dtype)
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
-      # Interpret the megablox Pallas kernel only when the TARGET is NOT TPU (CPU or GPU,
-      # e.g. equiv_chunk_test executing locally). During train_compile the local backend is
-      # CPU (JAX_PLATFORMS=cpu) but self.mesh targets tpu7x -> compile natively; interpret
-      # mode on a TPU target breaks check_vma and bloats HBM temporaries.
-      megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
+      flat_fsdp_shard = None
+      if self.config.moe_flat_fsdp_weights and not is_native_kernel and kernel.ndim == 2:
+        # `kernel` is the local [rows_local, cols] block of the flat (expert, fsdp)-sharded weight. After the
+        # dim-0 FSDP all-gather it holds this shard's E_local experts back to back: a free bitcast to
+        # [E_local, rows, cols]. With no FSDP gather axis the local block already is the whole expert group.
+        num_local_experts = self.num_experts // self.get_expert_parallelism_size()
+        gather_factor = 1
+        for axis_name, axis_idx in weight_gather_axes:
+          if axis_idx == 0:
+            gather_factor *= self.mesh.shape[axis_name]
+        gathered_rows = kernel.shape[0] * gather_factor
+        if gathered_rows % num_local_experts != 0:
+          raise ValueError(
+              f"moe_flat_fsdp_weights: {gathered_rows} gathered rows not divisible by {num_local_experts} experts"
+          )
+        gathered_shape = (num_local_experts, gathered_rows // num_local_experts, kernel.shape[1])
+        if weight_gather_axes:
+          flat_fsdp_shard = gathered_shape
+        else:
+          kernel = kernel.reshape(gathered_shape)
 
-      # We support various implementations for gmm - TE grouped_dense, tokamax gmm (v1, v2),
-      # older forked megablox, or jax.lax.ragged_dot.
-      # Determine whether we can use: tokamax gmm v1 (quantized)
-      # Pre-quantized QArray inputs must route through gmm_v2 custom VJP.
-      is_tokamax_v1_unquantized = (
-          self.config.use_tokamax_gmm
-          and not self.config.quantization
-          and not self.config.use_gmm_v2
-          and not isinstance(inputs, qpl.QArray)
-          and self.config.hardware != "cpu"
-      )
-      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox.
-      # On CPU (hardware="cpu"), bypass TPU Pallas custom-VJP kernels and fall back to jax.lax.ragged_dot.
-      use_custom_vjp_gmm = (self.config.use_tokamax_gmm or self.config.megablox) and self.config.hardware != "cpu"
-
-      if is_tokamax_v1_unquantized:
-        # tokamax v1 (unquantized)
-        output = tokamax.ragged_dot(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=tokamax_group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
-            preferred_element_type=self.dtype,
-            implementation="mosaic",
-            # `group_offset` is not yet supported
-            group_offset=None,
-        )
-      elif use_custom_vjp_gmm:
-        # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
-        flat_fsdp_shard = None
-        if self.config.moe_flat_fsdp_weights and not is_native_kernel and kernel.ndim == 2:
-          # `kernel` is the local [rows_local, cols] block of the flat (expert, fsdp)-sharded weight. After the
-          # dim-0 FSDP all-gather it holds this shard's E_local experts back to back: a free bitcast to
-          # [E_local, rows, cols]. With no FSDP gather axis the local block already is the whole expert group.
-          num_local_experts = self.num_experts // self.get_expert_parallelism_size()
-          gather_factor = 1
-          for axis_name, axis_idx in weight_gather_axes:
-            if axis_idx == 0:
-              gather_factor *= self.mesh.shape[axis_name]
-          gathered_rows = kernel.shape[0] * gather_factor
-          if gathered_rows % num_local_experts != 0:
-            raise ValueError(
-                f"moe_flat_fsdp_weights: {gathered_rows} gathered rows not divisible by {num_local_experts} experts"
-            )
-          gathered_shape = (num_local_experts, gathered_rows // num_local_experts, kernel.shape[1])
-          if weight_gather_axes:
-            flat_fsdp_shard = gathered_shape
-          else:
-            kernel = kernel.reshape(gathered_shape)
+      # TPU uses the gmm_v2 Pallas kernels (custom VJP); other platforms use jax.lax.ragged_dot. Check the mesh, not
+      # the local backend: train_compile runs on a CPU host but targets TPU.
+      if self.mesh.devices.flat[0].platform == "tpu":
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
@@ -2582,15 +2591,12 @@ class RoutedMoE(nnx.Module):
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
             use_qwix_quantization=self.config.use_qwix_quantization,
-            use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
-            use_gmm_v2=self.config.use_gmm_v2,
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             partial_sum=partial_sum,
-            interpret=megablox_interpret,
             return_lhs=return_lhs,
             fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
             return_rhs=return_rhs,
@@ -2608,6 +2614,7 @@ class RoutedMoE(nnx.Module):
             group_sizes,
             expert_assignments,
             padding_amount,
+            group_offset,
         )
 
       def unpad(t):
@@ -3211,18 +3218,7 @@ class RoutedMoE(nnx.Module):
             wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
           # Gather Hidden(2)
           wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
-      wi_tile_size = (
-          fwd_tile("wi_tile_fwd_batch_seq"),  # m (LHS batch)
-          fwd_tile("wi_tile_fwd_embed_dim"),  # k  (contracting)
-          fwd_tile("wi_tile_fwd_mlp_dim"),  # n (RHS batch)
-          self.config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
-          self.config.wi_tile_dlhs_mlp_dim,  # k (contracting)
-          self.config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
-          self.config.wi_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
-          self.config.wi_tile_drhs_embed_dim,  # Called k in megablox, but this is LHS batch dim
-          self.config.wi_tile_drhs_mlp_dim,  # Called n in megablox, and indeed is RHS batch dim
-      )
-      return wi_gather_axes, wi_tile_size
+      return wi_gather_axes, get_gmm_tiling(self.config)[0]
 
     def get_wo_gmm_params():
       wo_gather_axes = []
@@ -3241,18 +3237,7 @@ class RoutedMoE(nnx.Module):
             wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[2], 2))
           # Gather Hidden(1)
           wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
-      wo_tile_size = (
-          fwd_tile("wo_tile_fwd_batch_seq"),  # m (LHS batch)
-          fwd_tile("wo_tile_fwd_mlp_dim"),  # k (contracting)
-          fwd_tile("wo_tile_fwd_embed_dim"),  # n (RHS batch)
-          self.config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
-          self.config.wo_tile_dlhs_embed_dim,  # k (contracting)
-          self.config.wo_tile_dlhs_mlp_dim,  # n (RHS)
-          self.config.wo_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
-          self.config.wo_tile_drhs_mlp_dim,  # Called k in megablox, but this is LHS batch dim
-          self.config.wo_tile_drhs_embed_dim,  # Called n in megablox, and indeed is the RHS batch dim
-      )
-      return wo_gather_axes, wo_tile_size
+      return wo_gather_axes, get_gmm_tiling(self.config)[1]
 
     def gmm_up(
         x,
@@ -5215,7 +5200,7 @@ class RoutedMoE(nnx.Module):
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
         and cfg.sparse_matmul
-        and cfg.use_gmm_v2
+        and self.mesh.devices.flat[0].platform == "tpu"
         and not is_fused_moe_path
     )
     is_kernel_quantized = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and is_fused_moe_path

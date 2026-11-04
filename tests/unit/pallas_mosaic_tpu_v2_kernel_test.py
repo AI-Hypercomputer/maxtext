@@ -26,7 +26,6 @@ import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from maxtext.kernels.megablox import common
 from maxtext.kernels.megablox import ops as megablox_ops
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_backend
@@ -235,7 +234,7 @@ class GmmDispatchTest(parameterized.TestCase):
     # None exercises the public helper default for backward compatibility.
     kwargs = {} if use_dlhs_transpose_rhs is None else {"use_dlhs_transpose_rhs": use_dlhs_transpose_rhs}
     with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", return_value=expected) as gmm_v2_mock:
-      actual, lhs_scale_applied = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
+      actual, lhs_scale_applied = megablox_ops._dlhs_run(  # pylint: disable=protected-access
           dlhs_dout=dlhs_dout,
           rhs=rhs,
           group_sizes=group_sizes,
@@ -296,8 +295,6 @@ class GmmDispatchTest(parameterized.TestCase):
           lhs,
           rhs,
           group_sizes,
-          use_tokamax_backend=True,
-          use_gmm_v2=True,
           use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
           partial_sum=partial_sum,
           **kwargs,
@@ -782,7 +779,7 @@ class GmmTest(parameterized.TestCase):
       block_size,
       group_offset,
   ):
-    if weight_dtype == jnp.float4_e2m1fn and common.tpu_generation() < 7:
+    if weight_dtype == jnp.float4_e2m1fn and pltpu.get_tpu_info().generation < 7:
       self.skipTest("Expect TPUv7+")
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
@@ -908,7 +905,7 @@ class GmmTest(parameterized.TestCase):
       group_offset,
   ):
     """Test that quant_block_size > tile_k is handled correctly."""
-    if weight_dtype == jnp.float4_e2m1fn and common.tpu_generation() < 7:
+    if weight_dtype == jnp.float4_e2m1fn and pltpu.get_tpu_info().generation < 7:
       self.skipTest("Expect TPUv7+")
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
@@ -1017,7 +1014,7 @@ class GmmTest(parameterized.TestCase):
       block_size,
       group_offset,
   ):
-    if weight_dtype == jnp.float4_e2m1fn and common.tpu_generation() < 7:
+    if weight_dtype == jnp.float4_e2m1fn and pltpu.get_tpu_info().generation < 7:
       self.skipTest("Expect TPUv7+")
     if block_size > in_size:
       self.skipTest("block_size must be <= in_size")

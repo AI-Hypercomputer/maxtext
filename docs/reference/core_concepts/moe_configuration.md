@@ -31,10 +31,7 @@ MaxText supports both Dropless and Dropping strategies. Please refer to the deci
 
 Dropless:
 
-- Tokamax Ragged Dot (GMM v2): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=True, use_gmm_v2=True`.
-- [Tokamax Ragged Dot (GMM v1)](https://github.com/openxla/tokamax/tree/main/tokamax/_src/ops/ragged_dot): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=True`.
-- [Megablox](https://github.com/google/maxtext/tree/main/src/maxtext/kernels/megablox): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=True`.
-- [JAX Ragged Dot](https://docs.jax.dev/en/latest/_autosummary/jax.lax.ragged_dot.html): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=False`.
+- Grouped matmul (GMM): Enabled by setting `sparse_matmul=True`. On TPU this uses the [GMM v2](https://github.com/google/maxtext/tree/main/src/maxtext/kernels/megablox) Pallas kernel (forked from Tokamax); on CPU and GPU it uses [JAX Ragged Dot](https://docs.jax.dev/en/latest/_autosummary/jax.lax.ragged_dot.html), or the TransformerEngine grouped GEMM on GPU with `use_te_grouped_gemm=True`.
 - Dense Matmul: Enabled by setting `sparse_matmul=False, capacity_factor=-1`.
 
 Dropping:
@@ -99,16 +96,12 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `sparse_matmul`: Determines whether to use efficient sparse matrix multiplication or dense matrix multiplication.
 
-- `True`: Uses specialized kernels (like Tokamax Ragged Dot or Megablox) or JAX Ragged Dot to perform computation only on active tokens. This is generally faster for MoE.
+- `True`: Uses a grouped matmul (the GMM v2 kernel on TPU, JAX Ragged Dot on CPU and GPU) to perform computation only on active tokens. This is generally faster for MoE.
 - `False`: Performs dense computation with masking. This is typically used when checking numerical correctness or implementing dropping strategies.
 
-`use_tokamax_gmm`: If enabled, use Tokamax library's Ragged Dot for matmul. Recommended for dropless configurations.
+`use_gmm_v2_heuristic_tiling`: If enabled, use the heuristic tiling of the GMM v2 kernel. Recommended when not using custom tuned tile sizes.
 
-`use_gmm_v2`: If enabled, use the Tokamax GMM v2 kernel for grouped matrix multiplication. Requires `use_tokamax_gmm` to be True.
-
-`use_gmm_v2_heuristic_tiling`: If enabled, use the heuristic tiling from Tokamax GMM v2. Recommended when not using custom tuned tile sizes.
-
-`megablox`: If enabled, use Megablox for sparse matrix operations. Effective only when `use_tokamax_gmm` is False.
+`megablox`, `use_tokamax_gmm`, `use_gmm_v2`: Deprecated and ignored. The kernel is chosen by hardware as described above.
 
 `capacity_factor`: A scalar multiplier for expert capacity. Effective only when `sparse_matmul` is False.
 
@@ -153,7 +146,7 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `use_ring_of_experts` (experimental): This feature requires expert parallelism. If enabled, it replaces the standard two All-to-All communications with All-Gather in dispatch and Reduce-Scatter in collect. By gathering inputs across all shards, it allows for local routing and Top-K calculations, followed by result aggregation via Reduce-Scatter. This approach is particularly effective for models with a large Top-K, as it gathers activations before they are replicated k times to reduce communication.
 
-`moe_quantize_token_all_gather`: If enabled, quantizes token activations to the quantized dtype (e.g. FP8) prior to the Ring of Experts All-Gather across the EP mesh axis, reducing inter-chip communication volume proportionally to the quantized width (2x for FP8 vs BF16). Requires `use_ring_of_experts=True`, `use_gmm_v2=True`, and static activation calibration. See [Quantization guide](quantization.md) for full pipeline details. Default is `False`.
+`moe_quantize_token_all_gather`: If enabled, quantizes token activations to the quantized dtype (e.g. FP8) prior to the Ring of Experts All-Gather across the EP mesh axis, reducing inter-chip communication volume proportionally to the quantized width (2x for FP8 vs BF16). Requires TPU, `use_ring_of_experts=True`, and static activation calibration. See [Quantization guide](quantization.md) for full pipeline details. Default is `False`.
 
 `moe_topk_before_ep_all_gather`: If enabled with `use_ring_of_experts=True`, each expert shard runs top-k on its local tokens and all-gathers only the resulting `(batch, seq, num_experts_per_tok)` weights and expert ids, instead of all-gathering the `(batch, seq, num_experts)` router logits and repeating top-k on the full gathered batch on every shard. This removes the redundant top-k and cuts the router all-gather (and its backward reduce-scatter) by a factor of `num_experts / num_experts_per_tok`. Only the top-k (the index map) moves before the all-gather; the token sort/permutation still happens after it. Expert assignment is unchanged, and loss and gradients match up to floating-point summation order. Ignored with forced, hash or random routing. Default is `False`.
 
@@ -199,18 +192,12 @@ All `eval_*` tile sizes default to `None`. Only forward-pass tile configurations
 
 Implementation Support:
 
-- JAX Ragged Dot:
+- JAX Ragged Dot (CPU and GPU):
 
   - Supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`, plus their `eval_...` counterparts).
   - Configs are enabled for INT8, FP8, and BF16.
 
-- Megablox:
+- GMM v2 (TPU):
 
-  - Supports all 18 configurations (plus the 6 `eval_...` forward counterparts).
+  - Supports all 18 manual tiling configurations (plus the 6 `eval_...` forward counterparts). Optionally, use `use_gmm_v2_heuristic_tiling=True` for heuristic tiling.
   - Configs are enabled for INT8, FP8, and BF16.
-
-- Tokamax Ragged Dot (Includes two implementations):
-
-  - **GMM v1**: Uses Tokamax's native autotuner; does not accept manual tile sizes from MaxText.
-  - **GMM v2**: Supports all 18 manual tiling configurations (plus the 6 `eval_...` forward counterparts). Optionally, use `use_gmm_v2_heuristic_tiling=True` for heuristic tiling.
-  - Enabled for FP8 and BF16.

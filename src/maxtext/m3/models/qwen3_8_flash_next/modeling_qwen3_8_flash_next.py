@@ -41,7 +41,6 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
-import tokamax
 
 
 # =================================================================================================
@@ -995,14 +994,12 @@ class Qwen3_8Experts(nnx.Module):
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
       *,
-      use_tokamax_gmm: bool = False,
       rngs: nnx.Rngs,
   ):
     self.num_experts = num_experts
     self.emb_dim = emb_dim
     self.moe_mlp_dim = moe_mlp_dim
     self.dtype = dtype
-    self.use_tokamax_gmm = use_tokamax_gmm
 
     self.gate_up_proj = nnx.Param(
         nnx.initializers.lecun_normal()(rngs.params(), (num_experts, emb_dim, 2 * moe_mlp_dim), weight_dtype)
@@ -1012,19 +1009,8 @@ class Qwen3_8Experts(nnx.Module):
     )
 
   def _ragged_dot(self, lhs: jax.Array, rhs: jax.Array, group_sizes: jax.Array) -> jax.Array:
-    """Executes ragged dot via jax.lax.ragged_dot or tokamax.ragged_dot."""
-    if not self.use_tokamax_gmm:
-      return jax.lax.ragged_dot(lhs, rhs, group_sizes)
-    impl = (
-        "mosaic" if jax.default_backend() == "tpu" and all(s >= 128 for s in lhs.shape[-2:] + rhs.shape[-2:]) else "xla"
-    )
-    return tokamax.ragged_dot(
-        lhs=lhs,
-        rhs=rhs,
-        group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, lhs.shape[0]),
-        preferred_element_type=self.dtype,
-        implementation=impl,
-    )
+    """Executes ragged dot via jax.lax.ragged_dot."""
+    return jax.lax.ragged_dot(lhs, rhs, group_sizes)
 
   def __call__(
       self,
@@ -1169,7 +1155,6 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
       sharding: Any | None = None,
       *,
       shared_expert_intermediate_size: int,
-      use_tokamax_gmm: bool = False,
       rngs: nnx.Rngs,
   ):
     del sharding
@@ -1200,7 +1185,6 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
         moe_mlp_dim=moe_mlp_dim,
         dtype=dtype,
         weight_dtype=weight_dtype,
-        use_tokamax_gmm=use_tokamax_gmm,
         rngs=rngs,
     )
     self.shared_expert = Qwen3_8MLP(
@@ -1620,7 +1604,6 @@ class Qwen3_8DecoderLayer(nnx.Module):
           attention_kernel=str(c.qsa_attention_kernel),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
-    use_tokamax_gmm = bool(getattr(c, "sparse_matmul", False) and getattr(c, "use_tokamax_gmm", False))
     self.mlp = Qwen3_8SparseMoeBlock(
         emb_dim=emb,
         shared_expert_intermediate_size=int(c.mlp_dim),
@@ -1632,7 +1615,6 @@ class Qwen3_8DecoderLayer(nnx.Module):
         norm_topk_prob=bool(c.norm_topk_prob),
         dtype=dt,
         weight_dtype=wdt,
-        use_tokamax_gmm=use_tokamax_gmm,
     )
     self.ple = build_ple_layer(c, layer_idx, rngs=rngs) if include_ple else None
 

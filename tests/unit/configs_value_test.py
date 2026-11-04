@@ -998,19 +998,23 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.training_objective, "causal_lm")
     self.assertEqual(config.block_diffusion_mask_id, -1)
 
-  def test_cpu_hardware_disables_megablox(self):
-    """Tests that megablox is automatically disabled when hardware=cpu."""
-    config = pyconfig.initialize(
-        [
-            "",
-            _BASE_CONFIG_PATH,
-            "run_name=test",
-            "hardware=cpu",
-            "megablox=True",
-            "skip_jax_distributed_system=True",
-        ]
-    )
-    self.assertFalse(config.megablox)
+  def test_deprecated_gmm_flags_warn(self):
+    """Tests that the deprecated megablox / use_tokamax_gmm / use_gmm_v2 flags still parse and log a warning."""
+    with unittest.mock.patch("maxtext.utils.max_logging.log") as mock_log:
+      pyconfig.initialize(
+          [
+              "",
+              _BASE_CONFIG_PATH,
+              "run_name=test",
+              "skip_jax_distributed_system=True",
+              "megablox=False",
+              "use_tokamax_gmm=True",
+              "use_gmm_v2=True",
+          ]
+      )
+    warnings = [call.args[0] for call in mock_log.call_args_list if "is deprecated and ignored" in str(call.args[0])]
+    for flag in ("megablox", "use_tokamax_gmm", "use_gmm_v2"):
+      self.assertTrue(any(w.startswith(f"WARNING: {flag} is deprecated") for w in warnings), flag)
 
   def test_block_diffusion_pretraining_config(self):
     config = pyconfig.initialize(

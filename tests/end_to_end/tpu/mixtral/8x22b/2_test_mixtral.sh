@@ -29,7 +29,7 @@ python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_RE
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
   steps=5 max_target_length=128 async_checkpointing=false \
   tokenizer_path=${TOKENIZER_PATH} attention=flash dtype=bfloat16 \
-  weight_dtype=bfloat16 megablox=True sparse_matmul=True
+  weight_dtype=bfloat16 sparse_matmul=True
 
 # Run pre-training without load_parameters_path - matmul implementation
 python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
@@ -38,7 +38,7 @@ python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_RE
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
   steps=5 max_target_length=128 async_checkpointing=false \
   tokenizer_path=${TOKENIZER_PATH} attention=flash dtype=bfloat16 \
-  weight_dtype=bfloat16 megablox=False sparse_matmul=False
+  weight_dtype=bfloat16 sparse_matmul=False
 
 # Run pre-training without load_parameters_path - dropping implementation
 python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
@@ -47,6 +47,6 @@ python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_RE
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
   steps=5 max_target_length=128 async_checkpointing=false \
   tokenizer_path=${TOKENIZER_PATH} attention=flash dtype=bfloat16 \
-  weight_dtype=bfloat16 megablox=False sparse_matmul=False capacity_factor=1.25
+  weight_dtype=bfloat16 sparse_matmul=False capacity_factor=1.25
 
 # TODO(ranran): Add decoding, fine-tuning, and forward_pass_logit_checker tests after b/384580048

@@ -105,7 +105,6 @@ _QWEN3_NEXT = {
     "gdn_value_head_dim": 16,
     "gdn_chunk_size": 4,
     "sparse_matmul": True,
-    "megablox": False,
 }
 _QWEN3_NEXT_SCANNED = _QWEN3_NEXT | {"scan_layers": True}
 # 6 layers is one whole period plus a two-layer remainder, which the scanned path

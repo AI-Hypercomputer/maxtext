@@ -95,7 +95,7 @@ python3 -m maxtext.trainers.pre_train.train \
     tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} \
     dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} \
     enable_checkpointing=false \
-    attention=flash sparse_matmul=True use_tokamax_gmm=True \
+    attention=flash sparse_matmul=True \
     dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=4 \
     steps=5 max_target_length=1024 ici_fsdp_parallelism=4
 
@@ -107,7 +107,7 @@ python3 -m maxtext.trainers.pre_train.train \
     tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} \
     dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} \
     enable_checkpointing=true async_checkpointing=false load_parameters_path=${SCANNED_CKPT_PATH} \
-    scan_layers=True attention=flash sparse_matmul=True use_tokamax_gmm=True \
+    scan_layers=True attention=flash sparse_matmul=True \
     dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=4 \
     steps=5 max_target_length=1024 \
     ici_fsdp_parallelism=1 ici_expert_parallelism=4 checkpoint_storage_concurrent_gb=1024
@@ -125,7 +125,6 @@ python3 -m maxtext.inference.decode \
     scan_layers=False \
     attention=dot_product \
     sparse_matmul=True \
-    use_tokamax_gmm=True \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     per_device_batch_size=1 \

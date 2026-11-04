@@ -236,8 +236,6 @@ class Gmm3dTest(parameterized.TestCase):
         "preferred_element_type": jnp.bfloat16,
         "use_qwix_quantization": True,
         "qwix_rule": rule,
-        "use_tokamax_backend": True,
-        "use_gmm_v2": True,
         "use_dlhs_transpose_rhs": dlhs_tr,
         "fuse_dlhs_scale": accum_wi,
     }
@@ -323,14 +321,13 @@ class Gmm3dTest(parameterized.TestCase):
     np.testing.assert_allclose(np.asarray(dw3), np.asarray(dw2), rtol=1e-5, atol=1e-6)
     self.assertGreater(float(jnp.max(jnp.abs(out2.astype(jnp.float32)))), 0.0)
 
-  @parameterized.parameters((True,))
-  def test_shared_fixed_scale_bwd_is_bit_exact(self, use_gmm_v2):
+  def test_shared_fixed_scale_bwd_is_bit_exact(self):
     """Flag 1 (shared lhs/rhs fixed scale + shared quantized grad) is bit-identical to the unshared bwd.
 
     "fixed,-224,224" and "fixed,-224.0,224.0" give the same qwix scale, but _lhs_rhs_share_fixed_scale compares
     the strings, so the second spelling turns the shortcut (and share_quantized_grad) off without mocking.
     """
-    if use_gmm_v2 and pltpu.get_tpu_info().fp8_ops_per_second == 0:
+    if pltpu.get_tpu_info().fp8_ops_per_second == 0:
       self.skipTest("A fixed act scale in gmm_v2 needs fp8 matmul hardware.")
     k0, k1 = jax.random.split(jax.random.key(11))
     lhs = _rand(k0, (M, D), jnp.bfloat16)
@@ -356,8 +353,6 @@ class Gmm3dTest(parameterized.TestCase):
           preferred_element_type=jnp.bfloat16,
           use_qwix_quantization=True,
           qwix_rule=r,
-          use_tokamax_backend=True,
-          use_gmm_v2=use_gmm_v2,
       )
       return jnp.sum(out.astype(jnp.float32) ** 2)
 

@@ -36,19 +36,14 @@ class Train(parameterized.TestCase):
       self,
       *,
       quantization: str = "",
-      use_gmm_v2: bool = False,
       use_gmm_v2_heuristic_tiling: bool = False,
       ici_expert_parallelism: int = 1,
       use_ring_of_experts: bool = False,
       moe_quantize_token_all_gather: bool = False,
-      max_target_length: int | None = None,
+      max_target_length: int = 128,
   ):
     """Smoke train with small config."""
     sharding_tolerance = 0.22 if ici_expert_parallelism > 1 else 2e-2
-    if max_target_length is None:
-      # V1 FP8 TGMM requires the scale span to cover its 256-wide tile.
-      # With only 128 tokens, it raises "subchannel_iters != 1" in the backward pass.
-      max_target_length = 256 if quantization == "fp8_full" and not use_gmm_v2 else 128
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
@@ -72,9 +67,6 @@ class Train(parameterized.TestCase):
         f"sharding_tolerance={sharding_tolerance}",
         # tokamax gmm
         "sparse_matmul=True",
-        "megablox=False",
-        "use_tokamax_gmm=True",
-        f"use_gmm_v2={use_gmm_v2}",
         f"use_gmm_v2_heuristic_tiling={use_gmm_v2_heuristic_tiling}",
         f"use_ring_of_experts={use_ring_of_experts}",
         # tile sizes
@@ -120,15 +112,6 @@ class Train(parameterized.TestCase):
     train_main(args)
 
   @parameterized.named_parameters(
-      {"testcase_name": "bf16", "quantization": ""},
-      {"testcase_name": "fp8", "quantization": "fp8"},  # not quantize gmm
-      {"testcase_name": "fp8_full", "quantization": "fp8_full"},  # quantize gmm
-  )
-  @pytest.mark.tpu_only
-  def test_tokamax_v1(self, quantization: str):
-    self._run_smoke_train(use_gmm_v2=False, quantization=quantization)
-
-  @parameterized.named_parameters(
       {
           "testcase_name": "bf16_ep1",
           "quantization": "",
@@ -164,7 +147,6 @@ class Train(parameterized.TestCase):
       use_gmm_v2_heuristic_tiling: bool = False,
   ):
     self._run_smoke_train(
-        use_gmm_v2=True,
         quantization=quantization,
         ici_expert_parallelism=ici_expert_parallelism,
         use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
@@ -184,7 +166,6 @@ class Train(parameterized.TestCase):
       ici_expert_parallelism: int,
   ):
     self._run_smoke_train(
-        use_gmm_v2=True,
         quantization=quantization,
         ici_expert_parallelism=ici_expert_parallelism,
         use_ring_of_experts=True,

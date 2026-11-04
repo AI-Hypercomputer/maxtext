@@ -20,28 +20,14 @@ import dataclasses
 import functools
 from typing import List, Literal, NamedTuple, Tuple
 import jax
+from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.kernels.ragged import ragged_sort_tc
 from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
-import tokamax
-
-
-DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
-    dot_dimension_numbers=(([1], [2]), ([], [])),
-    lhs_ragged_dimensions=[0],
-    rhs_group_dimensions=[0],
-)
-
-DRHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
-    dot_dimension_numbers=(([0], [0]), ([], [])),
-    lhs_ragged_dimensions=[0],
-    rhs_group_dimensions=[],
-)
 
 
 class TcUnsortCfg(NamedTuple):
@@ -76,20 +62,17 @@ def gmm(
         128,
     ),
     group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
     *,
-    interpret: bool | None = None,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     use_qwix_quantization: bool = False,
-    use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
+    rhs_reduced_axes: tuple = tuple(),
     # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
     qwix_rule: qwix.QtRule | None = None,
     use_manual_quantization: bool = False,  # used in batchsplit
-    use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
     return_rhs: bool = False,
@@ -102,25 +85,20 @@ def gmm(
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
 ):
-  """Grouped matrix multiplication operation.
+  """Grouped matrix multiplication operation, using the gmm_v2 / tgmm_v2 TPU kernels.
 
   A 3D lhs ([m, k // 128, 128], e.g. tokens from the TensorCore ragged sort) is
   detected from its rank; `out_is_3d` writes the output as [m, n // 128, 128].
-  Both are only supported by the tokamax gmm_v2 backend; the backward pass then
-  consumes / produces the matching 3D cotangents without relayout copies. With
-  `out_is_3d`, a forward `partial_sum` must also be 3D; with `return_lhs`, the
-  cotangent of the returned (3D) lhs is accumulated into the 3D dlhs in place.
+  The backward pass then consumes / produces the matching 3D cotangents without
+  relayout copies. With `out_is_3d`, a forward `partial_sum` must also be 3D; with
+  `return_lhs`, the cotangent of the returned (3D) lhs is accumulated into the 3D
+  dlhs in place.
+
+  Inside a `shard_map` with check_vma=True, `lhs_vma_axes` / `rhs_vma_axes` are the
+  mesh axes lhs / rhs vary over: the output and dlhs vary over `lhs_vma_axes`, and
+  drhs over `rhs_vma_axes`. `rhs_reduced_axes` are the axes rhs is typed `reduced`
+  over; drhs is then returned `unreduced` over them.
   """
-  lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
-  if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
-    raise NotImplementedError("3D lhs / out requires use_tokamax_backend=True and use_gmm_v2=True.")
-  if interpret is None:
-    # Default to native (TPU) lowering. `jax.devices()[0]` is NOT the compile TARGET:
-    # during train_compile the local backend is CPU (JAX_PLATFORMS=cpu) while the mesh
-    # targets tpu7x, and interpret-mode there breaks check_vma (exposes the kernel's
-    # internal dynamic_slice VMA) and balloons HBM temporaries. Callers that genuinely
-    # run off-TPU (e.g. equiv_chunk_test) pass interpret based on their target mesh.
-    interpret = False
   quantization_rule = None
   if use_qwix_quantization:
     # 1. for non-batchsplit, retrieve rule ("gmm") via qwix interception
@@ -143,22 +121,12 @@ def gmm(
           act_calibration_method="absmax",
       )
 
-  if return_rhs and not (use_tokamax_backend and use_gmm_v2):
-    # The cotangent of the returned rhs is accumulated into drhs via tgmm_v2 partial_sum,
-    # which other backends do not support; they would silently drop it.
-    raise ValueError("return_rhs=True requires use_tokamax_backend=True and use_gmm_v2=True.")
-
-  if return_lhs and not (use_tokamax_backend and use_gmm_v2):
-    # The cotangent of the returned lhs is accumulated into dlhs via gmm_v2 partial_sum,
-    # which other backends do not support; they would silently drop it.
-    raise ValueError("return_lhs=True requires use_tokamax_backend=True and use_gmm_v2=True.")
-
   lhs_dtype = preferred_element_type if isinstance(lhs, qpl.QArray) else lhs.dtype
   rhs_dtype = preferred_element_type if isinstance(rhs, qpl.QArray) else rhs.dtype
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25),
+      nondiff_argnums=(3, 4, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 22),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -168,15 +136,12 @@ def gmm(
       preferred_element_type,
       tiling,
       group_offset,
-      existing_out,
-      interpret,
       quantization_rule,
-      use_tokamax_backend,
       weight_gather_axes,
       use_manual_quantization,
       lhs_vma_axes,
       rhs_vma_axes,
-      use_gmm_v2,
+      rhs_reduced_axes,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
       return_rhs,
@@ -230,15 +195,12 @@ def _gmm_fwd(
         128,
     ),
     group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
-    interpret: bool = False,
     quantization_rule: qwix.QtRule | None = None,
-    use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     use_manual_quantization: bool = False,
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
-    use_gmm_v2: bool = False,
+    rhs_reduced_axes: tuple = tuple(),
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
     return_rhs: bool = False,
@@ -273,7 +235,7 @@ def _gmm_fwd(
   gmm() drops lhs unless return_lhs=True and rhs unless return_rhs=True.
   """
 
-  del use_dlhs_transpose_rhs  # Only affects the custom backward pass.
+  del use_dlhs_transpose_rhs, rhs_vma_axes, rhs_reduced_axes  # Only affect the custom backward pass.
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
   # or gathered weights) to return matching cotangent containers in backward pass.
@@ -285,12 +247,11 @@ def _gmm_fwd(
     if any(axis_idx != 0 for _, axis_idx in weight_gather_axes):
       raise ValueError("flat_fsdp_shard: the flat rhs is gathered on dim 0 only.")
     if not (
-        use_tokamax_backend
-        and quantization_rule
+        quantization_rule
         and quantization_rule.bwd_qtype
         and quantization_rule.weight_calibration_method.startswith("fixed")
     ):
-      raise NotImplementedError("flat_fsdp_shard requires the tokamax QAG path (fixed weight calibration, bwd_qtype).")
+      raise NotImplementedError("flat_fsdp_shard requires the QAG path (fixed weight calibration, bwd_qtype).")
 
   # Quantize activation and weight
   if quantization_rule:
@@ -299,15 +260,13 @@ def _gmm_fwd(
         lhs,
         rhs,
         quantization_rule,
-        use_gmm_v2,
         use_manual_quantization,
         rhs_is_flat2d=flat_fsdp_shard is not None,
     )
 
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
   if (
-      use_tokamax_backend
-      and quantization_rule
+      quantization_rule
       and quantization_rule.bwd_qtype
       and quantization_rule.weight_calibration_method.startswith("fixed")
       and isinstance(rhs, qpl.QArray)
@@ -316,34 +275,19 @@ def _gmm_fwd(
     # pyrefly: ignore[bad-assignment]
     rhs = _fwd_gather_weight(rhs, weight_gather_axes, gathered_shape=flat_fsdp_shard)
 
-  # Backend Execution Routing
-  if use_tokamax_backend and not use_gmm_v2:
-    out = _fwd_run_tokamax_v1(lhs, rhs, group_sizes, preferred_element_type, use_manual_quantization)
-  elif use_tokamax_backend and use_gmm_v2:
-    out = _fwd_run_tokamax_v2(
-        lhs,
-        rhs,
-        group_sizes,
-        preferred_element_type,
-        tiling,
-        use_gmm_v2_heuristic_tiling,
-        group_offset,
-        partial_sum,
-        quantization_rule,
-        out_is_3d=out_is_3d,
-    )
-  else:
-    out = _fwd_run_megablox(
-        lhs,
-        rhs,
-        group_sizes,
-        preferred_element_type,
-        tiling,
-        group_offset,
-        existing_out,
-        interpret,
-        lhs_vma_axes,
-    )
+  out = _fwd_run(
+      lhs,
+      rhs,
+      group_sizes,
+      preferred_element_type,
+      tiling,
+      use_gmm_v2_heuristic_tiling,
+      group_offset,
+      partial_sum,
+      quantization_rule,
+      out_is_3d=out_is_3d,
+      out_manual_axis_type=_manual_axis_type(lhs_vma_axes),
+  )
 
   if tc_unsort_cfg is not None:
     cfg = tc_unsort_cfg
@@ -374,12 +318,17 @@ def _fwd_quantize_activation_and_weight(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
     quantization_rule: qwix.QtRule,
-    use_gmm_v2: bool,
     use_manual_quantization: bool,
     rhs_is_flat2d: bool = False,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
-  if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
+  # gmm_v2 quantizes a plain lhs inside the kernel, but only on chips with a matmul unit for the act dtype
+  # (make_gmm_configs); elsewhere it would skip the activation quantization, so quantize lhs here instead.
+  if (
+      quantization_rule.act_qtype
+      and not isinstance(lhs, qpl.QArray)
+      and not _kernel_quantizes_lhs(quantization_rule.act_qtype)
+  ):
     lhs = qpl.quantize(
         lhs,
         quantization_rule.act_qtype,
@@ -412,6 +361,14 @@ def _fwd_quantize_activation_and_weight(
   return lhs, rhs
 
 
+def _kernel_quantizes_lhs(act_qtype: jax.typing.DTypeLike) -> bool:
+  """Whether the chip has the fp8 (float act_qtype) or int8 matmul unit that gmm_v2 needs to quantize lhs in-kernel."""
+  tpu_info = pltpu.get_tpu_info()
+  if jnp.issubdtype(act_qtype, jnp.floating):
+    return tpu_info.fp8_ops_per_second > 0
+  return tpu_info.int8_ops_per_second > 0
+
+
 def _fwd_gather_weight(
     rhs: qpl.QArray,
     weight_gather_axes: List[Tuple[str, int]],
@@ -440,33 +397,6 @@ def _fwd_gather_weight(
     return s.reshape((1,) * (len(gathered_shape) - s.ndim) + tuple(s.shape))
 
   return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(rhs.scale), zero_point=_expand(rhs.zero_point))
-
-
-def _fwd_run_tokamax_v1(
-    lhs: jnp.ndarray | qpl.QArray,
-    rhs: jnp.ndarray | qpl.QArray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype,
-    use_manual_quantization: bool,
-) -> jnp.ndarray:
-  """Executes the standard Tokamax GMM V1 for forward pass."""
-  # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
-  out_kwargs = {}
-  if use_manual_quantization:
-    # used in batchsplit
-    out_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
-
-  return tokamax.ragged_dot(
-      lhs=lhs,
-      rhs=rhs,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=preferred_element_type,
-      # `group_offset` is not yet supported
-      group_offset=None,
-      implementation="mosaic",
-      **out_kwargs,
-  )
 
 
 def _fwd_prepare_rhs_scale(rhs: qpl.QArray) -> jnp.ndarray:
@@ -527,7 +457,12 @@ def _v2_zero_initialize(num_local_groups: int, group_sizes: jnp.ndarray, quantiz
   return quantized or num_local_groups < group_sizes.shape[0]
 
 
-def _fwd_run_tokamax_v2(
+def _manual_axis_type(varying: tuple, unreduced: tuple = ()) -> jax.sharding.ManualAxisType:
+  """Manual axis type of a kernel output; a shard_map with check_vma=True requires one even if it is empty."""
+  return jax.sharding.ManualAxisType(varying=frozenset(varying), unreduced=frozenset(unreduced))
+
+
+def _fwd_run(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
@@ -538,8 +473,9 @@ def _fwd_run_tokamax_v2(
     partial_sum: jnp.ndarray | None,
     quantization_rule: qwix.QtRule | None = None,
     out_is_3d: bool = False,
+    out_manual_axis_type: jax.sharding.ManualAxisType | None = None,
 ) -> jnp.ndarray:
-  """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
+  """Executes gmm_v2 for the forward pass OUT = LHS @ RHS."""
   rhs_operand = rhs
   rhs_scale = None
   quantized = quantization_rule is not None or isinstance(lhs, qpl.QArray) or isinstance(rhs, qpl.QArray)
@@ -582,6 +518,7 @@ def _fwd_run_tokamax_v2(
       maybe_quantize_lhs=maybe_quantize_lhs,
       zero_initialize=_v2_zero_initialize(rhs_operand.shape[0], group_sizes, quantized),
       out_is_3d=out_is_3d,
+      out_manual_axis_type=out_manual_axis_type,
   )
 
   # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
@@ -589,33 +526,6 @@ def _fwd_run_tokamax_v2(
   if isinstance(lhs, qpl.QArray):
     out = out * _scale_like(lhs.scale, out, out.dtype)
 
-  return out
-
-
-def _fwd_run_megablox(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype,
-    tiling: tuple,
-    group_offset: jnp.ndarray | None,
-    existing_out: jnp.ndarray | None,
-    interpret: bool,
-    lhs_vma_axes: tuple,
-) -> jnp.ndarray:
-  """Executes the Megablox backend fallback for forward pass."""
-  out = backend.gmm(
-      lhs,
-      rhs,
-      group_sizes,
-      preferred_element_type,
-      tiling[:3],
-      group_offset,
-      existing_out,
-      interpret=interpret,
-  )
-  for axis in lhs_vma_axes:
-    out = jax.lax.pcast(out, axis_name=axis, to="varying")
   return out
 
 
@@ -629,14 +539,12 @@ def _gmm_bwd(
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
     tiling: tuple[int, int, int, int, int, int, int, int, int],
-    interpret: bool,
     quantization_rule: qwix.QtRule | None,
-    use_tokamax_backend: bool,
     weight_gather_axes: List[Tuple[str, int]] | None,
     use_manual_quantization: bool,
     lhs_vma_axes: tuple,
     rhs_vma_axes: tuple,
-    use_gmm_v2: bool,
+    rhs_reduced_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     return_rhs: bool,
     return_lhs: bool,
@@ -663,10 +571,10 @@ def _gmm_bwd(
     None,
     None,
     jnp.ndarray | None,
-    jnp.ndarray | None,
     None,
 ]:
   """Backward function for throughput GMM VJP."""
+  del use_manual_quantization  # Only affects the forward weight quantization.
   (
       residual_lhs,
       residual_rhs,
@@ -716,7 +624,6 @@ def _gmm_bwd(
       residual_lhs,
       residual_rhs,
       group_sizes,
-      use_gmm_v2,
       quantization_rule,
   )
 
@@ -749,29 +656,25 @@ def _gmm_bwd(
     lhs_scale_for_dlhs = residual_lhs.scale
 
   # 3. DLHS Gradient Execution
-  dlhs, lhs_scale_applied = _compute_dlhs(
+  dlhs, lhs_scale_applied = _dlhs_run(
       dlhs_dout,
       rhs,
       group_sizes,
       group_offset,
       lhs_dtype,
       tiling,
-      use_tokamax_backend,
-      use_gmm_v2,
-      use_manual_quantization,
-      interpret,
-      lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
       partial_sum=dlhs_partial_sum,
       lhs_scale=lhs_scale_for_dlhs,
       fuse_dlhs_scale=fuse_dlhs_scale,
       use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
-      dlhs_is_3d=lhs_is_3d,
+      out_is_3d=lhs_is_3d,
       fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+      out_manual_axis_type=_manual_axis_type(lhs_vma_axes),
   )
 
   # 4. DRHS Gradient Execution
-  drhs = _compute_drhs(
+  drhs = _drhs_run(
       drhs_dout,
       lhs,
       group_sizes,
@@ -779,21 +682,15 @@ def _gmm_bwd(
       num_actual_groups,
       rhs_dtype,
       tiling,
-      use_tokamax_backend,
-      use_gmm_v2,
-      use_manual_quantization,
-      weight_gather_axes,
-      interpret,
-      rhs_vma_axes,
-      quantization_rule,
       use_gmm_v2_heuristic_tiling,
       partial_sum=drhs_partial_sum,
-      flat_rhs_shard=flat_fsdp_shard is not None,
+      out_manual_axis_type=_manual_axis_type(rhs_vma_axes, rhs_reduced_axes),
   )
+  if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
+    drhs = _drhs_scatter_weight(drhs, weight_gather_axes, flat_rhs_shard=flat_fsdp_shard is not None)
 
   # 5. Output Formatting
   dpartial_sum = grad if partial_sum_fwd is not None else None
-  d_existing_out = None if use_tokamax_backend else grad
 
   # If forward inputs were QArray, wrap cotangents in QArray to match JAX pytree container
   # structure expected by autodiff.
@@ -817,7 +714,7 @@ def _gmm_bwd(
         qtype=residual_rhs.qtype,
     )
 
-  return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None
+  return dlhs, drhs, None, None, dpartial_sum, None
 
 
 def _check_tc_unsort_bwd_supported(
@@ -888,7 +785,6 @@ def _bwd_prepare_inputs(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
-    use_gmm_v2: bool,
     quantization_rule: qwix.QtRule | None,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray, jnp.ndarray, jnp.ndarray]:
   """Prepares backward operands."""
@@ -904,15 +800,11 @@ def _bwd_prepare_inputs(
   # We cannot apply the scale to dlhs because axis n will disappear there.
   if isinstance(rhs, qpl.QArray):
     # rhs - qvalue: [g, k, n] scale: [1, 1, n]
-    if not use_gmm_v2:
-      dlhs_dout *= rhs.scale.astype(grad.dtype).reshape(1, -1)
-      rhs = rhs.qvalue
-    else:
-      # NOTE: rhs.scale is for the contracting dimension (N) in DLHS, but gmm_v2
-      # only supports scaling the output dimension. Thus, we must scale dlhs_dout
-      # beforehand.
-      dlhs_dout = _dlhs_scale_grad_by_rhs_scale(dlhs_dout, rhs, group_sizes)
-      rhs = rhs.qvalue
+    # NOTE: rhs.scale is for the contracting dimension (N) in DLHS, but gmm_v2
+    # only supports scaling the output dimension. Thus, we must scale dlhs_dout
+    # beforehand.
+    dlhs_dout = _dlhs_scale_grad_by_rhs_scale(dlhs_dout, rhs, group_sizes)
+    rhs = rhs.qvalue
 
   # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
   # in the residual tuple. In BWD, we explicitly quantize lhs.
@@ -972,87 +864,6 @@ def _bwd_quantize_gradient(
 # ==============================================================================
 
 
-def _compute_dlhs(
-    dlhs_dout: jnp.ndarray | qpl.QArray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    group_offset: jnp.ndarray | None,
-    lhs_dtype: jax.typing.DTypeLike,
-    tiling: tuple,
-    use_tokamax_backend: bool,
-    use_gmm_v2: bool,
-    use_manual_quantization: bool,
-    interpret: bool,
-    lhs_vma_axes: tuple,
-    use_gmm_v2_heuristic_tiling: bool,
-    partial_sum: jnp.ndarray | None = None,
-    lhs_scale: jnp.ndarray | None = None,
-    fuse_dlhs_scale: bool = False,
-    use_dlhs_transpose_rhs: bool = False,
-    dlhs_is_3d: bool = False,
-    fuse_3d_dlhs_ps: bool = False,
-) -> tuple[jnp.ndarray, bool]:
-  """Routes execution of DLHS based on backend choices.
-
-  Returns (dlhs, lhs_scale_applied). partial_sum (only set with return_lhs, i.e. tokamax gmm_v2) is
-  added to dlhs; lhs_scale_applied tells the caller whether lhs_scale was already folded into dlhs.
-  """
-  if use_tokamax_backend and not use_gmm_v2:
-    dlhs = _dlhs_run_tokamax_v1(
-        dlhs_dout,
-        rhs,
-        group_sizes,
-        lhs_dtype,
-        use_manual_quantization,
-    )
-    return dlhs, False
-  elif use_tokamax_backend and use_gmm_v2:
-    return _dlhs_run_tokamax_v2(
-        dlhs_dout,
-        rhs,
-        group_sizes,
-        group_offset,
-        lhs_dtype,
-        tiling,
-        use_gmm_v2_heuristic_tiling,
-        partial_sum=partial_sum,
-        lhs_scale=lhs_scale,
-        fuse_dlhs_scale=fuse_dlhs_scale,
-        use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
-        out_is_3d=dlhs_is_3d,
-        fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
-    )
-  else:
-    dlhs = _dlhs_run_megablox(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, interpret, lhs_vma_axes)
-    return dlhs, False
-
-
-def _dlhs_run_tokamax_v1(
-    dlhs_dout: jnp.ndarray | qpl.QArray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    lhs_dtype: jax.typing.DTypeLike,
-    use_manual_quantization: bool,
-) -> jnp.ndarray:
-  """Executes DLHS using GMM 1"""
-  dlhs_kwargs = {}
-  if use_manual_quantization:
-    dlhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
-
-  return tokamax.ragged_dot_general(
-      lhs=dlhs_dout,
-      rhs=rhs,
-      group_sizes=group_sizes,
-      ragged_dot_dimension_numbers=DLHS_RAGGED_DOT_DIM_NUMS,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=lhs_dtype,
-      # `group_offset` is not yet supported
-      group_offset=None,
-      implementation="mosaic",
-      **dlhs_kwargs,
-  )
-
-
 def _dlhs_scale_grad_by_rhs_scale(
     grad: jnp.ndarray,
     rhs: qpl.QArray,
@@ -1085,7 +896,7 @@ def _dlhs_scale_grad_by_rhs_scale(
   return grad * scale
 
 
-def _dlhs_run_tokamax_v2(
+def _dlhs_run(
     dlhs_dout: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
@@ -1099,8 +910,13 @@ def _dlhs_run_tokamax_v2(
     use_dlhs_transpose_rhs: bool = False,
     out_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    out_manual_axis_type: jax.sharding.ManualAxisType | None = None,
 ) -> tuple[jnp.ndarray, bool]:
-  """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
+  """Executes gmm_v2 for DLHS = DLHS_dout @ RHS^T.
+
+  Returns (dlhs, lhs_scale_applied). partial_sum (only set with return_lhs) is added to dlhs;
+  lhs_scale_applied tells the caller whether lhs_scale was already folded into dlhs.
+  """
   is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
   dlhs_lhs = dlhs_dout.qvalue if is_qarray_dout else dlhs_dout
 
@@ -1147,6 +963,7 @@ def _dlhs_run_tokamax_v2(
       zero_initialize=_v2_zero_initialize(rhs.shape[0], group_sizes, is_qarray_dout or lhs_scale is not None)
       and not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
+      out_manual_axis_type=out_manual_axis_type,
   )
 
   if not can_fuse_scale:
@@ -1162,78 +979,9 @@ def _dlhs_run_tokamax_v2(
   return dlhs, lhs_scale_applied
 
 
-def _dlhs_run_megablox(
-    dlhs_dout: jnp.ndarray | qpl.QArray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    group_offset: jnp.ndarray | None,
-    lhs_dtype: jax.typing.DTypeLike,
-    tiling: tuple,
-    interpret: bool,
-    lhs_vma_axes: tuple,
-) -> jnp.ndarray:
-  """Executes Megablox fallback for DLHS."""
-  return backend.gmm(
-      dlhs_dout,
-      rhs,
-      group_sizes,
-      lhs_dtype,
-      tiling[3:6],
-      group_offset,
-      transpose_rhs=True,
-      interpret=interpret,
-      varying_axes=lhs_vma_axes,
-  )
-
-
 # ==============================================================================
 # BWD DRHS TGMM
 # ==============================================================================
-
-
-def _compute_drhs(
-    drhs_dout: jnp.ndarray | qpl.QArray,
-    lhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    group_offset: jnp.ndarray | None,
-    num_actual_groups: int,
-    rhs_dtype: jax.typing.DTypeLike,
-    tiling: tuple,
-    use_tokamax_backend: bool,
-    use_gmm_v2: bool,
-    use_manual_quantization: bool,
-    weight_gather_axes: List[Tuple[str, int]] | None,
-    interpret: bool,
-    rhs_vma_axes: tuple,
-    quantization_rule: qwix.QtRule | None,
-    use_gmm_v2_heuristic_tiling: bool,
-    partial_sum: jnp.ndarray | None = None,
-    flat_rhs_shard: bool = False,
-) -> jnp.ndarray:
-  """Routes execution of DRHS based on backend choices."""
-  if use_tokamax_backend and not use_gmm_v2:
-    drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
-  elif use_tokamax_backend and use_gmm_v2:
-    drhs = _drhs_run_tokamax_v2(
-        drhs_dout,
-        lhs,
-        group_sizes,
-        group_offset,
-        num_actual_groups,
-        rhs_dtype,
-        tiling,
-        use_gmm_v2_heuristic_tiling,
-        partial_sum=partial_sum,
-    )
-  else:
-    drhs = _drhs_run_megablox(
-        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, interpret, rhs_vma_axes
-    )
-
-  if use_tokamax_backend and quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
-    drhs = _drhs_scatter_weight(drhs, weight_gather_axes, flat_rhs_shard=flat_rhs_shard)
-
-  return drhs
 
 
 def _drhs_scatter_weight(
@@ -1253,33 +1001,6 @@ def _drhs_scatter_weight(
   return drhs
 
 
-def _drhs_run_tokamax_v1(
-    drhs_dout: jnp.ndarray | qpl.QArray,
-    lhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    rhs_dtype: jax.typing.DTypeLike,
-    use_manual_quantization: bool,
-) -> jnp.ndarray:
-  """Executes standard Tokamax ragged_dot for DRHS."""
-  drhs_kwargs = {}
-  if use_manual_quantization:
-    drhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(
-        varying=frozenset(["expert"]), unreduced=frozenset(["data", "fsdp"])
-    )
-  return tokamax.ragged_dot_general(
-      lhs=lhs,
-      rhs=drhs_dout,
-      group_sizes=group_sizes,
-      ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=rhs_dtype,
-      # `group_offset` is not yet supported
-      group_offset=None,
-      implementation="mosaic",
-      **drhs_kwargs,
-  )
-
-
 def _drhs_prepare_bwd_scale(drhs_dout: qpl.QArray) -> jnp.ndarray:
   """Formats and broadcasts drhs_dout scale to (1, 1, size_n) for V2 TGMM kernel."""
   scale = drhs_dout.scale
@@ -1296,7 +1017,7 @@ def _drhs_prepare_bwd_scale(drhs_dout: qpl.QArray) -> jnp.ndarray:
   return rhs_scale
 
 
-def _drhs_run_tokamax_v2(
+def _drhs_run(
     drhs_dout: jnp.ndarray | qpl.QArray,
     lhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
@@ -1306,8 +1027,9 @@ def _drhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
+    out_manual_axis_type: jax.sharding.ManualAxisType | None = None,
 ) -> jnp.ndarray:
-  """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
+  """Executes tgmm_v2 for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
   drhs_lhs = lhs
 
@@ -1331,29 +1053,5 @@ def _drhs_run_tokamax_v2(
       preferred_element_type=rhs_dtype,
       group_offset=group_offset,
       tile_info=drhs_tiling,
-  )
-
-
-def _drhs_run_megablox(
-    drhs_dout: jnp.ndarray | qpl.QArray,
-    lhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    group_offset: jnp.ndarray | None,
-    num_actual_groups: int,
-    rhs_dtype: jax.typing.DTypeLike,
-    tiling: tuple,
-    interpret: bool,
-    rhs_vma_axes: tuple,
-) -> jnp.ndarray:
-  """Executes Megablox fallback for DRHS."""
-  return backend.tgmm(
-      lhs.swapaxes(0, 1),
-      drhs_dout,
-      group_sizes,
-      rhs_dtype,
-      tiling[-3:],
-      group_offset,
-      num_actual_groups,
-      interpret=interpret,
-      varying_axes=rhs_vma_axes,
+      out_manual_axis_type=out_manual_axis_type,
   )

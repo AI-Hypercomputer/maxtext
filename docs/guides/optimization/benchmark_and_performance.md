@@ -168,9 +168,7 @@ python3 -m maxtext.utils.estimator maxtext/configs/base.yml \
   cost_estimate_flops_fwd=5000000000000 \
   cost_estimate_flops_bwd=5000000000000 \
   float32_weight_sum=False \
-  megablox=true \
   sparse_matmul=true \
-  use_tokamax_gmm=false \
   use_tokamax_splash=true \
   max_target_length=4096 \
   use_random_routing=true \

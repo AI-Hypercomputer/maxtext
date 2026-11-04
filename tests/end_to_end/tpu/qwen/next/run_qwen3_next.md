@@ -27,7 +27,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     attention=flash \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
     dataset_type=grain \
     grain_file_type=tfrecord \
@@ -99,7 +98,6 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     attention=dot_product \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=False \
     sparse_matmul=False \
     ici_tensor_parallelism=1 \
     ici_fsdp_parallelism=1 \

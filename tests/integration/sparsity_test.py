@@ -68,7 +68,6 @@ class Train(parameterized.TestCase):
         "num_experts=2",
         "shared_experts=1",
         "sparse_matmul=True",
-        "megablox=False",
         f"quantization={quantization}",
         "use_qwix_quantization=True",
         "per_device_batch_size=2",

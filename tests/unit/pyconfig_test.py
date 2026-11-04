@@ -42,21 +42,12 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertTrue(config.quantization is None or config.quantization == "")
 
-  def test_gmm_v2_heuristic_tiling_requires_gmm_v2(self):
-    with self.assertRaisesRegex(ValueError, "`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`."):
-      pyconfig.initialize(
-          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
-          use_gmm_v2_heuristic_tiling=True,
-          use_gmm_v2=False,
-      )
-
   def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
     def initialize(**kwargs):
       return pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
           model_name="mixtral-8x7b",
-          megablox=True,
           sparse_matmul=True,
           use_ring_of_experts=True,
           use_ragged_sort=True,
@@ -377,9 +368,9 @@ class PyconfigTest(unittest.TestCase):
 
       with self.subTest(decoder_block=decoder_block):
         with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
-          initialize(num_experts=2, base_mlp_dim=128, base_moe_mlp_dim=128, sparse_matmul=False, megablox=False)
+          initialize(num_experts=2, base_mlp_dim=128, base_moe_mlp_dim=128, sparse_matmul=False)
 
-        config = initialize(num_experts=1, sparse_matmul=False, megablox=False)
+        config = initialize(num_experts=1, sparse_matmul=False)
         self.assertEqual(config.num_experts, 1)
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):

@@ -98,7 +98,6 @@ class SlidingWindowDecodeTest(parameterized.TestCase):
               "num_experts": 4,
               "num_experts_per_tok": 2,
               "sparse_matmul": False,
-              "megablox": False,
           },
       ),
   )

@@ -103,7 +103,6 @@ data_template_path=maxtext/examples/chat_templates/openmathinstruct2_rl.json \
 chat_template_path=maxtext/examples/chat_templates/gemma-3-27b-chat_template.json \
 remat_policy=full \
 decoder_layer_input=offload \
-megablox=True \
 sparse_matmul=True \
 use_custom_sort_vjp=True \
 attention=flash \

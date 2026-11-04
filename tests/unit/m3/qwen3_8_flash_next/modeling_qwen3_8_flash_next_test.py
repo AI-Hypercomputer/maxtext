@@ -1318,63 +1318,6 @@ class Qwen3_8MoETest(absltest.TestCase):
     ):
       self.assertTrue(jnp.any(jnp.asarray(getattr(g, "value", g)) != 0.0))
 
-  def test_experts_tokamax_gmm_matches_reference_and_default(self):
-    """Verifies use_tokamax_gmm=True matches jax.lax.ragged_dot and the per-token reference, forward and backward."""
-    n, d, m, e, k = 12, 32, 16, 8, 2
-    experts_default = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e,
-        emb_dim=d,
-        moe_mlp_dim=m,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        use_tokamax_gmm=False,
-        rngs=nnx.Rngs(9),
-    )
-    experts_tokamax = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e,
-        emb_dim=d,
-        moe_mlp_dim=m,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        use_tokamax_gmm=True,
-        rngs=nnx.Rngs(9),
-    )
-    nnx.update(experts_tokamax, nnx.state(experts_default))
-
-    x = jax.random.normal(jax.random.key(21), (n, d))
-    top_k_idx = jax.random.randint(jax.random.key(22), (n, k), 0, e)
-    top_k_w = jax.random.uniform(jax.random.key(23), (n, k))
-    top_k_w = top_k_w / jnp.sum(top_k_w, axis=-1, keepdims=True)
-
-    ref_out = experts_default.reference_forward(x, top_k_idx, top_k_w)
-    def_out = experts_default(x, top_k_idx, top_k_w)
-    tok_out = experts_tokamax(x, top_k_idx, top_k_w)
-    np.testing.assert_allclose(tok_out, ref_out, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(tok_out, def_out, rtol=1e-5, atol=1e-5)
-
-    skewed_idx = jnp.zeros((n, k), dtype=jnp.int32).at[:, 1].set(1)
-    np.testing.assert_allclose(
-        experts_tokamax(x, skewed_idx, top_k_w),
-        experts_default.reference_forward(x, skewed_idx, top_k_w),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-    def loss_fn(mod: modeling_qwen3_8_flash_next.Qwen3_8Experts, inp: jax.Array) -> jax.Array:
-      return jnp.sum(mod(inp, top_k_idx, top_k_w) * jnp.arange(1, d + 1, dtype=jnp.float32))
-
-    _, (grads_def, dx_def) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_default, x)
-    _, (grads_tok, dx_tok) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_tokamax, x)
-    np.testing.assert_allclose(dx_tok, dx_def, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(grads_tok.gate_up_proj.value, grads_def.gate_up_proj.value, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(grads_tok.down_proj.value, grads_def.down_proj.value, rtol=1e-5, atol=1e-5)
-
-    moe_def = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=False)
-    moe_tok = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=True)
-    nnx.update(moe_tok, nnx.state(moe_def))
-    x_3d = x.reshape(3, 4, d)
-    np.testing.assert_allclose(moe_tok(x_3d), moe_def(x_3d), rtol=1e-5, atol=1e-5)
-
 
 # =================================================================================================
 # SplitMix64 n-gram hashing and PLE
@@ -1884,9 +1827,8 @@ class Qwen3_8BackboneTest(absltest.TestCase):
             cfg_default.gdn_chunk_inverse,
             cfg_default.qsa_indexer_mask,
             cfg_default.qsa_attention_kernel,
-            cfg_default.use_tokamax_gmm,
         ),
-        ("block_doubling", "gather", "dense", False),
+        ("block_doubling", "gather", "dense"),
     )
     # Reference paths (triangular solve, gather mask, dense attention, dense MoE) vs. the TPU kernel paths.
     cfg_base = _get_mini_config(**common_kw, gdn_chunk_inverse="solve")
@@ -1895,7 +1837,6 @@ class Qwen3_8BackboneTest(absltest.TestCase):
         gdn_chunk_inverse="block_doubling",
         qsa_indexer_mask="reshape",
         qsa_attention_kernel="flash",
-        use_tokamax_gmm=True,
     )
     mod_base = m3_models.create_model(cfg_base, mesh=None)
     mod_opt = m3_models.create_model(cfg_opt, mesh=None)

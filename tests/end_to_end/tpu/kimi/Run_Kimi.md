@@ -88,10 +88,8 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     tokenizer_path=moonshotai/Kimi-K2-Instruct \
     attention=flash \
     use_tokamax_splash=True \
-    use_tokamax_gmm=False \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=True \
     sparse_matmul=True \
     dataset_type=synthetic \
     scan_layers=True \
@@ -126,10 +124,8 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     tokenizer_path=moonshotai/Kimi-K2-Instruct \
     attention=flash \
     use_tokamax_splash=True \
-    use_tokamax_gmm=False \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
-    megablox=True \
     sparse_matmul=True \
     dataset_type=grain \
     grain_file_type=tfrecord \
@@ -219,7 +215,6 @@ To run MMLU benchmarks and validate the model's performance, follow the instruct
 
 ## Supported MoE strategy
 * Dropless
-  * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
-  * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
+  * Grouped matmul with flag `sparse_matmul=True`: the GMM v2 Pallas kernel on TPU, [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) on CPU and GPU.
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
 * Dropping implementation with flag `sparse_matmul=False` and reasonable `capacity_factor`, commonly used from 1 to 1.25.

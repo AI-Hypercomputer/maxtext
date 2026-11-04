@@ -24,7 +24,7 @@ python3 -m maxtext.utils.layerwise_quantization  src/maxtext/configs/base.yml \
   model_name=deepseek2-16b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 \
   ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 \
   attention=dot_product quantization=int8 async_checkpointing=false enable_single_controller=true \
-  tokenizer_type=huggingface megablox=false sparse_matmul=false \
+  tokenizer_type=huggingface sparse_matmul=false \
   save_quantized_params_path=${SAVE_PARAMS_PATH?} checkpoint_storage_use_ocdbt=False \
   checkpoint_storage_use_zarr3=False
 

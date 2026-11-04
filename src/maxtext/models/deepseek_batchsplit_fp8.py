@@ -26,10 +26,8 @@ from maxtext.kernels import megablox, sort_activations
 from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
-from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_spec
 import qwix.pallas as qpl
-import tokamax
 
 
 @functools.partial(
@@ -958,63 +956,23 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           preferred_element_type=preferred_element_type,
           tiling=tiling,
           use_qwix_quantization=config.use_qwix_quantization,
-          use_tokamax_backend=config.use_tokamax_gmm,
           weight_gather_axes=weight_gather_axes,
           qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[-1],
       )
     else:
-      output = tokamax.ragged_dot(
+      output = megablox.gmm(
           lhs=inputs,
           rhs=kernel,
-          group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, len(inputs)),
-          precision=jax.lax.Precision.DEFAULT,
+          group_sizes=group_sizes,
           preferred_element_type=preferred_element_type,
-          implementation="mosaic",
+          tiling=tiling,
       )
     return output
 
   gmm_fn = functools.partial(gmm, group_sizes=group_sizes, preferred_element_type=config.dtype)
   wi_gather_axes = []
   wo_gather_axes = []
-
-  if max_utils.is_eval(config):
-    wi_tile_fwd_batch_seq = config.eval_wi_tile_fwd_batch_seq
-    wi_tile_fwd_embed_dim = config.eval_wi_tile_fwd_embed_dim
-    wi_tile_fwd_mlp_dim = config.eval_wi_tile_fwd_mlp_dim
-    wo_tile_fwd_batch_seq = config.eval_wo_tile_fwd_batch_seq
-    wo_tile_fwd_embed_dim = config.eval_wo_tile_fwd_embed_dim
-    wo_tile_fwd_mlp_dim = config.eval_wo_tile_fwd_mlp_dim
-  else:
-    wi_tile_fwd_batch_seq = config.wi_tile_fwd_batch_seq
-    wi_tile_fwd_embed_dim = config.wi_tile_fwd_embed_dim
-    wi_tile_fwd_mlp_dim = config.wi_tile_fwd_mlp_dim
-    wo_tile_fwd_batch_seq = config.wo_tile_fwd_batch_seq
-    wo_tile_fwd_embed_dim = config.wo_tile_fwd_embed_dim
-    wo_tile_fwd_mlp_dim = config.wo_tile_fwd_mlp_dim
-
-  wi_tile_size = (
-      wi_tile_fwd_batch_seq,  # m (LHS batch)
-      wi_tile_fwd_embed_dim,  # k  (contracting)
-      wi_tile_fwd_mlp_dim,  # n (RHS batch)
-      config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
-      config.wi_tile_dlhs_mlp_dim,  # k (contracting)
-      config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
-      config.wi_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
-      config.wi_tile_drhs_embed_dim,  # Called k in megablox, but this is LHS batch dim
-      config.wi_tile_drhs_mlp_dim,  # Called n in megablox, and indeed is the RHS batch dim
-  )
-
-  wo_tile_size = (
-      wo_tile_fwd_batch_seq,  # m (LHS batch)
-      wo_tile_fwd_mlp_dim,  # k (contracting)
-      wo_tile_fwd_embed_dim,  # n (RHS batch)
-      config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
-      config.wo_tile_dlhs_embed_dim,  # k (contracting)
-      config.wo_tile_dlhs_mlp_dim,  # n (RHS)
-      config.wo_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
-      config.wo_tile_drhs_mlp_dim,  # Called k in megablox, but this is LHS batch dim
-      config.wo_tile_drhs_embed_dim,  # Called n in megablox, and indeed is the RHS batch dim
-  )
+  wi_tile_size, wo_tile_size = moe_lib.get_gmm_tiling(config)
 
   if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()

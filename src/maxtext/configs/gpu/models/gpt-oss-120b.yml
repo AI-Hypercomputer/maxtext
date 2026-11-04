@@ -19,7 +19,6 @@ per_device_batch_size: 8
 
 
 # not supported at GPU
-megablox: false
 # dense_matmul without token dropping runs every token through all 128 experts
 # (32x the top-4 FLOPs), so the 120B config has to use the sparse (ragged_dot) path.
 sparse_matmul: true

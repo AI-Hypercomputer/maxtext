@@ -43,7 +43,6 @@ class Qwen3NextSharedExpertTest(unittest.TestCase):
         model_name="qwen3-next-80b-a3b",
         dtype="bfloat16",
         weight_dtype="bfloat16",
-        megablox=False,
         sparse_matmul=False,
         max_target_length=8,
         per_device_batch_size=1,
