@@ -1,0 +1,197 @@
+{
+  "hf_checkpoint_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "hf_revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "release_repo": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "release_revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "provenance_json_path": "tests/utils/deepseek_v41_reference/provenance.json",
+  "u1_commit": "32aeb9417711d2d31ba271e14244e2d88a0d3d67",
+  "u2_commit": "bffee4d13b78f3bb4148954ac2ba4d007cd068bd",
+  "u6a_commit": "e2b1526a9ace200bf5a159bf5cbf681d90845f4f",
+  "golden_version": "mm_v3",
+  "mm_v3_expected_distinct_non_l2_ranks": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47
+  ],
+  "pinned_tool_files": {
+    "tests/utils/deepseek_v41_reference/vision.py": "0f14ad58a28f774fd26313907d050ecea1670f30b23ccaf2115046c8babb4fe8",
+    "tests/utils/deepseek_v41_reference/image_processor.py": "584eace12c981aae13dd5a9f4fe0124359b0ac21d3ab18c88a5ae28ce4a95488",
+    "tests/utils/deepseek_v41_mm_golden/__init__.py": "59c54bf4a4bbe4015b6fbde934282c90032a97f3f084099612bee4b3857f2d49",
+    "tests/utils/deepseek_v41_mm_golden/reference_loader.py": "f73fe242e115774ceb97ab7709259274ceff526630875ffbef8481f1ddee544c",
+    "tests/utils/deepseek_v41_mm_golden/generate_mm_golden_logits.py": "138884268064ef6990ee3f194919709bce48b5155751b2d42ca57e1d3ac3023d"
+  },
+  "expected_golden_cases": {
+    "L1": {
+      "category": "logit_forward",
+      "num_images": 1
+    },
+    "L2": {
+      "category": "logit_forward",
+      "num_images": 2
+    },
+    "L3": {
+      "category": "logit_forward",
+      "num_images": 1
+    },
+    "L4": {
+      "category": "logit_forward",
+      "num_images": 4
+    },
+    "M1": {
+      "category": "masked_prefill",
+      "num_images": 1
+    },
+    "M2": {
+      "category": "masked_prefill",
+      "num_images": 1
+    },
+    "M3": {
+      "category": "masked_prefill",
+      "num_images": 2
+    },
+    "M4": {
+      "category": "masked_prefill",
+      "num_images": 2
+    },
+    "M5": {
+      "category": "masked_prefill",
+      "num_images": 3
+    },
+    "M6": {
+      "category": "masked_prefill",
+      "num_images": 3
+    },
+    "M7": {
+      "category": "masked_prefill",
+      "num_images": 2
+    },
+    "M8": {
+      "category": "masked_prefill",
+      "num_images": 4
+    }
+  },
+  "text_prefill_v2": {
+    "gcs_prefix": "gs://maxtext-deepseek/deepseek-v4.1-flash/golden/prefill_v2",
+    "prefill_goldens_v2.pkl": "55bc89dd7577af34e7a600b5ebd009947986e69e19fcdb2714ecdbd0541075ae",
+    "sha256_manifest.json": "2229e0427686bd2162d9a412ad0ed21b290febb65a43cfee4b8c55893f201252",
+    "sample_1_prose.npz": "eea76984441b85c7597a4e39144978465b6c70040c599d7e646bcb4c189d9b3d"
+  },
+  "mm_v1_gcs_prefix": "gs://maxtext-deepseek/deepseek-v4.1-flash/golden/mm_v1",
+  "mm_v1_pinned_tool_files": {
+    "tests/utils/deepseek_v41_reference/vision.py": "0f14ad58a28f774fd26313907d050ecea1670f30b23ccaf2115046c8babb4fe8",
+    "tests/utils/deepseek_v41_reference/image_processor.py": "584eace12c981aae13dd5a9f4fe0124359b0ac21d3ab18c88a5ae28ce4a95488",
+    "tests/utils/deepseek_v41_mm_golden/__init__.py": "59c54bf4a4bbe4015b6fbde934282c90032a97f3f084099612bee4b3857f2d49",
+    "tests/utils/deepseek_v41_mm_golden/reference_loader.py": "02512f39893056656051264aa0f6b51ff56628b0df15fb0dc6635716b7b9060b",
+    "tests/utils/deepseek_v41_mm_golden/generate_mm_golden_logits.py": "f930bab879d23a417c822fe6eebbfe4071881174d376f6a4763f6df94849f37d"
+  },
+  "mm_v1_expected_artifacts": [
+    "L1.npz",
+    "L2.npz",
+    "L3.npz",
+    "L4.npz",
+    "M1.npz",
+    "M2.npz",
+    "M3.npz",
+    "M4.npz",
+    "M5.npz",
+    "M6.npz",
+    "M7.npz",
+    "M8.npz",
+    "mm_logit.pkl",
+    "manifest.json"
+  ],
+  "mm_v1_outputs_sha256": {
+    "L1.npz": "84267d9acda83b7843d02d078d15dd762ef51cf2cc69ff59942d582960e9b830",
+    "L2.npz": "599c82c3387e7f5cee2efe2c99cfe33444ece56f51078402f22d1a310d633032",
+    "L3.npz": "fa7a84fda96953280e3f25227f0a8d988e331c8b4f83bd93c000c7e5a3551789",
+    "L4.npz": "20c91f8341a4c450a48f68be5ed926ef41bc432272d270b996d0f99bc106db20",
+    "M1.npz": "0644d7a9b2231c9448ba13d1a0ff9109723582819d3488e340b9c89b5a8b6188",
+    "M2.npz": "ee8ea2c7d5d1304993e1468d1ad95373c159386ac42485e9e8a9da4ecd20500c",
+    "M3.npz": "4cdbcc258f62b1a03b4d871f80131bc482e71973d16d6aa1c0aa6e07940555ff",
+    "M4.npz": "5d86538193befaf6336ce18cba951df7b049bf241d58c2b760c87c07f30a8893",
+    "M5.npz": "0633e62237a021d6b138e7af5e9bbd3779fb092c9c53663bb03dee70d83a6283",
+    "M6.npz": "9da82f9f69ace1fe5982e7a9ca46e6e7d1bd2fc1a89affe7c696f21fb022ba4e",
+    "M7.npz": "ad8485cfd21193eb664d46788e312cc6d6521499711c5235b5518b7bce7791b1",
+    "M8.npz": "a3a224fcdec0ecff12c5e0acd9318d4ca398c0543ea8002c2aae50d963a9b92f",
+    "mm_logit.pkl": "2c3bf8cb246202581d7305937e49ef402d44d7a7b5d4d13fb87298bd02cdeb2f"
+  },
+  "mm_v2_gcs_prefix": "gs://maxtext-deepseek/deepseek-v4.1-flash/golden/mm_v2",
+  "mm_v2_pinned_tool_files": {
+    "tests/utils/deepseek_v41_reference/vision.py": "0f14ad58a28f774fd26313907d050ecea1670f30b23ccaf2115046c8babb4fe8",
+    "tests/utils/deepseek_v41_reference/image_processor.py": "584eace12c981aae13dd5a9f4fe0124359b0ac21d3ab18c88a5ae28ce4a95488",
+    "tests/utils/deepseek_v41_mm_golden/__init__.py": "59c54bf4a4bbe4015b6fbde934282c90032a97f3f084099612bee4b3857f2d49",
+    "tests/utils/deepseek_v41_mm_golden/reference_loader.py": "a0ee5af99106b2a01f4e444c455de3cd54be7313725682298569b3f6ddd0423e",
+    "tests/utils/deepseek_v41_mm_golden/generate_mm_golden_logits.py": "38e63d7677f9712e27342415c97cdf82da94216e37448d3a72775d95454193dc"
+  },
+  "mm_v2_expected_artifacts": [
+    "L1.npz",
+    "L2.npz",
+    "L3.npz",
+    "L4.npz",
+    "M1.npz",
+    "M2.npz",
+    "M3.npz",
+    "M4.npz",
+    "M5.npz",
+    "M6.npz",
+    "M7.npz",
+    "M8.npz",
+    "mm_logit.pkl",
+    "manifest.json"
+  ],
+  "mm_v2_outputs_sha256": {},
+  "mm_v3_gcs_prefix": "gs://maxtext-deepseek/deepseek-v4.1-flash/golden/mm_v3",
+  "mm_v3_expected_artifacts": [
+    "L1.npz",
+    "L2.npz",
+    "L3.npz",
+    "L4.npz",
+    "M1.npz",
+    "M2.npz",
+    "M3.npz",
+    "M4.npz",
+    "M5.npz",
+    "M6.npz",
+    "M7.npz",
+    "M8.npz",
+    "mm_logit.pkl",
+    "manifest.json"
+  ],
+  "mm_v3_outputs_sha256": {
+    "L1.npz": "87c946317058429a6ce443b35ef042b0d3694fb7fbdda44f82d96c81233e8d50",
+    "L2.npz": "f61498ee831f3834d0598f2dd31f368f5a42c66257f51c167b98879f0b5e8f3f",
+    "L3.npz": "9b4aaef76cfee29e1f131a3beeb4fb7e513e4e885677a3f4d4946c145a901a8b",
+    "L4.npz": "d4218a5a0d27bd96584e2619c01f5bb7a60b48556bd33540034b3f6c13ab401a",
+    "M1.npz": "bdbe116d8c87887b23378c5fac3d2644021a85a83d68bfdfbf7010ed01ef73a7",
+    "M2.npz": "d6516fb91eab177b2e3264500353cfe3491b1e3537710681bd6e4219831ab6e8",
+    "M3.npz": "1b75164099338e15bd06eb7280e2309455e0b3a9780419c89a53c66ce319fc5d",
+    "M4.npz": "98b8ca6a309b481b7274663606d3a6c4315d116b4ff91a06969176d8261c2208",
+    "M5.npz": "9df1f6cff38752eadc995c1aa319a862310d04ad1fbe0d31110d9a0fffca89a9",
+    "M6.npz": "41ffb6de1ea06c67791a254c89cbc976291caa408514ce3c5f776c1c836cb5c6",
+    "M7.npz": "1cbcd36dab43a189647850a1ce36e5b704f73b84976bb354b9ab029932376f58",
+    "M8.npz": "01d7f853e97abcb5148e5deb63202637b8b8eb4f2f4a650442e37ea9ddebab18",
+    "manifest.json": "dd71d2ca04cd49b51f3c0b9c0ea4fa2fcc1451328e3b6c48b601e1313d7e83b4",
+    "mm_logit.pkl": "81539acef29dcfce87858cc86aeaf9cfb7e31d751a920558a51fc4352b1590db"
+  }
+}

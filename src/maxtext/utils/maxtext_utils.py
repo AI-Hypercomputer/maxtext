@@ -184,8 +184,16 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
-      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size, config=config)
-      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      if config.vision_encoder_block == VisionEncoderBlockType.DEEPSEEK41:
+        img_batch_size = global_batch_size
+        img_dtype = jnp.float32 if config.dataset_type == "synthetic" else jnp.int32
+      else:
+        img_batch_size = batch_size
+        img_dtype = jnp.int32
+      image_shape = mm_processor.get_dummy_image_shape_for_init(
+          config.model_name, batch_size=img_batch_size, config=config
+      )
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, img_dtype, sharding=batch_sharding)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
       if "llama4" in config.model_name:
