@@ -609,6 +609,10 @@ class PipelineParallelismTest(unittest.TestCase):
     with the FSDP all-gather hoisted out of the loop, and NNXCircularPipeline (weight prefetching) with the gathered
     slot carried across repeats and on the shifted schedule with the default re-gather. Every case shards the batch over
     FSDP besides the stages.
+
+    The first loss is pure forward pass and matches to rounding. After an update the two modes' programs can round
+    differently: with 4-way FSDP on an 8-device tpu7x, the circular case drifts by 1.5e-4 by the third step in bf16 (on
+    8 CPU devices in float32 it is bit-exact). So the later losses get a looser bound.
     """
     tiny_model = [
         "base_emb_dim=28",
@@ -646,7 +650,8 @@ class PipelineParallelismTest(unittest.TestCase):
     for name, case_args in cases.items():
       with self.subTest(case=name):
         explicit_losses, auto_losses = self._explicit_and_auto_losses(name, tiny_model + case_args)
-        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-5, atol=0.0)
+        np.testing.assert_allclose(explicit_losses[0], auto_losses[0], rtol=1e-5, atol=0.0)
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=5e-4, atol=0.0)
 
   def test_deepseek_explicit_sharding_matches_auto(self):
     """DeepSeek under explicit sharding with pipeline and expert parallelism.
@@ -655,6 +660,8 @@ class PipelineParallelismTest(unittest.TestCase):
     block run under the PP-as-DP rules; the routing biases are updated from the per-layer sown counts. The first loss
     is pure forward pass and matches to rounding. After an update the two modes' reassociated gradient reductions can
     move near-tied tokens to other experts, so the later losses drift by ~1e-4 and the bound is loose.
+
+    Data parallelism takes the devices beyond the four the pipeline and expert axes use (two on an 8-device tpu7x).
     """
     args = [
         "model_name=deepseek3-tiny",
@@ -670,6 +677,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "ici_pipeline_parallelism=2",
         "ici_expert_parallelism=2",
         "ici_fsdp_parallelism=1",
+        "ici_data_parallelism=-1",
         "num_pipeline_microbatches=4",
     ]
     explicit_losses, auto_losses = self._explicit_and_auto_losses("deepseek", args)
@@ -739,7 +747,8 @@ class PipelineParallelismTest(unittest.TestCase):
     """pipeline_unreduced_weight_grads only reorders the sum of each repeat's weight gradient: the losses must not move.
 
     DeepSeek on PP2 x FSDP2 with weight prefetching (BSW) on the phase-split schedule: the dense weights and the
-    routed experts (through the MoE shard_map) are both tagged. float32 at the highest matmul precision.
+    routed experts (through the MoE shard_map) are both tagged. float32 at the highest matmul precision. Data
+    parallelism takes any devices beyond four.
     """
     args = [
         "model_name=deepseek3-tiny",
@@ -757,6 +766,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "shard_mode=explicit",
         "ici_pipeline_parallelism=2",
         "ici_fsdp_parallelism=2",
+        "ici_data_parallelism=-1",
         "num_pipeline_microbatches=4",
         "pipeline_fsdp_ag_per_repeat=True",
         "pipeline_bsw_phase_split=True",
