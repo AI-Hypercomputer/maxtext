@@ -26,6 +26,14 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
+if __name__ == "__main__":
+  _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+  _src_dir = os.path.join(_repo_root, "src")
+  if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+  if _src_dir not in sys.path:
+    sys.path.insert(1, _src_dir)
+
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
@@ -89,12 +97,15 @@ class SyntheticDataShardingTest(parameterized.TestCase):
       if not sys.executable:
         self.skipTest("Needs >= 2 devices.")
       self.assertNotEqual(os.environ.get("_MAXTEXT_CONSTANT_PADDED_SUBPROC"), "1")
+      repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+      src_dir = os.path.join(repo_root, "src")
+      cur_pp = os.environ.get("PYTHONPATH", "")
       env = {
           **os.environ,
           "_MAXTEXT_CONSTANT_PADDED_SUBPROC": "1",
           "JAX_PLATFORMS": "cpu",
           "XLA_FLAGS": f"{os.environ.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count=2".strip(),
-          "PYTHONPATH": os.pathsep.join(filter(None, [*sys.path, os.environ.get("PYTHONPATH", "")])),
+          "PYTHONPATH": f"{repo_root}:{src_dir}:{cur_pp}".rstrip(":"),
       }
       cmd = [sys.executable, os.path.abspath(__file__), f"{type(self).__name__}.{self._testMethodName}"]
       res = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
@@ -143,6 +154,53 @@ class SyntheticDataShardingTest(parameterized.TestCase):
     self.assertEqual(eval_batch["inputs"].shape, (config.global_batch_size_to_load_eval, 8))
     self.assertTrue(bool(jnp.all(eval_batch["inputs_segmentation"] == 1)))
     self.assertTrue(bool(jnp.all(eval_batch["targets_segmentation"] == 1)))
+
+
+class DeepSeek41SyntheticDataTest(absltest.TestCase):
+  """Unit tests for DeepSeek-V4.1 multimodal synthetic batch padding masks and shardings."""
+
+  def test_deepseek41_constant_padded_elastic_zero_masks(self):
+    """B4: Verify logical_global_batch_size_to_load zero-masks padded dummy rows on segmentation."""
+    live_devices = tuple(jax.devices()[:1])
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        run_name="test_ds41_synthetic_padded",
+        enable_checkpointing=False,
+        per_device_batch_size=4.0,
+        dataset_type="synthetic",
+        packing=False,
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        max_target_length=400,
+        use_multimodal=True,
+        vision_encoder_block="deepseek41",
+        ds41_vision_grid=[4, 4],
+        ds41_vision_downsample_ratio=2,
+        max_num_images_per_example=1,
+        ds41_image_token_id=100,
+        vocab_size=200,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+    )
+    # Simulate constant_padded elastic batch where logical batch is half of global batch
+    g_load = config.global_batch_size_to_load
+    l_load = g_load // 2
+    object.__setattr__(config, "logical_global_batch_size_to_load", l_load)
+
+    mesh = Mesh(mesh_utils.create_device_mesh((1,), live_devices), config.mesh_axes)
+    iterator = SyntheticDataIterator(config, mesh, is_training=True)
+    train_batch = next(iterator)
+
+    self.assertGreater(g_load, 0)
+    self.assertGreater(l_load, 0)
+    # Active rows must have segmentation == 1
+    self.assertEqual(int(jnp.sum(train_batch["inputs_segmentation"][:l_load])), l_load * config.max_target_length)
+    # Padded rows must have both inputs_segmentation and targets_segmentation equal to 0
+    padded_inp_sum = int(jnp.sum(train_batch["inputs_segmentation"][l_load:]))
+    padded_tgt_sum = int(jnp.sum(train_batch["targets_segmentation"][l_load:]))
+    self.assertEqual(padded_inp_sum, 0, f"Expected 0 sum for padded inputs_segmentation, got {padded_inp_sum}")
+    self.assertEqual(padded_tgt_sum, 0, f"Expected 0 sum for padded targets_segmentation, got {padded_tgt_sum}")
 
 
 class PlaceHolderDataIteratorTest(absltest.TestCase):

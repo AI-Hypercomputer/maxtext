@@ -1246,7 +1246,12 @@ class DeepSeek41InitAndConfigTest(unittest.TestCase):
       self.assertIn("images", shaped)
       self.assertNotIn("image_masks", shaped)
       self.assertEqual(shaped["images"].shape, (batch_size, 1, expected_patches, 588))
-      self.assertEqual(shaped["images"].dtype, jnp.int32)
+      self.assertEqual(shaped["images"].dtype, jnp.float32)
+
+      cfg_tfds = mm_testing.mini_vision_maxtext_config(grid=grid, dtype_mm="bfloat16", dataset_type="tfds")
+      shaped_tfds = maxtext_utils.get_shaped_batch(cfg_tfds)
+      self.assertEqual(shaped_tfds["images"].shape, (batch_size, 1, expected_patches, 588))
+      self.assertEqual(shaped_tfds["images"].dtype, jnp.int32)
 
       if grid != (39, 39):
         dummy_images = jnp.ones(shaped["images"].shape, dtype=jnp.int32)

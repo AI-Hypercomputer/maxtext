@@ -139,6 +139,20 @@ def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.D
   )
 
 
+def _get_ds41_image_sharding(batch_sharding, enable_diloco: bool):
+  """Returns an explicit NamedSharding for DeepSeek-V4.1 multimodal images."""
+  if batch_sharding is None or not hasattr(batch_sharding, "mesh") or not hasattr(batch_sharding, "spec"):
+    return batch_sharding
+  spec = batch_sharding.spec
+  if enable_diloco and len(spec) >= 2:
+    img_spec = jax.sharding.PartitionSpec(spec[0], spec[1], None, None, None)
+  elif len(spec) >= 1:
+    img_spec = jax.sharding.PartitionSpec(spec[0], None, None, None)
+  else:
+    img_spec = jax.sharding.PartitionSpec()
+  return jax.sharding.NamedSharding(batch_sharding.mesh, img_spec)
+
+
 def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
@@ -179,8 +193,31 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
-      image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size, config=config)
-      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      is_ds41 = (
+          getattr(getattr(config, "vision_encoder_block", None), "value", getattr(config, "vision_encoder_block", None))
+          == "deepseek41"
+      )
+      if is_ds41:
+        img_dtype = jnp.float32 if getattr(config, "dataset_type", None) == "synthetic" else jnp.int32
+        base_shape = mm_processor.get_dummy_image_shape_for_init(
+            getattr(config, "model_name", ""), batch_size=global_batch_size, config=config
+        )
+        if getattr(config, "enable_diloco", False):
+          image_shape = (
+              config.num_diloco_replicas,
+              global_batch_size // config.num_diloco_replicas,
+          ) + base_shape[1:]
+        else:
+          image_shape = base_shape
+        img_shd = _get_ds41_image_sharding(batch_sharding, enable_diloco=bool(getattr(config, "enable_diloco", False)))
+      else:
+        img_batch_size = batch_size
+        img_dtype = jnp.int32
+        image_shape = mm_processor.get_dummy_image_shape_for_init(
+            getattr(config, "model_name", ""), batch_size=img_batch_size, config=config
+        )
+        img_shd = batch_sharding
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, img_dtype, sharding=img_shd)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
       if "llama4" in config.model_name:
