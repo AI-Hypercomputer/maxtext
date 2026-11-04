@@ -22,6 +22,10 @@ from jax import numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
 import numpy as np
+try:
+  import omegaconf
+except ImportError:  # pragma: no cover
+  omegaconf = None
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.integration.vllm.convert_utils import DEFAULT_TPU_NUM_LANES, compute_padded_moe_mlp_dim
@@ -55,6 +59,34 @@ from vllm.config import VllmConfig
 # If max_count / min_count >= this threshold, we group KV cache allocations by the
 # smaller count to prevent excessive memory padding for the minority layer type.
 _HYBRID_LAYER_IMBALANCE_THRESHOLD = 1.5
+
+# MaxText decoder blocks that interleave GatedDeltaNet (linear attention) layers
+# with full attention, i.e. vLLM hybrid (attention + mamba-style state) models.
+HYBRID_DECODER_BLOCKS = ("qwen3_next", "qwen3_5")
+
+
+def is_hybrid_maxtext_model(model_name: str | None) -> bool:
+  """Whether the MaxText model `model_name` is a hybrid attention + GDN model.
+
+  Reads `decoder_block` from the model's config (`configs/models/<name>.yml`)
+  without building the full MaxText config, since vLLM needs the answer when
+  the model class is registered, before any `VllmConfig` exists.
+  """
+  if not model_name:
+    return False
+  # -Instruct variants share the base model's architecture (as in pyconfig).
+  model_name = model_name.replace("-Instruct", "")
+  model_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "models", f"{model_name}.yml")
+  if not os.path.isfile(model_config_path):
+    return False
+  if omegaconf is not None:
+    decoder_block = omegaconf.OmegaConf.load(model_config_path).get("decoder_block", "")
+  else:
+    import yaml  # pylint: disable=import-outside-toplevel
+
+    with open(model_config_path, "r", encoding="utf-8") as f:
+      decoder_block = (yaml.safe_load(f) or {}).get("decoder_block", "")
+  return str(decoder_block) in HYBRID_DECODER_BLOCKS
 
 
 def next_power_of_two(x: int) -> int:
@@ -91,7 +123,8 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
     ValueError: If `hf_config_path` is not provided in the vLLM model config.
   """
   if "maxtext_config" in vllm_config.additional_config:
-    overrides = vllm_config.additional_config["maxtext_config"]
+    overrides = dict(vllm_config.additional_config["maxtext_config"])
+    overrides.pop("mtp_hf_checkpoint_path", None)
   else:
     overrides = {}
 
@@ -198,6 +231,11 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
   if getattr(cache_config, "mamba_cache_mode", "none") == "align":
     overrides["gdn_mamba_block_size"] = cache_config.block_size
 
+  # Enable 1-layer Multi-Token Prediction (MTP) when vLLM speculative_config uses method="mtp".
+  spec_config = getattr(vllm_config, "speculative_config", None)
+  if getattr(spec_config, "method", None) == "mtp":
+    overrides.setdefault("mtp_num_layers", 1)
+
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
   return maxtext_config
 
@@ -216,6 +254,11 @@ class MaxTextForCausalLM(nnx.Module):
   # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
   _self_manages_sharding: bool = True
   supports_multimodal: bool = False
+  # vLLM's `IsHybrid` flag (attention + mamba-style recurrent state). vLLM
+  # reads it from the registered class to enable mamba prefix caching
+  # ("align" cache mode) and the hybrid KV cache layout. Set per model by
+  # `register()`, since one class serves every MaxText model.
+  is_hybrid: bool = False
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
@@ -376,6 +419,14 @@ class MaxTextForCausalLM(nnx.Module):
 
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
+      if getattr(self.vllm_config, "speculative_config", None) is not None:
+        spec_method = getattr(self.vllm_config.speculative_config, "method", None)
+        decoder = getattr(self.model, "decoder", None)
+        if spec_method == "mtp" and decoder is not None and hasattr(decoder, "decoder_norm"):
+          normed_hidden = decoder.decoder_norm(hidden)
+          aux_hidden_states = [normed_hidden.reshape((-1, normed_hidden.shape[-1]))]
+        else:
+          aux_hidden_states = [hidden]
 
     return kv_caches, hidden, aux_hidden_states, expert_indices
 
@@ -468,6 +519,94 @@ class MaxTextForCausalLM(nnx.Module):
       # Reshape back to (num_tokens, vocab_size)
       return logits.squeeze(1)
 
+  @property
+  def mtp_layer(self) -> nnx.Module | None:
+    """Returns the first Multi-Token Prediction layer from the underlying Transformer, if present."""
+    mtp_block = getattr(self.model, "mtp_block", None)
+    return getattr(mtp_block, "mtp_layer_1", None)
+
+  def has_mtp(self) -> bool:
+    """Returns True if an MTP draft layer is attached to this model."""
+    return self.mtp_layer is not None
+
+  # pylint: disable=keyword-arg-before-vararg
+  def mtp_forward(
+      self,
+      kv_caches: list[jax.Array],
+      input_ids: jax.Array,
+      target_hidden_states: jax.Array | None = None,
+      attention_metadata: AttentionMetadata | dict | None = None,
+      _layer_name_to_kvcache_index: tuple | dict | None = None,
+      spec_step_idx: int = 0,
+      *args,
+      **kwargs,
+  ) -> tuple[list[jax.Array], jax.Array, list[jax.Array], None]:
+    """Executes one Multi-Token Prediction (MTP) draft step using the target model's shared embedding."""
+    del spec_step_idx, args
+    if not isinstance(self.model, nnx.Module) or self.mtp_layer is None:
+      raise ValueError("MTP layer is not initialized on MaxTextForCausalLM.")
+    if target_hidden_states is None:
+      target_hidden_states = kwargs.pop("target_hidden_states", kwargs.pop("hidden_states", None))
+    if _layer_name_to_kvcache_index is None:
+      _layer_name_to_kvcache_index = kwargs.pop("layer_name_to_kvcache_index", None)
+
+    attn_meta = (
+        attention_metadata.get("draft_layer.0") or next(iter(attention_metadata.values()))
+        if isinstance(attention_metadata, dict)
+        else attention_metadata
+    )
+    input_positions = normalize_vllm_input_positions(getattr(attn_meta, "input_positions", None))
+
+    draft_kv_index = (
+        dict(_layer_name_to_kvcache_index).get("draft_layer.0", len(kv_caches) - 1)
+        if (kv_caches and _layer_name_to_kvcache_index is not None)
+        else (len(kv_caches) - 1 if kv_caches else None)
+    )
+    draft_kv_cache = kv_caches[draft_kv_index] if draft_kv_index is not None else None
+
+    input_ids_2d = jnp.expand_dims(input_ids, axis=1) if input_ids.ndim == 1 else input_ids
+    prev_hidden_3d = (
+        jnp.expand_dims(target_hidden_states, axis=1) if target_hidden_states.ndim == 2 else target_hidden_states
+    )
+
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      target_embeds_3d = self.model.token_embedder(input_ids_2d.astype(jnp.int32), model_mode=self.model_mode)
+      raw_hidden, updated_draft_kv = self.mtp_layer(
+          prev_hidden_state=prev_hidden_3d.astype(self.maxtext_config.dtype),
+          target_token_embedding=target_embeds_3d.astype(self.maxtext_config.dtype),
+          position_ids=input_positions,
+          decoder_segment_ids=None,
+          deterministic=True,
+          model_mode=self.model_mode,
+          kv_cache=draft_kv_cache,
+          attention_metadata=attn_meta,
+          return_kv_cache=True,
+      )
+      normed_hidden = self.mtp_layer.final_norm(raw_hidden)
+      normed_hidden = normed_hidden.reshape((-1, normed_hidden.shape[-1]))
+
+    if kv_caches and draft_kv_index is not None and updated_draft_kv is not None:
+      kv_caches = list(kv_caches)
+      kv_caches[draft_kv_index] = updated_draft_kv
+
+    return kv_caches, normed_hidden, [normed_hidden], None
+
+  def compute_mtp_logits(self, hidden_states: jax.Array, lora_metadata=None) -> jax.Array:
+    """Projects already-normalized MTP hidden states (`mtp.norm`) to vocab logits."""
+    del lora_metadata
+    if not isinstance(self.model, nnx.Module):
+      raise ValueError("Model is not initialized.")
+    with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
+      y = jnp.expand_dims(hidden_states, axis=1) if hidden_states.ndim == 2 else hidden_states
+      logits = self.model.decoder.apply_output_head(
+          self.model.token_embedder, y, True, self.model_mode, normalize_y=False, reduce_mhc=False
+      )
+      return logits.squeeze(1)
+
+  def combine_hidden_states(self, hidden_states: jax.Array) -> jax.Array:
+    """Identity pass-through for EAGLE3/MTP proposer compatibility."""
+    return hidden_states
+
   def load_weights(self, rng_key: jax.Array) -> None:
     """Loads model weights using the underlying decoder model.
 
@@ -481,6 +620,26 @@ class MaxTextForCausalLM(nnx.Module):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
+      if getattr(model, "mtp_block", None) is not None and not getattr(model, "_mtp_block_restored", False):
+        add_cfg = getattr(self.vllm_config, "additional_config", None) or {}
+        mt_add_cfg = add_cfg.get("maxtext_config", {}) if isinstance(add_cfg, dict) else {}
+        explicit_mtp_hf = mt_add_cfg.get("mtp_hf_checkpoint_path") if isinstance(mt_add_cfg, dict) else None
+        model_path = getattr(self.cfg, "model", None)
+        load_format = getattr(getattr(self.vllm_config, "load_config", None), "load_format", None)
+        hf_ckpt_path = explicit_mtp_hf or (
+            model_path
+            if (
+                getattr(model, "_mtp_block_restored", None) is False
+                or (load_format == "dummy" and model_path and os.path.isdir(str(model_path)))
+            )
+            else None
+        )
+        if hf_ckpt_path:
+          hf_cfg_obj = getattr(self.cfg, "hf_config", None)
+          hf_cfg_dict = hf_cfg_obj.to_dict() if hasattr(hf_cfg_obj, "to_dict") else None
+          model_creation_utils.load_mtp_block_from_hf(
+              model, self.maxtext_config, self.mesh, str(hf_ckpt_path), hf_config_dict=hf_cfg_dict
+          )
       if self.maxtext_config.lora.enable_lora:
         model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
         if self.maxtext_config.lora.lora_restore_path:
@@ -542,7 +701,7 @@ def patch_kv_cache_manager():
     elif hasattr(decoder_block, "value"):
       decoder_block_str = decoder_block.value
 
-    if decoder_block_str in ("qwen3_next", "qwen3_5"):
+    if decoder_block_str in HYBRID_DECODER_BLOCKS:
       mamba_cache_mode = getattr(self.runner.cache_config, "mamba_cache_mode", "none")
       interval = cfg.inhomogeneous_layer_cycle_interval
 
@@ -579,8 +738,18 @@ def patch_kv_cache_manager():
 
       # Calculate groups
       num_layers = cfg.base_num_decoder_layers
-      num_attn = num_layers // interval
-      num_mamba = num_layers - num_attn
+      num_base_attn = num_layers // interval
+      num_mamba = num_layers - num_base_attn
+      vllm_cfg = getattr(self.runner, "vllm_config", None)
+      spec_cfg = getattr(vllm_cfg, "speculative_config", None) or getattr(self.runner, "speculative_config", None)
+      spec_method = getattr(spec_cfg, "method", None) if spec_cfg is not None else None
+      use_gemma4_mtp = bool(
+          spec_cfg is not None
+          and hasattr(spec_cfg, "use_gemma4_mtp")
+          and spec_cfg.use_gemma4_mtp()
+      )
+      num_draft_attn = 1 if (spec_method in ("mtp", "eagle3", "dflash") and not use_gemma4_mtp) else 0
+      num_attn = num_base_attn + num_draft_attn
 
       # To allocate memory uniformly for a hybrid model's KV/recurrent cache page table,
       # we group layers together. The uniform page size must support both attention and
@@ -625,7 +794,7 @@ def patch_kv_cache_manager():
 
     kv_cache_spec = original_get_kv_cache_spec(self)
 
-    if decoder_block_str in ("qwen3_next", "qwen3_5"):
+    if decoder_block_str in HYBRID_DECODER_BLOCKS:
       for i in range(cfg.base_num_decoder_layers):
         layer_name = f"layer.{i}"
         if (i + 1) % interval != 0:
@@ -644,6 +813,13 @@ def patch_kv_cache_manager():
               head_size,
               sliding_window=getattr(kv_cache_spec[layer_name], "sliding_window", None),
           )
+      if "draft_layer.0" in kv_cache_spec:
+        kv_cache_spec["draft_layer.0"] = self._create_attention_spec(
+            kv_cache_spec["draft_layer.0"].block_size,
+            num_kv_heads,
+            head_size,
+            sliding_window=getattr(kv_cache_spec["draft_layer.0"], "sliding_window", None),
+        )
 
     return kv_cache_spec
 

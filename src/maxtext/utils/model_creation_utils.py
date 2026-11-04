@@ -912,6 +912,7 @@ def from_pretrained(
             f"model_name={config.model_name}",
             f"base_output_directory={config.base_output_directory}",
             f"scan_layers={config.scan_layers}",
+            f"mtp_num_layers={getattr(config, 'mtp_num_layers', 0) or 0}",
             "use_multimodal=false",
             "skip_jax_distributed_system=True",
             "--lazy_load_tensors=True",
@@ -1030,6 +1031,7 @@ def from_pretrained(
           lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
       )
       is_nnx_checkpoint = True
+      mtp_in_ckpt = True
       if (
           "params" in metadata.item_metadata.tree.keys()
           and "params" in metadata.item_metadata.tree.get("params", {}).keys()
@@ -1042,9 +1044,11 @@ def from_pretrained(
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
 
-        target_for_restore = _adjust_target_for_moe_fusion(
-            target_for_restore, metadata.item_metadata.tree["params"]["params"], False
-        )
+        meta_params = metadata.item_metadata.tree["params"]["params"]
+        mtp_in_ckpt = "mtp_block" in meta_params
+        target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_params, False)
+        if not mtp_in_ckpt and isinstance(target_for_restore, dict):
+          target_for_restore.pop("mtp_block", None)
 
         # Linen checkpoints keep non-trainable variables (e.g. `Tid2EidVar`) in
         # collections beside "params"; restore the model leaves they hold too.
@@ -1110,7 +1114,10 @@ def from_pretrained(
         )
         has_base_key = "base" in metadata.item_metadata.tree
         meta_tree_for_params = metadata.item_metadata.tree.get("base", metadata.item_metadata.tree)
+        mtp_in_ckpt = "mtp_block" in meta_tree_for_params
         target_for_restore = _adjust_target_for_moe_fusion(target_for_restore, meta_tree_for_params, True)
+        if not mtp_in_ckpt and isinstance(target_for_restore, dict):
+          target_for_restore.pop("mtp_block", None)
         item_to_restore = {"base": target_for_restore} if has_base_key else target_for_restore
         restore_args = _fix_restore_args_for_shape_mismatch(
             ocp.checkpoint_utils.construct_restore_args(target_for_restore), meta_tree_for_params, mesh
@@ -1125,10 +1132,14 @@ def from_pretrained(
         # If yes, skip freeing device memory for this node and its children so they can be
         # initialized with random values.
         is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+        is_unrestored_mtp = not mtp_in_ckpt and any(
+            str(getattr(p, "key", getattr(p, "name", p))) == "mtp_block" for p in path
+        )
         if (
             isinstance(node, nnx.Variable)
             and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
             and not is_custom
+            and not is_unrestored_mtp
         ):
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
@@ -1137,7 +1148,7 @@ def from_pretrained(
           for leaf in jax.tree_util.tree_leaves(inner):
             if isinstance(leaf, jax.Array) and not leaf.is_deleted():
               leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
+        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom and not is_unrestored_mtp:
           node.delete()
 
         return node
@@ -1231,6 +1242,7 @@ def from_pretrained(
 
         checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
         nnx.update(model, checkpoint)
+        object.__setattr__(model, "_mtp_block_restored", bool(mtp_in_ckpt))
         unrestored = [
             jax.tree_util.keystr(path)
             for path, leaf in jax.tree_util.tree_flatten_with_path(nnx.state(model))[0]
@@ -1304,3 +1316,295 @@ def setup_decode_state_from_nnx(model, config, rng, mesh):
 
   state = maxtext_utils.init_decode_state(model.apply, params)
   return state, state_mesh_annotations
+
+
+def _stage_gcs_mtp_hf_checkpoint(gcs_uri: str) -> str:
+  """Stages index.json and mtp.* safetensors shards from a gs:// URI to a local /tmp cache."""
+  # pylint: disable=import-outside-toplevel
+  import fcntl
+  import hashlib
+  import json
+
+  cache_key = hashlib.sha256(gcs_uri.rstrip("/").encode("utf-8")).hexdigest()[:16]
+  local_dir = os.path.join("/tmp", f"maxtext_mtp_hf_{cache_key}")
+  lock_path = f"{local_dir}.lock"
+  done_marker = os.path.join(local_dir, ".done")
+  os.makedirs("/tmp", exist_ok=True)
+  with open(lock_path, "w", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    if os.path.exists(done_marker):
+      return local_dir
+    os.makedirs(local_dir, exist_ok=True)
+    remote_dir = epath.Path(gcs_uri)
+    cfg_remote = remote_dir / "config.json"
+    if cfg_remote.exists() and not os.path.exists(os.path.join(local_dir, "config.json")):
+      cfg_remote.copy(os.path.join(local_dir, "config.json"))
+    index_remote = remote_dir / "model.safetensors.index.json"
+    single_remote = remote_dir / "model.safetensors"
+    if index_remote.exists():
+      index_local = os.path.join(local_dir, "model.safetensors.index.json")
+      index_text = index_remote.read_text()
+      with open(index_local, "w", encoding="utf-8") as f:
+        f.write(index_text)
+      weight_map = json.loads(index_text).get("weight_map", {})
+      mtp_shards = sorted({shard for k, shard in weight_map.items() if k.startswith("mtp.")})
+      for shard in mtp_shards:
+        shard_local = os.path.join(local_dir, shard)
+        if not os.path.exists(shard_local):
+          max_logging.log(f"Staging MTP safetensors shard {shard} from {gcs_uri} to {local_dir}...")
+          (remote_dir / shard).copy(shard_local)
+    elif single_remote.exists():
+      shard_local = os.path.join(local_dir, "model.safetensors")
+      if not os.path.exists(shard_local):
+        single_remote.copy(shard_local)
+    else:
+      raise FileNotFoundError(f"No model.safetensors.index.json or model.safetensors found at {gcs_uri}")
+    with open(done_marker, "w", encoding="utf-8") as f:
+      f.write("ok\n")
+  return local_dir
+
+
+def load_mtp_block_from_hf(
+    model: nnx.Module,
+    config,
+    mesh: jax.sharding.Mesh,
+    hf_checkpoint_path: str,
+    hf_config_dict: dict | None = None,
+) -> bool:
+  """Populates `model.mtp_block` from HuggingFace safetensors using MaxText's PARAM_MAPPING.
+
+  Used when an existing trunk Orbax checkpoint was converted with `mtp_num_layers=0`
+  (or when the RL rollout worker initializes with `load_format="dummy"` and receives
+  trunk weights via Raiden weight sync while keeping a frozen MTP drafter).
+  """
+  # pylint: disable=import-outside-toplevel
+  import json
+  from maxtext.checkpoint_conversion.to_maxtext import LazyHFLoader
+  from maxtext.checkpoint_conversion.utils.param_mapping import (
+      HOOK_FNS,
+      PARAM_MAPPING,
+      QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+      QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+  )
+  from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns
+  from safetensors import safe_open
+
+  if getattr(model, "mtp_block", None) is None or not hf_checkpoint_path:
+    return False
+
+  local_or_repo = (
+      _stage_gcs_mtp_hf_checkpoint(str(hf_checkpoint_path))
+      if str(hf_checkpoint_path).startswith("gs://")
+      else str(hf_checkpoint_path)
+  )
+  if os.path.isdir(local_or_repo):
+    files = set(os.listdir(local_or_repo))
+    if "model.safetensors.index.json" not in files and "model.safetensors" not in files:
+      max_logging.log(f"Skipping MTP HF weight load: no safetensors found in {local_or_repo}")
+      return False
+    if hf_config_dict is None and "config.json" in files:
+      with open(os.path.join(local_or_repo, "config.json"), "r", encoding="utf-8") as f:
+        hf_config_dict = json.load(f)
+
+  text_cfg = {
+      "hidden_size": int(getattr(config, "emb_dim", getattr(config, "base_emb_dim", 2048))),
+      "num_hidden_layers": int(getattr(config, "num_decoder_layers", getattr(config, "base_num_decoder_layers", 40))),
+      "num_attention_heads": int(getattr(config, "num_query_heads", getattr(config, "base_num_query_heads", 16))),
+      "num_key_value_heads": int(getattr(config, "hf_num_kv_heads", 2) or 2),
+      "head_dim": int(getattr(config, "head_dim", 256)),
+      "num_experts": int(getattr(config, "num_experts", 1) or 1),
+      "moe_intermediate_size": int(getattr(config, "base_moe_mlp_dim", getattr(config, "moe_mlp_dim", 512)) or 512),
+      "linear_num_key_heads": int(getattr(config, "gdn_num_key_heads", 16) or 16),
+      "linear_num_value_heads": int(getattr(config, "gdn_num_value_heads", 32) or 32),
+      "linear_key_head_dim": int(getattr(config, "gdn_key_head_dim", 128) or 128),
+      "linear_value_head_dim": int(getattr(config, "gdn_value_head_dim", 128) or 128),
+  }
+  if isinstance(hf_config_dict, dict):
+    src_text = hf_config_dict.get("text_config", hf_config_dict)
+    if isinstance(src_text, dict):
+      for k, v in src_text.items():
+        if v is not None:
+          text_cfg[k] = v
+  full_hf_cfg = {"text_config": text_cfg}
+
+  hf_token = (
+      getattr(config, "hf_access_token", None)
+      or os.environ.get("HF_TOKEN")
+      or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+      or None
+  )
+  save_dtype = str(getattr(config, "weight_dtype", "bfloat16"))
+  loader = LazyHFLoader(local_or_repo, token=hf_token, save_dtype=save_dtype)
+
+  if None in loader.shard_map and os.path.isdir(local_or_repo):
+    with safe_open(os.path.join(local_or_repo, "model.safetensors"), framework="np") as sf:
+      available_hf_keys = set(sf.keys())
+  else:
+    available_hf_keys = {k for k in loader.shard_map if k is not None}
+  if available_hf_keys and not any(k.startswith("mtp.") for k in available_hf_keys):
+    max_logging.log(f"No mtp.* keys found in HF checkpoint {hf_checkpoint_path}; skipping MTP HF load.")
+    return False
+
+  model_key = str(getattr(config, "model_name", "")).replace("-Instruct", "")
+  map_fn = PARAM_MAPPING.get(model_key, QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING)
+  hook_fn_builder = HOOK_FNS.get(model_key, QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN)
+  mapping = map_fn(full_hf_cfg, config, scan_layers=False)
+  hooks = hook_fn_builder(full_hf_cfg, config, scan_layers=False, saving_to_hf=False)
+
+  mtp_sharded_state = nnx.state(model.mtp_block).filter(
+      lambda path, var: (
+          (not path or str(getattr(path[0], "key", path[0])) != "decoder")
+          and not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+      )
+  )
+  mtp_specs = nnx.get_partition_spec(mtp_sharded_state)
+
+  def _to_dict(tree, unwrap_fn):
+    if isinstance(tree, nnx.Variable):
+      return unwrap_fn(tree)
+    if hasattr(tree, "items"):
+      return {k: _to_dict(v, unwrap_fn) for k, v in tree.items()}
+    return tree
+
+  mtp_model_arrays = _to_dict(mtp_sharded_state, lambda v: v.get_value() if hasattr(v, "get_value") else v[...])
+  mtp_logical_axes = _to_dict(mtp_specs, lambda v: v.get_value() if hasattr(v, "get_value") else v)
+
+  replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+  ckpt_mtp: dict[str, Any] = {}
+  fused_gate_up_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+  for mt_key, hf_source in mapping.items():
+    if not isinstance(mt_key, str) or not mt_key.startswith("params-mtp_block-"):
+      continue
+    parts = mt_key.split("-")[2:]
+    parent = mtp_model_arrays
+    for p in parts[:-1]:
+      parent = parent.get(p, {}) if isinstance(parent, dict) else {}
+    if not isinstance(parent, dict):
+      continue
+    leaf_name = parts[-1]
+    if leaf_name in parent:
+      target_arr = parent[leaf_name]
+    elif leaf_name in ("wi_0", "wi_1") and "wi" in parent:
+      target_arr = parent["wi"]
+    else:
+      continue
+
+    if mt_key.endswith(("-key-kernel", "-value-kernel")):
+      unpadded_shape = (target_arr.shape[0], int(text_cfg["num_key_value_heads"]), target_arr.shape[2])
+    elif leaf_name in ("wi_0", "wi_1"):
+      unpadded_shape = (
+          target_arr.shape[0],
+          target_arr.shape[1],
+          int(text_cfg.get("moe_intermediate_size", target_arr.shape[2] // 2)),
+      )
+    elif leaf_name == "wo" and target_arr.ndim == 3:
+      unpadded_shape = (
+          target_arr.shape[0],
+          int(text_cfg.get("moe_intermediate_size", target_arr.shape[1])),
+          target_arr.shape[2],
+      )
+    else:
+      unpadded_shape = target_arr.shape
+
+    sharding = (
+        target_arr.sharding
+        if _stored_shape_evenly_shardable(target_arr, unpadded_shape)
+        else replicated_sharding
+    )
+    hook = hooks.get(mt_key)
+
+    if isinstance(hf_source, list):
+      if available_hf_keys and hf_source[0] not in available_hf_keys:
+        layer_prefix = hf_source[0].split(".mlp.experts.")[0]
+        if leaf_name in ("wi_0", "wi_1"):
+          gu_key = f"{layer_prefix}.mlp.experts.gate_up_proj"
+          if gu_key not in fused_gate_up_cache:
+            gu = loader.get_tensor(gu_key)
+            g, u = np.split(gu, 2, axis=-2)
+            fused_gate_up_cache[gu_key] = (np.swapaxes(g, -1, -2), np.swapaxes(u, -1, -2))
+          raw_np = fused_gate_up_cache[gu_key][0 if leaf_name == "wi_0" else 1]
+        else:
+          raw_np = np.swapaxes(loader.get_tensor(f"{layer_prefix}.mlp.experts.down_proj"), -1, -2)
+        sharding = (
+            target_arr.sharding
+            if _stored_shape_evenly_shardable(target_arr, raw_np.shape)
+            else replicated_sharding
+        )
+        sharded_arr = jax.make_array_from_callback(
+            raw_np.shape,
+            sharding,
+            lambda idx, a=raw_np, dt=target_arr.dtype: jnp.asarray(a[idx], dtype=dt),
+        )
+      else:
+        addr_map = sharding.addressable_devices_indices_map(unpadded_shape)
+        slice_shape = unpadded_shape[1:]
+        needed_experts = sorted({
+            e
+            for idx in addr_map.values()
+            for e in range(*idx[0].indices(len(hf_source)))
+        })
+        expert_cache = {
+            e: apply_hook_fns(loader.get_tensor(hf_source[e]), slice_shape, hook)
+            for e in needed_experts
+        }
+        actual_shape = (len(hf_source),) + expert_cache[needed_experts[0]].shape
+        sharding = (
+            target_arr.sharding
+            if _stored_shape_evenly_shardable(target_arr, actual_shape)
+            else replicated_sharding
+        )
+        addr_map = sharding.addressable_devices_indices_map(actual_shape)
+        device_buffers = []
+        for dev, idx in addr_map.items():
+          exp_indices = range(*idx[0].indices(len(hf_source)))
+          stacked = np.stack([expert_cache[e] for e in exp_indices], axis=0)
+          if len(idx) > 1:
+            stacked = stacked[(slice(None),) + idx[1:]]
+          device_buffers.append(jax.device_put(jnp.asarray(stacked, dtype=target_arr.dtype), dev))
+        sharded_arr = jax.make_array_from_single_device_arrays(actual_shape, sharding, device_buffers)
+    else:
+      raw_np = apply_hook_fns(loader.get_tensor(hf_source), unpadded_shape, hook)
+      sharding = (
+          target_arr.sharding
+          if _stored_shape_evenly_shardable(target_arr, raw_np.shape)
+          else replicated_sharding
+      )
+      sharded_arr = jax.make_array_from_callback(
+          raw_np.shape,
+          sharding,
+          lambda idx, a=raw_np, dt=target_arr.dtype: jnp.asarray(a[idx], dtype=dt),
+      )
+
+    node = ckpt_mtp
+    for p in parts[:-1]:
+      node = node.setdefault(p, {})
+    node[leaf_name] = sharded_arr
+
+  with mesh:
+    ckpt_mtp = _fuse_moe_weights(ckpt_mtp, mtp_model_arrays)
+
+    def _filter_keys(ckpt, model_dict):
+      if not hasattr(ckpt, "items") or not hasattr(model_dict, "items"):
+        return ckpt
+      return {k: _filter_keys(ckpt[k], model_dict[k]) for k in model_dict if k in ckpt}
+
+    ckpt_mtp = _filter_keys(ckpt_mtp, mtp_model_arrays)
+
+    def _align_tree(ckpt, model_arr, axes):
+      if isinstance(ckpt, dict):
+        return {
+            k: _align_tree(v, model_arr[k], axes.get(k) if isinstance(axes, dict) else None)
+            for k, v in ckpt.items()
+        }
+      if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
+        return ckpt
+      return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
+
+    ckpt_mtp = _align_tree(ckpt_mtp, mtp_model_arrays, mtp_logical_axes)
+    nnx.update(model.mtp_block, ckpt_mtp)
+
+  object.__setattr__(model, "_mtp_block_restored", True)
+  max_logging.log(f"Loaded MTP weights into model.mtp_block from {hf_checkpoint_path}")
+  return True
+

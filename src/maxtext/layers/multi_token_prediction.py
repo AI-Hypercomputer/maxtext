@@ -26,9 +26,11 @@ from maxtext.layers import mhc
 from maxtext.layers import moe
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
-from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.normalizations import Qwen3NextRMSNorm, RMSNorm
 from maxtext.models import deepseek4
 from maxtext.models import deepseek_batchsplit
+from maxtext.models import qwen3
+from maxtext.models import qwen3_5
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
@@ -42,6 +44,16 @@ def _is_deepseek4(config: Config) -> bool:
   depending on how the config was constructed, so both are accepted.
   """
   return config.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK4.value)
+
+
+def _is_qwen3_next_or_5(config: Config) -> bool:
+  """Returns True when the model uses the Qwen3-Next or Qwen3.5 decoder block."""
+  return config.decoder_block in (
+      DecoderBlockType.QWEN3_NEXT,
+      DecoderBlockType.QWEN3_NEXT.value,
+      DecoderBlockType.QWEN3_5,
+      DecoderBlockType.QWEN3_5.value,
+  )
 
 
 # Custom Variable types for MTP intermediate outputs
@@ -181,6 +193,8 @@ class MultiTokenPredictionLayer(nnx.Module):
       mesh: Mesh,
       layer_number: int,
       transformer_layer_module: Type[NNXDecoderLayer],
+      model_mode: str = MODEL_MODE_TRAIN,
+      quant=None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -191,19 +205,22 @@ class MultiTokenPredictionLayer(nnx.Module):
     self.rngs = rngs
     cfg = self.config
 
-    self.embedding_norm = RMSNorm(
+    norm_fn = Qwen3NextRMSNorm if _is_qwen3_next_or_5(cfg) else RMSNorm
+    self.embedding_norm = norm_fn(
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
-    self.hidden_state_norm = RMSNorm(
+    self.hidden_state_norm = norm_fn(
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
@@ -213,10 +230,12 @@ class MultiTokenPredictionLayer(nnx.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         use_bias=False,
+        shard_mode=cfg.shard_mode,
+        matmul_precision=cfg.matmul_precision,
         kernel_axes=("embed", None),
         rngs=rngs,
     )
-    # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
+    # Use MODEL_MODE_TRAIN for initialization by default; runtime model_mode is passed dynamically.
     self.is_mhc = _is_deepseek4(cfg) and cfg.mhc_expansion_rate > 1
     if _is_deepseek4(cfg):
       # `Decoder.get_decoder_layers()` returns `DeepSeek4ScannableBlock` when
@@ -229,17 +248,34 @@ class MultiTokenPredictionLayer(nnx.Module):
       self.transformer_layer = deepseek4.DeepSeek4DecoderLayer(
           config=cfg,
           mesh=mesh,
-          model_mode=MODEL_MODE_TRAIN,
+          model_mode=model_mode,
           rngs=rngs,
           layer_idx=cfg.base_num_decoder_layers + layer_number - 1,
           compress_ratio=0,
           is_hash_routing=False,
       )
+    elif _is_qwen3_next_or_5(cfg):
+      # `Decoder.get_decoder_layers()` returns `Qwen3_5ScannableBlock` / `Qwen3NextScannableBlock`
+      # when `scan_layers=True`. An MTP module is always a single full-attention MoE decoder layer
+      # placed immediately after the trunk layers (`base_num_decoder_layers + layer_number - 1`).
+      if cfg.decoder_block in (DecoderBlockType.QWEN3_5, DecoderBlockType.QWEN3_5.value):
+        layer_cls = qwen3_5.Qwen3_5DecoderLayer
+      else:
+        layer_cls = qwen3.Qwen3NextDecoderLayer
+      self.transformer_layer = layer_cls(
+          config=cfg,
+          mesh=mesh,
+          model_mode=model_mode,
+          layer_idx=cfg.base_num_decoder_layers + layer_number - 1,
+          rngs=rngs,
+          quant=quant,
+          is_full_attention_layer=True,
+      )
     else:
       self.transformer_layer = transformer_layer_module(
           config=cfg,
           mesh=mesh,
-          model_mode=MODEL_MODE_TRAIN,
+          model_mode=model_mode,
           rngs=rngs,
       )
 
@@ -254,11 +290,12 @@ class MultiTokenPredictionLayer(nnx.Module):
           rngs=rngs,
       )
 
-    self.final_norm = RMSNorm(
+    self.final_norm = norm_fn(
         num_features=cfg.emb_dim,
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )
@@ -312,7 +349,10 @@ class MultiTokenPredictionLayer(nnx.Module):
       decoder_segment_ids: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str = MODEL_MODE_TRAIN,
-  ) -> jnp.ndarray:
+      kv_cache=None,
+      attention_metadata=None,
+      return_kv_cache: bool = False,
+  ) -> jnp.ndarray | tuple[jnp.ndarray, object]:
     """Applies MTP combination, projection, and transformer processing.
 
     Args:
@@ -323,9 +363,13 @@ class MultiTokenPredictionLayer(nnx.Module):
         decoder_segment_ids: Shape [batch, seq_len] or None.
         deterministic: Whether to disable dropout.
         model_mode: Operational mode (train, eval, decode).
+        kv_cache: Optional KV cache passed to the inner transformer layer.
+        attention_metadata: Optional vLLM attention metadata passed to the inner transformer layer.
+        return_kv_cache: If True and the inner layer returns `(hidden_states, kv_cache)`, returns the full tuple.
 
     Returns:
-        Processed hidden state. Shape [batch, seq_len, hidden_size].
+        Processed hidden state (or `(hidden_state, kv_cache)` when `return_kv_cache=True`).
+        Shape [batch, seq_len, hidden_size].
     """
     target_token_embedding = sharding.maybe_shard_with_logical(
         target_token_embedding,
@@ -376,6 +420,16 @@ class MultiTokenPredictionLayer(nnx.Module):
           mesh=self.mesh,
           cfg=self.config,
       )
+    elif kv_cache is not None or attention_metadata is not None:
+      output = self.transformer_layer(
+          inputs=projected_features,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=position_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
     else:
       output = self.transformer_layer(
           inputs=projected_features,
@@ -385,6 +439,8 @@ class MultiTokenPredictionLayer(nnx.Module):
           model_mode=model_mode,
       )
 
+    if return_kv_cache:
+      return output
     return output[0] if isinstance(output, tuple) else output
 
 
@@ -473,6 +529,8 @@ class MultiTokenPredictionBlock(nnx.Module):
           mesh=mesh,
           layer_number=k,
           transformer_layer_module=transformer_layer_module,
+          model_mode=getattr(decoder, "model_mode", MODEL_MODE_TRAIN),
+          quant=getattr(decoder, "quant", None),
           rngs=rngs.fork(),
       )
       setattr(self, f"mtp_layer_{k}", layer)

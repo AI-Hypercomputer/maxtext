@@ -860,7 +860,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # vLLM PAGED STATE PATH: use tpu_inference fused conv + ragged delta-rule.
       # =========================================================================
       try:
-        from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.gdn_attention import (  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+            resolve_gdn_state_slots,
+            run_jax_gdn_attention,
+        )
         from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
         from tpu_inference.layers.common.utils import (  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
             reorder_concatenated_tensor_for_sharding,
@@ -922,24 +925,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           dp_size,
       )
 
-      if getattr(attention_metadata, "mamba_state_indices", None) is not None:
-        # Resident per-request slot: the same slot is read and written.
-        state_indices = truncate_sharded_tensor(
-            attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
-            padded_num_reqs_per_dp,
-            dp_size,
-        )
-        read_state_indices = state_indices
-      else:
-        state_indices, read_state_indices = self._mamba_block_table_slots(
-            attention_metadata,
-            seq_lens,
-            query_start_loc,
-            mamba_block_size,
-            padded_num_reqs_per_dp,
-            dp_size,
-            local_rows=max(conv_state_paged.shape[0] // dp_size, 1),
-        )
+      slots = resolve_gdn_state_slots(
+          attention_metadata,
+          seq_lens=seq_lens,
+          query_start_loc=query_start_loc,
+          padded_num_reqs_per_dp=padded_num_reqs_per_dp,
+          dp_size=dp_size,
+          num_local_rows=max(conv_state_paged.shape[0] // dp_size, 1),
+          mamba_block_size=mamba_block_size or 0,
+      )
 
       (new_conv_state_paged, new_recurrent_state_paged), gdn_output = run_jax_gdn_attention(
           mixed_qkv,
@@ -951,7 +945,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           None,  # conv_bias: MaxText conv1d uses use_bias=False.
           jnp.asarray(self.A_log[...], dtype=cfg.dtype),
           jnp.asarray(self.dt_bias[...], dtype=cfg.dtype),
-          state_indices,
+          slots.state_indices,
           query_start_loc,
           attention_metadata.request_distribution,  # pyrefly: ignore[missing-attribute]
           seq_lens,
@@ -961,7 +955,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           self.head_v_dim,
           cfg.gdn_conv_kernel_dim,
           mesh=self.mesh,
-          read_state_indices=read_state_indices,
+          **slots.kernel_kwargs(),
+      )
+      new_conv_state_paged, new_recurrent_state_paged = slots.apply_boundary_copies(
+          new_conv_state_paged, new_recurrent_state_paged, self.mesh
       )
 
       # Reshape GDN output and apply gated norm + out projection.

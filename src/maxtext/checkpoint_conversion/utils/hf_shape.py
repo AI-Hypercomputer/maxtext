@@ -825,6 +825,58 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, *, hf_prefix: str = "model.language_mode
           }
       )
 
+  mtp_num_layers = config.get("mtp_num_hidden_layers", config.get("mtp_num_layers", 0)) or 0
+  if mtp_num_layers > 0:
+    mapping.update(
+        {
+            "mtp.pre_fc_norm_embedding.weight": [hidden_size],
+            "mtp.pre_fc_norm_hidden.weight": [hidden_size],
+            "mtp.fc.weight": [hidden_size, 2 * hidden_size],
+            "mtp.norm.weight": [hidden_size],
+        }
+    )
+    for mtp_idx in range(mtp_num_layers):
+      mtp_prefix = f"mtp.layers.{mtp_idx}"
+      mapping.update(
+          {
+              f"{mtp_prefix}.input_layernorm.weight": [hidden_size],
+              f"{mtp_prefix}.post_attention_layernorm.weight": [hidden_size],
+              f"{mtp_prefix}.self_attn.q_proj.weight": [2 * q_dim, hidden_size],
+              f"{mtp_prefix}.self_attn.k_proj.weight": [kv_dim, hidden_size],
+              f"{mtp_prefix}.self_attn.v_proj.weight": [kv_dim, hidden_size],
+              f"{mtp_prefix}.self_attn.o_proj.weight": [hidden_size, q_dim],
+              f"{mtp_prefix}.self_attn.q_norm.weight": [head_dim],
+              f"{mtp_prefix}.self_attn.k_norm.weight": [head_dim],
+          }
+      )
+      if num_experts > 1:
+        mapping.update(
+            {
+                f"{mtp_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+                f"{mtp_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
+                f"{mtp_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
+                f"{mtp_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
+                f"{mtp_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
+            }
+        )
+        for expert_j in range(num_experts):
+          expert_prefix = f"{mtp_prefix}.mlp.experts.{expert_j}"
+          mapping.update(
+              {
+                  f"{expert_prefix}.gate_proj.weight": [moe_intermediate_size, hidden_size],
+                  f"{expert_prefix}.up_proj.weight": [moe_intermediate_size, hidden_size],
+                  f"{expert_prefix}.down_proj.weight": [hidden_size, moe_intermediate_size],
+              }
+          )
+      else:
+        mapping.update(
+            {
+                f"{mtp_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+                f"{mtp_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+                f"{mtp_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+            }
+        )
+
   return mapping
 
 
