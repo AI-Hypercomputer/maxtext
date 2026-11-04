@@ -140,11 +140,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: 'GPU Pre-Training Stable'
+          - name: 'GPU Pre-Training Stable (amd64)'
             device: gpu
             image_name: maxtext_gpu_jax_stable
             workflow: pre-training
             dockerfile: maxtext_gpu_dependencies.Dockerfile
+            platform: amd64
+          - name: 'GPU Pre-Training Stable (arm64)'
+            device: gpu
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
+            platform: arm64
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
@@ -155,6 +162,7 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
       image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
+      platform: ${{ matrix.platform }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
