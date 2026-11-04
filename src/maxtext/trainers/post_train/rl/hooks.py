@@ -20,6 +20,7 @@ from tunix.sft import hooks as _tunix_hooks
 
 from maxtext.common.goodput import GoodputEvent, record_goodput
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
+from maxtext.trainers.post_train.rl.metrics import evaluate_with_logging
 from maxtext.utils import max_logging
 
 
@@ -93,15 +94,17 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
     self._last_step_evaluated = outer_step
     try:
       tc = self._trainer_config
-      (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
+      result, _ = evaluate_with_logging(
+          evaluate,
           tc,
           self._test_dataset,
-          rl_cluster=self._rl_cluster,
+          self._rl_cluster,
           num_passes=tc.num_eval_passes,
           corr_lst=tc.eval_corr_lst,
           make_lst=tc.eval_make_lst,
           reward_fns=self._reward_fns,
       )
+      corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward = result
       max_logging.warning(
           f"Intermediate Eval (step={outer_step}): {corr=}, {total=},"
           f" {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%,"
