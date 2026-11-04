@@ -82,6 +82,21 @@ _V5P_TOPOLOGIES = {
     4096: "8x16x16",
 }
 
+_TPU7X_TOPOLOGIES = {
+    2: "1x1x1",
+    8: "2x2x1",
+    16: "2x2x2",
+    32: "2x2x4",
+    64: "2x4x4",
+    128: "4x4x4",
+    256: "4x4x8",
+    512: "4x8x8",
+    1024: "8x8x8",
+    2048: "8x8x16",
+}
+
+_TPU7X_TOPOLOGY_TO_DEVICES = {v: k for k, v in _TPU7X_TOPOLOGIES.items()}
+
 
 class LibTpuType(enum.Enum):
   """Enum for different libtpu types."""
@@ -146,6 +161,34 @@ class WorkloadConfig:
             "device_type is None and generate_metrics_and_upload_to_big_query is enabled. "
             "Device_type is required for uploading run results to BigQuery"
         )
+      return
+
+    if self.device_type.startswith("tpu7x"):
+      suffix = (
+          self.device_type[len("tpu7x-") :]
+          if self.device_type.startswith("tpu7x-")
+          else ""
+      )
+      if suffix in _TPU7X_TOPOLOGY_TO_DEVICES:
+        self.num_devices_per_slice = _TPU7X_TOPOLOGY_TO_DEVICES[suffix]
+        if not self.topology:
+          self.topology = suffix
+      else:
+        try:
+          size = int(suffix)
+        except ValueError as e:
+          raise ValueError(
+              f"Unsupported tpu7x device_type: {self.device_type}"
+          ) from e
+        if size not in _TPU7X_TOPOLOGIES and not self.topology:
+          raise ValueError(f"Unsupported tpu7x size: {size}")
+        self.num_devices_per_slice = size
+        if not self.topology:
+          self.topology = _TPU7X_TOPOLOGIES[size]
+
+      if not self.compute_type:
+        self.compute_type = "tpu7x-8"
+      self.hardware_id = "tpu7x"
       return
 
     size = int(self.device_type.split("-")[-1])
@@ -677,7 +720,12 @@ def generate_workload_cmd(
       name = f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
     else:
       name = f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
-    name = f"{common_prefix[:truncate_prefix]}-{name}{post_fix}"
+    prefix = (
+        "ranran"
+        if common_prefix.startswith("ranran")
+        else common_prefix[:truncate_prefix]
+    )
+    name = f"{prefix}-{name}{post_fix}"
   else:
     name = workload_name  # Use provided name
 
@@ -754,6 +802,10 @@ def generate_workload_cmd(
   escaped_user_command = user_command.replace("$", r"\$")
   command_flag = "" if is_pathways_headless_enabled else f' --command="{escaped_user_command} {upload_metrics_to_bq_cmd}"'
 
+  reservation_flag = ""
+  if cluster_config.reservation:
+    reservation_flag = f" --reservation={cluster_config.reservation}"
+
   return (
       (
           f"{workload_create_command}"
@@ -770,12 +822,14 @@ def generate_workload_cmd(
           f" --name={name}"
           f" --priority={wl_config.priority}"
           f" --restarts={wl_config.max_restarts}"
+          f"{reservation_flag}"
           f" {additional_flags}"
       ),
       name,
   )
 
 
+generate_workload_command = generate_workload_cmd
 generate_xpk_workload_cmd = generate_workload_cmd
 
 

@@ -33,12 +33,13 @@ class ClusterConfig:
     zone: The GCE zone where the cluster is located (e.g., 'us-central2-b').
     device_type: The type of TPU device in the cluster (e.g., 'v6e-256',
       'v5litepod-256', 'v5p-128').
-    location: The GCP location (region or zone) passed to `gcluster
-      --location` (e.g., 'us-central2' or 'us-central2-b'). Defaults to `zone`
-      if not explicitly specified. For regional GKE clusters, `location` must be
-      set to the cluster's region.
+    location: The GCP location (region or zone) passed to `gcluster --location`
+      (e.g., 'us-central2' or 'us-central2-b'). Defaults to `zone` if not
+      explicitly specified. For regional GKE clusters, `location` must be set to
+      the cluster's region.
     compute_type: Optional explicit `gcluster --compute-type` override.
     topology: Optional explicit `gcluster --topology` override.
+    reservation: Optional reservation name passed to `gcluster --reservation`.
   """
 
   cluster_name: str
@@ -48,6 +49,7 @@ class ClusterConfig:
   location: str | None = None
   compute_type: str | None = None
   topology: str | None = None
+  reservation: str | None = None
 
   def __post_init__(self):
     if not self.location and self.zone:
