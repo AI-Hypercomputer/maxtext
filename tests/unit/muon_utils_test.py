@@ -279,6 +279,20 @@ class TestTransformLogic(unittest.TestCase):
         mdn((0,), (-1,)),
     )
 
+  def test_self_attention_mla_output_gate(self):
+    # Head-expanded MLA g_proj (Kimi-K3): [emb, heads, v_head_dim] (unscanned) / [emb, layers, heads, v_head_dim]
+    # (scanned) orthogonalizes [emb, heads * v_head_dim] like wq_b / wkv_b.
+    for shape in ((256, 4, 32), (256, 2, 4, 32)):
+      self.assertEqual(
+          muon_utils.transform_logic(("decoder", "layers_3", "self_attention", "g_proj", "kernel"), shape=shape),
+          mdn((0,), (-2, -1)),
+      )
+    # Flat 2D g_proj (e.g. KDA) keeps the standard mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers_0", "self_attention", "g_proj", "kernel"), shape=(256, 128)),
+        mdn((0,), (-1,)),
+    )
+
   # --- 3. Standard ---
   def test_standard_weight(self):
     self.assertEqual(

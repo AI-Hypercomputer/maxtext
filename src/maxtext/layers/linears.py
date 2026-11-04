@@ -44,6 +44,59 @@ from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
 
 
+# SiTU betas used by Kimi-K3; they come from the HF config keys `activation_situ_beta`
+# and `activation_situ_linear_beta` (HF `SituAndMul`) and are not configurable here.
+# They are the explicit Kimi-K3 preset used as defaults below and by the registered
+# `"situ_gate"` / `"situ_linear"` activation names (HF `KimiLinearConfig` itself defaults
+# to `beta=1.0, linear_beta=None`, which is not what Kimi-K3 ships with).
+KIMI_K3_SITU_BETA = 4.0
+KIMI_K3_SITU_LINEAR_BETA = 25.0
+
+
+def _check_situ_beta(name: str, beta: float) -> None:
+  """Rejects non-positive SiTU betas (`beta=0` would otherwise produce `0 / 0 = NaN`)."""
+  if not beta > 0:
+    raise ValueError(f"SiTU {name} must be > 0, got {beta}.")
+
+
+def situ_gate(x: Array, beta: float = KIMI_K3_SITU_BETA) -> Array:
+  """SiTU gate activation: beta * tanh(x / beta) * sigmoid(x), computed in fp32."""
+  _check_situ_beta("beta", beta)
+  x32 = x.astype(jnp.float32)
+  return (beta * jnp.tanh(x32 / beta) * jax.nn.sigmoid(x32)).astype(x.dtype)
+
+
+def situ_linear(x: Array, beta: float = KIMI_K3_SITU_LINEAR_BETA) -> Array:
+  """SiTU soft-capped linear (up-branch) activation: beta * tanh(x / beta), computed in fp32."""
+  _check_situ_beta("linear_beta", beta)
+  x32 = x.astype(jnp.float32)
+  return (beta * jnp.tanh(x32 / beta)).astype(x.dtype)
+
+
+def situ_and_mul(
+    gate: Array,
+    up: Array,
+    *,
+    gate_beta: float = KIMI_K3_SITU_BETA,
+    linear_beta: float | None = KIMI_K3_SITU_LINEAR_BETA,
+    dtype: DType | None = None,
+) -> Array:
+  """Fused SiTU GLU: situ_gate(gate) * situ_linear(up), matching HF `SituAndMul`.
+
+  Both branches and their product are computed in fp32 and cast to `dtype` (default:
+  `gate.dtype`) once at the end, so bf16 callers round once instead of three times.
+  `linear_beta=None` leaves `up` untransformed, as in HF.
+  """
+  _check_situ_beta("beta", gate_beta)
+  g32 = gate.astype(jnp.float32)
+  u32 = up.astype(jnp.float32)
+  situ_a = gate_beta * jnp.tanh(g32 / gate_beta) * jax.nn.sigmoid(g32)
+  if linear_beta is not None:
+    _check_situ_beta("linear_beta", linear_beta)
+    u32 = linear_beta * jnp.tanh(u32 / linear_beta)
+  return (situ_a * u32).astype(gate.dtype if dtype is None else dtype)
+
+
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -51,6 +104,11 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
+  # SiTU activations used by the Kimi-K3 MLP/experts (gate and up branches)
+  elif fn_or_string == "situ_gate":
+    return situ_gate
+  elif fn_or_string == "situ_linear":
+    return situ_linear
   elif isinstance(fn_or_string, str):
     return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):
@@ -809,6 +867,7 @@ class MlpBlock(nnx.Module):
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
+    is_situ_glu = tuple(self.activations) == ("situ_gate", "situ_linear")
     if cfg.fused_mlp:
       x = self.wi(inputs, out_sharding=intermediate_sharding)
 
@@ -818,8 +877,8 @@ class MlpBlock(nnx.Module):
 
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
-        y = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x[:, :, idx, ...]))
-        activations.append(y)
+        y = self._clip_glu_input(idx, x[:, :, idx, ...])
+        activations.append(y if is_situ_glu else _convert_to_activation_function(act_fn)(y))
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
@@ -828,11 +887,15 @@ class MlpBlock(nnx.Module):
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
-        x = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x))
-        activations.append(x)
+        x = self._clip_glu_input(idx, x)
+        activations.append(x if is_situ_glu else _convert_to_activation_function(act_fn)(x))
 
-    # Take elementwise product of above intermediate activations.
-    x = functools.reduce(operator.mul, activations).astype(self.dtype)
+    if is_situ_glu:
+      # SiTU GLU: compute gate * up in fp32 and round once, matching HF `SituAndMul`.
+      x = situ_and_mul(activations[0], activations[1], dtype=self.dtype)
+    else:
+      # Take elementwise product of above intermediate activations.
+      x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     x = self._maybe_shard_with_logical(x, self.intermediate_logical)
