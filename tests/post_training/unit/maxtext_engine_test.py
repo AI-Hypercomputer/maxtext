@@ -84,6 +84,11 @@ class DummyPayload(abstract_engine.TrainerPayload):
   metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
 
 
+def _nested_tuples(value):
+  """A logical axis rule set with every list turned into a tuple, so two spellings of it compare equal."""
+  return tuple(_nested_tuples(v) for v in value) if isinstance(value, (list, tuple)) else value
+
+
 class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def setUp(self):
@@ -2652,6 +2657,213 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         # Second call is a no-op because all leaves already carry target shardings.
         t._settle_state()
         self.assertEqual(mock_put.call_count, first_pass_calls)
+
+  def test_parameter_offload_is_rejected(self):
+    """The engine has no parameter-offload path, so the flag must fail loudly."""
+    with self.assertRaisesRegex(NotImplementedError, "parameter_memory_host_offload"):
+      maxtext_engine.MaxTextTrainingEngine(self.setup_config(parameter_memory_host_offload=True))
+
+  def test_differing_eval_rules_are_rejected(self):
+    """`train.py` evaluates under `logical_axis_rules_for_eval`; the engine only has the training rules."""
+    differing = self.setup_config(custom_mesh_and_rule_for_eval="pure-fsdp")
+    self.assertNotEqual(
+        _nested_tuples(differing.logical_axis_rules_for_eval), _nested_tuples(differing.logical_axis_rules)
+    )
+    with self.assertRaisesRegex(NotImplementedError, "pure-fsdp"):
+      maxtext_engine.MaxTextTrainingEngine(differing)
+    self.mock_from_pretrained.assert_not_called()
+
+    # Both of these are accepted: the default, where the eval rules are the training rules, and an
+    # eval rule set named explicitly and equal to the training one. The latter reaches the engine
+    # as lists while the training rules are tuples, so it must be compared by value.
+    maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    same = self.setup_config(custom_mesh_and_rule="pure-fsdp", custom_mesh_and_rule_for_eval="pure-fsdp")
+    maxtext_engine.MaxTextTrainingEngine(same)
+    same.get_keys()["logical_axis_rules_for_eval"] = [
+        [k, list(v) if isinstance(v, tuple) else v] for k, v in same.logical_axis_rules
+    ]
+    self.assertNotEqual(same.logical_axis_rules_for_eval, same.logical_axis_rules)
+    maxtext_engine.MaxTextTrainingEngine(same)
+
+  def test_build_model_uses_rules_without_mesh(self):
+    """What `from_pretrained` sees when Tunix constructs the engine with a mesh.
+
+    The config's own logical axis rules must be in force, because some layers (e.g. Tokamax ring
+    attention) validate their sharding at `__init__`. A `jax.set_mesh` must not be: under one,
+    flax's `nnx.eval_shape` in `create_nnx_abstract_model` re-derives every sharding from its
+    logical names and raises for a name the rules leave unmapped, such as `norm` under `cp-as-ep`.
+    """
+    model, mesh = self.mock_from_pretrained.return_value
+    seen = {}
+
+    def record(*_args, **_kwargs):
+      seen["rules"], abstract_mesh = self._rules_and_mesh()
+      seen["mesh_set"] = not abstract_mesh.empty
+      return model  # A caller-supplied mesh means `from_pretrained` returns the bare model.
+
+    self.mock_from_pretrained.side_effect = record
+    maxtext_engine.MaxTextTrainingEngine(self.mock_config, mesh=mesh)
+
+    self.assertEqual(seen["rules"], self.mock_config.logical_axis_rules)
+    self.assertFalse(seen["mesh_set"])
+
+  def test_build_model_clears_caller_mesh(self):
+    """`with jax.set_mesh(mesh): MaxTextTrainingEngine(...)` must not reach `from_pretrained`.
+
+    See the previous test for why; `maxtext_engine_model_build_test.py` covers it on a real
+    model. The caller's mesh is restored afterwards.
+    """
+    model, mesh = self.mock_from_pretrained.return_value
+    seen = {}
+
+    def record(*_args, **_kwargs):
+      seen["mesh_set"] = not jax.sharding.get_abstract_mesh().empty
+      return model
+
+    self.mock_from_pretrained.side_effect = record
+    with jax.set_mesh(mesh):
+      maxtext_engine.MaxTextTrainingEngine(self.mock_config, mesh=mesh)
+      restored = jax.sharding.get_abstract_mesh()
+
+    self.assertFalse(seen["mesh_set"])
+    self.assertEqual(restored, mesh.abstract_mesh)
+
+  def test_eval_step_traces_under_engine_rules(self):
+    """The eval kernel traces under the config's rules and the engine mesh, as `fwd_bwd`'s does.
+
+    Tunix's `TrainerWorker.compile()` passes no dummy data, so `eval_step` is where the eval
+    kernel is first traced on that path. Covers both the deferred-compile path and the eager one,
+    and compares by value, so a wrong rule set or a missing mesh fails too.
+    """
+    seen = []
+
+    def loss_fn(model, *_args, **_kwargs):
+      seen.append(self._rules_and_mesh())
+      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(1.0))
+
+    deferred = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    deferred.with_loss_fn(loss_fn)
+    deferred.compile(None)  # What Tunix's worker does: no dummy payload, so nothing is built yet.
+    deferred.eval_step(DummyPayload())
+
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    eager = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    eager.with_loss_fn(loss_fn)
+    eager.eval_step(DummyPayload())
+
+    self.assertLen(seen, 2)
+    for engine, (rules, abstract_mesh) in zip((deferred, eager), seen):
+      self.assertEqual(rules, self.mock_config.logical_axis_rules)
+      self.assertEqual(abstract_mesh, engine._mesh.abstract_mesh)  # pylint: disable=protected-access
+
+  def test_skip_step_on_nan_leaves_the_state_unchanged(self):
+    """A non-finite gradient norm skips the step: weights and optimizer state are left as they were."""
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        t = self._adam_engine()
+        self.assertTrue(t._config.skip_step_on_nan)  # pylint: disable=protected-access
+        t.with_loss_fn(self._nan_loss_fn)
+        if compiled:
+          t.compile(DummyPayload())
+        before = jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer)))
+        t.fwd_bwd(DummyPayload())
+        self.assertEqual(t.update(), 1, "a skipped step still counts as a step")
+        after = jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer)))
+        jax.tree.map(np.testing.assert_array_equal, before, after)
+        metrics = t.get_metrics(clear_cache=True).scalar_metrics
+        self.assertTrue(np.isnan(np.asarray(metrics["gradient_norm"])).all())
+        np.testing.assert_array_equal(np.asarray(metrics["step_skipped"]), [1.0])
+
+        # The next finite step trains normally.
+        t.with_loss_fn(self._weighted_loss_fn)
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        np.testing.assert_array_equal(np.asarray(t.get_metrics(clear_cache=True).scalar_metrics["step_skipped"]), [0.0])
+        self.assertFalse(np.array_equal(np.asarray(t.state.model.weights[...]), jax.tree.leaves(before[0])[0]))
+
+  def test_without_skip_step_on_nan_a_nan_step_is_applied(self):
+    """Control for the test above: with the guard off, a NaN gradient reaches the weights, and no flag is recorded."""
+    t = self._adam_engine(skip_step_on_nan=False)
+    t.with_loss_fn(self._nan_loss_fn)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertTrue(np.isnan(np.asarray(t.state.model.weights[...])).all())
+    self.assertNotIn("step_skipped", t.get_metrics(clear_cache=True).scalar_metrics)
+
+  def test_max_grad_norm_spike_skips_steps_above_the_threshold(self):
+    """A finite step whose raw gradient norm exceeds `max_grad_norm_spike` is skipped; one at or below it is not."""
+    # `_weighted_loss_fn`'s normalized gradient is 2.0 per element, so its norm is sqrt(8) ~ 2.83.
+    for threshold, skipped in ((2.0, True), (3.0, False)):
+      for compiled in (False, True):
+        with self.subTest(threshold=threshold, compiled=compiled):
+          t = self._adam_engine(skip_step_on_nan=False, max_grad_norm_spike=threshold)
+          if compiled:
+            t.compile(DummyPayload())
+          before = np.asarray(t.state.model.weights[...])
+          t.fwd_bwd(DummyPayload())
+          t.update()
+          metrics = t.get_metrics(clear_cache=True).scalar_metrics
+          np.testing.assert_allclose(np.asarray(metrics["gradient_norm"]), [np.sqrt(8.0)], rtol=1e-6)
+          np.testing.assert_array_equal(np.asarray(metrics["step_skipped"]), [1.0 if skipped else 0.0])
+          moved = not np.array_equal(np.asarray(t.state.model.weights[...]), before)
+          self.assertEqual(moved, not skipped)
+
+  def test_skip_step_on_spikes_with_trainable_parameters_mask(self):
+    """`skip_step_on_spikes` wraps `apply_trainable_parameters_mask` and records `step_skipped`."""
+
+    class MoEModel(nnx.Module):
+
+      def __init__(self):
+        self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
+        self.weights = nnx.Param(jnp.array([1.0, 2.0]))
+
+    moe_model = MoEModel()
+    dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+    self.mock_from_pretrained.return_value = (moe_model, dummy_mesh)
+
+    cfg = self.setup_config(
+        opt_type="sgd",
+        skip_step_on_spikes=True,
+        skip_step_interval=6,
+        skip_step_scaling_factor=6.0,
+        trainable_parameters_mask=["^(?!.*router_gate).*"],
+    )
+    real_tx = maxtext_engine.optimizers.get_optimizer(cfg, lambda step: jnp.array(0.01))
+    with mock.patch.object(
+        maxtext_engine.train_utils,
+        "create_training_optimizer",
+        return_value=(lambda step: jnp.array(0.01), real_tx),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+
+    opt_state = nnx.to_pure_dict(nnx.state(t.state.optimizer))["opt_state"]
+    self.assertIn("is_skipped", opt_state)
+    self.assertIsInstance(t.state.optimizer.opt_state["inner_state"].inner_states["frozen"].inner_state, optax.EmptyState)
+
+    scale = {"val": 1.0}
+    t.with_loss_fn(
+        lambda model, *_a, **_k: (
+            abstract_engine.WeightedMetric(
+                unreduced_sum=scale["val"] * jnp.sum(model.weights[...]),
+                denominator=jnp.array(1.0),
+            ),
+            {},
+        ),
+        has_aux=True,
+    )
+    # Two warmup steps establish the rolling baseline, then a spike triggers `is_skipped`.
+    for s in (1.0, 1.1):
+      scale["val"] = s
+      t.fwd_bwd(DummyPayload())
+      t.update()
+      np.testing.assert_array_equal(np.asarray(t.get_metrics(clear_cache=True).scalar_metrics["step_skipped"]), [0.0])
+
+    weights_before_spike = np.asarray(t.state.model.weights[...]).copy()
+    scale["val"] = 1000.0
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    np.testing.assert_array_equal(np.asarray(t.get_metrics(clear_cache=True).scalar_metrics["step_skipped"]), [1.0])
+    np.testing.assert_array_equal(np.asarray(t.state.model.weights[...]), weights_before_spike)
 
 
 class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):

@@ -1254,6 +1254,10 @@ skip_step_on_spikes: false
 skip_step_interval: 128
 # The scaling factor to determine if a spike occurred
 skip_step_scaling_factor: 6.0
+# MaxTextTrainingEngine only: if true, skip the training step when the gradient norm is NaN or Inf
+skip_step_on_nan: true
+# MaxTextTrainingEngine only: if > 0, skip the training step when the raw gradient norm exceeds this threshold
+max_grad_norm_spike: 0.0
 
 # List of parameter names/patterns to train.
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].

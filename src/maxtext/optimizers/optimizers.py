@@ -150,18 +150,27 @@ def skip_step_on_spikes(
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
 
     # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    # Ensure non-finite metrics during warmup (when count < interval) do not poison the rolling buffer
+    is_finite = jnp.isfinite(loss)
+    if grad_norm is not None:
+      is_finite = jnp.logical_and(is_finite, jnp.isfinite(grad_norm))
+    is_ok = jnp.logical_and(is_ok, is_finite)
+
+    # Only update rolling buffers with finite metrics (preventing post-warmup poisoning)
     idx = count % interval
-    new_losses = losses.at[idx].set(loss)
+    new_losses = jnp.where(is_finite, losses.at[idx].set(loss), losses)
 
     new_grad_norms = grad_norms
     if grad_norm is not None:
-      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+      new_grad_norms = jnp.where(is_finite, grad_norms.at[idx].set(grad_norm), grad_norms)
+
+    new_count = jnp.where(is_finite, count + 1, count)
 
     new_state = {
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": count + 1,
+        "count": new_count,
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state
@@ -258,7 +267,7 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   # `multi_transform` still allocates `EmptyState` for frozen parameters inside `inner_state`.
   base_opt = apply_trainable_parameters_mask(base_opt, config)
 
-  if getattr(config, "skip_step_on_spikes", False):
+  if config.skip_step_on_spikes:
     base_opt = skip_step_on_spikes(
         base_opt,
         interval=config.skip_step_interval,
@@ -279,7 +288,7 @@ def apply_trainable_parameters_mask(base_opt, config):
   parameters are excluded from both gradient computation and `grad_norm`.
   """
   # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
+  trainable_patterns = config.trainable_parameters_mask
   freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
   if freeze_mask_fn is None:
     return base_opt
