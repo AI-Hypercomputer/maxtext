@@ -403,6 +403,42 @@ class TrainRLTest(unittest.TestCase):
     # what it accepts, so it must pass everything through.
     self.assertEqual(train_rl._kwargs_supported_by(type, unknown=3), {"unknown": 3})
 
+  def test_build_rl_profiler_config_returns_none_when_not_xplane(self):
+    """build_rl_profiler_config returns None unless profiler='xplane'."""
+    config = types.RLConfig(model_name="qwen3-0.6b")
+    self.assertIsNone(train_rl.build_rl_profiler_config(config))
+
+  def test_build_rl_profiler_config_forwards_enable_continuous_profiling(self):
+    """enable_continuous_profiling on RLConfig reaches RLProfileConfig."""
+    expected_tb_dir = "/tmp/tb/run1/tensorboard/"
+    with mock.patch.object(
+        train_rl.rl_cluster_lib, "RLProfileConfig"
+    ) as mock_profile_cfg:
+      default_config = types.RLConfig(
+          model_name="qwen3-0.6b",
+          profiler="xplane",
+          base_output_directory="/tmp/tb",
+          run_name="run1",
+      )
+      train_rl.build_rl_profiler_config(default_config)
+      default_kwargs = mock_profile_cfg.call_args.kwargs
+      self.assertIs(default_kwargs["enable_continuous_profiling"], False)
+      self.assertNotIn("mldiagnostics_dir", default_kwargs)
+      self.assertEqual(default_kwargs["output_dir"], expected_tb_dir)
+
+      mock_profile_cfg.reset_mock()
+      enabled_config = types.RLConfig(
+          model_name="qwen3-0.6b",
+          profiler="xplane",
+          base_output_directory="/tmp/tb",
+          run_name="run1",
+          enable_continuous_profiling=True,
+      )
+      train_rl.build_rl_profiler_config(enabled_config)
+      enabled_kwargs = mock_profile_cfg.call_args.kwargs
+      self.assertIs(enabled_kwargs["enable_continuous_profiling"], True)
+      self.assertEqual(enabled_kwargs["output_dir"], expected_tb_dir)
+
   def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
     """A packed row must hold prompt cap + generation cap (= max_target_length)."""
     with self.assertRaisesRegex(ValueError, "max_seq_token_per_tpu"):
