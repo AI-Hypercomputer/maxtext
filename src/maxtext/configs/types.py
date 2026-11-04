@@ -882,7 +882,7 @@ class DeepSeek41(BaseModel):
       description="Layers that run the indexer; the layers after them reuse the selected top-k positions.",
   )
   candidate_source_layer: int = Field(
-      -1, description="Layer whose index scores pre-select candidate blocks for later index sources (-1: off)."
+      -1, description="Layer whose index scores preselect candidate blocks for later index sources (-1: off)."
   )
   candidate_topk_blocks: NonNegativeInt = Field(0, description="Candidate blocks kept per query.")
   candidate_block_size: NonNegativeInt = Field(0, description="Compressed positions per candidate block.")
@@ -906,6 +906,17 @@ class DeepSeek41(BaseModel):
   ds41_engram_pad_id: int = Field(2, description="Token filling n-gram slots that have no history.")
   ds41_engram_compressed_vocab_size: NonNegativeInt = Field(
       0, description="Expected size of the compressed (normalized) tokenizer vocab (0: unchecked)."
+  )
+  ds41_vision_downsample_ratio: PositiveInt = Field(
+      3, description="Spatial downsample factor of the DeepSeek-V4.1 vision aligner (r x r ViT patches)."
+  )
+  ds41_vision_grid: list[int] = Field(
+      default_factory=lambda: [39, 39],
+      description="Static [n_vit_h, n_vit_w] patch grid for DeepSeek-V4.1 vision encoder initialization.",
+  )
+  ds41_image_token_id: int = Field(
+      129264,
+      description="Placeholder token ID marking DeepSeek-V4.1 image span positions.",
   )
 
 
@@ -5370,6 +5381,8 @@ class MaxTextConfig(
       raise ValueError(
           f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
+    if len(self.ds41_vision_grid) != 2 or any(dim <= 0 for dim in self.ds41_vision_grid):
+      raise ValueError(f"ds41_vision_grid must be [n_vit_h, n_vit_w] of positive ints, got {self.ds41_vision_grid!r}.")
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
       # support is pending clipped-linears in the vision encoder.
@@ -5392,9 +5405,23 @@ class MaxTextConfig(
           "maxtext-omni-gemma3-qwen3",
           "weaver-mini",
           "weaver-max",
+          "weaver-mini-diffuser",
+          "deepseek4.1-flash",
+          "deepseek4.1-flash-mini",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
+      if self.decoder_block == DecoderBlockType.DEEPSEEK41:
+        if self.vision_encoder_block != VisionEncoderBlockType.DEEPSEEK41:
+          raise ValueError(
+              "Multimodal DeepSeek-V4.1 requires vision_encoder_block='deepseek41', "
+              f"got {self.vision_encoder_block.value!r}."
+          )
+        if self.ds41_image_token_id <= 0 or self.ds41_image_token_id >= self.vocab_size:
+          raise ValueError(
+              "Multimodal DeepSeek-V4.1 requires 0 < ds41_image_token_id < vocab_size "
+              f"({self.vocab_size}), got {self.ds41_image_token_id!r}."
+          )
       if self.use_sft:
         if not self.sft_train_on_completion_only:
           raise ValueError("For multimodal SFT, `sft_train_on_completion_only` must be True.")

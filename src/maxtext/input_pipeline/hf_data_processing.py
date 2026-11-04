@@ -258,7 +258,7 @@ def vision_sft_preprocessing_pipeline(
   )
   operations.append(input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
-  operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name, config=config))
   if config.use_mrope:
     operations.append(
         input_pipeline_utils.ComputeQwen3OmniPositions(
