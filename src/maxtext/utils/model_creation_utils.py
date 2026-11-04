@@ -175,7 +175,18 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
   ckpt_shape = ckpt_arr.shape
   model_shape = model_arr.shape
   if ckpt_shape == model_shape:
-    return jax.device_put(ckpt_arr, model_arr.sharding)
+    if (
+        isinstance(ckpt_arr, jax.Array)
+        and isinstance( getattr(ckpt_arr, "sharding", None), jax.sharding.Sharding)
+        and isinstance( getattr(model_arr, "sharding", None), jax.sharding.Sharding)
+        and ckpt_arr.sharding.is_equivalent_to(model_arr.sharding, ckpt_arr.ndim)
+    ):
+      return ckpt_arr
+    aligned = jax.device_put(ckpt_arr, model_arr.sharding)
+    if isinstance(ckpt_arr, jax.Array) and aligned is not ckpt_arr and not ckpt_arr.is_deleted():
+      aligned.block_until_ready()
+      ckpt_arr.delete()
+    return aligned
   if len(ckpt_shape) != len(model_shape):
     raise ValueError(
         f"Checkpoint and model arrays have different ranks: {ckpt_shape} vs {model_shape}. "
@@ -183,7 +194,11 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         "unscanned format before loading with vLLM (vllm.yml sets scan_layers=False)."
     )
   if len(ckpt_shape) == 2 and ckpt_shape == model_shape[::-1]:
-    return jax.device_put(jnp.transpose(ckpt_arr), model_arr.sharding)
+    aligned = jax.device_put(jnp.transpose(ckpt_arr), model_arr.sharding)
+    if isinstance(ckpt_arr, jax.Array) and aligned is not ckpt_arr and not ckpt_arr.is_deleted():
+      aligned.block_until_ready()
+      ckpt_arr.delete()
+    return aligned
 
   axes = _normalize_logical_axes(logical_axes)
   if axes is None or len(axes) != len(model_shape):
@@ -217,7 +232,11 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
             f"Full shapes ckpt={ckpt_shape} model={model_shape}"
         )
       result = jnp.repeat(result, model_dim // ckpt_dim, axis=axis)
-  return jax.device_put(result, model_arr.sharding)
+  aligned = jax.device_put(result, model_arr.sharding)
+  if isinstance(ckpt_arr, jax.Array) and aligned is not ckpt_arr and not ckpt_arr.is_deleted():
+    aligned.block_until_ready()
+    ckpt_arr.delete()
+  return aligned
 
 
 def _intersect_with_metadata(target, meta_tree):
@@ -313,17 +332,33 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
 
       return arr_reshaped
 
-    # Apply per-shard padding and chunking
-    padded_chunked_wi_0 = _pad_and_chunk(ckpt_node["wi_0"], target_half_dim)
-    padded_chunked_wi_1 = _pad_and_chunk(ckpt_node["wi_1"], target_half_dim)
+    wi_0 = ckpt_node["wi_0"]
+    wi_1 = ckpt_node["wi_1"]
+    if n_shards == 1 and wi_0.shape[-1] == target_half_dim and wi_1.shape[-1] == target_half_dim:
+      fused_wi = jnp.concatenate([wi_0, wi_1], axis=-1)
+    else:
+      # Apply per-shard padding and chunking
+      padded_chunked_wi_0 = _pad_and_chunk(wi_0, target_half_dim)
+      padded_chunked_wi_1 = _pad_and_chunk(wi_1, target_half_dim)
 
-    # Concatenate along the inner chunk dimension to interleave the shards
-    # Shape becomes: (..., n_shards, target_chunk_size * 2)
-    wi_interleaved = jnp.concatenate([padded_chunked_wi_0, padded_chunked_wi_1], axis=-1)
+      # Concatenate along the inner chunk dimension to interleave the shards
+      # Shape becomes: (..., n_shards, target_chunk_size * 2)
+      wi_interleaved = jnp.concatenate([padded_chunked_wi_0, padded_chunked_wi_1], axis=-1)
+      fused_wi = wi_interleaved.reshape(*wi_model.shape)
+      if isinstance(fused_wi, jax.Array):
+        fused_wi.block_until_ready()
+      for tmp_arr in (padded_chunked_wi_0, padded_chunked_wi_1, wi_interleaved):
+        if isinstance(tmp_arr, jax.Array) and tmp_arr is not fused_wi and tmp_arr is not wi_0 and tmp_arr is not wi_1 and not tmp_arr.is_deleted():
+          tmp_arr.delete()
 
     # Flatten the n_shards dimension back out to match the final model shape, drop wi_0/wi_1.
     new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
-    new_node["wi"] = wi_interleaved.reshape(*wi_model.shape)
+    new_node["wi"] = fused_wi
+    if isinstance(fused_wi, jax.Array):
+      fused_wi.block_until_ready()
+    for old_arr in (wi_0, wi_1):
+      if isinstance(old_arr, jax.Array) and old_arr is not fused_wi and not old_arr.is_deleted():
+        old_arr.delete()
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
@@ -1209,10 +1244,8 @@ def from_pretrained(
         checkpoint = to_dict(checkpoint)
         logical_axes_tree = to_dict(logical_axes_tree)
 
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
-        # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
-        # This prevents the replicated intermediate copies from persisting until function return.
         del restored
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
 
         def _filter_to_model_keys(ckpt, model):
           """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
@@ -1485,8 +1518,18 @@ def load_mtp_block_from_hf(
     leaf_name = parts[-1]
     if leaf_name in parent:
       target_arr = parent[leaf_name]
+      if isinstance(target_arr, jax.Array):
+        parent[leaf_name] = jax.ShapeDtypeStruct(target_arr.shape, target_arr.dtype, sharding=target_arr.sharding)
+        if not target_arr.is_deleted():
+          target_arr.delete()
+        target_arr = parent[leaf_name]
     elif leaf_name in ("wi_0", "wi_1") and "wi" in parent:
       target_arr = parent["wi"]
+      if isinstance(target_arr, jax.Array):
+        parent["wi"] = jax.ShapeDtypeStruct(target_arr.shape, target_arr.dtype, sharding=target_arr.sharding)
+        if not target_arr.is_deleted():
+          target_arr.delete()
+        target_arr = parent["wi"]
     else:
       continue
 
