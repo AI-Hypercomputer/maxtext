@@ -26,6 +26,9 @@ override_model_config: false # When set to true allows overriding model paramete
 override_logical_axis_rules: false # When set overrides logical axis rules instead of merging them.
 
 normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
+output_multiplier: 1.0 # pre-sigmoid router and pre-softcap lm_head logit multiplier
+post_norm_eps: 1.e-08 # epsilon for post-attention, post-ffn, and post-expert normalizations
+residual_gate_temperature: 0.3 # temperature parameter for residual gate
 
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -1558,6 +1561,9 @@ audio_path: "" # Local audio path used for decoding, can be multiple paths separ
 image_placeholder: "<|image|>"
 video_placeholder: "<|video|>"
 audio_placeholder: "<|audio|>"
+image_token_id: 200092
+video_token_id: 200091
+audio_token_id: 200038
 use_audio_in_video: false
 video_max_grid_t: null
 video_max_grid_h: null
