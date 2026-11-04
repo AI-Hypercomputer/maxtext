@@ -2271,8 +2271,10 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         num_experts=config.num_experts,
         num_experts_per_tok=config.num_experts_per_tok,
         mesh=mesh,
-        kernel_init=max_initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+        kernel_init=max_initializers.nd_dense_init(
+            config.dense_init_scale, "fan_in", "truncated_normal"
+        ),
+        kernel_axes=("embed_router", None),
         intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
