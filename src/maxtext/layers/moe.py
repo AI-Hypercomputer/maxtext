@@ -620,6 +620,7 @@ class GateLogit(nnx.Module):
       kernel_axes: Tuple[Optional[str], ...] = (),
       use_bias: bool = False,
       bias_dtype: Optional[ctypes.DType] = None,
+      use_bias_vl: bool = False,
       score_func: str = "",
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
@@ -658,6 +659,7 @@ class GateLogit(nnx.Module):
     self.kernel_axes = kernel_axes
     self.use_bias = use_bias
     self.bias_dtype = bias_dtype or self.weight_dtype
+    self.use_bias_vl = use_bias_vl
     self.score_func = score_func
     self.quant = quant
     self.shard_mode = shard_mode
@@ -687,7 +689,9 @@ class GateLogit(nnx.Module):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates. DeepSeek-V4.1 keeps it in
         # float32 whatever weight_dtype is: the trained biases are large and close together (e.g. DeepSeek-V4.1-Flash
         # layer 39 spans 57.17..57.65), so bf16 would collapse them to a handful of values and change the top-k.
-        bias_init_dtype = jnp.float32 if self.model_name.startswith("deepseek4.1") else self.bias_dtype
+        bias_init_dtype = (
+            jnp.float32 if (self.model_name.startswith("deepseek4.1") or self.use_bias_vl) else self.bias_dtype
+        )
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, bias_init_dtype),
             out_sharding=bias_axes,
@@ -699,6 +703,19 @@ class GateLogit(nnx.Module):
         )
     else:
       self.bias = None
+
+    if self.use_bias_vl:
+      if not (self.use_bias and isinstance(self.bias, MoEBiasVar)):
+        raise ValueError(
+            f"GateLogit use_bias_vl=True requires use_bias=True with MoEBiasVar "
+            f"(model_name={self.model_name!r}, use_bias={self.use_bias})."
+        )
+      self.bias_vl = MoEBiasVar(
+          default_bias_init(rngs.params(), bias_shape, jnp.float32),
+          out_sharding=bias_axes,
+      )
+    else:
+      self.bias_vl = None
 
     if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
       self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
@@ -719,7 +736,12 @@ class GateLogit(nnx.Module):
       return None
     return getattr(self, self._quant_dot_general_name)
 
-  def __call__(self, inputs: jax.Array, _initializing: bool = False) -> Tuple[jax.Array, Optional[jax.Array]]:
+  def __call__(
+      self,
+      inputs: jax.Array,
+      _initializing: bool = False,
+      image_mask: jax.Array | None = None,
+  ) -> Tuple[jax.Array, Optional[jax.Array]]:
     inputs = jnp.asarray(inputs, self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
 
@@ -755,10 +777,33 @@ class GateLogit(nnx.Module):
     if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
       pre_bias_logits = output
 
+    if image_mask is not None:
+      if not self.use_bias_vl or self.bias_vl is None or self.bias is None:
+        raise ValueError(
+            f"GateLogit received image_mask with use_bias_vl={self.use_bias_vl}, "
+            f"bias_vl={self.bias_vl is not None}, bias={self.bias is not None}."
+        )
+      token_shape = output.shape[: -len(self.out_features_shape)]
+      if image_mask.shape != token_shape:
+        raise ValueError(
+            f"GateLogit image_mask shape {image_mask.shape} must match token shape {token_shape} "
+            f"for inputs shape {inputs.shape}."
+        )
+
     if self.use_bias:
-      if isinstance(self.bias, MoEBiasVar) and self.model_name.startswith("deepseek4.1"):
-        # Selection-only bias: add in float32 so bf16 compute does not round it away (see __init__).
-        output = output.astype(jnp.float32) + jnp.asarray(self.bias[...], jnp.float32)
+      if isinstance(self.bias, MoEBiasVar) and (self.model_name.startswith("deepseek4.1") or self.use_bias_vl):
+        # Selection-only bias: add in at least float32 so bf16 compute does not round it away (see __init__).
+        promote_dtype = jnp.promote_types(output.dtype, jnp.float32)
+        text_bias = jnp.asarray(self.bias[...], promote_dtype)
+        if image_mask is not None:
+          vl_bias = jnp.asarray(self.bias_vl[...], promote_dtype)
+          mask_expand = jnp.asarray(image_mask, dtype=jnp.bool_)
+          for _ in range(len(self.out_features_shape)):
+            mask_expand = mask_expand[..., None]
+          routing_bias = jnp.where(mask_expand, vl_bias, text_bias)
+        else:
+          routing_bias = text_bias
+        output = output.astype(promote_dtype) + routing_bias
       else:
         bias = jnp.asarray(self.bias[...], self.dtype)
         output += bias
@@ -922,6 +967,7 @@ class RoutedMoE(nnx.Module):
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
       is_hash_routing: bool = False,
+      use_bias_vl: bool = False,
       force_dropless: bool = False,
       weight_quant: Optional[quantizations.WeightQuantConfig] = None,
   ):
@@ -961,6 +1007,9 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
+    self.use_bias_vl = use_bias_vl
+    if self.use_bias_vl and self.is_hash_routing:
+      raise ValueError("RoutedMoE use_bias_vl=True is incompatible with is_hash_routing=True.")
     self.weight_quant = weight_quant
 
     # DeepSeek V4 Hash Routing
@@ -1057,6 +1106,7 @@ class RoutedMoE(nnx.Module):
         kernel_axes=self.kernel_axes,
         use_bias=self.config.routed_bias and not self.is_hash_routing,
         bias_dtype=jnp.float32 if self.config.float32_gate_logits else gate_weight_dtype,
+        use_bias_vl=self.use_bias_vl,
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
@@ -4985,6 +5035,7 @@ class RoutedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      image_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -4994,6 +5045,8 @@ class RoutedMoE(nnx.Module):
         in DeepSeek V4's early MoE layers. If None, routing relies purely on `gate_inputs` or `inputs`.
       gate_inputs: Optional alternate inputs to feed into the routing gate.
       out_sharding: Optional sharding specification for the output.
+      forced_routed_experts: Optional forced expert indices overriding gate selection.
+      image_mask: Optional boolean mask selecting `bias_vl` instead of `bias` on image tokens.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
@@ -5004,6 +5057,10 @@ class RoutedMoE(nnx.Module):
 
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
+    if cfg.te_moe_block and image_mask is not None:
+      raise ValueError("te_moe_block=True does not support multimodal image_mask.")
+    if self.is_hash_routing and image_mask is not None:
+      raise ValueError("is_hash_routing=True does not support multimodal image_mask.")
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
 
@@ -5033,9 +5090,13 @@ class RoutedMoE(nnx.Module):
           out_sharding,
       )
 
-    gate_logits, pre_bias_logits = self.gate(routing_inputs)
+    gate_logits, pre_bias_logits = (
+        self.gate(routing_inputs, image_mask=image_mask) if image_mask is not None else self.gate(routing_inputs)
+    )
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
+    if is_fused_moe_path and image_mask is not None:
+      raise ValueError("vllm_rpa fused_moe_matmul does not support multimodal image_mask.")
 
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
@@ -5196,6 +5257,7 @@ class RoutedAndSharedMoE(nnx.Module):
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
       is_hash_routing: bool = False,
+      use_bias_vl: bool = False,
   ):
     """Initializes the RoutedAndSharedMoE module.
 
@@ -5219,6 +5281,7 @@ class RoutedAndSharedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
+    self.use_bias_vl = use_bias_vl
     self.moe_expert_input_dim = (
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
@@ -5240,6 +5303,7 @@ class RoutedAndSharedMoE(nnx.Module):
         quant=self.quant,
         rngs=self.rngs,
         is_hash_routing=self.is_hash_routing,
+        use_bias_vl=self.use_bias_vl,
     )
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
@@ -5279,6 +5343,7 @@ class RoutedAndSharedMoE(nnx.Module):
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
       forced_routed_experts: jax.Array | None = None,
+      image_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -5301,6 +5366,7 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
         input_ids=input_ids,
         forced_routed_experts=forced_routed_experts,
+        image_mask=image_mask,
     )
     shared_experts = self.shared_experts(
         inputs,

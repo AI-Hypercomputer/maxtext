@@ -36,6 +36,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MultimodalInput,
     ShardMode,
+    VisionEncoderBlockType,
     get_weight_dtype,
 )
 from maxtext.configs.types import check_forced_routing_support
@@ -812,10 +813,18 @@ class NNXDecoder(nnx.Module):
       for i, spec in enumerate(specs):
         self._create_and_register_layer(deepseek41.DeepSeek41DecoderLayer, rngs, "layers", i, spec=spec)
 
-  def _apply_deepseek41_layers(self, y, decoder_positions, decoder_input_tokens, decoder_segment_ids=None):
+  def _apply_deepseek41_layers(
+      self,
+      y,
+      decoder_positions,
+      decoder_input_tokens,
+      decoder_segment_ids=None,
+      image_mask=None,
+  ):
     """Runs the DeepSeek-V4.1 layers on the embeddings and collapses the hyper-connection copies."""
     cfg = self.config
     carry = deepseek41.initial_carry(y, cfg.mhc_expansion_rate)
+    scan_kwargs = {"image_mask": image_mask} if image_mask is not None else {}
     if cfg.scan_layers:
       segments = deepseek41.build_segments(cfg)
       plans = deepseek41.build_segment_carry_plans(cfg, segments)
@@ -831,6 +840,7 @@ class NNXDecoder(nnx.Module):
             length=segment.repeats,
             metadata_axis_name="layers",
             skip_block_remat=True,
+            **scan_kwargs,
         )
         setattr(self, f"segments_{k}", stack)
         carry = {key: carry[key] for key in ("h", "pre_mix") + plan.keep_after}
@@ -846,9 +856,18 @@ class NNXDecoder(nnx.Module):
               decoder_positions=decoder_positions,
               decoder_input_tokens=decoder_input_tokens,
               decoder_segment_ids=decoder_segment_ids,
+              image_mask=image_mask,
               config=cfg,
               policy=remat_policy_fn,
               prevent_cse=prevent_cse,
+          )
+        elif image_mask is not None:
+          carry = layer(
+              carry,
+              decoder_positions,
+              decoder_input_tokens,
+              decoder_segment_ids=decoder_segment_ids,
+              image_mask=image_mask,
           )
         else:
           carry = layer(carry, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
@@ -1786,7 +1805,7 @@ class NNXDecoder(nnx.Module):
       audio_masks = multimodal_input.audio_masks
 
       if image_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in {
+        if cfg.vision_encoder_block == VisionEncoderBlockType.DEEPSEEK41 or cfg.model_name in {
             "gemma3-4b",
             "gemma3-12b",
             "gemma3-27b",
@@ -2300,7 +2319,14 @@ class NNXDecoder(nnx.Module):
 
     else:
       if self.is_deepseek41:
-        y = self._apply_deepseek41_layers(y, decoder_positions, decoder_input_tokens, decoder_segment_ids)
+        ds41_image_mask = bidirectional_mask if cfg.use_multimodal else None
+        y = self._apply_deepseek41_layers(
+            y,
+            decoder_positions,
+            decoder_input_tokens,
+            decoder_segment_ids,
+            image_mask=ds41_image_mask,
+        )
       elif self.is_gemma4_small:
         y, kv_caches = self._apply_gemma4_small_layers(
             y,

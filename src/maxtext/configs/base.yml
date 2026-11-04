@@ -1574,6 +1574,11 @@ temporal_patch_size_for_vit: 2
 num_position_embeddings_for_vit: 1024
 deepstack_visual_indexes_for_vit: []
 
+# DeepSeek-V4.1 vision encoder
+ds41_vision_downsample_ratio: 3
+ds41_vision_grid: [39, 39]
+ds41_image_token_id: 129264
+
 ### Audio encoder configs (Qwen3-OmniMoe)
 d_model_for_audio: 256
 encoder_attention_heads_for_audio: 4
