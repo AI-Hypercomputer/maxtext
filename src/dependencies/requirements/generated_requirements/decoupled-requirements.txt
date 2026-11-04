@@ -135,7 +135,7 @@ opt-einsum>=3.4.0
 optax>=0.2.8
 optree>=0.19.1
 optype>=0.18.0
-orbax-checkpoint>=0.12.8
+orbax-checkpoint==0.12.8
 packaging>=26.3
 pandas>=3.1.0
 parameterized>=0.9.0
