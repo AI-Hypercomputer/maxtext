@@ -912,6 +912,7 @@ def from_pretrained(
             f"model_name={config.model_name}",
             f"base_output_directory={config.base_output_directory}",
             f"scan_layers={config.scan_layers}",
+            f"mtp_num_layers={getattr(config, 'mtp_num_layers', 0) or 0}",
             "use_multimodal=false",
             "skip_jax_distributed_system=True",
             "--lazy_load_tensors=True",
