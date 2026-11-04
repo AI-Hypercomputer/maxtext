@@ -123,6 +123,7 @@ def build_hf_tokenizer(metadata: Any):
     """`token_utils.HuggingFaceTokenizer` whose chat-template encode works on transformers >= 5."""
 
     def encode(self, s: str, **kwargs):
+      """Tokenizes `s`, through the chat template when the metadata asks for it."""
       if not getattr(self.metadata, "use_chat_template", False):
         return super().encode(s, **kwargs)
       is_bos = kwargs.pop("is_bos", True)
