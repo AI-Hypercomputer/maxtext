@@ -15,7 +15,12 @@
 """Tests for grain data processing."""
 
 import functools
+import itertools
 import os
+import os.path
+import pickle
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,6 +36,7 @@ import jax.numpy as jnp
 import grain.python as grain
 import pytest
 from unittest.mock import patch
+from array_record.python import array_record_module
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
@@ -40,6 +46,7 @@ from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import elastic_utils
+from maxtext.utils import gcs_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
@@ -416,6 +423,236 @@ class TestGrainArrayRecordDataSource:
       )
 
     data_source.assert_called_once_with(["data.arrayrecord"], reader_options=expected_reader_options)
+
+
+class GrainColocatedPythonDataInputTest(unittest.TestCase):
+  """Builds the iterators as the colocated python coordinator does, then runs what each colocated host runs."""
+
+  _PATTERN = "gs://test-bucket/data-*.array_record"
+  _NUM_HOSTS = 2
+
+  def setUp(self):
+    super().setUp()
+    grain_data_processing.extract_file_instructions.cache_clear()
+    self.addCleanup(grain_data_processing.extract_file_instructions.cache_clear)
+    self.temp_dir = os.path.realpath(tempfile.mkdtemp())
+    self.addCleanup(shutil.rmtree, self.temp_dir)
+    self.files, self.records, self.instructions = [], [], []
+    for shard, num_records in enumerate((3, 5)):
+      path = os.path.join(self.temp_dir, f"data-{shard:05d}-of-00002.array_record")
+      writer = array_record_module.ArrayRecordWriter(path, "group_size:1")
+      for i in range(num_records):
+        record = f"shard {shard} record {i}".encode()
+        writer.write(record)
+        self.records.append(record)
+      writer.close()
+      self.files.append(path)
+      self.instructions.append(
+          grain_data_processing.FileInstruction(path, skip=0, take=num_records, examples_in_shard=num_records)
+      )
+    self.local_pattern = os.path.join(self.temp_dir, "data-*.array_record")
+    self.mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ["data"])
+
+  def _make_config(self, **overrides):
+    """Returns the config of a colocated python data input run over the test files, with `overrides`."""
+    kwargs = {
+        "per_device_batch_size": 1,
+        "run_name": "test",
+        "mesh_axes": ["data"],
+        "logical_axis_rules": [["batch", "data"]],
+        "data_sharding": ["data"],
+        "base_output_directory": self.temp_dir,
+        "dataset_type": "grain",
+        "grain_file_type": "arrayrecord",
+        "grain_train_files": self._PATTERN,
+        "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+        "enable_checkpointing": False,
+        "max_target_length": 128,
+        "enable_single_controller": True,
+        "colocated_python_data_input": True,
+        **overrides,
+    }
+    return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
+
+  def _build_on_hosts(self, make_iterator, config):
+    """Builds the iterator on the coordinator, then each colocated host's dataset from the get_ds_fn it receives.
+
+    Returns the gcs_glob_pattern mock and the ArrayRecordDataSource spy, both covering the hosts only, and the
+    records each host read.
+    """
+    with (
+        mock.patch.object(gcs_utils, "gcs_glob_pattern", return_value=self.files) as gcs_glob,
+        mock.patch.object(grain_data_processing.multihost_dataloading, "RemoteIteratorWrapper") as remote_iterator,
+    ):
+      make_iterator(config, self.mesh, [0])
+      # RemoteIteratorWrapper serializes get_ds_fn to the colocated hosts.
+      get_ds_fn = pickle.loads(pickle.dumps(remote_iterator.call_args.args[0]))
+      gcs_glob.reset_mock()
+      with mock.patch.object(
+          grain_data_processing.grain, "ArrayRecordDataSource", wraps=grain_data_processing.grain.ArrayRecordDataSource
+      ) as data_source:
+        # Each host builds its shard of the data, as RemoteIterator.reset does.
+        host_records = [
+            list(get_ds_fn(dataloading_host_index=i, dataloading_host_count=self._NUM_HOSTS))
+            for i in range(self._NUM_HOSTS)
+        ]
+    return gcs_glob, data_source, host_records
+
+  def _assert_hosts_read_file_instructions_without_globbing(self, gcs_glob, data_source, host_records):
+    self.assertEqual(gcs_glob.call_count, 0)
+    self.assertEqual(data_source.call_count, self._NUM_HOSTS)
+    for call in data_source.call_args_list:
+      self.assertTrue(all(isinstance(path, grain_data_processing.FileInstruction) for path in call.args[0]))
+    self.assertCountEqual(sum(host_records, []), self.records)
+
+  def test_extract_file_instructions(self):
+    self.assertEqual(grain_data_processing.extract_file_instructions(self.local_pattern), tuple(self.instructions))
+
+  def test_extract_file_instructions_is_cached_across_calls(self):
+    with mock.patch.object(
+        grain_data_processing, "find_data_files", wraps=grain_data_processing.find_data_files
+    ) as find_files:
+      first = grain_data_processing.extract_file_instructions(self.local_pattern)
+      second = grain_data_processing.extract_file_instructions(self.local_pattern)
+    self.assertEqual(first, tuple(self.instructions))
+    self.assertIs(first, second)
+    find_files.assert_called_once_with(self.local_pattern)
+
+  def test_preresolves_files_with_colocated_python(self):
+    config = SimpleNamespace(
+        colocated_python_data_input=True,
+        elastic_enabled=False,
+        grain_file_type="arrayrecord",
+        grain_data_source_max_workers=1,
+    )
+    self.assertEqual(
+        grain_data_processing._maybe_preresolve_arrayrecord_files(self.local_pattern, config),  # pylint: disable=protected-access
+        tuple(self.instructions),
+    )
+
+  def test_keeps_the_pattern_without_colocated_python(self):
+    for elastic in (False, True):
+      config = SimpleNamespace(
+          colocated_python_data_input=False,
+          elastic_enabled=elastic,
+          grain_file_type="arrayrecord",
+          grain_data_source_max_workers=1,
+      )
+      with (
+          self.subTest(elastic=elastic),
+          mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource") as data_source,
+      ):
+        self.assertEqual(
+            grain_data_processing._maybe_preresolve_arrayrecord_files(self.local_pattern, config),  # pylint: disable=protected-access
+            self.local_pattern,
+        )
+        data_source.assert_not_called()
+
+  def test_parse_mixture_string(self):
+    mixture = grain_data_processing._parse_mixture(  # pylint: disable=protected-access
+        "gs://bucket/data1.arrayrecord,0.7;gs://bucket/data2.arrayrecord,0.3"
+    )
+    self.assertEqual(mixture, (["gs://bucket/data1.arrayrecord", "gs://bucket/data2.arrayrecord"], [0.7, 0.3]))
+
+  def test_parse_mixture_pre_extracted_tuple(self):
+    inst1 = [grain_data_processing.FileInstruction("f1.arrayrecord", 0, 10, 10)]
+    inst2 = [grain_data_processing.FileInstruction("f2.arrayrecord", 0, 20, 20)]
+    mixture = grain_data_processing._parse_mixture(((inst1, inst2), [0.4, 0.6]))  # pylint: disable=protected-access
+    self.assertEqual(mixture, ([inst1, inst2], [0.4, 0.6]))
+
+  def test_parse_mixture_single_pattern_returns_none(self):
+    self.assertIsNone(grain_data_processing._parse_mixture("gs://bucket/*.arrayrecord"))  # pylint: disable=protected-access
+    self.assertIsNone(
+        grain_data_processing._parse_mixture(["gs://bucket/f1.arrayrecord", "gs://bucket/f2.arrayrecord"])  # pylint: disable=protected-access
+    )
+    self.assertIsNone(grain_data_processing._parse_mixture(tuple(self.instructions)))  # pylint: disable=protected-access
+    self.assertIsNone(grain_data_processing._parse_mixture(None))  # pylint: disable=protected-access
+
+  def test_colocated_hosts_do_not_glob(self):
+    config = self._make_config()
+    gcs_glob, data_source, host_records = self._build_on_hosts(grain_data_processing.make_grain_train_iterator, config)
+    self._assert_hosts_read_file_instructions_without_globbing(gcs_glob, data_source, host_records)
+
+  def test_colocated_eval_hosts_do_not_glob(self):
+    config = self._make_config(grain_eval_files=self._PATTERN)
+    gcs_glob, data_source, host_records = self._build_on_hosts(grain_data_processing.make_grain_eval_iterator, config)
+    self._assert_hosts_read_file_instructions_without_globbing(gcs_glob, data_source, host_records)
+
+  def test_colocated_mixture_matches_raw_pattern(self):
+    """A pre-resolved `;` mixture gives the hosts the same weights and records as the raw mixture pattern."""
+    patterns = []
+    for name, num_records in (("a", 400), ("b", 400), ("c", 6000)):
+      path = os.path.join(self.temp_dir, f"{name}-00000.array_record")
+      writer = array_record_module.ArrayRecordWriter(path, "group_size:1")
+      for i in range(num_records):
+        writer.write(f"{name}{i}".encode())
+      writer.close()
+      patterns.append(os.path.join(self.temp_dir, f"{name}-*.array_record"))
+    # Normalizing and rounding these weights a second time changes them (0.8947 -> 0.8948).
+    mixture = f"{patterns[0]},1;{patterns[1]},1;{patterns[2]},17"
+    with mock.patch.object(grain_data_processing.multihost_dataloading, "RemoteIteratorWrapper") as remote_iterator:
+      grain_data_processing.make_grain_train_iterator(self._make_config(grain_train_files=mixture), self.mesh, [0])
+    get_ds_fn = remote_iterator.call_args.args[0]
+    resolved = get_ds_fn.args[0]
+    self.assertIsInstance(resolved[0][0][0], grain_data_processing.FileInstruction)
+    self.assertEqual(
+        grain_data_processing._parse_mixture(resolved)[1],  # pylint: disable=protected-access
+        grain_data_processing._parse_mixture(mixture)[1],  # pylint: disable=protected-access
+    )
+    host_ds = get_ds_fn(dataloading_host_index=0, dataloading_host_count=1)
+    raw_ds = get_ds_fn.func(
+        mixture, *get_ds_fn.args[1:], **get_ds_fn.keywords, dataloading_host_index=0, dataloading_host_count=1
+    )
+    self.assertEqual(list(itertools.islice(host_ds, 4000)), list(itertools.islice(raw_ds, 4000)))
+
+  def test_colocated_hosts_resolve_files_when_the_controller_cannot(self):
+    """If the controller fails to resolve the files, it warns, and the hosts resolve the raw pattern themselves."""
+    with (
+        mock.patch.object(gcs_utils, "gcs_glob_pattern", side_effect=[PermissionError("403 Forbidden"), self.files]),
+        mock.patch.object(grain_data_processing.max_logging, "warning") as warning,
+        mock.patch.object(grain_data_processing.multihost_dataloading, "RemoteIteratorWrapper") as remote_iterator,
+    ):
+      grain_data_processing.make_grain_train_iterator(self._make_config(), self.mesh, [0])
+      get_ds_fn = remote_iterator.call_args.args[0]
+      host_records = list(get_ds_fn(dataloading_host_index=0, dataloading_host_count=1))
+    self.assertEqual(get_ds_fn.args[0], self._PATTERN)
+    warning.assert_called_once()
+    self.assertIn("PermissionError: 403 Forbidden", warning.call_args.args[0])
+    self.assertCountEqual(host_records, self.records)
+
+  def test_controller_retries_transient_dns_error_during_preresolution(self):
+    """A transient DNS error on the coordinator is retried before falling back to host-side globbing."""
+    expected_instructions = [grain_data_processing.FileInstruction("shard0", 0, 10, 10)]
+    with (
+        mock.patch.object(
+            grain_data_processing,
+            "extract_file_instructions",
+            side_effect=[socket.gaierror(-3, "Temporary failure in name resolution"), expected_instructions],
+        ) as extract_mock,
+        mock.patch.object(grain_data_processing.multihost_dataloading.time, "sleep"),
+        mock.patch.object(grain_data_processing.multihost_dataloading, "RemoteIteratorWrapper") as remote_iterator,
+    ):
+      grain_data_processing.make_grain_train_iterator(self._make_config(), self.mesh, [0])
+    self.assertEqual(extract_mock.call_count, 2)
+    get_ds_fn = remote_iterator.call_args.args[0]
+    self.assertEqual(get_ds_fn.args[0], expected_instructions)
+
+  def test_colocated_hosts_build_pipelines_with_zero_grain_workers(self):
+    """`grain_worker_count=0` runs grain in-process on the colocated hosts."""
+    config = self._make_config(grain_worker_count=0, grain_worker_count_eval=0, grain_eval_files=self._PATTERN)
+    for make_iterator in (
+        grain_data_processing.make_grain_train_iterator,
+        grain_data_processing.make_grain_eval_iterator,
+    ):
+      with (
+          self.subTest(make_iterator.__name__),
+          mock.patch.object(gcs_utils, "gcs_glob_pattern", return_value=self.files),
+          mock.patch.object(grain_data_processing.multihost_dataloading, "RemoteIteratorWrapper") as remote_iterator,
+      ):
+        make_iterator(config, self.mesh, [0])
+        get_ds_fn, preprocessing_fn = remote_iterator.call_args.args[:2]
+        # Each host builds its pipeline, as RemoteIterator.reset does.
+        preprocessing_fn(dataset=get_ds_fn(dataloading_host_index=0, dataloading_host_count=self._NUM_HOSTS))
 
 
 class GrainArrayRecordProcessingTest(

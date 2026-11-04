@@ -18,6 +18,7 @@ import json
 
 import pathlib
 import signal
+import socket
 import sys
 import tempfile
 
@@ -335,6 +336,66 @@ class MultihostDataloadingTest(parameterized.TestCase):
       remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=3))
     get_ds_fn.assert_not_called()
 
+  def test_remote_iterator_logs_dataset_and_preprocessing_timings(self):
+    remote_iterator = multihost_dataloading.RemoteIterator(
+        get_ds_fn=mock.Mock(return_value="dataset"),
+        preprocessing_fn=mock.Mock(return_value=MockElasticDataloader(4)),
+        global_shape=(32, 1),
+        checkpoint_path="",
+        elastic=False,
+    )
+    with mock.patch.object(multihost_dataloading.max_logging, "log") as log:
+      remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=12))
+    lines = [c.args[0] for c in log.call_args_list if "RemoteIterator timings" in c.args[0]]
+    self.assertLen(lines, 1)
+    self.assertRegex(lines[0], r"host=\S+ shard=4/8 ds_init_s=\d+\.\d{3} preprocess_s=\d+\.\d{3}")
+
+  def test_remote_iterator_logs_first_batch_time_once_per_reset(self):
+    remote_iterator = multihost_dataloading.RemoteIterator(
+        get_ds_fn=mock.Mock(return_value="dataset"),
+        preprocessing_fn=mock.Mock(side_effect=lambda **_: MockElasticDataloader(4)),
+        global_shape=(32, 1),
+        checkpoint_path="",
+        elastic=False,
+    )
+    remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=12))
+    with mock.patch.object(multihost_dataloading.max_logging, "log") as log:
+      remote_iterator._next_local_batch()
+      remote_iterator._next_local_batch()
+      remote_iterator.reset()
+      remote_iterator._next_local_batch()
+    first = [c.args[0] for c in log.call_args_list if "RemoteIterator first batch" in c.args[0]]
+    self.assertLen(first, 2)  # once after build, once after reset
+    self.assertRegex(first[0], r"host=\S+ shard=4/8 first_batch_s=\d+\.\d{3}")
+
+  def test_remote_iterator_build_survives_a_temporary_dns_failure(self):
+    get_ds_fn = mock.Mock(side_effect=[socket.gaierror(-3, "Temporary failure in name resolution"), "dataset"])
+    remote_iterator = multihost_dataloading.RemoteIterator(
+        get_ds_fn=get_ds_fn,
+        preprocessing_fn=mock.Mock(return_value=MockElasticDataloader(4)),
+        global_shape=(32, 1),
+        checkpoint_path="",
+        elastic=False,
+    )
+    with mock.patch.object(multihost_dataloading.time, "sleep"):
+      remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=12))
+    self.assertEqual(get_ds_fn.call_count, 2)
+
+  def test_remote_iterator_build_retries_transient_error_in_preprocessing(self):
+    preprocessing_fn = mock.Mock(
+        side_effect=[socket.gaierror(-3, "Temporary failure in name resolution"), MockElasticDataloader(4)]
+    )
+    remote_iterator = multihost_dataloading.RemoteIterator(
+        get_ds_fn=mock.Mock(return_value="dataset"),
+        preprocessing_fn=preprocessing_fn,
+        global_shape=(32, 1),
+        checkpoint_path="",
+        elastic=False,
+    )
+    with mock.patch.object(multihost_dataloading.time, "sleep"):
+      remote_iterator.build(_fake_mesh_array(range(8, 16), local_process=12))
+    self.assertEqual(preprocessing_fn.call_count, 2)
+
   def test_remote_iterator_wrapper_passes_the_directory_and_waits_for_the_colocated_calls(self):
     """Colocated calls run asynchronously: the state must be written before Orbax commits the checkpoint, and a
     failed restore must raise."""
@@ -539,6 +600,64 @@ class MultihostDataloadingTest(parameterized.TestCase):
     grain_it = MockGrainRootIterator()
     multihost_dataloading._terminate_iterator_workers(grain_it)
     self.assertTrue(grain_it._workers[0].terminated)
+
+
+class TransientRetryTest(absltest.TestCase):
+
+  def test_retries_temporary_dns_failures_then_returns(self):
+    fn = mock.Mock(side_effect=[socket.gaierror(-3, "Temporary failure in name resolution")] * 2 + ["dataset"])
+    sleep = mock.Mock()
+    with mock.patch.object(multihost_dataloading.max_logging, "warning") as warning:
+      self.assertEqual(multihost_dataloading.call_with_transient_retry(fn, attempts=5, sleep=sleep), "dataset")
+    self.assertEqual(fn.call_count, 3)
+    self.assertEqual(sleep.call_count, 2)
+    self.assertEqual(warning.call_count, 2)
+
+  def test_does_not_retry_non_transient_errors(self):
+    fn, sleep = mock.Mock(side_effect=ValueError("bad config")), mock.Mock()
+    with self.assertRaises(ValueError):
+      multihost_dataloading.call_with_transient_retry(fn, attempts=5, sleep=sleep)
+    fn.assert_called_once()
+    sleep.assert_not_called()
+
+  def test_reraises_after_the_last_attempt(self):
+    fn, sleep = mock.Mock(side_effect=ConnectionError("reset")), mock.Mock()
+    with self.assertRaises(ConnectionError):
+      multihost_dataloading.call_with_transient_retry(fn, attempts=3, sleep=sleep)
+    self.assertEqual((fn.call_count, sleep.call_count), (3, 2))
+
+  def test_recognizes_library_errors_by_class_name(self):
+    # urllib3 NameResolutionError/MaxRetryError, requests ConnectionError,
+    # google.api_core RetryError/ServiceUnavailable, google.auth TransportError.
+    for name in (
+        "NameResolutionError",
+        "MaxRetryError",
+        "ConnectionError",
+        "RetryError",
+        "ServiceUnavailable",
+        "TransportError",
+    ):
+      err = type(name, (Exception,), {})("x")
+      fn = mock.Mock(side_effect=[err, "ok"])
+      self.assertEqual(multihost_dataloading.call_with_transient_retry(fn, attempts=2, sleep=mock.Mock()), "ok")
+
+  def test_recognizes_transient_error_in_exception_cause_chain(self):
+    def fail_once():
+      if fail_once.calls == 0:
+        fail_once.calls += 1
+        raise RuntimeError("auth failed") from socket.gaierror(-3, "Temporary failure in name resolution")
+      return "ok"
+
+    fail_once.calls = 0
+    sleep = mock.Mock()
+    self.assertEqual(multihost_dataloading.call_with_transient_retry(fail_once, attempts=2, sleep=sleep), "ok")
+    self.assertEqual(fail_once.calls, 1)
+    sleep.assert_called_once()
+
+  def test_backoff_delay_is_bounded(self):
+    fn, sleep = mock.Mock(side_effect=[socket.gaierror(-3, "x")] * 4 + ["ok"]), mock.Mock()
+    multihost_dataloading.call_with_transient_retry(fn, attempts=5, base_delay_s=2.0, max_delay_s=5.0, sleep=sleep)
+    self.assertTrue(all(0.0 <= c.args[0] <= 5.0 for c in sleep.call_args_list))
 
 
 if __name__ == "__main__":

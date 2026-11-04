@@ -387,6 +387,16 @@ class ElasticUtilsTest(parameterized.TestCase):
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
     self.assertIsNone(kwargs["minimum_slice_count"])
 
+  def test_elastic_retry_waits_for_min_slices_not_all(self):
+    """b/544729435: startup must honour elastic_min_slice_count instead of waiting for every slice."""
+    config = FakeConfig()
+    config.elastic_enabled = True
+    config.elastic_min_slice_count = 1
+    config.grain_use_elastic_iterator = True  # avoid the replica-resize guard for grain
+    elastic_utils.elastic_manager = self.fake_manager
+    elastic_utils.elastic_retry(config)
+    self.assertEqual(self.fake_manager.elastic_retry.call_args.kwargs["minimum_slice_count"], 1)
+
   def test_elastic_retry_pre_callback_without_pre_callback_fn(self):
     """pre_callback still works when pre_callback_fn is not supplied."""
     config = FakeConfig()
