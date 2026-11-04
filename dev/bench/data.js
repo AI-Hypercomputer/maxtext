@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793754580989,
+  "lastUpdate": 1793767673203,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -63458,6 +63458,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4145.655999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Lance Wang",
+            "username": "ecnal-cienet",
+            "email": "lance.wang@cienet.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "5651d7fe290d0796f9d4cbab453c2dc0960341c6",
+          "message": "PR #5706: Fix safetensors_dynamic loading for gpt-oss, Qwen3.5, Qwen3-Next and Gemma\n\nImported from GitHub PR https://github.com/AI-Hypercomputer/maxtext/pull/5706\n\n# Description\n\n`source_checkpoint_layout=safetensors_dynamic` failed to load several supported models. This PR fixes these loader bugs:\n\n- **Composite keys.** A tuple of HF keys (several HF tensors fused into one leaf, e.g. qwen3.5 `in_proj_qkvz`) was only handled in multi-axis stacking. A tuple of MaxText keys (one HF tensor split into several leaves, e.g. gpt-oss and qwen3.5 `gate_up_proj`, qwen3-vl vision `qkv`) failed with `AttributeError: 'tuple' object has no attribute 'replace'`. Both are now loaded as in `to_maxtext`: a composite MaxText key is loaded as one tensor stacked on a new last axis, then split.\n- **NumPy hooks on multi-host.** Hooks that use NumPy (e.g. gemma4 `pad_hf_embedding_layer`) cannot read a `jax.Array` with shards on other hosts. If a hook fails on such a weight, the weight is now gathered to every host with `process_allgather` and the hook is retried, and the result is placed shard by shard with `jax.make_array_from_callback` (`jax.device_put` would all-gather it across hosts on device to compare the copies and can run out of HBM). Weights that load today do not take this path.\n- **Short partition specs.** A `PartitionSpec` may have fewer entries than the array rank. Both stacking functions indexed it by axis and raised `IndexError` (qwen3.5, qwen3-next). The spec is now padded with `None`.\n- **HF tensors used by several leaves.** gemma4 maps `experts.gate_up_proj` to both `wi_0` and `wi_1`, but each HF tensor was dropped after its first use. A tensor is now dropped after its last use.\n- **Legacy multimodal layouts.** `google/gemma-3-*-it` stores `language_model.model.*`, `vision_tower.*` and `multi_modal_projector.*`, while the mapping uses the names transformers gives after loading (`model.language_model.*`, ...). Such tensors are now renamed, only when the mapping uses the renamed name and not the stored one.\n- **Leaves with no HF tensor.** The DeepSeek-V4 mapping uses a `None` HF key for leaves that the hook builds (mHC norm scales). The loader looked up `None` and failed with `KeyError: None`. Such leaves now read no tensor and the hook builds the value, as in `to_maxtext`.\n- **MoE layers outside the scanned stack.** With `scan_layers`, the DeepSeek-V4 prefix layers (`layers_0`..`layers_2`) stay unrolled, and their per-expert lists were stacked at `param_scan_axis` (`RESHAPE FAILED: ... (4096, 2048) into (256, 2048)`). They, and the `MoEBiasVar` and `Tid2EidVar` collections, now stack along axis 0, the same rule as `to_maxtext`.\n- **Variable collections.** DeepSeek maps the MoE gate bias and the hash-routing table to `MoEBiasVar-...` and `Tid2EidVar-...` keys, while the weights state holds these leaves without the collection name. They were reported missing (DeepSeek-V4: `'decoder/layers_0/mlp/MoeBlock_0/tid2eid': missing`), and are now matched without the collection name. DeepSeek-V3 also maps the gate bias as a weight, and that key was loaded instead, stacked along `param_scan_axis` (`gate/bias: shape (256, 58) but the model expects (58, 256)`). Both keys name the same leaf, so it is now loaded once, from the collection key.\n- **Large weights in NumPy hooks on multi-host.** The gather above puts a copy of the whole weight on every device. qwen3.5-397b's 8.6 GB expert weights ran out of HBM (`16.03G` > `15.75G`). Weights over 1 GiB are now gathered in slices along the leading axis.\n- **qwen3-480b-a35b mapping key.** The mapping and hooks were keyed `qwen3-coder-480b-a35b`, while the model config, `HF_IDS` and `HF_MODEL_CONFIGS` use `qwen3-480b-a35b`, so both `to_maxtext` and safetensors_dynamic failed with `KeyError`. They are now keyed by the model name, and a test checks that every model in `HF_MODEL_CONFIGS` has a mapping and hooks.\n- **Missing `HF_IDS` entries.** qwen3-1.7b, qwen3-1.7b-base, qwen3-4b-base, qwen3-8b-base and qwen3-14b-base have a model config and a mapping but no `HF_IDS` entry, so `to_maxtext` failed with `Unsupported model name`, even with `--hf_model_path`. They are now added, and the test above also checks that every model in `HF_MODEL_CONFIGS` has an `HF_IDS` entry.\n\n# Tests\n\n- New unit tests in `tests/unit/checkpointing_test.py` for each case; `checkpointing_test.py` and `checkpointing_nnx_load_test.py` pass.\n- `train.py` with `source_checkpoint_layout=safetensors_dynamic`, 2 steps on v6e-32 (8 hosts):\n\n  | Model | `main` | With this change |\n  | --- | --- | --- |\n  | gemma3-4b (`google/gemma-3-4b-it`) | `KeyError: 'model.language_model.embed_tokens.weight'` | loads and trains |\n  | gemma4-26b | `RuntimeError: Fetching value for jax.Array that spans non-addressable devices` | loads and trains |\n  | gpt-oss-20b | `AttributeError: 'tuple' object has no attribute 'replace'` | loads and trains |\n  | qwen3.5-9b | `IndexError: list assignment index out of range` | loads and trains |\n\n- Loaded weights compared leaf by leaf with a `to_maxtext` checkpoint of the same model, and logits checked against HF with `forward_pass_logit_checker` (max KL over 4 prompts, threshold 0.03; the checker loads through `from_pretrained`, which needs the companion fix in #5705):\n\n  | Model | Hardware | Weights vs `to_maxtext` | Logits max KL |\n  | --- | --- | --- | --- |\n  | gpt-oss-20b | v6e-32 | 41/41 bit-exact | 3.3e-3 |\n  | gemma4-26b | v6e-32 | 47/47 bit-exact (bf16 and fp32) | 0.30 on a long prompt, same with the `to_maxtext` checkpoint |\n  | qwen3-next-80b-a3b | v6e-32 | 36/36 bit-exact | 3.0e-3 |\n  | qwen3.5-35b-a3b-fp8 | v6e-32, `ici_fsdp_parallelism=8 ici_data_parallelism=4` | 104/104 bit-exact | 1.6e-2 |\n  | llama3.1-8b (unchanged path) | v6e-32 | 12/12 bit-exact | 1.3e-4 |\n  | qwen3.5-9b | CPU | scanned 50/50, unscanned 379/379 bit-exact | 4.9e-6 |\n  | qwen3-vl-2b | CPU | 721/721 bit-exact | 1.2e-7 (text only) |\n  | gemma3-4b (bfloat16) | CPU | scanned 132/132, unscanned 444/444 bit-exact | 8.6e-5 |\n\n  The unscanned qwen3.5-9b and qwen3-vl-2b results also need the dtype fix in #5610. Before the shard-by-shard placement, gemma4-26b in float32 ran out of HBM (46.75G > 31.24G); with it, device 0 peaks at 5.6 GiB.\n\n- Large models on TPU v5e-256 (64 hosts per slice), with the multi-host read fix in #5828. `forward_pass_logit_checker` prints the expected top next token for \"Paris is the capital of\" (\" France\") and \"Monday, Tuesday, Wednesday,\" (\" Thursday\"):\n\n  | Model | Slices | Result |\n  | --- | --- | --- |\n  | qwen3.5-397b-a17b | 1 | loads (sliced gather); top tokens \" France\", \" Thursday\" |\n  | gpt-oss-120b | 1 | loads; top tokens \" France\", \" Thursday\" |\n  | qwen3-480b-a35b | 2 | loads (mapping key fix); `main` fails with `KeyError: 'qwen3-480b-a35b'` |\n  | deepseek4-284b (DeepSeek-V4-Flash, BF16) | 1 | loads (None key, prefix-layer stacking, variable collections); the forward pass then runs out of HBM on v5e (17.48G > 15.75G) |\n  | deepseek3-671b (BF16) | 2 | loads (variable collections); the forward pass then runs out of HBM on v5e (18.98G > 15.75G) |\n  | deepseek3.2-671b (BF16 copy of the FP8 checkpoint, made with `deepseek_dequantize.py`'s `dequantize_fp8`) | 2 | loads, including the indexer weights (read 216 s, transform 443 s; `attention=dot_product`, which MaxText requires for the sparse indexer with MLA); the forward pass then runs out of HBM on v5e (18.98G > 15.75G) |\n\n- The models that need more HBM than v5e has, on TPU tpu7x-128 (16 hosts per slice, 192 GB HBM per chip): the forward pass and two training steps on C4 (`train.py`) run, with the top tokens \" France\" and \" Thursday\":\n\n  | Model | Slices | Read, transform | Step-0 C4 loss |\n  | --- | --- | --- | --- |\n  | qwen3.5-397b-a17b | 2 | 51 s, 587 s | 3.60 |\n  | qwen3-480b-a35b | 2 | 191 s, 68 s | 2.44 |\n  | deepseek4-284b (DeepSeek-V4-Flash, BF16) | 2 | 296 s, 150 s | 2.66 |\n  | deepseek3-671b (BF16) | 1 | 252 s, 48 s | 2.15 |\n\n- Two slices, all MaxText models that have a `to_maxtext` checkpoint (44), with #5705 and #5828: two v5e-256 slices (128 hosts) or two v5e-32 slices (16 hosts). 42 give logits identical to the `to_maxtext` checkpoint (`--atol=0 --rtol=0`), within KL 0.03 of HF except for differences that the `to_maxtext` checkpoint shows too. The other two differ by known dtype rounding: gemma2-27b against a bfloat16 `to_maxtext` checkpoint (hooks run in the checkpoint dtype), and qwen3.5-35b-a3b-fp8, whose fp32 norms `to_maxtext` saves as bfloat16. This includes qwen3-1.7b and the four base models above, which `to_maxtext` could not convert before the `HF_IDS` fix.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nCopybara import of the project:\n\n--\n6bfe76d5de3d3c16da602cfdacf153461bd49800 by Lance Wang <lance.wang@cienet.com>:\n\nfix(load_dynamic): Composite keys, multi-host hooks, legacy keys\n\nsafetensors_dynamic failed to load several supported models:\n\n- Composite keys: a tuple of HF keys (several HF tensors fused into one leaf,\n  qwen3.5 in_proj_qkvz) was only handled in multi-axis stacking, and a tuple of\n  MaxText keys (one HF tensor split into several leaves, gpt-oss and qwen3.5\n  gate_up_proj, qwen3-vl vision qkv) raised AttributeError. Load both as\n  to_maxtext does: a composite MaxText key is loaded stacked on a new last axis\n  and split.\n- NumPy hooks on multi-host: hooks that use NumPy cannot read a jax.Array with\n  shards on other hosts (gemma4 pad_hf_embedding_layer). If a hook fails with\n  that error, gather the weight to every host and retry the hook. Other errors are\n  raised without the gather, since they may come from one host alone. The gathered result is placed\n  shard by shard (jax.make_array_from_callback): jax.device_put would all-gather\n  it across hosts on device to compare the copies and can run out of HBM.\n- Short partition specs: a PartitionSpec may be shorter than the array rank;\n  pad it with None before stacking (qwen3.5, qwen3-next).\n- An HF tensor used by several leaves (gemma4 experts.gate_up_proj for wi_0 and\n  wi_1) was dropped after its first use; drop it after its last use.\n- Legacy multimodal layouts (google/gemma-3-*-it) store\n  language_model.model.*, vision_tower.*, multi_modal_projector.*; rename them\n  to the names the mappings use when only the renamed name is mapped.\n- Leaves with no HF tensor (a None key, e.g. DeepSeek-V4 mHC norm scales) read\n  no tensor; the hook builds the value, as in to_maxtext.\n- With scan_layers, MoE layers outside the scanned stack (the DeepSeek-V4\n  prefix layers) and the MoEBiasVar and Tid2EidVar collections stack experts\n  along axis 0, as in to_maxtext.\n- Keys in the MoEBiasVar and Tid2EidVar collections (DeepSeek gate bias and\n  hash-routing table) were reported missing: the weights state holds these\n  leaves without the collection name. Match them without it. DeepSeek-V3 also\n  maps the gate bias as a weight; both keys name the same leaf, so it is loaded\n  once, from the collection key.\n- The multi-host gather for NumPy hooks put a copy of the whole weight on every\n  device, which ran out of HBM for the 8.6 GB qwen3.5-397b expert weights.\n  Weights over 1 GiB are now gathered in slices along the leading axis.\n- The qwen3-480b-a35b mapping and hooks were keyed qwen3-coder-480b-a35b, so\n  both to_maxtext and safetensors_dynamic failed with KeyError; key them by the\n  model name.\n- qwen3-1.7b, qwen3-1.7b-base, qwen3-4b-base, qwen3-8b-base and qwen3-14b-base\n  have mappings, hooks and configs but no HF_IDS entry, so to_maxtext rejected\n  them (\"Unsupported model name\"). Add the entries, and check in the mapping\n  test that every model in HF_MODEL_CONFIGS has one.\n\nMerging this change closes #5706\n\nCOPYBARA_INTEGRATE_REVIEW=https://github.com/AI-Hypercomputer/maxtext/pull/5706 from AI-Hypercomputer:fix/safetensors-dynamic-model-support 6bfe76d5de3d3c16da602cfdacf153461bd49800\nPiperOrigin-RevId: 1013271112",
+          "timestamp": "2026-11-03T21:54:45Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/5651d7fe290d0796f9d4cbab453c2dc0960341c6"
+        },
+        "date": 1793767672435,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 258.7839999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 66.919,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2104.034,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 100.49100000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.437,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4576.258999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 314,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1545.871,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.351,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4160.2609999999995,
             "unit": "sec"
           },
           {
