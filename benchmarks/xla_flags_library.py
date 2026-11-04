@@ -214,3 +214,38 @@ DISABLE_COLLECTIVE_MATMUL = " --xla_jf_spmd_threshold_for_windowed_einsum_mib=10
 DISABLE_MEGACORE_FUSION_ALLOW_AGS = " --xla_tpu_megacore_fusion_allow_ags=false"
 # Enable async collective permute.
 ENABLE_ASYNC_COLLECTIVE_PERMUTE = " --xla_enable_async_collective_permute=true"
+
+# TPU v7x (Ironwood) MoE scoped VMEM limit (64 MiB hardware limit)
+_V7X_VMEM_KIB = 65536
+V7X_MOE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_V7X_VMEM_KIB}"
+
+# TPU v7x MoE Async Collective Flags
+# Keeps expert-shuffle ragged all-to-all async on TensorCore while collectives run non-blocking.
+V7X_MOE_ASYNC_COLLECTIVES = (
+    " --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false"
+    " --xla_tpu_enable_async_ragged_all_to_all=true"
+    " --xla_tpu_force_async_all_to_all=true"
+    " --xla_enable_async_collective_permute=true"
+)
+
+# TPU v7x SparseCore Async Collective Flags for MoE
+V7X_SPARSECORE_ASYNC_COLLECTIVES = (
+    " --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+    " --xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all=false"
+    " --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false"
+    " --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=500000"
+    " --xla_all_gather_latency_bound_threshold_in_bytes=1000000"
+) + ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
+
+
+def get_v7x_qwen3_235b_flags(track: str) -> str:
+  """Returns XLA flags for Qwen3-235B ('baseline', 'fsdp_prefetch', or 'roe')."""
+  if track == "baseline":
+    middle = CF_FOR_ALL_GATHER
+  elif track == "fsdp_prefetch":
+    middle = V7X_SPARSECORE_ASYNC_COLLECTIVES
+  elif track == "roe":
+    middle = V7X_MOE_ASYNC_COLLECTIVES
+  else:
+    raise ValueError(f"Unknown track: {track}")
+  return V7X_MOE_VMEM_LIMIT_FLAG + middle + DATA_PARALLEL_OVERLAP
