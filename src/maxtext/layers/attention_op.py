@@ -1794,12 +1794,34 @@ class AttentionOp(nnx.Module):
           )
         else:
           validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
-          mask = tokamax_attention_base.Mask(is_causal=True)
+          is_causal = self.attention_type != AttentionType.FULL
+          k_start = None
+          if self.attention_type == AttentionType.LOCAL_SLIDING:
+            if self.sliding_window_size is None or self.sliding_window_size <= 0:
+              raise ValueError(f"LOCAL_SLIDING requires sliding_window_size > 0, got {self.sliding_window_size}.")
+            k_start = jnp.maximum(
+                0,
+                jnp.arange(query.shape[1], dtype=jnp.int32) - (self.sliding_window_size - 1),
+            )
+          mask = tokamax_attention_base.Mask(is_causal=is_causal, k_start=k_start)
           if decoder_segment_ids is not None:
-            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+            decoder_segment_ids_kv_in = (
+                decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+            )
+            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids_kv_in[:, None, :]
             mask = mask & tokamax_attention_base.Mask(seg_mask[:, None, :, :])
           gpu_flash_attn = _tokamax_gpu_flash_attention()
-          out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
+          out = gpu_flash_attn(
+              query,
+              key,
+              value,
+              logits_scale=1.0,
+              # NOTE: Tokamax's Triton VJP does not support logits_soft_cap yet, so
+              # gradients raise NotImplementedError when soft-cap is set. Use
+              # attention='dot_product' to train with soft-capping.
+              logits_soft_cap=self.attn_logits_soft_cap,
+              mask=mask,
+          )
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
@@ -1880,6 +1902,7 @@ class AttentionOp(nnx.Module):
           k,
           v,
           logits_scale=1.0,
+          logits_soft_cap=self.attn_logits_soft_cap,
           mask=mask,
           return_residuals=True,
           normalize_output=False,
