@@ -7064,6 +7064,14 @@ class RLConfig(
   )
   max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
   max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
+  train_steps: int = Field(
+      -1,
+      description=(
+          "Total number of RL training steps. Automatically derived as"
+          " dataset.num_batches * rl.num_iterations * dataset.train_fraction * num_epoch;"
+          " any provided value is overwritten."
+      ),
+  )
 
   debug: bool = Field(False, description="Enable debug mode for RL.")
 
@@ -7289,14 +7297,14 @@ class RLConfig(
     self.num_slices = 1 if self.cluster.num_trainer_slices == -1 else -1
 
     # Set train_steps based on the number of batches, iterations, train fraction, and epochs.
-    object.__setattr__(
-        self,
-        "train_steps",
-        int(self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch),
+    self.train_steps = int(
+        self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch
     )
 
     # Set learning_rate_schedule_steps based on train_steps if not explicitly provided.
-    if self.learning_rate_schedule_steps == -1:
+    # `learning_rate_schedule_steps` is declared on the `Optimizer` mixin; pylint's MRO walk over
+    # RLConfig's many bases does not always reach it, so this is a (nondeterministic) false positive.
+    if self.learning_rate_schedule_steps == -1:  # pylint: disable=access-member-before-definition
       self.learning_rate_schedule_steps = self.train_steps
 
     # Rollout parallelism checks
@@ -7323,7 +7331,7 @@ class RLConfig(
     if train_micro_batch_size <= 0:
       train_micro_batch_size = batch_size
     self.micro_batch_size_to_train_on = train_micro_batch_size
-    self.steps = getattr(self, "train_steps", getattr(self, "num_batches", 10))
+    self.steps = self.train_steps
 
     if self.remat_policy == "custom":
       tensors = [
