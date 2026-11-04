@@ -49,7 +49,7 @@ docstring-parser>=0.18.0
 drjax>=0.2.1
 duckdb>=2.0.0
 einshape>=1.0
-etils>=1.14.0
+etils>=1.15.0
 evaluate>=0.4.6
 execnet>=2.1.2
 fastapi>=0.162.0
@@ -134,7 +134,7 @@ opt-einsum>=3.4.0
 optax>=0.2.8
 optree>=0.19.1
 optype>=0.18.0
-orbax-checkpoint>=0.12.8
+orbax-checkpoint==0.12.8
 packaging>=26.3
 pandas>=3.1.0
 parameterized>=0.9.0
