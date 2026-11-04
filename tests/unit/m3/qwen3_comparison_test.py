@@ -57,11 +57,11 @@ def _get_base_config_args(use_m3: bool, reduced: bool = True, tp: int = 1):
     args.extend(
         [
             "override_model_config=true",
-            "num_decoder_layers=2",
-            "emb_dim=64",
-            "mlp_dim=128",
-            "num_query_heads=4",
-            "num_kv_heads=2",
+            "base_num_decoder_layers=2",
+            "base_emb_dim=64",
+            "base_mlp_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=2",
             "head_dim=16",
             "vocab_size=256",
         ]
