@@ -55,6 +55,7 @@ import optax
 from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
+from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
@@ -127,6 +128,7 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
 
 def train_loop(config) -> float:
   """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
+  m3_kernels.validate_attention_config(config)
   # `create_mesh()` defaults (fsdp within a slice, data across slices) are used as
   # is; the `ici_*`/`dcn_*` config fields are not wired through yet.
   mesh = create_mesh()

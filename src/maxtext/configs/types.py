@@ -1001,6 +1001,10 @@ class SplashAttention(BaseModel):
       False,
       description="Megacore-parallel kv-head groups in the static dkv grid. Needs >1 KV head; useful at local batch 1.",
   )
+  sa_gqa_head_stacking: bool = Field(
+      False,
+      description="Fold pairs of head_dim=64 GQA query heads along sequence in m3 Splash attention.",
+  )
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
