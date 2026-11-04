@@ -40,6 +40,7 @@ from maxtext.integration.vllm.convert_utils import (
     resolve_prefuse_moe_weights,
     resolve_rollout_tp,
 )
+from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
@@ -657,6 +658,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._state_graphdef: Any = None
     self._signature_compare_warned: bool = False
     self._replicated_batch_warned: bool = False
+    # Which parameters `trainable_parameters_mask` freezes, as a function of the parameter tree,
+    # or None when it freezes none. `_freeze_mask` caches its value for the compiled kernels.
+    self._freeze_mask_fn = optimizers.get_path_mask_fn(
+        training_config.trainable_parameters_mask, match_returns_true=False
+    )
+    self._freeze_mask: Any = None
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = self._build_model(wrap_with_tunix_adapter, tokenizer_pad_id)
@@ -783,6 +790,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval_signature = None
     if reset_model:
       self._model_graphdef = None
+      self._freeze_mask = None
     self._state_graphdef = None
     self._invalidate_pure_state()
     self.reset_accumulation()
@@ -922,6 +930,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     self._params_pure = None
     self._rest_pure = None
+    # Off the cached parameter tree that is being dropped; `_freeze_mask_for` recomputes it per trace.
+    self._freeze_mask = None
     self._state_pure = None
 
   def _disable_pure_state(self, reason: str) -> None:
@@ -1118,6 +1128,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
     return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
 
+  def _freeze_mask_for(self, tree: Any) -> Any:
+    """Returns which leaves of `tree` `trainable_parameters_mask` freezes, or None if it freezes none.
+
+    `tree` is a PyTree whose leaves match the parameters in path, shape and count; it can
+    be the parameters or a gradient tree shaped like them. Cached in `_freeze_mask` on first use and
+    cleared when the pure-state cache is invalidated, since that invalidates the parameter tree.
+    """
+    if self._freeze_mask is None and self._freeze_mask_fn is not None:
+      self._freeze_mask = self._freeze_mask_fn(tree)
+    return self._freeze_mask
+
+  def _stop_frozen_gradients(self, params: Any) -> Any:
+    """Returns `params` with `jax.lax.stop_gradient` on every leaf `trainable_parameters_mask` freezes.
+
+    Applied inside the differentiated function, so XLA generates no backward pass for frozen
+    parameters. `trainable_parameters_mask` is a whitelist of trainable parameter patterns, so
+    a parameter is frozen when the mask function returns False.
+    """
+    freeze_mask = self._freeze_mask_for(params)
+    if freeze_mask is None:
+      return params
+    return jax.tree.map(lambda x, frozen: jax.lax.stop_gradient(x) if frozen else x, params, freeze_mask)
+
   def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
     """Executes a single forward and backward pass and folds the result into the accumulator.
 
@@ -1136,6 +1169,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
     def diff_wrapper(p, r, b):
+      # No gradient for frozen parameters. `update()` zeroes the gradient of every parameter
+      # `trainable_parameters_mask` freezes before the norm, clipping and the optimizer see it, so
+      # stopping gradients here changes no number. Doing it inside the differentiated function means
+      # XLA traces no backward pass for those parameters at all.
+      p = self._stop_frozen_gradients(p)
       mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
       if self._gen_model_input_fn is not None:
         # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
@@ -1430,6 +1468,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._refresh_pure_state()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    self._freeze_mask_for(params_pure)
 
     def fwd_bwd(params, rest, dynamic):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
@@ -1749,6 +1788,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           )
     else:
       params, rest = self._read_model_pure(model)
+      self._freeze_mask = None
       with self._sharding_ctx():
         loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
             params, rest, batch, self._accumulated_grads, self._accumulated_denominator
