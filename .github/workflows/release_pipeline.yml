@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow will build and test the MaxText package, and build Docker images
-# for a Release Candidate when a new release tag is created.
+# This workflow verifies certified Release Candidate (RC) Docker images,
+# builds and publishes the MaxText wheel to PyPI with signed attestations,
+# publishes versioned documentation to Read the Docs, and promotes the
+# certified Docker images in Artifact Registry.
 
 name: MaxText Release Pipeline
 
@@ -24,9 +26,18 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'MaxText Release tag to build and test (e.g., maxtext-v0.2.3).'
+        description: 'MaxText Release tag (or branch/full 40-char SHA for dry-run, e.g., maxtext-v0.2.6).'
         required: true
         type: string
+      mode:
+        description: 'Execution mode: dry-run (verify without publishing), publish (certified release), or force-publish (bypass RC verification).'
+        required: false
+        default: 'dry-run'
+        type: choice
+        options:
+          - dry-run
+          - publish
+          - force-publish
 
 permissions:
   contents: read
@@ -35,226 +46,182 @@ permissions:
 jobs:
   get_maxtext_sha:
     name: Resolve MaxText SHA
+    # `on: release` does not support tag filters, so skip pre-releases and non-PyPI tags (e.g., mlperf*, tpu-recipes*).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (!github.event.release.prerelease && startsWith(github.event.release.tag_name, 'maxtext-v'))
     runs-on: ubuntu-latest
     outputs:
-      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      release_sha: ${{ steps.vars.outputs.release_sha }}
+      rc_sha: ${{ steps.vars.outputs.rc_sha }}
+      package_version: ${{ steps.vars.outputs.package_version }}
     steps:
-      - name: Checkout MaxText
+      - name: Checkout workflow scripts
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
-          fetch-depth: 1
           persist-credentials: false
-      - name: Resolve SHA
+      - name: Resolve SHA and Validate Release Commit
         id: vars
         shell: bash
-        run: |
-          MAXTEXT_SHA=$(git rev-parse HEAD)
-          echo "Using MaxText SHA: ${MAXTEXT_SHA}"
-          echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
-
-  release_approval:
-    name: Approve Release Candidate
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    # "release" environment is configured in MaxText repository settings.
-    # This environment requires manual approval before proceeding to the next job.
-    environment: release
-    steps:
-      - name: Acknowledge Approval
-        run: echo "Release candidate approved, proceeding to build and test MaxText package."
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          MODE: ${{ inputs.mode || 'publish' }}
+        run: bash .github/scripts/resolve_release_commit.sh
 
   build_maxtext_package:
     name: Build MaxText Package
-    needs: [release_approval, get_maxtext_sha]
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
+    needs: get_maxtext_sha
     uses: ./.github/workflows/build_package.yml
     with:
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-
-  run_ci_tests:
-    name: Test MaxText Package
-    needs: [build_maxtext_package, get_maxtext_sha]
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      needs.build_maxtext_package.result == 'success'
-    permissions:
-      issues: write
-      id-token: write
-      pull-requests: write
-      contents: write
-      actions: read
-    uses: ./.github/workflows/ci_pipeline.yml
-    with:
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-  build_tpu_release_candidate_images:
-    name: Build ${{ matrix.name }} Docker Image
-    needs: [build_maxtext_package, get_maxtext_sha]
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      needs.build_maxtext_package.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: 'TPU Pre-Training Stable'
-            device: tpu
-            image_name: maxtext_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - name: 'TPU Post-Training Stable'
-            device: tpu
-            image_name: maxtext_post_training_stable
-            workflow: post-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      repository_name: 'maxtext-images'
-      device: ${{ matrix.device }}
-      build_mode: stable
-      workflow: ${{ matrix.workflow }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
-  build_gpu_release_candidate_images:
-    name: Build ${{ matrix.name }} Docker Image
-    needs: [build_maxtext_package, get_maxtext_sha]
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      needs.build_maxtext_package.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: 'GPU Pre-Training Stable'
-            device: gpu
-            image_name: maxtext_gpu_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_gpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      repository_name: 'maxtext-images'
-      device: ${{ matrix.device }}
-      build_mode: stable
-      workflow: ${{ matrix.workflow }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
-  run_e2e_tests:
-    name: Run E2E tests
-    needs: [build_tpu_release_candidate_images, get_maxtext_sha]
-    # Ensure the SHA resolved and all image builds succeeded
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      needs.build_tpu_release_candidate_images.result == 'success'
-    uses: ./.github/workflows/run_e2e_tests.yml
-    with:
-      mode: stable
-      run_id: ${{ github.run_id }}
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-    secrets:
-      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.release_sha }}
 
   build_docs:
     name: Build Documentation
-    needs: [release_approval, get_maxtext_sha]
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
+    needs: get_maxtext_sha
     uses: ./.github/workflows/check_docs_build.yml
     with:
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.release_sha }}
 
-  check_links:
-    name: Check Links in Documentation
-    needs: [release_approval, get_maxtext_sha]
-    if: |
-      !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
-    permissions:
-      issues: write
-      contents: read
-    uses: ./.github/workflows/docs_link_check.yml
-    with:
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-
-  wait_for_tests_verification:
-    name: Wait for Tests Verification
-    needs: [run_ci_tests, run_e2e_tests]
-    if: |
-      !cancelled() &&
-      needs.run_ci_tests.result == 'success' && needs.run_e2e_tests.result == 'success'
+  tag_verification_gate:
+    name: Verify Release Candidate Docker Images
+    needs: get_maxtext_sha
+    if: ${{ inputs.mode != 'force-publish' }}
     runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'TPU Pre-Training'
+            image_name: tpu_pre_training
+            check_perf: true
+          - name: 'TPU Post-Training'
+            image_name: tpu_post_training
+            check_perf: false
     steps:
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev -q
-      - name: Poll for verified Docker images
+      - name: Verify Certification Tags
+        shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
+          DOCKER_IMAGE_NAME: ${{ matrix.image_name }}
+          RC_SHA: ${{ needs.get_maxtext_sha.outputs.rc_sha }}
+          CHECK_PERF: ${{ matrix.check_perf }}
         run: |
-          check_tag() {
-            gcloud container images describe "us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/$1" >/dev/null 2>&1
-          }
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${DOCKER_IMAGE_NAME}"
+          check_tag() { gcloud container images describe "${SOURCE_IMAGE}:$1" >/dev/null 2>&1; }
 
-          echo "Waiting for pre-training and post-training tests to complete..."
-          while true; do
-            PRETRAIN_READY=false
-            POSTTRAIN_READY=false
+          check_tag "${RC_SHA}" || { echo "Error: ${SOURCE_IMAGE}:${RC_SHA} does not exist."; exit 1; }
 
-            if check_tag "maxtext_jax_stable:verified-e2e-${GITHUB_RUN_ID}"; then
-              PRETRAIN_READY=true
+          FAIL_TAGS=("failed-e2e-${RC_SHA}")
+          REQ_TAGS=("verified-ci-${RC_SHA}" "verified-e2e-${RC_SHA}")
+          if [[ "${CHECK_PERF}" == "true" ]]; then
+            FAIL_TAGS+=("failed-perf-${RC_SHA}")
+            REQ_TAGS+=("verified-perf-${RC_SHA}")
+          fi
+
+          for tag in "${FAIL_TAGS[@]}"; do
+            if check_tag "${tag}"; then
+              echo "Error: Failure tag '${tag}' is present on ${SOURCE_IMAGE}:${RC_SHA}."
+              exit 1
             fi
-            if check_tag "maxtext_post_training_stable:verified-e2e-${GITHUB_RUN_ID}"; then
-              POSTTRAIN_READY=true
-            fi
-
-            if [ "$PRETRAIN_READY" = "true" ] && [ "$POSTTRAIN_READY" = "true" ]; then
-              echo "Both pre-training and post-training tests have passed. Proceeding to publish to PyPI."
-              break
-            fi
-
-            echo "Either pre-training or post-training tests are still running. Checking again in 5 minutes..."
-            sleep 300
           done
+
+          MISSING_TAGS=()
+          for tag in "${REQ_TAGS[@]}"; do
+            check_tag "${tag}" || MISSING_TAGS+=("${tag}")
+          done
+          if [[ ${#MISSING_TAGS[@]} -ne 0 ]]; then
+            echo "Error: ${SOURCE_IMAGE}:${RC_SHA} is missing required certification tag(s): ${MISSING_TAGS[*]}"
+            exit 1
+          fi
+          echo "All required certification tags are present for ${SOURCE_IMAGE}:${RC_SHA}."
 
   publish_to_pypi:
     name: Publish MaxText to PyPI
-    needs: [wait_for_tests_verification, get_maxtext_sha]
-    if: |
+    needs: [build_maxtext_package, build_docs, tag_verification_gate]
+    runs-on: ubuntu-latest
+    # "release" environment requires manual reviewer approval before proceeding and binds the PyPI OIDC claim.
+    environment: release
+    if: >-
       !cancelled() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      needs.wait_for_tests_verification.result == 'success'
+      needs.build_maxtext_package.result == 'success' &&
+      needs.build_docs.result == 'success' &&
+      (needs.tag_verification_gate.result == 'success' || (inputs.mode == 'force-publish' && needs.tag_verification_gate.result == 'skipped')) &&
+      (github.event_name == 'release' || endsWith(inputs.mode, 'publish'))
     permissions:
-      id-token: write
+      id-token: write # required for PyPI Trusted Publishing (OIDC) & Sigstore attestations
       attestations: write
       contents: read
-    uses: ./.github/workflows/pypi_release.yml
-    with:
-      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
-      run_id: ${{ github.run_id }}
-      publish: true
-    secrets:
-      READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel
+          path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/
+      - name: Generate signed SLSA build provenance attestation for wheel
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: 'dist/*.whl'
+      - name: Generate signed SPDX SBOM attestation for wheel
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-path: 'dist/*.whl'
+          sbom-path: 'sbom/maxtext-wheel.spdx.json'
+      - name: Publish MaxText wheel to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+          attestations: true
+
+  publish_to_rtd:
+    name: Publish MaxText to Read the Docs
+    needs: [get_maxtext_sha, publish_to_pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Trigger Read the Docs build
+        shell: bash
+        env:
+          READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
+          PYPI_VERSION: ${{ needs.get_maxtext_sha.outputs.package_version }}
+        run: bash .github/scripts/publish_readthedocs.sh
+
+  promote_docker_images:
+    name: Promote ${{ matrix.name }} Docker Image
+    needs: [get_maxtext_sha, publish_to_pypi]
+    runs-on: linux-x86-n4-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'TPU Pre-Training'
+            image_name: tpu_pre_training
+          - name: 'TPU Post-Training'
+            image_name: tpu_post_training
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+      - name: Add tags to Docker image
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          IMAGE_NAME: ${{ matrix.image_name }}
+          RC_SHA: ${{ needs.get_maxtext_sha.outputs.rc_sha }}
+          PYPI_VERSION: ${{ needs.get_maxtext_sha.outputs.package_version }}
+        run: |
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${IMAGE_NAME}"
+          gcloud container images describe "${SOURCE_IMAGE}:${RC_SHA}" >/dev/null 2>&1 || {
+            echo "Error: ${SOURCE_IMAGE}:${RC_SHA} does not exist in Artifact Registry."
+            exit 1
+          }
+          gcloud container images add-tag "${SOURCE_IMAGE}:${RC_SHA}" "${SOURCE_IMAGE}:${PYPI_VERSION}" --quiet
