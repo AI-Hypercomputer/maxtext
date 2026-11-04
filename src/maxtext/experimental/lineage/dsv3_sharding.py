@@ -530,6 +530,136 @@ TOPOLOGY_SHARDINGS: dict[tuple[int, int, int], TopologySharding] = {
 }
 
 
+# 4x8x8 "cp4": context parallelism 4 over x, EP 16 over (z, core), FSDP 8 over
+# y. Activations shard their sequence (outside attention) and the MLA heads
+# (inside it) over x, and their batch over (y, z, core). The attention and dense
+# weights are FSDP-sharded over y only (all-reduced over z and core in the
+# backward pass); the MoE weights are FSDP-sharded over the non-expert axes
+# (x, y), so their gradients are reduced across the x (sequence) shards too.
+_MLA_4X8X8_CP4 = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, "y", None),
+    # On its q_lora dim, as on 8x8x8.
+    q_up=P(None, "y", "x", None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, "y", None),
+    k_up=P(None, None, "x", "y"),
+    v_up=P(None, None, "x", "y"),
+    kv_norm_scale=P(None, None),
+    out=P(None, "x", None, "y"),
+)
+_SPARSE_4X8X8_CP4 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_4X8X8_CP4,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("z", "core"), ("x", "y"), None),
+            linear=P(None, ("z", "core"), ("x", "y"), None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, None, ("x", "y")),
+            gate_1=P(None, None, ("x", "y")),
+            linear=P(None, ("x", "y"), None),
+        ),
+    ),
+)
+
+# (per-slice topology, variant name) -> shardings, selected by
+# `sharding_config(mesh, variant=...)` instead of the `TOPOLOGY_SHARDINGS`
+# default for that topology.
+TOPOLOGY_SHARDING_VARIANTS: dict[tuple[tuple[int, int, int], str], TopologySharding] = {
+    ((4, 8, 8), "cp4"): TopologySharding(
+        axis_mapping={
+            "attention": "x",
+            "fsdp_attention": ("y", "z", "core"),
+            "expert": ("z", "core"),
+            "fsdp_moe": ("x", "y"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_4X8X8_CP4,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, "y"),
+                        gate_1=P(None, None, "y"),
+                        linear=P(None, "y", None),
+                    ),
+                ),
+                sparse=_SPARSE_4X8X8_CP4,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P("y", None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_4X8X8_CP4),
+            ),
+            embed_table=P(None, ("x", "y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("x", "y", "z", "core"), None),
+        ),
+    ),
+}
+
+# "cp4_gqa": "cp4" for the GQA attention path (see
+# `dsv3_types.GQA_PLACEHOLDER_DIM`). Only the unused `k_up` / `v_up`
+# placeholders ([128, 2, 4096] past the layer dim) change: their 2-wide dim
+# cannot be sharded 4 ways over x, so only their minor dim is FSDP-sharded.
+_MLA_4X8X8_CP4_GQA = dataclasses.replace(
+    _MLA_4X8X8_CP4,
+    k_up=P(None, None, None, "y"),
+    v_up=P(None, None, None, "y"),
+)
+_SPARSE_4X8X8_CP4_GQA = dataclasses.replace(_SPARSE_4X8X8_CP4, mla=_MLA_4X8X8_CP4_GQA)
+_CP4 = TOPOLOGY_SHARDING_VARIANTS[((4, 8, 8), "cp4")]
+TOPOLOGY_SHARDING_VARIANTS[((4, 8, 8), "cp4_gqa")] = TopologySharding(
+    axis_mapping=_CP4.axis_mapping,
+    weights=dataclasses.replace(
+        _CP4.weights,
+        decoder=dataclasses.replace(
+            _CP4.weights.decoder,
+            dense=dataclasses.replace(_CP4.weights.decoder.dense, mla=_MLA_4X8X8_CP4_GQA),
+            sparse=_SPARSE_4X8X8_CP4_GQA,
+        ),
+        mtp=dataclasses.replace(_CP4.weights.mtp, sparse=drop_layer_axis(_SPARSE_4X8X8_CP4_GQA)),
+    ),
+)
+
+# "cp4_gqa_a2a": "cp4_gqa" with Ulysses (all-to-all) context parallelism for
+# GQA. `q_up` (Wq) and `out` (Wo) are replicated over the CP axis x (FSDP over
+# y only), which selects `dsv3_mla._gqa_qkv_a2a` / `_gqa_out_projection`'s
+# all-to-all path: each device projects all heads of its sequence shard, and
+# q and the attention output are all-to-all'd between sequence and head
+# shards instead of all-gathering x and reduce-scattering the output.
+_MLA_4X8X8_CP4_GQA_A2A = dataclasses.replace(
+    _MLA_4X8X8_CP4_GQA,
+    q_up=P(None, "y", None, None),
+    out=P(None, None, None, "y"),
+)
+_SPARSE_4X8X8_CP4_GQA_A2A = dataclasses.replace(_SPARSE_4X8X8_CP4, mla=_MLA_4X8X8_CP4_GQA_A2A)
+TOPOLOGY_SHARDING_VARIANTS[((4, 8, 8), "cp4_gqa_a2a")] = TopologySharding(
+    # Wq / Wo are replicated over the CP axis x, so they are collected (and
+    # their gradients all-reduced) along it as well.
+    axis_mapping={**_CP4.axis_mapping, "attention_dp": "x"},
+    weights=dataclasses.replace(
+        _CP4.weights,
+        decoder=dataclasses.replace(
+            _CP4.weights.decoder,
+            dense=dataclasses.replace(_CP4.weights.decoder.dense, mla=_MLA_4X8X8_CP4_GQA_A2A),
+            sparse=_SPARSE_4X8X8_CP4_GQA_A2A,
+        ),
+        mtp=dataclasses.replace(
+            _CP4.weights.mtp,
+            sparse=drop_layer_axis(_SPARSE_4X8X8_CP4_GQA_A2A),
+        ),
+    ),
+)
+
+
 def dcn_batch_axis(
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
     axis: str | tuple[str, ...],
@@ -585,6 +715,7 @@ def yarn_freqs_sharding(
 
 def sharding_config(
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    variant: str | None = None,
 ) -> DSv3ShardingConfig:
   """Looks up the `DSv3ShardingConfig` of `mesh`'s per-slice topology.
 
@@ -601,12 +732,23 @@ def sharding_config(
     ValueError: If `TOPOLOGY_SHARDINGS` has no entry for that shape.
   """
   topology = (mesh.shape["x"], mesh.shape["y"], mesh.shape["z"])
-  entry = TOPOLOGY_SHARDINGS.get(topology)
+  if variant:
+    entry = TOPOLOGY_SHARDING_VARIANTS.get((topology, variant))
+    if entry is None:
+      raise ValueError(
+          f"No DSv3 sharding variant {variant!r} for per-slice topology"
+          f" {topology}; supported: {sorted(TOPOLOGY_SHARDING_VARIANTS)}."
+      )
+  else:
+    entry = TOPOLOGY_SHARDINGS.get(topology)
   if entry is None:
     raise ValueError(f"No DSv3 shardings for per-slice topology {topology}; supported:" f" {sorted(TOPOLOGY_SHARDINGS)}.")
   return DSv3ShardingConfig(
       axis_mapping={
           "dcn": DCN_AXIS if DCN_AXIS in mesh.axis_names else (),
+          # Data-parallel axes of the MLA `q_up` / `out` weights beyond
+          # `fsdp_attention`; empty unless a variant sets it.
+          "attention_dp": (),
           **entry.axis_mapping,
       },
       weights=entry.weights,

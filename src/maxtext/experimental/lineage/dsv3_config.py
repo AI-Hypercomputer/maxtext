@@ -28,6 +28,7 @@ import jax.numpy as jnp
 
 from maxtext.experimental.lineage import dsv3_expert_shuffle
 from maxtext.experimental.lineage import dsv3_sharding
+from maxtext.experimental.lineage import dsv3_types
 from maxtext.experimental.lineage import quantization
 
 # Quantization flag value -> `QuantConfig` (None runs in bf16).
@@ -39,6 +40,7 @@ QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
     "fp8_full_combine": quantization.FP8_FULL_COMBINE,
     "fp8_full_combine_per_hop": quantization.FP8_FULL_COMBINE_PER_HOP,
     "fp8_full_splash_qk_e3_combine_per_hop": (quantization.FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP),
+    "fp8_fsdp_ag": quantization.FP8_FSDP_AG,
 }
 
 
@@ -274,7 +276,21 @@ class DSv3Config:
           f"num_experts_per_tok ({m.num_experts_per_tok}) must be a positive"
           f" multiple of topk_routing_group ({m.topk_routing_group})."
       )
-    if m.num_kv_heads != m.num_query_heads:
+    if dsv3_types.is_gqa_dims(m.q_lora_rank, m.kv_lora_rank):
+      # GQA (see `dsv3_types.GQA_PLACEHOLDER_DIM`): q_lora_rank = kv_lora_rank
+      # = 0, a shared head_dim = v_head_dim = rope_head_dim and no
+      # non-positional q/k part.
+      if m.num_query_heads % m.num_kv_heads:
+        raise ValueError(
+            f"GQA num_query_heads ({m.num_query_heads}) must be a multiple of" f" num_kv_heads ({m.num_kv_heads})."
+        )
+      if m.qk_head_dim != 0 or m.rope_head_dim != m.v_head_dim:
+        raise ValueError(
+            "GQA needs qk_head_dim == 0 and rope_head_dim == v_head_dim (the"
+            f" head dim), got qk_head_dim={m.qk_head_dim},"
+            f" rope_head_dim={m.rope_head_dim}, v_head_dim={m.v_head_dim}."
+        )
+    elif m.num_kv_heads != m.num_query_heads:
       raise ValueError(f"num_kv_heads ({m.num_kv_heads}) must equal num_query_heads" f" ({m.num_query_heads}).")
     if k.dq_reduction_steps not in (None, 1, 3):
       raise ValueError("dq_reduction_steps must be one of (None, 1, 3), got" f" {k.dq_reduction_steps}.")

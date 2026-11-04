@@ -1190,7 +1190,11 @@ def qkv_up_from_qkv_down_bwd(
     grad_q, grad_k, grad_v = (jnp.transpose(x, (0, 2, 1, 3)) for x in (grad_q, grad_k, grad_v))
     t, n = grad_q.shape[2], grad_q.shape[1]
     cos_sin = jnp.concatenate([cos, sin], axis=-1).reshape(cos.shape[0], t, -1)
-    kw = dict(dims=dims, block_t=min(blocks[0], t), block_n=min(blocks[1], n))
+    block_n = min(blocks[1], n)
+    # The backward kernels need an even head tile that divides the local heads.
+    while block_n > 2 and (n % block_n or block_n % 2):
+      block_n -= 1
+    kw = dict(dims=dims, block_t=min(blocks[0], t), block_n=block_n)
 
     def heads_minor(w):  # [C, N, D] -> [N * D, C], a bitcast for C-minor w.
       return jnp.transpose(w, (1, 2, 0)).reshape(-1, w.shape[0])
@@ -1803,6 +1807,308 @@ def splash_attention_bwd(
   return dq, dk, dv
 
 
+# Width of the GQA placeholders stored in the MLA `q_down` / `kv_down` residual
+# slots; the GQA backward rematerializes q, k and v from `norm_x` instead.
+_GQA_RESIDUAL_PLACEHOLDER_DIM = 8
+
+
+def _gqa_qkv(
+    x: jt.Num[jax.Array, "B T D"],
+    wq: jt.Num[jax.Array, "D N H"],
+    wkv: jt.Num[jax.Array, "D KV2H"],
+    yarn_freqs: tuple[
+        jt.Num[jax.Array, "B T 1 H"],
+        jt.Num[jax.Array, "B T 1 H"],
+    ],
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+) -> tuple[
+    jt.Num[jax.Array, "B T N H"],
+    jt.Num[jax.Array, "B T N H"],
+    jt.Num[jax.Array, "B T N H"],
+]:
+  """GQA q/k/v projections, RoPE and KV head expansion to the local q heads.
+
+  Weights use the `dsv3_types.GQA_PLACEHOLDER_DIM` layout: `wq` is
+  `[D, num_query_heads, head_dim]` (heads sharded like MLA `q_up`) and `wkv` is
+  the fused `[D, 2 * num_kv_heads * head_dim]` (replicated over the head axis,
+  like MLA `kv_down`). x is all-gathered along the sequence (the `attention`
+  axis), every device computes all KV heads and then picks the KV head of each
+  of its local q heads, so splash runs as MHA on the local heads.
+
+  Args:
+    x: Normalized input activations, sequence-sharded like MLA inputs.
+    wq: Query projection weights.
+    wkv: Fused key/value projection weights.
+    yarn_freqs: RoPE cos and sin over the full head dim.
+    mesh: The device mesh.
+
+  Returns:
+    q (scaled by head_dim**-0.5), k and v, each `[B, T, num_query_heads,
+    head_dim]` and sharded `P(batch, None, heads, None)`.
+  """
+
+  def _parts(a: jax.Array) -> tuple[Any, ...]:
+    parts = tuple(jax.typeof(a).sharding.spec.partitions)
+    return parts + (None,) * (a.ndim - len(parts))
+
+  batch_axis, seq_axis = _parts(x)[:2]
+  head_axis = _parts(wq)[1]
+  if head_axis is None and seq_axis is not None:
+    # Ulysses (a2a) context parallelism: `wq` is replicated over the sequence
+    # axis, so every device projects all q heads for its sequence shard and an
+    # all-to-all trades the sequence shards for head shards.
+    return _gqa_qkv_a2a(x, wq, wkv, yarn_freqs, mesh=mesh)
+  head_dim, num_q = wq.shape[-1], wq.shape[-2]
+  num_kv = wkv.shape[-1] // (2 * head_dim)
+  group = num_q // num_kv
+  scale = head_dim**-0.5
+  out_spec = jax.sharding.PartitionSpec(batch_axis, None, head_axis, None)
+
+  def _local(x, wq, wkv, cos, sin):
+    with jax.named_scope("gqa_qkv_projection"):
+      # Like MLA's kv_down: project the local sequence shard with the
+      # (replicated) KV weights, then all-gather the narrow result.
+      kv = jnp.einsum("btd,dk->btk", x, wkv)
+      if seq_axis is not None:
+        kv = jax.lax.all_gather(kv, axis_name=seq_axis, axis=1, tiled=True, to="invarying")
+        x = jax.lax.all_gather(x, axis_name=seq_axis, axis=1, tiled=True, to="invarying")
+      q = jnp.einsum("btd,dnh->btnh", x, wq)
+      kv = kv.reshape(*kv.shape[:2], 2 * num_kv, head_dim)
+      k, v = kv[:, :, :num_kv], kv[:, :, num_kv:]
+      q = yarn(q, (cos * scale, sin * scale)).astype(x.dtype)
+      k = yarn(k, (cos, sin)).astype(x.dtype)
+      num_local_q = q.shape[2]
+      first = 0 if head_axis is None else jax.lax.axis_index(head_axis) * num_local_q
+      kv_head = (first + jnp.arange(num_local_q)) // group
+      return q, jnp.take(k, kv_head, axis=2), jnp.take(v, kv_head, axis=2)
+
+  cos, sin = yarn_freqs
+  return jax.shard_map(
+      _local,
+      mesh=mesh,
+      out_specs=(out_spec, out_spec, out_spec),
+      check_vma=True,
+  )(x, wq, wkv, cos, sin)
+
+
+def _gqa_qkv_a2a(
+    x: jt.Num[jax.Array, "B T D"],
+    wq: jt.Num[jax.Array, "D N H"],
+    wkv: jt.Num[jax.Array, "D KV2H"],
+    yarn_freqs: tuple[
+        jt.Num[jax.Array, "B T 1 H"],
+        jt.Num[jax.Array, "B T 1 H"],
+    ],
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+) -> tuple[
+    jt.Num[jax.Array, "B T N H"],
+    jt.Num[jax.Array, "B T N H"],
+    jt.Num[jax.Array, "B T N H"],
+]:
+  """GQA q/k/v with Ulysses (all-to-all) context parallelism.
+
+  `x` is sharded `P(batch, seq, None)` over the sequence (CP) axis, and `wq`
+  and `wkv` are replicated over it. Each device projects all q heads and all
+  KV heads on its own sequence shard (no all-gather of `x`), applies RoPE with
+  its shard of the YaRN frequencies, then:
+    * q: an all-to-all trades sequence shards for head shards, so each device
+      holds `num_query_heads / cp` heads for the full sequence;
+    * k, v: the narrow KV heads (which need not divide `cp`) are all-gathered
+      along the sequence, and each device picks the KV head of each local q
+      head.
+  The `wq` cotangent is summed over the sequence axis by shard_map's
+  varying-manual-axes typing (`wq` is invariant over it).
+
+  Args:
+    x: Normalized input activations, sequence-sharded.
+    wq: Query projection weights `[D, num_query_heads, head_dim]`.
+    wkv: Fused key/value projection weights `[D, 2 * num_kv_heads * head_dim]`.
+    yarn_freqs: RoPE cos and sin over the full head dim, `[B, T, 1, H]`.
+    mesh: The device mesh.
+
+  Returns:
+    q (scaled by head_dim**-0.5), k and v, each `[B, T, num_query_heads,
+    head_dim]` and sharded `P(batch, None, seq_axis, None)`.
+  """
+
+  def _parts(a: jax.Array) -> tuple[Any, ...]:
+    parts = tuple(jax.typeof(a).sharding.spec.partitions)
+    return parts + (None,) * (a.ndim - len(parts))
+
+  batch_axis, seq_axis = _parts(x)[:2]
+  head_dim, num_q = wq.shape[-1], wq.shape[-2]
+  num_kv = wkv.shape[-1] // (2 * head_dim)
+  group = num_q // num_kv
+  scale = head_dim**-0.5
+  out_spec = jax.sharding.PartitionSpec(batch_axis, None, seq_axis, None)
+  cos, sin = yarn_freqs
+  # The RoPE tables follow x's sequence sharding.
+  freq_spec = jax.sharding.PartitionSpec(batch_axis, seq_axis, None, None)
+  cos = jax.sharding.reshard(cos, freq_spec)
+  sin = jax.sharding.reshard(sin, freq_spec)
+
+  def _local(x, wq, wkv, cos, sin):
+    with jax.named_scope("gqa_qkv_projection_a2a"):
+      kv = jnp.einsum("btd,dk->btk", x, wkv)
+      kv = kv.reshape(*kv.shape[:2], 2 * num_kv, head_dim)
+      k, v = kv[:, :, :num_kv], kv[:, :, num_kv:]
+      k = yarn(k, (cos, sin)).astype(x.dtype)
+      q = jnp.einsum("btd,dnh->btnh", x, wq)
+      q = yarn(q, (cos * scale, sin * scale)).astype(x.dtype)
+      # [B, T/cp, N, H] -> [B, T, N/cp, H].
+      q = jax.lax.all_to_all(q, axis_name=seq_axis, split_axis=2, concat_axis=1, tiled=True)
+      # [B, T/cp, KV, H] -> [B, T, KV, H]. The (default) varying result
+      # makes the backward a reduce-scatter of dk / dv rather than an
+      # all-reduce.
+      k = jax.lax.all_gather(k, axis_name=seq_axis, axis=1, tiled=True)
+      v = jax.lax.all_gather(v, axis_name=seq_axis, axis=1, tiled=True)
+      num_local_q = q.shape[2]
+      first = jax.lax.axis_index(seq_axis) * num_local_q
+      kv_head = (first + jnp.arange(num_local_q)) // group
+      return q, jnp.take(k, kv_head, axis=2), jnp.take(v, kv_head, axis=2)
+
+  return jax.shard_map(
+      _local,
+      mesh=mesh,
+      out_specs=(out_spec, out_spec, out_spec),
+      check_vma=True,
+  )(x, wq, wkv, cos, sin)
+
+
+def _gqa_out_projection(
+    splash_out: jt.Num[jax.Array, "B T N V"],
+    w_out: jt.Num[jax.Array, "N V D"],
+) -> jt.Num[jax.Array, "B T D"]:
+  """GQA output projection, reduce-scatter or Ulysses (all-to-all) flavored.
+
+  If `w_out` is head-sharded like the splash output, this is the MLA
+  `out_projection` (head-partial sums reduce-scattered along the sequence).
+  If `w_out` is replicated over the splash head axis (the `_gqa_qkv_a2a`
+  layout), an all-to-all first trades the head shards back for sequence
+  shards, and each device projects all heads of its sequence shard.
+
+  Args:
+    splash_out: `[B, T, N, V]` splash output, heads sharded over the CP axis.
+    w_out: `[N, V, D]` output projection weights.
+
+  Returns:
+    `[B, T, D]` activations, sequence-sharded over the CP axis.
+  """
+  attn_spec = jax.typeof(splash_out).sharding.spec
+  head_axis = attn_spec[2]
+  w_parts = tuple(jax.typeof(w_out).sharding.spec.partitions)
+  w_head_axis = w_parts[0] if w_parts else None
+  if head_axis is None or w_head_axis is not None:
+    return out_projection(splash_out, w_out)
+  out_spec = jax.sharding.PartitionSpec(attn_spec[0], head_axis, None)
+
+  def _out(o: jax.Array, w: jax.Array) -> jax.Array:
+    with jax.named_scope("out_projection_a2a"):
+      # [B, T, N/cp, V] -> [B, T/cp, N, V].
+      o = jax.lax.all_to_all(o, axis_name=head_axis, split_axis=1, concat_axis=2, tiled=True)
+      return dot(o, w, axes=2)
+
+  return jax.shard_map(
+      _out,
+      mesh=jax.typeof(splash_out).sharding.mesh,
+      out_specs=out_spec,
+      check_vma=True,
+  )(splash_out, w_out)
+
+
+def _check_gqa_weights(w: dsv3_types.DSv3MLAWeightsPytree) -> None:
+  assert w.q_up is not None and w.kv_down is not None and w.out is not None
+  for name, arr in (("q_up", w.q_up), ("kv_down", w.kv_down), ("out", w.out)):
+    if jnp.dtype(arr.dtype).itemsize < 2:
+      raise ValueError(f"GQA projections run in bf16, but {name} is {arr.dtype}; use a" " QuantConfig with mla=None.")
+
+
+def _gqa_fwd(
+    x: jt.Num[jax.Array, "B T D"],
+    yarn_freqs: tuple[
+        jt.Num[jax.Array, "B T 1 H"],
+        jt.Num[jax.Array, "B T 1 H"],
+    ],
+    splash_kernel: Any,
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    segment_ids: jt.Num[jax.Array, "B T"] | None,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array]]:
+  """bf16 GQA forward with the `dsv3_mla_fwd` interface."""
+  _check_gqa_weights(w)
+  q, k, v = _gqa_qkv(x, w.q_up, w.kv_down, yarn_freqs, mesh=mesh)
+  splash_out, context = splash_attention(q, k, v, splash_kernel, segment_ids=segment_ids)
+  out = _gqa_out_projection(splash_out, w.out)
+  placeholder = x[..., :_GQA_RESIDUAL_PLACEHOLDER_DIM]
+  return out, (placeholder, placeholder, context, splash_out)
+
+
+def _gqa_bwd(
+    grad_out: jt.Num[jax.Array, "B T D"],
+    norm_x: jt.Num[jax.Array, "B T D"],
+    context: jt.Num[jax.Array, "B N T"],
+    splash_out: jt.Num[jax.Array, "B T N H"],
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    yarn_freqs: tuple[
+        jt.Num[jax.Array, "B T 1 H"],
+        jt.Num[jax.Array, "B T 1 H"],
+    ],
+    splash_kernel: Any,
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    segment_ids: jt.Num[jax.Array, "B T"] | None,
+) -> tuple[jax.Array, dsv3_types.DSv3MLAWeightsPytree, tuple[Any, Any]]:
+  """bf16 GQA backward with the `dsv3_mla_bwd` interface.
+
+  Rematerializes q, k and v from `norm_x` (like MLA rematerializes them from
+  its latents) and backpropagates through the projections with `jax.vjp`,
+  which also sums the KV-head expansion and reduce-scatters grad_x along the
+  sequence.
+  """
+  _check_gqa_weights(w)
+  _, out_proj_vjp = jax.vjp(_gqa_out_projection, splash_out, w.out)
+  grad_splash_out, grad_w_out = out_proj_vjp(grad_out)
+
+  def _qkv(x, wq, wkv):
+    return _gqa_qkv(x, wq, wkv, yarn_freqs, mesh=mesh)
+
+  (q, k, v), qkv_vjp = jax.vjp(_qkv, norm_x, w.q_up, w.kv_down)
+  grad_q, grad_k, grad_v = splash_attention_bwd(
+      grad_splash_out,
+      splash_out,
+      context,
+      q,
+      k,
+      v,
+      splash_kernel,
+      segment_ids=segment_ids,
+  )
+  grad_norm_x, grad_wq, grad_wkv = qkv_vjp((grad_q, grad_k, grad_v))
+
+  def zeros(a):
+    # The cotangent of a reduced weight is unreduced (`_cotangent_sharding`).
+    if a is None:
+      return None
+    return jnp.zeros(a.shape, a.dtype, out_sharding=_cotangent_sharding(a))
+
+  grad_w = dsv3_types.DSv3MLAWeightsPytree(
+      q_down=zeros(w.q_down),
+      q_up=grad_wq,
+      q_norm_scale=zeros(w.q_norm_scale),
+      kv_down=grad_wkv,
+      k_up=zeros(w.k_up),
+      v_up=zeros(w.v_up),
+      kv_norm_scale=zeros(w.kv_norm_scale),
+      out=grad_w_out,
+  )
+  # The YaRN frequencies are constants of the step.
+  grad_yarn_freqs = tuple(jnp.zeros_like(f) for f in yarn_freqs)
+  return grad_norm_x, grad_w, grad_yarn_freqs
+
+
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def dsv3_mla_fwd(
@@ -1842,6 +2148,15 @@ def dsv3_mla_fwd(
   With `quant_rule`, all projections run in fp8 (see `quantize_mla_weights`);
   weights not already quantized (e.g. before collection) are quantized here.
   """
+  if kv_lora_rank == 0:
+    return _gqa_fwd(
+        x,
+        yarn_freqs,
+        splash_kernel,
+        w,
+        mesh=mesh,
+        segment_ids=segment_ids,
+    )
   if quant_rule is not None:
     w = quantize_mla_weights(w, quant_rule)
     x = _quantize_act(x, quant_rule)
@@ -1974,6 +2289,19 @@ def dsv3_mla_bwd(
   With `quant_rule`, all projections are backpropagated through like the fp8
   routed expert GMMs; see `_qdot_bwd`.
   """
+  if kv_lora_rank == 0:
+    del q_down, kv_down  # GQA placeholders.
+    return _gqa_bwd(
+        grad_out,
+        norm_x,
+        context,
+        splash_out,
+        w,
+        yarn_freqs,
+        splash_kernel,
+        mesh=mesh,
+        segment_ids=segment_ids,
+    )
   x_q = norm_x
   if quant_rule is not None:
     w = quantize_mla_weights(w, quant_rule)

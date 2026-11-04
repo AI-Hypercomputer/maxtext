@@ -109,6 +109,44 @@ class MlaQuantRule(GmmQuantRule):
 
 
 @dataclasses.dataclass(frozen=True)
+class FsdpWeightQuantRule:
+  """Weight-only fp8 quantization of the routed expert FSDP all-gathers.
+
+  The routed expert weights are quantized once per step with a static
+  per-tensor scale and all-gathered in `weight_qtype`; the expert GMM kernels
+  dequantize the gathered weight tiles to bf16 in VMEM, folding the scale into
+  the f32 accumulator. All other weights (attention, shared experts, dense
+  MLPs, norms, router) are all-gathered in bf16. All matmuls run on bf16
+  operands; activations and activation gradients are never quantized. The
+  routed expert weight gradients are those of the dequantized weights (a
+  straight-through estimator). Every decoder weight gradient is cast to
+  `grad_reduce_dtype` before its FSDP reduce-scatters and DP all-reduces.
+
+  Attributes:
+    weight_qtype: Dtype the routed expert weights are all-gathered in.
+    weight_calibration_method: Static `fixed,<min>,<max>` weight calibration.
+    grad_reduce_dtype: Dtype of the weight gradients and their reductions.
+  """
+
+  weight_qtype: Any = jnp.float8_e4m3fn
+  weight_calibration_method: str = "fixed,-224,224"
+  grad_reduce_dtype: Any = jnp.float32
+
+  def __post_init__(self):
+    _ = self.weight_scale
+
+  @property
+  def weight_scale(self) -> float:
+    return get_static_scale(self.weight_calibration_method, self.weight_qtype)
+
+  def quantize(self, w: jax.Array) -> jax.Array:
+    """Returns w quantized with the static weight scale, unless it is."""
+    if w.dtype == self.weight_qtype:
+      return w
+    return static_quantize(w, self.weight_qtype, self.weight_scale)
+
+
+@dataclasses.dataclass(frozen=True)
 class QuantConfig:
   """Model-wide quantization config. `None` fields stay unquantized.
 
@@ -127,14 +165,20 @@ class QuantConfig:
       combine reduce-scatter with its own per-token bound (local + die-to-die
       absmax plus the bound received with the running sum) instead of one
       all-device scale per token, which removes the cross-device absmax gather.
+    fsdp_weights: If set, fp8 all-gathers of the routed expert weights with bf16
+      compute and f32 gradient reductions (see `FsdpWeightQuantRule`). Exclusive
+      with `routed_experts` and `mla`.
   """
 
   routed_experts: GmmQuantRule | None = None
   mla: GmmQuantRule | None = None
   combine_qtype: Any | None = None
   combine_per_hop_scaling: bool = False
+  fsdp_weights: FsdpWeightQuantRule | None = None
 
   def __post_init__(self):
+    if self.fsdp_weights is not None and (self.routed_experts is not None or self.mla is not None):
+      raise ValueError("fsdp_weights is exclusive with routed_experts and mla quantization.")
     if self.combine_qtype is not None and self.combine_qtype != jnp.float8_e4m3fn:
       raise ValueError("combine_qtype must be None or jnp.float8_e4m3fn, got" f" {self.combine_qtype!r}.")
     if self.combine_per_hop_scaling and self.combine_qtype is None:
@@ -160,6 +204,8 @@ FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP = dataclasses.replace(
     combine_qtype=jnp.float8_e4m3fn,
     combine_per_hop_scaling=True,
 )
+# bf16 compute, fp8 routed expert weight all-gathers, f32 gradient reductions.
+FP8_FSDP_AG = QuantConfig(fsdp_weights=FsdpWeightQuantRule())
 
 
 def static_quantize(x: jax.Array, qtype: Any, scale: float) -> jax.Array:

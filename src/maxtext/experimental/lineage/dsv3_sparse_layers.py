@@ -19,6 +19,7 @@ import functools
 from typing import Any, Protocol
 
 import jax
+import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
 
@@ -27,6 +28,7 @@ from maxtext.experimental.lineage import dsv3_sparse_layer
 from maxtext.experimental.lineage import dsv3_types
 from maxtext.experimental.lineage import ops
 from maxtext.experimental.lineage import quantization
+from maxtext.experimental.lineage.gmmv2 import expert_mlp
 
 
 class NormFn(Protocol):
@@ -73,6 +75,20 @@ def _with_expert_permutations(fn: Callable[..., Any], *, accepts: bool = True) -
     if accepts:
       kwargs["expert_permutations"] = w_aux
     return fn(*args, **kwargs)
+
+  return wrapped
+
+
+def _with_grad_dtype(reduce_fn: Callable[..., Any], dtype: jax.typing.DTypeLike) -> Callable[..., Any]:
+  """Casts the floating gradients to `dtype` before `reduce_fn` reduces them."""
+
+  @functools.wraps(reduce_fn)
+  def wrapped(grad, like, **kwargs):
+    grad = jax.tree.map(
+        lambda g: g.astype(dtype) if jnp.issubdtype(g.dtype, jnp.floating) else g,
+        grad,
+    )
+    return reduce_fn(grad, like, **kwargs)
 
   return wrapped
 
@@ -177,6 +193,11 @@ def dsv3_sparse_layers(
   mb0, mb1 = ops.split_microbatches(x, mesh=mesh)
   yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
   segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
+  fsdp_rule = quant.fsdp_weights if quant else None
+  if fsdp_rule is not None:
+    # The routed expert weights stay fp8 after their collection; the GMMs
+    # dequantize them in VMEM and output f32 weight gradients.
+    gmm_fn = expert_mlp.WeightOnlyFp8Gmm(gmm_fn, fsdp_rule.weight_scale, fsdp_rule.grad_reduce_dtype)
 
   _collect_w_dcn = functools.partial(
       dsv3_sparse_layer.collect_w_dcn,
@@ -380,6 +401,10 @@ def dsv3_sparse_layers(
   )
   _reduce_w_ici_sc1 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc1, axis_mapping=axis_mapping)
   _reduce_w_ici_sc0 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc0, axis_mapping=axis_mapping)
+  if fsdp_rule is not None:
+    # Every gradient reduction (the FSDP reduce-scatters on ICI and the DP
+    # all-reduce on DCN) follows this first stage, so all run in f32.
+    _reduce_w_ici_sc1 = _with_grad_dtype(_reduce_w_ici_sc1, fsdp_rule.grad_reduce_dtype)
   collect_fn_pre = None
   reduce_fn_pre = None
   if expert_permutations is not None:
@@ -430,11 +455,11 @@ def dsv3_sparse_layers(
       _reduce_w_ici_sc1,
       _reduce_w_ici_sc0,
       _collect_w_ici_bwd,
-      # Quantizes the routed expert and MLA weights of all layers once, so
-      # that they are collected in fp8 in both passes.
+      # Quantizes the routed expert (and, without fsdp_weights, MLA) weights
+      # of all layers once, so that they are collected in fp8 in both passes.
       quantize_fn=(
           functools.partial(dsv3_sparse_layer.quantize_weights, quant=quant)
-          if quant and (quant.routed_experts or quant.mla)
+          if quant and (quant.routed_experts or quant.mla or fsdp_rule)
           else None
       ),
       offload_fn=dsv3_sparse_layer.offload_residuals,

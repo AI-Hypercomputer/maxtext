@@ -461,6 +461,16 @@ def quantize_weights(
     )
   if quant.mla is not None:
     w = dataclasses.replace(w, mla=dsv3_mla.quantize_mla_weights(w.mla, quant.mla))
+  if quant.fsdp_weights is not None:
+    # Only the routed expert weights are all-gathered in fp8; the attention,
+    # shared expert, norm and router weights stay bf16.
+    w = dataclasses.replace(
+        w,
+        moe=dataclasses.replace(
+            w.moe,
+            routed=jax.tree.map(quant.fsdp_weights.quantize, w.moe.routed),
+        ),
+    )
   return w
 
 
@@ -4061,13 +4071,15 @@ def _w_ici_axes() -> dsv3_types.DSv3SparseLayerWeightsPytree:
       pre_attn_norm_scale=("fsdp_attention", "attention"),
       mla=dsv3_types.DSv3MLAWeightsPytree(
           q_down=("fsdp_attention", "attention"),
-          q_up=("fsdp_attention",),
+          # `attention_dp` is empty except for head-replicated GQA weights
+          # under Ulysses CP (see dsv3_sharding "cp4_gqa_a2a").
+          q_up=("fsdp_attention", "attention_dp"),
           q_norm_scale=("fsdp_attention",),
           kv_down=("fsdp_attention", "attention"),
           k_up=("fsdp_attention",),
           v_up=("fsdp_attention",),
           kv_norm_scale=("fsdp_attention",),
-          out=("fsdp_attention",),
+          out=("fsdp_attention", "attention_dp"),
       ),
       post_attn_norm_scale=("fsdp_attention", "attention"),
       moe=dsv3_types.DSv3MoEWeightsPytree(

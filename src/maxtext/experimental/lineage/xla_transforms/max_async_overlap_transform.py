@@ -60,6 +60,7 @@ import json
 import re
 from typing import Any
 
+from absl import logging
 from jax._src.lib import hlo as _hlo
 import jax.extend.xla as jex_xla
 
@@ -1680,8 +1681,19 @@ def transform_module(
       continue
 
     graph = _build_graph(sequence, computations_by_name, fusion_cache, async_bodies)
-    result = reschedule(graph)
-    validate_order(graph, result.order)
+    try:
+      result = reschedule(graph)
+      validate_order(graph, result.order)
+    except ScheduleTransformError as e:
+      # Keep XLA's schedule for this computation rather than failing the
+      # whole compile, e.g. when multi-slice DCN send/recv FIFO and glue
+      # constraints cannot all be met by the bubbling heuristic.
+      logging.warning(
+          "max_async_overlap_transform: keeping the original schedule of %s:" " %s",
+          computation.name,
+          e,
+      )
+      continue
 
     by_name = {inst.name: inst for inst in sequence}
     schedule.set_sequence(computation, [by_name[name] for name in result.order])

@@ -1753,6 +1753,7 @@ class DeepSeekMoE(BaseModel):
       "fp8_full_splash_qk_e3",
       "fp8_full_combine_per_hop",
       "fp8_full_splash_qk_e3_combine_per_hop",
+      "fp8_fsdp_ag",
   ] = Field(
       "none",
       description="Quantization of the Lineage sparse-layer routed experts and MLA. Only used if use_lineage is True.",

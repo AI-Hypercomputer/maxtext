@@ -173,19 +173,44 @@ def collect_w_dcn(
   return ops.collect_along_axis(w, "dcn", axis_mapping)
 
 
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def reduce_w_dcn(
+    grad_w: dsv3_types.DSv3DenseLayerWeightsPytree,
+    like: dsv3_types.DSv3DenseLayerWeightsPytree,
+    *,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+) -> dsv3_types.DSv3DenseLayerWeightsPytree:
+  """Reduces dense layer weight gradients across the DCN mesh axis.
+
+  The dual of `collect_w_dcn`; `like` only gives the shardings, so the
+  gradients may differ in dtype from the weights.
+
+  Args:
+    grad_w: Gradients of the `collect_w_dcn` outputs.
+    like: Weights with the shardings of the `collect_w_dcn` inputs.
+    axis_mapping: Mapping from logical to physical mesh axes.
+
+  Returns:
+    The reduced gradients, sharded like `like`.
+  """
+  return ops.reduce_along_axis(grad_w, "dcn", axis_mapping, like)
+
+
 def _w_ici_axes() -> dsv3_types.DSv3DenseLayerWeightsPytree:
   """Returns the ICI axes each dense layer weight is collected along."""
   return dsv3_types.DSv3DenseLayerWeightsPytree(
       pre_attn_norm_scale=("fsdp_attention", "attention"),
       mla=dsv3_types.DSv3MLAWeightsPytree(
           q_down=("fsdp_attention", "attention"),
-          q_up=("fsdp_attention",),
+          # `attention_dp` is empty except for head-replicated GQA weights
+          # under Ulysses CP (see dsv3_sharding "cp4_gqa_a2a").
+          q_up=("fsdp_attention", "attention_dp"),
           q_norm_scale=("fsdp_attention",),
           kv_down=("fsdp_attention", "attention"),
           k_up=("fsdp_attention",),
           v_up=("fsdp_attention",),
           kv_norm_scale=("fsdp_attention",),
-          out=("fsdp_attention",),
+          out=("fsdp_attention", "attention_dp"),
       ),
       post_attn_norm_scale=("fsdp_attention", "attention"),
       mlp=dsv3_types.DSv3MLPWeightsPytree(

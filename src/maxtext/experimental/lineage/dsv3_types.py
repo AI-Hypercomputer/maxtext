@@ -244,6 +244,86 @@ def _add_layer_dim(
   return (num_layers,) + shape if num_layers > 1 else shape
 
 
+def is_gqa_dims(cq_dim: int, ckv_dim: int) -> bool:
+  """Whether MLA LoRA ranks of 0 select grouped-query attention (GQA)."""
+  return cq_dim == 0 and ckv_dim == 0
+
+
+# GQA reuses `DSv3MLAWeightsPytree` (and so every MLA sharding, collection and
+# scan path) with these field meanings:
+#   q_up:    (emb_dim, num_query_heads, head_dim)      query projection Wq
+#   kv_down: (emb_dim, 2 * num_kv_heads * head_dim)    fused [Wk | Wv]
+#   out:     (num_query_heads, head_dim, emb_dim)      output projection
+# The KV heads are replicated over the `attention` (core) axis, since the
+# number of KV heads need not divide it. The remaining fields are small
+# placeholders that the GQA forward and backward ignore; their shapes only have
+# to divide the MLA PartitionSpecs.
+GQA_PLACEHOLDER_DIM = 128
+# Shape of the `k_up` / `v_up` placeholders, past the layer dim. MLA shards the
+# minor dim over the FSDP axes (up to 32 ways) and the dense layers collect it
+# with a SparseCore-pinned all-gather, which needs whole 128-lane shards and a
+# gathered size above the SparseCore offload threshold (~0.5 MB per core).
+GQA_PLACEHOLDER_KV_SHAPE = (128, 2, 32 * 128)
+
+
+def _init_gqa_weights(
+    rng: jax.Array,
+    *,
+    emb_dim: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    weight_dtype: jax.typing.DTypeLike,
+    num_layers: int,
+    out_shardings: DSv3MLAWeightsPytree[ShardingType],
+    kernel_init: Initializer,
+    scale_init: Initializer,
+) -> DSv3MLAWeightsPytree[ArrayType]:
+  """Initializes GQA weights in the `DSv3MLAWeightsPytree` layout above."""
+  if num_query_heads % num_kv_heads:
+    raise ValueError(f"num_query_heads ({num_query_heads}) must be a multiple of" f" num_kv_heads ({num_kv_heads}) for GQA.")
+  p = GQA_PLACEHOLDER_DIM
+
+  @functools.partial(jax.jit, out_shardings=out_shardings)
+  def _init(rng):
+    add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
+    k = jax.random.split(rng, 8)
+    k_init = functools.partial(kernel_init, dtype=weight_dtype)
+    s_init = functools.partial(scale_init, dtype=weight_dtype)
+    return DSv3MLAWeightsPytree[ArrayType](
+        q_down=k_init(k[0], add_layer_dim((emb_dim, p)), out_sharding=out_shardings.q_down),
+        q_up=k_init(
+            k[1],
+            add_layer_dim((emb_dim, num_query_heads, head_dim)),
+            out_sharding=out_shardings.q_up,
+        ),
+        q_norm_scale=s_init(k[2], add_layer_dim(p), out_sharding=out_shardings.q_norm_scale),
+        kv_down=k_init(
+            k[3],
+            add_layer_dim((emb_dim, 2 * num_kv_heads * head_dim)),
+            out_sharding=out_shardings.kv_down,
+        ),
+        k_up=k_init(
+            k[4],
+            add_layer_dim(GQA_PLACEHOLDER_KV_SHAPE),
+            out_sharding=out_shardings.k_up,
+        ),
+        v_up=k_init(
+            k[5],
+            add_layer_dim(GQA_PLACEHOLDER_KV_SHAPE),
+            out_sharding=out_shardings.v_up,
+        ),
+        kv_norm_scale=s_init(k[6], add_layer_dim(p), out_sharding=out_shardings.kv_norm_scale),
+        out=k_init(
+            k[7],
+            add_layer_dim((num_query_heads, head_dim, emb_dim)),
+            out_sharding=out_shardings.out,
+        ),
+    )
+
+  return _init(rng)
+
+
 def init_dsv3_mla_weights(
     rng: jax.Array,
     emb_dim: int,
@@ -288,6 +368,19 @@ def init_dsv3_mla_weights(
   """
   out_shardings = _resolve_shardings(out_shardings, mesh, axis_mapping)
   out_shardings = out_shardings if out_shardings else DSv3MLAWeightsPytree[ShardingType]()
+  if is_gqa_dims(cq_dim, ckv_dim):
+    return _init_gqa_weights(
+        rng,
+        emb_dim=emb_dim,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=v_head_dim,
+        weight_dtype=weight_dtype,
+        num_layers=num_layers,
+        out_shardings=out_shardings,
+        kernel_init=kernel_init,
+        scale_init=scale_init,
+    )
 
   @functools.partial(
       jax.jit,

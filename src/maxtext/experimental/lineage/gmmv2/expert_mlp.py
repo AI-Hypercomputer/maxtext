@@ -131,6 +131,17 @@ def _check_3d(name: str, x: jax.Array) -> None:
 _FP8_OUT_DTYPE = jnp.bfloat16
 
 
+def _w8_dx_kwargs(w_scale: jax.Array | None) -> dict[str, Any]:
+  """`gmm_v2` arguments applying an fp8 weight's scale to a bf16 GMM output."""
+  if w_scale is None:
+    return {}
+  return dict(
+      out_scale=w_scale,
+      acc_dtype=jnp.float32,
+      preferred_element_type=_FP8_OUT_DTYPE,
+  )
+
+
 def _gmm(cfg: ExpertMlpConfig, tiles: TileSizes | None, *args, **kwargs):
   if tiles is not None:
     kwargs["tile_info"] = tiles
@@ -403,6 +414,7 @@ def gate_gmm_bwd(
     dx_scale: jax.Array | None = None,  # f32 [1, 1]
     dw_scale: jax.Array | None = None,  # f32 [1, 1]
     dw_dtype: jnp.dtype | None = None,
+    w_scale: jax.Array | None = None,  # f32 [1, 1]
 ) -> tuple[jax.Array, jax.Array]:  # dx3d [BT, D // 128, 128], dw [E, D, F_gate]
   """Backward pass for gate_gmm given the cotangent of its BT output rows.
 
@@ -410,6 +422,9 @@ def gate_gmm_bwd(
   `dgate_scale` / `dgate_qtype`) operands: dx3d = dgate @ w_q^T scaled by
   `dx_scale`, dw = x3d^T @ dgate scaled by `dw_scale`, both output in bf16 (dw
   in `dw_dtype`, or w_gate's dtype).
+
+  Without `w_q` both GMMs run in bf16; an fp8 w_gate (weight-only quantization)
+  is dequantized in VMEM and its per-tensor `w_scale` applied to dx3d.
 
   Args:
     cfg: Kernel configuration.
@@ -430,6 +445,8 @@ def gate_gmm_bwd(
     dw_scale: Product of the x3d and dgate scales (or x3d scale when
       `dgate_scale` or `dgate_tile_exps` is given).
     dw_dtype: Dtype of dw_gate. Defaults to w_gate's dtype.
+    w_scale: Per-tensor scale of an fp8 w_gate without `w_q` (weight-only
+      quantization).
 
   Returns:
     Tuple of (dx3d, dw_gate), with dw_gate including dw_acc.
@@ -438,7 +455,7 @@ def gate_gmm_bwd(
   dw_kwargs: dict[str, Any]
   if w_q is None:
     dgate = dgate.astype(x3d.dtype)
-    dx_kwargs, dw_kwargs = {}, {}
+    dx_kwargs, dw_kwargs = _w8_dx_kwargs(w_scale), {}
   else:
     target_dw_dtype = w_gate.dtype if dw_dtype is None else dw_dtype
     if (
@@ -607,6 +624,7 @@ def linear_gmm_bwd(
     dact_scale: jax.Array | None = None,  # f32 [1, 1]
     dw_scale: jax.Array | None = None,  # f32 [1, 1]
     dw_dtype: jnp.dtype | None = None,
+    w_scale: jax.Array | None = None,  # f32 [1, 1]
 ) -> tuple[jax.Array, jax.Array]:  # dact [BT, F], dw [E, F, D]
   """Backward pass for linear_gmm given the cotangent of its output.
 
@@ -615,6 +633,10 @@ def linear_gmm_bwd(
   `dact_scale`, and dw = act^T @ dout3d with act quantized in-kernel like in
   `linear_gmm_fp8` (or consumed directly if already fp8) and scaled by
   `dw_scale`, both output in bf16 (dw in `dw_dtype`, or w_linear's dtype).
+
+  Without `w_q` both GMMs run in bf16; an fp8 w_linear (weight-only
+  quantization) is dequantized in VMEM and its per-tensor `w_scale` applied to
+  dact.
 
   Args:
     cfg: Kernel configuration.
@@ -633,6 +655,8 @@ def linear_gmm_bwd(
       `dout_scale` is given).
     dw_scale: Scale of dout3d (or None when `dout_scale` is given).
     dw_dtype: Dtype of dw_linear. Defaults to w_linear's dtype.
+    w_scale: Per-tensor scale of an fp8 w_linear without `w_q` (weight-only
+      quantization).
 
   Returns:
     Tuple of (dact, dw_linear), with dw_linear including dw_acc.
@@ -641,7 +665,7 @@ def linear_gmm_bwd(
   dw_kwargs: dict[str, Any]
   if w_q is None:
     dout3d = dout3d.astype(act.dtype)
-    dact_kwargs, dw_kwargs = {}, {}
+    dact_kwargs, dw_kwargs = _w8_dx_kwargs(w_scale), {}
   else:
     dact_kwargs = dict(
         out_scale=dact_scale,
@@ -801,6 +825,42 @@ def linear_gmm_bwd_gather(
       dgrad.grad_gate_tile_exps,
       dgrad.grad_coeffs,
       dw,
+  )
+
+
+def linear_gmm_w8(
+    cfg: ExpertMlpConfig,
+    act: jax.Array,  # bf16 [BT, F]
+    w_q: jax.Array,  # fp8 [E, F, D]
+    group_sizes: jax.Array,  # int32 [E]
+    *,
+    w_scale: jax.Array,  # f32 [1, 1]
+) -> jax.Array:  # bf16 [BT, D // 128, 128]
+  """Weight-only fp8 `linear_gmm` (forward only; see `linear_gmm_bwd`).
+
+  w_q is dequantized to bf16 in VMEM, so the matmul runs in bf16; the f32
+  accumulator is scaled by w_q's per-tensor `w_scale`.
+
+  Args:
+    cfg: Kernel configuration.
+    act: bf16 activations.
+    w_q: fp8 linear weights.
+    group_sizes: Tokens per local expert.
+    w_scale: Per-tensor scale of w_q.
+
+  Returns:
+    The bf16 output in the 3D layout.
+  """
+  if act.ndim != 2:
+    raise ValueError(f"act must be 2D [M, F], got shape {act.shape}.")
+  return _gmm(
+      cfg,
+      cfg.linear_fwd,
+      act,
+      w_q,
+      group_sizes,
+      out_is_3d=True,
+      **_w8_dx_kwargs(w_scale),
   )
 
 
@@ -1087,6 +1147,114 @@ class ExpertGmm3d:
         act_scale=x_scale,
         act_qtype=x_qtype,
         out_scale=out_scale,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class WeightOnlyFp8Gmm:
+  """bf16 `dsv3_experts.GmmFn` on fp8 (weight-only quantized) routed weights.
+
+  The routed-expert weights arrive all-gathered in fp8, quantized with the
+  static per-tensor `weight_scale`. Every GMM keeps its bf16 activations; the
+  kernels dequantize the fp8 weight tiles to bf16 in VMEM and scale the f32
+  accumulator by `weight_scale`. The weight gradients are output in
+  `grad_dtype`. Used on the unquantized (`quant_rule=None`) expert path, so it
+  implements neither the fused GLU nor the gathering kernels.
+
+  Attributes:
+    base: GMMs to run.
+    weight_scale: Static per-tensor scale of the fp8 weights.
+    grad_dtype: Dtype of the weight gradients.
+  """
+
+  base: ExpertGmm3d
+  weight_scale: float
+  grad_dtype: Any = jnp.float32
+
+  def _w_scale(self, w: jax.Array) -> jax.Array | None:
+    if not gmmv2_kernel.is_fp8(w.dtype):
+      return None
+    return jnp.full((1, 1), self.weight_scale, jnp.float32)
+
+  def gate(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      out: jax.Array,
+      out_offset: jax.Array | int,
+      out_scale: jax.Array | None = None,
+  ) -> Any:
+    assert out_scale is None, "WeightOnlyFp8Gmm expects bf16 activations."
+    return self.base.gate(x, w, group_sizes, out, out_offset, out_scale=self._w_scale(w))
+
+  def gate_bwd(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      dgate: jax.Array,
+      dw_acc: jax.Array | None = None,
+      *,
+      w_q: jax.Array | None = None,
+      dx_scale: jax.Array | None = None,
+      dw_scale: jax.Array | None = None,
+      dw_dtype: jnp.dtype | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    assert w_q is None and dx_scale is None and dw_scale is None
+    return gate_gmm_bwd(
+        self.base.cfg,
+        x,
+        w,
+        group_sizes,
+        dgate,
+        dw_acc,
+        dw_dtype=self.grad_dtype if dw_dtype is None else dw_dtype,
+        w_scale=self._w_scale(w),
+    )
+
+  def linear(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      *,
+      x_scale: jax.Array | None = None,
+      x_qtype: jnp.dtype | None = None,
+      out_scale: jax.Array | None = None,
+  ) -> jax.Array:
+    assert x_scale is None and x_qtype is None and out_scale is None
+    w_scale = self._w_scale(w)
+    if w_scale is None:
+      return self.base.linear(x, w, group_sizes)
+    return linear_gmm_w8(self.base.cfg, x, w, group_sizes, w_scale=w_scale)
+
+  def linear_bwd(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      dout: jax.Array,
+      dw_acc: jax.Array | None = None,
+      *,
+      w_q: jax.Array | None = None,
+      x_scale: jax.Array | None = None,
+      x_qtype: jnp.dtype | None = None,
+      dx_scale: jax.Array | None = None,
+      dw_scale: jax.Array | None = None,
+      dw_dtype: jnp.dtype | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    assert w_q is None and x_scale is None and x_qtype is None
+    assert dx_scale is None and dw_scale is None
+    return linear_gmm_bwd(
+        self.base.cfg,
+        x,
+        w,
+        group_sizes,
+        dout,
+        dw_acc,
+        dw_dtype=self.grad_dtype if dw_dtype is None else dw_dtype,
+        w_scale=self._w_scale(w),
     )
 
 

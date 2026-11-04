@@ -831,6 +831,16 @@ def inner_kernel(
     else:
       tiled_lhs = tiled_lhs_ref.get_value().reshape(-1, cfgs.tiles.tile_k)[:bucket_m]
     tiled_rhs = tiled_rhs_ref.get_weight()
+    if (
+        is_fp8(tiled_rhs.dtype)
+        and not is_fp8(tiled_lhs.dtype)
+        and not cfgs.rhs_cfgs.has_scale
+        and not cfgs.lhs_cfgs.should_quantize
+    ):
+      # Weight-only fp8: dequantize the unscaled fp8 weight tile to the (bf16)
+      # lhs dtype in VMEM so that the matmul runs in bf16. The caller folds the
+      # weight's per-tensor scale into `out_scale`.
+      tiled_rhs = tiled_rhs.astype(tiled_lhs.dtype)
     if cfgs.transpose_rhs:
       tiled_rhs = jnp.transpose(tiled_rhs)
 

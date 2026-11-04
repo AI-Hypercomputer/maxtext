@@ -138,5 +138,42 @@ def dsv3_dense_layers(
   def _scan_fn(x, w):
     return _dsv3_dense_layer(x, w), ()
 
-  x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici, _reduce_w_ici)
+  fsdp_rule = quant.fsdp_weights if quant else None
+  if fsdp_rule is None:
+    x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici, _reduce_w_ici)
+    return x
+
+  # Under fsdp_weights the dense layer weights stay bf16 (only routed expert
+  # weights are all-gathered in fp8), but their gradients are cast to f32
+  # right after each layer's backward pass, so every gradient reduction runs
+  # in f32.
+  def _f32_grad_scan_fn(x, w):
+    return _scan_fn(x, _with_grad_dtype(fsdp_rule.grad_reduce_dtype, w))
+
+  x, _ = ops.w_collect_pipelined_scan(
+      _f32_grad_scan_fn,
+      x,
+      w,
+      _collect_w_dcn,
+      _collect_w_ici,
+      _reduce_w_ici,
+      functools.partial(dsv3_dense_layer.reduce_w_dcn, axis_mapping=axis_mapping),
+  )
   return x
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+def _with_grad_dtype(dtype: Any, w: Any) -> Any:
+  """Identity whose cotangents are cast to `dtype`."""
+  return w
+
+
+def _with_grad_dtype_fwd(dtype, w):
+  return w, None
+
+
+def _with_grad_dtype_bwd(dtype, _, ct):
+  return (jax.tree.map(lambda g: g.astype(dtype), ct),)
+
+
+_with_grad_dtype.defvjp(_with_grad_dtype_fwd, _with_grad_dtype_bwd)
