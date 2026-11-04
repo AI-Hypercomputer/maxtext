@@ -340,6 +340,12 @@ class Transformer(nnx.Module):
     #     decoder_target_mask = jnp.ones(dummy_shape, dtype=jnp.int32)
     #     decoder_segment_ids = jnp.ones(dummy_shape, dtype=jnp.int32)
 
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      # In vLLM, logits (and MTP draft steps) are computed separately after updating the KV cache.
+      if expert_indices is not None:
+        return hidden_state, kv_caches, expert_indices
+      return hidden_state, kv_caches
+
     # The Multi-Token Prediction (MTP) block functions as a "side-car" to the main
     # model, active only during training. It computes an auxiliary loss based on
     # predicting multiple future tokens, as described in the DeepSeek-V3 paper.
@@ -367,11 +373,5 @@ class Transformer(nnx.Module):
             model_mode=model_mode,
             main_token_embeddings=mtp_token_embeddings,
         )
-
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
-      # In vLLM, logits are computed separately after updating the KV cache.
-      if expert_indices is not None:
-        return hidden_state, kv_caches, expert_indices
-      return hidden_state, kv_caches
 
     return logits

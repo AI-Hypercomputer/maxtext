@@ -1219,6 +1219,91 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(
     )
     mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-bias"] = "model.visual.merger.linear_fc2.bias"
 
+  # Multi-Token Prediction (MTP) layers for Qwen3.5
+  mtp_num_layers = getattr(maxtext_config, "mtp_num_layers", 0) or 0
+  for j in range(mtp_num_layers):
+    k = j + 1
+    mtp_prefix = f"params-mtp_block-mtp_layer_{k}"
+    tl_prefix = f"{mtp_prefix}-mtp_{k}_transformer_layer"
+    hf_mtp_layer = f"mtp.layers.{j}"
+
+    mapping.update(
+        {
+            f"{mtp_prefix}-mtp_{k}_embedding_norm-scale": "mtp.pre_fc_norm_embedding.weight",
+            f"{mtp_prefix}-mtp_{k}_hidden_state_norm-scale": "mtp.pre_fc_norm_hidden.weight",
+            f"{mtp_prefix}-mtp_{k}_projection-kernel": "mtp.fc.weight",
+            f"{mtp_prefix}-mtp_{k}_final_norm-scale": "mtp.norm.weight",
+            f"{tl_prefix}-input_layernorm-scale": f"{hf_mtp_layer}.input_layernorm.weight",
+            f"{tl_prefix}-post_attention_layernorm-scale": f"{hf_mtp_layer}.post_attention_layernorm.weight",
+            f"{tl_prefix}-attention-attention-query-kernel": f"{hf_mtp_layer}.self_attn.q_proj.weight",
+            f"{tl_prefix}-attention-attention-key-kernel": f"{hf_mtp_layer}.self_attn.k_proj.weight",
+            f"{tl_prefix}-attention-attention-value-kernel": f"{hf_mtp_layer}.self_attn.v_proj.weight",
+            f"{tl_prefix}-attention-attention-out-kernel": f"{hf_mtp_layer}.self_attn.o_proj.weight",
+            f"{tl_prefix}-attention-attention-query_norm-scale": f"{hf_mtp_layer}.self_attn.q_norm.weight",
+            f"{tl_prefix}-attention-attention-key_norm-scale": f"{hf_mtp_layer}.self_attn.k_norm.weight",
+        }
+    )
+    if is_quantized:
+      mapping.update(
+          {
+              f"{tl_prefix}-attention-attention-query-kernel_scale": f"{hf_mtp_layer}.self_attn.q_proj.weight_scale_inv",
+              f"{tl_prefix}-attention-attention-key-kernel_scale": f"{hf_mtp_layer}.self_attn.k_proj.weight_scale_inv",
+              f"{tl_prefix}-attention-attention-value-kernel_scale": f"{hf_mtp_layer}.self_attn.v_proj.weight_scale_inv",
+              f"{tl_prefix}-attention-attention-out-kernel_scale": f"{hf_mtp_layer}.self_attn.o_proj.weight_scale_inv",
+          }
+      )
+
+    if num_experts > 1:
+      mapping.update(
+          {
+              f"{tl_prefix}-mlp-routed_experts-gate-kernel": f"{hf_mtp_layer}.mlp.gate.weight",
+              f"{tl_prefix}-mlp-shared_expert-wi_0-kernel": f"{hf_mtp_layer}.mlp.shared_expert.gate_proj.weight",
+              f"{tl_prefix}-mlp-shared_expert-wi_1-kernel": f"{hf_mtp_layer}.mlp.shared_expert.up_proj.weight",
+              f"{tl_prefix}-mlp-shared_expert-wo-kernel": f"{hf_mtp_layer}.mlp.shared_expert.down_proj.weight",
+              f"{tl_prefix}-mlp-shared_expert_gate-kernel": f"{hf_mtp_layer}.mlp.shared_expert_gate.weight",
+              f"{tl_prefix}-mlp-routed_experts-wi_0": [
+                  f"{hf_mtp_layer}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
+              ],
+              f"{tl_prefix}-mlp-routed_experts-wi_1": [
+                  f"{hf_mtp_layer}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)
+              ],
+              f"{tl_prefix}-mlp-routed_experts-wo": [
+                  f"{hf_mtp_layer}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)
+              ],
+          }
+      )
+      if is_quantized:
+        mapping.update(
+            {
+                f"{tl_prefix}-mlp-shared_expert-wi_0-kernel_scale": (
+                    f"{hf_mtp_layer}.mlp.shared_expert.gate_proj.weight_scale_inv"
+                ),
+                f"{tl_prefix}-mlp-shared_expert-wi_1-kernel_scale": (
+                    f"{hf_mtp_layer}.mlp.shared_expert.up_proj.weight_scale_inv"
+                ),
+                f"{tl_prefix}-mlp-shared_expert-wo-kernel_scale": (
+                    f"{hf_mtp_layer}.mlp.shared_expert.down_proj.weight_scale_inv"
+                ),
+                f"{tl_prefix}-mlp-routed_experts-wi_0_scale": [
+                    f"{hf_mtp_layer}.mlp.experts.{e}.gate_proj.weight_scale_inv" for e in range(num_experts)
+                ],
+                f"{tl_prefix}-mlp-routed_experts-wi_1_scale": [
+                    f"{hf_mtp_layer}.mlp.experts.{e}.up_proj.weight_scale_inv" for e in range(num_experts)
+                ],
+                f"{tl_prefix}-mlp-routed_experts-wo_scale": [
+                    f"{hf_mtp_layer}.mlp.experts.{e}.down_proj.weight_scale_inv" for e in range(num_experts)
+                ],
+            }
+        )
+    else:
+      mapping.update(
+          {
+              f"{tl_prefix}-mlp-wi_0-kernel": f"{hf_mtp_layer}.mlp.gate_proj.weight",
+              f"{tl_prefix}-mlp-wi_1-kernel": f"{hf_mtp_layer}.mlp.up_proj.weight",
+              f"{tl_prefix}-mlp-wo-kernel": f"{hf_mtp_layer}.mlp.down_proj.weight",
+          }
+      )
+
   return mapping
 
 
@@ -1453,6 +1538,41 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
             process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
         )
         hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
+    else:
+      hooks[f"{mlp_prefix}-wi_0-kernel"] = reshape_kernel
+      hooks[f"{mlp_prefix}-wi_1-kernel"] = reshape_kernel
+      hooks[f"{mlp_prefix}-wo-kernel"] = reshape_kernel
+
+  # Multi-Token Prediction (MTP) hooks for Qwen3.5
+  mtp_num_layers = getattr(maxtext_config, "mtp_num_layers", 0) or 0
+  for j in range(mtp_num_layers):
+    k = j + 1
+    mtp_prefix = f"params-mtp_block-mtp_layer_{k}"
+    tl_prefix = f"{mtp_prefix}-mtp_{k}_transformer_layer"
+    mlp_prefix = f"{tl_prefix}-mlp"
+
+    hooks[f"{mtp_prefix}-mtp_{k}_projection-kernel"] = transpose
+    for key in ["query", "key", "value", "out"]:
+      hooks[f"{tl_prefix}-attention-attention-{key}-kernel"] = reshape_kernel
+      if is_quantized:
+        hooks[f"{tl_prefix}-attention-attention-{key}-kernel_scale"] = reshape_kernel
+
+    if num_experts > 1:
+      hooks[f"{mlp_prefix}-routed_experts-gate-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
+      hooks[f"{mlp_prefix}-routed_experts-wi_0"] = transpose
+      hooks[f"{mlp_prefix}-routed_experts-wi_1"] = transpose
+      hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose
+      if is_quantized:
+        hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel_scale"] = transpose
+        hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel_scale"] = transpose
+        hooks[f"{mlp_prefix}-shared_expert-wo-kernel_scale"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wi_0_scale"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wi_1_scale"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wo_scale"] = transpose
     else:
       hooks[f"{mlp_prefix}-wi_0-kernel"] = reshape_kernel
       hooks[f"{mlp_prefix}-wi_1-kernel"] = reshape_kernel

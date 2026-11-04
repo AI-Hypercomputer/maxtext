@@ -17,7 +17,7 @@
 import os
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import register_model
-from .adapter import MaxTextForCausalLM
+from .adapter import MaxTextForCausalLM, is_hybrid_maxtext_model
 from .multimodal import get_multimodal_handler
 
 
@@ -40,6 +40,12 @@ def register(config=None):
   MaxTextForCausalLM.supports_multimodal = multimodal_handler is not None
   if multimodal_handler is not None:
     logger.info("Setting supports_multimodal = True for %s", model_name)
+
+  # Must be set before `register_model`, which hands vLLM a subclass whose
+  # interface flags (`IsHybrid`) vLLM inspects at registration.
+  MaxTextForCausalLM.is_hybrid = is_hybrid_maxtext_model(model_name)
+  if MaxTextForCausalLM.is_hybrid:
+    logger.info("Setting is_hybrid = True for %s", model_name)
 
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
 
