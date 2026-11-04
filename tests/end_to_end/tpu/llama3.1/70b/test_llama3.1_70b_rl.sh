@@ -60,7 +60,7 @@ python3 -m maxtext.inference.vllm_decode \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.6 \
+    hbm_utilization_vllm=0.5 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=true enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=16 \
