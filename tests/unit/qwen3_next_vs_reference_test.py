@@ -921,6 +921,76 @@ class TestQwen3Next(unittest.TestCase):
 
     print("test_gated_delta_net_structure passed!")
 
+  def test_gated_delta_net_left_padding_invariance_and_gradients(self):
+    """Tests that left-padding tokens do not corrupt outputs or gradients."""
+    print("Running test_gated_delta_net_left_padding_invariance_and_gradients.")
+    pad_len = 64
+    valid_len = self.seq_len - pad_len
+    key_pad, key_valid = jax.random.split(jax.random.PRNGKey(123))
+
+    valid_hidden = jax.random.normal(
+        key_valid,
+        (self.batch_size, valid_len, self.hidden_size),
+        dtype=self.cfg.dtype,
+    )
+    pad_noise = (
+        jax.random.normal(
+            key_pad,
+            (self.batch_size, pad_len, self.hidden_size),
+            dtype=self.cfg.dtype,
+        )
+        * 10.0
+    )
+    padded_hidden = jnp.concatenate([pad_noise, valid_hidden], axis=1)
+
+    unpadded_segment_ids = jnp.ones((self.batch_size, valid_len), dtype=jnp.int32)
+    padded_segment_ids = jnp.concatenate(
+        [
+            jnp.zeros((self.batch_size, pad_len), dtype=jnp.int32),
+            jnp.ones((self.batch_size, valid_len), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.nnx_rngs,
+        inputs_shape=padded_hidden.shape,
+    )
+
+    unpadded_out, _ = jax_model(valid_hidden, decoder_segment_ids=unpadded_segment_ids)
+    padded_out, _ = jax_model(padded_hidden, decoder_segment_ids=padded_segment_ids)
+
+    # 1. Padding token outputs must be strictly zeroed out.
+    zero_pad = np.zeros((self.batch_size, pad_len, self.hidden_size), dtype=np.float32)
+    np.testing.assert_array_equal(
+        np.asarray(padded_out[:, :pad_len, :]),
+        zero_pad,
+    )
+
+    # 2. Valid token outputs must match unpadded forward pass without bleed.
+    np.testing.assert_allclose(
+        np.asarray(padded_out[:, pad_len:, :]),
+        np.asarray(unpadded_out),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # 3. Gradients must be finite and zero on left-padding inputs.
+    def loss_fn(inputs):
+      out, _ = jax_model(inputs, decoder_segment_ids=padded_segment_ids)
+      valid_mask = (padded_segment_ids != 0)[..., None]
+      return jnp.sum(jnp.where(valid_mask, out, 0.0) ** 2)
+
+    input_grads = jax.grad(loss_fn)(padded_hidden)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(input_grads))))
+    np.testing.assert_array_equal(
+        np.asarray(input_grads[:, :pad_len, :]),
+        zero_pad,
+    )
+    print("test_gated_delta_net_left_padding_invariance_and_gradients passed!")
+
   def test_qwen3_next_rms_norm(self):
     """Tests the custom Qwen3NextRMSNorm layer against its PyTorch reference."""
     print("Running test_qwen3_next_rms_norm...")
