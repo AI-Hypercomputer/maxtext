@@ -1467,6 +1467,7 @@ sa_v_layout: "HEAD_DIM_MINOR"
 eval_sa_q_layout: "HEAD_DIM_MINOR"
 eval_sa_k_layout: "HEAD_DIM_MINOR"
 eval_sa_v_layout: "HEAD_DIM_MINOR"
+sa_gqa_head_stacking: false # fold pairs of head_dim=64 GQA query heads in m3 Splash attention.
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax

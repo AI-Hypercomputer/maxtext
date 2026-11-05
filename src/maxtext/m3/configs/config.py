@@ -226,6 +226,7 @@ class TransformerConfig(BaseModel):
   split_head_dim: bool = True
   norm_num_groups: int = 32
   use_base2_exp: bool = True
+  sa_gqa_head_stacking: bool = False
 
 
 # ----------------------------------------------------------------------------

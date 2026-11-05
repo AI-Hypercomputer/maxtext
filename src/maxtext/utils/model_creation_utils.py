@@ -734,8 +734,10 @@ def create_model(
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
+    m3_kernels.validate_attention_config(config)
     model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
     model = m3_scan.maybe_apply_scan(model, config)
     return model
@@ -838,7 +840,11 @@ def create_nnx_abstract_model(
     # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
     # AbstractMesh). Sharding is resolved afterwards via the helper, so the
     # wrap is unnecessary here.
-    abs_model = nnx.eval_shape(_create_model)
+    if getattr(config, "use_m3_model", False) and mesh is not None:
+      with jax.set_mesh(mesh):
+        abs_model = nnx.eval_shape(_create_model)
+    else:
+      abs_model = nnx.eval_shape(_create_model)
     if mesh is None:
       mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
