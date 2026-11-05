@@ -47,7 +47,15 @@ class ManagedMLDiagnostics:
       cls._instance = super(ManagedMLDiagnostics, cls).__new__(cls)
     return cls._instance
 
-  def __init__(self, config: Any, sampler_config: Any | None = None):
+  def __init__(self, config: Any, sampler_config: Any | None = None, **mlrun_kwargs: Any):
+    """Creates the ML Diagnostics run once per process.
+
+    Args:
+      config: MaxText config (pyconfig or pydantic) that owns the `managed_mldiagnostics_*` fields.
+      sampler_config: Optional RL sampler config; keys that differ from `config` are uploaded as `sampler.<key>`.
+      **mlrun_kwargs: Extra keyword arguments passed through to `machinelearning_run`
+        (e.g. `rl_orchestrator="TUNIX"` from the RL entrypoint).
+    """
     if hasattr(self, "_initialized"):
       return
     self._initialized = True
@@ -87,4 +95,5 @@ class ManagedMLDiagnostics:
         region=region,
         metric_only_run=config.managed_mldiagnostics_metric_only_run,
         application_framework="MAXTEXT",
+        **mlrun_kwargs,
     )

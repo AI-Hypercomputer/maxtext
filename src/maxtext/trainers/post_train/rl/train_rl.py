@@ -716,9 +716,10 @@ def rl_train(argv: Sequence[str], kwargs: dict):
   # Create the ML Diagnostics run before any tunix object: `RLCluster` builds
   # `RLProfiler`, whose managed backend preflights `Xprof._ensure_initialized()`
   # and raises if no MLRun is active. Both configs are uploaded (sampler keys
-  # that differ from the trainer's are recorded as `sampler.<key>`).
+  # that differ from the trainer's are recorded as `sampler.<key>`). The run is
+  # labelled `rl_orchestrator=tunix` because MaxText RL training delegates to tunix.
   if trainer_config.managed_mldiagnostics:
-    ManagedMLDiagnostics(trainer_config, sampler_config=sampler_config)
+    ManagedMLDiagnostics(trainer_config, sampler_config=sampler_config, rl_orchestrator="TUNIX")
 
   goodput_recorder = create_goodput_recorder(trainer_config)
   record_goodput(goodput_recorder, RECORD_JOB_START_TIME)
