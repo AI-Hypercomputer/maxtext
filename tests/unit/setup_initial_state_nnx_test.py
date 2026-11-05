@@ -114,6 +114,8 @@ def _config():
       source_checkpoint_layout="orbax",
       expansion_factor_real_data=-1,
       scan_layers=False,
+      optimizer_memory_host_offload=False,
+      parameter_memory_host_offload=False,
   )
 
 
