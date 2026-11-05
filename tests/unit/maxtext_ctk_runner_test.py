@@ -153,8 +153,8 @@ class CtkRunnerTest(unittest.TestCase):
         device_type="v6e-256",
     )
     pw_config = PathwaysConfig(
-        server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
-        proxy_server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest",
+        server_image="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest",
+        proxy_server_image="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest",
         runner_image="us-docker.pkg.dev/my-project/maxtext_runner:latest",
         colocated_python_sidecar_image="us-docker.pkg.dev/my-project/sidecar:latest",
     )
@@ -181,11 +181,11 @@ class CtkRunnerTest(unittest.TestCase):
     self.assertEqual(name, "ali-pw-llama2--1-xyz")
     self.assertIn("--pathways", cmd)
     self.assertIn(
-        "--pathways-server-image=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
+        "--pathways-server-image=us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest",
         cmd,
     )
     self.assertIn(
-        "--pathways-proxy-server-image=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest",
+        "--pathways-proxy-server-image=us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest",
         cmd,
     )
     self.assertIn(
@@ -212,8 +212,8 @@ class CtkRunnerTest(unittest.TestCase):
         device_type="v6e-256",
     )
     pw_config = PathwaysConfig(
-        server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
-        proxy_server_image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest",
+        server_image="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest",
+        proxy_server_image="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest",
         runner_image="us-docker.pkg.dev/my-project/maxtext_runner:latest",
         headless=True,
     )

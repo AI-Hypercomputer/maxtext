@@ -31,8 +31,8 @@ from benchmarks.recipes import parser_utils
 from benchmarks.recipes import user_configs
 from benchmarks.ctk_configs import ClusterConfig
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server"
 RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 
 # Cluster Params
