@@ -523,6 +523,23 @@ class DataTypes(BaseModel):
 
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
+  grad_accumulation_dtype: DType | None = Field(
+      None,
+      description=(
+          "The data type MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "
+          "None uses grad_dtype. 'float32' with grad_dtype=bfloat16 sums more precisely, at the cost of float32 "
+          "gradients on device: the accumulator, and each micro-batch's gradients beside it."
+      ),
+  )
+  cast_grads_after_all_reduce: bool = Field(
+      False,
+      description=(
+          "MaxTextTrainingEngine only. Gradients that its forward/backward pass sums across devices by an all-reduce "
+          "alone (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass "
+          "in the parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the "
+          "all-reduce."
+      ),
+  )
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
