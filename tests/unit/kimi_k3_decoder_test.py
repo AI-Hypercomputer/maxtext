@@ -17,8 +17,8 @@
 These need no PyTorch or HF reference, so they run in CI. They cover:
 
   1. `kimi-k3.yml` building a `HyperParameters` through the real config pipeline, the
-     released 93-layer layout, and the guards for unsupported modes (packing, scan_layers,
-     pipeline parallelism, autoregressive decode).
+     released 93-layer layout, and the guards for unsupported modes (packing,
+     pipeline parallelism, autoregressive decode). scan_layers=True is covered in kimi_k3_scan_test.py.
   2. `KimiK3DecoderLayer` running forward and backward passes, threading the AttnRes
      `block_residual` highway across a heterogeneous KDA/MLA, dense/MoE stack.
   3. The emitted parameter tree matching the `param_mapping.py` naming contract.
@@ -102,7 +102,7 @@ def _toy_config(**overrides):
       "original_max_position_embeddings": _SEQ_LEN,
       "max_prefill_predict_length": _SEQ_LEN // 2,
       "per_device_batch_size": 1,
-      # Kimi-K3 is unscanned and unpacked only for now.
+      # Unscanned here; scan_layers=True is covered in kimi_k3_scan_test.py. Unpacked only for now.
       "scan_layers": False,
       "packing": False,
       "enable_checkpointing": False,
@@ -243,10 +243,6 @@ class KimiK3FullAttnLayerResolutionTest(unittest.TestCase):
 
 class KimiK3DecoderGuardTest(unittest.TestCase):
   """Unsupported modes must fail loudly instead of building a silently wrong model."""
-
-  def test_scan_layers_is_rejected(self):
-    with self.assertRaisesRegex(ValueError, "scan_layers"):
-      _build_model(_toy_config(scan_layers=True))
 
   def test_pipeline_parallelism_is_rejected(self):
     # A real pipeline mesh needs several devices; the guard only reads these two fields.

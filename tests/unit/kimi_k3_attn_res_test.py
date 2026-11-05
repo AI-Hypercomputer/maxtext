@@ -31,7 +31,12 @@ import ml_dtypes
 import numpy as np
 
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS
-from maxtext.layers.attn_res import _apply_attn_res
+from maxtext.layers.attn_res import (
+    _apply_attn_res,
+    attn_res_num_buffer_slots,
+    commit_attn_res_block,
+    init_attn_res_buffer,
+)
 from tests.utils.kimi_k3_conversion_utils import convert_pytorch_module_to_maxtext_params
 
 try:
@@ -97,10 +102,71 @@ class KimiK3AttnResTest(parameterized.TestCase):
     empty = jnp.zeros((_B, _S, 0, _D))
     np.testing.assert_array_equal(_apply_attn_res(prefix, empty, proj, norm, _EPS), prefix)
 
-  def test_static_num_blocks_rejected(self):
+  def test_static_num_blocks_validates_args(self):
+    """The static-padded path needs a buffer of exactly num_blocks slots and a committed count."""
     prefix = jnp.zeros((_B, _S, _D))
-    with self.assertRaises(NotImplementedError):
+    with self.assertRaisesRegex(ValueError, "block buffer"):
       _apply_attn_res(prefix, jnp.zeros((_B, _S, 2, _D)), jnp.ones((_D, 1)), jnp.ones((_D,)), _EPS, num_blocks=1)
+    with self.assertRaisesRegex(ValueError, "num_committed"):
+      _apply_attn_res(prefix, jnp.zeros((_B, _S, 2, _D)), jnp.ones((_D, 1)), jnp.ones((_D,)), _EPS, num_blocks=2)
+
+  @parameterized.parameters(1, 2, 8)
+  def test_static_padded_parity_vs_hf_formula(self, num_blocks):
+    """Masked pooling over a padded buffer equals the HF formula over the committed blocks."""
+    prefix, blocks, proj, norm = _make_inputs(num_blocks)
+    expected = np_apply_attn_res(prefix, blocks, proj, norm)
+    p, b, w, n = _to_jax(prefix, blocks, proj, norm)
+    padded = jnp.concatenate([b, jnp.full(b.shape[:-2] + (3, _D), 7.0, b.dtype)], axis=-2)
+    actual = _apply_attn_res(
+        p, padded, w, n, epsilon=_EPS, num_blocks=num_blocks + 3, num_committed=jnp.int32(num_blocks)
+    )
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=1e-5, atol=1e-5)
+
+  def test_static_padded_equals_dynamic_for_every_count(self):
+    """Under jit with a traced count, masked pooling == the dynamic path over the first n blocks (n = 0..M)."""
+    num_slots = 5
+    p, b, w, n = _to_jax(*_make_inputs(num_slots, seed=4))
+    masked = jax.jit(lambda c: _apply_attn_res(p, b, w, n, epsilon=_EPS, num_blocks=num_slots, num_committed=c))
+    for count in range(num_slots + 1):
+      want = _apply_attn_res(p, b[..., :count, :], w, n, epsilon=_EPS)
+      np.testing.assert_allclose(masked(jnp.int32(count)), want, rtol=1e-6, atol=1e-6)
+
+  def test_static_padded_dtype_and_shape_checks(self):
+    """The static path keeps PR6's semantics: promoted output dtype and strict weight shapes."""
+    p, b, w, n = _to_jax(*_make_inputs(3))
+    out = _apply_attn_res(p.astype(jnp.bfloat16), b, w, n, _EPS, num_blocks=3, num_committed=jnp.int32(0))
+    self.assertEqual(out.dtype, jnp.float32)
+    np.testing.assert_allclose(out, p.astype(jnp.bfloat16).astype(jnp.float32))
+    out = _apply_attn_res(
+        p.astype(jnp.bfloat16), b.astype(jnp.bfloat16), w, n, _EPS, num_blocks=3, num_committed=jnp.int32(2)
+    )
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    with self.assertRaisesRegex(ValueError, "must have shape"):
+      _apply_attn_res(p, b, w.T, n, _EPS, num_blocks=3, num_committed=jnp.int32(1))
+    with self.assertRaisesRegex(ValueError, "only valid with num_blocks"):
+      _apply_attn_res(p, b, w, n, _EPS, num_committed=jnp.int32(1))
+
+  def test_buffer_commits_match_dynamic_block_list(self):
+    """commit_attn_res_block on every layer (count advances only on commits) == the growing concat list."""
+    num_layers, block_size = 7, 3
+    rng = np.random.default_rng(5)
+    xs = jnp.asarray(rng.standard_normal((num_layers, _B, _S, _D)).astype(np.float32))
+    _, _, proj, norm = _to_jax(*_make_inputs(1, seed=6))
+    slots = attn_res_num_buffer_slots(num_layers, block_size)
+
+    def step(buf, inputs):
+      i, x = inputs
+      pooled = _apply_attn_res(x, buf.blocks, proj, norm, _EPS, num_blocks=slots, num_committed=buf.count)
+      return commit_attn_res_block(buf, x, i % block_size == 0), pooled
+
+    buf, pooled = jax.lax.scan(step, init_attn_res_buffer(xs[0], slots), (jnp.arange(num_layers), xs))
+    blocks = jnp.zeros((_B, _S, 0, _D))
+    for i in range(num_layers):
+      np.testing.assert_allclose(pooled[i], _apply_attn_res(xs[i], blocks, proj, norm, _EPS), rtol=1e-6, atol=1e-6)
+      if i % block_size == 0:
+        blocks = jnp.concatenate([blocks, xs[i][..., None, :]], axis=-2)
+    self.assertEqual(int(buf.count), blocks.shape[-2])
+    np.testing.assert_array_equal(buf.blocks[..., : blocks.shape[-2], :], blocks)
 
   @parameterized.named_parameters(
       ("proj_1x1", (1, 1), (_D,)),

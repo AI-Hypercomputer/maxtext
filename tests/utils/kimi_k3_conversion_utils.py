@@ -182,3 +182,61 @@ def load_params_into_nnx(
     if unconsumed:
       raise KeyError(f"converted keys never loaded into module: {unconsumed}")
   return loaded
+
+
+def convert_hf_state_dict_via_to_maxtext(
+    pt_state_dict: Mapping[str, Any],
+    hf_config: dict[str, Any],
+    maxtext_config: Any,
+    target_shapes: Mapping[str, tuple[int, ...]],
+    *,
+    lazy: bool = False,
+) -> dict[str, np.ndarray]:
+  """Converts a full HF state dict through the production `to_maxtext` per-parameter loop.
+
+  Unlike `convert_pytorch_module_to_maxtext_params` (unscanned only, test-side stacking), this
+  runs `to_maxtext`'s own loaders (`_get_hf_loading_function` / `_get_maxtext_weight`), so it
+  covers the scanned layout (`maxtext_config.scan_layers=True`): layer stacking on
+  `param_scan_axis`, nested (expert, block) stacking and the `MoEBiasVar` collection.
+
+  Args:
+    pt_state_dict: Full HF state dict (keys with or without the `language_model.` prefix).
+    hf_config: The Hugging Face (text) config dict.
+    maxtext_config: MaxText config; `scan_layers` selects the layout.
+    target_shapes: MaxText checkpoint key (with collection prefix, e.g. `MoEBiasVar-...`) -> shape,
+      as returned by `to_maxtext.get_maxtext_model_info`.
+    lazy: Build `LazyTensor`s (the `--lazy_load_tensors` path) and materialize them afterwards.
+
+  Returns:
+    MaxText checkpoint key (with collection prefix) -> converted NumPy array.
+  """
+  # pylint: disable=import-outside-toplevel,protected-access
+  from maxtext.checkpoint_conversion import to_maxtext
+  from maxtext.checkpoint_conversion.utils.utils import validate_and_filter_param_map_keys
+
+  scan_layers = bool(maxtext_config.scan_layers)
+  param_map = PARAM_MAPPING["kimi-k3"](hf_config, maxtext_config, scan_layers=scan_layers)
+  hook_map = HOOK_FNS["kimi-k3"](hf_config, maxtext_config, scan_layers=scan_layers, saving_to_hf=False)
+  keys = list(target_shapes)
+  index = {k: (i, tuple(target_shapes[k])) for i, k in enumerate(keys)}
+
+  def getter(hf_key, dtype=None):
+    del dtype
+    matching_key = _find_state_dict_key(hf_key, pt_state_dict)
+    if matching_key is None:
+      raise KeyError(f"HF key {hf_key} not in the state dict")
+    return _to_numpy(pt_state_dict[matching_key]).astype(np.float32)
+
+  weights = [None] * len(keys)
+  for mt_key in validate_and_filter_param_map_keys(param_map.keys(), set(keys)):
+    idx, shape = index[mt_key]
+    load_fn = to_maxtext._get_hf_loading_function(
+        param_map[mt_key], getter, hook_map.get(mt_key), shape, maxtext_config, mt_key
+    )
+    to_maxtext._get_maxtext_weight(load_fn, idx, shape, mt_key, weights, "float32", lazy)
+  return {k: np.asarray(w) for k, w in zip(keys, weights)}
+
+
+def load_checkpoint_params_into_nnx(module: nnx.Module, converted: Mapping[str, np.ndarray]) -> list[str]:
+  """`load_params_into_nnx` for checkpoint-keyed weights (`params-...` / `MoEBiasVar-...` keys)."""
+  return load_params_into_nnx(module, {_to_params_key(k): v for k, v in converted.items()}, prefix="params")
