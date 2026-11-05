@@ -48,7 +48,7 @@ import numpy as np
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL
 from maxtext.configs import pyconfig
-from maxtext.multimodal import processor_ming_talker
+from maxtext.multimodal import processor_ming
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -271,27 +271,27 @@ def main(argv: Sequence[str]) -> None:
   generator = MingTalkerGenerator(config)
 
   language = config.ming_talker_language or None
-  prompt = processor_ming_talker.build_tts_prompt(language)
-  instruction = processor_ming_talker.build_ip_instruction(config.ming_talker_ip_name)
+  prompt = processor_ming.build_tts_prompt(language)
+  instruction = processor_ming.build_ip_instruction(config.ming_talker_ip_name)
   frontend_path = os.environ.get("MING_TALKER_FRONTEND_PATH", "")
   if frontend_path:
-    fragments = processor_ming_talker.HFTextFrontend(frontend_path, config.ming_talker_max_fragment_length).fragments(
+    fragments = processor_ming.HFTextFrontend(frontend_path, config.ming_talker_max_fragment_length).fragments(
         config.prompt, language or "en"
     )
   else:
-    fragments = processor_ming_talker.split_text(config.prompt, config.ming_talker_max_fragment_length)
+    fragments = processor_ming.split_text(config.prompt, config.ming_talker_max_fragment_length)
   if not fragments:
     raise ValueError("Empty prompt: nothing to synthesize.")
 
   sample_rate = config.ming_vae_sample_rate
   chunks = []
   for index, fragment in enumerate(fragments):
-    input_ids = processor_ming_talker.talker_input_ids(tokenizer, fragment, prompt, instruction)
+    input_ids = processor_ming.talker_input_ids(tokenizer, fragment, prompt, instruction)
     start = time.time()
     result = generator.generate_latents(input_ids, seed=config.ming_talker_seed + index)
     generated = time.time()
     waveform = generator.latents_to_waveform(result["latents"])
-    chunks.append(processor_ming_talker.trim_trailing_silence(waveform, sample_rate))
+    chunks.append(processor_ming.trim_trailing_silence(waveform, sample_rate))
     max_logging.log(
         f"Fragment {index}: {fragment!r} -> {input_ids.shape[0]} prompt tokens, {result['latents'].shape[0]} latents,"
         f" {waveform.shape[0] / sample_rate:.2f} s audio (talker {generated - start:.1f} s,"

@@ -17,7 +17,7 @@
 # LLM: Qwen2 decoder (`talker/llm/config.json`), fed with input embeddings. Its last hidden state drives a
 # flow-matching DiT head that samples one 64-dim AudioVAE latent per step; an aggregator embeds the latent
 # as the next LLM input, a stop head ends the fragment, and the AudioVAE decoder turns latents into 44.1 kHz
-# audio. See `maxtext.models.ming_talker` and `maxtext.inference.ming_talker_decode`.
+# audio. See `MingTalkerHeads` in `maxtext.models.ming` and `maxtext.inference.ming_talker_decode`.
 
 decoder_block: "qwen2"
 base_emb_dim: 896

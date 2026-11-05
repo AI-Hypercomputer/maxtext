@@ -1797,7 +1797,7 @@ class Ming(BaseModel):
   ming_norm_audio_embeds: bool = Field(
       True, description="L2-normalize the projected audio embeddings (norm_query_embeds)."
   )
-  # Talker (text -> speech): Qwen2 LLM (the regular decoder) + the heads below, see `maxtext.models.ming_talker`.
+  # Talker (text -> speech): Qwen2 LLM (decoder) + the heads below, see `MingTalkerHeads` in `maxtext.models.ming`.
   ming_talker: bool = Field(
       False, description="Build the Ming talker heads (CFM DiT, aggregator, stop/speaker heads, AudioVAE decoder)."
   )

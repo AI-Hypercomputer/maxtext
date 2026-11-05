@@ -150,9 +150,9 @@ class Transformer(nnx.Module):
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
     # Ming talker (text -> speech): the decoder above is the talker LLM; these are its non-LLM heads.
     if getattr(cfg, "ming_talker", False):
-      from maxtext.models import ming_talker  # pylint: disable=import-outside-toplevel
+      from maxtext.models import ming  # pylint: disable=import-outside-toplevel
 
-      self.ming_talker = ming_talker.MingTalkerHeads(config=cfg, rngs=rngs)
+      self.ming_talker = ming.MingTalkerHeads(config=cfg, rngs=rngs)
     else:
       self.ming_talker = None
 

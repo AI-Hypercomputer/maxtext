@@ -4375,7 +4375,7 @@ def MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
   """Maps MaxText Ming talker keys to the HF `talker/model.safetensors` + `talker/vae/model.safetensors` keys.
 
   The talker LLM is a Qwen2 decoder (`model.*`, reusing the Qwen mapping; embeddings are tied so there is
-  no `lm_head`). The heads live under `params-ming_talker-*` (see `maxtext.models.ming_talker`). Only the
+  no `lm_head`). The heads live under `params-ming_talker-*` (see `MingTalkerHeads` in `maxtext.models.ming`). Only the
   AudioVAE decoder is mapped (`decoder.*`); the VAE encoder is used for voice cloning only.
   """
   mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
