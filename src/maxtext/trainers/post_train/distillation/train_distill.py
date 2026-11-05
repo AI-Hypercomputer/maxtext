@@ -54,6 +54,7 @@ from orbax import checkpoint
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.layers import quantizations
 from maxtext.layers.learn_to_init_layer import apply_lti_model_update
 from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.distillation import distillation_utils, lti_utils
@@ -75,7 +76,6 @@ from maxtext.utils import model_creation_utils
 from tunix.sft import peft_trainer
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
-
 
 # -----------------------------------------------------------------------------
 # Distillation Optimizer with cosine decay and warmup
@@ -761,6 +761,8 @@ def _train_distill_impl(
             student_weights_share_map=getattr(student_config, "distill_student_weights_share_map", {}),
         )
 
+      # Prune the student's initial weights with the configured N:M sparsity (no-op if unset).
+      quantizations.apply_initial_weight_sparsity(student_model, student_config)
       student_model.train()
       model_bundle = ModelBundle(teacher_model, student_model)
 
