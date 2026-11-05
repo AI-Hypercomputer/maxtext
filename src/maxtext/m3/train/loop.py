@@ -40,7 +40,6 @@ Example (CPU or TPU)::
 """
 
 import functools
-import math
 import time
 from collections.abc import Sequence
 
@@ -56,14 +55,26 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core import kernels as m3_kernels
-from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.core import moe as m3_moe
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, mesh_from_config
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 
-# Mesh axes the batch dimension is split over. Matches the defaults of
-# `create_mesh` (fsdp within a slice, data across slices).
+# Legacy batch axes constant preserved for callers; `batch_spec` resolves the
+# active `Sharding` strategy's batch rule (`("data", "fsdp", "expert")` by default).
 _BATCH_AXES = ("data", "fsdp")
+
+
+def batch_spec(sharding: Sharding) -> P:
+  """Returns the `PartitionSpec` for `(batch, length)` token inputs under `sharding`."""
+  return sharding("input_tokens", ("batch", "length"), TensorType.ACTIVATION)
+
+
+def _batch_shards(mesh: Mesh, spec: P) -> int:
+  """Counts how many ways `spec` splits axis 0 across `mesh`."""
+  axes = m3_kernels.resolve_mesh_axes(mesh, spec[0] if spec else None)
+  return m3_kernels.mesh_axis_size(mesh, axes)
 
 
 def make_optimizer(config) -> optax.GradientTransformation:
@@ -75,30 +86,34 @@ def make_optimizer(config) -> optax.GradientTransformation:
 
 
 @functools.lru_cache(maxsize=32)
-def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Mesh):
-  """Jitted batch generator for one shape, with output sharded along the batch dimension.
-
-  One asynchronously dispatched program instead of several eager ops plus a
-  `device_put`. This avoids idle time at the start of each step. `out_shardings`
-  (rather than `with_sharding_constraint`) keeps the exact `P(_BATCH_AXES)` spec
-  instead of letting XLA drop size-1 axes.
-  """
+def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Mesh, spec: P):
+  """Jitted batch generator for one shape, with output laid out according to `spec`."""
 
   def body(key: jax.Array) -> dict[str, jax.Array]:
     tokens = jax.random.randint(key, (batch_size, seq_len + 1), 0, vocab_size, dtype=jnp.int32)
     positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, seq_len))
     return {"inputs": tokens[:, :-1], "targets": tokens[:, 1:], "positions": positions}
 
-  return jax.jit(body, out_shardings=NamedSharding(mesh, P(_BATCH_AXES)))
+  axes = m3_kernels.resolve_mesh_axes(mesh, spec[0] if spec else None)
+  resolved_spec = P(axes, None) if axes is not None else P(None, None)
+  return jax.jit(body, out_shardings=NamedSharding(mesh, resolved_spec))
 
 
-def make_synthetic_batch(config, mesh: Mesh, key: jax.Array) -> dict[str, jax.Array]:
-  """Random token batch, sharded along the batch dimension.
-
-  Targets are the inputs shifted left by one, so the loss is ordinary
-  next-token prediction rather than a constant.
-  """
-  fn = _synthetic_batch_fn(config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh)
+def make_synthetic_batch(
+    config,
+    mesh: Mesh,
+    key: jax.Array,
+    sharding: Sharding | None = None,
+) -> dict[str, jax.Array]:
+  """Random token batch, sharded along the strategy's batch axes."""
+  spec = batch_spec(sharding or DefaultSharding())
+  fn = _synthetic_batch_fn(
+      config.global_batch_size_to_train_on,
+      config.max_target_length,
+      config.vocab_size,
+      mesh,
+      spec,
+  )
   return fn(key)
 
 
@@ -129,9 +144,9 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
 def train_loop(config) -> float:
   """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
   m3_kernels.validate_attention_config(config)
-  # `create_mesh()` defaults (fsdp within a slice, data across slices) are used as
-  # is; the `ici_*`/`dcn_*` config fields are not wired through yet.
-  mesh = create_mesh()
+  m3_moe.validate_moe_config(config)
+  mesh = mesh_from_config(config)
+  sharding = DefaultSharding()
   max_logging.log(f"m3 loop: mesh {dict(mesh.shape)} over {len(jax.devices())} device(s)")
 
   # `global_batch_size_to_train_on` already includes gradient accumulation, and
@@ -142,11 +157,12 @@ def train_loop(config) -> float:
         f"got gradient_accumulation_steps={config.gradient_accumulation_steps}."
     )
   batch_size = config.global_batch_size_to_train_on
-  batch_shards = math.prod(mesh.shape[axis] for axis in _BATCH_AXES)
+  spec = batch_spec(sharding)
+  batch_shards = _batch_shards(mesh, spec)
   if batch_size == 0 or batch_size % batch_shards:
     raise ValueError(
         f"per_device_batch_size={config.per_device_batch_size} gives a global batch of {batch_size}, which does not "
-        f"split over the {batch_shards} shards of mesh axes {_BATCH_AXES}."
+        f"split over the {batch_shards} shards of {spec}."
     )
 
   with jax.set_mesh(mesh):
@@ -175,7 +191,7 @@ def train_loop(config) -> float:
     pending = None  # (step, loss) dispatched but not yet logged.
     last_done = time.perf_counter()
     for step in range(config.steps):
-      batch = make_synthetic_batch(config, mesh, jax.random.fold_in(data_key, step))
+      batch = make_synthetic_batch(config, mesh, jax.random.fold_in(data_key, step), sharding)
       prof.maybe_activate_profiler(step, pending)
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         step_loss = step_fn(batch)

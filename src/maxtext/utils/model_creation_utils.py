@@ -33,7 +33,6 @@ import collections
 from collections.abc import Sequence
 import dataclasses
 from functools import partial
-import math
 import os
 import subprocess
 import sys
@@ -640,9 +639,11 @@ def create_model(
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.core import moe as m3_moe  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
     m3_kernels.validate_attention_config(config)
+    m3_moe.validate_moe_config(config)
     model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
     model = m3_scan.maybe_apply_scan(model, config)
     return model
@@ -670,55 +671,8 @@ def _apply_m3_default_named_sharding(
     named_sharding_state: Any,
     mesh: Any,
 ) -> Any:
-  """Assigns 1D NamedSharding across fsdp/fsdp_transpose for unpartitioned M3 variables.
-
-  Falls back to the largest non-data/non-stage mesh axis when
-  fsdp/fsdp_transpose are absent.
-  """
-  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
-  if not shard_axes:
-    fallback_axes = [
-        (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
-    ]
-    if not fallback_axes:
-      max_logging.log(
-          "WARNING: M3 default sharding found no fsdp/fsdp_transpose or"
-          " non-data axis with size > 1; keeping weights replicated."
-      )
-      return named_sharding_state
-    shard_axes = (max(fallback_axes, key=lambda x: x[1])[0],)
-  axis_size = math.prod(int(mesh.shape[a]) for a in shard_axes)
-  spec_axis = shard_axes[0] if len(shard_axes) == 1 else shard_axes
-
-  def _shard_leaf(path, a_var, s_var):
-    cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
-    is_unsharded = (
-        not hasattr(cur_sharding, "spec")
-        or cur_sharding.spec == jax.sharding.PartitionSpec()
-        or all(s is None for s in cur_sharding.spec)
-    )
-    if not is_unsharded:
-      return s_var
-    inner_a = a_var.get_value() if hasattr(a_var, "get_value") else a_var
-    if not hasattr(inner_a, "shape"):
-      return s_var
-    shape = inner_a.shape
-    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
-    # Scanned `decoder.cycles.{gdn_0,gdn_1,gdn_2,qsa_3}` params carry a leading cycle axis; never shard it.
-    start_d = 1 if "cycles" in path_strs else 0
-    for d in range(start_d, len(shape)):
-      if shape[d] % axis_size == 0:
-        new_spec = jax.sharding.PartitionSpec(*(spec_axis if i == d else None for i in range(len(shape))))
-        new_sharding = jax.sharding.NamedSharding(mesh, new_spec)
-        return s_var.replace(new_sharding) if hasattr(s_var, "replace") else new_sharding
-    return s_var
-
-  return jax.tree_util.tree_map_with_path(
-      _shard_leaf,
-      abs_var_state,
-      named_sharding_state,
-      is_leaf=lambda n: isinstance(n, nnx.Variable),
-  )
+  """Delegates unpartitioned m3 variable sharding to `sharding.apply_m3_default_named_sharding`."""
+  return sharding.apply_m3_default_named_sharding(abs_var_state, named_sharding_state, mesh)
 
 
 def create_nnx_abstract_model(

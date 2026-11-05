@@ -19,7 +19,9 @@ import collections
 from collections.abc import Iterable
 import contextlib
 import inspect  # for debugging only
+import math
 from pathlib import Path
+from typing import Any
 
 from flax import nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
@@ -1423,3 +1425,69 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+def apply_m3_default_named_sharding(
+    abs_var_state: Any,
+    named_sharding_state: Any,
+    mesh: Any,
+    *,
+    scan_layers: bool = False,
+    param_scan_axis: int = 1,
+) -> Any:
+  """Assigns 1D NamedSharding across fsdp/fsdp_transpose/expert for unpartitioned m3 variables.
+
+  Preserves variables whose m3 sharding strategy explicitly set `out_sharding`
+  (e.g. `P(None)` on norm scales), skips stacked scan axes (`cycles` axis 0 and
+  `ScannedLayers` `param_scan_axis`), and falls back to the largest non-data/non-stage
+  mesh axis when `fsdp`, `fsdp_transpose`, and `expert` are size 1 or absent.
+  """
+  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose", "expert") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
+  if not shard_axes:
+    fallback_axes = [
+        (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
+    ]
+    if not fallback_axes:
+      max_logging.log(
+          "WARNING: M3 default sharding found no fsdp/fsdp_transpose/expert or"
+          " non-data axis with size > 1; keeping weights replicated."
+      )
+      return named_sharding_state
+    shard_axes = (max(fallback_axes, key=lambda x: x[1])[0],)
+  axis_size = math.prod(int(mesh.shape[a]) for a in shard_axes)
+  spec_axis = shard_axes[0] if len(shard_axes) == 1 else shard_axes
+
+  def _shard_leaf(path, a_var, s_var):
+    if hasattr(a_var, "get_metadata") and isinstance(a_var.get_metadata().get("out_sharding"), P):
+      return s_var
+    cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
+    is_unsharded = (
+        not hasattr(cur_sharding, "spec") or cur_sharding.spec == P() or all(s is None for s in cur_sharding.spec)
+    )
+    if not is_unsharded:
+      return s_var
+    inner_a = a_var.get_value() if hasattr(a_var, "get_value") else a_var
+    if not hasattr(inner_a, "shape") or not inner_a.shape:
+      return s_var
+    shape = inner_a.shape
+    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
+    skip_axes: set[int] = set()
+    if "cycles" in path_strs:
+      skip_axes.add(0)
+    elif scan_layers and "layers" in path_strs:
+      skip_axes.add(min(int(param_scan_axis), len(shape) - 1) if isinstance(a_var, nnx.Param) else 0)
+    for d, dim in enumerate(shape):
+      if d in skip_axes:
+        continue
+      if dim % axis_size == 0:
+        new_spec = P(*(spec_axis if i == d else None for i in range(len(shape))))
+        new_sharding = NamedSharding(mesh, new_spec)
+        return s_var.replace(new_sharding) if hasattr(s_var, "replace") else new_sharding
+    return s_var
+
+  return jax.tree_util.tree_map_with_path(
+      _shard_leaf,
+      abs_var_state,
+      named_sharding_state,
+      is_leaf=lambda n: isinstance(n, nnx.Variable),
+  )
