@@ -17,6 +17,10 @@
 # This script automates finding the correct pod in a MaxText server workload
 # and establishes a port-forward connection to it.
 #
+# NOTE: XPK is deprecated; launch the server with Cluster Toolkit (`gcluster job submit`)
+# as described in benchmarks/api_server/README.md. Despite its name, this helper only
+# uses gcloud/kubectl, so it also works for Cluster Toolkit workloads.
+#
 # Usage:
 # bash port_forward_xpk.sh job_name=<job_name> project=<project> zone=<zone> cluster=<cluster> [namespace=<namespace>]
 

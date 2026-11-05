@@ -12,8 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backward-compatible re-export shim for benchmarks.ctk_configs."""
+"""Deprecated backward-compatible re-export shim for benchmarks.ctk_configs.
+
+XPK is deprecated. MaxText benchmarks now run on Cluster Toolkit (gcluster);
+import from `benchmarks.ctk_configs` instead. This module only re-exports
+those symbols for existing callers and may be removed in a future release.
+"""
+
+import warnings
 
 # pylint: disable=unused-import,wildcard-import,unused-wildcard-import
 from benchmarks.ctk_configs import *  # noqa: F401,F403
 from benchmarks.ctk_configs import ClusterConfig, XpkClusterConfig
+
+warnings.warn(
+    "benchmarks.xpk_configs is deprecated because XPK is deprecated; "
+    "use benchmarks.ctk_configs (Cluster Toolkit) instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
