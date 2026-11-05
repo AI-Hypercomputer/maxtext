@@ -615,6 +615,32 @@ qwen3_32b_config = transformers.Qwen3Config(
 )
 
 
+# from https://huggingface.co/meta-llama/Meta-Llama-3-8B/blob/main/config.json
+# Differs from 3.1-8b only in RoPE scaling and context length.
+llama3_8b_config = transformers.LlamaConfig(
+    vocab_size=128256,
+    hidden_size=4096,
+    intermediate_size=14336,
+    num_hidden_layers=32,
+    num_attention_heads=32,
+    num_key_value_heads=8,
+    max_position_embeddings=8192,
+    head_dim=128,
+    rms_norm_eps=1e-5,
+    bos_token_id=128000,
+    eos_token_id=128001,
+    attention_bias=False,
+    attention_dropout=0.0,
+    hidden_act="silu",
+    initializer_range=0.02,
+    mlp_bias=False,
+    model_type="llama",
+    pretraining_tp=1,
+    rope_theta=500000.0,
+    tie_word_embeddings=False,
+    use_cache=True,
+)
+
 llama31_8b_config = transformers.LlamaConfig(
     vocab_size=128256,
     hidden_size=4096,
@@ -2575,6 +2601,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-vl-30b-a3b": qwen3_vl_30b_a3b_config,
     "weaver-mini": weaver_mini_config,
     "weaver-max": weaver_max_config,
+    "llama3-8b": llama3_8b_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
