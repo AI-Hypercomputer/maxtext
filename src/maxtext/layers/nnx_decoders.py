@@ -2115,6 +2115,7 @@ class NNXDecoder(nnx.Module):
       multimodal_input: None | MultimodalInput = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings=None,
+      skip_lm_head: bool = False,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -2650,6 +2651,10 @@ class NNXDecoder(nnx.Module):
         and getattr(cfg, "indexer_loss_scaling_factor", 0.0) > 0.0
         and not getattr(cfg, "indexer_sparse_training", False)
     ) and model_mode == MODEL_MODE_TRAIN:
+      logits = None
+
+    elif skip_lm_head:
+      hidden_state = self._reduce_mhc_streams(hidden_state)
       logits = None
 
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
