@@ -19,7 +19,9 @@ model structures with Tunix's training interfaces.
 """
 
 import abc
-from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence
+import dataclasses
+import functools
+from typing import Any, Callable, Iterator, List, Literal, NamedTuple, Optional, Sequence
 
 import flax
 from flax import nnx
@@ -35,7 +37,6 @@ from maxtext.common import grain_utility
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 from tunix.sft import peft_trainer
 
-
 # -----------------------------------------------------------------------------
 # Custom Data Structures
 # -----------------------------------------------------------------------------
@@ -45,14 +46,57 @@ from tunix.sft import peft_trainer
 class DistillationForwardOutput:
   """Dataclass to carry MaxText-specific output fields."""
 
-  #: logits
-  logits: jax.Array
+  #: Logits [batch, seq, vocab]. With `distill_fused_lm_head` (training mode), a
+  #: `(hidden_states [batch, seq, emb], embedding_table [vocab, emb])` tuple instead;
+  #: the strategy then projects to logits one sequence chunk at a time.
+  logits: jax.Array | tuple[jax.Array, jax.Array]
   #: out_projection_activations
   out_projection_activations: jax.Array | None = None
   #: moe load balance loss
   moe_lb_loss: jax.Array | None = None
   #: top-k indices for sparse offline distillation
   top_k_indices: jax.Array | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class LMHeadSpec:
+  """Per-model settings needed to turn (hidden_states, embedding_table) into logits.
+
+  Mirrors the tied-embedding branch of the decoder's `apply_output_head`.
+  """
+
+  #: Divide the logits by sqrt(emb_dim) (`normalize_embedding_logits`).
+  normalize_embedding_logits: bool
+  #: tanh soft cap applied to the logits (`final_logits_soft_cap`); None or 0 disables it.
+  final_logits_soft_cap: float | None
+  #: Accumulate the logits matmul in float32 (`logits_dot_in_fp32`).
+  logits_dot_in_fp32: bool
+
+
+def project_to_logits(hidden: jax.Array, embedding_table: jax.Array, head: LMHeadSpec) -> jax.Array:
+  """Computes tied-embedding logits [batch, seq, vocab] like the decoder's `apply_output_head`."""
+  dot_dtype = jnp.float32 if head.logits_dot_in_fp32 else hidden.dtype
+  logits = jnp.einsum(
+      "...e,ve->...v", hidden, jnp.asarray(embedding_table, jnp.bfloat16), preferred_element_type=dot_dtype
+  )
+  if head.normalize_embedding_logits:
+    logits = logits / jnp.sqrt(hidden.shape[-1])
+  if head.final_logits_soft_cap:
+    logits = jnp.tanh(logits / head.final_logits_soft_cap) * head.final_logits_soft_cap
+  return logits
+
+
+class Labels(NamedTuple):
+  """Hard-label targets returned by `DistillationStrategy.create_labels`.
+
+  Integer targets plus a mask are used instead of masked one-hot vectors so that
+  no [batch, seq, vocab] label tensor is allocated.
+  """
+
+  #: Integer target token ids, [batch, seq]. Masked-out positions hold 0.
+  targets: jax.Array
+  #: Float32 validity mask, [batch, seq]: 1.0 for positions that contribute to the loss.
+  mask: jax.Array
 
 
 @flax.struct.dataclass(frozen=True)
@@ -250,6 +294,156 @@ def calculate_distillation_tflops_per_device(
   return student_tflops + teacher_tflops, student_tflops, teacher_tflops
 
 
+def _sum_over_seq_chunks(
+    fn: Callable[..., tuple[jax.Array, ...]],
+    num_chunks: int,
+    seq_arrays: Sequence[jax.Array],
+    *extra_args: Any,
+) -> tuple[jax.Array, ...]:
+  """Sums the tuple of scalars returned by `fn` over equal chunks of the sequence axis.
+
+  `fn(*seq_chunks, *extra_args)` is called on `num_chunks` equal slices of axis 1
+  of every array in `seq_arrays` and is rematerialized (`jax.checkpoint`) per
+  chunk, so the backward pass only keeps one chunk's intermediates (e.g. float32
+  [batch, chunk, vocab] softmax tensors) live at a time.
+
+  Args:
+    fn: Function returning a tuple of scalars (e.g. masked loss sums) for one chunk.
+    num_chunks: Number of chunks; must divide the sequence length.
+    seq_arrays: Arrays of shape [batch, seq, ...] that are sliced along axis 1.
+    *extra_args: Arguments passed unchanged to every call of `fn`.
+
+  Returns:
+    The element-wise sum of `fn`'s outputs over all chunks.
+  """
+  seq_len = seq_arrays[0].shape[1]
+  if num_chunks <= 0 or seq_len % num_chunks != 0:
+    raise ValueError(f"Sequence length {seq_len} must be divisible by the number of loss chunks ({num_chunks}).")
+  ckpt_fn = jax.checkpoint(fn)
+  if num_chunks == 1:
+    return ckpt_fn(*seq_arrays, *extra_args)
+  chunk_len = seq_len // num_chunks
+
+  def body(acc, idx):
+    chunks = [jax.lax.dynamic_slice_in_dim(a, idx * chunk_len, chunk_len, axis=1) for a in seq_arrays]
+    return jax.tree.map(jnp.add, acc, ckpt_fn(*chunks, *extra_args)), None
+
+  chunk_shapes = [jax.ShapeDtypeStruct((a.shape[0], chunk_len) + a.shape[2:], a.dtype) for a in seq_arrays]
+  out_shapes = jax.eval_shape(fn, *chunk_shapes, *extra_args)
+  init = jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), out_shapes)
+  acc, _ = jax.lax.scan(body, init, jnp.arange(num_chunks))
+  return acc
+
+
+def _logit_loss_sums(
+    s_logits: jax.Array,
+    t_logits: jax.Array,
+    targets: jax.Array,
+    mask: jax.Array,
+    temperature: jax.Array,
+    *,
+    unit_temperature: bool,
+    zero_hard_loss_weight: bool,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Masked sums of (KL at T, KL at T=1, student CE, teacher CE) over full-vocabulary logits.
+
+  Args:
+    s_logits: Student logits, [batch, seq, vocab].
+    t_logits: Teacher logits, [batch, seq, vocab]. No gradient flows into them.
+    targets: Integer targets, [batch, seq].
+    mask: Validity mask, [batch, seq].
+    temperature: Softmax temperature for the soft loss.
+    unit_temperature: True if the temperature is 1 for the whole run; the T=1 KL
+      metric then equals the soft KL and is not recomputed.
+    zero_hard_loss_weight: True if the hard (student CE) loss has weight 0 for the
+      whole run; the student CE is then a metric only and gets no backward pass.
+
+  Returns:
+    (kl_at_T_sum, kl_T1_sum, student_ce_sum, teacher_ce_sum).
+  """
+  s = s_logits.astype(jnp.float32)
+  t = jax.lax.stop_gradient(t_logits).astype(jnp.float32)
+  kl_soft_pos = optax.kl_divergence(
+      jax.nn.log_softmax(s / temperature, axis=-1), jax.nn.softmax(t / temperature, axis=-1)
+  )
+  kl_soft_sum = jnp.sum(kl_soft_pos * mask)
+  if unit_temperature:
+    kl_t1_sum = jax.lax.stop_gradient(kl_soft_sum)
+  else:
+    log_s_1 = jax.nn.log_softmax(jax.lax.stop_gradient(s), axis=-1)
+    kl_t1_sum = jnp.sum(optax.kl_divergence(log_s_1, jax.nn.softmax(t, axis=-1)) * mask)
+  s_for_ce = jax.lax.stop_gradient(s) if zero_hard_loss_weight else s
+  ce_student_sum = jnp.sum(optax.softmax_cross_entropy_with_integer_labels(logits=s_for_ce, labels=targets) * mask)
+  ce_teacher_sum = jnp.sum(optax.softmax_cross_entropy_with_integer_labels(logits=t, labels=targets) * mask)
+  return kl_soft_sum, kl_t1_sum, ce_student_sum, ce_teacher_sum
+
+
+# Positional arguments follow the `_sum_over_seq_chunks` protocol: fn(*seq_chunks, *extra_args).
+def _fused_logit_loss_sums(  # pylint: disable=too-many-positional-arguments
+    s_hidden: jax.Array,
+    t_hidden: jax.Array,
+    targets: jax.Array,
+    mask: jax.Array,
+    s_embedding: jax.Array,
+    t_embedding: jax.Array,
+    temperature: jax.Array,
+    *,
+    student_head: LMHeadSpec,
+    teacher_head: LMHeadSpec,
+    unit_temperature: bool,
+    zero_hard_loss_weight: bool,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Like `_logit_loss_sums`, but first projects hidden states to logits with each model's LM head."""
+  s_logits = project_to_logits(s_hidden, s_embedding, student_head)
+  t_logits = project_to_logits(jax.lax.stop_gradient(t_hidden), jax.lax.stop_gradient(t_embedding), teacher_head)
+  return _logit_loss_sums(
+      s_logits,
+      t_logits,
+      targets,
+      mask,
+      temperature,
+      unit_temperature=unit_temperature,
+      zero_hard_loss_weight=zero_hard_loss_weight,
+  )
+
+
+def _top_k_logit_loss_sums(
+    s_logits: jax.Array,
+    t_top_k_logits: jax.Array,
+    top_k_indices: jax.Array,
+    targets: jax.Array,
+    mask: jax.Array,
+    *,
+    temperature: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Offline-mode loss sums when only the teacher's top-K logits are stored.
+
+  KL(T || S) is computed with both distributions normalized over the teacher's
+  top-K vocabulary subset. Full teacher logits are unavailable, so the teacher CE
+  and the T=1 KL metrics are reported as 0.
+
+  Args:
+    s_logits: Student logits, [batch, seq, vocab].
+    t_top_k_logits: Teacher top-K logits, [batch, seq, K].
+    top_k_indices: Vocabulary indices of `t_top_k_logits`, [batch, seq, K].
+    targets: Integer targets, [batch, seq].
+    mask: Validity mask, [batch, seq].
+    temperature: Softmax temperature for the soft loss.
+
+  Returns:
+    (kl_at_T_sum, 0, student_ce_sum, 0).
+  """
+  s = s_logits.astype(jnp.float32)
+  t = jax.lax.stop_gradient(t_top_k_logits).astype(jnp.float32)
+  t_p = jax.nn.softmax(t / temperature, axis=-1)
+  log_t_p = jax.nn.log_softmax(t / temperature, axis=-1)
+  log_s_p = jax.nn.log_softmax(jnp.take_along_axis(s, top_k_indices, axis=-1) / temperature, axis=-1)
+  kl_soft_sum = jnp.sum(jnp.sum(t_p * (log_t_p - log_s_p), axis=-1) * mask)
+  ce_student_sum = jnp.sum(optax.softmax_cross_entropy_with_integer_labels(logits=s, labels=targets) * mask)
+  zero = jnp.zeros((), dtype=jnp.float32)
+  return kl_soft_sum, zero, ce_student_sum, zero
+
+
 class DistillationStrategy(abc.ABC):
   """Abstract base class for MaxText Distillation Strategies."""
 
@@ -274,7 +468,7 @@ class DistillationStrategy(abc.ABC):
       self,
       student_output: "DistillationForwardOutput",
       teacher_output: "DistillationForwardOutput",
-      labels: jax.Array,
+      labels: Labels,
       step: jax.Array | None = None,
   ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes the distillation loss.
@@ -282,7 +476,7 @@ class DistillationStrategy(abc.ABC):
     Args:
         student_output: The forward pass output of the student model.
         teacher_output: The forward pass output of the frozen teacher model.
-        labels: The masked one-hot encoded ground truth labels.
+        labels: The ground truth labels from `create_labels`.
         step: Current training step for dynamic scheduling. If None, uses fixed values.
 
     Returns:
@@ -295,13 +489,13 @@ class DistillationStrategy(abc.ABC):
   def compute_eval_loss(
       self,
       student_output: "DistillationForwardOutput",
-      labels: jax.Array,
+      labels: Labels,
   ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes the evaluation loss (typically just the task loss).
 
     Args:
         student_output: The forward pass output of the student model.
-        labels: The masked one-hot encoded ground truth labels.
+        labels: The ground truth labels from `create_labels`.
 
     Returns:
         A tuple containing the scalar loss and an empty (or auxiliary) dict.
@@ -309,9 +503,9 @@ class DistillationStrategy(abc.ABC):
     raise NotImplementedError
 
   @abc.abstractmethod
-  def create_labels(self, targets: jax.Array, targets_segmentation: Optional[jax.Array] = None, **kwargs) -> jax.Array:
+  def create_labels(self, targets: jax.Array, targets_segmentation: Optional[jax.Array] = None, **kwargs) -> Labels:
     """
-    Creates labels tensor to compute the loss
+    Creates the labels used to compute the loss.
     """
     raise NotImplementedError
 
@@ -339,6 +533,10 @@ class CombinedDistillationStrategy(DistillationStrategy):
       beta_end: float | None = None,
       beta_schedule: Literal["constant", "linear", "cosine"] = "constant",
       max_steps: int = 1,
+      logit_loss_chunks: int | None = None,
+      fused_lm_head_chunks: int | None = None,
+      student_lm_head: LMHeadSpec | None = None,
+      teacher_lm_head: LMHeadSpec | None = None,
   ):
     """Initializes the Combined distillation strategy.
 
@@ -363,6 +561,18 @@ class CombinedDistillationStrategy(DistillationStrategy):
         beta_end: Target beta_feature value at end of training. None keeps beta fixed.
         beta_schedule: Schedule type for beta annealing.
         max_steps: Total training steps, used for schedule computation.
+        logit_loss_chunks: Number of sequence chunks used to compute the online
+          (full-vocabulary) logit losses. Each chunk is rematerialized in the
+          backward pass, which bounds the float32 softmax intermediates to one
+          chunk. Must divide the sequence length. None picks 4 chunks when the
+          sequence length is a multiple of 4 and at least 512, else 1.
+        fused_lm_head_chunks: Number of sequence chunks for models that return
+          `(hidden_states, embedding_table)` (`distill_fused_lm_head`). Logits are
+          computed per chunk with `student_lm_head` / `teacher_lm_head`, so full
+          sequence logits are never materialized. Must divide the sequence length.
+          None means the models return logits.
+        student_lm_head: LM head settings of the student; required with `fused_lm_head_chunks`.
+        teacher_lm_head: LM head settings of the teacher; required with `fused_lm_head_chunks`.
     """
 
     super().__init__(
@@ -385,6 +595,17 @@ class CombinedDistillationStrategy(DistillationStrategy):
     self.beta_end = beta_end
     self.beta_schedule = beta_schedule
     self.max_steps = max_steps
+    if logit_loss_chunks is not None and logit_loss_chunks <= 0:
+      raise ValueError(f"logit_loss_chunks must be positive, got {logit_loss_chunks}")
+    self.logit_loss_chunks = logit_loss_chunks
+    if fused_lm_head_chunks is not None:
+      if fused_lm_head_chunks <= 0:
+        raise ValueError(f"fused_lm_head_chunks must be positive, got {fused_lm_head_chunks}")
+      if student_lm_head is None or teacher_lm_head is None:
+        raise ValueError("fused_lm_head_chunks requires student_lm_head and teacher_lm_head.")
+    self.fused_lm_head_chunks = fused_lm_head_chunks
+    self.student_lm_head = student_lm_head
+    self.teacher_lm_head = teacher_lm_head
 
     # Validate schedule parameter ranges
     if alpha_end is not None and not 0.0 <= alpha_end <= 1.0:
@@ -459,11 +680,72 @@ class CombinedDistillationStrategy(DistillationStrategy):
     beta_feature = compute_schedule(step, self.max_steps, self.beta_feature, self.beta_end, self.beta_schedule)
     return alpha, temperature, beta_feature
 
+  def _is_fixed_at(self, start: float, end: float | None, schedule: str, value: float) -> bool:
+    """Returns True if a scheduled weight equals `value` for the whole run."""
+    return start == value and (end is None or schedule == "constant" or end == value)
+
+  def _logit_loss_sums(
+      self,
+      student_output: DistillationForwardOutput,
+      teacher_output: DistillationForwardOutput,
+      targets: jax.Array,
+      mask: jax.Array,
+      temperature: jax.Array,
+  ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Returns masked sums of (KL at T, KL at T=1, student CE, teacher CE)."""
+    fixed_weights = {
+        "unit_temperature": self._is_fixed_at(self.temperature, self.temperature_end, self.temperature_schedule, 1.0),
+        "zero_hard_loss_weight": self._is_fixed_at(self.alpha, self.alpha_end, self.alpha_schedule, 1.0),
+    }
+    s_logits = student_output.logits
+    t_logits = teacher_output.logits
+    num_fused_chunks = self.fused_lm_head_chunks
+    student_head, teacher_head = self.student_lm_head, self.teacher_lm_head
+    if isinstance(s_logits, tuple) or isinstance(t_logits, tuple):
+      if (
+          not isinstance(s_logits, tuple)
+          or not isinstance(t_logits, tuple)
+          or num_fused_chunks is None
+          or student_head is None
+          or teacher_head is None
+      ):
+        raise ValueError(
+            "Fused LM-head outputs (hidden_states, embedding_table) require both the student and the teacher to use "
+            "distill_fused_lm_head and the strategy to be built with fused_lm_head_chunks."
+        )
+      s_hidden, s_embedding = s_logits
+      t_hidden, t_embedding = t_logits
+      loss_fn = functools.partial(
+          _fused_logit_loss_sums, student_head=student_head, teacher_head=teacher_head, **fixed_weights
+      )
+      kl_sum, kl_t1_sum, ce_student_sum, ce_teacher_sum = _sum_over_seq_chunks(
+          loss_fn,
+          num_fused_chunks,
+          (s_hidden, t_hidden, targets, mask),
+          s_embedding,
+          t_embedding,
+          temperature,
+      )
+      return kl_sum, kl_t1_sum, ce_student_sum, ce_teacher_sum
+    if teacher_output.top_k_indices is not None:
+      return _top_k_logit_loss_sums(
+          s_logits, t_logits, teacher_output.top_k_indices, targets, mask, temperature=temperature
+      )
+    loss_fn = functools.partial(_logit_loss_sums, **fixed_weights)
+    seq_len = s_logits.shape[1]
+    num_chunks = self.logit_loss_chunks
+    if num_chunks is None:
+      num_chunks = 4 if seq_len >= 512 and seq_len % 4 == 0 else 1
+    kl_sum, kl_t1_sum, ce_student_sum, ce_teacher_sum = _sum_over_seq_chunks(
+        loss_fn, num_chunks, (s_logits, t_logits, targets, mask), temperature
+    )
+    return kl_sum, kl_t1_sum, ce_student_sum, ce_teacher_sum
+
   def compute_loss(
       self,
       student_output: DistillationForwardOutput,
       teacher_output: DistillationForwardOutput,
-      labels: jax.Array,
+      labels: Labels,
       step: jax.Array | None = None,
   ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes Loss and Auxiliary Metrics.
@@ -475,9 +757,6 @@ class CombinedDistillationStrategy(DistillationStrategy):
     # Resolve scheduled weights for this step
     alpha, temperature, beta_feature = self._get_scheduled_weights(step)
 
-    s_logits = student_output.logits.astype(jnp.float32)
-    t_logits = teacher_output.logits.astype(jnp.float32)
-
     s_features = student_output.out_projection_activations
     t_features = teacher_output.out_projection_activations
 
@@ -487,62 +766,16 @@ class CombinedDistillationStrategy(DistillationStrategy):
           "Ensure the model architecture supports feature extraction (e.g., 'out_projection_activations' is sowed)."
       )
 
-    # Per-token validity mask, derived from the one-hot labels so we don't need
-    # a separate mask input. A padded (fully-zero) row yields `any != 0 == False`.
-    mask = jnp.any(labels != 0, axis=-1).astype(jnp.float32)  # [B, T]
+    mask = labels.mask.astype(jnp.float32)  # [B, T]
     valid_count = jnp.sum(mask)
     safe_count = jnp.maximum(valid_count, 1.0)
 
-    # --- Soft loss: KL on temperature-softened distributions ---
-
-    # Pre-compute Student log-probs over the full vocabulary
-    log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
-    log_s_1_full = jax.nn.log_softmax(s_logits, axis=-1)
-
-    if getattr(teacher_output, "top_k_indices", None) is not None:
-      # --- SPARSE KL DIVERGENCE (Offline Mode) ---
-
-      # 1. Normalize teacher probabilities only over the saved Top-K subset
-      t_p_T_sparse = jax.nn.softmax(t_logits / temperature, axis=-1)
-      log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
-
-      # 2. Gather Student unnormalized logits at the Teacher's exact Top-K indices
-      s_logits_sparse = jnp.take_along_axis(
-          s_logits, teacher_output.top_k_indices, axis=-1  # pyrefly: ignore[bad-argument-type]
-      )
-
-      # 3. Normalize Student probabilities only over the exact same Top-K subset
-      log_s_T_sparse = jax.nn.log_softmax(s_logits_sparse / temperature, axis=-1)
-
-      # 4. KL(T || S) = Sum_over_TopK( P_T * (log_P_T - log_P_S) )
-      kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
-
-      # We don't have the full teacher logits to compute exact cross-entropy, so we zero it out
-      ce_teacher_per_pos = jnp.zeros(s_logits.shape[:-1])
-      kl_t1_sum = jnp.array(0.0)
-
-    else:
-      # --- DENSE KL DIVERGENCE (Online Mode) ---
-      t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
-      t_p_1 = jax.nn.softmax(t_logits, axis=-1)
-
-      kl_softened_per_pos = optax.kl_divergence(log_s_T_full, t_p_T)  # [B, T]
-      kl_t1_per_pos = optax.kl_divergence(log_s_1_full, t_p_1)
-
-      ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-      kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
-
-    # --- Final Loss Aggregation ---
-    kl_softened_sum = jnp.sum(kl_softened_per_pos * mask)
+    kl_softened_sum, kl_t1_sum, ce_student_sum, ce_teacher_sum = self._logit_loss_sums(
+        student_output, teacher_output, labels.targets, mask, temperature
+    )
     soft_loss_sum_scaled = kl_softened_sum * (temperature**2)
     soft_loss_mean = soft_loss_sum_scaled / safe_count
-
-    # --- Hard loss: student CE against ground-truth ---
-    ce_student_per_pos = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    ce_student_sum = jnp.sum(ce_student_per_pos * mask)
     hard_loss_mean = ce_student_sum / safe_count
-
-    ce_teacher_sum = jnp.sum(ce_teacher_per_pos * mask)
 
     base_logit_loss = (alpha * soft_loss_mean) + ((1.0 - alpha) * hard_loss_mean)
 
@@ -556,12 +789,16 @@ class CombinedDistillationStrategy(DistillationStrategy):
         s_features_sliced = s_features
         t_features_sliced = t_features
 
-      s_features_sliced = s_features_sliced.astype(jnp.float32)
-      t_features_sliced = t_features_sliced.astype(jnp.float32)
+      feature_loss_fn = self.feature_loss_fn
 
-      feature_loss = beta_feature * self.feature_loss_fn(  # pyrefly: ignore[not-callable]
-          s_features_sliced, t_features_sliced, mask
-      )
+      # Rematerialized so the float32 copies of the [L, B, T, D] features are not kept for the backward pass.
+      @jax.checkpoint
+      def _feature_loss(s_feat, t_feat, mask_in):
+        s_f = s_feat.astype(jnp.float32)
+        t_f = jax.lax.stop_gradient(t_feat).astype(jnp.float32)
+        return feature_loss_fn(s_f, t_f, mask_in)  # pyrefly: ignore[not-callable]
+
+      feature_loss = beta_feature * _feature_loss(s_features_sliced, t_features_sliced, mask)
 
     total_loss = base_logit_loss + feature_loss
 
@@ -613,17 +850,30 @@ class CombinedDistillationStrategy(DistillationStrategy):
   def compute_eval_loss(
       self,
       student_output: DistillationForwardOutput,
-      labels: jax.Array,
+      labels: Labels,
   ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes Eval Loss. Returns (loss, metrics) with (sum, count) metric pairs."""
-    s_logits = student_output.logits.astype(jnp.float32)
-
-    mask = jnp.any(labels != 0, axis=-1).astype(jnp.float32)
+    mask = labels.mask.astype(jnp.float32)
     valid_count = jnp.sum(mask)
     safe_count = jnp.maximum(valid_count, 1.0)
 
-    ce_per_pos = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    ce_sum = jnp.sum(ce_per_pos * mask)
+    s_out_logits = student_output.logits
+    if isinstance(s_out_logits, tuple):
+      num_fused_chunks = self.fused_lm_head_chunks
+      head = self.student_lm_head
+      if num_fused_chunks is None or head is None:
+        raise ValueError("Fused LM-head student outputs require the strategy to be built with fused_lm_head_chunks.")
+      s_hidden, s_embedding = s_out_logits
+
+      def _ce_sum(hidden, targets, mask_in, embedding, head=head):
+        logits = project_to_logits(hidden, embedding, head).astype(jnp.float32)
+        return (jnp.sum(optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=targets) * mask_in),)
+
+      (ce_sum,) = _sum_over_seq_chunks(_ce_sum, num_fused_chunks, (s_hidden, labels.targets, mask), s_embedding)
+    else:
+      s_logits = s_out_logits.astype(jnp.float32)
+      ce_per_pos = optax.softmax_cross_entropy_with_integer_labels(logits=s_logits, labels=labels.targets)
+      ce_sum = jnp.sum(ce_per_pos * mask)
     task_loss = ce_sum / safe_count
 
     metrics = {
@@ -632,14 +882,14 @@ class CombinedDistillationStrategy(DistillationStrategy):
     }
     return task_loss, metrics
 
-  def create_labels(self, targets, targets_segmentation=None, **kwargs):
-    """Converts integer targets to masked one-hot vectors for hard label loss."""
+  def create_labels(self, targets, targets_segmentation=None, **kwargs) -> Labels:
+    """Returns integer targets and a validity mask (pad and segmentation-0 positions are masked out)."""
     del kwargs  # Unused
-    one_hot = jax.nn.one_hot(targets, self.vocab_size)
-    mask = jnp.not_equal(targets, self.pad_id).astype(one_hot.dtype)[..., None]
+    mask = jnp.not_equal(targets, self.pad_id).astype(jnp.float32)
     if targets_segmentation is not None:
-      mask = mask * (targets_segmentation != 0)[..., None]
-    return one_hot * mask
+      mask = mask * (targets_segmentation != 0).astype(jnp.float32)
+    safe_targets = jnp.where(mask > 0, targets, 0).astype(jnp.int32)
+    return Labels(targets=safe_targets, mask=mask)
 
 
 # -----------------------------------------------------------------------------

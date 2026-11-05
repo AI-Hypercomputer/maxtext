@@ -15,6 +15,7 @@
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
 import ast
+import json
 import logging
 import os
 import sys
@@ -28,6 +29,7 @@ import jax
 import jax.numpy as jnp
 
 import omegaconf
+import yaml
 
 from maxtext.configs import pyconfig_deprecated
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS, MAXTEXT_PKG_DIR
@@ -283,7 +285,13 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         new_value = [new_value]
 
     # Coerce string/tuple inputs for list[str] configuration fields into Python lists.
-    if key in ("train_data_columns", "eval_data_columns", "trainable_parameters_mask", "adamw_mask"):
+    if key in (
+        "train_data_columns",
+        "eval_data_columns",
+        "trainable_parameters_mask",
+        "adamw_mask",
+        "student_params_to_update",
+    ):
       new_value = _coerce_to_list(new_value)
 
     # An empty value provided in the configuration is treated as None
@@ -305,7 +313,16 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
     if key == "run_name" and new_value is None:
       new_value = ""
 
-    if key in ("dump_hlo_local_module_name", "dump_hlo_module_name") and new_value is None:
+    if (
+        key
+        in (
+            "dump_hlo_local_module_name",
+            "dump_hlo_module_name",
+            "load_parameters_path",
+            "load_full_state_path",
+        )
+        and new_value is None
+    ):
       new_value = ""
 
     if key == "tokenizer_path" and new_value is None:
@@ -439,6 +456,52 @@ def initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] =
     raise e
 
 
+def _quote_single_element_regex_list(arg: str) -> str:
+  """Quotes `key=[elem]` CLI overrides whose single element is not valid YAML.
+
+  OmegaConf parses CLI values as YAML, so an unquoted regex list such as
+  `student_params_to_update=[decoder/layers_(?:[013])/]` fails to parse (the
+  nested brackets). If the bracketed value has exactly one element (no
+  top-level comma), it is rewritten to `key=["elem"]` and a warning is logged.
+  Multi-element values are left unchanged so OmegaConf reports the parse error;
+  quote such elements explicitly, e.g. `'key=["regex1", "regex2"]'`.
+
+  Args:
+    arg: A single `key=value` CLI argument.
+
+  Returns:
+    The (possibly rewritten) argument.
+  """
+  if "=" not in arg:
+    return arg
+  key, value = arg.split("=", 1)
+  value = value.strip()
+  if not (value.startswith("[") and value.endswith("]")):
+    return arg
+  try:
+    yaml.safe_load(value)
+    return arg
+  except yaml.YAMLError:
+    pass
+  inner = value[1:-1].strip()
+  depth = 0
+  for char in inner:
+    if char in "([{":
+      depth += 1
+    elif char in ")]}":
+      depth -= 1
+    elif char == "," and depth == 0:
+      logger.warning(
+          'CLI override %r is not valid YAML; quote list elements explicitly, e.g. \'%s=["...", "..."]\'.',
+          arg,
+          key,
+      )
+      return arg
+  quoted = f"{key}=[{json.dumps(inner)}]"
+  logger.warning("Interpreting CLI override %r as %r (single quoted list element).", arg, quoted)
+  return quoted
+
+
 def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic config class whereas `initialize` returns the og `HyperParameters`
@@ -448,7 +511,7 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
   base_yml_config = _load_config(config_path)
 
   # 2. Get overrides from CLI and kwargs
-  cli_cfg = omegaconf.OmegaConf.from_cli(cli_args)
+  cli_cfg = omegaconf.OmegaConf.from_cli([_quote_single_element_regex_list(arg) for arg in cli_args])
   if "hf_access_token" in cli_cfg:
     logger.warning(
         "WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes "
