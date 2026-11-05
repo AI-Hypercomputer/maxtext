@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793841352224,
+  "lastUpdate": 1793853870911,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -64115,6 +64115,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 331,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Yuchen Yao",
+            "username": "AusarYao28",
+            "email": "yaoyuchen@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "15bee862df851916df65fe81da5cc284be9372ce",
+          "message": "Add multi-device sharding and AOT HLO conformance Checks 5-8, unified runner, and synthetic unit tests for m3 models.\n\n- Validate stacked_param_path_patterns, expert_weight_param_patterns, num_scanned_blocks, and min_sharded_param_elements in ConformanceSpec.validate_spec_invariants (spec.py).\n- Implement create_conformance_driver_mesh, check_driver_mesh_and_axis_names (Check 5), check_no_post_init_param_constraints (Check 6), check_weight_sharding_coverage (Check 7), check_no_expert_weight_all_gather (Check 8), and run_conformance_check dispatcher (checks.py).\n- Configure 4 virtual host CPU devices in BUILD and add synthetic positive and negative unit tests for Checks 5-8 and run_conformance_check (conformance_test.py).\n\nPiperOrigin-RevId: 1014298790",
+          "timestamp": "2026-11-05T02:30:34Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/15bee862df851916df65fe81da5cc284be9372ce"
+        },
+        "date": 1793853869904,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 260.88799999999986,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 65.736,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2113.5040000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 137.3899999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.722,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1588.4099999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 200.88,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4462.920999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 336,
             "unit": "count"
           }
         ]
