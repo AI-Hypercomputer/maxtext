@@ -133,6 +133,29 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     # Power-of-two 32768 = 256 * 128 pads up to 36864 = 288 * 128 (288 = 9 * 32).
     self.assertEqual(fsdp_prefetch._sc_rs_padded_minor_size(32768), 36864)  # pylint: disable=protected-access
 
+  def test_metadata_layer_spec_and_param_layer_specs(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
+    rules = (("embed", "fsdp"), ("mlp", "tensor"), ("layers", None))
+    var = nnx.Param(
+        jnp.ones((8, 3, 4)),
+        out_sharding=("embed", "layers", "mlp"),
+        eager_sharding=False,
+        **{nnx.PARTITION_NAME: "layers"},
+    )
+    no_meta = nnx.Param(jnp.ones((3, 4)))
+    # pylint: disable=protected-access
+    spec = fsdp_prefetch._metadata_layer_spec(var, mesh, rules)
+    self.assertEqual(tuple(spec), ("fsdp", "tensor"))
+    self.assertIsNone(fsdp_prefetch._metadata_layer_spec(no_meta, mesh, rules))
+
+    tree = (var, no_meta)
+    auto_cfg = types.SimpleNamespace(shard_mode=ShardMode.AUTO, logical_axis_rules=rules)
+    explicit_cfg = types.SimpleNamespace(shard_mode=ShardMode.EXPLICIT, logical_axis_rules=rules)
+    specs = fsdp_prefetch._param_layer_specs(tree, 2, mesh, auto_cfg)
+    self.assertEqual(tuple(specs[0]), ("fsdp", "tensor"))
+    self.assertIsNone(specs[1])
+    self.assertIsNone(fsdp_prefetch._param_layer_specs(tree, 2, mesh, explicit_cfg))
+
 
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
   """Lowers the FSDP weight all-gather against abstract multi-device meshes (no devices needed)."""
@@ -634,6 +657,120 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
         on_device, _, _ = self._grads(num_blocks=2, num_a=3, defer=defer, decoder_layer_input="device")
         for g, d in zip(jax.tree.leaves(got), jax.tree.leaves(on_device)):
           np.testing.assert_allclose(np.asarray(g), np.asarray(d), rtol=1e-6, atol=1e-6)
+
+
+class FsdpPrefetchAutoModeTest(unittest.TestCase):
+  """Homogeneous and inhomogeneous prefetch under `ShardMode.AUTO` recover FSDP axes from NNX metadata."""
+
+  def _annotate_kernels(self, params):
+    def _tag(v):
+      if not isinstance(v, nnx.Variable) or v.get_value().ndim != 3:
+        return v
+      return v.replace(
+          out_sharding=("layers", "embed", "mlp"),
+          sharding_names=("layers", "embed", "mlp"),
+          **{nnx.PARTITION_NAME: "layers"},
+      )
+
+    return jax.tree.map(_tag, params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+  def test_homogeneous_auto_mode_emits_tagged_all_gather_and_matches_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Auto,), devices=jax.devices()[:4])
+    dim, batch, length = 8, 8, 6
+    layers = [_ToyLayer(dim, nnx.Rngs(params=i)) for i in range(length)]
+    graphdef = nnx.graphdef(layers[0])
+    params = self._annotate_kernels(
+        jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(l, nnx.Param) for l in layers])
+    )
+    x_np = np.random.default_rng(0).standard_normal((batch, dim)).astype(np.float32)
+
+    def ref_loss(p, x):
+      for i in range(length):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, i=i: v[i], p))(x)
+      return (x * x).sum()
+
+    ref_grads = jax.grad(ref_loss)(params, x_np)
+    for decoder_layer_input in ("device", "offload"):
+      with self.subTest(decoder_layer_input=decoder_layer_input):
+        config = types.SimpleNamespace(
+            param_scan_axis=0,
+            shard_mode=ShardMode.AUTO,
+            debug_sharding=False,
+            prefetch_fsdp_defer_grad_reduce_scatter=True,
+            decoder_layer_input=decoder_layer_input,
+            logical_axis_rules=(("embed", "fsdp"), ("mlp", None), ("layers", None)),
+        )
+
+        def loss(p, x, cfg=config):
+          y, _, _ = fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+              nnx.merge(graphdef, p), x, length=length, mesh=mesh, config=cfg
+          )
+          return (y * y).sum()
+
+        with jax.set_mesh(mesh):
+          p_sharded = jax.tree.map(lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None)), params)
+          x = jax.device_put(x_np, PartitionSpec("fsdp", None))
+          f = jax.jit(jax.grad(loss))
+          grads = f(p_sharded, x)
+          hlo = f.lower(p_sharded, x).as_text()
+
+        for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
+          np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+        self.assertIn("stablehlo.all_gather", hlo)
+        self.assertIn('xla_explicit_fsdp = "yes"', hlo)
+
+  def test_inhomogeneous_auto_mode_emits_tagged_all_gather_and_matches_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Auto,), devices=jax.devices()[:4])
+    dim, batch, num_blocks, num_a = 8, 8, 2, 3
+    blocks = [_ToyBlock(num_a, dim, nnx.Rngs(params=b)) for b in range(num_blocks)]
+    graphdef = nnx.graphdef(blocks[0])
+    params = self._annotate_kernels(
+        jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(b, nnx.Param) for b in blocks])
+    )
+    x_np = np.random.default_rng(0).standard_normal((batch, dim)).astype(np.float32)
+
+    def ref_loss(p, x):
+      for b in range(num_blocks):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, b=b: v[b], p))(x)
+      return (x * x).sum()
+
+    ref_grads = jax.grad(ref_loss)(params, x_np)
+    for decoder_layer_input in ("device", "offload"):
+      with self.subTest(decoder_layer_input=decoder_layer_input):
+        config = types.SimpleNamespace(
+            param_scan_axis=0,
+            shard_mode=ShardMode.AUTO,
+            debug_sharding=False,
+            prefetch_fsdp_defer_grad_reduce_scatter=True,
+            decoder_layer_input=decoder_layer_input,
+            logical_axis_rules=(("embed", "fsdp"), ("mlp", None), ("layers", None)),
+        )
+
+        def loss(p, x, cfg=config):
+          layers = nnx.merge(graphdef, p)
+          stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+          y, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+              layers, stages, x, length=num_blocks, mesh=mesh, config=cfg
+          )
+          return (y * y).sum()
+
+        with jax.set_mesh(mesh):
+          p_sharded = jax.tree.map(
+              lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None) if v.ndim == 3 else PartitionSpec()), params
+          )
+          x = jax.device_put(x_np, PartitionSpec("fsdp", None))
+          f = jax.jit(jax.grad(loss))
+          grads = f(p_sharded, x)
+          hlo = f.lower(p_sharded, x).as_text()
+
+        for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
+          np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+        self.assertIn("stablehlo.all_gather", hlo)
+        self.assertIn('xla_explicit_fsdp = "yes"', hlo)
 
 
 if __name__ == "__main__":
