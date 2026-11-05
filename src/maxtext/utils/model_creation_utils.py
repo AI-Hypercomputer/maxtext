@@ -415,6 +415,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
     config: Model config, used to detect the expert-parallel fused MoE kernel.
       When None, the per-shard interleaved layout is used.
   """
+  is_vllm_rpa = config is None or config.attention in _VLLM_FUSED_MOE_ATTENTION
 
   def _is_fusion_site(node):
     """A ckpt-side dict that holds wi_0/wi_1 leaf siblings — the parent of a fusion."""
@@ -459,7 +460,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
     n_shards = 1
     use_ep = False
     wi_sharding = getattr(wi_model, "sharding", None)
-    if isinstance(wi_sharding, jax.sharding.NamedSharding):
+    if is_vllm_rpa and isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
