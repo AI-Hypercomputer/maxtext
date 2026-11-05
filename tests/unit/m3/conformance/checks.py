@@ -12,17 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-agnostic implementations of MaxText m3 conformance Checks 1-4."""
+"""Model-agnostic implementations of MaxText m3 conformance Checks 1-8."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import copy
 import fnmatch
+import math
 import re
 from typing import Any, cast
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.m3.core import sharding as m3_sharding
 from tests.unit.m3.conformance import spec
 import numpy as np
 
@@ -32,6 +34,47 @@ _FP32_TOL = 1e-5
 # TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
 # to 1e-7.
 _AUX_FLOOR = 1e-7
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 4.
+_DRIVER_MESH_DEVICES = 4
+_DRIVER_MESH_ICI = {"data": 1, "fsdp": 2, "tensor": 2, "expert": 1}
+_VALID_MESH_AXES = frozenset(m3_sharding.MESH_AXIS_NAMES)
+_PARAM_TAINT_UNARY_PRIMITIVES = frozenset(
+    {
+        "convert_element_type",
+        "bitcast_convert_type",
+        "reshape",
+        "squeeze",
+        "rev",
+        "transpose",
+        "broadcast_in_dim",
+        "slice",
+        "dynamic_slice",
+        "copy",
+        "Copy",
+        "device_put",
+        "sharding_constraint",
+        "reshard",
+    }
+)
+_CALL_HOP_PRIMITIVES = frozenset(
+    {
+        "jit",
+        "pjit",
+        "remat2",
+        "remat",
+        "checkpoint",
+        "shard_map",
+        "custom_jvp_call",
+        "custom_vjp_call",
+        "eval_jaxpr",
+        "closed_call",
+        "call",
+        "composite",
+    }
+)
+_REDUCTION_JAXPR_PRIMITIVES = frozenset({"reduce", "reduce_window"})
+_ALL_GATHER_OPCODE_RE = re.compile(r"\ball-gather(?:-start|-done)?\(")
+_HLO_TENSOR_SHAPE_RE = re.compile(r"\b[a-z][a-z0-9]*\[([0-9,\s]*)\]")
 _OUTPUT_KIND_NDIM = {
     spec.OutputKind.LOGITS: 3,
     spec.OutputKind.DIFFUSION: 3,
@@ -109,6 +152,17 @@ def _assert_fp32_parity(actual: jax.Array, ref: jax.Array, tag: str) -> None:
     raise AssertionError(f"Frobenius mismatch at {tag}: {diff_norm} > {limit}")
 
 
+def _should_skip(spec_obj: spec.ConformanceSpec, check_id: spec.CheckId) -> bool:
+  """Validates spec invariants and returns True when `check_id` is declared `NOT_APPLICABLE`."""
+  spec_obj.validate_spec_invariants()
+  if check_id not in spec_obj.skips:
+    return False
+  decl = spec_obj.skips[check_id]
+  if decl.status != spec.SkipStatus.NOT_APPLICABLE or not decl.reason.strip():
+    raise AssertionError(f"{spec_obj.model_name}: invalid or empty skip {check_id}")
+  return True
+
+
 def run_check_or_skip(
     spec_obj: spec.ConformanceSpec,
     check_id: spec.CheckId,
@@ -116,13 +170,7 @@ def run_check_or_skip(
     mesh: jax.sharding.Mesh,
 ) -> bool:
   """Runs `check_fn` or validates an explicit `NOT_APPLICABLE` skip."""
-  spec_obj.validate_spec_invariants()
-  if check_id in spec_obj.skips:
-    decl = spec_obj.skips[check_id]
-    if decl.status != spec.SkipStatus.NOT_APPLICABLE or not decl.reason.strip():
-      raise AssertionError(
-          f"{spec_obj.model_name}: invalid or empty skip {check_id}",
-      )
+  if _should_skip(spec_obj, check_id):
     return False
   check_fn(spec_obj, mesh)
   return True
@@ -151,7 +199,7 @@ def check_scan_remat_equivalence(
   if not has_ref or len(set(variants)) != len(variants):
     raise ValueError(f"{name}: invalid scan_remat_variants {variants!r}")
   weights = {k: 1.0 for k in spec_obj.aux_losses}
-  with jax.sharding.set_mesh(mesh):
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
     model_ref = spec_obj.build_model(mesh, nnx.Rngs(0), False, "none")
     state_ref = nnx.clone(nnx.state(model_ref))
     meta_ref = [_var_meta(p, v) for p, v in _flatten_vars(state_ref)]
@@ -202,7 +250,7 @@ def check_param_and_grad_health(
 ) -> None:
   """Check 2: Enforces Invariant (1) (`nnx.Param` is the only trainable var)."""
   name = spec_obj.model_name
-  with jax.sharding.set_mesh(mesh):
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
     try:
       spec_obj.build_model(mesh, cast(Any, None), True, "none")
       raise AssertionError(f"{name}: accepted rngs=None")
@@ -282,7 +330,7 @@ def check_non_param_state_stability(
   weights = {k: 1.0 for k in spec_obj.aux_losses}
   diff_param = nnx.DiffState(0, nnx.Param)
   vg_fn = nnx.value_and_grad(_eval_loss, argnums=diff_param, has_aux=True)
-  with jax.sharding.set_mesh(mesh):
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
     model = spec_obj.build_model(mesh, nnx.Rngs(0), True, "none")
     batch = spec_obj.build_batch(jax.random.PRNGKey(0), mesh)
     treedef_ref, ref_map = _inspect_rest(model, "init")
@@ -324,7 +372,7 @@ def check_aux_loss_grad_coupling(
   name = spec_obj.model_name
   if not spec_obj.aux_losses:
     raise AssertionError(f"{name}: spec.aux_losses is empty")
-  with jax.sharding.set_mesh(mesh):
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
     model = spec_obj.build_model(mesh, nnx.Rngs(0), True, "none")
     init_full_state = nnx.clone(nnx.state(model))
     batch = spec_obj.build_batch(jax.random.PRNGKey(7), mesh)
@@ -372,3 +420,399 @@ def check_aux_loss_grad_coupling(
           raise AssertionError(
               f"{name}: {aux_key} bad/zero grad delta on {path}",
           )
+
+
+def create_conformance_driver_mesh() -> jax.sharding.Mesh:
+  """Builds the canonical 4-device m3 `(data=1, fsdp=2, tensor=2, expert=1)` driver mesh."""
+  devices = jax.devices()
+  if len(devices) < _DRIVER_MESH_DEVICES:
+    raise AssertionError(f"Checks require >= {_DRIVER_MESH_DEVICES} JAX devices, got {len(devices)}.")
+  return m3_sharding.create_mesh(ici=_DRIVER_MESH_ICI, devices=devices[:_DRIVER_MESH_DEVICES])
+
+
+def _create_single_device_mesh() -> jax.sharding.Mesh:
+  """Builds a 1-device canonical m3 mesh for single-device Checks 1-4."""
+  devices = jax.devices()
+  if not devices:
+    raise AssertionError("Conformance checks require >= 1 JAX device, got 0.")
+  return m3_sharding.create_mesh(devices=devices[:1])
+
+
+def _extract_spec_axes(spec_like: Any, context: str) -> list[str]:
+  """Extracts physical mesh axis strings from a PartitionSpec, NamedSharding, tuple, or str."""
+  if spec_like is None:
+    return []
+  if isinstance(spec_like, str):
+    return [spec_like]
+  if isinstance(spec_like, jax.sharding.NamedSharding):
+    return _extract_spec_axes(spec_like.spec, context)
+  if isinstance(spec_like, (jax.sharding.PartitionSpec, tuple)):
+    axes: list[str] = []
+    for entry in spec_like:
+      if entry is not None and not isinstance(entry, (str, tuple)):
+        raise AssertionError(f"{context}: invalid PartitionSpec entry {entry!r}")
+      axes.extend(_extract_spec_axes(entry, context))
+    return axes
+  raise AssertionError(f"{context}: unsupported sharding spec {spec_like!r}")
+
+
+def _assert_valid_axes(axes: Sequence[str], context: str) -> None:
+  """Asserts every physical axis name belongs to `m3_sharding.MESH_AXIS_NAMES`."""
+  unknown = [axis for axis in axes if axis not in _VALID_MESH_AXES]
+  if unknown:
+    raise AssertionError(f"{context}: non-m3 mesh axes {unknown}; got!= {m3_sharding.MESH_AXIS_NAMES}")
+
+
+def _validate_stacked_patterns(spec_obj: spec.ConformanceSpec, param_vars: Sequence[tuple[str, Any]]) -> None:
+  """Validates `stacked_param_path_patterns` and `num_scanned_blocks` (`m3/README.md` Invariant (3))."""
+  if not spec_obj.stacked_param_path_patterns:
+    return
+  n_scan = spec_obj.num_scanned_blocks
+  if n_scan <= 1:
+    raise AssertionError(f"{spec_obj.model_name}: requires num_scanned_blocks > 1, got {n_scan}")
+  for pat in spec_obj.stacked_param_path_patterns:
+    if not any(bool(re.search(pat, path_str)) for path_str, _ in param_vars):
+      raise AssertionError(f"{spec_obj.model_name}: unmatched stacked pattern {pat!r}")
+
+
+def _resolve_unstacked_shape(
+    spec_obj: spec.ConformanceSpec, path_str: str, full_shape: tuple[int, ...]
+) -> tuple[bool, tuple[int, ...]]:
+  """Returns `(is_stacked, unstacked_shape)` after verifying any leading scan dimension (`m3/README.md` (3))."""
+  is_stacked = any(bool(re.search(pat, path_str)) for pat in spec_obj.stacked_param_path_patterns)
+  if not is_stacked:
+    return False, full_shape
+  n_scan = spec_obj.num_scanned_blocks
+  if not full_shape or full_shape[0] != n_scan:
+    raise AssertionError(f"{spec_obj.model_name}: {path_str} {full_shape} leading axis != num_scanned_blocks={n_scan}")
+  return True, full_shape[1:]
+
+
+def check_driver_mesh_and_axis_names(spec_obj: spec.ConformanceSpec) -> None:
+  """Check 5: Enforces `m3/README.md` Invariants (5) & (6) (driver `Mesh` identity & `MESH_AXIS_NAMES`)."""
+  name = spec_obj.model_name
+  driver_mesh = create_conformance_driver_mesh()
+  with jax.sharding.set_mesh(driver_mesh), nnx.use_eager_sharding(True):
+    model = spec_obj.build_model(driver_mesh, nnx.Rngs(0), True, "none")
+  if not hasattr(model, "mesh") or model.mesh is not driver_mesh:
+    raise AssertionError(f"{name}: model.mesh must be identical (`is`) to driver_mesh")
+  for graph_path, graph_node in nnx.iter_graph(model, graph=True):
+    node_label = ".".join(map(str, graph_path)) if graph_path else "<root>"
+    if isinstance(graph_node, jax.sharding.Mesh) and graph_node is not driver_mesh:
+      raise AssertionError(f"{name}: {node_label} holds private Mesh != driver_mesh")
+    if hasattr(graph_node, "mesh") and graph_node.mesh is not None and graph_node.mesh is not driver_mesh:
+      raise AssertionError(f"{name}: {node_label}.mesh is not driver_mesh")
+  array_count = 0
+  for path_str, leaf_node in _flatten_vars(nnx.state(model)):
+    if isinstance(leaf_node, nnx.Variable):
+      meta = leaf_node.get_metadata()
+      for meta_key in ("out_sharding", "sharding"):
+        if meta_key in meta and meta[meta_key] is not None:
+          meta_val = meta[meta_key]
+          ctx = f"{name}:{path_str}.{meta_key}"
+          if isinstance(meta_val, jax.sharding.NamedSharding) and meta_val.mesh is not driver_mesh:
+            raise AssertionError(f"{ctx}: NamedSharding.mesh is not driver_mesh")
+          _assert_valid_axes(_extract_spec_axes(meta_val, ctx), ctx)
+      val = leaf_node.get_value()
+    else:
+      val = leaf_node
+    if not isinstance(val, jax.Array):
+      continue
+    array_count += 1
+    if not isinstance(val.sharding, jax.sharding.NamedSharding):
+      raise AssertionError(f"{name}: {path_str} sharding must be NamedSharding, got {type(val.sharding).__name__}")
+    if val.sharding.mesh is not driver_mesh:
+      raise AssertionError(f"{name}: {path_str} sharding.mesh is not driver_mesh")
+    _assert_valid_axes(_extract_spec_axes(val.sharding.spec, f"{name}:{path_str}"), f"{name}:{path_str}")
+  if array_count < 1:
+    raise AssertionError(f"{name}: expected >= 1 jax.Array leaf in nnx.state(model)")
+
+
+def _bind_outvar_taints(
+    outvars: Sequence[Any], out_taints: Sequence[str | None], local_taint: dict[int, str], prim: str
+) -> None:
+  """Verifies output arity and records non-`None` parameter taint on `outvars` (`m3/README.md` (7))."""
+  if len(outvars) != len(out_taints):
+    raise AssertionError(f"{prim}: outvars arity mismatch ({len(outvars)} != {len(out_taints)})")
+  for out_v, src in zip(outvars, out_taints, strict=True):
+    if src is not None and type(out_v).__name__ != "DropVar" and id(out_v) not in local_taint:
+      local_taint[id(out_v)] = src
+
+
+def _walk_carry_fixed_point(
+    sub_j: Any,
+    prefix_taints: Sequence[str | None],
+    init_carry_taints: Sequence[str | None],
+    suffix_taints: Sequence[str | None],
+    violations: list[tuple[str, str]],
+) -> tuple[list[str | None], list[str | None]]:
+  """Iterates `_walk_jaxpr_param_taint` until loop-carry taint stabilizes (`m3/README.md` (7))."""
+  carry = list(init_carry_taints)
+  n_carry = len(carry)
+  while True:
+    iter_violations: list[tuple[str, str]] = []
+    sub_outs = _walk_jaxpr_param_taint(sub_j, [*prefix_taints, *carry, *suffix_taints], iter_violations)
+    if len(sub_outs) < n_carry:
+      raise AssertionError(f"carry jaxpr outvars ({len(sub_outs)}) < num_carry ({n_carry})")
+    promoted = False
+    for idx in range(n_carry):
+      src = sub_outs[idx]
+      if carry[idx] is None and src is not None:
+        carry[idx] = src
+        promoted = True
+    if not promoted:
+      violations.extend(iter_violations)
+      return carry, sub_outs[n_carry:]
+
+
+def _walk_jaxpr_param_taint(
+    jaxpr_like: Any, in_taints: Sequence[str | None], violations: list[tuple[str, str]]
+) -> list[str | None]:
+  """Propagates parameter taint through `jaxpr_like` and records sharding constraints (`m3/README.md` (7))."""
+  jaxpr_obj = jaxpr_like.jaxpr if hasattr(jaxpr_like, "jaxpr") else jaxpr_like
+  n_sub_in, n_in = len(jaxpr_obj.invars), len(in_taints)
+  if n_sub_in != n_in:
+    raise AssertionError(f"jaxpr invars arity mismatch ({n_sub_in} != {n_in})")
+  local_taint: dict[int, str] = {}
+  for sub_in, src in zip(jaxpr_obj.invars, in_taints, strict=True):
+    if src is not None and type(sub_in).__name__ != "DropVar":
+      local_taint[id(sub_in)] = src
+
+  for eqn in jaxpr_obj.eqns:
+    prim = eqn.primitive.name
+    eqn_in = [local_taint[id(v)] if id(v) in local_taint else None for v in eqn.invars]
+    in0 = eqn_in[0] if eqn_in else None
+    if prim in ("sharding_constraint", "reshard", "device_put") and in0 is not None:
+      violations.append((in0, prim))
+
+    tainted_src: str | None = None
+    if prim in _PARAM_TAINT_UNARY_PRIMITIVES and in0 is not None:
+      tainted_src = in0
+    elif prim == "concatenate" and in0 is not None and all(t is not None for t in eqn_in):
+      tainted_src = in0
+    if tainted_src is not None:
+      _bind_outvar_taints(eqn.outvars, [tainted_src] * len(eqn.outvars), local_taint, prim)
+      continue
+
+    if prim == "cond":
+      if "branches" not in eqn.params or not eqn.params["branches"] or not eqn_in:
+        raise AssertionError(f"cond: invalid params/arity invars={len(eqn_in)}")
+      for branch in eqn.params["branches"]:
+        b_outs = _walk_jaxpr_param_taint(branch, eqn_in[1:], violations)
+        _bind_outvar_taints(eqn.outvars, b_outs, local_taint, prim)
+    elif prim == "while":
+      for req in ("cond_jaxpr", "cond_nconsts", "body_jaxpr", "body_nconsts"):
+        if req not in eqn.params:
+          raise AssertionError(f"while: missing {req!r} in eqn.params")
+      c_nc, b_nc = eqn.params["cond_nconsts"], eqn.params["body_nconsts"]
+      if c_nc < 0 or b_nc < 0 or c_nc + b_nc > len(eqn_in):
+        raise AssertionError(f"while: bad consts ({c_nc}, {b_nc}) vs {len(eqn_in)}")
+      cond_j = eqn.params["cond_jaxpr"].jaxpr
+      body_j = eqn.params["body_jaxpr"].jaxpr
+      init_carry = eqn_in[c_nc + b_nc :]
+      if len(body_j.outvars) != len(init_carry):
+        raise AssertionError(f"while: body outvars ({len(body_j.outvars)}) != {len(init_carry)}")
+      carry_out, _ = _walk_carry_fixed_point(body_j, eqn_in[c_nc : c_nc + b_nc], init_carry, (), violations)
+      _walk_jaxpr_param_taint(cond_j, [*eqn_in[:c_nc], *carry_out], violations)
+      _bind_outvar_taints(eqn.outvars, carry_out, local_taint, prim)
+    elif prim == "scan":
+      if "jaxpr" not in eqn.params or "ft_in" not in eqn.params:
+        raise AssertionError(f"scan: missing jaxpr/ft_in in {sorted(eqn.params)}")
+      consts_ft, carry_ft, xs_ft = eqn.params["ft_in"].unpack()
+      n_c, n_k, n_x = len(consts_ft), len(carry_ft), len(xs_ft)
+      if len(eqn_in) != n_c + n_k + n_x:
+        raise AssertionError(f"scan: invars ({len(eqn_in)}) != ft_in ({n_c} + {n_k} + {n_x})")
+      carry_out, ys_out = _walk_carry_fixed_point(
+          eqn.params["jaxpr"], eqn_in[:n_c], eqn_in[n_c : n_c + n_k], eqn_in[n_c + n_k :], violations
+      )
+      _bind_outvar_taints(eqn.outvars, [*carry_out, *ys_out], local_taint, prim)
+    elif prim in _CALL_HOP_PRIMITIVES or (
+        prim not in _REDUCTION_JAXPR_PRIMITIVES and ("jaxpr" in eqn.params or "call_jaxpr" in eqn.params)
+    ):
+      if "jaxpr" not in eqn.params and "call_jaxpr" not in eqn.params:
+        raise AssertionError(f"{prim}: missing jaxpr/call_jaxpr in eqn.params")
+      sub_ref = eqn.params["jaxpr"] if "jaxpr" in eqn.params else eqn.params["call_jaxpr"]
+      sub_outs = _walk_jaxpr_param_taint(sub_ref, eqn_in, violations)
+      _bind_outvar_taints(eqn.outvars, sub_outs, local_taint, prim)
+
+  return [local_taint[id(v)] if id(v) in local_taint else None for v in jaxpr_obj.outvars]
+
+
+def check_no_post_init_param_constraints(spec_obj: spec.ConformanceSpec) -> None:
+  """Check 6: Enforces `m3/README.md` Invariant (7) (no parameter sharding constraints in `__call__`)."""
+  name = spec_obj.model_name
+  driver_mesh = create_conformance_driver_mesh()
+  with jax.sharding.set_mesh(driver_mesh), nnx.use_eager_sharding(True):
+    model = spec_obj.build_model(driver_mesh, nnx.Rngs(0), True, "none")
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), driver_mesh)
+    graphdef, params_state, rest_state = nnx.split(model, nnx.Param, ...)
+    flat_params, _ = jax.tree_util.tree_flatten_with_path(params_state)
+    if not flat_params:
+      raise AssertionError(f"{name}: model has no nnx.Param leaves")
+
+    def _pure_forward(
+        p_state: Any, r_state: Any, b_inputs: Mapping[str, jax.Array]
+    ) -> tuple[jax.Array, dict[str, jax.Array]]:
+      merged = nnx.merge(graphdef, p_state, r_state)
+      fwd_out = spec_obj.forward_fn(merged, b_inputs)
+      _validate_forward_output(spec_obj, fwd_out)
+      return fwd_out.primary, {**fwd_out.aux_losses}
+
+    closed_jaxpr = jax.make_jaxpr(_pure_forward)(params_state, rest_state, batch)
+    top_jaxpr = closed_jaxpr.jaxpr
+    n_invars, n_params = len(top_jaxpr.invars), len(flat_params)
+    if n_invars < n_params:
+      raise AssertionError(f"{name}: jaxpr invars ({n_invars}) < param leaves ({n_params})")
+    root_in_taints: list[str | None] = [None] * n_invars
+    for idx, (key_path, leaf_val) in enumerate(flat_params):
+      if not isinstance(leaf_val, jax.Array):
+        raise AssertionError(f"{name}: non-jax.Array nnx.Param leaf at {key_path}")
+      raw_name = jax.tree_util.keystr(key_path, simple=True, separator=".")
+      root_in_taints[idx] = raw_name.removesuffix(".value").removesuffix(".raw_value")
+    violations: list[tuple[str, str]] = []
+    _walk_jaxpr_param_taint(top_jaxpr, root_in_taints, violations)
+    if violations:
+      deduped = list(dict.fromkeys(violations))
+      raise AssertionError(f"{name}: post-init parameter sharding constraints in forward: {deduped}")
+
+
+def check_weight_sharding_coverage(spec_obj: spec.ConformanceSpec) -> None:
+  """Check 7: Enforces `m3/README.md` Invariant (6) & comparison-doc 2-D+ weight sharding coverage."""
+  name = spec_obj.model_name
+  driver_mesh = create_conformance_driver_mesh()
+  with jax.sharding.set_mesh(driver_mesh), nnx.use_eager_sharding(True):
+    model = spec_obj.build_model(driver_mesh, nnx.Rngs(0), True, "none")
+  param_vars = _flatten_vars(nnx.state(model, nnx.Param))
+  if not param_vars:
+    raise AssertionError(f"{name}: model has no nnx.Param")
+  _validate_stacked_patterns(spec_obj, param_vars)
+  eligible_count = 0
+  seen_axes: set[str] = set()
+  min_elems = spec_obj.min_sharded_param_elements
+  for path_str, param_node in param_vars:
+    arr = _unwrap_leaf(param_node)
+    if not isinstance(arr, jax.Array):
+      raise AssertionError(f"{name}: non-jax.Array nnx.Param at {path_str}")
+    _, unstacked_shape = _resolve_unstacked_shape(spec_obj, path_str, arr.shape)
+    if len(unstacked_shape) < 2 or math.prod(unstacked_shape) < min_elems:
+      continue
+    eligible_count += 1
+    if not isinstance(arr.sharding, jax.sharding.NamedSharding) or arr.sharding.mesh is not driver_mesh:
+      raise AssertionError(f"{name}: {path_str} must have NamedSharding on driver_mesh")
+    if arr.sharding.spec == jax.sharding.PartitionSpec():
+      raise AssertionError(f"{name}: {path_str} {arr.shape} has unsharded PartitionSpec()")
+    axes = _extract_spec_axes(arr.sharding.spec, f"{name}:{path_str}")
+    _assert_valid_axes(axes, f"{name}:{path_str}")
+    if not axes or not any(driver_mesh.shape[axis] > 1 for axis in axes):
+      raise AssertionError(f"{name}: {path_str} uses size-1 mesh axes {arr.sharding.spec}")
+    if not arr.addressable_shards or math.prod(arr.addressable_shards[0].data.shape) >= math.prod(arr.shape):
+      raise AssertionError(f"{name}: {path_str} shard not smaller than {arr.shape}")
+    seen_axes.update(axes)
+  if eligible_count < 1:
+    raise AssertionError(f"{name}: expected >= 1 eligible 2-D+ weight >= {min_elems} elements")
+  if "fsdp" not in seen_axes or "tensor" not in seen_axes:
+    raise AssertionError(f"{name}: weights must shard across both 'fsdp' and 'tensor': {sorted(seen_axes)}")
+
+
+def check_no_expert_weight_all_gather(spec_obj: spec.ConformanceSpec) -> None:
+  """Check 8: Enforces comparison-doc expert `all-gather` OOM invariant in AOT-compiled 4-device HLO."""
+  name = spec_obj.model_name
+  if not spec_obj.expert_weight_param_patterns:
+    raise AssertionError(f"{name}: spec.expert_weight_param_patterns is empty")
+  driver_mesh = create_conformance_driver_mesh()
+  with jax.sharding.set_mesh(driver_mesh), nnx.use_eager_sharding(True):
+    model = spec_obj.build_model(driver_mesh, nnx.Rngs(0), True, "none")
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), driver_mesh)
+    param_vars = _flatten_vars(nnx.state(model, nnx.Param))
+    _validate_stacked_patterns(spec_obj, param_vars)
+    forbidden_shapes: dict[tuple[int, ...], str] = {}
+    for pat in spec_obj.expert_weight_param_patterns:
+      hits = [(p_str, p_node) for p_str, p_node in param_vars if bool(re.search(pat, p_str))]
+      if not hits:
+        raise AssertionError(f"{name}: unmatched expert_weight_param_patterns entry {pat!r}")
+      for path_str, param_node in hits:
+        arr = _unwrap_leaf(param_node)
+        if not isinstance(arr, jax.Array) or not isinstance(arr.sharding, jax.sharding.NamedSharding):
+          raise AssertionError(f"{name}: expert param {path_str} must be NamedSharding jax.Array")
+        if arr.sharding.mesh is not driver_mesh or not arr.addressable_shards:
+          raise AssertionError(f"{name}: expert param {path_str} not placed on driver_mesh")
+        full_shape = arr.shape
+        shard_shape = arr.addressable_shards[0].data.shape
+        is_stacked, unstacked_shape = _resolve_unstacked_shape(spec_obj, path_str, full_shape)
+        if len(unstacked_shape) < 3:
+          raise AssertionError(f"{name}: {path_str} unstacked {unstacked_shape} must be >= 3-D")
+        if math.prod(shard_shape) >= math.prod(full_shape):
+          raise AssertionError(f"{name}: {path_str} {full_shape} is unsharded (shard={shard_shape})")
+        forbidden_shapes[full_shape] = path_str
+        forbidden_shapes[unstacked_shape] = path_str
+        if len(unstacked_shape) == 4:
+          d0, d1, d2, d3 = unstacked_shape
+          for s3 in ((d0, d1, d2 * d3), (d0, d1 * d2, d3)):
+            forbidden_shapes[s3] = path_str
+            if is_stacked:
+              forbidden_shapes[(spec_obj.num_scanned_blocks, *s3)] = path_str
+
+    graphdef, params_state, rest_state = nnx.split(model, nnx.Param, ...)
+    weights = {k: 1.0 for k in spec_obj.aux_losses}
+
+    @jax.jit
+    def _compiled_step(p_state: Any, r_state: Any, b_inputs: Mapping[str, jax.Array]) -> Any:
+      def _step_loss(p_inner: Any) -> jax.Array:
+        merged = nnx.merge(graphdef, p_inner, r_state)
+        fwd_out = spec_obj.forward_fn(merged, b_inputs)
+        _validate_forward_output(spec_obj, fwd_out)
+        return spec_obj.loss_fn(fwd_out, b_inputs, weights)
+
+      return jax.value_and_grad(_step_loss)(p_state)
+
+    hlo_text = _compiled_step.lower(params_state, rest_state, batch).compile().as_text()
+    if hlo_text is None:
+      raise AssertionError(f"{name}: compiled step as_text() returned None")
+
+  for raw_line in hlo_text.splitlines():
+    stripped = raw_line.strip()
+    if stripped.startswith("//"):
+      continue
+    ag_match = _ALL_GATHER_OPCODE_RE.search(stripped)
+    if ag_match is None:
+      continue
+    lhs_prefix = stripped[: ag_match.start()]
+    for dims_str in _HLO_TENSOR_SHAPE_RE.findall(lhs_prefix):
+      ag_shape = tuple(int(dim) for dim in dims_str.split(",") if dim.strip())
+      if ag_shape in forbidden_shapes:
+        raise AssertionError(
+            f"{name}: full expert weight all-gather of {forbidden_shapes[ag_shape]} {ag_shape}: {stripped}"
+        )
+
+
+def _bind_single_device(
+    check_fn: Callable[[spec.ConformanceSpec, jax.sharding.Mesh], None],
+) -> Callable[[spec.ConformanceSpec], None]:
+  """Adapts a single-device check `(spec, mesh) -> None` to `(spec) -> None`."""
+
+  def _runner(spec_obj: spec.ConformanceSpec) -> None:
+    check_fn(spec_obj, _create_single_device_mesh())
+
+  return _runner
+
+
+_CHECK_RUNNERS: Mapping[spec.CheckId, Callable[[spec.ConformanceSpec], None]] = {
+    spec.CheckId.SCAN_REMAT_EQUIVALENCE: _bind_single_device(check_scan_remat_equivalence),
+    spec.CheckId.PARAM_AND_GRAD_HEALTH: _bind_single_device(check_param_and_grad_health),
+    spec.CheckId.NON_PARAM_STATE_STABILITY: _bind_single_device(check_non_param_state_stability),
+    spec.CheckId.AUX_LOSS_GRAD_COUPLING: _bind_single_device(check_aux_loss_grad_coupling),
+    spec.CheckId.DRIVER_MESH_AND_AXIS_NAMES: check_driver_mesh_and_axis_names,
+    spec.CheckId.NO_POST_INIT_PARAM_CONSTRAINTS: check_no_post_init_param_constraints,
+    spec.CheckId.WEIGHT_SHARDING_COVERAGE: check_weight_sharding_coverage,
+    spec.CheckId.NO_EXPERT_WEIGHT_ALL_GATHER: check_no_expert_weight_all_gather,
+}
+
+
+def run_conformance_check(spec_obj: spec.ConformanceSpec, check_id: spec.CheckId) -> bool:
+  """Dispatches `check_id` across Checks 1-8 (`m3/README.md` Invariants (1)-(7)), respecting `skips`."""
+  if not isinstance(check_id, spec.CheckId) or check_id not in _CHECK_RUNNERS:
+    raise ValueError(f"{spec_obj.model_name}: unsupported check_id {check_id!r}")
+  if _should_skip(spec_obj, check_id):
+    return False
+  _CHECK_RUNNERS[check_id](spec_obj)
+  return True

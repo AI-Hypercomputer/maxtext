@@ -17,6 +17,7 @@
 from collections.abc import Callable, Mapping
 import dataclasses
 import enum
+import re
 
 from flax import nnx
 import jax
@@ -72,7 +73,13 @@ class ForwardOutput:
 
 @dataclasses.dataclass(frozen=True)
 class ConformanceSpec:
-  """Declarative conformance specification for an m3 model."""
+  """Declarative conformance specification for an m3 model.
+
+  Regex fields (`re.search`): `frozen_param_patterns`, `aux_losses` target
+  patterns,
+  `stacked_param_path_patterns`, and `expert_weight_param_patterns`.
+  Glob fields (`fnmatch.fnmatchcase`): `mutable_non_param_patterns`.
+  """
 
   model_name: str
   output_kind: OutputKind
@@ -98,7 +105,7 @@ class ConformanceSpec:
   )
 
   def validate_spec_invariants(self) -> None:
-    """Validates static ConformanceSpec field invariants."""
+    """Validates static ConformanceSpec field invariants (`m3/README.md` Invariants (1)-(7))."""
     if not isinstance(self.model_name, str) or not self.model_name.strip():
       raise ValueError(
           f"ConformanceSpec.model_name is blank: {self.model_name!r}.",
@@ -113,6 +120,26 @@ class ConformanceSpec:
       raise ValueError(
           f"{self.model_name}: invalid mutable_non_param_patterns {pats!r}.",
       )
+    regex_fields = (
+        ("stacked_param_path_patterns", self.stacked_param_path_patterns),
+        ("expert_weight_param_patterns", self.expert_weight_param_patterns),
+    )
+    for pat_field, regex_pats in regex_fields:
+      if not isinstance(regex_pats, tuple):
+        raise ValueError(f"{self.model_name}: invalid {pat_field} {regex_pats!r}.")
+      for p in regex_pats:
+        if not (isinstance(p, str) and bool(p.strip()) and p == p.strip()):
+          raise ValueError(f"{self.model_name}: invalid {pat_field} {regex_pats!r}.")
+        try:
+          re.compile(p)
+        except re.error as exc:
+          raise ValueError(f"{self.model_name}: invalid {pat_field} regex {p!r}: {exc}.") from exc
+    for int_field, int_val in (
+        ("num_scanned_blocks", self.num_scanned_blocks),
+        ("min_sharded_param_elements", self.min_sharded_param_elements),
+    ):
+      if isinstance(int_val, bool) or not isinstance(int_val, int) or int_val < 1:
+        raise ValueError(f"{self.model_name}: {int_field} must be int >= 1, got {int_val!r}.")
 
 
 _REGISTERED_SPECS: list[ConformanceSpec | Callable[[], ConformanceSpec]] = []
