@@ -16,8 +16,13 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+from typing import Any, cast
+
 from flax import nnx
-from maxtext.common.common_types import get_weight_dtype
+import jax
+from jax import ad_checkpoint
+import jax.numpy as jnp
+from maxtext.common.common_types import Array, get_weight_dtype
 from maxtext.layers.linears import MlpBlock
 from maxtext.models.qwen3 import (
     Qwen3NextDecoderLayer,
@@ -127,3 +132,93 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         out_sharding=self.out_sharding,
     )
     return mlp_output, None
+
+  def __call__(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray = None,
+      decoder_positions: None | jnp.ndarray = None,
+      deterministic: bool = False,
+      model_mode: str = "train",
+      previous_chunk=None,
+      slot: None | int = None,
+      kv_cache: None | dict[str, Array] = None,
+      attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jnp.ndarray | None = None,
+  ):
+    if not (
+        getattr(self.config, "qwen3_5_sublayer_remat", False)
+        and getattr(self.config, "num_experts", 1) > 1
+        and kv_cache is None
+    ):
+      return super().__call__(
+          inputs,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          forced_routed_experts=forced_routed_experts,
+      )
+
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = ad_checkpoint.checkpoint_name(inputs, "decoder_layer_input")
+
+    if isinstance(attention_metadata, dict):
+      attention_metadata = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
+
+    attn_graphdef, attn_state = nnx.split((self.input_layernorm, self.attention), nnx.Variable)
+
+    def _run_attn_subblock_impl(x_in, state_in, seg_in, pos_in):
+      norm_mod, attn_mod = nnx.merge(attn_graphdef, state_in)
+      h = norm_mod(x_in, out_sharding=self.out_sharding)
+      h = self._maybe_shard_with_logical(h, self.activation_axis_names)
+      if isinstance(attn_mod, Qwen3NextFullAttention):
+        attn_out, _ = cast(Qwen3NextFullAttention, attn_mod)(
+            h,
+            seg_in,
+            pos_in,
+            deterministic,
+            model_mode,
+            kv_cache=None,
+            attention_metadata=attention_metadata,
+            out_sharding=self.out_sharding,
+        )
+      else:
+        attn_out, _ = cast(Qwen3NextGatedDeltaNet, attn_mod)(
+            h,
+            model_mode=model_mode,
+            kv_cache=None,
+            decoder_segment_ids=seg_in,
+            attention_metadata=attention_metadata,
+            out_sharding=self.out_sharding,
+        )
+      attn_out = self._maybe_shard_with_logical(attn_out, self.activation_axis_names)
+      h_out = x_in + attn_out
+      return self._maybe_shard_with_logical(h_out, self.activation_axis_names)
+
+    _run_attn_subblock = jax.checkpoint(_run_attn_subblock_impl, policy=None, prevent_cse=False)
+    hidden_states = _run_attn_subblock(inputs, attn_state, decoder_segment_ids, decoder_positions)
+    hidden_states = ad_checkpoint.checkpoint_name(hidden_states, "attn_subblock_out")
+    new_kv_cache = None
+
+    residual = hidden_states
+    hidden_states = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+
+    mlp_output, load_balance_loss = self._apply_mlp(hidden_states, deterministic, forced_routed_experts)
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+
+    mlp_output = self._maybe_shard_with_logical(mlp_output, self.activation_axis_names)
+    layer_output = residual + mlp_output
+    layer_output = self._maybe_shard_with_logical(
+        layer_output,
+        self.activation_axis_names,
+    )
+    return layer_output, new_kv_cache

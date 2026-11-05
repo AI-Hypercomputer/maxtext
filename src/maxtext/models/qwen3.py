@@ -47,6 +47,7 @@ from maxtext.common.common_types import (
     get_weight_dtype,
 )
 from maxtext.inference import kvcache
+from maxtext.kernels import gdn_fused
 from maxtext.kernels.attention import gdn_cp
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
@@ -215,6 +216,350 @@ def naive_jax_chunk_gated_delta_rule(
   core_attn_out = jnp.transpose(core_attn_out, (0, 2, 1, 3)).astype(initial_dtype)
 
   return core_attn_out, final_state if output_final_state else None
+
+
+def _jax_chunk_gated_delta_rule_fast_core(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    chunk_size: int = 64,
+    initial_state: None | Array = None,
+    use_qk_norm_in_gdn: bool = False,
+    cp_axis: None | str = None,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+    inverse_block_size: int = 16,
+    recurrence_impl: str = "jax",
+    inverse_precision: str = "highest",
+    pallas_heads_per_block: int = 4,
+) -> tuple[Array, None | Array]:
+  """Core implementation of Gated Delta Rule for a batch or single sequence."""
+  # =========================================================================
+  # STAGE 1: PREPARATION & PADDING
+  # =========================================================================
+  initial_dtype = query.dtype
+
+  def _pad_seq(x, length, val=0.0):
+    return jnp.pad(x, ((0, 0), (0, length)) + ((0, 0),) * (x.ndim - 2), constant_values=val)
+
+  if recurrence_impl == "fused" and cp_axis is None and initial_state is None:
+    if use_qk_norm_in_gdn:
+      query = l2norm(query, dim=-1, eps=1e-6)
+      key = l2norm(key, dim=-1, eps=1e-6)
+    g = g.astype(jnp.float32)
+    query = query.astype(compute_dtype)
+    key = key.astype(compute_dtype)
+    value = value.astype(compute_dtype)
+    beta = beta.astype(compute_dtype)
+    scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
+    query = query * scale
+    seq_len = key.shape[1]
+    pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
+    if pad_len > 0:
+      query = _pad_seq(query, pad_len)
+      key = _pad_seq(key, pad_len)
+      value = _pad_seq(value, pad_len)
+      g = _pad_seq(g, pad_len)
+      beta = _pad_seq(beta, pad_len)
+
+    o = gdn_fused.gdn_fused_bhtd(
+        query,
+        key,
+        value,
+        g,
+        beta,
+        chunk_size=chunk_size,
+        heads_per_block=pallas_heads_per_block,
+        inverse_block_size=inverse_block_size,
+        use_qk_norm=False,
+        scale_q=False,
+    )
+    if pad_len > 0:
+      o = o[:, :seq_len, :, :]
+    return o.astype(initial_dtype), None
+
+  if use_qk_norm_in_gdn:
+    query = l2norm(query, dim=-1, eps=1e-6)
+    key = l2norm(key, dim=-1, eps=1e-6)
+
+  g = g.astype(jnp.float32)
+
+  # 2. Cast inputs to the requested compute_dtype (cfg.dtype) to save memory/compute
+  query = query.astype(compute_dtype)
+  key = key.astype(compute_dtype)
+  value = value.astype(compute_dtype)
+  beta = beta.astype(compute_dtype)
+
+  # Scale Query (keep in compute_dtype)
+  scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
+  query = query * scale
+
+  B, seq_len, H, K_dim = key.shape
+  V_dim = value.shape[-1]
+
+  pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
+  if pad_len > 0:
+    query = _pad_seq(query, pad_len)
+    key = _pad_seq(key, pad_len)
+    value = _pad_seq(value, pad_len)
+    g = _pad_seq(g, pad_len)
+    beta = _pad_seq(beta, pad_len)
+
+  if value.shape[2] > query.shape[2] and value.shape[2] % query.shape[2] == 0:
+    repeats = value.shape[2] // query.shape[2]
+    query = jnp.repeat(query, repeats, axis=2)
+    key = jnp.repeat(key, repeats, axis=2)
+    H = value.shape[2]
+
+  num_chunks = query.shape[1] // chunk_size
+
+  # Helper: (B, S, H, D) -> (B, N, H, C, D)
+  def to_chunk(x):
+    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
+
+  # Helper for scalars: (B, S, H) -> (B, N, H, C)
+  def to_chunk_scalar(x):
+    return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
+
+  q_c = to_chunk(query)
+  k_c = to_chunk(key)
+  v_c = to_chunk(value)
+  g_c = to_chunk_scalar(g)
+  beta_c = to_chunk_scalar(beta)
+
+  # =========================================================================
+  # STAGE 2: INTRA-CHUNK PRE-COMPUTATION (Parallel)
+  # =========================================================================
+
+  # Cumulative decay (Must be float32)
+  g_cumsum = jnp.cumsum(g_c, axis=-1)
+  k_beta = k_c * beta_c[..., None]
+
+  # S Matrix Calculation
+  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.DEFAULT, preferred_element_type=jnp.float32)
+
+  # Apply mask BEFORE exp to prevent 'inf' gradients
+  g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  g_diff = jnp.where(mask, g_diff, -1e30)
+
+  S = S * jnp.exp(g_diff)
+  S = jnp.where(mask, S, 0.0)
+
+  # Inversion (A) - Fast Recursive Block Inversion
+  L = jnp.eye(chunk_size, dtype=jnp.float32) + S
+  A = invert_unit_lower_triangular(L, block_size=inverse_block_size, precision=_INVERSE_PRECISION[inverse_precision])
+
+  # 5. WY Factors
+  v_beta = v_c * beta_c[..., None]
+  u_chunks = jnp.matmul(
+      A.astype(compute_dtype), v_beta, precision=jax.lax.Precision.DEFAULT, preferred_element_type=jnp.float32
+  )
+  u_chunks = u_chunks.astype(compute_dtype)
+
+  k_beta_g = k_beta.astype(jnp.float32) * jnp.exp(g_cumsum)[..., None]
+  w_chunks = jnp.matmul(
+      A.astype(compute_dtype),
+      k_beta_g.astype(compute_dtype),
+      precision=jax.lax.Precision.DEFAULT,
+      preferred_element_type=jnp.float32,
+  )
+  w_chunks = w_chunks.astype(compute_dtype)
+
+  # =========================================================================
+  # STAGE 3: INTER-CHUNK RECURRENCE (Scan)
+  # =========================================================================
+
+  scan_perm_vec = (1, 0, 2, 3, 4)
+  scan_perm_scl = (1, 0, 2, 3)
+
+  w_scan = w_chunks.transpose(scan_perm_vec)
+  u_scan = u_chunks.transpose(scan_perm_vec)
+  k_scan = k_c.transpose(scan_perm_vec)
+  q_scan = q_c.transpose(scan_perm_vec)
+  g_scan = g_cumsum.transpose(scan_perm_scl)
+
+  if initial_state is None:
+    h_init = jnp.zeros((B, H, K_dim, V_dim), dtype=jnp.float32)
+  else:
+    h_init = initial_state.astype(jnp.float32)
+
+  xs = (w_scan, u_scan, q_scan, k_scan, g_scan)
+
+  def scan_body(h, args):
+    w, u, q, k, g = args
+    prec = jax.lax.Precision.DEFAULT
+
+    # --- Output Computation ---
+    # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
+    q_g = q.astype(jnp.float32) * jnp.exp(g)[..., None]
+    attn_inter = jnp.matmul(
+        q_g.astype(compute_dtype), h.astype(compute_dtype), precision=prec, preferred_element_type=jnp.float32
+    )
+
+    # 2. Delta Rule Subtraction (v_prime and v_new)
+    # w serves as k_cumdecay, u serves as value_intra
+    v_prime = jnp.matmul(w, h.astype(compute_dtype), precision=prec, preferred_element_type=jnp.float32)
+    v_new = u.astype(jnp.float32) - v_prime
+
+    # 3. Intra-chunk: q(dtype) @ k(dtype) -> f32
+    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=prec, preferred_element_type=jnp.float32)
+
+    # Mask before exp
+    g_diff = g[..., :, None] - g[..., None, :]
+    mask_intra = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
+    g_diff = jnp.where(mask_intra, g_diff, -1e30)
+
+    attn_i = attn * jnp.exp(g_diff)
+    attn_i = jnp.where(mask_intra, attn_i, 0.0)
+
+    # Note: We do NOT multiply attn_i by beta here. The Delta rule mathematically
+    # absorbed beta inside v_new (via u).
+
+    # 4. Combine Core Output (cast to compute_dtype to halve scan output storage)
+    term2 = jnp.matmul(
+        attn_i.astype(compute_dtype), v_new.astype(compute_dtype), precision=prec, preferred_element_type=jnp.float32
+    )
+    o_c = (attn_inter + term2).astype(compute_dtype)
+
+    # --- State Update ---
+    g_i_last_exp = jnp.exp(g[..., -1, None, None])
+    h_new = h * g_i_last_exp
+
+    # Apply Delta Rule K decay to state
+    g_diff_exp_state = jnp.exp(g[..., -1, None] - g)[..., None]
+    k_i_g_diff = k.astype(jnp.float32) * g_diff_exp_state
+
+    update_term = jnp.matmul(
+        k_i_g_diff.astype(compute_dtype).swapaxes(-1, -2),
+        v_new.astype(compute_dtype),
+        precision=prec,
+        preferred_element_type=jnp.float32,
+    )
+    h_new = h_new + update_term
+
+    return h_new, o_c
+
+  if cp_axis is None:
+    ckpt_scan_body = jax.checkpoint(scan_body, prevent_cse=False)
+    final_h, o_chunks = lax.scan(ckpt_scan_body, h_init, xs)
+  else:
+    # Sequence is sharded over cp_axis, so a sequential scan over chunks is not
+    # available. Fold the local chunks into one affine map, exchange those, then
+    # replay locally from the correct incoming state. See kernels/attention/gdn_cp.py.
+    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_scan, g_scan)
+    h_in, final_h = gdn_cp.incoming_state(A_loc, B_loc, h_init, cp_axis)
+    _, o_chunks = lax.scan(scan_body, h_in, xs)
+
+  # =========================================================================
+  # STAGE 4: FINALIZATION
+  # =========================================================================
+  o = o_chunks.transpose(1, 0, 3, 2, 4)
+  o = o.reshape(B, -1, H, V_dim)
+
+  if pad_len > 0:
+    o = o[:, :seq_len, :, :]
+
+  o = o.astype(initial_dtype)
+
+  return o, (final_h.astype(compute_dtype) if initial_state is not None else None)
+
+
+def jax_chunk_gated_delta_rule_fast(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    chunk_size: int = 64,
+    initial_state: None | Array = None,
+    use_qk_norm_in_gdn: bool = False,
+    cp_axis: None | str = None,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+    inverse_block_size: int = 16,
+    recurrence_impl: str = "jax",
+    pallas_batch_map: bool = False,
+    inverse_precision: str = "highest",
+    pallas_heads_per_block: int = 4,
+) -> tuple[Array, None | Array]:
+  """Optimized JAX implementation of Gated Delta Rule with bounded per-sequence HBM."""
+  B = query.shape[0]
+  use_pallas = recurrence_impl in ("pallas", "fused") and initial_state is None
+  if cp_axis is not None or B <= 1 or (use_pallas and not pallas_batch_map):
+    return _jax_chunk_gated_delta_rule_fast_core(
+        query,
+        key,
+        value,
+        g,
+        beta,
+        chunk_size=chunk_size,
+        initial_state=initial_state,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        cp_axis=cp_axis,
+        compute_dtype=compute_dtype,
+        inverse_block_size=inverse_block_size,
+        recurrence_impl=recurrence_impl,
+        inverse_precision=inverse_precision,
+        pallas_heads_per_block=pallas_heads_per_block,
+    )
+
+  has_init = initial_state is not None
+
+  @functools.partial(jax.checkpoint, prevent_cse=False)
+  def _single_seq_gdn(args):
+    q_b, k_b, v_b, g_b, beta_b, h_b = args
+    init_b = h_b[None] if has_init else None
+    out_b, final_b = _jax_chunk_gated_delta_rule_fast_core(
+        q_b[None],
+        k_b[None],
+        v_b[None],
+        g_b[None],
+        beta_b[None],
+        chunk_size=chunk_size,
+        initial_state=init_b,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        cp_axis=None,
+        compute_dtype=compute_dtype,
+        inverse_block_size=inverse_block_size,
+        recurrence_impl=recurrence_impl,
+        inverse_precision=inverse_precision,
+        pallas_heads_per_block=pallas_heads_per_block,
+    )
+    return out_b[0], (final_b[0] if has_init else jnp.zeros((0,), dtype=compute_dtype))
+
+  dummy_h = initial_state if has_init else jnp.zeros((B, 0), dtype=compute_dtype)
+  o, final_h = jax.lax.map(_single_seq_gdn, (query, key, value, g, beta, dummy_h))
+  return o, (final_h if has_init else None)
+
+
+_INVERSE_PRECISION = {
+    "highest": jax.lax.Precision.HIGHEST,
+    "high": jax.lax.Precision.HIGH,
+    "default": jax.lax.Precision.DEFAULT,
+}
+
+
+def invert_unit_lower_triangular(L_mat, block_size=16, precision=jax.lax.Precision.HIGHEST):
+  """Inverts a unit lower-triangular matrix via recursive 2x2 block inversion."""
+  N = L_mat.shape[-1]
+  if N == 1:
+    return jnp.ones_like(L_mat)
+  if N <= block_size:
+    identity = jnp.eye(N, dtype=L_mat.dtype)
+    identity_bcast = jnp.broadcast_to(identity, L_mat.shape)
+    return jax.scipy.linalg.solve_triangular(L_mat, identity_bcast, lower=True, unit_diagonal=True)
+  N2 = N // 2
+  L11 = L_mat[..., :N2, :N2]
+  L21 = L_mat[..., N2:, :N2]
+  L22 = L_mat[..., N2:, N2:]
+  X11 = invert_unit_lower_triangular(L11, block_size, precision=precision)
+  X22 = invert_unit_lower_triangular(L22, block_size, precision=precision)
+  mid = jnp.matmul(L21, X11, precision=precision)
+  X21 = jnp.matmul(-X22, mid, precision=precision)
+  top = jnp.concatenate([X11, jnp.zeros_like(L21.swapaxes(-1, -2))], axis=-1)
+  bottom = jnp.concatenate([X21, X22], axis=-1)
+  return jnp.concatenate([top, bottom], axis=-2)
 
 
 def jax_chunk_gated_delta_rule(
@@ -766,94 +1111,192 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
-    # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-    qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
-    # ba: (B, S, 2 * H_v)
-    ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
-
-    # =========================================================================
-    # QKVZ and BA Reshaping and Splitting (shared by both paths)
-    # =========================================================================
-    # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
-    new_shape_qkvz = (
-        batch,
-        seq_len,
-        self.num_k_heads,  # H_k
-        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
-    )
-    # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
-    mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
+    v_per_k_dim = self.v_heads_per_k_head * self.head_v_dim
+    qkv_dim_per_k = 2 * self.head_k_dim + v_per_k_dim
+    gdn_head_unsharded = True
     if self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
-      # LENGTH, not None. This with_sharding_constraint told XLA to gather the
-      # full sequence onto every device for the qkvz projection. With ctx=2 at
-      # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
-      # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
-      # and the reason the first version of this patch cut GDN memory but still
-      # lost overall.
-      cp_len = LENGTH if gdn_context_axes(cfg) else None
-      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
-      # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
-      qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-          qkvz_pspec,
-          mixed_qkvz.shape,
-          self.mesh,
-          dims=(0,),
-          allow_remove_axes=True,
+      gdn_head_pspec = logical_to_mesh_axes((gdn_head_axis,), mesh=self.mesh, rules=get_logical_axis_rules())[0]
+      if gdn_head_pspec is not None:
+        axes = gdn_head_pspec if isinstance(gdn_head_pspec, tuple) else (gdn_head_pspec,)
+        gdn_head_unsharded = all(self.mesh.shape.get(ax, 1) == 1 for ax in axes if ax is not None)
+    use_split_qkvz = (
+        not use_paged_state
+        and cfg.gdn_chunk_impl == "fast"
+        and (model_mode == MODEL_MODE_TRAIN or active_cache is None)
+        and self.in_proj_qkvz.quant is None
+        and self.in_proj_qkvz.kernel_scale is None
+        and not self.in_proj_qkvz.use_bias
+        and self.in_proj_ba.quant is None
+        and self.in_proj_ba.kernel_scale is None
+        and not self.in_proj_ba.use_bias
+        and gdn_head_unsharded
+    )
+
+    query = key = value_raw = None
+    if use_split_qkvz:
+      proj_qkvz = self.in_proj_qkvz
+      if hasattr(proj_qkvz.kernel, "get_value"):
+        w_qkvz = proj_qkvz.kernel.get_value()
+      elif isinstance(proj_qkvz.kernel, (dict, nnx.State)) and "value" in proj_qkvz.kernel:
+        w_qkvz = proj_qkvz.kernel["value"]
+      else:
+        w_qkvz = getattr(proj_qkvz.kernel, "value", proj_qkvz.kernel)
+      if hasattr(w_qkvz, "value"):
+        w_qkvz = w_qkvz.value
+      if proj_qkvz.parameter_memory_host_offload:
+        w_qkvz = jax.device_put(w_qkvz, max_utils.device_space())
+      w_qkvz = jnp.asarray(w_qkvz, proj_qkvz.dtype)
+      w_qkvz = proj_qkvz._maybe_two_stage_all_gather(w_qkvz)
+      w_qkvz_3d = jnp.reshape(
+          w_qkvz,
+          (w_qkvz.shape[0], self.num_k_heads, qkv_dim_per_k + v_per_k_dim),
       )
-      qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
-      # Under ShardMode.EXPLICIT `with_sharding_constraint` is an assertion rather than
-      # a hint and rejects any layout it has to change, so reshard through the helper.
-      mixed_qkvz = maybe_shard_with_name(
-          mixed_qkvz,
-          qkvz_sharding,
-          shard_mode=cfg.shard_mode,
-          debug_sharding=cfg.debug_sharding,
+      w_q, w_k, w_v, w_z = jnp.split(
+          w_qkvz_3d,
+          [self.head_k_dim, 2 * self.head_k_dim, qkv_dim_per_k],
+          axis=2,
       )
+      w_qkv = jnp.concatenate(
+          [
+              jnp.reshape(w_q, (w_qkvz.shape[0], self.key_dim)),
+              jnp.reshape(w_k, (w_qkvz.shape[0], self.key_dim)),
+              jnp.reshape(w_v, (w_qkvz.shape[0], self.value_dim)),
+          ],
+          axis=-1,
+      )
+      w_z_flat = jnp.reshape(w_z, (w_qkvz.shape[0], self.value_dim))
+      hs_cast = jnp.asarray(hidden_states, proj_qkvz.dtype)
+      dot_out_sharding = flat_sharding if proj_qkvz.shard_mode == ShardMode.EXPLICIT else None
+      qkv = lax.dot_general(
+          hs_cast,
+          w_qkv,
+          (((hs_cast.ndim - 1,), (0,)), ((), ())),
+          precision=lax.Precision(proj_qkvz.matmul_precision),
+          out_sharding=dot_out_sharding,
+      )
+      qkv = checkpoint_name(qkv, "gdn_qkv")
+      z = None
+      z_flat = None
+      proj_ba = self.in_proj_ba
+      if hasattr(proj_ba.kernel, "get_value"):
+        w_ba = proj_ba.kernel.get_value()
+      elif isinstance(proj_ba.kernel, (dict, nnx.State)) and "value" in proj_ba.kernel:
+        w_ba = proj_ba.kernel["value"]
+      else:
+        w_ba = getattr(proj_ba.kernel, "value", proj_ba.kernel)
+      if hasattr(w_ba, "value"):
+        w_ba = w_ba.value
+      if proj_ba.parameter_memory_host_offload:
+        w_ba = jax.device_put(w_ba, max_utils.device_space())
+      w_ba = jnp.asarray(w_ba, proj_ba.dtype)
+      w_ba = proj_ba._maybe_two_stage_all_gather(w_ba)
+      w_ba_3d = jnp.reshape(w_ba, (w_ba.shape[0], self.num_k_heads, 2 * self.v_heads_per_k_head))
+      w_b, w_a = jnp.split(w_ba_3d, [self.v_heads_per_k_head], axis=2)
+      w_ba_reordered = jnp.concatenate(
+          [
+              jnp.reshape(w_b, (w_ba.shape[0], self.num_v_heads)),
+              jnp.reshape(w_a, (w_ba.shape[0], self.num_v_heads)),
+          ],
+          axis=-1,
+      )
+      hs_ba = jnp.asarray(hidden_states, proj_ba.dtype)
+      ba_reordered = lax.dot_general(
+          hs_ba,
+          w_ba_reordered,
+          (((hs_ba.ndim - 1,), (0,)), ((), ())),
+          precision=lax.Precision(proj_ba.matmul_precision),
+          out_sharding=dot_out_sharding,
+      )
+      ba_reordered = checkpoint_name(ba_reordered, "gdn_ba")
+      b, a = jnp.split(ba_reordered, [self.num_v_heads], axis=-1)
+    else:
+      # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
+      qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+      # ba: (B, S, 2 * H_v)
+      ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
-    split_indices_qkvz = [
-        self.head_k_dim,  # D_k
-        2 * self.head_k_dim,  # 2 * D_k
-        2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
-    ]
-    # query: (B, S, H_k, D_k)
-    # key: (B, S, H_k, D_k)
-    # value_raw: (B, S, H_k, V_per_K * D_v)
-    # z_raw: (B, S, H_k, V_per_K * D_v)
-    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+      # =========================================================================
+      # QKVZ and BA Reshaping and Splitting (shared by both paths)
+      # =========================================================================
+      # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
+      new_shape_qkvz = (
+          batch,
+          seq_len,
+          self.num_k_heads,  # H_k
+          2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+      )
+      # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
+      mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
+      if self.mesh is not None:
+        logical_rules = get_logical_axis_rules()
+        # LENGTH, not None. This with_sharding_constraint told XLA to gather the
+        # full sequence onto every device for the qkvz projection. With ctx=2 at
+        # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
+        # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
+        # and the reason the first version of this patch cut GDN memory but still
+        # lost overall.
+        cp_len = LENGTH if gdn_context_axes(cfg) else None
+        qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
+        # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
+        qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            qkvz_pspec,
+            mixed_qkvz.shape,
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
+        )
+        qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
+        # Under ShardMode.EXPLICIT `with_sharding_constraint` is an assertion rather than
+        # a hint and rejects any layout it has to change, so reshard through the helper.
+        mixed_qkvz = maybe_shard_with_name(
+            mixed_qkvz,
+            qkvz_sharding,
+            shard_mode=cfg.shard_mode,
+            debug_sharding=cfg.debug_sharding,
+        )
 
-    # value: (B, S, H_v, D_v)
-    value = jnp.reshape(
-        value_raw,
-        (batch, seq_len, self.num_v_heads, self.head_v_dim),
-        out_sharding=head_sharding,
-    )
-    # z: (B, S, H_v, D_v)
-    z = jnp.reshape(
-        z_raw,
-        (batch, seq_len, self.num_v_heads, self.head_v_dim),
-        out_sharding=head_sharding,
-    )
+      split_indices_qkvz = [
+          self.head_k_dim,  # D_k
+          2 * self.head_k_dim,  # 2 * D_k
+          qkv_dim_per_k,  # 2 * D_k + V_per_K * D_v
+      ]
+      # query: (B, S, H_k, D_k)
+      # key: (B, S, H_k, D_k)
+      # value_raw: (B, S, H_k, V_per_K * D_v)
+      # z_raw: (B, S, H_k, V_per_K * D_v)
+      query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
 
-    # BA Reshaping and Splitting
-    new_shape_ba = (
-        batch,
-        seq_len,
-        self.num_k_heads,  # H_k
-        2 * self.v_heads_per_k_head,
-    )
-    # mixed_ba: (B, S, H_k, 2 * V_per_K)
-    mixed_ba = jnp.reshape(ba, new_shape_ba, out_sharding=head_sharding)
+      if use_paged_state or cfg.gdn_chunk_impl != "fast":
+        # z: (B, S, H_v, D_v)
+        z = jnp.reshape(
+            z_raw,
+            (batch, seq_len, self.num_v_heads, self.head_v_dim),
+            out_sharding=head_sharding,
+        )
+        z_flat = None
+      else:
+        z = None
+        z_flat = jnp.reshape(z_raw, (batch, seq_len, -1), out_sharding=flat_sharding)
 
-    split_indices_ba = [self.v_heads_per_k_head]
-    # b_raw: (B, S, H_k, V_per_K)
-    # a_raw: (B, S, H_k, V_per_K)
-    b_raw, a_raw = jnp.split(mixed_ba, split_indices_ba, axis=3)
+      # BA Reshaping and Splitting
+      new_shape_ba = (
+          batch,
+          seq_len,
+          self.num_k_heads,  # H_k
+          2 * self.v_heads_per_k_head,
+      )
+      # mixed_ba: (B, S, H_k, 2 * V_per_K)
+      mixed_ba = jnp.reshape(ba, new_shape_ba, out_sharding=head_sharding)
 
-    # b: (B, S, H_v)
-    b = jnp.reshape(b_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
-    # a: (B, S, H_v)
-    a = jnp.reshape(a_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
+      split_indices_ba = [self.v_heads_per_k_head]
+      # b_raw: (B, S, H_k, V_per_K)
+      # a_raw: (B, S, H_k, V_per_K)
+      b_raw, a_raw = jnp.split(mixed_ba, split_indices_ba, axis=3)
+
+      # b: (B, S, H_v)
+      b = jnp.reshape(b_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
+      # a: (B, S, H_v)
+      a = jnp.reshape(a_raw, (batch, seq_len, self.num_v_heads), out_sharding=flat_sharding)
 
     if use_paged_state:
       # =========================================================================
@@ -972,24 +1415,26 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       return output, (new_conv_state_paged, new_recurrent_state_paged)
 
-    # Flatten head dimensions for concatenation before conv
-    # q: (B, S, K_dim)
-    q = jnp.reshape(query, (batch, seq_len, -1), out_sharding=flat_sharding)
-    # k: (B, S, K_dim)
-    k = jnp.reshape(key, (batch, seq_len, -1), out_sharding=flat_sharding)
-    # v: (B, S, V_dim)
-    v = jnp.reshape(value, (batch, seq_len, -1), out_sharding=flat_sharding)
-
-    # =========================================================================
-    # STEP B: 1D Convolution
-    # =========================================================================
-    qkv = jnp.concatenate([q, k, v], axis=-1)
-    batch, seq_len, _ = qkv.shape
     conv_kernel_size = self.config.gdn_conv_kernel_dim
-
     conv_state = None
     recurrent_state = None
     next_conv_state = None
+
+    if not use_split_qkvz:
+      # Flatten head dimensions for concatenation before conv
+      # q: (B, S, K_dim)
+      q = jnp.reshape(query, (batch, seq_len, -1), out_sharding=flat_sharding)
+      # k: (B, S, K_dim)
+      k = jnp.reshape(key, (batch, seq_len, -1), out_sharding=flat_sharding)
+      # v: (B, S, V_dim)
+      v = jnp.reshape(value_raw, (batch, seq_len, -1), out_sharding=flat_sharding)
+
+      # =========================================================================
+      # STEP B: 1D Convolution
+      # =========================================================================
+      qkv = jnp.concatenate([q, k, v], axis=-1)
+    batch, seq_len, _ = qkv.shape
+
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       recurrent_state, conv_state = active_cache.get_gdn_states()
       orig_cache_batch = conv_state.shape[0]
@@ -1025,13 +1470,22 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
       else:
         next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
+
+      # Perform the convolution.
+      conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
+      # Slice the output to match the original input sequence length.
+      conv_out = conv_out[:, -seq_len:, :]
+    elif cfg.gdn_chunk_impl == "fast":
+      # self.conv1d already uses padding="CAUSAL" (left-pads conv_kernel_size - 1
+      # zeros along sequence axis inside lax.conv_general_dilated), so calling it
+      # directly on qkv avoids allocating a padded (B, S + 3, 8192) copy and slice.
+      conv_out = self.conv1d(qkv, out_sharding=flat_sharding)
     else:
       conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
+      conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
+      conv_out = conv_out[:, -seq_len:, :]
+    conv_out = checkpoint_name(conv_out, "gdn_conv_out")
 
-    # Perform the convolution.
-    conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
-    # Slice the output to match the original input sequence length.
-    conv_out = conv_out[:, -seq_len:, :]
     qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
     # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
@@ -1081,7 +1535,18 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       value = jnp.where(mask[..., None, None], value, 0.0)
       g = jnp.where(mask[..., None], g, 0.0)
 
-    if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
+    query = checkpoint_name(query, "gdn_post_conv")
+    key = checkpoint_name(key, "gdn_post_conv")
+    value = checkpoint_name(value, "gdn_post_conv")
+    g = checkpoint_name(g, "gdn_post_conv")
+    beta = checkpoint_name(beta, "gdn_post_conv")
+
+    defer_qk_repeat = (
+        cfg.gdn_chunk_impl == "fast"
+        and getattr(cfg, "gdn_recurrence_impl", "jax") == "fused"
+        and not (seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE)
+    )
+    if not defer_qk_repeat and self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
       repeats = self.num_v_heads // self.num_k_heads
       # query shape after repeat: (B, S, H_v, D_k)
       query = jnp.repeat(query, repeats, axis=2, out_sharding=head_sharding)
@@ -1156,6 +1621,28 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         beta = jax.sharding.reshard(beta, g_beta_pspec)
         recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
 
+      delta_fn = (
+          functools.partial(
+              jax_chunk_gated_delta_rule_fast,
+              inverse_block_size=cfg.gdn_inverse_block_size,
+              recurrence_impl=getattr(cfg, "gdn_recurrence_impl", "jax"),
+              pallas_batch_map=getattr(cfg, "gdn_pallas_batch_map", False),
+              inverse_precision=getattr(cfg, "gdn_inverse_precision", "highest"),
+              pallas_heads_per_block=getattr(cfg, "gdn_pallas_heads_per_block", 4),
+          )
+          if cfg.gdn_chunk_impl == "fast"
+          else jax_chunk_gated_delta_rule
+      )
+      # recurrent_state_arg is a zero placeholder when there is no real state.
+      # The Pallas recurrence needs initial_state=None; it then returns no
+      # final state, so pass the zero placeholder through (training ignores it).
+      pallas_no_state = (
+          cfg.gdn_chunk_impl == "fast"
+          and getattr(cfg, "gdn_recurrence_impl", "jax") in ["pallas", "fused"]
+          and recurrent_state is None
+          and not cp_axes
+      )
+
       @functools.partial(
           jax.shard_map,
           mesh=self.mesh,
@@ -1174,22 +1661,37 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           check_vma=False,
       )
       def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h):
-        return jax_chunk_gated_delta_rule(
+        out, final_h = delta_fn(
             query=q,
             key=k,
             value=v,
             g=g_val,
             beta=beta_val,
             chunk_size=cfg.gdn_chunk_size,
-            initial_state=init_h,
+            initial_state=None if pallas_no_state else init_h,
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=cfg.dtype,
             cp_axis=cp_axes or None,
         )
+        if pallas_no_state:
+          final_h = init_h
+        return out, final_h
 
       core_attn_out, next_recurrent_state = shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg)
     else:
-      core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
+      delta_fn = (
+          functools.partial(
+              jax_chunk_gated_delta_rule_fast,
+              inverse_block_size=cfg.gdn_inverse_block_size,
+              recurrence_impl=getattr(cfg, "gdn_recurrence_impl", "jax"),
+              pallas_batch_map=getattr(cfg, "gdn_pallas_batch_map", False),
+              inverse_precision=getattr(cfg, "gdn_inverse_precision", "highest"),
+              pallas_heads_per_block=getattr(cfg, "gdn_pallas_heads_per_block", 4),
+          )
+          if cfg.gdn_chunk_impl == "fast"
+          else jax_chunk_gated_delta_rule
+      )
+      core_attn_out, next_recurrent_state = delta_fn(
           query,
           key,
           value,
@@ -1218,7 +1720,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_conv_state = next_conv_state[:orig_cache_batch]
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
-    next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
+    if next_recurrent_state is not None:
+      next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
@@ -1228,12 +1731,29 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # The normalization and gating is applied per-head on the value dimension.
 
-    # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
-    gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
+    # Apply the norm and gate. Output shape: (B, S, H_v, D_v) or flattened (B, S, value_dim)
+    core_attn_out = checkpoint_name(core_attn_out, "gdn_core_out")
+    query = key = value_raw = None
+    if use_split_qkvz:
+      z_flat = lax.dot_general(
+          hs_cast,
+          w_z_flat,
+          (((hs_cast.ndim - 1,), (0,)), ((), ())),
+          precision=lax.Precision(proj_qkvz.matmul_precision),
+          out_sharding=dot_out_sharding,
+      )
+    if z_flat is not None:
+      z_flat = checkpoint_name(z_flat, "gdn_z")
+      norm_out = self.norm.rms_norm(core_attn_out, out_sharding=head_sharding).astype(cfg.dtype)
+      norm_out_flat = jnp.reshape(norm_out, (batch, seq_len, -1), out_sharding=flat_sharding)
+      gated_output = norm_out_flat * jax.nn.silu(z_flat.astype(jnp.float32)).astype(cfg.dtype)
+    else:
+      z = checkpoint_name(z, "gdn_z")
+      gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
 
-    # Reshape back to a single feature dimension for the final projection.
-    # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
-    gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
+      # Reshape back to a single feature dimension for the final projection.
+      # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
+      gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)
