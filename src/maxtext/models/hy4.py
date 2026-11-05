@@ -347,6 +347,10 @@ class Hy4Indexer(attention_mla.Indexer):
 
     topk_values, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)
     del topk_values
+    # Tag `topk_indices` under `"indexer_cutoff_threshold"` so `indexer_cutoff_threshold=device|offload`
+    # saves the discrete top-k selection across remat boundaries (preventing backward mask flips and
+    # allowing JAX DCE to eliminate backward Indexer recomputation).
+    topk_indices = checkpoint_name(topk_indices, "indexer_cutoff_threshold")
     # Match HYV4Attention: scatter False at topk_indices (unmasked=0.0, masked=DEFAULT_MASK_VALUE)
     selected = (
         jnp.zeros_like(indexer_score, dtype=jnp.bool_)
