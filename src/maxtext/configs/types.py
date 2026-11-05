@@ -3060,6 +3060,10 @@ class Optimizer(BaseModel):
       0.1,
       description="Final LR as a fraction of peak LR (applies to both cosine and WSD schedules).",
   )
+  cosine_learning_rate_final_fraction: Optional[float] = Field(
+      None,
+      description="Optional final LR fraction override for cosine schedule in RL training.",
+  )
   wsd_decay_steps_fraction: float = Field(
       0.1,
       ge=0.0,
@@ -3814,6 +3818,25 @@ class VLLM(BaseModel):
   )
 
 
+class MimoConfig(BaseModel):
+  """Configuration for MiMo-style length penalty, GAR, and span-level credit assignment."""
+
+  lp_pass_rate_threshold: float = 0.5
+  lp_max_penalty: float = 0.4
+  lp_dead_zone: float = 0.2
+  lp_saturation: float = 1.0
+  lp_gamma: float = 1.0
+  gar_lambda_max: float = 2.0
+  gar_rank_rho: float = 0.5
+  span_kappa: float = 1.5
+  span_alpha_max: float = 2.0
+  span_beta_min: float = 0.5
+  span_beta_pos: float = 0.5
+  span_renormalize: bool = True
+  std_normalize: bool = True
+  max_flagged_token_ratio_per_turn: float = 0.35
+
+
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
@@ -3865,7 +3888,14 @@ class RL(BaseModel):
   num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
-  loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
+  loss_algo: Literal["grpo", "gspo-token", "gspo-turn"] = Field(
+      "grpo",
+      description="Loss algorithm, i.e., 'grpo', 'gspo-token', or 'gspo-turn'.",
+  )
+  gspo_pool_mode: Literal["sequence", "turn", "span", "turn_span"] = Field(
+      "sequence",
+      description="Pooling granularity for GSPO log-ratios ('sequence', 'turn', 'span', or 'turn_span').",
+  )
   loss_agg_mode: Literal["token-mean", "sequence-mean", "sequence-mean-token-mean"] = Field(
       "sequence-mean-token-mean",
       description="Specifies the method for aggregating loss across the batch.",
@@ -3904,6 +3934,150 @@ class RL(BaseModel):
           "False selects the step-0 re-forward path (trainer recomputes them)"
       ),
   )
+  advantage_estimator: Literal["grpo", "gae", "drgrpo", "rloo", "grpo-loo", "reinforce_plus_plus", "mimo"] = Field(
+      "grpo",
+      description=(
+          "Advantage estimator algorithm ('grpo', 'gae', 'drgrpo', 'rloo', "
+          "'grpo-loo', 'reinforce_plus_plus', or 'mimo')."
+      ),
+  )
+  clip_mode: Literal["ppo", "mask"] = Field(
+      "ppo",
+      description="Surrogate clipping mode ('ppo' min-clip or 'mask' indicator masking).",
+  )
+  epsilon_neg: Optional[float] = Field(
+      None,
+      description="Lower-bound clipping epsilon for negative advantages (defaults to grpo_epsilon when None).",
+  )
+  epsilon_neg_high: Optional[float] = Field(
+      None,
+      description="Upper-bound clipping epsilon for negative advantages (defaults to epsilon_high when None).",
+  )
+  token_advantage_mode: Literal["none", "mask", "mimo"] = Field(
+      "none",
+      description="Token-level advantage shaping mode ('none', 'mask', or 'mimo').",
+  )
+  mimo: Optional[MimoConfig] = Field(
+      None,
+      description="Configuration for MiMo-style length penalty, GAR, and span-level credit assignment.",
+  )
+  mini_batch_size: Optional[int] = Field(
+      None,
+      description="Mini-batch size for policy updates per rollout batch (defaults to batch_size when None).",
+  )
+  compute_logps_micro_batch_size: Optional[int] = Field(
+      None,
+      description="Micro-batch size for computing old/ref logprobs (defaults to train_micro_batch_size when None).",
+  )
+  compute_logps_chunk_size: Optional[int] = Field(
+      None,
+      description="Optional sequence chunk size for computing per-token logprobs without remat boundary mismatch.",
+  )
+  exact_token_continuity: bool = Field(
+      True,
+      description="Enforce exact token continuity across multi-turn agentic trajectories.",
+  )
+  sampler_is: Optional[Literal["token"]] = Field(
+      None,
+      description="Sampler-trainer importance sampling correction ('token' or None).",
+  )
+  sampler_is_threshold: float = Field(
+      2.0,
+      description="Truncation threshold C_TIS for sampler-trainer importance sampling.",
+  )
+  sampler_rs: Optional[Literal["geometric", "token"]] = Field(
+      None,
+      description="Sequence-level rejection sampling mode ('geometric', 'token', or None).",
+  )
+  sampler_rs_min: Optional[float] = Field(
+      None,
+      description="Lower bound for sequence-level rejection sampling.",
+  )
+  sampler_rs_max: Optional[float] = Field(
+      None,
+      description="Upper bound for sequence-level rejection sampling.",
+  )
+  seq_logprob_error_threshold: Optional[float] = Field(
+      None,
+      description="Per-token sampler-trainer logprob error threshold for sequence rejection.",
+  )
+  env_class_path: str = Field(
+      "",
+      description="Dotted path or file:ClassName for custom agentic RL environment class.",
+  )
+  env_kwargs: dict[str, Any] = Field(
+      default_factory=dict,
+      description="Keyword arguments forwarded to custom agentic RL environment constructor.",
+  )
+  group_postprocessor_path: str = Field(
+      "",
+      description="Dotted path or file:ClassName for custom group postprocessor.",
+  )
+  judge_base_url: str = Field(
+      "",
+      description="Base URL for OpenAI-compatible LLM judge server (empty uses MockJudgeClient).",
+  )
+  judge_model: str = Field(
+      "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      description="Model identifier for OpenAI-compatible LLM judge server.",
+  )
+  judge_max_in_flight_groups: int = Field(
+      8,
+      description="Maximum concurrent trajectory groups in flight to the LLM judge.",
+  )
+  judge_timeout_s: float = Field(
+      60.0,
+      description="Per-group timeout in seconds for the LLM judge stage.",
+  )
+  judge_max_flagged_segments_per_turn: int = Field(
+      1,
+      description="Maximum number of root-cause segments flagged per failed turn by the judge postprocessor.",
+  )
+  judge_audit_only: bool = Field(
+      False,
+      description="If True, runs the judge and logs telemetry without mutating rewards or flagged_token_mask.",
+  )
+  judge_max_concurrency: int = Field(
+      64,
+      description="Maximum concurrent HTTP requests to the OpenAI-compatible LLM judge server.",
+  )
+  enable_thinking: bool = Field(
+      False,
+      description="Whether to enable <think>...</think> reasoning mode in Qwen3 prompts and judge calls.",
+  )
+  forward_only_old_logps: bool = Field(
+      False,
+      description="Whether to compute old_per_token_logps via a forward-only pass with identical micro-batch shape.",
+  )
+  max_flagged_token_ratio_per_turn: float = Field(
+      0.35,
+      description="Maximum fraction of turn tokens allowed to be flagged by the judge before tail-fallback masking.",
+  )
+  gspo_length_adaptive_clipping: bool = Field(
+      False,
+      description=(
+          "Enable length-adaptive clipping band epsilon_eff(L) = clip(epsilon * sqrt(L_ref / L), clip_min, clip_max)."
+      ),
+  )
+  gspo_ref_length: int = Field(
+      1024,
+      description="Reference sequence/turn length L_ref for length-adaptive GSPO clipping.",
+  )
+  gspo_clip_min: float = Field(
+      0.001,
+      description="Lower clamp bound for length-adaptive GSPO clipping epsilon.",
+  )
+  gspo_clip_max: float = Field(
+      0.05,
+      description="Upper clamp bound for length-adaptive GSPO clipping epsilon.",
+  )
+  min_seq_len_norm: Optional[int] = Field(
+      None,
+      description="Minimum sequence/turn token length floor L_min in GSPO length normalization.",
+  )
+
+
+_RL_NESTED_FIELDS: tuple[str, ...] = tuple(RL.model_fields.keys())
 
 
 class RLDataset(BaseModel):
@@ -7064,6 +7238,7 @@ class RLConfig(
   )
   max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
   max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
+  train_steps: int = Field(0, description="Total number of RL training optimizer steps.")
 
   debug: bool = Field(False, description="Enable debug mode for RL.")
 
@@ -7132,10 +7307,16 @@ class RLConfig(
         if not isinstance(nested_dict, dict):
           nested_dict = {}
           data[field_name] = nested_dict
+        explicit_nested_keys = set(nested_dict.keys())
 
         # Check if any parameter of the nested model was passed as a flat key in `data`
         for inner_key in annotation.model_fields.keys():
-          if inner_key in data:
+          if inner_key in data and field_name == "rl":
+            nested_dict[inner_key] = data[inner_key]
+          elif inner_key in explicit_nested_keys:
+            if inner_key in cls.model_fields:
+              data[inner_key] = nested_dict[inner_key]
+          elif inner_key in data:
             nested_dict[inner_key] = data[inner_key]
 
     # Map legacy step-based profiling flags to RL role-invocation profiling fields
@@ -7212,10 +7393,8 @@ class RLConfig(
         self.tokenizer_path = HF_IDS[model_name]
         self.tokenizer_type = TokenizerType.HUGGINGFACE
       else:
-        raise ValueError(
-            "model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
-          Please pass tokenizer_path in your command."
-        )
+        raise ValueError("model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
+          Please pass tokenizer_path in your command.")
 
     if self.optimizer_memory_host_offload:
       raise ValueError(
@@ -7288,11 +7467,15 @@ class RLConfig(
       raise ValueError("`num_trainer_slices` and `num_samplers_slices` must be both -1 or both positive.")
     self.num_slices = 1 if self.cluster.num_trainer_slices == -1 else -1
 
-    # Set train_steps based on the number of batches, iterations, train fraction, and epochs.
-    object.__setattr__(
-        self,
-        "train_steps",
-        int(self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch),
+    # Set train_steps based on the number of batches, mini-batches, iterations, train fraction, and epochs.
+    effective_mini_batch = self.rl.mini_batch_size or self.batch_size
+    num_mini_batches = max(1, self.batch_size // effective_mini_batch)
+    self.train_steps = int(
+        self.dataset.num_batches
+        * num_mini_batches
+        * self.rl.num_iterations
+        * self.dataset.train_fraction
+        * self.num_epoch
     )
 
     # Set learning_rate_schedule_steps based on train_steps if not explicitly provided.

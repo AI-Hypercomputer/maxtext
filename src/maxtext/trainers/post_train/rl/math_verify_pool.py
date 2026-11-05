@@ -38,6 +38,7 @@ used during GRPO/GSPO training to compute rewards for each example in a batch.
 import atexit
 import itertools
 import multiprocessing
+import multiprocessing.pool
 import os
 import threading
 import time

@@ -14,6 +14,7 @@
 
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
+
 import importlib.util
 import itertools
 import json
@@ -33,7 +34,6 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_
 
 from maxtext.trainers.post_train.rl.math_verify_pool import math_verify_pool, verify_math_worker
 from maxtext.utils import max_logging
-
 
 EPSILON = 1e-6
 
@@ -629,6 +629,8 @@ def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
     schedule_steps = lr_schedule_steps
   else:
     schedule_steps = tmvp_config.train_steps
+  cosine_final_frac = getattr(tmvp_config, "cosine_learning_rate_final_fraction", None)
+  end_value = tmvp_config.learning_rate * float(cosine_final_frac) if cosine_final_frac is not None else 0.0
   schedule = optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0,
       peak_value=tmvp_config.learning_rate,
@@ -639,7 +641,7 @@ def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
       # GPU LR schedule across TPU runs with different num_batches).
       warmup_steps=int(tmvp_config.warmup_steps_fraction * schedule_steps),
       decay_steps=schedule_steps,
-      end_value=0.0,
+      end_value=end_value,
   )
 
   # TODO: @mazumdera: try optimizer offloading with adamw
@@ -963,13 +965,23 @@ def _load_worker_importable_module(module_path: str, function_name: str):
   return module
 
 
-def load_custom_callable(module_path: str, function_name: str, importable_by_workers: bool = False) -> Callable:
-  """Load a callable from a user-provided Python file via importlib.
+def load_custom_callable(
+    module_path: str,
+    function_name: Optional[str] = None,
+    importable_by_workers: bool = False,
+) -> Callable:
+  """Load a callable from a user-provided Python file or dotted module path via importlib.
 
-  `module_path` is an absolute or relative filesystem path to a `.py` file.
-  The file is loaded as a fresh module (not added to sys.path) and the
-  named attribute is returned. Used to plug in user-defined `process_data`
-  (for custom datasets) and reward functions without editing maxtext.
+  `module_path` can be:
+    - An absolute or relative filesystem path to a `.py` file (requires `function_name`
+      or `path/to/file.py:AttrName`).
+    - A dotted Python import path (`package.module.ClassName` when `function_name` is
+      omitted, or `package.module` when `function_name` is provided).
+
+  When loading from a file, the file is loaded as a fresh module (not added to
+  sys.path) and the named attribute is returned. Used to plug in user-defined
+  `process_data` (for custom datasets), reward functions, agentic environments,
+  and group postprocessors without editing maxtext.
 
   `importable_by_workers` is for callables that get pickled into worker
   processes, i.e. reward fns under tunix's `reward_num_workers`. Those workers
@@ -984,13 +996,56 @@ def load_custom_callable(module_path: str, function_name: str, importable_by_wor
   loaded privately as without the flag; such a callable does not pickle, which
   tunix detects immediately and handles by evaluating it in the parent process.
   """
-  if not os.path.isfile(module_path):
+  if ":" in module_path and not os.path.isfile(module_path):
+    mod_part, attr_part = module_path.rsplit(":", 1)
+    return load_custom_callable(mod_part, attr_part, importable_by_workers=importable_by_workers)
+
+  if os.path.isfile(module_path):
+    if not function_name:
+      raise ValueError(f"function_name is required when loading from file path {module_path!r}")
+    if importable_by_workers:
+      module = _load_worker_importable_module(module_path, function_name)
+    else:
+      module = _exec_user_module(f"_user_module_{function_name}", module_path)
+    fn = getattr(module, function_name, None)
+    if fn is None:
+      raise ValueError(f"{module_path!r} does not define a function named {function_name!r}")
+    if not (callable(fn) or hasattr(fn, "process_group")):
+      raise ValueError(f"Resolved attribute {function_name!r} from {module_path!r} is not callable: {fn!r}")
+    return fn
+
+  if not module_path or module_path.endswith(".py") or os.sep in module_path or "/" in module_path:
     raise ValueError(f"Cannot import {module_path!r}: file does not exist")
-  if importable_by_workers:
-    module = _load_worker_importable_module(module_path, function_name)
+
+  if function_name:
+    pkg_mod, attr_name = module_path, function_name
   else:
-    module = _exec_user_module(f"_user_module_{function_name}", module_path)
-  fn = getattr(module, function_name, None)
+    if "." not in module_path:
+      raise ValueError(f"Cannot import {module_path!r}: expected dotted path 'package.module.Attr' or file path")
+    pkg_mod, attr_name = module_path.rsplit(".", 1)
+
+  try:
+    module = importlib.import_module(pkg_mod)
+  except ImportError as e:
+    raise ValueError(f"Cannot import module {pkg_mod!r} from {module_path!r}: {e}") from e
+
+  fn = getattr(module, attr_name, None)
   if fn is None:
-    raise ValueError(f"{module_path!r} does not define a function named {function_name!r}")
+    raise ValueError(f"{pkg_mod!r} does not define a function named {attr_name!r}")
+  if not (callable(fn) or hasattr(fn, "process_group")):
+    raise ValueError(f"Resolved attribute {attr_name!r} from {module_path!r} is not callable: {fn!r}")
   return fn
+
+
+def trajectory_reward_passthrough(
+    prompts: list[str],
+    completions: list[str],
+    tmvp_config: Any = None,
+    trajectory_rewards: Optional[list[float]] = None,
+    **kwargs: Any,
+) -> list[float]:
+  """Returns pre-computed trajectory rewards from an agentic environment or group postprocessor."""
+  del completions, tmvp_config, kwargs
+  if trajectory_rewards is not None:
+    return [0.0 if r is None else float(r) for r in trajectory_rewards]
+  return [0.0] * len(prompts)

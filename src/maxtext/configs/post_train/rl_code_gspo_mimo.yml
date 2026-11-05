@@ -1,0 +1,124 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optimal Sequence-Level GSPO-MiMo base configuration for multi-turn Python
+# coding RL on Qwen/Qwen3-4B (TPU v6e-8).
+
+base_config: "rl.yml"
+
+# Model & Tokenizer
+model_name: "qwen3-4b"
+tokenizer_path: "Qwen/Qwen3-4B"
+tokenizer_type: "huggingface"
+load_checkpoint_only_once: false
+
+# Sequence lengths & batching (8 prompts x G=8 = 64 trajectories/step)
+max_prefill_predict_length: 2048
+max_target_length: 10240
+batch_size: 8
+num_batches: 150
+num_epoch: 1
+train_fraction: 1.0
+num_test_batches: 0
+eval_interval: -1
+max_seq_token_per_tpu: 0
+train_micro_batch_size: 2
+rollout_micro_batch_size: 2
+
+# Sampling (T=1.0, top_p=1.0, top_k disabled)
+decode_sampling_temperature: 1.0
+decode_sampling_top_k: 0
+decode_sampling_nucleus_p: 1.0
+
+# Optimizer (AdamW, lr=1e-6 constant after 10-step warmup)
+learning_rate: 1.0e-6
+warmup_steps_fraction: 0.0166667
+cosine_learning_rate_final_fraction: 1.0
+adam_b2: 0.99
+adam_weight_decay: 0.0
+gradient_clipping_threshold: 1.0
+
+# Checkpointing
+enable_checkpointing: true
+checkpoint_period: 25
+max_num_checkpoints_to_keep: 10
+
+# Coding RL Dataset Processor
+dataset_processor_path: "maxtext.trainers.post_train.rl.code_rl.dataset_processor"
+
+# Disaggregated Trainer/Sampler Topology on v6e-8 (4 trainer chips, 4 rollout chips)
+chips_per_vm: 8
+trainer_devices_fraction: 0.5
+sampler_devices_fraction: 0.5
+rollout_data_parallelism: 4
+rollout_tensor_parallelism: 1
+rollout_expert_parallelism: 1
+
+# Agentic RL & Optimal Sequence-Level GSPO-MiMo Credit Assignment
+rl:
+  use_agentic_rollout: true
+  num_generations: 8
+  num_iterations: 1
+  mini_batch_size: 2
+  off_policy_steps: 0
+  grpo_beta: 0.0
+  loss_algo: "gspo-token"
+  gspo_pool_mode: "sequence"
+  loss_agg_mode: "sequence-mean-token-mean"
+  min_seq_len_norm: 128
+  advantage_estimator: "mimo"
+  token_advantage_mode: "mimo"
+  clip_mode: "ppo"
+  grpo_epsilon: 0.005
+  epsilon_high: 0.008
+  gspo_length_adaptive_clipping: false
+  gspo_ref_length: 1024
+  gspo_clip_min: 0.001
+  gspo_clip_max: 0.05
+  max_flagged_token_ratio_per_turn: 0.35
+  use_rollout_logps: false
+  sampler_is: "token"
+  sampler_is_threshold: 2.0
+  exact_token_continuity: true
+  max_concurrency: 64
+  env_class_path: "tunix.rl.agentic.environments.code.code_env.PythonCodeEnv"
+  env_kwargs:
+    max_steps: 3
+    test_timeout_s: 3.0
+    max_obs_chars: 1500
+  group_postprocessor_path: "tunix.rl.agentic.environments.code.code_judge_postprocessor.CodeJudgeGroupPostProcessor"
+  judge_base_url: "http://10.128.0.2:8000/v1"
+  judge_model: "Qwen/Qwen3-235B-A22B-Instruct-2507"
+  judge_max_in_flight_groups: 8
+  judge_timeout_s: 60.0
+  judge_max_flagged_segments_per_turn: 1
+  judge_audit_only: false
+  judge_max_concurrency: 64
+  enable_thinking: false
+  forward_only_old_logps: false
+  mimo:
+    lp_pass_rate_threshold: 0.5
+    lp_max_penalty: 0.4
+    lp_dead_zone: 0.2
+    lp_saturation: 1.0
+    lp_gamma: 1.0
+    gar_lambda_max: 2.0
+    gar_rank_rho: 0.5
+    span_kappa: 1.5
+    span_alpha_max: 2.0
+    span_beta_min: 0.5
+    span_beta_pos: 0.5
+    span_renormalize: true
+    std_normalize: true
+    max_flagged_token_ratio_per_turn: 0.35
