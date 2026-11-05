@@ -343,7 +343,7 @@ while IFS= read -r file; do
   fi
 
   # Post-training source/test changes
-  if matches_pattern "$file" "src/maxtext/trainers/post_train/|tests/post_training/"; then
+  if matches_pattern "$file" "src/maxtext/trainers/post_train/|src/maxtext/training_engine/|src/maxtext/experimental/maxtext_engine/|tests/post_training/"; then
     echo "Post-training files changed, enabling TPU post-training tests."
     enable_flags run_tests run_posttrain_tests
     matched=true
