@@ -15,9 +15,25 @@
 """Tensor handling utility functions for checkpoint conversion."""
 
 from functools import partial
+import re
 from typing import Any, Callable, List
 import jax
 import jax.numpy as np
+
+_UNROLLED_LAYER_KEY = re.compile(r"(^|-)decoder-layers_\d+-")
+
+
+def is_unrolled_layer_key(mt_key: str | tuple[str, ...]) -> bool:
+  """Whether `mt_key` names a single unrolled decoder layer (`...-decoder-layers_{i}-...`).
+
+  With scan_layers=True, models that unroll some layers (e.g. Kimi-K3's prefix/suffix
+  around its scanned cycles) keep per-layer `layers_{i}` keys. Such a key holds one layer,
+  so a list of HF keys mapped to it is not a layer stack: it is an expert stack, on axis 0
+  exactly as in the unscanned layout.
+  """
+  if isinstance(mt_key, tuple):
+    mt_key = mt_key[0] if mt_key else ""
+  return bool(_UNROLLED_LAYER_KEY.search(mt_key))
 
 
 def apply_hook_fns(weight, target_shape, hook_fns):
