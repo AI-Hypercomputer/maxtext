@@ -159,11 +159,22 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
     batch_size, seq_len, emb_dim = hidden_states.shape
     vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
 
-    reshaped_hidden_states = _reshape(
-        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
-    )
-    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
-    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    if config.vocab_tiling_seq_major:
+      n_tiles = config.num_vocab_tiling
+
+      def _to_tiles(x, spec):
+        x = x.reshape((batch_size, n_tiles, seq_len // n_tiles) + x.shape[2:]).swapaxes(0, 1)
+        return _maybe_shard_with_name(x.reshape((n_tiles, vocab_tile_size) + x.shape[3:]), spec)
+
+      reshaped_hidden_states = _to_tiles(hidden_states, reshaped_hidden_spec)
+      reshaped_labels = _to_tiles(labels, reshaped_data_spec)
+      reshaped_segmentation = _to_tiles(segmentation, reshaped_data_spec)
+    else:
+      reshaped_hidden_states = _reshape(
+          hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+      )
+      reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+      reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
 
     def _fwd_scan_body(accumulators, chunk_data):
       loss_accumulator, z_loss_accumulator = accumulators
@@ -248,7 +259,16 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
     grad_head = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_head)
     grad_reshaped_hidden_states *= loss_cotangent
     grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)
-    grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
+    if config.vocab_tiling_seq_major:
+      n_tiles = config.num_vocab_tiling
+      grad_reshaped_hidden_states = grad_reshaped_hidden_states.reshape(
+          (n_tiles, batch_size, seq_len // n_tiles, emb_dim)
+      ).swapaxes(0, 1)
+      grad_reshaped_hidden_states = _maybe_shard_with_name(
+          grad_reshaped_hidden_states.reshape((batch_size, seq_len, emb_dim)), hidden_spec
+      )
+    else:
+      grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
 
     # Return explicit zeros for other_params and rest, not None. With None, JAX builds
     # the zero cotangents with the wrong layer-axis order for scanned params, and the
