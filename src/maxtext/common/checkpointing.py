@@ -1504,7 +1504,21 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   elif config:
     # Save in the Linen on-disk layout so NNX and Linen checkpoints are interchangeable.
     if isinstance(state, nnx.State):
+      # Non-trainable model variables (e.g. `MoEBiasVar` routing biases) live in their own Linen
+      # collections beside "params"; keep them so a train -> save -> restore round trip preserves them.
+      nnx_model_state = state["model"] if "model" in state else state
+      custom_collections = collections.defaultdict(dict)
+      for path_tuple, leaf in nnx.to_flat_state(nnx_model_state):
+        if isinstance(leaf, nnx.Variable) and not isinstance(
+            leaf, (nnx.Param, nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)
+        ):
+          col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
+          if col != "params":
+            custom_collections[col][tuple(path_tuple)] = leaf.get_value()
       state = train_state_nnx.to_checkpoint_dict(state)
+      if custom_collections and isinstance(state.get("params"), dict):
+        for col, col_flat in custom_collections.items():
+          state["params"][col] = nnx.traversals.unflatten_mapping(col_flat)
 
   if config and getattr(config, "enable_checkpointing", False):
     if (
