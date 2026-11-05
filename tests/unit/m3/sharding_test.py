@@ -59,6 +59,7 @@ from maxtext.m3.core.sharding import _ambient_mesh_is_explicit
 from maxtext.m3.core.sharding import _count_slices
 from maxtext.m3.core.sharding import _resolve_axis_sizes
 from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.core.sharding import project_spec_to_mesh
 
 
 class _ExampleSharding(Sharding):
@@ -397,7 +398,7 @@ class ShardModeTest(parameterized.TestCase):
     mixed = jax.sharding.Mesh(
         base.devices,
         MESH_AXIS_NAMES,
-        axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto) * 2,
+        axis_types=(jax.sharding.AxisType.Explicit,) + (jax.sharding.AxisType.Auto,) * (len(MESH_AXIS_NAMES) - 1),
     )
     with jax.sharding.set_mesh(mixed):
       with self.assertRaisesRegex(ValueError, "mixes explicit and non-explicit"):
@@ -443,28 +444,82 @@ class DefaultShardingTest(parameterized.TestCase):
     self.sharding = DefaultSharding()
 
   @parameterized.named_parameters(
-      ("q_proj", "q_proj", ("embed", "heads", "head_dim"), P(("fsdp", "expert"), "tensor", None)),
-      ("k_proj", "k_proj", ("embed", "kv_heads", "head_dim"), P(("fsdp", "expert"), "tensor", None)),
-      ("o_proj", "o_proj", ("heads", "head_dim", "embed"), P("tensor", None, ("fsdp", "expert"))),
-      ("gate", "gate", ("embed", "mlp"), P(("fsdp", "expert"), "tensor")),
-      ("down", "down", ("mlp", "embed"), P("tensor", ("fsdp", "expert"))),
-      ("embedding", "embed", ("vocab", "embed"), P("tensor", ("fsdp", "expert"))),
+      ("q_proj", "q_proj", ("embed", "heads", "head_dim"), P(("fsdp", "fsdp_transpose", "expert"), "tensor", None)),
+      ("k_proj", "k_proj", ("embed", "kv_heads", "head_dim"), P(("fsdp", "fsdp_transpose", "expert"), "tensor", None)),
+      ("o_proj", "o_proj", ("heads", "head_dim", "embed"), P("tensor", None, ("fsdp", "fsdp_transpose", "expert"))),
+      ("gate", "gate", ("embed", "mlp"), P(("fsdp", "fsdp_transpose", "expert"), "tensor")),
+      ("down", "down", ("mlp", "embed"), P("tensor", ("fsdp", "fsdp_transpose", "expert"))),
+      ("embedding", "embed", ("vocab", "embed"), P("tensor", ("fsdp", "fsdp_transpose", "expert"))),
+      ("stacked_gate", "gate", ("layers", "embed", "mlp"), P("stage", ("fsdp", "fsdp_transpose", "expert"), "tensor")),
       ("norm_scale", "attn_norm", ("norm",), P(None)),
   )
   def test_weight_specs(self, tensor_name, axes, expected):
     self.assertEqual(self.sharding(tensor_name, axes), expected)
 
   @parameterized.named_parameters(
-      ("query", "query", ("batch", "length", "heads", "head_dim"), P(("data", "fsdp", "expert"), None, "tensor", None)),
-      ("key", "key", ("batch", "length", "kv_heads", "head_dim"), P(("data", "fsdp", "expert"), None, "tensor", None)),
-      ("residual", "post_attn", ("batch", "length", "embed"), P(("data", "fsdp", "expert"), None, None)),
-      ("mlp_mid", "mlp_mid", ("batch", "length", "mlp"), P(("data", "fsdp", "expert"), None, "tensor")),
-      ("logits", "logits", ("batch", "length", "vocab"), P(("data", "fsdp", "expert"), None, "tensor")),
+      (
+          "query",
+          "query",
+          ("batch", "length", "heads", "head_dim"),
+          P(("data", "fsdp", "fsdp_transpose", "expert"), "context", "tensor", None),
+      ),
+      (
+          "key",
+          "key",
+          ("batch", "kv_length", "kv_heads", "head_dim"),
+          P(("data", "fsdp", "fsdp_transpose", "expert"), None, "tensor", None),
+      ),
+      (
+          "residual",
+          "post_attn",
+          ("batch", "norm_length", "embed"),
+          P(("data", "fsdp", "fsdp_transpose", "expert"), "context", None),
+      ),
+      (
+          "mlp_mid",
+          "mlp_mid",
+          ("batch", "length", "mlp"),
+          P(("data", "fsdp", "fsdp_transpose", "expert"), "context", "tensor"),
+      ),
+      (
+          "logits",
+          "logits",
+          ("batch", "length", "vocab"),
+          P(("data", "fsdp", "fsdp_transpose", "expert"), "context", "tensor"),
+      ),
   )
   def test_activation_specs(self, tensor_name, axes, expected):
     self.assertEqual(self.sharding(tensor_name, axes, TensorType.ACTIVATION), expected)
 
-  @parameterized.parameters("embed", "heads", "kv_heads", "head_dim", "mlp", "vocab", "norm", "length")
+  def test_sequence_parallel_activation_specs(self):
+    sp = DefaultSharding(sequence_parallel=True)
+    self.assertEqual(
+        sp("norm_in", ("batch", "norm_length", "embed"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose", "expert"), ("context", "tensor"), None),
+    )
+    self.assertEqual(
+        sp("attn_in", ("batch", "length", "heads", "head_dim"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose", "expert"), "context", "tensor", None),
+    )
+    self.assertEqual(
+        sp("kv", ("batch", "kv_length", "kv_heads", "head_dim"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose", "expert"), None, "tensor", None),
+    )
+
+  @parameterized.parameters(
+      "embed",
+      "heads",
+      "kv_heads",
+      "head_dim",
+      "mlp",
+      "vocab",
+      "norm",
+      "length",
+      "norm_length",
+      "kv_length",
+      "stage",
+      "layers",
+  )
   def test_logical_axes_resolve_for_both_tensor_types(self, axis):
     """Each logical axis a model may pass has a rule for both tensor types.
 
@@ -623,7 +678,7 @@ class CreateMeshTest(parameterized.TestCase):
 
   def test_axis_names_are_stable(self):
     """Model rules reference these by name; reordering silently rewires sharding."""
-    self.assertEqual(MESH_AXIS_NAMES, ("data", "fsdp", "tensor", "expert"))
+    self.assertEqual(MESH_AXIS_NAMES, ("data", "stage", "fsdp", "fsdp_transpose", "context", "tensor", "expert"))
 
   def test_single_device_mesh_is_trivial(self):
     """Defaults must work on one device so there is no special-case code path."""
@@ -725,6 +780,100 @@ class CreateMeshTest(parameterized.TestCase):
     """`ici` / `dcn` must be given when the default's axis is not on the mesh, rather than guessed."""
     with self.assertRaisesRegex(ValueError, message):
       create_mesh(devices=jax.devices()[:1], axis_names=("redundant", "vae_spatial"), **kwargs)
+
+  def test_project_spec_to_four_axis_mesh_and_explicit_size_one_axes(self):
+    mesh_4ax = create_mesh(ici={"fsdp": 1}, devices=jax.devices()[:1], axis_names=("data", "fsdp", "tensor", "expert"))
+    spec = DefaultSharding(sequence_parallel=True)("x", ("batch", "norm_length", "embed"), TensorType.ACTIVATION)
+    self.assertEqual(project_spec_to_mesh(spec, mesh_4ax), P(("data", "fsdp", "expert"), "tensor", None))
+    with self.assertRaisesRegex(ValueError, "unknown mesh axis"):
+      project_spec_to_mesh(P("tp"), mesh_4ax)
+
+    abs_exp_mesh = jax.sharding.AbstractMesh(
+        tuple(2 if a in ("fsdp", "tensor") else 1 for a in MESH_AXIS_NAMES),
+        MESH_AXIS_NAMES,
+        axis_types=(jax.sharding.AxisType.Explicit,) * len(MESH_AXIS_NAMES),
+    )
+    self.assertEqual(project_spec_to_mesh(spec, abs_exp_mesh), P("fsdp", "tensor", None))
+
+  def test_tpu_v6e_without_coords_and_default_device_config(self):
+    from maxtext.m3.configs import config as m3_config  # pylint: disable=import-outside-toplevel
+
+    class _NoCoordsV6e:
+
+      def __init__(self, idx):
+        self.id = idx
+        self.device_kind = "TPU v6 lite"
+
+    no_coords = [_NoCoordsV6e(i) for i in range(8)]
+    with mock.patch("maxtext.m3.core.sharding.mesh_utils.create_device_mesh") as create_dm:
+      create_dm.side_effect = lambda shape, devs, **kw: np.array(devs, dtype=object).reshape(shape)
+      m_no_coords = create_mesh(ici={"fsdp": 8}, devices=no_coords, optimize_mesh_for_tpu_v6e=True)
+      self.assertEqual(list(m_no_coords.devices.reshape(-1)), no_coords)
+
+    m_cfg = sharding_lib.mesh_from_config(m3_config.DeviceConfig(), devices=jax.devices()[:1])
+    self.assertEqual(m_cfg.axis_names, MESH_AXIS_NAMES)
+
+  def test_custom_mesh_and_tpu_v6e_ring_match_legacy_max_utils_without_linen(self):
+    from maxtext.utils import max_utils  # pylint: disable=import-outside-toplevel
+
+    class _FakeDev:
+
+      def __init__(self, idx, slice_idx=0, coords=(0, 0, 0), kind="TPU v5"):
+        self.id = idx
+        self.slice_index = slice_idx
+        self.process_index = slice_idx
+        self.coords = coords
+        self.device_kind = kind
+
+    fake_256 = [_FakeDev(i, slice_idx=0) for i in range(256)]
+    fake_512 = [_FakeDev(i, slice_idx=i // 256) for i in range(512)]
+
+    def fake_cdm(shape, devs, **_):
+      return np.array(devs, dtype=object).reshape(shape)
+
+    with (
+        mock.patch.object(sharding_lib.mesh_utils, "create_device_mesh", side_effect=fake_cdm),
+        mock.patch.object(max_utils.mesh_utils, "create_device_mesh", side_effect=fake_cdm),
+    ):
+      for strategy, ici_map in (
+          ("hybrid_ring_64x4", {"fsdp": 64, "tensor": 4}),
+          ("hybrid_ring_64x4", {"fsdp": 64, "context": 4}),
+          ("hybrid_ring_32x8", {"fsdp": 32, "tensor": 8}),
+          ("hybrid_ring_32x8", {"fsdp": 32, "expert": 8}),
+      ):
+        m_1s = create_mesh(ici=ici_map, devices=fake_256, custom_mesh=strategy)
+        ici_shape = tuple(m_1s.shape[a] for a in MESH_AXIS_NAMES)
+        ref_1s = max_utils.create_custom_device_mesh(ici_shape, (1,) * len(MESH_AXIS_NAMES), fake_256, strategy)
+        self.assertTrue(np.array_equal(m_1s.devices, ref_1s))
+
+        m_2s = create_mesh(ici=ici_map, dcn={"data": 2}, devices=fake_512, custom_mesh=strategy)
+        dcn_2s = tuple(2 if a == "data" else 1 for a in MESH_AXIS_NAMES)
+        ref_2s = max_utils.create_custom_device_mesh(ici_shape, dcn_2s, fake_512, strategy)
+        self.assertTrue(np.array_equal(m_2s.devices, ref_2s))
+
+      with self.assertRaisesRegex(ValueError, "supported strategies"):
+        create_mesh(ici={"fsdp": 64, "tensor": 4}, devices=fake_256, custom_mesh="unknown_ring")
+      with self.assertRaisesRegex(ValueError, "Invalid custom_mesh"):
+        create_mesh(ici={"fsdp": 8}, devices=fake_256[:8], custom_mesh="hybrid_ring_64x4")
+      # Reversed axis order (4x64 instead of 64x4) and extra non-unit axes must fail closed.
+      with self.assertRaisesRegex(ValueError, "ordered non-unit axes"):
+        create_mesh(ici={"fsdp": 4, "tensor": 64}, devices=fake_256, custom_mesh="hybrid_ring_64x4")
+      with self.assertRaisesRegex(ValueError, "ordered non-unit axes"):
+        create_mesh(ici={"fsdp": 8, "tensor": 32}, devices=fake_256, custom_mesh="hybrid_ring_32x8")
+      fake_1024 = [_FakeDev(i, slice_idx=0) for i in range(1024)]
+      with self.assertRaisesRegex(ValueError, "ordered non-unit axes"):
+        create_mesh(ici={"data": 4, "fsdp": 64, "tensor": 4}, devices=fake_1024, custom_mesh="hybrid_ring_64x4")
+
+      v6e_devs = [_FakeDev(i, coords=(i // 4, i % 4, 0), kind="TPU v6 lite") for i in range(8)]
+      m_v6e = create_mesh(ici={"fsdp": 8}, devices=v6e_devs, optimize_mesh_for_tpu_v6e=True)
+      raw_v6e = np.array(v6e_devs, dtype=object).reshape(tuple(8 if a == "fsdp" else 1 for a in MESH_AXIS_NAMES))
+      ref_v6e = max_utils.optimize_mesh_for_tpu_v6e(raw_v6e, v6e_devs)
+      self.assertTrue(np.array_equal(m_v6e.devices, ref_v6e))
+
+    # Confirm sharding_lib does not import numpy or flax.linen.
+    self.assertNotIn("np", vars(sharding_lib))
+    self.assertNotIn("numpy", vars(sharding_lib))
+    self.assertFalse(any(k == "linen" for k in vars(sharding_lib)))
 
 
 @pytest.mark.tpu_only
@@ -838,8 +987,8 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
     # n devices across 2 slices is n/2 per slice. The default `fsdp=-1` must
     # absorb n/2, not n -- absorbing n is the bug this test exists to catch.
     per_slice = self.n // 2
-    self.assertEqual(recorded["ici"], (1, per_slice, 1, 1))
-    self.assertEqual(recorded["dcn"], (2, 1, 1, 1))
+    self.assertEqual(recorded["ici"], (1, 1, per_slice, 1, 1, 1, 1))
+    self.assertEqual(recorded["dcn"], (2, 1, 1, 1, 1, 1, 1))
     self.assertEqual(mesh.shape["data"], 2)
     self.assertEqual(mesh.shape["fsdp"], per_slice)
 

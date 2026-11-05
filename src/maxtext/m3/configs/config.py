@@ -82,18 +82,30 @@ class DeviceConfig(BaseModel):
   hardware: str = "tpu"
   skip_jax_distributed_system: bool = False
   jax_cache_dir: str = ""
-  mesh_axes: list[str] = Field(default_factory=lambda: ["data", "fsdp", "context", "tensor"])
+  mesh_axes: list[str] = Field(
+      default_factory=lambda: ["data", "stage", "fsdp", "fsdp_transpose", "context", "tensor", "expert"]
+  )
+  shard_mode: str = "auto"
+  sequence_parallel: bool = False
+  custom_mesh: str = ""
+  optimize_mesh_for_tpu_v6e: bool = False
   logical_axis_rules: tuple = ()
   vae_logical_axis_rules: tuple = ()
   data_sharding: tuple = ()
-  dcn_data_parallelism: int = 1
+  dcn_data_parallelism: int = -1
+  dcn_pipeline_parallelism: int = 1
   dcn_fsdp_parallelism: int = 1
-  dcn_context_parallelism: int = -1
+  dcn_fsdp_transpose_parallelism: int = 1
+  dcn_context_parallelism: int = 1
   dcn_tensor_parallelism: int = 1
+  dcn_expert_parallelism: int = 1
   ici_data_parallelism: int = 1
-  ici_fsdp_parallelism: int = 1
-  ici_context_parallelism: int = -1
+  ici_pipeline_parallelism: int = 1
+  ici_fsdp_parallelism: int = -1
+  ici_fsdp_transpose_parallelism: int = 1
+  ici_context_parallelism: int = 1
   ici_tensor_parallelism: int = 1
+  ici_expert_parallelism: int = 1
   allow_split_physical_axes: bool = False
   compile_topology_num_slices: int = -1
   num_slices: int = 1

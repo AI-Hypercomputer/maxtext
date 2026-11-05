@@ -37,9 +37,11 @@ and cannot be used on weights.
 """
 
 import abc
+import collections
+from collections.abc import Mapping, Sequence
+import dataclasses
 import enum
 import math
-from collections.abc import Mapping, Sequence
 from typing import Any
 
 import jax
@@ -58,12 +60,13 @@ from jax.sharding import PartitionSpec as P
 # reads the data axis by name: on a mesh with no axis called `"data"` it
 # declines Zero-1 (one warning) and deferred gradient all-reduce (silently).
 #
-# TODO: This is a basic starting point, this list will be expanded soon.
-# Legacy carries twelve axes, but that list is a union -- its seven strategy
-# configs under `configs/custom_mesh_and_rule/` use between one and six. The
-# ones m3 is likely to need next are `stage` (pipeline), `context` and
-# `context_usp_ulysses` (context parallelism), and `tensor_sequence`.
-MESH_AXIS_NAMES = ("data", "fsdp", "tensor", "expert")
+# Data, pipeline stage, 2D FSDP (`fsdp` x `fsdp_transpose`), context, tensor,
+# and expert parallelism, in legacy's exact relative mesh order.
+MESH_AXIS_NAMES = ("data", "stage", "fsdp", "fsdp_transpose", "context", "tensor", "expert")
+
+HYBRID_RING_64X4 = "hybrid_ring_64x4"
+HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
 
 # A logical axis maps to one mesh axis, several (their product shards the
 # dimension), or None to leave the dimension replicated.
@@ -108,11 +111,7 @@ def _ambient_mesh_is_explicit() -> bool:
 
 
 def _validate_mesh_axes(mapped: MeshAxes, axis: str, tensor_name: str) -> None:
-  """Rejects mesh axis names that are not on the mesh.
-
-  Without this a typo such as `"tp"` for `"tensor"` surfaces much later as an
-  opaque sharding error, far from the rule that produced it.
-  """
+  """Rejects mesh axis names that are not in `MESH_AXIS_NAMES`."""
   if mapped is None:
     return
   names = (mapped,) if isinstance(mapped, str) else tuple(mapped)
@@ -122,6 +121,44 @@ def _validate_mesh_axes(mapped: MeshAxes, axis: str, tensor_name: str) -> None:
         f"Sharding rule for logical axis {axis!r} of tensor {tensor_name!r} returned unknown mesh "
         f"axes {unknown}; expected names from {MESH_AXIS_NAMES}."
     )
+
+
+def project_spec_to_mesh(spec: P, mesh_or_axes: Mesh | jax.sharding.AbstractMesh | Sequence[str]) -> P:
+  """Projects `spec` onto `mesh_or_axes`, dropping absent optional axes and size-1 explicit axes.
+
+  Keeps 4-axis test meshes (e.g. `("data", "fsdp", "tensor", "expert")`) working
+  with 7-axis rules while normalizing size-1 `Explicit` axes to match legacy
+  input/loss shardings (`utils/sharding.py`).
+  """
+  if hasattr(mesh_or_axes, "axis_names"):
+    axis_names = set(mesh_or_axes.axis_names)
+  else:
+    axis_names = set(mesh_or_axes)
+
+  explicit_shape: dict[str, int] | None = None
+  axis_types = tuple(getattr(mesh_or_axes, "axis_types", ()))
+  if axis_types and all(t == jax.sharding.AxisType.Explicit for t in axis_types) and hasattr(mesh_or_axes, "shape"):
+    explicit_shape = dict(mesh_or_axes.shape)
+
+  projected = []
+  for entry in spec:
+    if entry is None:
+      projected.append(None)
+      continue
+    names = (entry,) if isinstance(entry, str) else tuple(entry)
+    kept = []
+    for name in names:
+      if name not in axis_names and name not in MESH_AXIS_NAMES:
+        raise ValueError(f"PartitionSpec {spec!r} references unknown mesh axis {name!r}; mesh has {sorted(axis_names)}.")
+      if name in axis_names and (explicit_shape is None or explicit_shape.get(name, 2) > 1):
+        kept.append(name)
+    if not kept:
+      projected.append(None)
+    elif len(kept) == 1:
+      projected.append(kept[0])
+    else:
+      projected.append(tuple(kept))
+  return P(*projected)
 
 
 class Sharding(abc.ABC):
@@ -200,7 +237,18 @@ class Sharding(abc.ABC):
           )
         claimed[mesh_axis] = axis
       resolved.append(mapped)
-    return P(*resolved)
+    spec = P(*resolved)
+    ambient = jax.sharding.get_abstract_mesh()
+    if not ambient.empty:
+      _ambient_mesh_is_explicit()
+      return project_spec_to_mesh(spec, ambient)
+    return spec
+
+  def out_sharding(self, tensor_name: str, axes: Sequence[str | None]) -> P | None:
+    """Returns the explicit output `PartitionSpec` under an `Explicit` mesh, else `None`."""
+    if jax.sharding.get_abstract_mesh().empty or not _ambient_mesh_is_explicit():
+      return None
+    return self(tensor_name, axes, TensorType.ACTIVATION)
 
   def constrain(self, x: jax.Array, tensor_name: str, axes: Sequence[str | None]) -> jax.Array:
     """Applies an activation sharding constraint to `x`.
@@ -222,6 +270,10 @@ class Sharding(abc.ABC):
     spec = self(tensor_name, axes, TensorType.ACTIVATION)
     if _ambient_mesh_is_explicit():
       return jax.sharding.reshard(x, spec)
+    if isinstance(getattr(x, "sharding", None), jax.sharding.SingleDeviceSharding):
+      mesh = jax.sharding.get_mesh()
+      if isinstance(mesh, Mesh) and not mesh.empty:
+        return jax.device_put(x, jax.sharding.NamedSharding(mesh, spec))
     return jax.lax.with_sharding_constraint(x, spec)
 
 
@@ -236,51 +288,64 @@ def param_metadata(sharding: Sharding, tensor_name: str, axes: Sequence[str | No
   replicated, with nothing to say so. Declaring it per parameter keeps the
   model's placement independent of what else the process imported.
   """
-  return {"out_sharding": sharding(tensor_name, axes), "eager_sharding": True}
+  return {
+      "out_sharding": sharding(tensor_name, axes),
+      "eager_sharding": not jax.sharding.get_abstract_mesh().empty,
+  }
 
 
+@dataclasses.dataclass(frozen=True)
 class DefaultSharding(Sharding):
-  """The design doc's rule set: FSDP weights, tensor-parallel heads and MLP.
+  """Default m3 parallelism rules across 2D FSDP, context, tensor, pipeline, and expert axes.
 
-  Weights: the model dimension (`embed`) is sharded over `fsdp` x `expert`;
-  heads, MLP width and vocabulary over `tensor`; norm scales and `head_dim`
-  replicated. Activations: `batch` over `data` x `fsdp` x `expert`; heads, MLP
-  width and vocabulary over `tensor`; the residual stream (`embed`) and
-  `length` replicated.
+  Weights shard `embed` across `("fsdp", "fsdp_transpose", "expert")` so dense
+  parameters are never replicated when `fsdp_transpose > 1` or `expert > 1`;
+  `heads`, `kv_heads`, `mlp`, and `vocab` shard over `tensor`; `stage`/`layers`
+  shard over `stage`; `norm` and `head_dim` stay replicated.
 
-  Which of these axes are live is decided by the mesh shape, not here. An axis
-  of size 1 shards nothing, so the same rules serve pure FSDP
-  (`ici={"fsdp": -1}`), FSDP with tensor parallelism
-  (`ici={"fsdp": -1, "tensor": 4}`) and data parallelism across slices
-  (`dcn={"data": -1}`).
-
-  `expert` sits in the `batch` and `embed` unions, as it does in legacy's
-  `activation_batch` and `embed` rules, so that on a mesh which splits it a
-  dense model's weights are sharded across it rather than replicated once per
-  expert shard. A routed-expert weight carries its own `experts` dimension,
-  which will want `expert` for itself; that rule arrives with the first MoE
-  model, and the conflict check in `Sharding.__call__` is what will flag the
-  tensors whose `embed` must then give `expert` up.
-
-  Two places this follows the design doc rather than legacy's
-  `logical_axis_rules`: legacy shards the residual-stream activation and the
-  norm scale over `tensor`, where this leaves both replicated.
+  Activations shard `batch` over `("data", "fsdp", "fsdp_transpose", "expert")`
+  and `length` over `context`. When `sequence_parallel=True` (Megatron sequence
+  parallelism), `norm_length` (the residual stream and RMSNorm inputs) shards
+  over `("context", "tensor")`, replacing TP `all-reduce`s on residual
+  projections with `reduce-scatter` + `all-gather` and cutting residual/norm
+  activation memory by `1 / tensor`.
   """
+
+  sequence_parallel: bool = False
 
   def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
     match axis, tensor_type:
       case "batch", TensorType.ACTIVATION:
-        return ("data", "fsdp", "expert")
+        return ("data", "fsdp", "fsdp_transpose", "expert")
       case "embed", TensorType.WEIGHT:
-        return ("fsdp", "expert")
+        return ("fsdp", "fsdp_transpose", "expert")
       case "embed", TensorType.ACTIVATION:
+        return None
+      case ("stage" | "layers"), TensorType.WEIGHT:
+        return "stage"
+      case "stage", TensorType.ACTIVATION:
+        return "stage"
+      case "layers", TensorType.ACTIVATION:
         return None
       case ("heads" | "kv_heads" | "mlp" | "vocab"), _:
         return "tensor"
-      case ("length" | "head_dim" | "norm"), _:
+      case ("length" | "norm_length" | "kv_length"), TensorType.WEIGHT:
+        return None
+      case "length", TensorType.ACTIVATION:
+        return "context"
+      case "norm_length", TensorType.ACTIVATION:
+        return ("context", "tensor") if self.sequence_parallel else "context"
+      case "kv_length", TensorType.ACTIVATION:
+        return None
+      case ("head_dim" | "norm"), _:
         return None
       case _:
         raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
+
+
+def sharding_from_config(config: Any) -> DefaultSharding:
+  """Builds `DefaultSharding` from `config` (`sequence_parallel=False` by default)."""
+  return DefaultSharding(sequence_parallel=bool(getattr(config, "sequence_parallel", False)))
 
 
 def _resolve_axis_sizes(
@@ -373,6 +438,98 @@ def _default_sizes(axis: str, kind: str, axis_names: Sequence[str]) -> dict[str,
   return {axis: -1}
 
 
+def _reshape_mesh_to_rings(slice_mesh_16x16: Any, strategy: str) -> Any:
+  """Reshapes a `(16, 16)` slice device array into `(64, 4)` or `(32, 8)` 2D torus rings."""
+  if strategy == HYBRID_RING_64X4:
+    tiles = slice_mesh_16x16.reshape(8, 2, 8, 2).transpose(0, 2, 1, 3).copy()
+    tiles[:, :, 1, :] = tiles[:, :, 1, ::-1]
+    return tiles.reshape(64, 4)
+  if strategy == HYBRID_RING_32X8:
+    tiles = slice_mesh_16x16.reshape(8, 2, 4, 4).transpose(0, 2, 1, 3).copy()
+    tiles[:, :, 1, :] = tiles[:, :, 1, ::-1]
+    return tiles.reshape(32, 8)
+  raise ValueError(f"Unknown custom_mesh strategy {strategy!r}; expected {HYBRID_RING_64X4!r} or {HYBRID_RING_32X8!r}.")
+
+
+def _is_valid_custom_mesh(ici_shape: Sequence[int], custom_mesh: str) -> bool:
+  """Validates `custom_mesh` against the ordered non-unit dimensions of `ici_shape`."""
+  if not custom_mesh:
+    return False
+  expected_non_unit = {
+      HYBRID_RING_64X4: [64, 4],
+      HYBRID_RING_32X8: [32, 8],
+  }
+  if custom_mesh not in expected_non_unit:
+    raise ValueError(f"Invalid custom_mesh={custom_mesh!r}; supported strategies are {sorted(expected_non_unit)}.")
+  non_unit = [dim for dim in ici_shape if dim != 1]
+  if non_unit != expected_non_unit[custom_mesh]:
+    raise ValueError(
+        f"Invalid custom_mesh={custom_mesh!r} for ICI mesh shape {tuple(ici_shape)}; "
+        f"expected ordered non-unit axes {tuple(expected_non_unit[custom_mesh])}, got {tuple(non_unit)}."
+    )
+  return True
+
+
+def _create_custom_device_mesh(
+    ici_shape: Sequence[int],
+    dcn_shape: Sequence[int],
+    devices: Sequence[jax.Device],
+    custom_mesh: str,
+) -> Any:
+  """Builds a single- or multi-slice custom ring device mesh (`64x4` or `32x8` per 256-chip slice)."""
+  if len(devices) % 256 != 0:
+    raise ValueError(f"custom_mesh={custom_mesh!r} requires a multiple of 256 devices, got {len(devices)}.")
+  if math.prod(dcn_shape) > 1 and any(not hasattr(d, "slice_index") for d in devices):
+    raise ValueError(f"Device {devices[0]!r} is missing `slice_index` required for multi-slice custom_mesh.")
+  granule_dict: dict[int, list[jax.Device]] = collections.defaultdict(list)
+  for dev in devices:
+    granule_dict[getattr(dev, "slice_index", 0)].append(dev)
+  granules = [granule_dict[k] for k in sorted(granule_dict)]
+  if math.prod(dcn_shape) != len(granules):
+    raise ValueError(f"Number of slices ({len(granules)}) must equal product of dcn_shape {tuple(dcn_shape)}.")
+  if any(len(g) != 256 for g in granules):
+    raise ValueError(f"custom_mesh={custom_mesh!r} requires 256 devices per slice, got {[len(g) for g in granules]}.")
+
+  per_granule = [
+      _reshape_mesh_to_rings(
+          mesh_utils.create_device_mesh([16, 16], granule, allow_split_physical_axes=False),
+          custom_mesh,
+      ).reshape(ici_shape)
+      for granule in granules
+  ]
+  if len(per_granule) == 1:
+    return per_granule[0]
+
+  ndim = len(ici_shape)
+  stacked = per_granule[0][None].repeat(len(per_granule), axis=0).copy()
+  for idx, g_mesh in enumerate(per_granule):
+    stacked[idx] = g_mesh
+  interleaved = stacked.reshape(*dcn_shape, *ici_shape).transpose(
+      tuple(val for i in range(ndim) for val in (i, i + ndim))
+  )
+  return interleaved.reshape(tuple(d * m for d, m in zip(dcn_shape, ici_shape)))
+
+
+def _optimize_mesh_for_tpu_v6e(device_array: Any, devices: Sequence[jax.Device]) -> Any:
+  """Reorders the second half of a 1D-ring TPU v6e `(2, 4, 1)` host mesh into a Hamiltonian ring."""
+  if getattr(devices[0], "device_kind", None) != "TPU v6 lite":
+    return device_array
+  num_devices = len(devices)
+  if num_devices not in device_array.shape or not all(hasattr(d, "coords") for d in devices):
+    return device_array
+  coords = [d.coords for d in devices]
+  dims = tuple(max(c[i] for c in coords) - min(c[i] for c in coords) + 1 for i in range(len(coords[0])))
+  if dims != (2, 4, 1):
+    return device_array
+  axis_idx = device_array.shape.index(num_devices)
+  ndim = device_array.ndim
+  perm = (axis_idx, *range(axis_idx), *range(axis_idx + 1, ndim))
+  inv_perm = (*range(1, axis_idx + 1), 0, *range(axis_idx + 1, ndim))
+  moved = device_array.transpose(perm).copy()
+  moved[4:] = moved[-1:3:-1]
+  return moved.transpose(inv_perm)
+
+
 def create_mesh(
     *,
     ici: Mapping[str, int] | None = None,
@@ -380,6 +537,9 @@ def create_mesh(
     devices: Sequence[jax.Device] | None = None,
     axis_names: Sequence[str] = MESH_AXIS_NAMES,
     explicit: bool = False,
+    custom_mesh: str = "",
+    allow_split_physical_axes: bool = False,
+    optimize_mesh_for_tpu_v6e: bool = False,
 ) -> Mesh:
   """Builds the device mesh over `axis_names` (by default `MESH_AXIS_NAMES`).
 
@@ -459,45 +619,49 @@ def create_mesh(
   ici_shape = _resolve_axis_sizes(ici_sizes, len(devices) // num_slices, "ICI", "per-slice device count", axis_names)
   dcn_shape = _resolve_axis_sizes(dcn_sizes, num_slices, "DCN", "slice count", axis_names)
 
-  if num_slices > 1:
-    device_array = mesh_utils.create_hybrid_device_mesh(ici_shape, dcn_shape, devices)
+  if _is_valid_custom_mesh(ici_shape, custom_mesh):
+    device_array = _create_custom_device_mesh(ici_shape, dcn_shape, devices, custom_mesh)
+  elif num_slices > 1:
+    if allow_split_physical_axes:
+      device_array = mesh_utils.create_hybrid_device_mesh(ici_shape, dcn_shape, devices, allow_split_physical_axes=True)
+    else:
+      device_array = mesh_utils.create_hybrid_device_mesh(ici_shape, dcn_shape, devices)
   else:
     # Not `create_hybrid_device_mesh` with an all-ones DCN shape: it requires
     # every device to expose `slice_index`, which single-slice TPU and CPU
     # devices do not, so it raises rather than degrading to the ICI-only case.
-    device_array = mesh_utils.create_device_mesh(ici_shape, devices)
+    if allow_split_physical_axes:
+      device_array = mesh_utils.create_device_mesh(ici_shape, devices, allow_split_physical_axes=True)
+    else:
+      device_array = mesh_utils.create_device_mesh(ici_shape, devices)
+
+  if optimize_mesh_for_tpu_v6e:
+    device_array = _optimize_mesh_for_tpu_v6e(device_array, devices)
 
   axis_types = (jax.sharding.AxisType.Explicit,) * len(axis_names) if explicit else None
   return Mesh(device_array, axis_names, axis_types=axis_types)
 
 
-# Legacy parallelism axes the m3 mesh does not carry. A config that sets one
-# of them asks for a layout m3 cannot build, so `mesh_from_config` refuses it
-# rather than silently running a different one.
+# Legacy parallelism axes that are not part of `MESH_AXIS_NAMES`. Setting one
+# of them != 1 raises `ValueError` rather than running a silent mismatch.
 _UNSUPPORTED_PARALLELISM_AXES = (
     "diloco",
-    "fsdp_transpose",
     "sequence",
-    "context",
     "context_usp_ulysses",
     "context_autoregressive",
     "tensor_sequence",
-    "pipeline",
     "autoregressive",
 )
-# Legacy mesh-layout knobs `create_mesh` does not implement, with the value
-# that means "off".
+
+
 _UNSUPPORTED_MESH_FIELDS = {
-    "custom_mesh": "",
     "custom_mesh_and_rule": "",
     "custom_mesh_and_rule_for_eval": "",
-    "allow_split_physical_axes": False,
-    "optimize_mesh_for_tpu_v6e": False,
 }
 
 
 def unsupported_mesh_settings(config) -> dict[str, Any]:
-  """The legacy mesh settings `config` turns on that m3 does not implement, with their values."""
+  """Returns legacy parallelism settings enabled on `config` that `MESH_AXIS_NAMES` does not carry."""
   unsupported = {}
   for network in ("ici", "dcn"):
     for axis in _UNSUPPORTED_PARALLELISM_AXES:
@@ -512,27 +676,48 @@ def unsupported_mesh_settings(config) -> dict[str, Any]:
   return unsupported
 
 
-def mesh_from_config(config, devices: Sequence[jax.Device] | None = None) -> Mesh:
-  """Builds the mesh a config describes, over `MESH_AXIS_NAMES`.
+def _read_axis_parallelism(config: Any, network: str, axis: str, default: int) -> int:
+  """Reads `{network}_{axis}_parallelism`, mapping mesh axis `stage` onto legacy `*_pipeline_parallelism`."""
+  if axis != "stage":
+    return getattr(config, f"{network}_{axis}_parallelism", default)
+  pipe_field = f"{network}_pipeline_parallelism"
+  stage_field = f"{network}_stage_parallelism"
+  has_pipe = hasattr(config, pipe_field)
+  has_stage = hasattr(config, stage_field)
+  pipe_val = getattr(config, pipe_field, default)
+  stage_val = getattr(config, stage_field, default)
+  if has_pipe and has_stage and pipe_val != 1 and stage_val != 1 and pipe_val != stage_val:
+    raise ValueError(f"Conflicting {pipe_field}={pipe_val} and {stage_field}={stage_val}; set {pipe_field} only.")
+  if has_stage and (not has_pipe or stage_val != 1):
+    return stage_val
+  return pipe_val
 
-  Reads legacy's field names so the knobs users already know keep working:
-  `ici_<axis>_parallelism` / `dcn_<axis>_parallelism` for `data`, `fsdp`,
-  `tensor` and `expert`, and `shard_mode` (`auto` / `explicit`). Legacy's
-  defaults (`ici_fsdp_parallelism=-1`, `dcn_data_parallelism=-1`) are
-  `create_mesh`'s, so a slim config without the fields gets the same mesh.
-  Any other parallelism axis set to something other than 1, or a custom mesh
-  layout, is refused with the field named.
+
+def mesh_from_config(config, devices: Sequence[jax.Device] | None = None) -> Mesh:
+  """Builds the mesh `config` describes over `MESH_AXIS_NAMES`.
+
+  Supports `data`, `stage` (`*_pipeline_parallelism`), `fsdp`, `fsdp_transpose`,
+  `context`, `tensor`, and `expert` across ICI and DCN, `shard_mode`
+  (`auto` / `explicit`), `custom_mesh` (`hybrid_ring_64x4` / `hybrid_ring_32x8`),
+  `allow_split_physical_axes`, and `optimize_mesh_for_tpu_v6e`.
   """
   unsupported = unsupported_mesh_settings(config)
   if unsupported:
     raise ValueError(
-        f"m3 builds its mesh over {MESH_AXIS_NAMES} with the default device layout; "
-        f"it does not implement {unsupported} (see m3/README.md)."
+        f"m3 builds its mesh over {MESH_AXIS_NAMES}; it does not implement {unsupported} (see m3/README.md)."
     )
-  ici = {axis: getattr(config, f"ici_{axis}_parallelism", -1 if axis == "fsdp" else 1) for axis in MESH_AXIS_NAMES}
-  dcn = {axis: getattr(config, f"dcn_{axis}_parallelism", -1 if axis == "data" else 1) for axis in MESH_AXIS_NAMES}
+  ici = {axis: _read_axis_parallelism(config, "ici", axis, -1 if axis == "fsdp" else 1) for axis in MESH_AXIS_NAMES}
+  dcn = {axis: _read_axis_parallelism(config, "dcn", axis, -1 if axis == "data" else 1) for axis in MESH_AXIS_NAMES}
   shard_mode = getattr(config, "shard_mode", "auto")
   shard_mode = getattr(shard_mode, "value", shard_mode)  # pyconfig hands over a `str` Enum
   if shard_mode not in ("auto", "explicit"):
     raise ValueError(f"shard_mode must be 'auto' or 'explicit'; got {shard_mode!r}.")
-  return create_mesh(ici=ici, dcn=dcn, devices=devices, explicit=shard_mode == "explicit")
+  return create_mesh(
+      ici=ici,
+      dcn=dcn,
+      devices=devices,
+      explicit=shard_mode == "explicit",
+      custom_mesh=getattr(config, "custom_mesh", "") or "",
+      allow_split_physical_axes=bool(getattr(config, "allow_split_physical_axes", False)),
+      optimize_mesh_for_tpu_v6e=bool(getattr(config, "optimize_mesh_for_tpu_v6e", False)),
+  )
