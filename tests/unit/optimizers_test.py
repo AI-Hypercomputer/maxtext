@@ -870,6 +870,21 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     self.assertAlmostEqual(float(updates["x"][0]), -float(sched(8)), places=6)  # not -sched(3)
     self.assertEqual(int(state["inner_state"].count), 9)
 
+  def test_skip_with_bf16_grads_and_float32_updates(self):
+    """Under jit, bf16 gradients with an optimizer that returns float32 updates (Zero-1 + gradient accumulation)."""
+    opt = optimizers.skip_step_on_spikes(optax.adamw(1e-3), interval=4, scaling_factor=1.0)
+    params = {"x": jnp.ones((4,), jnp.float32)}
+    opt_state = opt.init(params)
+    grads = {"x": jnp.full((4,), 0.1, jnp.bfloat16)}
+    step = jax.jit(lambda g, s, loss: opt.update(g, s, params, loss=loss, grad_norm=jnp.float32(0.1)))
+    for _ in range(2):
+      updates, opt_state = step(grads, opt_state, jnp.float32(1.0))
+      self.assertFalse(opt_state["is_skipped"])
+    updates, opt_state = step(grads, opt_state, jnp.float32(100.0))
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(updates["x"].dtype, jnp.float32)
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+
   def test_no_skip_without_kwargs(self):
     inner_opt = optax.sgd(0.1)
     opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)

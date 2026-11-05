@@ -166,9 +166,14 @@ def skip_step_on_spikes(
     def do_update():
       return inner_opt.update(updates, inner_state, params, **extra_args)
 
+    # The inner optimizer's updates can differ in dtype from the gradients (e.g. float32 updates from bf16 gradients
+    # under Zero-1 + gradient accumulation), and lax.cond needs both branches to match, so the skip branch's zeros
+    # take the shapes and dtypes the update branch produces.
+    update_avals = jax.eval_shape(do_update)[0]
+
     def skip_update():
       # b/500923599: Investigate logging compatible with jax.jit, jax.lax.cond, and Pathway
-      inner_updates = jax.tree_util.tree_map(jnp.zeros_like, updates)
+      inner_updates = jax.tree_util.tree_map(lambda a: jnp.zeros(a.shape, a.dtype), update_avals)
       return inner_updates, inner_state
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
