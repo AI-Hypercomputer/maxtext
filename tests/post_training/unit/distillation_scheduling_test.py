@@ -23,7 +23,6 @@ import pytest
 pytest.importorskip("tunix")
 pytestmark = [pytest.mark.tpu_only, pytest.mark.post_training]
 
-import jax
 import jax.numpy as jnp
 from flax import nnx
 import numpy as np
@@ -56,8 +55,8 @@ def _make_divergent_outputs(vocab_size=4):
   return student, teacher
 
 
-def _make_labels(vocab_size=4):
-  return jax.nn.one_hot(jnp.array([[0, 1]]), vocab_size)
+def _make_labels():
+  return distillation_utils.Labels(targets=jnp.array([[0, 1]], dtype=jnp.int32), mask=jnp.ones((1, 2), jnp.float32))
 
 
 def _mean(pair):
@@ -448,9 +447,10 @@ class TrainerStepCounterTest(unittest.TestCase):
     # Simulate resume from step 5
     model_bundle.training_step.set_value(jnp.array(5, dtype=jnp.int32))
 
-    # nnx.split returns (graphdef, diff_params, rest); loss_wrapper_pure takes (diff_params, rest).
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    # nnx.split returns (graphdef, diff_params, frozen_params, rest);
+    # loss_wrapper_pure takes (diff_params, frozen_params, rest).
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     # grad_fn returns ((loss, (aux, new_rest)), grads)
     mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
@@ -464,9 +464,9 @@ class TrainerStepCounterTest(unittest.TestCase):
     self.assertEqual(int(model_bundle.training_step[...]), 6)
 
     # Trigger loss_wrapper_pure to verify step=5 was passed to compute_loss.
-    # Signature is (diff_params, rest).
+    # Signature is (diff_params, frozen_params, rest).
     loss_wrapper = mock_value_and_grad.call_args[0][0]
-    loss_wrapper(mock_diff_params, mock_rest)
+    loss_wrapper(mock_diff_params, mock_frozen_params, mock_rest)
 
     call_kwargs = trainer.strategy.compute_loss.call_args
     self.assertIn("step", call_kwargs.kwargs)
@@ -503,8 +503,8 @@ class TrainerStepCounterTest(unittest.TestCase):
     model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
     optimizer = mock.Mock()
 
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
     mock_value_and_grad.return_value = mock_grad_fn
