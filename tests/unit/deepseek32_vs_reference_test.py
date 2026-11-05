@@ -1021,7 +1021,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
     # Copy Weights
     nnx.update(jax_mla, get_jax_mla_weights(pt_mla, self.config))
 
-    jax_out, _ = jax_mla(
+    jax_out, _, _ = jax_mla(
         inputs_q=jax_inputs["x"],
         inputs_kv=jax_inputs["x"],
         inputs_positions=jax_inputs["positions"],
