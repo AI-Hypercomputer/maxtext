@@ -2054,6 +2054,10 @@ class HardwareAndMesh(BaseModel):
       description="The names of the axes in the logical device mesh.",
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
+  sequence_parallel: bool = Field(
+      False,
+      description="Shard m3 residual and RMSNorm sequence axis across tensor parallelism (Megatron sequence parallelism).",
+  )
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
   scan_layers: bool = Field(
       True,

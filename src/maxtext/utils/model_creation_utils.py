@@ -736,6 +736,10 @@ def create_model(
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
+    if mesh is not None and jax.sharding.get_abstract_mesh().empty:
+      with jax.set_mesh(mesh):
+        model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+        return m3_scan.maybe_apply_scan(model, config)
     model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
     model = m3_scan.maybe_apply_scan(model, config)
     return model
@@ -768,7 +772,7 @@ def _apply_m3_default_named_sharding(
   Falls back to the largest non-data/non-stage mesh axis when
   fsdp/fsdp_transpose are absent.
   """
-  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
+  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose", "expert") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
   if not shard_axes:
     fallback_axes = [
         (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
