@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793853870911,
+  "lastUpdate": 1793868567799,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -64212,6 +64212,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4462.920999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 336,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Yuchen Yao",
+            "username": "AusarYao28",
+            "email": "yaoyuchen@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "2db9021e03b3a91717c55adbee7cb1e6e452cfed",
+          "message": "Add CPU conformance specs for qwen3-0.6b and glm5.3-flash, wire lazy dynamic spec discovery into conformance_test, and harden pure-array NNX transform boundaries and scanned Check 8 all-gather detection.\n\n- Add per-model conformance_spec modules under src/maxtext/m3/models/qwen3/ and src/maxtext/m3/models/glm5_3_flash/.\n- Register qwen3-0.6b conformance spec exercising Checks 2, 3, and 6 with documented NOT_APPLICABLE SkipDeclarations for Checks 1, 4, 5, 7, and 8.\n- Register glm5.3-flash conformance spec on a 10-layer 4-device CPU mini-twin exercising all 8 conformance checks with zero skips.\n- Dynamically discover registered m3 model conformance_spec modules via pkgutil.iter_modules without eagerly importing sibling model packages, and execute all 8 checks per registered spec in conformance_test.py without model-name literals in tests/unit/m3/conformance/.\n- Unwrap nnx.Variable state trees to pure arrays across JAX transform boundaries with cached module-level JIT reuse in checks.py, and extend Check 8 HLO forbidden_shapes to detect scanned dynamic-slice singleton-axis expert all-gather shapes (1, *unstacked_shape) and 4-D reshaped (1, *s3).\n\nPiperOrigin-RevId: 1014444254",
+          "timestamp": "2026-11-05T07:44:30Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/2db9021e03b3a91717c55adbee7cb1e6e452cfed"
+        },
+        "date": 1793868566915,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 260.17199999999985,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 67.168,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2118.594,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 136.89999999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.34499999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4692.273,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 336,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1600.1369999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 200.50699999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4470.034,
             "unit": "sec"
           },
           {
