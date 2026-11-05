@@ -67,15 +67,79 @@ def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
   return mean, std
 
 
+def extract_is_skipped(opt_state):
+  """Extracts the boolean `is_skipped` scalar from an optimizer state tree if present."""
+  if isinstance(opt_state, dict) and "is_skipped" in opt_state:
+    return opt_state["is_skipped"]
+  return None
+
+
+def skip_step_on_nan_or_grad_spike(
+    inner_opt: optax.GradientTransformation,
+    skip_on_nan: bool = True,
+    max_grad_norm_spike: float = 0.0,
+) -> optax.GradientTransformationExtraArgs:
+  """Lightweight wrapper that skips updates on NaN/Inf metrics or absolute grad-norm spikes.
+
+  Unlike `skip_step_on_spikes`, this wrapper allocates no rolling history buffers,
+  making it suitable when only non-finite protection and/or a static pre-clipping
+  gradient-norm ceiling (`max_grad_norm_spike`) is desired.
+  """
+
+  def init_fn(params):
+    return {
+        "inner_state": inner_opt.init(params),
+        "is_skipped": jnp.array(False, dtype=jnp.bool_),
+    }
+
+  def update_fn(updates, state, params=None, **extra_args):
+    loss = extra_args.pop("loss", None)
+    grad_norm = extra_args.pop("grad_norm", None)
+
+    if loss is None and grad_norm is None:
+      inner_updates, new_inner_state = inner_opt.update(updates, state["inner_state"], params, **extra_args)
+      return inner_updates, {
+          "inner_state": new_inner_state,
+          "is_skipped": jnp.array(False, dtype=jnp.bool_),
+      }
+
+    is_ok = jnp.array(True, dtype=jnp.bool_)
+    if skip_on_nan:
+      if loss is not None:
+        is_ok = jnp.logical_and(is_ok, jnp.isfinite(loss))
+      if grad_norm is not None:
+        is_ok = jnp.logical_and(is_ok, jnp.isfinite(grad_norm))
+    if max_grad_norm_spike > 0.0 and grad_norm is not None:
+      is_ok = jnp.logical_and(is_ok, jnp.logical_and(jnp.isfinite(grad_norm), grad_norm <= max_grad_norm_spike))
+
+    def do_update():
+      return inner_opt.update(updates, state["inner_state"], params, **extra_args)
+
+    def skip_update():
+      return jax.tree_util.tree_map(jnp.zeros_like, updates), state["inner_state"]
+
+    inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
+    return inner_updates, {
+        "inner_state": new_inner_state,
+        "is_skipped": jnp.logical_not(is_ok),
+    }
+
+  return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
 def skip_step_on_spikes(
-    inner_opt: optax.GradientTransformation, interval: int, scaling_factor: float
+    inner_opt: optax.GradientTransformation,
+    interval: int,
+    scaling_factor: float,
+    max_grad_norm_spike: float = 0.0,
 ) -> optax.GradientTransformationExtraArgs:
   """Wrapper that skips updates when loss or grad_norm spike.
 
   This wrapper calculates a rolling mean and standard deviation (using
   Bessel's correction) over the last `interval` steps for both the loss
   and the gradient norm. If the current step's loss or gradient norm
-  exceeds `mean + scaling_factor * std`, the update is zeroed and the
+  exceeds `mean + scaling_factor * std` (or is NaN/Inf, or exceeds
+  `max_grad_norm_spike` when positive), the update is zeroed and the
   optimizer state is not advanced, effectively skipping the step.
 
   Reference implementation:
@@ -85,6 +149,7 @@ def skip_step_on_spikes(
     inner_opt: The inner Optax gradient transformation to wrap.
     interval: The number of recent steps to use for calculating mean and std.
     scaling_factor: The multiplier for standard deviation to set the spike threshold.
+    max_grad_norm_spike: Optional absolute upper bound on pre-clipping `grad_norm`.
 
   Returns:
     An optax.GradientTransformationExtraArgs that skips spikes.
@@ -121,6 +186,14 @@ def skip_step_on_spikes(
     losses = state["losses"]
     grad_norms = state["grad_norms"]
 
+    # Ensure non-finite metrics and static grad-norm cap breaches are never treated as valid, even during warmup.
+    is_finite = jnp.isfinite(loss)
+    within_abs_cap = jnp.array(True, dtype=jnp.bool_)
+    if grad_norm is not None:
+      is_finite = jnp.logical_and(is_finite, jnp.isfinite(grad_norm))
+      if max_grad_norm_spike > 0.0:
+        within_abs_cap = grad_norm <= max_grad_norm_spike
+
     # Compute rolling stats
     loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
     grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
@@ -133,10 +206,11 @@ def skip_step_on_spikes(
     else:
       is_ok = is_loss_ok
 
-    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum)
+    # Only enforce rolling-stat skip if we have at least half the interval filled (or 2 elements minimum).
+    # Warmup permits normal variations before statistics stabilize, but never non-finite values or static cap breaches.
     min_history = max(2, interval // 2)
     is_warmup = (count + 1) < min_history
-    is_ok = jnp.logical_or(is_warmup, is_ok)
+    is_ok = jnp.logical_and(jnp.logical_and(is_finite, within_abs_cap), jnp.logical_or(is_warmup, is_ok))
 
     # Conditionally execute the inner optimizer to prevent momentum poisoning
     def do_update():
@@ -149,19 +223,21 @@ def skip_step_on_spikes(
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
 
-    # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    # Update rolling buffers (append only finite values so spikes become the new baseline without NaN poisoning)
     idx = count % interval
-    new_losses = losses.at[idx].set(loss)
+    new_losses = jnp.where(is_finite, losses.at[idx].set(loss), losses)
 
     new_grad_norms = grad_norms
     if grad_norm is not None:
-      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+      new_grad_norms = jnp.where(is_finite, grad_norms.at[idx].set(grad_norm), grad_norms)
+
+    new_count = jnp.where(is_finite, count + 1, count)
 
     new_state = {
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": count + 1,
+        "count": new_count,
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state
@@ -251,19 +327,29 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
-  # Apply `trainable_parameters_mask` before `skip_step_on_spikes` so `skip_step_on_spikes`
-  # stays the outermost transformation: callers expect `opt_state` to be a top-level dict
-  # exposing `opt_state["is_skipped"]` (whereas `optax.multi_transform` wraps state in
-  # `PartitionState`), while `multi_transform` still forwards extra_args (`loss`, `grad_norm`)
-  # and avoids allocating optimizer state for frozen parameters (`MaskedNode` placeholders in
-  # the trainable branch's state and a single `EmptyState` for the frozen branch).
+  # Apply `trainable_parameters_mask` before the skip-step wrappers so `skip_step_on_spikes`
+  # and `skip_step_on_nan_or_grad_spike` stay the outermost transformation: callers expect
+  # `opt_state` to be a top-level dict exposing `opt_state["is_skipped"]` (whereas
+  # `optax.multi_transform` wraps state in `PartitionState`), while `multi_transform` still
+  # forwards extra_args (`loss`, `grad_norm`) and avoids allocating optimizer state for frozen
+  # parameters (`MaskedNode` placeholders in the trainable branch's state and a single
+  # `EmptyState` for the frozen branch).
   base_opt = apply_trainable_parameters_mask(base_opt, config)
 
-  if config.skip_step_on_spikes:
+  max_grad_norm_spike = float(getattr(config, "max_grad_norm_spike", 0.0))
+  skip_on_nan = bool(getattr(config, "skip_step_on_nan", False))
+  if getattr(config, "skip_step_on_spikes", False):
     base_opt = skip_step_on_spikes(
         base_opt,
         interval=config.skip_step_interval,
         scaling_factor=config.skip_step_scaling_factor,
+        max_grad_norm_spike=max_grad_norm_spike,
+    )
+  elif skip_on_nan or max_grad_norm_spike > 0.0:
+    base_opt = skip_step_on_nan_or_grad_spike(
+        base_opt,
+        skip_on_nan=skip_on_nan,
+        max_grad_norm_spike=max_grad_norm_spike,
     )
 
   return base_opt
