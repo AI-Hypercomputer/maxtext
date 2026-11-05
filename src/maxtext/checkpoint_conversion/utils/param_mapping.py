@@ -4867,22 +4867,35 @@ class WAN2_1_HF_TO_MAXTEXT:
           add(f"{mt}-{name}-gamma", f"{hf}.{name}.gamma", reshape)
 
       levels, num_res_blocks = len(hf_config["dim_mult"]), hf_config["num_res_blocks"]
-      # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
-      idx = 0
-      for level in range(levels):
-        for _ in range(num_res_blocks):
-          resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
-          idx += 1
-        if level < levels - 1:
-          conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
-          conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
-          idx += 1
+      is_residual = hf_config.get("is_residual", False)
+      if is_residual:
+        for level in range(levels):
+          for j in range(num_res_blocks):
+            resnet(f"encoder-down_blocks-{level}-resnets-{j}", f"encoder.down_blocks.{level}.resnets.{j}")
+          if level < levels - 1:
+            down_mt, down_hf = f"encoder-down_blocks-{level}-downsampler", f"encoder.down_blocks.{level}.downsampler"
+            conv_layer(f"{down_mt}-resample-conv", f"{down_hf}.resample.1")
+            conv_layer(f"{down_mt}-time_conv-conv", f"{down_hf}.time_conv")
+      else:
+        # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
+        idx = 0
+        for level in range(levels):
+          for _ in range(num_res_blocks):
+            resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
+            idx += 1
+          if level < levels - 1:
+            conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
+            conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
+            idx += 1
       # Decoder: `num_res_blocks + 1` resnets per level, each level but the last ends in an upsampler.
       for level in range(levels):
         for j in range(num_res_blocks + 1):
           resnet(f"decoder-up_blocks-{level}-resnets-{j}", f"decoder.up_blocks.{level}.resnets.{j}")
         if level < levels - 1:
-          up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
+          if is_residual:
+            up_mt, up_hf = f"decoder-up_blocks-{level}-upsampler", f"decoder.up_blocks.{level}.upsampler"
+          else:
+            up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
           conv_layer(f"{up_mt}-resample-layers-1", f"{up_hf}.resample.1")
           conv_layer(f"{up_mt}-time_conv-conv", f"{up_hf}.time_conv")
       for coder in ("encoder", "decoder"):
@@ -5565,4 +5578,5 @@ VLLM_HOOK_FNS = {
 # Diffusers models (multi-component checkpoints), keyed by `model_name`; used by to_maxtext_diffusers.py.
 DIFFUSERS_PARAM_MAPPING = {
     "wan2.1": WAN2_1_HF_TO_MAXTEXT,
+    "wan2.2": WAN2_1_HF_TO_MAXTEXT,
 }

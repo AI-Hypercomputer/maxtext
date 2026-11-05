@@ -38,6 +38,22 @@ _CONFIG = {
     "attn_scales": [],
     "temperal_downsample": [False, True, True],
 }
+# Tiny Wan 2.2 residual VAE (Wan 2.2 5B: base_dim 160, decoder_base_dim 256, z_dim 48, patch_size 2, 4x16x16).
+_RESIDUAL_CONFIG = {
+    "base_dim": 8,
+    "decoder_base_dim": 16,
+    "z_dim": 12,
+    "dim_mult": [1, 2, 4, 4],
+    "num_res_blocks": 2,
+    "attn_scales": [],
+    "temperal_downsample": [False, True, True],
+    "is_residual": True,
+    "in_channels": 12,
+    "out_channels": 12,
+    "patch_size": 2,
+    "scale_factor_temporal": 4,
+    "scale_factor_spatial": 16,
+}
 _BATCH, _FRAMES, _HEIGHT, _WIDTH = 1, 5, 16, 16
 
 
@@ -47,10 +63,12 @@ class AutoencoderKLWanTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     cls.vae = AutoencoderKLWan(rngs=nnx.Rngs(0), **_CONFIG)
+    cls.residual_vae = AutoencoderKLWan(rngs=nnx.Rngs(0), **_RESIDUAL_CONFIG)
 
   def test_latent_shape(self):
     self.assertEqual(AutoencoderKLWan.latent_shape(_CONFIG, 2, 81, 480, 832), (2, 4, 21, 60, 104))
     self.assertEqual(AutoencoderKLWan.latent_shape(_CONFIG, 1, 1, 16, 16), (1, 4, 1, 2, 2))
+    self.assertEqual(AutoencoderKLWan.latent_shape(_RESIDUAL_CONFIG, 2, 81, 704, 1280), (2, 12, 21, 44, 80))
 
   def test_encode_decode_shapes(self):
     video = jax.random.uniform(jax.random.key(0), (_BATCH, 3, _FRAMES, _HEIGHT, _WIDTH), minval=-1.0, maxval=1.0)
@@ -67,6 +85,18 @@ class AutoencoderKLWanTest(unittest.TestCase):
     latents = jax.random.normal(jax.random.key(1), AutoencoderKLWan.latent_shape(_CONFIG, _BATCH, _FRAMES, 16, 16))
     decoded = self.vae.decode(latents, AutoencoderKLWanCache(self.vae)).sample
     self.assertEqual(decoded.shape, (_BATCH, _FRAMES, 16, 16, 3))
+
+  def test_residual_vae_encode_decode_shapes(self):
+    height, width = 32, 32
+    video = jax.random.uniform(jax.random.key(2), (_BATCH, 3, _FRAMES, height, width), minval=-1.0, maxval=1.0)
+    posterior = self.residual_vae.encode(video, AutoencoderKLWanCache(self.residual_vae)).latent_dist
+    latents = posterior.mode()
+    b, z, f, h, w = AutoencoderKLWan.latent_shape(_RESIDUAL_CONFIG, _BATCH, _FRAMES, height, width)
+    self.assertEqual(latents.shape, (b, f, h, w, z))
+
+    decoded = self.residual_vae.decode(latents, AutoencoderKLWanCache(self.residual_vae)).sample
+    self.assertEqual(decoded.shape, (_BATCH, _FRAMES, height, width, 3))
+    self.assertTrue(np.all(np.isfinite(np.asarray(decoded))))
 
 
 if __name__ == "__main__":

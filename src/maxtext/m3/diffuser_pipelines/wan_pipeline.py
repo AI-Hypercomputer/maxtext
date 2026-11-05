@@ -455,8 +455,16 @@ class WanPipeline(DiffusionPipeline):
 
     self.vae_mesh = kwargs.get("vae_mesh", mesh)
 
-    self.vae_scale_factor_temporal = 2 ** sum(self.vae.temperal_downsample) if getattr(self, "vae", None) else 4
-    self.vae_scale_factor_spatial = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
+    if getattr(self, "vae", None) is not None:
+      self.vae_scale_factor_temporal = getattr(self.vae, "scale_factor_temporal", None) or (
+          2 ** sum(self.vae.temperal_downsample)
+      )
+      self.vae_scale_factor_spatial = getattr(self.vae, "scale_factor_spatial", None) or (
+          2 ** len(self.vae.temperal_downsample)
+      )
+    else:
+      self.vae_scale_factor_temporal = 4
+      self.vae_scale_factor_spatial = 8
     self.video_processor = VaeVideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)  # For i2v tasks to be added.
 
     self.p_run_inference = None
@@ -490,7 +498,7 @@ class WanPipeline(DiffusionPipeline):
     mesh = getattr(self, "vae_mesh", getattr(self, "mesh", None))
     if mesh is not None and hasattr(mesh, "shape"):
       vae_spatial = mesh.shape.get("vae_spatial", 1)
-      if vae_spatial > 1 and (width // 8) % vae_spatial != 0:
+      if vae_spatial > 1 and (width // self.vae_scale_factor_spatial) % vae_spatial != 0:
         max_logging.log(
             "Warning: Latent width is not divisible by vae_spatial mesh axis"
             f" ({vae_spatial}). VAE spatial sharding will be partially"
@@ -1113,6 +1121,19 @@ class WanPipeline(DiffusionPipeline):
       )
       num_frames = num_frames // self.vae_scale_factor_temporal * self.vae_scale_factor_temporal + 1
     num_frames = max(num_frames, 1)
+
+    patch_size_h = self.transformer.patch_size[1] if getattr(self, "transformer", None) is not None else 2
+    patch_size_w = self.transformer.patch_size[2] if getattr(self, "transformer", None) is not None else 2
+    mod_value_h = self.vae_scale_factor_spatial * patch_size_h
+    mod_value_w = self.vae_scale_factor_spatial * patch_size_w
+    if height % mod_value_h != 0 or width % mod_value_w != 0:
+      new_height = (height // mod_value_h) * mod_value_h
+      new_width = (width // mod_value_w) * mod_value_w
+      max_logging.log(
+          f"`height` ({height}) and `width` ({width}) have to be divisible by"
+          f" ({mod_value_h}, {mod_value_w}). Rounding to ({new_height}, {new_width})."
+      )
+      height, width = new_height, new_width
 
     # 2. Define call parameters
     if prompt is not None and isinstance(prompt, str):

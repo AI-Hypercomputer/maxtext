@@ -71,6 +71,22 @@ _VAE_CONFIG = {
     "temperal_downsample": [False, True, True],
     "z_dim": 4,
 }
+_VAE_RESIDUAL_CONFIG = {
+    "attn_scales": [],
+    "base_dim": 8,
+    "decoder_base_dim": 16,
+    "dim_mult": [1, 2, 4, 4],
+    "dropout": 0.0,
+    "in_channels": 12,
+    "is_residual": True,
+    "num_res_blocks": 2,
+    "out_channels": 12,
+    "patch_size": 2,
+    "scale_factor_spatial": 16,
+    "scale_factor_temporal": 4,
+    "temperal_downsample": [False, True, True],
+    "z_dim": 12,
+}
 # UMT5 text encoder (umt5-xxl: d_model 4096, 24 layers, 64 heads x 64, d_ff 10240).
 _TEXT_ENCODER_CONFIG = {
     "d_ff": 24,
@@ -114,6 +130,7 @@ class Wan21ParamMappingTest(parameterized.TestCase):
 
   def test_registered(self):
     self.assertIs(DIFFUSERS_PARAM_MAPPING["wan2.1"], WAN2_1_HF_TO_MAXTEXT)
+    self.assertIs(DIFFUSERS_PARAM_MAPPING["wan2.2"], WAN2_1_HF_TO_MAXTEXT)
     self.assertEqual(set(WAN2_1_HF_TO_MAXTEXT.COMPONENTS), {"transformer", "vae", "text_encoder"})
 
   @parameterized.named_parameters(
@@ -121,6 +138,7 @@ class Wan21ParamMappingTest(parameterized.TestCase):
       ("transformer_t2v_scanned", "transformer", _TRANSFORMER_CONFIG, True),
       ("transformer_i2v", "transformer", _I2V_CONFIG, False),
       ("vae", "vae", _VAE_CONFIG, False),
+      ("vae_residual", "vae", _VAE_RESIDUAL_CONFIG, False),
       ("text_encoder", "text_encoder", _TEXT_ENCODER_CONFIG, False),
   )
   def test_mapping_covers_model(self, component, config, scan_layers):
@@ -287,6 +305,25 @@ class DiffusersConversionParityTest(unittest.TestCase):
     with jax.default_matmul_precision("float32"):
       mean = model.encode(video, AutoencoderKLWanCache(model)).latent_dist.mode()  # channels-last (B, F, H, W, z)
       # Decode the reference latents so the decoder is compared on identical inputs.
+      decoded = model.decode(np.transpose(expected_mean, (0, 2, 3, 4, 1)), AutoencoderKLWanCache(model)).sample
+    np.testing.assert_allclose(np.transpose(np.asarray(mean), (0, 4, 1, 2, 3)), expected_mean, atol=1e-4, rtol=1e-4)
+    np.testing.assert_allclose(np.transpose(np.asarray(decoded), (0, 4, 1, 2, 3)), expected_video, atol=1e-4, rtol=1e-4)
+
+  def test_converted_residual_vae_matches_diffusers(self):
+    torch.manual_seed(0)
+    vae_config = dict(_VAE_RESIDUAL_CONFIG, num_res_blocks=1)
+    hf_model = diffusers.AutoencoderKLWan(**vae_config).eval()
+    _randomize_torch_params(hf_model)
+    state, model_config = _convert(hf_model, "vae")
+    model = _load_converted(AutoencoderKLWan(**model_config, rngs=nnx.Rngs(0)), state)
+
+    video = np.random.default_rng(0).uniform(-1.0, 1.0, (1, 3, 5, 32, 32)).astype(np.float32)  # (B, C, F, H, W)
+    with torch.no_grad():
+      expected_mean = hf_model.encode(torch.from_numpy(video)).latent_dist.mean
+      expected_video = hf_model.decode(expected_mean).sample.numpy()
+    expected_mean = expected_mean.numpy()
+    with jax.default_matmul_precision("float32"):
+      mean = model.encode(video, AutoencoderKLWanCache(model)).latent_dist.mode()  # channels-last (B, F, H, W, z)
       decoded = model.decode(np.transpose(expected_mean, (0, 2, 3, 4, 1)), AutoencoderKLWanCache(model)).sample
     np.testing.assert_allclose(np.transpose(np.asarray(mean), (0, 4, 1, 2, 3)), expected_mean, atol=1e-4, rtol=1e-4)
     np.testing.assert_allclose(np.transpose(np.asarray(decoded), (0, 4, 1, 2, 3)), expected_video, atol=1e-4, rtol=1e-4)
