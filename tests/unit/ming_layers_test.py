@@ -28,6 +28,9 @@ Explicit runs require PyTorch, Transformers, fla, and the HF remote code's depen
 (including `openai-whisper` and `torchaudio`). Missing dependencies or unavailable reference code
 raise setup errors rather than skipping the comparisons. Set `HF_HUB_OFFLINE=1` to use cached code.
 
+The talker (text -> speech) tests at the end of the file compare against the HF `talker/` modules
+(`MING_TALKER_HF_PATH`, or `$MING_HF_PATH/talker` for a local snapshot) and skip without them.
+
 Run:
   JAX_PLATFORMS=cpu python3 -m pytest tests/unit/ming_layers_test.py
 """
@@ -793,6 +796,310 @@ class MingScanTest(unittest.TestCase):
       with mesh, nn_partitioning.axis_rules(c.logical_axis_rules):
         outs.append(m(decoder_input_tokens=ids, decoder_positions=pos, decoder_segment_ids=seg, enable_dropout=False))
     np.testing.assert_allclose(np.asarray(outs[1]), np.asarray(outs[0]), atol=1e-4, rtol=1e-4)
+
+
+# -----------------------------------------------------------------------------
+# Talker (text -> speech)
+# -----------------------------------------------------------------------------
+#
+# Compares the CFM DiT (with classifier-free guidance), the Euler sampler, the aggregator and the AudioVAE
+# decoder with the publisher's `talker/` PyTorch modules (needs `x-transformers` and `diffusers`). The talker
+# LLM is MaxText's regular Qwen2 decoder and is covered by a separate end-to-end HF parity check.
+# The reference defaults to `$MING_HF_PATH/talker` for a local snapshot; `MING_TALKER_HF_PATH` overrides it
+# and `MING_TALKER_EXTRA_PATH` may point at a side directory with the extra packages. Without a reference
+# the comparisons are skipped; the frontend tests always run.
+
+_LOCAL_TALKER_PATH = os.path.join(HF_PATH, "talker")
+TALKER_HF_PATH = os.environ.get("MING_TALKER_HF_PATH") or (
+    _LOCAL_TALKER_PATH if os.path.isdir(_LOCAL_TALKER_PATH) else ""
+)
+TALKER_EXTRA_PATH = os.environ.get("MING_TALKER_EXTRA_PATH", "")
+
+# Talker: small but structurally faithful dimensions.
+TALKER_EMB, TALKER_LATENT = 32, 8
+TALKER_DIT_HIDDEN, TALKER_DIT_HEADS, TALKER_DIT_LAYERS = 64, 4, 2
+(
+    TALKER_VAE_HIDDEN,
+    TALKER_VAE_HEADS,
+    TALKER_VAE_KV_HEADS,
+    TALKER_VAE_MLP,
+    TALKER_VAE_LAYERS,
+    TALKER_VAE_WINDOW,
+    TALKER_VAE_HOP,
+) = (64, 4, 2, 128, 2, 8, 16)
+
+
+def make_talker_config(**kwargs):
+  """Small, structurally faithful Ming talker config (CPU, float32)."""
+  overrides = dict(  # pylint: disable=use-dict-literal
+      model_name="ming-3.0-audio-tiny-talker",
+      override_model_config=True,
+      base_emb_dim=TALKER_EMB,
+      base_num_query_heads=4,
+      base_num_kv_heads=2,
+      head_dim=8,
+      base_mlp_dim=64,
+      base_num_decoder_layers=1,
+      vocab_size=128,
+      ming_talker_latent_dim=TALKER_LATENT,
+      ming_talker_speaker_dim=16,
+      ming_talker_dit_hidden_size=TALKER_DIT_HIDDEN,
+      ming_talker_dit_num_layers=TALKER_DIT_LAYERS,
+      ming_talker_dit_num_heads=TALKER_DIT_HEADS,
+      ming_talker_aggregator_hidden_size=TALKER_DIT_HIDDEN,
+      ming_talker_aggregator_num_layers=TALKER_DIT_LAYERS,
+      ming_talker_aggregator_num_heads=TALKER_DIT_HEADS,
+      ming_vae_hidden_size=TALKER_VAE_HIDDEN,
+      ming_vae_num_layers=TALKER_VAE_LAYERS,
+      ming_vae_num_heads=TALKER_VAE_HEADS,
+      ming_vae_num_kv_heads=TALKER_VAE_KV_HEADS,
+      ming_vae_mlp_dim=TALKER_VAE_MLP,
+      ming_vae_sliding_window=TALKER_VAE_WINDOW,
+      ming_vae_hop_length=TALKER_VAE_HOP,
+      per_device_batch_size=1,
+      max_target_length=32,
+      max_prefill_predict_length=16,
+      scan_layers=False,
+      matmul_precision="highest",
+      dtype="float32",
+      weight_dtype="float32",
+      skip_jax_distributed_system=True,
+      hardware="cpu",
+  )
+  overrides.update(kwargs)
+  return pyconfig.initialize(["", BASE_CONFIG], **overrides)
+
+
+class MingTalkerFrontendTest(unittest.TestCase):
+  """Reference-free checks of the text frontend."""
+
+  def test_ip_instruction(self):
+    instruction = processor_ming.build_ip_instruction("灵小柔")
+    self.assertEqual(
+        instruction,
+        '{"audio_sequence": [{"序号": 1, "说话人": "speaker_1", "方言": null, "风格": null, "语速": null, "基频": null,'
+        ' "音量": null, "情感": null, "BGM": {"Genre": null, "Mood": null, "Instrument": null, "Theme": null,'
+        ' "ENV": null, "SNR": null}, "IP": "灵小柔"}]}',
+    )
+
+  def test_prompt_language(self):
+    default = processor_ming.TALKER_TTS_PROMPT
+    self.assertEqual(processor_ming.build_tts_prompt(None), default)
+    self.assertEqual(processor_ming.build_tts_prompt("en"), default)
+    self.assertEqual(processor_ming.build_tts_prompt("ja"), default + "Target language: Japanese.\n")
+
+  def test_split_text(self):
+    self.assertEqual(processor_ming.split_text("Hello world"), ["Hello world."])
+    frags = processor_ming.split_text("One two three. Four five six! " * 4, max_length=40)
+    self.assertTrue(all(len(f) <= 40 for f in frags))
+    self.assertEqual(" ".join(frags), ("One two three. Four five six! " * 4).strip())
+
+  def test_trim_trailing_silence(self):
+    sr = 1000
+    speech = np.concatenate([0.5 * np.ones(250), np.zeros(1000), 0.5 * np.ones(30)])
+    # Frames of 100: last loud frame is frame 2 (samples 200-299); keep 0.3 s after it; remainder 80 samples dropped.
+    out = processor_ming.trim_trailing_silence(speech[:1250], sr)
+    self.assertEqual(out.shape[0], 300 + 300)
+    self.assertEqual(processor_ming.trim_trailing_silence(np.zeros(50), sr).shape[0], 50)
+
+  def test_timesteps(self):
+    t = np.asarray([0, 2, 4, 6, 8, 12, 16, 20, 24, 28, 32], np.float32) / 32
+    np.testing.assert_allclose(ming.epss_timesteps(10), 1 - np.cos(np.pi / 2 * t), atol=1e-6)
+
+
+@pytest.mark.skipif(
+    not TALKER_HF_PATH, reason="no talker reference: set MING_TALKER_HF_PATH or a local MING_HF_PATH snapshot"
+)
+class MingTalkerLayersTest(unittest.TestCase):
+  """MaxText talker heads vs the publisher's PyTorch modules with identical random weights."""
+
+  @classmethod
+  def setUpClass(cls):
+    for path in (TALKER_EXTRA_PATH, TALKER_HF_PATH):
+      if path and path not in sys.path:
+        sys.path.insert(0, path)
+    from talker_module import aggregator, cfm, dit  # pylint: disable=import-outside-toplevel,import-error
+    from AudioVAE import vae_modules  # pylint: disable=import-outside-toplevel,import-error
+
+    cls.hf_dit, cls.hf_cfm, cls.hf_agg, cls.hf_vae = dit, cfm, aggregator, vae_modules
+    torch.manual_seed(0)
+    cls.config = make_talker_config()
+    cls.heads = ming.MingTalkerHeads(cls.config, rngs=nnx.Rngs(0))
+
+  # ---------------------------------------------------------------- helpers
+  def t2j(self, t):
+    return jnp.asarray(t.detach().float().cpu().numpy())
+
+  def randomize(self, module, seed, std=0.1):
+    """Fills HF parameters with random values; RoPE buffers are bf16-rounded like the checkpoint."""
+    g = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+      for name, p in list(module.named_parameters()) + list(module.named_buffers()):
+        if "inv_freq" in name:
+          # The publisher's checkpoint stores bf16-rounded RoPE frequencies.
+          p.copy_(p.to(torch.bfloat16).float())
+        elif name.endswith("window"):
+          continue
+        elif "norm" in name:
+          p.copy_(1.0 + std * torch.randn(p.shape, generator=g))
+        else:
+          p.copy_(std * torch.randn(p.shape, generator=g))
+
+  def set_dense(self, mt, hf):
+    mt.kernel.value = self.t2j(hf.weight).T
+    if getattr(hf, "bias", None) is not None:
+      mt.bias.value = self.t2j(hf.bias)
+
+  def set_norm(self, mt, hf):
+    mt.scale.value = self.t2j(hf.weight)
+
+  def copy_blocks(self, mt, hf_blocks):
+    for i, blk in enumerate(hf_blocks):
+      m = getattr(mt, f"blocks_{i}")
+      self.set_norm(m.norm1, blk.norm1)
+      self.set_norm(m.norm2, blk.norm2)
+      for n in ("to_q", "to_k", "to_v"):
+        self.set_dense(getattr(m.attn, n), getattr(blk.attn, n))
+      self.set_dense(m.attn.to_out, blk.attn.to_out[0])
+      self.set_dense(m.mlp_in, blk.mlp.ff[0][0])
+      self.set_dense(m.mlp_out, blk.mlp.ff[2])
+
+  def make_dit(self):
+    """Builds a random HF DiT and copies its weights into the MaxText CFM DiT."""
+    hf = self.hf_dit.DiT(
+        in_channels=TALKER_LATENT,
+        hidden_size=TALKER_DIT_HIDDEN,
+        depth=TALKER_DIT_LAYERS,
+        num_heads=TALKER_DIT_HEADS,
+        mlp_ratio=4,
+        llm_cond_dim=TALKER_EMB,
+        attn_backend="torch",
+        attn_mask_enabled=False,
+        dropout=0.0,
+    ).eval()
+    self.randomize(hf, 1)
+    mt = self.heads.cfm
+    self.set_dense(mt.x_embedder, hf.x_embedder)
+    self.set_dense(mt.c_embedder, hf.c_embedder.cond_embedder)
+    self.set_dense(mt.time_fc1, hf.t_embedder.time_mlp[0])
+    self.set_dense(mt.time_fc2, hf.t_embedder.time_mlp[2])
+    self.copy_blocks(mt, hf.blocks)
+    self.set_norm(mt.final_norm, hf.final_layer.norm_final)
+    self.set_dense(mt.final_linear, hf.final_layer.linear)
+    return hf, mt
+
+  def assert_close(self, mt_out, hf_out, atol=ATOL, rtol=RTOL):
+    np.testing.assert_allclose(np.asarray(mt_out, np.float32), hf_out.detach().float().numpy(), atol=atol, rtol=rtol)
+
+  # ---------------------------------------------------------------- tests
+  def test_dit_rope_matches_checkpoint_buffers(self):
+    ref = (1.0 / (10000 ** (torch.arange(0, 64, 2).float() / 64))).to(torch.bfloat16).float()
+    np.testing.assert_array_equal(ming.dit_rope_freqs(2, 64)[1, ::2], ref.numpy())
+    hann = torch.hann_window(3528).to(torch.bfloat16).float().numpy()
+    np.testing.assert_array_equal(ming.talker_bf16_round(ming.periodic_hann_window(3528)), hann)
+
+  def test_dit_forward_with_cfg(self):
+    hf, mt = self.make_dit()
+    g = torch.Generator().manual_seed(2)
+    x, hist = torch.randn(2, 1, TALKER_LATENT, generator=g), torch.randn(2, 1, TALKER_LATENT, generator=g)
+    cond = torch.randn(2, 1, TALKER_EMB, generator=g)
+    t = torch.tensor(0.3)
+    with torch.no_grad():
+      pred, null_pred = torch.chunk(hf.forward_with_cfg(x, t, cond, hist), 2, dim=0)
+      expected = pred + (pred - null_pred) * 2.0
+    out = mt.forward_with_cfg(self.t2j(x), jnp.float32(0.3), self.t2j(cond), self.t2j(hist), 2.0)
+    self.assert_close(out, expected)
+
+  def test_cfm_sample(self):
+    hf_dit, mt = self.make_dit()
+    hf = self.hf_cfm.CFM(hf_dit, steps=10)
+    g = torch.Generator().manual_seed(3)
+    noise, hist = torch.randn(1, 1, TALKER_LATENT, generator=g), torch.randn(1, 1, TALKER_LATENT, generator=g)
+    cond = torch.randn(1, 1, TALKER_EMB, generator=g)
+    sde = torch.randn(10, 1, 1, TALKER_LATENT, generator=g)
+    timesteps = self.hf_cfm.get_epss_timesteps(10, "cpu", torch.float32)
+    for sigma, temperature in ((0.25, 0.0), (0.25, 0.5)):
+      with torch.no_grad():
+        expected = hf.sample(cond, hist, noise, timesteps, torch.tensor([2.0, sigma, temperature]), sde)
+      out = ming.cfm_sample(
+          mt, self.t2j(cond), self.t2j(hist), self.t2j(noise), 10, 2.0, sigma, temperature, self.t2j(sde)
+      )
+      self.assert_close(out, expected, atol=1e-3, rtol=1e-3)
+
+  def test_aggregator(self):
+    hf = self.hf_agg.Aggregator(
+        in_channels=TALKER_LATENT,
+        hidden_size=TALKER_DIT_HIDDEN,
+        depth=TALKER_DIT_LAYERS,
+        num_heads=TALKER_DIT_HEADS,
+        mlp_ratio=4,
+        llm_input_dim=TALKER_EMB,
+        attn_backend="torch",
+        attn_mask_enabled=False,
+        dropout=0.0,
+    ).eval()
+    self.randomize(hf, 4)
+    mt = self.heads.aggregator
+    mt.word_embedder.value = self.t2j(hf.word_embedder.weight)
+    self.set_dense(mt.x_embedder, hf.x_embedder)
+    self.copy_blocks(mt, hf.blocks)
+    self.set_norm(mt.final_norm, hf.final_layer.norm_final)
+    self.set_dense(mt.final_linear, hf.final_layer.linear)
+    latent = torch.randn(3, 1, TALKER_LATENT, generator=torch.Generator().manual_seed(5))
+    with torch.no_grad():
+      expected = hf(latent)
+    self.assert_close(mt(self.t2j(latent)), expected)
+
+  def test_vae_decoder(self):
+    backbone = {
+        "hidden_size": TALKER_VAE_HIDDEN,
+        "intermediate_size": TALKER_VAE_MLP,
+        "num_hidden_layers": TALKER_VAE_LAYERS,
+        "num_attention_heads": TALKER_VAE_HEADS,
+        "num_key_value_heads": TALKER_VAE_KV_HEADS,
+        "rms_norm_eps": 1e-6,
+        "rope_theta": 1_000_000.0,
+        "sliding_window": TALKER_VAE_WINDOW,
+        "use_sliding_window": True,
+        "max_window_layers": 0,
+        "max_position_embeddings": 4096,
+        "vocab_size": 1,
+        "is_causal": True,
+        "use_cache": False,
+        "_attn_implementation": "eager",
+        "attn_implementation": "eager",
+        "hidden_act": "silu",
+        "model_type": "qwen2",
+    }
+    hf = self.hf_vae.Decoder(
+        decoder_args=backbone, output_dim=TALKER_VAE_HOP, latent_dim=TALKER_LATENT, patch_size=4
+    ).eval()
+    self.randomize(hf, 6, std=0.05)
+    mt = self.heads.audio_vae
+    self.set_dense(mt.fc1, hf.fc1)
+    for i, layer in enumerate(hf.decoder.layers):
+      m = getattr(mt, f"layers_{i}")
+      self.set_norm(m.input_layernorm, layer.input_layernorm)
+      self.set_norm(m.post_attention_layernorm, layer.post_attention_layernorm)
+      for n in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        self.set_dense(getattr(m, n), getattr(layer.self_attn, n))
+      for n in ("gate_proj", "up_proj", "down_proj"):
+        self.set_dense(getattr(m, n), getattr(layer.mlp, n))
+    self.set_norm(mt.norm, hf.decoder.norm)
+    self.set_dense(mt.head_out, hf.head.out)
+    # 6 latents -> 24 frames > sliding window 8, so the window mask is exercised.
+    latents = torch.randn(1, 6, TALKER_LATENT, generator=torch.Generator().manual_seed(7))
+    with torch.no_grad():
+      expected, _, _ = hf.low_level_reconstruct(
+          latents, use_cache=False, stream_state=(None, None, None), last_chunk=True
+      )
+    out = mt(self.t2j(latents))
+    self.assertEqual(out.shape, (1, 6 * 4 * TALKER_VAE_HOP))
+    self.assert_close(out, expected[:, 0], atol=5e-4, rtol=5e-3)
+    # Edge-padding the latents (shape bucketing in ming_talker_decode) leaves the real samples unchanged.
+    padded = jnp.pad(self.t2j(latents), ((0, 0), (0, 5), (0, 0)), mode="edge")
+    padded_out = mt(padded, jnp.int32(6))
+    np.testing.assert_allclose(np.asarray(padded_out[:, : out.shape[1]]), np.asarray(out), atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":
