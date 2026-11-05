@@ -6098,8 +6098,6 @@ class MaxTextConfig(
             "te_moe_block=True does not currently support norm_topk_prob=True "
             "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'."
         )
-      if self.te_moe_block and self.use_random_routing:
-        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
       if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
         raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
       if self.te_moe_block and not self.te_gmm_quantization:
