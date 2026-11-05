@@ -606,6 +606,66 @@ assert train._TF_AVAILABLE is False
     )
     self.assertEqual(config.tokenizer_type, "huggingface")
 
+  def test_quote_single_element_regex_list(self):
+    quote = pyconfig._quote_single_element_regex_list  # pylint: disable=protected-access
+    # Unquoted single regex with nested brackets is quoted.
+    self.assertEqual(
+        quote("student_params_to_update=[decoder/layers_(?:[013])/]"),
+        'student_params_to_update=["decoder/layers_(?:[013])/"]',
+    )
+    # Valid YAML lists and non-list values are untouched.
+    self.assertEqual(quote("k=[a, b]"), "k=[a, b]")
+    self.assertEqual(quote('k=["a[0]", "b"]'), 'k=["a[0]", "b"]')
+    self.assertEqual(quote("k=v"), "k=v")
+    self.assertEqual(quote("no_equals"), "no_equals")
+    # Ambiguous multi-element values are left for OmegaConf to reject.
+    self.assertEqual(quote("k=[a[0],b]"), "k=[a[0],b]")
+    # A comma nested inside brackets/parentheses is part of the single element.
+    self.assertEqual(quote("k=[a(?:x,y)[1]]"), 'k=["a(?:x,y)[1]"]')
+
+  def test_cli_regex_list_override(self):
+    config = pyconfig.initialize(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+            get_test_config_path(),
+            "student_params_to_update=[decoder/layers_(?:[013])/]",
+        ],
+        skip_jax_distributed_system=True,
+    )
+    self.assertEqual(config.student_params_to_update, ["decoder/layers_(?:[013])/"])
+
+  def test_cli_multi_element_list_override(self):
+    config = pyconfig.initialize(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+            get_test_config_path(),
+            'student_params_to_update=["decoder/layers_0/", "decoder/layers_(?:[13])/"]',
+        ],
+        skip_jax_distributed_system=True,
+    )
+    self.assertEqual(config.student_params_to_update, ["decoder/layers_0/", "decoder/layers_(?:[13])/"])
+
+  def test_student_params_to_update_string_coerced_to_list(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        student_params_to_update="decoder/layers_0/",
+    )
+    self.assertEqual(config.student_params_to_update, ["decoder/layers_0/"])
+
+  def test_empty_checkpoint_paths_from_cli(self):
+    config = pyconfig.initialize(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+            get_test_config_path(),
+            "load_parameters_path=",
+            "load_full_state_path=",
+        ],
+        skip_jax_distributed_system=True,
+    )
+    self.assertEqual(config.load_parameters_path, "")
+    self.assertEqual(config.load_full_state_path, "")
+
   def test_list_config_coercion(self):
     """Verifies that string/tuple inputs for list[str] config fields are coerced to lists."""
     # Case 1: Plain string (coerced to single-item list)

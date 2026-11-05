@@ -448,9 +448,10 @@ class TrainerStepCounterTest(unittest.TestCase):
     # Simulate resume from step 5
     model_bundle.training_step.set_value(jnp.array(5, dtype=jnp.int32))
 
-    # nnx.split returns (graphdef, diff_params, rest); loss_wrapper_pure takes (diff_params, rest).
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    # nnx.split returns (graphdef, diff_params, frozen_params, rest);
+    # loss_wrapper_pure takes (diff_params, frozen_params, rest).
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     # grad_fn returns ((loss, (aux, new_rest)), grads)
     mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
@@ -464,9 +465,9 @@ class TrainerStepCounterTest(unittest.TestCase):
     self.assertEqual(int(model_bundle.training_step[...]), 6)
 
     # Trigger loss_wrapper_pure to verify step=5 was passed to compute_loss.
-    # Signature is (diff_params, rest).
+    # Signature is (diff_params, frozen_params, rest).
     loss_wrapper = mock_value_and_grad.call_args[0][0]
-    loss_wrapper(mock_diff_params, mock_rest)
+    loss_wrapper(mock_diff_params, mock_frozen_params, mock_rest)
 
     call_kwargs = trainer.strategy.compute_loss.call_args
     self.assertIn("step", call_kwargs.kwargs)
@@ -503,8 +504,8 @@ class TrainerStepCounterTest(unittest.TestCase):
     model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
     optimizer = mock.Mock()
 
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
     mock_value_and_grad.return_value = mock_grad_fn
