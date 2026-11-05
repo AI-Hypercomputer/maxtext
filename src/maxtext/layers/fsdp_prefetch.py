@@ -44,12 +44,14 @@ from maxtext.common.common_types import ShardMode
 from maxtext.utils import max_logging, maxtext_utils_nnx, sharding
 
 
-def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
+def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False, src_sharding=None):
   """All-gathers `w` over the FSDP mesh axes by resharding it to its FSDP-stripped sharding.
 
-  Leaves without a NamedSharding are returned unchanged.
+  Leaves without a NamedSharding are returned unchanged. `src_sharding` overrides the sharding read
+  from `w`'s type: in auto mode the traced type does not carry the FSDP axes, so the caller passes the
+  parameter's sharding derived from its logical-axis metadata instead.
   """
-  w_sharding = getattr(jax.typeof(w), "sharding", None) or getattr(w, "sharding", None)
+  w_sharding = src_sharding or getattr(jax.typeof(w), "sharding", None) or getattr(w, "sharding", None)
   if not isinstance(w_sharding, NamedSharding) or w_sharding.spec is None:
     return w
   src_sharding = NamedSharding(mesh, w_sharding.spec)
@@ -66,7 +68,22 @@ def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
   return sharding.maybe_shard_with_name(w, gathered_sharding, shard_mode=shard_mode, debug_sharding=debug_sharding)
 
 
-def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False):
+# Mesh axes, besides the FSDP axes, that activations are batch-sharded over (`activation_batch` in
+# `base.yml`): the gradient of every layer weight is summed over them.
+_BATCH_AXES = ("data", "expert")
+
+
+def _extra_batch_axes(mesh, spec, ax):
+  """`_BATCH_AXES` (of size > 1) that `spec` neither shards over nor lists in the FSDP axes `ax`."""
+  used = {a for entry in spec for a in ((entry,) if isinstance(entry, str) else (entry or ()))}
+  return tuple(a for a in _BATCH_AXES if mesh.shape.get(a, 1) > 1 and a not in used and a not in ax)
+
+
+def _expected_unreduced_axes(mesh, src_spec, fsdp_axes):
+  return frozenset(fsdp_axes) | frozenset(_extra_batch_axes(mesh, src_spec, fsdp_axes))
+
+
+def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, tag=True):
   """All-gathers `w` over its FSDP mesh axes with an explicit all_gather tagged `xla_explicit_fsdp`.
 
   On TPUs that offload all-gathers to the SparseCore, the tag lets XLA's FSDP scheduler
@@ -112,26 +129,43 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False):
     if tuple(in_spec) != spec:
       w = jax.sharding.reshard(w, NamedSharding(mesh, in_spec))
 
-    def gather_reduced(x):
-      return jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
+    # Activations are batch-sharded over `_BATCH_AXES` (e.g. `expert` under expert parallelism). A
+    # weight replicated over such an axis (e.g. the MoE router, whose `embed_router` dimension is
+    # sharded over `fsdp` only) contracts over it in its gradient as well, so it is also typed `reduced`
+    # over it: the weight already holds the same value on those devices, and its gradient then comes
+    # back `unreduced` over every axis it must be summed over.
+    extra = _extra_batch_axes(mesh, in_spec, ax)
 
-    with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
-      return jax.shard_map(
-          gather_reduced,
-          mesh=mesh,
-          in_specs=in_spec,
-          out_specs=jax.sharding.PartitionSpec(*gathered, reduced=frozenset(ax)),
-      )(w)
+    def gather_reduced(x):
+      if tag:
+        with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
+          x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
+      else:
+        x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
+      if extra:
+        x = jax.lax.pcast(x, extra if len(extra) > 1 else extra[0], to="reduced")
+      return x
+
+    return jax.shard_map(
+        gather_reduced,
+        mesh=mesh,
+        in_specs=in_spec,
+        out_specs=jax.sharding.PartitionSpec(*gathered, reduced=frozenset(ax) | frozenset(extra)),
+    )(w)
 
   def gather(x):
     for i, ax in dims:
       x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=i, tiled=True)
     return x
 
-  with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
-    return jax.shard_map(
-        gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
-    )(w)
+  if tag:
+    with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
+      return jax.shard_map(
+          gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
+      )(w)
+  return jax.shard_map(
+      gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
+  )(w)
 
 
 def _fsdp_scatter_dim(ndim, mesh, src_spec):
@@ -173,7 +207,30 @@ def _pin_scatter_dim_major(g, dim):
   return with_layout_constraint(g, Layout((dim,) + tuple(i for i in range(g.ndim) if i != dim)))
 
 
-def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec):
+def _is_valid_sc_rs_minor_tiles(k):
+  """Whether `k` minor 128-element tiles can be partitioned by XLA's 3D SparseCore reduce-scatter."""
+  if k <= 0 or k % 3 != 0:
+    return False
+  rem = k // 3
+  while rem % 2 == 0:
+    rem //= 2
+  return rem in (1, 3, 5)
+
+
+def _sc_rs_padded_minor_size(n):
+  """Rounds minor dimension `n` up (if needed) so 3D SparseCore reduce-scatter does not decompose to all-reduce."""
+  if n < 384 or n % 128 != 0:
+    return n
+  k = n // 128
+  if _is_valid_sc_rs_minor_tiles(k):
+    return n
+  k = ((k + 2) // 3) * 3
+  while not _is_valid_sc_rs_minor_tiles(k):
+    k += 3
+  return k * 128
+
+
+def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=True):
   """Reduce-scatters a gathered-weight gradient `g` over its FSDP mesh axes, tagged `xla_explicit_fsdp`.
 
   The inverse of the `reduced` `_explicit_fsdp_all_gather`: `g` is `unreduced` over the FSDP axes
@@ -186,24 +243,158 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec):
   axes of a single dimension: reduce-scattering an already-reduced gradient would sum it again.
   """
   scatter = _fsdp_scatter_dim(g.ndim, mesh, src_spec)
-  if scatter is None or not _is_unreduced_over(g, scatter[1]):
+  if scatter is None or not _is_unreduced_over(g, _expected_unreduced_axes(mesh, src_spec, scatter[1])):
     return None
   dim, ax = scatter
+  extra = _extra_batch_axes(mesh, src_spec, ax)
   spec = tuple(src_spec) + (None,) * (g.ndim - len(tuple(src_spec)))
   gathered = tuple(gathered_spec) + (None,) * (g.ndim - len(tuple(gathered_spec)))
   g_spec = jax.typeof(g).sharding.spec
-  g = _pin_scatter_dim_major(g, dim)
+  minor_dim = 1 - dim if not tag and g.ndim == 2 else None
+  orig_minor = g.shape[minor_dim] if minor_dim is not None and gathered[minor_dim] is None else None
+  padded_minor = _sc_rs_padded_minor_size(orig_minor) if orig_minor is not None else None
+  if padded_minor is None or padded_minor == orig_minor:
+    g = _pin_scatter_dim_major(g, dim)
 
   def psum_scatter(x):
-    return jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
+    if padded_minor is not None and padded_minor > orig_minor:
+      pad_width = [(0, 0)] * x.ndim
+      pad_width[minor_dim] = (0, padded_minor - orig_minor)
+      x = jnp.pad(x, pad_width)
+      x = _pin_scatter_dim_major(x, dim)
+    if tag:
+      with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
+        x = jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
+    else:
+      x = jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
+    if extra:
+      x = jax.lax.psum(x, extra if len(extra) > 1 else extra[0])
+    if padded_minor is not None and padded_minor > orig_minor:
+      x = jax.lax.slice_in_dim(x, 0, orig_minor, axis=minor_dim)
+    return x
 
-  with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
-    return jax.shard_map(
-        psum_scatter,
+  return jax.shard_map(
+      psum_scatter,
+      mesh=mesh,
+      in_specs=jax.sharding.PartitionSpec(
+          *gathered, unreduced=frozenset(ax) | frozenset(extra), unreduced_kind=g_spec.unreduced_kind
+      ),
+      out_specs=jax.sharding.PartitionSpec(*spec),
+  )(g)
+
+
+def explicit_fsdp_weight(w, mesh):
+  """All-gathers an unscanned FSDP-sharded weight in forward and reduce-scatters its gradient in backward."""
+  w_sharding = getattr(jax.typeof(w), "sharding", None) or getattr(w, "sharding", None)
+  if not isinstance(w_sharding, NamedSharding) or w_sharding.spec is None:
+    return w
+  src_sharding = NamedSharding(mesh, w_sharding.spec)
+  scatter = _fsdp_scatter_dim(w.ndim, mesh, src_sharding.spec)
+  if scatter is None:
+    return w
+  gathered_sharding = sharding.remove_fsdp_from_sharding(src_sharding)
+  src_spec = src_sharding.spec
+  gathered_spec = gathered_sharding.spec
+
+  @jax.custom_vjp
+  def _op(x):
+    out = _explicit_fsdp_all_gather(x, mesh, src_spec, gathered_spec, reduced=True, tag=False)
+    return x if out is None else out
+
+  def _fwd(x):
+    return _op(x), None
+
+  def _bwd(_, g):
+    out = _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=False)
+    if out is not None:
+      return (out,)
+    return (sharding.maybe_shard_with_name(g, src_sharding, ShardMode.EXPLICIT),)
+
+  _op.defvjp(_fwd, _bwd)
+  return _op(w)
+
+
+def explicit_fsdp_embed_lookup(embedding, inputs, out_sharding, mesh):
+  """Looks up `embedding[inputs]` and explicitly reduce-scatters `d_embedding` in the backward pass."""
+  emb_sharding = getattr(jax.typeof(embedding), "sharding", None) or getattr(embedding, "sharding", None)
+  in_sharding = getattr(jax.typeof(inputs), "sharding", None) or getattr(inputs, "sharding", None)
+  if (
+      embedding.ndim != 2
+      or inputs.ndim < 1
+      or not isinstance(emb_sharding, NamedSharding)
+      or emb_sharding.spec is None
+      or not isinstance(in_sharding, NamedSharding)
+      or in_sharding.spec is None
+      or not isinstance(out_sharding, NamedSharding)
+      or out_sharding.spec is None
+  ):
+    return embedding.at[inputs].get(out_sharding=out_sharding)
+
+  scatter = _fsdp_scatter_dim(embedding.ndim, mesh, emb_sharding.spec)
+  if scatter is None:
+    return embedding.at[inputs].get(out_sharding=out_sharding)
+  dim, ax = scatter
+  emb_spec = tuple(emb_sharding.spec) + (None,) * (embedding.ndim - len(tuple(emb_sharding.spec)))
+  other_entry = emb_spec[1 - dim]
+  other_axes = (
+      () if other_entry is None else (tuple(other_entry) if isinstance(other_entry, (tuple, list)) else (other_entry,))
+  )
+  if any(mesh.shape[a] > 1 for a in other_axes):
+    return embedding.at[inputs].get(out_sharding=out_sharding)
+
+  in_spec = tuple(in_sharding.spec) + (None,) * (inputs.ndim - len(tuple(in_sharding.spec)))
+  out_spec = tuple(out_sharding.spec) + (None,) * (inputs.ndim + 1 - len(tuple(out_sharding.spec)))
+  if any(e is not None for e in in_spec[1:]) or any(e is not None for e in out_spec[1:]) or in_spec[0] != out_spec[0]:
+    return embedding.at[inputs].get(out_sharding=out_sharding)
+
+  batch_entry = in_spec[0]
+  batch_axes = (
+      () if batch_entry is None else (tuple(batch_entry) if isinstance(batch_entry, (tuple, list)) else (batch_entry,))
+  )
+  batch_axes = tuple(a for a in batch_axes if mesh.shape[a] > 1)
+  if not set(ax).issubset(set(batch_axes)):
+    return embedding.at[inputs].get(out_sharding=out_sharding)
+  extra = tuple(a for a in batch_axes if a not in ax)
+
+  embed_shape = embedding.shape
+  embed_dtype = embedding.dtype
+  minor_dim = 1 - dim
+  orig_minor = embed_shape[minor_dim]
+  padded_minor = _sc_rs_padded_minor_size(orig_minor)
+  padded_embed_shape = (padded_minor, embed_shape[1]) if minor_dim == 0 else (embed_shape[0], padded_minor)
+  emb_pspec = jax.sharding.PartitionSpec(*emb_spec)
+  in_pspec = jax.sharding.PartitionSpec(*in_spec)
+  out_pspec = jax.sharding.PartitionSpec(*out_spec)
+
+  @jax.custom_vjp
+  def _lookup(emb, ids):
+    return emb.at[ids].get(out_sharding=out_sharding)
+
+  def _fwd(emb, ids):
+    return _lookup(emb, ids), ids
+
+  def _bwd(ids, dout):
+    def _scatter_add_and_rs(local_ids, local_dout):
+      d_emb = jnp.zeros(padded_embed_shape, dtype=embed_dtype).at[local_ids].add(local_dout.astype(embed_dtype))
+      d_emb = _pin_scatter_dim_major(d_emb, dim)
+      d_emb = jax.lax.psum_scatter(d_emb, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
+      if extra:
+        d_emb = jax.lax.psum(d_emb, extra if len(extra) > 1 else extra[0])
+      if padded_minor > orig_minor:
+        d_emb = jax.lax.slice_in_dim(d_emb, 0, orig_minor, axis=minor_dim)
+      return d_emb
+
+    d_emb = jax.shard_map(
+        _scatter_add_and_rs,
         mesh=mesh,
-        in_specs=jax.sharding.PartitionSpec(*gathered, unreduced=frozenset(ax), unreduced_kind=g_spec.unreduced_kind),
-        out_specs=jax.sharding.PartitionSpec(*spec),
-    )(g)
+        in_specs=(in_pspec, out_pspec),
+        out_specs=emb_pspec,
+        check_vma=False,
+    )(ids, dout)
+    return d_emb, None
+
+  _lookup.defvjp(_fwd, _bwd)
+  return _lookup(embedding, inputs)
 
 
 def _per_layer_sharding(stacked, mesh):
@@ -212,6 +403,38 @@ def _per_layer_sharding(stacked, mesh):
   if not isinstance(s, NamedSharding) or s.spec is None:
     return None
   return NamedSharding(mesh, jax.sharding.PartitionSpec(*tuple(s.spec)[1:]))
+
+
+def _has_fsdp_axes(spec, mesh):
+  """Whether some dimension of `spec` is sharded over an FSDP mesh axis of size > 1."""
+  for entry in tuple(spec or ()):
+    axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+    if sharding.fsdp_axes_for_dim(tuple(a for a in axes if mesh.shape.get(a, 1) > 1)):
+      return True
+  return False
+
+
+def _metadata_layer_spec(variable, mesh, rules):
+  """Per-layer mesh PartitionSpec of a scanned parameter from its NNX logical-axis metadata, or None.
+
+  In auto shard mode the traced parameters' types do not carry their mesh axes, so the FSDP axes are
+  recovered from the logical axis names the parameter was created with (with the scan axis removed),
+  mapped through the logical axis rules exactly as when the parameter shardings were created.
+  """
+  if not isinstance(variable, nnx.Variable):
+    return None
+  meta = variable.get_metadata()
+  names = next((meta[k] for k in ("out_sharding", "sharding", "sharding_names") if meta.get(k) is not None), None)
+  ndim = getattr(variable.get_value(), "ndim", 0)
+  if names is None or ndim < 1 or len(names) != ndim:
+    return None
+  names = list(names)
+  scan_name = meta.get(nnx.PARTITION_NAME)
+  if scan_name is None or scan_name not in names:
+    return None
+  names.remove(scan_name)
+  spec = sharding.logical_to_mesh_axes(tuple(names), mesh, rules=rules)
+  return jax.sharding.PartitionSpec(*(tuple(spec) + (None,) * (ndim - 1 - len(tuple(spec)))))
 
 
 def _needs_minor_dim_layout_pin(stacked, layer_sharding, mesh):
@@ -241,6 +464,7 @@ _PrefetchCtx = collections.namedtuple(
         "remat_policy",
         "prevent_cse",
         "defer_grad_reduce_scatter",
+        "offload_layer_inputs",
     ],
 )
 
@@ -436,7 +660,7 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
       if out is not None:
         return out
     scatter = _fsdp_scatter_dim(g.ndim, ctx.mesh, s.spec)
-    if scatter is not None and _is_unreduced_over(g, scatter[1]):
+    if scatter is not None and _is_unreduced_over(g, _expected_unreduced_axes(ctx.mesh, s.spec, scatter[1])):
       g = _pin_scatter_dim_major(g, scatter[0])
     return sharding.maybe_shard_with_name(g, s, ctx.shard_mode, debug_sharding=ctx.debug_sharding)
 
@@ -448,7 +672,7 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
       flags = []
       for g, s in zip(leaves, layer_shardings):
         scatter = None if s is None else _fsdp_scatter_dim(g.ndim, ctx.mesh, s.spec)
-        eligible = scatter is not None and _is_unreduced_over(g, scatter[1])
+        eligible = scatter is not None and _is_unreduced_over(g, _expected_unreduced_axes(ctx.mesh, s.spec, scatter[1]))
         flags.append(bool(ctx.defer_grad_reduce_scatter and eligible))
       tag_cache["flags"] = flags
     return tag_cache["flags"]
@@ -510,6 +734,35 @@ def _expand0(tree):
   return jax.tree.map(lambda x: jnp.expand_dims(x, 0), tree)
 
 
+def _with_memory_kind(x, kind):
+  """`jax.device_put`s `x` to memory `kind` ("pinned_host" or "device"), keeping its sharding."""
+  s = jax.typeof(x).sharding
+  if not isinstance(s, NamedSharding):
+    return x
+  return jax.device_put(x, s.with_memory_kind(kind))
+
+
+def _host_stack_buffer(y, n):
+  """A zero `[n, *y.shape]` buffer in host memory, filled one layer input at a time.
+
+  Writing each offloaded input into it with a `dynamic_update_slice` (rather than stacking the inputs
+  as scan outputs, which `unroll=2` builds by concatenating pairs of inputs) is the pattern XLA's host
+  offloader lowers to an async device-to-host copy into a slice of the buffer, instead of host compute.
+  """
+  return _with_memory_kind(jnp.zeros_like(jnp.broadcast_to(y[None], (n,) + y.shape)), "pinned_host")
+
+
+def _host_stack_write(buf, y, idx):
+  """Writes `y` into slot `idx` of host buffer `buf`, expanding axis 0 on device before the host copy."""
+  return jax.lax.dynamic_update_slice(buf, _with_memory_kind(y[None], "pinned_host"), (idx,) + (0,) * y.ndim)
+
+
+def _host_stack_read(buf, idx):
+  """Reads slot `idx` from host buffer `buf` to device, squeezing axis 0 on device after the host copy."""
+  s = jax.lax.dynamic_slice(buf, (idx,) + (0,) * (buf.ndim - 1), (1,) + buf.shape[1:])
+  return jnp.squeeze(_with_memory_kind(s, "device"), axis=0)
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0, 6, 7))
 def _custom_vjp_prefetch_pipeline(
     graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
@@ -553,9 +806,13 @@ def _custom_vjp_prefetch_pipeline_fwd(
     # single-trip while-loops into the parent computation, where FSDP gathers must not depend on
     # earlier FSDP gathers without a while-loop barrier in between.
     ordered = (length - 2) // 2 >= 2
+    # With `decoder_layer_input: offload`, the inputs of layers 1 .. length-2 go to a host buffer, one
+    # dynamic_update_slice per layer. Only in a multi-trip loop: a single-trip loop is unrolled into
+    # the parent computation, where host copies break XLA's FIFO ordering of FSDP collectives.
+    offload_mid = ctx.offload_layer_inputs and ordered
 
     def body(carry, xs):
-      y_k, w_k = carry
+      y_k, w_k, ys_buf = carry
       state_k, next_idx = xs
       params_next = _slice_at(params, next_idx)
       if ordered:
@@ -564,20 +821,28 @@ def _custom_vjp_prefetch_pipeline_fwd(
         y_k, params_next = jax.lax.optimization_barrier((y_k, params_next))
       w_next = gather_fn(params_next)  # AG(k+1) || layer k.
       y_out, saved_k = fwd_layer(y_k, w_k, state_k, layout)
-      return (y_out, w_next), (y_k, saved_k)
+      if offload_mid:
+        ys_buf = _host_stack_write(ys_buf, y_k, next_idx - 2)
+        return (y_out, w_next, ys_buf), (None, saved_k)
+      return (y_out, w_next, ys_buf), (y_k, saved_k)
 
+    ys_buf = _host_stack_buffer(y, length - 2) if offload_mid else None
     # Iterates k = 1 .. length-2; element j of xs has state[j+1] and next_idx = j + 2.
-    (y, w_curr), (ys_mid, saved_mid) = jax.lax.scan(
+    (y, w_curr, ys_buf), (ys_mid, saved_mid) = jax.lax.scan(
         body,
-        (y, w_curr),
+        (y, w_curr, ys_buf),
         (_slice_range(state, 1, length - 1), jnp.arange(2, length, dtype=jnp.int32)),
         unroll=2,
     )
+    if offload_mid:
+      ys_mid = ys_buf
   y_last_in = y if length > 1 else x_in
   if length > 1:
     final_y, saved_last = fwd_layer(y_last_in, w_curr, _slice_at(state, length - 1), layout)
   else:
     final_y, saved_last = y, saved_0
+  # Only the scanned middle layers' inputs are offloaded (see `offload_mid`): the first and last
+  # layers' inputs are used outside the loops, and the backward pass starts with the last one.
   residuals = (
       x_in,
       ys_mid,
@@ -645,10 +910,14 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
     pending = deferred(dw)
     if length > 2:
       ordered = (length - 2) // 2 >= 2
+      offload_mid = ctx.offload_layer_inputs and ordered  # As in the forward pass.
 
       def body(carry, xs):
         g_k, w_k, d_acc, pending = carry
         y_k, saved_k, state_k, k_idx = xs
+        if offload_mid:
+          # Layer k's input from the host buffer: an async host-to-device copy of one slice.
+          y_k = _host_stack_read(ys_mid, k_idx - 1)
         params_prev = _slice_at(params, k_idx - 1)
         if ordered:
           # In the 2nd unrolled step of each iteration, waits for the 1st step's g_k (which is
@@ -664,10 +933,11 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
         return (g_km1, w_km1, d_acc, deferred(dw_k)), None
 
       # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1.
+      ys_xs = jnp.zeros((length - 2, 0), jnp.int8) if offload_mid else ys_mid  # Unused placeholder when offloaded.
       (g, w_prev, d_params, pending), _ = jax.lax.scan(
           body,
           (g, w_prev, d_params, pending),
-          (ys_mid, saved_mid, _slice_range(state, 1, length - 1), jnp.arange(1, length - 1, dtype=jnp.int32)),
+          (ys_xs, saved_mid, _slice_range(state, 1, length - 1), jnp.arange(1, length - 1, dtype=jnp.int32)),
           reverse=True,
           unroll=2,
       )
@@ -704,6 +974,26 @@ def _also_save_sublayer_inputs(remat_policy):
     decision = remat_policy(prim, *args, **params)
     if decision is False or decision is ad_checkpoint.Recompute:
       return _SAVE_SUBLAYER_INPUTS(prim, *args, **params)
+    return decision
+
+  return policy
+
+
+def _keep_layer_inputs_on_device(remat_policy):
+  """Returns `remat_policy` with `decoder_layer_input` saved instead of offloaded.
+
+  The pipeline saves each layer's input itself (and with `decoder_layer_input: offload`, moves that
+  copy to host memory with `jax.device_put`). Saved, the per-layer remat's `decoder_layer_input`
+  residual is a passthrough of the layer input and is dropped (see `_PASSTHROUGH_PRIMITIVES`);
+  offloaded, it would be a second, host-memory copy of the same activation.
+  """
+  if remat_policy is None:
+    return None
+
+  def policy(prim, *args, **params):
+    decision = remat_policy(prim, *args, **params)
+    if params.get("name") == "decoder_layer_input" and isinstance(decision, ad_checkpoint.Offloadable):
+      return ad_checkpoint.Saveable
     return decision
 
   return policy
@@ -764,6 +1054,10 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
   params_leaves, params_treedef = jax.tree_util.tree_flatten(params)
   state_leaves, state_treedef = jax.tree_util.tree_flatten(state)
 
+  offload_layer_inputs = getattr(config, "decoder_layer_input", "device") == "offload"
+  if offload_layer_inputs:
+    remat_policy = _keep_layer_inputs_on_device(remat_policy)
+
   ctx = _PrefetchCtx(
       mesh=mesh,
       shard_mode=config.shard_mode,
@@ -778,6 +1072,7 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       remat_policy=remat_policy,
       prevent_cse=prevent_cse,
       defer_grad_reduce_scatter=bool(getattr(config, "prefetch_fsdp_defer_grad_reduce_scatter", False)),
+      offload_layer_inputs=offload_layer_inputs,
   )
   return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 

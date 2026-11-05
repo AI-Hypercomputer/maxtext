@@ -18,11 +18,13 @@ Pipeline-level gradient parity against the regular scanned layer stack is tested
 nnx_decoders_test.py (TestNNXDecoderPrefetchGradParity).
 """
 
+import re
 import types
 import unittest
 from unittest import mock
 
 import jax
+from jax import ad_checkpoint
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import AbstractMesh, AxisType, Mesh, NamedSharding, PartitionSpec
@@ -122,6 +124,14 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     self.assertEqual(tuple(stripped["co_sharded"].spec), (None, "tensor"))
     self.assertEqual(tuple(stripped["routed"].spec), ("expert", None, None))
     self.assertEqual(tuple(stripped["compound"].spec), ("expert", None))
+
+  def test_sc_rs_padded_minor_size(self):
+    # 18432 = 144 * 128 (144 = 9 * 16, odd_part(144 // 3) = 3) is already valid.
+    self.assertEqual(fsdp_prefetch._sc_rs_padded_minor_size(18432), 18432)  # pylint: disable=protected-access
+    # DeepSeek-V3 vocab 129280 = 1010 * 128 pads up to 147456 = 1152 * 128 (1152 = 9 * 128).
+    self.assertEqual(fsdp_prefetch._sc_rs_padded_minor_size(129280), 147456)  # pylint: disable=protected-access
+    # Power-of-two 32768 = 256 * 128 pads up to 36864 = 288 * 128 (288 = 9 * 32).
+    self.assertEqual(fsdp_prefetch._sc_rs_padded_minor_size(32768), 36864)  # pylint: disable=protected-access
 
 
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
@@ -349,6 +359,158 @@ class FsdpPrefetchReducedGradTest(unittest.TestCase):
     self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 2)
     self.assertNotIn("stablehlo.all_reduce", hlo)
 
+  def test_explicit_fsdp_weight_and_embed_lookup_gradients_match_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs at least 4 devices.")
+    mesh = jax.make_mesh(
+        (2, 2), ("fsdp", "expert"), axis_types=(AxisType.Explicit, AxisType.Explicit), devices=jax.devices()[:4]
+    )
+    rng = np.random.default_rng(1)
+    # 512 minor elements (4 * 128, not divisible by 3) pads to 768 (6 * 128) in _sc_rs_padded_minor_size.
+    w_logits_np = rng.standard_normal((8, 512)).astype(np.float32)
+    w_gate_np = rng.standard_normal((8, 6)).astype(np.float32)
+    w_embed_np = rng.standard_normal((512, 8)).astype(np.float32)
+    x_np = rng.standard_normal((4, 8)).astype(np.float32)
+    ids_np = rng.integers(0, 512, size=(4, 4), dtype=np.int32)
+    out_sharding = NamedSharding(mesh, PartitionSpec(("fsdp", "expert"), None, None))
+
+    def step_loss(w_logits, wg, w_embed, x, ids):
+      # 1. logits_dense: sharded on ('fsdp', 'expert') on dim 0, padded minor dim in backward RS.
+      wl = fsdp_prefetch.explicit_fsdp_weight(w_logits, mesh)
+      logits = jnp.einsum(
+          "bd,dv->bv", x, wl, precision=jax.lax.Precision.HIGHEST, out_sharding=PartitionSpec(("fsdp", "expert"), None)
+      )
+      # 2. gate.kernel: `wg` is the gathered weight (reduced over 'fsdp' and, via pcast, 'expert').
+      gate_out = jnp.einsum(
+          "bd,de->be", x, wg, precision=jax.lax.Precision.HIGHEST, out_sharding=PartitionSpec(("fsdp", "expert"), None)
+      )
+      # 3. token_embedder: forward gather + backward padded scatter-add -> reduce-scatter.
+      emb_out = fsdp_prefetch.explicit_fsdp_embed_lookup(w_embed, ids, out_sharding, mesh)
+      return (logits * logits).sum() + (gate_out * gate_out).sum() + (emb_out * emb_out).sum()
+
+    def step_grads(w_logits, w_gate, w_embed, x, ids):
+      # As in the prefetch pipeline, differentiate w.r.t. the gathered gate weight: its gradient comes
+      # back unreduced over both 'fsdp' and 'expert' and is then reduce-scattered explicitly.
+      wg = fsdp_prefetch._apply_sharding_hint(w_gate, mesh, ShardMode.EXPLICIT)  # pylint: disable=protected-access
+      _, vjp_fn = jax.vjp(lambda wl, g, we: step_loss(wl, g, we, x, ids), w_logits, wg, w_embed)
+      dl, dg, de = vjp_fn(jnp.ones((), jnp.float32))
+      dg = fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+          dg, mesh, PartitionSpec("fsdp", None), PartitionSpec(None, None)
+      )
+      return dl, dg, de
+
+    def ref_loss(w_logits, w_gate, w_embed):
+      logits = jnp.einsum("bd,dv->bv", x_np, w_logits, precision=jax.lax.Precision.HIGHEST)
+      gate_out = jnp.einsum("bd,de->be", x_np, w_gate, precision=jax.lax.Precision.HIGHEST)
+      emb_out = w_embed[ids_np]
+      return (logits * logits).sum() + (gate_out * gate_out).sum() + (emb_out * emb_out).sum()
+
+    with jax.set_mesh(mesh):
+      wl_dev = jax.device_put(w_logits_np, PartitionSpec(("fsdp", "expert"), None))
+      wg_dev = jax.device_put(w_gate_np, PartitionSpec("fsdp", None))
+      we_dev = jax.device_put(w_embed_np, PartitionSpec(None, ("fsdp", "expert")))
+      x_dev = jax.device_put(x_np, PartitionSpec(("fsdp", "expert"), None))
+      ids_dev = jax.device_put(ids_np, PartitionSpec(("fsdp", "expert"), None))
+      grad_fn = jax.jit(step_grads)
+      got_grads = grad_fn(wl_dev, wg_dev, we_dev, x_dev, ids_dev)
+      hlo = grad_fn.lower(wl_dev, wg_dev, we_dev, x_dev, ids_dev).as_text()
+
+    want_grads = jax.grad(ref_loss, argnums=(0, 1, 2))(w_logits_np, w_gate_np, w_embed_np)
+    for got, want in zip(got_grads, want_grads):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+    self.assertEqual(tuple(got_grads[0].sharding.spec.partitions), (("fsdp", "expert"), None))
+    self.assertEqual(tuple(got_grads[1].sharding.spec.partitions), ("fsdp", None))
+    self.assertEqual(tuple(got_grads[2].sharding.spec.partitions), (None, ("fsdp", "expert")))
+    # All three weights use reduce-scatter (with 512 -> 768 minor-dim padding for logits and embed).
+    self.assertGreaterEqual(hlo.count("stablehlo.reduce_scatter"), 3)
+    self.assertIn("768xf32", hlo)
+
+
+class _ToyLayer(nnx.Module):
+  """tanh(tanh(x @ kernel)), naming its input `decoder_layer_input` and its hidden activation `mlpwi`."""
+
+  def __init__(self, dim, rngs):
+    self.kernel = nnx.Param(jax.random.normal(rngs.params(), (dim, dim)) / dim**0.5)
+
+  def __call__(self, x):
+    x = ad_checkpoint.checkpoint_name(x, "decoder_layer_input")
+    h = ad_checkpoint.checkpoint_name(jnp.tanh(x @ self.kernel[...]), "mlpwi")
+    return jnp.tanh(h), None
+
+
+class FsdpPrefetchLayerInputOffloadTest(unittest.TestCase):
+  """`decoder_layer_input: offload` in the prefetch pipeline: inputs saved in host memory, same gradients."""
+
+  def _grads(self, decoder_layer_input, length=5):
+    """(pipeline gradients, reference gradients, jaxpr text) for a stack of `length` toy layers."""
+    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
+    dim, batch = 8, 8
+    layers = [_ToyLayer(dim, nnx.Rngs(params=i)) for i in range(length)]
+    graphdef = nnx.graphdef(layers[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(l, nnx.Param) for l in layers])
+    x_np = np.random.default_rng(0).standard_normal((batch, dim)).astype(np.float32)
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=True,
+        decoder_layer_input=decoder_layer_input,
+    )
+    # As remat_policy=custom builds it: `decoder_layer_input` saved or offloaded, `mlpwi` saved.
+    offload = decoder_layer_input == "offload"
+    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+        names_which_can_be_saved=["mlpwi"] + ([] if offload else ["decoder_layer_input"]),
+        names_which_can_be_offloaded=["decoder_layer_input"] if offload else [],
+        offload_src="device",
+        offload_dst="pinned_host",
+    )
+
+    def loss(p, x):
+      y, _, _ = fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+          nnx.merge(graphdef, p), x, length=length, mesh=mesh, config=config, remat_policy=policy
+      )
+      return (y * y).sum()
+
+    def ref_loss(p, x):
+      for i in range(length):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, i=i: v[i], p))(x)
+      return (x * x).sum()
+
+    with jax.set_mesh(mesh):
+      p_sharded = jax.tree.map(lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None)), params)
+      x = jax.device_put(x_np, PartitionSpec("fsdp", None))
+      f = jax.jit(jax.grad(loss))
+      grads = f(p_sharded, x)
+      # The jaxpr, since CPU lowering does not keep host memory placement (device and host memory are the same).
+      jaxpr = str(jax.make_jaxpr(jax.grad(loss))(p_sharded, x))
+    return grads, jax.grad(ref_loss)(params, x_np), jaxpr
+
+  def test_offloaded_inputs_match_reference_and_on_device(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # 6 layers: the middle layers' loop (4 layers, unroll=2) has 2 trips, so their inputs are offloaded.
+    got, ref, jaxpr = self._grads("offload", length=6)
+    for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+    on_device, _, device_jaxpr = self._grads("device", length=6)
+    for g, d in zip(jax.tree.leaves(got), jax.tree.leaves(on_device)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(d), rtol=1e-6, atol=1e-6)
+    # 3 device_puts: the host buffer for the middle layers' inputs, each input's move into it (one
+    # dynamic_update_slice per layer in the forward loop body) and its move back (backward loop body).
+    # The per-layer remat does not offload a second copy of the input (which would add 2 per remat site).
+    self.assertEqual(len(re.findall(r"= device_put\b", jaxpr)), 3, jaxpr)
+    self.assertNotRegex(device_jaxpr, r"= device_put\b")
+
+  def test_single_trip_loop_keeps_inputs_on_device(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # 5 layers: the middle layers' loop has 1 trip (XLA unrolls it into the parent computation, where
+    # host copies break the FIFO ordering of FSDP collectives), so nothing is offloaded.
+    got, ref, jaxpr = self._grads("offload", length=5)
+    for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+    self.assertNotRegex(jaxpr, r"= device_put\b")
+
 
 class _ToySubLayer(nnx.Module):
   """tanh(x @ kernel) (+ bias): a sub-layer of `_ToyBlock`."""
@@ -359,7 +521,8 @@ class _ToySubLayer(nnx.Module):
     self.bias = nnx.Param(0.1 * jax.random.normal(rngs.params(), (dim,)) if bias else jnp.zeros((0,)))
 
   def __call__(self, x):
-    y = jnp.tanh(x @ self.kernel[...])
+    x = ad_checkpoint.checkpoint_name(x, "decoder_layer_input")
+    y = ad_checkpoint.checkpoint_name(jnp.tanh(x @ self.kernel[...]), "mlpwi")
     return (y + self.bias[...] if self.has_bias else y), None
 
 
@@ -384,7 +547,7 @@ class _ToyBlock(nnx.Module):
 class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
   """Per-sub-layer prefetch of inhomogeneous blocks with deferred dW reduce-scatters on CPU devices."""
 
-  def _grads(self, num_blocks, num_a, defer):
+  def _grads(self, num_blocks, num_a, defer, decoder_layer_input="device"):
     """(gradients of the prefetch pipeline, reference gradients, lowered HLO) for a toy block stack."""
     mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
     dim, batch = 8, 8
@@ -397,13 +560,21 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
         shard_mode=ShardMode.EXPLICIT,
         debug_sharding=False,
         prefetch_fsdp_defer_grad_reduce_scatter=defer,
+        decoder_layer_input=decoder_layer_input,
+    )
+    offload = decoder_layer_input == "offload"
+    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+        names_which_can_be_saved=["mlpwi"] + ([] if offload else ["decoder_layer_input"]),
+        names_which_can_be_offloaded=["decoder_layer_input"] if offload else [],
+        offload_src="device",
+        offload_dst="pinned_host",
     )
 
     def loss(p, x):
       layers = nnx.merge(graphdef, p)
       stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
       y, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
-          layers, stages, x, length=num_blocks, mesh=mesh, config=config
+          layers, stages, x, length=num_blocks, mesh=mesh, config=config, remat_policy=policy
       )
       return (y * y).sum()
 
@@ -451,6 +622,18 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
     for num_a in (1, 2, 5):
       with self.subTest(num_a=num_a):
         self._assert_matches_reference(num_blocks=2, num_a=num_a)
+
+  def test_offloaded_sublayer_inputs_match_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    for defer in (False, True):
+      with self.subTest(defer=defer):
+        got, ref, _ = self._grads(num_blocks=2, num_a=3, defer=defer, decoder_layer_input="offload")
+        for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+        on_device, _, _ = self._grads(num_blocks=2, num_a=3, defer=defer, decoder_layer_input="device")
+        for g, d in zip(jax.tree.leaves(got), jax.tree.leaves(on_device)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(d), rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
