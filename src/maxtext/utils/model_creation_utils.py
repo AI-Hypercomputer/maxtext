@@ -1424,6 +1424,9 @@ def from_pretrained(
           )
         else:
           checkpoint = restored_root
+        # Drop this reference to the restored tree. Otherwise it keeps the arrays restored at their stored
+        # shapes alive after they are padded, expanded or fused below, for as long as this frame lives.
+        del restored_root
       else:
         checkpoint = restored["params"]["params"]
         for col, col_tree in restored["params"].items():
