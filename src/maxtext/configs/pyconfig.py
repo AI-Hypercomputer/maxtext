@@ -283,7 +283,13 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         new_value = [new_value]
 
     # Coerce string/tuple inputs for list[str] configuration fields into Python lists.
-    if key in ("train_data_columns", "eval_data_columns", "trainable_parameters_mask", "adamw_mask"):
+    if key in (
+        "train_data_columns",
+        "eval_data_columns",
+        "trainable_parameters_mask",
+        "frozen_parameters_mask",
+        "adamw_mask",
+    ):
       new_value = _coerce_to_list(new_value)
 
     # An empty value provided in the configuration is treated as None

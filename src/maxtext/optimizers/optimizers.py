@@ -16,6 +16,7 @@
 """Utils that are only interesting to MaxText."""
 
 import re
+from flax import nnx
 import jax
 import jax.numpy as jnp
 
@@ -44,6 +45,104 @@ def _get_path_mask_fn(patterns, match_returns_true=True):
     return jax.tree_util.tree_map_with_path(_is_masked, params)
 
   return mask_fn
+
+
+def _get_effective_freeze_patterns(config) -> tuple[list[str], list[str]]:
+  """Returns (trainable_patterns, frozen_patterns) combining masks and legacy encoder freeze flags."""
+  trainable_patterns = list(getattr(config, "trainable_parameters_mask", None) or [])
+  frozen_patterns = list(getattr(config, "frozen_parameters_mask", None) or [])
+
+  if getattr(config, "use_multimodal", False) and getattr(config, "freeze_vision_encoder_params", False):
+    frozen_patterns.append(r"(^|/)vision_encoder/.*VisionEncoderLayer_0.*")
+  if getattr(config, "use_audio", False) and getattr(config, "freeze_audio_encoder_params", False):
+    frozen_patterns.append(r"(^|/)audio_encoder/.*AudioEncoder_0.*")
+
+  return trainable_patterns, frozen_patterns
+
+
+def _build_path_trainable_predicate(config):
+  """Returns a predicate `is_trainable_path(path_str: str) -> bool`, or None if all params are trainable."""
+  trainable_patterns, frozen_patterns = _get_effective_freeze_patterns(config)
+  if not trainable_patterns and not frozen_patterns:
+    return None
+
+  compiled_trainable = [re.compile(p) for p in trainable_patterns]
+  compiled_frozen = [re.compile(p) for p in frozen_patterns]
+
+  def is_trainable_path(path_str: str) -> bool:
+    is_trainable = True
+    if compiled_trainable:
+      is_trainable = any(p.search(path_str) for p in compiled_trainable)
+    if is_trainable and compiled_frozen:
+      if any(p.search(path_str) for p in compiled_frozen):
+        is_trainable = False
+    return is_trainable
+
+  return is_trainable_path
+
+
+def get_freeze_mask_fn(config):
+  """Create a boolean mask function returning True for frozen parameters and False for trainable ones.
+
+  Supports both `trainable_parameters_mask` (whitelist) and `frozen_parameters_mask` (blacklist),
+  as well as multimodal `freeze_vision_encoder_params` and `freeze_audio_encoder_params`.
+  Returns None if no freezing rules are configured.
+  """
+  is_trainable_path = _build_path_trainable_predicate(config)
+  if is_trainable_path is None:
+    return None
+
+  def mask_fn(params):
+    def _is_frozen(path, _):
+      path_str = jax.tree_util.keystr(path, simple=True, separator="/")
+      return not is_trainable_path(path_str)
+
+    return jax.tree_util.tree_map_with_path(_is_frozen, params)
+
+  return mask_fn
+
+
+def get_trainable_param_filter(config) -> nnx.filterlib.Filter:
+  """Returns an NNX Filter matching only trainable parameters according to config."""
+  base_param_type = (
+      getattr(nnx, "LoRAParam", nnx.Param) if getattr(getattr(config, "lora", None), "enable_lora", False) else nnx.Param
+  )
+  is_trainable_path = _build_path_trainable_predicate(config)
+  if is_trainable_path is None:
+    return base_param_type
+
+  base_pred = nnx.filterlib.to_predicate(base_param_type)
+
+  def _trainable_predicate(path, x) -> bool:
+    if not base_pred(path, x):
+      return False
+    path_str = "/".join(str(p) for p in path)
+    return is_trainable_path(path_str)
+
+  return _trainable_predicate
+
+
+def filter_shardings_for_trainable(shardings_tree, trainable_tree):
+  """Extracts the subset of `shardings_tree` whose keys match `trainable_tree`."""
+  if shardings_tree is None:
+    return None
+
+  def _filter_mapping(s_node, t_node):
+    s_map = s_node.raw_mapping if isinstance(s_node, nnx.State) else s_node
+    t_map = t_node.raw_mapping if isinstance(t_node, nnx.State) else t_node
+    if (
+        isinstance(t_map, dict)
+        and not isinstance(t_node, nnx.Variable)
+        and isinstance(s_map, dict)
+        and not isinstance(s_node, nnx.Variable)
+    ):
+      return {k: _filter_mapping(s_map[k], v) for k, v in t_map.items() if k in s_map}
+    return s_node
+
+  filtered = _filter_mapping(shardings_tree, trainable_tree)
+  if isinstance(trainable_tree, nnx.State) and isinstance(filtered, dict):
+    return nnx.State(filtered)
+  return filtered
 
 
 def get_adamw_mask(config):
@@ -186,7 +285,7 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
     base_opt = adam_pax(
         learning_rate_schedule,
         beta1=config.adam_b1,
-        beta2=config.adam_b2,
+        beta2=config.adam_beta2 if hasattr(config, "adam_beta2") else config.adam_b2,
         epsilon=config.adam_eps,
         epsilon_root=config.adam_eps_root,
         weight_decay=config.adam_weight_decay,
@@ -221,12 +320,15 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
         "adam_weight_decay": config.adam_weight_decay,
     }
 
+    trainable_filter = get_trainable_param_filter(config)
     if muon_type in ("optax", "optax_muon"):
       assert not getattr(
           config, "muon_use_all_to_all", False
       ), "all-to-all communication in muon is only supported with maxtext_muon, not optax_muon."
       if model is not None:
         muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
+        if isinstance(muon_weight_dimension_numbers, nnx.State) and _build_path_trainable_predicate(config) is not None:
+          muon_weight_dimension_numbers = nnx.state(muon_weight_dimension_numbers, trainable_filter)
       else:
         raise ValueError("Please specify model to extract muon dimension number.")
       muon_kwargs = muon_kwargs | {"muon_weight_dimension_numbers": muon_weight_dimension_numbers}
@@ -234,6 +336,8 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
     elif muon_type in ("maxtext", "maxtext_muon"):
       if model is not None:
         muon_weight_dimension_numbers = get_maxtext_muon_weight_dimension_numbers(model, config, mesh=mesh)
+        if isinstance(muon_weight_dimension_numbers, nnx.State) and _build_path_trainable_predicate(config) is not None:
+          muon_weight_dimension_numbers = nnx.state(muon_weight_dimension_numbers, trainable_filter)
       else:
         raise ValueError("Please specify model to extract muon dimension number.")
 
@@ -257,19 +361,30 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
         scaling_factor=config.skip_step_scaling_factor,
     )
 
-  # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  # If parameter freezing rules are configured, support both:
+  # 1. Pre-filtered parameter trees (from `nnx.Optimizer(model, tx, wrt=get_trainable_param_filter(config))`),
+  #    where all leaves in `params` are already trainable — delegating directly to `base_opt` avoids
+  #    wrapping `opt_state` in `PartitionState`/`MaskedNode`.
+  # 2. Unfiltered parameter trees (e.g. direct `tx.init(params)` in Linen, unit tests, or external trainers
+  #    like Tunix `DPOTrainer`), where frozen parameters are mapped to `optax.set_to_zero()` via `multi_transform`.
+  freeze_mask_fn = get_freeze_mask_fn(config)
   if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
-    return optax.multi_transform(
+    partitioned_opt = optax.multi_transform(
         {"trainable": base_opt, "frozen": optax.set_to_zero()},
         lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
     )
+
+    def _init_fn(params):
+      if any(jax.tree_util.tree_leaves(freeze_mask_fn(params))):
+        return partitioned_opt.init(params)
+      return base_opt.init(params)
+
+    def _update_fn(updates, state, params=None, **extra_args):
+      if isinstance(state, optax.transforms.PartitionState):
+        return partitioned_opt.update(updates, state, params, **extra_args)
+      return base_opt.update(updates, state, params, **extra_args)
+
+    return optax.GradientTransformationExtraArgs(_init_fn, _update_fn)
 
   return base_opt
 

@@ -48,6 +48,7 @@ except (ImportError, AttributeError):
 
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
+from maxtext.optimizers import optimizers
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -221,11 +222,7 @@ def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager
 
     def create_train_state_fn():
       nnx_model = _create_model_partial()
-      wrt = (
-          getattr(nnx, "LoRAParam", nnx.Param)
-          if getattr(getattr(config, "lora", None), "enable_lora", False)
-          else nnx.Param
-      )
+      wrt = optimizers.get_trainable_param_filter(config)
       optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 

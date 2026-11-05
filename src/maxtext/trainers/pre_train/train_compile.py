@@ -135,11 +135,7 @@ def get_shaped_inputs(topology_mesh, config):
 
   def create_train_state_fn():
     nnx_model = _create_model_partial()
-    wrt = (
-        getattr(nnx, "LoRAParam", nnx.Param)
-        if getattr(getattr(config, "lora", None), "enable_lora", False)
-        else nnx.Param
-    )
+    wrt = optimizers.get_trainable_param_filter(config)
     optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
     return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 

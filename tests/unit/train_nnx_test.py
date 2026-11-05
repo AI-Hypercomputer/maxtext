@@ -1405,5 +1405,171 @@ class TestNNXNamedScopeContext(unittest.TestCase):
     self.assertIn("_Attn/query_norm/rsqrt", hlo)
 
 
+class TestParameterFreezingNNX(unittest.TestCase):
+  """Verifies unified parameter freezing across backward, GA, grad_norm/clipping, and optimizer."""
+
+  def _make_adamw_cfg(self, **overrides):
+    """Creates a minimal AdamW config for parameter freezing tests."""
+    cfg = _Cfg(**overrides)
+    cfg.opt_type = "adamw"
+    cfg.adam_b1 = 0.9
+    cfg.adam_b2 = 0.999
+    cfg.adam_eps = 1e-8
+    cfg.adam_eps_root = 0.0
+    cfg.adam_weight_decay = 0.1
+    cfg.mu_dtype = jnp.float32
+    cfg.adamw_mask = []
+    return cfg
+
+  def test_frozen_params_excluded_from_backward_grad_norm_clipping_and_optimizer(self):
+    """Frozen parameters must not allocate opt_state, must not affect grad_norm/clipping, and must not decay."""
+    cfg = self._make_adamw_cfg(gradient_clipping_threshold=0.05)
+    cfg.frozen_parameters_mask = ["embed"]
+
+    model = _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    # Give embed huge weights so if it were differentiated, its gradient norm would dominate and scale down proj's grad.
+    model.embed.embedding.set_value(model.embed.embedding.get_value() * 100.0)
+    embed_before = model.embed.embedding.get_value().copy()
+    proj_before = model.proj.kernel.get_value().copy()
+
+    tx = optimizers.get_optimizer(cfg, lambda step: 0.05)
+    wrt = optimizers.get_trainable_param_filter(cfg)
+    optimizer = nnx.Optimizer(model, tx, wrt=wrt)
+
+    # Verify optimizer state only has 'proj', not 'embed'
+    opt_state_pure = nnx.as_pure(optimizer.opt_state)
+    self.assertIn("proj", opt_state_pure[0].mu)
+    self.assertNotIn("embed", opt_state_pure[0].mu)
+
+    state_graphdef, state_pure = nnx.split(train_state_nnx.TrainStateNNX(model, optimizer))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    # Compute reference gradient norm of `proj` alone
+    model_graphdef, trainable_only_params, rest_model_state = nnx.split(model, wrt, ...)
+
+    def proj_only_loss(proj_params):
+      m = nnx.merge(model_graphdef, proj_params, rest_model_state, copy=True)
+      loss, _ = pre_train.loss_fn(m, cfg, data, dropout_rng=None, params=None, is_train=True)
+      return loss
+
+    expected_proj_grads = jax.grad(proj_only_loss)(trainable_only_params)
+    expected_raw_norm = float(maxtext_utils_l2_norm(expected_proj_grads))
+
+    next_state_pure, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+    next_state = nnx.merge(state_graphdef, next_state_pure)
+
+    # 1. Frozen parameter `embed` is completely unchanged (no gradient update AND no AdamW weight decay)
+    np.testing.assert_array_equal(next_state.model.embed.embedding.get_value(), embed_before)
+    # 2. Trainable parameter `proj` is updated
+    self.assertFalse(jnp.allclose(next_state.model.proj.kernel.get_value(), proj_before))
+    # 3. `learning/raw_grad_norm` matches `proj`-only gradient norm (not polluted by `embed`)
+    np.testing.assert_allclose(float(metrics["scalar"]["learning/raw_grad_norm"]), expected_raw_norm, rtol=1e-5)
+    # 4. `learning/grad_norm` is clipped to threshold (0.05)
+    np.testing.assert_allclose(float(metrics["scalar"]["learning/grad_norm"]), 0.05, rtol=1e-4)
+
+  def test_frozen_params_with_gradient_accumulation(self):
+    """Frozen parameters work end-to-end with gradient_accumulation_steps > 1."""
+    cfg = self._make_adamw_cfg(gradient_accumulation_steps=2, gradient_clipping_threshold=1.0)
+    cfg.trainable_parameters_mask = ["proj"]
+
+    model = _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    embed_before = model.embed.embedding.get_value().copy()
+    proj_before = model.proj.kernel.get_value().copy()
+
+    tx = optimizers.get_optimizer(cfg, lambda step: 0.05)
+    wrt = optimizers.get_trainable_param_filter(cfg)
+    optimizer = nnx.Optimizer(model, tx, wrt=wrt)
+    state_graphdef, state_pure = nnx.split(train_state_nnx.TrainStateNNX(model, optimizer))
+
+    _, all_params, _ = nnx.split(model, nnx.Param, ...)
+    ns = jax.sharding.NamedSharding(model.mesh, jax.sharding.PartitionSpec())
+    params_shardings = jax.tree.map(lambda _: ns, all_params)
+
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on * cfg.gradient_accumulation_steps, vocab=cfg.vocab_size)
+    next_state_pure, metrics = pre_train.train_step(
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=params_shardings,
+        state=state_pure,
+        data=data,
+    )
+    next_state = nnx.merge(state_graphdef, next_state_pure)
+
+    np.testing.assert_array_equal(next_state.model.embed.embedding.get_value(), embed_before)
+    self.assertFalse(jnp.allclose(next_state.model.proj.kernel.get_value(), proj_before))
+    self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/raw_grad_norm"]))
+    self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/grad_norm"]))
+
+  def test_customer_engram_freezing_scenarios(self):
+    """Verifies DeepSeek/Engram customer scenarios: (1) train only engram, (2) freeze engram + embed."""
+
+    class _TinyEngramDecoder(_TinyDecoder):
+      """Tiny decoder with an additional engram linear layer for freezing tests."""
+
+      def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
+        super().__init__(vocab_size, hidden, rngs=rngs)
+        self.engram = nnx.Linear(hidden, hidden, rngs=rngs)
+
+      def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+        del decoder_positions, kwargs
+        h = self.embed(decoder_input_tokens)
+        h = h + self.engram(h)
+        return self.proj(h)
+
+    # Scenario 1: Whitelist only `engram` (`trainable_parameters_mask=['.*engram.*']`)
+    cfg1 = self._make_adamw_cfg(gradient_clipping_threshold=0.1)
+    cfg1.trainable_parameters_mask = [".*engram.*"]
+    model1 = _TinyEngramDecoder(cfg1.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    embed1_before = model1.embed.embedding.get_value().copy()
+    proj1_before = model1.proj.kernel.get_value().copy()
+    engram1_before = model1.engram.kernel.get_value().copy()
+
+    tx1 = optimizers.get_optimizer(cfg1, lambda step: 0.05)
+    wrt1 = optimizers.get_trainable_param_filter(cfg1)
+    opt1 = nnx.Optimizer(model1, tx1, wrt=wrt1)
+    self.assertEqual(list(nnx.as_pure(opt1.opt_state)[0].mu.keys()), ["engram"])
+
+    state_gd1, state_pure1 = nnx.split(train_state_nnx.TrainStateNNX(model1, opt1))
+    data = _make_data(batch=cfg1.micro_batch_size_to_train_on, vocab=cfg1.vocab_size)
+    next_state_pure1, _ = pre_train.train_step(
+        state_gd1, cfg1, state_mesh_shardings=None, params_shardings=None, state=state_pure1, data=data
+    )
+    next_state1 = nnx.merge(state_gd1, next_state_pure1)
+    np.testing.assert_array_equal(next_state1.model.embed.embedding.get_value(), embed1_before)
+    np.testing.assert_array_equal(next_state1.model.proj.kernel.get_value(), proj1_before)
+    self.assertFalse(jnp.allclose(next_state1.model.engram.kernel.get_value(), engram1_before))
+
+    # Scenario 2: Blacklist `engram` and `embed` (`frozen_parameters_mask=['.*engram.*', '.*embed.*']`)
+    cfg2 = self._make_adamw_cfg(gradient_clipping_threshold=0.1)
+    cfg2.frozen_parameters_mask = [".*engram.*", ".*embed.*"]
+    model2 = _TinyEngramDecoder(cfg2.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    embed2_before = model2.embed.embedding.get_value().copy()
+    proj2_before = model2.proj.kernel.get_value().copy()
+    engram2_before = model2.engram.kernel.get_value().copy()
+
+    tx2 = optimizers.get_optimizer(cfg2, lambda step: 0.05)
+    wrt2 = optimizers.get_trainable_param_filter(cfg2)
+    opt2 = nnx.Optimizer(model2, tx2, wrt=wrt2)
+    self.assertEqual(list(nnx.as_pure(opt2.opt_state)[0].mu.keys()), ["proj"])
+
+    state_gd2, state_pure2 = nnx.split(train_state_nnx.TrainStateNNX(model2, opt2))
+    next_state_pure2, _ = pre_train.train_step(
+        state_gd2, cfg2, state_mesh_shardings=None, params_shardings=None, state=state_pure2, data=data
+    )
+    next_state2 = nnx.merge(state_gd2, next_state_pure2)
+    np.testing.assert_array_equal(next_state2.model.embed.embedding.get_value(), embed2_before)
+    np.testing.assert_array_equal(next_state2.model.engram.kernel.get_value(), engram2_before)
+    self.assertFalse(jnp.allclose(next_state2.model.proj.kernel.get_value(), proj2_before))
+
+
+def maxtext_utils_l2_norm(pytree):
+  """Computes global L2 norm of a PyTree of arrays."""
+  leaves = jax.tree_util.tree_leaves(pytree)
+  return jnp.sqrt(sum(jnp.vdot(x, x) for x in leaves))
+
+
 if __name__ == "__main__":
   unittest.main()
