@@ -18,6 +18,7 @@ This module is the single place that translates MaxText's flat checkpoint flags
 into those objects. It builds configuration only.
 """
 import datetime
+from typing import Any
 
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import v1 as ocp
@@ -29,6 +30,22 @@ _BYTES_PER_GB = 10**9
 # Matches the v0 SingleReplicaArrayHandler broadcast limit (1000 MB) that
 # MaxText used when restoring a single replica and broadcasting to the rest.
 _SINGLE_REPLICA_BROADCAST_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1000
+
+
+def _build_deprioritized_callback() -> Any:
+  """Builds a serialization callback that marks all D2H transfers asynchronous."""
+  # Import Orbax serialization priority types lazily because they live in internal modules.
+  # pylint: disable-next=g-import-not-at-top,import-outside-toplevel
+  from orbax.checkpoint._src.serialization import types as serialization_types
+
+  class _DeprioritizedCallback(serialization_types.DefaultSerializationStatusCallback):
+    """Queues device-to-host transfers asynchronously so Orbax enforces `transfer_concurrent_bytes`."""
+
+    def key_priority(self, _: Any) -> serialization_types.TransferPriority:
+      """Marks all leaves asynchronous so transfers queue behind the D2H byte limiter."""
+      return serialization_types.TransferPriority.ASYNCHRONOUS_DEPRIORITIZED
+
+  return _DeprioritizedCallback()
 
 
 def build_save_decision_policy(
@@ -150,6 +167,10 @@ def build_context(
     ctx.memory.read_concurrent_bytes = concurrent_bytes
   if checkpoint_storage_device_host_concurrent_gb is not None:
     ctx.memory.transfer_concurrent_bytes = checkpoint_storage_device_host_concurrent_gb * _BYTES_PER_GB
+    if colocated_python_checkpointing:
+      # Mark D2H transfers asynchronous so Orbax queues them behind `transfer_concurrent_bytes`
+      # instead of transferring every array synchronously.
+      ctx.memory.serialization_status_callback = _build_deprioritized_callback()
 
   if enable_continuous_checkpointing:
     ctx.asynchronous.timeout_secs = int(datetime.timedelta(minutes=60).total_seconds())
