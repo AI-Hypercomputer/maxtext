@@ -83,11 +83,11 @@ RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=
 RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
     KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
     python3 -m pip install --upgrade --no-cache-dir --ignore-installed pip setuptools wheel uv keyrings.google-artifactregistry-auth nvidia-nvtx-cu12 nvidia-nccl-cu12 && \
-    apt-get purge -y python3-pip python3-wheel && \
+    apt-get purge -y python3-pip python3-wheel python3-pip-whl python3-venv python3.12-venv && \
     ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nvtx/include/nvtx3 /usr/local/include/nvtx3 && \
     ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 "/usr/lib/$(uname -m)-linux-gnu/libnccl.so.2" && \
     ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 "/usr/lib/$(uname -m)-linux-gnu/libnccl.so" && \
-    python3 -c 'import ensurepip, os, shutil; shutil.rmtree(os.path.join(os.path.dirname(ensurepip.__file__), "_bundled"), ignore_errors=True)'
+    rm -rf /usr/share/python-wheels /usr/lib/python3*/ensurepip/_bundled /usr/local/lib/python3*/ensurepip/_bundled
 
 # Set environment variables for Google Cloud SDK, GCC 12, and NVIDIA container runtime
 ENV PATH="/usr/local/nvidia/bin:/usr/local/google-cloud-sdk/bin:/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvcc/bin:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc/bin:${PATH}"
