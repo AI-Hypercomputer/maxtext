@@ -1154,6 +1154,7 @@ class RoutedMoeTest(parameterized.TestCase):
           config=SimpleNamespace(
               decoder_block=None,
               load_balance_loss_weight=0.0,
+              moe_sc_gather_reduce=False,
               moe_use_direct_token_gather=use_direct_token_gather,
               num_experts=4,
               use_ragged_sort=False,

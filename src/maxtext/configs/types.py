@@ -1542,6 +1542,26 @@ class MoEGeneral(BaseModel):
           " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
       ),
   )
+  moe_sc_gather_reduce: bool = Field(
+      False,
+      description=(
+          "Non-ring sparse_matmul with num_experts_per_tok=8: gather token rows"
+          " straight into expert order (no top-k repeat) and run the top-k sums"
+          " (dispatch backward, and the combine under"
+          " moe_weights_on_activation) on the SparseCore gather-reduce kernel"
+          " instead of on the TensorCore."
+      ),
+  )
+  moe_weights_on_activation: bool = Field(
+      False,
+      description=(
+          "Without ring of experts (sparse_matmul, expert parallelism 1, no"
+          " mlp_bias): multiply the routing weights into the sorted (rows, mlp)"
+          " expert activation before the wo matmul, and combine the top-k"
+          " expert outputs in unpermute by a plain sum instead of the (rows,"
+          " emb) weighted einsum."
+      ),
+  )
   moe_tc_ragged_flatten_block_size: int = Field(
       0,
       description=(
@@ -2606,6 +2626,14 @@ class RematAndOffload(BaseModel):
           "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
           "does not re-run the dispatch token all-gather and ragged sort; the expert GMMs re-run "
           "from the saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
+  moe_routed_output: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the Gemma4 routed MoE output after the unsort and top-k combine (before "
+          "post_feedforward_layernorm_2). 'device' saves it so the backward does not replay the wo GMM, "
+          "unsort and combine. Default 'remat' recomputes (existing behavior)."
       ),
   )
   moe_routing_maps: RematLocation = Field(
@@ -5998,6 +6026,7 @@ class MaxTextConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routed_output",
           "moe_routing_maps",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
@@ -7391,6 +7420,14 @@ class MaxTextConfig(
           "moe_bwd_prequant_before_unsort=True requires moe_tc_ragged_3d_dispatch=True and"
           " moe_tc_ragged_weights_on_activation=True."
       )
+    if self.moe_sc_gather_reduce and (self.num_experts_per_tok != 8 or not self.sparse_matmul):
+      raise ValueError("moe_sc_gather_reduce=True requires sparse_matmul=True and num_experts_per_tok=8.")
+    if self.moe_weights_on_activation and (
+        not self.sparse_matmul or self.mlp_bias or self.decoder_block == DecoderBlockType.LLAMA4
+    ):
+      raise ValueError(
+          "moe_weights_on_activation=True requires sparse_matmul=True, mlp_bias=False and a non-Llama4 model."
+      )
     if self.moe_combine_bwd_direct_qarray and not self.moe_bwd_prequant_before_unsort:
       raise ValueError("moe_combine_bwd_direct_qarray=True requires moe_bwd_prequant_before_unsort=True.")
     if self.moe_bwd_prequant_before_unsort and self.quantization:
@@ -8020,6 +8057,7 @@ class RLConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routed_output",
           "moe_routing_maps",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
