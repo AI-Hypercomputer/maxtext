@@ -628,6 +628,27 @@ class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
 
+# Separate routing randomness from weight initialization without advancing its RNG.
+ROUTING_RNG_TAG = 0x524F5554  # ASCII "ROUT"
+
+
+@jax.custom_vjp
+def _replace_router_logits(logits, noise):
+  """Use benchmark logits in forward, with a straight-through router gradient."""
+  return noise
+
+
+def _replace_router_logits_fwd(logits, noise):
+  return noise, None
+
+
+def _replace_router_logits_bwd(_, cotangent):
+  return cotangent, None
+
+
+_replace_router_logits.defvjp(_replace_router_logits_fwd, _replace_router_logits_bwd)
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -741,7 +762,9 @@ class GateLogit(nnx.Module):
       return None
     return getattr(self, self._quant_dot_general_name)
 
-  def __call__(self, inputs: jax.Array, _initializing: bool = False) -> Tuple[jax.Array, Optional[jax.Array]]:
+  def __call__(
+      self, inputs: jax.Array, _initializing: bool = False, *, routing_key: jax.Array | None = None
+  ) -> Tuple[jax.Array, Optional[jax.Array]]:
     inputs = jnp.asarray(inputs, self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
 
@@ -769,6 +792,10 @@ class GateLogit(nnx.Module):
         out_sharding=output_sharding,
     )
     pre_bias_logits = None
+
+    if routing_key is not None:
+      noise = jax.random.normal(routing_key, output.shape, output.dtype)
+      output = _replace_router_logits(output, noise)
 
     if self.score_func:
       output = linears._convert_to_activation_function(self.score_func)(output)
@@ -981,6 +1008,18 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
+    if config.te_moe_block and config.use_random_routing:
+      if is_hash_routing:
+        raise ValueError("Fixed random routing requires TE MoE with ordinary top-k routing.")
+      if config.load_balance_loss_weight != 0 or config.routed_bias_update_rate != 0 or config.routed_bias:
+        raise ValueError("Fixed random routing requires auxiliary routing loss and expert bias to be disabled.")
+    # Layer initialization splits these keys before stacking the layer state.
+    # Keep a fixed key across microbatches, steps, and backward rematerialization.
+    self.fixed_routing_key = (
+        nnx.Variable(jax.random.fold_in(rngs.params.key[...], ROUTING_RNG_TAG))
+        if config.te_moe_block and config.use_random_routing
+        else None
+    )
     self.weight_quant = weight_quant
 
     # DeepSeek V4 Hash Routing
@@ -1421,7 +1460,9 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
-      if self.config.use_random_routing:
+      # TE randomizes logits before scoring; retain normal top-k selection here.
+      # Native JAX retains its existing random expert-ID selection.
+      if self.config.use_random_routing and not self.config.te_moe_block:
         if rngs is None:
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
@@ -5158,6 +5199,12 @@ class RoutedMoE(nnx.Module):
 
     # Older TE versions take the router arguments directly and do not return expert counts.
     supports_router_info = hasattr(te_moe, "RouterComputationInfo")
+    if (
+        self.config.te_moe_block
+        and self.config.use_random_routing
+        and (not supports_router_info or not hasattr(te_moe, "RoutingMapInfo"))
+    ):
+      raise ImportError("Fixed random routing requires TransformerEngine with moe.RoutingMapInfo support.")
     if not supports_router_info:
       if self.is_hash_routing:
         raise ImportError(
@@ -5180,6 +5227,14 @@ class RoutedMoE(nnx.Module):
           "scaling_factor": self.config.routed_scaling_factor,
           "aux_loss_coeff": self.config.load_balance_loss_weight,
           "gate_kernel_axes": self.kernel_axes,
+      }
+    elif self.config.te_moe_block and self.config.use_random_routing:
+      gate_dtype = jnp.float32 if self.config.float32_gate_logits else self.config.dtype
+      gate_logits, pre_bias_logits = self.gate(inputs.astype(gate_dtype), routing_key=self.fixed_routing_key[...])
+      routing_weights, routing_indices = self.get_topk(gate_logits, pre_bias_logits)
+      router_kwargs = {
+          "router_info": te_moe.RoutingMapInfo(routing_indices=routing_indices, routing_weights=routing_weights),
+          "collect_expert_counts": False,
       }
     elif self.is_hash_routing:
       router_kwargs = {
@@ -5282,6 +5337,8 @@ class RoutedMoE(nnx.Module):
 
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
+    if cfg.te_moe_block and cfg.use_random_routing and forced_routed_experts is not None:
+      raise ValueError("Fixed random routing does not support forced expert indices.")
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
 

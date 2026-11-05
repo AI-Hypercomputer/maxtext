@@ -177,7 +177,7 @@ class ConfigTest(absltest.TestCase):
         "te_moe_block": True,
         "te_gmm_quantization": "te_no_quant",
         # Prevent the general EP validation from masking the more specific
-        # te_moe_block/use_random_routing incompatibility under test.
+        # TE-specific incompatibilities under test.
         "override_logical_axis_rules": True,
     }
     invalid_configs = (
@@ -186,7 +186,6 @@ class ConfigTest(absltest.TestCase):
             "te_moe_block=True does not currently support norm_topk_prob=True "
             "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'.",
         ),
-        ({"use_random_routing": True}, "te_moe_block=True does not support use_random_routing=True."),
         (
             {"decoder_block": types.DecoderBlockType.LLAMA4},
             "te_moe_block=True does not currently support Llama4 routing semantics.",
@@ -202,6 +201,25 @@ class ConfigTest(absltest.TestCase):
         with self.assertRaises(pydantic.ValidationError) as context:
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
+
+  def test_te_moe_block_accepts_random_routing(self):
+    config = types.MaxTextConfig(
+        run_name="test",
+        num_experts=2,
+        base_moe_mlp_dim=7168,
+        first_num_dense_layers=1,
+        sparse_matmul=True,
+        prefuse_moe_weights=True,
+        te_moe_block=True,
+        te_gmm_quantization="te_no_quant",
+        override_logical_axis_rules=True,
+        use_random_routing=True,
+        load_balance_loss_weight=0.0,
+        routed_bias_update_rate=0.0,
+        routed_bias=False,
+    )
+    self.assertTrue(config.te_moe_block)
+    self.assertTrue(config.use_random_routing)
 
   def test_te_moe_disable_cudnn_gmm_fusion_requires_te_moe_block(self):
     common_config = {

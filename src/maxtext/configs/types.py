@@ -6212,8 +6212,6 @@ class MaxTextConfig(
         raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
       if self.te_moe_block and self.norm_topk_prob:
         raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
-      if self.te_moe_block and self.use_random_routing:
-        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
       if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
         raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
       if self.te_moe_block and not self.te_gmm_quantization:
