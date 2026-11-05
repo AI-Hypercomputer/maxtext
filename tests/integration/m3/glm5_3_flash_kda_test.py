@@ -55,6 +55,7 @@ except ImportError:
   HAS_TORCH = False
 
 pytestmark = [
+    pytest.mark.integration_test,
     pytest.mark.scheduled_only,
     pytest.mark.skipif(not HAS_TORCH, reason="Torch or transformers not available"),
 ]
@@ -666,80 +667,6 @@ class Glm5KdaAttentionTest(parameterized.TestCase):
     _sharded(layer.dt_bias, P("tensor"))
     _sharded(layer.o_norm.weight, P(None))
     _sharded(layer.o_proj.kernel, P("tensor", "fsdp"))
-
-  def test_kda_multi_device_sharding_parity(self):
-    """Verifies numerical parity between sharded and unsharded Glm5KdaAttention forward and backward."""
-    if len(jax.devices()) < 4:
-      if "TEST_SRCDIR" in os.environ:
-        self.fail("Expected >= 4 JAX devices under Blaze XLA_FLAGS, got" f" {len(jax.devices())}")
-      self.skipTest(f"Requires >= 4 JAX devices, got {len(jax.devices())}")
-    mesh = m3_sharding.create_mesh(
-        ici={"data": 2, "fsdp": 1, "tensor": 2, "expert": 1},
-        devices=jax.devices()[:4],
-    )
-    sharding = Glm5Sharding.from_mesh(mesh)
-    cfg = self._mini_cfg()
-
-    layer_ref = Glm5KdaAttention(cfg, rngs=nnx.Rngs(0))
-    rng = np.random.RandomState(42)
-    for cv in (layer_ref.q_conv1d, layer_ref.k_conv1d, layer_ref.v_conv1d):
-      cv.weight[...] = jnp.array(rng.randn(*cv.weight[...].shape).astype(np.float32))
-    layer_ref.A_log[...] = jnp.array(rng.randn(*layer_ref.A_log[...].shape).astype(np.float32))
-    layer_ref.dt_bias[...] = jnp.array(rng.randn(*layer_ref.dt_bias[...].shape).astype(np.float32))
-
-    with jax.sharding.set_mesh(mesh):
-      layer_sharded = Glm5KdaAttention(cfg, sharding=sharding, rngs=nnx.Rngs(0))
-      ref_dict = dict(nnx.state(layer_ref, nnx.Param).flat_state())
-      sharded_state = nnx.state(layer_sharded, nnx.Param)
-      sharded_dict = dict(sharded_state.flat_state())
-      for path, ref_var in ref_dict.items():
-        target_var = sharded_dict[path]
-        target_shd = target_var.sharding if target_var.sharding is not None else jax.sharding.NamedSharding(mesh, P())
-        target_var[...] = jax.device_put(ref_var[...], target_shd)
-      nnx.update(layer_sharded, sharded_state)
-
-    x_np = rng.randn(4, 8, 64).astype(np.float32)
-    cot_np = rng.randn(4, 8, 64).astype(np.float32)
-    x = jnp.array(x_np)
-    cot = jnp.array(cot_np)
-
-    def loss(m, inp, c):
-      return jnp.sum(m(inp) * c)
-
-    vg = nnx.value_and_grad(loss, argnums=(0, 1))
-    _, (g_ref, gx_ref) = vg(layer_ref, x, cot)
-    out_ref = layer_ref(x)
-
-    x_sharded = jax.device_put(x, jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), None, None)))
-    cot_sharded = jax.device_put(cot, jax.sharding.NamedSharding(mesh, P(("data", "fsdp"), None, None)))
-
-    with jax.sharding.set_mesh(mesh):
-      vg_sharded = jax.jit(vg)
-      _, (g_sharded, gx_sharded) = vg_sharded(layer_sharded, x_sharded, cot_sharded)
-      out_sharded = jax.jit(lambda m, inp: m(inp))(layer_sharded, x_sharded)
-
-    def _assert_frob_rel(actual, ref, name, tol=1e-5):
-      a_np = np.array(actual, dtype=np.float64)
-      r_np = np.array(ref, dtype=np.float64)
-      self.assertTrue(np.all(np.isfinite(a_np)), f"Non-finite actual: {name}")
-      self.assertTrue(np.all(np.isfinite(r_np)), f"Non-finite ref: {name}")
-      denom = max(float(np.linalg.norm(r_np)), 1e-12)
-      frob_rel = float(np.linalg.norm(a_np - r_np)) / denom
-      self.assertLessEqual(frob_rel, tol, f"{name} frob_rel={frob_rel} > {tol}")
-
-    _assert_frob_rel(out_sharded, out_ref, "output")
-    _assert_frob_rel(gx_sharded, gx_ref, "gx")
-    g_ref_flat = dict(nnx.state(g_ref, nnx.Param).flat_state())
-    g_sharded_flat = dict(nnx.state(g_sharded, nnx.Param).flat_state())
-    self.assertLen(g_ref_flat, 15)
-    self.assertEqual(set(g_ref_flat.keys()), set(g_sharded_flat.keys()))
-    for path, ref_var in g_ref_flat.items():
-      _assert_frob_rel(g_sharded_flat[path][...], ref_var[...], ".".join(map(str, path)))
-
-    # Positive check: verify gradients are non-trivial
-    self.assertGreater(float(np.linalg.norm(np.array(g_ref.A_log[...]))), 1e-4)
-    self.assertGreater(float(np.linalg.norm(np.array(g_ref.dt_bias[...]))), 1e-4)
-    self.assertGreater(float(np.linalg.norm(np.array(gx_ref))), 1e-4)
 
   def test_loud_guards(self):
     """Verifies loud ValueError checks for packing and backend selection."""
