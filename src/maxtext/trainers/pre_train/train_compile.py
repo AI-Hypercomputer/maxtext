@@ -153,7 +153,11 @@ def get_shaped_inputs(topology_mesh, config):
   # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
   # not the raw model — mirroring how the training loop does nnx.split(train_state).
   with axis_rules(config.logical_axis_rules):
-    abs_train_state = nnx.eval_shape(init_state_fn)
+    if getattr(config, "use_m3_model", False) and topology_mesh is not None:
+      with jax.set_mesh(topology_mesh):
+        abs_train_state = nnx.eval_shape(init_state_fn)
+    else:
+      abs_train_state = nnx.eval_shape(init_state_fn)
     graphdef, _ = nnx.split(abs_train_state)
   model = graphdef
 

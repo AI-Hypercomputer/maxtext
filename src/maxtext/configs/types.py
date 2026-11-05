@@ -1005,6 +1005,12 @@ class SplashAttention(BaseModel):
       False,
       description="Fold pairs of head_dim=64 GQA query heads along sequence in m3 Splash attention.",
   )
+  moe_bwd_wgrad_overlap: bool = Field(
+      False,
+      description=(
+          "Tie token input cotangents to expert weight cotangents in m3 MoE backward to overlap wgrad reduce-scatter."
+      ),
+  )
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")

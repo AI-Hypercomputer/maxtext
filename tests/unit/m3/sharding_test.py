@@ -866,5 +866,45 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
         create_mesh(devices=self.devices)
 
 
+class DefaultShardingMoERulesTest(parameterized.TestCase):
+  """Verifies routed-expert logical axis rules and `param_metadata` eager sharding."""
+
+  def test_routed_expert_weight_and_activation_rules(self):
+    sharding = DefaultSharding()
+    self.assertEqual(sharding("wi_0", ("experts", "expert_embed", "expert_mlp")), P("expert", "fsdp", "tensor"))
+    self.assertEqual(sharding("wo", ("experts", "expert_mlp", "expert_embed")), P("expert", "tensor", "fsdp"))
+    self.assertEqual(sharding("gate_up_3d", ("experts", "expert_embed", None)), P("expert", "fsdp", None))
+    self.assertEqual(
+        sharding("gate_up_4d", ("experts", "expert_embed", None, "expert_mlp")),
+        P("expert", "fsdp", None, "tensor"),
+    )
+    self.assertEqual(
+        sharding("act", ("experts", "expert_embed", "expert_mlp"), TensorType.ACTIVATION),
+        P("expert", None, "tensor"),
+    )
+    with self.assertRaisesRegex(ValueError, "expert"):
+      sharding("bad_routed", ("experts", "embed", "mlp"))
+
+  def test_param_metadata_and_mesh_from_config(self):
+    sharding = DefaultSharding()
+    meta = sharding_lib.param_metadata(sharding, "wi_0", ("experts", "expert_embed", "expert_mlp"))
+    self.assertEqual(meta, {"out_sharding": P("expert", "fsdp", "tensor"), "eager_sharding": True})
+
+    # Outside any mesh, `constrain` is a no-op.
+    x = jnp.ones((2, 4), dtype=jnp.float32)
+    np.testing.assert_array_equal(sharding.constrain(x, "x", ("batch", "length")), x)
+
+    cfg = SimpleNamespace(ici_fsdp_parallelism=-1, shard_mode="explicit")
+    mesh = sharding_lib.mesh_from_config(cfg, devices=jax.devices()[:1])
+    self.assertEqual(mesh.axis_types, (jax.sharding.AxisType.Explicit,) * len(MESH_AXIS_NAMES))
+
+    with self.assertRaisesRegex(ValueError, "does not implement"):
+      sharding_lib.mesh_from_config(SimpleNamespace(ici_pipeline_parallelism=2), devices=jax.devices()[:1])
+    with self.assertRaisesRegex(ValueError, "custom_mesh"):
+      sharding_lib.mesh_from_config(SimpleNamespace(custom_mesh="hybrid_ring_64x4"), devices=jax.devices()[:1])
+    with self.assertRaisesRegex(ValueError, "shard_mode"):
+      sharding_lib.mesh_from_config(SimpleNamespace(shard_mode="invalid"), devices=jax.devices()[:1])
+
+
 if __name__ == "__main__":
   absltest.main()
