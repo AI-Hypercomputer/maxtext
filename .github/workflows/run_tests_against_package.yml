@@ -219,6 +219,13 @@ jobs:
           # omit this libtpu init args for gpu tests
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
+            if [[ "${INPUTS_FLAVOR}" == tpu7x-* ]]; then
+              # b/543017989: on TPU7x, a scoped VMEM limit above 32 MiB lets XLA lower the MoE
+              # post-all-to-all token-permutation gather (bf16[4096,4096]) as a TensorCore fusion,
+              # which produces wrong results (QuantizedMoeTest.test_gmm_grad_equivalence
+              # tokamax_v2_fp8_*_ep4). Keep such gathers on the SparseCore until XLA is fixed.
+              export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS} --xla_tpu_offload_all_supported_gathers_to_sparsecore=true"
+            fi
           else
             # For cuda12, explicitly point to the pip-installed CUDA libraries
             # to avoid conflicts with system-level installations on the runner.
