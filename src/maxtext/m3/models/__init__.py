@@ -42,8 +42,20 @@ def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
   return modeling_glm5_3_flash.create_glm5_3_flash_model(config, mesh=mesh, rngs=rngs, **kwargs)
 
 
+def create_granitemoe_model(config, mesh=None, *, rngs, **kwargs):
+  """Lazy factory for GraniteMoe (`granite-3.0-1b-a400m` / `granitemoe`)."""
+  # pylint: disable=import-outside-toplevel
+  if rngs is None:
+    raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
+  from maxtext.m3.models.granitemoe import modeling_granitemoe  # pylint: disable=g-import-not-at-top
+
+  return modeling_granitemoe.create_granitemoe_model(config, mesh=mesh, rngs=rngs, **kwargs)
+
+
 MODEL_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": create_glm5_3_flash_model,
+    "granite-3.0-1b-a400m": create_granitemoe_model,
+    "granitemoe": create_granitemoe_model,
     "qwen3-0.6b": create_qwen3_model,
     "qwen3-vl-2b": create_qwen3_vl_model,
     "qwen3.8-flash-next": create_qwen3_8_flash_next_model,
@@ -71,8 +83,18 @@ def calculate_glm5_3_flash_tflops_per_device(config, log: bool = True):
   return glm5_flops.calculate_glm5_3_flash_tflops_per_device(config, log=log)
 
 
+def calculate_granitemoe_tflops_per_device(config, log: bool = True):
+  """Lazy wrapper for GraniteMoe TFLOPs calculation."""
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.m3.models.granitemoe import utils_granitemoe
+
+  return utils_granitemoe.calculate_granitemoe_tflops_per_device(config, log=log)
+
+
 MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": calculate_glm5_3_flash_tflops_per_device,
+    "granite-3.0-1b-a400m": calculate_granitemoe_tflops_per_device,
+    "granitemoe": calculate_granitemoe_tflops_per_device,
     "qwen3.8-flash-next": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
     "qwen3.8-flash-next-mini": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
 }
@@ -97,8 +119,18 @@ def configure_glm5_3_flash_engine(engine):
   return glm5_train.configure_glm5_engine(engine)
 
 
+def configure_granitemoe_engine(engine):
+  """Lazy wrapper for GraniteMoe training engine configuration."""
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.m3.models.granitemoe import utils_granitemoe
+
+  return utils_granitemoe.configure_granitemoe_engine(engine)
+
+
 MODEL_ENGINE_CONFIG_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": configure_glm5_3_flash_engine,
+    "granite-3.0-1b-a400m": configure_granitemoe_engine,
+    "granitemoe": configure_granitemoe_engine,
 }
 
 

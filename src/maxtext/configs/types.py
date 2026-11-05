@@ -336,6 +336,7 @@ ModelName = Literal[
     "envy-switch-large",
     "envy-switch-xxl",
     "glm5.3-flash",
+    "granite-3.0-1b-a400m",
     "ming-3.0-audio-tiny",
     "hy4-preview",
 ]
@@ -6964,6 +6965,10 @@ class MaxTextConfig(
     if self.model_name == "glm5.3-flash" and not self.use_m3_model:
       raise ValueError(
           "glm5.3-flash requires use_m3_model=True; legacy decoder_block is not" " supported for GLM-5.3-Flash."
+      )
+    if self.model_name == "granite-3.0-1b-a400m" and not self.use_m3_model:
+      raise ValueError(
+          "granite-3.0-1b-a400m requires use_m3_model=True; legacy decoder_block is not supported for GraniteMoe."
       )
     return self
 
