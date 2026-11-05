@@ -155,6 +155,10 @@ def gmm(
 
   lhs_dtype = preferred_element_type if isinstance(lhs, qpl.QArray) else lhs.dtype
   rhs_dtype = preferred_element_type if isinstance(rhs, qpl.QArray) else rhs.dtype
+  if jnp.isscalar(group_offset):
+    # Callers may pass a Python int (e.g. group_offset=0). Under jit custom_vjp turns it into an array;
+    # under jax.disable_jit() it stays an int and the kernels' group_offset.shape / [None] fail.
+    group_offset = jnp.asarray(group_offset, dtype=jnp.int32)
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
