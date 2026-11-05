@@ -768,6 +768,114 @@ class AdamPaxScalarLearningRateTest(parameterized.TestCase):
     self.assertLess(float(updates_c["w"][0]), 0.0)
 
 
+class AdamPaxLowMemoryTest(parameterized.TestCase):
+  """Tests for opt_type='adam_pax_low_memory' and its bf16 update rounding modes."""
+
+  def _make_opt(self, update_rounding, lr=1e-3):
+    return optimizers.adam_pax_low_memory(
+        learning_rate_fn=lambda step: lr,
+        beta1=0.0,  # Use the RMS-normalized gradient directly.
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+        update_rounding=update_rounding,
+        stochastic_rounding_seed=0,
+    )
+
+  def _run(self, opt, params, grads, steps):
+    state = opt.init(params)
+    for _ in range(steps):
+      updates, state = opt.update(grads, state, params)
+      params = optax.apply_updates(params, updates)
+    return params, state
+
+  def test_state_size(self):
+    params = {"w": jnp.ones((4, 8), jnp.bfloat16)}
+    _, nearest_state = self._run(self._make_opt("nearest"), params, params, steps=1)
+    _, kahan_state = self._run(self._make_opt("kahan"), params, params, steps=1)
+    # No per-parameter second moment; Kahan keeps a residual of the params' shape.
+    self.assertEqual(nearest_state.nu.shape, ())
+    self.assertEqual(kahan_state.nu["w"].shape, (4, 8))
+    self.assertEqual(kahan_state.nu["w"].dtype, jnp.bfloat16)
+
+  def test_kahan_keeps_sub_ulp_updates(self):
+    # lr * normalized_grad (1e-3) is far below half a bf16 ulp at 1.0 (~3.9e-3),
+    # so round-to-nearest drops every update while Kahan accumulates them.
+    params = {"w": jnp.ones((2, 4), jnp.bfloat16)}
+    grads = {"w": -jnp.ones((2, 4), jnp.bfloat16)}
+    steps = 100
+    nearest, _ = self._run(self._make_opt("nearest"), params, grads, steps)
+    kahan, _ = self._run(self._make_opt("kahan"), params, grads, steps)
+
+    self.assertTrue(jnp.all(nearest["w"] == 1.0))
+    expected = 1.0 + steps * 1e-3
+    self.assertTrue(jnp.allclose(kahan["w"].astype(jnp.float32), expected, atol=8e-3))
+
+  def test_stochastic_rounding_is_unbiased(self):
+    params = {"w": jnp.ones((64, 64), jnp.bfloat16)}
+    grads = {"w": -jnp.ones((64, 64), jnp.bfloat16)}
+    steps = 20
+    sr, _ = self._run(self._make_opt("stochastic"), params, grads, steps)
+    mean = float(jnp.mean(sr["w"].astype(jnp.float32)))
+    self.assertAlmostEqual(mean, 1.0 + steps * 1e-3, delta=2e-3)
+
+  def test_zero_weights_with_zero_grads_stay_zero(self):
+    # N:M-masked entries (zero weight, zero gradient) must remain exactly zero.
+    params = {"w": jnp.array([[0.0, 1.0, 0.0, 1.0]], jnp.bfloat16)}
+    grads = {"w": jnp.array([[0.0, -1.0, 0.0, -1.0]], jnp.bfloat16)}
+    for rounding in ("nearest", "kahan", "stochastic"):
+      out, _ = self._run(self._make_opt(rounding), params, grads, steps=5)
+      self.assertEqual(float(out["w"][0, 0]), 0.0, rounding)
+      self.assertEqual(float(out["w"][0, 2]), 0.0, rounding)
+
+  def test_invalid_rounding_raises(self):
+    with self.assertRaises(ValueError):
+      self._make_opt("bogus")
+
+  @parameterized.parameters("nearest", "kahan", "stochastic")
+  def test_scalar_and_vector_params(self, rounding):
+    # 0-d and 1-d params (e.g. scalars, norm scales) must not crash the RMS normalization.
+    params = {"s": jnp.array(1.0, jnp.bfloat16), "v": jnp.ones((4,), jnp.bfloat16)}
+    grads = {"s": jnp.array(-0.5, jnp.bfloat16), "v": -jnp.ones((4,), jnp.bfloat16)}
+    out, _ = self._run(self._make_opt(rounding, lr=0.1), params, grads, steps=2)
+    self.assertEqual(out["s"].shape, ())
+    self.assertGreater(float(out["s"]), 1.0)
+    self.assertTrue(jnp.all(out["v"] > 1.0))
+
+  def test_kahan_residual_has_param_shape_and_dtype(self):
+    params = {"w": jnp.ones((4, 8), jnp.bfloat16), "b": jnp.ones((8,), jnp.float32)}
+    state = self._make_opt("kahan").init(params)
+    for name, p in params.items():
+      self.assertEqual(state.nu[name].shape, p.shape)
+      self.assertEqual(state.nu[name].dtype, p.dtype)
+
+  def test_rounding_requires_low_memory_opt_type(self):
+    argv = ["", get_test_config_path(), "run_name=test", "opt_type=adam_pax", "bf16_update_rounding=kahan"]
+    with self.assertRaisesRegex(ValueError, "requires opt_type='adam_pax_low_memory'"):
+      pyconfig.initialize(argv)
+
+  def test_invalid_rounding_rejected_by_config(self):
+    argv = ["", get_test_config_path(), "run_name=test", "opt_type=adam_pax_low_memory", "bf16_update_rounding=bogus"]
+    with self.assertRaises(Exception):
+      pyconfig.initialize(argv)
+
+  def test_get_optimizer(self):
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=adam_pax_low_memory",
+        "bf16_update_rounding=kahan",
+    ]
+    config = pyconfig.initialize(argv)
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    with patch.object(optimizers, "adam_pax_low_memory") as mock_opt:
+      optimizers.get_optimizer(config, learning_rate_schedule)
+      mock_opt.assert_called_once()
+      _, kwargs = mock_opt.call_args
+      self.assertEqual(kwargs["update_rounding"], "kahan")
+
+
 class TrainableParametersMaskTest(parameterized.TestCase):
   """Tests for the trainable parameters mask functionality via get_optimizer"""
 
