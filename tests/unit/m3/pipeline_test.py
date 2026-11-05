@@ -14,6 +14,7 @@
 
 """Tests for the diffusion pipeline helpers (`pipeline_utils.py`, `wan_pipeline.py`)."""
 
+import types
 import unittest
 
 import pytest
@@ -25,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.inference import sample
 from maxtext.m3.diffuser_pipelines import pipeline_utils
 from maxtext.m3.diffuser_pipelines import wan_pipeline
 from maxtext.m3.models.wan import WanModel
@@ -89,6 +91,33 @@ class WanPipelineHelpersTest(unittest.TestCase):
     self.assertEqual(mag_ratios.shape, (10,))  # resampled to 5 (cond, uncond) pairs
     *_, mag_ratios = wan_pipeline.init_magcache(10, 0.2, base)
     np.testing.assert_array_equal(mag_ratios, base)  # already the right length
+
+  def test_get_pipeline_class(self):
+    class _Cfg:
+
+      def __init__(self, model_name, model_type="T2V", supported_types=()):
+        self.model_name = model_name
+        self.model_type = model_type
+        self.supported_types = list(supported_types)
+
+    self.assertIs(sample.get_pipeline_class(_Cfg("wan2.1")), wan_pipeline.WanPipeline2_1)
+    self.assertIs(sample.get_pipeline_class(_Cfg("wan2.2", "T2V", ["T2V"])), wan_pipeline.WanPipeline2_1)
+    self.assertIs(sample.get_pipeline_class(_Cfg("wan2.1", "I2V", ["T2V", "I2V"])), wan_pipeline.WanPipeline2_1)
+    with self.assertRaises(NotImplementedError):  # TI2V image conditioning is not implemented for wan2.2
+      sample.get_pipeline_class(_Cfg("wan2.2", "I2V", ["T2V"]))
+
+  def test_align_video_size(self):
+    def _pipe(scale_factor_spatial):
+      pipe = object.__new__(wan_pipeline.WanPipeline2_1)  # no components needed
+      pipe.vae_scale_factor_spatial = scale_factor_spatial
+      pipe.transformer = types.SimpleNamespace(patch_size=(1, 2, 2))
+      return pipe
+
+    wan22, wan21 = _pipe(16), _pipe(8)
+    self.assertEqual(wan22._align_video_size(720, 1280), (704, 1280))  # pylint: disable=protected-access
+    self.assertEqual(wan22._align_video_size(704, 1280), (704, 1280))  # pylint: disable=protected-access
+    self.assertEqual(wan21._align_video_size(720, 1280), (720, 1280))  # pylint: disable=protected-access
+    self.assertEqual(wan21._align_video_size(721, 1290), (720, 1280))  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

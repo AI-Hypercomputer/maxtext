@@ -64,6 +64,8 @@ def call_pipeline(config, pipeline, prompt, negative_prompt, num_inference_steps
 # `maxtext.m3.diffuser_pipelines`, imported on demand. Register new models here.
 MODEL_NAME_TO_PIPELINE = {
     "wan2.1": "wan_pipeline.WanPipeline2_1",
+    # Wan 2.2 TI2V-5B, T2V only (TI2V image conditioning is a follow-up): same pipeline, only the VAE config differs.
+    "wan2.2": "wan_pipeline.WanPipeline2_1",
 }
 
 
@@ -81,6 +83,13 @@ def get_pipeline_class(config):
     raise ValueError(
         f"No diffusion pipeline registered for model_name '{config.model_name}'."
         f" Registered: {sorted(MODEL_NAME_TO_PIPELINE)}."
+    )
+  # `supported_types` comes from the model YAML; unsupported `model_type`s fail fast here.
+  supported_types = getattr(config, "supported_types", None)
+  model_type = getattr(config, "model_type", "T2V")
+  if supported_types and model_type not in supported_types:
+    raise NotImplementedError(
+        f"model_name '{config.model_name}' supports model_type {list(supported_types)} only, got '{model_type}'."
     )
   module_name, class_name = MODEL_NAME_TO_PIPELINE[config.model_name].rsplit(".", 1)
   module = importlib.import_module(f"maxtext.m3.diffuser_pipelines.{module_name}")
