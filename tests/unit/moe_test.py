@@ -49,6 +49,37 @@ from tests.utils import linen_wrappers
 import pytest
 
 
+class FixedRandomRouterTest(unittest.TestCase):
+  """Pure JAX checks for the benchmark's replacement-logit semantics."""
+
+  def test_straight_through_gradient(self):
+    logits = jnp.ones((8, 16))
+    noise = jax.random.normal(jax.random.key(7), logits.shape)
+    cotangent = jnp.arange(logits.size, dtype=jnp.float32).reshape(logits.shape)
+    result, pullback = jax.vjp(moe._replace_router_logits, logits, noise)  # pylint: disable=protected-access
+    grad_logits, grad_noise = pullback(cotangent)
+    np.testing.assert_array_equal(result, noise)
+    np.testing.assert_array_equal(grad_logits, cotangent)
+    np.testing.assert_array_equal(grad_noise, jnp.zeros_like(noise))
+
+  def test_fixed_layer_keys_and_remat(self):
+    layer_keys = jax.random.split(jax.random.key(7), 3)
+    keys = jax.vmap(lambda key: jax.random.fold_in(key, moe.ROUTING_RNG_TAG))(layer_keys)
+
+    def forward(logits, key):
+      noise = jax.random.normal(key, logits.shape)
+      return jnp.sum(jnp.square(moe._replace_router_logits(logits, noise)))  # pylint: disable=protected-access
+
+    logits = jnp.ones((8, 16))
+    samples = jax.vmap(lambda key: jax.random.normal(key, logits.shape))(keys)
+    np.testing.assert_array_equal(samples[0], jax.random.normal(keys[0], logits.shape))
+    self.assertFalse(np.array_equal(samples[0], samples[1]))
+    plain = jax.value_and_grad(forward)(logits, keys[0])
+    rematted = jax.jit(jax.value_and_grad(jax.checkpoint(forward)))(logits, keys[0])
+    for expected, actual in zip(plain, rematted):
+      np.testing.assert_allclose(actual, expected, rtol=1e-6)
+
+
 def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
   """
   Compute the relative norm difference between two pytrees and enforce threshold.
