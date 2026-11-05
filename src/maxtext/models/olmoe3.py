@@ -1392,6 +1392,8 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     [emo_min, emo_max] or, with ``emo_document_expert_pool_choices`` set,
     from that set of sizes (uniformly, or with ``emo_document_expert_pool_probs``);
     outside training it is fixed at ``emo_eval_document_expert_pool``.
+    With ``emo_causal_pool`` a token's totals cover only its document's tokens
+    so far, so the pool never depends on later tokens.
 
     MaxText packs documents contiguously, so the per-document score totals are
     cumulative-sum differences at document boundaries rather than a scatter
@@ -1414,10 +1416,15 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
 
     scores = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
     csum = jnp.cumsum(scores, axis=1)
-    csum_end = jnp.take_along_axis(csum, end[..., None], axis=1)
     before = jnp.take_along_axis(csum, jnp.maximum(start - 1, 0)[..., None], axis=1)
     csum_before = jnp.where((start == 0)[..., None], 0.0, before)
-    document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
+    if cfg.emo_causal_pool:
+      # Each token's pool comes from its document's tokens up to and including itself, as at inference. The first
+      # token's pool is then its own top `pool` experts, which hold its top-k: its routing is unconstrained.
+      document_scores = csum - csum_before
+    else:
+      csum_end = jnp.take_along_axis(csum, end[..., None], axis=1)
+      document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
 
     if rngs is not None and cfg.model_call_mode != "inference" and not _EMO_EVAL_POOLS.get():
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs

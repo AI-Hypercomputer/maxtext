@@ -1407,6 +1407,11 @@ class MoEGeneral(BaseModel):
       description="With moe_lean_routing, find the EMo pool threshold by bisecting on the score bits"
       " (32 counting passes) instead of sorting every token's expert scores.",
   )
+  emo_causal_pool: bool = Field(
+      False,
+      description="EMo: choose each token's pool from its document's router scores up to and including that token,"
+      " instead of the whole document's, so the pool never depends on later tokens.",
+  )
   olmoe3_segments_for_emo_only: bool = Field(
       False,
       description=(

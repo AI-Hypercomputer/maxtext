@@ -318,6 +318,8 @@ emo_document_expert_pool_choices: []
 emo_document_expert_pool_probs: []
 # With moe_lean_routing, find the EMo pool threshold by bisection instead of a sort.
 emo_threshold_by_bisection: false
+# EMo: choose each token's pool from its document's tokens up to itself (causal) instead of the whole document.
+emo_causal_pool: false
 # OLMoE3: attention/KDA mixers ignore segment ids (whole-instance, as OLMo-core); only EMo uses them.
 olmoe3_segments_for_emo_only: false
 moe_global_load_balancing: false # OLMo-core global_load_balancing: LB counts averaged over the whole batch, not per device
