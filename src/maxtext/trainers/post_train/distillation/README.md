@@ -8,7 +8,11 @@ and [`post_training_index.md`](../../../../../docs/tutorials/post_training_index
 
 Canonical launchers:
 - Cluster Toolkit (recommended): [`scripts/run_distill_ctk.sh`](scripts/run_distill_ctk.sh)
-- Legacy XPK: [`scripts/run_distill_xpk.sh`](scripts/run_distill_xpk.sh)
+- Legacy XPK (deprecated): [`scripts/run_distill_xpk.sh`](scripts/run_distill_xpk.sh)
+
+> **Note:** XPK is deprecated. Use Cluster Toolkit (`run_distill_ctk.sh`) for all new
+> runs. The XPK launcher is kept only for existing XPK environments and may be removed
+> in a future release.
 
 See each script's header for all supported environment variables, and see [`knowledge_distillation.md`](../../../../../docs/tutorials/posttraining/knowledge_distillation.md#multi-host-on-gke-via-cluster-toolkit) for step-by-step Cluster Toolkit usage.
 
