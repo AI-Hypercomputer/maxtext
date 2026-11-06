@@ -169,7 +169,7 @@ def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
 
 
 _REPLICATED_BATCH_DIM_WARNING = (
-    "Loss input with batch dim %d does not divide mesh axis %r (size %d), so that "
+    "%s with batch dim %d does not divide mesh axis %r (size %d), so that "
     "dimension is replicated instead of sharded: every device along the axis holds and "
     "computes the whole micro-batch, %dx the work a sharded one would do there. Results "
     "stay correct. If it was not deliberate -- a sequence-packed micro-batch is always "
@@ -753,6 +753,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._state_graphdef: Any = None
     self._signature_compare_warned: bool = False
     self._replicated_batch_warned: bool = False
+    self._fwd_only_replicated_batch_warned: bool = False
     # Which parameters `trainable_parameters_mask` freezes, as a function of the parameter tree,
     # or None when it freezes none. `_freeze_mask` caches its value for the compiled kernels.
     self._freeze_mask_fn = optimizers.get_path_mask_fn(
@@ -1008,19 +1009,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Invalidates any cached forward-only JIT executable.
 
     Args:
-      fn: Called as `fn(model, payload)`, where `model` is a read-only copy of
-        the trainer model and `payload` is the sharded input payload.
+      fn: Called as `fn(model, payload)` under `jax.jit`, where `model` is a
+        read-only copy of the trainer model (`nnx.merge(..., copy=True)` and
+        `mdl.eval()`; note `TunixMaxTextAdapter` does not forward
+        `config.enable_dropout`, so `Transformer`'s default `enable_dropout=True`
+        overrides `mdl.eval()` and dropout stays active iff `dropout_rate > 0`)
+        and `payload` is the sharded input payload. Must return a pytree of arrays.
 
     Returns:
       self, for chaining.
     """
 
-    def _kernel(params: Any, rest: Any, payload: abstract_engine.TrainerPayload) -> Any:
-      mdl = nnx.merge(self._model_graphdef, params, rest, copy=True)
+    def fwd_only(
+        graphdef: Any,
+        params: Any,
+        rest: Any,
+        payload: abstract_engine.TrainerPayload,
+    ) -> Any:
+      mdl = nnx.merge(graphdef, params, rest, copy=True)
       mdl.eval()
       return fn(mdl, payload)
 
-    self._fwd_only_fn = _kernel
+    self._fwd_only_fn = fwd_only
     self._compiled_fwd_only = None
     self._compiled_fwd_only_signature = None
     return self
@@ -1661,26 +1671,34 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     return tuple(sharding.get_input_data_sharding(self._config, self._mesh).spec)
 
-  def _leaf_data_sharding(self, leaf: Any, data_spec: tuple[Any, ...]) -> jax.sharding.NamedSharding | None:
-    """Returns where one loss input goes, given the `[batch, sequence]` spec above.
+  def _leaf_data_sharding(
+      self,
+      leaf: Any,
+      data_spec: tuple[Any, ...],
+      fwd_only: bool = False,
+  ) -> jax.sharding.NamedSharding | None:
+    """Returns where one input leaf goes, given the `[batch, sequence]` spec above.
 
     `data_spec` describes a rank-2 input, so it cannot be used as a pytree prefix for a
-    `gen_model_input_fn` batch, whose leaves have mixed rank -- a rank-2 spec applied to a
-    rank-1 array is an error. Each leaf instead takes the leading entries its own rank can
-    absorb, so the batch dimension stays sharded and everything below it is replicated.
+    `gen_model_input_fn` batch or `fwd_only` payload, whose leaves have mixed rank -- a rank-2
+    spec applied to a rank-1 array is an error. Each leaf instead takes the leading entries its
+    own rank can absorb, so the batch dimension stays sharded and everything below it is
+    replicated.
 
     A leaf whose batch dim doesn't evenly divide the batch axis's mesh size replicates
     that dim instead of sharding it -- every device holds and computes on the same data
     with no cross-device split, which is correct (there's nothing to reduce back together
-    afterwards) but wastes compute across the axis for that micro-batch. That is an N-fold
-    cost, so it warns once per instance rather than living only in this docstring.
+    afterwards) but wastes compute across the axis for that micro-batch. Because that is an
+    N-fold cost, each path (`fwd_bwd` and `fwd_only`) warns once per engine instance.
     Sequence packing reaches this from the distributed packer, whose row count is tunix's
     `train_micro_batch_size` and defaults to 1; the colocated packer sizes its rows as
     `fsdp * dp` and so shards cleanly by construction.
 
     Args:
-      leaf: One loss input, or None.
+      leaf: One input array, or None.
       data_spec: The `[batch, sequence]` PartitionSpec entries from `_input_data_spec`.
+      fwd_only: When True, tracks warning state with `_fwd_only_replicated_batch_warned`
+        and labels the log for forward-only inputs rather than training loss inputs.
     """
     if leaf is None:
       return None
@@ -1689,21 +1707,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if spec and spec[0] is not None:
       axis_size = self._batch_axis_size(spec[0])
       if leaf.shape[0] % axis_size:
-        # Warn once per instance, not per leaf: this runs under a tree_map over every
-        # loss input, and they normally share a batch dim. Silence here would leave an
-        # N-fold compute cliff visible only in a docstring.
-        if not self._replicated_batch_warned:
-          self._replicated_batch_warned = True
-          logging.warning(_REPLICATED_BATCH_DIM_WARNING, leaf.shape[0], spec[0], axis_size, axis_size)
+        # Warn once per path per instance, not per leaf: this runs under a tree_map over
+        # every input leaf, and they normally share a batch dim.
+        warned = self._fwd_only_replicated_batch_warned if fwd_only else self._replicated_batch_warned
+        if not warned:
+          if fwd_only:
+            self._fwd_only_replicated_batch_warned = True
+            input_label = "Forward-only input"
+          else:
+            self._replicated_batch_warned = True
+            input_label = "Loss input"
+          logging.warning(_REPLICATED_BATCH_DIM_WARNING, input_label, leaf.shape[0], spec[0], axis_size, axis_size)
         spec[0] = None
     return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(*spec))
 
   def _batch_data_shardings(self, dynamic_batch: Any) -> Any:
-    """Builds a per-leaf sharding tree for the traced part of a batch.
+    """Builds a per-leaf sharding tree for the traced part of a training batch.
 
-    The `in_shardings` half of what `_compile_for_batch` needs; `fwd_only` places its
-    own inputs through the same `_leaf_data_sharding`, so a read-only forward pass lands
-    the batch exactly where a compiled step would.
+    `fwd_bwd` uses this for training batches (`fwd_only=False`); `fwd_only` uses
+    `_fwd_only_data_shardings` so forward-only payloads keep rank-0/zero-width arrays
+    replicated and warn independently on indivisible batches.
 
     Args:
       dynamic_batch: The traced half of a loss-input batch.
@@ -1715,16 +1738,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return jax.tree.map(lambda leaf: self._leaf_data_sharding(leaf, data_spec), dynamic_batch)
 
   def _fwd_only_data_shardings(self, payload: Any) -> Any:
-    """Builds per-leaf input shardings for `fwd_only`."""
+    """Builds per-leaf input shardings for `fwd_only`, keeping rank-0 and empty arrays replicated."""
     data_spec = self._input_data_spec()
     replicated = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
 
     def leaf_sharding(leaf: Any) -> jax.sharding.NamedSharding | None:
-      if leaf is None:
-        return None
       if jnp.ndim(leaf) == 0 or 0 in leaf.shape:
         return replicated
-      return self._leaf_data_sharding(leaf, data_spec)
+      return self._leaf_data_sharding(leaf, data_spec, fwd_only=True)
 
     return jax.tree.map(leaf_sharding, payload)
 
@@ -2295,10 +2316,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
     return model
 
-  def _compile_fwd_only_for_batch(self, payload: abstract_engine.TrainerPayload, signature: Any) -> None:
+  def _compile_fwd_only_for_batch(
+      self,
+      model: nnx.Module,
+      payload: abstract_engine.TrainerPayload,
+      signature: Any,
+  ) -> None:
     """JIT-compiles the forward-only kernel for a single payload signature."""
     assert self._fwd_only_fn is not None
-    model = self._live_model()
     self._settle_state(shard_zero1=self._compiled)
     if self._mesh is None:
       compiled_fn = jax.jit(self._fwd_only_fn, donate_argnums=())
@@ -2309,6 +2334,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       compiled_fn = jax.jit(
           self._fwd_only_fn,
           in_shardings=(
+              None,
               params_shardings,
               rest_shardings,
               self._fwd_only_data_shardings(payload),
@@ -2322,9 +2348,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Read-only: runs the registered `with_fwd_only_fn` callback on `payload`.
 
     Strips host `metadata` from `payload`, shards array leaves onto the
-    engine's data axis (replicating rank-0 and empty arrays), and executes the
-    callback inside `jax.jit(..., donate_argnums=())` on a read-only
-    `eval()`-mode model copy (`nnx.merge(..., copy=True)` and `mdl.eval()`),
+    engine's data axis (replicating rank-0 and empty arrays, and raising
+    `ValueError` in `jax.jit` if a committed `jax.Array` leaf has a mismatched
+    sharding), and executes the callback inside `jax.jit(..., donate_argnums=())`
+    on a read-only `eval()`-mode model copy (`nnx.merge(..., copy=True)` and
+    `mdl.eval()`; note `TunixMaxTextAdapter` does not forward
+    `config.enable_dropout`, so `Transformer`'s default `enable_dropout=True`
+    overrides `mdl.eval()` and dropout stays active iff `dropout_rate > 0`),
     caching the compiled executable for the current payload signature without
     touching gradients, accumulators, or metrics.
 
@@ -2332,14 +2362,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       payload: Input payload to prepare and shard.
 
     Returns:
-      Whatever the callback returns.
+      The pytree of arrays returned by the callback.
 
     Raises:
       ValueError: If `with_fwd_only_fn` has not been called.
       TypeError: If the engine's model is not an NNX module.
     """
     if self._fwd_only_fn is None:
-      raise ValueError("MaxTextTrainingEngine.fwd_only needs a callback: call" " with_fwd_only_fn() first.")
+      raise ValueError("MaxTextTrainingEngine.fwd_only needs a callback: call with_fwd_only_fn() first.")
+    model = self._live_model()
     if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
       payload = dataclasses.replace(payload, metadata={})
     signature = _batch_signature(payload, {})
@@ -2351,10 +2382,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     with self._sharding_ctx():
       if self._compiled_fwd_only is None or self._needs_recompile(signature, self._compiled_fwd_only_signature):
-        self._compile_fwd_only_for_batch(payload, signature)
+        self._compile_fwd_only_for_batch(model, payload, signature)
       assert self._compiled_fwd_only is not None
-      params, rest = self._read_model_pure(self._live_model())
-      out = self._compiled_fwd_only(params, rest, payload)
+      params, rest = self._read_model_pure(model)
+      out = self._compiled_fwd_only(self._model_graphdef, params, rest, payload)
 
     self._throttler.add_computation(
         computation=[leaf for leaf in jax.tree.leaves(out) if isinstance(leaf, jax.Array)],
