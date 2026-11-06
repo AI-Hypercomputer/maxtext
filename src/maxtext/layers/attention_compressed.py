@@ -475,6 +475,31 @@ def prime_prefill_cache_state(
       cache.overlap_gate.set_value(overlap_gate_to_write)
 
 
+def topk_indices_to_selection_mask(top_k_indices: Array, compressed_len: int) -> Array:
+  """Marks the compressed blocks selected by the indexer.
+
+  Args:
+    top_k_indices: `[batch, seq, k]` selected block ids; negative ids are invalid.
+    compressed_len: Number of compressed blocks.
+
+  Returns:
+    A `[batch, seq, compressed_len]` bool array, True where the block id appears in the
+    row's valid top-k ids.
+  """
+  # Scatter the selected block ids straight into the mask rather than materializing a
+  # [batch, seq, k, compressed_len] comparison and reducing it. Duplicate ids are harmless
+  # (set is idempotent). Invalid (-1) ids must map past the end: JAX wraps negative indices
+  # before mode="drop" is applied, so map -1 to compressed_len.
+  safe_indices = jnp.where(top_k_indices >= 0, top_k_indices, compressed_len)
+
+  def _row_mask(row_indices):
+    return jnp.zeros((compressed_len,), dtype=jnp.bool_).at[row_indices].set(True, mode="drop")
+
+  # vmap (rather than explicit batch/seq index arrays) emits a scatter with batch and seq as
+  # batching dims, which the SPMD partitioner keeps sharded instead of gathering the operand.
+  return jax.vmap(jax.vmap(_row_mask))(safe_indices)
+
+
 def compute_hca_padding(
     q_len: int,
     comp_len: int,
@@ -1317,12 +1342,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
     # 3. Apply Dynamic Masking Logic
     k = top_k_indices.shape[-1]
     if k > 0:
-      valid = top_k_indices >= 0
-      entry_indices = jnp.arange(compressed_len)[None, None, :]
-      is_in_topk = jnp.expand_dims(top_k_indices, axis=-1) == entry_indices[None, ...]
-      is_valid_and_in_topk = is_in_topk & jnp.expand_dims(valid, axis=-1)
-
-      is_selected = jnp.any(is_valid_and_in_topk, axis=2)
+      is_selected = topk_indices_to_selection_mask(top_k_indices, compressed_len)
       is_selected = jnp.expand_dims(is_selected, axis=1)
 
       compressed_mask = jnp.where(is_selected, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)

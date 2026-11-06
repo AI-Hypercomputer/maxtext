@@ -17,11 +17,58 @@
 import unittest
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 from flax import nnx
 from maxtext.configs.pyconfig import initialize
-from maxtext.layers.attention_compressed import CompressedAttention
+from maxtext.layers.attention_compressed import CompressedAttention, topk_indices_to_selection_mask
 from tests.utils.test_helpers import get_test_config_path
+
+
+def _reference_selection_mask(top_k_indices, compressed_len):
+  """Broadcast-compare formulation: [batch, seq, k, compressed_len] reduced over k."""
+  valid = top_k_indices >= 0
+  entry_indices = jnp.arange(compressed_len)[None, None, :]
+  is_in_topk = jnp.expand_dims(top_k_indices, axis=-1) == entry_indices[None, ...]
+  is_valid_and_in_topk = is_in_topk & jnp.expand_dims(valid, axis=-1)
+  return jnp.any(is_valid_and_in_topk, axis=2)
+
+
+class TopkSelectionMaskTest(unittest.TestCase):
+  """The scatter-based selection mask matches the broadcast-compare reference."""
+
+  def _assert_matches_reference(self, top_k_indices, compressed_len):
+    top_k_indices = jnp.asarray(top_k_indices, dtype=jnp.int32)
+    expected = np.asarray(_reference_selection_mask(top_k_indices, compressed_len))
+    for fn in (topk_indices_to_selection_mask, jax.jit(topk_indices_to_selection_mask, static_argnums=1)):
+      actual = np.asarray(fn(top_k_indices, compressed_len))
+      self.assertEqual(actual.shape, top_k_indices.shape[:2] + (compressed_len,))
+      self.assertEqual(actual.dtype, np.bool_)
+      np.testing.assert_array_equal(actual, expected)
+
+  def test_random_indices_with_padding_and_duplicates(self):
+    batch, seq, k, compressed_len = 2, 16, 8, 12
+    key_ids, key_pad = jax.random.split(jax.random.PRNGKey(0))
+    # Ids drawn from a range smaller than k force duplicates within rows.
+    ids = jax.random.randint(key_ids, (batch, seq, k), 0, compressed_len // 2)
+    pad = jax.random.bernoulli(key_pad, 0.3, (batch, seq, k))
+    self._assert_matches_reference(jnp.where(pad, -1, ids), compressed_len)
+
+  def test_invalid_ids_select_nothing(self):
+    compressed_len = 6
+    # -1 must not wrap to the last block; other negatives and ids >= compressed_len are dropped.
+    top_k_indices = [[[-1, -1, -1], [-3, 6, 100], [5, -1, 5], [0, 5, -6]]]
+    self._assert_matches_reference(top_k_indices, compressed_len)
+    mask = np.asarray(topk_indices_to_selection_mask(jnp.asarray(top_k_indices), compressed_len))
+    np.testing.assert_array_equal(mask[0, 0], np.zeros(compressed_len, dtype=bool))
+    np.testing.assert_array_equal(mask[0, 1], np.zeros(compressed_len, dtype=bool))
+    np.testing.assert_array_equal(mask[0, 2], [False] * 5 + [True])
+    np.testing.assert_array_equal(mask[0, 3], [True] + [False] * 4 + [True])
+
+  def test_k_larger_than_compressed_len(self):
+    batch, seq, k, compressed_len = 1, 8, 16, 4
+    ids = jax.random.randint(jax.random.PRNGKey(1), (batch, seq, k), -1, compressed_len + 2)
+    self._assert_matches_reference(ids, compressed_len)
 
 
 class CompressedAttentionTest(unittest.TestCase):
