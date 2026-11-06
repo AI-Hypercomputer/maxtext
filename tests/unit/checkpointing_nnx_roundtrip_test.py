@@ -139,13 +139,14 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
 
   # --- helpers ---------------------------------------------------------------
 
-  def _manager(self):
+  def _manager(self, **kwargs):
     return checkpointing.create_orbax_checkpoint_manager(
         os.path.join(self._dir, "ckpt"),
         enable_checkpointing=True,
         use_async=False,
         save_interval_steps=1,
         dataset_type="tfds",
+        **kwargs,
     )
 
   def _trained(self, model):
@@ -197,6 +198,20 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
     restored = self._restore(manager, _Model)
 
     self.assertEqual(jax.tree_util.tree_structure(saved), jax.tree_util.tree_structure(restored))
+    matches = jax.tree_util.tree_map(_leaf_equal, saved, restored)
+    mismatched = [jax.tree_util.keystr(p) for p, ok in jax.tree_util.tree_leaves_with_path(matches) if not ok]
+    self.assertEqual(mismatched, [], f"leaves differ after round trip: {mismatched}")
+
+  def test_full_state_round_trip_without_array_metadata_is_exact(self):
+    """Colocated Python skips Orbax ArrayMetadata; the typed dropout rng key still round-trips."""
+    manager = self._manager(colocated_python_checkpointing=True)
+    state = self._trained(_Model(nnx.Rngs(0)))
+    saved = nnx.state(state).to_pure_dict()
+    self._save(manager, state)
+    written_dirs = {name for _, dirs, _ in os.walk(self._dir) for name in dirs}
+    self.assertNotIn("array_metadatas", written_dirs)
+    restored = self._restore(manager, _Model)
+
     matches = jax.tree_util.tree_map(_leaf_equal, saved, restored)
     mismatched = [jax.tree_util.keystr(p) for p, ok in jax.tree_util.tree_leaves_with_path(matches) if not ok]
     self.assertEqual(mismatched, [], f"leaves differ after round trip: {mismatched}")
