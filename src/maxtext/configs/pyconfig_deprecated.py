@@ -21,6 +21,7 @@ import math
 import os
 import sys
 import datetime
+import warnings
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
@@ -42,6 +43,35 @@ _MAX_PREFIX = "M_"
 
 # YAML attribute to specify inheritance.
 _BASE_CONFIG_ATTR = "base_config"
+_CONFIGS_MODULE_DIR = os.path.dirname(os.path.realpath(__file__))
+_DEFAULT_CONFIGS_DIR = _CONFIGS_MODULE_DIR
+
+
+def resolve_model_config_path(base_config_path: str, model_name: str, configs_dir: str | None = None) -> tuple[str, bool]:
+  """Resolves `<model_name>.yml` across active `models/` and fallback `models/deprecated/`."""
+  pkg_configs_dir = configs_dir if configs_dir is not None else _DEFAULT_CONFIGS_DIR
+  config_dir = os.path.dirname(base_config_path)
+  parent_config_dir = os.path.dirname(config_dir)
+
+  active_candidates = (
+      os.path.join(config_dir, "models", f"{model_name}.yml"),
+      os.path.join(parent_config_dir, "models", f"{model_name}.yml"),
+      os.path.join(pkg_configs_dir, "models", f"{model_name}.yml"),
+  )
+  for candidate in active_candidates:
+    if os.path.isfile(candidate):
+      return candidate, False
+
+  deprecated_candidates = (
+      os.path.join(config_dir, "models", "deprecated", f"{model_name}.yml"),
+      os.path.join(parent_config_dir, "models", "deprecated", f"{model_name}.yml"),
+      os.path.join(pkg_configs_dir, "models", "deprecated", f"{model_name}.yml"),
+  )
+  for candidate in deprecated_candidates:
+    if os.path.isfile(candidate):
+      return candidate, True
+
+  return os.path.join(pkg_configs_dir, "models", f"{model_name}.yml"), False
 
 
 def yaml_key_to_env_key(s: str) -> str:
@@ -893,12 +923,21 @@ class _HyperParameters:
     updated_keys = []
     if raw_keys["model_name"] != "default":
       model_name = raw_keys["model_name"]
-      # First look at the model configs next to the base_config_path, and
-      # fallback to the python codebase if the config cannot be found.
-      file_path = os.path.join(os.path.dirname(base_config_path), "models", f"{model_name}.yml")
-      if not os.path.isfile(file_path):
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
+      effective_config_path = (
+          config_name if (not os.path.isfile(base_config_path) and os.path.isfile(config_name)) else base_config_path
+      )
+      file_path, is_deprecated_model = resolve_model_config_path(effective_config_path, model_name)
+      if is_deprecated_model:
+        warnings.warn(
+            f"Model config '{model_name}' is deprecated under the MaxText Model Lifecycle Policy and will be removed"
+            " in a future release. Pin a prior release tag if you rely on this model.",
+            DeprecationWarning,
+            skip_file_prefixes=(_CONFIGS_MODULE_DIR,),
+        )
+        max_logging.log(
+            f"WARNING: Model config '{model_name}' is loaded from deprecated/ ({file_path}) and will be removed in a"
+            " future release."
+        )
       # Use omegaconf.OmegaConf to load the model-specific configuration.
       model_vars = omegaconf.OmegaConf.load(file_path)
       model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)

@@ -15,15 +15,23 @@
 """Tests for pyconfig."""
 
 import os.path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import warnings
 import jax.numpy as jnp
 import yaml
 
 from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.configs.pyconfig import (
+    _CONFIG_FILE_MAPPING,
+    _module_from_path,
+    resolve_config_path,
+    resolve_model_config_path,
+)
 from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
@@ -989,6 +997,120 @@ assert train._TF_AVAILABLE is False
     )
     self.assertEqual(cfg_override.weight_dtype, jnp.float32)
     self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
+
+  def test_resolve_model_config_path_priority_and_fallback(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      pkg_dir = os.path.join(tmpdir, "pkg_configs")
+      parent_dir = os.path.join(tmpdir, "custom_configs")
+      sub_dir = os.path.join(parent_dir, "post_train")
+      config_path = os.path.join(sub_dir, "sft.yml")
+      os.makedirs(sub_dir, exist_ok=True)
+
+      # 1. Missing everywhere -> returns default package active path with is_deprecated=False.
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, os.path.join(pkg_dir, "models", "gemma-2b.yml"))
+      self.assertFalse(is_deprecated)
+
+      # 2. Package deprecated fallback.
+      pkg_deprecated = os.path.join(pkg_dir, "models", "deprecated", "gemma-2b.yml")
+      os.makedirs(os.path.dirname(pkg_deprecated), exist_ok=True)
+      with open(pkg_deprecated, "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 2048\n")
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, pkg_deprecated)
+      self.assertTrue(is_deprecated)
+
+      # 3. Parent deprecated takes precedence over package deprecated.
+      parent_deprecated = os.path.join(parent_dir, "models", "deprecated", "gemma-2b.yml")
+      os.makedirs(os.path.dirname(parent_deprecated), exist_ok=True)
+      with open(parent_deprecated, "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 2048\n")
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, parent_deprecated)
+      self.assertTrue(is_deprecated)
+
+      # 4. Active package model always takes precedence over any deprecated path.
+      pkg_active = os.path.join(pkg_dir, "models", "gemma-2b.yml")
+      with open(pkg_active, "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 2048\n")
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, pkg_active)
+      self.assertFalse(is_deprecated)
+
+  def test_deprecated_model_config_fallback_and_active_precedence(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for cfg_filename in ("base.yml", "decoupled_base_test.yml"):
+        shutil.copyfile(
+            os.path.join(MAXTEXT_CONFIGS_DIR, cfg_filename),
+            os.path.join(tmpdir, cfg_filename),
+        )
+
+      test_cfg_basename = os.path.basename(get_test_config_path())
+      tmp_test_cfg = os.path.join(tmpdir, test_cfg_basename)
+      nested_dir = os.path.join(tmpdir, "post_train")
+      os.makedirs(nested_dir, exist_ok=True)
+      nested_cfg = os.path.join(nested_dir, "nested_test.yml")
+      with open(nested_cfg, "w", encoding="utf-8") as f:
+        f.write(f"base_config: ../{test_cfg_basename}\n")
+
+      active_models_dir = os.path.join(tmpdir, "models")
+      deprecated_models_dir = os.path.join(active_models_dir, "deprecated")
+      os.makedirs(deprecated_models_dir, exist_ok=True)
+
+      # Place gemma-2b ONLY in models/deprecated/.
+      shutil.copyfile(
+          os.path.join(MAXTEXT_CONFIGS_DIR, "models", "gemma-2b.yml"),
+          os.path.join(deprecated_models_dir, "gemma-2b.yml"),
+      )
+
+      # Place qwen3-0.6b in BOTH active models/ and models/deprecated/ (with sentinel dim).
+      shutil.copyfile(
+          os.path.join(MAXTEXT_CONFIGS_DIR, "models", "qwen3-0.6b.yml"),
+          os.path.join(active_models_dir, "qwen3-0.6b.yml"),
+      )
+      with open(os.path.join(deprecated_models_dir, "qwen3-0.6b.yml"), "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 99999\n")
+
+      with mock.patch.object(pyconfig, "_DEFAULT_CONFIGS_DIR", tmpdir):
+        with warnings.catch_warnings(record=True) as caught:
+          warnings.simplefilter("always", DeprecationWarning)
+          cfg_deprecated = pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), tmp_test_cfg],
+              skip_jax_distributed_system=True,
+              model_name="gemma-2b",
+          )
+        self.assertEqual(cfg_deprecated.base_emb_dim, 2048)
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning) and "gemma-2b" in str(w.message)]
+        self.assertEqual(len(dep_warnings), 1)
+        self.assertIn("MaxText Model Lifecycle Policy", str(dep_warnings[0].message))
+        self.assertEqual(os.path.realpath(dep_warnings[0].filename), os.path.realpath(__file__))
+
+        with warnings.catch_warnings(record=True) as caught_nested:
+          warnings.simplefilter("always", DeprecationWarning)
+          cfg_nested = pyconfig.initialize_pydantic(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), nested_cfg],
+              skip_jax_distributed_system=True,
+              model_name="gemma-2b",
+          )
+        self.assertEqual(cfg_nested.base_emb_dim, 2048)
+        nested_dep_warnings = [
+            w for w in caught_nested if issubclass(w.category, DeprecationWarning) and "gemma-2b" in str(w.message)
+        ]
+        self.assertEqual(len(nested_dep_warnings), 1)
+        self.assertEqual(os.path.realpath(nested_dep_warnings[0].filename), os.path.realpath(__file__))
+
+        with warnings.catch_warnings(record=True) as caught_active:
+          warnings.simplefilter("always", DeprecationWarning)
+          cfg_active = pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), tmp_test_cfg],
+              skip_jax_distributed_system=True,
+              model_name="qwen3-0.6b",
+          )
+        self.assertEqual(cfg_active.base_emb_dim, 1024)
+        active_dep_warnings = [
+            w for w in caught_active if issubclass(w.category, DeprecationWarning) and "qwen3-0.6b" in str(w.message)
+        ]
+        self.assertEqual(len(active_dep_warnings), 0)
 
 
 if __name__ == "__main__":

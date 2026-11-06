@@ -15,11 +15,12 @@
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
 import ast
+import copy
 import logging
 import os
 import sys
 from typing import Any
-import copy
+import warnings
 
 # Disable dill to avoid conflict with gfile (dill requires buffering=0, which gfile forbids)
 os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
@@ -40,6 +41,8 @@ from maxtext.utils import max_logging
 logger = logging.getLogger(__name__)
 
 _BASE_CONFIG_ATTR = "base_config"
+_CONFIGS_MODULE_DIR = os.path.dirname(os.path.realpath(__file__))
+_DEFAULT_CONFIGS_DIR = _CONFIGS_MODULE_DIR
 _MAX_PREFIX = "M_"
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: str2bool}
 
@@ -439,6 +442,40 @@ def initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] =
     raise e
 
 
+def resolve_model_config_path(config_path: str, model_name: str, configs_dir: str | None = None) -> tuple[str, bool]:
+  """Resolves `<model_name>.yml` across active `models/` and fallback `models/deprecated/`.
+
+  Returns:
+    A `(resolved_path, is_deprecated)` tuple. Active `models/` directories take
+    precedence over `models/deprecated/` directories. When no file exists on
+    disk, returns the default package `models/<model_name>.yml` path with
+    `is_deprecated=False`.
+  """
+  pkg_configs_dir = configs_dir if configs_dir is not None else _DEFAULT_CONFIGS_DIR
+  config_dir = os.path.dirname(config_path)
+  parent_config_dir = os.path.dirname(config_dir)
+
+  active_candidates = (
+      os.path.join(config_dir, "models", f"{model_name}.yml"),
+      os.path.join(parent_config_dir, "models", f"{model_name}.yml"),
+      os.path.join(pkg_configs_dir, "models", f"{model_name}.yml"),
+  )
+  for candidate in active_candidates:
+    if os.path.isfile(candidate):
+      return candidate, False
+
+  deprecated_candidates = (
+      os.path.join(config_dir, "models", "deprecated", f"{model_name}.yml"),
+      os.path.join(parent_config_dir, "models", "deprecated", f"{model_name}.yml"),
+      os.path.join(pkg_configs_dir, "models", "deprecated", f"{model_name}.yml"),
+  )
+  for candidate in deprecated_candidates:
+    if os.path.isfile(candidate):
+      return candidate, True
+
+  return active_candidates[-1], False
+
+
 def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic config class whereas `initialize` returns the og `HyperParameters`
@@ -472,22 +509,21 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
   model_name = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
   model_cfg = {}
   if model_name != "default":
-    # First try relative to base config path
-    model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
-    # Try looking for "models" under "src/maxtext/configs/"
-    if not os.path.isfile(model_config_path):
-      model_config_path = os.path.join(
-          os.path.dirname(os.path.dirname(config_path)),
-          "models",
-          f"{model_name}.yml",
-      )
-
-    if not os.path.isfile(model_config_path):
-      # Fallback to the default location within package
-      dir_path = os.path.dirname(os.path.realpath(__file__))
-      model_config_path = os.path.join(dir_path, "models", f"{model_name}.yml")
+    model_config_path, is_deprecated_model = resolve_model_config_path(config_path, model_name)
 
     if os.path.exists(model_config_path):
+      if is_deprecated_model:
+        warnings.warn(
+            f"Model config '{model_name}' is deprecated under the MaxText Model Lifecycle Policy and will be removed"
+            " in a future release. Pin a prior release tag if you rely on this model.",
+            DeprecationWarning,
+            skip_file_prefixes=(_CONFIGS_MODULE_DIR,),
+        )
+        logger.warning(
+            "Model config '%s' is loaded from deprecated/ (%s) and will be removed in a future release.",
+            model_name,
+            model_config_path,
+        )
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
       # if override_model_config=True, only apply model configs for keys not present in overrides.
       if temp_cfg.get("override_model_config"):
