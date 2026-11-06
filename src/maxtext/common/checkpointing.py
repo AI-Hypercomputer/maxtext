@@ -396,6 +396,9 @@ def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   Returns:
     The NNX state. Leaves the checkpoint doesn't hold, e.g. caches, stay `jax.ShapeDtypeStruct`s.
   """
+  restored_linen = checkpoint_context.rewrap_raw_prng_keys(
+      restored_linen, train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
+  )
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
 

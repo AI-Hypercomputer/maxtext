@@ -82,6 +82,14 @@ class DummyStatefulNNXModel(nnx.Module):
     self.calls = nnx.BatchStat(jnp.array(0.0))
 
 
+class DummyRngNNXModel(nnx.Module):
+  """A model whose state holds a typed PRNG key, as models with dropout do."""
+
+  def __init__(self, seed: int):
+    self.weights = nnx.Param(jnp.array([1.0, 2.0]))
+    self.rngs = nnx.Rngs(dropout=seed)
+
+
 @struct.dataclass(frozen=True, kw_only=True)
 class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
@@ -1230,6 +1238,33 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     t2._checkpoint_manager.wait_until_finished()
     t3 = maxtext_engine.MaxTextTrainingEngine(cfg)
     self.assertEqual(t3.restore_checkpoint(), {"step": 2})
+
+  def test_restore_rewraps_prng_keys_saved_without_array_metadata(self):
+    """Colocated Python saves no ArrayMetadata; the restored PRNG key must still be a typed key."""
+    build_context = checkpoint_context.build_context
+
+    def build_context_without_array_metadata(**kwargs):
+      ctx = build_context(**kwargs)
+      ctx.array.saving.array_metadata_store = None
+      return ctx
+
+    self.enter_context(
+        mock.patch.object(checkpoint_context, "build_context", side_effect=build_context_without_array_metadata)
+    )
+    cfg = self.setup_config(enable_checkpointing=True)
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.return_value = (DummyRngNNXModel(seed=1), mesh)
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    saved_key = jax.random.key_data(jax.tree.leaves(nnx.state(t.model, nnx.RngKey))[0])
+    t.save_checkpoint(metadata={}, force=True)
+    t._checkpoint_manager.wait_until_finished()
+
+    self.mock_from_pretrained.return_value = (DummyRngNNXModel(seed=2), mesh)
+    t2 = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t2.restore_checkpoint()
+    restored_key = jax.tree.leaves(nnx.state(t2.model, nnx.RngKey))[0]
+    self.assertTrue(jax.dtypes.issubdtype(restored_key.dtype, jax.dtypes.prng_key))
+    np.testing.assert_array_equal(jax.random.key_data(restored_key), saved_key)
 
   def test_restores_a_checkpoint_written_with_the_orbax_v0_checkpoint_manager(self):
     """Checkpoints written before the move to `training.Checkpointer` still restore, metadata included."""

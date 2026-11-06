@@ -15,11 +15,13 @@
 """Maps MaxText checkpoint config onto the Orbax v1 Context + training policies.
 
 This module is the single place that translates MaxText's flat checkpoint flags
-into those objects. It builds configuration only.
+into those objects. It builds configuration only, plus `rewrap_raw_prng_keys` for restoring
+what one of those settings saves.
 """
 import datetime
 from typing import Any
 
+import jax
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import v1 as ocp
 
@@ -142,6 +144,7 @@ def build_context(
       to the rest (replaces the v0 ``SingleReplicaArrayHandler``).
     replica_axis_index: Mesh axis separating replicas for load-and-broadcast.
     colocated_python_checkpointing: Use Pathways colocated-python checkpointing.
+      Skips Orbax's per-process ArrayMetadata.
     enable_pathways_persistence: Use the Pathways persistence array handler, which
       writes from the TPU workers directly to storage. Colocated Python takes
       precedence when both are set.
@@ -198,6 +201,10 @@ def build_context(
       use_colocated_python=colocated_python_checkpointing,
       use_persistence_array_handler=enable_pathways_persistence,
   )
+  if colocated_python_checkpointing:
+    # Otherwise each worker waits up to 600s for process 0 to create `array_metadatas/`,
+    # which hangs elastic resizes while process 0 is down or late (b/547505923).
+    ctx.array.saving.array_metadata_store = None
 
   if partial_load:
     ctx.pytree.loading.partial_load = True
@@ -206,3 +213,25 @@ def build_context(
     ctx.checkpoint_layout = checkpoint_layout
 
   return ctx
+
+
+def rewrap_raw_prng_keys(restored: Any, abstract: Any) -> Any:
+  """Re-wraps typed PRNG keys that a checkpoint without Orbax ArrayMetadata restores as raw key data.
+
+  `build_context` skips ArrayMetadata under `colocated_python_checkpointing`, so restores of
+  those checkpoints need this.
+  """
+  abstract_leaves = dict(jax.tree_util.tree_leaves_with_path(abstract))
+
+  def rewrap(path, leaf):
+    target_dtype = getattr(abstract_leaves.get(path), "dtype", None)
+    if (
+        isinstance(leaf, jax.Array)
+        and target_dtype is not None
+        and jax.dtypes.issubdtype(target_dtype, jax.dtypes.prng_key)
+        and not jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key)
+    ):
+      return jax.random.wrap_key_data(leaf, dtype=target_dtype)
+    return leaf
+
+  return jax.tree_util.tree_map_with_path(rewrap, restored)
