@@ -26,7 +26,6 @@ from typing import Any, Optional, Tuple
 import jax.numpy as jnp
 from flax import nnx
 from jax import Array
-from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
 from maxtext.integration.tunix.utils import VllmWeightMapping
 from maxtext.models.models import Transformer
 
@@ -108,6 +107,10 @@ class TunixMaxTextAdapter(nnx.Module):
       pad_id: Optional[int] = None,
   ):
     super().__init__()
+    # Imported here: building the HF model configs imports transformers/torch(vision), which pre-training
+    # pulls in transitively via model_creation_utils but never uses.
+    from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=import-outside-toplevel
+
     self.base = base_model
     self._vllm_weight_mapping = VllmWeightMapping(
         self.base.config.model_name,
