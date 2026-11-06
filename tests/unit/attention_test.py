@@ -4878,6 +4878,142 @@ class MLATest(attention_test_util.MLATestBase):
       },
   )
   @pytest.mark.tpu_only
+  def test_tpu_flash_attention_context_parallel_grad_with_indexer(
+      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
+  ):
+    """Test gradient equivalence between dot_product and flash attention + all-gather context parallelism with Indexer.
+
+    This path uses the custom VJP of flash_attention_block_masked, so the
+    forward test above does not cover its backward pass.
+    """
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_target_length": 512,
+        "sa_block_q": 128,
+        "sa_block_kv": 128,
+        "sa_block_kv_compute": 128,
+        "sa_block_q_dkv": 128,
+        "sa_block_kv_dkv": 128,
+        "sa_block_kv_dkv_compute": 128,
+        "attention_type": AttentionType.MLA.value,
+        "use_indexer": True,
+        "indexer_loss_scaling_factor": 0.1,
+        "indexer_topk": indexer_topk,
+        "q_lora_rank": 4,
+        "kv_lora_rank": 4,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "dtype": "float32",
+    }
+
+    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **config_arguments,
+        attention="flash",
+        rope_type=cfg.rope_type,
+        context_parallel_strategy="all_gather",
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_context_parallelism=ici_context_parallelism,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=False,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_as_mla_flash_cp = MLA(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          attention_type=AttentionType(cfg_cp.attention_type),
+          q_lora_rank=cfg_cp.q_lora_rank,
+          kv_lora_rank=cfg_cp.kv_lora_rank,
+          qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
+          qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
+          v_head_dim=cfg_cp.v_head_dim,
+          model_mode=MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
+    nnx.update(attention_as_mla_flash_cp, nnx.state(mla))
+    generic_graphdef, generic_state = nnx.split(mla)
+    cp_graphdef, cp_state = nnx.split(attention_as_mla_flash_cp)
+
+    def generic_loss(lnx):
+      mla_merged = nnx.merge(generic_graphdef, generic_state)
+      output, _ = mla_merged(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def cp_loss(lnx):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
+        cp_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        cp_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        cp_decoder_segment_ids = decoder_segment_ids
+        cp_decoder_positions = decoder_positions
+      cp_merged = nnx.merge(cp_graphdef, cp_state)
+      output, _ = cp_merged(
+          lnx,
+          lnx,
+          decoder_segment_ids=cp_decoder_segment_ids,
+          inputs_positions=cp_decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      cp_grad = jax.grad(cp_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    cp_grad = jax.device_get(cp_grad)
+
+    self.assertTrue(
+        jax.numpy.allclose(generic_grad, cp_grad, rtol=1e-02, atol=1e-06, equal_nan=False),
+        msg=(
+            "MLA+Indexer input gradients from generic dot product and flash attention + all-gather context"
+            f" parallelism are not close. context_parallel_load_balance={context_parallel_load_balance}."
+        ),
+    )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "no_lb_cp2",
+          "context_parallel_load_balance": False,
+          "ici_context_parallelism": 2,
+          "indexer_topk": 256,
+      },
+      {
+          "testcase_name": "lb_cp4_smallk",
+          "context_parallel_load_balance": True,
+          "ici_context_parallelism": 4,
+          "indexer_topk": 32,
+      },
+  )
+  @pytest.mark.tpu_only
   def test_tpu_flash_attention_ring_context_parallel_with_indexer(
       self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
   ):
