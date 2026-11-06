@@ -482,6 +482,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
       use_scale: bool = True,
+      scale_factor: float = 8.0,
+      low_freq_factor: float = 1.0,
+      high_freq_factor: float = 4.0,
       shard_mode: ShardMode = ShardMode.AUTO,
       # Not used in LLaMARotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
@@ -498,6 +501,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
       fprop_dtype: The dtype of the output.
       use_scale: Whether to apply LLaMA3.1 scaling factor.
+      scale_factor: LLaMA3.1 scaling factor (8 for Llama 3.1, 16 for Llama 4 Scout).
+      low_freq_factor: LLaMA3.1 low frequency factor.
+      high_freq_factor: LLaMA3.1 high frequency factor (4 for Llama 3.1, 1 for Llama 4 Scout).
       rngs: rng keys passed in by nnx.bridge.to_linen.
     """
     super().__init__(
@@ -514,6 +520,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     # LLaMA3.1 ROPE scaling, see the original pytorch implementation:
     # https://github.com/meta-llama/llama-models/blob/301ca3a2b3b10e94ddcd1fdd2c57e52f812e1cac/models/llama3/reference_impl/model.py#L45C5-L45C18
     self.use_scale = use_scale
+    self.scale_factor = scale_factor
+    self.low_freq_factor = low_freq_factor
+    self.high_freq_factor = high_freq_factor
 
   @property
   def timescale(self):
@@ -531,9 +540,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
 
   def _apply_scaling_factor(self, freq):
     """apply scaling factor to rotary position embedding."""
-    scale_factor = 8
-    low_freq_factor = 1
-    high_freq_factor = 4
+    scale_factor = self.scale_factor
+    low_freq_factor = self.low_freq_factor
+    high_freq_factor = self.high_freq_factor
     old_context_len = 8192  # original llama3 length
 
     low_freq_wavelen = old_context_len / low_freq_factor
@@ -548,6 +557,8 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
         return freq / scale_factor
 
       def equal_wavelen(freq):
+        if high_freq_factor == low_freq_factor:  # no transition band (Llama 4 Scout)
+          return freq / scale_factor
         smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
         return (1 - smooth) * freq / scale_factor + smooth * freq
 
