@@ -22,12 +22,13 @@ import jax.numpy as jnp
 import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
+from maxtext.utils import max_logging
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
 
-def _get_path_mask_fn(patterns, match_returns_true=True):
+def get_path_mask_fn(patterns, match_returns_true=True):
   """Helper to create a mask function from a list of regex patterns."""
   if not patterns:
     return None
@@ -48,7 +49,7 @@ def _get_path_mask_fn(patterns, match_returns_true=True):
 
 def get_adamw_mask(config):
   """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
-  return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
+  return get_path_mask_fn(config.adamw_mask, match_returns_true=False)
 
 
 def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
@@ -250,28 +251,80 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
-  if getattr(config, "skip_step_on_spikes", False):
+  # Apply `trainable_parameters_mask` before `skip_step_on_spikes` so `skip_step_on_spikes`
+  # stays the outermost transformation: callers expect `opt_state` to be a top-level dict
+  # exposing `opt_state["is_skipped"]` (whereas `optax.multi_transform` wraps state in
+  # `PartitionState`), while `multi_transform` still forwards extra_args (`loss`, `grad_norm`)
+  # and avoids allocating optimizer state for frozen parameters (`MaskedNode` placeholders in
+  # the trainable branch's state and a single `EmptyState` for the frozen branch).
+  base_opt = apply_trainable_parameters_mask(base_opt, config)
+
+  if config.skip_step_on_spikes:
     base_opt = skip_step_on_spikes(
         base_opt,
         interval=config.skip_step_interval,
         scaling_factor=config.skip_step_scaling_factor,
     )
 
-  # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
-    return optax.multi_transform(
-        {"trainable": base_opt, "frozen": optax.set_to_zero()},
-        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
-    )
-
   return base_opt
+
+
+def apply_trainable_parameters_mask(base_opt, config):
+  """Freeze every parameter not matched by `config.trainable_parameters_mask`.
+
+  Returns `base_opt` unchanged when the mask is empty, so callers can apply this
+  unconditionally. Wrap only the optimizer itself, not a chain that includes
+  gradient clipping: in the `pre_train` loop, clipping sees the whole gradient
+  tree before updates are zeroed, whereas `MaxTextTrainingEngine` also stops
+  gradients on frozen parameters inside its forward-backward kernel so frozen
+  parameters are excluded from both gradient computation and `grad_norm`.
+  """
+  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  trainable_patterns = config.trainable_parameters_mask
+  freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  if freeze_mask_fn is None:
+    return base_opt
+
+  has_logged = False
+
+  def _label_params(params):
+    """Labels every parameter array, and reports what the mask actually did.
+
+    `trainable_parameters_mask` is a whitelist, so expressing "freeze only X"
+    needs a negative pattern -- and a pattern that matches nothing freezes the
+    whole model. In the `pre_train` loop that failure is otherwise silent
+    (gradients are still computed and `grad_norm` looks normal, only the updates
+    are zeroed), while `MaxTextTrainingEngine` stops gradients on frozen leaves
+    up front. Log the counts once so the intent is checkable against the run log.
+    """
+    nonlocal has_logged
+    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
+    if not has_logged:
+      has_logged = True
+      leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
+      frozen = [p for p, v in leaves if v == "frozen"]
+      max_logging.log(
+          f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}" f" of {len(leaves)} parameter arrays"
+      )
+      if not frozen:
+        max_logging.warning("trainable_parameters_mask froze nothing -- did the pattern match everything?")
+      elif len(frozen) == len(leaves):
+        max_logging.warning("trainable_parameters_mask froze EVERY parameter -- training is a no-op")
+      max_display = 50
+      for path in frozen[:max_display]:
+        max_logging.log(f"  frozen: {jax.tree_util.keystr(path, simple=True, separator='/')}")
+      if len(frozen) > max_display:
+        max_logging.log(f"  ... and {len(frozen) - max_display} more frozen parameter arrays")
+    return labels
+
+  # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
+  # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
+  # massive states (momentum, variance) for the entire model before zeroing the updates.
+  # By using multi_transform, only the trainable parameters get states allocated.
+  return optax.multi_transform(
+      {"trainable": base_opt, "frozen": optax.set_to_zero()},
+      _label_params,
+  )
 
 
 def adam_pax(
