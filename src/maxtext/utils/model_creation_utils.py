@@ -736,9 +736,11 @@ def create_model(
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
     model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
     model = m3_scan.maybe_apply_scan(model, config)
+    model = add_named_scopes(model)
     return model
 
   # Model definition
