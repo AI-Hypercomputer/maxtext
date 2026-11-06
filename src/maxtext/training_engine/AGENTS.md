@@ -12,6 +12,7 @@ Here are the refactoring rules:
 The execution scripts for this code currently live in the Tunix `atwigg/mlperf` branch under the `experimental` directory. Check if the features that we are porting were actually used in the final MLPerf submission.
 
 * Place config flags in the categories that they belong to (e.g., checkpointing settings in `Checkpointing`, rollout-specific settings in `vllm` such as `vllm.rollout_fp8_moe`, etc.).
+* Place config flags that are specific to `maxtext_engine` and Tunix (such as `CompileConfig` for standalone AOT compilation) in `src/maxtext/configs/maxtext_engine_types.py` rather than flooding `src/maxtext/configs/base.yml` or `src/maxtext/configs/types.py`.
 * MaxText should be configured using Pydantic config and not via environment variables. Replace environment variables with config flags.
 * AI agents tend to use defensive `getattr(config, "flag_name", None)`. We should directly use `config.flag_name` instead. Some unit tests might need to be updated to use Pydantic to avoid test failures.
 
