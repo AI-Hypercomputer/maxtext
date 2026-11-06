@@ -3756,6 +3756,10 @@ class VLLM(BaseModel):
   """vLLM-specific configuration for rollouts."""
 
   rollout_fp8_moe: bool = Field(False, description="Enable FP8 MoE for the rollout.")
+  rollout_fp8_full: bool = Field(
+      False,
+      description="Enable full-model FP8 (both MoE and quantized DenseGeneral layers) for the rollout.",
+  )
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")

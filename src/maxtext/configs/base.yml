@@ -1684,6 +1684,8 @@ use_raiden_ffi: null
 vllm_load_format: "dummy"
 # Enable FP8 MoE for the rollout
 rollout_fp8_moe: false
+# Enable full-model FP8 (both MoE and quantized DenseGeneral layers) for the rollout
+rollout_fp8_full: false
 
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
