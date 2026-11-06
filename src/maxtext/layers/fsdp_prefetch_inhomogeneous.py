@@ -331,7 +331,7 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
   """Backward pass with each sub-layer's tagged dW reduce-scatters deferred to the next backward step.
 
   As in `fsdp_prefetch._custom_vjp_prefetch_pipeline_bwd` with `defer_grad_reduce_scatter`, the
-  weight gradients of sub-layer j that get a tagged (dedicated SparseCore) reduce-scatter are carried
+  weight gradients of sub-layer j that get a deferred reduce-scatter are carried
   unreduced into the step of sub-layer j-1, which issues it before its own all-gather, so it completes
   with that all-gather and overlaps that sub-layer's recompute and vjp. A reduce-scatter must complete
   within the while-loop that issues it, so it is issued in the loop that runs sub-layer j-1:
