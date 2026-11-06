@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793914261361,
+  "lastUpdate": 1793927339058,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -64665,6 +64665,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 336,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "e4a3d98eac20d30c086e8fb3dde8cc351af6d4ae",
+          "message": "Refactor MaxTextTrainingEngine state lifecycle, property setters, and single-pass state settlement\n\n# Description\n\n- Unify `model.setter`, `optimizer.setter`, and `state.setter` around a shared `_reset_compiled_state(reset_model=...)` helper that also clears `self._state` on model and optimizer replacement, discards any in-flight gradient accumulation (`reset_accumulation()`), and initializes all compiled executable and graphdef attributes (`_compiled_fwd_bwd`, `_compiled_fwd_bwd_accum`, `_compiled_update`, `_model_graphdef`, `_state_graphdef`) in `__init__`.\n- Ensure `state.setter` synchronizes `self._model = getattr(value, 'model', None)` and `self._optimizer = getattr(value, 'optimizer', None)` (setting them to `None` if the new state lacks them rather than silently keeping the old objects) so `engine.model` and `engine.optimizer` never drift from `engine.state`.\n- Consolidate `_place_state_on_mesh` and `_shard_optimizer_state_over_data` into a single-pass `_settle_state()` helper that computes the final target sharding for each model and optimizer leaf in one traversal and invokes `jax.device_put` at most once per leaf.\n- Only call `_refresh_pure_state()` after `restore_checkpoint` when the engine has already compiled executables (`if self._compiled:`).\n- Deduplicate `model` resolution in `fwd_bwd` and simplify `update()`'s compiled branch check (`if self._compiled:`).\n- Add unit tests covering `state.setter` synchronization, clearing in-flight accumulation on setter calls, clearing model/optimizer when state lacks them, and single-pass `_settle_state()` exercising Zero-1 moment sharding.\n\n# Tests\n\n```bash\npytest tests/post_training/unit/maxtext_engine_test.py -k \"test_state_setter or test_settle_state or test_setters_reset\" -q\n```\nResult: Unit tests passed. Pre-commit (codespell, pylint, pyink, yamllint) passed cleanly.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1015100601",
+          "timestamp": "2026-11-06T01:00:10Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/e4a3d98eac20d30c086e8fb3dde8cc351af6d4ae"
+        },
+        "date": 1793927338272,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 260.9319999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 64.515,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2102.924,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 137.4379999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 162.64600000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4804.542,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1586.2980000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 206.952,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4469.090999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 340,
             "unit": "count"
           }
         ]
