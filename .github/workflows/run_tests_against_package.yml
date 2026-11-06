@@ -237,6 +237,26 @@ jobs:
               fi
             fi
           fi
+          if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            # CPU flavors run the suite under pytest-xdist inside one container whose cgroup memory
+            # limit (~125 GiB on linux-x86-n4-32) is shared by every worker. A single TrainCompile AOT
+            # compile peaks at 10-16 GB and the worker keeps 6-8 GB afterwards, so -n auto (32 workers)
+            # overcommits the pod: scheduled shards died at 94-99 % progress with no traceback (container
+            # or runner lost, #6052), consistent with hitting that limit. 8 workers leave ~16 GB each.
+            # Keep CPU_XDIST_PARALLELISM in tools/dev/calculate_workers.py in sync.
+            CPU_XDIST_WORKERS=8
+            # glibc otherwise creates up to 8*ncores malloc arenas per process, inflating RSS.
+            export MALLOC_ARENA_MAX=2
+            # Log the actual memory and /tmp budget so a killed shard or a full disk can be diagnosed from
+            # the run log. (/tmp is a 9p mount on the runner's ~98 GB work disk, not tmpfs, so the
+            # TrainCompile pickles are not RAM-resident; tests/unit/train_compile_test.py removes them anyway.)
+            echo "CPU test budget: nproc=$(nproc) xdist_workers=${CPU_XDIST_WORKERS}"
+            echo "cgroup memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
+            free -g || true
+            df -h /tmp || true
+            findmnt -T /tmp 2>/dev/null || mount | grep ' /tmp ' || true
+            echo "cgroup files: $(find /sys/fs/cgroup/ -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || true)"
+          fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ] && [ "${INPUTS_DEVICE_TYPE}" = "tpu" ] && [[ "${INPUTS_FLAVOR}" == *-unit ]]; then
             # TPU unit flavors: whole test classes stay on one shard (tests/utils/class_split.py), so the first
             # test of a class pays its XLA compile in scheduled and PR runs alike. The rest keep pytest-split
@@ -259,13 +279,13 @@ jobs:
             fi
             if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
               $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto ${SPLIT_ALGO}"
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n ${CPU_XDIST_WORKERS} ${SPLIT_ALGO}"
             else
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
             fi
           elif [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
             $PYTHON_EXE -m pip install --quiet pytest-xdist
-            SPLIT_ARGS="-n auto"
+            SPLIT_ARGS="-n ${CPU_XDIST_WORKERS}"
           else
             SPLIT_ARGS=""
           fi
@@ -286,8 +306,37 @@ jobs:
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
+            MEMWATCH_PID=""
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+              # Sample memory while pytest runs. The scheduled shard deaths leave no log of their own, so these
+              # samples are the only record of how close a shard got to the cgroup limit and of how much
+              # headroom CPU_XDIST_WORKERS leaves (#6052). memory.peak needs kernel >= 5.19 and may not be
+              # emulated by the sandbox; the RSS sum works everywhere (it double-counts shared pages, so it
+              # is an upper bound).
+              mem_sample() {
+                local cur peak rss
+                cur=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo unknown)
+                peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo unknown)
+                rss=$(awk '/^VmRSS:/ {s+=$2} END {printf "%.1fGiB", s/1048576}' /proc/[0-9]*/status 2>/dev/null || echo unknown)
+                echo "[memwatch $(date -u +%H:%M:%S)] memory.current=${cur} memory.peak=${peak} rss_sum=${rss}"
+              }
+              (
+                while kill -0 "$PYTEST_PID" 2>/dev/null; do
+                  mem_sample
+                  # Sleep in 1 s slices so the sampler exits promptly when pytest does (an orphaned `sleep 30`
+                  # would hold the step's stdout open until it expired).
+                  for _ in $(seq 30); do kill -0 "$PYTEST_PID" 2>/dev/null || break; sleep 1; done
+                done
+              ) &
+              MEMWATCH_PID=$!
+            fi
             PYTEST_EXIT_CODE=0
             wait "$PYTEST_PID" || PYTEST_EXIT_CODE=$?
+            if [ -n "$MEMWATCH_PID" ]; then
+              kill "$MEMWATCH_PID" 2>/dev/null || true
+              wait "$MEMWATCH_PID" 2>/dev/null || true
+              echo "[memwatch] final: $(mem_sample | sed 's/^\[memwatch [0-9:]*\] //') memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
+            fi
             if [ "$PYTEST_EXIT_CODE" -eq 2 ] || [ "$PYTEST_EXIT_CODE" -eq 3 ]; then
               # An interrupted session (e.g. a collection error) still writes a result file, without the test times.
               # Drop it so process_test_results.py counts this shard as missing instead of saving a near-zero total.

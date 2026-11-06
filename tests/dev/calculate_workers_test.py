@@ -36,7 +36,7 @@ def test_constants():
   assert DEFAULT_WORKERS == 1
   assert LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD == 16.0
   assert TARGET_MINUTES_PER_WORKER == 8.0
-  assert CPU_XDIST_PARALLELISM == 16
+  assert CPU_XDIST_PARALLELISM == 8
 
 
 def test_get_max_workers_for_flavor():
@@ -79,7 +79,7 @@ def test_calculate_workers_zero_matching_tests():
 
 def test_calculate_workers_heavy_suite():
   """Tests worker allocation for heavy suites (>= 16 effective mins)."""
-  baseline = {f"cpu-unit::test_{i}": 600.0 for i in range(30)}  # 300 CPU-mins -> 18.75 eff mins
+  baseline = {f"cpu-unit::test_{i}": 600.0 for i in range(30)}  # 300 CPU-mins -> 37.5 eff mins
   workers, groups = calculate_workers("cpu-unit", baseline)
   assert workers == 4
   assert groups == [1, 2, 3, 4]
@@ -100,7 +100,7 @@ def test_calculate_workers_lightweight_suite():
   baseline_medium = {f"gpu-integration::test_{i}": 100.0 for i in range(6)}
   assert calculate_workers("gpu-integration", baseline_medium) == (2, [1, 2])
 
-  # 20 CPU tests taking 60s each = 20.0 CPU-mins -> 1.25 eff mins under xdist -> 1 worker
+  # 20 CPU tests taking 60s each = 20.0 CPU-mins -> 2.5 eff mins under xdist -> 1 worker
   baseline_cpu = {f"cpu-post-training-unit::test_{i}": 60.0 for i in range(20)}
   assert calculate_workers("cpu-post-training-unit", baseline_cpu) == (1, [1])
 
