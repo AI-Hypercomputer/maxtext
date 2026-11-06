@@ -136,6 +136,7 @@ dtype: "bfloat16"
 # 'fp8' for 8-bit floating-point gemms on nvidia gpus.
 # 'nanoo_fp8' for 8-bit floating-point gemms on amd mi300/mi325 gpus.
 # 'fp8_full' for fp8 quantization with static scaling.
+# 'multipass' for qwix multi-pass residual quantization (see qwix_multipass_mode below).
 # 'serve_fp8_weight' to load and use FP8 checkpoint directly at inference time.
 # 'jax_mxfp8' / 'jax_mxfp4' for OCP MX training through jax.nn.scaled_dot_general.
 quantization: ""
@@ -188,6 +189,13 @@ quantization_local_shard_count: -1
 # 1 = no tiling; >1 makes XLA all-reduce the full weight gradient under FSDP instead of reduce-scattering it.
 # Applies to quantization=int8, fp8, etc.; ignored by fp8_full, which never tiles weight gradients (same as 1).
 qwix_bwd_weight_grad_tile_count: 1
+# quantization=multipass only: qwix multi-pass mode of the forward, activation-gradient (dlhs) and weight-gradient (drhs) matmuls,
+# e.g. 'three_pass_fp8', 'four_pass_int4', 'three_pass_fp8_fp4/fp4_fp4/fp4'. "" leaves that matmul unquantized; set at least one.
+qwix_multipass_mode: ""
+qwix_dlhs_multipass_mode: ""
+qwix_drhs_multipass_mode: ""
+# quantization=multipass only: block size along the contraction axis of the forward matmul. null = one scale per channel.
+qwix_multipass_tile_size: null
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
 weight_sparsity_n: null
 # The 'M' in N:M sparsity, representing the number of values in each block.

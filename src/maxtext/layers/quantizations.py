@@ -1261,6 +1261,105 @@ class NANOOFp8Provider(qwix.QtProvider):
     return _apply_fp8_op_in_nnx(NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
 
 
+_QWIX_MULTIPASS_MODE_KEYS = ("multipass_mode", "dlhs_multipass_mode", "drhs_multipass_mode")
+
+
+class MultipassQtProvider(qwix.QtProvider):
+  """`qwix.QtProvider` for `quantization=multipass`.
+
+  A multi-pass rule sets no `weight_qtype`: the mode in `additional_qt_config`
+  picks the pass dtypes and consumes unquantized operands. Upstream `QtProvider`
+  skips such rules, so `dot_general` also dispatches on the multi-pass modes
+  here, and `einsum` only quantizes weight contractions (see its docstring).
+
+  TODO(b/582860484): Remove the `dot_general` override once the Qwix releases
+  MaxText supports run multi-pass rules themselves.
+  """
+
+  @staticmethod
+  def _has_multipass_mode(rule: qwix.QtRule) -> bool:
+    modes = rule.additional_qt_config or {}
+    return any(modes.get(k) for k in _QWIX_MULTIPASS_MODE_KEYS)
+
+  def _is_passthrough(self, rule: qwix.QtRule | None) -> bool:
+    return rule is None or (rule.weight_qtype is None and not self._has_multipass_mode(rule))
+
+  def dot_general(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      *,
+      out_sharding=None,
+  ) -> jax.Array:
+    """Routes multi-pass rules to `dot_general_qt`; else matches `QtProvider`."""
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if self._is_passthrough(rule):
+      return jax.lax.dot_general(
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
+      )
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
+    return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
+
+  def einsum(
+      self,
+      einsum_str: str,
+      *operands: jax.Array,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      _dot_general: Callable[..., jax.Array] = jax.lax.dot_general,  # pylint: disable=invalid-name
+      out_sharding=None,
+  ) -> jax.Array:
+    """Multi-passes an einsum only when contracting a parameter and activation.
+
+    MaxText also writes activation-only products (attention scores, MoE
+    dispatch/combine, routing-weight sums) and the contraction-free RMSNorm
+    scaling as `jnp.einsum`. A module-path rule cannot tell them from the expert
+    weight einsums of the dense MoE path, and `QtProvider.einsum` would quantize
+    them all.
+    """
+    rule, op_id = self._get_current_rule_and_op_id("einsum")
+    if self._is_passthrough(rule) or len(operands) != 2:
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          _dot_general=_dot_general,
+          out_sharding=out_sharding,
+      )
+
+    def custom_dot_general(lhs, rhs, dimension_numbers, precision, preferred_element_type, **kwargs):
+      (lhs_contracting, _), _ = dimension_numbers
+      # einsum may swap lhs and rhs, so look the parameter up here.
+      operands_are_params = (flax_util.find_param(lhs) is not None, flax_util.find_param(rhs) is not None)
+      if not lhs_contracting or operands_are_params.count(True) != 1:
+        return jax.lax.dot_general(
+            lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=preferred_element_type, **kwargs
+        )
+      # Same as QtProvider.einsum: dot_general_qt takes neither precision nor
+      # preferred_element_type.
+      config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
+      return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
+
+    with jax.disable_jit():
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          _dot_general=custom_dot_general,
+          out_sharding=out_sharding,
+      )
+
+
 def _get_router_proj_unquantized_rule() -> qwix.QtRule:
   """Returns a Qwix rule that keeps the MoE router (gate) projection unquantized.
 
@@ -1363,7 +1462,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
-  def make_qt_rule(dtype) -> list[qwix.QtRule]:
+  def make_qt_rule(dtype, tile_size=None, additional_qt_config=None, op_names=("dot_general",)) -> list[qwix.QtRule]:
     rules = []
     if not config.quantize_router_proj:
       rules.append(_get_router_proj_unquantized_rule())
@@ -1373,11 +1472,13 @@ def get_quantization_rule(config: Config):
             weight_qtype=dtype,
             act_qtype=dtype,
             bwd_qtype=dtype,
+            tile_size=tile_size,
             bwd_weight_grad_tile_size=(
                 1 / config.qwix_bwd_weight_grad_tile_count if config.qwix_bwd_weight_grad_tile_count > 1 else None
             ),
             disable_channelwise_axes=False,
-            op_names=("dot_general",),
+            additional_qt_config=additional_qt_config,
+            op_names=op_names,
         )
     )
     return rules
@@ -1402,6 +1503,25 @@ def get_quantization_rule(config: Config):
       return get_fp8_full_qwix_rule_w_sparsity(config)
     case "fp8_gpu":
       return make_qt_rule(jnp.float8_e4m3fn)
+
+    case "multipass":
+      # The mode quantizes inside qwix's multipass_dot, so the rule sets no
+      # qtype; an unset mode leaves that matmul in full precision. Covers the
+      # decoder-layer dot_general projections and weight einsums (MoE experts on
+      # the dense sparse_matmul=False path). Grouped matmuls (gmm/ragged_dot)
+      # stay unquantized: qwix has no multi-pass kernel.
+      modes = {
+          "multipass_mode": config.qwix_multipass_mode,
+          "dlhs_multipass_mode": config.qwix_dlhs_multipass_mode,
+          "drhs_multipass_mode": config.qwix_drhs_multipass_mode,
+      }
+      return make_qt_rule(
+          None,
+          tile_size=config.qwix_multipass_tile_size,
+          additional_qt_config={k: v for k, v in modes.items() if v},
+          op_names=("dot_general", "einsum"),
+      )
+
     case "":
       return None
 
@@ -1411,6 +1531,8 @@ def get_qt_provider(config):
   match config.quantization:
     case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
       return qwix.QtProvider(get_quantization_rule(config))
+    case "multipass":
+      return MultipassQtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))
     case "fp8_nanoo":

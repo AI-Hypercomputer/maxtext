@@ -109,6 +109,7 @@ class QuantizationType(str, Enum):
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
   SERVE_FP8_WEIGHT = "serve_fp8_weight"
+  MULTIPASS = "multipass"
 
 
 # The OCP MX recipes that run through jax.nn.scaled_dot_general.
@@ -638,6 +639,35 @@ class Quantization(BaseModel):
       description="Qwix: split the contraction axis of each weight-gradient matmul into this many tiles, each with"
       " its own quantization scale. 1 disables tiling. Tiles are summed after the matmul, so under FSDP tiling"
       " makes XLA all-reduce the full weight gradient instead of reduce-scattering it. fp8_full ignores it.",
+  )
+  qwix_multipass_mode: str = Field(
+      "",
+      description=(
+          "`quantization=multipass` only: Qwix multi-pass mode of the forward weight matmuls, e.g. 'three_pass_fp8',"
+          " 'four_pass_int4', 'three_pass_fp8_fp4/fp4_fp4/fp4' (see Qwix's `multipass_dot.MultiPassMode`). Empty"
+          " leaves the forward matmul unquantized."
+      ),
+  )
+  qwix_dlhs_multipass_mode: str = Field(
+      "",
+      description=(
+          "`quantization=multipass` only: multi-pass mode of the activation-gradient matmul (dX = dY @ W^T)."
+          " Empty leaves it unquantized."
+      ),
+  )
+  qwix_drhs_multipass_mode: str = Field(
+      "",
+      description=(
+          "`quantization=multipass` only: multi-pass mode of the weight-gradient matmul (dW = X^T @ dY)."
+          " Empty leaves it unquantized."
+      ),
+  )
+  qwix_multipass_tile_size: PositiveInt | None = Field(
+      None,
+      description=(
+          "`quantization=multipass` only: block size along the contraction axis of the forward matmul. None = one scale"
+          " per channel."
+      ),
   )
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
@@ -4935,6 +4965,29 @@ class MaxTextConfig(
           "shard_embed_moe_on_fsdp requires quantization to be specified and "
           "weight_quantization_calibration_method to be fixed (static scaling mode)."
       )
+    return self
+
+  @model_validator(mode="after")
+  def validate_qwix_multipass_quantization(self) -> "MaxTextConfig":
+    """Validates `quantization=multipass` and its `qwix_*multipass_mode` / `qwix_multipass_tile_size` knobs."""
+    modes = (self.qwix_multipass_mode, self.qwix_dlhs_multipass_mode, self.qwix_drhs_multipass_mode)
+    if self.quantization != QuantizationType.MULTIPASS:
+      if any(modes) or self.qwix_multipass_tile_size is not None:
+        raise ValueError(
+            "qwix_multipass_mode, qwix_dlhs_multipass_mode, qwix_drhs_multipass_mode and qwix_multipass_tile_size"
+            " require quantization='multipass'."
+        )
+      return self
+    if not self.use_qwix_quantization:
+      raise ValueError("quantization='multipass' requires use_qwix_quantization=True.")
+    if not any(modes):
+      raise ValueError(
+          "quantization='multipass' requires at least one of qwix_multipass_mode, qwix_dlhs_multipass_mode or"
+          " qwix_drhs_multipass_mode."
+      )
+    # The residual passes already recover the precision that weight-gradient tiling buys single-pass recipes.
+    if self.qwix_bwd_weight_grad_tile_count > 1:
+      raise ValueError("quantization='multipass' does not support qwix_bwd_weight_grad_tile_count > 1.")
     return self
 
   def _validate_jax_mx_quantization(self) -> None:
