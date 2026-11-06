@@ -1432,6 +1432,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           matmul_precision=cfg.matmul_precision,
+          shard_mode=cfg.shard_mode,
           rngs=rngs,
       )
     else:
@@ -1481,9 +1482,17 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         out_sharding=out_sharding,
     )
 
-    # 3. Apply the gate for the shared expert. The output is (batch, seq, 1), so it
-    # carries no feature axis to pin and takes the default layout.
-    shared_gate_output = self.shared_expert_gate(hidden_states)
+    # 3. Apply the gate for the shared expert. The output is (batch, seq, 1). Under
+    # tensor parallelism `hidden_states` carries `embed` on `tensor` while the kernel
+    # carries it on `fsdp`/`expert`, and explicit sharding will not pick a layout for a
+    # contraction sharded on both sides, so keep the block's batch and length layout
+    # and replicate the size-1 feature axis.
+    gate_sharding = None
+    if out_sharding is not None:
+      gate_sharding = jax.sharding.NamedSharding(
+          out_sharding.mesh, jax.sharding.PartitionSpec(*out_sharding.spec[:2], None)
+      )
+    shared_gate_output = self.shared_expert_gate(hidden_states, out_sharding=gate_sharding)
 
     # 4. Combine the outputs.
     final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
