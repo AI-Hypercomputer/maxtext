@@ -180,7 +180,7 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div id="timeline" style="overflow-x:auto"></div>
 </div>
 
-<div class="card gradient-hero"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines" style="overflow-x:auto"></div></div>
+<div class="card gradient-hero"><div class="ct">Test run time by device</div><div id="devlines-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div><div id="devlines"></div></div>
 <div class="card hero gradient-hero">
 <div class="ct">Worker time per merged pull request</div>
 <div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="worker">This chart shows where each merged pull request's CI time went, one bar per device lane. <span class="g-more">Each bar shows the total time: jobs run side by side, so the bar height is the slowest one, not the sum. "Time shown" picks which minutes count: the tests on their own, or the wait for a free runner and the setup as well. Bars run from the oldest merged pull request on the left to the newest on the right. A red cross above a bar marks a failure: in the all-lanes view the run itself failed, and in a single suite's view one of that suite's workers failed on that run. Hover a lane to follow it across all pull requests. Click a bar to list every suite's time in that run. Pick one suite from the dropdown to see one bar per worker instead. The pull request number under each bar opens that pull request on GitHub in a new tab; its merge date is under it.</span></div>
@@ -1439,7 +1439,12 @@ ${rows.map((r,ri)=>{
   svg.addEventListener('mouseleave',()=>{if(selRect)selRect.remove();dragX0=null;dragging=false;selRect=null;window.__devDragged=false;window.__devDragging=false});
   svg.addEventListener('dblclick',()=>{DEV_ZOOM=null;renderDevLines()});
 
-  host.appendChild(svg);
+  const svgWrap=document.createElement('div');
+  svgWrap.setAttribute('data-devscroll','1');
+  svgWrap.style.cssText='overflow-x:auto';
+  svgWrap.appendChild(svg);
+  host.appendChild(svgWrap);
+  scrollToNewest(svgWrap);
 }
 
 // ============ RUNNER QUEUE LATENCY ============
