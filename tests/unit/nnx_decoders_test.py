@@ -378,7 +378,7 @@ class TestNNXDecoderGetDecoderLayers(unittest.TestCase):
 
   def test_llama2_decoder_block(self):
 
-    decoder = self._make_decoder(model_name="llama2-7b")
+    decoder = self._make_decoder(model_name="llama3.1-8b")
     layers = decoder.get_decoder_layers()
     self.assertEqual(layers, [LlamaDecoderLayer])
 
@@ -414,7 +414,7 @@ class TestNNXDecoderGetNormLayer(unittest.TestCase):
 
   def test_gpt3_returns_gpt3_layer_norm(self):
 
-    cfg = _make_config(model_name="gpt3-52k")
+    cfg = _make_config(decoder_block=DecoderBlockType.GPT3)
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertIsInstance(decoder.decoder_norm, Gpt3LayerNorm)

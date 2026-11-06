@@ -39,10 +39,10 @@ _MODEL_OVERRIDES = {
     "base_num_kv_heads": 2,
     "base_mlp_dim": 256,
     "max_prefill_predict_length": 4,
-    "model_name": "llama2-7b",
+    "model_name": "llama3.1-8b",
     "override_model_config": True,
     "weight_dtype": "bfloat16",
-    "tokenizer_path": "meta-llama/Llama-2-7b",
+    "tokenizer_path": "meta-llama/Llama-3.1-8B",
 }
 
 # Step-window profiling flags from the `Profiling` mixin that `RLConfig`
@@ -125,7 +125,7 @@ class RLProfilingConfigTest(parameterized.TestCase):
   )
   def test_invocation_window_bounds(self, **bad):
     with self.assertRaises(pydantic.ValidationError):
-      types.RLConfig(model_name="llama2-7b", tokenizer_path="meta-llama/Llama-2-7b", **bad)
+      types.RLConfig(model_name="llama3.1-8b", tokenizer_path="meta-llama/Llama-3.1-8B", **bad)
 
   @parameterized.parameters(*_LEGACY_PROFILING_FLAGS)
   def test_legacy_step_profiling_flags_are_accepted_by_rl_config(self, flag):
@@ -265,8 +265,8 @@ class RLProfilingConfigTest(parameterized.TestCase):
       with self.subTest(bad_kwargs=bad_kwargs):
         with self.assertRaisesRegex(pydantic.ValidationError, error_regex):
           types.RLConfig(
-              model_name="llama2-7b",
-              tokenizer_path="meta-llama/Llama-2-7b",
+              model_name="llama3.1-8b",
+              tokenizer_path="meta-llama/Llama-3.1-8B",
               remat_policy="none",
               **bad_kwargs,
           )
