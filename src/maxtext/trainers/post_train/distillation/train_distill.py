@@ -846,7 +846,7 @@ def _train_distill_impl(
       eval_iter = None
       if raw_eval_iter is not None:
         max_logging.log("Evaluation iterator successfully initialized.")
-        eval_iter = distillation_utils.MaxTextToTunixIterator(raw_eval_iter)
+        eval_iter = distillation_utils.MaxTextToTunixIterable(raw_eval_iter)
       elif student_config.eval_interval > 0:
         max_logging.log("Warning: eval_interval > 0 but create_data_iterator returned None for eval_iter.")
 
