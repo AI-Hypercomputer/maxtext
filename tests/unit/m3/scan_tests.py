@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import scan
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model
@@ -64,9 +65,12 @@ class ScanTest(parameterized.TestCase):
 
   @parameterized.parameters(0, 1, 2)
   def test_qwen3_scan_forward_gradients_and_checkpoint_layout(self, axis):
-    plain = create_qwen3_model(tiny_config(), rngs=nnx.Rngs(0))
-    config = tiny_config(True, axis)
-    scanned = scan.maybe_apply_scan(create_qwen3_model(config, rngs=nnx.Rngs(0)), config)
+    # Parameters are placed from their sharding metadata at construction, which
+    # needs a mesh in scope; one device is enough (README rule 3).
+    with jax.set_mesh(create_mesh(devices=jax.devices()[:1])):
+      plain = create_qwen3_model(tiny_config(), rngs=nnx.Rngs(0))
+      config = tiny_config(True, axis)
+      scanned = scan.maybe_apply_scan(create_qwen3_model(config, rngs=nnx.Rngs(0)), config)
     p_plain, p_scan = flat_params(plain), flat_params(scanned)
     for path, value in p_plain.items():
       if path[:3] == ("decoder", "layers", "layers"):

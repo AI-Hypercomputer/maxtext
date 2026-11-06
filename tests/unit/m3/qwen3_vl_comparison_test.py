@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.m3.core import checkpoint as m3_checkpoint
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLModel,
     create_qwen3_vl_model,
@@ -75,7 +76,9 @@ class Qwen3VLComparisonTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     devices = jax.devices()[:1]
-    self.mesh = Mesh(np.array(devices), ("data",))
+    # m3 parameters carry sharding over the m3 mesh axes, so m3 models are built on that mesh.
+    self.mesh = create_mesh(devices=devices)
+    self.legacy_mesh = Mesh(np.array(devices), ("data",))
 
   def test_model_creation_utils_routing(self):
     """Verifies that model_creation_utils routes to Qwen3VLModel when use_m3_model=True."""
@@ -89,7 +92,7 @@ class Qwen3VLComparisonTest(absltest.TestCase):
     cfg_old = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=False, reduced=False))
     cfg_new = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=True, reduced=False))
 
-    _, abs_old = model_creation_utils.create_nnx_abstract_model(cfg_old, self.mesh)
+    _, abs_old = model_creation_utils.create_nnx_abstract_model(cfg_old, self.legacy_mesh)
     _, abs_new = model_creation_utils.create_nnx_abstract_model(cfg_new, self.mesh)
 
     p_old = nnx.state(abs_old, nnx.Param)

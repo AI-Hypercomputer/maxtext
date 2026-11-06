@@ -20,14 +20,13 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 from maxtext.utils import model_creation_utils
-import numpy as np
 
 
 class M3SmokeTest(absltest.TestCase):
@@ -35,8 +34,9 @@ class M3SmokeTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    devices = jax.devices()[:1]
-    self.mesh = Mesh(np.array(devices), ("data",))
+    # m3 models place parameters from sharding metadata naming the m3 mesh axes,
+    # so the mesh has to carry those names even on one device (README rule 3).
+    self.mesh = create_mesh(devices=jax.devices()[:1])
 
   def test_unregistered_model_raises_value_error(self):
     """Verifies model_name not in m3 registry raises ValueError."""

@@ -785,6 +785,12 @@ def _apply_m3_default_named_sharding(
   spec_axis = shard_axes[0] if len(shard_axes) == 1 else shard_axes
 
   def _shard_leaf(path, a_var, s_var):
+    # A model that resolved its own `out_sharding` (m3 models built on a `Sharding` strategy) has
+    # already decided this leaf's layout, including deliberate replication such as norm scales'
+    # `P(None)`; only unannotated leaves get the fallback.
+    metadata = a_var.get_metadata() if hasattr(a_var, "get_metadata") else {}
+    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec):
+      return s_var
     cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
     is_unsharded = (
         not hasattr(cur_sharding, "spec")
@@ -838,8 +844,15 @@ def create_nnx_abstract_model(
     # Wrapping in `jax.set_mesh(mesh)` trips Flax 0.12.6's `_to_variable` for
     # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
     # AbstractMesh). Sharding is resolved afterwards via the helper, so the
-    # wrap is unnecessary here.
-    abs_model = nnx.eval_shape(_create_model)
+    # wrap is unnecessary here for legacy models. m3 models are the exception:
+    # their parameters are placed from `out_sharding` metadata as they are
+    # created (`eager_sharding`), which needs the mesh in scope, and they carry
+    # no AQT variables.
+    if getattr(config, "use_m3_model", False) and mesh is not None:
+      with jax.set_mesh(mesh):
+        abs_model = nnx.eval_shape(_create_model)
+    else:
+      abs_model = nnx.eval_shape(_create_model)
     if mesh is None:
       mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
