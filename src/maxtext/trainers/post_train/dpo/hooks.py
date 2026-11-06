@@ -31,6 +31,11 @@ class DPOTrainingHooks(BaseTrainingHooks):
     # For DPO, we sum both chosen and rejected masks
     return jnp.sum(batch["chosen_mask"] != 0) + jnp.sum(batch["rejected_mask"] != 0)
 
+  @override
+  def eval_loss_is_preaveraged(self) -> bool:
+    """Tunix aggregates DPO and ORPO losses as a cross-batch weighted mean."""
+    return True
+
 
 class DPODataHooks(BaseDataHooks):
   """Data hooks for DPO."""
