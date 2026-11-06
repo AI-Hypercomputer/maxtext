@@ -2942,6 +2942,50 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     # wi_0, wi_1 and wo of each of the 4 sub-layers.
     self.assertEqual(checked, 12)
 
+  def test_qwen3_5_auto_mode_populates_sublayer_param_layer_specs(self):
+    """Under `shard_mode='auto'`, each sub-layer group receives per-layer FSDP `PartitionSpec`s from NNX metadata."""
+    cfg = _make_config(
+        **{
+            **_QWEN3_5_TINY,
+            "scan_layers": True,
+            "num_decoder_layers": 8,
+            "base_num_decoder_layers": 8,
+            "inhomogeneous_layer_cycle_interval": 4,
+            "prefetch_fsdp_weights": True,
+            "shard_mode": "auto",
+        }
+    )
+    decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+    stages = fsdp_prefetch_inhomogeneous.sublayer_stages(decoder.layers)
+    self.assertEqual(len(stages), 4)
+    axis_sizes = {axis: 1 for axis in cfg.mesh_axes} | {"fsdp": 4, "expert": 2}
+    mesh = AbstractMesh(tuple(axis_sizes.values()), tuple(axis_sizes), axis_types=(AxisType.Auto,) * len(axis_sizes))
+    x_in = jnp.zeros((1, 8, cfg.emb_dim), dtype=jnp.float32)
+    with unittest.mock.patch.object(
+        fsdp_prefetch_inhomogeneous,
+        "_custom_vjp_nested_prefetch_pipeline",
+        return_value=(x_in, None),
+    ) as nested:
+      fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+          decoder.layers,
+          stages,
+          x_in,
+          jnp.zeros((1, 8), dtype=jnp.int32),
+          jnp.zeros((1, 8), dtype=jnp.int32),
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          length=2,
+          mesh=mesh,
+          config=cfg,
+      )
+    self.assertEqual(nested.call_count, 1)
+    ctxs = nested.call_args.args[7]
+    self.assertEqual(len(ctxs), 2)
+    for ctx in ctxs:
+      self.assertIsNotNone(ctx.param_layer_specs)
+      fsdp_specs = [s for s in ctx.param_layer_specs if s is not None and "fsdp" in str(s)]
+      self.assertGreaterEqual(len(fsdp_specs), 10)
+
   def test_qwen3_5_remat_minimal(self):
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
       self._assert_qwen3_5_parity(num_blocks=4, remat_policy="minimal")

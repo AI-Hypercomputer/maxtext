@@ -235,7 +235,7 @@ def _custom_vjp_nested_prefetch_pipeline_fwd(
 
 def _custom_vjp_nested_prefetch_pipeline_bwd(graphdefs, length, ctxs, sizes, res, g_out):
   """Backward pass of `_custom_vjp_nested_prefetch_pipeline`: one reverse scan step per block."""
-  if ctxs[0].defer_grad_reduce_scatter:
+  if ctxs[0].defer_grad_reduce_scatter and ctxs[0].shard_mode == fsdp_prefetch.ShardMode.EXPLICIT:
     return _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, g_out)
   ys, saved, params_leaves, state_leaves, d_args, d_kwargs = res
   g, _ = g_out  # Non-parameter layer state is not differentiated.
@@ -630,7 +630,7 @@ def apply_layers_with_fsdp_prefetch(
   )
   # Groups consecutive sub-layers of one structure (e.g. the unstacked `local_layers`), stacked
   # `[length, n, ...]`, so each group can be scanned by sub-layer.
-  groups = []  # [graphdef, params_treedef, state_treedef, [params leaves per sub-layer], [state leaves ...]]
+  groups = []  # [graphdef, params_treedef, state_treedef, [params leaves per sub-layer], [state leaves ...], specs]
   for stage_graphdef, p, s in stages:
     p, s = fsdp_prefetch._layer_major(p, s, config.param_scan_axis, length)
     p_leaves, p_treedef = jax.tree_util.tree_flatten(p)
@@ -647,7 +647,8 @@ def apply_layers_with_fsdp_prefetch(
         g[3].append(p_leaves)
         g[4].append(s_leaves)
         continue
-    groups.append([stage_graphdef, p_treedef, s_treedef, [p_leaves], [s_leaves]])
+    p_specs = fsdp_prefetch._param_layer_specs(p, len(p_leaves), mesh, config)
+    groups.append([stage_graphdef, p_treedef, s_treedef, [p_leaves], [s_leaves], p_specs])
 
   def stack(per_sublayer):
     return tuple(jnp.stack(xs, axis=1) for xs in zip(*per_sublayer))
@@ -661,7 +662,7 @@ def apply_layers_with_fsdp_prefetch(
       diff_kwargs_leaves,
       length,
       # The stage params are already layer-major (`_layer_major` above), so the setup must not move the scan axis again.
-      tuple(ctx._replace(params_treedef=g[1], state_treedef=g[2], scan_axis=0) for g in groups),
+      tuple(ctx._replace(params_treedef=g[1], state_treedef=g[2], scan_axis=0, param_layer_specs=g[5]) for g in groups),
       tuple(len(g[3]) for g in groups),
   )
   return final_y, layers, None

@@ -258,9 +258,14 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=True):
 
   def psum_scatter(x):
     if padded_minor is not None and padded_minor > orig_minor:
-      pad_width = [(0, 0)] * x.ndim
-      pad_width[minor_dim] = (0, padded_minor - orig_minor)
-      x = jnp.pad(x, pad_width)
+      padding_config = [(0, 0, 0)] * x.ndim
+      padding_config[minor_dim] = (0, padded_minor - orig_minor, 0)
+      # `x` is unreduced over the FSDP (and extra batch) axes; `lax.pad` requires the padding value
+      # to be unreduced over the same axes, so cast a zero scalar invarying -> varying -> unreduced.
+      unreduced_axes = tuple(ax) + tuple(extra)
+      pad_value = jax.lax.pcast(jnp.zeros((), x.dtype), unreduced_axes, to="varying")
+      pad_value = jax.lax.pcast(pad_value, unreduced_axes, to="unreduced")
+      x = jax.lax.pad(x, pad_value, padding_config)
       x = _pin_scatter_dim_major(x, dim)
     if tag:
       with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
@@ -429,12 +434,23 @@ def _metadata_layer_spec(variable, mesh, rules):
   if names is None or ndim < 1 or len(names) != ndim:
     return None
   names = list(names)
-  scan_name = meta.get(nnx.PARTITION_NAME)
+  scan_name = meta.get(nnx.PARTITION_NAME, "layers")
   if scan_name is None or scan_name not in names:
     return None
   names.remove(scan_name)
   spec = sharding.logical_to_mesh_axes(tuple(names), mesh, rules=rules)
   return jax.sharding.PartitionSpec(*(tuple(spec) + (None,) * (ndim - 1 - len(tuple(spec)))))
+
+
+def _param_layer_specs(params, num_leaves, mesh, config):
+  """Per-param-leaf per-layer PartitionSpecs from `params`'s NNX logical-axis metadata (auto mode only)."""
+  if config.shard_mode == ShardMode.EXPLICIT:
+    return None
+  variables = jax.tree_util.tree_leaves(params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  if len(variables) != num_leaves:
+    return None
+  rules = getattr(config, "logical_axis_rules", None)
+  return tuple(_metadata_layer_spec(v, mesh, rules) for v in variables)
 
 
 def _needs_minor_dim_layout_pin(stacked, layer_sharding, mesh):
@@ -465,7 +481,11 @@ _PrefetchCtx = collections.namedtuple(
         "prevent_cse",
         "defer_grad_reduce_scatter",
         "offload_layer_inputs",
+        # Auto shard mode only: per-param-leaf per-layer PartitionSpecs from the NNX logical-axis metadata
+        # (None entries where unavailable), used when the traced type hides the FSDP axes.
+        "param_layer_specs",
     ],
+    defaults=(None,),
 )
 
 # Primitives that pass their (single) operand through unchanged. A remat residual produced only by a
@@ -615,6 +635,13 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   params = jax.tree_util.tree_unflatten(ctx.params_treedef, params_leaves)
   state = jax.tree_util.tree_unflatten(ctx.state_treedef, state_leaves)
   layer_shardings = [_per_layer_sharding(p, ctx.mesh) for p in params_leaves]
+  auto_fallback = [False] * len(layer_shardings)
+  if ctx.shard_mode != ShardMode.EXPLICIT and ctx.param_layer_specs is not None:
+    # Auto mode: the traced types hide the FSDP axes, so use the parameters' metadata-derived specs.
+    for i, (s, spec) in enumerate(zip(layer_shardings, ctx.param_layer_specs)):
+      if spec is not None and _has_fsdp_axes(spec, ctx.mesh) and (s is None or not _has_fsdp_axes(s.spec, ctx.mesh)):
+        layer_shardings[i] = NamedSharding(ctx.mesh, spec)
+        auto_fallback[i] = True
   consts = (tuple(diff_args_leaves), tuple(diff_kwargs_leaves))
 
   pin_layout_flags = [_needs_minor_dim_layout_pin(p, s, ctx.mesh) for p, s in zip(params_leaves, layer_shardings)]
@@ -623,8 +650,8 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
     """All-gathers one layer's FSDP-sharded params (bf16[E, D/fsdp, F] -> bf16[E, D, F])."""
     leaves, treedef = jax.tree_util.tree_flatten(layer_params)
     out = []
-    for x, pin in zip(leaves, pin_layout_flags):
-      x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding)
+    for x, pin, s, fb in zip(leaves, pin_layout_flags, layer_shardings, auto_fallback):
+      x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding, src_sharding=s if fb else None)
       if pin:
         # 3D+ weights gathered on their minor-most dimension (e.g. [E, F, D/fsdp] where D/fsdp is not a
         # multiple of 128) exit all-gather in layout {1, 0, 2}. Pinning only those weights to default
@@ -1073,6 +1100,7 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       prevent_cse=prevent_cse,
       defer_grad_reduce_scatter=bool(getattr(config, "prefetch_fsdp_defer_grad_reduce_scatter", False)),
       offload_layer_inputs=offload_layer_inputs,
+      param_layer_specs=_param_layer_specs(params, len(params_leaves), mesh, config),
   )
   return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 
