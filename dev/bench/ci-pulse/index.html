@@ -156,6 +156,7 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <main>
 <!-- How old the numbers are. Filled from meta.json when real data loads; empty on the sample data. -->
 <div id="freshness" style="font-size:12px;color:var(--muted);margin:0 0 10px"></div>
+<div id="insights-host" class="card gradient-hero" style="padding:14px 18px;margin-bottom:14px"></div>
 
 <div id="page-main">
 <div class="card hero">
@@ -187,7 +188,7 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div id="wk-meta" style="font-size:12px;color:var(--muted);margin-bottom:6px"></div>
 <div id="worker-chart" style="overflow-x:auto"></div>
 </div>
-<div class="card gradient-hero"><div class="ct">Flaky jobs and tests</div>
+<div class="card gradient-hero"><div class="ct" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>Flaky jobs and tests</span><div id="flaky-mode-bar" style="display:flex;gap:6px;flex-wrap:wrap;font-weight:400"></div></div>
 <div id="flaky"></div></div>
 </div><!-- /page-main -->
 
@@ -517,6 +518,7 @@ function jtSort(id,key){
     const k=th.getAttribute('data-jtkey');const ar=th.querySelector('.jtarr');
     if(ar)ar.textContent=(k===s.key)?(s.dir==='desc'?' ▼':' ▲'):'';
   });
+  if(!window.__CI_PULSE_MOCK__&&String(id).startsWith('jt-jobs-'))loadPrDetailIntoModal(String(id).slice(8));
 }
 
 function jd(commit,jobId){
@@ -1094,7 +1096,7 @@ function openModal(c,ci,wcs,med){
         stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:4px">
 <thead><tr>${jtTh(tid,'','Test',thS0+';text-align:left','Restore the default order')}${jtTh(tid,'dur','Duration',thS0+';text-align:right','Sort by duration')}${jtTh(tid,'base','Baseline',thS0+';text-align:right','Sort by baseline duration')}${jtTh(tid,'delta','Δ',thS0+';text-align:right','Sort by change against the baseline')}<th style="${thS0}">Status</th></tr></thead><tbody id="${esc(tid)}-body">${sorted.map(jtRow).join('')}</tbody></table>`;
       }
-      stepHtml+=`</div>`;
+      stepHtml+=`<div class="pr-live-slot" data-pr="${esc(c.hash)}" data-jobid="${esc(j.id)}" data-jobname="${esc(j.name)}" data-lane="${esc(j.lane)}"></div></div>`;
 
       const jobHtml=`<tr style="opacity:${dim?0.25:1};cursor:pointer" onclick="const x=document.getElementById(${jsArg(String(rid))});x.style.display=x.style.display==='none'?'block':'none';this.querySelector('.xarr').textContent=x.style.display==='none'?'▸':'▾'">
 <td style="font-size:13px;max-width:300px;min-width:220px;white-space:normal;line-height:1.25;padding-right:6px" title="${esc(j.name)}"><span class="xarr" style="color:var(--muted);margin-right:4px">▸</span><strong>${esc(j.name)}</strong></td>
@@ -1133,6 +1135,7 @@ ${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta
 </div>
 </div><button class="modal-close" onclick="closeModal()">✕</button></div>
 <div class="modal-body">
+<div id="modal-pr-banner-${esc(c.hash)}"></div>
 <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;padding:10px 14px;background:var(--elevated);border-radius:8px;flex-wrap:wrap">
 <span style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Waterfall legend</span>
 <span style="display:flex;align-items:center;gap:5px;font-size:13px"><span style="width:14px;height:10px;border-radius:2px;background:var(--q);display:inline-block"></span><span style="color:var(--ink2)">Queue wait</span></span>
@@ -1153,6 +1156,7 @@ ${split?`<span style="display:flex;align-items:center;gap:5px;font-size:13px"><s
 
   $('#overlay').classList.add('on');
   document.body.style.overflow='hidden';
+  if(!window.__CI_PULSE_MOCK__)loadPrDetailIntoModal(c.hash,runUrl);
 }
 function closeModal(){$('#overlay').classList.remove('on');document.body.style.overflow='';window.__thiBack=null}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
@@ -1473,7 +1477,7 @@ function rangeCovers(w,list){return list.length?`${w.label} covers ${list.length
 // ============ PAGE SWITCH ============
 
 // ============ HW FILTER ============
-$$('.fchip').forEach(btn=>{btn.addEventListener('click',()=>{HW=btn.dataset.hw;$$('.fchip').forEach(b=>b.classList.toggle('on',b===btn));renderAll()})});
+$$('.fchip[data-hw]').forEach(btn=>{btn.addEventListener('click',()=>{HW=btn.dataset.hw;$$('.fchip[data-hw]').forEach(b=>b.classList.toggle('on',b===btn));renderAll()})});
 
 // ============ TEST SUITE HEALTH (integrated from bench analysis) ============
 let TH_COMMITS = [
@@ -2204,8 +2208,24 @@ function flakyCalc(){
   const inRange=R.inRange;
   return{idxs,iset,n:idxs.length,rows,label,inRange,days:R.days,custom:R.custom};
 }
+let FLAKY_MODE='pr';
+let SCHED_COMMITS=[],SCHED_RESCUES=[],SCHED_FLAKY_TESTS=[],DOCKER_WORKFLOWS=[],DOCKER_RESCUES=[],RAW_QUEUE=[],INSIGHTS_VIEW=null;
+function setFlakyMode(m){FLAKY_MODE=m;renderFlaky()}
+function renderFlakyModeBar(){
+  const bar=$('#flaky-mode-bar');if(!bar)return;
+  const R=getRange();
+  const sRuns=SCHED_COMMITS.filter(c=>{const d=c.iso?new Date(c.iso):thDateOf(c.date);return R.has(d)});
+  const sRed=SCHED_RESCUES.reduce((a,j)=>a+(j.fails||[]).filter(f=>sRuns.some(c=>c.key===f.pr)).length,0);
+  const dFails=DOCKER_RESCUES.filter(r=>{const d=r.iso?new Date(r.iso):null;return R.has(d)&&!r.rescued}).length;
+  bar.innerHTML=`<button type="button" class="fchip ${FLAKY_MODE==='pr'?'on':''}" onclick="setFlakyMode('pr')">Merged PRs</button>`
+    +`<button type="button" class="fchip ${FLAKY_MODE==='sched'?'on':''}" onclick="setFlakyMode('sched')">Scheduled main (4-hourly)${sRed?` <span class="chip fail" style="margin-left:4px;padding:0 5px;font-size:12px">${sRed}</span>`:''}</button>`
+    +`<button type="button" class="fchip ${FLAKY_MODE==='docker'?'on':''}" onclick="setFlakyMode('docker')">Nightly Docker Pipelines${dFails?` <span class="chip fail" style="margin-left:4px;padding:0 5px;font-size:12px">${dFails}</span>`:''}</button>`;
+}
 function renderFlaky(){
   const host=$('#flaky');if(!host)return;
+  renderFlakyModeBar();
+  if(FLAKY_MODE==='sched'){renderFlakySched(host);return}
+  if(FLAKY_MODE==='docker'){renderFlakyDocker(host);return}
   const cal=flakyCalc();
   const n=cal.n;
   if(!n){host.innerHTML='<div style="font-size:14px;color:var(--muted)">No merged pull requests fall inside this date range.</div>';return}
@@ -2308,6 +2328,10 @@ function renderFlaky(){
   const footFacts=[];
   if(listed.length&&others>0)footFacts.push(`The other ${others} of ${JOBS.length} jobs had no failures ${cal.inRange}.`);
   if(gated)footFacts.push(`No rate is shown: this range has only ${n} merged pull requests, and a rate needs at least 10.`);
+  const R=getRange();
+  const sKeys=new Set(SCHED_COMMITS.filter(c=>{const d=c.iso?new Date(c.iso):thDateOf(c.date);return R.has(d)}).map(c=>c.key));
+  const schedNames=SCHED_RESCUES.filter(j=>j.events.some(e=>sKeys.has(e.pr))||(j.fails||[]).some(f=>sKeys.has(f.pr))).map(j=>esc(j.name));
+  if(schedNames.length)footFacts.push(`On scheduled main runs ${cal.inRange}, ${schedNames.length} job${schedNames.length===1?'':'s'} also recorded failures or retries (<a href="#" onclick="event.preventDefault();setFlakyMode('sched')" style="color:var(--accent);text-decoration:none">view Scheduled main &rarr;</a>): ${schedNames.join(', ')}.`);
   if(footFacts.length)h+=`<div data-flfoot style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.55">${footFacts.join(' ')}</div>`;
   host.innerHTML=h;
 }
@@ -2464,13 +2488,431 @@ function toggleGuide(key){
 }
 new MutationObserver(()=>initGuides()).observe(document.documentElement,{childList:true,subtree:true});
 initGuides();
+// ============ SCHEDULED MAIN & NIGHTLY DOCKER PIPELINES (CARD 4 TABS) ============
+function renderFlakyGuideGhost(){
+  return `<div class="gtitle" style="display:none"><div data-guide="flaky">This chart shows which jobs failed: amber cells passed on re-run, outlined cells were never re-run. <span class="g-more">Each row is one job. Each cell is one merged pull request. Hover a cell to see which tests failed. Click a row for the full list of failed tests. <b>What the rate is:</b> the share of merged pull requests where this job failed on its first attempt and passed on a re-run. An amber rate means at least 1 in 10; red means at least 1 in 5. <b>Why a rate is sometimes hidden:</b> below 10 runs a single failure swings the percentage too far to be meaningful.</span></div></div>`;
+}
+function renderFlakySched(host){
+  const R=getRange();
+  const runs=SCHED_COMMITS.filter(c=>{const d=c.iso?new Date(c.iso):thDateOf(c.date);return R.has(d)});
+  const n=runs.length;
+  if(!n){host.innerHTML=renderFlakyGuideGhost()+`<div style="font-size:14px;color:var(--muted)">No scheduled main runs fall inside this date range.</div>`;return}
+  const keyIdx=dict();runs.forEach((c,i)=>{keyIdx[c.key]=i});
+  const rows=SCHED_RESCUES.map(j=>{
+    const evIn=j.events.filter(e=>e.pr in keyIdx);
+    const runIn=[...new Set(evIn.map(e=>e.pr))];
+    const failIn=(j.fails||[]).filter(f=>f.pr in keyIdx);
+    return{j,evIn,runIn,failIn,rate:n?(runIn.length+failIn.length)/n:0};
+  }).filter(r=>r.evIn.length>0||r.failIn.length>0).sort((a,b)=>(b.failIn.length-a.failIn.length)||b.rate-a.rate);
+  const totE=rows.reduce((a,r)=>a+r.evIn.length,0);
+  const totF=rows.reduce((a,r)=>a+r.failIn.length,0);
+  const first=runs[0],last=runs[runs.length-1];
+  let h=renderFlakyGuideGhost()+`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${R.label}: <b>${n} scheduled main runs</b> (4-hourly timer on unchanged <span class="mono">main</span>). <b>${totF}</b> job failure${totF===1?'':'s'} stayed red and <b>${totE}</b> passed on retry.</div>`;
+
+  // Top summary: tests that failed on scheduled main runs
+  const tRows=SCHED_FLAKY_TESTS.map(ft=>{
+    const j=SCHED_RESCUES.find(r=>r.id===ft.job);
+    const inRuns=ft.prs.filter(p=>p in keyIdx);
+    return{ft,j,inRuns};
+  }).filter(r=>r.j&&r.inRuns.length>0).sort((a,b)=>b.inRuns.length-a.inRuns.length||a.ft.test.localeCompare(b.ft.test));
+  h+=sumBlock({key:'sched-flaky',title:'Tests that failed on scheduled main runs',
+    lead:tRows.length?'Individual pytest failures recorded on scheduled main runs in the selected range.':'',
+    empty:totE||totF?'Failures in the selected range occurred on gate or non-JUnit jobs, or JUnit artifacts had expired.':'No test failures on scheduled main runs in the selected range.',
+    cols:'minmax(240px,1.3fr) minmax(170px,1fr) 140px',
+    head:['Test','Job it runs in','<span style="display:block;text-align:right">Failed runs</span>'],
+    rows:tRows.slice(0,8).map(r=>({
+      tone:r.inRuns.length>=3?'crit':r.inRuns.length>=2?'warn':'none',
+      dim:HW!=='all'&&r.j.lane.toLowerCase()!==HW,
+      onclick:`openSchedPop(${jsArg(String(r.j.id))})`,
+      cells:[
+        `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${esc(r.ft.test)}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(r.ft.cause)}</div>`,
+        `<span style="color:var(--ink2)"><span style="color:${LANE_COLORS[r.j.lane]||'var(--muted)'}">&#9679;</span> ${esc(r.j.name)}</span>`,
+        `<span class="mono" style="display:block;text-align:right;font-weight:700;color:var(--crit)">${r.inRuns.length} of ${n} runs</span>`
+      ]}))});
+
+  const CELL_MIN=16,CELL_GAP=2;
+  const stripPx=n*CELL_MIN+Math.max(0,n-1)*CELL_GAP;
+  const rowMin=290+16+stripPx+16+340+34;
+  h+=`<div style="font-size:14px;font-weight:700;color:var(--ink);margin:4px 0 6px">Scheduled main runs per job</div>
+  <div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px">
+    <span>Each cell is one 4-hourly scheduled run on <span class="mono">main</span>, oldest on the left &mdash; ${esc(first.label)} &rarr; ${esc(last.label)}.</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:var(--warn);display:inline-block"></span>failed first, passed on re-run</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;border:2px solid var(--crit);display:inline-block"></span>failed on main (never re-run)</span>
+    <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER};display:inline-block"></span>passed first try</span>
+  </div>`;
+  h+='<div style="overflow-x:auto">';
+  h+=rows.map(({j,evIn,runIn,failIn})=>{
+    const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
+    const resIdx=dict();evIn.forEach(e=>{resIdx[keyIdx[e.pr]]=e});
+    const failIdx=dict();failIn.forEach(f=>{failIdx[keyIdx[f.pr]]=f});
+    const cells=runs.map((c,i)=>{
+      const st=resIdx[i]?'background:var(--warn)':failIdx[i]?'background:transparent;border:2px solid var(--crit)':`background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER}`;
+      return `<div style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;cursor:pointer;${st}" title="${esc(c.label)} · ${resIdx[i]?'passed on retry':failIdx[i]?'failed on main':'passed'}" onclick="event.stopPropagation();openSchedPop(${jsArg(String(j.id))},${jsArg(String(c.key))})"></div>`;
+    }).join('');
+    return `<div class="issue-row" onclick="openSchedPop(${jsArg(String(j.id))})" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
+      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(j.name)}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]||'var(--muted)'}">&#9679;</span> ${esc(j.lane||'Hosted')} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${esc(RUNNER_LABELS[j.id])}</span>`:''}</div></div>
+      <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
+      <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)"><span style="color:${failIn.length?'var(--crit)':'var(--warn)'};font-weight:700">${failIn.length} failed</span> &middot; ${runIn.length} rescued of ${n}</div>
+    </div>`;
+  }).join('');
+  h+='</div>';
+  host.innerHTML=h;
+}
+function openSchedPop(jobId,runKey){
+  const j=SCHED_RESCUES.find(r=>r.id===jobId);if(!j)return;
+  const R=getRange();
+  const runs=SCHED_COMMITS.filter(c=>{const d=c.iso?new Date(c.iso):thDateOf(c.date);return R.has(d)});
+  const keySet=new Set(runs.map(c=>c.key));
+  const evs=j.events.filter(e=>runKey?e.pr===runKey:keySet.has(e.pr));
+  const fls=(j.fails||[]).filter(f=>runKey?f.pr===runKey:keySet.has(f.pr));
+  const all=[...fls.map(f=>({...f,kind:'fail'})),...evs.map(e=>({...e,kind:'rescued'}))];
+  const tests=SCHED_FLAKY_TESTS.filter(t=>t.job===jobId&&(runKey?t.prs.includes(runKey):t.prs.some(p=>keySet.has(p))));
+  const rowsH=all.slice(-15).reverse().map(x=>{
+    const runUrl=x.runId?`https://github.com/${REPO}/actions/runs/${x.runId}`:null;
+    return `<div style="display:grid;grid-template-columns:130px 110px 1fr auto;gap:10px;align-items:center;padding:6px 4px;border-top:1px solid var(--grid);font-size:13px">
+      <span class="mono">${esc(x.date||x.pr)}</span>
+      <span><span class="chip ${x.kind==='fail'?'fail':'flaky'}">${x.kind==='fail'?'FAILED':'RESCUED'}</span></span>
+      <span class="mono" style="color:var(--muted);font-size:12px">run #${esc(x.runId||'')}</span>
+      <span>${runUrl?`<a href="${esc(safeUrl(runUrl))}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px">GitHub run &rarr;</a>`:''}</span>
+    </div>`;
+  }).join('');
+  const testH=tests.length?`<div style="font-size:13px;font-weight:600;color:var(--ink2);margin:10px 0 4px">Failed pytest cases recorded:</div>`+tests.map(t=>`<div style="padding:4px 0;border-top:1px solid var(--grid)"><div class="mono" style="font-size:12px;font-weight:600;color:var(--ink)">${esc(t.test)}</div><div class="mono" style="font-size:12px;color:var(--muted)">${esc(t.cause)}</div></div>`).join(''):'';
+  $('#wkpop-body').innerHTML=`<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
+    <div style="font-size:17px;font-weight:700;color:var(--ink)">${esc(j.name)}</div>
+    <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:8px"><span style="color:${LANE_COLORS[j.lane]||'var(--muted)'}">&#9679;</span> ${esc(j.lane||'Hosted')} lane &middot; Scheduled main runs</div>
+    ${rowsH||'<div style="font-size:13px;color:var(--muted);padding:8px 0">Passed on the first attempt on this scheduled run.</div>'}
+    ${testH}`;
+  $('#wkpop').style.display='flex';
+}
+function renderFlakyDocker(host){
+  const R=getRange();
+  const wfIn=DOCKER_WORKFLOWS.filter(w=>{const d=new Date(w.day+'T12:00:00');return R.has(d)});
+  const rcIn=DOCKER_RESCUES.filter(r=>{const d=r.iso?new Date(r.iso):null;return R.has(d)});
+  let h=renderFlakyGuideGhost();
+  if(!wfIn.length&&!rcIn.length){
+    host.innerHTML=h+`<div style="font-size:14px;color:var(--muted)">No Nightly Docker Pipeline runs fall inside this date range.</div>`;
+    return;
+  }
+  const failCount=rcIn.filter(r=>!r.rescued).length,rescCount=rcIn.filter(r=>r.rescued).length;
+  h+=`<div style="font-size:14px;color:var(--ink);margin-bottom:10px">${R.label}: <b>${wfIn.reduce((a,w)=>a+(w.runs||0),0)} nightly Docker pipeline runs</b> across TPU and GPU image workflows. <b>${failCount}</b> image build job${failCount===1?'':'s'} failed and <b>${rescCount}</b> passed on retry.</div>`;
+  h+=sumBlock({key:'docker-flaky',title:'Nightly Docker image build failures & retries',
+    lead:rcIn.length?'Base image build, push, or promotion jobs that failed or required a retry in the selected date range.':'',
+    empty:'All nightly TPU and GPU Docker image builds passed on their first attempt in the selected date range.',
+    cols:'minmax(240px,1.5fr) 120px 120px 130px',
+    head:['Docker image job','Outcome','Date','GitHub Run'],
+    rows:rcIn.slice().reverse().slice(0,10).map(r=>{
+      const runUrl=r.runId?`https://github.com/${REPO}/actions/runs/${r.runId}`:'#';
+      return{
+        tone:r.rescued?'warn':'crit',
+        dim:false,
+        cells:[
+          `<div style="font-weight:600;color:var(--ink)">${esc(r.jobName)}</div>`,
+          `<span class="chip ${r.rescued?'flaky':'fail'}">${r.rescued?'RESCUED':'FAILED'}</span>`,
+          `<span class="mono" style="color:var(--ink2)">${esc(r.date)}</span>`,
+          `<a href="${esc(safeUrl(runUrl))}" target="_blank" rel="noopener" class="mono" style="color:var(--accent);text-decoration:none">#${esc(r.runId)} &rarr;</a>`
+        ]};
+    })});
+  const byWf=dict();
+  wfIn.forEach(w=>{(byWf[w.workflow_name]=byWf[w.workflow_name]||[]).push(w)});
+  h+=`<div style="font-size:14px;font-weight:700;color:var(--ink);margin:6px 0 6px">Daily pipeline runs &amp; build duration</div>`;
+  h+=Object.entries(byWf).map(([name,list])=>{
+    const isGpu=/GPU/i.test(name);
+    const col=isGpu?'var(--gpu)':'var(--bld)';
+    const medMin=median(list.map(x=>mins(x.median_wall_seconds)));
+    const totRuns=list.reduce((a,x)=>a+(x.runs||0),0);
+    const cells=list.map(d=>{
+      const dayRc=rcIn.filter(r=>r.day===d.day&&(isGpu?/GPU/i.test(r.jobName):/TPU/i.test(r.jobName)));
+      const hasFail=dayRc.some(r=>!r.rescued),hasResc=dayRc.some(r=>r.rescued);
+      const st=hasFail?'background:transparent;border:2px solid var(--crit)':hasResc?'background:var(--warn)':`background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER}`;
+      return `<div style="flex:1;height:16px;border-radius:3px;min-width:16px;${st}" title="${esc(d.day)} · ${d.runs} run(s) · median ${mins(d.median_wall_seconds).toFixed(1)}m"></div>`;
+    }).join('');
+    return `<div class="issue-row" style="grid-template-columns:290px 1fr 280px">
+      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(name)}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${col}">&#9679;</span> ${isGpu?'GPU':'TPU'} Docker pipeline &middot; ${list.length} active days</div></div>
+      <div style="display:flex;gap:3px;align-items:center">${cells}</div>
+      <div class="mono" style="font-size:13px;text-align:right;color:var(--ink)"><b>${medMin.toFixed(1)}m</b> median &middot; ${totRuns} runs</div>
+    </div>`;
+  }).join('');
+  host.innerHTML=h;
+}
+
+// ============ TOP COLLAPSIBLE CI HEALTH & TEST DURATION INSIGHTS BAR ============
+let INSIGHT_TAB=null;
+function toggleInsightTab(key){
+  INSIGHT_TAB=(INSIGHT_TAB===key)?null:key;
+  renderInsights();
+}
+function computeInsights(){
+  const W=getWindows(),R=W.range,cur=W.current;
+  const matchHw=lane=>HW==='all'||String(lane||'').toLowerCase()===HW;
+
+  // 1. Slowed Tests & 2. New Heavy Tests (from views/insights.json when loaded, or TESTS in mock mode)
+  let slowTests=[],newTests=[];
+  if(INSIGHTS_VIEW&&INSIGHTS_VIEW.slow_tests){
+    slowTests=INSIGHTS_VIEW.slow_tests.filter(x=>{
+      const j=JOBS.find(jb=>jb.id.split('#')[0]===x.flavor);
+      return matchHw(j?j.lane:'cpu');
+    });
+    newTests=(INSIGHTS_VIEW.new_tests||[]).filter(x=>{
+      const j=JOBS.find(jb=>jb.id.split('#')[0]===x.flavor);
+      return matchHw(j?j.lane:'cpu');
+    });
+  }else{
+    cur.forEach(c=>{
+      const tMap=TESTS[c.hash]||{};
+      Object.entries(tMap).forEach(([jid,obj])=>{
+        const j=JOBS.find(x=>x.id===jid)||{lane:'TPU',name:jid};
+        if(!matchHw(j.lane))return;
+        (obj.tests||[]).forEach(t=>{
+          if(t.isNew&&t.dur>=10)newTests.push({flavor:jid,worker:null,name:t.name,duration_seconds:t.dur,last_pr:c.hash});
+          else if(t.dur&&t.base&&(t.dur-t.base)>=3&&t.dur>=t.base*1.35){
+            const diff=+(t.dur-t.base).toFixed(1),pct=Math.round((diff/t.base)*100);
+            slowTests.push({flavor:jid,name:t.name,max_seconds:t.dur,baseline_seconds:t.base,delta_seconds:diff,pct,last_pr:c.hash});
+          }
+        });
+      });
+    });
+  }
+
+  // 3. Worker Shard Imbalance (multi-worker suites in current range)
+  const shardRows=[];
+  Object.entries(WK_GROUPS||{}).forEach(([flavor,g])=>{
+    if(!matchHw(g.lane)||!g.jobs||g.jobs.length<2||/^jupyter/i.test(flavor))return;
+    const perJob=g.jobs.map(jid=>{
+      const vals=cur.map(c=>(c.o[jid]&&c.o[jid].r)||0).filter(v=>v>0);
+      return{jid,med:median(vals)};
+    }).filter(x=>x.med>0).sort((a,b)=>b.med-a.med);
+    if(perJob.length<2)return;
+    const maxW=perJob[0],othMed=median(perJob.slice(1).map(x=>x.med));
+    const gap=+(maxW.med-othMed).toFixed(1);
+    if(maxW.med>=8&&gap>=2.5&&maxW.med>=othMed*1.25){
+      const wNum=maxW.jid.includes('#')?maxW.jid.split('#')[1]:'1';
+      shardRows.push({flavor,name:g.name,lane:g.lane,worker:wNum,maxMin:maxW.med,othMin:othMed,gap});
+    }
+  });
+  shardRows.sort((a,b)=>b.gap-a.gap);
+
+  // 4. Runner Queue Watchdog
+  const queueRows=[];
+  ['tpu','gpu','cpu'].forEach(cat=>{
+    if(!matchHw(cat))return;
+    let maxQ=0,maxPr=null;
+    const waits=[];
+    cur.forEach(c=>{
+      const wc=wallClock(c,'all');
+      const q=(wc.catQueue&&wc.catQueue[cat])||0;
+      waits.push(q);
+      if(q>maxQ){maxQ=q;maxPr=c.hash}
+    });
+    const medQ=median(waits);
+    if(maxQ>=8){
+      queueRows.push({lane:cat.toUpperCase(),machine:machineOfCat(cat)||cat.toUpperCase(),maxQ:+maxQ.toFixed(1),medQ:+medQ.toFixed(1),pr:maxPr});
+    }
+  });
+  queueRows.sort((a,b)=>b.maxQ-a.maxQ);
+
+  // 5. Suite & Check Alerts (cross-PR failing checks + rescue spikes in range)
+  const cal=flakyCalc();
+  const alertRows=cal.rows
+    .filter(r=>matchHw(r.j.lane)&&(r.failIn.length>=1||r.prIn.length>=2))
+    .sort((a,b)=>(b.failIn.length-a.failIn.length)||(b.prIn.length-a.prIn.length))
+    .slice(0,8)
+    .map(r=>({id:r.j.id,name:r.j.name,lane:r.j.lane,fails:r.failIn.length,rescues:r.prIn.length,
+      lastPr:(r.failIn[r.failIn.length-1]||r.evIn[r.evIn.length-1]||{}).pr||''}));
+
+  return{W,slowTests,newTests,shardRows,queueRows,alertRows};
+}
+function renderInsights(){
+  const host=$('#insights-host');if(!host)return;
+  const ins=computeInsights();
+  const cats=[
+    {key:'slow',icon:'🐢',label:'Slowed Tests',rows:ins.slowTests,tone:ins.slowTests.length?'warn':'good'},
+    {key:'new',icon:'🆕',label:'New Heavy Tests',rows:ins.newTests,tone:ins.newTests.length?'warn':'good'},
+    {key:'shard',icon:'⚖️',label:'Worker Shard Imbalance',rows:ins.shardRows,tone:ins.shardRows.length?'warn':'good'},
+    {key:'queue',icon:'⏳',label:'Runner Queue Watchdog',rows:ins.queueRows,tone:ins.queueRows.some(q=>q.maxQ>=15)?'crit':ins.queueRows.length?'warn':'good'},
+    {key:'suite',icon:'🚨',label:'Suite & Check Alerts',rows:ins.alertRows,tone:ins.alertRows.some(a=>a.fails>=2)?'crit':ins.alertRows.length?'warn':'good'},
+  ];
+  const totSignals=cats.reduce((a,c)=>a+c.rows.length,0);
+  const pillsH=cats.map(c=>{
+    const on=INSIGHT_TAB===c.key;
+    const badgeCol=c.rows.length===0?'color:var(--good);background:var(--tint-good)':c.tone==='crit'?'color:var(--crit);background:var(--tint-crit)':'color:var(--warn);background:var(--tint-warn)';
+    return `<button type="button" class="fchip ${on?'on':''}" onclick="toggleInsightTab('${c.key}')" style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px">
+      <span>${c.icon} ${esc(c.label)}</span>
+      <span class="mono" style="font-size:12px;font-weight:700;padding:1px 6px;border-radius:99px;${badgeCol}">${c.rows.length}</span>
+    </button>`;
+  }).join('');
+
+  let drawerH='';
+  if(INSIGHT_TAB==='slow'){
+    drawerH=sumBlock({key:'ins-slow',title:'Slowed tests vs. baseline',
+      lead:'Tests whose duration in recent merged pull requests increased significantly over their historical baseline. Click a row to open the pull request.',
+      empty:'No slowed tests flagged in the selected range.',
+      cols:'minmax(240px,1.5fr) minmax(130px,0.9fr) 110px 110px 130px',
+      head:['Test','Suite','Baseline','Recent Peak','Slowdown'],
+      rows:ins.slowTests.map(r=>({
+        tone:r.delta_seconds>=60?'crit':'warn',
+        onclick:r.last_pr?`inspectPR(${jsArg(String(r.last_pr))})`:'',
+        cells:[
+          `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${esc(r.name)}</div><div style="font-size:12px;color:var(--muted)">last flagged in #${esc(r.last_pr)}</div>`,
+          `<span class="mono" style="color:var(--ink2)">${esc(r.flavor)}</span>`,
+          `<span class="mono" style="color:var(--muted)">${Number(r.baseline_seconds).toFixed(1)}s</span>`,
+          `<span class="mono" style="font-weight:700">${Number(r.max_seconds).toFixed(1)}s</span>`,
+          `<span class="mono" style="color:var(--crit);font-weight:700">+${Number(r.delta_seconds).toFixed(1)}s (+${Math.round(r.pct)}%)</span>`
+        ]}))});
+  }else if(INSIGHT_TAB==='new'){
+    drawerH=sumBlock({key:'ins-new',title:'New heavy tests (not yet in baseline)',
+      lead:'Newly added or renamed test cases taking at least 15 seconds. Click a row to inspect the pull request.',
+      empty:'No new heavy tests detected in the selected range.',
+      cols:'minmax(240px,1.5fr) minmax(140px,1fr) 120px 120px',
+      head:['New test','Suite','Duration','Pull Request'],
+      rows:ins.newTests.map(r=>({
+        tone:r.duration_seconds>=60?'warn':'none',
+        onclick:r.last_pr?`inspectPR(${jsArg(String(r.last_pr))})`:'',
+        cells:[
+          `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${esc(r.name)}</div>`,
+          `<span class="mono" style="color:var(--ink2)">${esc(r.flavor)}${r.worker?` (worker ${esc(r.worker)})`:''}</span>`,
+          `<span class="mono" style="font-weight:700;color:var(--warn)">${Number(r.duration_seconds).toFixed(1)}s</span>`,
+          `<span class="mono" style="color:var(--accent)">#${esc(r.last_pr)}</span>`
+        ]}))});
+  }else if(INSIGHT_TAB==='shard'){
+    drawerH=sumBlock({key:'ins-shard',title:'Worker shard imbalance',
+      lead:'Multi-worker suites where the slowest worker shard takes significantly longer than the median of the other workers. Click a row to view per-worker bars.',
+      empty:'All multi-worker suites are balanced in the selected range.',
+      cols:'minmax(220px,1.3fr) 120px 120px 120px 140px',
+      head:['Suite','Slowest Shard','Slowest Med','Other Workers','Straggler Gap'],
+      rows:ins.shardRows.map(r=>({
+        tone:r.gap>=5?'warn':'none',
+        onclick:`setWKSel(${jsArg(String(r.flavor))});document.getElementById('worker-chart').scrollIntoView({behavior:'smooth'})`,
+        cells:[
+          `<div style="font-weight:600;color:var(--ink)"><span style="color:${LANE_COLORS[r.lane]||'var(--muted)'}">&#9679;</span> ${esc(r.name)}</div>`,
+          `<span class="mono" style="font-weight:700">worker ${esc(r.worker)}</span>`,
+          `<span class="mono">${r.maxMin.toFixed(1)}m</span>`,
+          `<span class="mono" style="color:var(--muted)">${r.othMin.toFixed(1)}m</span>`,
+          `<span class="mono" style="color:var(--warn);font-weight:700">+${r.gap.toFixed(1)}m</span>`
+        ]}))});
+  }else if(INSIGHT_TAB==='queue'){
+    drawerH=sumBlock({key:'ins-queue',title:'Runner queue wait spikes',
+      lead:'Device lanes where a merged pull request waited at least 8 minutes for an available self-hosted runner.',
+      empty:'No runner queue spikes (>= 8m) occurred in the selected range.',
+      cols:'120px minmax(200px,1.2fr) 120px 120px 130px',
+      head:['Lane','Machine Label','Peak Wait','Median Wait','Peak PR'],
+      rows:ins.queueRows.map(r=>({
+        tone:r.maxQ>=15?'crit':'warn',
+        onclick:r.pr?`inspectPR(${jsArg(String(r.pr))})`:'',
+        cells:[
+          `<span style="color:${LANE_COLORS[r.lane]||'var(--ink)'};font-weight:700">${esc(r.lane)}</span>`,
+          `<span class="mono" style="font-size:12px;color:var(--ink2)">${esc(r.machine)}</span>`,
+          `<span class="mono" style="color:${r.maxQ>=15?'var(--crit)':'var(--warn)'};font-weight:700">${r.maxQ}m</span>`,
+          `<span class="mono" style="color:var(--muted)">${r.medQ}m</span>`,
+          `<span class="mono" style="color:var(--accent)">#${esc(r.pr)}</span>`
+        ]}))});
+  }else if(INSIGHT_TAB==='suite'){
+    drawerH=sumBlock({key:'ins-suite',title:'Failing checks & repeated retries across runs',
+      lead:'Jobs that failed without re-run or required multiple retries across merged pull requests in the selected range.',
+      empty:'No repeated job failures or retry spikes in the selected range.',
+      cols:'minmax(240px,1.5fr) 110px 130px 130px 110px',
+      head:['Job','Lane','Unrescued Fails','Passed on Retry','Latest PR'],
+      rows:ins.alertRows.map(r=>({
+        tone:r.fails>=2?'crit':'warn',
+        onclick:`openFlakyPop(${jsArg(String(r.id))})`,
+        cells:[
+          `<span style="font-weight:600;color:var(--ink)">${esc(r.name)}</span>`,
+          `<span style="color:${LANE_COLORS[r.lane]||'var(--muted)'};font-weight:600">${esc(r.lane)}</span>`,
+          `<span class="mono" style="color:${r.fails?'var(--crit)':'var(--muted)'};font-weight:700">${r.fails} run${r.fails===1?'':'s'}</span>`,
+          `<span class="mono" style="color:${r.rescues?'var(--warn)':'var(--muted)'};font-weight:700">${r.rescues} run${r.rescues===1?'':'s'}</span>`,
+          `<span class="mono" style="color:var(--accent)">${esc(r.lastPr)}</span>`
+        ]}))});
+  }
+
+  host.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:15px;font-weight:700;color:var(--ink)">CI health &amp; test duration insights</span>
+      <span style="font-size:12px;color:var(--muted)">${esc(ins.W.label)} &middot; click a category pill to expand</span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">${pillsH}${INSIGHT_TAB?`<button type="button" class="fchip" onclick="toggleInsightTab(null)" style="font-size:12px;color:var(--muted)">Hide &#10005;</button>`:''}</div>
+  </div>${drawerH?`<div style="margin-top:10px">${drawerH}</div>`:''}`;
+}
+
+// ============ LAZY-LOADED PR MODAL STEP & JUNIT DRILL-DOWN (views/pr/<n>.json) ============
+const PR_VIEW_CACHE=dict();
+let PTB_CACHE=null;
+async function loadPrDetailIntoModal(hash,runUrl){
+  try{
+    if(!/^\d+$/.test(String(hash)))return;
+    if(!PR_VIEW_CACHE[hash]){
+      const res=await fetch(`${VIEWS_BASE}pr/${hash}.json`,{cache:'no-cache'});
+      if(!res||!res.ok)return;
+      PR_VIEW_CACHE[hash]=await res.json();
+    }
+    if(PTB_CACHE===null&&!window.__FILES__){
+      PTB_CACHE=await fetch('../per_test_baseline.json',{cache:'no-cache'}).then(r=>r&&r.ok?r.json():{}).catch(()=>({}));
+    }
+    const prView=PR_VIEW_CACHE[hash];
+    if(!prView||!prView.tables)return;
+    const bannerEl=document.getElementById('modal-pr-banner-'+hash);
+    if(!bannerEl)return;
+
+    const errors=rowsOf(prView.tables.errors);
+    const prJobs=rowsOf(prView.tables.jobs);
+    const prSteps=rowsOf(prView.tables.steps);
+    const prTests=rowsOf(prView.tables.tests);
+
+    const stepFails=errors.filter(e=>e.failed_step&&(e.job_name||e.name)!=='All Required Tests Passed');
+    if(stepFails.length){
+      bannerEl.innerHTML=`<div style="margin-bottom:12px;padding:10px 14px;background:var(--tint-crit);border:1px solid rgba(220,38,38,0.28);border-left:4px solid var(--crit);border-radius:8px;font-size:13px;color:var(--ink)">`
+        +`<div style="font-weight:700;color:var(--crit);margin-bottom:4px">&#10005; Failed workflow step${stepFails.length===1?'':'s'} recorded in this pull request:</div>`
+        +stepFails.slice(0,6).map(e=>`<div style="padding:2px 0"><span style="font-weight:600">${esc(e.job_name||e.name||'')}</span> (attempt #${esc(e.attempt)}) failed at step <span class="mono" style="font-weight:600;color:var(--crit)">${esc(e.failed_step)}</span></div>`).join('')
+        +`</div>`;
+    }
+
+    const slots=document.querySelectorAll(`#modal .pr-live-slot[data-pr="${hash}"]`);
+    slots.forEach(slot=>{
+      const jobid=slot.getAttribute('data-jobid')||'';
+      const matchedJobs=prJobs.filter(r=>jobSlug({...r,lane:resolveLane(r)})===jobid);
+      if(!matchedJobs.length)return;
+      const lastJob=matchedJobs[matchedJobs.length-1];
+      const steps=prSteps.filter(s=>s.job_id===lastJob.job_id&&s.attempt===lastJob.attempt&&s.conclusion!=='skipped');
+      let h='';
+      if(steps.length){
+        h+=`<div style="margin-top:8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Recorded GitHub Actions steps (attempt #${esc(lastJob.attempt)})</div>`;
+        h+=`<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px">`;
+        steps.forEach(s=>{
+          const dSec=(s.started_at&&s.completed_at)?Math.max(0,(new Date(s.completed_at)-new Date(s.started_at))/1000):0;
+          const dTxt=dSec>=60?(dSec/60).toFixed(1)+'m':Math.round(dSec)+'s';
+          const stCol=s.conclusion==='failure'?'var(--crit)':s.conclusion==='success'?'var(--good)':'var(--muted)';
+          h+=`<tr><td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">#${esc(s.number)} ${esc(s.name)}</td><td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:70px;text-align:right">${dTxt}</td><td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:70px;text-align:right;color:${stCol}">${esc(s.conclusion||s.status||'')}</td></tr>`;
+        });
+        h+=`</table>`;
+      }
+      const flavor=lastJob.flavor,worker=lastJob.worker;
+      const jTests=flavor?prTests.filter(t=>t.flavor===flavor&&(worker==null||t.worker===worker)):[];
+      if(jTests.length){
+        const sorted=[...jTests].sort((a,b)=>(a.status==='passed'?1:0)-(b.status==='passed'?1:0)||(b.duration||0)-(a.duration||0));
+        h+=`<div style="margin-top:8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">JUnit tests in this job (${jTests.length} total, slowest &amp; failed first)</div>`;
+        h+=`<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:4px"><thead><tr><th style="padding:3px 8px;font-size:12px">Test</th><th style="padding:3px 8px;font-size:12px;text-align:right">Duration</th><th style="padding:3px 8px;font-size:12px;text-align:right">Baseline</th><th style="padding:3px 8px;font-size:12px">Status</th></tr></thead><tbody>`;
+        sorted.slice(0,25).forEach(t=>{
+          const key=`${t.flavor}::${t.classname}.${t.name}`;
+          const base=(PTB_CACHE&&PTB_CACHE[key])||null;
+          const dur=t.duration!=null?+Number(t.duration).toFixed(1):null;
+          const fail=t.status&&t.status!=='passed'&&t.status!=='skipped';
+          h+=`<tr style="${fail?'background:var(--tint-crit)':''}"><td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);font-size:12px">${esc(t.name)}</td><td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);text-align:right">${dur!==null?dur+'s':'—'}</td><td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--muted)">${base!==null?Number(base).toFixed(1)+'s':'—'}</td><td style="padding:3px 8px;border-bottom:1px solid var(--grid)">${fail?`<span class="chip fail">&#10005; ${esc((t.failure_message||'FAIL').split('\n')[0].slice(0,60))}</span>`:'<span style="color:var(--good)">&#10003;</span>'}</td></tr>`;
+        });
+        h+=`</tbody></table>`;
+      }
+      if(h)slot.innerHTML=h;
+    });
+  }catch(_e){}
+}
+
 // Range change = new window everywhere: drop both brush zooms (they index the drawn list), then redraw.
 function setRange(){TL_ZOOM=null;DEV_ZOOM=null;renderAll()}
 function renderHdot(){const hd=$('#hdot');if(!hd)return;const c0=getWindows().current[0];hd.style.background=c0?(c0.status==='fail'?'var(--crit)':c0.status==='flaky'?'var(--warn)':'var(--good)'):'var(--muted)';hd.title=c0?`The newest merged pull request in this range (${c0.pr}) ${c0.status==='fail'?'failed':c0.status==='flaky'?'passed only after a re-run':'passed'}.`:'No merged pull request falls inside this date range.'}
 // Zoom seams: the charts zoom by dragging, and these let a test drive the same state.
 function tlZoomTo(a,b){const n=getWindows().current.length;TL_ZOOM={a:Math.max(0,a),b:Math.min(n-1,b)};renderTimeline()}
 function devZoomTo(a,b){const n=getWindows().current.length;DEV_ZOOM={a:Math.max(0,Math.min(a,n-1)),b:Math.max(0,Math.min(b,n-1))};renderDevLines()}
-function renderAll(){renderHdot();renderWorker();renderTimeline();renderDevLines();renderFlaky()}
+function renderAll(){renderHdot();renderInsights();renderWorker();renderTimeline();renderDevLines();renderFlaky()}
 
 // ==========================================================================
 // REAL DATA
@@ -2516,6 +2958,14 @@ async function loadViews(base){
     });
     out[group]=tables;
   }));
+  try{
+    const ins=await fetch(base+'insights.json',{cache:'no-cache'}).then(r=>r&&r.ok?r.json():null).catch(()=>null);
+    if(ins&&ins.tables){
+      const it=dict();
+      Object.entries(ins.tables).forEach(([name,table])=>{it[name]=rowsOf(table)});
+      out.insights=it;
+    }
+  }catch(_e){}
   return out;
 }
 
@@ -2532,6 +2982,17 @@ async function getJSON(url){
 const LANE_CAT=dict({TPU:'tpu',GPU:'gpu',CPU:'cpu',Build:'build',Hosted:'infra'});
 const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
+function resolveLane(row){
+  if(row&&row.lane&&row.lane!=='Unknown'&&row.lane!=='No runner')return row.lane;
+  const lbl=String((row&&row.runner_label)||'');
+  if(/ct6e|tpu/i.test(lbl))return'TPU';
+  if(/a100|h100|gpu/i.test(lbl))return'GPU';
+  if(/n[24]-32/i.test(lbl))return'CPU';
+  if(/buildkit/i.test(lbl))return'Build';
+  if(/ubuntu/i.test(lbl))return'Hosted';
+  return(row&&row.lane)||'Hosted';
+}
+
 function mins(seconds){return seconds==null?0:Math.round((seconds/60)*100)/100}
 function stamp(iso){
   const d=new Date(iso);
@@ -2547,7 +3008,7 @@ function median(list){
 // One job identity, stable across runs. The GitHub job name carries the run's
 // own numbering, so it cannot be the key; flavor plus worker can.
 function jobSlug(row){
-  if(row.lane==='Build')return'pkg';
+  if(resolveLane(row)==='Build')return'pkg';
   if(row.flavor)return row.worker==null?row.flavor:`${row.flavor}#${row.worker}`;
   // The jobs view calls it name, the rescues view calls it job_name. Reading only one of them
   // made every flavourless rescue row slug to the literal string "job", so hundreds of unrelated
@@ -2570,13 +3031,15 @@ function adaptViews(v){
   const queue=(v.queue&&v.queue.queue)||[];
   const rescues=(v.flaky&&v.flaky.rescues)||[];
   const rescueTests=(v.flaky&&v.flaky.rescue_tests)||[];
+  const workflows=(v.workflows&&v.workflows.workflows)||[];
 
   // ---- the job catalogue, discovered from the data rather than hard-coded ----
   const seen=new Map();
   jobRows.forEach(r=>{
+    const lane=resolveLane(r);
     const id=jobSlug(r);
-    if(!seen.has(id))seen.set(id,{id,name:jobTitle(r),cat:LANE_CAT[r.lane]||'infra',
-                                  lane:r.lane||'Hosted',label:r.runner_label||'',q:[],s:[],r:[]});
+    if(!seen.has(id))seen.set(id,{id,name:jobTitle(r),cat:LANE_CAT[lane]||'infra',
+                                  lane:lane||'Hosted',label:r.runner_label||'',q:[],s:[],r:[]});
     const j=seen.get(id);
     j.q.push(mins(r.queued_seconds));j.s.push(mins(r.setup_seconds));j.r.push(mins(r.run_seconds));
   });
@@ -2712,7 +3175,7 @@ function adaptViews(v){
   const rescueByJob=dict();
   rescues.forEach(r=>{
     const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
-    const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[],fails:[]};
+    const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:resolveLane(r)||'',events:[],fails:[]};
     if(!r.rescued){
       if(!g.fails.some(f=>f.pr==='#'+r.pr))g.fails.push({pr:'#'+r.pr,url:r.html_url||null,runId:r.run_id});
       return;
@@ -2747,9 +3210,59 @@ function adaptViews(v){
     if(!f.prs.includes('#'+x.pr))f.prs.push('#'+x.pr);
   });
 
+  // ---- scheduled main runs (pr == null) and nightly Docker image pipelines ----
+  const schedRunsMap=new Map();
+  const addSchedRun=(rid,iso)=>{if(rid&&iso&&!schedRunsMap.has(rid))schedRunsMap.set(rid,iso)};
+  suites.forEach(s=>{if(s.pr==null&&s.event==='schedule')addSchedRun(s.run_id,s.created_at)});
+  queue.forEach(q=>{if(q.pr==null&&q.event==='schedule')addSchedRun(q.run_id,q.created_at)});
+  rescues.forEach(r=>{if(r.pr==null&&!/Docker Image/i.test(r.job_name||''))addSchedRun(r.run_id,r.created_at)});
+  const schedCommits=[...schedRunsMap.entries()]
+    .sort((a,b)=>new Date(a[1])-new Date(b[1]))
+    .map(([runId,iso])=>({key:'run:'+runId,runId,iso,date:stamp(iso).split(' ').slice(0,2).join(' '),label:stamp(iso)}));
+
+  const schedRescueByJob=dict();
+  const schedFailedKeys=new Set();
+  rescues.forEach(r=>{
+    if(r.pr!=null||/Docker Image/i.test(r.job_name||''))return;
+    schedFailedKeys.add(`${r.run_id}|${r.job_name}|${r.failed_attempt}`);
+    const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
+    const lane=resolveLane(r);
+    const g=schedRescueByJob[id]=schedRescueByJob[id]||{id,name:r.job_name||id,lane:lane||'',events:[],fails:[]};
+    const rKey='run:'+r.run_id,dt=stamp(r.created_at);
+    if(!r.rescued){
+      if(!g.fails.some(f=>f.pr===rKey))g.fails.push({pr:rKey,date:dt,url:r.html_url||null,runId:r.run_id});
+      return;
+    }
+    g.events.push({pr:rKey,date:dt,
+      wasted:r.wasted_seconds==null?null:mins(r.wasted_seconds),
+      cause:r.failed_conclusion||r.final_conclusion||'',
+      url:r.html_url||null,runId:r.run_id});
+  });
+  const schedFlakyByTest=dict();
+  rescueTests.forEach(x=>{
+    if(x.pr!=null||!schedFailedKeys.has(`${x.run_id}|${x.job_name}|${x.failed_attempt}`))return;
+    const key=x.classname?`${x.classname}.${x.name}`:x.name;
+    const id=x.flavor?(x.worker==null?x.flavor:`${x.flavor}#${x.worker}`):jobSlug({job_name:x.job_name});
+    const f=schedFlakyByTest[key]=schedFlakyByTest[key]||{test:x.name,job:id,prs:[],
+      cause:(x.failure_message||'').split('\n')[0].slice(0,120)};
+    const rKey='run:'+x.run_id;
+    if(!f.prs.includes(rKey))f.prs.push(rKey);
+  });
+
+  const dockerWorkflows=workflows
+    .filter(w=>/Docker Images Pipeline/i.test(w.workflow_name||''))
+    .slice()
+    .sort((a,b)=>String(a.day||'').localeCompare(String(b.day||'')));
+  const dockerRescues=rescues
+    .filter(r=>/Docker Image/i.test(r.job_name||''))
+    .map(r=>({runId:r.run_id,jobName:r.job_name||'',lane:resolveLane(r),rescued:!!r.rescued,
+      iso:r.created_at,day:String(r.created_at||'').slice(0,10),date:stamp(r.created_at),url:r.html_url||null}));
+
   return{jobs,labels,commits,times,timeIso,runIds,triggers,probeQ,counts,
     wkGroups,thCategories,thCommits,
-    rescues:Object.values(rescueByJob),flaky:Object.values(flakyByTest)};
+    rescues:Object.values(rescueByJob),flaky:Object.values(flakyByTest),
+    schedCommits,schedRescues:Object.values(schedRescueByJob),schedFlakyTests:Object.values(schedFlakyByTest),
+    dockerWorkflows,dockerRescues,rawQueue:queue,insights:v.insights||null};
 }
 
 // Assigning the model is the only place the globals are written.
@@ -2760,6 +3273,9 @@ function applyModel(m,generatedAt){
   TEST_COUNTS=m.counts;WK_GROUPS=m.wkGroups;
   TH_CATEGORIES=m.thCategories;TH_COMMITS=m.thCommits;
   RESCUES=m.rescues;FLAKY_TESTS=m.flaky.length?m.flaky:FLAKY_TESTS;
+  SCHED_COMMITS=m.schedCommits||[];SCHED_RESCUES=m.schedRescues||[];SCHED_FLAKY_TESTS=m.schedFlakyTests||[];
+  DOCKER_WORKFLOWS=m.dockerWorkflows||[];DOCKER_RESCUES=m.dockerRescues||[];
+  RAW_QUEUE=m.rawQueue||[];INSIGHTS_VIEW=m.insights||null;
   TESTS=dict();                               // per-test detail is not in the month views
   STEPS=dict();                               // nor are per-step names and timings
   if(generatedAt){const d=new Date(generatedAt);if(!isNaN(d))TODAY=d}
