@@ -232,17 +232,17 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True, scope="module")
 def clear_jax_compilation_cache():
-  """Clears JAX compilation caches and forces garbage collection after each test module.
+  """Clears JAX in-memory compilation caches and forces GC when a worker leaves a test module.
 
-  Prevents XLA memory accumulation and compilation cache buildup across
-  long test runs while preserving intra-module compilation cache reuse.
+  Runs on every backend. xdist workers are long-lived processes that interleave many modules, so
+  this bounds how much jit/tracing cache a worker carries forward, at the cost of re-compiles when
+  it returns to a module. Intra-module cache reuse is preserved; the persistent on-disk cache is
+  not touched. This caps cache growth; it does not reclaim memory a worker holds for other reasons.
   """
   yield
   try:
-    has_accelerator = any(d.platform in ("tpu", "gpu", "proxy") for d in jax.devices())
-    if has_accelerator:
-      jax.clear_caches()
-      gc.collect()
+    jax.clear_caches()
+    gc.collect()
   except Exception:  # pylint: disable=broad-exception-caught
     pass
 
