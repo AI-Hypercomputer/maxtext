@@ -17,7 +17,14 @@
 
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import config
+
+try:
+  from maxtext.models.kernels.gdn import config
+except (ImportError, ModuleNotFoundError):
+  try:
+    from maxtext.src.maxtext.models.kernels.gdn import config
+  except (ImportError, ModuleNotFoundError):
+    from . import config
 
 
 def align_to(x: int, alignment: int) -> int:
@@ -60,17 +67,16 @@ def get_vmem_estimate_bytes(
   # 3. Double-buffered output activation buffer.
   out_bytes = 2 * (tile_b * chunk_sz * aligned_out_dim * act_out_bytes)
 
-  # 4. Temporary scratch buffers and working state memory.
-  # Both decode and prefill maintain working recurrent state representations
-  # concurrently with double-buffered recurrent state DMA buffers.
-  scratch_recurrent_bytes = 2 * (tile_b * n_v * d_v * d_k * rec_state_bytes)
+  # 4. Temporary scratch buffers (allocated in non-batched mode).
   if is_decode:
     scratch_conv_bytes = 0
+    scratch_recurrent_bytes = 0
   else:
     scratch_conv_bytes = tile_b * max(0, kernel_size - 1) * dim_size * conv_state_bytes
+    scratch_recurrent_bytes = tile_b * n_v * d_v * d_k * rec_state_bytes
 
   # 5. Static weight cache references in on-chip memory.
-  weights_bytes = (kernel_size * dim_size * 4) + (aligned_num_v_heads * 8)
+  weights_bytes = ((kernel_size - 1) * dim_size * 4) + (dim_size * 4) + (aligned_num_v_heads * 8)
 
   # 6. Working memory for intra-chunk recurrence and projections.
   intermediate_bytes = n_v * (5 * chunk_sz * chunk_sz + 3 * chunk_sz * (aligned_d_v + aligned_d_k)) * 4
@@ -135,9 +141,25 @@ def calculate_decode_tile_size(
   conv_state_bytes = jnp.dtype(conv_state_dtype).itemsize
   rec_state_bytes = jnp.dtype(recurrent_state_dtype).itemsize
 
-  # Search descending power-of-2 tile candidates (up to 32) bounded by
-  # batch size.
-  decode_candidates = [c for c in (32, 16, 8, 4, 2, 1) if c <= batch_size]
+  # Balance vector compute density against on-chip VMEM capacity:
+  # - Cap tile size across batch size tiers to maximize vector lane compute
+  #   density.
+  # - Floor at tile_b = 4 for small batches to ensure compute density.
+  # - When value head count is large (n_v >= 64), recurrent state working
+  #   memory scales up, so cap max_decode_b to 4 to prevent on-chip memory
+  #   overflow.
+  if n_v >= 64:
+    max_decode_b = 2
+  elif batch_size <= 64:
+    max_decode_b = 4
+  elif batch_size <= 128:
+    max_decode_b = 8
+  elif batch_size <= 256:
+    max_decode_b = 16
+  else:
+    max_decode_b = 32
+
+  decode_candidates = [c for c in (32, 16, 8, 4, 2, 1) if c <= batch_size and c <= max_decode_b]
   decode_tile_size = decode_candidates[-1]
 
   for cand in decode_candidates:
@@ -310,6 +332,6 @@ def get_tile_sizes(
     )
 
   # Guarantee strictly positive tile sizes (>= 1) for Pallas grid compilation.
-  decode_tile_size = max(1, min(decode_tile_size, padded_batch_size))
+  decode_tile_size = max(1, min(decode_tile_size, batch_size))
   mixed_tile_size = max(1, min(mixed_tile_size, batch_size))
   return decode_tile_size, mixed_tile_size
