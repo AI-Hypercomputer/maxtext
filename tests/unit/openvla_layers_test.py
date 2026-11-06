@@ -137,7 +137,6 @@ class OpenVLAViTBlockTest(unittest.TestCase):
   """Single transformer block parity (DINOv2 block with LayerScale, SigLIP block without)."""
 
   def _check(self, name):
-    """Check single OpenVLAViT block against corresponding timm block."""
     np.random.seed(0)
     torch.manual_seed(0)
     timm_model = make_timm_vit(name)
@@ -158,7 +157,7 @@ class OpenVLAViTTowerTest(unittest.TestCase):
   """Full tower parity: patch embed + pos embed + prefix tokens + blocks, second-to-last block output."""
 
   def _check(self, name):
-    """Compares the JAX ViT tower output against timm for the given model name."""
+    """Compares the full JAX tower against timm (second-to-last block output) on random images."""
     np.random.seed(0)
     torch.manual_seed(0)
     timm_model = make_timm_vit(name)
