@@ -1203,10 +1203,59 @@ class GraniteMoeGoldenParityAndPerturbTest(absltest.TestCase):
       with self.assertRaises(AssertionError, msg=f"Torch-free PerturbSpec {spec.name!r} failed to trip!"):
         _assert_parity(perturbed_model)
 
+  def test_extract_hf_router_logits_handles_legacy_and_v5_22_tuple_layouts(self):
+    num_tokens, num_experts, top_k = 20, 8, 2
+    expected_logits = np.arange(num_tokens * num_experts, dtype=np.float32).reshape(num_tokens, num_experts)
+
+    # Legacy HF GraniteMoeTopKGating (transformers <= 5.12.1):
+    # (index_sorted_experts, batch_index, batch_gates, expert_size, logits)
+    legacy_out = (
+        np.zeros((num_tokens * top_k,), dtype=np.int64),
+        np.zeros((num_tokens * top_k,), dtype=np.int64),
+        np.ones((num_tokens * top_k,), dtype=np.float32),
+        [5] * num_experts,
+        expected_logits,
+    )
+    self.assertIs(_extract_hf_router_logits(legacy_out, num_experts), expected_logits)
+
+    # Modern HF GraniteMoeTopKRouter (transformers >= 5.22.1):
+    # (router_logits, top_k_weights, top_k_index) where out[-1] is Long!
+    modern_out = (
+        expected_logits,
+        np.ones((num_tokens, top_k), dtype=np.float32),
+        np.zeros((num_tokens, top_k), dtype=np.int64),
+    )
+    self.assertIs(_extract_hf_router_logits(modern_out, num_experts), expected_logits)
+
+    # Direct tensor pass-through:
+    self.assertIs(_extract_hf_router_logits(expected_logits, num_experts), expected_logits)
+
 
 # ==============================================================================
 # Suite 3: Live PyTorch Weight-Copy Parity & `PerturbSpec` Negative Controls
 # ==============================================================================
+
+
+def _extract_hf_router_logits(out: Any, num_experts: int) -> Any:
+  """Extracts `(num_tokens, num_experts)` float router logits across HF transformers versions.
+
+  - `transformers <= 5.12.1` (`GraniteMoeTopKGating`) returns
+    `(index_sorted_experts, batch_index, batch_gates, expert_size, logits)` with `logits` at `out[-1]`.
+  - `transformers >= 5.22.1` (`GraniteMoeTopKRouter`) returns
+    `(router_logits, top_k_weights, top_k_index)` with float `router_logits` at `out[0]` and integer
+    `top_k_index` at `out[-1]`.
+  """
+  if not isinstance(out, tuple):
+    return out
+  for item in out:
+    if getattr(item, "ndim", None) != 2 or item.shape[-1] != num_experts:
+      continue
+    if HAS_TORCH and torch.is_tensor(item):
+      if torch.is_floating_point(item):
+        return item
+    elif hasattr(item, "dtype") and np.issubdtype(np.asarray(item).dtype, np.floating):
+      return item
+  raise ValueError(f"Could not find (num_tokens, {num_experts}) float router_logits in router output: {out!r}")
 
 
 @unittest.skipUnless(HAS_TORCH, "PyTorch + transformers required for HF reference parity tests.")
@@ -1326,13 +1375,16 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
           dtype=np.int64,
       )
 
-      # Capture HF router_logits via forward hooks (works across both transformers 5.12.1 and v5 HEAD).
+      # Capture HF router_logits via forward hooks across both legacy (<=5.12.1) and v5.22+ router return tuples.
+      num_experts = cfg.num_local_experts
       captured_router_logits: list[Any] = []
       hooks = []
       for layer in hf_model.model.layers:
         hooks.append(
             layer.block_sparse_moe.router.register_forward_hook(
-                lambda _mod, _inp, out, buf=captured_router_logits: buf.append(out[-1] if isinstance(out, tuple) else out)
+                lambda _mod, _inp, out, buf=captured_router_logits, ne=num_experts: buf.append(
+                    _extract_hf_router_logits(out, ne)
+                )
             )
         )
 
@@ -1380,7 +1432,7 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
         captured_unpadded: list[Any] = []
         hooks2 = [
             layer.block_sparse_moe.router.register_forward_hook(
-                lambda _m, _i, o, buf=captured_unpadded: buf.append(o[-1] if isinstance(o, tuple) else o)
+                lambda _m, _i, o, buf=captured_unpadded, ne=num_experts: buf.append(_extract_hf_router_logits(o, ne))
             )
             for layer in hf_model.model.layers
         ]
