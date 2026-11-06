@@ -43,5 +43,18 @@ function check(){
   sel.value=sel.value==='30'?'14':'30';
   sel.dispatchEvent(new w.Event('change',{bubbles:true}));
   ok(tl().scrollLeft===3900,`after changing the date range it is at the right end again (scrollLeft ${tl().scrollLeft})`);
+
+  // Sticky left Y-axis pins on all 3 SVG charts and sticky left job column in #flaky
+  for(const [selStr,label] of [
+    ['#timeline .yaxis-pin','main timeline chart'],
+    ['#devlines [data-devscroll] .yaxis-pin','device run-time chart'],
+    ['#worker-chart .yaxis-pin','worker chart'],
+  ]){
+    const pin=d.querySelector(selStr);
+    ok(!!pin && pin.style.position==='sticky' && pin.style.left==='0px' && /\dm/.test(pin.textContent),
+      `${label} pins its left Y-axis (${pin?pin.textContent:'missing'})`);
+  }
+  const flSticky=d.querySelectorAll('#flaky [data-flscroll] [style*="position:sticky"]');
+  ok(flSticky.length>=2,'flaky re-runs strip pins its left job-name column while scrolling horizontally');
   finish();
 }

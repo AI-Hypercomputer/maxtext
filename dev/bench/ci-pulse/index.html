@@ -684,10 +684,10 @@ function renderTimeline(){
   }
 
   // Grid
-  const yStep=niceStep(ymax,5);
+  const yStep=niceStep(ymax,5),yTicks=[];
   for(let v=0;v<=ymax;v+=yStep){
     el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'var(--grid)','stroke-dasharray':'2,2'});
-    if(v%20===0)el('text',{x:LP-6,y:py(v)+4,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=fmtTick(v);
+    if(v%20===0){el('text',{x:LP-6,y:py(v)+4,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=fmtTick(v);yTicks.push({y:py(v),label:fmtTick(v)})}
   }
   // Median (drawn only when it fits the zoomed scale)
   if(median<=ymax&&totals.length>=5){  // a median of fewer than 5 runs says little
@@ -910,6 +910,7 @@ function renderTimeline(){
   }
 
   host.appendChild(svg);
+  pinYAxis(host,LP,H,yTicks);
   scrollToNewest(host);
 }
 
@@ -920,6 +921,16 @@ function scrollToNewest(el){
   if(typeof ResizeObserver!=='function')return;
   const ro=new ResizeObserver(()=>{if(el.clientWidth){ro.disconnect();el.scrollLeft=el.scrollWidth}});
   ro.observe(el);
+}
+function pinYAxis(scroller,LP,H,ticks){
+  if(!scroller||!ticks||!ticks.length)return;
+  scroller.querySelectorAll('.yaxis-pin').forEach(n=>n.remove());
+  const pin=document.createElement('div');
+  pin.className='yaxis-pin';
+  pin.setAttribute('aria-hidden','true');
+  pin.style.cssText=`position:sticky;left:0;top:0;width:${LP}px;height:${H}px;margin-bottom:-${H}px;z-index:4;pointer-events:none;background:linear-gradient(90deg,var(--surface) 84%,transparent)`;
+  pin.innerHTML=ticks.map(t=>`<span style="position:absolute;right:6px;top:${(t.y/H*100).toFixed(2)}%;transform:translateY(-50%);font-size:11px;font-family:var(--mono);color:#64748B;line-height:1;white-space:nowrap">${esc(t.label)}</span>`).join('');
+  scroller.insertBefore(pin,scroller.firstChild);
 }
 
 // ============ TOOLTIP ============
@@ -1320,10 +1331,11 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
   const el=(t,a)=>{const e=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))e.setAttribute(k,String(v));svg.appendChild(e);return e};
 
   // Grid
-  const step=niceStep(yMax,5);
+  const step=niceStep(yMax,5),yTicks=[];
   for(let v=0;v<=yMax;v+=step){
     el('line',{x1:LP,y1:py(v),x2:W-RP,y2:py(v),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
     el('text',{x:LP-6,y:py(v)+3,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=fmtTick(v);
+    yTicks.push({y:py(v),label:fmtTick(v)});
   }
 
   // Crosshair (shared)
@@ -1443,6 +1455,7 @@ ${rows.map((r,ri)=>{
   svgWrap.setAttribute('data-devscroll','1');
   svgWrap.style.cssText='overflow-x:auto';
   svgWrap.appendChild(svg);
+  pinYAxis(svgWrap,LP,H,yTicks);
   host.appendChild(svgWrap);
   scrollToNewest(svgWrap);
 }
@@ -1987,10 +2000,11 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
     svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
     svg.style.cssText=`display:block;width:100%;min-width:${W}px;opacity:${dimAll?0.25:1}`;
     const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
-    const step=niceStep(ymax,4);
+    const step=niceStep(ymax,4),yTicks=[];
     for(let g=0;g<=ymax;g+=step){
       el('line',{x1:LP,y1:py(g),x2:W-RP,y2:py(g),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
       el('text',{x:LP-6,y:py(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=fmtTick(g);
+      yTicks.push({y:py(g),label:fmtTick(g)});
     }
     const slotW=(W-LP-RP-gap*LIST.length)/LIST.length;
     LIST.forEach((c,i)=>{
@@ -2036,6 +2050,7 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
       if(dpt.status==='fail')el('text',{x:x0+slotW/2,y:py(dpt.v)-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
     });
     host.appendChild(svg);
+    pinYAxis(host,LP,H,yTicks);
     scrollToNewest(host);
     return;
   }
@@ -2055,10 +2070,11 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
   svg.style.cssText=`display:block;width:100%;min-width:${W}px`;
   const el=(a,b)=>{const e=document.createElementNS(ns,a);for(const[k,v]of Object.entries(b))e.setAttribute(k,String(v));svg.appendChild(e);return e};
-  const wStep=niceStep(ymax,5);
+  const wStep=niceStep(ymax,5),yTicks=[];
   for(let g=0;g<=ymax;g+=wStep){
     el('line',{x1:LP,y1:y(g),x2:W-RP,y2:y(g),stroke:'var(--grid)','stroke-width':1,'stroke-dasharray':'3,3'});
     el('text',{x:LP-6,y:y(g)+3,'text-anchor':'end','font-size':'11',fill:'#64748B','font-family':'var(--mono)'}).textContent=fmtTick(g);
+    yTicks.push({y:y(g),label:fmtTick(g)});
   }
   const slotW=(W-LP-RP-gap*LIST.length)/LIST.length;
   LIST.forEach((c,i)=>{
@@ -2106,6 +2122,7 @@ ${breakdown(p,sl.label)}
     if(c.status==='fail')el('text',{x:x0+slotW/2,y:y(groupVal[i])-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
   });
   host.appendChild(svg);
+  pinYAxis(host,LP,H,yTicks);
   scrollToNewest(host);
 }
 // ============ JOBS RESCUED BY RE-RUNS (aggregate flakiness) ============
@@ -2317,7 +2334,7 @@ function renderFlaky(){
       ?`${prIn.length} of ${n} runs &middot; <span style="color:var(--muted)">too few to rate (needs 10)</span>`
       :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${prIn.length} of ${n} runs`;
     return `<div class="issue-row" data-flane="${esc(j.lane)}" onclick="openFlakyPop(${jsArg(String(j.id))})" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
-      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(j.name)}</div>
+      <div style="position:sticky;left:0;z-index:2;background:var(--surface);padding-right:8px"><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(j.name)}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${esc(j.lane)} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${esc(RUNNER_LABELS[j.id])}</span>`:''}</div></div>
       <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
       <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)">${rateTxt}</div>
@@ -2325,7 +2342,7 @@ function renderFlaky(){
   }).join('');
   if(listed.length){
     h+=`<div data-flaxis="1" style="display:grid;grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;gap:16px;align-items:start;padding:0 17px">
-      <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">merged pull request &rarr;</div>
+      <div style="position:sticky;left:0;z-index:2;background:var(--surface);font-size:12px;color:var(--muted);text-align:right;padding-top:2px;padding-right:8px">merged pull request &rarr;</div>
       <div style="display:flex;gap:2px">${(()=>{const n=cal.idxs.length,step=n<=10?1:n<=20?2:n<=40?4:5;return cal.idxs.map((ci,vi)=>{const show=vi%step===0||vi===n-1;return`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:${show?38:8}px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div>${show?`<div style="position:absolute;top:7px;left:50%;transform:translateX(-50%);text-align:center;font-size:10px;font-family:var(--mono);line-height:1.3;white-space:nowrap"><div style="font-weight:700;color:var(--ink)">${esc(TH_COMMITS[ci].pr)}</div><div style="color:var(--muted)">${dayNum(TH_COMMITS[ci].date)}</div></div>`:''}</div>`}).join('')})()}</div>
       <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
     </div>`;
@@ -2558,7 +2575,7 @@ function renderFlakySched(host){
       return `<div style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;cursor:pointer;${st}" title="${esc(c.label)} · ${resIdx[i]?'passed on retry':failIdx[i]?'failed on main':'passed'}" onclick="event.stopPropagation();openSchedPop(${jsArg(String(j.id))},${jsArg(String(c.key))})"></div>`;
     }).join('');
     return `<div class="issue-row" onclick="openSchedPop(${jsArg(String(j.id))})" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
-      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(j.name)}</div>
+      <div style="position:sticky;left:0;z-index:2;background:var(--surface);padding-right:8px"><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(j.name)}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]||'var(--muted)'}">&#9679;</span> ${esc(j.lane||'Hosted')} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${esc(RUNNER_LABELS[j.id])}</span>`:''}</div></div>
       <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
       <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)"><span style="color:${failIn.length?'var(--crit)':'var(--warn)'};font-weight:700">${failIn.length} failed</span> &middot; ${runIn.length} rescued of ${n}</div>
@@ -2566,7 +2583,7 @@ function renderFlakySched(host){
   }).join('');
   if(rows.length){
     h+=`<div style="display:grid;grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;gap:16px;align-items:start;padding:0 17px">
-      <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">scheduled main run &rarr;</div>
+      <div style="position:sticky;left:0;z-index:2;background:var(--surface);font-size:12px;color:var(--muted);text-align:right;padding-top:2px;padding-right:8px">scheduled main run &rarr;</div>
       <div style="display:flex;gap:2px">${(()=>{const step=n<=10?1:n<=20?2:n<=40?4:6;return runs.map((c,vi)=>{const show=vi%step===0||vi===n-1;return`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:${show?36:8}px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div>${show?`<div style="position:absolute;top:7px;left:50%;transform:translateX(-50%);text-align:center;font-size:10px;font-family:var(--mono);line-height:1.3;white-space:nowrap"><div style="font-weight:700;color:var(--ink)">${dayNum(c.date)}</div><div style="color:var(--muted)">${esc((c.label||'').split(' ')[2]||'')}</div></div>`:''}</div>`}).join('')})()}</div>
       <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
     </div>`;
@@ -2648,7 +2665,7 @@ function renderFlakyDocker(host){
       return `<div style="flex:1;height:16px;border-radius:3px;min-width:16px;${st}" title="${esc(d.day)} · ${d.runs} run(s) · median ${mins(d.median_wall_seconds).toFixed(1)}m"></div>`;
     }).join('');
     return `<div class="issue-row" style="grid-template-columns:290px 1fr 280px;min-width:${rowMin}px">
-      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(name)}</div>
+      <div style="position:sticky;left:0;z-index:2;background:var(--surface);padding-right:8px"><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(name)}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${col}">&#9679;</span> ${isGpu?'GPU':'TPU'} Docker pipeline &middot; ${list.length} active days</div></div>
       <div style="display:flex;gap:3px;align-items:center">${cells}</div>
       <div class="mono" style="font-size:13px;text-align:right;color:var(--ink)"><b>${medMin.toFixed(1)}m</b> median &middot; ${totRuns} runs</div>
