@@ -18,12 +18,12 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.xla_metadata import set_xla_metadata
 from jax.sharding import NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode
 from maxtext.layers.moe import load_balance_updates_from_counts
+from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_name
 
 
@@ -114,7 +114,9 @@ def gradient_accumulation_loss_and_grad(
   # token capacity, so the cotangents carry the GA=1 magnitude, and fold S back into the final division below.
   # The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
   use_tunix_ga = getattr(config, "use_tunix_gradient_accumulation", False)
-  token_capacity = getattr(config, "global_batch_size_to_train_on", 0) * getattr(config, "max_target_length", 0)
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  batch_size = logical_batch if isinstance(logical_batch, int) else getattr(config, "global_batch_size_to_train_on", 0)
+  token_capacity = batch_size * getattr(config, "max_target_length", 0)
   loss_scale = 1.0 / float(token_capacity) if (token_capacity > 0 and not use_tunix_ga) else 1.0
 
   # functools.wraps keeps _loss_fn's signature visible, which nnx.value_and_grad needs to resolve is_train=.
@@ -130,15 +132,12 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-    # Scope double-buffering to model scans, not the enclosing gradient accumulation scan.
-    # This metadata only affects XLA:GPU; see https://github.com/openxla/xla/pull/43468.
-    # Enable it with JAX_OPTIMIZATION_LEVEL=O1 and
-    # XLA_FLAGS="--xla_gpu_enable_while_loop_unrolling=WHILE_LOOP_UNROLLING_MANUAL_UNROLL".
+    loop_unroll_ctx = max_utils.model_loop_unroll_context(config)
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
-      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+      with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
@@ -148,7 +147,7 @@ def gradient_accumulation_loss_and_grad(
           if dropout_rng is not None
           else None
       )
-      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+      with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]

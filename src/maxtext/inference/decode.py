@@ -124,6 +124,8 @@ def main(argv: Sequence[str]) -> None:
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
         num_videos=getattr(processor_outputs, "num_videos", 0),
+        audio_placeholder=config.audio_placeholder,
+        num_audios=getattr(processor_outputs, "num_audios", 0),
     )
 
   metadata = engine.get_tokenizer()
@@ -245,8 +247,8 @@ def main(argv: Sequence[str]) -> None:
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 
-  assert output.startswith(
-      config.autoregressive_decode_assert
+  assert " ".join(output.split()).startswith(
+      " ".join(config.autoregressive_decode_assert.split())
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
   # Deactivate profiler

@@ -15,6 +15,8 @@ Qwen3 is a family of open-source large language models from the Qwen team at Ali
 
 -   **Qwen3.5-35B-A3B**
 
+-   **Qwen3.8-2.4T-A95B**
+
 For more details on Qwen3 architecture, see the [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388).
 
 For more details on Qwen3-Omni architecture, see the [Qwen3-Omni Technical Report](https://arxiv.org/abs/2509.17765).
@@ -33,37 +35,56 @@ To get started, you first need a MaxText-compatible checkpoint.
 1.  **Download the Model**: Download the official model from Hugging Face. You can use a tool like `hf_transfer` for a fast download.
 
     ```bash
+    # Example for Qwen3.8-2.4T-A95B
+    hf download Qwen/Qwen3.8-2.4T-A95B --local-dir /path/to/qwen3.8_2_4t_hf_checkpoint
+    ```
+
+    ```bash
     # Example for Qwen3.5-35B-A3B
-    hf_transfer download Qwen/Qwen3.5-35B-A3B --local-dir /path/to/qwen3.5_35b_hf_checkpoint
+    hf download Qwen/Qwen3.5-35B-A3B --local-dir /path/to/qwen3.5_35b_hf_checkpoint
     ```
 
     ```bash
     # Example for Qwen3-235B-A22B
-    hf_transfer download Qwen/Qwen3-235B-A22B-Thinking-2507 --local-dir /path/to/qwen3_hf_checkpoint
+    hf download Qwen/Qwen3-235B-A22B-Thinking-2507 --local-dir /path/to/qwen3_hf_checkpoint
     ```
 
 2.  **Convert the Checkpoint**: 
 
     **Checkpointing Util**: Supports bidirection conversion from MaxText <-> HF. For more info look at [convert_checkpoint](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/checkpointing_solutions/convert_checkpoint.md) doc.
+  - Ex. Qwen3.8-2.4T-A95B
+
+    ```bash
+    # Set scan_layers=false for unscanned checkpoint
+    JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
+        model_name=qwen3.8-2.4t-a95b \
+        base_output_directory=gs://your-gcs-bucket/qwen3.8_2_4t_maxtext_ckpt \
+        hf_access_token=${HF_TOKEN} \
+        scan_layers=true \
+        use_multimodal=false
+    ```
+
   - Ex. Qwen3.5-35B
 
     ```bash
+    # Set scan_layers=false for unscanned checkpoint
     JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
         model_name=qwen3.5-35b-a3b \
         base_output_directory=gs://your-gcs-bucket/qwen3.5_35b_maxtext_ckpt \
         hf_access_token=${HF_TOKEN} \
-        scan_layers=true \ # Set to false for unscanned checkpoint
+        scan_layers=true \
         use_multimodal=false
     ```
 
   - Ex. Qwen3-MoE
-    
+
     ```bash
+    # Set scan_layers=false for unscanned checkpoint
     JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
         model_name=<qwen3-30b-a3b|qwen3-235b-a22b|qwen3-480b-a35b> \
         base_output_directory=gs://your-gcs-bucket/qwen3_maxtext_ckpt \
         hf_access_token=${HF_TOKEN} \
-        scan_layers=true \ # Set to false for unscanned checkpoint
+        scan_layers=true \
         hf_model_path=${HF_MODEL_PATH} # Optional
     ```
 
@@ -207,4 +228,23 @@ export BASE_OUTPUT_PATH=gs://<YOUR-GCS-BUCKET>/qwen3.5-397b-a17b_maxtext_ckpt
 
 # 3. Execute the conversion and validation script
 bash tests/end_to_end/tpu/qwen/moe/qwen3.5-397b-a17b/1_test_qwen3.5_397b_a17b.sh
+```
+
+### Qwen3.8-2.4T-A95B
+
+```bash
+# 1. Export your Hugging Face token
+export HF_TOKEN="your_hf_token_here"
+
+# 2. Set the base path for conversion outputs
+export BASE_OUTPUT_PATH=gs://<YOUR-GCS-BUCKET>/qwen3.8-2.4t-a95b_maxtext_ckpt
+
+# (Optional) Set the path to your local Hugging Face checkpoint
+# export HF_MODEL_PATH=/path/to/local/qwen3.8-2.4t-a95b_hf_checkpoint
+
+# 3. Execute the checkpoint conversion script (CPU)
+bash tests/end_to_end/tpu/qwen/moe/qwen3.8-2.4t-a95b/1_test_qwen3.8_2.4t_a95b.sh
+
+# 4. (Optional) Execute the end-to-end TPU validation script (v5p-512)
+# bash tests/end_to_end/tpu/qwen/moe/qwen3.8-2.4t-a95b/2_test_qwen3.8_2.4t_a95b.sh
 ```

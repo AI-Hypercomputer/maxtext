@@ -122,6 +122,7 @@ def make_config(**overrides):
       "data_shuffle_seed": 1234,
       "steps": 12000,
       "global_batch_size_to_train_on": 16384,
+      "logical_global_batch_size_to_train_on": None,
       "global_batch_size_to_eval_on": 1024,
       "per_device_batch_size": 1.0,
       "gradient_accumulation_steps": 1,
@@ -324,11 +325,41 @@ class MllogUtilsTest(unittest.TestCase):
         _CONSTANTS.TENSOR_PARALLELISM: 2,
         _CONSTANTS.CONTEXT_PARALLELISM: 1,
         _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_LINEAR: "fp8",
+        _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN: "bfloat16",
         _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM: "fp8",
         _CONSTANTS.CONFIG_FILENAME: "deepseek3-671b-lineage.yml",
     }
     for key, value in expected.items():
       self.assertEqual(self.mllogger.value_of(key), value, key)
+
+    self.mllogger.events.clear()
+    config.lineage_quantization = "fp8_full_splash_qk_e3"
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN), "fp8")
+
+  def test_init_print_attn_precision_includes_quantized_splash_qk(self):
+    config = self.setup_local(experimental_sa_quant_q_fp8=True)
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN), "fp8")
+
+    self.mllogger.events.clear()
+    config_k = make_config(
+        mllog_file=config.mllog_file,
+        experimental_sa_quant_q_fp8=False,
+        experimental_sa_quant_k_fp8=True,
+    )
+    mllog_utils.init_print(config_k)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN), "fp8")
+
+  def test_init_print_eval_samples_is_capped_at_eval_set_size(self):
+    config = self.setup_local(global_batch_size_to_eval_on=16384)
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.EVAL_SAMPLES), 1024)
+
+    self.mllogger.events.clear()
+    config_full = make_config(mllog_file=config.mllog_file, eval_steps=-1)
+    mllog_utils.init_print(config_full)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.EVAL_SAMPLES), 1024)
 
   def test_init_print_comm_precision_includes_quantized_token_all_gather(self):
     config = self.setup_local(moe_quantize_token_all_gather=True)
@@ -530,6 +561,20 @@ class MllogUtilsTest(unittest.TestCase):
         self.mllogger.metadata_of("tracked_stats"),
         {"samples_count": 5 * config.global_batch_size_to_train_on},
     )
+
+  def test_logical_global_batch_size_overrides_padded_physical_batch_in_events(self):
+    config = self.setup_local(global_batch_size_to_train_on=112, logical_global_batch_size_to_train_on=100)
+    mllog_utils.init_print(config)
+    mllog_utils.block_start(config, step=0)
+    mllog_utils.tracked_stats(config, step=3, step_time=0.5, loss=2.0, start_step=1)
+    mllog_utils.eval_start(config, step=3, start_step=1)
+    mllog_utils.eval_stop(config, step=3, eval_loss=4.0, start_step=1)
+
+    self.assertEqual(self.mllogger.value_of("global_batch_size"), 100)
+    self.assertEqual(self.mllogger.metadata_of("block_start"), {"samples_count": 100, "step": 0})
+    self.assertEqual(self.mllogger.metadata_of("tracked_stats"), {"samples_count": 200})
+    self.assertEqual(self.mllogger.metadata_of("eval_start"), {"samples_count": 200, "step": 3})
+    self.assertEqual(self.mllogger.metadata_of("eval_stop"), {"samples_count": 200, "step": 3})
 
   def test_validation_time_is_keyed_by_step(self):
     """The reference keys this tracked_stats variant by step, not samples_count."""

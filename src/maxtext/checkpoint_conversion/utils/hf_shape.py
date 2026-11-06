@@ -14,6 +14,9 @@
 
 """Hugging Face shape checkpoint conversion utils."""
 
+import math
+from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
+
 
 def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   """Generates a shape mapping for Hugging Face Gemma3 parameters.
@@ -495,8 +498,13 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
       "lm_head.weight": [vocab_size, hidden_size],
   }
 
-  # --- Loop Over Layers ---
-  for layer_idx in range(num_hidden_layers):
+  mtp_num_layers = config.get(
+      "num_nextn_predict_layers",
+      config.get("num_mtp_layers", config.get("mtp_num_layers", 0)),
+  )
+
+  # --- Loop Over Layers (including MTP layers if present) ---
+  for layer_idx in range(num_hidden_layers + mtp_num_layers):
     layer_prefix = f"model.layers.{layer_idx}"
 
     # --- Attention weights ---
@@ -511,6 +519,16 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
         # output projection
         f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
     }
+
+    if layer_idx >= num_hidden_layers:
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.enorm.weight": [hidden_size],
+              f"{layer_prefix}.hnorm.weight": [hidden_size],
+              f"{layer_prefix}.eh_proj.weight": [hidden_size, 2 * hidden_size],
+              f"{layer_prefix}.shared_head.norm.weight": [hidden_size],
+          }
+      )
 
     # query projection
     if q_lora_rank is None:
@@ -692,7 +710,7 @@ def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
       )
 
 
-def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
+def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, *, hf_prefix: str = "model.language_model"):
   """Returns mapping between HuggingFace Qwen3.5 weights path and their shape."""
 
   if "text_config" in config:
@@ -726,13 +744,13 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
 
   # --- Initialize Mapping ---
   mapping = {
-      "model.language_model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.language_model.norm.weight": [hidden_size],
+      f"{hf_prefix}.embed_tokens.weight": [vocab_size, hidden_size],
+      f"{hf_prefix}.norm.weight": [hidden_size],
       "lm_head.weight": [vocab_size, hidden_size],
   }
 
   for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"model.language_model.layers.{layer_idx}"
+    layer_prefix = f"{hf_prefix}.layers.{layer_idx}"
 
     # Standard Layer Norms
     mapping[f"{layer_prefix}.input_layernorm.weight"] = [hidden_size]
@@ -809,6 +827,11 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
       )
 
   return mapping
+
+
+def QWEN3_8_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HF weight shapes for the text-only Qwen3.8 checkpoint."""
+  return QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, hf_prefix="model")
 
 
 def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
@@ -1217,8 +1240,14 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
         f"{comp_prefix}.ape": [r, comp_dim],
     }
 
-  for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"layers.{layer_idx}"
+  def _layer_shapes(layer_prefix, is_hash, ratio):
+    """Returns the HF shapes for one DeepSeek-V4 transformer layer under `layer_prefix`.
+
+    Args:
+      layer_prefix: HF key prefix, e.g. `layers.3` or `mtp.0`.
+      is_hash: Whether the layer uses hash routing (emits `tid2eid` instead of a gate bias).
+      ratio: Compression ratio; 0 means the layer has no compressor weights.
+    """
     layer_mapping = {
         f"{layer_prefix}.attn_norm.weight": [hidden_size],
         f"{layer_prefix}.ffn_norm.weight": [hidden_size],
@@ -1245,14 +1274,8 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
         f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],
         f"{layer_prefix}.ffn.gate.bias": [n_routed_experts],
     }
-    if layer_idx < num_hash_layers:
+    if is_hash:
       layer_mapping[f"{layer_prefix}.ffn.gate.tid2eid"] = [vocab_size, config.get("num_experts_per_tok", 2)]
-
-    compress_ratios = config.get("compress_ratios")
-    if compress_ratios and layer_idx < len(compress_ratios):
-      ratio = compress_ratios[layer_idx]
-    else:
-      ratio = 0 if layer_idx < 2 else (4 if layer_idx % 2 == 0 else 128)
 
     if ratio > 0:
       comp_dim = 2 * head_dim if ratio == 4 else head_dim
@@ -1273,7 +1296,373 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
     layer_mapping[f"{layer_prefix}.ffn.shared_experts.w3.weight"] = [moe_intermediate_size, hidden_size]
     layer_mapping[f"{layer_prefix}.ffn.shared_experts.w2.weight"] = [hidden_size, moe_intermediate_size]
 
-    mapping.update(layer_mapping)
+    return layer_mapping
+
+  compress_ratios = config["compress_ratios"]
+  for layer_idx in range(num_hidden_layers):
+    mapping.update(
+        _layer_shapes(
+            f"layers.{layer_idx}",
+            is_hash=layer_idx < num_hash_layers,
+            ratio=compress_ratios[layer_idx],
+        )
+    )
+
+  # Multi-Token Prediction heads. Each MTP depth owns a full DeepSeek-V4 decoder layer,
+  # built as DeepSeek4DecoderLayer(compress_ratio=0, is_hash_routing=False), so it has
+  # neither compressor weights nor hash routing but does carry a MoE gate bias. On top of
+  # that it has its own norms, a fused input projection and a hyper-connection head.
+  mtp_num_layers = config.get(
+      "num_nextn_predict_layers",
+      config.get("num_mtp_layers", config.get("mtp_num_layers", 0)),
+  )
+  for mtp_idx in range(mtp_num_layers):
+    mtp_prefix = f"mtp.{mtp_idx}"
+    mapping.update(_layer_shapes(mtp_prefix, is_hash=False, ratio=0))
+    mapping.update(
+        {
+            f"{mtp_prefix}.enorm.weight": [hidden_size],
+            f"{mtp_prefix}.hnorm.weight": [hidden_size],
+            f"{mtp_prefix}.norm.weight": [hidden_size],
+            f"{mtp_prefix}.e_proj.weight": [hidden_size, hidden_size],
+            f"{mtp_prefix}.h_proj.weight": [hidden_size, hidden_size],
+            # MaxText fuses these two into a single [2 * emb, emb] kernel, so the export
+            # splits one MaxText param into two HF params via this composite key.
+            (f"{mtp_prefix}.e_proj.weight", f"{mtp_prefix}.h_proj.weight"): (
+                [hidden_size, hidden_size],
+                [hidden_size, hidden_size],
+            ),
+            f"{mtp_prefix}.hc_head_fn": [hc_mult, hidden_size * hc_mult],
+            f"{mtp_prefix}.hc_head_base": [hc_mult],
+            f"{mtp_prefix}.hc_head_scale": [1],
+        }
+    )
+
+  return mapping
+
+
+def _qwen3_8_flash_next_is_prime(n: int) -> bool:
+  """Returns whether n is prime."""
+  if n < 2:
+    return False
+  if n < 4:
+    return True
+  if n % 2 == 0 or n % 3 == 0:
+    return False
+  i = 5
+  while i * i <= n:
+    if n % i == 0 or n % (i + 2) == 0:
+      return False
+    i += 6
+  return True
+
+
+def _qwen3_8_flash_next_nth_prime_after(start: int, nth: int) -> int:
+  """Returns the nth prime strictly greater than start."""
+  candidate = start
+  found = 0
+  while found < nth:
+    candidate += 1
+    if _qwen3_8_flash_next_is_prime(candidate):
+      found += 1
+  return candidate
+
+
+def QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE(config):
+  """Generates a shape mapping for HuggingFace Qwen3.8-Flash-Next parameters."""
+  # Accept a `PreTrainedConfig` (e.g. `HF_MODEL_CONFIGS[...]`) as well as its `to_dict()` output.
+  if hasattr(config, "to_dict"):
+    config = config.to_dict()
+  tcfg = (
+      config.get("text_config", config)
+      if isinstance(config, dict) and isinstance(config.get("text_config"), dict)
+      else config
+  )
+  if (
+      isinstance(config, dict)
+      and not config.get("language_model_only", False)
+      and ("text_config" in config or "vision_config" in config)
+  ):
+    text_base = "model.language_model"
+  else:
+    text_base = "model"
+
+  hidden_size = tcfg["hidden_size"]
+  vocab_size = tcfg["vocab_size"]
+  num_hidden_layers = tcfg["num_hidden_layers"]
+  num_attention_heads = tcfg["num_attention_heads"]
+  num_key_value_heads = tcfg["num_key_value_heads"]
+  head_dim = tcfg["head_dim"]
+  hc_count = tcfg.get("hc_count", 4)
+  hc_lowrank = tcfg.get("hc_lowrank", 320)
+  hc_dim = hc_count * hidden_size
+  moe_intermediate_size = tcfg["moe_intermediate_size"]
+  shared_expert_intermediate_size = tcfg["shared_expert_intermediate_size"]
+  num_experts = tcfg["num_experts"]
+  linear_num_key_heads = tcfg["linear_num_key_heads"]
+  linear_num_value_heads = tcfg["linear_num_value_heads"]
+  linear_key_head_dim = tcfg["linear_key_head_dim"]
+  linear_value_head_dim = tcfg["linear_value_head_dim"]
+  linear_conv_kernel_dim = tcfg.get("linear_conv_kernel_dim", 4)
+  indexer_n_heads = tcfg.get("indexer_n_heads", 4)
+  indexer_kv_heads = tcfg.get("indexer_kv_heads", 1)
+  indexer_head_dim = tcfg.get("indexer_head_dim", 128)
+  layer_types = tcfg.get("layer_types") or [
+      "full_attention" if (i + 1) % 4 == 0 else "linear_attention" for i in range(num_hidden_layers)
+  ]
+
+  q_dim = num_attention_heads * head_dim
+  kv_dim = num_key_value_heads * head_dim
+  gdn_k_dim = linear_num_key_heads * linear_key_head_dim
+  gdn_v_dim = linear_num_value_heads * linear_value_head_dim
+  conv_dim = 2 * gdn_k_dim + gdn_v_dim
+
+  mapping = {
+      f"{text_base}.embed_tokens.weight": [vocab_size, hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+      f"{text_base}.hyper_connection_mixer.hc_norm.weight": [hc_dim],
+      f"{text_base}.hyper_connection_mixer.input_mix_weight_down.weight": [
+          hc_lowrank,
+          hc_dim,
+      ],
+      f"{text_base}.hyper_connection_mixer.input_mix_weight_up.weight": [
+          hc_dim,
+          hc_lowrank,
+      ],
+  }
+
+  def _layer_shapes(prefix: str, is_qsa: bool) -> dict:
+    layer_map = {
+        f"{prefix}.mlp.gate.weight": [num_experts, hidden_size],
+        f"{prefix}.mlp.experts.gate_up_proj": [
+            num_experts,
+            2 * moe_intermediate_size,
+            hidden_size,
+        ],
+        f"{prefix}.mlp.experts.down_proj": [
+            num_experts,
+            hidden_size,
+            moe_intermediate_size,
+        ],
+        f"{prefix}.mlp.shared_expert.gate_proj.weight": [
+            shared_expert_intermediate_size,
+            hidden_size,
+        ],
+        f"{prefix}.mlp.shared_expert.up_proj.weight": [
+            shared_expert_intermediate_size,
+            hidden_size,
+        ],
+        f"{prefix}.mlp.shared_expert.down_proj.weight": [
+            hidden_size,
+            shared_expert_intermediate_size,
+        ],
+        f"{prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
+    }
+    for hc in ("attn_hyper_connection", "mlp_hyper_connection"):
+      layer_map.update(
+          {
+              f"{prefix}.{hc}.hc_norm.weight": [hc_dim],
+              f"{prefix}.{hc}.input_mix_weight_down.weight": [hc_lowrank, hc_dim],
+              f"{prefix}.{hc}.input_mix_weight_up.weight": [hc_dim, hc_lowrank],
+              f"{prefix}.{hc}.block_inject_weight.weight": [hc_count, hc_dim],
+          }
+      )
+    if is_qsa:
+      layer_map.update(
+          {
+              f"{prefix}.self_attn.q_proj.weight": [2 * q_dim, hidden_size],
+              f"{prefix}.self_attn.k_proj.weight": [kv_dim, hidden_size],
+              f"{prefix}.self_attn.v_proj.weight": [kv_dim, hidden_size],
+              f"{prefix}.self_attn.o_proj.weight": [hidden_size, q_dim],
+              f"{prefix}.self_attn.q_norm.weight": [head_dim],
+              f"{prefix}.self_attn.k_norm.weight": [head_dim],
+              f"{prefix}.self_attn.indexer.index_qk_proj.weight": [
+                  (indexer_n_heads + indexer_kv_heads) * indexer_head_dim,
+                  hidden_size,
+              ],
+              f"{prefix}.self_attn.indexer.q_layernorm.weight": [indexer_head_dim],
+              f"{prefix}.self_attn.indexer.k_layernorm.weight": [indexer_head_dim],
+          }
+      )
+    else:
+      layer_map.update(
+          {
+              f"{prefix}.linear_attn.A_log": [linear_num_value_heads],
+              f"{prefix}.linear_attn.dt_bias": [linear_num_value_heads],
+              f"{prefix}.linear_attn.conv1d.weight": [
+                  conv_dim,
+                  1,
+                  linear_conv_kernel_dim,
+              ],
+              f"{prefix}.linear_attn.in_proj_qkv.weight": [conv_dim, hidden_size],
+              f"{prefix}.linear_attn.in_proj_z.weight": [gdn_v_dim, hidden_size],
+              f"{prefix}.linear_attn.in_proj_b.weight": [
+                  linear_num_value_heads,
+                  hidden_size,
+              ],
+              f"{prefix}.linear_attn.in_proj_a.weight": [
+                  linear_num_value_heads,
+                  hidden_size,
+              ],
+              f"{prefix}.linear_attn.norm.weight": [linear_value_head_dim],
+              f"{prefix}.linear_attn.out_proj.weight": [hidden_size, gdn_v_dim],
+          }
+      )
+    return layer_map
+
+  for layer_idx in range(num_hidden_layers):
+    is_qsa = layer_types[layer_idx] == "full_attention"
+    mapping.update(_layer_shapes(f"{text_base}.layers.{layer_idx}", is_qsa=is_qsa))
+
+  ple_layer_ids = tcfg.get("ple_layer_ids", [2])
+  if tcfg.get("use_ple_layer", bool(ple_layer_ids)):
+    default_pid = (int(ple_layer_ids[0]) - 1) if ple_layer_ids else 1
+    ple_layer_id = tcfg.get("ple_layer_id", default_pid)
+    ple_pfx = f"{text_base}.layers.{ple_layer_id}.ple"
+    ple_embed_dim = tcfg.get("ple_embed_dim", hidden_size)
+    ple_conv_kernel_size = tcfg.get("ple_conv_kernel_size", 4)
+    ngram_size = tcfg.get("ngram_size", 3)
+    heads_per_ngram = tcfg.get("heads_per_ngram", 8)
+    ngram_vocab_size_base = tcfg.get("ngram_vocab_size_base", 20000000)
+    split_ngram_parts = max(1, int(tcfg.get("split_ngram_parts", 128)))
+    divisible_by = tcfg.get("make_ngram_vocab_size_divisible_by", 128)
+
+    ngram_heads = (ngram_size - 1) * heads_per_ngram
+    head_dim_per_ngram = ple_embed_dim // ngram_heads
+    total_vocab = sum(_qwen3_8_flash_next_nth_prime_after(ngram_vocab_size_base - 1, h + 1) for h in range(ngram_heads))
+    padded_vocab_size = math.ceil(total_vocab / divisible_by) * divisible_by
+    shard_rows = padded_vocab_size // split_ngram_parts
+
+    mapping.update(
+        {
+            f"{ple_pfx}.conv1d.weight": [hc_dim, 1, ple_conv_kernel_size],
+            f"{ple_pfx}.key_proj.weight": [hc_dim, ple_embed_dim],
+            f"{ple_pfx}.value_proj.weight": [hidden_size, ple_embed_dim],
+            f"{ple_pfx}.norm_key.weight": [hc_dim],
+            f"{ple_pfx}.norm_query.weight": [hc_dim],
+            f"{ple_pfx}.norm_conv.weight": [hc_dim],
+            f"{ple_pfx}.ple_embedding.ngram_embedding.weight": [
+                padded_vocab_size,
+                head_dim_per_ngram,
+            ],
+        }
+    )
+    shard_keys = tuple(f"{ple_pfx}.ple_embedding.ngram_embedding.shard_{s}.weight" for s in range(split_ngram_parts))
+    for sk in shard_keys:
+      mapping[sk] = [shard_rows, head_dim_per_ngram]
+    mapping[shard_keys] = tuple([shard_rows, head_dim_per_ngram] for _ in range(split_ngram_parts))
+
+  mtp_num_layers = tcfg.get("mtp_num_hidden_layers", tcfg.get("mtp_num_layers", 1))
+  if mtp_num_layers and mtp_num_layers > 0:
+    mapping.update(
+        {
+            "mtp.pre_fc_norm_embedding.weight": [hidden_size],
+            "mtp.pre_fc_norm_hidden.weight": [hc_dim],
+            "mtp.fc_embedding.weight": [hidden_size, hidden_size],
+            "mtp.fc_hidden.weight": [hidden_size, hidden_size],
+            "mtp.hyper_connection_mixer.hc_norm.weight": [hc_dim],
+            "mtp.hyper_connection_mixer.input_mix_weight_down.weight": [
+                hc_lowrank,
+                hc_dim,
+            ],
+            "mtp.hyper_connection_mixer.input_mix_weight_up.weight": [
+                hc_dim,
+                hc_lowrank,
+            ],
+        }
+    )
+    for mtp_idx in range(mtp_num_layers):
+      mapping.update(_layer_shapes(f"mtp.layers.{mtp_idx}", is_qsa=True))
+
+  return mapping
+
+
+def HY4_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns the HuggingFace parameter shapes for Hy4-preview."""
+  hidden_size = config["hidden_size"]
+  vocab_size = config["vocab_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  intermediate_size = config["intermediate_size"]
+  moe_intermediate_size = config["moe_intermediate_size"]
+  n_routed_experts = config["n_routed_experts"]
+  num_attention_heads = config["num_attention_heads"]
+  q_lora_rank = config["q_lora_rank"]
+  kv_lora_rank = config["kv_lora_rank"]
+  qk_nope_head_dim = config["qk_nope_head_dim"]
+  qk_rope_head_dim = config["qk_rope_head_dim"]
+  v_head_dim = config["v_head_dim"]
+  index_n_heads = config["index_n_heads"]
+  index_head_dim = config["index_head_dim"]
+  hc_mult = config.get("hc_mult", 4)
+  first_num_dense_layers = config.get("first_num_dense_layers", 1)
+
+  mapping = {
+      "model.embed_tokens.weight": [vocab_size, hidden_size],
+      "model.hc_head.hc_head_fn": [hc_mult, hc_mult * hidden_size],
+      "model.hc_head.hc_head_base": [hc_mult],
+      "model.hc_head.hc_head_scale": [1],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+  }
+
+  for i in range(num_hidden_layers):
+    pfx = f"model.layers.{i}"
+    is_full_idx = (i < first_num_dense_layers) or ((i - first_num_dense_layers) % 4 == 0)
+    is_moe = i >= first_num_dense_layers
+    mapping.update(
+        {
+            f"{pfx}.input_layernorm.weight": [hidden_size],
+            f"{pfx}.post_attention_layernorm.weight": [hidden_size],
+            f"{pfx}.hc_attn_layer.hc_pre.hc_fn": [2 * hc_mult, hc_mult * hidden_size],
+            f"{pfx}.hc_attn_layer.hc_pre.hc_base": [2 * hc_mult],
+            f"{pfx}.hc_attn_layer.hc_pre.hc_scale": [2],
+            f"{pfx}.hc_mlp_layer.hc_pre.hc_fn": [2 * hc_mult, hc_mult * hidden_size],
+            f"{pfx}.hc_mlp_layer.hc_pre.hc_base": [2 * hc_mult],
+            f"{pfx}.hc_mlp_layer.hc_pre.hc_scale": [2],
+            f"{pfx}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
+            f"{pfx}.self_attn.q_a_layernorm.weight": [q_lora_rank],
+            f"{pfx}.self_attn.q_b_proj.weight": [
+                num_attention_heads * (qk_nope_head_dim + qk_rope_head_dim),
+                q_lora_rank,
+            ],
+            f"{pfx}.self_attn.kv_a_proj_with_mqa.weight": [kv_lora_rank + qk_rope_head_dim, hidden_size],
+            f"{pfx}.self_attn.kv_a_layernorm.weight": [kv_lora_rank],
+            f"{pfx}.self_attn.kv_b_proj.weight": [num_attention_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank],
+            f"{pfx}.self_attn.linear_gate.weight": [num_attention_heads * v_head_dim, hidden_size],
+            f"{pfx}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * v_head_dim],
+            f"{pfx}.self_attn.learnable_sink_param": [num_attention_heads],
+        }
+    )
+    if is_full_idx:
+      mapping.update(
+          {
+              f"{pfx}.self_attn.indexer.wq_b.weight": [index_n_heads * index_head_dim, q_lora_rank],
+              f"{pfx}.self_attn.indexer.wk.weight": [index_head_dim, hidden_size],
+              f"{pfx}.self_attn.indexer.k_norm.weight": [index_head_dim],
+              f"{pfx}.self_attn.indexer.k_norm.bias": [index_head_dim],
+              f"{pfx}.self_attn.indexer.weights_proj.weight": [index_n_heads, hidden_size],
+          }
+      )
+    if not is_moe:
+      mapping.update(
+          {
+              f"{pfx}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+              f"{pfx}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+              f"{pfx}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+          }
+      )
+    else:
+      mapping.update(
+          {
+              f"{pfx}.mlp.gate.weight": [n_routed_experts, hidden_size],
+              f"{pfx}.mlp.gate.e_score_correction_bias": [n_routed_experts],
+              f"{pfx}.mlp.experts.gate_up_proj": [n_routed_experts, 2 * moe_intermediate_size, hidden_size],
+              f"{pfx}.mlp.experts.down_proj": [n_routed_experts, hidden_size, moe_intermediate_size],
+              f"{pfx}.mlp.shared_experts.gate_proj.weight": [moe_intermediate_size, hidden_size],
+              f"{pfx}.mlp.shared_experts.up_proj.weight": [moe_intermediate_size, hidden_size],
+              f"{pfx}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
+          }
+      )
   return mapping
 
 
@@ -1312,6 +1701,8 @@ HF_SHAPE = {
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3.2-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
+    "deepseek4-1600b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
+    "hy4-preview": HY4_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
@@ -1322,5 +1713,9 @@ HF_SHAPE = {
     "qwen3.5-35b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.8-2.4t-a95b": QWEN3_8_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.8-flash-next": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.8-flash-next-mini": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_HF_WEIGHTS_TO_SHAPE,
 }

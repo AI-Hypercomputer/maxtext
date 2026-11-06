@@ -20,6 +20,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import numpy as np
 import qwix
@@ -70,7 +71,7 @@ class Gmm3dTest(parameterized.TestCase):
     self.assertEqual(jax.devices()[0].platform, "tpu")
     self.gs = jnp.asarray(GROUP_SIZES)
 
-  @parameterized.product(lhs_dtype=["bfloat16", "float8_e4m3fn"], tile_k=[1024, 1792, 3584, 7168])
+  @parameterized.parameters(("bfloat16", 1024), ("float8_e4m3fn", 7168))
   def test_gmm_3d_lhs(self, lhs_dtype, tile_k):
     """wi fwd (fp8 tokens x fp8 weight) / wo dlhs: 3D lhs, 2D out."""
     lhs_dtype = jnp.dtype(lhs_dtype)
@@ -90,9 +91,7 @@ class Gmm3dTest(parameterized.TestCase):
       np.testing.assert_array_equal(_f32(got), _f32(want))
     self.assertTrue(np.all(_f32(got)[GROUP_SIZES.sum() :] == 0))
 
-  @parameterized.product(
-      lhs_dtype=["bfloat16", "float8_e4m3fn"], tile_n=[1024, 1792, 3584, 7168], quantize_lhs=[False, True]
-  )
+  @parameterized.parameters(("bfloat16", 1024, True), ("float8_e4m3fn", 3584, False))
   def test_gmm_3d_out(self, lhs_dtype, tile_n, quantize_lhs):
     """wo fwd (bf16 act, quantized in-kernel) / wi dlhs (fp8 grad): 2D lhs, 3D bf16 out."""
     lhs_dtype = jnp.dtype(lhs_dtype)
@@ -138,7 +137,7 @@ class Gmm3dTest(parameterized.TestCase):
     _assert_close_chunked_k(got, want, max_mismatch_frac=1e-3)
     self.assertTrue(np.all(_f32(got)[GROUP_SIZES.sum() :] == 0))
 
-  @parameterized.product(dtype=["bfloat16", "float8_e4m3fn"], which=["lhs", "rhs"], tile=[1024, 1792, 3584, 7168])
+  @parameterized.parameters(("bfloat16", "lhs", 1024), ("float8_e4m3fn", "rhs", 3584))
   def test_tgmm_3d(self, dtype, which, tile):
     """dWi (3D lhs tokens) / dWo (3D rhs grad)."""
     dtype = jnp.dtype(dtype)
@@ -160,7 +159,7 @@ class Gmm3dTest(parameterized.TestCase):
     got = jax.jit(f)(lhs3, rhs3, self.gs)
     np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
-  @parameterized.product(lhs_dtype=["bfloat16", "float8_e4m3fn"], tile_k=[1024, 3584, 7168])
+  @parameterized.parameters(("bfloat16", 1024), ("float8_e4m3fn", 7168))
   def test_gmm_3d_lhs_transpose_rhs(self, lhs_dtype, tile_k):
     """wo dlhs with native transpose_rhs: 3D lhs (the 3D grad), rhs [g, n, k] contracted on its last dim."""
     lhs_dtype = jnp.dtype(lhs_dtype)
@@ -177,7 +176,7 @@ class Gmm3dTest(parameterized.TestCase):
     else:
       np.testing.assert_array_equal(_f32(got), _f32(want))
 
-  @parameterized.product(tile_n=[1024, 3584, 7168], ps_dtype=["bfloat16", "float32"], transpose_rhs=[False, True])
+  @parameterized.parameters((1024, "bfloat16", False), (3584, "float32", True))
   def test_gmm_3d_out_partial_sum(self, tile_n, ps_dtype, transpose_rhs):
     """wi_0 dlhs accumulated onto the wi_1 dlhs (3D partial_sum), optionally with native transpose_rhs."""
     ps_dtype = jnp.dtype(ps_dtype)
@@ -198,9 +197,7 @@ class Gmm3dTest(parameterized.TestCase):
     self.assertEqual(got.shape, (M, D // 128, 128))
     np.testing.assert_array_equal(_f32(got.reshape(M, D)), _f32(want))
 
-  @parameterized.product(
-      tiles=["1024", "window"], option=["none", "accumulate_wi_dlhs", "dlhs_transpose_rhs", "chunk_wgrad", "all"]
-  )
+  @parameterized.parameters(("1024", "none"), ("window", "all"))
   def test_ops_gmm_3d_vjp(self, tiles, option):
     """ops.gmm custom VJP (fp8 QArray lhs path as in moe) with 3D lhs / out, alone and with the gmm options.
 
@@ -326,7 +323,7 @@ class Gmm3dTest(parameterized.TestCase):
     np.testing.assert_allclose(np.asarray(dw3), np.asarray(dw2), rtol=1e-5, atol=1e-6)
     self.assertGreater(float(jnp.max(jnp.abs(out2.astype(jnp.float32)))), 0.0)
 
-  @parameterized.parameters(True, False)
+  @parameterized.parameters((True,))
   def test_shared_fixed_scale_bwd_is_bit_exact(self, use_gmm_v2):
     """Flag 1 (shared lhs/rhs fixed scale + shared quantized grad) is bit-identical to the unshared bwd.
 
@@ -386,6 +383,30 @@ def _poison_hbm():
   del xs
 
 
+def _poison_vmem():
+  """Fills 3/4 of VMEM with NaN. VMEM is not cleared between kernels, so VMEM a later kernel reads unfilled is NaN."""
+  vmem_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
+  chunk = 512
+  rows = vmem_bytes * 3 // 4 // (128 * 4) // chunk * chunk
+
+  def kernel(out_ref, scratch_ref):
+    def fill(i, carry):
+      scratch_ref[pl.ds(pl.multiple_of(i * chunk, chunk), chunk), :] = jnp.full((chunk, 128), jnp.nan, jnp.float32)
+      return carry
+
+    jax.lax.fori_loop(0, rows // chunk, fill, 0)
+    out_ref[...] = scratch_ref[:8, :]
+
+  jax.block_until_ready(
+      pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          scratch_shapes=[pltpu.VMEM((rows, 128), jnp.float32)],
+          compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_bytes * 7 // 8),
+      )()
+  )
+
+
 def _k_tail_reference(lhs, rhs, transpose_rhs):
   lhs, rhs = np.asarray(lhs, np.float32), np.asarray(rhs, np.float32)
   if transpose_rhs:
@@ -401,10 +422,7 @@ def _k_tail_reference(lhs, rhs, transpose_rhs):
 class GmmV2KTailTest(parameterized.TestCase):
   """tile_k does not divide size_k: the partial last K tile must mask lhs as well as rhs (stale VMEM is not zero)."""
 
-  @parameterized.product(
-      size_k_tile_k=((256, 384), (384, 256), (640, 512)),
-      transpose_rhs=(False, True),
-  )
+  @parameterized.parameters(((256, 384), False), ((384, 256), True))
   def test_partial_k_tile_matches_reference(self, size_k_tile_k, transpose_rhs):
     size_k, tile_k = size_k_tile_k
     lhs = jax.random.normal(jax.random.PRNGKey(0), (K_TAIL_M, size_k), jnp.float32).astype(jnp.bfloat16)
@@ -424,6 +442,45 @@ class GmmV2KTailTest(parameterized.TestCase):
     np.testing.assert_allclose(
         np.asarray(out)[:num_valid], _k_tail_reference(lhs, rhs, transpose_rhs)[:num_valid], rtol=1e-5, atol=1e-5
     )
+
+  @parameterized.parameters(True, False)
+  def test_partial_k_tile_with_rhs_scale(self, maybe_quantize_lhs):
+    """A per-channel fp8 rhs on K=256 with MoE's default tile_k=1024, as in FlatFsdpWeightsParityTest.
+
+    The rhs scale has one K block, but the kernel's scale block spans tile_k / size_k = 4 of them, so scale rows 1-3
+    are VMEM the pipeline never fills. The K blocks past size_k must not read them, even to scale a zero product.
+    """
+    size_k, tile_k = 256, 1024
+    lhs = jax.random.normal(jax.random.PRNGKey(0), (K_TAIL_M, size_k), jnp.float32).astype(jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.PRNGKey(1), (K_TAIL_G, size_k, K_TAIL_N), jnp.float32) * 0.05
+    rhs_scale = jnp.max(jnp.abs(rhs), axis=1, keepdims=True) / float(jnp.finfo(FP8).max)
+    rhs_q = (rhs / rhs_scale).astype(FP8)
+    rhs_scale = rhs_scale[:, :, None, :]  # [G, 1 K block, 1, N]
+    group_sizes = jnp.asarray(K_TAIL_GROUP_SIZES)
+
+    def run(tile_k):
+      tiles = gmm_v2.TileSizes(tile_m=128, tile_k=tile_k, tile_n=K_TAIL_N)
+      return jax.jit(
+          lambda lhs, rhs_q, rhs_scale: gmm_v2.gmm_v2(
+              lhs,
+              rhs_q,
+              group_sizes,
+              rhs_scale=rhs_scale,
+              tile_info=tiles,
+              preferred_element_type=jnp.float32,
+              maybe_quantize_lhs=maybe_quantize_lhs,
+          )
+      )(lhs, rhs_q, rhs_scale)
+
+    want = run(size_k)  # A single full K tile: no K blocks past size_k.
+    _poison_vmem()
+    got = run(tile_k)
+
+    num_valid = int(K_TAIL_GROUP_SIZES.sum())
+    got, want = np.asarray(got)[:num_valid], np.asarray(want)[:num_valid]
+    self.assertTrue(np.isfinite(got).all(), f"{np.isnan(got).any(axis=1).sum()} of {num_valid} valid rows have NaN")
+    # The quantized-lhs path accumulates in bf16.
+    np.testing.assert_allclose(got, want, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,11 @@
 # inner script is the source of truth for hyperparameters; this script only
 # handles cluster/storage/image plumbing and forwards env vars.
 #
+# DEPRECATED: XPK is deprecated. Use Cluster Toolkit instead: submit
+# run_olmo3_7b_stage1.sh with `gcluster job submit` as shown in README.md.
+# This script is kept only for existing XPK environments and may be removed
+# in a future release.
+#
 # Pattern mirrors src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh.
 #
 # Usage:
@@ -73,6 +78,8 @@
 #   L3 (human):     resume_until_done exits non-zero after MAX_RETRIES.
 
 set -euo pipefail
+
+echo "WARNING: XPK is deprecated. Use Cluster Toolkit (gcluster job submit + run_olmo3_7b_stage1.sh; see README.md) instead." >&2
 
 MODE="${1:-submit}"
 

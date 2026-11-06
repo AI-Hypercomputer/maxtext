@@ -51,7 +51,11 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     AttentionType,
 )
-from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
+from maxtext.layers.attention_op import (
+    AttentionOp,
+    _resolve_attention_type,
+    resolve_context_parallel_strategy,
+)
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
@@ -492,7 +496,7 @@ class Attention(nnx.Module):
     # Ulysses exchanges sequence ownership for head ownership through an
     # all-to-all, so the context axis shards KV heads too even though no
     # logical rule says so.
-    if self.config.context_parallel_strategy.lower() == "ulysses":
+    if resolve_context_parallel_strategy(self.config, self.attention_type) == "ulysses":
       ulysses_axis = self.config.context_sharding
       if ulysses_axis not in kv_head_axes:
         kv_head_axes.append(ulysses_axis)
@@ -567,6 +571,7 @@ class Attention(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         block_size=block_size,
         rngs=self.rngs,
     )
@@ -605,6 +610,7 @@ class Attention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         block_size=block_size,
@@ -647,6 +653,7 @@ class Attention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -703,6 +710,7 @@ class Attention(nnx.Module):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=False if self.is_qwen2 else self.use_bias_in_projections,
         block_size=block_size,
@@ -1037,6 +1045,25 @@ class Attention(nnx.Module):
     # position. Only the donor writes the cache; shared layers read it as-is.
     update_kv_cache = not self.share_kv_layer
 
+    sinks = self.sinks.astype(jnp.float32) if self.sinks is not None else None
+    if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
+      from tpu_inference.layers.common.cp_attention import dcp_forward  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+      kv_cache, output = dcp_forward(
+          self.mesh,
+          query,
+          key,
+          value,
+          rpa_kv_cache,
+          md,
+          sm_scale=1.0,
+          attention_chunk_size=attention_chunk_size,
+          q_scale=q_scale,
+          k_scale=k_scale,
+          v_scale=v_scale,
+      )
+      return output, kv_cache
+
     output, kv_cache = rpa_ops(
         self.mesh,
         query,
@@ -1047,7 +1074,7 @@ class Attention(nnx.Module):
         md.block_tables,
         md.query_start_loc,
         md.request_distribution,
-        self.sinks.astype(jnp.float32) if self.sinks is not None else None,
+        sinks,
         1.0,
         attention_chunk_size,
         q_scale,

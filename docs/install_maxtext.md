@@ -96,6 +96,12 @@ the specific, tested versions of dependencies defined by MaxText, rather than
 the latest available ones. This ensures a consistent and reproducible
 environment, which is critical for stable performance and for running
 benchmarks.
+
+For `maxtext[cuda12]`, `--resolution=lowest` is required, not just recommended.
+The GPU extra holds `tokamax` at 0.0.14 and `transformer-engine` at 2.19.0 only
+through these lower bounds; without the flag, newer releases are resolved
+instead (`transformer-engine-jax` 2.20.x fails to build, and `tokamax` 0.0.15+
+breaks `import transformers` in GPU environments without PyTorch).
 ```
 
 (install-from-source)=

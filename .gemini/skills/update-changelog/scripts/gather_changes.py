@@ -60,6 +60,8 @@ RAW_COMMITS_FILE = "raw_commits.txt"
 POLISHED_NOTES_FILE = "new_notes.md"
 LAST_UPDATED_RE = re.compile(r"\*{0,2}Last Updated\*{0,2}\s*:\s*\*{0,2}`?([0-9a-f]{7,40})`?", re.IGNORECASE)
 MERGE_SUBJECT_RE = re.compile(r"^Merge pull request #\d+ from [^\s]+\s*")
+# `Reverts <hash>` (Copybara rollbacks) or `This reverts commit <hash>.` (`git revert`) on any line of a commit message.
+REVERT_MARKER_RE = re.compile(r"^(?:this\s+)?reverts?\s+(?:commit\s+)?([0-9a-f]{7,40})\b", re.IGNORECASE | re.MULTILINE)
 
 SECTION_ORDER = ("#### Changes", "#### Bug Fixes", "#### Deprecations")
 CATEGORY_ORDER = (
@@ -113,8 +115,8 @@ def run_git_log() -> str:
   if not last_commit:
     print(f"Error: Could not find a valid '**Last Updated**: <commit_hash>' in {RELEASE_NOTES_RELPATH}.")
     sys.exit(1)
-  # %h: short commit hash, %P: parent hashes, %s: subject, %b: body
-  pretty_format = f"{COMMIT_DELIMITER}%h{FIELD_SEP}%P{FIELD_SEP}%s{FIELD_SEP}%b{FILES_SEP}"
+  # %h: short commit hash, %H: full commit hash, %P: parent hashes, %s: subject, %b: body
+  pretty_format = f"{COMMIT_DELIMITER}%h{FIELD_SEP}%H{FIELD_SEP}%P{FIELD_SEP}%s{FIELD_SEP}%b{FILES_SEP}"
   cmd = [
       "git",
       "log",
@@ -132,6 +134,31 @@ def run_git_log() -> str:
   return result.stdout
 
 
+def resolve_commit(rev: str) -> Optional[str]:
+  """Resolves `rev` (e.g. an abbreviated hash) to a full commit hash, or returns None if it is unknown locally."""
+  result = subprocess.run(
+      ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  return result.stdout.strip() if result.returncode == 0 else None
+
+
+def get_commit_message(commit_hash: str) -> str:
+  """Returns the full commit message (subject and body) of `commit_hash`, or an empty string if it is unknown."""
+  result = subprocess.run(["git", "log", "-1", "--format=%B", commit_hash], capture_output=True, text=True, check=False)
+  return result.stdout if result.returncode == 0 else ""
+
+
+def extract_reverted_commit(message: str) -> Optional[str]:
+  """Returns the commit that `message` declares it reverts (as a full hash when resolvable), or None."""
+  match = REVERT_MARKER_RE.search(message)
+  if not match:
+    return None
+  return resolve_commit(match.group(1)) or match.group(1)
+
+
 def is_followup_or_cleanup_subject(subject: str) -> bool:
   """Returns True if a commit subject is a PR review follow-up, comment cleanup, or lint/test-only fix."""
   s = subject.strip().lower()
@@ -139,7 +166,8 @@ def is_followup_or_cleanup_subject(subject: str) -> bool:
   cleanup_patterns = [
       r"^(?:address(?:ed|ing)?|review|pr)\s+(?:code\s+)?(?:review\s+|pr\s+)?(?:feedback|comments?)",
       r"^clean\s*up\s+(?:comments?|descriptions?|docstrings?|code|formatting|imports?)",
-      r"^(?:fix(?:ed|es)?\s+)?(?:pylint|pyink|lint(?:er|ing)?|formatting|reformat|typos?|nits?)\b",
+      r"^(?:fix(?:ed|es)?\s+)?(?:pre-?commit|pylint|pyink|lint(?:er|ing)?|formatting|reformat|typos?|nits?)\b"
+      r"(?!.*\band\s+(?:add|enable|fix|implement|improve|remove|support|update)\w*\b)",
       r"^format\b[^:]*\blint\b",
       r"^(?:add|fix(?:ed|es)?|improve)\s+(?:[a-z0-9_.-]+\s+){0,2}(?:tests?|testing|test_[a-z0-9_]+)\b"
       r"(?!.*\band\s+(?:add|enable|fix|implement|improve|remove|support|update)\w*\b)",
@@ -270,20 +298,23 @@ def extract_ref_id(commit_hash: str, subject: str, body: str) -> str:
 def parse_commits(raw_log: str) -> List[Dict[str, Any]]:
   """Parses `run_git_log` output into cleaned changelog candidate entries."""
   commits = []
+  reverted_by: Dict[str, Optional[str]] = {}
 
   for entry in raw_log.split(COMMIT_DELIMITER):
     entry = entry.strip()
     if not entry:
       continue
 
-    # 1. Unpack `<hash>===FIELD_SEP===<parents>===FIELD_SEP===<subject>===FIELD_SEP===<body>===FILES_SEP===<files>`
+    # 1. Unpack `<hash>===FIELD_SEP===<full hash>===FIELD_SEP===<parents>===FIELD_SEP===<subject>===FIELD_SEP===<body>
+    #    ===FILES_SEP===<files>`
     parts = entry.split(FIELD_SEP)
-    if len(parts) < 4:
+    if len(parts) < 5:
       continue
     commit_hash = parts[0].strip()
-    parents = parts[1].strip().split()
-    subject = parts[2].strip()
-    body_and_files = parts[3].split(FILES_SEP, 1)
+    full_hash = parts[1].strip()
+    parents = parts[2].strip().split()
+    subject = parts[3].strip()
+    body_and_files = parts[4].split(FILES_SEP, 1)
     raw_body = body_and_files[0]
     files_block = body_and_files[1] if len(body_and_files) > 1 else ""
     changed_files = [line.strip() for line in files_block.splitlines() if line.strip()]
@@ -296,7 +327,11 @@ def parse_commits(raw_log: str) -> List[Dict[str, Any]]:
     if len(parents) > 1:
       subject, body = resolve_merge_commit(subject, body, parents[0], parents[1])
 
-    # 4. Exclude review follow-ups, lint cleanups, and minor chores
+    # 4. Record which commit this one reverts (if any) before applying exclusions, so a revert whose subject is
+    #    filtered out below (e.g. `Reverts <hash>`) can still cancel its target in step 6
+    reverted_by[full_hash] = extract_reverted_commit(f"{subject}\n{raw_body}\n{body}")
+
+    # 5. Exclude review follow-ups, lint cleanups, and minor chores
     if is_excluded_commit(subject, body):
       if len(parents) > 1 and MERGE_SUBJECT_RE.match(subject):
         print(
@@ -308,13 +343,55 @@ def parse_commits(raw_log: str) -> List[Dict[str, Any]]:
 
     commits.append(
         {
+            "hash": full_hash,
             "ref_id": ref_id,
             "summary": clean_commit_subject(subject, body),
             "doc_link": extract_rtd_links(changed_files),
         }
     )
 
-  return commits
+  # 6. Drop reverts together with the commits they undo when both land inside the window
+  return drop_reverted_commits(commits, reverted_by)
+
+
+def drop_reverted_commits(commits: List[Dict[str, Any]], reverted_by: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
+  """Removes revert pairs that cancel out inside the window and labels reverts of older commits.
+
+  `reverted_by` maps every first-parent commit in the window (newest first, as `git log` emits them) to the commit its
+  message says it reverts, or None. A revert and its target that both land in the window are dropped together since
+  their net change is nothing; reverting such a dropped revert re-lands the original, which is restored instead. A
+  revert whose target predates the window is kept but prefixed with `Revert of: ` so its bullet cannot be mistaken for
+  the original change, unless that target was itself a revert (the commit then re-lands an older change and is kept
+  as-is).
+  """
+  dropped: set[str] = set()
+  relabel: set[str] = set()
+  for commit_hash, target in reversed(list(reverted_by.items())):  # oldest first
+    if not target:
+      continue
+    if target not in reverted_by:
+      if not extract_reverted_commit(get_commit_message(target)):
+        relabel.add(commit_hash)
+    elif target not in dropped:
+      dropped.update((target, commit_hash))
+      print(
+          f"Note: dropped {commit_hash[:9]} and {target[:9]} -- the revert cancels the original inside this window.",
+          file=sys.stderr,
+      )
+    else:
+      dropped.add(commit_hash)
+      original = reverted_by.get(target)
+      if original in dropped and not reverted_by.get(original):
+        dropped.discard(original)
+
+  kept: List[Dict[str, Any]] = []
+  for commit in commits:
+    if commit["hash"] in dropped:
+      continue
+    if commit["hash"] in relabel:
+      commit["summary"] = f"Revert of: {commit['summary']}"
+    kept.append(commit)
+  return kept
 
 
 def group_multipart_commits(commits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -440,16 +517,18 @@ def merge_unreleased_notes(existing_text: str, new_text: str) -> str:
     submap = merged.get(h4, {})
     if not any(submap.values()):
       continue
-    sec_lines = [f"{h4}\n"]
+    # Headings and bullet lists are separated by exactly one blank line, which is what the mdformat pre-commit hook
+    # enforces on `docs/`; anything else makes the hook rewrite the file and fail CI on the generated PR.
+    sec_blocks = [h4]
     all_h5 = list(dict.fromkeys(["", *CATEGORY_ORDER, *submap.keys()]))
     for h5 in all_h5:
       bullets = submap.get(h5, [])
       if not bullets:
         continue
       if h5:
-        sec_lines.append(f"{h5}\n")
-      sec_lines.extend(bullets)
-    out_blocks.append("\n".join(sec_lines))
+        sec_blocks.append(h5)
+      sec_blocks.append("\n".join(bullets))
+    out_blocks.append("\n\n".join(sec_blocks))
 
   return "\n\n".join(out_blocks)
 

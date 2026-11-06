@@ -50,7 +50,7 @@ from transformers import AutoModelForCausalLM
 from flax.training import train_state
 from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
-from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
+from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, single_stack_axis, stacked_axes
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
 
@@ -286,13 +286,9 @@ def process_maxtext_param(
     # Case 2 or 3: The source tensor is stacked on a single axis.
     if maxtext_config.scan_layers:
       max_logging.log("\tscan")
-      # Case 2: Standard scanned layer. Stacked on layer axis (param_scan_axis) for multidimensional
-      # weights or 2D block scales, or axis 0 for 1D tensors (e.g. per-layer scalar scales like
-      # Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)).
+      # Case 2: Standard scanned layer, stacked as `single_stack_axis` says.
       weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
-      axis_to_slice = (
-          maxtext_config.param_scan_axis if getattr(weight_sample, "ndim", 0) > maxtext_config.param_scan_axis else 0
-      )
+      axis_to_slice = single_stack_axis(maxtext_param_key, maxtext_config, getattr(weight_sample, "shape", ()))
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.

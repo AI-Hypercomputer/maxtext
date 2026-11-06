@@ -54,11 +54,16 @@ norm_topk_prob: true
 routed_bias: true
 routed_bias_update_rate: 0.001
 load_balance_loss_weight: 0.0001
+# DeepSeek-V3 sequence-wise balance loss (V3 Eqs 17-20) on the Sqrt(Softplus) affinities.
+moe_use_megatron_seq_aux_loss: true
 log_moe_bias_norms: false
 routed_scaling_factor: 1.5
+# Reference Gate computes router logits in fp32 (linear(x.float(), weight.float())) regardless of model dtype.
+float32_gate_logits: true
 
 
 # --- Attention configuration ---
+attention: "dot_product"  # use_indexer requires dot_product, or flash with use_tokamax_splash
 attention_type: 'compressed'
 use_indexer: true
 q_lora_rank: 1024
@@ -67,7 +72,12 @@ o_lora_rank: 1024
 sliding_window_size: 128
 
 # --- RoPE ---
-rope_type: "default"
+# Values below mirror the official HF config.json `rope_scaling`:
+# {"type": "yarn", "factor": 16, "beta_fast": 32, "beta_slow": 1, "original_max_position_embeddings": 65536}.
+rope_type: "yarn"
+rope_factor: 16
+beta_fast: 32
+beta_slow: 1
 rope_max_timescale: 10000                  # Main RoPE theta
 compressed_rope_max_timescale: 160000      # Compressed RoPE theta
 max_position_embeddings: 1048576

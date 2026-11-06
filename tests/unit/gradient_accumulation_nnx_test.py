@@ -19,6 +19,7 @@
 import unittest
 from dataclasses import dataclass
 
+from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,6 +28,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from qwix._src.core import qarray
 
 from maxtext.common.common_types import ShardMode
+from maxtext.trainers.pre_train import train
 from maxtext.utils import gradient_accumulation
 
 
@@ -50,6 +52,40 @@ class _TinyNNX(nnx.Module):
 
   def __call__(self, x):
     return self.linear(x)
+
+
+class _CausalLMCfg(_Cfg):
+  """Minimal config schema read by `train.loss_fn` and `gradient_accumulation_loss_and_grad`."""
+
+  vocab_size: int = 8
+  max_target_length: int = 4
+  logical_global_batch_size_to_train_on: int | None = None
+  attention_type: str = "global"
+  num_vocab_tiling: int = 1
+  num_experts: int = 1
+  z_loss_multiplier: float = 1e-4
+  moe_dropless_fallback: str = "none"
+
+  def __init__(self, **kwargs):
+    super().__init__()
+    self.__dict__.update(kwargs)
+
+  def __getattr__(self, _):
+    return 0
+
+
+class _TinyCausalLMNNX(nnx.Module):
+  """Per-row independent causal-LM NNX module compatible with `train.loss_fn`."""
+
+  def __init__(self, vocab_size: int, hidden_dim: int, mesh: Mesh, rngs: nnx.Rngs, probe=None):
+    self.embed = nnx.Embed(num_embeddings=vocab_size, features=hidden_dim, rngs=rngs)
+    self.proj = nnx.Linear(hidden_dim, vocab_size, rngs=rngs)
+    self.mesh, self._probe = mesh, probe
+
+  def __call__(self, decoder_input_tokens, **kwargs):
+    del kwargs
+    logits = self.proj(jnp.tanh(self.embed(decoder_input_tokens)))
+    return self._probe(logits) if self._probe is not None else logits
 
 
 def _fake_loss_fn(model, config, data, dropout_rng, params, is_train=True):
@@ -417,6 +453,75 @@ class TestGradientAccumulationNNX(unittest.TestCase):
             self.assertTrue(jnp.all(jnp.isfinite(gradient)))
             self.assertTrue(jnp.all(gradient == 0))
 
+  def test_zero_segmentation_padded_rows_preserve_loss_and_grads(self):
+    """Zero-segmentation padded rows in `constant_padded` mode leave loss, gradients, and cotangents invariant."""
+    mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1), ("data",))
+    ns = NamedSharding(mesh, PartitionSpec())
+    seg = jnp.array([[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 2, 2], [1, 1, 0, 0]], dtype=jnp.int32)
+    unpadded = {
+        "inputs": jnp.array([[1, 2, 3, 4], [2, 3, 4, 5], [5, 1, 2, 6], [7, 4, 0, 0]], dtype=jnp.int32),
+        "inputs_position": jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (4, 4)),
+        "inputs_segmentation": seg,
+        "targets": jnp.array([[2, 3, 4, 1], [3, 4, 5, 2], [1, 2, 6, 3], [4, 5, 7, 6]], dtype=jnp.int32),
+        "targets_segmentation": seg,
+    }
+    # Non-zero token IDs inside zero-segmentation dummy rows verify masking rather than token values zeros them out.
+    dummy = {
+        "inputs": jnp.array([[6, 5, 4, 3], [7, 2, 1, 5]], dtype=jnp.int32),
+        "inputs_position": jnp.zeros((2, 4), dtype=jnp.int32),
+        "inputs_segmentation": jnp.zeros((2, 4), dtype=jnp.int32),
+        "targets": jnp.array([[5, 4, 3, 2], [2, 1, 5, 7]], dtype=jnp.int32),
+        "targets_segmentation": jnp.zeros((2, 4), dtype=jnp.int32),
+    }
+    tail_padded = {k: jnp.concatenate([v, dummy[k]], axis=0) for k, v in unpadded.items()}
+    interleaved = {k: v[jnp.array([0, 2, 1, 4, 3, 5])] for k, v in tail_padded.items()}
+
+    def _assert_matches_ref(loss, aux, grads, check_z_loss=False):
+      np.testing.assert_allclose(loss, ref_loss, rtol=1e-6, atol=1e-6)
+      np.testing.assert_allclose(aux["xent_sum"], ref_aux["xent_sum"], rtol=1e-6, atol=1e-6)
+      if check_z_loss:
+        np.testing.assert_allclose(aux["z_loss"], ref_aux["z_loss"], rtol=1e-6, atol=1e-6)
+      self.assertEqual(int(aux["total_weights"]), int(ref_aux["total_weights"]))
+      for g_got, g_ref in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
+        np.testing.assert_allclose(g_got, g_ref, rtol=1e-6, atol=1e-6)
+
+    seen_ref = []
+    model_ref = _TinyCausalLMNNX(8, 6, mesh, nnx.Rngs(42), probe=_make_fixed_fp8_bwd_probe(seen_ref, False))
+    graphdef, params, rest = nnx.split(model_ref, nnx.Param, ...)
+    loss_fn = lambda p, r, cfg, b: train.loss_fn(nnx.merge(graphdef, p, r, copy=True), cfg, dict(b), None, None)  # pylint: disable=unnecessary-lambda-assignment
+    cfg_ref = _CausalLMCfg(micro_batch_size_to_train_on=4, global_batch_size_to_train_on=4, gradient_accumulation_steps=1)
+    (ref_loss, ref_aux), ref_grads = jax.value_and_grad(loss_fn, has_aux=True)(params, rest, cfg_ref, unpadded)
+    cfg_ga1 = _CausalLMCfg(
+        micro_batch_size_to_train_on=6,
+        global_batch_size_to_train_on=6,
+        logical_global_batch_size_to_train_on=4,
+        gradient_accumulation_steps=1,
+    )
+    (ga1_loss, ga1_aux), ga1_grads = jax.value_and_grad(loss_fn, has_aux=True)(params, rest, cfg_ga1, tail_padded)
+    jax.effects_barrier()
+    _assert_matches_ref(ga1_loss, ga1_aux, ga1_grads, check_z_loss=True)
+
+    for layout, batch, real_mb0 in (("tail", tail_padded, [0, 2]), ("interleaved", interleaved, [0, 1, 3])):
+      with self.subTest(layout=layout):
+        seen_ga2 = []
+        model_ga2 = _TinyCausalLMNNX(8, 6, mesh, nnx.Rngs(42), probe=_make_fixed_fp8_bwd_probe(seen_ga2, False))
+        params_shardings = jax.tree.map(lambda _: ns, nnx.split(model_ga2, nnx.Param, ...)[1])
+        cfg_ga2 = _CausalLMCfg(
+            micro_batch_size_to_train_on=3,
+            global_batch_size_to_train_on=6,
+            logical_global_batch_size_to_train_on=4,
+            gradient_accumulation_steps=2,
+        )
+        ga2_loss, ga2_aux, ga2_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+            train.loss_fn, cfg_ga2, model_ga2, None, params_shardings, dict(batch), None
+        )
+        jax.effects_barrier()
+        _assert_matches_ref(ga2_loss, ga2_aux, ga2_grads)
+        for zero_slice in (seen_ga2[0][2:], seen_ga2[1][2:]) if layout == "tail" else (seen_ga2[1][1:],):
+          np.testing.assert_array_equal(zero_slice, np.zeros_like(zero_slice))
+        scale = float(ref_aux["total_weights"]) / float(4 * cfg_ga2.max_target_length)
+        np.testing.assert_allclose(seen_ga2[0][: len(real_mb0)], seen_ref[0][real_mb0] * scale, rtol=1e-6, atol=1e-6)
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

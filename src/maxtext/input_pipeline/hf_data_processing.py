@@ -366,6 +366,7 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
 
   if use_sft:
+    input_pipeline_utils.fix_pad_token_if_needed(tokenizer)
     if not chat_template:
       chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
 
@@ -398,7 +399,11 @@ def preprocessing_pipeline(
     data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
         input_pipeline_utils.apply_chat_template,
-        fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
+        fn_kwargs={
+            "tokenizer_model": tokenizer,
+            "data_column_name": data_column_names[0],
+            "model_name": getattr(config, "model_name", None),
+        },
     )
 
   pad_id = _get_pad_id(tokenizer)

@@ -1,0 +1,258 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 490" width="100%" height="100%" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="red-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0.5 1.5 L 9 5 L 0.5 8.5 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1520" height="490" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="10" y="16" width="1500" height="44" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="20" y="43" font-size="12.5" font-weight="700" fill="#334155">TPU Timeline (Backward Pass)</text>
+  <rect x="10" y="68" width="1500" height="120" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="68" width="200" height="120" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="68" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="90" font-size="13.5" font-weight="700" fill="#0f172a">▾ TensorCore</text>
+  <text x="34" y="108" font-size="11" font-weight="500" fill="#475569">/device:TPU:0</text>
+  <text x="34" y="144" font-size="11.5" font-weight="600" fill="#334155">▸ XLA Ops</text>
+  <rect x="10" y="216" width="1500" height="128" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="216" width="200" height="128" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="216" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="238" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 0</text>
+  <text x="34" y="256" font-size="11" font-weight="500" fill="#475569">Dedicated FSDP Core (id=0)</text>
+  <text x="34" y="292" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <rect x="10" y="358" width="1500" height="114" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="358" width="200" height="114" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="358" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="380" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 1</text>
+  <text x="34" y="398" font-size="11" font-weight="500" fill="#475569">MoE Offload Core</text>
+  <text x="34" y="434" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <text x="34" y="328" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="34" y="457" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="420.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i</text>
+  <rect x="216" y="93" width="408" height="15" rx="2" fill="#bae6fd" opacity="0.85"/>
+  <text x="420.0" y="104" font-size="9.5" font-weight="600" fill="#0c4a6e" text-anchor="middle">scanned_layers_bwd (recompute + vjp layer i)</text>
+  <rect x="215" y="132" width="13" height="34" rx="2" fill="#bae6fd" stroke="#38bdf8" stroke-width="0.8"/>
+  <text x="221.5" y="153" font-size="7.5" font-weight="600" fill="#0369a1" text-anchor="middle">co</text>
+  <rect x="229" y="132" width="13" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <text x="235.5" y="153" font-size="7.5" font-weight="600" fill="#15803d" text-anchor="middle">co</text>
+  <rect x="246" y="132" width="52" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="272" y="153" font-size="9" font-weight="600" fill="#14532d" text-anchor="middle">spl...</text>
+  <rect x="300" y="132" width="20" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="310" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">g</text>
+  <rect x="322" y="132" width="20" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="1"/>
+  <text x="332" y="153" font-size="8.5" font-weight="700" fill="#134e4a" text-anchor="middle">g</text>
+  <rect x="344" y="132" width="20" height="34" rx="2" fill="#a7f3d0" stroke="#10b981" stroke-width="1"/>
+  <text x="354" y="153" font-size="8.5" font-weight="700" fill="#064e3b" text-anchor="middle">g</text>
+  <rect x="244" y="129" width="124" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="306.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">recompute_i</text>
+  <rect x="370" y="132" width="20" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="380" y="153" font-size="8.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">g</text>
+  <rect x="392" y="132" width="20" height="34" rx="2" fill="#bbf7d0" stroke="#22c55e" stroke-width="1"/>
+  <text x="402" y="153" font-size="8.5" font-weight="700" fill="#14532d" text-anchor="middle">g</text>
+  <rect x="414" y="132" width="20" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="424" y="153" font-size="8.5" font-weight="700" fill="#713f12" text-anchor="middle">g</text>
+  <rect x="438" y="132" width="22" height="34" rx="2" fill="#fed7aa" stroke="#f97316" stroke-width="0.9"/>
+  <text x="449" y="153" font-size="8" font-weight="600" fill="#7c2d12" text-anchor="middle">fu</text>
+  <rect x="462" y="132" width="40" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="0.9"/>
+  <text x="482" y="153" font-size="8.5" font-weight="600" fill="#134e4a" text-anchor="middle">spl...</text>
+  <rect x="504" y="132" width="42" height="34" rx="2" fill="#fdba74" stroke="#ea580c" stroke-width="0.9"/>
+  <text x="525" y="153" font-size="8.5" font-weight="600" fill="#7c2d12" text-anchor="middle">spl...</text>
+  <rect x="548" y="132" width="8" height="34" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="556" y="132" width="20" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="566" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">tg</text>
+  <rect x="578" y="132" width="20" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="588" y="153" font-size="8.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">tg</text>
+  <rect x="600" y="132" width="20" height="34" rx="2" fill="#86efac" stroke="#16a34a" stroke-width="1"/>
+  <text x="610" y="153" font-size="8.5" font-weight="700" fill="#14532d" text-anchor="middle">tg</text>
+  <rect x="368" y="129" width="256" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="496.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">vjp_i</text>
+  <rect x="218" y="240" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <rect x="218.0" y="274" width="35.3" height="34" rx="2" fill="#fca5a5" stroke="#ef4444" stroke-width="1"/>
+  <text x="235.7" y="295" font-size="8" font-weight="700" fill="#7f1d1d" text-anchor="middle">all-...</text>
+  <rect x="255.3" y="274" width="35.3" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="273.0" y="295" font-size="8" font-weight="700" fill="#14532d" text-anchor="middle">all-...</text>
+  <rect x="292.7" y="274" width="35.3" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="310.3" y="295" font-size="8" font-weight="700" fill="#0c4a6e" text-anchor="middle">al...</text>
+  <rect x="216" y="271" width="114" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="267.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i-1</text>
+  <rect x="336.0" y="274" width="92.7" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="382.3" y="295" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">reduce-sca...</text>
+  <rect x="430.7" y="274" width="92.7" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="477.0" y="295" font-size="8.5" font-weight="700" fill="#881337" text-anchor="middle">reduce-sca...</text>
+  <rect x="525.3" y="274" width="92.7" height="34" rx="2" fill="#bef264" stroke="#65a30d" stroke-width="1"/>
+  <text x="571.7" y="295" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">reduce-sca...</text>
+  <rect x="334" y="271" width="286" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="489.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">RS_i+1</text>
+  <rect x="218" y="316" width="110" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="273.0" y="329" font-size="8.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLL</text>
+  <rect x="336" y="316" width="282" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="477.0" y="329" font-size="9.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="220" y="384" width="400" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="420.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i MoE offload)</text>
+  <rect x="238" y="406" width="10" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="302" y="406" width="10" height="26" rx="1.5" fill="#99f6e4" stroke="#14b8a6" stroke-width="0.8"/>
+  <rect x="370" y="406" width="10" height="26" rx="1.5" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="435" y="406" width="10" height="26" rx="1.5" fill="#fde68a" stroke="#eab308" stroke-width="0.8"/>
+  <rect x="540" y="406" width="10" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="220" y="444" width="120" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="280" y="457" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="344" y="444" width="110" height="18" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="399" y="457" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="458" y="444" width="152" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="534" y="457" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <text x="840.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i-1</text>
+  <rect x="636" y="93" width="408" height="15" rx="2" fill="#bae6fd" opacity="0.85"/>
+  <text x="840.0" y="104" font-size="9.5" font-weight="600" fill="#0c4a6e" text-anchor="middle">scanned_layers_bwd (recompute + vjp layer i-1)</text>
+  <rect x="666" y="132" width="52" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="692" y="153" font-size="9" font-weight="600" fill="#881337" text-anchor="middle">spl...</text>
+  <rect x="720" y="132" width="20" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="730" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">g</text>
+  <rect x="742" y="132" width="20" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="1"/>
+  <text x="752" y="153" font-size="8.5" font-weight="700" fill="#134e4a" text-anchor="middle">g</text>
+  <rect x="764" y="132" width="20" height="34" rx="2" fill="#a7f3d0" stroke="#10b981" stroke-width="1"/>
+  <text x="774" y="153" font-size="8.5" font-weight="700" fill="#064e3b" text-anchor="middle">g</text>
+  <rect x="664" y="129" width="124" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="726.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">recompute_i-1</text>
+  <rect x="790" y="132" width="20" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="800" y="153" font-size="8.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">g</text>
+  <rect x="812" y="132" width="20" height="34" rx="2" fill="#bbf7d0" stroke="#22c55e" stroke-width="1"/>
+  <text x="822" y="153" font-size="8.5" font-weight="700" fill="#14532d" text-anchor="middle">g</text>
+  <rect x="834" y="132" width="20" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="844" y="153" font-size="8.5" font-weight="700" fill="#713f12" text-anchor="middle">g</text>
+  <rect x="858" y="132" width="22" height="34" rx="2" fill="#fed7aa" stroke="#f97316" stroke-width="0.9"/>
+  <text x="869" y="153" font-size="8" font-weight="600" fill="#7c2d12" text-anchor="middle">fu</text>
+  <rect x="882" y="132" width="40" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="0.9"/>
+  <text x="902" y="153" font-size="8.5" font-weight="600" fill="#134e4a" text-anchor="middle">spl...</text>
+  <rect x="924" y="132" width="42" height="34" rx="2" fill="#fdba74" stroke="#ea580c" stroke-width="0.9"/>
+  <text x="945" y="153" font-size="8.5" font-weight="600" fill="#7c2d12" text-anchor="middle">spl...</text>
+  <rect x="968" y="132" width="8" height="34" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="976" y="132" width="20" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="986" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">tg</text>
+  <rect x="998" y="132" width="20" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="1008" y="153" font-size="8.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">tg</text>
+  <rect x="1020" y="132" width="20" height="34" rx="2" fill="#86efac" stroke="#16a34a" stroke-width="1"/>
+  <text x="1030" y="153" font-size="8.5" font-weight="700" fill="#14532d" text-anchor="middle">tg</text>
+  <rect x="788" y="129" width="256" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="916.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">vjp_i-1</text>
+  <rect x="638" y="240" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <rect x="638.0" y="274" width="92.7" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="684.3" y="295" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">reduce-sca...</text>
+  <rect x="732.7" y="274" width="92.7" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="779.0" y="295" font-size="8.5" font-weight="700" fill="#881337" text-anchor="middle">reduce-sca...</text>
+  <rect x="827.3" y="274" width="92.7" height="34" rx="2" fill="#bef264" stroke="#65a30d" stroke-width="1"/>
+  <text x="873.7" y="295" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">reduce-sca...</text>
+  <rect x="636" y="271" width="286" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="779.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">RS_i</text>
+  <rect x="928.0" y="274" width="35.3" height="34" rx="2" fill="#fca5a5" stroke="#ef4444" stroke-width="1"/>
+  <text x="945.7" y="295" font-size="8" font-weight="700" fill="#7f1d1d" text-anchor="middle">all-...</text>
+  <rect x="965.3" y="274" width="35.3" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="983.0" y="295" font-size="8" font-weight="700" fill="#14532d" text-anchor="middle">all-...</text>
+  <rect x="1002.7" y="274" width="35.3" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="1020.3" y="295" font-size="8" font-weight="700" fill="#0c4a6e" text-anchor="middle">al...</text>
+  <rect x="926" y="271" width="114" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="975.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i-2</text>
+  <rect x="638" y="316" width="282" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="779.0" y="329" font-size="9.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="928" y="316" width="110" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="983.0" y="329" font-size="8.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLL</text>
+  <rect x="640" y="384" width="400" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="840.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i-1 MoE offload)</text>
+  <rect x="658" y="406" width="10" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="722" y="406" width="10" height="26" rx="1.5" fill="#99f6e4" stroke="#14b8a6" stroke-width="0.8"/>
+  <rect x="790" y="406" width="10" height="26" rx="1.5" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="855" y="406" width="10" height="26" rx="1.5" fill="#fde68a" stroke="#eab308" stroke-width="0.8"/>
+  <rect x="960" y="406" width="10" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="640" y="444" width="120" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="700" y="457" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="764" y="444" width="110" height="18" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="819" y="457" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="878" y="444" width="152" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="954" y="457" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <text x="1260.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i-2</text>
+  <rect x="1056" y="93" width="408" height="15" rx="2" fill="#bae6fd" opacity="0.85"/>
+  <text x="1260.0" y="104" font-size="9.5" font-weight="600" fill="#0c4a6e" text-anchor="middle">scanned_layers_bwd (recompute + vjp layer i-2)</text>
+  <rect x="1055" y="132" width="13" height="34" rx="2" fill="#bae6fd" stroke="#38bdf8" stroke-width="0.8"/>
+  <text x="1061.5" y="153" font-size="7.5" font-weight="600" fill="#0369a1" text-anchor="middle">co</text>
+  <rect x="1069" y="132" width="13" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <text x="1075.5" y="153" font-size="7.5" font-weight="600" fill="#15803d" text-anchor="middle">co</text>
+  <rect x="1086" y="132" width="52" height="34" rx="2" fill="#bbf7d0" stroke="#4ade80" stroke-width="1"/>
+  <text x="1112" y="153" font-size="9" font-weight="600" fill="#14532d" text-anchor="middle">spl...</text>
+  <rect x="1140" y="132" width="20" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1150" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">g</text>
+  <rect x="1162" y="132" width="20" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="1"/>
+  <text x="1172" y="153" font-size="8.5" font-weight="700" fill="#134e4a" text-anchor="middle">g</text>
+  <rect x="1184" y="132" width="20" height="34" rx="2" fill="#a7f3d0" stroke="#10b981" stroke-width="1"/>
+  <text x="1194" y="153" font-size="8.5" font-weight="700" fill="#064e3b" text-anchor="middle">g</text>
+  <rect x="1084" y="129" width="124" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1146.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">recompute_i-2</text>
+  <rect x="1210" y="132" width="20" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="1220" y="153" font-size="8.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">g</text>
+  <rect x="1232" y="132" width="20" height="34" rx="2" fill="#bbf7d0" stroke="#22c55e" stroke-width="1"/>
+  <text x="1242" y="153" font-size="8.5" font-weight="700" fill="#14532d" text-anchor="middle">g</text>
+  <rect x="1254" y="132" width="20" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
+  <text x="1264" y="153" font-size="8.5" font-weight="700" fill="#713f12" text-anchor="middle">g</text>
+  <rect x="1278" y="132" width="22" height="34" rx="2" fill="#fed7aa" stroke="#f97316" stroke-width="0.9"/>
+  <text x="1289" y="153" font-size="8" font-weight="600" fill="#7c2d12" text-anchor="middle">fu</text>
+  <rect x="1302" y="132" width="40" height="34" rx="2" fill="#99f6e4" stroke="#14b8a6" stroke-width="0.9"/>
+  <text x="1322" y="153" font-size="8.5" font-weight="600" fill="#134e4a" text-anchor="middle">spl...</text>
+  <rect x="1344" y="132" width="42" height="34" rx="2" fill="#fdba74" stroke="#ea580c" stroke-width="0.9"/>
+  <text x="1365" y="153" font-size="8.5" font-weight="600" fill="#7c2d12" text-anchor="middle">spl...</text>
+  <rect x="1388" y="132" width="8" height="34" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1396" y="132" width="20" height="34" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="1"/>
+  <text x="1406" y="153" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">tg</text>
+  <rect x="1418" y="132" width="20" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="1428" y="153" font-size="8.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">tg</text>
+  <rect x="1440" y="132" width="20" height="34" rx="2" fill="#86efac" stroke="#16a34a" stroke-width="1"/>
+  <text x="1450" y="153" font-size="8.5" font-weight="700" fill="#14532d" text-anchor="middle">tg</text>
+  <rect x="1208" y="129" width="256" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1336.0" y="124" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">vjp_i-2</text>
+  <rect x="1058" y="240" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <rect x="1058.0" y="274" width="35.3" height="34" rx="2" fill="#fca5a5" stroke="#ef4444" stroke-width="1"/>
+  <text x="1075.7" y="295" font-size="8" font-weight="700" fill="#7f1d1d" text-anchor="middle">all-...</text>
+  <rect x="1095.3" y="274" width="35.3" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="1113.0" y="295" font-size="8" font-weight="700" fill="#14532d" text-anchor="middle">all-...</text>
+  <rect x="1132.7" y="274" width="35.3" height="34" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="1"/>
+  <text x="1150.3" y="295" font-size="8" font-weight="700" fill="#0c4a6e" text-anchor="middle">al...</text>
+  <rect x="1056" y="271" width="114" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1107.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i-3</text>
+  <rect x="1176.0" y="274" width="92.7" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="1222.3" y="295" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">reduce-sca...</text>
+  <rect x="1270.7" y="274" width="92.7" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="1317.0" y="295" font-size="8.5" font-weight="700" fill="#881337" text-anchor="middle">reduce-sca...</text>
+  <rect x="1365.3" y="274" width="92.7" height="34" rx="2" fill="#bef264" stroke="#65a30d" stroke-width="1"/>
+  <text x="1411.7" y="295" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">reduce-sca...</text>
+  <rect x="1174" y="271" width="286" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="1329.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">RS_i-1</text>
+  <rect x="1058" y="316" width="110" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="1113.0" y="329" font-size="8.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLL</text>
+  <rect x="1176" y="316" width="282" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="1317.0" y="329" font-size="9.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="1060" y="384" width="400" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1260.0" y="395" font-size="9.5" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i-2 MoE offload)</text>
+  <rect x="1078" y="406" width="10" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="1142" y="406" width="10" height="26" rx="1.5" fill="#99f6e4" stroke="#14b8a6" stroke-width="0.8"/>
+  <rect x="1210" y="406" width="10" height="26" rx="1.5" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1275" y="406" width="10" height="26" rx="1.5" fill="#fde68a" stroke="#eab308" stroke-width="0.8"/>
+  <rect x="1380" y="406" width="10" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="1060" y="444" width="120" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1120" y="457" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="1184" y="444" width="110" height="18" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="1239" y="457" font-size="8.5" font-weight="700" fill="#831843" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="1298" y="444" width="152" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1374" y="457" font-size="8.5" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="1476" y="132" width="34" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="1493" y="153" font-size="8.5" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="1476" y="274" width="36" height="34" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="1494" y="295" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">reduce-...</text>
+  <line x1="210" y1="16" x2="210" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="630" y1="16" x2="630" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1050" y1="16" x2="1050" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1470" y1="16" x2="1470" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="175" y1="184" x2="414" y2="265" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="175" y1="268" x2="306.0" y2="174" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="324" y1="267" x2="721.0" y2="174" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="606" y1="173" x2="688" y2="265" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="995.0" y1="267" x2="1146.0" y2="174" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+  <line x1="1036" y1="173" x2="1264" y2="265" stroke="#dc2626" stroke-width="2.6" marker-end="url(#red-arrow)"/>
+</svg>

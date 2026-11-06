@@ -14,9 +14,14 @@
 
 """Pipeline layer wrapping a decoder layer(s). Supports circular pipelining"""
 
+import functools
+
 import jax
-from jax.sharding import PartitionSpec as P
+import jax.numpy as jnp
+from jax.sharding import AxisType, PartitionSpec as P, reshard
 from flax import nnx
+
+from maxtext.common.common_types import ShardMode
 
 
 def get_mesh_axis_dim_indices(physical_partition_spec, axis_name="fsdp"):
@@ -104,6 +109,8 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
     A new `PartitionSpec` with the gathered axes removed, or the original object if it
     was not a PartitionSpec.
   """
+  # Copy: the caller shares one list across all leaves; appending in place would leak "expert" into later leaves.
+  axes_to_remove = list(axes_to_remove)
   if not is_moe_block_0:
     axes_to_remove.append("expert")
 
@@ -118,7 +125,12 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
         else:
           new_spec.append(None)  # None signifies replication across the removed mesh axis
       elif isinstance(axis, (list, tuple)):
-        new_axis = [a for a in axis if a not in axes_to_remove]
+        # cp-as-ep: when 'context' is co-sharded with 'expert' on a routed-MoE dim (e.g. exp -> ['context', 'expert']),
+        # it is part of expert parallelism, not a gathered axis. Stripping it would all-gather the expert weights over
+        # context (2x BSW bytes) and force a collective-permute back to the ('context', 'expert') layout the MoE
+        # shard_map expects.
+        keep_context = is_moe_block_0 and "expert" in axis
+        new_axis = [a for a in axis if a not in axes_to_remove or (keep_context and a == "context")]
         new_spec.append(tuple(new_axis))
       else:
         raise ValueError(f"Unsupported_axis_type: {type(axis)}")
@@ -126,6 +138,88 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
     return P(*new_spec)
 
   return pps
+
+
+def pipeline_stage_mesh(mesh, shard_mode):
+  """Returns the mesh the pipeline stage layers are built with: `mesh`, with 'stage' an Auto axis under EXPLICIT.
+
+  The stage function is vmapped over the stages. Under explicit sharding a vmap over an Explicit mesh axis replicates
+  the vmapped dim inside any shard_map in the layers (the MoE's, e.g., which then all-gathers every stage's tokens and
+  weights) and cannot batch a gather from an unbatched operand. So the stages run with 'stage' Auto and named by
+  spmd_axis_name, as under shard_mode=auto, while every other axis stays Explicit (see `call_with_stage_axis_auto`).
+  The layers resolve their shardings against their mesh, which must match the one in context when they run.
+  """
+  if shard_mode != ShardMode.EXPLICIT or "stage" not in mesh.axis_names:
+    return mesh
+  return mesh.update(
+      axis_types=tuple(AxisType.Auto if name == "stage" else t for name, t in zip(mesh.axis_names, mesh.axis_types))
+  )
+
+
+def call_with_stage_axis_auto(fn, stage_mesh, *args):
+  """Calls `fn(*args)` under `stage_mesh` ('stage' Auto) and returns its outputs explicitly sharded by stage on dim 0.
+
+  Like `jax.sharding.auto_axes(fn, axes="stage")`, except that the outputs keep the shardings `fn` gave them on the
+  other (Explicit) axes, which are only known once it has been traced.
+  """
+  with jax.sharding.use_abstract_mesh(stage_mesh.abstract_mesh):
+    args = jax.tree.map(lambda a: reshard(a, remove_mesh_axis_from_spec(jax.typeof(a).sharding.spec, "stage")), args)
+    out = fn(*args)
+    out_specs = jax.tree.map(lambda o: jax.typeof(o).sharding.spec, out)
+  return jax.tree.map(lambda o, spec: reshard(o, P("stage", *spec.partitions[1:])), out, out_specs)
+
+
+def remove_mesh_axis_from_spec(spec, axis_name):
+  """Drops `axis_name` from every dimension of a PartitionSpec, keeping its reduced/unreduced axes."""
+  return P(*(remove_mesh_axis(p, axis_name) for p in spec.partitions), unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def weight_grad_reduced_axes(mesh, rules):
+  """Mesh axes (of size > 1, other than 'stage') that a stage's activation tokens are sharded over.
+
+  A stage weight's gradient sums over the tokens, so on each device it is a partial sum over exactly these axes.
+  """
+  from maxtext.utils.sharding import logical_to_mesh_axes, mesh_axes_for_dim  # pylint: disable=import-outside-toplevel
+
+  axes = set()
+  for logical_axis in ("activation_batch", "activation_length"):
+    spec = logical_to_mesh_axes((logical_axis,), mesh, rules=rules)
+    if spec is not None and spec.partitions:
+      axes.update(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+  axes.discard("stage")
+  return frozenset(axes)
+
+
+def tag_weight_grad_reduced(spec, reduced_axes):
+  """Tags a gathered stage weight's spec `reduced` over the token axes it is not itself sharded on.
+
+  The weight's cotangent then comes out `unreduced` over them (each device's partial sum over the tokens it saw),
+  so accumulating it over microbatches needs no communication; the reduction runs where the tag was applied.
+  """
+  if not isinstance(spec, P) or not reduced_axes:
+    return spec
+  used = set()
+  for dim_axes in spec.partitions:
+    if dim_axes is not None and dim_axes is not P.UNCONSTRAINED:
+      used.update(dim_axes if isinstance(dim_axes, tuple) else (dim_axes,))
+  reduced = frozenset(reduced_axes) - used
+  return spec.update(reduced=spec.reduced | reduced) if reduced else spec
+
+
+def spec_partitions(x):
+  """Returns the per-dimension mesh axes of `x`'s (explicit) sharding, padded with None to `x.ndim`."""
+  partitions = list(jax.typeof(x).sharding.spec.partitions)
+  return partitions + [None] * (x.ndim - len(partitions))
+
+
+def remove_mesh_axis(dim_axes, axis_name):
+  """Drops `axis_name` from one PartitionSpec entry (None, a mesh axis name or a tuple of them)."""
+  if dim_axes is None or dim_axes == axis_name:
+    return None
+  if isinstance(dim_axes, str):
+    return dim_axes
+  remaining = tuple(a for a in dim_axes if a != axis_name)
+  return remaining or None
 
 
 def strip_pipeline_repeat_logical_axis(full_logical_spec):
@@ -232,12 +326,14 @@ def create_gradient_accumulation_scan(
 
 
 def is_static_param(path, v):
-  """Predicate matching nnx.Param and FP8 _overwrite_with_gradient variables.
+  """Predicate matching nnx.Param, FP8 _overwrite_with_gradient and MoEBiasVar variables.
 
-  Used throughout the pipeline to split state into trainable params vs other state.
+  Used throughout the pipeline to split state into loop-invariant weights vs other state.
+  MoEBiasVar (DeepSeek's aux-loss-free routing bias) is not differentiated, but it is
+  read-only inside the forward pass, so it is staged per layer like a weight.
   Must be consistent everywhere to prevent tree structure mismatches.
   """
-  return isinstance(v, nnx.Param) or type(v).__name__ == "_overwrite_with_gradient"
+  return isinstance(v, nnx.Param) or type(v).__name__ in ("_overwrite_with_gradient", "MoEBiasVar")
 
 
 def advance_rng_state(state, iteration):
@@ -328,6 +424,80 @@ def unflatten_nnx_state(arrays, treedef, is_var_flags, var_types, var_metadata):
     else:
       new_leaves.append(arr)
   return treedef.unflatten(new_leaves)
+
+
+# How a metric sown inside a pipelined layer is reduced over the microbatches that layer processed. Names without an
+# entry use the dtype rule (bool: any, float: mean, int: sum), which suits the per-layer logging statistics
+# (activation_mean / activation_stdev / activation_fraction_zero).
+SOWN_MICROBATCH_REDUCTIONS = {
+    "moe_has_overflow": jnp.any,
+    "moe_lb_loss": jnp.mean,
+    "moe_bias_updates": jnp.sum,  # per-expert token counts under PP (decoded in train.py)
+    "max_logits": jnp.max,
+    "te_moe_total_recv_tokens": jnp.max,
+    "te_moe_recv_capacity_per_rank": jnp.min,
+}
+# Sown values that have no meaningful per-layer reduction over microbatches.
+UNSUPPORTED_SOWN_METRICS = ("out_projection_activations",)
+
+
+def _sown_leaf_names(treedef):
+  """Name (last string key of the path) of each leaf of a flattened sown-metrics state."""
+  template = jax.tree_util.tree_unflatten(treedef, list(range(treedef.num_leaves)))
+  names = []
+  for path, _ in jax.tree_util.tree_flatten_with_path(template)[0]:
+    keys = [str(getattr(p, "key", getattr(p, "name", ""))) for p in path]
+    keys = [k for k in keys if k and not k.isdigit()]
+    names.append(keys[-1] if keys else "")
+  return names
+
+
+def reduce_sown_metrics_per_layer(
+    stacked_arrays, treedef, num_repeats, num_microbatches, num_stages, forwarding_delay, squeeze_repeats=False
+):
+  """Maps sown metrics stacked over pipeline iterations back to the layers that produced them.
+
+  Args:
+    stacked_arrays: flattened sown state (see flatten_nnx_state); each leaf is [iterations, num_stages, ...].
+    treedef: its treedef, used to recover the metric names.
+    num_repeats, num_microbatches, num_stages, forwarding_delay: pipeline schedule.
+    squeeze_repeats: drop the repeat dim (non-circular pipeline, whose layers are stacked [num_stages, ...]).
+
+  Stage s runs microbatch m of repeat r at iteration r * num_microbatches + m + forwarding_delay * s (see
+  get_microbatch_and_repeat_ids); every other (iteration, stage) pair is bubble compute on garbage inputs and must
+  not leak into losses or bias updates. Returns leaves of shape [num_repeats, num_stages, ...], reduced over
+  microbatches with SOWN_MICROBATCH_REDUCTIONS, i.e. the same layout as the stacked layer weights.
+  """
+  valid_iteration = (
+      jnp.arange(num_repeats)[:, None, None] * num_microbatches
+      + jnp.arange(num_microbatches)[None, :, None]
+      + forwarding_delay * jnp.arange(num_stages)[None, None, :]
+  )
+  stage_index = jnp.arange(num_stages)[None, None, :]
+
+  def _reduce(name, stacked_leaf):
+    if name in UNSUPPORTED_SOWN_METRICS:
+      raise ValueError(f"Sown value '{name}' cannot be reduced over pipeline microbatches; unsupported with PP.")
+    # Under explicit sharding the gather's output sharding is ambiguous: keep the leaf's stage (and later) dims'.
+    partitions = spec_partitions(stacked_leaf)
+    out_sharding = P(None, None, *partitions[1:]) if any(p is not None for p in partitions) else None
+    # (num_repeats, num_microbatches, num_stages, ...)
+    per_microbatch = stacked_leaf.at[valid_iteration, stage_index].get(out_sharding=out_sharding)
+    reduction = SOWN_MICROBATCH_REDUCTIONS.get(name)
+    if reduction is None:
+      if per_microbatch.dtype == jnp.bool_:
+        reduction = jnp.any
+      elif jnp.issubdtype(per_microbatch.dtype, jnp.inexact):
+        reduction = jnp.mean
+      else:
+        reduction = jnp.sum
+    per_layer = reduction(per_microbatch, axis=1)
+    return per_layer[0] if squeeze_repeats else per_layer
+
+  return [
+      jax.tree.map(functools.partial(_reduce, name), leaf)
+      for name, leaf in zip(_sown_leaf_names(treedef), stacked_arrays)
+  ]
 
 
 def arrays_to_linen_collection(arrays, keys):

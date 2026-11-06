@@ -103,3 +103,11 @@ Update this document at each phase of the bring-up:
 > [!IMPORTANT]
 > **Gotcha 7: TPU VM execution & command formatting**.
 > Always execute debugging, decoding, checkpoint conversion, and logits checking python commands directly from the MaxText root directory on your TPU VM. Run commands using standard python module flags (e.g., `python3 -m maxtext.inference.decode`).
+
+---
+
+## Optional: Large PR Cleanup & Atomic Split
+
+`pr_cleanup=false` by default. Only an explicit user request for cleanup/splitting or `pr_cleanup=true` enables this phase; a large diff or passing validation does not. Otherwise, skip it without loading the reference.
+
+After Phase 4 passes, follow [Large PR Cleanup & Atomic Split](references/pr_cleanup.md) for artifact removal, full-diff formatting, pylint fixes, and atomic PR stacking. This is separate from the four correctness phases.

@@ -18,11 +18,10 @@ import dataclasses
 import functools
 from functools import partial
 import math
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, NamedTuple, Optional, Tuple
 
 from flax import linen as nn
 from flax import nnx
-from flax.linen import partitioning
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -73,12 +72,17 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, maybe_shard_with_pspec
+from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, logical_to_spec, maybe_shard_with_pspec, with_logical_constraint
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
-from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+
+try:  # pragma: no cover
+  from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+  from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
+except ImportError:  # pragma: no cover
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
@@ -96,6 +100,22 @@ dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 
 _COMPRESSED_DQ_REDUCTION_STEPS = 3
 
 
+class _SplashBlocks(NamedTuple):
+  """Splash attention block sizes and Q/K/V layouts for one pass."""
+
+  block_q: int
+  block_kv: int
+  block_kv_compute: int
+  block_q_dkv: int
+  block_kv_dkv: int
+  block_kv_dkv_compute: int
+  block_q_dq: int
+  block_kv_dq: int
+  q_layout: str
+  k_layout: str
+  v_layout: str
+
+
 def _resolve_attention_type(config: Config, attention_type: AttentionType | str | None) -> AttentionType:
   configured_attention_type = AttentionType(getattr(config, "attention_type", AttentionType.GLOBAL.value))
   if attention_type is None:
@@ -104,6 +124,55 @@ def _resolve_attention_type(config: Config, attention_type: AttentionType | str 
   if configured_attention_type == AttentionType.BLOCK_DIFFUSION and resolved_attention_type == AttentionType.GLOBAL:
     return configured_attention_type
   return resolved_attention_type
+
+
+def resolve_context_parallel_strategy(config: Config, attention_type: AttentionType) -> str:
+  """Returns the effective context-parallel strategy for a layer.
+
+  `LOCAL_SLIDING` layers use `config.local_context_parallel_strategy` when it is
+  non-empty, and otherwise fall back to `config.context_parallel_strategy`. All
+  other attention types always use `config.context_parallel_strategy`.
+
+  Args:
+    config: Model configuration containing context-parallel strategy settings.
+    attention_type: The layer's attention type.
+
+  Returns:
+    Lowercase context-parallel strategy name (e.g., `"halo"`, `"ring"`).
+  """
+  if attention_type == AttentionType.LOCAL_SLIDING and config.local_context_parallel_strategy:
+    return config.local_context_parallel_strategy.lower()
+  return config.context_parallel_strategy.lower()
+
+
+def _halo_tails(k: Array, v: Array, seg: Array, halo: int) -> tuple[Array, Array, Array]:
+  """Slices the trailing `halo` KV tokens and segment IDs from a sequence chunk."""
+  return k[:, :, -halo:, :], v[:, :, -halo:, :], seg[:, -halo:]
+
+
+def _recv_halo(
+    k: Array,
+    v: Array,
+    seg: Array,
+    *,
+    halo: int,
+    context_axis: str,
+    perm: list[tuple[int, int]],
+    is_edge_rank: Array,
+    edge: tuple[Array, Array, Array] | None = None,
+) -> tuple[Array, Array, Array]:
+  """Receives the trailing `halo` KV tokens from the neighbour selected by `perm`.
+
+  On `is_edge_rank`, the neighbour does not precede this chunk in the global
+  sequence, so `edge` is used instead; `None` means nothing precedes it and
+  masks the halo out with segment ID `-2`.
+  """
+  k_halo, v_halo, seg_halo = (
+      jax.lax.ppermute(x, axis_name=context_axis, perm=perm) for x in _halo_tails(k, v, seg, halo)
+  )
+  if edge is None:
+    edge = (jnp.zeros_like(k_halo), jnp.zeros_like(v_halo), jnp.full_like(seg_halo, -2))
+  return tuple(jnp.where(is_edge_rank, e, h) for e, h in zip(edge, (k_halo, v_halo, seg_halo), strict=True))
 
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:
@@ -157,6 +226,21 @@ def validate_gpu_flash_attention(
     )
   if record_max_logits:
     raise NotImplementedError("record_max_logits (QK-Clip) is not supported for GPU flash attention kernels yet.")
+
+
+def _tokamax_gpu_flash_attention():
+  """Returns the Tokamax FlashAttention op for GPU."""
+  # Imported lazily, since the jax-triton kernel needs Triton, which only ships
+  # with tokamax[cuda].
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  try:
+    from tokamax._src.ops.attention import triton as tokamax_triton
+  except ImportError:  # pragma: no cover
+    # TODO(b/532554266): Remove the fallback once the MaxText GPU environment uses tokamax>=0.0.18.
+    from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+
+    return tokamax_pallas_triton.PallasTritonFlashAttention()
+  return tokamax_triton.TritonFlashAttention()
 
 
 def _sinks_to_te_softmax_offset(sinks: Array, num_query_heads: int) -> Array:
@@ -715,7 +799,7 @@ class AttentionOp(nnx.Module):
     # Only the cudnn_flash_te bridge draws from these, and only with attention dropout
     # on; holding them otherwise leaves dead RNG state in the model.
     self.rngs = rngs if dropout_rate > 0.0 else None
-    if self.attention_kernel == "flash" and tokamax_ring_attention.is_context_parallel_ring_requested(self.config):
+    if self.attention_kernel == "flash" and self.context_parallel_strategy == "ring":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware == "tpu":
         if not self.config.use_tokamax_splash:
@@ -761,7 +845,7 @@ class AttentionOp(nnx.Module):
             dkv_dim_q=3,
             dkv_dim_kv=3,
         )
-    if self.attention_kernel == "flash" and ulysses_attention.is_context_parallel_ulysses_requested(self.config):
+    if self.attention_kernel == "flash" and self.context_parallel_strategy == "ulysses":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware != "tpu":
         raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
@@ -812,7 +896,7 @@ class AttentionOp(nnx.Module):
           dkv_dim_kv=3,
           attention_label="TPU Ulysses attention",
       )
-    if self.attention_kernel == "flash" and usp_attention.is_context_parallel_usp_requested(self.config):
+    if self.attention_kernel == "flash" and self.context_parallel_strategy == "usp":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware != "tpu":
         raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
@@ -934,6 +1018,10 @@ class AttentionOp(nnx.Module):
     logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
+  @property
+  def context_parallel_strategy(self) -> str:
+    return resolve_context_parallel_strategy(self.config, self.attention_type)
+
   def _context_parallel_size(self) -> int:
     """Number of ways the query sequence is actually sharded, per the active rules.
 
@@ -1002,6 +1090,28 @@ class AttentionOp(nnx.Module):
         extra_stack_level=1,
     )
 
+  def _decode_cache_positions(self, segment_positions, decoder_segment_ids, s_len, kv_cache_part):
+    """Absolute query and key positions for a single-token decode step over one KV cache.
+
+    Prefill cache slot i holds position i. The AR cache is written in order from
+    the first decode step, so its newest valid slot holds the query token.
+
+    Returns:
+      (abs_q [batch, 1, 1], abs_k [batch, 1, s_len]), or None when the cache part,
+      the query position or the AR cache segment ids are unknown.
+    """
+    if kv_cache_part is None or segment_positions is None:
+      return None
+    abs_q = segment_positions[:, :, None]
+    slots = jnp.arange(s_len)[None, None, :]
+    if kv_cache_part == "prefill":
+      return abs_q, jnp.broadcast_to(slots, abs_q.shape[:2] + (s_len,))
+    if decoder_segment_ids is None:
+      return None
+    valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
+    newest = jnp.max(jnp.where(valid, jnp.arange(s_len)[None, :], -1), axis=-1)[:, None, None]
+    return abs_q, abs_q - newest + slots
+
   def generate_attention_mask(
       self,
       query,
@@ -1015,6 +1125,7 @@ class AttentionOp(nnx.Module):
       pad_kv_total: int = 0,
       decoder_segment_ids_kv: Optional[Array] = None,
       attention_type: AttentionType | None = None,
+      kv_cache_part: str | None = None,
   ) -> Array | None:
     """Generates a combined attention mask for Transformer models.
 
@@ -1090,6 +1201,10 @@ class AttentionOp(nnx.Module):
         this call. Lets a caller ask for a subset of the usual mask, e.g. a
         kernel that applies causality and the sliding window itself and only
         needs sequence separation. Defaults to `self.attention_type`.
+      kv_cache_part: In single-token decode, which KV cache `key` comes from:
+        "prefill" or "ar". With `segment_positions`, the sliding window is then
+        measured between true query and key positions. None keeps the
+        slot-index approximation.
 
     Returns:
       An `Array` representing the attention mask, with shape
@@ -1184,6 +1299,11 @@ class AttentionOp(nnx.Module):
       )
       if use_segment_positions:
         sliding_mask = sliding_mask[:, None, None, :, :]
+      if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+        decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
+        if decode_positions is not None:
+          distance = decode_positions[0] - decode_positions[1]
+          sliding_mask = ((distance >= 0) & (distance < self.sliding_window_size))[:, None, None, :, :]
       output_mask = sliding_mask * output_mask
     elif attention_type == AttentionType.COMPRESSED:
       # DeepSeek-V4 Compressed Attention decomposes the full KV sequence of length
@@ -1232,6 +1352,11 @@ class AttentionOp(nnx.Module):
         """
         if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
           # --- CASE 1: Single-token Autoregressive Decoding ---
+          decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part)
+          if decode_positions is not None:
+            distance = decode_positions[0] - decode_positions[1]
+            in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
+            return in_window & (distance >= 0)
           # Safely use segment_positions if provided, or fall back to next_pos
           if segment_positions is not None:
             abs_q = segment_positions[:, :, None]
@@ -1583,6 +1708,145 @@ class AttentionOp(nnx.Module):
         record_max_logits=record_max_logits,
     )
 
+  def _validate_tpu_halo_runtime(
+      self,
+      *,
+      model_mode: str,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      indexer_mask: Array | None = None,
+      use_ragged_attention: bool = False,
+  ) -> None:
+    """Validates runtime constraints for the halo sliding-window CP path."""
+    if self.attention_type != AttentionType.LOCAL_SLIDING:
+      raise ValueError("Halo context parallelism is only supported for AttentionType.LOCAL_SLIDING.")
+    if not self.config.use_tokamax_splash:
+      raise ValueError("Halo context parallelism requires use_tokamax_splash=True.")
+    if self.sliding_window_size is None or self.sliding_window_size <= 0:
+      raise ValueError("Halo context parallelism requires sliding_window_size > 0.")
+    if model_mode != MODEL_MODE_TRAIN:
+      raise ValueError("Halo context parallelism is supported only for train mode.")
+    if use_ragged_attention:
+      raise ValueError("Halo context parallelism does not support ragged attention.")
+    if previous_chunk is not None:
+      raise ValueError("Halo context parallelism does not support chunked prefill.")
+    if indexer_mask is not None:
+      raise ValueError("Halo context parallelism does not support indexer masks.")
+    if bidirectional_mask is not None:
+      raise ValueError("Halo context parallelism does not support bidirectional masks.")
+
+  def _splash_blocks(self) -> _SplashBlocks:
+    """Returns the forward and backward Splash block sizes and layouts."""
+    if max_utils.is_eval(self.config):
+      return _SplashBlocks(
+          block_q=self.eval_block_q,
+          block_kv=self.eval_block_kv,
+          block_kv_compute=self.eval_block_kv_compute,
+          block_q_dkv=self.eval_block_q,
+          block_kv_dkv=self.eval_block_kv,
+          block_kv_dkv_compute=self.eval_block_kv_compute,
+          block_q_dq=self.eval_block_q,
+          block_kv_dq=self.eval_block_kv,
+          q_layout=self.eval_q_layout,
+          k_layout=self.eval_k_layout,
+          v_layout=self.eval_v_layout,
+      )
+    return _SplashBlocks(
+        block_q=self.block_q,
+        block_kv=self.block_kv,
+        block_kv_compute=self.block_kv_compute,
+        block_q_dkv=self.block_q_dkv,
+        block_kv_dkv=self.block_kv_dkv,
+        block_kv_dkv_compute=self.block_kv_dkv_compute,
+        block_q_dq=self.block_q_dq,
+        block_kv_dq=self.block_kv_dq,
+        q_layout=self.q_layout,
+        k_layout=self.k_layout,
+        v_layout=self.v_layout,
+    )
+
+  def _create_sa_config(
+      self,
+      blocks: _SplashBlocks,
+      q_len: int,
+      kv_len: int,
+      attn_logits_soft_cap: float | None,
+  ) -> tokamax_splash_kernel.SplashConfig | splash_attention_kernel.BlockSizes:
+    """Builds the Splash kernel config, clamped to `q_len` and `kv_len`."""
+    config = self.config
+    if config.use_tokamax_splash:
+      # Tokamax only allows diagonal sub-tile skipping with a pure `CausalMask`, which
+      # GLOBAL/MLA get unless load-balanced context parallelism permutes the sequence.
+      use_diag_skip = (
+          self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
+          and q_len == kv_len
+          and not (self._context_parallel_size() > 1 and self._load_balanced_context_parallel())
+      )
+      diag_skip_kwargs = {}
+      if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
+        # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
+        diag_skip_kwargs = {
+            "qk_diag_skip": self.qk_diag_skip,
+            "sv_diag_skip": self.sv_diag_skip,
+            "qk_diag_grid": config.sa_qk_diag_grid,
+        }
+      return tokamax_splash_kernel.SplashConfig(
+          block_q=min(blocks.block_q, q_len),
+          block_kv=min(blocks.block_kv, kv_len),
+          block_kv_compute=min(blocks.block_kv_compute, kv_len),
+          block_q_dkv=min(blocks.block_q_dkv, q_len),
+          block_kv_dkv=min(blocks.block_kv_dkv, kv_len),
+          block_kv_dkv_compute=min(blocks.block_kv_dkv_compute, kv_len),
+          use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
+          q_layout=tokamax_splash_kernel.QKVLayout[blocks.q_layout],
+          k_layout=tokamax_splash_kernel.QKVLayout[blocks.k_layout],
+          v_layout=tokamax_splash_kernel.QKVLayout[blocks.v_layout],
+          attn_logits_soft_cap=attn_logits_soft_cap,
+          fuse_reciprocal=self.fuse_reciprocal,
+          use_base2_exp=self.use_base2_exp,
+          dkv_reuse_scaled_q=getattr(config, "sa_dkv_reuse_scaled_q", False),
+          q_prescaled_log2e=getattr(config, "sa_q_prescaled_log2e", False),
+          residual_checkpoint_name="context",
+          fwd_cost_estimate=pl.CostEstimate(
+              flops=config.cost_estimate_flops_fwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          )
+          if config.cost_estimate_flops_fwd >= 0
+          else None,
+          bwd_cost_estimate=pl.CostEstimate(
+              flops=config.cost_estimate_flops_bwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          )
+          if config.cost_estimate_flops_bwd >= 0
+          else None,
+          # `dq_reduction_steps` of 0 means "unset" (see configs/base.yml); the Tokamax
+          # backward kernel accepts only 3 or None, so COMPRESSED opts into the ring buffer
+          # while every other attention type leaves the reduction unconstrained.
+          dq_reduction_steps=(
+              config.dq_reduction_steps
+              if config.dq_reduction_steps > 0
+              else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
+          ),
+          use_experimental_scheduler=self.use_splash_scheduler,
+          **diag_skip_kwargs,
+      )
+    return splash_attention_kernel.BlockSizes(
+        block_q=min(blocks.block_q, q_len),
+        block_kv=min(blocks.block_kv, kv_len),
+        block_kv_compute=min(blocks.block_kv_compute, kv_len),
+        block_q_dkv=min(blocks.block_q_dkv, q_len),
+        block_kv_dkv=min(blocks.block_kv_dkv, kv_len),
+        block_kv_dkv_compute=min(blocks.block_kv_dkv_compute, kv_len),
+        block_q_dq=None if self.use_fused_bwd_kernel else min(blocks.block_q_dq, q_len),
+        block_kv_dq=None if self.use_fused_bwd_kernel else min(blocks.block_kv_dq, kv_len),
+        use_fused_bwd_kernel=self.use_fused_bwd_kernel,
+        q_layout=splash_attention_kernel.QKVLayout[blocks.q_layout],
+        k_layout=splash_attention_kernel.QKVLayout[blocks.k_layout],
+        v_layout=splash_attention_kernel.QKVLayout[blocks.v_layout],
+    )
+
   def apply_attention(
       self,
       query: Array,
@@ -1602,6 +1866,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      kv_cache_part: str | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1621,22 +1886,21 @@ class AttentionOp(nnx.Module):
     cp_size = self._context_parallel_size()
     if self.attention_type == AttentionType.COMPRESSED and cp_size > 1:
       raise ValueError(f"Context parallelism (cp_size={cp_size}) is not supported with AttentionType.COMPRESSED.")
-    if (
-        target_hardware == "tpu"
-        and tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
-        and self.attention_kernel != "flash"
-    ):
+    if target_hardware == "tpu" and self.context_parallel_strategy == "ring" and self.attention_kernel != "flash":
       raise ValueError("TPU Tokamax ring attention requires attention_kernel='flash'.")
-    if ulysses_attention.is_context_parallel_ulysses_requested(self.config):
+    if self.context_parallel_strategy == "ulysses":
       if target_hardware != "tpu":
         raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
       if self.attention_kernel != "flash":
         raise ValueError("TPU Ulysses attention requires attention_kernel='flash'.")
-    if usp_attention.is_context_parallel_usp_requested(self.config):
+    if self.context_parallel_strategy == "usp":
       if target_hardware != "tpu":
         raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
       if self.attention_kernel != "flash":
         raise ValueError("TPU USP attention requires attention_kernel='flash'.")
+    if self.context_parallel_strategy == "halo" and cp_size > 1:
+      if self.attention_kernel not in ("flash", "autoselected"):
+        raise ValueError("Halo context parallelism (local_context_parallel_strategy='halo') requires flash attention.")
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
@@ -1678,6 +1942,7 @@ class AttentionOp(nnx.Module):
           compressed_mask=compressed_mask,
           record_max_logits=record_max_logits,
           decoder_segment_ids_kv=decoder_segment_ids_kv,
+          kv_cache_part=kv_cache_part,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -1736,12 +2001,34 @@ class AttentionOp(nnx.Module):
           )
         else:
           validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
-          mask = tokamax_attention_base.Mask(is_causal=True)
+          is_causal = self.attention_type != AttentionType.FULL
+          k_start = None
+          if self.attention_type == AttentionType.LOCAL_SLIDING:
+            if self.sliding_window_size is None or self.sliding_window_size <= 0:
+              raise ValueError(f"LOCAL_SLIDING requires sliding_window_size > 0, got {self.sliding_window_size}.")
+            k_start = jnp.maximum(
+                0,
+                jnp.arange(query.shape[1], dtype=jnp.int32) - (self.sliding_window_size - 1),
+            )
+          mask = tokamax_attention_base.Mask(is_causal=is_causal, k_start=k_start)
           if decoder_segment_ids is not None:
-            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+            decoder_segment_ids_kv_in = (
+                decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+            )
+            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids_kv_in[:, None, :]
             mask = mask & tokamax_attention_base.Mask(seg_mask[:, None, :, :])
-          gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
-          out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
+          gpu_flash_attn = _tokamax_gpu_flash_attention()
+          out = gpu_flash_attn(
+              query,
+              key,
+              value,
+              logits_scale=1.0,
+              # NOTE: Tokamax's Triton VJP does not support logits_soft_cap yet, so
+              # gradients raise NotImplementedError when soft-cap is set. Use
+              # attention='dot_product' to train with soft-capping.
+              logits_soft_cap=self.attn_logits_soft_cap,
+              mask=mask,
+          )
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
@@ -1816,12 +2103,13 @@ class AttentionOp(nnx.Module):
       mask = tokamax_attention_base.Mask(
           k_end=lengths[..., None],
       )
-      gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+      gpu_flash_attn = _tokamax_gpu_flash_attention()
       local_out, (local_max, local_sum) = gpu_flash_attn(
           q,
           k,
           v,
           logits_scale=1.0,
+          logits_soft_cap=self.attn_logits_soft_cap,
           mask=mask,
           return_residuals=True,
           normalize_output=False,
@@ -1888,13 +2176,29 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Array | None = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
-  ) -> tuple[Array, Array]:
+  ) -> tuple[Array, Array | None]:
     """TPU Flash Attention."""
 
-    use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
-    use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
-    use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
+    use_tokamax_ring = self.context_parallel_strategy == "ring"
+    use_ulysses = self.context_parallel_strategy == "ulysses"
+    use_usp = self.context_parallel_strategy == "usp"
     cp_size = self._context_parallel_size()
+    if self.context_parallel_strategy == "halo" and cp_size > 1:
+      return self.tpu_halo_flash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          attn_logits_soft_cap=attn_logits_soft_cap,
+          sinks=sinks,
+          indexer_mask=indexer_mask,
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+          use_ragged_attention=use_ragged_attention,
+          record_max_logits=record_max_logits,
+          decoder_segment_ids_kv=decoder_segment_ids_kv,
+      )
     load_balanced_context_parallel = self._load_balanced_context_parallel()
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(
@@ -1937,31 +2241,13 @@ class AttentionOp(nnx.Module):
     pad_q = 0
     pad_kv = 0
     decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+    if getattr(self.config, "sa_ignore_segment_ids", False):
+      # Every row is one segment (stream chunking), so the segment mask is a no-op; causal masking still applies.
+      decoder_segment_ids = None
+      decoder_segment_ids_kv_in = None
 
-    if max_utils.is_eval(self.config):
-      block_q = self.eval_block_q
-      block_kv = self.eval_block_kv
-      block_kv_compute = self.eval_block_kv_compute
-      block_q_dkv = block_q
-      block_kv_dkv = block_kv
-      block_kv_dkv_compute = block_kv_compute
-      block_q_dq = block_q
-      block_kv_dq = block_kv
-      q_layout = self.eval_q_layout
-      k_layout = self.eval_k_layout
-      v_layout = self.eval_v_layout
-    else:
-      block_q = self.block_q
-      block_kv = self.block_kv
-      block_kv_compute = self.block_kv_compute
-      block_q_dkv = self.block_q_dkv
-      block_kv_dkv = self.block_kv_dkv
-      block_kv_dkv_compute = self.block_kv_dkv_compute
-      block_q_dq = self.block_q_dq
-      block_kv_dq = self.block_kv_dq
-      q_layout = self.q_layout
-      k_layout = self.k_layout
-      v_layout = self.v_layout
+    blocks = self._splash_blocks()
+    block_q, block_kv = blocks.block_q, blocks.block_kv
 
     # Pad sequences to block-sized boundaries upfront for AttentionType.COMPRESSED
     if self.attention_type == AttentionType.COMPRESSED:
@@ -2040,81 +2326,6 @@ class AttentionOp(nnx.Module):
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
 
-    # create_splash_attention config
-    def create_sa_config(config, query, key, attn_logits_soft_cap):
-      if config.use_tokamax_splash:
-        # Tokamax only allows diagonal sub-tile skipping with a pure `CausalMask`, which
-        # GLOBAL/MLA get unless load-balanced context parallelism permutes the sequence.
-        use_diag_skip = (
-            self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
-            and query.shape[2] == key.shape[2]
-            and not (cp_size > 1 and load_balanced_context_parallel)
-        )
-        diag_skip_kwargs = {}
-        if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
-          # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
-          diag_skip_kwargs = {
-              "qk_diag_skip": self.qk_diag_skip,
-              "sv_diag_skip": self.sv_diag_skip,
-              "qk_diag_grid": config.sa_qk_diag_grid,
-          }
-        sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(block_q, query.shape[2]),
-            block_kv=min(block_kv, key.shape[2]),
-            block_kv_compute=min(block_kv_compute, key.shape[2]),
-            block_q_dkv=min(block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
-            use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
-            q_layout=tokamax_splash_kernel.QKVLayout[q_layout],
-            k_layout=tokamax_splash_kernel.QKVLayout[k_layout],
-            v_layout=tokamax_splash_kernel.QKVLayout[v_layout],
-            attn_logits_soft_cap=attn_logits_soft_cap,
-            fuse_reciprocal=self.fuse_reciprocal,
-            use_base2_exp=self.use_base2_exp,
-            residual_checkpoint_name="context",
-            fwd_cost_estimate=pl.CostEstimate(
-                flops=config.cost_estimate_flops_fwd,
-                transcendentals=0,
-                bytes_accessed=0,
-            )
-            if config.cost_estimate_flops_fwd >= 0
-            else None,
-            bwd_cost_estimate=pl.CostEstimate(
-                flops=config.cost_estimate_flops_bwd,
-                transcendentals=0,
-                bytes_accessed=0,
-            )
-            if config.cost_estimate_flops_bwd >= 0
-            else None,
-            # `dq_reduction_steps` of 0 means "unset" (see configs/base.yml); the Tokamax
-            # backward kernel accepts only 3 or None, so COMPRESSED opts into the ring buffer
-            # while every other attention type leaves the reduction unconstrained.
-            dq_reduction_steps=(
-                config.dq_reduction_steps
-                if config.dq_reduction_steps > 0
-                else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
-            ),
-            use_experimental_scheduler=self.use_splash_scheduler,
-            **diag_skip_kwargs,
-        )
-      else:
-        sa_config = splash_attention_kernel.BlockSizes(
-            block_q=min(block_q, query.shape[2]),
-            block_kv=min(block_kv, key.shape[2]),
-            block_kv_compute=min(block_kv_compute, key.shape[2]),
-            block_q_dkv=min(block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
-            block_q_dq=None if self.use_fused_bwd_kernel else min(block_q_dq, query.shape[2]),
-            block_kv_dq=None if self.use_fused_bwd_kernel else min(block_kv_dq, key.shape[2]),
-            use_fused_bwd_kernel=self.use_fused_bwd_kernel,
-            q_layout=splash_attention_kernel.QKVLayout[q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[v_layout],
-        )
-      return sa_config
-
     if use_tokamax_ring or use_usp:
       sa_config, splash_kernel, segment_axis_names_splash_kernel = (
           tokamax_ring_attention.make_sharded_ring_attention_kernel(
@@ -2129,7 +2340,7 @@ class AttentionOp(nnx.Module):
           )
       )
     elif use_ulysses:
-      sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
+      sa_config = self._create_sa_config(blocks, query.shape[2], key.shape[2], attn_logits_soft_cap)
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
@@ -2156,7 +2367,7 @@ class AttentionOp(nnx.Module):
       segment_axis_names_splash_kernel = jax.sharding.PartitionSpec(None)
       splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
     else:
-      sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
+      sa_config = self._create_sa_config(blocks, query.shape[2], key.shape[2], attn_logits_soft_cap)
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
       splash_q_seq_shards = cp_size
@@ -2280,7 +2491,7 @@ class AttentionOp(nnx.Module):
     elif not use_tokamax_ring and not use_ulysses and not use_usp and self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
-      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
+      segment_axis_names_splash_kernel = logical_to_spec((Q_LENGTH,))
     elif not use_tokamax_ring and not use_ulysses and not use_usp:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
@@ -2651,6 +2862,230 @@ class AttentionOp(nnx.Module):
 
     return x, None
 
+  def tpu_halo_flash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      attn_logits_soft_cap: float | None = None,
+      sinks: Array | None = None,
+      indexer_mask: Array | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      use_ragged_attention: bool = False,
+      record_max_logits: bool = False,
+      decoder_segment_ids_kv: Array | None = None,
+  ) -> tuple[Array, Array | None]:
+    """Runs TPU Flash Attention with halo KV exchange for sliding-window CP.
+
+    Every context-parallel rank keeps its own sequence shard of Q/K/V. A
+    sliding window of `sliding_window_size` can only see that many tokens
+    before the shard boundary, so instead of all-gathering K/V each rank
+    receives just the trailing `halo` KV tokens of the preceding chunk via
+    `ppermute` and runs the Tokamax Splash kernel on `[halo | local chunk]`.
+    With load-balanced CP each rank owns two chunks and the same exchange
+    happens per chunk.
+
+    Args:
+      query: Query tensor of shape `(batch, q_len, num_heads, head_dim)`.
+      key: Key tensor of shape `(batch, kv_len, num_kv_heads, head_dim)`.
+      value: Value tensor of shape `(batch, kv_len, num_kv_heads, head_dim)`.
+      decoder_segment_ids: Optional query segment IDs of shape `(batch, q_len)`.
+      attn_logits_soft_cap: Optional soft cap for attention logits.
+      sinks: Optional attention sink logits of shape `(num_heads,)`.
+      indexer_mask: Unsupported on the halo CP path; must be `None`.
+      model_mode: Execution mode; only `MODEL_MODE_TRAIN` is supported.
+      previous_chunk: Unsupported on the halo CP path; must be `None`.
+      bidirectional_mask: Unsupported on the halo CP path; must be `None`.
+      use_ragged_attention: Unsupported on the halo CP path; must be `False`.
+      record_max_logits: Whether to return per-head maximum attention logits.
+      decoder_segment_ids_kv: Optional KV segment IDs of shape `(batch, kv_len)`.
+
+    Returns:
+      A tuple `(output, max_logits)` where `output` has shape
+      `(batch, q_len, num_heads, head_dim)` and `max_logits` is the per-head
+      maximum logits tensor when `record_max_logits=True`, or `None` otherwise.
+
+    Raises:
+      ValueError: If runtime configuration or input sequence shapes violate
+        halo context parallelism constraints.
+    """
+    self._validate_tpu_halo_runtime(
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        indexer_mask=indexer_mask,
+        use_ragged_attention=use_ragged_attention,
+    )
+    cp_size = self._context_parallel_size()
+    load_balanced = self._load_balanced_context_parallel()
+    chunks_per_rank = 2 if load_balanced else 1
+    context_axis = self.config.context_sharding
+
+    # Transpose to ('batch', 'heads', 'length', 'kv')
+    query = jnp.transpose(query, axes=(0, 2, 1, 3))
+    key = jnp.transpose(key, axes=(0, 2, 1, 3))
+    value = jnp.transpose(value, axes=(0, 2, 1, 3))
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+
+    # Per-chunk geometry. The halo is rounded up to the KV block size so the kernel's block
+    # grid lines up with the [halo | chunk] layout.
+    seq_len = query.shape[2]
+    total_chunks = chunks_per_rank * cp_size
+    if key.shape[2] != seq_len or seq_len % total_chunks != 0:
+      raise ValueError(
+          f"Halo context parallelism requires equal query/key sequence lengths divisible by {total_chunks} "
+          f"(cp_size={cp_size}, load_balanced={load_balanced}), got {query.shape[2]=} and {key.shape[2]=}."
+      )
+    blocks = self._splash_blocks()
+    chunk_q_len = seq_len // total_chunks
+    kv_block_align = math.lcm(min(blocks.block_kv, chunk_q_len), min(blocks.block_kv_dkv, chunk_q_len))
+    halo = ((self.sliding_window_size + kv_block_align - 1) // kv_block_align) * kv_block_align
+    if chunk_q_len < halo or chunk_q_len % kv_block_align != 0:
+      raise ValueError(
+          f"Halo context parallelism requires per-chunk sequence length {chunk_q_len} to be a multiple of "
+          f"{kv_block_align} and at least the block-aligned sliding window {halo} "
+          f"(sliding_window_size={self.sliding_window_size}, cp_size={cp_size}, load_balanced={load_balanced})."
+      )
+    chunk_kv_len = halo + chunk_q_len
+    local_q_len = chunks_per_rank * chunk_q_len
+    local_kv_len = chunks_per_rank * chunk_kv_len
+
+    sa_config = self._create_sa_config(blocks, chunk_q_len, chunk_kv_len, attn_logits_soft_cap)
+    if self.config.use_max_logit_estimate > 0:
+      sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
+
+    # Mask over the local [halo | chunk] layout: queries start `halo` columns into the KV
+    # axis. With load balancing the second chunk's queries are shifted by one more halo.
+    mask_shape = (local_q_len, local_kv_len)
+    window = (self.sliding_window_size - 1, self.sliding_window_size)
+    causal_mask = tokamax_splash_mask.CausalMask(shape=mask_shape, offset=halo)
+    local_mask = tokamax_splash_mask.LocalMask(shape=mask_shape, window_size=window, offset=halo)
+    if load_balanced:
+      q_seq = np.arange(local_q_len, dtype=np.int32)
+      q_seq[chunk_q_len:] += halo
+      causal_mask.q_sequence = q_seq
+      local_mask.q_sequence = q_seq
+
+    @functools.partial(jax.jit, static_argnames=["single_head_mask"])
+    def wrap_splash_kernel(single_head_mask):
+      return tokamax_splash_kernel.make_splash_mha(mask=single_head_mask, config=sa_config, q_seq_shards=1)
+
+    # Every rank runs the kernel over its own full local sequence, so the kernel's mask
+    # metadata is replicated rather than sequence-sharded.
+    segment_axis_names_splash_kernel = jax.sharding.PartitionSpec(None)
+    splash_kernel = self._maybe_shard_with_pspec(
+        wrap_splash_kernel(causal_mask & local_mask), segment_axis_names_splash_kernel
+    )
+
+    # Q, K, V and segment IDs are all sequence-sharded over the context axis.
+    axis_names_q = tokamax_ring_attention.with_sequence_axis(
+        self._logical_to_mesh_axes(self.flash_axis_names_q), context_axis, sequence_dim=2
+    )
+    axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+        self._logical_to_mesh_axes(self.flash_axis_names_kv), context_axis, sequence_dim=2
+    )
+    segment_axis_names_q = segment_axis_names_kv = None
+    if decoder_segment_ids is not None:
+      segment_axis_names_q = tokamax_ring_attention.with_sequence_axis(
+          self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH)), context_axis, sequence_dim=1
+      )
+      segment_axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+          self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH)), context_axis, sequence_dim=1
+      )
+    sink_axis_names = self._logical_to_mesh_axes((HEAD,))
+    # max_logits share the query sharding minus the head_dim axis.
+    max_logits_spec = jax.sharding.PartitionSpec(*axis_names_q[:-1]) if record_max_logits else None
+
+    perm_fwd = [(i, (i + 1) % cp_size) for i in range(cp_size)]
+    perm_bwd = [(i, (i - 1) % cp_size) for i in range(cp_size)]
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            axis_names_q,
+            axis_names_kv,
+            axis_names_kv,
+            segment_axis_names_q,
+            segment_axis_names_kv,
+            segment_axis_names_splash_kernel,
+            sink_axis_names,
+        ),
+        out_specs=(axis_names_q, max_logits_spec),
+        check_vma=False,
+    )
+    def wrap_halo_flash_attention(query, key, value, seg_q, seg_kv, splash_kernel, sinks):
+      b_loc, _, s_local, _ = query.shape
+      rank = jax.lax.axis_index(context_axis)
+      if seg_q is None:
+        seg_q = jnp.zeros((b_loc, s_local), dtype=jnp.int32)
+      if seg_kv is None:
+        seg_kv = jnp.zeros((b_loc, s_local), dtype=jnp.int32)
+
+      if load_balanced:
+        # Rank r owns global chunks r and 2*cp_size-1-r. Chunk 0 follows chunk 0 of rank r-1;
+        # chunk 1 follows chunk 1 of rank r+1, except on the last rank where it directly
+        # follows that rank's own chunk 0.
+        k0, k1 = jnp.split(key, 2, axis=2)
+        v0, v1 = jnp.split(value, 2, axis=2)
+        seg0, seg1 = jnp.split(seg_kv, 2, axis=1)
+        k0_halo, v0_halo, seg0_halo = _recv_halo(
+            k0, v0, seg0, halo=halo, context_axis=context_axis, perm=perm_fwd, is_edge_rank=rank == 0
+        )
+        k1_halo, v1_halo, seg1_halo = _recv_halo(
+            k1,
+            v1,
+            seg1,
+            halo=halo,
+            context_axis=context_axis,
+            perm=perm_bwd,
+            is_edge_rank=rank == cp_size - 1,
+            edge=_halo_tails(k0, v0, seg0, halo),
+        )
+        key = jnp.concatenate([k0_halo, k0, k1_halo, k1], axis=2)
+        value = jnp.concatenate([v0_halo, v0, v1_halo, v1], axis=2)
+        seg_kv = jnp.concatenate([seg0_halo, seg0, seg1_halo, seg1], axis=1)
+      else:
+        k_halo, v_halo, seg_halo = _recv_halo(
+            key, value, seg_kv, halo=halo, context_axis=context_axis, perm=perm_fwd, is_edge_rank=rank == 0
+        )
+        key = jnp.concatenate([k_halo, key], axis=2)
+        value = jnp.concatenate([v_halo, value], axis=2)
+        seg_kv = jnp.concatenate([seg_halo, seg_kv], axis=1)
+
+      segment_ids = tokamax_splash_kernel.SegmentIds(seg_q, seg_kv)
+      if record_max_logits:
+
+        def kernel_with_stats(q, k, v, seg_ids, sink_logits):
+          out, stats = splash_kernel(q, k, v, seg_ids, sinks=sink_logits, save_residuals=True)
+          return out, stats["max_logits"]
+
+        return jax.vmap(kernel_with_stats, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
+
+      def kernel_fn(q, k, v, seg_ids, sink_logits):
+        return splash_kernel(q, k, v, seg_ids, sinks=sink_logits)
+
+      out = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
+      return out, None
+
+    x, max_logits = wrap_halo_flash_attention(
+        self._maybe_shard_with_pspec(query, axis_names_q),
+        self._maybe_shard_with_pspec(key, axis_names_kv),
+        self._maybe_shard_with_pspec(value, axis_names_kv),
+        self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q),
+        self._maybe_shard_with_pspec(decoder_segment_ids_kv_in, segment_axis_names_kv),
+        splash_kernel,
+        self._maybe_shard_with_pspec(sinks, sink_axis_names),
+    )
+    x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    if record_max_logits:
+      # q_len is sharded; reduce locally first, output is (batch, heads).
+      return x, jnp.max(max_logits, axis=2)
+    return x, None
+
   def cudnn_flash_attention(
       self,
       query: Array,
@@ -2947,9 +3382,9 @@ class AttentionOp(nnx.Module):
 
     local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
-      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_out = with_logical_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
     elif model_mode == MODEL_MODE_PREFILL:
-      local_out = partitioning.with_sharding_constraint(local_out, (BATCH_ATTN, KV_LENGTH, HEAD, D_KV))
+      local_out = with_logical_constraint(local_out, (BATCH_ATTN, KV_LENGTH, HEAD, D_KV))
 
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:, 0:1, :, :]
@@ -2957,9 +3392,9 @@ class AttentionOp(nnx.Module):
       local_out = local_out[:, 0:1, :, :]
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
-      local_max = partitioning.with_sharding_constraint(local_max, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_max = with_logical_constraint(local_max, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_sum = with_logical_constraint(local_sum, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_out = with_logical_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
 
     return local_out, local_max, local_sum
 
@@ -2981,6 +3416,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      kv_cache_part: str | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -3012,29 +3448,29 @@ class AttentionOp(nnx.Module):
       weights_prefill_shd = (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
 
     if self.is_partition_in_decode(q_seq_len):
-      query = partitioning.with_sharding_constraint(query, decode_q_sharding)
+      query = with_logical_constraint(query, decode_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_kv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_kv_sharding)
+        key.qvalue = with_logical_constraint(key.qvalue, decode_kv_sharding)
+        value.qvalue = with_logical_constraint(value.qvalue, decode_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, decode_kv_sharding)
-        value = partitioning.with_sharding_constraint(value, decode_kv_sharding)
+        key = with_logical_constraint(key, decode_kv_sharding)
+        value = with_logical_constraint(value, decode_kv_sharding)
     elif model_mode == MODEL_MODE_PREFILL:
-      query = partitioning.with_sharding_constraint(query, prefill_q_sharding)
+      query = with_logical_constraint(query, prefill_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_kv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_kv_sharding)
+        key.qvalue = with_logical_constraint(key.qvalue, prefill_kv_sharding)
+        value.qvalue = with_logical_constraint(value.qvalue, prefill_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, prefill_kv_sharding)
-        value = partitioning.with_sharding_constraint(value, prefill_kv_sharding)
+        key = with_logical_constraint(key, prefill_kv_sharding)
+        value = with_logical_constraint(value, prefill_kv_sharding)
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode, qk_product_einsum)
     if self.is_partition_in_decode(q_seq_len):
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_decode_shd)
+      attn_weights = with_logical_constraint(attn_weights, weights_decode_shd)
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_prefill_shd)
+      attn_weights = with_logical_constraint(attn_weights, weights_prefill_shd)
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -3054,6 +3490,7 @@ class AttentionOp(nnx.Module):
         compressed_mask=compressed_mask,
         segment_positions=segment_positions,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        kv_cache_part=kv_cache_part,
     )
 
     if self.config.moba:
@@ -3082,9 +3519,9 @@ class AttentionOp(nnx.Module):
       attn_weights = apply_mask_to_logits(attn_weights, indexer_mask)
 
     if self.is_partition_in_decode(q_seq_len):
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
+      attn_mask = with_logical_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
+      attn_mask = with_logical_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
 
@@ -3322,6 +3759,7 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
         compress_ratio=compress_ratio,
+        kv_cache_part="prefill" if model_mode == MODEL_MODE_AUTOREGRESSIVE else None,
     )
 
     if ar_kv_cache is None:
@@ -3347,6 +3785,7 @@ class AttentionOp(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         indexer_mask=indexer_mask_ar,
         compressed_mask=compressed_mask,
+        kv_cache_part="ar",
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )

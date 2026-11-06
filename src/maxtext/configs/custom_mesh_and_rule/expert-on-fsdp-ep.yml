@@ -1,0 +1,122 @@
+# Copyright 2026 Google LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Backend-neutral expert-on-fsdp-ep preset.
+# Shard the expert dimension of 3D expert weights across the physical FSDP axis,
+# optionally together with EP, in (expert, fsdp) order. Keep FSDP off embed_moe
+# so each shard contains complete expert matrices when other model axes are size 1.
+# Use shard_exp_on_fsdp=false to retain the standard logical expert weight axes.
+# This mapping does not require te_moe_block; GPU testing so far used TE MoE.
+# Preserve the default mesh, data sharding, and every non-expert-weight rule.
+# Rules copied from base.yml at 0345138779864295fa23230deb979605e841a6d8;
+# only exp and embed_moe differ. Custom rules replace the whole rule list.
+logical_axis_rules: [
+                      ['circular_repeats', []],
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
+                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['activation_vocab', ['tensor', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor']],
+                      ['activation_vocab', 'tensor_sequence'],
+                      # Vocab Weights
+                      ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_batch_attn', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_input_length_attn', ['tensor_sequence', 'context']],
+                      ['activation_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['activation_kv_heads', ['tensor', 'tensor_sequence']],
+                      ['activation_length_attn', ['context', 'context_usp_ulysses']],
+                      ['activation_q_length', ['context', 'context_usp_ulysses']],
+                      ['activation_kv_length', []],
+                      ['activation_embed_attn', ['tensor']],
+                      ['activation_kv', ['tensor', 'tensor_sequence']],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_head_dim', ['tensor', 'tensor_sequence']],
+                      # Attention Weights
+                      ['heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['q_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['kv_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['qkv', []],
+                      ['kv', []],
+                      ['kv_head_dim', []],
+                      ['q_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['q_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
+                      ["q_lora_up_proj", []],
+                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['kv_lora', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
+                      ["kv_lora_up_proj", []],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_length_moe', ['context', 'context_usp_ulysses']],
+                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'context_usp_ulysses']],
+                      ['activation_embed_moe', ['tensor']],
+                      ['activation_mlp_moe', ['tensor', 'tensor_sequence']],
+                      ['activation_exp', ['expert']],
+                      # MoE Weights
+                      ['exp', ['expert', 'fsdp']],
+                      ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed_moe', []],
+                      ['embed_router', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses']],
+                      ['embed_router', ['fsdp', 'context', 'context_usp_ulysses']],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['segment_ids_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_mlp', ['tensor', 'tensor_sequence']],
+                      # Note activation batch and length also get used in vocab
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_length', ['context', 'context_usp_ulysses']],
+                      ['activation_norm_length', ['tensor_sequence', 'context', 'context_usp_ulysses']],
+                      ['activation_embed', ['tensor']],
+                      ['activation_stage', 'stage'],
+                      # General Weights
+                      ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      # GDN (linear-attention) projections shard like 'mlp' during training; the
+                      # vLLM serving config overrides this to match tpu-inference's ATTN_HEAD order.
+                      ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['embed', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
+                      ['norm', ['tensor']],
+                      ['layers', 'stage'],
+                      ['diloco', 'diloco'],
+                      ['engram_dim', ['tensor']],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
+                      ['local_layers', []],
+                      ['mhc', []],
+                      # ==========================================
+                      # Inference(Prefill, Decode, Cache)
+                      # ==========================================
+                      ['prefill_activation_length', ['context', 'context_usp_ulysses']],
+                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'context_usp_ulysses']],
+                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['decode_length', []],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
+                      ['paged_kv_heads', ['tensor']],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', []],
+                      ['cache_heads_none', []],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
+                      ['num_pages', []],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []],
+                      # ==========================================
+                      # Deprecated / Scheduled for Removal
+                      # ==========================================
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['exp_with_fsdp', 'fsdp'],
+                  ]

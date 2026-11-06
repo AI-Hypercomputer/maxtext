@@ -16,7 +16,7 @@
 
 # DeepSeek
 
-DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The currently supported models are DeepSeek V2-Lite (16B), DeepSeek V3 (671B), DeepSeek R1 (671B), DeepSeek V3.1 (671B), DeepSeek V3.2 (671B), and DeepSeek V4-Flash (284B).
+DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The currently supported models are DeepSeek V2-Lite (16B), DeepSeek V3 (671B), DeepSeek R1 (671B), DeepSeek V3.1 (671B), DeepSeek V3.2 (671B), DeepSeek V4-Flash (284B), and DeepSeek V4-Pro (1600B).
 
 * DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance.
 
@@ -26,7 +26,7 @@ DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The
 
 * DeepSeek-V3.2 introduces [DeepSeek Sparse Attention](https://arxiv.org/pdf/2512.02556) (DSA), successfully reduces computational complexity while preserving model performance in long-context scenarios.
 
-* DeepSeek V4-Flash introduces radical architectural shifts, moving to Hybrid Attention (combining Compressed Sparse Attention and Heavily Compressed Attention) and Manifold-Constrained Hyper-Connections (mHC).
+* DeepSeek V4-Flash (284B) and DeepSeek V4-Pro (1600B) introduce radical architectural shifts, moving to Hybrid Attention (combining Compressed Sparse Attention and Heavily Compressed Attention) and Manifold-Constrained Hyper-Connections (mHC).
 
 **Please note:**
 * To leverage MLA with Flash Attention, ensure you have the latest JAX version.
@@ -39,12 +39,13 @@ To get started, follow the instructions at HuggingFace ([V3](https://huggingface
 * run [convert_deepseek_family_unscanned_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
 
 ### Checkpoint conversion for V3.2 and V4
-For V3.2 (671B) and V4-Flash (284B), we use the unified conversion script `src/maxtext/checkpoint_conversion/to_maxtext.py`.
+For V3.2 (671B), V4-Flash (284B), and V4-Pro (1600B), we use the unified conversion script `src/maxtext/checkpoint_conversion/to_maxtext.py`, or the end-to-end conversion scripts [`v4-284b/1_test_deepseek.sh`](v4-284b/1_test_deepseek.sh) and [`v4-1600b/1_test_deepseek.sh`](v4-1600b/1_test_deepseek.sh).
 
 #### 1. Download Model Weights
 Download the Hugging Face weights to your local environment:
 * For V3.2: [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2)
 * For V4-Flash: [deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+* For V4-Pro: [deepseek-ai/DeepSeek-V4-Pro](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro)
 
 #### 2. Dequantize Weights (if in FP8/FP4)
 If downloading the quantized weights, convert them from FP8/FP4 to BF16 using [deepseek_dequantize.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py) on CPU:  
@@ -57,7 +58,18 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_dequantize 
 *(Alternatively, use the official DeepSeek script [fp8_cast_bf16.py](https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py) to convert on GPU).*
 
 #### 3. Convert to MaxText-compatible Orbax format
-Execute the following command to finalize the conversion. Ensure your environment variables (`$BASE_OUTPUT_PATH`, `$HF_TOKEN`, and `$BF16_LOCAL_PATH`) are exported before running. Set `MODEL_NAME` to `deepseek3.2-671b` or `deepseek4-284b`. Setting `scan_layers=true` generates scanned Orbax format for training and fine-tuning. Setting `scan_layers=false` generates unscanned format in Orbax for decoding.
+Execute the following command to finalize the conversion. Ensure your environment variables (`$BASE_OUTPUT_PATH`, `$HF_TOKEN`, and `$BF16_LOCAL_PATH`) are exported before running. Set `MODEL_NAME` to `deepseek3.2-671b`, `deepseek4-284b`, or `deepseek4-1600b`. Setting `scan_layers=true` generates scanned Orbax format for training and fine-tuning. Setting `scan_layers=false` generates unscanned format in Orbax for decoding.
+
+Canonical pre-converted assets:
+* **DeepSeek V4-Flash (284B)**:
+  * Scanned Checkpoint: `gs://maxtext-deepseek/deepseek4-284b/2026-09-30/scanned/0/items`
+  * Unscanned Checkpoint: `gs://maxtext-deepseek/deepseek4-284b/2026-09-30/unscanned/0/items`
+  * Golden Logits: `gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl`
+* **DeepSeek V4-Pro (1600B)**:
+  * Scanned Checkpoint: `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/scanned/0/items`
+  * Unscanned Checkpoint: `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/unscanned/0/items`
+  * Hash-Routing Table: `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/tid2eid.safetensors`
+  * Golden Logits: `gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl`
 
 > [!TIP]
 > For large models like V3.2 and V4, you can optionally speed up the conversion drastically on large CPU machines by sharding checkpoint across simulated cpu devices and eagerly loading tensors. E.g., appending `--simulated_cpu_devices_count=16 --lazy_load_tensors=False` to the command.
@@ -275,6 +287,8 @@ DeepSeek-V4 employs a hybrid attention architecture across its layers, interleav
 
 As described in the DeepSeek-V4 technical report (Section 4.2.2), sparse attention pre-training follows a three-stage strategy: **Dense Pre-training**, **Lightning Indexer Warm-up**, and **Sparse Pre-training**.
 
+`deepseek4-284b.yml` sets `use_indexer: true`. Enabling the indexer loss (`indexer_loss_scaling_factor > 0`) requires `indexer_topk` (512) < `max_target_length // 4`, i.e. `max_target_length >= 4096`. `indexer_sparse_training` selects dense warm-up (`false`) or sparse training (`true`) and only takes effect when the indexer loss is enabled. Overriding a key set in `deepseek4-284b.yml` (e.g. `use_indexer`) needs `override_model_config=true`.
+
 1. **Dense Pre-training Stage**
 The model is pre-trained with standard dense attention across all tokens (first 1T tokens) before attention sparsity is introduced.
 ```sh
@@ -295,7 +309,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     dataset_type=synthetic \
-    # Standard dense pre-training flags
     override_model_config=true \
     use_indexer=false \
     indexer_loss_scaling_factor=0.0
@@ -322,7 +335,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     dataset_type=synthetic \
-    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    override_model_config=true \
     indexer_sparse_training=false \
     indexer_loss_scaling_factor=1.0 \
     trainable_parameters_mask=['.*indexer.*']
@@ -349,7 +362,39 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     dataset_type=synthetic \
-    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    indexer_sparse_training=true \
+    indexer_loss_scaling_factor=1.0
+```
+
+For V4-Pro (deepseek4-1600b) on a single tpu7x 4x4x8 slice (128 chips, 256 TensorCores):
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_pro_sparse_pretraining \
+    model_name=deepseek4-1600b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Pro \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
+    per_device_batch_size=3 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=8 \
+    ici_expert_parallelism=32 \
+    dcn_fsdp_parallelism=1 \
+    dcn_data_parallelism=1 \
+    ragged_buffer_factor=2.0 \
+    megablox=False \
+    sparse_matmul=True \
+    remat_policy=full \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=1024 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    override_model_config=true \
+    indexer_topk=64 \
     indexer_sparse_training=true \
     indexer_loss_scaling_factor=1.0
 ```
@@ -380,6 +425,32 @@ python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
     ici_tensor_parallelism=128 \
     ici_fsdp_parallelism=1 \
     prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "
+```
+
+One example command to run decoding with DeepSeek V4-Pro (1600B) on the unscanned checkpoint, with the flags of the end-to-end decode stage:
+
+```sh
+python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=decode_v4_pro \
+    model_name=deepseek4-1600b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Pro \
+    load_parameters_path=${UNSCANNED_CKPT_PATH?} \
+    scan_layers=False \
+    attention=dot_product \
+    sparse_matmul=True \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    per_device_batch_size=1 \
+    max_prefill_predict_length=64 \
+    max_target_length=512 \
+    ici_fsdp_parallelism=-1 \
+    ici_tensor_parallelism=1 \
+    ici_expert_parallelism=16 \
+    checkpoint_storage_concurrent_gb=1024 \
+    mla_naive_kvcache=false \
+    prompt="An attention function can be described as..."
 ```
 
 ## Correctness
@@ -431,23 +502,10 @@ To run MMLU benchmarks and validate the model's performance, follow the instruct
 
 ### Logit comparison for V4-284b
 
-To verify correctness for the DeepSeek V4 model, we compare the logits against the HuggingFace implementation.
-
-Run the forward pass logit checker command below. The test uses `indexer_topk=4` to cover all pathways in the model without excessive sequence lengths in testing. To cover each pathway in the model, we need to set the prompt length such that: sliding window (`prompt_len > sliding_window_size`), HCA (`prompt_len / hca_compression_factor > 1`), and CSA (`prompt_len / csa_compression_factor > indexer_topk`).
-
-**Important Note for Golden Logit Generation**: To generate golden logits with `indexer_topk=4`, you must modify `config.json` in your local HuggingFace checkpoint directory, changing `"index_topk": 512` to `"index_topk": 4` before running the generation script.
-
-One example command to generate golden logits from HuggingFace for DeepSeek V4-Flash (using a prompt length of 512 tokens to trigger sliding window, CSA, and HCA layer requirements):
+Forward-pass logits for DeepSeek V4-Flash (`deepseek4-284b`) are compared against official reference golden logits generated with the unmodified HuggingFace `index_topk=512` hyperparameter (`gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl`):
 
 ```sh
-python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
-    --model-id=deepseek-ai/DeepSeek-V4-Flash \
-    --output-path=golden_data_deepseek4-284b_proper_512.jsonl \
-    --prompts='<Insert prompt here>' \
-    --hf-model-path=$BF16_LOCAL_PATH
-```
-
-```sh
+gcloud storage cp gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl /tmp/golden_data_deepseek4-284b.jsonl
 python3 -m tests.utils.forward_pass_logit_checker \
     src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
@@ -457,7 +515,11 @@ python3 -m tests.utils.forward_pass_logit_checker \
     attention=dot_product \
     per_device_batch_size=1 \
     model_name=deepseek4-284b \
-    max_target_length=1024 \
+    override_model_config=True \
+    indexer_topk=512 \
+    max_target_length=512 \
+    sparse_matmul=True \
+    megablox=False \
     ici_fsdp_parallelism=1 \
     ici_expert_parallelism=-1 \
     weight_dtype=bfloat16 \
@@ -466,11 +528,63 @@ python3 -m tests.utils.forward_pass_logit_checker \
     matmul_precision=highest \
     float32_logits=false \
     float32_qk_product=false \
-    override_model_config=True \
-    indexer_topk=4 \
-    --golden_logits_path=golden_data_deepseek4-284b_proper_512.jsonl \
-    --max_kl_div=0.75
+    --golden_logits_path=/tmp/golden_data_deepseek4-284b.jsonl \
+    --max_kl_div=0.42 \
+    --clip_logits_epsilon=1e-6
 ```
+
+### Logit comparison for V4-Pro (1600B)
+
+```sh
+gcloud storage cp gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl /tmp/golden_data_deepseek4-1600b.jsonl
+python3 -m tests.utils.forward_pass_logit_checker \
+    src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_PATH} \
+    run_name=ds4_pro_parity \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    scan_layers=False \
+    attention=dot_product \
+    per_device_batch_size=1 \
+    model_name=deepseek4-1600b \
+    override_model_config=True \
+    indexer_topk=1024 \
+    max_target_length=512 \
+    max_prefill_predict_length=512 \
+    activations_in_float32=false \
+    matmul_precision=highest \
+    float32_logits=false \
+    float32_qk_product=false \
+    sparse_matmul=True \
+    megablox=False \
+    ici_fsdp_parallelism=-1 \
+    dcn_fsdp_parallelism=-1 \
+    dcn_data_parallelism=1 \
+    ici_expert_parallelism=16 \
+    ici_tensor_parallelism=1 \
+    ici_context_parallelism=1 \
+    weight_dtype=bfloat16 \
+    dtype=bfloat16 \
+    --golden_logits_path=/tmp/golden_data_deepseek4-1600b.jsonl \
+    --max_kl_div=0.42 \
+    --clip_logits_epsilon=1e-6
+```
+
+### End-to-end test for V4-284b
+
+[`v4-284b/2_test_deepseek.sh`](v4-284b/2_test_deepseek.sh) runs three stages against a converted checkpoint. Each can be skipped with `RUN_LOGIT`, `RUN_PRETRAIN` or `RUN_DECODE=false`.
+
+1. **Logit check**: `forward_pass_logit_checker` on the unscanned checkpoint with `indexer_topk=512`, compared against `gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl`. Fails if the max per-token KL divergence exceeds `MAX_KL_DIV` (default `0.42`).
+2. **Pre-train**: 20 steps of sparse pre-training (`indexer_sparse_training=true`, `indexer_loss_scaling_factor=1.0`, `max_target_length=4096`) from the scanned checkpoint. Fails unless the final `loss` and `lm_loss` are finite and strictly positive.
+3. **Decode**: `maxtext.inference.decode` on the unscanned checkpoint. Fails unless the output starts with `DECODE_ASSERT`.
+
+### End-to-end test for V4-Pro (1600B)
+
+Automated checkpoint conversion is handled via [`v4-1600b/1_test_deepseek.sh`](v4-1600b/1_test_deepseek.sh), and full pipeline verification is executed via [`v4-1600b/2_test_deepseek.sh`](v4-1600b/2_test_deepseek.sh):
+
+1. **Logit check**: `forward_pass_logit_checker` on the unscanned checkpoint with `indexer_topk=1024`, compared against `gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl`. Fails if max per-token KL divergence exceeds `MAX_KL_DIV` (default `0.42`). The same check runs on the scanned checkpoint (`RUN_SCANNED_LOGIT_CHECK`, default `true`).
+2. **Pre-train**: `STEPS` (default 20) steps of sparse pre-training (`indexer_sparse_training=true`, `indexer_loss_scaling_factor=1.0`, `indexer_topk=64`, `max_target_length=1024`) from `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/scanned/0/items`. Fails unless final `loss` and `lm_loss` are finite and strictly positive.
+3. **SFT**: `SFT_STEPS` (default 5) steps of `train_sft_native` (`post_train/sft.yml`, `max_target_length=1024`, `opt_type=sgd`) from the scanned checkpoint. Fails unless every step's `loss` is finite and strictly positive.
+4. **Decode**: `maxtext.inference.decode` on `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/unscanned/0/items`. Fails unless output text satisfies `DECODE_ASSERT`.
 
 ## MLA Optimization
 
@@ -495,4 +609,4 @@ To optimize YaRN Rotary Position Embedding (RoPE) performance, you can enable pa
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
 * Dropping implementation with flag `sparse_matmul=False` and reasonable `capacity_factor`, commonly used from 1 to 1.25.
 
-See more examples in scripts for [V2-Lite](v2-16b), [V3](v3-671b), [V3.2](v3.2-671b), and [V4](v4-284b).
+See more examples in scripts for [V2-Lite](v2-16b), [V3](v3-671b), [V3.2](v3.2-671b), [V4](v4-284b), and [V4-Pro](v4-1600b).

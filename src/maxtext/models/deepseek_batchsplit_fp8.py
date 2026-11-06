@@ -20,7 +20,6 @@ import functools
 import math
 from typing import Any, Sequence
 
-from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from maxtext.kernels import megablox, sort_activations
@@ -28,6 +27,7 @@ from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import logical_to_spec
 import qwix.pallas as qpl
 import tokamax
 
@@ -1018,8 +1018,8 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
 
   if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
-    w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
-    wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
+    w0_pspec = logical_to_spec(gating_pspec)
+    wo_pspec = logical_to_spec(linear_pspec)
     ignored_axes = ("expert", "tensor")
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
@@ -1170,8 +1170,8 @@ def process_activations(
   )
   if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
-    gating_pspec = nn.logical_to_mesh_axes(gating_pspec)
-    linear_pspec = nn.logical_to_mesh_axes(linear_pspec)
+    gating_pspec = logical_to_spec(gating_pspec)
+    linear_pspec = logical_to_spec(linear_pspec)
   else:
     gating_pspec = jax.sharding.PartitionSpec(None, None, expert_axis_name)
     linear_pspec = jax.sharding.PartitionSpec(None, expert_axis_name, None)

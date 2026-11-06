@@ -35,7 +35,9 @@ import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
+from maxtext.common.goodput import get_goodput_job_name
 from maxtext.common import grain_utility
+from maxtext.common import snapshotting
 from maxtext.common import train_state_nnx
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline import synthetic_data_processing
@@ -47,6 +49,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
 from maxtext.utils import sharding as maxtext_sharding
+from orbax.checkpoint import logging as ocp_logging
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -340,7 +343,7 @@ def _load_linen_checkpoint_into_nnx(
   """Restores a Linen-layout checkpoint into an NNX state.
 
   Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
-  `_restored_linen_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
+  `restored_linen_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
   present, else keep their fresh init value. A genuinely-missing weight raises.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
@@ -363,6 +366,7 @@ def _load_linen_checkpoint_into_nnx(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=bool(getattr(config, "colocated_python_checkpointing", False)),
   )
   # Orbax v1 refuses to read an item subdirectory directly (the step root carries the
   # checkpoint indicator); normalize the documented ".../<step>/items" form to its root
@@ -374,14 +378,23 @@ def _load_linen_checkpoint_into_nnx(
     restored = ocp.load(
         root, linen_abstract, checkpointable_name=checkpointable_name
     )  # pyrefly: ignore[bad-argument-type]
-  return _restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
+  return restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
 
 
-def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
+def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   """Reshapes a restored Linen-layout tree into the NNX state.
 
   Raises if the checkpoint is missing a weight. Every NNX restore path ends here: the load
-  itself is the Linen one, since MaxText reads and writes the Linen on-disk layout.
+  itself is the Linen one, since MaxText reads and writes the Linen on-disk layout. The
+  in-memory snapshot restore (`snapshotting.py`) uses it too.
+
+  Args:
+    restored_linen: The restored `items` tree, in the Linen on-disk layout.
+    abstract_nnx_state: The abstract NNX state to reshape it into.
+    config: Optional MaxText config, passed on to the weight check.
+
+  Returns:
+    The NNX state. Leaves the checkpoint doesn't hold, e.g. caches, stay `jax.ShapeDtypeStruct`s.
   """
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
@@ -485,6 +498,7 @@ def _load_full_state_from_path(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         checkpoint_layout=ocp.options.CheckpointLayout.ORBAX,
         enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+        colocated_python_checkpointing=bool(getattr(maxtext_config, "colocated_python_checkpointing", False)),
     )
     with context:
       return ocp.load(path, abstract_unboxed_pre_state)
@@ -512,7 +526,7 @@ def _load_full_state_from_path(
     # The conversion fn returns MaxText's on-disk (Linen) layout, which is what NNX reads,
     # so NNX needs the same reshape as every other restore. An NNX state passes through.
     if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
-      state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
+      state = restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
     return state
 
   raise ocp.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
@@ -534,6 +548,8 @@ def create_orbax_checkpoint_manager(
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
     ocdbt_target_data_file_size_bytes: int | None = None,
+    colocated_python_checkpointing: bool = False,
+    async_checkpointing_timeout_secs: int | None = None,
 ):
   """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -541,12 +557,6 @@ def create_orbax_checkpoint_manager(
     return None
 
   # TODO: b/529622681 - Remove deprecated settings.
-  if orbax_logger is not None:
-    max_logging.warning(
-        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
-        " Orbax v1 now configures its own logger internally. This config"
-        " setting is ignored and will be removed."
-    )
   if dataset_type is not None:
     max_logging.warning(
         "Specifying dataset_type upon checkpointer creation is deprecated and"
@@ -570,6 +580,8 @@ def create_orbax_checkpoint_manager(
       todelete_full_path=todelete_full_path,
       todelete_subdir=todelete_subdir,
       partial_load=True,
+      colocated_python_checkpointing=colocated_python_checkpointing,
+      async_checkpointing_timeout_secs=async_checkpointing_timeout_secs,
   )
 
   manager = ocp.training.Checkpointer(
@@ -583,6 +595,7 @@ def create_orbax_checkpoint_manager(
       preservation_policy=checkpoint_context.build_preservation_policy(
           max_to_keep=max_num_checkpoints_to_keep,
       ),
+      logger=orbax_logger,
   )
   # Necessary bridge to support v0 backward compatibility.
   manager.use_async = use_async  # pyrefly: ignore[missing-attribute]
@@ -622,6 +635,13 @@ def wait_until_finished(checkpoint_manager):
     checkpoint_manager.wait()
 
 
+def is_saving_in_progress(checkpoint_manager) -> bool:
+  """Whether an async save is still running. The v0 emergency managers don't report it, so they count as idle."""
+  if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+    return False
+  return checkpoint_manager.is_saving_in_progress()
+
+
 def reached_preemption(checkpoint_manager, step: int) -> bool:
   """Whether a preemption sync point has been reached at ``step`` (manager-agnostic)."""
   if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
@@ -655,6 +675,7 @@ def load_state_if_possible(
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
     maxtext_config: Any | None = None,
+    snapshotter: ocp.training.pathways.Snapshotter | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -674,6 +695,9 @@ def load_state_if_possible(
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
     source_checkpoint_layout: Optional checkpoint context to use for loading,
       provided in string format with the default being "orbax".
+    snapshotter: Optional `snapshotting.Snapshotter` of an elastic run in snapshot mode. When it holds a snapshot
+      that is at least as recent as the latest checkpoint, the state and the data iterator position are restored
+      from it instead of from the checkpoint.
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -696,6 +720,16 @@ def load_state_if_possible(
   # does: the NNX abstract is converted to that layout going in, and what comes back is reshaped
   # into the NNX state on the way out.
   is_nnx = isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX))
+
+  if snapshotting.should_restore_snapshot(snapshotter, checkpoint_manager):
+    snapshot_state = snapshotting.load_snapshot(snapshotter, abstract_unboxed_pre_state, maxtext_config, data_iterator)
+    if snapshot_state is not None:
+      # Match the return shape of the checkpoint restore branches below: emergency managers return a bare state
+      # (Case 1), while `ocp.training.Checkpointer` wraps it under `"items"` (Case 2).
+      if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+        return (snapshot_state, None)
+      return ({"items": snapshot_state}, None)
+    max_logging.log("In-memory snapshot restore failed; falling back to checkpoint restore.")
 
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
@@ -730,7 +764,7 @@ def load_state_if_possible(
               restored, abstract_unboxed_pre_state, config=maxtext_config
           )
         elif is_nnx:
-          restored = _restored_linen_to_nnx(restored, abstract_unboxed_pre_state, config=maxtext_config)
+          restored = restored_linen_to_nnx(restored, abstract_unboxed_pre_state, config=maxtext_config)
         return (restored, None)
 
       # Case 2: standard v1 Checkpointer, restoring the grain iterator in place when
@@ -753,7 +787,7 @@ def load_state_if_possible(
         )
         restored = {"items": restored_items}
       elif is_nnx:
-        restored_items = _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
+        restored_items = restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
         restored = {"items": restored_items}
       return (restored, None)
 
@@ -784,6 +818,7 @@ def load_state_if_possible(
         use_zarr3=use_zarr3,
         enable_single_replica_ckpt_restoring=bool(enable_single_replica_ckpt_restoring),
         convert_flat_moe_weights=bool(getattr(maxtext_config, "moe_flat_fsdp_weights", False)),
+        colocated_python_checkpointing=bool(getattr(maxtext_config, "colocated_python_checkpointing", False)),
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -806,14 +841,36 @@ def load_state_if_possible(
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
-  """DEPRECATED: Setup checkpoint logger."""
-  # TODO: b/529622681 - Remove this config option entirely.
-  if config.enable_checkpoint_cloud_logger:
+  """Sets up the Orbax checkpoint Cloud Logger used by ML Goodput.
+
+  Args:
+    config: MaxText config.
+
+  Returns:
+    An Orbax `CloudLogger` writing to the `goodput_<job_name>` log (where
+    `job_name` is resolved via `get_goodput_job_name(config)`) if
+    `enable_checkpoint_cloud_logger` is set, otherwise None.
+  """
+  if not config.enable_checkpoint_cloud_logger:
+    return None
+  max_logging.log("Setting up checkpoint logger...")
+  cloud_logger_cls = getattr(ocp_logging, "CloudLogger", None)
+  cloud_logger_options_cls = getattr(ocp_logging, "CloudLoggerOptions", None)
+  if cloud_logger_cls is None or cloud_logger_options_cls is None:
     max_logging.warning(
-        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
-        " Orbax v1 now configures its own logger internally. This config"
-        " setting is ignored and will be removed."
+        "enable_checkpoint_cloud_logger is set but Orbax CloudLogger is unavailable"
+        " (is google-cloud-logging installed?). Checkpoint logs are disabled."
     )
+    return None
+  job_name = get_goodput_job_name(config)
+  logger_name = f"goodput_{job_name}"
+  try:
+    orbax_cloud_logger = cloud_logger_cls(options=cloud_logger_options_cls(job_name=job_name, logger_name=logger_name))
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"Failed to initialize Orbax CloudLogger: {e}. Checkpoint logs are disabled.")
+    return None
+  max_logging.log(f"Successfully set up checkpoint cloud logger: {logger_name}")
+  return orbax_cloud_logger
 
 
 def _scale_sharding(weight_sharding, scale_shape):
@@ -1040,11 +1097,13 @@ def load_params_from_path(
     use_zarr3=True,
     enable_single_replica_ckpt_restoring: bool = False,
     convert_flat_moe_weights: bool = False,
+    colocated_python_checkpointing: bool = False,
 ):
   """Load decode params from checkpoint at specified path.
 
   With `convert_flat_moe_weights` (moe_flat_fsdp_weights), 3D/4D routed-expert weights in the checkpoint are converted
-  to the flat [E * rows, (L,) cols] layout the model expects.
+  to the flat [E * rows, (L,) cols] layout the model expects. With `colocated_python_checkpointing` (Pathways single
+  controller only), the restore runs on the workers through the Orbax colocated-Python dispatcher.
   """
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
@@ -1068,8 +1127,16 @@ def load_params_from_path(
   # Orbax v1 fails a mid-load shape mismatch itself, with an error that reports the
   # shapes but not which weight; compare the stored metadata first so the error names
   # it. A metadata read failure falls through to the load (worst case: Orbax's error).
+  # With colocated Python, read the metadata under the same checkpointing implementation
+  # as the load: outside a Context, Orbax on Pathways requires remote Python instead.
+  metadata_context = (
+      checkpoint_context.build_context(colocated_python_checkpointing=True)
+      if colocated_python_checkpointing
+      else contextlib.nullcontext()
+  )
   try:
-    stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
+    with metadata_context:
+      stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
   except Exception as e:  # pylint: disable=broad-except
     max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
     stored = None
@@ -1161,6 +1228,7 @@ def load_params_from_path(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=colocated_python_checkpointing,
   )
   # Dispatch on the on-disk layout instead of assuming a step root: callers pass step roots,
   # v0-style pytree dirs (normalized above), and v0 flat params-only checkpoints
@@ -1484,7 +1552,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       and getattr(config, "dataset_type", None) == "grain"
       and not isinstance(data_iterator, PlaceHolderDataIterator)
   ):
-    checkpointables["iter"] = grain_utility.for_save(step, data_iterator, config.expansion_factor_real_data)
+    checkpointables["iter"] = grain_utility.for_save(data_iterator, config.expansion_factor_real_data)
   # The v1 Checkpointer raises for an already-existing step BEFORE consulting the
   # save decision policy; v0 silently skipped such saves (should_save ran first).
   # Preserve v0 semantics: e.g. resuming from a non-latest step into a directory

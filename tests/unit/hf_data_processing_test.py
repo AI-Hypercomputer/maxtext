@@ -35,6 +35,26 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
+class _PadEqualsEosTokenizer:
+  """Hugging Face tokenizer stand-in with DeepSeek's pad == eos == 1 and `<｜▁pad▁｜>` at id 2."""
+
+  _VOCAB = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+  def __init__(self):
+    self.chat_template = None
+    self.bos_token_id = 0
+    self.eos_token_id = 1
+    self.unk_token_id = None
+    self.pad_token = "<｜end▁of▁sentence｜>"
+
+  @property
+  def pad_token_id(self):
+    return self._VOCAB[self.pad_token]
+
+  def get_vocab(self):
+    return dict(self._VOCAB)
+
+
 class HfDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
@@ -206,6 +226,52 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
     self.assertIs(result, iterator)
     return data_loader.call_args.kwargs["operations"]
 
+  def test_sft_forwards_model_name_to_apply_chat_template(self):
+    dataset = mock.MagicMock()
+    dataset.select_columns.return_value = dataset
+    dataset.map.return_value = dataset
+    dataset.features.keys.return_value = ["messages"]
+    tokenizer = SimpleNamespace(pad_token_id=0, unk_token_id=1, bos_token_id=2, chat_template=None)
+    config = SimpleNamespace(elastic_enabled=False, training_objective="causal_lm", model_name="deepseek4-1600b")
+
+    with (
+        mock.patch.object(hf_data_processing.transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+        mock.patch.object(hf_data_processing.data_processing_utils, "validate_and_configure_sft_columns"),
+        mock.patch.object(
+            hf_data_processing.instruction_data_processing,
+            "convert_to_conversational_format",
+            return_value=(dataset, ["messages"]),
+        ),
+        mock.patch.object(hf_data_processing.input_pipeline_utils, "is_conversational", return_value=True),
+        mock.patch.object(hf_data_processing.input_pipeline_utils, "HFDataSource", return_value=[object()]),
+        mock.patch.object(hf_data_processing.grain, "DataLoader", return_value=object()),
+        mock.patch.object(hf_data_processing.multihost_dataloading, "MultiHostDataLoadIterator", return_value=object()),
+    ):
+      hf_data_processing.preprocessing_pipeline(
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          global_mesh=SimpleNamespace(size=1),
+          dataset=dataset,
+          config=config,
+          data_column_names=("messages",),
+          tokenize=False,
+          tokenizer_path="unused",
+          hf_access_token=None,
+          global_batch_size=1,
+          max_target_length=8,
+          shuffle=False,
+          data_shuffle_seed=0,
+          packing=False,
+          use_dpo=False,
+          use_sft=True,
+      )
+
+    chat_template_calls = [
+        c for c in dataset.map.call_args_list if c.args and c.args[0] is input_pipeline_utils.apply_chat_template
+    ]
+    self.assertEqual(len(chat_template_calls), 1)
+    self.assertEqual(chat_template_calls[0].kwargs["fn_kwargs"]["model_name"], "deepseek4-1600b")
+
   def test_default_objective_keeps_next_token_shift(self):
     transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
         SimpleNamespace(),
@@ -319,6 +385,53 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
             self._block_diffusion_config(),
             **(base_args | overrides),
         )
+
+  def test_sft_masks_prompts_with_remapped_pad_id(self):
+    dataset = mock.MagicMock()
+    dataset.select_columns.return_value = dataset
+    dataset.map.return_value = dataset
+    dataset.features.keys.return_value = ["messages"]
+    tokenizer = _PadEqualsEosTokenizer()
+
+    with (
+        mock.patch.object(hf_data_processing.transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+        mock.patch.object(hf_data_processing.data_processing_utils, "validate_and_configure_sft_columns"),
+        mock.patch.object(
+            hf_data_processing.instruction_data_processing,
+            "convert_to_conversational_format",
+            return_value=(dataset, ["messages"]),
+        ),
+        mock.patch.object(hf_data_processing.input_pipeline_utils, "is_conversational", return_value=True),
+        mock.patch.object(hf_data_processing.input_pipeline_utils, "HFDataSource", return_value=[object()]),
+        mock.patch.object(hf_data_processing.grain, "DataLoader", return_value=object()) as data_loader,
+        mock.patch.object(hf_data_processing.multihost_dataloading, "MultiHostDataLoadIterator", return_value=object()),
+    ):
+      hf_data_processing.preprocessing_pipeline(
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          global_mesh=SimpleNamespace(size=1),
+          dataset=dataset,
+          config=SimpleNamespace(elastic_enabled=False, training_objective="causal_lm"),
+          data_column_names=("messages",),
+          tokenize=False,
+          tokenizer_path="unused",
+          hf_access_token=None,
+          global_batch_size=1,
+          max_target_length=8,
+          shuffle=False,
+          data_shuffle_seed=0,
+          packing=False,
+          use_dpo=False,
+          use_sft=True,
+      )
+
+    operations = data_loader.call_args.kwargs["operations"]
+    masking = [op for op in operations if isinstance(op, input_pipeline_utils.SFTPromptMasking)]
+    self.assertEqual(len(masking), 1)
+    self.assertEqual(masking[0].unk_id, 2)
+    pad_ops = [op for op in operations if isinstance(op, input_pipeline_utils.PadOrTrimToMaxLength)]
+    self.assertEqual(len(pad_ops), 1)
+    self.assertEqual(pad_ops[0].pad_id, 2)
 
 
 if __name__ == "__main__":

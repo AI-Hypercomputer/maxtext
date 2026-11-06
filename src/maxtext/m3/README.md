@@ -32,9 +32,10 @@ concerns are applied as post-construction transforms rather than branched on ins
 m3/
   core/      # RoPE, sharding, interfaces, checkpoint, data — only what NNX lacks
   infra/     # remat, scan, quantization, offload — applied after construction
-  configs/   # slim Pydantic config types + base.yml
+  configs/   # slim Pydantic config types, model configs (e.g. glm5_3_flash_config) + base.yml
   models/    # one directory per model family + create_model dispatch
   train/     # m3's own training loop (one of two supported drivers)
+  diffuser_pipelines/  # diffusion model inference pipelines: checkpoint loading, denoising loop, VAE decode; driven by inference/sample.py
 ```
 
 There is no `layers/` directory: NNX *is* the layer library.
@@ -48,7 +49,8 @@ There is no `layers/` directory: NNX *is* the layer library.
    Some duplication across model files is cheaper than a 60-parameter shared layer.
 3. **Sharding is an annotation.** Models receive a `Sharding` instance at construction and refer to
    logical axis names only (`"embed"`, `"heads"`, `"mlp"`). Model code never names physical mesh
-   axes or devices.
+   axes or devices. Models are constructed inside `jax.sharding.set_mesh(mesh)`, on one device as
+   on many: Flax places parameters from their metadata at construction and raises without a mesh.
 4. **Infrastructure stays out of model code.** No `maybe_remat`, no `dot_general` injection, no
    `model_mode` conditionals. Only zero-cost annotations belong in `__call__`: sharding specs and
    `checkpoint_name` tags.
@@ -56,6 +58,57 @@ There is no `layers/` directory: NNX *is* the layer library.
    YAML files override a base.
 6. **Readability is a feature.** A model file should read top to bottom without jumping through a
    shared decoder.
+
+## Precision and quantization
+
+Precision follows legacy MaxText's mixed-precision pattern — float32 master weights and optimizer
+moments, bfloat16 compute, float32 loss — and each concern lives in exactly one place:
+
+| Concern | Where | Config |
+| :---- | :---- | :---- |
+| Parameter storage dtype (master weights) | `param_dtype=` on every NNX layer at construction | `weight_dtype` |
+| Compute dtype | `dtype=` on every NNX layer at construction | `dtype` |
+| Float32 islands (softmax, logits, routing, MoE combine) | the model's own arithmetic | — |
+| Matmul precision for float32 operands | `jax.default_matmul_precision` around setup and the step (`train/loop.py`) | `matmul_precision` |
+| int8 / fp8 matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
+
+`matmul_precision` matters only when matmul operands are float32: on TPU `default` runs them as
+one bfloat16 pass, `highest` as full float32. With bfloat16 compute it changes nothing, as in
+legacy, where it is threaded into every `DenseGeneral`.
+
+Quantization is a transform (`train/loop.py::setup_model`), applied with qwix by interception:
+nothing in a model file changes, parameters stay `nnx.Param` with their paths, and the transform
+asserts that. What it quantizes is decided structurally: every `nnx.Linear`, `nnx.LinearGeneral`
+and `nnx.Einsum` under the decoder stack (`decoder/layers…`), including MoE routers (anything under
+a `gate` module) unless `quantize_router_proj=false`, as in legacy. Each of those layers performs one weight matmul, and the qwix rule lists their
+exact paths, so attention scores, the MoE combine and anything else a block computes in its own
+`__call__` are never matched — nor are the embedding, the LM head or norms, which sit outside the
+stack. The converse is checked too: a module under the stack that holds a weight without being one
+of those layers is refused by name rather than left in full precision silently. Today that is
+Qwen3-VL, whose language-model attention still uses a hand-rolled `DenseGeneral` (rule 1).
+
+| `quantization=` | weights, activations | gradients |
+| :---- | :---- | :---- |
+| `int8` | int8 | int8 |
+| `fp8`, `fp8_e4m3` | float8_e4m3fn | float8_e4m3fn |
+| `fp8_e5m2` | float8_e5m2 | float8_e5m2 |
+| `fp8_full` | float8_e4m3fn | float8_e5m2 |
+
+The names mean what they mean in legacy's qwix path. Quantization requires
+`use_qwix_quantization=true`: with it false, legacy trains the same config with AQT, which m3
+doesn't have, so m3 refuses rather than switching recipe.
+
+Scales are dynamic, calibration absmax. `quantization` and `quantize_router_proj` are the legacy
+quantization fields m3 reads. A config that turns on a legacy knob m3 does not implement — `quantize_logits_proj`,
+`quantize_mtp`, `sa_qproj_bwd_bf16`, a non-absmax calibration method, weight-gradient tiling,
+block-scaled weights (`weight_block_size`), `unquantized_modules`, sparsity, batch-split — is refused rather than trained with a recipe other than the one it names;
+so is `grad_dtype` other than float32 in the loop. Rather than run qwix's eager initialization pass, the transform
+traces one forward pass of the training shape and requires one matmul in the recipe's dtype per
+planned projection; a model with no projections under `decoder/layers` is refused, not trained
+unquantized. Not yet: MoE grouped matmuls (they will join the plan through `ragged_dot`; the
+Pallas executors need in-kernel quantization), fp8 attention (a kernel feature, not a qwix rule),
+int4 / fp4, static scales, and weight-only quantization for serving. The legacy drivers
+(`model_creation_utils.create_model`) do not apply m3 transforms yet.
 
 ## Invariants for the training-engine and RL path
 
@@ -70,6 +123,7 @@ bearing for that second driver — breaking them tends to fail silently:
 | Remat and scan wrappers must be path-transparent | Parameter paths feed checkpointing, HF mappings, weight sync, optimizer masks and unscan; an extra path segment breaks them, in several cases without an error |
 | Auxiliary losses fold into the primary loss | Only the primary loss is differentiated; a router loss reported alongside it contributes no gradient |
 | One `Mesh` object shared with the driver | Sharding whose mesh differs from the engine's is silently replaced by full replication |
+| Mesh axes keep legacy's names (`data`, `fsdp`, `tensor`, `expert`) | The engine reads the data axis by name: on a mesh with no axis called `data` it declines Zero-1 (one warning) and deferred gradient all-reduce (silently) |
 | No parameter sharding constraints after init | Parameters are sharded once by the initializer; re-asserting collides with the engine's deferred all-reduce and Zero-1 resharding |
 
 ## Tests

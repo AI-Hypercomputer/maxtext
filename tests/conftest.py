@@ -116,6 +116,7 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
   import maxtext  # pylint: disable=unused-import
 
 from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils import class_split
 from tests.utils.newly_added_detection import get_changed_tests
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
@@ -207,6 +208,11 @@ def pytest_collection_modifyitems(config, items):
       item.add_marker(pytest.mark.cpu_only)
 
 
+def pytest_addoption(parser):
+  """Registers the class-level shard split options; pass them as --opt=value (see tests/utils/class_split.py)."""
+  class_split.pytest_addoption(parser)
+
+
 def pytest_configure(config):
   """Registers custom pytest markers dynamically."""
   for m in [
@@ -221,6 +227,7 @@ def pytest_configure(config):
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
+  class_split.pytest_configure(config)
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -238,6 +245,15 @@ def clear_jax_compilation_cache():
       gc.collect()
   except Exception:  # pylint: disable=broad-exception-caught
     pass
+
+
+@pytest.fixture(autouse=True)
+def restore_jax_remove_size_one_mesh_axis_from_type():
+  """Saves and restores jax_remove_size_one_mesh_axis_from_type around each test item."""
+  previous_flag = getattr(jax.config, "jax_remove_size_one_mesh_axis_from_type", None)
+  yield
+  if previous_flag is not None:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
 
 @pytest.fixture(autouse=True)

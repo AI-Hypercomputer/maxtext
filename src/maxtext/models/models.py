@@ -23,9 +23,10 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from flax.core import FrozenDict
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
+from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -35,6 +36,7 @@ from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_logging
+from maxtext.utils import sharding
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
@@ -138,8 +140,11 @@ class Transformer(nnx.Module):
         config=cfg,
         rngs=rngs,
     )
+    # Audio-only multimodal models (e.g. Ming) have no vision tower.
     self.vision_encoder = (
-        VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_multimodal", False) else None
+        VisionEncoder(config=cfg, mesh=mesh, rngs=rngs)
+        if getattr(cfg, "use_multimodal", False) and cfg.vision_encoder_block != VisionEncoderBlockType.NONE
+        else None
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
@@ -151,13 +156,16 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config,
-          mesh=self.mesh,
-          transformer_layer_module=mtp_layer,
-          decoder=self.decoder,
-          rngs=rngs,
-      )
+      # With pipeline parallelism the MTP block runs under the PP-as-DP rules (see __call__), so under explicit sharding
+      # it is built under them too. Without pipeline parallelism, or under auto, this context is a no-op.
+      with sharding.pp_act_as_dp_construction_rules(self.config):
+        self.mtp_block = MultiTokenPredictionBlock(
+            config=self.config,
+            mesh=self.mesh,
+            transformer_layer_module=mtp_layer,
+            decoder=self.decoder,
+            rngs=rngs,
+        )
 
   def no_op(self, *args, **kwargs):
     """A no-op method to allow the model to be used in a lazy context."""
@@ -208,6 +216,7 @@ class Transformer(nnx.Module):
       attention_metadata: dict[str, Any] | None = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings: jax.Array | None = None,
+      skip_lm_head: bool = False,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -246,7 +255,7 @@ class Transformer(nnx.Module):
     video_embeddings = None
     audio_embeddings = None
     deepstack_visual_embeds = None
-    if getattr(self.config, "use_multimodal", False) and encoder_images is not None:
+    if getattr(self.config, "use_multimodal", False) and self.vision_encoder is not None and encoder_images is not None:
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_images, deterministic=not enable_dropout
       )
@@ -254,7 +263,7 @@ class Transformer(nnx.Module):
           self.config, decoder_input_tokens, is_video=False
       )
 
-    if getattr(self.config, "use_multimodal", False) and encoder_videos is not None:
+    if getattr(self.config, "use_multimodal", False) and self.vision_encoder is not None and encoder_videos is not None:
       video_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
           input_images=encoder_videos,
           input_masks=encoder_video_masks,
@@ -314,6 +323,7 @@ class Transformer(nnx.Module):
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
         forced_routed_experts=forced_routed_experts,
+        skip_lm_head=skip_lm_head,
     )  # pytype: disable=wrong-keyword-args
     if isinstance(res, tuple) and len(res) == 4:
       logits, hidden_state, kv_caches, expert_indices = res
@@ -341,23 +351,32 @@ class Transformer(nnx.Module):
     #      logit projection.
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
-      self.mtp_block(
-          shared_embedding=self.token_embedder,
-          main_hidden_state=hidden_state,
-          input_ids=decoder_input_tokens,
-          target_ids=decoder_target_tokens,
-          target_mask=decoder_target_mask,
-          position_ids=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=not enable_dropout,
-          model_mode=model_mode,
-          main_token_embeddings=mtp_token_embeddings,
-      )
+      mtp_axis_rules = sharding.get_logical_axis_rules() or self.config.logical_axis_rules
+      if getattr(self.config, "using_pipeline_parallelism", False):
+        # The MTP block runs outside the pipeline. Like the non-pipelined decoder layers, let 'stage' act as
+        # data parallelism; otherwise every stage redundantly computes (and holds) the whole MTP layer.
+        mtp_axis_rules = sharding.logical_axis_rules_pp_act_as_dp(mtp_axis_rules)
+      with flax_logical_axis_rules(mtp_axis_rules):
+        self.mtp_block(
+            shared_embedding=self.token_embedder,
+            main_hidden_state=hidden_state,
+            input_ids=decoder_input_tokens,
+            target_ids=decoder_target_tokens,
+            target_mask=decoder_target_mask,
+            position_ids=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=not enable_dropout,
+            model_mode=model_mode,
+            main_token_embeddings=mtp_token_embeddings,
+        )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.
       if expert_indices is not None:
         return hidden_state, kv_caches, expert_indices
       return hidden_state, kv_caches
+
+    if skip_lm_head:
+      return hidden_state
 
     return logits

@@ -149,8 +149,9 @@ dmypy.json
 .idea
 
 # Gemini CLI
-.gemini/
+.gemini/*
 !.gemini/commands/
+!.gemini/config.yaml
 .agents/
 gha-creds-*.json
 

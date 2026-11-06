@@ -19,7 +19,7 @@ import json
 import math
 import qwix.pallas as qpl
 import re
-from typing import ClassVar, Tuple, Sequence, Callable
+from typing import Any, ClassVar, Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -66,7 +66,7 @@ except (NameError, AttributeError):
   pass
 from maxtext.layers import nnx_wrappers
 
-from maxtext.configs.types import TeCommGemmOverlapPolicy
+from maxtext.configs.types import JAX_MX_QUANTIZATIONS, TeCommGemmOverlapPolicy
 from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils import max_logging
@@ -146,6 +146,47 @@ def dequantize_weight(
   return w_c * scale_c
 
 
+def quantize_weight_per_channel(w: Any, channel_axis: int = 2) -> Tuple[Any, Any]:
+  """Per-channel float8_e4m3fn quantization of an (num_experts, in_dim, out_dim) MoE expert weight.
+
+  Keeps one absmax scale per expert (axis 0) and channel (`channel_axis`), reducing over the other
+  axes, so the scale has w's rank with the reduced axes set to 1. The fused MoE kernel applies such
+  per-output-channel scales after its FP8 matmul. Accepts a jax.ShapeDtypeStruct for shape inference.
+
+  Returns:
+    (quantized weight in float8_e4m3fn, float32 scale).
+  """
+  reduce_axes = tuple(d for d in range(w.ndim) if d not in (0, channel_axis))
+  if isinstance(w, jax.ShapeDtypeStruct):
+    scale_shape = list(w.shape)
+    for d in reduce_axes:
+      scale_shape[d] = 1
+    return (
+        jax.ShapeDtypeStruct(w.shape, jnp.float8_e4m3fn),
+        jax.ShapeDtypeStruct(tuple(scale_shape), jnp.float32),
+    )
+  fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
+  max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
+  scale = jnp.maximum(max_val / fp8_max, 1e-12).astype(jnp.float32)
+  q_w = jnp.clip(w / scale, -fp8_max, fp8_max).astype(jnp.float8_e4m3fn)
+  return q_w, scale
+
+
+def fake_quantize_weight_per_channel(w: Array, channel_axis: int = 2) -> Array:
+  """Rounds `w` to the grid of `quantize_weight_per_channel(w)`, with a straight-through gradient.
+
+  The forward value is the dequantized weight in `w.dtype`, i.e. the weight an FP8 rollout holding
+  `quantize_weight_per_channel(w)` computes with. The backward pass treats the rounding as the
+  identity, so gradients reach the high-precision `w`.
+  """
+  q, scale = quantize_weight_per_channel(w, channel_axis)
+  # Under jit, XLA folds the f32 -> fp8 -> f32 convert pair into a no-op, dropping the rounding.
+  q = jax.lax.optimization_barrier(q)
+  w_q = jax.lax.stop_gradient((q.astype(jnp.float32) * scale).astype(w.dtype))
+  # w - stop_gradient(w) is exactly zero, so the forward value is exactly w_q.
+  return w_q + (w - jax.lax.stop_gradient(w))
+
+
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
@@ -160,6 +201,91 @@ class Quantization:
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
+
+
+class JaxBlockScaledDotGeneral(nnx.Module):
+  """Stateless OCP MX dot_general: `jax.nn.scaled_dot_general` with one config for both operands and one for the gradient.
+
+  `mode` and `gradient_mode` are `jax.nn.get_scaled_dot_general_config` names, "mxfp8" or "mxfp4" (mxfp4 needs
+  jax>=0.12.0); the matching MaxText `quantization` value is the same name with a `jax_` prefix.
+  """
+
+  def __init__(self, mode: str, gradient_mode: str | None = None):
+    gradient_mode = gradient_mode or mode
+    # Reject a mode this JAX lacks here, not at trace time.
+    for name in (mode, gradient_mode):
+      try:
+        jax.nn.get_scaled_dot_general_config(name)
+      except (AttributeError, ValueError) as e:
+        raise ValueError(
+            f"quantization=jax_{mode} needs a JAX with scaled_dot_general mode '{name}' (mxfp4: jax>=0.12.0)"
+        ) from e
+    self.mode = mode
+    self.gradient_mode = gradient_mode
+
+  def __call__(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+  ) -> jax.Array:
+    # jax.nn.scaled_dot_general takes no precision argument.
+    del precision
+    output_dtype = jnp.result_type(lhs, rhs) if preferred_element_type is None else preferred_element_type
+    config = jax.nn.get_scaled_dot_general_config(self.mode)
+    gradient_config = jax.nn.get_scaled_dot_general_config(self.gradient_mode)
+    self._check_contracting_dims(lhs, rhs, dimension_numbers, config.block_size)
+    return jax.nn.scaled_dot_general(
+        lhs, rhs, dimension_numbers, preferred_element_type=output_dtype, configs=[config, config, gradient_config]
+    )
+
+  def _check_contracting_dims(
+      self, lhs: jax.Array, rhs: jax.Array, dimension_numbers: jax.lax.DotDimensionNumbers, block: int
+  ) -> None:
+    """Checks that the contracting dims are a whole number of blocks.
+
+    Three GEMMs are checked here:
+    - forward, y = x @ W
+    - backward, dx = g @ W^T
+    - backward, dW = x^T @ g
+    """
+    (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
+    lhs_free = [d for d in range(lhs.ndim) if d not in lhs_contract and d not in lhs_batch]
+    rhs_free = [d for d in range(rhs.ndim) if d not in rhs_contract and d not in rhs_batch]
+    contracting_sizes = {
+        "forward (y = x @ W)": math.prod(lhs.shape[d] for d in lhs_contract),
+        "input gradient (dx = g @ W^T)": math.prod(rhs.shape[d] for d in rhs_free),
+        "weight gradient (dW = x^T @ g)": math.prod(lhs.shape[d] for d in lhs_free),
+    }
+    for gemm, k in contracting_sizes.items():
+      if k < block or k % block != 0:
+        raise ValueError(
+            f"quantization=jax_{self.mode}: the {gemm} GEMM contracts over {k} elements, which must be at least"
+            f" {block} and a multiple of {block}; lhs {lhs.shape}, rhs {rhs.shape}, dimension_numbers"
+            f" {dimension_numbers}."
+        )
+
+
+@dataclass
+class JaxBlockScaledQuantization(Quantization):
+  """Configures OCP MX quantization through `jax.nn.scaled_dot_general`."""
+
+  # MX scales are the per-block amax of the data; no RNG is used at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
+  quant_mode = "train"
+  mode: str
+  gradient_mode: str | None = None
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    del mesh_axes
+    return functools.partial(JaxBlockScaledDotGeneral, mode=self.mode, gradient_mode=self.gradient_mode)
+
+  def einsum(self, *args, **kwargs):
+    del args, kwargs
+    raise ValueError(f"quantization='jax_{self.mode}' does not support einsum.")
 
 
 def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
@@ -212,15 +338,11 @@ def native_fp8_dot_general(
     kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
 
   rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
-  if scheme == "per_tensor":
-    channelwise_axes = []
-    tiled_axes = {}
-  elif scheme == "per_channel":
-    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+  channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+  if scheme in ("per_tensor", "per_channel"):
     tiled_axes = {}
   else:
     rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
-    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
     tiled_axes = {lhs_axis: rhs_block_size}
   if is_static_calibration(act_calibration_method):
     channelwise_axes = []
@@ -899,6 +1021,8 @@ def _get_quant_config(config):
   """Set quantization params based on user configuration."""
   if not config.quantization or config.quantization == "":
     return None
+  if config.quantization in JAX_MX_QUANTIZATIONS:
+    return config.quantization
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
@@ -959,7 +1083,12 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
-    if quant_cfg == "fp8":
+    if quant_cfg in JAX_MX_QUANTIZATIONS:
+      mode = quant_cfg.removeprefix("jax_")
+      if quant_mode_str != "train":
+        raise ValueError(f"quantization='jax_{mode}' supports quant_mode 'train' only, got '{quant_mode_str}'.")
+      return JaxBlockScaledQuantization(mode=mode, gradient_mode=config.jax_mx_gradient_mode or None)
+    elif quant_cfg == "fp8":
       return Fp8Quantization()
     elif quant_cfg == "nanoo_fp8":
       return NANOOFp8Quantization()
@@ -1200,6 +1329,21 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   # Disjunct regex paths, e.g. "(path1|path2|...)"
   module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
 
+  if config.sa_qproj_bwd_bf16:
+    rules.append(
+        qwix.QtRule(
+            module_path=(rf"{module_path}/(self_)?attention\w*/(query|wq_a|wq_b)"),
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=None,
+            weight_calibration_method=config.weight_quantization_calibration_method,
+            act_calibration_method=config.act_quantization_calibration_method,
+            bwd_calibration_method=config.bwd_quantization_calibration_method,
+            additional_qt_config={"sparsity_rule": sparsity_rule},
+            op_names=("dot_general",),
+        )
+    )
+
   rules.append(
       qwix.QtRule(
           module_path=module_path,
@@ -1229,7 +1373,9 @@ def get_quantization_rule(config: Config):
             weight_qtype=dtype,
             act_qtype=dtype,
             bwd_qtype=dtype,
-            bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+            bwd_weight_grad_tile_size=(
+                1 / config.qwix_bwd_weight_grad_tile_count if config.qwix_bwd_weight_grad_tile_count > 1 else None
+            ),
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
@@ -1375,11 +1521,21 @@ def without_qwix_interception(fn: Callable) -> Callable:
 
 
 def _cast_reduced_from(arr, reduced_arr):
+  """Casts `arr` to be reduced along the same mesh axes as `reduced_arr`.
+
+  Inside shard_map this uses `pcast(..., to="reduced")`; outside it reshards to
+  `reduced_arr`'s sharding. Axes `arr` is already reduced along are skipped, as
+  `pcast` rejects a reduced -> reduced cast.
+  """
   aval = jax.typeof(reduced_arr)
   # In shard map
   if aval.sharding.mesh.axis_types[0] == jax.sharding.AxisType.Manual:
+    # With JAX's unreduced (HiJAX) lowering, `jnp.full_like(reduced_arr, ...)`
+    # already carries the reduced axes.
+    already_reduced = jax.typeof(arr).mat.reduced
     for axis in aval.mat.reduced:
-      arr = jax.lax.pcast(arr, axis, to="reduced")
+      if axis not in already_reduced:
+        arr = jax.lax.pcast(arr, axis, to="reduced")
     return arr
   # Outside shard map
   return jax.reshard(arr, aval.sharding)

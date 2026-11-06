@@ -37,8 +37,8 @@ def get_model_params(quantization):
   return [
       f"quantization={quantization}",
       "base_emb_dim=128",
-      "base_num_query_heads=2",
-      "base_num_kv_heads=2",
+      "base_num_query_heads=4",
+      "base_num_kv_heads=4",
       "base_mlp_dim=128",
       "base_num_decoder_layers=1",
       "head_dim=64",

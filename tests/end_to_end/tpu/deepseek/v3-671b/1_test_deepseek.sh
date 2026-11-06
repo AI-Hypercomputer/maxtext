@@ -35,8 +35,24 @@ if [ -z "${CKPT_DISK_LOCATION}" ]; then
   export CKPT_DISK_LOCATION=/tmp/hf
 fi
 
-# 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
+# Convert checkpoint to `scanned` format, more suitable for training
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path=${CKPT_DISK_LOCATION} \
+    base_output_directory=${BASE_OUTPUT_PATH}/scanned \
+    scan_layers=true \
+    hardware=cpu \
+    skip_jax_distributed_system=True
+export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/0/items
+echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
-# 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
+# Convert checkpoint to `unscanned` format, more suitable for decoding
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path=${CKPT_DISK_LOCATION} \
+    base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
+    scan_layers=false \
+    hardware=cpu \
+    skip_jax_distributed_system=True
+export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/0/items
+echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"

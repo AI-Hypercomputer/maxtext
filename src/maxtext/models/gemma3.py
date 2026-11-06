@@ -186,7 +186,6 @@ class Gemma3DecoderLayer(nnx.Module):
         mesh=self.mesh,
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
-        extra_stack_level=1,
     )
 
   def __call__(
@@ -331,7 +330,6 @@ class Gemma3ScannableBlock(nnx.Module):
         mesh=self.mesh,
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
-        extra_stack_level=1,
     )
 
   def __call__(

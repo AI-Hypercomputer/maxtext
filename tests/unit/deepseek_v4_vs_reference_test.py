@@ -42,6 +42,17 @@ sys.path.insert(0, os.path.join(transformers_repo_path, "src"))
 
 _ORIG_MATMUL_PRECISION = None
 
+# HF DeepSeek-V4-Flash config.json `rope_scaling`; DeepseekV4Config applies it to compress layers only,
+# with attention_factor=1.0.
+_YARN_ROPE_SCALING = {
+    "rope_type": "yarn",
+    "factor": 16.0,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "original_max_position_embeddings": 65536,
+    "attention_factor": 1.0,
+}
+
 
 def setUpModule():
   global _ORIG_MATMUL_PRECISION
@@ -117,7 +128,7 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
                 "partial_rotary_factor": self.partial_rotary_factor,
             },
             "compress": {
-                "rope_type": "default",
+                **_YARN_ROPE_SCALING,
                 "rope_theta": self.compress_rope_theta,
                 "partial_rotary_factor": self.partial_rotary_factor,
             },
@@ -147,10 +158,16 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
     # 1. Initialization
     # --------------------------------------------------------------------------
     ref_rope = DeepseekV4RotaryEmbedding_PT(self.config)
+    rope_params = self.config.rope_parameters[layer_type]
     mt_rope = DeepSeekV4RotaryEmbedding(
         head_dim=self.head_dim,
         partial_rotary_factor=self.partial_rotary_factor,
         rope_theta=expected_theta,
+        rope_type=rope_params["rope_type"],
+        rope_factor=rope_params.get("factor", 1.0),
+        beta_fast=rope_params.get("beta_fast", 32.0),
+        beta_slow=rope_params.get("beta_slow", 1.0),
+        original_max_position_embeddings=rope_params.get("original_max_position_embeddings", 65536),
     )
 
     # --------------------------------------------------------------------------
@@ -461,7 +478,7 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         rope_parameters={
             "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": self.partial_rotary_factor},
             "compress": {
-                "rope_type": "default",
+                **_YARN_ROPE_SCALING,
                 "rope_theta": 160000.0,
                 "partial_rotary_factor": self.partial_rotary_factor,
             },
@@ -491,6 +508,11 @@ class DeepSeekV4CompressedAttentionTest(parameterized.TestCase):
         "o_lora_rank": self.pt_config.o_lora_rank,
         "compress_ratios": [0, 4, 128],  # Dummy list for the test
         "compressed_rope_max_timescale": self.pt_config.rope_parameters["compress"]["rope_theta"],
+        "rope_type": "yarn",
+        "rope_factor": _YARN_ROPE_SCALING["factor"],
+        "beta_fast": _YARN_ROPE_SCALING["beta_fast"],
+        "beta_slow": _YARN_ROPE_SCALING["beta_slow"],
+        "original_max_position_embeddings": _YARN_ROPE_SCALING["original_max_position_embeddings"],
         "indexer_n_heads": self.pt_config.index_n_heads,
         "indexer_head_dim": self.pt_config.index_head_dim,
         "indexer_topk": self.pt_config.index_topk,

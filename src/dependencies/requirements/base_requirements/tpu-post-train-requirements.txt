@@ -16,7 +16,9 @@ llguidance<1.8.0
 loguru
 lxml
 mistral_common
+ml-goodput-measurement>=0.2.3
 model-hosting-container-standards
+nanobind>=2.5.0
 openai
 openai-harmony
 outlines-core==0.2.11
@@ -27,13 +29,20 @@ perfetto
 prometheus-fastapi-instrumentator
 py-cpuinfo
 pybase64
+# pydantic-extra-types 2.11.2 was yanked on PyPI; exclude it so mirrors without PEP 592 yanked metadata do not lock 2.11.2.
+pydantic-extra-types!=2.11.2
 pytest-mock
 python-json-logger
 pyzmq
 ray
+scikit-build-core>=0.10
+# tunix requires safetensors<0.8 (newer versions break with jax>=0.9).
+safetensors<0.8
 setproctitle>=1.0
-setuptools==78.1.0
-torch==2.11.0
+setuptools==80.9.0
+sqlalchemy
+torch==2.12.0
+torchvision==0.27.0
 watchfiles
 xgrammar
 xprof

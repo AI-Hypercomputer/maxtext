@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,24 +15,34 @@
 """
 This recipe demonstrates how to launch a Pathways workload in headless mode.
 
-In headless mode, the XPK workload starts the Pathways server and proxy
-components but does not run a user command. This is useful for setting up a
-persistent training environment that can be connected to later by a separate
-runner process.
+In headless mode, the Cluster Toolkit (gcluster) workload starts the Pathways
+server and proxy components but does not run a user command. This is useful for
+setting up a persistent training environment that can be connected to later by a
+separate runner process.
 """
 
+import argparse
+import dataclasses
+
 import benchmarks.recipes.args_helper as helper
-from benchmarks import maxtext_xpk_runner as mxr
+from benchmarks import maxtext_ctk_runner as mcr
+from benchmarks.recipes import parser_utils
 from benchmarks.recipes.user_configs import USER_CONFIG
+from benchmarks.recipes.user_configs import UserConfig
 
 
 def main() -> int:
+  parser = argparse.ArgumentParser()
+  parser_utils.add_arguments(parser)
+  parser.set_defaults(**{f.name: getattr(USER_CONFIG, f.name) for f in dataclasses.fields(USER_CONFIG) if f.init})
+  args, _ = parser.parse_known_args()
+  user_config = UserConfig(**vars(args))
+
   # Handle command line arguments using args_helper
   should_continue = helper.handle_cmd_args(
-      USER_CONFIG.cluster_config,
-      USER_CONFIG.delete,
-      xpk_path=USER_CONFIG.xpk_path,
-      user=USER_CONFIG.user,
+      user_config.cluster_config,
+      is_delete=user_config.delete,
+      user=user_config.user,
   )
 
   if not should_continue:
@@ -41,30 +51,29 @@ def main() -> int:
   num_slices = 2
 
   # Run workloads in the following slice configurations
-  wl_config = mxr.WorkloadConfig(
+  wl_config = mcr.WorkloadConfig(
       model=None,
       num_slices=num_slices,
-      device_type=USER_CONFIG.cluster_config.device_type,
-      base_output_directory=USER_CONFIG.base_output_directory,
+      device_type=user_config.cluster_config.device_type,
+      base_output_directory=user_config.base_output_directory,
       max_restarts=0,
       libtpu_type=None,
       libtpu_nightly_version="",
-      base_docker_image="",
-      pathways_config=USER_CONFIG.pathways_config,
-      xpk_path=USER_CONFIG.xpk_path,
+      base_docker_image=None,
+      pathways_config=dataclasses.replace(user_config.pathways_config, headless=True),
   )
-  command, name = mxr.generate_xpk_workload_cmd(
-      cluster_config=USER_CONFIG.cluster_config,
+  command, name = mcr.generate_workload_cmd(
+      cluster_config=user_config.cluster_config,
       wl_config=wl_config,
-      workload_name=USER_CONFIG.headless_workload_name,
+      workload_name=user_config.headless_workload_name,
   )
 
   print(f"Name of the workload is: {name} \n")
-  print(f"XPK command to be used is: {command} \n")
+  print(f"gcluster command to be used is: {command} \n")
 
-  return_code = mxr.run_command_with_updates(command, name)
+  return_code = mcr.run_command_with_updates(command, name)
   if return_code != 0:
-    print(f"Unable to run xpk workload: {name}")
+    print(f"Unable to run gcluster workload: {name}")
 
   return return_code
 

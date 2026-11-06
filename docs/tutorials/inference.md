@@ -82,6 +82,8 @@ In the command above we pass in the `vllm_hf_overrides='{architectures: ["MaxTex
 
 For Qwen3-VL multimodal decode, vLLM supplies the image processor, scheduling, and sampling, while MaxText runs the vision encoder and language model. New model families plug in through `MultimodalHandler`: a handler may register a processor supplied by vLLM or a vLLM-compatible processor implemented in MaxText when the model is not yet supported upstream. Modality encoding remains in MaxText in either case.
 
+For JEV-style decision making with a fixed set of allowed answers, see [Decision Models](decision_models.md). The tutorial explains next-token scoring and includes a complete Qwen3.5-9B example with checkpoint conversion, Bespoke-Nimble LoRA merging, and recorded scoring results.
+
 # Online Inference
 
 We can also run online inference (an inference server) running a MaxText model by using the [`vllm serve`](https://docs.vllm.ai/en/stable/cli/serve/) API. In order to invoke this with a MaxText model, we provide the following additional arguments:

@@ -1,0 +1,374 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Enforces test limits and generates macro-level benchmark metrics in a single pass."""
+
+import argparse
+import glob
+import json
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+# Relative regression threshold ratio (1.20 = 20% slower)
+REL_REGRESSION_OTHER_RATIO = 1.20
+
+# Absolute increase thresholds to filter out noise
+ABS_INCREASE_UNIT_SEC = 15.0
+ABS_INCREASE_INTEGRATION_SEC = 30.0
+
+# TODO: Remove a module from this list once a few nightly runs with the class-level shard split
+# (tests/utils/class_split.py, TPU unit flavors) show no more PER-TEST REGRESSION ALERT warnings for it.
+# Modules excluded from per-test regression enforcement.
+# These modules have heavy XLA compilation costs that are shared across tests within the same
+# CI shard. Before the class-level split (tests/utils/class_split.py), pytest-split dealt single
+# tests, and its deal changed whenever the set of selected tests or their recorded durations
+# changed (PR runs deselect scheduled_only tests, so a PR's shards never matched the nightly's).
+# The first test in each shard pays a cold-compile penalty (~30-130s) while subsequent tests reuse
+# the cache (~4-25s), which created massive false-positive duration swings (e.g. 5s -> 130s)
+# depending on shard position, not code changes. Per-test regressions in these modules are logged
+# as warnings for visibility but do not fail the CI run.
+# See: https://github.com/AI-Hypercomputer/maxtext/pull/5308
+EXCLUDED_MODULES_PER_TEST = {
+    "tests.unit.moe_test",
+    "tests.unit.attention_test",
+    "tests.unit.megablox_gmm_3d_test",
+    "tests.unit.megablox_relayout_test",
+    "tests.unit.m3.qwen3_vl_comparison_test",
+    "tests.unit.tiling_test",
+    "tests.integration.pipeline_parallelism_test",
+}
+
+
+def extract_job_name(xml_file):
+  """Extracts job/flavor name from XML filename."""
+  basename = os.path.basename(xml_file)
+  parts = basename.removesuffix(".xml").split("-")
+  if len(parts) >= 4 and parts[0] == "test" and parts[1] == "results":
+    return "-".join(parts[2:-1])
+  elif len(parts) >= 3:
+    return parts[2]
+  else:
+    return "unknown"
+
+
+_SHARD_SUFFIX_RE = re.compile(r"^(\d+)(?:of(\d+))?$")
+
+
+def extract_shard_layout(xml_file):
+  """Extracts (worker_group, total_workers) from a shard result filename.
+
+  'test-results-<flavor>-<G>of<N>.xml' gives (G, N) and 'test-results-<flavor>-<G>.xml' gives
+  (G, None). Any other name gives None.
+  """
+  parts = os.path.basename(xml_file).removesuffix(".xml").split("-")
+  if len(parts) < 4 or parts[0] != "test" or parts[1] != "results":
+    return None
+  match = _SHARD_SUFFIX_RE.match(parts[-1])
+  if not match:
+    return None
+  group = int(match.group(1))
+  total = int(match.group(2)) if match.group(2) else None
+  return group, total
+
+
+def find_missing_shards(xml_files):
+  """Returns {job_name: [missing worker groups]} for jobs whose result files do not cover 1..N.
+
+  A shard that was cancelled or timed out never uploads its XML, so the total N carried by the
+  'GofN' suffix of its sibling files is larger than the number of groups seen. Files without a
+  'GofN' suffix carry no expectation and are never reported.
+  """
+  expected_total = {}
+  seen_groups = {}
+  for xml_file in xml_files:
+    layout = extract_shard_layout(xml_file)
+    if layout is None:
+      continue
+    group, total = layout
+    job_name = extract_job_name(xml_file)
+    seen_groups.setdefault(job_name, set()).add(group)
+    if total is not None:
+      expected_total[job_name] = max(expected_total.get(job_name, 0), total)
+
+  missing = {}
+  for job_name, total in sorted(expected_total.items()):
+    missing_groups = [g for g in range(1, total + 1) if g not in seen_groups[job_name]]
+    if missing_groups:
+      missing[job_name] = missing_groups
+  return missing
+
+
+def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
+  """Processes a single testcase and checks for limit violations or regressions."""
+  failed = False
+
+  # 1. Skip processing for skipped tests to avoid corrupting the baseline with ~0s durations
+  if testcase.find("skipped") is not None:
+    return False
+
+  # 2. Skip processing for failed/errored tests to prevent capturing abnormally short durations
+  if testcase.find("failure") is not None or testcase.find("error") is not None:
+    return False
+
+  time_val = float(testcase.get("time", 0.0))
+  name = testcase.get("name", "unknown")
+  classname = testcase.get("classname", "unknown")
+  full_name = f"{classname}.{name}"
+
+  # Parse custom properties to extract markers
+  markers = set()
+  properties_elem = testcase.find("properties")
+  if properties_elem is not None:
+    for prop in properties_elem.findall("property"):
+      if prop.get("name") == "marker":
+        markers.add(prop.get("value"))
+
+  is_integration = "integration_test" in markers
+  is_cpu = "cpu" in os.path.basename(xml_file).lower() or "cpu" in job_name.lower()
+
+  if is_integration:
+    abs_noise_threshold = ABS_INCREASE_INTEGRATION_SEC
+    rel_regression_ratio = REL_REGRESSION_OTHER_RATIO
+    test_type = "Integration Test"
+  else:
+    abs_noise_threshold = ABS_INCREASE_UNIT_SEC
+    rel_regression_ratio = REL_REGRESSION_OTHER_RATIO
+    test_type = "Unit Test"
+
+  baseline_key = f"{job_name}::{full_name}"
+  new_baseline_data[baseline_key] = time_val
+
+  # Skip regression checking for CPU tests due to shared CPU multi-tenancy noise
+  skip_regression = is_cpu
+
+  # Check relative regression if baseline exists
+  if not skip_regression and baseline_key in baseline_data:
+    base_time = baseline_data[baseline_key]
+    if isinstance(base_time, (int, float)) and base_time > 0:
+      ratio = time_val / base_time
+      increase = time_val - base_time
+      if ratio >= rel_regression_ratio and increase > abs_noise_threshold:
+        # classname is "<module>.<Class>" for a test method and "<module>" for a test function.
+        is_excluded = any(classname == m or classname.startswith(m + ".") for m in EXCLUDED_MODULES_PER_TEST)
+        if is_excluded:
+          print(
+              f"::warning::[PER-TEST REGRESSION ALERT] {test_type} significantly degraded"
+              + " (Warn-only: module excluded due to shard-position noise)."
+          )
+        else:
+          print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
+          failed = True
+        print(f"  Test: {full_name}")
+        print(f"  Flavor: {job_name}")
+        print(f"  File: {os.path.basename(xml_file)}")
+        print(f"  Previous Duration: {base_time:.2f}s")
+        print(f"  New Duration: {time_val:.2f}s")
+        print(f"  Increase: +{increase:.2f}s ({(ratio - 1) * 100:.1f}%)")
+        print(f"  Thresholds: >{(rel_regression_ratio - 1) * 100:.0f}% AND >{abs_noise_threshold}s")
+        print("-" * 50)
+
+  return failed
+
+
+def main():
+  """Parses XML files and processes test results."""
+  parser = argparse.ArgumentParser(
+      description="Enforce test limits, check regressions, and parse JUnit XML to Benchmark format."
+  )
+  parser.add_argument("xml_dir", help="Directory containing JUnit XML files")
+  parser.add_argument("--baseline", type=str, help="Path to the baseline JSON file", default=None)
+  parser.add_argument(
+      "--save-baseline",
+      type=str,
+      help="Path to save the new baseline JSON file",
+      default=None,
+  )
+  parser.add_argument(
+      "--warn-only",
+      action="store_true",
+      help="Report regressions but do not return a non-zero exit code",
+  )
+  parser.add_argument(
+      "--output-benchmark",
+      type=str,
+      help="Path to save the benchmark JSON file",
+      default=None,
+  )
+  args = parser.parse_args()
+
+  xml_files = sorted(glob.glob(os.path.join(args.xml_dir, "*.xml")))
+  if not xml_files:
+    print(f"No XML files found in {args.xml_dir}")
+    sys.exit(0)
+
+  baseline_data = {}
+  if args.baseline and os.path.exists(args.baseline):
+    try:
+      with open(args.baseline, "r", encoding="utf-8") as f:
+        baseline_data = json.load(f)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Error loading baseline {args.baseline}: {e}")
+
+  # Initialize with existing baseline data, filtering out old legacy keys without flavor separator '::'
+  new_baseline_data = {
+      k: v for k, v in baseline_data.items() if "::" in k and "::MODULE::" not in k and isinstance(v, (int, float))
+  }
+  has_regression = False
+  has_errors = False
+
+  total_times_by_job = {}
+  total_tests_by_job = {}
+  active_keys_by_job = {}
+  corrupt_jobs = set()
+
+  # A shard that was cancelled or timed out leaves no result file. Its tests keep their previous baseline
+  # entries and the tests that ran are recorded as usual, but the flavor's totals would be short, so they
+  # stay off the dashboard.
+  missing_shards = find_missing_shards(xml_files)
+  for job_name, groups in missing_shards.items():
+    missing_groups = ", ".join(str(g) for g in groups)
+    print(
+        f"::warning::[PARTIAL RESULTS] Flavor {job_name} has no result file for worker group(s) {missing_groups}. "
+        "Its totals stay off the dashboard; the tests of the missing group(s) keep their previous baseline entries."
+    )
+
+  for xml_file in xml_files:
+    job_name = extract_job_name(xml_file)
+
+    try:
+      tree = ET.parse(xml_file)
+      root = tree.getroot()
+
+      job_time = 0.0
+      job_count = 0
+
+      for testcase in root.iter("testcase"):
+        job_count += 1
+        time_val = float(testcase.get("time", 0.0))
+        job_time += time_val
+
+        if testcase.find("skipped") is None:
+          name = testcase.get("name", "unknown")
+          classname = testcase.get("classname", "unknown")
+          active_keys_by_job.setdefault(job_name, set()).add(f"{job_name}::{classname}.{name}")
+
+        # Micro-level regression check (enforced for non-excluded modules, warn-only for excluded)
+        if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
+          has_regression = True
+
+      if job_name != "unknown" or job_count > 0:
+        total_times_by_job[job_name] = total_times_by_job.get(job_name, 0.0) + job_time
+        total_tests_by_job[job_name] = total_tests_by_job.get(job_name, 0) + job_count
+
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f"Error parsing or processing {xml_file}: {e}")
+      corrupt_jobs.add(job_name)
+      has_errors = True
+
+  # Prune stale baseline entries (deleted, renamed, moved, or skipped tests) for flavors that ran all shards.
+  # Flavors that did not run in this invocation or have missing/corrupt shards keep their previous baseline entries.
+  for job_name in total_times_by_job:
+    if job_name == "unknown" or job_name in missing_shards or job_name in corrupt_jobs:
+      continue
+    active_keys = active_keys_by_job.get(job_name, set())
+    if not active_keys:
+      print(f"::warning::[EMPTY RESULTS] Flavor {job_name} recorded 0 active tests; preserving its baseline entries.")
+      continue
+    prefix = f"{job_name}::"
+    for key in [k for k in new_baseline_data if k.startswith(prefix) and k not in active_keys]:
+      del new_baseline_data[key]
+
+  # Output macro-level benchmark JSON if requested
+  if args.output_benchmark:
+    benchmarks = []
+    for job, total_time in sorted(total_times_by_job.items()):
+      # Exclude CPU/decoupled suites (runner noise) and flavors with missing/corrupt shards or 0 active tests
+      if (
+          "cpu" in job.lower()
+          or "decoupled" in job.lower()
+          or job in missing_shards
+          or job in corrupt_jobs
+          or not active_keys_by_job.get(job)
+      ):
+        continue
+      benchmarks.append(
+          {
+              "name": f"Total {job.upper()} Tests Duration",
+              "unit": "sec",
+              "value": total_time,
+          }
+      )
+      benchmarks.append(
+          {
+              "name": f"Total {job.upper()} Tests Count",
+              "unit": "count",
+              "value": total_tests_by_job.get(job, 0),
+          }
+      )
+
+    if not benchmarks:
+      # github-action-benchmark fails on an empty list. Without the file, track_performance.yml skips that step.
+      print(f"No flavor has dashboard totals in this run; {args.output_benchmark} is not written.")
+    else:
+      try:
+        dirname = os.path.dirname(args.output_benchmark)
+        if dirname:
+          os.makedirs(dirname, exist_ok=True)
+        with open(args.output_benchmark, "w", encoding="utf-8") as f:
+          json.dump(benchmarks, f, indent=2)
+        print(f"Saved benchmark results to {args.output_benchmark}")
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"Error saving benchmark results: {e}")
+        has_errors = True
+
+  # Save baseline only if no critical execution/parsing errors occurred
+  if args.save_baseline:
+    if has_errors:
+      print(
+          "Warning: Critical errors occurred during parsing. "
+          "Skipping saving of the new baseline to prevent corruption."
+      )
+    else:
+      try:
+        dirname = os.path.dirname(args.save_baseline)
+        if dirname:
+          os.makedirs(dirname, exist_ok=True)
+        sorted_baseline = dict(sorted(new_baseline_data.items()))
+        with open(args.save_baseline, "w", encoding="utf-8") as f:
+          json.dump(sorted_baseline, f, indent=2)
+        print(f"Saved new baseline to {args.save_baseline}")
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"Error saving baseline {args.save_baseline}: {e}")
+        has_errors = True
+
+  # Determine final exit status
+  if has_errors:
+    print("\nOne or more critical errors occurred during execution.")
+    sys.exit(1)
+  elif has_regression:
+    print("\nOne or more tests regressed significantly.")
+    if args.warn_only:
+      print("Non-blocking mode active: exiting with code 0.")
+      sys.exit(0)
+    else:
+      sys.exit(1)
+  else:
+    print("All tests passed execution time and regression checks.")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+  main()

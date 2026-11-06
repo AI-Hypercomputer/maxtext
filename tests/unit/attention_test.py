@@ -325,6 +325,353 @@ class JaxFlashAttentionTest(unittest.TestCase):
         atol=1e-3,
     )
 
+  def test_flash_attention_bwd_mha(self):
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(42)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_attn(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_attn(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_gqa(self):
+    batch, q_heads, kv_heads, q_len, kv_len, head_dim = 2, 4, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(123)
+
+    q = jnp.asarray(rng.normal(size=(batch, q_heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, kv_heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, kv_heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, q_heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_gqa(query, key, value):
+      head_mult = q_heads // kv_heads
+      key_rep = jnp.repeat(key, head_mult, axis=1)
+      value_rep = jnp.repeat(value, head_mult, axis=1)
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key_rep)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value_rep)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_gqa(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_causal(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(456)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+    mask_arr = mask_obj[:, :]
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask_obj,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+        is_causal=True,
+    )
+
+    def dense_causal(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      logits = jnp.where(mask_arr[None, None, :, :], logits, -1e30)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_causal(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_soft_cap(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    cap = 5.0
+    rng = np.random.default_rng(789)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        cap=cap,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        cap=cap,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_capped(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      logits = jnp.tanh(logits / cap) * cap
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_capped(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_segment_ids(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(999)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    q_seg = jnp.array([[0] * 16 + [1] * 16], dtype=jnp.int32)
+    kv_seg = jnp.array([[0] * 16 + [1] * 16], dtype=jnp.int32)
+    segment_ids = jax_flash_attention.SegmentIds(q=q_seg, kv=kv_seg)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=segment_ids,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        segment_ids=segment_ids,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_segmented(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      seg_mask = q_seg[:, None, :, None] == kv_seg[:, None, None, :]
+      logits = jnp.where(seg_mask, logits, -1e30)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_segmented(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_3d_mqa(self):
+    q_heads, q_len, kv_len, head_dim = 4, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(101)
+
+    q = jnp.asarray(rng.normal(size=(q_heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(q_heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q[None, :],
+        k[None, None, :],
+        v[None, None, :],
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+    output_3d = jnp.squeeze(output, axis=0)
+    lse_3d = jnp.squeeze(stats["logsumexp"], axis=0)
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output_3d,
+        do=do,
+        logsumexp=lse_3d,
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    self.assertEqual(dq.shape, q.shape)
+    self.assertEqual(dk.shape, k.shape)
+    self.assertEqual(dv.shape, v.shape)
+
+    def dense_mqa(query, key, value):
+      logits = jnp.einsum("hqd,kd->hqk", query, key)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("hqk,kd->hqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_mqa(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
 
 class SplashLocalMaskTest(unittest.TestCase):
   """Tests for Splash local masks."""
@@ -1903,8 +2250,10 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
@@ -2262,48 +2611,6 @@ class AttentionTest(parameterized.TestCase):
           "shard_mode": "auto",
       },
       {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "explicit",
-      },
-      {
           "testcase_name": "cp_ep_with_load_balance_explicit",
           "ici_context_parallelism": 2,
           "context_parallel_load_balance": True,
@@ -2463,8 +2770,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -2553,36 +2858,12 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "no_load_balance",
-          "context_parallel_load_balance": False,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": False,
-      },
-      {
-          "testcase_name": "load_balance",
-          "context_parallel_load_balance": True,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": False,
-      },
-      {
           "testcase_name": "load_balance_dq_reduction_unroll",
           "context_parallel_load_balance": True,
           "max_target_length": 1024,
           "dq_reduction_steps": 3,
           "ring_scan_unroll": 2,
           "packing": False,
-      },
-      {
-          "testcase_name": "packed",
-          "context_parallel_load_balance": False,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": True,
       },
       {
           "testcase_name": "packed_load_balance",
@@ -2925,8 +3206,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -2971,8 +3250,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -3507,11 +3784,26 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
-  @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
-  def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
+  @staticmethod
+  def _stub_tpu_inference_attention(mock_rpa_ops=None, mock_dcp_forward=None):
+    pkg = types.ModuleType("tpu_inference")
+    layers = types.ModuleType("tpu_inference.layers")
+    common = types.ModuleType("tpu_inference.layers.common")
+    attn_iface = types.ModuleType("tpu_inference.layers.common.attention_interface")
+    cp_attn = types.ModuleType("tpu_inference.layers.common.cp_attention")
+    attn_iface.sharded_ragged_paged_attention = mock_rpa_ops or mock.MagicMock()
+    cp_attn.dcp_forward = mock_dcp_forward or mock.MagicMock()
+    return {
+        "tpu_inference": pkg,
+        "tpu_inference.layers": layers,
+        "tpu_inference.layers.common": common,
+        "tpu_inference.layers.common.attention_interface": attn_iface,
+        "tpu_inference.layers.common.cp_attention": cp_attn,
+    }
+
+  def test_forward_serve_vllm(self):
     """Tests the forward_serve_vllm method with mocked RPA attention."""
+    mock_sharded_ragged_paged_attention = mock.MagicMock()
     # Setup config for vLLM RPA
     vllm_config_arguments = self.config_arguments.copy()
     vllm_config_arguments["attention"] = "vllm_rpa"
@@ -3560,17 +3852,20 @@ class AttentionTest(parameterized.TestCase):
 
     mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
-    # Call the attention layer
-    output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
-    )
+    with mock.patch.dict(
+        sys.modules, self._stub_tpu_inference_attention(mock_rpa_ops=mock_sharded_ragged_paged_attention)
+    ):
+      # Call the attention layer
+      output, updated_kv_cache = attention_vllm(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=mock_kv_cache,
+          attention_metadata=mock_attention_metadata,
+      )
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
@@ -3582,11 +3877,9 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
 
-  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
-  @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
-  def test_forward_serve_vllm_batched_rpa(self, mock_sharded_ragged_paged_attention):
+  def test_forward_serve_vllm_batched_rpa(self):
     """Tests the forward_serve_vllm method with mocked batched RPA attention."""
+    mock_sharded_ragged_paged_attention = mock.MagicMock()
     # Setup config for vLLM Batched RPA
     vllm_config_arguments = self.config_arguments.copy()
     vllm_config_arguments["attention"] = "vllm_batched_rpa"
@@ -3635,17 +3928,20 @@ class AttentionTest(parameterized.TestCase):
 
     mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
-    # Call the attention layer
-    output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
-    )
+    with mock.patch.dict(
+        sys.modules, self._stub_tpu_inference_attention(mock_rpa_ops=mock_sharded_ragged_paged_attention)
+    ):
+      # Call the attention layer
+      output, updated_kv_cache = attention_vllm(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=mock_kv_cache,
+          attention_metadata=mock_attention_metadata,
+      )
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
@@ -3657,6 +3953,83 @@ class AttentionTest(parameterized.TestCase):
     expected_output = attention_vllm.out_projection(reshaped_mock_output)
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
+
+  def test_forward_serve_vllm_dcp(self):
+    """Tests that forward_serve_vllm dispatches to dcp_forward when mesh has dcp > 1."""
+    mock_rpa_ops = mock.MagicMock()
+    mock_dcp_forward = mock.MagicMock()
+
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    total_tokens = self.global_batch_size * seq_len
+    query = jnp.ones((self.global_batch_size, seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    value = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    mock_kv_cache = [jnp.ones((1,))]
+    mock_attention_metadata = mock.Mock()
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,))]
+    mock_dcp_forward.return_value = (mock_updated_kv_cache, mock_output)
+
+    attention_vllm.mesh = types.SimpleNamespace(shape={"dcp": 2})
+
+    with mock.patch.dict(
+        sys.modules,
+        self._stub_tpu_inference_attention(mock_rpa_ops=mock_rpa_ops, mock_dcp_forward=mock_dcp_forward),
+    ):
+      output, updated_kv_cache = attention_vllm.forward_serve_vllm(
+          query,
+          key,
+          value,
+          rpa_kv_cache=mock_kv_cache,
+          rpa_metadata=mock_attention_metadata,
+      )
+
+    mock_dcp_forward.assert_called_once()
+    mock_rpa_ops.assert_not_called()
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertTrue(jnp.allclose(output, mock_output))
+
+    from maxtext.layers import initializers, moe  # pylint: disable=import-outside-toplevel
+
+    moe_layer = moe.RoutedMoE(
+        config=config,
+        num_experts=4,
+        num_experts_per_tok=2,
+        mesh=types.SimpleNamespace(shape={"dcp": 2}),
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=64,
+        weight_dtype=self.dtype,
+        dtype=self.dtype,
+        quant=None,
+        rngs=self.nnx_rng,
+    )
+    self.assertEqual(moe_layer._expert_parallelism_name, ("attn_dp_expert", "expert", "dcp"))  # pylint: disable=protected-access
 
 
 class MLATest(attention_test_util.MLATestBase):
@@ -3960,48 +4333,6 @@ class MLATest(attention_test_util.MLATestBase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 1,
           "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "explicit",
       },
       {
           "testcase_name": "cp_ep_with_load_balance_explicit",
@@ -5994,8 +6325,10 @@ class CompressedAttentionTest(parameterized.TestCase):
   def setUp(self):
     """Setup test dependencies and configuration."""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
   @parameterized.named_parameters(
       {"testcase_name": "csa_ratio4_dot_product", "compress_ratio": 4, "attention_kernel": "dot_product"},
@@ -6247,8 +6580,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "compressed_rope_max_timescale": 160000,
         "rope_max_timescale": 10000,
         "qk_rope_head_dim": 64,
+        "override_model_config": True,
+        "base_emb_dim": 256,
         "base_num_kv_heads": 1,
-        "base_num_query_heads": 16,
+        "base_num_query_heads": 4,
     }
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -6434,8 +6769,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "compressed_rope_max_timescale": 160000,
         "rope_max_timescale": 10000,
         "qk_rope_head_dim": 64,
+        "override_model_config": True,
+        "base_emb_dim": 256,
         "base_num_kv_heads": 1,
-        "base_num_query_heads": 16,
+        "base_num_query_heads": 4,
     }
     cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],

@@ -67,7 +67,7 @@ from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
+from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, single_stack_axis, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
@@ -144,6 +144,29 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
       return tensor.astype(np.float32)
     return tensor
   return np.asarray(tensor)
+
+
+# Router state bf16 cannot hold exactly: the fp32 routing bias and integer
+# token-to-expert ids (bf16 rounds integers above 256).
+_FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+_FULL_PRECISION_SUBSTRINGS = (
+    "-attn_hc-",
+    "-ffn_hc-",
+    "-hc_head-",
+    "-self_attention-sinks",
+    "-self_attention-indexer-k_norm-",
+    "-self_attention-indexer-weights_proj-",
+)
+
+
+def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
+  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
+  if save_dtype not in ("bfloat16", DType.BFLOAT16):
+    return save_dtype
+  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
+  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
+    return "float32"
+  return save_dtype
 
 
 class LazyHFLoader:
@@ -226,7 +249,7 @@ class LazyHFLoader:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
 
-  def get_tensor(self, key: str) -> np.ndarray:
+  def get_tensor(self, key: str, dtype: str | None = None) -> np.ndarray:
     """
     Retrieves a specific tensor by name, lazily loading its shard if necessary.
 
@@ -270,7 +293,7 @@ class LazyHFLoader:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
         t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, self.save_dtype)
+        return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
 
 
 class LazyTensor:
@@ -421,7 +444,7 @@ def _build_multi_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
-    mt_key: str = "",
+    mt_key: str | tuple[str, ...] = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along several axes.
 
@@ -497,19 +520,7 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
-  axis_to_stack = 0
-  if config.scan_layers:
-    is_var_collection = "MoEBiasVar" in mt_key or "Tid2EidVar" in mt_key
-    is_unscanned_moe = "MoeBlock" in mt_key and "scanned_blocks" not in mt_key
-    if not (is_var_collection or is_unscanned_moe):
-      # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
-      # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
-      # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
-      # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
-      axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
-  else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
-    axis_to_stack = 0
+  axis_to_stack = single_stack_axis(mt_key, config, target_shape)
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
@@ -903,8 +914,8 @@ def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revisi
 
   original_getter = tensor_getter
 
-  def _merged_getter(key):
-    base_w = original_getter(key)
+  def _merged_getter(key, **kwargs):
+    base_w = original_getter(key, **kwargs)
     if key in base_to_lora:
       lora_dict = base_to_lora[key]
       if "A" in lora_dict and "B" in lora_dict:
@@ -1098,7 +1109,7 @@ def main(
               for k, v in hf_state_dict_numpy.items()
           }
 
-      def _eager_getter(key):
+      def _eager_getter(key, dtype=None):
         if key is None:
           return None
         resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
@@ -1106,7 +1117,7 @@ def main(
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]
-        return _convert_tensor_to_numpy(v, save_dtype)
+        return _convert_tensor_to_numpy(v, dtype or save_dtype)
 
       tensor_getter = _eager_getter
 
@@ -1162,9 +1173,11 @@ def main(
 
       # Step 2: Determine the loading function for hf key
       # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
+      param_save_dtype = _param_save_dtype(mt_param_key_or_keys, save_dtype)
+      getter = tensor_getter if param_save_dtype == save_dtype else partial(tensor_getter, dtype=param_save_dtype)
       load_fn = _get_hf_loading_function(
           hf_source_keys_or_key,
-          tensor_getter,
+          getter,
           hook_fn,
           mt_target_shape_or_shapes,
           config,
@@ -1179,7 +1192,7 @@ def main(
           mt_target_shape_or_shapes,
           mt_param_key_or_keys,
           final_mt_weights,
-          save_dtype,
+          param_save_dtype,
           lazy_load_tensors,
       )
 

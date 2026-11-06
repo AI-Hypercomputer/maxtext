@@ -60,7 +60,7 @@ jobs:
           if { [ "$EVENT_NAME" = "schedule" ] && [ "$REF" = "refs/heads/main" ]; } || [ "$HEAD_REF" = "ci/test-duration-tracking" ]; then
             EXTRA_ARGS+=("--warn-only")
           fi
-          python3 tests/utils/process_test_results.py test-results \
+          python3 tools/dev/process_test_results.py test-results \
             --baseline per_test_baseline.json \
             --save-baseline new_per_test_baseline.json \
             --output-benchmark benchmark-results.json \
@@ -86,6 +86,8 @@ jobs:
           git worktree remove gh-pages
 
       - name: Track Test Durations (Macro-level Dashboard)
+        # process_test_results.py writes no file when no flavor has dashboard totals (e.g. every one is CPU or partial).
+        if: ${{ hashFiles('benchmark-results.json') != '' }}
         uses: benchmark-action/github-action-benchmark@3d3bca03e83647895ef4f911fa57de3c7a391aaf # v1.13.0
         with:
           name: MaxText Test Execution Times

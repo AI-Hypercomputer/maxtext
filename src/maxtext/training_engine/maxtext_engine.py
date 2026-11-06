@@ -306,8 +306,7 @@ def _conform_accumulator(value: Any, target: jax.sharding.NamedSharding) -> Any:
   """Moves one accumulated-gradient leaf onto `target`, preserving the value it represents.
 
   Only ever needed when the accumulator outlives the shardings it was produced under: a
-  checkpoint restore hands back the summed gradient, and a recompile may turn the deferred
-  all-reduce on or off. Both directions are exact -- resharding away from `unreduced` runs
+  recompile may turn the deferred all-reduce on or off. Both directions are exact -- resharding away from `unreduced` runs
   the all-reduce, and `device_put` onto it keeps the value on one data replica and zeroes
   the others, so the pending all-reduce reproduces it.
   """
@@ -645,12 +644,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # alone cannot express "wanted, not yet built", and conflating them would either make
     # every eager caller compile or make a deferred compile never happen.
     self._compile_requested = False
+    self._compiled_fwd_bwd: Any = None
+    self._compiled_fwd_bwd_accum: Any = None
+    self._compiled_update: Any = None
     self._compiled_signature: Any = None
     # `{kernel name: the jitted wrapper}` staged by the last `_compile_for_batch`; empty until
     # then, and only ever read straight after one, since a recompile replaces every entry.
     self._jitted_kernels: dict[str, Any] = {}
     self._compiled_eval: Any = None
     self._compiled_eval_signature: Any = None
+    self._model_graphdef: Any = None
+    self._state_graphdef: Any = None
     self._signature_compare_warned: bool = False
     self._replicated_batch_warned: bool = False
     if not training_config.model_name:
@@ -684,9 +688,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
     self._total_micro_steps = 0
-    # Set when this run resumed from an intra-step checkpoint, cleared once the step it
-    # resumed into completes and its finished state has been checkpointed.
-    self._resumed_mid_step = False
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
@@ -694,6 +695,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # covers every parameter, which is correct only because LoRA is rejected above.
     self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model, mesh=self._mesh)
     self._optimizer = self._build_optimizer(tx)
+    if self._config.use_m3_model:
+      from maxtext.m3 import models as m3_models  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+      m3_models.configure_engine(self)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
@@ -759,12 +764,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _checkpoint_dir(self) -> str:
     """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
-    return self._config.checkpoint_dir
+    return self._config.checkpoint_dir if self._config.enable_checkpointing else ""
 
   @property
   def total_micro_steps(self) -> int:
     """Returns how many micro steps this run has folded in over its whole lifetime."""
     return self._total_micro_steps
+
+  def _reset_compiled_state(self, *, reset_model: bool) -> None:
+    """Clears compiled executables, signatures, and cached pure state after a model/optimizer/state replacement."""
+    self._compiled = False
+    self._compiled_fwd_bwd = None
+    self._compiled_fwd_bwd_accum = None
+    self._compiled_update = None
+    self._jitted_kernels = {}
+    self._compiled_signature = None
+    self._compiled_eval = None
+    self._compiled_eval_signature = None
+    if reset_model:
+      self._model_graphdef = None
+    self._state_graphdef = None
+    self._invalidate_pure_state()
+    self.reset_accumulation()
 
   @property
   def model(self) -> Any:
@@ -775,14 +796,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def model(self, new_model: Any) -> None:
     """Sets the NNX model instance."""
     self._model = new_model
-    self._compiled = False
-    self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
-    self._compiled_update = None
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
-    self._model_graphdef = None
-    self._invalidate_pure_state()
+    self._state = None
+    self._reset_compiled_state(reset_model=True)
 
   @property
   def optimizer(self) -> Any:
@@ -793,14 +808,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def optimizer(self, new_optimizer: Any) -> None:
     """Sets the NNX optimizer instance."""
     self._optimizer = new_optimizer
-    self._compiled = False
-    self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
-    self._compiled_update = None
-    self._state_graphdef = None
-    self._invalidate_pure_state()
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
+    self._state = None
+    self._reset_compiled_state(reset_model=False)
 
   @property
   def train_step(self) -> int:
@@ -823,14 +832,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def state(self, new_state: Any) -> None:
     """Sets the current train state."""
     self._state = new_state
-    self._compiled = False
-    self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
-    self._compiled_update = None
-    self._state_graphdef = None
-    self._invalidate_pure_state()
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
+    self._model = getattr(new_state, _MODEL_STATE_KEY, None) if new_state is not None else None
+    self._optimizer = getattr(new_state, _OPTIMIZER_STATE_KEY, None) if new_state is not None else None
+    self._reset_compiled_state(reset_model=True)
 
   @property
   def micro_step_count(self) -> int:
@@ -841,6 +845,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def has_accumulated_grads(self) -> bool:
     """Returns True if accumulated gradients are present."""
     return self._accumulated_grads is not None
+
+  def reset_accumulation(self) -> None:
+    """Discards any gradients and metrics accumulated within the current training step."""
+    self._cached_losses.clear()
+    self._accumulated_grads = None
+    self._accumulated_denominator = None
+    self._micro_step_count = 0
 
   def with_loss_fn(self, customized_fn: Callable[..., Any], has_aux: bool = False) -> "MaxTextTrainingEngine":
     """Overrides the default autoregressive loss function with a custom RL loss.
@@ -1048,77 +1059,51 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Returns one train-state leaf committed to `target`."""
     return jax.device_put(leaf, target)
 
-  def _place_state_on_mesh(self) -> None:
-    """Commits every train-state leaf to this mesh, in place, before anything is compiled.
+  def _settle_state(self) -> None:
+    """Places every train-state leaf onto its target mesh and Zero-1 sharding in one pass.
 
-    `nnx.Optimizer` builds optax's `count` and its own `step` with `jnp.zeros` under no mesh, so
-    they reach the first update uncommitted and come back from it committed -- a second argument
-    signature, and a second compile of the largest kernel in the engine. Settling them up front
-    makes steps one and two the same program. Also covers state that arrives later, from a
-    restore or a public setter.
+    `nnx.Optimizer` builds optax's `count` and its own `step` with `jnp.zeros` under no mesh, and
+    allocates parameter-shaped moments replicated across the data axis. Settling the state up front
+    commits scalar bookkeeping leaves to the mesh and shards moments over `data` when Zero-1 is
+    active, so the first and second steps see the same input shardings and `state_mesh_shardings`
+    can be read directly off the state. Idempotent: leaves already on their target sharding are
+    left alone.
     """
-    if self._mesh is None or self._state is None:
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    if self._mesh is None:
       return
+    state_pure = self._read_state_pure()
+    zero1 = _zero1_active(self._config, self._mesh) is None
     moved = False
 
-    def place(leaf):
+    def place(leaf: Any, is_optimizer: bool) -> Any:
       nonlocal moved
       # `device_put` would turn a Python scalar in the state into a device array.
       if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
         return leaf
-      leaf_sharding = getattr(leaf, "sharding", None)
-      if isinstance(leaf_sharding, jax.sharding.NamedSharding) and leaf_sharding.mesh == self._mesh:
+      base = self._mesh_sharding(leaf)
+      target = (_zero1_sharding(self._mesh, leaf, base) or base) if (is_optimizer and zero1) else base
+      if getattr(leaf, "sharding", None) == target:
         return leaf
       moved = True
-      return self._place_leaf(leaf, self._mesh_sharding(leaf))
+      return self._place_leaf(leaf, target)
 
-    placed = jax.tree.map(place, self._read_state_pure())
+    if isinstance(state_pure, nnx.State) and _OPTIMIZER_STATE_KEY in state_pure:
+      placed = nnx.State(
+          {
+              key: jax.tree.map(functools.partial(place, is_optimizer=key == _OPTIMIZER_STATE_KEY), subtree)
+              for key, subtree in state_pure.raw_mapping.items()
+          }
+      )
+    else:
+      placed = jax.tree.map(functools.partial(place, is_optimizer=False), state_pure)
+
     if not moved:
       return
     with self._sharding_ctx():
       nnx.update(self._state, placed)
     self._invalidate_pure_state()
-    self._refresh_pure_state()
-
-  def _shard_optimizer_state_over_data(self) -> None:
-    """Moves the optimizer's parameter-shaped state onto the Zero-1 layout, in place.
-
-    `nnx.Optimizer` allocates the moments eagerly, as `zeros_like` of each parameter, so
-    they arrive replicated over the data axis however `shard_optimizer_over_data` is set --
-    which is why the flag has so far been a silent no-op here. Resharding them once, before
-    `_compile_for_batch` reads the state's layout back off the arrays, is all it takes for
-    the rest of the engine to follow: the update kernel's in/out shardings are derived from
-    exactly these arrays.
-
-    Every leaf is placed by `_zero1_sharding`, moments and bookkeeping alike, rather than
-    by walking for the ones named `mu`/`nu`. A scalar `count` has no dimension to shard and
-    comes back untouched, and a partitioned optimizer (Muon's `muon`/`adam` branches) needs
-    no special case. Idempotent: a leaf already carrying the data axis is left alone, so a
-    recompile or a restored checkpoint re-runs this for free.
-    """
-    if _zero1_active(self._config, self._mesh) is not None:
-      return
-    state_pure = self._read_state_pure()
-    if _OPTIMIZER_STATE_KEY not in state_pure:
-      return
-
-    moved = False
-
-    def place(leaf):
-      nonlocal moved
-      target = _zero1_sharding(self._mesh, leaf, self._mesh_sharding(leaf))
-      if target is None:
-        return leaf
-      moved = True
-      return self._place_leaf(leaf, target)
-
-    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
-    if not moved:
-      return
-    with self._sharding_ctx():
-      nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
-    self._invalidate_pure_state()
-    self._refresh_pure_state()
 
   def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
     """Returns `state_pure` with its `nnx.Param` leaves moved onto `params_shardings`.
@@ -1439,14 +1424,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     `static_batch` is closed over rather than passed, so non-array loss arguments (Tunix's
     `algo_config`, `pad_id`, `eos_id`) never reach the jit boundary.
     """
-    # The only place the graphs are walked: a recompile is when they may legitimately have
-    # changed shape, and everything after is maintained as plain pytrees.
+    # Place uncommitted leaves and shard Zero-1 moments before reading shardings off the state,
+    # then cache the pure state so the compiled step path never re-walks the NNX module graph.
+    self._settle_state()
     self._refresh_pure_state()
-    # Before the Zero-1 pass and the shardings read off the state below.
-    self._place_state_on_mesh()
-    # Before the shardings below are read off the state: this is what puts the optimizer
-    # moments on the Zero-1 layout, and `state_mesh_shardings` has to see them there.
-    self._shard_optimizer_state_over_data()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
 
@@ -1491,10 +1472,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
       update_in_shardings = (state_mesh_shardings, grad_shardings, replicated, None)
       update_out_shardings = (state_mesh_shardings, None, None)
-      # A live accumulator predates this compile -- a checkpoint restore hands one back, and
-      # a recompile can flip the deferral on or off -- so it may not be on the shardings the
-      # kernels were just built for. `jax.jit` matches `in_shardings` exactly and would
-      # reject it.
+      # A live accumulator predates this compile -- a recompile can flip the deferral on or
+      # off -- so it may not be on the shardings the kernels were just built for. `jax.jit`
+      # matches `in_shardings` exactly and would reject it.
       if self._accumulated_grads is not None:
         with self._sharding_ctx():
           self._accumulated_grads = jax.tree.map(_conform_accumulator, self._accumulated_grads, grad_shardings)
@@ -1581,7 +1561,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def compile(
       self,
-      dummy_data: abstract_engine.TrainerPayload,
+      dummy_data: abstract_engine.TrainerPayload | None = None,
       compiler_options: dict[str, Any] | None = None,
   ) -> None:
     """Triggers SPMD compilation of the fwd_bwd, update and eval steps.
@@ -1593,6 +1573,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         compiles lazily on the first `fwd_bwd` instead.
       compiler_options: Optional dictionary of compilation options passed to XLA compiler.
     """
+
+    def _resolve_dummy_routed_experts(data: Any) -> Any:
+      if not isinstance(data, abstract_engine.RLTrainerPayload):
+        return data
+      routed_experts = data.routed_experts
+      if routed_experts is None or routed_experts.size != 0:
+        return data
+      num_layers = self._config.num_decoder_layers
+      top_k = self._config.num_experts_per_tok
+      batch_size, seq_len = routed_experts.shape[:2]
+      expanded = np.zeros(
+          (batch_size, seq_len, num_layers, top_k),
+          dtype=routed_experts.dtype,
+      )
+      return dataclasses.replace(data, routed_experts=expanded)
+
     # Recorded even when compilation is deferred: it is what tells `fwd_bwd` the caller
     # wants the compiled path at all. Engines that never call `compile` stay eager.
     self._compile_requested = True
@@ -1609,6 +1605,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
       return
 
+    dummy_data = _resolve_dummy_routed_experts(dummy_data)
     compiled = self.compile_kernels(dummy_data, compiler_options)
     self._compiled_fwd_bwd = compiled["fwd_bwd"]
     self._compiled_fwd_bwd_accum = compiled["fwd_bwd_accum"]
@@ -1713,26 +1710,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       }
 
   @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
     Args:
       payload: Packed micro-batch training input.
-      **kwargs: Implementation-specific options, accepted for interface compatibility
-        and ignored by this engine.
     """
     batch = self._prepare_batch(payload)
 
-    model = getattr(self._state, "model", None) if self._state is not None else self._model
+    if self._state is None:
+      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
     # Wait for previous computations to finish before dispatching the next one to TPU.
     self._throttler.wait_for_next()
-
-    if self._state is None:
-      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
 
     if self._compile_requested:
       dynamic_batch, static_batch = _split_static_and_dynamic(batch)
@@ -1783,14 +1776,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._total_micro_steps += 1
 
   @_profiled_step("update")
-  def update(self, **kwargs: Any) -> int:
+  def update(self) -> int:
     """Applies accumulated gradients to update NNX model weights in HBM.
 
     Reuses NNX optimizer step from train.py (lines 511-535).
-
-    Args:
-      **kwargs: Implementation-specific options, accepted for interface compatibility
-        and ignored by this engine.
 
     Returns:
       The train step count after this update. Unchanged when there is nothing to apply.
@@ -1822,7 +1811,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # `state_pure` is donated, so between this call and the `nnx.update` below `self._state`
     # is torn -- reading one of its arrays raises "Array has been deleted". Keep them adjacent.
     with self._sharding_ctx():
-      if self._compiled and hasattr(self, "_compiled_update"):
+      if self._compiled:
         new_state_pure, grad_norm, is_skipped = self._compiled_update(
             state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
         )
@@ -1848,18 +1837,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         self._metrics_recorder.get_step_metrics(self.train_step),
     )
 
-    self._cached_losses.clear()
-    self._accumulated_grads = None
-    self._accumulated_denominator = None
-    self._micro_step_count = 0
+    self.reset_accumulation()
     self._train_step += 1
-
-    if self._resumed_mid_step:
-      # This is the step the run resumed into, and it just finished. The checkpoint on disk
-      # for it is still the partial one. Orbax's save-interval policy will not save this step
-      # again.
-      self._resumed_mid_step = False
-      self.save_checkpoint(metadata={"step": self.train_step}, force=True)
 
     return self.train_step
 
@@ -1884,7 +1863,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         self._metrics_logger.write_metrics(buffer, mode=metrics_module.Mode.EVAL)
       self._eval_metrics_recorder.cleanup()
 
-  def eval_step(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
+  def eval_step(self, payload: abstract_engine.TrainerPayload) -> None:
     """Prepares inputs, runs the evaluation, and logs eval metrics.
 
     Callers should bracket a sequence of eval_step calls with eval_context() so that the metrics
@@ -1892,7 +1871,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     Args:
       payload: Packed micro-batch evaluation input.
-      **kwargs: Additional keyword arguments for evaluation.
     """
     batch = self._prepare_batch(payload)
 
@@ -2016,106 +1994,86 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     return out
 
-  def _reduced_accumulated_grads(self) -> Any:
-    """Returns the accumulated gradients in the form Orbax can serialize.
-
-    While the data-parallel all-reduce is deferred they are held `unreduced` -- a
-    per-replica partial sum -- which Orbax cannot write (`device_indices_map` is undefined
-    for one) and which would not be a meaningful thing to write anyway. Resharding runs the
-    all-reduce the pending `update()` would have run, so the checkpoint holds exactly the
-    total that step will apply. `_compile_for_batch` puts a restored total back on the
-    accumulator's shardings.
-    """
-    if self._accumulated_grads is None or self._plain_grad_shardings is None:
-      return self._accumulated_grads
-    with self._sharding_ctx():
-      return jax.tree.map(jax.sharding.reshard, self._accumulated_grads, self._plain_grad_shardings)
-
-  def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
-    """Forces asynchronous Orbax checkpoint serialization.
+  def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
+    """Saves a checkpoint at a step boundary via Orbax.
 
     Args:
       metadata: Checkpoint metadata payload from Orchestrator.
-      **kwargs: Additional checkpoint saving options.
+      step: Step to save under. Defaults to `metadata["step"]`, then to the current step.
+      force: Save even if Orbax's save-interval policy would skip this step.
+
+    Raises:
+      ValueError: If called mid-step, with micro-batches accumulated that `update()` has not
+        applied yet. Checkpoints are taken between optimizer steps only.
     """
-    if not self._config.enable_checkpointing or not self._checkpoint_dir():
+    if self._micro_step_count > 0:
+      raise ValueError(
+          f"Mid-step checkpointing is not supported; micro_step_count must be 0, got {self._micro_step_count}."
+      )
+    if not self._checkpoint_dir():
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
+      return
+
+    if step is None and isinstance(metadata, Mapping):
+      step = metadata.get("step")
+    if step is None:
+      step = self.train_step
+    if not self._checkpoint_manager.should_save(step, force=force):
       return
 
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
+    # Settle uncompiled state onto the mesh and Zero-1 layout before Orbax serializes it; a
+    # compiled engine has already settled its state in `_compile_for_batch`.
+    if not self._compiled:
+      self._settle_state()
 
-    step = kwargs.pop("step", None)
-    if step is None and isinstance(metadata, Mapping):
-      step = metadata.get("step")
-    if step is None:
-      # checkpoint for incomplete train step is saved for self.train_step+1
-      # because update() is not called yet to increment train_step;
-      # checkpoint for completed step is saved for self.train_step because update() increments train_step
-      step = self.train_step + 1 if self._micro_step_count > 0 else self.train_step
-
-    if self._micro_step_count > 0:
-      logging.info(
-          "Saving intra-step checkpoint at step %d (micro_step_count=%d).",
-          step,
-          self._micro_step_count,
-      )
-    else:
-      logging.info("Saving checkpoint at step %d.", step)
+    logging.info("Saving checkpoint at step %d.", step)
 
     custom_metadata = {}
-    if metadata:
-      # Metadata from Orchestrator
+    # Metadata from the orchestrator is a black box: stored as given, so falsy values such as
+    # `{}` or `0` round-trip too.
+    if metadata is not None:
       custom_metadata["additional_metadata"] = metadata
-    # The gradients are stored unreduced, so their divisor has to survive the round-trip too.
-    if self._micro_step_count > 0 and self._accumulated_denominator is not None:
-      custom_metadata["accumulated_denominator"] = float(self._accumulated_denominator)
 
     ckpt_saved = self._checkpoint_manager.save_checkpoint(
         step=step,
-        checkpoint_state=checkpointing.CheckpointState(
-            model=self.model,
-            optimizer=self.optimizer,
-            # The full history, not `get_metrics()`: CheckpointState.accumulated_metrics is
-            # a list, and restore_checkpoint iterates it back into the recorder's buffer.
-            accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),
-            accumulated_grads=self._reduced_accumulated_grads(),
-            # Recorded by the CheckpointManager into custom_metadata, so that a later save
-            # at this same step can tell it supersedes this one.
-            micro_step_count=self._micro_step_count,
-        ),
+        checkpoint_state=checkpointing.CheckpointState(model=self.model, optimizer=self.optimizer),
         custom_metadata=custom_metadata,
-        **kwargs,
+        force=True,
     )
     if ckpt_saved:
       logging.info("Checkpoint saved at step %d.", step)
 
-  def restore_checkpoint(self, **kwargs: Any) -> Any:
-    """Restores the latest Multi-Tier Checkpoint and returns its metadata.
+  def restore_checkpoint(self, *, step: int | None = None) -> Any:
+    """Restores a checkpoint via Orbax and returns its metadata.
 
     Args:
-      **kwargs: Additional checkpoint restoration options.
+      step: Checkpoint step to restore. If None, restores the latest checkpoint.
 
     Returns:
-      The metadata PyTree of the restored checkpoint.
-    """
-    step = kwargs.get("step", None)
-    checkpoint_state = checkpointing.CheckpointState(
-        model=self.model,
-        optimizer=self.optimizer,
-        # Not `_reduced_accumulated_grads()`: unlike the save path, nothing here reads the
-        # value. `CheckpointManager.restore_checkpoint` builds its restore target from the
-        # model's params and overwrites this field, so reducing would run the deferred
-        # all-reduce over the whole gradient tree, and allocate a second copy of it, for a
-        # value that is thrown away. In the one corner where it does survive the call --
-        # metadata says `micro_step_count > 0` but the checkpoint holds no accumulator --
-        # unreduced is the form the already-compiled kernels want, and `_conform_accumulator`
-        # below is then a no-op instead of a reshard back.
-        accumulated_grads=self._accumulated_grads,
-    )
+      The metadata PyTree of the restored checkpoint, or `{"step": restored_step}` if saved
+      without custom metadata, or None if checkpointing is disabled or there is no checkpoint
+      to restore.
 
-    restored_step, restored_checkpoint_state, restored_metadata = self._checkpoint_manager.restore_checkpoint(
-        checkpoint_state=checkpoint_state,
+    Raises:
+      checkpointing.CheckpointRestoreError: If a checkpoint exists at `step` but cannot be
+        restored.
+    """
+    if not self._checkpoint_dir():
+      return None
+    if step is None:
+      step = self._checkpoint_manager.get_latest_step()
+    if step is None:
+      return None
+
+    # The restore target is read off the live state, and the Pathways array handler only restores
+    # into a NamedSharding. An engine that has not compiled yet -- e.g. resumed before its first
+    # step -- still holds optax's `count` and the optimizer's `step` uncommitted on one device.
+    # Settle the state here so every target leaf carries its mesh and Zero-1 sharding.
+    self._settle_state()
+    restored_step, restored_metadata = self._checkpoint_manager.restore_checkpoint(
+        checkpoint_state=checkpointing.CheckpointState(model=self.model, optimizer=self.optimizer),
         step=step,
     )
     if restored_step is None:
@@ -2123,102 +2081,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     logging.info("Checkpoint restored from step %d.", restored_step)
     # Orbax has just written new arrays into the live NNX variables, so the cache is wrong
-    # rather than merely old.
+    # rather than merely old. Re-settle the restored arrays onto the mesh and Zero-1 layout,
+    # and refresh the pure-state cache if the engine is compiled.
     self._invalidate_pure_state()
-
-    if restored_checkpoint_state.accumulated_metrics:
-      buffers = []
-      for b in restored_checkpoint_state.accumulated_metrics:
-        if isinstance(b, dict):
-          wms = {}
-          for k, wm in b.get("weighted_metrics", {}).items():
-            if isinstance(wm, dict):
-              wms[k] = abstract_engine.WeightedMetric(**wm)
-            else:
-              wms[k] = wm
-          buffers.append(
-              abstract_engine.MetricsBuffer(
-                  id=b.get("id", 0),
-                  mode=b.get("mode", "train"),
-                  weighted_metrics=wms,
-                  scalar_metrics=b.get("scalar_metrics", {}),
-                  aggregation_fns=b.get("aggregation_fns", {}),
-              )
-          )
-        else:
-          buffers.append(b)
-      # pylint: disable-next=protected-access
-      self._metrics_recorder._metrics_buffer = buffers
-
-    restored_additional_metadata = None
-    # Checkpoint with no metadata says nothing about how far into its step it
-    # got, and must not inherit the count from whatever this engine was doing before.
-    self._micro_step_count = 0
-    restored_denominator = None
-    if restored_metadata:
-      self._micro_step_count = restored_metadata.get("micro_step_count", 0)
-      restored_denominator = restored_metadata.get("accumulated_denominator", None)
-      restored_additional_metadata = restored_metadata.get("additional_metadata", None)
-
-    if self._micro_step_count > 0:
-      logging.info(
-          "Restored intra-step checkpoint at step %d (micro_step_count=%d).",
-          restored_step,
-          self._micro_step_count,
-      )
-      # update() will increment the step after applying the accumulated gradients
-      self.train_step = restored_step - 1
-      # The checkpoint at `restored_step` holds a partially accumulated step. Once that step
-      # completes, `update` replaces it with the finished state.
-      self._resumed_mid_step = True
-    else:
-      self.train_step = restored_step
-      self._resumed_mid_step = False
-
-    # Restore intra-step state if it exists. Gated on the count because for a complete step
-    # `restored_checkpoint_state.accumulated_grads` is just the value this engine passed in
-    # above, which the branch above has already discarded.
-    if self._micro_step_count > 0 and restored_checkpoint_state.accumulated_grads:
-      self._accumulated_grads = restored_checkpoint_state.accumulated_grads
-      if self._unreduced_grad_shardings is not None:
-        # What was saved is the reduced total; what the already-compiled kernels take is an
-        # unreduced partial. Without this the resumed step dies on an `in_shardings`
-        # mismatch, since restoring does not recompile -- the batch shape has not changed.
-        with self._sharding_ctx():
-          self._accumulated_grads = jax.tree.map(
-              _conform_accumulator, self._accumulated_grads, self._unreduced_grad_shardings
-          )
-      self._accumulated_denominator = jnp.float32(restored_denominator if restored_denominator else 0.0)
-
-      rebuilt_losses = None
-      if self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
-        active_buf = self._metrics_recorder.get_step_metrics(restored_step)
-        if active_buf and "loss" in active_buf.weighted_metrics:
-          wm = active_buf.weighted_metrics["loss"]
-          if wm.unreduced_sum.ndim > 0:
-            rebuilt_losses = [
-                abstract_engine.WeightedMetric(
-                    unreduced_sum=wm.unreduced_sum[i],
-                    denominator=wm.denominator[i],
-                    eps=wm.eps,
-                    min_denom=wm.min_denom,
-                )
-                for i in range(wm.unreduced_sum.shape[0])
-            ]
-          else:
-            rebuilt_losses = [wm]
-          self._cached_losses = rebuilt_losses
-
-      # Checkpoints predating the denominator carry no value for it, but the losses rebuilt
-      # above carry the very denominators that went into the saved gradients. Only those:
-      # any `_cached_losses` from before the restore belong to a different run.
-      if not restored_denominator and rebuilt_losses:
-        denominator = jnp.float32(0.0)
-        for cached_loss in rebuilt_losses:
-          denominator = denominator + jnp.sum(cached_loss.denominator).astype(jnp.float32)
-        self._accumulated_denominator = denominator
-
-    return restored_additional_metadata
+    self._settle_state()
+    if self._compiled:
+      self._refresh_pure_state()
+    self.train_step = restored_step
+    # Whatever this engine accumulated before the restore belongs to a different run: the
+    # checkpoint is at a step boundary, so the restored step starts with nothing accumulated.
+    self._metrics_recorder.cleanup()
+    self.reset_accumulation()
+    if restored_metadata and "additional_metadata" in restored_metadata:
+      return restored_metadata["additional_metadata"]
+    return {"step": restored_step}
 
   def record_metrics(
       self,
@@ -2227,14 +2103,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
       mode: metrics_module.Mode = metrics_module.Mode.TRAIN,
   ) -> None:
-    """Records a metric into the buffer, appending to JAX arrays.
+    """Records a metric into the step's buffer (host-side; concatenated once at flush time).
 
     Args:
       name: The name of the metric.
       metric: The metric to record.
       aggregation_fn: The aggregation function to apply to the metric.
     """
-    if metric is None:
+    # `loss_fn` auxiliary outputs can contain `None` entries (disabled optional losses),
+    # `"intermediate_outputs"` (sow activations/mutable collections), or tuples/lists
+    # (e.g., `(total_loss, aux)`). Skip these so `buffer_metrics` only receives scalar
+    # metrics, arrays, or nested metric dicts.
+    if metric is None or name == "intermediate_outputs" or isinstance(metric, (tuple, list)):
       return
     if isinstance(metric, dict):
       for sub_k, sub_v in metric.items():
@@ -2310,21 +2190,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def prepare_weight_sync(
       self,
+      *,
+      sync_request: Any = None,
       staging_transport: str = "raiden",
-      **kwargs: Any,
   ) -> Any:
     """Stages weights for transfer and returns access coordinates.
 
     Args:
+      sync_request: The round's request from Tunix's `WeightSyncCoordinator`, forwarded by
+        `TrainerWorker`. Unused: staging does not depend on the round.
       staging_transport: Weight staging transport ('raiden' or custom).
-      **kwargs: Weight staging parameters.
 
     Returns:
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
+    del sync_request
     if staging_transport == "raiden":
       try:
-        from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+        from tunix.dist_rl.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top,import-outside-toplevel
       except ImportError as exc:
         # Fatal, not a warning: Raiden staging was explicitly requested and cannot be
         # provided. Returning empty metadata instead defers the failure to the caller --
@@ -2332,7 +2215,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # side", which reports a count from another process and never mentions the missing
         # module, leaving the real cause in this worker's log on another host.
         raise RuntimeError(
-            "staging_transport='raiden' requires tunix.experimental.weight_sync."
+            "staging_transport='raiden' requires tunix.dist_rl.weight_sync."
             "raiden_synchronizer, which the installed tunix does not provide. Install a"
             " tunix build that ships it, or select a different staging_transport."
         ) from exc
@@ -2419,8 +2302,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # naming the transport that was actually asked for.
     raise ValueError(f"unknown staging_transport {staging_transport!r}; expected 'raiden'.")
 
-  def release_weight_sync(self, **kwargs: Any) -> Any:
-    """Releases staged weight buffers after transfer completion."""
+  def release_weight_sync(self, *, sync_request: Any = None) -> Any:
+    """Releases staged weight buffers after transfer completion.
+
+    Args:
+      sync_request: The round's request, forwarded by Tunix's `TrainerWorker`. Unused.
+    """
+    del sync_request
     self._last_staged_step = None
     self._staged_metadata = None
     if self._raiden_sync:
@@ -2439,13 +2327,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._last_staged_step = None
     self._staged_metadata = None
 
-    if self._config.enable_checkpointing and self._checkpoint_dir() and self._checkpoint_manager:
-      self.save_checkpoint(metadata=None, force=True)
-      self._checkpoint_manager.close()
-
-    # Write the metrics and cleanup metrics logger resources
-    self._throttler.cleanup()
-
-    # Cleanup metrics recorder resources after saving the checkpoint, ensuring all buffered metrics are saved properly
-    self._metrics_recorder.cleanup()
-    self._metrics_logger.cleanup()
+    try:
+      if self._checkpoint_dir():
+        try:
+          if self._config.save_checkpoint_on_completion:
+            if self._micro_step_count > 0:
+              # Checkpoints are taken between optimizer steps only; the partial step is lost.
+              logging.warning(
+                  "Closing mid-step (micro_step_count=%d); skipping the final checkpoint.", self._micro_step_count
+              )
+            else:
+              self.save_checkpoint(metadata={"step": self.train_step}, force=True)
+        finally:
+          self._checkpoint_manager.close()
+    finally:
+      try:
+        self._throttler.cleanup()
+      finally:
+        try:
+          self._metrics_recorder.cleanup()
+        finally:
+          self._metrics_logger.cleanup()

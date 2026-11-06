@@ -33,6 +33,7 @@ except ImportError:
 
 # Minimum wall-clock seconds between two uploads of the staging log to GCS.
 _MIN_SYNC_INTERVAL_SECONDS = 5.0
+_DSV3_EVAL_DATASET_SIZE = 1024
 
 _enabled = False
 _is_configured = False
@@ -234,6 +235,12 @@ def _lowest_precision(*precisions: str) -> str:
   return min(precisions, key=lambda p: _PRECISION_BITS.get(p, 0))
 
 
+def _global_batch_size_to_train_on(config) -> int:
+  """Returns the logical training batch size (excluding elastic constant-batch padding rows)."""
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  return logical_batch if isinstance(logical_batch, int) else config.global_batch_size_to_train_on
+
+
 def init_print(config):
   """Logs the static submission and hyperparameter events for compliance checking."""
   setup_mllog(config)
@@ -250,10 +257,16 @@ def init_print(config):
   mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.DEEPSEEKV3_671B)
   mllogger.event(mllog.constants.SEED, config.data_shuffle_seed)
   mllogger.event(mllog.constants.MAX_STEPS, config.steps)
-  mllogger.event(mllog.constants.GLOBAL_BATCH_SIZE, config.global_batch_size_to_train_on)
+  mllogger.event(mllog.constants.GLOBAL_BATCH_SIZE, _global_batch_size_to_train_on(config))
   mllogger.event(mllog.constants.GRADIENT_ACCUMULATION_STEPS, config.gradient_accumulation_steps)
   mllogger.event(mllog.constants.MAX_SEQUENCE_LENGTH, config.max_target_length)
-  mllogger.event(mllog.constants.EVAL_SAMPLES, config.global_batch_size_to_eval_on * config.eval_steps)
+  # The eval set has 1024 sequences; larger eval batches only repeat them.
+  eval_samples = (
+      min(config.global_batch_size_to_eval_on * config.eval_steps, _DSV3_EVAL_DATASET_SIZE)
+      if config.eval_steps > 0
+      else _DSV3_EVAL_DATASET_SIZE
+  )
+  mllogger.event(mllog.constants.EVAL_SAMPLES, eval_samples)
   mllogger.event(mllog.constants.TRAIN_SAMPLES, 1574207408)
   mllogger.event(mllog.constants.INIT_CHECKPOINT_STEP, 0)
   mllogger.event(mllog.constants.OPT_NAME, mllog.constants.ADAMW)
@@ -282,6 +295,9 @@ def init_print(config):
   expert_parallelism = _axis_product(config, "ici_expert_parallelism", "dcn_expert_parallelism")
   quantization = getattr(config, "quantization", None)
   token_all_gather_quantized = quantization and getattr(config, "moe_quantize_token_all_gather", False)
+  attn_quantized = bool(
+      getattr(config, "experimental_sa_quant_q_fp8", False) or getattr(config, "experimental_sa_quant_k_fp8", False)
+  )
   if use_lineage:
     # Lineage runs on a physical mesh where every ici_*_parallelism field is 1.
     # Its MLA projections are head-sharded across the `activation_length`
@@ -291,15 +307,17 @@ def init_print(config):
     tensor_parallelism = _rule_parallelism(config, "activation_length")
     quantization = quantization or config.lineage_quantization
     token_all_gather_quantized = True
+    attn_quantized = "splash_qk" in (config.lineage_quantization or "")
   dtype_str = _mllog_precision(getattr(config, "dtype", "bfloat16"))
   linear_prec = _mllog_precision(quantization, fallback=dtype_str)
+  attn_prec = _lowest_precision(dtype_str, "fp8") if attn_quantized else dtype_str
   comm_precisions = [_mllog_precision(getattr(config, "grad_dtype", None), fallback=dtype_str)]
   if token_all_gather_quantized and expert_parallelism > 1:
     # The EP token all-gather sends tokens in the GMM activation qtype.
     comm_precisions.append(linear_prec)
   comm_prec = _lowest_precision(*comm_precisions)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_LINEAR, linear_prec)
-  mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_ATTN, dtype_str)
+  mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_ATTN, attn_prec)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_COMM, comm_prec)
   mllogger.event(mllog.constants.TENSOR_PARALLELISM, tensor_parallelism)
   mllogger.event(
@@ -337,7 +355,7 @@ def block_start(config, step=0):
   if not _should_log():
     return
   _open_block = {
-      "samples_count": config.global_batch_size_to_train_on,
+      "samples_count": _global_batch_size_to_train_on(config),
       "step": step,
   }
   mllogger.start(mllog.constants.BLOCK_START, metadata=dict(_open_block))
@@ -373,7 +391,7 @@ def eval_start(config, step, start_step=0):
   mllogger.start(
       mllog.constants.EVAL_START,
       metadata={
-          "samples_count": (step - start_step) * config.global_batch_size_to_train_on,
+          "samples_count": (step - start_step) * _global_batch_size_to_train_on(config),
           "step": step,
       },
   )
@@ -383,7 +401,7 @@ def eval_stop(config, step, eval_loss, start_step=0):
   """Logs EVAL_ACCURACY and EVAL_STOP, then opens the next block or stops the run."""
   if not _should_log():
     return
-  samples_count = (step - start_step) * config.global_batch_size_to_train_on
+  samples_count = (step - start_step) * _global_batch_size_to_train_on(config)
 
   mllogger.event(
       mllog.constants.EVAL_ACCURACY,
@@ -431,7 +449,7 @@ def tracked_stats(config, step, step_time, loss, start_step=0):
     value["train_step_time"] = step_time
   mllogger.event(
       key="tracked_stats",
-      metadata={mllog.constants.SAMPLES_COUNT: (step - start_step) * config.global_batch_size_to_train_on},
+      metadata={mllog.constants.SAMPLES_COUNT: (step - start_step) * _global_batch_size_to_train_on(config)},
       value=value,
   )
   sync_log()

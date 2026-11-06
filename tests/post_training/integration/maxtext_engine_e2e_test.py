@@ -40,7 +40,7 @@ import pytest
 # failure where it does not -- rather than passing or failing on which tunix happens to
 # be installed.
 try:
-  importlib.import_module("tunix.experimental.weight_sync.raiden_synchronizer")
+  importlib.import_module("tunix.dist_rl.weight_sync.raiden_synchronizer")
   _RAIDEN_AVAILABLE = True
 except ImportError:
   _RAIDEN_AVAILABLE = False
@@ -145,6 +145,7 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
         "async_checkpointing": True,
         # Disable scan_layers to prevent prepare_weight_sync from trying to unscan layers on DummyNNXModel
         "scan_layers": False,
+        "profiler": "xplane",
         "skip_first_n_steps_for_profiler": 1,
         "profiler_steps": 2,
     }
@@ -168,7 +169,7 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     mock_create_opt.return_value = (lambda step: jnp.array(0.001), optax.sgd(0.01))
 
     mock_ckpt_mgr_inst = mock.MagicMock()
-    mock_ckpt_mgr_inst.restore_checkpoint.return_value = (None, None, None)
+    mock_ckpt_mgr_inst.restore_checkpoint.return_value = (None, None)
     mock_ckpt_mgr.return_value = mock_ckpt_mgr_inst
 
     trainer_instance = maxtext_engine.MaxTextTrainingEngine(mock_config)

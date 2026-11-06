@@ -58,7 +58,7 @@ EXCLUDED_GCLOUD_PACKAGES = (
 )
 
 # Versions this environment pins away from the source lock. tokamax imports xprof at module scope
-# from 0.0.13 onwards (still the case in 0.0.14), and maxtext imports tokamax from megablox, so with
+# from 0.0.13 onwards (still the case in 0.0.16), and maxtext imports tokamax from megablox, so with
 # xprof filtered out above every test that reaches maxtext.layers.moe fails to collect. 0.0.12 is
 # the last release that does not need xprof, so the decoupled environment stays free of the Cloud
 # clients without holding the hardware locks back. Drop this once tokamax no longer requires xprof,

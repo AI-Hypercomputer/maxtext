@@ -31,6 +31,13 @@ import numpy as np
 
 import pathwaysutils  # pylint: disable=unused-import
 
+# Triton (used by te_mhc) segfaults when its native library is loaded after TensorFlow's, so load
+# it first when it is installed.
+try:
+  import triton  # pylint: disable=unused-import
+except ImportError:
+  pass
+
 try:
   import tensorflow as tf
 
@@ -60,6 +67,7 @@ from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate,
 from maxtext.layers.attention_mla import indexer_losses
 from maxtext.layers import moe
 from maxtext.common import checkpointing, profiler
+from maxtext.common import snapshotting
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -72,6 +80,7 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -82,6 +91,7 @@ from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils import mllog_utils
+from maxtext.utils import gpu_collective_overlap_pass
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
@@ -105,6 +115,21 @@ def get_first_step(model, state):
     step_val = state.step.get_value() if hasattr(state.step, "get_value") else state.step
     return int(step_val)
   return int(state.optimizer.step.get_value())
+
+
+def _one_hot_targets(targets, config, mesh):
+  """Expand integer targets into the one-hot matrix cross entropy multiplies with the logits."""
+  if not getattr(config, "lm_head_fsdp_as_vocab_tp", False):
+    return jax.nn.one_hot(targets, config.vocab_size)
+  # A vocab-parallel head leaves the logits sharded on vocab rather than on batch, so the
+  # one-hot matrix has to be built in that layout too -- see sharding.vocab_parallel_one_hot.
+  return sharding.vocab_parallel_one_hot(
+      targets,
+      config.vocab_size,
+      mesh,
+      sharding.lm_head_logical_axes(vocab_parallel=True)[2],
+      config.shard_mode,
+  )
 
 
 # -----------------------------------------------------------------------------
@@ -151,6 +176,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  if lineage_adapter.is_native(config):
+    return lineage_adapter.loss_and_aux(model, config, data, is_train=is_train)
   # Only forward the kwarg when router replay is actually in use, so models
   # and adapters whose __call__ predates the feature keep working.
   forced_routing_kwargs = (
@@ -219,9 +246,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if indexer_losses_state is not None:
     intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
-  if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+  is_dense_warmup = config.use_indexer and config.indexer_loss_scaling_factor > 0.0 and not config.indexer_sparse_training
+  if is_dense_warmup and is_train:
     # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
     # The main model parameters are frozen and only the indexer is trained via KL divergence.
+    # Gated on indexer_loss_scaling_factor > 0 like the logits skip in nnx_decoders.py; otherwise
+    # there is no indexer loss either and the total objective would be zero.
     xent_sum = 0.0
     total_z_loss = 0.0
   elif config.num_vocab_tiling > 1:
@@ -236,7 +266,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
           target_positions,
           data["targets_segmentation"] != 0,
       )
-    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+    one_hot_targets = _one_hot_targets(data["targets"], config, model.mesh)
     xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
     xent = sharding.maybe_shard_with_logical(
@@ -473,6 +503,45 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
   return None
 
 
+def _decode_moe_bias_update(update, config):
+  """Returns the value to add to a routed gate bias from a sown `moe_bias_updates`.
+
+  Under pipeline parallelism the MoE layers sow per-expert token counts instead of the +-rate step (see
+  `calculate_load_balance_updates(return_counts=True)`): the pipeline sums them over microbatches, so the step
+  below is taken on the load of the whole global batch, exactly like the non-pipelined model.
+  """
+  update = jnp.asarray(update[0] if isinstance(update, (tuple, list)) else update)
+  if not getattr(config, "using_pipeline_parallelism", False):
+    return update
+  counts = update.astype(jnp.float32)
+  return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * config.routed_bias_update_rate
+
+
+def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config) -> None:
+  """Adds every sown `moe_bias_updates` to the gate bias of the module that sowed it.
+
+  Needed under pipeline parallelism, where the decoder's MoE layers live in two stacks with different
+  gate-bias layouts: `moe_layers_outside_pipeline` ([layers, experts]) and the pipeline stage module
+  `pipeline_module.layers` ([repeats, stages, experts]). Each stack sows an update shaped like its bias.
+  """
+  for path, update in traverse_util.flatten_dict(intermediates).items():
+    if path[-1] != "moe_bias_updates":
+      continue
+    target = root
+    for key in path[:-1]:
+      target = getattr(target, key)
+    bias = _find_gate_bias(target)
+    if bias is None:
+      continue
+    update = _decode_moe_bias_update(update, config)
+    if update.shape != bias.value.shape:
+      raise ValueError(
+          f"moe_bias_updates at {'/'.join(map(str, path))} has shape {update.shape}, "
+          f"but the gate bias it updates has shape {bias.value.shape}."
+      )
+    bias.value = bias.value + update.astype(bias.value.dtype)
+
+
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
   """Training step for the NNX model.
 
@@ -507,6 +576,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         data,
         loss_rng,
     )
+    if lineage_adapter is not None and lineage_adapter.is_native(config):
+      # The Lineage model leaves its router state untouched per microbatch; apply
+      # one full-batch routed-bias / expert-permutation update for the step.
+      aux = lineage_adapter.finalize_accumulated_step(loss_model, aux)
   else:
     owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
     custom_param_filter = nnx.Any(owg_type)
@@ -562,7 +635,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       return loss, (aux, non_param_rest)
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-    (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+    # Potentially mark model's loops for double buffering on GPUs.
+    with max_utils.model_loop_unroll_context(config):
+      (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
     nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
@@ -618,7 +693,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   # pylint: disable=too-many-nested-blocks
-  if config.routed_bias and config.routed_bias_update_rate > 0.0:
+  if lineage_adapter.is_native(config):
+    diag_bias_values = list(aux.get("diag_bias_values", ()))
+    diag_bias_updates = list(aux.get("diag_bias_updates", ()))
+  elif config.routed_bias and config.routed_bias_update_rate > 0.0:
     if getattr(config, "model_name", "").startswith("deepseek4"):
       max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
       flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
@@ -639,7 +717,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           continue
         for _, node in nnx.iter_graph(target):
           if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
-            update_val = update[0] if isinstance(update, (tuple, list)) else update
+            update_val = _decode_moe_bias_update(update, config)
             name_prefix = "-".join(map(str, prefix))
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
@@ -649,15 +727,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
     else:
-      # 1. Update main decoder scanned MoE layers.
-      # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
-      decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
-      decoder_bias = _find_gate_bias(decoder_layer)
-      if decoder_bias is not None and moe_bias_updates is not None:
-        decoder_update = jnp.array(moe_bias_updates[0])
-        decoder_bias.value = decoder_bias.value + decoder_update
-        diag_bias_values.append(decoder_bias.value)
-        diag_bias_updates.append(decoder_update)
+      if getattr(config, "using_pipeline_parallelism", False):
+        # 1. Update the decoder MoE layers outside and inside the pipeline (two stacks, two bias layouts).
+        _apply_moe_bias_updates_by_path(new_state.model.decoder, intermediate_outputs.get("decoder", {}), config)
+      else:
+        # 1. Update main decoder scanned MoE layers.
+        # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
+        decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
+        decoder_bias = _find_gate_bias(decoder_layer)
+        if decoder_bias is not None and moe_bias_updates is not None:
+          decoder_update = jnp.array(moe_bias_updates[0])
+          decoder_bias.value = decoder_bias.value + decoder_update
+          diag_bias_values.append(decoder_bias.value)
+          diag_bias_updates.append(decoder_update)
 
       # 2. Update auxiliary MTP MoE layers (if enabled).
       # Unlike the main decoder, each MTP layer is an individual un-scanned layer
@@ -667,7 +749,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           mtp_layer = getattr(new_state.model.mtp_block, f"mtp_layer_{i + 1}", None)
           mtp_bias = _find_gate_bias(mtp_layer)
           if mtp_bias is not None:
-            mtp_update = jnp.array(update)
+            mtp_update = _decode_moe_bias_update(update, config)
             mtp_bias.value = mtp_bias.value + mtp_update
             diag_bias_values.append(mtp_bias.value)
             diag_bias_updates.append(mtp_update)
@@ -799,8 +881,17 @@ def training_loop_iteration(
     jax_device_state: dict[str, Any],
     python_vars: dict[str, Any],
     immutable_data: dict[str, Any],
+    elastic_retry_cache: elastic_utils.RetryCache | None = None,
 ):
-  """Executes a single iteration of the training loop."""
+  """Executes a single iteration of the training loop.
+
+  Args:
+    jax_device_state: Device arrays and jitted functions the loop updates.
+    python_vars: Python-side loop state the loop updates.
+    immutable_data: Values fixed for the attempt that the loop only reads.
+    elastic_retry_cache: The retry cache of an elastic run, or None. It outlives the attempt; in snapshot mode its
+      `snapshotter` slot holds the in-memory snapshots the loop saves into.
+  """
   # Unpack jax_device_state
   state = jax_device_state["state"]
   init_rng = jax_device_state["init_rng"]
@@ -825,6 +916,10 @@ def training_loop_iteration(
 
   # Unpack immutable_data
   config = immutable_data["config"]  # for helpers
+  if elastic_retry_cache is None:
+    snapshotter = None
+  else:
+    snapshotter = elastic_retry_cache.snapshotter
   logical_axis_rules_for_train = immutable_data["logical_axis_rules_for_train"]
   logical_axis_rules_for_eval = immutable_data["logical_axis_rules_for_eval"]
   eval_interval = immutable_data["eval_interval"]
@@ -842,8 +937,6 @@ def training_loop_iteration(
   dump_hlo_upload_all = immutable_data["dump_hlo_upload_all"]
 
   prof.maybe_activate_profiler(step, state)
-  if config.elastic_enabled:
-    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
     example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
@@ -890,6 +983,8 @@ def training_loop_iteration(
   completed_step = step + 1
 
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
+  # Snapshot mode: copy the state and the data iterator position to host memory when due.
+  snapshotting.maybe_save_snapshot(snapshotter, config, state, step, checkpoint_manager, data_iterator)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
     jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -965,6 +1060,10 @@ def training_loop_iteration(
   if not ran_eval:
     mllog_utils.step_end(config, completed_step)
 
+  if config.elastic_enabled and completed_step < immutable_data["steps"]:
+    # Scale up only right after backing up this step. After the last step there is nothing left to scale up for.
+    snapshotting.maybe_back_up_and_scale_up(snapshotter, config, state, step, checkpoint_manager, data_iterator)
+
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
   python_vars["last_step_completion"] = last_step_completion
@@ -1031,11 +1130,9 @@ def build_first_phase_graphdef(config, jit_model, state):
   return jit_model_first_phase
 
 
-def aot_compile_step(p_step, lower_args, compiler_options, prefix):
+def aot_compile_step(p_step, lower_args, compiler_options=None, prefix=""):
   """Lowers and compiles p_step ahead of time (warms the executable cache) and prints its memory stats."""
-  compiled = p_step.lower(*lower_args).compile(compiler_options=compiler_options)
-  max_utils.print_compiled_memory_stats(compiled.memory_analysis(), prefix=prefix)
-  return compiled
+  return train_utils.aot_compile_step(p_step, lower_args, compiler_options=compiler_options, prefix=prefix)
 
 
 def make_synthetic_batch(config, shaped_batch, seed=0):
@@ -1143,8 +1240,19 @@ def start_run_clock(config, start_step, warmup_fn=None, barrier_fn=None, python_
   mllog_utils.block_start(config, start_step)
 
 
-def train_loop(config, recorder, state=None):
-  """Main Training loop."""
+def train_loop(config, recorder, state=None, elastic_retry_cache=None):
+  """Main Training loop.
+
+  Args:
+    config: Config object.
+    recorder: Goodput recorder.
+    state: Optional initial train state.
+    elastic_retry_cache: Optional `elastic_utils.RetryCache`. An elastic retry on the same slices reuses the setup and the
+      compiled steps cached in it instead of building them again.
+
+  Returns:
+    The final train state.
+  """
   (
       init_rng,
       checkpoint_manager,
@@ -1157,7 +1265,7 @@ def train_loop(config, recorder, state=None):
       rampup_manager,
       eval_data_iterator,
       state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  ) = train_utils.setup_train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
@@ -1187,16 +1295,24 @@ def train_loop(config, recorder, state=None):
   else:
     params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config,
-      jit_model,
-      mesh,
-      state,
-      state_mesh_shardings,
-      train_step,
-      eval_step,
-      eval_data_iterator,
-      params_shardings,
+  # Jit the train and eval steps, or reuse the ones compiled by the previous elastic attempt. A pause/resume retry
+  # comes back on the same slices, so the compiled programs still fit and the retrace, lowering and compile are
+  # skipped. After a replica resize the cache has been emptied, so the steps are compiled again for the new mesh.
+  p_train_step, p_eval_step = elastic_utils.get_or_build(
+      elastic_retry_cache,
+      "train_and_eval_step",
+      functools.partial(
+          train_utils.jit_train_and_eval_step,
+          config,
+          jit_model,
+          mesh,
+          state,
+          state_mesh_shardings,
+          train_step,
+          eval_step,
+          eval_data_iterator,
+          params_shardings,
+      ),
   )
 
   if jit_model_eval is not None and p_eval_step is not None:
@@ -1247,7 +1363,7 @@ def train_loop(config, recorder, state=None):
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
-      state = jax.device_put(state, state_mesh_shardings)
+      state = sharding.reshard_train_state(state, state_mesh_shardings, config.enable_single_controller)
     if config.enable_diloco:
       # The DiLoCo train step takes (state, batch, rng), like the inner NNX step.
       lower_args = (state, shaped_batch, init_rng)
@@ -1261,9 +1377,7 @@ def train_loop(config, recorder, state=None):
       # compile would only add a third full compilation on top of the profiling
       # compile and the FDO recompile; skip it and its memory stats.
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
-      compiled_stats = compiled.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_stats, prefix="train")
+      aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
       precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
@@ -1286,9 +1400,7 @@ def train_loop(config, recorder, state=None):
         eval_lower_args = (state, shaped_eval_batch, init_rng)
       else:
         eval_lower_args = (state, shaped_eval_batch)
-      compiled_eval = p_eval_step.lower(*eval_lower_args).compile(compiler_options=compiler_options)
-      compiled_eval_stats = compiled_eval.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
+      aot_compile_step(p_eval_step, eval_lower_args, compiler_options, prefix="eval")
       precompiled_eval = True
       if p_eval_step_dropless is not None:
         aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")
@@ -1364,8 +1476,12 @@ def train_loop(config, recorder, state=None):
         warmup_list += [
             ("train", "train", p_train_step),
             ("train_first_phase", "train", p_train_step_first_phase),
-            ("train_dropless", "train", p_train_step_dropless),
         ]
+        if config.warmup_skip_train_dropless:
+          if p_train_step_dropless is not None:
+            max_logging.log("warmup_programs_in_init: skipping train_dropless (warmup_skip_train_dropless=True)")
+        else:
+          warmup_list.append(("train_dropless", "train", p_train_step_dropless))
       if precompiled_eval:
         warmup_list += [("eval", "eval", p_eval_step), ("eval_dropless", "eval", p_eval_step_dropless)]
       # Same shardings as the loop's batches: the loader's device_put sharding for train, the eval rules for eval.
@@ -1421,7 +1537,9 @@ def train_loop(config, recorder, state=None):
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
       step = python_vars["step"]
-      metrics = training_loop_iteration(jax_device_state, python_vars, immutable_data)
+      metrics = training_loop_iteration(
+          jax_device_state, python_vars, immutable_data, elastic_retry_cache=elastic_retry_cache
+      )
       python_vars["step"] += 1
 
       if getattr(config, "te_moe_block", False):
@@ -1481,7 +1599,8 @@ def train_loop(config, recorder, state=None):
     metric_logger_instance.flush_metrics_and_cleanup()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
-      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      train_batch_size = config.logical_global_batch_size_to_train_on or config.global_batch_size_to_train_on
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * train_batch_size
       # Only reached when eval never hit target_eval_loss; a converged run already
       # logged RUN_STOP with status "success" from eval_stop.
       mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
@@ -1507,6 +1626,8 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
+  gpu_collective_overlap_pass.register()
+  jax.config.update("jax_default_prng_impl", config.prng_impl)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
@@ -1524,10 +1645,13 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   return config, recorder
 
 
-def run(config, recorder):
+def run(config, recorder, elastic_retry_cache=None):
   """Run the job given hyperparameters and utilities."""
-  with (max_utils.maybe_get_transformer_engine_context(config),):
-    train_loop(config, recorder)
+  with (
+      max_utils.maybe_get_transformer_engine_context(config),
+      profiler.nnx_named_scope_context(),
+  ):
+    train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
 
 def get_train_func(config, recorder, argv):
@@ -1535,24 +1659,46 @@ def get_train_func(config, recorder, argv):
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
 
-    def on_elastic_event():
-      elastic_utils.record_elastic_event_start(recorder, config)
+    # Setup that an elastic retry on the same slices can reuse: the `initialize` result, the mesh, the abstract
+    # model and the jitted steps. `elastic_retry` turns it on for the run and empties it when the slices change,
+    # so a pause/resume retry reuses everything and a replica resize rebuilds everything. It is shared by
+    # `elastic_retry` and the attempts it runs, and is passed down to `train_loop` and `setup_train_loop`. It
+    # can't live in the config: the config built for an attempt is itself one of the cached objects.
+    elastic_retry_cache = elastic_utils.RetryCache()
+    # Snapshot mode (`elastic_backup_kind: snapshot`): the snapshotter keeps the latest copy of the train state in
+    # host memory across attempts. It is not a cache entry, so a slice change never clears it. None otherwise.
+    elastic_retry_cache.snapshotter = snapshotting.create_snapshotter(config)
+
+    def on_elastic_event(scale_up):
+      elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
+      if elastic_retry_cache.snapshotter is not None and not scale_up:
+        # A save that was running when the slice went down may be stuck on it; start over with a new snapshotter
+        # that keeps the last completed snapshot. Before a scale-up nothing is in flight: `maybe_back_up_and_scale_up`
+        # waited for the last save.
+        elastic_retry_cache.snapshotter = snapshotting.reset_snapshotter(elastic_retry_cache.snapshotter)
 
     def on_slices_ready():
       elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      elastic_config, elastic_recorder = initialize(argv)
+      # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
+      # replica resize `initialize` runs again so the config picks up the new slice count.
+      elastic_config, elastic_recorder = elastic_utils.get_or_build(
+          elastic_retry_cache, "initialize", functools.partial(initialize, argv)
+      )
       run(
           elastic_config,
           elastic_recorder,
+          elastic_retry_cache=elastic_retry_cache,
       )
 
+    # Every attempt goes through `elastic_train_wrapper`; the cache decides how much of it is skipped.
     train_func = elastic_utils.elastic_retry(
         config,
         callback_fn=on_elastic_event,
         pre_callback_fn=on_slices_ready,
+        retry_cache=elastic_retry_cache,
     )(functools.partial(elastic_train_wrapper, argv=argv))
   else:
     # Use the already initialized variables

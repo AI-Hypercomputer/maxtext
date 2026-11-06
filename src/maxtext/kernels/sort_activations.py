@@ -112,12 +112,14 @@ def _unroute_impl(
         single_sc=True,
     )
     return kernel(tokens, inds)
+  num_tokens, k = selected_experts.shape
+  inds = jnp.reshape(inds, (num_tokens, k)).T.reshape(-1)
   return jnp.sum(
       jnp.reshape(
           _sort_impl(tokens, inds, use_gather_mosaic_kernel),
-          (-1, selected_experts.shape[1]) + tokens.shape[1:],
+          (k, num_tokens) + tokens.shape[1:],
       ),
-      axis=1,
+      axis=0,
   )
 
 

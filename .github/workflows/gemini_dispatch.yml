@@ -31,9 +31,19 @@ on:
   issue_comment:
     types: ['created']
 
-  # Trigger when any label is attached to the PR
+  # Trigger when any label is attached to the PR, and when a PR is opened or
+  # marked ready for review (automatic review).
   pull_request:
-    types: ['labeled']
+    types: ['labeled', 'opened', 'ready_for_review']
+
+  # Automatic review of PRs from forks, which do not receive secrets on
+  # `pull_request` events. SECURITY: this event runs with secrets and the
+  # workflow definition from the base branch. Jobs it triggers must never check
+  # out, build, or execute code from the PR head; the review reads the PR only
+  # through the GitHub API. It is gated below to fork PRs whose author is a
+  # CONTRIBUTOR, MEMBER, COLLABORATOR, or OWNER of this repository.
+  pull_request_target:
+    types: ['opened', 'ready_for_review']
 
 defaults:
   run:
@@ -61,7 +71,13 @@ jobs:
           env | grep '^DEBUG_'
 
   dispatch:
-    # For PRs: only if not from a fork
+    # For PRs from branches of this repository: reviews run when a
+    # gemini-review/gemini-investigate label is added, or automatically when a
+    # non-draft PR opened by a human (not a bot, e.g. Copybara exports of
+    # internal changes) is opened or marked ready for review.
+    # For PRs from forks (pull_request_target): automatic review only, and only
+    # if the PR author is a CONTRIBUTOR, MEMBER, COLLABORATOR, or OWNER. Other
+    # fork PRs can be reviewed by a maintainer commenting @gemini-cli /review.
     # For comments: only if user types @gemini-cli and is OWNER/MEMBER/COLLABORATOR
     if: |-
       (
@@ -69,6 +85,19 @@ jobs:
         github.event.pull_request.head.repo.fork == false &&
         github.event.action == 'labeled' &&
         (contains(github.event.label.name, 'gemini-review') || contains(github.event.label.name, 'gemini-investigate'))
+      ) || (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.fork == false &&
+        (github.event.action == 'opened' || github.event.action == 'ready_for_review') &&
+        github.event.pull_request.draft == false &&
+        github.event.sender.type == 'User'
+      ) || (
+        github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.full_name != github.repository &&
+        (github.event.action == 'opened' || github.event.action == 'ready_for_review') &&
+        github.event.pull_request.draft == false &&
+        github.event.sender.type == 'User' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]'), github.event.pull_request.author_association)
       ) || (
         github.event.sender.type == 'User' &&
         startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@gemini-cli') &&
@@ -111,7 +140,10 @@ jobs:
             const payload = context.payload;
             core.setOutput('request', request);
 
-            if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-review')) {
+            if (payload.action === 'opened' || payload.action === 'ready_for_review') {
+              core.setOutput('command', 'review');
+              core.setOutput('automatic', 'true');
+            } else if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-review')) {
               core.setOutput('command', 'review');
             } else if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-investigate')) {
               core.setOutput('command', 'investigate');
@@ -136,10 +168,16 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
           ISSUE_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          AUTOMATIC: '${{ steps.extract_command.outputs.automatic }}'
           MESSAGE: |-
             🤖 Hi @${{ github.actor }}, I've received your request, and I'm working on it now! You can track my progress [in the logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
+          AUTOMATIC_MESSAGE: |-
+            🤖 Hi @${{ github.actor }}, I'm running an automatic MaxText review of this pull request. You can track my progress [in the logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). To request another review later, add the `gemini-review` label or comment `@gemini-cli /review`.
           REPOSITORY: '${{ github.repository }}'
         run: |-
+          if [[ "${AUTOMATIC}" == "true" ]]; then
+            MESSAGE="${AUTOMATIC_MESSAGE}"
+          fi
           gh issue comment "${ISSUE_NUMBER}" \
             --body "${MESSAGE}" \
             --repo "${REPOSITORY}"

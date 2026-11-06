@@ -14,7 +14,8 @@
 
 """Tests for the Megatron-LM MoE aux loss and expert-bias update of RoutedMoE.
 
-Sigmoid routers use Megatron-LM's seq_aux_loss, computed once per full sequence,
+Sigmoid and Sqrt(Softplus) (DeepSeek-V4) routers use Megatron-LM's seq_aux_loss,
+computed once per full sequence,
 and the loss-free-balancing bias update is one sign() over the full batch. Also
 covers the moe_log_max_load_ratio debug metric. The reference functions below
 are line-by-line ports of Megatron-LM (TopKRouter._apply_seq_aux_loss,
@@ -135,10 +136,11 @@ class MegatronSeqAuxLossTest(unittest.TestCase):
       )
 
     self.assertTrue(moe.uses_megatron_seq_aux_loss(config("sigmoid")))
+    self.assertTrue(moe.uses_megatron_seq_aux_loss(config("sqrtsoftplus")))
     self.assertFalse(moe.uses_megatron_seq_aux_loss(config("sigmoid", moe_use_megatron_seq_aux_loss=False)))
     # Missing attribute on a stub config defaults to False.
     self.assertFalse(moe.uses_megatron_seq_aux_loss(SimpleNamespace(routed_score_func="sigmoid")))
-    for score_func in ("softmax", "sqrtsoftplus", ""):
+    for score_func in ("softmax", ""):
       self.assertFalse(moe.uses_megatron_seq_aux_loss(config(score_func)), score_func)
     # TransformerEngine's MoEBlock computes its own aux loss.
     self.assertFalse(moe.uses_megatron_seq_aux_loss(config("sigmoid", te_moe_block=True)))
@@ -482,6 +484,141 @@ class RingOfExpertsIntegrationTest(unittest.TestCase):
     self.assertAlmostEqual(ratio_large, ratio, places=6)
     self.assertTrue(overflow_small)
     self.assertFalse(overflow_large)
+
+
+def _sqrt_softplus(u):
+  return np.sqrt(np.logaddexp(0.0, u))
+
+
+def reference_sqrtsoftplus_seq_aux_loss(u, alpha, k):
+  """Returns (loss, dloss/du) for router logits u of shape (batch, seq, experts), in float64."""
+  u = np.asarray(u, np.float64)
+  batch, seq, num_experts = u.shape
+  s = _sqrt_softplus(u)
+  topk = np.argsort(-s, axis=-1, kind="stable")[..., :k]
+  counts = np.zeros((batch, num_experts))
+  for b in range(batch):
+    counts[b] = np.bincount(topk[b].ravel(), minlength=num_experts)
+  f = num_experts / (k * seq) * counts
+  s_sum = np.sum(s, axis=-1, keepdims=True)
+  p = np.mean(s / s_sum, axis=1)
+  loss = alpha * np.mean(np.sum(f * p, axis=-1))
+  # f is an indicator count (zero gradient); the gradient flows through P only.
+  f_b = f[:, None, :]
+  dl_ds = alpha / (batch * seq) * (f_b / s_sum - np.sum(f_b * s, axis=-1, keepdims=True) / s_sum**2)
+  # d sqrt(softplus(u)) / du = sigmoid(u) / (2 s).
+  dl_du = dl_ds / (1.0 + np.exp(-u)) / (2.0 * s)
+  return loss, dl_du
+
+
+def _tiny_v4_config(run_name, **overrides):
+  """Returns a float32 deepseek4-tiny config on CPU; `overrides` replace the defaults below."""
+  kwargs = {
+      "run_name": run_name,
+      "enable_checkpointing": False,
+      "model_name": "deepseek4-tiny",
+      "attention": "dot_product",
+      "override_model_config": True,
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "matmul_precision": "highest",
+      "float32_gate_logits": True,
+      # megablox runs its Pallas kernels in interpret mode off-TPU.
+      "megablox": True,
+      "sparse_matmul": True,
+      "per_device_batch_size": 2,
+      "max_target_length": 16,
+  }
+  kwargs.update(overrides)
+  return pyconfig.initialize([None, get_test_config_path()], **kwargs)
+
+
+def _run_routed_moe_lb_loss(cfg):
+  """Returns (lb_loss, d lb_loss / d gate kernel, gate kernel, inputs) of one routed (non-hash) MoE block."""
+  mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+  model = linen_wrappers.to_linen(
+      moe.RoutedMoE,
+      name="MoeBlock",
+      config=cfg,
+      num_experts=cfg.num_experts,
+      num_experts_per_tok=cfg.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", "mlp"),
+      intermediate_dim=cfg.moe_mlp_dim,
+      dtype=cfg.dtype,
+  )
+  rng_model, rng_inputs = jax.random.split(jax.random.PRNGKey(11))
+  inputs = jax.random.normal(
+      rng_inputs, (cfg.per_device_batch_size * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim)
+  )
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+    params = model.init({"params": rng_model, "dropout": rng_model}, inputs)["params"]
+
+    def loss_fn(params):
+      (_, lb_loss, _), _ = model.apply({"params": params}, inputs, mutable=["intermediates"])
+      return lb_loss
+
+    lb_loss, grads = jax.jit(jax.value_and_grad(loss_fn))(params)
+  gate_kernel = np.asarray(params["gate"]["kernel"].value, np.float64)
+  gate_grad = np.asarray(grads["gate"]["kernel"].value, np.float64)
+  return float(lb_loss), gate_grad, gate_kernel, np.asarray(inputs, np.float64)
+
+
+class SqrtSoftplusSeqAuxLossTest(unittest.TestCase):
+  """deepseek4-tiny RoutedMoE seq aux loss with Sqrt(Softplus) scores vs a float64 reference.
+
+  DeepSeek-V4 keeps the DeepSeek-V3 sequence-wise balance loss (V3 Eqs 17-20) with
+  Sqrt(Softplus) affinities s:
+    L = alpha * sum_i f_i * P_i,
+    f_i = N / (K * T) * #{t : s_{i,t} in Topk(s_{:,t}, K)} (unbiased scores),
+    P_i = mean_t s_{i,t} / sum_j s_{j,t}.
+  The reference is float64 numpy written from the paper, independent of MaxText.
+  """
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.cfg = _tiny_v4_config("ds4_aux_spec")
+    cls.lb_loss, cls.gate_grad, gate_kernel, inputs = _run_routed_moe_lb_loss(cls.cfg)
+    cls.logits = np.einsum("bse,ex->bsx", inputs, gate_kernel)
+    cls.ref_loss, dl_du = reference_sqrtsoftplus_seq_aux_loss(
+        cls.logits, cls.cfg.load_balance_loss_weight, cls.cfg.num_experts_per_tok
+    )
+    cls.ref_gate_grad = np.einsum("bse,bsx->ex", inputs, dl_du)
+
+  def test_config_matches_spec(self):
+    self.assertEqual(self.cfg.routed_score_func, "sqrtsoftplus")
+    self.assertAlmostEqual(self.cfg.load_balance_loss_weight, 1e-4)
+    self.assertTrue(moe.uses_megatron_seq_aux_loss(self.cfg))
+
+  def test_loss_value_matches_spec(self):
+    rel = abs(self.lb_loss - self.ref_loss) / abs(self.ref_loss)
+    self.assertLessEqual(rel, 1e-5, f"maxtext={self.lb_loss!r} spec={self.ref_loss!r}")
+
+  def test_router_gradient_matches_spec(self):
+    rel_l2 = np.linalg.norm(self.gate_grad - self.ref_gate_grad) / np.linalg.norm(self.ref_gate_grad)
+    cosine = np.sum(self.gate_grad * self.ref_gate_grad) / (
+        np.linalg.norm(self.gate_grad) * np.linalg.norm(self.ref_gate_grad)
+    )
+    self.assertLessEqual(rel_l2, 1e-4)
+    self.assertGreaterEqual(cosine, 0.99999)
+
+  def test_score_gradient_matches_spec(self):
+    """Gradient w.r.t. the pre-bias router logits of the loss on Sqrt(Softplus) scores."""
+    router = _RouterStub(self.cfg.num_experts, self.cfg.num_experts_per_tok, self.cfg.load_balance_loss_weight)
+
+    def loss(u):
+      return router.megatron_seq_aux_loss(jnp.sqrt(jax.nn.softplus(u)))
+
+    got = np.asarray(jax.grad(loss)(jnp.asarray(self.logits, jnp.float32)), np.float64)
+    _, want = reference_sqrtsoftplus_seq_aux_loss(
+        self.logits, self.cfg.load_balance_loss_weight, self.cfg.num_experts_per_tok
+    )
+    rel_l2 = np.linalg.norm(got - want) / np.linalg.norm(want)
+    cosine = np.sum(got * want) / (np.linalg.norm(got) * np.linalg.norm(want))
+    self.assertLessEqual(rel_l2, 1e-4)
+    self.assertGreaterEqual(cosine, 0.99999)
 
 
 if __name__ == "__main__":

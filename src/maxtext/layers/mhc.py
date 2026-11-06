@@ -192,8 +192,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         out_sharding=(None,),
     )
 
-  def _get_mhc_weights(self) -> mhc_kernel.MhcWeights:
-    """Collects layer parameters into a structured MhcWeights PyTree."""
+  def _get_mhc_weights(self):
+    """Collects layer parameters into a structured weights PyTree."""
     return mhc_kernel.MhcWeights(
         norm_scale=jnp.asarray(self.mhc_norm.scale[...], self.dtype),
         pre_alpha=jnp.asarray(self.pre_alpha[...], self.dtype),
@@ -242,6 +242,50 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
 
+  @staticmethod
+  def _apply_branch(branch_fn: Callable, mhc_type: HyperConnectionType, layer_input: Array, **kwargs):
+    """Calls the wrapped branch according to `mhc_type`, returning `(layer_out, metadata)`."""
+    metadata = {}
+    if mhc_type == HyperConnectionType.ATTENTION:
+      layer_out, _ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
+    elif mhc_type == HyperConnectionType.MLP_DENSE:
+      layer_out = branch_fn(inputs=layer_input, **kwargs)
+    elif mhc_type == HyperConnectionType.MLP_MOE:
+      layer_out, load_balance_loss, moe_bias_updates = branch_fn(inputs=layer_input, **kwargs)
+      metadata["load_balance_loss"] = load_balance_loss
+      metadata["moe_bias_updates"] = moe_bias_updates
+    else:
+      raise ValueError(f"Unsupported type: {mhc_type}")
+    return layer_out, metadata
+
+  def _te_call(self, norm_fn: Callable, branch_fn: Callable, x: Array, mhc_type: HyperConnectionType, **kwargs):
+    """Sinkhorn mHC with Transformer Engine's fused Triton kernels."""
+    from transformer_engine.jax import mhc as te_mhc  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    k, d = self.k, self.dim
+    w = self._get_mhc_weights()
+    # MaxText flattens the streams as (k, d) while TE expects (d, k), with x of shape (..., d, k).
+    projection = jnp.concatenate([w.pre_alpha, w.post_alpha, w.res_alpha], axis=-1)  # (k*d, N)
+    phi = projection.reshape(k, d, -1).transpose(2, 1, 0).reshape(-1, d * k)
+    norm_weight = w.norm_scale.reshape(k, d).T.reshape(d * k)
+    alpha = jnp.concatenate([w.pre_scale, w.post_scale, w.res_scale])
+    beta = jnp.concatenate([w.pre_bias, w.post_bias, w.res_bias.reshape(-1)])
+
+    out, metadata = te_mhc.mhc(
+        jnp.swapaxes(x, -1, -2),
+        phi,
+        alpha,
+        beta,
+        lambda layer_input: self._apply_branch(branch_fn, mhc_type, norm_fn(layer_input), **kwargs),
+        norm_weight,
+        has_aux=True,
+        use_tf32=self.matmul_precision != jax.lax.Precision.HIGHEST,
+        norm_eps=self.config.normalization_layer_epsilon,
+        pre_eps=1e-6,
+        sinkhorn_iters=self.sinkhorn_iterations,
+    )
+    return jnp.swapaxes(out, -1, -2), metadata
+
   def __call__(
       self,
       norm_fn: Callable,
@@ -262,6 +306,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     Returns:
         The processed tensor, maintaining the shape of `x`.
     """
+    if getattr(self.config, "te_mhc", False):
+      return self._te_call(norm_fn, branch_fn, x, mhc_type, **kwargs)
+
     # x shape: [batch, seq, expansion_rate, emb]
     b, s, k, d = x.shape
 
@@ -324,17 +371,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     layer_input = norm_fn(layer_input)
 
     # 4. Attention or MLP
-    metadata = {}
-    if mhc_type == HyperConnectionType.ATTENTION:
-      layer_out, _ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
-    elif mhc_type == HyperConnectionType.MLP_DENSE:
-      layer_out = branch_fn(inputs=layer_input, **kwargs)
-    elif mhc_type == HyperConnectionType.MLP_MOE:
-      layer_out, load_balance_loss, moe_bias_updates = branch_fn(inputs=layer_input, **kwargs)
-      metadata["load_balance_loss"] = load_balance_loss
-      metadata["moe_bias_updates"] = moe_bias_updates
-    else:
-      raise ValueError(f"Unsupported type: {mhc_type}")
+    layer_out, metadata = self._apply_branch(branch_fn, mhc_type, layer_input, **kwargs)
 
     if use_kernel:
       fwd_block_size = getattr(self.config, "mhc_pallas_kernel_fwd_block_size", 256)

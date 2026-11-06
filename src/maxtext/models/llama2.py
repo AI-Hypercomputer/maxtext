@@ -131,7 +131,6 @@ class LlamaDecoderLayer(nnx.Module):
         mesh=self.mesh,
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
-        extra_stack_level=1,
     )
 
   def __call__(
@@ -217,7 +216,7 @@ class LlamaDecoderLayer(nnx.Module):
 
       stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)  # pyrefly: ignore[unbound-name]
       return (layer_output, stacked_kv_cache, layer_idx + 1), None  # pyrefly: ignore[unbound-name]
-    elif cfg.scan_layers:
-      return layer_output, None
     else:
+      # Also under scan_layers: vLLM's static unroll over the scanned layers passes each layer its own
+      # `kv_cache` and keeps the cache returned here.
       return layer_output, kv_cache

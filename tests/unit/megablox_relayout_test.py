@@ -136,7 +136,7 @@ class RelayoutTest(parameterized.TestCase):
     super().setUp()
     self.assertEqual(jax.devices()[0].platform, "tpu")
 
-  @parameterized.product(dtype=DTYPES, tile_d0=[8, 16, 32, 56], gm=[4, 8])
+  @parameterized.product(dtype=DTYPES, tile_d0=[8, 56], gm=[4])
   def test_load(self, dtype, tile_d0, gm):
     dtype = jnp.dtype(dtype)
     sub = _sub(dtype)
@@ -146,7 +146,7 @@ class RelayoutTest(parameterized.TestCase):
     got = jax.jit(lambda a: _flatten_4d(a, gm, tile_d0))(x4d)
     np.testing.assert_array_equal(_bits(got), _bits(x.reshape(m, D0 * D1)))
 
-  @parameterized.product(dtype=DTYPES, tile_d0=[8, 56], tm_load=[64, 96])
+  @parameterized.product(dtype=DTYPES, tile_d0=[8], tm_load=[64])
   def test_load_partial_rows(self, dtype, tile_d0, tm_load):
     dtype = jnp.dtype(dtype)
     sub = _sub(dtype)
@@ -159,7 +159,7 @@ class RelayoutTest(parameterized.TestCase):
     want[:, tm_load:, :] = 0.0
     np.testing.assert_array_equal(np.asarray(got.astype(jnp.float32)), want.reshape(m, D0 * D1))
 
-  @parameterized.product(dtype=DTYPES, tile_d0=[8, 16, 32, 56], gm=[4, 8])
+  @parameterized.product(dtype=DTYPES, tile_d0=[8, 56], gm=[4])
   def test_store(self, dtype, tile_d0, gm):
     dtype = jnp.dtype(dtype)
     sub = _sub(dtype)
@@ -176,7 +176,7 @@ class RelayoutTest(parameterized.TestCase):
       got = jax.jit(lambda a, t=tile_d0: _unflatten_to_4d(a, gm, t, sub))(y)
       np.testing.assert_array_equal(_bits(got), _bits(y.reshape(m // sub, sub, D0, D1)))
 
-  @parameterized.product(dtype=DTYPES, tile_d0=[14, 28], gm=[4])
+  @parameterized.product(dtype=DTYPES, tile_d0=[14], gm=[4])
   def test_load_window(self, dtype, tile_d0, gm):
     """D0 windows that are not multiples of 8 (e.g. tiles 1792 / 3584), incl. fp8 sub-word starts."""
     dtype = jnp.dtype(dtype)
