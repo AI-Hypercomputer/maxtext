@@ -839,6 +839,37 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
   def test_skip_step_on_both_spike(self):
     self._run_spike_test({"loss": 100.0, "grad_norm": 100.0})
 
+  def test_schedule_follows_the_step_through_skips(self):
+    """A skipped step leaves Adam's state and step count alone but still advances the lr schedule, as OLMo-core."""
+    sched = optax.linear_schedule(1.0, 0.0, 10)
+    opt = optimizers.skip_step_on_spikes(
+        optax.chain(optax.scale_by_adam(), optax.scale_by_learning_rate(sched)), interval=4, scaling_factor=1.0
+    )
+    params = {"x": jnp.array([1.0])}
+    state = opt.init(params)
+    step = jax.jit(lambda s, loss: opt.update({"x": jnp.array([1.0])}, s, params, loss=loss))
+    skipped = 0
+    for i, loss in enumerate([1.0, 1.0, 1.0, 100.0, 100.0, 1.0, 1.0]):
+      _, state = step(state, jnp.float32(loss))
+      skipped += int(state["is_skipped"])
+      adam, _ = state["inner_state"]
+      self.assertEqual(int(state["inner_state"][1].count), i + 1)  # the schedule: every step
+      self.assertEqual(int(adam.count), i + 1 - skipped)  # Adam's bias correction: applied steps only
+    self.assertEqual(skipped, 2)
+
+  def test_lagging_schedule_count_is_resynced(self):
+    """A checkpoint whose schedule counter lags the step (skips before this fix) uses the step's lr from then on."""
+    sched = optax.linear_schedule(1.0, 0.0, 10)
+    opt = optimizers.skip_step_on_spikes(optax.scale_by_learning_rate(sched), interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    state = opt.init(params)
+    # 8 steps in (a full window of ordinary losses), with the schedule counter 5 steps behind.
+    state = {**state, "count": jnp.asarray(8, jnp.int32), "losses": jnp.ones(4, jnp.float32),
+             "inner_state": optax.ScaleByScheduleState(count=jnp.asarray(3, jnp.int32))}
+    updates, state = opt.update({"x": jnp.array([1.0])}, state, params, loss=jnp.float32(1.0))
+    self.assertAlmostEqual(float(updates["x"][0]), -float(sched(8)), places=6)  # not -sched(3)
+    self.assertEqual(int(state["inner_state"].count), 9)
+
   def test_no_skip_without_kwargs(self):
     inner_opt = optax.sgd(0.1)
     opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
