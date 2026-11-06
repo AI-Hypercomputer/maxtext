@@ -39,6 +39,7 @@ from maxtext.utils.model_creation_utils import (
     _fuse_moe_halves_concatenated,
     _fused_moe_kernel_uses_ep,
     _logical_partition_specs,
+    _quantize_fp8_moe_weights,
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
 )
@@ -1624,6 +1625,287 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+class TestFp8MoeQuantAndCycleStacking(unittest.TestCase):
+  """Tests for FP8 MoE weight quantization, cycle layer stacking, and chunked FP8 restore."""
+
+  def setUp(self):
+    super().setUp()
+    self.mesh = jax.sharding.Mesh(jax.local_devices()[:1], ("x",))
+    self.sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec())
+
+  def test_align_checkpoint_to_model_shapes_same_sharding_fast_path(self):
+    """When shapes and shardings already match, _align_checkpoint_to_model_shapes returns ckpt_arr directly."""
+    ckpt_arr = jax.device_put(jnp.ones((2, 4), dtype=jnp.float32), self.sharding)
+    model_arr = jax.device_put(jnp.zeros((2, 4), dtype=jnp.float32), self.sharding)
+    out = _align_checkpoint_to_model_shapes(ckpt_arr, model_arr)
+    self.assertIs(out, ckpt_arr)
+
+  def test_fuse_moe_weights_local_and_global_layers_and_free_inputs(self):
+    """_fuse_moe_weights resolves local_layers/global_layer slots and frees input buffers when requested."""
+    wi_0_a = jax.device_put(jnp.ones((2, 2, 4, 3), dtype=jnp.float32), self.sharding)
+    wi_1_a = jax.device_put(2 * jnp.ones((2, 2, 4, 3), dtype=jnp.float32), self.sharding)
+    wi_0_b = jax.device_put(3 * jnp.ones((2, 2, 4, 3), dtype=jnp.float32), self.sharding)
+    wi_1_b = jax.device_put(4 * jnp.ones((2, 2, 4, 3), dtype=jnp.float32), self.sharding)
+    wi_0_g = jax.device_put(5 * jnp.ones((2, 2, 4, 3), dtype=jnp.float32), self.sharding)
+    wi_1_g = jax.device_put(6 * jnp.ones((2, 2, 4, 3), dtype=jnp.float32), self.sharding)
+    wi_0_p = jnp.ones((2, 4, 3), dtype=jnp.float32)
+    wi_1_p = 2 * jnp.ones((2, 4, 3), dtype=jnp.float32)
+
+    ckpt_tree = {
+        "decoder": {
+            "layers": {
+                "layer_0": {"moe": {"wi_0": wi_0_a, "wi_1": wi_1_a}},
+                "layer_1": {"moe": {"wi_0": wi_0_b, "wi_1": wi_1_b}},
+                "layer_2": {"moe": {"wi_0": wi_0_g, "wi_1": wi_1_g}},
+                "layer_9": {"moe": {"wi_0": jnp.ones((2, 4, 3)), "wi_1": jnp.ones((2, 4, 3))}},
+            },
+            "padded_moe": {"wi_0": wi_0_p, "wi_1": wi_1_p},
+        }
+    }
+    model_tree = {
+        "decoder": {
+            "layers": {
+                # slot_axis = param_scan_axis + 1 = 2; shape[2] == 2 local slots
+                "local_layers": {"moe": {"wi": jnp.zeros((2, 2, 2, 4, 6), dtype=jnp.float32)}},
+                "global_layer": {"moe": {"wi": jnp.zeros((2, 2, 4, 6), dtype=jnp.float32)}},
+            },
+            # Padded target half dim: 8 // 2 = 4 > 3
+            "padded_moe": {"wi": jnp.zeros((2, 4, 8), dtype=jnp.float32)},
+        }
+    }
+    config = types.SimpleNamespace(attention="dot_product", param_scan_axis=1)
+    out = _fuse_moe_weights(ckpt_tree, model_tree, config=config, free_inputs=True)
+
+    self.assertEqual(out["decoder"]["layers"]["layer_0"]["moe"]["wi"].shape, (2, 2, 4, 6))
+    self.assertEqual(out["decoder"]["layers"]["layer_1"]["moe"]["wi"].shape, (2, 2, 4, 6))
+    self.assertEqual(out["decoder"]["layers"]["layer_2"]["moe"]["wi"].shape, (2, 2, 4, 6))
+    # Out-of-range slot layer_9 is left unfused.
+    self.assertIn("wi_0", out["decoder"]["layers"]["layer_9"]["moe"])
+    # Padded MoE path pads each half from 3 -> 4 before interleaving.
+    self.assertEqual(out["decoder"]["padded_moe"]["wi"].shape, (2, 4, 8))
+    self.assertTrue(wi_0_a.is_deleted())
+    self.assertTrue(wi_1_a.is_deleted())
+
+  def test_quantize_fp8_moe_weights_all_branches(self):
+    """_quantize_fp8_moe_weights handles abstract shapes, 2D/3D keepdims, 1D/0D scales, and nested dicts."""
+    fp8_dtype = jnp.float8_e4m3fn
+    w_wi = jax.device_put(jnp.arange(48, dtype=jnp.float32).reshape(2, 4, 6), self.sharding)
+    w_wo = jax.device_put(jnp.ones((2, 4, 6), dtype=jnp.float32) * 2.0, self.sharding)
+    w_wi_0 = jax.device_put(jnp.ones((2, 4, 3), dtype=jnp.float32) * 3.0, self.sharding)
+    w_kernel = jax.device_put(jnp.ones((4, 8), dtype=jnp.float32) * 4.0, self.sharding)
+    w_sub_kernel = jax.device_put(jnp.ones((4, 8), dtype=jnp.float32) * 5.0, self.sharding)
+
+    ckpt_tree = {
+        "abstract_block": {
+            "wi": jax.ShapeDtypeStruct((2, 4, 6), jnp.bfloat16, sharding=self.sharding),
+        },
+        "moe_block": {
+            "wi": w_wi,
+            "wo": w_wo,
+            "wi_0": w_wi_0,
+            "kernel": w_kernel,
+            "nested": {"kernel": w_sub_kernel},
+        },
+        "unmatched_block": {
+            "kernel": jnp.ones((2, 2), dtype=jnp.float32),
+        },
+    }
+    model_tree = {
+        "abstract_block": {
+            "wi": jax.ShapeDtypeStruct((2, 4, 6), fp8_dtype, sharding=self.sharding),
+            "wi_scale": jax.ShapeDtypeStruct((2, 1, 6), jnp.float32, sharding=self.sharding),
+        },
+        "moe_block": {
+            "wi": jax.device_put(jnp.zeros((2, 4, 6), dtype=fp8_dtype), self.sharding),
+            "wi_scale": jax.device_put(jnp.zeros((2, 1, 6), dtype=jnp.float32), self.sharding),
+            # Same shape as wo -> triggers fallback reduce_axes = (1,)
+            "wo": jax.device_put(jnp.zeros((2, 4, 6), dtype=fp8_dtype), self.sharding),
+            "wo_scale": jax.device_put(jnp.zeros((2, 4, 6), dtype=jnp.float32), self.sharding),
+            # 1D per-expert scale -> triggers keepdims=False
+            "wi_0": jax.device_put(jnp.zeros((2, 4, 3), dtype=fp8_dtype), self.sharding),
+            "wi_0_scale": jax.device_put(jnp.zeros((2,), dtype=jnp.float32), self.sharding),
+            # 2D DenseGeneral kernel with per-channel scale (1, 8)
+            "kernel": jax.device_put(jnp.zeros((4, 8), dtype=fp8_dtype), self.sharding),
+            "kernel_scale": jax.device_put(jnp.zeros((1, 8), dtype=jnp.float32), self.sharding),
+            # Nested dict with 0D per-tensor scale
+            "nested": {
+                "kernel": jax.device_put(jnp.zeros((4, 8), dtype=fp8_dtype), self.sharding),
+                "kernel_scale": jax.device_put(jnp.zeros((), dtype=jnp.float32), self.sharding),
+            },
+        },
+    }
+
+    out = _quantize_fp8_moe_weights(ckpt_tree, model_tree)
+
+    self.assertIsInstance(out["abstract_block"]["wi"], jax.ShapeDtypeStruct)
+    self.assertEqual(out["abstract_block"]["wi"].dtype, fp8_dtype)
+    self.assertIsInstance(out["abstract_block"]["wi_scale"], jax.ShapeDtypeStruct)
+    self.assertEqual(out["abstract_block"]["wi_scale"].shape, (2, 1, 6))
+
+    moe_out = out["moe_block"]
+    self.assertEqual(moe_out["wi"].dtype, fp8_dtype)
+    self.assertEqual(moe_out["wi_scale"].shape, (2, 1, 6))
+    self.assertTrue(w_wi.is_deleted())
+
+    self.assertEqual(moe_out["wo"].dtype, fp8_dtype)
+    self.assertEqual(moe_out["wo_scale"].shape, (2, 1, 6))
+
+    self.assertEqual(moe_out["wi_0"].dtype, fp8_dtype)
+    self.assertEqual(moe_out["wi_0_scale"].shape, (2,))
+
+    self.assertEqual(moe_out["kernel"].dtype, fp8_dtype)
+    self.assertEqual(moe_out["kernel_scale"].shape, (1, 8))
+
+    self.assertEqual(moe_out["nested"]["kernel"].dtype, fp8_dtype)
+    self.assertEqual(moe_out["nested"]["kernel_scale"].shape, ())
+
+    # Unmatched block is returned untouched.
+    self.assertNotIn("kernel_scale", out["unmatched_block"])
+
+  def test_from_pretrained_fp8_chunked_restore_and_cycle_stacking(self):
+    """from_pretrained quantizes BF16 checkpoints into FP8 in layer chunks and stacks cycle layers."""
+    fp8_dtype = jnp.float8_e4m3fn
+    sharding_4d = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None, None, None))
+
+    class _DummyFp8Layer(nnx.Module):
+      """Dummy FP8 decoder layer for chunked restore testing."""
+
+      def __init__(self, sharding):
+        self.wi = nnx.Param(jax.device_put(jnp.zeros((2, 4, 6), dtype=fp8_dtype), sharding))
+        self.wi_scale = nnx.Param(jax.device_put(jnp.ones((2, 1, 6), dtype=jnp.float32), sharding))
+        self.wo = nnx.Param(jax.device_put(jnp.zeros((2, 3, 4), dtype=fp8_dtype), sharding))
+        self.wo_scale = nnx.Param(jax.device_put(jnp.ones((2, 3, 1), dtype=jnp.float32), sharding))
+        self.kernel = nnx.Param(jax.device_put(jnp.zeros((4, 8), dtype=fp8_dtype), sharding))
+        self.kernel_scale = nnx.Param(jax.device_put(jnp.ones((1, 8), dtype=jnp.float32), sharding))
+
+    class _DummyCycleBlock(nnx.Module):
+      """Dummy cycle block with local_layers and global_layer."""
+
+      def __init__(self, sharding, sharding_4d_arg):
+        # slot_axis = param_scan_axis + 1 = 2; shape (1, 2, 2, 4) has 2 local slots at axis 2.
+        self.local_layers = nnx.Dict(
+            {"kernel": nnx.Param(jax.device_put(jnp.zeros((1, 2, 2, 4), dtype=jnp.float32), sharding_4d_arg))}
+        )
+        self.global_layer = nnx.Dict(
+            {"kernel": nnx.Param(jax.device_put(jnp.zeros((1, 2, 4), dtype=jnp.float32), sharding))}
+        )
+
+    class _DummyFp8Model(nnx.Module):
+      """Dummy FP8 model wrapping decoder layers and cycle block."""
+
+      def __init__(self, num_layers, mesh, sharding, sharding_4d_arg):
+        self.mesh = mesh
+        dec_dict = {f"layers_{i}": _DummyFp8Layer(sharding) for i in range(num_layers)}
+        dec_dict["cycle"] = _DummyCycleBlock(sharding, sharding_4d_arg)
+        dec_dict["decoder_norm"] = nnx.Dict(
+            {"scale": nnx.Param(jax.device_put(jnp.zeros((4,), dtype=jnp.float32), sharding))}
+        )
+        self.decoder = nnx.Dict(dec_dict)
+
+    def _build_abstract_and_concrete(num_layers):
+      concrete = _DummyFp8Model(num_layers, self.mesh, self.sharding, sharding_4d)
+      graphdef, state = nnx.split(concrete)
+      abs_state = jax.tree.map(
+          lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", self.sharding)),
+          state,
+      )
+      abstract = nnx.merge(graphdef, abs_state)
+      return (lambda: concrete), abstract, concrete
+
+    # Subtest 1: Value-wrapped NNX checkpoint with 6 layers (>5 triggers multi-chunk PyTreeRestore)
+    create_fn, abstract_model, concrete_model = _build_abstract_and_concrete(num_layers=6)
+    ckpt_layers_meta = {}
+    for i in range(6):
+      ckpt_layers_meta[f"layers_{i}"] = {
+          "wi_0": {"value": _FakeArrayMetadata((2, 4, 3), dtype=jnp.bfloat16)},
+          "wi_1": {"value": _FakeArrayMetadata((2, 4, 3), dtype=jnp.bfloat16)},
+          "wo": {"value": _FakeArrayMetadata((2, 3, 4), dtype=jnp.bfloat16)},
+          "kernel": {"value": _FakeArrayMetadata((4, 8), dtype=jnp.bfloat16)},
+      }
+    ckpt_layers_meta["cycle"] = {
+        "layer_0": {"kernel": {"value": _FakeArrayMetadata((1, 2, 4), dtype=jnp.float32)}},
+        "layer_1": {"kernel": {"value": _FakeArrayMetadata((1, 2, 4), dtype=jnp.float32)}},
+        "layer_2": {"kernel": {"value": _FakeArrayMetadata((1, 2, 4), dtype=jnp.float32)}},
+    }
+    ckpt_layers_meta["decoder_norm"] = {"scale": {"value": _FakeArrayMetadata((4,), dtype=jnp.float32)}}
+    nnx_metadata = MagicMock()
+    nnx_metadata.item_metadata.tree = {"decoder": ckpt_layers_meta}
+
+    class _FakeCheckpointer:
+      """Fake Orbax checkpointer for testing chunked FP8 restore."""
+
+      def __init__(self, *args, **kwargs):
+        del args, kwargs
+        self.restore_calls = 0
+
+      def metadata(self, path):
+        del path
+        return nnx_metadata
+
+      def restore(self, path, item=None, args=None, **kw):
+        del path, kw
+        self.restore_calls += 1
+        target_item = args.item if args is not None else item
+        return jax.tree.map(
+            lambda x: jnp.ones(x.shape, x.dtype) * 2.0 if hasattr(x, "shape") else x,
+            target_item,
+        )
+
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/fp8_chunked_ckpt")
+    with (
+        patch.object(model_creation_utils.checkpointing, "load_checkpoint_metadata", return_value={}),
+        patch.object(model_creation_utils, "create_nnx_abstract_model", return_value=(create_fn, abstract_model)),
+        patch.object(model_creation_utils.maxtext_utils_nnx, "create_nnx_sharded_model", return_value=concrete_model),
+        patch.object(model_creation_utils.ocp, "Checkpointer", _FakeCheckpointer),
+    ):
+      restored_model = model_creation_utils.from_pretrained(cfg, self.mesh)
+
+    self.assertIs(restored_model, concrete_model)
+    self.assertEqual(restored_model.decoder["layers_0"].wi[...].dtype, fp8_dtype)
+    self.assertEqual(restored_model.decoder["layers_5"].kernel[...].dtype, fp8_dtype)
+    self.assertEqual(restored_model.decoder["cycle"].local_layers["kernel"][...].shape, (1, 2, 2, 4))
+    np.testing.assert_array_equal(
+        np.asarray(restored_model.decoder["cycle"].global_layer["kernel"][...]),
+        np.full((1, 2, 4), 2.0, dtype=np.float32),
+    )
+
+    # Subtest 2: Linen checkpoint with 2 layers (<=5 single-chunk branch, is_nnx=False)
+    create_fn2, abstract_model2, concrete_model2 = _build_abstract_and_concrete(num_layers=2)
+    linen_layers_meta = {}
+    for i in range(2):
+      linen_layers_meta[f"layers_{i}"] = {
+          "wi_0": _FakeArrayMetadata((2, 4, 3), dtype=jnp.bfloat16),
+          "wi_1": _FakeArrayMetadata((2, 4, 3), dtype=jnp.bfloat16),
+          "wo": _FakeArrayMetadata((2, 3, 4), dtype=jnp.bfloat16),
+          "kernel": _FakeArrayMetadata((4, 8), dtype=jnp.bfloat16),
+      }
+    linen_layers_meta["cycle"] = {
+        "layer_0": {"kernel": _FakeArrayMetadata((1, 2, 4), dtype=jnp.float32)},
+        "layer_1": {"kernel": _FakeArrayMetadata((1, 2, 4), dtype=jnp.float32)},
+        "layer_2": {"kernel": _FakeArrayMetadata((1, 2, 4), dtype=jnp.float32)},
+    }
+    linen_layers_meta["decoder_norm"] = {"scale": _FakeArrayMetadata((4,), dtype=jnp.float32)}
+    linen_metadata = MagicMock()
+    linen_metadata.item_metadata.tree = {"params": {"params": {"decoder": linen_layers_meta}}}
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = linen_metadata
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: jax.tree.map(
+        lambda x: jnp.ones(x.shape, x.dtype) * 3.0 if hasattr(x, "shape") else x,
+        item,
+    )
+    with (
+        patch.object(model_creation_utils.checkpointing, "load_checkpoint_metadata", return_value={}),
+        patch.object(model_creation_utils, "create_nnx_abstract_model", return_value=(create_fn2, abstract_model2)),
+        patch.object(model_creation_utils.maxtext_utils_nnx, "create_nnx_sharded_model", return_value=concrete_model2),
+        patch.object(model_creation_utils.ocp, "Checkpointer", return_value=mock_ckptr),
+    ):
+      restored_linen = model_creation_utils.from_pretrained(cfg, self.mesh)
+
+    self.assertIs(restored_linen, concrete_model2)
+    self.assertEqual(restored_linen.decoder["layers_1"].wi[...].dtype, fp8_dtype)
 
 
 if __name__ == "__main__":
