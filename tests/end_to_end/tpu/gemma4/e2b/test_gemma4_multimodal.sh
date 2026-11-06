@@ -40,6 +40,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MA
     --hf_model_path=${HF_MODEL} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/converted_mm/${idx} \
     use_multimodal=true \
+    use_clipped_linears_for_vit=true \
     scan_layers=${USE_SCAN_LAYERS}
 
 export MAXTEXT_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/converted_mm/${idx}/0/items
