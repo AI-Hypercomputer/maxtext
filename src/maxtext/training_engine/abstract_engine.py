@@ -122,7 +122,7 @@ class TrainingConfig:
 
 
 class AbstractTrainingEngine(abc.ABC):
-  """Core trainer interface executing model updates and Multi-Tier Checkpointing.
+  """Core trainer interface executing model updates and checkpointing.
 
   The Trainer owns the model weights in accelerator HBM and executes forward/
   backward passes, weight updates, evaluation steps, and checkpoint saving/

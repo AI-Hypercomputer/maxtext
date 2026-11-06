@@ -68,11 +68,11 @@ def build_save_decision_policy(
   return policies.FixedIntervalPolicy(interval=save_interval_steps)  # pyrefly: ignore[bad-return]
 
 
-def build_preservation_policy(*, max_to_keep: int) -> ocp.training.preservation_policies.PreservationPolicy:
+def build_preservation_policy(*, max_to_keep: int | None) -> ocp.training.preservation_policies.PreservationPolicy:
   """Builds the v1 PreservationPolicy (keep the latest N checkpoints).
 
   Args:
-    max_to_keep: The maximum number of checkpoints to keep.
+    max_to_keep: The maximum number of checkpoints to keep. None keeps every checkpoint.
 
   Returns:
     A configured ``ocp.training.preservation_policies.PreservationPolicy``.
@@ -87,11 +87,14 @@ def build_context(
     ocdbt_target_data_file_size_bytes: int | None = None,
     checkpoint_storage_concurrent_gb: int | None = None,
     enable_continuous_checkpointing: bool = False,
+    async_checkpointing_timeout_secs: int | None = None,
+    checkpoint_storage_device_host_concurrent_gb: int | None = None,
     todelete_full_path: str | None = None,
     todelete_subdir: str | None = None,
     enable_single_replica_ckpt_restoring: bool = False,
     replica_axis_index: int = 0,
     colocated_python_checkpointing: bool = False,
+    enable_pathways_persistence: bool = False,
     partial_load: bool = False,
     checkpoint_layout: ocp.options.CheckpointLayout | None = None,
 ) -> ocp.Context:
@@ -108,13 +111,21 @@ def build_context(
       the per-array ``chunk_byte_size`` (matching the v0 ``SaveArgs`` value).
     checkpoint_storage_concurrent_gb: Concurrent IO budget in GB; applied to
       both write and read as a byte limit (v0 used one value for both).
-    enable_continuous_checkpointing: If true, set a 60-minute async timeout.
+    enable_continuous_checkpointing: If true, set a 60-minute async timeout unless
+      `async_checkpointing_timeout_secs` is also set.
+    async_checkpointing_timeout_secs: Optional deadline in seconds for async
+      checkpoint saves.
+    checkpoint_storage_device_host_concurrent_gb: Optional budget in GB for
+      device-to-host transfers in flight during a save.
     todelete_full_path: GCS soft-delete path.
     todelete_subdir: Subdirectory renaming hook for deletions.
     enable_single_replica_ckpt_restoring: Restore on one replica and broadcast
       to the rest (replaces the v0 ``SingleReplicaArrayHandler``).
     replica_axis_index: Mesh axis separating replicas for load-and-broadcast.
     colocated_python_checkpointing: Use Pathways colocated-python checkpointing.
+    enable_pathways_persistence: Use the Pathways persistence array handler, which
+      writes from the TPU workers directly to storage. Colocated Python takes
+      precedence when both are set.
     partial_load: Restore only the keys present in the abstract tree (the v1
       equivalent of v0 ``partial_restore=True``).
     checkpoint_layout: On-disk layout (``ORBAX`` or ``SAFETENSORS``) for
@@ -137,9 +148,13 @@ def build_context(
     concurrent_bytes = checkpoint_storage_concurrent_gb * _BYTES_PER_GB
     ctx.memory.write_concurrent_bytes = concurrent_bytes
     ctx.memory.read_concurrent_bytes = concurrent_bytes
+  if checkpoint_storage_device_host_concurrent_gb is not None:
+    ctx.memory.transfer_concurrent_bytes = checkpoint_storage_device_host_concurrent_gb * _BYTES_PER_GB
 
   if enable_continuous_checkpointing:
     ctx.asynchronous.timeout_secs = int(datetime.timedelta(minutes=60).total_seconds())
+  if async_checkpointing_timeout_secs is not None:
+    ctx.asynchronous.timeout_secs = async_checkpointing_timeout_secs
 
   if todelete_full_path is not None:
     ctx.deletion.gcs_deletion_options.todelete_full_path = todelete_full_path
@@ -155,16 +170,12 @@ def build_context(
         _SINGLE_REPLICA_BROADCAST_MEMORY_LIMIT_BYTES
     )
 
-  if colocated_python_checkpointing:
-    ctx.pathways.checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
-        use_colocated_python=True,
-    )
-  else:
-    # v0 only used Pathways handlers when explicitly registered,
-    # and the persistence handler rejects non-NamedSharding arrays and the
-    # OCDBT/zarr3 layout MaxText writes. NO_DISPATCHER restores the standard
-    # controller-side ArrayHandler.
-    ctx.pathways.checkpointing_impl = ocp_pathways.CheckpointingImpl.NO_DISPATCHER
+  # When both flags are False, `from_options` returns `NO_DISPATCHER` (the standard
+  # controller-side ArrayHandler).
+  ctx.pathways.checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+      use_colocated_python=colocated_python_checkpointing,
+      use_persistence_array_handler=enable_pathways_persistence,
+  )
 
   if partial_load:
     ctx.pytree.loading.partial_load = True
