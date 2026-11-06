@@ -17,7 +17,7 @@
 import os
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import register_model
-from .adapter import MaxTextForCausalLM, is_hybrid_maxtext_model
+from .adapter import MODELS_CONFIG_MAP, MaxTextForCausalLM, MaxTextModelConfig, is_hybrid_maxtext_model
 from .multimodal import get_multimodal_handler
 
 
@@ -48,6 +48,7 @@ def register(config=None):
     logger.info("Setting is_hybrid = True for %s", model_name)
 
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
+  MODELS_CONFIG_MAP["MaxTextForCausalLM"] = MaxTextModelConfig
 
   # Dynamically apply KVCacheManager patch when registering the adapter
   # pylint: disable=import-outside-toplevel

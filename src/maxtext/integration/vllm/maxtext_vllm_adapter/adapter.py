@@ -14,6 +14,7 @@
 
 """vLLM adapter for MaxText models."""
 
+import dataclasses
 import os
 from flax import nnx
 from flax.core.spmd import logical_axis_rules
@@ -54,6 +55,13 @@ except ImportError:
 
 
 from vllm.config import VllmConfig
+try:
+  from vllm.model_executor.models.config import MODELS_CONFIG_MAP, VerifyAndUpdateConfig
+except ImportError:  # pragma: no cover
+  MODELS_CONFIG_MAP = {}
+
+  class VerifyAndUpdateConfig:  # type: ignore[no-redef]
+    pass
 
 # Threshold to determine if the ratio of attention to mamba layers is highly imbalanced.
 # If max_count / min_count >= this threshold, we group KV cache allocations by the
@@ -87,6 +95,74 @@ def is_hybrid_maxtext_model(model_name: str | None) -> bool:
     with open(model_config_path, "r", encoding="utf-8") as f:
       decoder_block = (yaml.safe_load(f) or {}).get("decoder_block", "")
   return str(decoder_block) in HYBRID_DECODER_BLOCKS
+
+
+class MaxTextModelConfig(VerifyAndUpdateConfig):
+  """vLLM config hook for `MaxTextForCausalLM`.
+
+  When `vllm serve` (or `LLM`/`AsyncLLMEngine`) launches without
+  `MAXTEXT_MODEL_NAME` set in the environment before `register()` runs —
+  passing `model_name` via `additional_config["maxtext_config"]["model_name"]`
+  instead — `MaxTextForCausalLM.is_hybrid` is still `False` when `ModelConfig`
+  inspects the registered class. Updating `_model_info.is_hybrid` here (inside
+  `VllmConfig.try_verify_and_update_config`, before vLLM checks
+  `if self.model_config.is_hybrid:`) lets vLLM's own
+  `HybridAttentionMambaModelConfig.verify_and_update_config` default
+  `cache_config.mamba_cache_mode = "align"` and `mamba_block_size` when prefix
+  caching is enabled.
+  """
+
+  @staticmethod
+  def verify_and_update_config(vllm_config: VllmConfig) -> None:
+    additional_config = getattr(vllm_config, "additional_config", None)
+    maxtext_cfg = (
+        additional_config.get("maxtext_config", {})
+        if isinstance(additional_config, dict)
+        else {}
+    )
+    if not isinstance(maxtext_cfg, dict):
+      maxtext_cfg = {}
+
+    model_name = maxtext_cfg.get("model_name") or os.environ.get("MAXTEXT_MODEL_NAME")
+    if model_name:
+      os.environ.setdefault("MAXTEXT_MODEL_NAME", str(model_name))
+
+    explicit_decoder_block = maxtext_cfg.get("decoder_block")
+    if explicit_decoder_block is not None:
+      is_hybrid = str(explicit_decoder_block) in HYBRID_DECODER_BLOCKS
+    else:
+      is_hybrid = is_hybrid_maxtext_model(model_name)
+
+    if MaxTextForCausalLM.is_hybrid != is_hybrid:
+      MaxTextForCausalLM.is_hybrid = is_hybrid
+      try:
+        from tpu_inference.models.common.model_loader import register_model  # pylint: disable=import-outside-toplevel
+
+        register_model("MaxTextForCausalLM", MaxTextForCausalLM)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is not None:
+      model_info = getattr(model_config, "_model_info", None)
+      if model_info is not None and getattr(model_info, "is_hybrid", None) != is_hybrid:
+        if dataclasses.is_dataclass(model_info):
+          model_config._model_info = dataclasses.replace(model_info, is_hybrid=is_hybrid)
+        else:
+          model_info.is_hybrid = is_hybrid
+      elif model_info is None and not isinstance(getattr(type(model_config), "is_hybrid", None), property):
+        model_config.is_hybrid = is_hybrid
+
+    if is_hybrid:
+      cache_config = getattr(vllm_config, "cache_config", None)
+      if (
+          cache_config is not None
+          and getattr(cache_config, "enable_prefix_caching", False)
+          and getattr(cache_config, "mamba_cache_mode", "none") == "none"
+      ):
+        cache_config.mamba_cache_mode = "align"
+        if getattr(cache_config, "mamba_block_size", None) is None:
+          cache_config.mamba_block_size = getattr(cache_config, "block_size", None)
 
 
 def next_power_of_two(x: int) -> int:

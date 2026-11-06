@@ -48,7 +48,6 @@ from jax.sharding import Mesh
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.experimental.lineage import lineage_adapter
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import nnx_wrappers
@@ -58,6 +57,12 @@ from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
+
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
+except ImportError:
+  lineage_adapter = None
 
 try:
   from orbax.checkpoint.metadata import ArrayMetadata as _OrbaxArrayMetadata
@@ -252,7 +257,7 @@ def _intersect_with_metadata(target, meta_tree):
   return out
 
 
-def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
+def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
   This properly interleaves the gate and up projections based on the target tensor
@@ -260,6 +265,11 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
   """
+  is_vllm_rpa = (
+      True
+      if config is None
+      else getattr(config, "attention", "") in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
+  )
 
   def _is_fusion_site(node):
     """A ckpt-side dict that holds wi_0/wi_1 leaf siblings — the parent of a fusion."""
@@ -303,7 +313,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
     # Determine the number of shards (TP degree) along the concatenated axis
     n_shards = 1
     wi_sharding = getattr(wi_model, "sharding", None)
-    if isinstance(wi_sharding, jax.sharding.NamedSharding):
+    if is_vllm_rpa and isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
@@ -573,7 +583,7 @@ def from_config(
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
-  if rngs is not None and lineage_adapter.is_native(config):
+  if rngs is not None and lineage_adapter is not None and lineage_adapter.is_native(config):
     return lineage_adapter.LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   if rngs is not None:
     return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
@@ -984,7 +994,8 @@ def from_pretrained(
   _, _abs_state_for_specs = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
-  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  with logical_axis_rules(config.logical_axis_rules):
+    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
   # TODO: print debug_sharding info
 
   sharded_state = nnx.state(model)
@@ -1350,7 +1361,7 @@ def from_pretrained(
           checkpoint = _collapse_legacy_cycle_slot_layers(
               checkpoint, legacy_cycle_interval, scan_axis=scan_axis
           )
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays, config=config)
 
         def _filter_to_model_keys(ckpt, model):
           """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
@@ -1730,7 +1741,7 @@ def load_mtp_block_from_hf(
     node[leaf_name] = sharded_arr
 
   with mesh:
-    ckpt_mtp = _fuse_moe_weights(ckpt_mtp, mtp_model_arrays)
+    ckpt_mtp = _fuse_moe_weights(ckpt_mtp, mtp_model_arrays, config=config)
 
     def _filter_keys(ckpt, model_dict):
       if not hasattr(ckpt, "items") or not hasattr(model_dict, "items"):
