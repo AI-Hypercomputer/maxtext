@@ -50,7 +50,7 @@ from transformers import AutoModelForCausalLM
 from flax.training import train_state
 from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
-from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
+from maxtext.checkpoint_conversion.utils.tensor_handling import is_unrolled_layer_key, nesting_depth, stacked_axes
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
 
@@ -296,7 +296,7 @@ def process_maxtext_param(
           s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
       )
       weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
-      if is_var_collection or is_unscanned_moe:
+      if is_var_collection or is_unscanned_moe or is_unrolled_layer_key(key_str):
         axis_to_slice = 0
       else:
         axis_to_slice = (
