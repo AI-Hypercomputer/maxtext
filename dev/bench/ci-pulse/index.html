@@ -2036,6 +2036,7 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
       if(dpt.status==='fail')el('text',{x:x0+slotW/2,y:py(dpt.v)-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
     });
     host.appendChild(svg);
+    scrollToNewest(host);
     return;
   }
 
@@ -2105,6 +2106,7 @@ ${breakdown(p,sl.label)}
     if(c.status==='fail')el('text',{x:x0+slotW/2,y:y(groupVal[i])-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
   });
   host.appendChild(svg);
+  scrollToNewest(host);
 }
 // ============ JOBS RESCUED BY RE-RUNS (aggregate flakiness) ============
 // Window = the merged pull requests inside the header date range (shared with every other card).
@@ -2339,6 +2341,7 @@ function renderFlaky(){
   if(schedNames.length)footFacts.push(`On scheduled main runs ${cal.inRange}, ${schedNames.length} job${schedNames.length===1?'':'s'} also recorded failures or retries (<a href="#" onclick="event.preventDefault();setFlakyMode('sched')" style="color:var(--accent);text-decoration:none">view Scheduled main &rarr;</a>): ${schedNames.join(', ')}.`);
   if(footFacts.length)h+=`<div data-flfoot style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.55">${footFacts.join(' ')}</div>`;
   host.innerHTML=h;
+  const fls=host.querySelector('[data-flscroll]');if(fls)scrollToNewest(fls);
 }
 // Hovering a row of the Flakiest tests table lights up, in the Re-runs per job strips below,
 // exactly the pull requests where THAT test failed on the first attempt. Its job's other
@@ -2545,7 +2548,7 @@ function renderFlakySched(host){
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;border:2px solid var(--crit);display:inline-block"></span>failed on main (never re-run)</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER};display:inline-block"></span>passed first try</span>
   </div>`;
-  h+='<div style="overflow-x:auto">';
+  h+='<div data-flscroll="1" style="overflow-x:auto">';
   h+=rows.map(({j,evIn,runIn,failIn})=>{
     const dim=HW!=='all'&&j.lane.toLowerCase()!==HW;
     const resIdx=dict();evIn.forEach(e=>{resIdx[keyIdx[e.pr]]=e});
@@ -2561,8 +2564,16 @@ function renderFlakySched(host){
       <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)"><span style="color:${failIn.length?'var(--crit)':'var(--warn)'};font-weight:700">${failIn.length} failed</span> &middot; ${runIn.length} rescued of ${n}</div>
     </div>`;
   }).join('');
+  if(rows.length){
+    h+=`<div style="display:grid;grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;gap:16px;align-items:start;padding:0 17px">
+      <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">scheduled main run &rarr;</div>
+      <div style="display:flex;gap:2px">${(()=>{const step=n<=10?1:n<=20?2:n<=40?4:6;return runs.map((c,vi)=>{const show=vi%step===0||vi===n-1;return`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:${show?36:8}px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div>${show?`<div style="position:absolute;top:7px;left:50%;transform:translateX(-50%);text-align:center;font-size:10px;font-family:var(--mono);line-height:1.3;white-space:nowrap"><div style="font-weight:700;color:var(--ink)">${dayNum(c.date)}</div><div style="color:var(--muted)">${esc((c.label||'').split(' ')[2]||'')}</div></div>`:''}</div>`}).join('')})()}</div>
+      <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
+    </div>`;
+  }
   h+='</div>';
   host.innerHTML=h;
+  const fls=host.querySelector('[data-flscroll]');if(fls)scrollToNewest(fls);
 }
 function openSchedPop(jobId,runKey){
   const j=SCHED_RESCUES.find(r=>r.id===jobId);if(!j)return;
@@ -2622,25 +2633,30 @@ function renderFlakyDocker(host){
   const byWf=dict();
   wfIn.forEach(w=>{(byWf[w.workflow_name]=byWf[w.workflow_name]||[]).push(w)});
   h+=`<div style="font-size:14px;font-weight:700;color:var(--ink);margin:6px 0 6px">Daily pipeline runs &amp; build duration</div>`;
+  h+='<div data-flscroll="1" style="overflow-x:auto">';
   h+=Object.entries(byWf).map(([name,list])=>{
     const isGpu=/GPU/i.test(name);
     const col=isGpu?'var(--gpu)':'var(--bld)';
     const medMin=median(list.map(x=>mins(x.median_wall_seconds)));
     const totRuns=list.reduce((a,x)=>a+(x.runs||0),0);
+    const stripPx=list.length*16+Math.max(0,list.length-1)*3;
+    const rowMin=290+16+stripPx+16+280+34;
     const cells=list.map(d=>{
       const dayRc=rcIn.filter(r=>r.day===d.day&&(isGpu?/GPU/i.test(r.jobName):/TPU/i.test(r.jobName)));
       const hasFail=dayRc.some(r=>!r.rescued),hasResc=dayRc.some(r=>r.rescued);
       const st=hasFail?'background:transparent;border:2px solid var(--crit)':hasResc?'background:var(--warn)':`background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER}`;
       return `<div style="flex:1;height:16px;border-radius:3px;min-width:16px;${st}" title="${esc(d.day)} · ${d.runs} run(s) · median ${mins(d.median_wall_seconds).toFixed(1)}m"></div>`;
     }).join('');
-    return `<div class="issue-row" style="grid-template-columns:290px 1fr 280px">
+    return `<div class="issue-row" style="grid-template-columns:290px 1fr 280px;min-width:${rowMin}px">
       <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(name)}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${col}">&#9679;</span> ${isGpu?'GPU':'TPU'} Docker pipeline &middot; ${list.length} active days</div></div>
       <div style="display:flex;gap:3px;align-items:center">${cells}</div>
       <div class="mono" style="font-size:13px;text-align:right;color:var(--ink)"><b>${medMin.toFixed(1)}m</b> median &middot; ${totRuns} runs</div>
     </div>`;
   }).join('');
+  h+='</div>';
   host.innerHTML=h;
+  const fls=host.querySelector('[data-flscroll]');if(fls)scrollToNewest(fls);
 }
 
 // ============ TOP COLLAPSIBLE CI HEALTH & TEST DURATION INSIGHTS BAR ============
