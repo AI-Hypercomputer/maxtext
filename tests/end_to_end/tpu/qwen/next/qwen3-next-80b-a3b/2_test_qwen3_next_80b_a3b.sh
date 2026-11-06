@@ -12,6 +12,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 export PYTHONPATH=$PYTHONPATH:$(pwd)/src
 
 export MODEL_NAME='qwen3-next-80b-a3b'

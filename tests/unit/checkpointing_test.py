@@ -15,28 +15,38 @@
 """Unit tests for the checkpointing components."""
 
 import os
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+from flax import nnx
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
+from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
+    _gather_in_slices,
     get_hf_loading_function,
 )
 from maxtext.common import checkpointing
 import numpy as np
 import optax
-import orbax.checkpoint as ocp_v0
 import pytest
 import safetensors.numpy
 
+ocp_v0 = ocp
+
 pytestmark = [pytest.mark.decoupled_target]
+
+
+class _StopBeforeDownload(Exception):
+  """Raised by a mocked `HfFileSystem.glob` to stop a load before it downloads anything."""
 
 
 class BinaryChunkedStackTest(parameterized.TestCase):
@@ -102,6 +112,43 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[0], tensors["layer_0.weight"])
     np.testing.assert_allclose(result[1], tensors["layer_1.weight"])
 
+  @parameterized.named_parameters(
+      ("unscanned_moe_layer", "params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (3, 4, 6), 0),
+      ("tid2eid_collection", "Tid2EidVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-tid2eid", (3, 4, 6), 0),
+      ("scanned_layers", "params-decoder-layers-mlp-wi_0", (4, 3, 6), 1),
+  )
+  def test_single_axis_stack_axis_follows_mt_key(self, mt_key, target_shape, axis):
+    # With scan_layers, MoE layers outside the scanned stack (e.g. DeepSeek-V4 prefix layers) still stack
+    # experts along axis 0, as in to_maxtext.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {f"w{i}": np.full((4, 6), i, dtype=np.float32) for i in range(3)}
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=target_shape, dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec(None, None, None))
+    )
+
+    result = get_hf_loading_function(list(tensors), tensors.__getitem__, None, target_leaf, MockConfig(), mt_key)()
+
+    self.assertEqual(result.shape, target_shape)
+    np.testing.assert_array_equal(np.take(np.asarray(result), 2, axis=axis), tensors["w2"])
+
+  @parameterized.named_parameters(
+      ("not_scanned", False, "params-decoder-layers_0-mlp-wi_0", (4, 3, 6), 0),
+      ("scanned_layers", True, "params-decoder-layers-mlp-wi_0", (4, 3, 6), 1),
+      ("per_layer_scale", True, "params-decoder-layers-mlp-wi_0-kernel_scale", (4,), 0),
+      ("unscanned_moe_layer", True, "params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (3, 4, 6), 0),
+      ("moe_bias_collection", True, "MoEBiasVar-decoder-layers-mlp-MoeBlock_0-gate-bias", (4, 3), 0),
+      ("composite_key", True, ("params-decoder-layers-mlp-wi_0", "params-decoder-layers-mlp-wi_1"), (4, 3, 6), 1),
+  )
+  def test_single_stack_axis(self, scan_layers, mt_key, target_shape, axis):
+    # One rule for the dynamic loader, to_maxtext and the conversion back to HF.
+    config = mock.Mock(scan_layers=scan_layers, param_scan_axis=1)
+    self.assertEqual(tensor_handling.single_stack_axis(mt_key, config, target_shape), axis)
+
   def test_get_hf_loading_function_case_4_multi_axis(self):
     # Tests Case 4, line 190, 73, and gets loader for multi-axis stacked
     class MockConfig:
@@ -144,6 +191,294 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[0, 1], tensors["expert_0.layer_1.weight"])
     np.testing.assert_allclose(result[1, 0], tensors["expert_1.layer_0.weight"])
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
+
+  @parameterized.product(
+      layout=["single_axis", "expert_stack", "nested_scan"],
+      spec=[(), ("x",)],
+  )
+  def test_get_hf_loading_function_accepts_short_spec(self, layout, spec):
+    # A PartitionSpec may have fewer entries than the array rank; the rest are replicated.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {f"w{i}": np.full((4, 4), i, dtype=np.float32) for i in range(4)}
+    mt_key = ""
+    if layout == "single_axis":
+      hf_keys = ["w0", "w1"]
+      expected = np.stack([tensors["w0"], tensors["w1"]], axis=1)
+    else:
+      hf_keys = [["w0", "w1"], ["w2", "w3"]]
+      expected = np.stack([np.stack([tensors[k] for k in row]) for row in hf_keys])
+      if layout == "nested_scan":
+        mt_key = "params-decoder-layers-local_layers-mlp-kernel"
+        expected = np.moveaxis(expected, (0, 1), (1, 2))
+    sharding = NamedSharding(self.mesh, PartitionSpec(*spec))
+    target_leaf = jax.ShapeDtypeStruct(shape=expected.shape, dtype=np.float32, sharding=sharding)
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig(), mt_key)()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, sharding)
+
+  @parameterized.named_parameters(
+      ("single_key", ("a", "b"), (4, 8)),
+      ("stacked", [("a", "b"), ("c", "d")], (4, 2, 8)),
+  )
+  def test_get_hf_loading_function_accepts_composite_hf_key(self, hf_keys, target_shape):
+    # A tuple of HF keys is fetched together and fused into one leaf by the hook.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {k: np.full((4, 4), i, dtype=np.float32) for i, k in enumerate("abcd")}
+
+    def concat(weights, target_shape):
+      del target_shape
+      return np.concatenate(weights, axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    target_leaf = jax.ShapeDtypeStruct(shape=target_shape, dtype=np.float32, sharding=sharding)
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, concat, target_leaf, MockConfig())()
+
+    self.assertEqual(result.shape, target_shape)
+    np.testing.assert_array_equal(result[..., :4] if len(target_shape) == 2 else result[:, 0, :4], tensors["a"])
+    np.testing.assert_array_equal(result[..., 4:] if len(target_shape) == 2 else result[:, 0, 4:], tensors["b"])
+
+  def test_hook_gathers_weight_spanning_other_hosts(self):
+    # A NumPy hook cannot read a weight with shards on other hosts; the loader gathers it and retries.
+    def numpy_only_hook(weight, target_shape):
+      del target_shape
+      if isinstance(weight, jax.Array):
+        raise RuntimeError("Fetching value for `jax.Array` that spans non-addressable devices is not possible.")
+      return weight * 2
+
+    weight = jnp.ones((4, 4), dtype=jnp.float32)
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    with (
+        mock.patch.object(tensor_handling, "_spans_other_hosts", return_value=True),
+        mock.patch.object(tensor_handling, "_gather_to_host", side_effect=np.asarray) as gather,
+    ):
+      result = get_hf_loading_function("w", {"w": weight}.__getitem__, numpy_only_hook, target_leaf, None)()
+
+    gather.assert_called_once()
+    np.testing.assert_array_equal(result, np.full((4, 4), 2, dtype=np.float32))
+
+  def test_other_hook_error_on_weight_spanning_other_hosts_is_not_retried(self):
+    # Only the non-addressable error starts the all-gather; any other error may come from one host alone.
+    def out_of_memory_on_device(weight, target_shape):
+      del target_shape
+      if isinstance(weight, jax.Array):
+        raise RuntimeError("RESOURCE_EXHAUSTED: Out of memory")
+      return weight
+
+    weight = jnp.ones((4, 4), dtype=jnp.float32)
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    load_fn = get_hf_loading_function("w", {"w": weight}.__getitem__, out_of_memory_on_device, target_leaf, None)
+    with (
+        mock.patch.object(tensor_handling, "_spans_other_hosts", return_value=True),
+        mock.patch.object(tensor_handling, "_gather_to_host", side_effect=np.asarray) as gather,
+        self.assertRaisesRegex(RuntimeError, "RESOURCE_EXHAUSTED"),
+    ):
+      load_fn()
+
+    gather.assert_not_called()
+
+  def test_host_array_is_placed_per_shard_on_multi_host(self):
+    # A host result (e.g. after the gather fallback) must not go through jax.device_put, which all-gathers it
+    # across hosts on device to compare the copies.
+    host_array = np.arange(16, dtype=np.float32).reshape(4, 4)
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    with (
+        mock.patch.object(type(sharding), "is_fully_addressable", new_callable=mock.PropertyMock, return_value=False),
+        mock.patch.object(
+            tensor_handling.jax, "make_array_from_callback", wraps=jax.make_array_from_callback
+        ) as per_shard,
+        mock.patch.object(tensor_handling.jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._device_put(host_array, sharding)  # pylint: disable=protected-access
+
+    per_shard.assert_called_once()
+    device_put.assert_not_called()
+    np.testing.assert_array_equal(result, host_array)
+
+  def test_hook_error_on_local_weight_is_raised(self):
+    def failing_hook(weight, target_shape):
+      raise RuntimeError("hook bug")
+
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    load_fn = get_hf_loading_function("w", {"w": jnp.ones((4, 4))}.__getitem__, failing_hook, target_leaf, None)
+    with self.assertRaisesRegex(RuntimeError, "hook bug"):
+      load_fn()
+
+  def test_transform_reuses_hf_tensor_for_several_leaves(self):
+    # gemma4 maps one HF tensor to two MaxText leaves, each hook taking one half.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = False
+
+    hf_state = {"gate_up": np.arange(32, dtype=np.float32).reshape(4, 8)}
+    expected = hf_state["gate_up"].copy()
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=sharding)
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state,
+        {"wi_0": leaf, "wi_1": leaf},
+        {"params-wi_0": "gate_up", "params-wi_1": "gate_up"},
+        {"params-wi_0": lambda x, shape: x[:, :4], "params-wi_1": lambda x, shape: x[:, 4:]},
+        MockConfig(),
+    )["params"]
+
+    np.testing.assert_array_equal(restored["wi_0"], expected[:, :4])
+    np.testing.assert_array_equal(restored["wi_1"], expected[:, 4:])
+    self.assertEmpty(hf_state)
+
+  def test_transform_loads_variable_collections(self):
+    # DeepSeek maps the MoE gate bias and the hash-routing table into the MoEBiasVar and Tid2EidVar
+    # collections, whose leaves the weights state holds without the collection name. DeepSeek-V3 also
+    # maps the gate bias as a weight; the collection key is used, and stacks the layers along axis 0.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    biases = [np.full((4,), i, dtype=np.float32) for i in range(3)]
+    tid2eid = np.arange(6, dtype=np.int32).reshape(2, 3)
+    hf_state = {f"layers.{i}.gate.bias": b for i, b in enumerate(biases)}
+    hf_state["layers.0.gate.tid2eid"] = tid2eid
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    target = {
+        "decoder": {
+            "layers": {"gate": {"bias": jax.ShapeDtypeStruct((3, 4), np.float32, sharding=sharding)}},
+            "layers_0": {"tid2eid": jax.ShapeDtypeStruct((2, 3), np.int32, sharding=sharding)},
+        }
+    }
+    bias_keys = [f"layers.{i}.gate.bias" for i in range(3)]
+    mapping = {
+        "params-decoder-layers-gate-bias": bias_keys,
+        "MoEBiasVar-decoder-layers-gate-bias": bias_keys,
+        "Tid2EidVar-decoder-layers_0-tid2eid": "layers.0.gate.tid2eid",
+    }
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target, mapping, {}, MockConfig())["params"]
+
+    np.testing.assert_array_equal(restored["decoder"]["layers"]["gate"]["bias"], np.stack(biases))
+    np.testing.assert_array_equal(restored["decoder"]["layers_0"]["tid2eid"], tid2eid)
+    self.assertEmpty(hf_state)
+
+  @parameterized.named_parameters(
+      ("single_key", "gate_up", (4, 8)),
+      ("stacked", ["gate_up_0", "gate_up_1"], (4, 2, 8)),
+  )
+  def test_transform_splits_composite_mt_key(self, hf_source, leaf_shape):
+    # A tuple of MaxText keys gets one HF tensor that the hook splits along a new last axis.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    hf_keys = [hf_source] if isinstance(hf_source, str) else hf_source
+    hf_state = {k: np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i for i, k in enumerate(hf_keys)}
+    expected = {k: v.copy() for k, v in hf_state.items()}
+
+    def split(weight, target_shape):
+      self.assertEqual(target_shape, [leaf_shape[:1] + leaf_shape[-1:]] * 2)
+      return np.stack([weight[:, :8], weight[:, 8:]], axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding)
+    target_tree = {"mlp": {"wi_0": leaf, "wi_1": leaf}}
+    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state, target_tree, {mt_key: hf_source}, {mt_key: split}, MockConfig()
+    )["params"]["mlp"]
+
+    for i, k in enumerate(hf_keys):
+      index = (Ellipsis,) if isinstance(hf_source, str) else (slice(None), i)
+      np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
+      np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
+    self.assertEqual(restored["wi_0"].sharding, sharding)
+
+  @parameterized.named_parameters(
+      ("single_key", "w0", (4, 4)),
+      ("single_axis_stack", ["w0", "w1"], (2, 4, 4)),
+      ("multi_axis_stack", [["w0", "w1"], ["w2", "w3"]], (2, 2, 4, 4)),
+  )
+  def test_get_hf_loading_function_returns_target_dtype(self, hf_keys, target_shape):
+    # HF checkpoints are usually bf16; every case must return the target dtype (float32 here).
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    tensors = {f"w{i}": np.full((4, 4), i + 0.5, dtype=jnp.bfloat16) for i in range(4)}
+    # The stacked cases index the spec by axis, so give it one entry per axis, as MaxText does.
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=target_shape,
+        dtype=np.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec(*([None] * len(target_shape)))),
+    )
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig())()
+
+    self.assertEqual(result.shape, target_shape)
+    self.assertEqual(result.dtype, np.float32)
+    self.assertEqual(result.sharding, target_leaf.sharding)
+    first_slice = result[(0,) * (len(target_shape) - 2)]
+    np.testing.assert_array_equal(first_slice, tensors["w0"].astype(np.float32))
+
+  @parameterized.named_parameters(
+      ("sliced", 40, 4),  # 10 rows of 12 bytes, 3 rows per slice: slices of 3, 3, 3 and 1 rows.
+      ("whole", 1000, 1),
+  )
+  def test_gather_in_slices_bounds_each_gather(self, max_bytes, num_gathers):
+    weight = jnp.arange(30, dtype=jnp.float32).reshape(10, 3)
+    gathered = []
+
+    def gather_fn(piece):
+      gathered.append(piece.nbytes)
+      return np.asarray(piece)
+
+    result = _gather_in_slices(weight, gather_fn, max_bytes=max_bytes)
+
+    np.testing.assert_array_equal(result, np.asarray(weight))
+    self.assertLen(gathered, num_gathers)
+    self.assertLessEqual(max(gathered), max(max_bytes, 12))
+
+  def test_get_hf_loading_function_without_hf_key_uses_hook(self):
+    # A leaf with no HF tensor (None key, e.g. DeepSeek-V4 mHC norm scales) is built by its hook alone.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    def getter(key):
+      raise AssertionError(f"No HF tensor should be read, got {key}.")
+
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=(4,), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec(None))
+    )
+
+    def ones_hook(weight, target_shape):
+      del weight
+      return np.ones(target_shape, dtype=np.float32)
+
+    result = get_hf_loading_function(None, getter, ones_hook, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, np.ones(4, dtype=np.float32))
+    self.assertEqual(result.sharding, target_leaf.sharding)
 
 
 class LoadDynamicTest(parameterized.TestCase):
@@ -237,6 +572,32 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
 
+  @parameterized.named_parameters(
+      ("base", "llama3.1-8b"),
+      ("instruct_8b", "llama3.1-8b-Instruct"),
+      ("instruct_70b", "llama3.1-70b-Instruct"),
+  )
+  @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
+  def test_empty_path_resolves_repo_of_exact_model_name(self, model_name, mock_hf_fs):
+    # -Instruct variants have their own HF_IDS entries; using the base name would load the base
+    # model's weights.
+    mock_hf_fs.return_value.glob.side_effect = _StopBeforeDownload
+    config = mock.Mock(model_name=model_name, hf_access_token=None, base_output_directory="gs://dummy-bucket")
+
+    with self.assertRaises(_StopBeforeDownload):
+      load_dynamic.load_safetensors_dynamic_state("", {}, config)
+
+    expected_repo = load_dynamic.maxtext_globals.HF_IDS[model_name]
+    mock_hf_fs.return_value.glob.assert_called_once_with(f"{expected_repo}/*.safetensors")
+
+  def test_empty_path_without_hf_ids_entry_raises(self):
+    # HF_IDS has llama3.1-405b but no -Instruct entry for it, so this must raise instead of using the
+    # base repo.
+    config = mock.Mock(model_name="llama3.1-405b-Instruct", hf_access_token=None, base_output_directory="gs://b")
+
+    with self.assertRaisesRegex(ValueError, "No HF repo for model_name=llama3.1-405b-Instruct"):
+      load_dynamic.load_safetensors_dynamic_state("", {}, config)
+
 
 class SourceCheckpointLoadingTest(parameterized.TestCase):
   """Tests for the `load_state_if_possible` function with safetensors_dynamic layout."""
@@ -250,6 +611,39 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     self.safetensors_ckpt_dir = self.tmp_dir / "hf_safetensors"
     self.safetensors_ckpt_dir.mkdir(parents=True, exist_ok=True)
     self.safetensors_ckpt_path = self.safetensors_ckpt_dir / "model.safetensors"
+
+  def test_rename_legacy_hf_keys(self):
+    # google/gemma-3-*-it stores the text model under `language_model.model.`; the mapping uses the names
+    # transformers gives after loading.
+    hf_state = {
+        "language_model.model.embed_tokens.weight": 0,
+        "language_model.lm_head.weight": 1,
+        "vision_tower.vision_model.post_layernorm.weight": 2,
+        "multi_modal_projector.mm_soft_emb_norm.weight": 3,
+        "model.norm.weight": 4,
+        "vision_tower.unmapped.weight": 5,
+    }
+    mapping = {
+        "params-a": "model.language_model.embed_tokens.weight",
+        "params-b": ["lm_head.weight"],
+        "params-c": "model.vision_tower.vision_model.post_layernorm.weight",
+        "params-d": ("model.multi_modal_projector.mm_soft_emb_norm.weight",),
+        "params-e": "model.norm.weight",
+    }
+
+    renamed = load_dynamic.rename_legacy_hf_keys(hf_state, mapping)
+
+    self.assertEqual(
+        renamed,
+        {
+            "model.language_model.embed_tokens.weight": 0,
+            "lm_head.weight": 1,
+            "model.vision_tower.vision_model.post_layernorm.weight": 2,
+            "model.multi_modal_projector.mm_soft_emb_norm.weight": 3,
+            "model.norm.weight": 4,
+            "vision_tower.unmapped.weight": 5,
+        },
+    )
 
   def test_load_safetensors_dynamic_single_key(self):
     if os.getenv("JAX_PLATFORMS") == "proxy":
@@ -472,6 +866,624 @@ class CheckpointErrorHandlerTest(parameterized.TestCase):
         checkpointing.maybe_save_checkpoint(self.mock_manager, self.state, config, data_iterator=None, step=1)
       self.assertIn("Checkpointing failed. GCS failure", str(cm.exception))
       self.assertIs(cm.exception.__cause__, original_error)
+
+
+class FP8DequantizeOnLoadTest(parameterized.TestCase):
+  """Tests for dequantize-on-load parameter restoration."""
+
+  def setUp(self):
+    super().setUp()
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+
+  def _save_and_restore_checkpoint(
+      self,
+      ckpt_name: str,
+      ckpt_weights: dict[str, Any],
+      target_abstract: Any,
+      is_bare: bool = True,
+  ) -> Any:
+    """Helper to save weights to an Orbax checkpoint and restore them."""
+    path = self.tmp_dir / ckpt_name
+    tree = {"params": {"params": ckpt_weights}} if is_bare else {"params": ckpt_weights}
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+        path,
+        tree,
+        force=True,
+    )
+    restored = checkpointing.load_params_from_path(str(path), target_abstract, 8)
+    return restored.to_pure_dict() if isinstance(restored, nnx.State) else restored
+
+  def test_load_fp8_checkpoint_into_bf16_nnx_model(self):
+    """Loading an FP8 checkpoint into a BF16 NNX model restores dequantized BF16 weights and drops scale."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(2.0, dtype=jnp.float32)
+    bias = jnp.array([0.1, -0.2], dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_ckpt", ckpt_weights, params_abstract)
+    # Hand-derived expectation: fp8_kernel * scalar scale (2.0):
+    # [[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]] * 2.0
+    # = [[0.5, 1.0], [2.0, 3.0], [0.25, 1.5], [4.0, 1.0]]
+    expected_kernel = np.array(
+        [[0.5, 1.0], [2.0, 3.0], [0.25, 1.5], [4.0, 1.0]],
+        dtype=np.float32,
+    )
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 2))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    self.assertIn("bias", pure["linear"])
+    self.assertEqual(pure["linear"]["bias"].dtype, jnp.bfloat16)
+    np.testing.assert_array_equal(np.array(pure["linear"]["bias"]), np.array(bias))
+
+  def test_load_fp8_checkpoint_into_fp8_nnx_model(self):
+    """Loading an FP8 checkpoint into an FP8 NNX model preserves FP8 kernel and scale."""
+
+    class FP8Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.float8_e4m3fn)
+        self.linear.kernel_scale = nnx.Param(jnp.ones((), dtype=jnp.float32))
+
+    model = FP8Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 0.5]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(3.5, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.float8_e4m3fn)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_to_fp8_ckpt", ckpt_weights, params_abstract)
+
+    self.assertIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(pure["linear"]["kernel_scale"].dtype, jnp.float32)
+    np.testing.assert_array_equal(np.array(pure["linear"]["kernel"]), np.array(fp8_kernel))
+    np.testing.assert_array_equal(np.array(pure["linear"]["kernel_scale"]), np.array(scale))
+
+  def test_load_fp8_checkpoint_into_bf16_linen_dict(self):
+    """Loading an FP8 checkpoint into a BF16 Linen parameter dict restores dequantized BF16 weights."""
+    target_weights = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+                "bias": jax.ShapeDtypeStruct(shape=(2,), dtype=jnp.bfloat16),
+            }
+        }
+    }
+
+    fp8_kernel = jnp.array([[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+    bias = jnp.zeros((2,), dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "params": {
+            "linear": {
+                "kernel": fp8_kernel,
+                "kernel_scale": scale,
+                "bias": bias,
+            }
+        }
+    }
+
+    # Hand-derived expectation: fp8_kernel * scalar scale (0.5):
+    # [[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]] * 0.5
+    # = [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]]
+    expected_kernel = np.array(
+        [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]],
+        dtype=np.float32,
+    )
+    restored = self._save_and_restore_checkpoint("fp8_linen_ckpt", ckpt_weights, target_weights, is_bare=False)
+
+    self.assertNotIsInstance(restored, nnx.State)
+    self.assertIn("params", restored)
+    self.assertNotIn("kernel_scale", restored["params"]["linear"])
+    self.assertEqual(restored["params"]["linear"]["kernel"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.array(restored["params"]["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_per_channel_scale_into_bf16_model(self):
+    """Loading an FP8 checkpoint with per-channel scale restores dequantized BF16 weights and drops scale."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array([[0.25, 0.5], [1.0, 1.5], [0.125, 0.75], [2.0, 3.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array([2.0, 0.5], dtype=jnp.float32)
+    bias = jnp.array([0.1, -0.2], dtype=jnp.bfloat16)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+            "bias": bias,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_per_channel_ckpt", ckpt_weights, params_abstract)
+    # Hand-derived expectation: fp8_kernel (4, 2) * per-channel scale (2,) [2.0, 0.5]
+    # Column 0 scaled by 2.0: [0.25, 1.0, 0.125, 2.0] * 2.0 = [0.5, 2.0, 0.25, 4.0]
+    # Column 1 scaled by 0.5: [0.5, 1.5, 0.75, 3.0] * 0.5 = [0.25, 0.75, 0.375, 1.5]
+    expected_kernel = np.array(
+        [[0.5, 0.25], [2.0, 0.75], [0.25, 0.375], [4.0, 1.5]],
+        dtype=np.float32,
+    )
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 2))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_blockwise_scales_into_bf16_model(self):
+    """Loading an FP8 checkpoint with 2D block scales restores dequantized BF16 weights and drops scale."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 4, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    fp8_kernel = jnp.array(
+        [[1.0, 2.0, 3.0, 4.0], [0.5, 1.5, 2.5, 3.5], [0.25, 0.75, 1.25, 1.75], [2.0, 1.0, 0.5, 0.25]],
+        dtype=jnp.float8_e4m3fn,
+    )
+    scale = jnp.array([[0.5, 1.0], [2.0, 0.25]], dtype=jnp.float32)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": fp8_kernel,
+            "kernel_scale": scale,
+        }
+    }
+
+    pure = self._save_and_restore_checkpoint("fp8_blockwise_ckpt", ckpt_weights, params_abstract)
+    # Hand-derived expectation: fp8_kernel (4, 4) * 2D block scale (2, 2) with 2x2 blocks:
+    # Block (0, 0) scale 0.5: [[1.0, 2.0], [0.5, 1.5]] * 0.5 = [[0.5, 1.0], [0.25, 0.75]]
+    # Block (0, 1) scale 1.0: [[3.0, 4.0], [2.5, 3.5]] * 1.0 = [[3.0, 4.0], [2.5, 3.5]]
+    # Block (1, 0) scale 2.0: [[0.25, 0.75], [2.0, 1.0]] * 2.0 = [[0.5, 1.5], [4.0, 2.0]]
+    # Block (1, 1) scale 0.25: [[1.25, 1.75], [0.5, 0.25]] * 0.25 = [[0.3125, 0.4375], [0.125, 0.0625]]
+    expected_kernel = np.array(
+        [
+            [0.5, 1.0, 3.0, 4.0],
+            [0.25, 0.75, 2.5, 3.5],
+            [0.5, 1.5, 0.3125, 0.4375],
+            [4.0, 2.0, 0.125, 0.0625],
+        ],
+        dtype=np.float32,
+    )
+
+    self.assertNotIn("kernel_scale", pure["linear"])
+    self.assertEqual(pure["linear"]["kernel"].dtype, jnp.bfloat16)
+    self.assertEqual(pure["linear"]["kernel"].shape, (4, 4))
+    np.testing.assert_allclose(
+        np.array(pure["linear"]["kernel"]),
+        np.array(expected_kernel),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_load_fp8_checkpoint_with_moe_scales_into_bf16_model(self):
+    """Loading an FP8 checkpoint with 3D block and per-expert MoE scales restores dequantized BF16 weights."""
+    target_weights = {
+        "params": {
+            "moe": {
+                "kernel": jax.ShapeDtypeStruct(shape=(2, 4, 4), dtype=jnp.bfloat16),
+            }
+        }
+    }
+
+    # Asymmetric FP8 kernel (2, 4, 4):
+    # - Expert 0 differs from Expert 1
+    # - Every 2x2 scale block differs from its neighbours
+    # - Asymmetric under transpose of axes (1, 2)
+    # - All values exactly representable in float8_e4m3fn
+    fp8_kernel = jnp.array(
+        [
+            # Expert 0 (4, 4):
+            [
+                [0.5, 1.0, 1.5, 2.0],
+                [2.5, 3.0, 3.5, 4.0],
+                [1.0, 1.5, 2.0, 2.5],
+                [3.0, 3.5, 4.0, 0.5],
+            ],
+            # Expert 1 (4, 4):
+            [
+                [1.5, 2.0, 2.5, 3.0],
+                [0.5, 1.0, 1.5, 2.0],
+                [3.5, 4.0, 0.5, 1.0],
+                [2.0, 2.5, 3.0, 3.5],
+            ],
+        ],
+        dtype=jnp.float8_e4m3fn,
+    )
+
+    # 3D block scale (2, 2, 2) with 2x2 blocks per expert, asymmetric under transpose
+    scale_blockwise = jnp.array(
+        [
+            # Expert 0:
+            [[0.5, 1.0], [2.0, 1.5]],
+            # Expert 1:
+            [[1.0, 2.0], [0.5, 4.0]],
+        ],
+        dtype=jnp.float32,
+    )
+    # Per-expert scale (2,)
+    scale_per_expert = jnp.array([2.0, 0.5], dtype=jnp.float32)
+
+    # Hand-derived expectation for 3D blockwise:
+    # Expert 0:
+    # block (0, 0) scale 0.5: [[0.5, 1.0], [2.5, 3.0]] * 0.5 = [[0.25, 0.5], [1.25, 1.5]]
+    # block (0, 1) scale 1.0: [[1.5, 2.0], [3.5, 4.0]] * 1.0 = [[1.5, 2.0], [3.5, 4.0]]
+    # block (1, 0) scale 2.0: [[1.0, 1.5], [3.0, 3.5]] * 2.0 = [[2.0, 3.0], [6.0, 7.0]]
+    # block (1, 1) scale 1.5: [[2.0, 2.5], [4.0, 0.5]] * 1.5 = [[3.0, 3.75], [6.0, 0.75]]
+    # Expert 1:
+    # block (0, 0) scale 1.0: [[1.5, 2.0], [0.5, 1.0]] * 1.0 = [[1.5, 2.0], [0.5, 1.0]]
+    # block (0, 1) scale 2.0: [[2.5, 3.0], [1.5, 2.0]] * 2.0 = [[5.0, 6.0], [3.0, 4.0]]
+    # block (1, 0) scale 0.5: [[3.5, 4.0], [2.0, 2.5]] * 0.5 = [[1.75, 2.0], [1.0, 1.25]]
+    # block (1, 1) scale 4.0: [[0.5, 1.0], [3.0, 3.5]] * 4.0 = [[2.0, 4.0], [12.0, 14.0]]
+    expected_blockwise = np.array(
+        [
+            [
+                [0.25, 0.5, 1.5, 2.0],
+                [1.25, 1.5, 3.5, 4.0],
+                [2.0, 3.0, 3.0, 3.75],
+                [6.0, 7.0, 6.0, 0.75],
+            ],
+            [
+                [1.5, 2.0, 5.0, 6.0],
+                [0.5, 1.0, 3.0, 4.0],
+                [1.75, 2.0, 2.0, 4.0],
+                [1.0, 1.25, 12.0, 14.0],
+            ],
+        ],
+        dtype=np.float32,
+    )
+
+    # Hand-derived expectation for per-expert:
+    # Expert 0 scaled by 2.0:
+    # [[0.5, 1.0, 1.5, 2.0], [2.5, 3.0, 3.5, 4.0], [1.0, 1.5, 2.0, 2.5], [3.0, 3.5, 4.0, 0.5]] * 2.0
+    # = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 1.0]]
+    # Expert 1 scaled by 0.5:
+    # [[1.5, 2.0, 2.5, 3.0], [0.5, 1.0, 1.5, 2.0], [3.5, 4.0, 0.5, 1.0], [2.0, 2.5, 3.0, 3.5]] * 0.5
+    # = [[0.75, 1.0, 1.25, 1.5], [0.25, 0.5, 0.75, 1.0], [1.75, 2.0, 0.25, 0.5], [1.0, 1.25, 1.5, 1.75]]
+    expected_per_expert = np.array(
+        [
+            [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+                [2.0, 3.0, 4.0, 5.0],
+                [6.0, 7.0, 8.0, 1.0],
+            ],
+            [
+                [0.75, 1.0, 1.25, 1.5],
+                [0.25, 0.5, 0.75, 1.0],
+                [1.75, 2.0, 0.25, 0.5],
+                [1.0, 1.25, 1.5, 1.75],
+            ],
+        ],
+        dtype=np.float32,
+    )
+
+    test_cases = [
+        ("blockwise", scale_blockwise, expected_blockwise),
+        ("per_expert", scale_per_expert, expected_per_expert),
+    ]
+
+    for scale_name, scale, expected_kernel in test_cases:
+      ckpt_weights = {
+          "params": {
+              "moe": {
+                  "kernel": fp8_kernel,
+                  "kernel_scale": scale,
+              }
+          }
+      }
+      restored = self._save_and_restore_checkpoint(
+          f"fp8_moe_{scale_name}_ckpt", ckpt_weights, target_weights, is_bare=False
+      )
+
+      self.assertNotIn("kernel_scale", restored["params"]["moe"])
+      self.assertEqual(restored["params"]["moe"]["kernel"].dtype, jnp.bfloat16)
+      self.assertEqual(restored["params"]["moe"]["kernel"].shape, (2, 4, 4))
+      np.testing.assert_allclose(
+          np.array(restored["params"]["moe"]["kernel"]),
+          expected_kernel,
+          rtol=1e-3,
+          atol=1e-3,
+      )
+
+  def test_load_fp8_checkpoint_shape_mismatch_raises(self):
+    """Loading an FP8 checkpoint with incompatible weight shape raises a descriptive ValueError."""
+
+    class BF16Model(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.linear = nnx.Linear(4, 2, rngs=rngs, dtype=jnp.bfloat16, param_dtype=jnp.bfloat16)
+
+    model = BF16Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+
+    ckpt_weights = {
+        "linear": {
+            "kernel": jnp.zeros((4, 3), dtype=jnp.float8_e4m3fn),
+            "kernel_scale": jnp.array(1.0, dtype=jnp.float32),
+        }
+    }
+
+    with self.assertRaisesRegex(ValueError, r"shape \(4, 3\) but the model expects \(4, 2\)"):
+      self._save_and_restore_checkpoint("mismatched_ckpt", ckpt_weights, params_abstract)
+
+  def test_augment_want_with_scales_flat_linen_checkpoint(self):
+    """Verifies that flat Linen checkpoints without an inner 'params' key correctly traverse line 700."""
+    want = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+            }
+        }
+    }
+    # In a flat Linen checkpoint, stored.get("params") contains layer dicts directly (no inner "params" key).
+    stored = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.float8_e4m3fn),
+                "kernel_scale": jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
+            }
+        }
+    }
+    # This call directly exercises checkpointing.py:700:
+    # `if not is_nnx and "params" in want and isinstance(meta_weights, dict) and "params" not in meta_weights:`
+    augmented = checkpointing._augment_want_with_scales(  # pylint: disable=protected-access
+        want, stored, is_nnx=False, restore_key="params"
+    )
+    self.assertIn("params", augmented)
+    self.assertIn("kernel_scale", augmented["params"]["linear"])
+    self.assertEqual(augmented["params"]["linear"]["kernel_scale"].shape, ())
+    self.assertEqual(augmented["params"]["linear"]["kernel_scale"].dtype, jnp.float32)
+
+  @mock.patch.object(checkpointing.ocp, "load")
+  @mock.patch.object(checkpointing.ocp, "metadata")
+  def test_load_fp8_flat_linen_checkpoint(self, mock_metadata_fn, mock_load_fn):
+    """Loading an FP8 checkpoint with flat Linen weights exercises checkpointing.py:700 in restore flow."""
+    want = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.bfloat16),
+            }
+        }
+    }
+    fp8_kernel = jnp.array([[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]], dtype=jnp.float8_e4m3fn)
+    scale = jnp.array(0.5, dtype=jnp.float32)
+
+    # Stored metadata has flat Linen layout: stored["params"] has no inner "params" key
+    mock_meta = mock.MagicMock()
+    mock_meta.metadata = {
+        "params": {
+            "linear": {
+                "kernel": jax.ShapeDtypeStruct(shape=(4, 2), dtype=jnp.float8_e4m3fn),
+                "kernel_scale": jax.ShapeDtypeStruct(shape=(), dtype=jnp.float32),
+            }
+        }
+    }
+    mock_metadata_fn.return_value = mock_meta
+
+    # ocp.load returns the loaded pytree matching the augmented target
+    mock_load_fn.return_value = {
+        "params": {
+            "params": {
+                "linear": {
+                    "kernel": fp8_kernel,
+                    "kernel_scale": scale,
+                }
+            }
+        }
+    }
+
+    restored = checkpointing.load_params_from_path(str(self.tmp_dir / "flat_linen_ckpt"), want, 8)
+
+    # Verify that line 700 augmented want["params"] with kernel_scale
+    mock_load_fn.assert_called_once()
+    called_target = mock_load_fn.call_args[0][1]
+    self.assertIn("kernel_scale", called_target["params"]["params"]["linear"])
+
+    # Hand-derived expectation: fp8_kernel * scalar scale (0.5):
+    # [[0.5, 1.0], [0.25, 0.75], [1.5, 0.125], [0.5, 2.0]] * 0.5
+    # = [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]]
+    expected_kernel = np.array(
+        [[0.25, 0.5], [0.125, 0.375], [0.75, 0.0625], [0.25, 1.0]],
+        dtype=np.float32,
+    )
+
+    self.assertIn("params", restored)
+    self.assertNotIn("kernel_scale", restored["params"]["linear"])
+    self.assertEqual(restored["params"]["linear"]["kernel"].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.array(restored["params"]["linear"]["kernel"]),
+        expected_kernel,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_scale_sharding_derivation(self):
+    """Tests that _scale_sharding correctly derives shardings across multi-axis meshes."""
+    devices = np.array(jax.devices()[:1]).reshape((1, 1))
+    mesh = jax.sharding.Mesh(devices, ("fsdp", "tensor"))
+
+    # 1. Unsharded / None
+    self.assertIsNone(checkpointing._scale_sharding(None, (16, 4)))  # pylint: disable=protected-access
+
+    # 2. Divisible block scale: retains divisible axes
+    weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
+    scale_sharding = checkpointing._scale_sharding(weight_sharding, (16, 4))  # pylint: disable=protected-access
+    self.assertIsInstance(scale_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(scale_sharding.mesh, mesh)
+    self.assertEqual(scale_sharding.spec, jax.sharding.PartitionSpec("fsdp", "tensor"))
+
+    # 3. Scalar scale (rank 0): falls back to replicated P()
+    scalar_sharding = checkpointing._scale_sharding(weight_sharding, ())  # pylint: disable=protected-access
+    self.assertIsInstance(scalar_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(scalar_sharding.spec, jax.sharding.PartitionSpec())
+
+    # 4. 1D per-channel scale (rank 1): falls back to replicated P()
+    channel_sharding = checkpointing._scale_sharding(weight_sharding, (4,))  # pylint: disable=protected-access
+    self.assertIsInstance(channel_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(channel_sharding.spec, jax.sharding.PartitionSpec())
+
+    # 5. 4D MoE block scale with leading unpartitioned dims
+    moe_weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
+    moe_scale_sharding = checkpointing._scale_sharding(moe_weight_sharding, (16, 10, 16, 4))  # pylint: disable=protected-access
+    self.assertIsInstance(moe_scale_sharding, jax.sharding.NamedSharding)
+    self.assertEqual(moe_scale_sharding.spec, jax.sharding.PartitionSpec(None, None, "fsdp", "tensor"))
+
+
+class FlatMoeWeightsLoadTest(parameterized.TestCase):
+  """load_params_from_path converts 3D/4D routed-expert weights to the moe_flat_fsdp_weights layout."""
+
+  def setUp(self):
+    """Builds an (fsdp, expert=2) mesh and random 3D/4D routed-expert weights."""
+    super().setUp()
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for an (fsdp, expert=2) mesh.")
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+    devices = np.array(jax.devices()).reshape((jax.device_count() // 2, 2))
+    self.mesh = Mesh(devices, ("fsdp", "expert"))
+    self.num_experts, self.layers, self.rows, self.cols = 4, 3, 4 * jax.device_count(), 16
+    rng = np.random.RandomState(0)
+    # Scanned decoder MoE [E, L, rows, cols] and unscanned MTP MoE [E, rows, cols], as in a 3D checkpoint.
+    self.wi_0 = rng.randn(self.num_experts, self.layers, self.rows, self.cols).astype(np.float32)
+    self.wo = rng.randn(self.num_experts, self.cols, self.rows).astype(np.float32)
+
+  def _flat_target(self, shape):
+    return jax.ShapeDtypeStruct(
+        shape,
+        jnp.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec(("expert", "fsdp"), *([None] * (len(shape) - 1)))),
+    )
+
+  def _load(self, ckpt_weights, convert_flat_moe_weights, linen=False):
+    """Saves `ckpt_weights` as a checkpoint and loads it into a flat NNX (or Linen) params target."""
+    path = self.tmp_dir / f"ckpt_{convert_flat_moe_weights}"
+    ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(path, {"params": {"params": ckpt_weights}}, force=True)
+    # NNX params state, as load_state_if_possible passes it (training is NNX-only).
+    target = nnx.State(
+        {
+            "decoder": {
+                "MoeBlock_0": {
+                    "wi_0": nnx.Param(self._flat_target((self.num_experts * self.rows, self.layers, self.cols)))
+                }
+            },
+            "mtp": {"MoeBlock_0": {"wo": nnx.Param(self._flat_target((self.num_experts * self.cols, self.rows)))}},
+        }
+    )
+    if linen:
+      # A Linen TrainState.params target is keyed by collection.
+      target = {"params": nnx.to_pure_dict(target)}
+    restored = checkpointing.load_params_from_path(
+        str(path), target, 8, convert_flat_moe_weights=convert_flat_moe_weights
+    )
+    return restored["params"] if linen else nnx.to_pure_dict(restored)
+
+  def _ckpt_3d(self):
+    return {"decoder": {"MoeBlock_0": {"wi_0": self.wi_0}}, "mtp": {"MoeBlock_0": {"wo": self.wo}}}
+
+  @parameterized.named_parameters(("nnx", False), ("linen", True))
+  def test_3d_checkpoint_converted_to_flat(self, linen):
+    restored = self._load(self._ckpt_3d(), convert_flat_moe_weights=True, linen=linen)
+    wi_0 = restored["decoder"]["MoeBlock_0"]["wi_0"]
+    wo = restored["mtp"]["MoeBlock_0"]["wo"]
+    expected_wi_0 = self.wi_0.transpose(0, 2, 1, 3).reshape((self.num_experts * self.rows, self.layers, self.cols))
+    np.testing.assert_array_equal(np.asarray(wi_0), expected_wi_0)
+    np.testing.assert_array_equal(np.asarray(wo), self.wo.reshape((self.num_experts * self.cols, self.rows)))
+    self.assertEqual(wi_0.sharding.spec, PartitionSpec(("expert", "fsdp"), None, None))
+    self.assertEqual(wo.sharding.spec, PartitionSpec(("expert", "fsdp"), None))
+
+  def test_flat_checkpoint_loads_unchanged(self):
+    flat = {
+        "decoder": {
+            "MoeBlock_0": {
+                "wi_0": self.wi_0.transpose(0, 2, 1, 3).reshape((self.num_experts * self.rows, self.layers, self.cols))
+            }
+        },
+        "mtp": {"MoeBlock_0": {"wo": self.wo.reshape((self.num_experts * self.cols, self.rows))}},
+    }
+    restored = self._load(flat, convert_flat_moe_weights=True)
+    np.testing.assert_array_equal(
+        np.asarray(restored["decoder"]["MoeBlock_0"]["wi_0"]), flat["decoder"]["MoeBlock_0"]["wi_0"]
+    )
+    np.testing.assert_array_equal(np.asarray(restored["mtp"]["MoeBlock_0"]["wo"]), flat["mtp"]["MoeBlock_0"]["wo"])
+
+  def test_no_conversion_without_flag(self):
+    """With the flag off the load path is unchanged: a 3D checkpoint into a flat target is a shape mismatch."""
+    with self.assertRaises(ValueError):
+      self._load(self._ckpt_3d(), convert_flat_moe_weights=False)
+
+  def test_convert_replicated_target(self):
+    """A replicated flat target (empty PartitionSpec) converts without indexing past the spec."""
+    x = jnp.asarray(self.wi_0)
+    target = jax.ShapeDtypeStruct(
+        (self.num_experts * self.rows, self.layers, self.cols),
+        jnp.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec()),
+    )
+    out = checkpointing._flat_moe_convert(x, target)  # pylint: disable=protected-access
+    expected = self.wi_0.transpose(0, 2, 1, 3).reshape(target.shape)
+    np.testing.assert_array_equal(np.asarray(out), expected)
+
+  def test_restore_plan_single_axis_dim0(self):
+    """With a size-one expert axis dim 0 is just "fsdp": restore with the rows dim sharded, not the expert dim."""
+    stored = jax.ShapeDtypeStruct(self.wi_0.shape, jnp.float32)
+    want = jax.ShapeDtypeStruct(
+        (self.num_experts * self.rows, self.layers, self.cols),
+        jnp.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec("fsdp", None, None)),
+    )
+    plan = checkpointing._flat_moe_restore_plan({"wi_0": want}, {"wi_0": stored})  # pylint: disable=protected-access
+    self.assertEqual(plan[("wi_0",)][1].sharding.spec, PartitionSpec(None, None, "fsdp", None))
 
 
 if __name__ == "__main__":

@@ -458,7 +458,7 @@ class TrainerStepCounterTest(unittest.TestCase):
     mock_global_norm.return_value = mock.Mock()
     trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
 
-    trainer._train_step(model_bundle, optimizer, mock.Mock())
+    trainer._train_step(model_bundle, optimizer, None, mock.Mock())
 
     # Step should have incremented to 6
     self.assertEqual(int(model_bundle.training_step[...]), 6)
@@ -511,11 +511,11 @@ class TrainerStepCounterTest(unittest.TestCase):
     mock_global_norm.return_value = mock.Mock()
 
     self.assertEqual(int(model_bundle.training_step[...]), 0)
-    trainer._train_step(model_bundle, optimizer, mock.Mock())
+    trainer._train_step(model_bundle, optimizer, None, mock.Mock())
     self.assertEqual(int(model_bundle.training_step[...]), 1)
-    trainer._train_step(model_bundle, optimizer, mock.Mock())
+    trainer._train_step(model_bundle, optimizer, None, mock.Mock())
     self.assertEqual(int(model_bundle.training_step[...]), 2)
-    trainer._train_step(model_bundle, optimizer, mock.Mock())
+    trainer._train_step(model_bundle, optimizer, None, mock.Mock())
     self.assertEqual(int(model_bundle.training_step[...]), 3)
 
 

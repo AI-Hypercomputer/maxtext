@@ -19,8 +19,8 @@ import functools
 import os
 from typing import Sequence
 
-from flax import linen as nn, nnx, traverse_util
-from flax.linen import partitioning as nn_partitioning
+from flax import nnx, traverse_util
+from flax.core.spmd import logical_axis_rules as axis_rules
 from flax.training.train_state import TrainState
 import jax
 from jax.experimental import mesh_utils
@@ -31,13 +31,12 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
-    MODEL_MODE_AUTOREGRESSIVE,
-    MODEL_MODE_PREFILL,
     ReorderStrategy,
     ShardMode,
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -101,10 +100,7 @@ def get_functional_train_with_signature(
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  if getattr(config, "retry_when_tokens_dropped", False) is True:
-    donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
-  else:
-    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -257,7 +253,7 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   return [], []
 
 
-def load_compiled(config, partial_train, state, execution_devices):
+def load_compiled(config, partial_train, state, execution_devices, data_sharding=None):
   """# Loading a serialized compiled train step function."""
 
   # Currently partial_train and state  are needed to reconstruct
@@ -274,7 +270,7 @@ def load_compiled(config, partial_train, state, execution_devices):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = get_shaped_batch(config)
+  shaped_batch = get_shaped_batch(config, batch_sharding=data_sharding)
   shaped_input_args = (state, shaped_batch)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
@@ -284,6 +280,10 @@ def load_compiled(config, partial_train, state, execution_devices):
 
 def calculate_tokens_training_per_device(config):
   """Calculate training Tokens per device"""
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  num_devices = getattr(config, "num_target_devices", None)
+  if isinstance(logical_batch, int) and isinstance(num_devices, int) and num_devices > 0:
+    return config.max_target_length * logical_batch / num_devices
   return config.max_target_length * config.per_device_batch_size * config.gradient_accumulation_steps
 
 
@@ -752,7 +752,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING, DecoderBlockType.HY4):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -760,7 +760,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1153,8 +1153,149 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
   )
 
 
+def calculate_hy4_tflops_training_per_device(config, total_ffn_flops_all_layers, embedding_flops):
+  """Calculates the training TFLOPs per device for Hy4.
+
+  Hy4 combines Gated MLA, a periodic DeepSeek Sparse Attention (DSA) indexer,
+  and Identity Hyper-Connections (iHC). This function models:
+  1. Gated MLA projections (Q LoRA, KV LoRA, output, and elementwise sigmoid gate)
+     applied on all layers.
+  2. Sparse causal attention restricted to the top-k keys selected by the indexer,
+     or dense causal attention when max_target_length <= indexer_topk.
+  3. DSA indexer projections and scoring on "full" indexer layers only (the first
+     dense layer(s) plus the first layer of every inhomogeneous_layer_cycle_interval
+     MoE cycle); "shared" layers reuse the preceding full layer's top-k mask.
+  4. iHC pre/post projections and stream contraction/expansion, applied twice per
+     layer (around attention and FFN), plus the final HC head. Unlike mHC, iHC has
+     no k^2 residual-mixing matrix.
+
+  The indexer's inputs are stop-gradient, its top-k mask is nondifferentiable, and
+  Hy4 has no indexer loss, so the indexer receives no gradient and its projection
+  and scoring FLOPs are counted forward-only (1x) instead of 3x.
+
+  Args:
+    config: MaxTextConfig instance containing architectural hyperparameters.
+    total_ffn_flops_all_layers: Pre-computed Feed-Forward (dense MLP + MoE) FLOPs.
+    embedding_flops: Pre-computed unembedding projection FLOPs.
+
+  Returns:
+    A tuple of (total_attn_flops_in_tflops, total_weight_flops_in_tflops).
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  emb_dim = config.emb_dim
+  num_layers = config.num_decoder_layers
+  qk_head_dim_sum = config.qk_nope_head_dim + config.qk_rope_head_dim
+  bs_tokens = batch_size * seq_len
+
+  # 1. Gated MLA Projections (Executed on all layers)
+  # - Q projection: down-projects inputs to q_lora_rank, then up-projects to query_heads * (qk_nope + qk_rope).
+  #   FLOPs = 2 * B * S * (D * Q_rank + Q_rank * H * (D_nope + D_rope))
+  q_flops = (
+      2
+      * batch_size
+      * seq_len
+      * (emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+  )
+  # - KV projection: down-projects inputs to kv_lora_rank + shared rope key, then up-projects the latent
+  #   to per-head nope keys and values.
+  #   FLOPs = 2 * B * S * (D * (KV_rank + D_rope) + KV_rank * H * (D_nope + D_v))
+  kv_flops = (
+      2
+      * batch_size
+      * seq_len
+      * (
+          emb_dim * (config.kv_lora_rank + config.qk_rope_head_dim)
+          + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
+      )
+  )
+  # - Out projection: projects attention output H * D_v -> D.
+  #   FLOPs = 2 * B * S * (H * D_v) * D
+  projection_flops = 2 * batch_size * seq_len * emb_dim * config.num_query_heads * config.v_head_dim
+  # - Elementwise sigmoid gate (`gate_proj`): projects inputs D -> H * D_v, same size as the out projection.
+  gate_projection_flops = projection_flops
+
+  # 2. DSA Indexer Layer Counting
+  # "full" indexer layers: the first dense layer(s), plus the first layer of every
+  # inhomogeneous_layer_cycle_interval MoE cycle (e.g. 1 + ceil(77 / 4) = 21 of 78 layers).
+  # "shared" layers reuse the preceding full layer's top-k mask and run no indexer.
+  num_full_indexer_layers = min(config.first_num_dense_layers, num_layers)
+  num_remaining_layers = max(0, num_layers - config.first_num_dense_layers)
+  num_full_indexer_layers += (
+      num_remaining_layers + config.inhomogeneous_layer_cycle_interval - 1
+  ) // config.inhomogeneous_layer_cycle_interval
+
+  # 3. Attention Core (Executed on all layers)
+  indexer_projection_flops_per_layer = 0
+  indexer_scoring_flops_per_layer = 0
+  if config.use_indexer and seq_len > config.indexer_topk:
+    # - Indexer projections (Q_rank -> H_idx * D_idx, D -> D_idx, D -> H_idx) and causal
+    #   query-key scoring + head reduction, on full indexer layers only.
+    indexer_projection_flops_per_layer, indexer_scoring_flops_per_layer = calculate_indexer_tflops_per_device(config)
+    # - Sparse causal attention: each query attends to at most indexer_topk keys.
+    #   Ratio = (K/T) - 0.5 * (K/T)^2 already accounts for the causal mask.
+    #   FLOPs = 2 * B * S^2 * H * (D_qk + D_v) * Ratio
+    indexer_mask_ratio = calculate_indexer_mask_ratio(config.indexer_topk, seq_len)
+    attention_flops_per_layer = (
+        2
+        * batch_size
+        * seq_len
+        * seq_len
+        * config.num_query_heads
+        * (qk_head_dim_sum + config.v_head_dim)
+        * indexer_mask_ratio
+    )
+  else:
+    # - Dense causal attention: the indexer is bypassed when S <= indexer_topk (or disabled).
+    #   FLOPs = 2 * B * S^2 * H * (D_qk + D_v) / 2 (divided by 2 for causal mask)
+    attention_flops_per_layer = (
+        batch_size * seq_len * seq_len * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+    )
+    num_full_indexer_layers = 0
+
+  # 4. Identity Hyper-Connections (iHC) Overheads
+  # Mirrors calculate_mhc_flops_per_layer minus the k^2 residual-mixing terms iHC lacks.
+  hc_expansion_rate = config.mhc_expansion_rate
+  # - Pre/post mixing projection: flattened streams [B, S, k * D] -> [B, S, 2k].
+  #   FLOPs = 2 * B * S * (k * D) * 2k
+  hc_mix_flops = 2 * bs_tokens * (hc_expansion_rate * emb_dim) * (2 * hc_expansion_rate)
+  # - Pre-contraction: weighted sum of k streams into the branch input [B, S, D].
+  hc_pre_contract_flops = 2 * bs_tokens * hc_expansion_rate * emb_dim
+  # - Post-expansion: outer product of post weights [B, S, k] with branch output [B, S, D].
+  hc_post_outer_flops = bs_tokens * hc_expansion_rate * emb_dim
+  hc_flops_per_block = hc_mix_flops + hc_pre_contract_flops + hc_post_outer_flops
+  # - HC head (once, before the final norm): [B, S, k * D] -> [B, S, k] projection + stream contraction.
+  hc_head_flops = 2 * bs_tokens * (hc_expansion_rate * emb_dim) * hc_expansion_rate + hc_pre_contract_flops
+  # iHC wraps both attention and FFN, so it runs twice per layer.
+  hc_flops = 2 * num_layers * hc_flops_per_block + hc_head_flops
+
+  # 5. Pipeline TFLOP Aggregation
+  indexer_projection_flops = indexer_projection_flops_per_layer * num_full_indexer_layers
+  indexer_attention_flops = indexer_scoring_flops_per_layer * num_full_indexer_layers
+  total_weight_flops = (
+      total_ffn_flops_all_layers
+      + (q_flops + kv_flops + projection_flops + gate_projection_flops) * num_layers
+      + hc_flops
+      + embedding_flops
+  )
+  total_attention_flops = attention_flops_per_layer * num_layers
+
+  # Scale by 3x for Forward + Backward training passes, except the gradient-free
+  # indexer, which runs forward-only (1x).
+  return (
+      (total_attention_flops * 3 + indexer_attention_flops) / 10**12,
+      (total_weight_flops * 3 + indexer_projection_flops) / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
+  if config.use_m3_model:
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.m3 import models as m3_models
+
+    if config.model_name in m3_models.MODEL_FLOPS_REGISTRY:
+      return m3_models.calculate_tflops_per_device(config, log=log)
   # MLP flops
   is_ffn_flops_already_total = False
   if config.num_experts > 1:
@@ -1166,6 +1307,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.HY4,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
@@ -1260,6 +1402,10 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops
     )
+  elif config.decoder_block == DecoderBlockType.HY4:
+    attention_tflops, learnable_weight_tflops = calculate_hy4_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops
+    )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
@@ -1327,6 +1473,7 @@ def calculate_tflops_training_per_device(config, log=True):
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       if config.decoder_block in (
           DecoderBlockType.DEEPSEEK,
+          DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
@@ -1472,7 +1619,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> list:
+def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str, ravel: bool = True) -> list:
   """Collects intermediate leaf values whose dict-key path ends with suffix_keys.
 
   Works regardless of model architecture (scanned, scannable blocks, or standard),
@@ -1482,9 +1629,11 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
     intermediate_outputs: The intermediates dict returned by model.apply().
     *suffix_keys: One or more key names forming the expected path suffix,
       e.g. ``("moe_lb_loss",)`` or ``("self_attention", "indexer_loss")``.
+    ravel: Flatten each leaf to 1-D. Pass False for leaves that are sharded
+      across the mesh, where flattening would force a reshard collective.
 
   Returns:
-    A list of 1-D JAX arrays, one per matching leaf (already ravelled).
+    A list of JAX arrays, one per matching leaf (1-D unless ``ravel=False``).
   """
   suffix = tuple(suffix_keys)
   n = len(suffix)
@@ -1492,7 +1641,7 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
     path_keys = tuple(k.key for k in path if hasattr(k, "key"))
     if len(path_keys) >= n and path_keys[-n:] == suffix:
-      values.append(jnp.ravel(val))
+      values.append(jnp.ravel(val) if ravel else val)
   return values
 
 
@@ -1599,7 +1748,7 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
-  with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with model.mesh, axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
 
@@ -1647,7 +1796,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(config, mesh, init_state_fn, False)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
           unboxed_abstract_state.params,
@@ -1661,7 +1810,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   return state, state_mesh_annotations
 
 
-def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=None):
   is_training = True
   return setup_initial_state(
       data_iterator,
@@ -1670,6 +1819,7 @@ def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_s
       checkpoint_manager,
       init_state_fn,
       is_training,
+      snapshotter=snapshotter,
   )
 
 
@@ -1680,6 +1830,7 @@ def setup_initial_state(
     checkpoint_manager,
     init_state_fn,
     is_training=True,
+    snapshotter=None,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
@@ -1691,6 +1842,9 @@ def setup_initial_state(
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
     init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
+    snapshotter: Optional `snapshotting.Snapshotter` of an elastic run in snapshot mode. When it holds a snapshot
+      that is at least as recent as the latest checkpoint, the state and the data iterator position are restored
+      from it instead of from the checkpoint.
 
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
@@ -1705,11 +1859,12 @@ def setup_initial_state(
   )
 
   # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
+    native = lineage_adapter.is_native(config)
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
-        config.load_parameters_path,
+        "" if native else config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
@@ -1722,7 +1877,19 @@ def setup_initial_state(
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
+        snapshotter=snapshotter,
     )
+    if native and restored is None and raw_params is None and config.load_parameters_path:
+      # The Lineage-native model restores MaxText-layout params against its own abstract target.
+      raw_params = checkpointing.load_params_from_path(
+          config.load_parameters_path,
+          lineage_adapter.maxtext_restore_target(config, mesh),
+          config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_single_replica_ckpt_restoring=bool(config.enable_single_replica_ckpt_restoring),
+          colocated_python_checkpointing=bool(config.enable_single_controller and config.colocated_python_checkpointing),
+      )
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)
 
@@ -1737,7 +1904,10 @@ def setup_initial_state(
         in_shardings=None,
         out_shardings=state_mesh_shardings,
     )()
-    if raw_params:
+    if raw_params and native:
+      # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
+      lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+    elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (
           state["model"]
@@ -1823,15 +1993,6 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
-def get_logical_annotations(config, mesh, init_state_fn):
-  init_state_partial = init_state_fn
-
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-    logical_annotations = nn.get_partition_spec(abstract_state)
-  return logical_annotations
-
-
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)."""
   return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
@@ -1865,7 +2026,7 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   """
   assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
     # nnx_construct_named_sharding which correctly inserts the stacked-layers
     # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
@@ -1963,69 +2124,6 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.micro_batch_size_to_train_on,
-        config.max_prefill_predict_length,
-    )
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
-        model_mode=MODEL_MODE_PREFILL,
-        slot=0,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
-def get_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        slot=0,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
 def _nnx_cache_partition_specs(abstract_model, config, mesh):
   """Per-leaf PartitionSpec tree for the abstract model's nnx.Cache vars.
 
@@ -2035,7 +2133,7 @@ def _nnx_cache_partition_specs(abstract_model, config, mesh):
   _, cache_state, _ = nnx.split(abstract_model, nnx.Cache, ...)
   # nnx_construct_named_sharding reads logical axis rules from the
   # active flax partitioning context, so wrap.
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     named_state = sharding.nnx_construct_named_sharding(cache_state, mesh)
   return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
 
@@ -2115,7 +2213,17 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if num_slices > 1:
+  if getattr(config, "use_lineage", False):
+    dcn_parallelism = (
+        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+    )
+    mesh = lineage_adapter.create_device_mesh(
+        ici_parallelism,
+        devices,
+        dcn_parallelism=dcn_parallelism,
+        allow_split_physical_axes=allow_split_physical_axes,
+    )
+  elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
 

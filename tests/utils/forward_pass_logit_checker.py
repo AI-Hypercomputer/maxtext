@@ -75,6 +75,8 @@ import os
 from pathlib import Path
 import sys
 import absl
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from google.cloud import storage
 import jax
 import jax.numpy as jnp
@@ -268,8 +270,18 @@ def get_data(golden_data_point, config):
   model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
-  if config.use_multimodal:
+  # Audio-only multimodal models (e.g. Ming) provide `audio_values` instead of `pixel_values`.
+  if config.use_audio and golden_data_point.get("audio_values") is not None:
+    audio_values = np.asarray(golden_data_point["audio_values"], dtype=np.float32)  # [1, T_mel, n_mels]
+    # Tile to the global batch: audio embeddings are reshaped per batch row when merged into the text.
+    audio_values = np.concatenate([audio_values] * config.global_batch_size_to_train_on, axis=0)
+    max_logging.log(f"audio_values.shape = {audio_values.shape}")
+  else:
+    audio_values = None
+
+  if config.use_multimodal and audio_values is None:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
+  if config.use_multimodal and "pixel_values" in golden_data_point:
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
     # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
@@ -347,7 +359,7 @@ def get_data(golden_data_point, config):
     decoder_positions = np.stack(
         [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
     )
-  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values
+  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values, audio_values
 
 
 def main(config, test_args):  # pylint: disable=W0621
@@ -387,17 +399,40 @@ def main(config, test_args):  # pylint: disable=W0621
   if config.model_name.startswith(("llama3.1", "mixtral")):
     tokenizer.pad_token = tokenizer.eos_token
 
+  max_logging.log("Initializing MaxText model")
+  model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+
+  if config.lora.enable_lora:
+    model = lora_utils.apply_lora_to_model(model, mesh, config)
+    if config.lora.lora_restore_path:
+      lora_utils.restore_lora_from_path(model, config)
+
+  # Split once so the jitted step receives the existing parameter arrays
+  # rather than a staged second copy of them.
+  nnx_graphdef, nnx_state = nnx.split(model)
+
+  @jax.jit
+  def eval_step_nnx(step_state, ids, decoder_positions, decoder_segment_ids, images=None, audios=None):
+    """Fused NNX forward pass.
+
+    Without jit the decoder runs op-by-op and every layer's intermediates stay
+    live, which exhausts HBM on the sparse MoE path and is much slower on CPU.
+    """
+    # The mesh and logical axis rules are read at trace time, so they must be
+    # active here or every PartitionSpec resolves to replicated.
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      nnx_model = nnx.merge(nnx_graphdef, step_state)
+      return nnx_model(
+          decoder_input_tokens=ids,
+          decoder_positions=decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          encoder_images=images,
+          encoder_audios=audios,
+          enable_dropout=False,
+      )
+
   if not test_args.run_hf_model:
     """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
-    max_logging.log("Initializing MaxText model")
-    model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
-
-    if config.lora.enable_lora:
-      model = lora_utils.apply_lora_to_model(model, mesh, config)
-      if config.lora.lora_restore_path:
-        lora_utils.restore_lora_from_path(model, config)
-    state = None
-
     if test_args.golden_logits_path == "":
       input_golden_data_path = os.path.join(
           MAXTEXT_TEST_ASSETS_ROOT,
@@ -425,31 +460,20 @@ def main(config, test_args):  # pylint: disable=W0621
         golden_data = pickle.load(f)
     else:
       raise ValueError("golden_logits_path must end with .jsonl, .pickle, or .pkl")
+
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
       max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
+      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images, audios = get_data(
+          golden_data_point, config
+      )
       max_logging.log("maxtext forward pass")
-      if state is None:
-        full_train_logits = model(
-            decoder_input_tokens=ids,
-            decoder_positions=decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            encoder_images=images,
-            enable_dropout=False,
-        )
-      else:
-        full_train_logits = model.apply(
-            state.params,
-            ids,
-            decoder_positions,
-            decoder_segment_ids,
-            encoder_images=images,
-            enable_dropout=False,
-            rngs={"aqt": init_rng},
-        )
+      full_train_logits = eval_step_nnx(nnx_state, ids, decoder_positions, decoder_segment_ids, images, audios)
 
+      # Only batch element 0 is compared; slice before the allgather so the
+      # full [batch, seq, vocab] logits are never materialized per host.
+      full_train_logits = full_train_logits[:1]
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
       if full_train_logits.ndim == 4:
@@ -532,7 +556,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
       # Mask out vision placeholder tokens for KL calculation
       ignore_token_ids = []
-      if "qwen3" in config.model_name.lower():
+      if getattr(config, "use_multimodal", False) and "qwen3" in config.model_name.lower():
         from maxtext.multimodal.processor_qwen3_omni import QwenTokens  # pylint: disable=import-outside-toplevel
 
         qwen_tokens = QwenTokens(config)
@@ -632,14 +656,6 @@ def main(config, test_args):  # pylint: disable=W0621
         raise ImportError("peft library is required to load HF LoRA adapter. Run `pip install peft`.") from exc
       hf_model = PeftModel.from_pretrained(hf_model, hf_lora_path)
 
-    maxtext_model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
-
-    if config.lora.enable_lora:
-      maxtext_model = lora_utils.apply_lora_to_model(maxtext_model, mesh, config)
-      if config.lora.lora_restore_path:
-        lora_utils.restore_lora_from_path(maxtext_model, config)
-    maxtext_state = None
-
     # The long prompt is required to catch position-dependent regressions (e.g. RoPE);
     # the short prompts above cannot detect them. See build_long_prompt().
     prompts = ["I love to", "Today is a", "What is the", build_long_prompt()]
@@ -675,22 +691,7 @@ def main(config, test_args):  # pylint: disable=W0621
         hf_logits_torch = hf_model(**inputs).logits
 
       # --- MaxText Forward Pass ---
-      if maxtext_state is None:
-        mt_logits_jax = maxtext_model(
-            decoder_input_tokens=mt_ids,
-            decoder_positions=mt_decoder_positions,
-            decoder_segment_ids=mt_decoder_segment_ids,
-            enable_dropout=False,
-        )
-      else:
-        mt_logits_jax = maxtext_model.apply(
-            maxtext_state.params,
-            mt_ids,
-            mt_decoder_positions,
-            mt_decoder_segment_ids,
-            enable_dropout=False,
-            rngs={"aqt": init_rng},
-        )
+      mt_logits_jax = eval_step_nnx(nnx_state, mt_ids, mt_decoder_positions, mt_decoder_segment_ids)
       mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
       mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
 

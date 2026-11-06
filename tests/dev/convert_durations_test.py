@@ -92,3 +92,17 @@ def test_convert_entry_parameterized_with_dots(mock_repo_root):
       "tests/unit/attention_test.py::AttentionTest::test_hlo_diff[qwen3_1.7b-qwen3-1.7b-overrides2]",
       45.2,
   )
+
+
+def test_convert_entry_absl_parameterized_method_dots(mock_repo_root):
+  """Preserves dots inside absl.testing.parameterized method names."""
+  res = convert_durations.convert_entry(
+      "tpu-unit::tests.unit.attention_test.AttentionTest.test_model_llama3.1-8b",
+      44.5,
+      repo_root=mock_repo_root,
+  )
+  assert res == (
+      "tpu-unit",
+      "tests/unit/attention_test.py::AttentionTest::test_model_llama3.1-8b",
+      44.5,
+  )

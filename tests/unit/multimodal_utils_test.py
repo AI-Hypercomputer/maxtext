@@ -443,6 +443,14 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     self.assertIsNone(mm_processor._get_vision_block("llama2-7b"))
     self.assertEqual(mm_processor._get_decoder_block("llama2-7b"), "llama2-7b")
 
+    # Ming has an audio decoder but no vision encoder.
+    self.assertIsNone(mm_processor._get_vision_block("ming-3.0-audio-tiny"))
+    self.assertEqual(mm_processor._get_decoder_block("ming-3.0-audio-tiny"), "ming")
+    self.assertEqual(mm_processor.get_dummy_image_shape_for_init("ming-3.0-audio-tiny"), ())
+    ming_prompt = mm_processor.reformat_prompt("transcribe", "<img>", "ming-3.0-audio-tiny", num_images=0, num_audios=1)
+    self.assertLess(ming_prompt.index("<|audio_pad|>"), ming_prompt.index("transcribe"))
+    self.assertEqual(mm_processor.reformat_response("done", "ming-3.0-audio-tiny"), "done<|role_end|>")
+
   def test_get_vision_and_decoder_block_routing_from_config(self):
     # pylint: disable=protected-access
     # Test with pyconfig Config objects
@@ -534,7 +542,7 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     )
     self.assertEqual(mm_processor.get_image_offsets(omni_config, None), 255)
 
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni
 
     qwen_image_pad = processor_maxtext_omni.DECODER_SPECIAL_TOKENS["qwen3"]["image_pad"]
     tokens = [1, qwen_image_pad, 2]

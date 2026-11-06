@@ -20,7 +20,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: 'Build mode: stable or nightly'
+        description: 'Build mode: stable, nightly, or release_candidate'
         required: true
         type: string
       run_id:
@@ -31,6 +31,11 @@ on:
         description: 'GitHub SHA of MaxText to be passed to the Airflow DAG run.'
         required: true
         type: string
+      test_scope:
+        description: 'Which test suites the DAG should run: all, pre-training or post-training.'
+        required: false
+        type: string
+        default: all
     secrets:
       AIRFLOW_CALLBACK_TOKEN:
         required: false
@@ -41,7 +46,7 @@ permissions:
 jobs:
   e2e_airflow_tests:
     name: E2E Airflow Tests
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Get Airflow URI
@@ -61,23 +66,40 @@ jobs:
           RUN_ID: ${{ inputs.run_id }}
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
+          TEST_SCOPE: ${{ inputs.test_scope }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
         run: |
           IAP_TOKEN=$(gcloud auth print-access-token)
           PAYLOAD=$(python3 -c 'import json, os
           from datetime import datetime, timezone
+          mode = os.environ["BUILD_MODE"]
           run_id = os.environ["RUN_ID"]
+          sha = os.environ["COMMIT_SHA"]
           repo = os.environ["GITHUB_REPO"]
+          test_scope = os.environ["TEST_SCOPE"]
+          project = os.environ.get("PROJECT_NAME") or "tpu-prod-env-multipod"
+          if mode == "release_candidate":
+              pre_img = f"us-docker.pkg.dev/{project}/maxtext-images/tpu_pre_training:{sha}"
+              post_img = f"us-docker.pkg.dev/{project}/maxtext-images/tpu_post_training:{sha}"
+          else:
+              pre_img = f"us-docker.pkg.dev/{project}/maxtext-images/maxtext_jax_{mode}:{run_id}"
+              post_img = f"us-docker.pkg.dev/{project}/maxtext-images/maxtext_post_training_{mode}:{run_id}"
           now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           print(json.dumps({
               "dag_run_id": f"auto_gha__{run_id}__{now}",
-              "note": f"Automated E2E TPU test suite triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
+              "note": f"Automated E2E TPU test suite ({test_scope}) triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
               "conf": {
-                  "build_mode": os.environ["BUILD_MODE"],
-                  "commit_sha": os.environ["COMMIT_SHA"],
+                  "build_mode": mode,
+                  "commit_sha": sha,
                   "github_run_id": run_id,
                   "github_repo": repo,
                   "github_token": os.environ["GITHUB_TOKEN"],
                   "is_automated": True,
+                  "test_scope": test_scope,
+                  "docker_images": {
+                      "tpu_pre_training": pre_img,
+                      "tpu_post_training": post_img,
+                  },
               }
           }))')
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \

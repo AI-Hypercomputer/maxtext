@@ -32,7 +32,8 @@ from fastapi import HTTPException
 
 from benchmarks.api_server.maxtext_generator import MaxTextGenerator
 from benchmarks.api_server.server_models import LogProbsPayload
-from benchmarks.api_server.encoding import encoding_dsv32, encoding_dsv4
+from benchmarks.api_server.encoding import encoding_dsv32
+from maxtext.input_pipeline import encoding_dsv4
 
 # ----------------------------
 # Debugging

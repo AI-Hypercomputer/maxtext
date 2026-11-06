@@ -38,10 +38,10 @@ StackFrames
   %custom-call.1 = s32[1024]{0:T(1024)} custom-call(%param_1.7), custom_call_target="AssumeGatherIndicesInBound", operand_layout_constraints={s32[1024]{0:T(1024)}}, metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
   %slice.34 = s32[512]{0:T(512)} slice(%custom-call.1), slice={[0:512]}, metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
   %reshape.757 = s32[4,128]{1,0:T(4,128)} reshape(%slice.34), frontend_attributes={is_spmd_generated="true"}, metadata={op_name="jit(train_step)/jvp()/broadcast_in_dim" stack_frame_id=0}
-  %transpose.461 = s32[4,128]{1,0:T(4,128)} transpose(%reshape.757), dimensions={0,1}, frontend_attributes={is_spmd_generated="true"}, metadata={op_name="jit(train_step)/jvp()/broadcast_in_dim" stack_frame_id=0}
-  %gather.4 = bf16[4,128,512]{2,1,0:T(8,128)(2,1)} gather(%param_0.2, %transpose.461), offset_dims={2}, collapsed_slice_dims={0}, start_index_map={0}, index_vector_dim=2, slice_sizes={1,512}, metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
-  %transpose.460 = bf16[4,128,512]{2,1,0:T(8,128)(2,1)} transpose(%gather.4), dimensions={0,1,2}, metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
-  ROOT %reshape.756 = bf16[512,512]{1,0:T(8,128)(2,1)S(1)} reshape(%transpose.460), metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
+  %transpose.460 = s32[4,128]{1,0:T(4,128)} transpose(%reshape.757), dimensions={0,1}, frontend_attributes={is_spmd_generated="true"}, metadata={op_name="jit(train_step)/jvp()/broadcast_in_dim" stack_frame_id=0}
+  %gather.4 = bf16[4,128,512]{2,1,0:T(8,128)(2,1)} gather(%param_0.2, %transpose.460), offset_dims={2}, collapsed_slice_dims={0}, start_index_map={0}, index_vector_dim=2, slice_sizes={1,512}, metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
+  %transpose.459 = bf16[4,128,512]{2,1,0:T(8,128)(2,1)} transpose(%gather.4), dimensions={0,1,2}, metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
+  ROOT %reshape.756 = bf16[512,512]{1,0:T(8,128)(2,1)S(1)} reshape(%transpose.459), metadata={op_name="jit(train_step)/jvp()/gather" stack_frame_id=0}
 }
 
 %fused_computation.500 (param_0.1548: f32[128,4]) -> bf16[4,128] {
@@ -770,7 +770,7 @@ StackFrames
   %fusion.331.clone.1 = bf16[128,2048]{1,0:T(8,128)(2,1)} fusion(%param_1.1719, %param_2.1311, %param_3.872), kind=kLoop, calls=%fused_computation.418.clone.clone
   %param_0.1549 = bf16[151936,2048]{1,0:T(8,128)(2,1)} parameter(0)
   %fusion.367 = bf16[151936,2048]{1,0:T(8,128)(2,1)} fusion(%param_0.1549), kind=kLoop, calls=%bitcast_fusion.1
-  %convolution.115.clone.1 = bf16[128,151936]{1,0:T(8,128)(2,1)S(1)} convolution(%fusion.331.clone.1, %fusion.367), dim_labels=bf_oi->bf, metadata={op_name="jit(train_step)/jvp()/dot_general" stack_frame_id=0}
+  %convolution.115.clone.1 = bf16[128,151936]{1,0:T(8,128)(2,1)S(1)} convolution(%fusion.331.clone.1, %fusion.367), dim_labels=bf_oi->bf, metadata={op_name="jit(train_step)/jvp(...e,ve->...v)/dot_general" stack_frame_id=0}
   %constant.454.clone.3 = bf16[]{:T(256)} constant(-inf)
   %reduce.242 = bf16[128]{0:T(256)(128)(2,1)S(1)} reduce(%convolution.115.clone.1, %constant.454.clone.3), dimensions={1}, to_apply=%region_8.11, metadata={op_name="jit(train_step)/jvp()/reduce_max" stack_frame_id=0}
   ROOT %tuple.170 = (bf16[128]{0:T(256)(128)(2,1)S(1)}, bf16[128,151936]{1,0:T(8,128)(2,1)S(1)}) tuple(%reduce.242, %convolution.115.clone.1)
@@ -947,8 +947,8 @@ StackFrames
   %fusion.353.clone.1 = bf16[128,151936]{1,0:T(8,128)(2,1)} fusion(%param_3.871, %param_4.500, %param_5.430, %param_6.297, %param_7.190, /*index=5*/%param_8.112), kind=kLoop, calls=%fused_computation.369.clone.1.clone.clone
   %param_2.1300 = bf16[151936,2048]{1,0:T(8,128)(2,1)} parameter(2)
   %fusion.366 = bf16[151936,2048]{1,0:T(8,128)(2,1)} fusion(%param_2.1300), kind=kLoop, calls=%bitcast_fusion
-  %convolution.113.clone.1 = bf16[128,2048]{1,0:T(8,128)(2,1)} convolution(%fusion.353.clone.1, %fusion.366), dim_labels=bf_io->bf, metadata={op_name="jit(train_step)/transpose(jvp())/dot_general" stack_frame_id=0}
-  %bitcast.578.clone.1 = bf16[1,128,2048]{2,1,0:T(8,128)(2,1)S(1)} bitcast(%convolution.113.clone.1), metadata={op_name="jit(train_step)/transpose(jvp())/dot_general" stack_frame_id=0}
+  %convolution.113.clone.1 = bf16[128,2048]{1,0:T(8,128)(2,1)} convolution(%fusion.353.clone.1, %fusion.366), dim_labels=bf_io->bf, metadata={op_name="jit(train_step)/transpose(jvp(...e,ve->...v))/dot_general" stack_frame_id=0}
+  %bitcast.578.clone.1 = bf16[1,128,2048]{2,1,0:T(8,128)(2,1)S(1)} bitcast(%convolution.113.clone.1), metadata={op_name="jit(train_step)/transpose(jvp(...e,ve->...v))/dot_general" stack_frame_id=0}
   %convert.370 = f32[1,128,2048]{2,1,0:T(8,128)} convert(%bitcast.578.clone.1)
   %param_1.1717 = bf16[1,128,2048]{2,1,0:T(8,128)(2,1)S(1)} parameter(1)
   %convert_element_type.1253 = f32[1,128,2048]{2,1,0:T(8,128)} convert(%param_1.1717), metadata={op_name="jit(train_step)/jvp()/convert_element_type" stack_frame_id=0}

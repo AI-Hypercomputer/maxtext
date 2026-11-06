@@ -1021,7 +1021,7 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
 
   def _make_mock_config(self):
     cfg = MagicMock()
-    cfg.retry_when_tokens_dropped = False
+    cfg.moe_dropless_fallback = None
     return cfg
 
   def test_returns_five_tuple(self):
@@ -1053,14 +1053,14 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
     )
     self.assertEqual(donate_argnums, 0)
 
-  def test_donate_argnums_is_empty_with_retry_when_tokens_dropped(self):
+  def test_donate_argnums_is_zero_with_step_dropless_fallback(self):
     step = self._make_mock_step()
     cfg = self._make_mock_config()
-    cfg.retry_when_tokens_dropped = True
+    cfg.moe_dropless_fallback = "step"
     _, _, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
         step, "data_sharding", "state_shardings", "model", cfg
     )
-    self.assertEqual(donate_argnums, ())
+    self.assertEqual(donate_argnums, 0)
 
   def test_functional_train_is_partial(self):
     """functional_train should partially apply model and config."""
@@ -1300,6 +1300,16 @@ class TestCalculateTokensTrainingPerDevice(unittest.TestCase):
     result = maxtext_utils.calculate_tokens_training_per_device(cfg)
     self.assertEqual(result, 128 * 2 * 4)
 
+  def test_constant_padded_mode_uses_logical_training_batch(self):
+    cfg = MagicMock()
+    cfg.max_target_length = 128
+    cfg.per_device_batch_size = 7.0
+    cfg.gradient_accumulation_steps = 1
+    cfg.logical_global_batch_size_to_train_on = 100
+    cfg.num_target_devices = 16
+    result = maxtext_utils.calculate_tokens_training_per_device(cfg)
+    self.assertEqual(result, 128 * 100 / 16)
+
 
 class TestCalculateIndexerMaskRatio(unittest.TestCase):
   """Tests for calculate_indexer_mask_ratio."""
@@ -1380,11 +1390,19 @@ class TestGetDenseMoeLayers(unittest.TestCase):
     self.assertEqual(dense, 0)
     self.assertEqual(moe, 8)
 
-  def test_qwen3_5_block(self):
+  def test_qwen3_5_moe_block(self):
     cfg = self._make_cfg(DecoderBlockType.QWEN3_5, num_decoder_layers=8)
+    cfg.num_experts = 256
     dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
     self.assertEqual(dense, 0)
     self.assertEqual(moe, 8)
+
+  def test_qwen3_5_dense_block(self):
+    cfg = self._make_cfg(DecoderBlockType.QWEN3_5, num_decoder_layers=8)
+    cfg.num_experts = 1
+    dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
+    self.assertEqual(dense, 8)
+    self.assertEqual(moe, 0)
 
   def test_unsupported_block_raises(self):
     cfg = self._make_cfg(DecoderBlockType.DEFAULT)
@@ -1451,34 +1469,6 @@ class TestSetupTrainingState(unittest.TestCase):
     state, _, _, _, was_restored = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
     self.assertFalse(was_restored)
     self.assertIsNotNone(state.optimizer)
-
-
-class TestGetLogicalAnnotations(unittest.TestCase):
-  """Tests for get_logical_annotations."""
-
-  def setUp(self):
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
-    devices_array = maxtext_utils.create_device_mesh(self.config)
-    self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-    self.rng = jax.random.PRNGKey(0)
-    self.tx = optax.adam(learning_rate=0.001)
-
-  def test_returns_partition_spec_tree(self):
-    def create_train_state_fn():
-      nnx_model = self._create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, self.tx, wrt=nnx.Param)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-    init_state_fn = create_train_state_fn
-    annotations = maxtext_utils_nnx.get_partition_spec_nnx(
-        maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
-    )
-    # Result should be a pytree with PartitionSpec leaves
-    leaves = jax.tree_util.tree_leaves(annotations)
-    self.assertGreater(len(leaves), 0)
-    for leaf in leaves:
-      self.assertIsInstance(leaf, PartitionSpec)
 
 
 class TestSaveQuantizedCheckpoint(unittest.TestCase):

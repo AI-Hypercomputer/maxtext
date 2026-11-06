@@ -1,0 +1,61 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow adds the `skip-ci-tests` label to every new PR, so CI skips the heavy TPU/GPU tests
+# while the PR is reviewed. After 2 approvals, auto_label_pr.yml adds the "pull ready" label and removes
+# this one, which runs all tests (on PRs from forks, a maintainer adds "pull ready"). Removing
+# `skip-ci-tests` runs them sooner.
+# A label added with GITHUB_TOKEN starts no new CI run.
+# PRs that Copybara exports (copybara-service[bot]) don't get it: Copybara merges them itself without
+# approvals here, so they would never get "pull ready" and never run the heavy tests.
+
+name: Add skip-ci-tests Label
+
+on:
+  # zizmor: ignore[dangerous-triggers] This workflow never checks out or runs PR code: it only adds
+  # a label. pull_request_target gives PRs from forks a token that can add it.
+  pull_request_target:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  add_skip_ci_tests_label:
+    name: Add skip-ci-tests label
+    # A PR opened with `scheduled-only` asked for the full scheduled pipeline, so it keeps running it.
+    # Copybara's PRs are skipped too (see above); IS_COPYBARA_PR in ci_pipeline.yml names the same author.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'scheduled-only') && github.event.pull_request.user.login != 'copybara-service[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write  # to add the label
+    steps:
+      - name: Add the skip-ci-tests label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Retries transient GitHub errors: this PR's first CI run is gated because it expects the label, and
+          # nothing adds the label later. Adding a label that is already there changes nothing, so retries are safe.
+          for attempt in 1 2 3 4 5; do
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" -f "labels[]=skip-ci-tests" --silent; then
+              exit 0
+            fi
+            if (( attempt < 5 )); then
+              echo "Attempt ${attempt} to add the 'skip-ci-tests' label failed; retrying in $(( attempt * 10 )) seconds."
+              sleep $(( attempt * 10 ))
+            fi
+          done
+          echo "::error::Could not add the 'skip-ci-tests' label to PR #${PR_NUMBER}. Add it by hand, or push a new commit to run all tests."
+          exit 1

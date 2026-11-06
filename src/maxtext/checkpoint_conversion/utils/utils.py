@@ -50,7 +50,7 @@ from transformers import AutoModelForCausalLM
 from flax.training import train_state
 from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
-from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
+from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, single_stack_axis, stacked_axes
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
 
@@ -286,8 +286,9 @@ def process_maxtext_param(
     # Case 2 or 3: The source tensor is stacked on a single axis.
     if maxtext_config.scan_layers:
       max_logging.log("\tscan")
-      # Case 2: Standard scanned layer. Stacked ONLY on the layer axis.
-      axis_to_slice = maxtext_config.param_scan_axis
+      # Case 2: Standard scanned layer, stacked as `single_stack_axis` says.
+      weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
+      axis_to_slice = single_stack_axis(maxtext_param_key, maxtext_config, getattr(weight_sample, "shape", ()))
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
@@ -469,6 +470,17 @@ def save_safetensor_file(
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
     if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
       state_dict = state_dict["model.safetensors"]
+
+    # safetensors' numpy backend (0.8.0) serializes a non-contiguous array's
+    # raw buffer and ignores strides, writing the correct shape metadata with
+    # untransposed data -- silent corruption. Its torch backend raises on
+    # non-contiguous input instead; the numpy path does not. Any hook ending in
+    # `.T` (e.g. the DeepSeek-V4 MHC alpha composite) produces exactly such a
+    # view, so normalise every tensor to C-contiguous before writing.
+    for _key in list(state_dict.keys()):
+      _val = state_dict[_key]
+      if isinstance(_val, np.ndarray) and not _val.flags["C_CONTIGUOUS"]:
+        state_dict[_key] = np.ascontiguousarray(_val)
 
     if output_dir_final.startswith("gs://"):
       local_path = os.path.join(local_dir_to_save_to, file_name)
@@ -1024,7 +1036,7 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   return result
 
 
-def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
+def extract_linen_weights(weights_dict: dict, prefix: str = "params-") -> dict[str, np.ndarray]:
   """Extract weights from Linen checkpoint structure.
 
   Linen checkpoints have structure: {'params': {'decoder': {'decoder_norm': {'scale': array}}}}
@@ -1032,6 +1044,7 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
 
   Args:
     weights_dict: Linen checkpoint weights dictionary
+    prefix: Prefix for parameter keys (defaults to "params-")
 
   Returns:
     Dictionary mapping parameter names to weight arrays
@@ -1040,7 +1053,7 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
     path_keys = param_key_parts_from_path(path_tuple)
-    maxtext_param_key = "params-" + "-".join(path_keys)
+    maxtext_param_key = prefix + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
       raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
     result[maxtext_param_key] = leaf_value
@@ -1082,8 +1095,18 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
   else:
     # Linen checkpoint: check if there's a nested 'params' key
     if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
-      actual_weights_dict = actual_weights_dict["params"]
-      max_logging.log("Detected Linen checkpoint structure")
+      extra_collections = [k for k in actual_weights_dict if k != "params"]
+      if extra_collections:
+        max_logging.log(
+            f"Detected multi-collection Linen checkpoint structure with collections: {list(actual_weights_dict.keys())}"
+        )
+        result = {}
+        for col_name, col_dict in actual_weights_dict.items():
+          result.update(extract_linen_weights(col_dict, prefix=f"{col_name}-"))
+        return result
+      else:
+        actual_weights_dict = actual_weights_dict["params"]
+        max_logging.log("Detected Linen checkpoint structure")
     else:
       max_logging.log("Detected Linen checkpoint structure (single params layer)")
     return extract_linen_weights(actual_weights_dict)
@@ -1287,8 +1310,9 @@ def save_weights_to_checkpoint(
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
+  params = jax_weights if (isinstance(jax_weights, dict) and "params" in jax_weights) else {"params": jax_weights}
   state_new = train_state.TrainState(
-      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+      step=step_number_to_save_new_ckpt, apply_fn=None, params=params, tx=None, opt_state={}  # type: ignore
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))

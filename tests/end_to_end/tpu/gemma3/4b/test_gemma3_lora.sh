@@ -35,7 +35,8 @@ python3 -m maxtext.inference.vllm_decode \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
     scan_layers=false \
-    enable_single_controller=${use_pathways}
+    enable_single_controller=${use_pathways} \
+    weight_dtype=bfloat16
 
 # Step 2: Run LoRA on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -67,12 +68,5 @@ python3 -m maxtext.inference.vllm_decode \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
     scan_layers=true \
-    enable_single_controller=${use_pathways}
-
-# Step 5: Convert the checkpoint from MaxText format to Hugging Face format
-python3 -m maxtext.checkpoint_conversion.to_huggingface \
-    model_name=${MODEL_NAME} \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
-    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY}/lora/${run_id}/checkpoints/5/model_params \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/unscanned/${run_id} \
-    scan_layers=true
+    enable_single_controller=${use_pathways} \
+    weight_dtype=bfloat16

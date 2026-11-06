@@ -16,6 +16,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='llama3.1-70b'
 
@@ -62,7 +67,8 @@ python3 -m maxtext.trainers.pre_train.train \
     max_target_length=2048 steps=2 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} scan_layers=false use_multimodal=${USE_MULTIMODAL} \
-    ici_tensor_parallelism=4
+    ici_tensor_parallelism=4 \
+    allow_split_physical_axes=True
 
 # Step 3: Run inference on the checkpoint generated from the previous run
 if [ ${USE_MULTIMODAL} == true ]; then

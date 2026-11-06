@@ -1,20 +1,28 @@
 #!/bin/bash
 
-# This script launches a DiLoCo pre-training workload on a GKE cluster using XPK.
+# This script launches a DiLoCo pre-training workload on a GKE cluster using
+# Cluster Toolkit (gcluster). See docs/run_maxtext/run_maxtext_via_cluster_toolkit.md
+# for how to install gcluster and create a cluster.
+#
+# Note: TPU reservations are configured on the cluster's node pools when the
+# cluster is created, so there is no per-workload reservation flag.
 
 set -e
 
 # --- Cluster Parameters ---
 export PROJECT_ID="${PROJECT_ID:-}"
 export CLUSTER_NAME="${CLUSTER_NAME:-}"
-export ZONE="${ZONE:-}"
-export RESERVATION="${RESERVATION:-}"  # optional
+export LOCATION="${LOCATION:-}" # GKE cluster location: the cluster's region for regional clusters, or its zone for zonal ones
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-}" # change to your own GCS bucket for logging and checkpointing
 export DATASET_PATH="${DATASET_PATH:-}" # change to your own GSC bucket for datasets. Make sure datasets exists
-export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2026-06-22)
+export DOCKER_IMAGE="${DOCKER_IMAGE:-}" # Full path to the Docker image you pushed (e.g., your-region-docker.pkg.dev/your-project-id/your-repo/maxtext-runner:latest)
 export TPU_TYPE="${TPU_TYPE:-}"  # At least v5p-32 is needed to run Qwen3-30b-a3b. v5p-8 for qwen3-8b
 export NUM_SLICES="${NUM_SLICES:-}"  # you need at least two slices to let diloco take effect
-export WORKLOAD_NAME="${WORKLOAD_NAME:-$(whoami)-diloco-${TPU_TYPE}-$(date +%Y%m%d-%H%M%S)}" # this will be the name of run, for logging purposes
+export WORKLOAD_NAME="${WORKLOAD_NAME:-diloco-$(date +%m%d-%H%M%S)}" # workload and run name (gcluster limits workload names to 28 characters)
+if [ "${#WORKLOAD_NAME}" -gt 28 ]; then
+  echo "Error: WORKLOAD_NAME '${WORKLOAD_NAME}' exceeds the 28-character limit for gcluster workload names."
+  exit 1
+fi
 
 # --- Model Parameters ---
 export MODEL_NAME="${MODEL_NAME:-}"
@@ -89,15 +97,14 @@ diloco_outer_momentum=$DILOCO_OUTER_MOMENTUM \
 steps=$TRAINING_STEPS"
 
 # Workload Creation
-xpk workload create \
+gcluster job submit \
   --cluster="$CLUSTER_NAME" \
   --project="$PROJECT_ID" \
-  --zone="$ZONE" \
+  --location="$LOCATION" \
   --priority=medium \
-  --max-restarts=0 \
-  --tpu-type="$TPU_TYPE" \
+  --restarts=0 \
+  --compute-type="$TPU_TYPE" \
   --num-slices="$NUM_SLICES" \
-  --docker-image="${DOCKER_IMAGE}" \
-  --workload="${WORKLOAD_NAME}" \
-  ${RESERVATION:+--reservation="$RESERVATION"} \
+  --image="${DOCKER_IMAGE}" \
+  --name="${WORKLOAD_NAME}" \
   --command="${MAXTEXT_COMMAND}"

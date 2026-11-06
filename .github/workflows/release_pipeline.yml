@@ -68,21 +68,18 @@ jobs:
     name: Build MaxText Package
     needs: [release_approval, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/build_package.yml
     with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
 
   run_ci_tests:
     name: Test MaxText Package
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     permissions:
@@ -102,7 +99,7 @@ jobs:
     name: Build ${{ matrix.name }} Docker Image
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     strategy:
@@ -122,11 +119,13 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
+      repository_name: 'maxtext-images'
       device: ${{ matrix.device }}
       build_mode: stable
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -134,26 +133,36 @@ jobs:
     name: Build ${{ matrix.name }} Docker Image
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: 'GPU Pre-Training Stable'
+          - name: 'GPU Pre-Training Stable (amd64)'
             device: gpu
             image_name: maxtext_gpu_jax_stable
             workflow: pre-training
             dockerfile: maxtext_gpu_dependencies.Dockerfile
+            platform: amd64
+          - name: 'GPU Pre-Training Stable (arm64)'
+            device: gpu
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
+            platform: arm64
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
+      repository_name: 'maxtext-images'
       device: ${{ matrix.device }}
       build_mode: stable
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
+      platform: ${{ matrix.platform }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -162,7 +171,7 @@ jobs:
     needs: [build_tpu_release_candidate_images, get_maxtext_sha]
     # Ensure the SHA resolved and all image builds succeeded
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_tpu_release_candidate_images.result == 'success'
     uses: ./.github/workflows/run_e2e_tests.yml
@@ -177,7 +186,7 @@ jobs:
     name: Build Documentation
     needs: [release_approval, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/check_docs_build.yml
@@ -188,7 +197,7 @@ jobs:
     name: Check Links in Documentation
     needs: [release_approval, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     permissions:
@@ -202,20 +211,20 @@ jobs:
     name: Wait for Tests Verification
     needs: [run_ci_tests, run_e2e_tests]
     if: |
-      always() &&
+      !cancelled() &&
       needs.run_ci_tests.result == 'success' && needs.run_e2e_tests.result == 'success'
-    runs-on: linux-x86-n2-16-buildkit
+    runs-on: linux-x86-n4-16-buildkit
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Poll for verified Docker images
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           check_tag() {
-            gcloud container images describe "gcr.io/${PROJECT_NAME}/$1" >/dev/null 2>&1
+            gcloud container images describe "us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/$1" >/dev/null 2>&1
           }
 
           echo "Waiting for pre-training and post-training tests to complete..."
@@ -243,14 +252,17 @@ jobs:
     name: Publish MaxText to PyPI
     needs: [wait_for_tests_verification, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.wait_for_tests_verification.result == 'success'
     permissions:
       id-token: write
+      attestations: write
       contents: read
     uses: ./.github/workflows/pypi_release.yml
     with:
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
       run_id: ${{ github.run_id }}
       publish: true
+    secrets:
+      READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}

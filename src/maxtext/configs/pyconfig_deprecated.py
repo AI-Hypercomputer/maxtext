@@ -262,9 +262,11 @@ def validate_keys(keys):
         "Please disable MTP by setting mtp_num_layers=0 for inference."
     )
 
-  assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
-      "enable_checkpointing"
-  ], "You must set enable_checkpointing to load a checkpoint"
+  # Kept in sync with `types.MaxTextConfig`: only a full-state resume reads through the
+  # CheckpointManager. `load_parameters_path` warm starts through its own `ocp.Checkpointer`.
+  assert (
+      keys["load_full_state_path"] == "" or keys["enable_checkpointing"]
+  ), "You must set enable_checkpointing to resume from load_full_state_path"
   assert (
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
@@ -516,6 +518,7 @@ def validate_and_assign_remat_tensors(keys):
       "moe_mlpwi_0",
       "moe_mlpwi_1",
       "moe_mlpwo",
+      "te_moe_dispatch_remat_location",
       "query_proj",
       "key_proj",
       "value_proj",
@@ -702,7 +705,7 @@ class _HyperParameters:
   def user_init(raw_keys):
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
-      raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # set by some JobSet launchers, e.g. for Pathways
       if raw_keys["run_name"] == "":
         now = datetime.datetime.now()
         timestamp = now.strftime("%Y-%m-%d-%H-%M")

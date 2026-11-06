@@ -25,7 +25,6 @@ import random
 import os
 import os.path
 
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.trainers.post_train.sft.train_sft_native import main as sft_main
@@ -42,13 +41,8 @@ class GradientAccumulationTest(unittest.TestCase):
 
   def setUp(self):
     """Set up test fixtures before each test method."""
-    decoupled = is_decoupled()
     self.dataset_path = get_test_dataset_path()
-    self.base_output_directory = (
-        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
-        if decoupled
-        else get_test_base_output_directory()
-    )
+    self.base_output_directory = get_test_base_output_directory()
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only

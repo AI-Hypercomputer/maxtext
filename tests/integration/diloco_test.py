@@ -20,6 +20,7 @@ import shutil
 import tempfile
 from tempfile import gettempdir
 import unittest
+from unittest import mock
 
 import chex
 from flax.experimental import nnx
@@ -28,6 +29,7 @@ import jax.numpy as jnp
 import jax.sharding
 from maxtext.common import checkpointing
 from maxtext.common.train_state_nnx import TrainStateNNX
+from maxtext.configs import types
 from maxtext.configs.pyconfig import initialize_pydantic
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -369,6 +371,35 @@ class DiLoCoTest(unittest.TestCase):
         )
     )
 
+  @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
+  def test_streaming_diloco_two_slices_bucketized(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_streaming_diloco_bucketized.pickle")
+    train_compile_main(
+        (
+            None,
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8",
+            "compile_topology_num_slices=2",
+            "ici_fsdp_parallelism=-1",
+            "dcn_diloco_parallelism=2",
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=3",
+            "diloco_bucketize_non_scanned=true",
+            "model_name=gemma2-2b",
+            "override_model_config=True",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=2",
+            "base_mlp_dim=64",
+            "base_num_query_heads=1",
+            "base_num_kv_heads=1",
+            "head_dim=4",
+        )
+    )
+
   def test_fragmented_tree_manipulator_scanned_filter(self):
     """Tests that parameters matching regex but lacking leading layer dim are NOT marked scanned."""
     num_layers = 4
@@ -412,6 +443,64 @@ class DiLoCoTest(unittest.TestCase):
           ]
       )
     self.assertIn("enable_streaming_diloco=True requires scan_layers=True", str(ctx.exception))
+
+  def test_bucketize_non_scanned_requires_streaming_diloco(self):
+    with self.assertRaisesRegex(ValueError, "diloco_bucketize_non_scanned requires enable_streaming_diloco=True"):
+      initialize_pydantic(["", get_test_config_path(), "enable_diloco=true", "diloco_bucketize_non_scanned=true"])
+
+  def test_bucketize_non_scanned_is_off_by_default(self):
+    """The resolved config (base.yml over the pydantic default) leaves bucketization off."""
+    config = initialize_pydantic(
+        ["", get_test_config_path(), "enable_diloco=true", "enable_streaming_diloco=true", "num_diloco_fragments=2"]
+    )
+    self.assertFalse(config.diloco_bucketize_non_scanned)
+
+  def test_bucketize_non_scanned_requires_three_fragments(self):
+    with self.assertRaisesRegex(ValueError, "diloco_bucketize_non_scanned requires num_diloco_fragments >= 3"):
+      initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "enable_streaming_diloco=true",
+              "num_diloco_fragments=2",
+              "diloco_bucketize_non_scanned=true",
+          ]
+      )
+
+  def test_bucketize_non_scanned_rejects_zero1(self):
+    with self.assertRaisesRegex(ValueError, "diloco_bucketize_non_scanned does not support shard_optimizer_over_data"):
+      initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "enable_streaming_diloco=true",
+              "num_diloco_fragments=3",
+              "base_num_decoder_layers=2",
+              "diloco_bucketize_non_scanned=true",
+              "shard_optimizer_over_data=true",
+          ]
+      )
+
+  def test_streaming_diloco_logs_the_effective_sync_period(self):
+    args = [
+        "",
+        get_test_config_path(),
+        "enable_diloco=true",
+        "enable_streaming_diloco=true",
+        "num_diloco_fragments=4",
+        "base_num_decoder_layers=6",
+    ]
+    with mock.patch.object(types.max_logging, "warning") as warning:
+      initialize_pydantic(args + ["diloco_sync_period=10"])
+    messages = [c.args[0] for c in warning.call_args_list if "diloco_sync_period" in c.args[0]]
+    # round(10 / 4) = 2 steps between syncs, so each fragment syncs every 8 steps, not 10.
+    self.assertEqual(len(messages), 1)
+    self.assertIn("each fragment is synced every 8 steps", messages[0])
+    with mock.patch.object(types.max_logging, "warning") as warning:
+      initialize_pydantic(args + ["diloco_sync_period=12"])
+    self.assertEqual([c for c in warning.call_args_list if "diloco_sync_period" in c.args[0]], [])
 
   def test_apply_flat_fragment_shapedtypestruct(self):
     """Tests that FragmentedTreeManipulator handles ShapeDtypeStruct leaves during abstract tracing."""

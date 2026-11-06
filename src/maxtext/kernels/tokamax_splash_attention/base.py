@@ -135,7 +135,7 @@ def _attention_reference_custom_bwd(
 
   p = jnp.exp(logits - logsumexp[..., None])
   p = jnp.where(mask, p, 0.0)
-  do = do.astype(jnp.float32)  # pytype: disable=attribute-error
+  do = do.astype(jnp.float32)
   dv = jnp.einsum("pt,pd->td", p, do).astype(v.dtype)
   dp = jnp.einsum("pd,td->pt", do, v.astype(jnp.float32))
 

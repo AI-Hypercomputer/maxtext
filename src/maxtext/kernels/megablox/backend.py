@@ -305,7 +305,7 @@ def gmm(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
@@ -433,13 +433,13 @@ def gmm(
         loaded_lhs = lhs[...]
         loaded_lhs = dataclasses.replace(loaded_lhs, qvalue=mask_k_rem_lhs(loaded_lhs.qvalue))
       else:
-        loaded_lhs = mask_k_rem_lhs(lhs[...])  # pytype: disable=wrong-arg-types
+        loaded_lhs = mask_k_rem_lhs(lhs[...])
 
       if isinstance(rhs, qpl.QArray):
         loaded_rhs = rhs[...]
         loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=mask_k_rem_rhs(loaded_rhs.qvalue))
       else:
-        loaded_rhs = mask_k_rem_rhs(rhs[...])  # pytype: disable=wrong-arg-types
+        loaded_rhs = mask_k_rem_rhs(rhs[...])
 
       if transpose_rhs:
         dot_general_dims = (((1,), (1,)), ((), ()))
@@ -576,7 +576,7 @@ def tgmm(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     num_actual_groups: int | None = None,
@@ -609,7 +609,7 @@ def tgmm(
     group_offset = group_offset[None]
   group_sizes = _validate_args(
       lhs=lhs, rhs=rhs, group_sizes=group_sizes, expected_rhs_dims=2  # pyrefly: ignore[bad-argument-type]
-  )  # pyrefly: ignore[bad-argument-type]
+  )
 
   # Gather shape information.
   k, m, n = (lhs.shape[0], lhs.shape[1], rhs.shape[1])

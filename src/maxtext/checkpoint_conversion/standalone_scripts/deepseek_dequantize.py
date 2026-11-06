@@ -187,8 +187,12 @@ def convert_model(input_path: str, output_path: str, cache_file_num: int = 2):
         else:
           print(f"\nWarning: scale missing for {name}. Keeping original tensor.")
           new_state_dict[name] = tensor
+      elif name.endswith(("e_score_correction_bias", "gate.bias", "tid2eid")):
+        # Keep router bias and integer tid2eid ids in their source dtype: bf16
+        # rounds the fp32 router bias and integer ids above 256.
+        new_state_dict[name] = tensor
       else:
-        # Keep other non-quantized tensors (like biases, embeds, layer norms) intact in BF16
+        # Keep other non-quantized tensors (like embeds, layer norms) intact in BF16
         new_state_dict[name] = tensor.to(torch.bfloat16)
 
     save_file(new_state_dict, os.path.join(output_path, file_name))

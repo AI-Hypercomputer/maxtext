@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Unit tests for all optimizers."""
+
 import re
 from typing import NamedTuple
 import unittest
@@ -545,6 +546,37 @@ DEEPSEEK4_DIMENSION_NUMBER = {
     }
 }
 
+_DEEPSEEK4_LAYER_HCA_PREFIX = {
+    "mhc_attention": _DEEPSEEK4_MHC,
+    "mhc_mlp": _DEEPSEEK4_MHC,
+    "mlp": _DEEPSEEK4_MLP,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK4_ATTN_HCA,
+}
+
+DEEPSEEK4_1600B_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "hc_head": {
+                "hc_base": None,
+                "hc_fn": mdn(reduction_axis=(0,), output_axis=(-1,)),
+                "hc_scale": None,
+            },
+            "layers_0": _DEEPSEEK4_LAYER_HCA_PREFIX,
+            "layers_1": _DEEPSEEK4_LAYER_HCA_PREFIX,
+            "layers_2": _DEEPSEEK4_LAYER_CSA_PREFIX,
+            "logits_dense": {"kernel": None},
+            "scanned_blocks": {
+                "layers_0": _DEEPSEEK4_LAYER_HCA_SCANNED,
+                "layers_1": _DEEPSEEK4_LAYER_CSA_SCANNED,
+            },
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
 
 class MuonDimensionTest(parameterized.TestCase):
   """Unit tests for Muon dimension number generation.
@@ -557,6 +589,7 @@ class MuonDimensionTest(parameterized.TestCase):
       ("deepseek2-16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
       ("deepseek3-671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek4-284b", "deepseek4-284b", DEEPSEEK4_DIMENSION_NUMBER),
+      ("deepseek4-1600b", "deepseek4-1600b", DEEPSEEK4_1600B_DIMENSION_NUMBER),
       ("kimi-k2-1t", "kimi-k2-1t", DEEPSEEK3_DIMENSION_NUMBER),
       ("llama2-7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
       ("llama3-8b", "llama3-8b", LLAMA2_DIMENSION_NUMBER),

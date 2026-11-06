@@ -22,6 +22,7 @@ Covers the answer-extraction contract:
   3. Untagged native final prose does not bypass the configured answer format.
 """
 
+import random
 import unittest
 from types import SimpleNamespace
 
@@ -67,6 +68,38 @@ class ExtractAnswerTest(unittest.TestCase):
   def test_multiple_boxed_returns_last(self):
     got = utils_rl.extract_answer("first \\boxed{1} then \\boxed{99}", self.config)
     self.assertEqual(got, "99")
+
+  def test_nested_boxed_returns_outer(self):
+    got = utils_rl.extract_answer("\\boxed{a \\boxed{b}}", self.config)
+    self.assertEqual(got, "a \\boxed{b}")
+
+  def test_unclosed_boxed_is_ignored(self):
+    got = utils_rl.extract_answer("\\boxed{ {x } then \\boxed{5}", self.config)
+    self.assertEqual(got, "5")
+
+  def test_matches_reference_stack_scan(self):
+    """Fuzz the linear scan against the previous stack-based implementation."""
+
+    def reference(content):
+      boxed_matches = []
+      stack = []
+      for i, ch in enumerate(content):
+        if ch == "{":
+          stack.append(i)
+        elif ch == "}":
+          if not stack:
+            continue
+          op = stack.pop()
+          if content[:op].endswith("\\boxed"):
+            boxed_matches.append(content[op + 1 : i].strip())
+      return boxed_matches[-1] if boxed_matches else None
+
+    rng = random.Random(0)
+    alphabet = ["{", "}", "\\boxed{", "\\frac{1}{2}", "x", " ", "\\boxed"]
+    for _ in range(5000):
+      content = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 24)))
+      got = utils_rl._last_balanced_boxed(content)  # pylint: disable=protected-access
+      self.assertEqual(got, reference(content), content)
 
   def test_boxed_strips_whitespace(self):
     got = utils_rl.extract_answer("<answer>\\boxed{ 7 }</answer>", self.config)

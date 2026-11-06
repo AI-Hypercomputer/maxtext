@@ -79,13 +79,12 @@ class GrainCheckpointable(ocp.StatefulCheckpointable):
     * **list** of `(iterator, process_index, process_count)` -> explicit
       per-file write/read for a host-count change (`expansion_factor_real_data`).
       The index/count arithmetic is computed by the caller.
-    * **RemoteIteratorWrapper** (Pathways colocated-python) -> the wrapper
-      persists/restores its own state keyed by `step`; identified structurally
-      (it exposes `save_state`/`restore_state`) so this module stays
-      independent of the input pipeline.
+    * **RemoteIteratorWrapper** (Pathways colocated-python) -> if elastic, like
+      **ElasticIterator**. Otherwise each colocated host writes and reads its
+      own `process_{index}-of-{count}.json` in the directory Orbax passes.
   """
 
-  def __init__(self, item, *, restore_process_index=None, restore_process_count=None, step=None):
+  def __init__(self, item, *, restore_process_index=None, restore_process_count=None):
     """Initializes a GrainCheckpointable.
 
     Args:
@@ -98,26 +97,26 @@ class GrainCheckpointable(ocp.StatefulCheckpointable):
       restore_process_count: restore-only; the stored host count for the file name.
         `None` uses the current process count (the standard, grain-native
         path).
-      step: required only for the `RemoteIteratorWrapper` case.
     """
     self._item = item
     self._restore_process_index = restore_process_index
     self._restore_process_count = restore_process_count
-    self._step = step
 
   async def save(self, directory):
     """Snapshots the wrapped iterator's state and returns a coroutine that writes it to ``directory``."""
     item = self._item
 
-    # RemoteIteratorWrapper handles checkpointing via colocated python
-    if isinstance(item, RemoteIteratorWrapper):
-      item.save_state(self._step)
+    # A non-elastic RemoteIteratorWrapper keeps one state file per colocated host. The hosts write it now, at the step
+    # being saved, into the directory Orbax creates (`await_creation` creates it if Orbax hasn't yet).
+    if isinstance(item, RemoteIteratorWrapper) and not item.elastic:
+      item.save_state(await directory.await_creation())
       return no_op()
 
     # ElasticIterator state is a single global scalar shared by all shards,
     # so we write one fixed `process_0.json` from process 0 only. This file
-    # layout survives changes in `jax.process_count()`.
-    if isinstance(item, ElasticIterator):
+    # layout survives changes in `jax.process_count()`. The elastic
+    # RemoteIteratorWrapper reports the same global position.
+    if isinstance(item, (ElasticIterator, RemoteIteratorWrapper)):
       state = item.get_state()  # snapshot in the blocking phase
 
       async def _write_elastic():
@@ -158,14 +157,14 @@ class GrainCheckpointable(ocp.StatefulCheckpointable):
     """Restores the wrapped iterator's state from ``directory`` (or returns a coroutine that does)."""
     item = self._item
 
-    # In Pathways + colocated_python environment, RemoteIteratorWrapper handles checkpointing
-    if isinstance(item, RemoteIteratorWrapper):
-      item.restore_state(self._step)
+    # A non-elastic RemoteIteratorWrapper: each colocated host reads its own state file.
+    if isinstance(item, RemoteIteratorWrapper) and not item.elastic:
+      item.restore_state(directory)
       return no_op()
 
     # McJax and Pathways through controller cases
-    # ElasticIterator: every process reads the same shared `process_0.json`.
-    if isinstance(item, ElasticIterator):
+    # ElasticIterator (or the elastic RemoteIteratorWrapper): every process reads the same shared `process_0.json`.
+    if isinstance(item, (ElasticIterator, RemoteIteratorWrapper)):
 
       async def _read_elastic():
         filename = directory / _PROCESS_0_FILENAME
@@ -214,10 +213,10 @@ class GrainCheckpointable(ocp.StatefulCheckpointable):
     return _read_single_fallback()
 
 
-def for_save(step: int, data_iterator: Any, expansion_factor_real_data: int) -> GrainCheckpointable:
+def for_save(data_iterator: Any, expansion_factor_real_data: int) -> GrainCheckpointable:
   """Builds the v1 ``GrainCheckpointable`` for saving the grain iterator."""
   if isinstance(data_iterator, RemoteIteratorWrapper):
-    return GrainCheckpointable(data_iterator, step=step)
+    return GrainCheckpointable(data_iterator)
 
   if (
       not isinstance(data_iterator, list)
@@ -250,7 +249,7 @@ def for_restore(
 ) -> GrainCheckpointable:
   """Builds the v1 ``GrainCheckpointable`` for restoring the grain iterator."""
   if isinstance(data_iterator, RemoteIteratorWrapper):
-    return GrainCheckpointable(data_iterator, step=step)
+    return GrainCheckpointable(data_iterator)
 
   if (
       not isinstance(data_iterator, list)

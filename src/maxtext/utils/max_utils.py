@@ -31,10 +31,12 @@ from packaging.version import Version
 
 from etils import epath
 import flax
+from flax.core.spmd import get_logical_axis_rules
 import jax
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from jax.experimental import mesh_utils
+from jax.experimental.xla_metadata import set_xla_metadata
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 import numpy as np
@@ -46,7 +48,7 @@ from maxtext.utils import elastic_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE, StubSummaryWriter
 from maxtext.utils import max_logging
-from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, ReorderStrategy
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
@@ -237,8 +239,11 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   Currently jax.distributed.initialize() fully works as expected!
 
-  For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
+  For CPUs, we force the JAX platform to 'cpu' before any backend initialization and call
+  jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  if is_cpu_backend(raw_keys):
+    jax.config.update("jax_platforms", "cpu")
 
   # Early exit for cases where we don't need to initialize the jax distributed system.
   if raw_keys["skip_jax_distributed_system"]:
@@ -349,8 +354,8 @@ def initialize_jax_for_gpu(raw_keys):
 def initialize_jax_for_cpu(raw_keys):
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
   coordinator_ip_address = get_coordinator_ip_address()
-  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
-  # Env variables to be set in XPK or otherwise
+  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port (the port XPK exposes for CPU workloads)
+  # These env variables must be set by the launcher (XPK sets them for CPU workloads)
   job_index = int(os.environ.get("JOB_INDEX"))  # pyrefly: ignore[bad-argument-type]
   job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))  # pyrefly: ignore[bad-argument-type]
   processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))  # pyrefly: ignore[bad-argument-type]
@@ -427,12 +432,29 @@ def get_num_slices(raw_keys, config=None):
 
 def is_cpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a CPU backend."""
-  return raw_keys["hardware"] == "cpu"
+  return raw_keys.get("hardware") == "cpu"
 
 
 def is_gpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a GPU backend."""
-  return raw_keys["hardware"] == "gpu"
+  return raw_keys.get("hardware") == "gpu"
+
+
+def model_loop_unroll_context(config):
+  """Returns a context that marks the model's loops traced inside it for double buffering.
+
+  `_xla_loop_unroll_strategy` is only read by XLA:GPU (https://github.com/openxla/xla/pull/43468);
+  enable it with JAX_OPTIMIZATION_LEVEL=O1 and
+  XLA_FLAGS="--xla_gpu_enable_while_loop_unrolling=WHILE_LOOP_UNROLLING_MANUAL_UNROLL". The other
+  unrolling modes ignore it. Enter it around the model's forward and backward pass only, so that it
+  scopes the model's scans and not an enclosing loop such as the gradient accumulation scan.
+  On TPU/CPU it is a no-op: `set_xla_metadata` pre-populates frontend attributes on every traced op,
+  causing XLA's CallInliner to drop `_xla_compute_type` from `compute_on("device")` calls and
+  XLA:TPU to auto-offload those collectives to SparseCore.
+  """
+  if getattr(config, "hardware", "tpu") in ("gpu", "gpu_multiprocess"):
+    return set_xla_metadata(_xla_loop_unroll_strategy="double-buffer")
+  return nullcontext()
 
 
 def get_coordinator_ip_address():
@@ -620,6 +642,31 @@ def unbox_logicallypartioned(boxed_pytree):
   )
 
 
+def tie_cotangents(*args):
+  """Returns args unchanged; in the backward pass, their cotangents are released together.
+
+  Pass an op's inputs through it and apply the op to the results, e.g. `y, w = tie_cotangents(y, w)`.
+  The optimization barrier makes each cotangent available only once all of them are computed, so XLA
+  cannot defer computing one of them (e.g. a weight gradient) and keep the large output cotangent it
+  consumes alive across the rest of the backward pass. Only cotangents flowing through the returned
+  values are tied, so use them only in that op.
+  """
+
+  @jax.custom_vjp
+  def tied(*a):
+    return a
+
+  def tied_fwd(*a):
+    return a, None
+
+  def tied_bwd(_, cts):
+    return jax.lax.optimization_barrier(cts)
+
+  tied.defvjp(tied_fwd, tied_bwd)
+  outputs = tied(*args)
+  return outputs[0] if len(args) == 1 else outputs
+
+
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
@@ -664,7 +711,6 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
-        jnp.ndarray,
     ],
 ]:
   """Forward-mode of `cross_entropy_with_logits`."""
@@ -679,7 +725,6 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
   total_z_loss = z_loss * jax.lax.square(log_z)
   loss += total_z_loss
   return (loss, total_z_loss), (  # pyrefly: ignore[bad-return]
-      logits,
       targets,
       z_loss,
       exp_shifted,
@@ -695,19 +740,18 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
-        jnp.ndarray,
     ],
     g: tuple[jnp.ndarray, jnp.ndarray],
 ) -> tuple[jnp.ndarray, None, None]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.  # pyrefly: ignore[bad-assignment]
-  logits, targets, z_loss, exp_shifted, sum_exp, log_z = res
+  targets, z_loss, exp_shifted, sum_exp, log_z = res
   # z-loss term adds the (2 * z_loss * log_z) factor.
   deriv = jnp.expand_dims(1 + 2 * z_loss * log_z, -1) * exp_shifted / sum_exp - targets
   g_logits = jnp.expand_dims(g, axis=-1) * deriv  # pyrefly: ignore[bad-argument-type]
 
   return (
-      jnp.asarray(g_logits, logits.dtype),
+      jnp.asarray(g_logits, exp_shifted.dtype),  # exp_shifted has the logits' dtype
       None,  # we don't need gradients on targets
       None,  # we don't need gradients on z_loss
   )  # sets z-loss coeff gradient to 0
@@ -905,9 +949,11 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
     # Reshape squashes the [cp_size, 2] pair dimensions back into [2*cp_size]: [2*cp_size, b, group_size, h, d]
     permuted = stacked.reshape(2 * cp_size, *swapped.shape[1:])
   else:
-    # Strided slice extracts every other chunk natively: each [cp_size, b, group_size, h, d]
-    first_half = swapped[0::2, ...]
-    second_half_reversed = swapped[1::2, ...]
+    # Reshape into [cp_size, 2, ...] to extract interleaved chunks contiguously
+    # without strided slicing (which causes XLA backward adjoint interior padding).
+    reshaped_swapped = swapped.reshape(cp_size, 2, *swapped.shape[1:])
+    first_half = reshaped_swapped[:, 0, ...]
+    second_half_reversed = reshaped_swapped[:, 1, ...]
     second_half = second_half_reversed[::-1, ...]
     # Concatenate along axis 0: [2*cp_size, b, group_size, h, d]
     permuted = jnp.concatenate([first_half, second_half], axis=0)
@@ -952,8 +998,6 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
   See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
   """
   # pylint: disable=import-outside-toplevel
-  from maxtext.common.common_types import ReorderStrategy
-
   _reorder_keys = {
       "inputs",
       "targets",
@@ -1021,6 +1065,30 @@ def reordered_cp_size(config, mesh) -> int:
   if mesh is None or not getattr(config, "context_parallel_load_balance", False):
     return 1
   return mesh.shape.get(config.context_sharding, 1)
+
+
+def resolve_reorder_strategy(config):
+  """The permutation the input pipeline applies when `reordered_cp_size(config, mesh) > 1`.
+
+  Resolves `context_parallel_reorder_strategy=AUTO` the way `setup_train_loop` does: STRIPED
+  (a Transformer Engine feature) for packed ring attention on GPU, DUAL_CHUNK_SWAP otherwise.
+
+  Returns:
+    A `ReorderStrategy` other than AUTO.
+  """
+  strategy = getattr(config, "context_parallel_reorder_strategy", None)
+  if strategy is None:
+    # Configs that predate the field only have the DUAL_CHUNK_SWAP permutation.
+    return ReorderStrategy.DUAL_CHUNK_SWAP
+  if strategy != ReorderStrategy.AUTO:
+    return strategy
+  if (
+      config.packing
+      and config.context_parallel_strategy.lower() == "ring"
+      and config.hardware in ("gpu", "gpu_multiprocess")
+  ):
+    return ReorderStrategy.STRIPED
+  return ReorderStrategy.DUAL_CHUNK_SWAP
 
 
 @staticmethod
@@ -1303,7 +1371,19 @@ def maybe_bootstrap_te_moe(config, mesh, shaped_batch):
   ep_size = mesh.shape.get(ep_axis, 1)
   fsdp_size = mesh.shape.get(fsdp_axis, 1)
 
-  batch_size, sequence_length = shaped_batch["inputs"].shape[:2]
+  loaded_batch_size, sequence_length = shaped_batch["inputs"].shape[:2]
+  ga_steps = config.gradient_accumulation_steps
+  if loaded_batch_size % ga_steps != 0:
+    raise ValueError(f"TE MoE EP loaded batch size ({loaded_batch_size}) must be divisible by GA steps ({ga_steps}).")
+  # Bootstrap for one model invocation, not the full accumulated batch.
+  # Cover both the loaded microbatch and the model-initialization batch.
+  batch_size = max(loaded_batch_size // ga_steps, config.micro_batch_size_to_train_on)
+  if config.eval_interval > 0:
+    batch_size = max(batch_size, config.micro_batch_size_to_eval_on)
+  if batch_size <= 0 or batch_size % (fsdp_size * ep_size) != 0:
+    raise ValueError(
+        f"TE MoE EP per-call batch size ({batch_size}) must be positive and divisible by FSDP * EP ({fsdp_size * ep_size})."
+    )
   if config.num_experts % ep_size != 0:
     raise ValueError(f"num_experts={config.num_experts} must be divisible by EP size={ep_size}.")
 
@@ -1380,6 +1460,28 @@ def maybe_pad(inputs, tile_size):
     inputs = jax.lax.pad(
         inputs,
         jnp.array(0.0, dtype=inputs.dtype),
-        [(0, padding_amount, 0), (0, 0, 0)],
+        [(0, padding_amount, 0)] + [(0, 0, 0)] * (inputs.ndim - 1),
     )
   return inputs, padding_amount
+
+
+def is_eval(config) -> bool:
+  """Returns True when evaluation-specific kernel tile sizes (`eval_*`) should be used.
+
+  Evaluation tile sizes (`eval_*`) take effect when evaluation runs under a
+  custom logical mesh/sharding rule (`logical_axis_rules_for_eval !=
+  logical_axis_rules`). Because `eval_step` executes inside
+  `logical_axis_rules(config.logical_axis_rules_for_eval)`, comparing the
+  active logical axis rules against `logical_axis_rules_for_eval` reliably
+  distinguishes evaluation from training without relying on batch size or
+  tensor sharding.
+
+  Args:
+    config: MaxText config object.
+
+  Returns:
+    True if executing under evaluation logical axis rules.
+  """
+  eval_rules = getattr(config, "logical_axis_rules_for_eval", None)
+  train_rules = getattr(config, "logical_axis_rules", None)
+  return bool(eval_rules and eval_rules != train_rules and get_logical_axis_rules() == eval_rules)

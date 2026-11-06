@@ -16,6 +16,8 @@
 
 
 import enum
+import functools
+import math
 from typing import Any, Optional, Tuple
 
 import jax
@@ -32,21 +34,22 @@ from maxtext.common.common_types import (
     DType,
     MODEL_MODE_TRAIN,
     MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
     AttentionType,
     DEFAULT_MASK_VALUE,
 )
 
-from maxtext.layers import nnx_wrappers
 from maxtext.layers.attention_mla import indexer_losses
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
-from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference.kvcache import KVQuant
 from maxtext.inference import kvcache
 from maxtext.utils.globals import EPS
+from maxtext.kernels.attention import csa_streamindex
 
 
 class CSAPoolingConfig(enum.IntEnum):
@@ -265,6 +268,7 @@ def compute_csa_prefill_chunk_pooling(
     head_dim: int,
     dtype: Any,
     cache: Optional[Any] = None,
+    true_length: Optional[Array] = None,
 ) -> Tuple[Array, int, Optional[Array], Optional[Array], int]:
   """Helper for CSA prefill chunking, overlap pooling, and RoPE embedding.
 
@@ -281,6 +285,9 @@ def compute_csa_prefill_chunk_pooling(
     head_dim: Target head dimension (`head_dim` or `index_head_dim`).
     dtype: Computation dtype.
     cache: Optional KVCache instance.
+    true_length: Optional unpadded prompt length per batch row, shape `[batch]`. When set,
+      the returned overlap prior is the last window made only of real tokens, so decode
+      continues from the true prompt end rather than from the padded prefill end.
 
   Returns:
     Tuple of (compressed, compressed_len, next_prior_kv, next_prior_gate, usable).
@@ -312,6 +319,21 @@ def compute_csa_prefill_chunk_pooling(
     compressed_len = compressed.shape[1]
     positions = position_ids[:, :usable:compress_rate]
     compressed = rotary_emb(compressed, positions, unsqueeze_dim=None)
+
+    if true_length is not None:
+      n_true = (true_length // compress_rate).astype(jnp.int32)  # [B]
+      last = jnp.maximum(n_true - 1, 0)[:, None, None, None]
+      true_prior_kv = jnp.take_along_axis(chunk_kv_reshaped, last, axis=1)
+      true_prior_gate = jnp.take_along_axis(chunk_gate_reshaped, last, axis=1)
+      if prior_kv is not None and prior_kv.size == true_prior_kv.size:
+        fallback_kv = prior_kv.reshape(true_prior_kv.shape).astype(true_prior_kv.dtype)
+        fallback_gate = prior_gate.reshape(true_prior_gate.shape).astype(true_prior_gate.dtype)
+      else:
+        fallback_kv = jnp.zeros_like(true_prior_kv)
+        fallback_gate = jnp.zeros_like(true_prior_gate)
+      has_window = (n_true > 0)[:, None, None, None]
+      next_prior_kv = jnp.where(has_window, true_prior_kv, fallback_kv)
+      next_prior_gate = jnp.where(has_window, true_prior_gate, fallback_gate)
   else:
     compressed = jnp.zeros((batch_size, 0, head_dim), dtype=dtype)
     compressed_len = 0
@@ -331,6 +353,7 @@ def prime_prefill_cache_state(
     cache: Any,
     next_prior_kv: Optional[Array] = None,
     next_prior_gate: Optional[Array] = None,
+    true_length: Optional[Array] = None,
 ) -> None:
   """Shared utility to initialize and prime KVCache state during prefill.
 
@@ -352,17 +375,35 @@ def prime_prefill_cache_state(
     cache: Target KVCache instance.
     next_prior_kv: Trailing window KV prior to write to overlap cache (optional).
     next_prior_gate: Trailing window gate prior to write to overlap cache (optional).
+    true_length: Optional unpadded prompt length per batch row, shape `[batch]`. When set,
+      the leftover buffer, accumulator index and entry count follow the true prompt end;
+      compressed blocks past it stay in the cache but are masked out by `entry_count`.
   """
   if compressed_kv.ndim == 3:
     compressed_kv = jnp.expand_dims(compressed_kv, 2)
   remainder = seq_len % compress_rate
-  if remainder > 0:
+  if true_length is not None:
+    true_length = true_length.astype(jnp.int32)
+    n_true = true_length // compress_rate  # [B]
+    true_remainder = true_length % compress_rate  # [B]
+    # Tokens [n_true * rate, true_length) seed the leftover buffer; later slots stay zero.
+    pad_spec = ((0, 0), (0, compress_rate), (0, 0))
+    slice_rows = jax.vmap(lambda x, s: jax.lax.dynamic_slice_in_dim(x, s, compress_rate, axis=0))
+    keep = (jnp.arange(compress_rate)[None, :] < true_remainder[:, None])[:, :, None]
+    leftover_kv = jnp.where(keep, slice_rows(jnp.pad(kv, pad_spec), n_true * compress_rate), 0)
+    leftover_gate = jnp.where(keep, slice_rows(jnp.pad(gate, pad_spec), n_true * compress_rate), 0)
+    padded_kv = jnp.expand_dims(leftover_kv, 2)
+    padded_gate = jnp.expand_dims(leftover_gate, 2)
+    accumulator = true_remainder[:, None]
+  elif remainder > 0:
     leftover_kv = kv[:, usable:]
     leftover_gate = gate[:, usable:]
     pad_len = compress_rate - remainder
     padded_kv = jnp.expand_dims(jnp.pad(leftover_kv, ((0, 0), (0, pad_len), (0, 0))), 2)
     padded_gate = jnp.expand_dims(jnp.pad(leftover_gate, ((0, 0), (0, pad_len), (0, 0))), 2)
+    accumulator = jnp.full((kv.shape[0], 1), remainder, dtype=jnp.int32)
 
+  if true_length is not None or remainder > 0:
     assert cache.leftover_buffer_kv is not None, "leftover_buffer_kv cannot be None"
     assert cache.leftover_buffer_gate is not None, "leftover_buffer_gate cannot be None"
     assert cache.accumulator_index is not None, "accumulator_index cannot be None"
@@ -373,10 +414,11 @@ def prime_prefill_cache_state(
       repeats = actual_batch // padded_kv.shape[0]
       padded_kv = jnp.repeat(padded_kv, repeats, axis=0)
       padded_gate = jnp.repeat(padded_gate, repeats, axis=0)
+      accumulator = jnp.repeat(accumulator, repeats, axis=0)
 
     cache.leftover_buffer_kv.set_value(padded_kv)
     cache.leftover_buffer_gate.set_value(padded_gate)
-    cache.accumulator_index.set_value(jnp.full((actual_batch, 1), remainder, dtype=jnp.int32))
+    cache.accumulator_index.set_value(accumulator.astype(jnp.int32))
 
   compressed_len = compressed_kv.shape[1]
   if compressed_len > 0:
@@ -408,7 +450,13 @@ def prime_prefill_cache_state(
     # Ensure entry_count update matches the physical cache batch size
     assert cache.entry_count is not None, "entry_count cannot be None"
     actual_batch = cache.entry_count.get_value().shape[0]
-    cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
+    if true_length is not None:
+      entry_count = jnp.minimum(n_true, compressed_len)[:, None]
+      if entry_count.shape[0] != actual_batch:
+        entry_count = jnp.repeat(entry_count, actual_batch // entry_count.shape[0], axis=0)
+      cache.entry_count.set_value(entry_count.astype(jnp.int32))
+    else:
+      cache.entry_count.set_value(jnp.full((actual_batch, 1), compressed_len, dtype=jnp.int32))
 
     if next_prior_kv is not None and next_prior_gate is not None:
       overlap_kv_to_write = next_prior_kv
@@ -478,7 +526,7 @@ class BaseDeepseekCompressor(nnx.Module):
       compress_ratio: int,
       rotary_embedding: Any,
       proj_multiplier: int,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
@@ -554,7 +602,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
@@ -593,6 +641,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       position_ids: Array,
       model_mode: str,
       cache: Optional[Any] = None,
+      true_length: Optional[Array] = None,
   ) -> Tuple[Array, Array]:
     """Forward pass for the HCA compressor.
 
@@ -602,6 +651,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       position_ids: Absolute token positions. Shape: `[batch, seq_len]`.
       model_mode: The execution mode (e.g. train, prefill, or autoregressive).
       cache: Optional KV cache instance used during inference.
+      true_length: Optional unpadded prompt length per batch row (prefill only), shape `[batch]`.
 
     Returns:
       compressed_kv: The pooled KV tensors. Shape: `[batch, n_windows, 1, head_dim]`.
@@ -683,6 +733,7 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
           usable=usable,
           compress_rate=self.compress_rate,
           cache=cache,
+          true_length=true_length,
       )
 
     # During decoding (seq_len == 1), dot-product attention requires a zero mask
@@ -728,9 +779,10 @@ class DeepseekV4Indexer(nnx.Module):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       rngs: Optional[nnx.Rngs] = None,
+      mesh: Optional[Mesh] = None,
   ):
     """Initializes the Indexer for CSA.
 
@@ -741,9 +793,12 @@ class DeepseekV4Indexer(nnx.Module):
       kernel_init: Weight initializer for the indexer projections.
       quant: Optional quantization scheme.
       rngs: Optional random state initialization.
+      mesh: Device mesh. Required to shard the StreamIndex Pallas kernel; without
+        it the kernel runs unsharded and GSPMD all-gathers its operands.
     """
     self.config = config
     self.compress_rate = compress_ratio
+    self.mesh = mesh
     self.index_n_heads = config.indexer_n_heads
     self.index_head_dim = config.indexer_head_dim
     self.index_topk = config.indexer_topk
@@ -821,6 +876,64 @@ class DeepseekV4Indexer(nnx.Module):
 
     self.rotary_emb = rotary_embedding
 
+  def _streamindex_scores_sharded(self, q: Array, compressed: Array, weights: Array) -> Array:
+    """Runs the StreamIndex Pallas kernel under a batch-only `shard_map`.
+
+    A bare `pallas_call` lowers to an opaque `tpu_custom_call` that GSPMD cannot
+    partition, so it conservatively all-gathers every operand to full global
+    shape on each device — reconstructing the whole `[B, H, S, D]` query and
+    defeating the memory saving the kernel exists to provide. `shard_map` makes
+    the partitioning explicit and removes those collectives.
+
+    Only the batch dimension is sharded. Context/sequence parallelism is not
+    supported: `compressed` would have to be replicated across the context axis
+    (causality means late query rows need every earlier compressed block), which
+    is a separate change.
+
+    Args:
+      q: `[B, H, S, D]`.
+      compressed: `[B, W, D]`.
+      weights: `[B, S, H]`.
+
+    Returns:
+      Index scores, `[B, S, W]`.
+    """
+    batch_size = q.shape[0]
+
+    batch_axes = tuple(
+        axis for axis in ("data", "fsdp", "fsdp_transpose", "expert") if self.mesh is not None and axis in self.mesh.shape
+    )
+    num_batch_shards = math.prod(self.mesh.shape[a] for a in batch_axes) if batch_axes else 1
+
+    if self.mesh is None or num_batch_shards == 1:
+      return csa_streamindex.csa_streamindex_score(q, compressed, weights, self.softmax_scale)
+
+    if batch_size % num_batch_shards != 0:
+      raise ValueError(
+          f"CSA StreamIndex kernel requires batch_size ({batch_size}) to be divisible by the "
+          f"number of batch shards ({num_batch_shards}) across mesh axes {batch_axes}. "
+          "Adjust the batch size or disable use_csa_streamindex_kernel."
+      )
+
+    q_pspec = jax.sharding.PartitionSpec(batch_axes, None, None, None)
+    # `compressed`, `weights` and the output are all 3D and batch-sharded alike.
+    pspec_3d = jax.sharding.PartitionSpec(batch_axes, None, None)
+
+    # check_vma=False is required, not defensive: `pallas_call` builds its
+    # `out_shape` from a plain `jax.ShapeDtypeStruct`, which carries no
+    # `manual_axis_type`, and check_vma=True rejects that outright.
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(q_pspec, pspec_3d, pspec_3d),
+        out_specs=pspec_3d,
+        check_vma=False,
+    )
+    def _sharded(local_q, local_compressed, local_weights):
+      return csa_streamindex.csa_streamindex_score(local_q, local_compressed, local_weights, self.softmax_scale)
+
+    return _sharded(q, compressed, weights)
+
   def __call__(
       self,
       hidden_states: Array,
@@ -830,6 +943,7 @@ class DeepseekV4Indexer(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       cache: Optional[Any] = None,
       return_scores: bool = False,
+      true_length: Optional[Array] = None,
   ) -> Tuple[Array, Optional[Array]]:
     """Forward pass for the DeepSeek-V4 Indexer.
 
@@ -841,6 +955,7 @@ class DeepseekV4Indexer(nnx.Module):
       model_mode: Execution mode (train, prefill, or autoregressive).
       cache: Optional Indexer KV cache instance for inference.
       return_scores: Whether to return (final_indices, index_scores).
+      true_length: Optional unpadded prompt length per batch row (prefill only), shape `[batch]`.
 
     Returns:
       A tuple (top_k_indices, indexer_scores) where indexer_scores is None when return_scores=False.
@@ -906,6 +1021,7 @@ class DeepseekV4Indexer(nnx.Module):
           head_dim=self.index_head_dim,
           dtype=self.dtype,
           cache=cache,
+          true_length=true_length,
       )
 
       # Prefill Cache Insertion
@@ -920,6 +1036,7 @@ class DeepseekV4Indexer(nnx.Module):
             cache=cache,
             next_prior_kv=next_prior_kv,
             next_prior_gate=next_prior_gate,
+            true_length=true_length,
         )
 
     if compressed_len == 0:
@@ -930,11 +1047,19 @@ class DeepseekV4Indexer(nnx.Module):
     q = self.q_proj(q_latent).reshape((batch_size, seq_len, self.index_n_heads, self.index_head_dim))
     q = jnp.transpose(q, (0, 2, 1, 3))
     q = self.rotary_emb(q, position_ids, unsqueeze_dim=1)
-
     weights = self.weights_proj(hidden_states).astype(jnp.float32) * self.weights_scaling
 
+    # The Pallas kernel is a training-only path. AR decode arrives with
+    # seq_len==1 and prefill with cache-derived `compressed`; neither shape
+    # suits the kernel's fixed grid. It takes precedence over
+    # `csa_qk_head_chunk_size`: the kernel keeps the forward intermediate in
+    # VMEM instead of chunking it, and chunks its own backward.
+    use_kernel = self.config.use_csa_streamindex_kernel and model_mode == MODEL_MODE_TRAIN
     head_chunk_size = getattr(self.config, "csa_qk_head_chunk_size", 0)
-    if head_chunk_size > 0:
+
+    if use_kernel:
+      index_scores = self._streamindex_scores_sharded(q, compressed, weights)
+    elif head_chunk_size > 0:
       # Student chunks indexer heads (indexer_n_heads); teacher path
       # in calculate_csa_indexer_loss chunks query heads (num_query_heads).
       num_chunks = self.index_n_heads // head_chunk_size
@@ -964,24 +1089,26 @@ class DeepseekV4Indexer(nnx.Module):
       init_score = jnp.zeros((batch_size, seq_len, compressed_len), dtype=jnp.float32)
       index_scores, _ = jax.lax.scan(jax.checkpoint(scan_body_indexer), init_score, {"q": q_h, "w": w_h})
     else:
-      scores = jnp.einsum(
-          "bhsd, bwd -> bhsw",
-          q.astype(jnp.float32),
-          compressed.astype(jnp.float32),
+      index_scores = csa_streamindex.csa_indexer_scores_jax(
+          q,
+          compressed,
+          weights,
+          softmax_scale=self.softmax_scale,
           precision=self.config.matmul_precision,
       )
-      scores = jax.nn.relu(scores) * self.softmax_scale
-      index_scores = jnp.einsum("bhsw,bsh->bsw", scores, weights, precision=self.config.matmul_precision)
 
     k = min(self.index_topk, compressed_len)
 
-    # --- ONLY RUN MATHEMATICAL CAUSAL MASK IN PREFILL/TRAIN ---
+    # `future_mask` is supplied by the AR path (derived from cache validity).
+    # In prefill/train it is None and is derived from positions here.
     if future_mask is None:
       usable_len = compressed_len * self.compress_rate
       block_positions = position_ids[:, : usable_len : self.compress_rate]
       future_mask = (block_positions[:, None, :] + self.compress_rate) > (position_ids[:, :, None] + 1)
 
-    # Apply the mask to the scores
+    # Masking is always applied here, never inside the kernel: the kernel cannot
+    # see `position_ids` and would have to synthesize them from grid indices,
+    # which breaks for packed sequences where positions reset mid-sequence.
     index_scores = jnp.where(future_mask, jnp.full_like(index_scores, -jnp.inf), index_scores)
 
     combined_invalid = future_mask
@@ -1016,10 +1143,11 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       config: Any,
       compress_ratio: int,
       rotary_embedding: Any,
-      kernel_init: Any = nnx.initializers.normal(stddev=0.02),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
+      mesh: Optional[Mesh] = None,
   ):
     """Initializes the CSA Compressor.
 
@@ -1052,6 +1180,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
         kernel_init=kernel_init,
         quant=quant,
         rngs=rngs,
+        mesh=mesh,
     )
 
   def __call__(
@@ -1065,6 +1194,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       indexer_cache: Optional[Any] = None,
       use_indexer: bool = True,
       return_indexer_scores: bool = False,
+      true_length: Optional[Array] = None,
   ) -> Tuple[Array, Array, Optional[Array]]:
     """Forward pass for the CSA compressor.
 
@@ -1078,6 +1208,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       indexer_cache: Optional Indexer KV cache instance for inference.
       use_indexer: Whether to run the indexer to compute sparse attention masks.
       return_indexer_scores: Whether to return indexer scores along with compressed KV and mask.
+      true_length: Optional unpadded prompt length per batch row (prefill only), shape `[batch]`.
 
     Returns:
       compressed_kv: The pooled KV tensors.
@@ -1096,6 +1227,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
           model_mode,
           indexer_cache,
           return_scores=return_indexer_scores,
+          true_length=true_length,
       )
     else:
       top_k_indices = None
@@ -1156,6 +1288,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
           head_dim=self.head_dim,
           dtype=self.dtype,
           cache=cache,
+          true_length=true_length,
       )
       compressed_kv = jnp.expand_dims(compressed, 2)
 
@@ -1170,6 +1303,7 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
             cache=cache,
             next_prior_kv=next_prior_kv,
             next_prior_gate=next_prior_gate,
+            true_length=true_length,
         )
 
     if compressed_len == 0:
@@ -1386,11 +1520,18 @@ class CompressedAttention(Attention):
     # Override the base rotary embedding with the correct theta for this layer.
     # CSA / HCA layers use compressed_rope_max_timescale (160000).
     # Sliding window prefix layers use rope_max_timescale (10000).
-    rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
+    is_compressed = self.compress_ratio > 0
+    rope_theta = self.config.compressed_rope_max_timescale if is_compressed else self.config.rope_max_timescale
     self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.config.head_dim,
         partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
         rope_theta=rope_theta,
+        rope_type=self.config.rope_type if is_compressed else "default",
+        rope_factor=self.config.rope_factor,
+        beta_fast=self.config.beta_fast,
+        beta_slow=self.config.beta_slow,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        truncate=self.config.rope_truncate,
         fprop_dtype=self.dtype,
     )
 
@@ -1414,6 +1555,7 @@ class CompressedAttention(Attention):
           quant=self.quant,
           model_mode=self.model_mode,
           rngs=self.rngs,
+          mesh=self.mesh,
       )
 
     # Set softmax scaling. DeepSeek-V4 natively uses standard scaling.
@@ -1453,7 +1595,7 @@ class CompressedAttention(Attention):
       batch_size, _ = max_utils.get_batch_seq_len_for_mode(self.config, MODEL_MODE_AUTOREGRESSIVE)
 
       max_prefill_comp = max(1, self.max_prefill_predict_length // self.compress_ratio)
-      max_target_comp = max(max_prefill_comp + 1, self.max_target_length // self.compress_ratio)
+      max_target_comp = max_prefill_comp + max(1, self.max_target_length // self.compress_ratio)
 
       comp_head_dim = self.head_dim if self.compress_ratio > 4 else 2 * self.head_dim
 
@@ -1656,10 +1798,15 @@ class CompressedAttention(Attention):
       )
       compressed_segment_mask = jnp.where(valid_comp_seg, 0.0, DEFAULT_MASK_VALUE)
 
+    # Padded prefill: decode-time compressor state must start at the true prompt end.
+    prefill_true_length = None
+    if model_mode == MODEL_MODE_PREFILL and decoder_segment_ids is not None:
+      prefill_true_length = jnp.sum(decoder_segment_ids != 0, axis=1).astype(jnp.int32)
+
     # Route to the appropriate compressor depending on the layer's role in the architecture
     if self.compress_ratio > 4:
       compressed_kv, compressed_mask = self.hca_compressor(
-          inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache
+          inputs_kv, q_normed, inputs_positions, model_mode, self.compressor_cache, true_length=prefill_true_length
       )
     elif self.compress_ratio == 4:
       use_indexer = self.config.use_indexer
@@ -1677,6 +1824,7 @@ class CompressedAttention(Attention):
             self.indexer_cache,
             use_indexer=True,
             return_indexer_scores=should_compute_loss,
+            true_length=prefill_true_length,
         )
         is_sparse_training = self.config.indexer_sparse_training
         is_dense_warmup = (model_mode == MODEL_MODE_TRAIN) and (scaling_factor > 0.0) and (not is_sparse_training)
@@ -1715,6 +1863,7 @@ class CompressedAttention(Attention):
             self.indexer_cache,
             use_indexer=False,
             return_indexer_scores=False,
+            true_length=prefill_true_length,
         )
         compressed_mask = self.get_compressed_mask(
             inputs_positions,
@@ -1738,12 +1887,18 @@ class CompressedAttention(Attention):
     # Tokamax dynamic splash tile boundary alignment. Note: Tokamax kernel inside AttentionOp additionally
     # sets inner block size as min(block_kv, key_len) during kernel invocation.
     if self.attention_kernel == "flash":
+      if max_utils.is_eval(self.config):
+        block_q = self.config.eval_sa_block_q
+        block_kv = self.config.eval_sa_block_kv
+      else:
+        block_q = self.config.sa_block_q
+        block_kv = self.config.sa_block_kv
       comp_len = compressed_kv.shape[1] if compressed_kv is not None else 0
       _, pad_kv_total = compute_hca_padding(
           q_len=inputs_q.shape[1],
           comp_len=comp_len,
-          block_q=self.config.sa_block_q,
-          block_kv=self.config.sa_block_kv,
+          block_q=block_q,
+          block_kv=block_kv,
           kv_len=kv.shape[1],
       )
 
@@ -2015,70 +2170,3 @@ class CompressedAttention(Attention):
     indexer_loss = (jnp.sum(kl_per_token) / num_valid_tokens) * scaling_factor
 
     return indexer_loss
-
-
-def compressed_attention(
-    *,
-    config: Config,
-    num_query_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    max_target_length: int,
-    mesh: Mesh,
-    attention_kernel: str,
-    inputs_q_shape: Tuple,
-    inputs_kv_shape: Tuple,
-    dtype: DType = jnp.float32,
-    weight_dtype: DType = jnp.float32,
-    max_prefill_predict_length: int = -1,
-    dropout_rate: float = 0.0,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
-    float32_qk_product: bool = False,
-    float32_logits: bool = False,
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.COMPRESSED,
-    attn_logits_soft_cap: float | None = None,
-    sliding_window_size: int | None = None,
-    use_ragged_attention: bool = False,
-    ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
-    query_pre_attn_scalar: float | None = None,
-    use_bias_in_projections: bool = False,
-    q_lora_rank: int = 1536,
-    name: str | None = None,
-):
-  """Wrapper to create the CompressedAttention linen module."""
-  return nnx_wrappers.to_linen(
-      CompressedAttention,
-      config=config,
-      num_query_heads=num_query_heads,
-      num_kv_heads=num_kv_heads,
-      head_dim=head_dim,
-      max_target_length=max_target_length,
-      mesh=mesh,
-      attention_kernel=attention_kernel,
-      inputs_q_shape=inputs_q_shape,
-      inputs_kv_shape=inputs_kv_shape,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      max_prefill_predict_length=max_prefill_predict_length,
-      dropout_rate=dropout_rate,
-      kernel_init=kernel_init,
-      float32_qk_product=float32_qk_product,
-      float32_logits=float32_logits,
-      quant=quant,
-      kv_quant=kv_quant,
-      attention_type=attention_type,
-      attn_logits_soft_cap=attn_logits_soft_cap,
-      sliding_window_size=sliding_window_size,
-      use_ragged_attention=use_ragged_attention,
-      ragged_block_size=ragged_block_size,
-      use_qk_norm=use_qk_norm,
-      query_pre_attn_scalar=query_pre_attn_scalar,
-      use_bias_in_projections=use_bias_in_projections,
-      q_lora_rank=q_lora_rank,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )

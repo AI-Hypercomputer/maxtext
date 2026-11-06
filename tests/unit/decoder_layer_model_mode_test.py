@@ -56,7 +56,7 @@ from flax.linen import partitioning as nn_partitioning
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.configs import pyconfig
 from maxtext.layers import attention_mla, attentions
-from maxtext.models import deepseek, gemma, gemma2, gemma3, llama2, mistral, qwen2, qwen3
+from maxtext.models import deepseek, gemma, gemma2, gemma3, gpt3, gpt_oss, llama2, mistral, qwen2, qwen3
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -114,12 +114,27 @@ _GEMMA3 = {
     "head_dim": 16,
 }
 
-# Layers onboarded to explicit sharding, as (case name, layer class, extra config).
+# With the TPU kernels off the sparse path lowers to ragged_dot, which runs on CPU.
+_GPT_OSS = {
+    "decoder_block": "gpt_oss",
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "base_moe_mlp_dim": 64,
+    "sparse_matmul": True,
+    "megablox": False,
+    "use_tokamax_gmm": False,
+}
+
+# Layers onboarded to explicit sharding, as (name, layer class, config, ctor kwargs).
 _SHARD_MODE_LAYERS = [
-    ("gemma", gemma.GemmaDecoderLayer, {"decoder_block": "gemma"}),
-    ("gemma2", gemma2.Gemma2DecoderLayer, {"decoder_block": "gemma2"}),
-    ("gemma3", gemma3.Gemma3DecoderLayer, _GEMMA3),
-    ("gemma3_scannable_block", gemma3.Gemma3ScannableBlock, _GEMMA3),
+    ("gemma", gemma.GemmaDecoderLayer, {"decoder_block": "gemma"}, {}),
+    ("gemma2", gemma2.Gemma2DecoderLayer, {"decoder_block": "gemma2"}, {}),
+    ("gemma3", gemma3.Gemma3DecoderLayer, _GEMMA3, {}),
+    ("gemma3_scannable_block", gemma3.Gemma3ScannableBlock, _GEMMA3, {}),
+    ("gpt3", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": False}, {}),
+    ("gpt3_fused_qkv", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": True}, {}),
+    ("gpt_oss", gpt_oss.GptOssDecoderLayer, _GPT_OSS, {"attention_type": attentions.AttentionType.GLOBAL}),
+    ("gpt_oss_scannable_block", gpt_oss.GptOssScannableBlock, _GPT_OSS, {}),
 ]
 
 
@@ -237,7 +252,7 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
           "set XLA_FLAGS=--xla_force_host_platform_device_count=8"
       )
 
-  def _forward(self, layer_cls, extra_config, shard_mode):
+  def _forward(self, layer_cls, extra_config, ctor_kwargs, shard_mode):
     """Builds one decoder layer in the given shard mode and runs a single forward pass.
 
     The rng seeds are fixed so both modes initialize identical weights; any difference
@@ -246,6 +261,7 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
     Args:
       layer_cls: Decoder layer class to instantiate.
       extra_config: Config overrides this family needs, on top of _COMMON.
+      ctor_kwargs: Extra constructor arguments this family requires.
       shard_mode: Either "auto" or "explicit".
 
     Returns:
@@ -265,6 +281,7 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
           mesh=mesh,
           model_mode=MODEL_MODE_TRAIN,
           rngs=nnx.Rngs(params=0, dropout=0),
+          **ctor_kwargs,
       )
       batch = cfg.micro_batch_size_to_train_on
       length = cfg.max_target_length
@@ -283,10 +300,10 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
     return np.asarray(jax.device_get(output))
 
   @parameterized.named_parameters(*_SHARD_MODE_LAYERS)
-  def test_explicit_matches_auto(self, layer_cls, extra_config):
+  def test_explicit_matches_auto(self, layer_cls, extra_config, ctor_kwargs):
     """The explicit run must both succeed and reproduce the auto-mode activations."""
-    auto_out = self._forward(layer_cls, extra_config, "auto")
-    explicit_out = self._forward(layer_cls, extra_config, "explicit")
+    auto_out = self._forward(layer_cls, extra_config, ctor_kwargs, "auto")
+    explicit_out = self._forward(layer_cls, extra_config, ctor_kwargs, "explicit")
 
     self.assertEqual(auto_out.shape, explicit_out.shape)
     np.testing.assert_allclose(
@@ -298,14 +315,55 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(*_SHARD_MODE_LAYERS)
-  def test_explicit_shard_mode_is_accepted_by_config(self, layer_cls, extra_config):
+  def test_explicit_shard_mode_is_accepted_by_config(self, layer_cls, extra_config, ctor_kwargs):
     """Every onboarded decoder must be on the explicit-sharding allowlist in configs/types.py."""
-    del layer_cls
+    del layer_cls, ctor_kwargs
     cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **(_COMMON | extra_config | {"shard_mode": "explicit"}),
     )
     self.assertEqual(cfg.shard_mode, ShardMode.EXPLICIT)
+
+
+class DecoderLayerScannedKvCacheTest(parameterized.TestCase):
+  """With scan_layers=True, a decoder layer must still return the KV cache its attention returns.
+
+  When vLLM serves a scanned model, the decoder statically unrolls the scanned layers, passes each
+  layer its own `kv_cache` and stores the cache the layer returns for the next step. A layer that
+  returns None there drops every cache update: the first token, computed in the same attention call
+  that writes the prompt's keys and values, is still right, but every later token attends to a stale
+  cache and decoding degenerates.
+  """
+
+  @parameterized.named_parameters(
+      ("llama2", llama2.LlamaDecoderLayer, {}, {}),
+      ("qwen3", qwen3.Qwen3DecoderLayer, {"decoder_block": "qwen3"}, {"quant": None}),
+  )
+  def test_scanned_layer_returns_attention_kv_cache(self, layer_cls, extra_config, ctor_kwargs):
+    cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **(_COMMON | extra_config | {"scan_layers": True}))
+    mesh = _mesh(cfg)
+    updated_kv_cache = jnp.full((2, 3), 7.0)
+
+    def spy(_self, inputs_q, *args, **kwargs):
+      del args, kwargs
+      return jnp.zeros_like(inputs_q), updated_kv_cache
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
+      layer = layer_cls(
+          config=cfg,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          mesh=mesh,
+          rngs=nnx.Rngs(params=0, dropout=0),
+          **ctor_kwargs,
+      )
+      batch = cfg.micro_batch_size_to_train_on
+      inputs = jnp.zeros((batch, 1, cfg.emb_dim), dtype=jnp.float32)
+      positions = jnp.zeros((batch, 1), dtype=jnp.int32)
+      segment_ids = jnp.ones((batch, 1), dtype=jnp.int32)
+      with mock.patch.object(attentions.Attention, "__call__", spy):
+        _, kv_cache = layer(inputs, segment_ids, positions, True, MODEL_MODE_AUTOREGRESSIVE, kv_cache=jnp.zeros((2, 3)))
+
+    self.assertIs(kv_cache, updated_kv_cache, "the scanned layer dropped the KV cache returned by its attention")
 
 
 if __name__ == "__main__":

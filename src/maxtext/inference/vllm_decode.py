@@ -34,7 +34,7 @@ from typing import Any, Sequence
 
 from absl import app
 from absl import flags
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 from maxtext.common import profiler
 from maxtext.common.common_types import Config
@@ -89,11 +89,12 @@ def build_chat_messages(config: Config) -> list[dict[str, Any]]:
   return messages
 
 
-def decode_with_vllm(config: Config) -> None:
-  """Decode using vLLM with a MaxText model implementation.
+def create_vllm_llm(config: Config, **overrides: Any) -> LLM:
+  """Create a vLLM engine with optional keyword overrides.
 
   Args:
-    config: MaxText config.
+    config: MaxText config; the adapter must already be registered.
+    **overrides: Additional or overriding keyword arguments for ``vllm.LLM``.
   """
   # Prepare vLLM Arguments
   vllm_args = {
@@ -138,6 +139,8 @@ def decode_with_vllm(config: Config) -> None:
   if config.max_num_seqs is not None:
     vllm_args["max_num_seqs"] = config.max_num_seqs
 
+  vllm_args.update(overrides)
+
   global _USE_MROPE
   _USE_MROPE = config.use_multimodal and config.use_mrope
 
@@ -150,8 +153,17 @@ def decode_with_vllm(config: Config) -> None:
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
-  with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
-    llm = LLM(**vllm_args)
+  with logical_axis_rules(vllm_config.logical_axis_rules):
+    return LLM(**vllm_args)
+
+
+def decode_with_vllm(config: Config) -> None:
+  """Decode using vLLM with a MaxText model implementation.
+
+  Args:
+    config: MaxText config.
+  """
+  llm = create_vllm_llm(config)
 
   max_logging.log("Generating output...")
   tokenizer = transformers.AutoTokenizer.from_pretrained(

@@ -16,6 +16,10 @@
 Test initialization
 """
 
-import pathwaysutils
+try:
+  import pathwaysutils
 
-pathwaysutils.initialize()
+  pathwaysutils.initialize()
+except ModuleNotFoundError as e:
+  if e.name != "pathwaysutils":
+    raise

@@ -1,0 +1,83 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# tencent/Hy4-preview: HYV4ForCausalLM (model_type="hy_v4").
+# 78 layers: Layer 0 is dense SwiGLU MLP + full DSA indexer; Layers 1..77 are sparse MoE
+# (256 routed experts, top-8, clamped SwiGLU limit=10.0, 1 unclamped shared expert) with
+# a 4-layer DSA indexer cycle of [full, shared, shared, shared] starting at Layer 1.
+# Each layer wraps attention and FFN in 4-stream Identity Hyper-Connections (iHC) and
+# uses Gated MLA with learnable per-head attention sinks.
+
+decoder_block: "hy4"
+base_emb_dim: 6144
+base_num_decoder_layers: 78
+base_num_query_heads: 64
+base_num_kv_heads: 64
+head_dim: 256
+vocab_size: 120832
+normalization_layer_epsilon: 1.0e-5
+logits_via_embedding: false
+enable_dropout: false
+mlp_activations: ["silu", "linear"]
+inhomogeneous_layer_cycle_interval: 4
+
+# 4-stream Identity Hyper-Connections (iHC)
+mhc_expansion_rate: 4
+
+# Dense MLP (layer 0) and Sparse MoE (layers 1..77)
+base_mlp_dim: 18432
+first_num_dense_layers: 1
+base_moe_mlp_dim: 2048
+num_experts: 256
+num_experts_per_tok: 8
+shared_experts: 1
+routed_scaling_factor: 2.827
+routed_score_func: "sigmoid"
+routed_bias: true
+routed_bias_update_rate: 0.0
+norm_topk_prob: true
+n_routing_groups: -1
+topk_routing_group: -1
+float32_gate_logits: true
+mlp_activations_limit: 10.0
+
+# Gated MLA + Learnable Sinks
+attention: "dot_product"
+attention_type: "mla"
+attention_sink: true
+q_lora_rank: 2048
+kv_lora_rank: 512
+qk_nope_head_dim: 192
+qk_rope_head_dim: 64
+v_head_dim: 256
+mscale: 1.0
+mla_naive_kvcache: false
+
+# Non-interleaved RoPE (rope_theta = 10,000,000)
+rope_type: "default"
+rope_max_timescale: 10_000_000
+max_position_embeddings: 1048576
+original_max_position_embeddings: 1048576
+rope_interleave: false
+
+# DeepSeek Sparse Attention (DSA) Indexer
+use_indexer: true
+indexer_n_heads: 32
+indexer_head_dim: 128
+indexer_topk: 2048
+
+# Tokenizer
+tokenizer_type: "huggingface"
+tokenizer_path: "tencent/Hy4-preview"
+add_bos: false

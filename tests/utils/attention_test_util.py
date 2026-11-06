@@ -22,7 +22,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from maxtext.configs import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
@@ -55,14 +54,10 @@ class MLATestBase(parameterized.TestCase):
     """Initializes the configuration for each test"""
     super().setUp()
     config_args = dict(self.config_arguments)
-    if is_decoupled():  # TODO(gulsumgudukbay): remove this after jax is updated.
-      # Older/newer JAX versions may not recognize this flag; ignore if absent.
-      try:
-        jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
-      except AttributeError:
-        pass
-    else:
+    if hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],

@@ -24,7 +24,7 @@ import pytest
 import os
 import shutil
 import jax
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path
 from maxtext.trainers.pre_train import train_compile
 from maxtext.trainers.pre_train import train
 
@@ -106,7 +106,7 @@ class CompileThenLoadTest(unittest.TestCase):
     assert os.path.exists(self.pickle_file), f"Compilation failed: {self.pickle_file} was not created."
 
     load_specific_args = [
-        "base_output_directory=gs://runner-maxtext-logs",
+        f"base_output_directory={get_test_base_output_directory()}",
         f"run_name=compile_then_load_{test_name}",
         f"compiled_trainstep_file={self.pickle_file}",
     ]

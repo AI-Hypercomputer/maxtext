@@ -37,6 +37,13 @@ Step-by-step guide for building MaxText docker images.
 Step-by-step guides for pre-training with real datasets like C4 using HuggingFace, Grain, or TFDS.
 ```
 
+```{grid-item-card} 🌐 DiLoCo Training
+:link: tutorials/diloco_pretraining
+:link-type: doc
+
+Step-by-step production recipes for distributed low-communication multi-slice training with DiLoCo and Streaming DiLoCo.
+```
+
 ```{grid-item-card} 🧩 Post-training
 :link: tutorials/post_training_index
 :link-type: doc
@@ -50,6 +57,13 @@ Techniques for SFT, RL, and other post-training workflows on TPU.
 
 Step-by-step guides for running inference of MaxText models on vLLM.
 ```
+
+```{grid-item-card} 📋 Decision Models
+:link: tutorials/decision_models
+:link-type: doc
+
+Score allowed answers with MaxText on vLLM, including a Qwen3.5-9B example with LoRA weights.
+```
 ````
 
 ```{toctree}
@@ -59,6 +73,8 @@ maxdepth: 1
 ---
 tutorials/build_maxtext.md
 tutorials/pretraining.md
+tutorials/diloco_pretraining.md
 tutorials/post_training_index.md
 tutorials/inference.md
+tutorials/decision_models.md
 ```

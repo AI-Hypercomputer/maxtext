@@ -21,16 +21,17 @@ import os
 import sys
 import queue
 import enum
+import datetime
 
 import numpy as np
 
 import jax
-
 from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 from maxtext.common.gcloud_stub import workload_monitor
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
 from maxtext.utils import exceptions
+from maxtext.utils import mllog_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -53,6 +54,25 @@ _METRICS_TO_MANAGED = {
     # There are no mappings to the following metrics yet:
     # "latency", "mfu"
 }
+
+
+STEP_DIAGNOSTICS_KEYS = (
+    ("raw_grad_norm", "learning/raw_grad_norm"),
+    ("grad_norm", "learning/grad_norm"),
+    ("param_norm", "learning/param_norm"),
+    ("max_abs_grad", "diag/max_abs_grad"),
+    ("moe_bias_checksum", "diag/moe_bias_checksum"),
+    ("moe_bias_update_nonzero", "diag/moe_bias_update_nonzero"),
+    ("moe_overflow", "diag/moe_overflow"),
+)
+
+
+def step_diagnostics_text(scalars):
+  """The log_step_diagnostics part of the step line: 'diag: raw_grad_norm=... grad_norm=... ...' (%.9e; n/a if absent)."""
+  parts = []
+  for name, key in STEP_DIAGNOSTICS_KEYS:
+    parts.append(f"{name}={float(scalars[key]):.9e}" if key in scalars else f"{name}=n/a")
+  return "diag: " + " ".join(parts)
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -93,13 +113,14 @@ class MetricLogger:
   Logger for saving metrics to a local file, GCS and TensorBoard.
   """
 
-  def __init__(self, config, learning_rate_schedule):
+  def __init__(self, config, learning_rate_schedule, start_step=0):
     self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
     self.config = config
     self.metadata = {}
     self.running_gcs_metrics = [] if config.gcs_metrics else None
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
+    self.start_step = start_step
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     # self.buffered_metrics is a polymorphic deferred-write queue. Entries are one of:
     #   ("train", train_step, metrics, step_time_delta)
@@ -108,6 +129,10 @@ class MetricLogger:
     # Number of eval steps accumulated since the last reset_eval_metrics(). Used by
     # buffer_and_write_metrics to detect the eval→train transition and trigger finalization.
     self._pending_eval_step_count = 0
+    # Wall-clock start of the in-flight eval loop, set by mark_eval_loop_start(). Used to emit
+    # the mllog validation_time from _finalize_eval_metrics, where the eval metrics are already
+    # being materialized, so measuring it costs no extra device synchronization.
+    self._eval_loop_start = None
     if self.config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
@@ -119,6 +144,10 @@ class MetricLogger:
           name=config.wandb_run_name,
           resume="allow",
       )  # Initialize wandb logger.
+
+  def mark_eval_loop_start(self):
+    """Records the wall-clock start of an eval loop for the mllog validation_time event."""
+    self._eval_loop_start = datetime.datetime.now()
 
   def reset_eval_metrics(self):
     """Resets the cumulative metrics dictionary for a new evaluation run."""
@@ -217,6 +246,9 @@ class MetricLogger:
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
+      if "learning/moe_max_load_ratio" in scalars:
+        log_parts.append(f"moe_max_load_ratio: {scalars['learning/moe_max_load_ratio']:.4f}")
+        log_parts.append(f"moe_max_load_ratio_mean: {scalars['learning/moe_max_load_ratio_mean']:.4f}")
 
     if getattr(self.config, "mtp_num_layers", 0) > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)
@@ -227,7 +259,19 @@ class MetricLogger:
       indexer_l = scalars.get("learning/indexer_loss", 0.0)
       log_parts.append(f"indexer_loss: {float(indexer_l)}")
 
+    if getattr(self.config, "log_step_diagnostics", False):
+      log_parts.append(step_diagnostics_text(scalars))
+
     max_logging.log(", ".join(log_parts))
+
+    # Logged here rather than in the train loop: metrics are flushed one step late, so reading
+    # the flag does not add a per-step host sync (which the in-layer fallback exists to avoid).
+    fallback_layers = scalars.get("learning/moe_dropless_fallback_layers")
+    if fallback_layers is not None and int(fallback_layers) > 0:
+      max_logging.log(
+          f"Step {step}: MoE ragged buffer overflow detected in {int(fallback_layers)} layer(s); "
+          f"in-layer dropless fallback was used (no tokens dropped)."
+      )
 
   def _log_eval_metrics(self, metrics, step):
     """Logs the final accumulated eval summary at the end of an eval run."""
@@ -256,6 +300,13 @@ class MetricLogger:
       log_parts.append(f"avg_indexer_loss={indexer_l:.3f}")
 
     max_logging.log(", ".join(log_parts))
+
+    fallback_layers = int(scalars.get("eval/moe_dropless_fallback_layers", 0))
+    if fallback_layers > 0:
+      max_logging.log(
+          f"Eval after train step {step}: MoE ragged buffer overflow detected in {fallback_layers} layer(s) "
+          f"summed over eval steps; in-layer dropless fallback was used (no tokens dropped)."
+      )
 
   def _log_running_eval_metrics(self, metrics, step):
     """Logs a per-eval-step running average (deferred by one eval step)."""
@@ -418,6 +469,14 @@ class MetricLogger:
     if is_training:
       self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
       self.buffered_metrics.append(("train", step, metrics, step_time_delta))
+      if self._pending_eval_step_count > 0 or getattr(self.config, "enable_mllog", False):
+        # Under enable_mllog, flush this step's entry now so tracked_stats stays ahead of
+        # eval_stop/run_stop, and on steps without an eval also lands inside the step's own
+        # block_start/block_stop pair. The .item() in the flush is the only synchronization
+        # this adds, and the device is already the bottleneck, so it costs no step time.
+        # On eval steps train.py has already emitted block_stop/eval_start, so tracked_stats
+        # falls inside the eval interval instead; the 6.1 checker does not constrain it there.
+        self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
       if self._pending_eval_step_count > 0:
         self._finalize_eval_metrics(step)
     else:
@@ -428,8 +487,17 @@ class MetricLogger:
     """Dispatches a single buffered entry to the writer."""
     kind = entry[0]
     if kind == "train":
-      _, step, metrics, _ = entry
+      _, step, metrics, step_time_delta = entry
       self.write_metrics(metrics, step)
+      # tracked_stats calls .item() on learning/loss. Deferring it to here means the step it
+      # belongs to has already completed, so the materialization does not block the train loop.
+      mllog_utils.tracked_stats(
+          self.config,
+          step + 1,
+          step_time_delta.total_seconds(),
+          metrics["scalar"]["learning/loss"],
+          start_step=self.start_step,
+      )
     elif kind == "eval":
       _, eval_step, raw_metrics, step_time_delta = entry
       # _accumulate_eval_metrics calls float() that materialize the metrics, deferred to here
@@ -461,6 +529,10 @@ class MetricLogger:
         scalar.get("evaluation/mtp_acceptance_rate_percent", 0.0)
     )
     self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(scalar.get("evaluation/z_loss", 0.0))
+    if "evaluation/moe_dropless_fallback_layers" in scalar:
+      self.cumulative_eval_metrics["scalar"]["eval/moe_dropless_fallback_layers"] += float(
+          scalar["evaluation/moe_dropless_fallback_layers"]
+      )
 
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
@@ -493,6 +565,14 @@ class MetricLogger:
 
     self.write_metrics(self.cumulative_eval_metrics, train_step, metric_type="eval")
     self._pending_eval_step_count = 0
+    # Emitted here rather than at the end of the eval loop in train.py: reaching this point
+    # required materializing every eval metric, so the elapsed time already covers the eval
+    # device work without a dedicated jax.block_until_ready() draining the pipeline. Must stay
+    # ahead of eval_stop, which may emit the terminal run_stop.
+    if self._eval_loop_start is not None:
+      mllog_utils.validation_time(train_step + 1, (datetime.datetime.now() - self._eval_loop_start).total_seconds())
+      self._eval_loop_start = None
+    mllog_utils.eval_stop(self.config, train_step + 1, eval_loss, self.start_step)
     if self.config.target_eval_loss and eval_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
 
@@ -507,4 +587,5 @@ class MetricLogger:
       self._flush_one_buffered_entry(entry)
     self.buffered_metrics = []
 
+    mllog_utils.sync_log(force=True)
     max_utils.close_summary_writer(self.writer)

@@ -15,6 +15,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 if [ -z "$1" ]; then
   echo "Error: run_id argument is required."
   exit 1
@@ -66,7 +71,8 @@ python3 -m maxtext.trainers.pre_train.train \
     checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} \
     scan_layers=false \
-    use_multimodal=false
+    use_multimodal=false \
+    ici_expert_parallelism=8
 
 # Step 3: Run inference on the checkpoint generated from the previous run
     python3 -m maxtext.inference.decode \

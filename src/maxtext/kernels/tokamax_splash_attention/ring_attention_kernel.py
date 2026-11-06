@@ -782,7 +782,7 @@ class RingSplashAttentionKernel:
     def mask_info_spec(mask_info):
       if mask_info is None:
         return None
-      return MaskInfo(  # pytype: disable=wrong-arg-types,bad-argument-type
+      return MaskInfo(
           mask_next=_resolve_spec(mask_info.mask_next),  # pyrefly: ignore[bad-argument-type]
           active_rows=_resolve_spec(mask_info.active_rows),  # pyrefly: ignore[bad-argument-type]
           active_cols=_resolve_spec(mask_info.active_cols),  # pyrefly: ignore[bad-argument-type]

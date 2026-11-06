@@ -15,12 +15,18 @@
 """Unit tests for input_pipeline_utils."""
 
 import dataclasses
+import types
 import unittest
 from types import SimpleNamespace
 
 import numpy as np
 
-from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+from maxtext.input_pipeline.input_pipeline_utils import (
+    BlockDiffusionCorruption,
+    compute_file_sharding,
+    PadOrTrimToMaxLength,
+    SFTPromptMasking,
+)
 from maxtext.multimodal import utils as mm_utils
 
 import pytest
@@ -48,7 +54,15 @@ class BlockDiffusionPaddingTest(unittest.TestCase):
 
     self.assertEqual(
         tuple(field.name for field in dataclasses.fields(transform)),
-        ("block_size", "mask_id", "min_noise", "logit_alignment", "canvas_policy", "axis"),
+        (
+            "block_size",
+            "mask_id",
+            "min_noise",
+            "logit_alignment",
+            "canvas_policy",
+            "axis",
+            "completion_only",
+        ),
     )
     self.assertNotEqual(dataclasses.asdict(transform), dataclasses.asdict(other))
     self.assertIn("block_size=4", repr(transform))
@@ -121,6 +135,149 @@ class BlockDiffusionPaddingTest(unittest.TestCase):
           },
           np.random.default_rng(0),
       )
+
+
+class BlockDiffusionSFTInputTest(unittest.TestCase):
+  """Checks completion roles remain separate from corruption and validity."""
+
+  def _prepared_batch(self):
+    """Builds a block-aligned conversation with two completion spans."""
+    clean = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=8,
+        unk_id=0,
+        training_objective="block_diffusion",
+    ).map(
+        {
+            "messages": [[11, 12], [21, 22], [31], [41]],
+            "is_prompt": [True, False, True, False],
+        }
+    )
+    return PadOrTrimToMaxLength(
+        max_length=8,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(clean)
+
+  def test_role_mask_preserves_clean_targets_and_padding(self):
+    batch = self._prepared_batch()
+
+    np.testing.assert_array_equal(batch["inputs"], batch["targets"])
+    np.testing.assert_array_equal(batch["completion_mask"], [0, 0, 1, 1, 0, 1, 0, 0])
+    np.testing.assert_array_equal(batch["targets_segmentation"], [1, 1, 1, 1, 1, 1, 0, 0])
+    self.assertNotIn("completion_mask_segmentation", batch)
+    self.assertNotIn("completion_mask_position", batch)
+
+  def test_prompt_masking_rejects_unsupported_objective(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported training objective"):
+      SFTPromptMasking(
+          text_column_name="messages",
+          completion_only=True,
+          max_target_length=8,
+          training_objective="unsupported",
+      )
+
+  def test_completion_only_corruption_never_supervises_prompt(self):
+    batch = self._prepared_batch()
+    output = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=1.0,
+        completion_only=True,
+        axis=0,
+    ).random_map(batch, np.random.default_rng(0))
+
+    completion = batch["completion_mask"] != 0
+    self.assertFalse(output["corruption_mask"][~completion].any())
+    self.assertFalse(output["targets_loss_mask"][~completion].any())
+    np.testing.assert_array_equal(output["targets"], batch["targets"])
+
+  def test_completion_only_corruption_requires_role_mask(self):
+    batch = self._prepared_batch()
+    del batch["completion_mask"]
+
+    with self.assertRaisesRegex(ValueError, "explicit completion_mask"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_none_role_mask(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = None
+
+    with self.assertRaisesRegex(ValueError, "non-None completion_mask"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_mismatched_role_mask_shape(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = batch["completion_mask"][:-1]
+
+    with self.assertRaisesRegex(ValueError, "completion_mask must match inputs shape"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_role_mask_on_padding(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"][6] = 1
+
+    with self.assertRaisesRegex(ValueError, "subset of valid target positions"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_future_prompt_in_block(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = np.asarray([0, 0, 1, 1, 1, 0, 0, 0], dtype=np.int32)
+
+    with self.assertRaisesRegex(ValueError, "prompt token after a completion token"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_full_token_corruption_treats_none_role_mask_as_absent(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = None
+
+    output = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=1.0,
+        axis=0,
+    ).random_map(batch, np.random.default_rng(0))
+
+    self.assertTrue(output["corruption_mask"][:6].all())
+    self.assertFalse(output["corruption_mask"][6:].any())
+
+  def test_causal_sft_contract_is_unchanged(self):
+    batch = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=4,
+        unk_id=0,
+    ).map({"messages": [[11, 12], [21, 22]], "is_prompt": [True, False]})
+
+    np.testing.assert_array_equal(batch["inputs"], [11, 12, 21, 22])
+    np.testing.assert_array_equal(batch["targets"], [0, 0, 21, 22])
+    self.assertNotIn("completion_mask", batch)
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
@@ -393,6 +550,116 @@ class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
     # None pixel_values raises ValueError
     with self.assertRaisesRegex(ValueError, "must have pixel_values"):
       unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
+
+
+class FixPadTokenIfNeededTest(unittest.TestCase):
+  """Tests for fix_pad_token_if_needed and SFT completion EOS loss masking."""
+
+  def test_remaps_ds4_pad_token_via_get_vocab(self):
+    vocab = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+    class _DummyTokenizer:
+      """Dummy tokenizer with get_vocab."""
+
+      def __init__(self):
+        self._pad_token = "<｜end▁of▁sentence｜>"
+        self.pad_token_id = 1
+        self.eos_token_id = 1
+
+      @property
+      def pad_token(self):
+        return self._pad_token
+
+      @pad_token.setter
+      def pad_token(self, value):
+        self._pad_token = value
+        self.pad_token_id = vocab[value]
+
+      def get_vocab(self):
+        return vocab
+
+    tok = _DummyTokenizer()
+    self.assertTrue(input_pipeline_utils.fix_pad_token_if_needed(tok))
+    self.assertEqual(tok.pad_token, "<｜▁pad▁｜>")
+    self.assertEqual(tok.pad_token_id, 2)
+    self.assertEqual(tok.eos_token_id, 1)
+
+  def test_remaps_ds4_pad_token_via_convert_tokens_to_ids(self):
+    vocab = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+    class _DummyTokenizerNoGetVocab:
+      """Dummy tokenizer with convert_tokens_to_ids only."""
+
+      def __init__(self):
+        self._pad_token = "<｜end▁of▁sentence｜>"
+        self.pad_token_id = 1
+        self.eos_token_id = 1
+
+      @property
+      def pad_token(self):
+        return self._pad_token
+
+      @pad_token.setter
+      def pad_token(self, value):
+        self._pad_token = value
+        self.pad_token_id = vocab[value]
+
+      def convert_tokens_to_ids(self, token):
+        return vocab.get(token)
+
+    tok = _DummyTokenizerNoGetVocab()
+    self.assertTrue(input_pipeline_utils.fix_pad_token_if_needed(tok))
+    self.assertEqual(tok.pad_token, "<｜▁pad▁｜>")
+    self.assertEqual(tok.pad_token_id, 2)
+
+  def test_tokenizer_without_ds4_pad_token_is_unchanged(self):
+    tok_pad_equals_eos = types.SimpleNamespace(
+        pad_token="<eos>",
+        pad_token_id=1,
+        eos_token="<eos>",
+        eos_token_id=1,
+        get_vocab=lambda: {"<bos>": 0, "<eos>": 1, "hello": 2},
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_pad_equals_eos))
+    self.assertEqual(tok_pad_equals_eos.pad_token, "<eos>")
+    self.assertEqual(tok_pad_equals_eos.pad_token_id, 1)
+
+    tok_standard = types.SimpleNamespace(
+        pad_token="<pad>",
+        pad_token_id=0,
+        eos_token="<eos>",
+        eos_token_id=1,
+        get_vocab=lambda: {"<pad>": 0, "<eos>": 1, "<｜▁pad▁｜>": 2},
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_standard))
+    self.assertEqual(tok_standard.pad_token, "<pad>")
+    self.assertEqual(tok_standard.pad_token_id, 0)
+
+    tok_unk_fallback = types.SimpleNamespace(
+        pad_token="<eos>",
+        pad_token_id=1,
+        eos_token="<eos>",
+        eos_token_id=1,
+        unk_token_id=0,
+        convert_tokens_to_ids=lambda _tok: 0,
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_unk_fallback))
+    self.assertEqual(tok_unk_fallback.pad_token, "<eos>")
+    self.assertEqual(tok_unk_fallback.pad_token_id, 1)
+
+  def test_completion_eos_is_weighted_only_when_pad_differs_from_eos(self):
+    # Prompt [BOS=0, 10, 11], completion [20, 21, EOS=1].
+    example = {"text": [[0, 10, 11], [20, 21, 1]], "is_prompt": [True, False]}
+    weighted_eos = {}
+    for pad_id in (1, 2):
+      masked = input_pipeline_utils.SFTPromptMasking(
+          text_column_name="text", completion_only=True, max_target_length=8, unk_id=pad_id
+      ).map(dict(example))
+      masked["targets_segmentation"] = np.ones_like(masked["targets"])
+      shifted = input_pipeline_utils.ShiftData(ignored_ids=[pad_id, 0], axis=0).map(masked)
+      weighted_eos[pad_id] = int(((shifted["targets"] == 1) & (shifted["targets_segmentation"] != 0)).sum())
+    # pad_id == eos_id drops the completion EOS from the loss; the remapped pad id keeps it.
+    self.assertEqual(weighted_eos, {1: 0, 2: 1})
 
 
 if __name__ == "__main__":

@@ -21,6 +21,9 @@ Example cmd:
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_ckpt \
     --base_model_path <path/to/meta/ckpt> \
     --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size deepseek3-671b --enable_mtp
+
+`--weight_dtype` sets the stored dtype: `float16` (default) or `float32` casts every weight; `keep` keeps each
+tensor's source dtype but stores bf16 as float16 (e.g. DeepSeek-V3: float16 weights, float32 router bias).
 """
 
 # pylint: disable=line-too-long
@@ -46,6 +49,27 @@ from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+
+
+# `--weight_dtype` values that cast every weight; "keep" keeps each source tensor's dtype, except bf16 -> float16.
+WEIGHT_DTYPES = {"float16": torch.float16, "float32": torch.float32}
+
+
+def _to_numpy(tensor: torch.Tensor, weight_dtype: str) -> np.ndarray:
+  """Returns `tensor` as a numpy array cast to `weight_dtype`.
+
+  With "keep", the tensor keeps its own dtype (e.g. a float32 router bias), except that bf16 is stored as float16,
+  the same as the default (numpy has no bfloat16).
+
+  Args:
+    tensor: The source tensor.
+    weight_dtype: "float16", "float32" or "keep".
+  """
+  if weight_dtype != "keep":
+    tensor = tensor.to(WEIGHT_DTYPES[weight_dtype])
+  elif tensor.dtype == torch.bfloat16:
+    tensor = tensor.to(torch.float16)
+  return tensor.numpy()
 
 
 # Group size used by Kimi-K2 quantized variants for per-group symmetric int4 scales.
@@ -301,8 +325,10 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
   return mapping
 
 
-def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info, enable_mtp=False) -> dict:
-  """Convert Huggingface Checkpoint to Jax."""
+def _convert_huggingface_to_jax_weights(
+    base_model_path, model_params, mem_info, enable_mtp=False, weight_dtype="float16"
+) -> dict:
+  """Convert Huggingface Checkpoint to Jax, storing weights as `weight_dtype` (see `_to_numpy`)."""
   base_num_decoder_layers = model_params["num_layers"]
   first_num_dense_layers = model_params["first_num_dense_layers"]
   base_num_query_heads = model_params["base_num_query_heads"]
@@ -415,19 +441,19 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
-  jax_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder_norm.scale"].to(torch.float16).numpy()
+  jax_weights["decoder"]["decoder_norm"]["scale"] = _to_numpy(chkpt_vars["decoder_norm.scale"], weight_dtype)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # logits dense #################################################
   max_logging.log("Processing logits dense")
-  jax_weights["decoder"]["logits_dense"]["kernel"] = (
-      chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
-  )
+  jax_weights["decoder"]["logits_dense"]["kernel"] = _to_numpy(
+      chkpt_vars["logits_dense.kernel"], weight_dtype
+  ).transpose()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # token embedding ##############################################
   max_logging.log("Processing token embeddings")
-  jax_weights["token_embedder"]["embedding"] = chkpt_vars["token_embedder.embedding"].to(torch.float16).numpy()
+  jax_weights["token_embedder"]["embedding"] = _to_numpy(chkpt_vars["token_embedder.embedding"], weight_dtype)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   layers = {
@@ -442,22 +468,22 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
     post_self_attention_layer_norm = jax_weights["decoder"][f"{layer_key}"]["post_self_attention_layer_norm"]
 
     for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
-      pre_self_attention = (
-          chkpt_vars[f"{layer_key}.{layer_idx}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+      pre_self_attention = _to_numpy(
+          chkpt_vars[f"{layer_key}.{layer_idx}.pre_self_attention_layer_norm.scale"], weight_dtype
       )
-      post_self_attention = (
-          chkpt_vars[f"{layer_key}.{layer_idx}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+      post_self_attention = _to_numpy(
+          chkpt_vars[f"{layer_key}.{layer_idx}.post_self_attention_layer_norm.scale"], weight_dtype
       )
-      kv_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.kv_norm.scale"].to(torch.float16).numpy().transpose()
-      wkv_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"].to(torch.float16).numpy().transpose()
-      wkv_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"].to(torch.float16).numpy().transpose()
-      out = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"].to(torch.float16).numpy().transpose()
+      kv_norm = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.kv_norm.scale"], weight_dtype).transpose()
+      wkv_a = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"], weight_dtype).transpose()
+      wkv_b = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"], weight_dtype).transpose()
+      out = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"], weight_dtype).transpose()
       if q_lora_rank != 0:
-        q_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"].to(torch.float16).numpy()
-        wq_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"].to(torch.float16).numpy().transpose()
-        wq_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"].to(torch.float16).numpy().transpose()
+        q_norm = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"], weight_dtype)
+        wq_a = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"], weight_dtype).transpose()
+        wq_b = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"], weight_dtype).transpose()
       else:
-        query = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"].to(torch.float16).numpy().transpose()
+        query = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"], weight_dtype).transpose()
 
       # reshape to match maxtext
       wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
@@ -470,12 +496,16 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
       # initialization
       if self_attention["kv_norm"]["scale"] is None:
         stack_shape = (layer_value,)
-        self_attention["kv_norm"]["scale"] = np.zeros(stack_shape + kv_norm.shape, dtype=np.float16)
-        self_attention["wkv_a"]["kernel"] = np.zeros(stack_shape + wkv_a.shape, dtype=np.float16)
-        self_attention["wkv_b"]["kernel"] = np.zeros(stack_shape + wkv_b.shape, dtype=np.float16)
-        self_attention["out"]["kernel"] = np.zeros(stack_shape + out.shape, dtype=np.float16)
-        pre_self_attention_layer_norm["scale"] = np.zeros(stack_shape + pre_self_attention.shape, dtype=np.float16)
-        post_self_attention_layer_norm["scale"] = np.zeros(stack_shape + post_self_attention.shape, dtype=np.float16)
+        self_attention["kv_norm"]["scale"] = np.zeros(stack_shape + kv_norm.shape, dtype=kv_norm.dtype)
+        self_attention["wkv_a"]["kernel"] = np.zeros(stack_shape + wkv_a.shape, dtype=wkv_a.dtype)
+        self_attention["wkv_b"]["kernel"] = np.zeros(stack_shape + wkv_b.shape, dtype=wkv_b.dtype)
+        self_attention["out"]["kernel"] = np.zeros(stack_shape + out.shape, dtype=out.dtype)
+        pre_self_attention_layer_norm["scale"] = np.zeros(
+            stack_shape + pre_self_attention.shape, dtype=pre_self_attention.dtype
+        )
+        post_self_attention_layer_norm["scale"] = np.zeros(
+            stack_shape + post_self_attention.shape, dtype=post_self_attention.dtype
+        )
         if q_lora_rank != 0:
           self_attention.update(
               {
@@ -484,12 +514,12 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
                   "wq_b": {"kernel": None},
               }
           )
-          self_attention["q_norm"]["scale"] = np.zeros(stack_shape + q_norm.shape, dtype=np.float16)
-          self_attention["wq_a"]["kernel"] = np.zeros(stack_shape + wq_a.shape, dtype=np.float16)
-          self_attention["wq_b"]["kernel"] = np.zeros(stack_shape + wq_b.shape, dtype=np.float16)
+          self_attention["q_norm"]["scale"] = np.zeros(stack_shape + q_norm.shape, dtype=q_norm.dtype)
+          self_attention["wq_a"]["kernel"] = np.zeros(stack_shape + wq_a.shape, dtype=wq_a.dtype)
+          self_attention["wq_b"]["kernel"] = np.zeros(stack_shape + wq_b.shape, dtype=wq_b.dtype)
         else:
           self_attention.update({"query": {"kernel": None}})
-          self_attention["query"]["kernel"] = np.zeros(stack_shape + query.shape, dtype=np.float16)
+          self_attention["query"]["kernel"] = np.zeros(stack_shape + query.shape, dtype=query.dtype)
 
       self_attention["kv_norm"]["scale"][layer_idx, ...] = kv_norm
       self_attention["wkv_a"]["kernel"][layer_idx, ...] = wkv_a
@@ -529,15 +559,15 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
     if layer_key == "dense_layers":
       mlp = jax_weights["decoder"][f"{layer_key}"]["mlp"]
       for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
-        wi_0 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_0.kernel"].to(torch.float16).numpy().transpose()
-        wi_1 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_1.kernel"].to(torch.float16).numpy().transpose()
-        wo = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wo.kernel"].to(torch.float16).numpy().transpose()
+        wi_0 = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_0.kernel"], weight_dtype).transpose()
+        wi_1 = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_1.kernel"], weight_dtype).transpose()
+        wo = _to_numpy(chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wo.kernel"], weight_dtype).transpose()
         # initialization
         if mlp["wo"]["kernel"] is None:
           stack_shape = (layer_value,)
-          mlp["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=np.float16)
-          mlp["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=np.float16)
-          mlp["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=np.float16)
+          mlp["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=wi_0.dtype)
+          mlp["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=wi_1.dtype)
+          mlp["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=wo.dtype)
         mlp["wi_0"]["kernel"][layer_idx, ...] = wi_0
         mlp["wi_1"]["kernel"][layer_idx, ...] = wi_1
         mlp["wo"]["kernel"][layer_idx, ...] = wo
@@ -551,47 +581,32 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
       moe = jax_weights["decoder"][f"{layer_key}"]["DeepSeekMoeBlock_0"]
       for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
         if q_lora_rank != 0:
-          gate_bias = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-        gate = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wi_0 = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wi_1 = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wo = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
+          gate_bias = _to_numpy(
+              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"], weight_dtype
+          ).transpose()
+        gate = _to_numpy(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"], weight_dtype
+        ).transpose()
+        shared_wi_0 = _to_numpy(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"], weight_dtype
+        ).transpose()
+        shared_wi_1 = _to_numpy(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"], weight_dtype
+        ).transpose()
+        shared_wo = _to_numpy(
+            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wo.kernel"], weight_dtype
+        ).transpose()
 
         # initialization
         if moe["MoeBlock_0"]["gate"]["kernel"] is None:
           stack_shape = (layer_value,)
           if q_lora_rank != 0:
             moe["MoeBlock_0"]["gate"].update({"bias": None})
-            moe["MoeBlock_0"]["gate"]["bias"] = np.zeros(stack_shape + gate_bias.shape, dtype=np.float16)
-          moe["MoeBlock_0"]["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=np.float16)
-          moe["shared_experts"]["wi_0"]["kernel"] = np.zeros(stack_shape + shared_wi_0.shape, dtype=np.float16)
-          moe["shared_experts"]["wi_1"]["kernel"] = np.zeros(stack_shape + shared_wi_1.shape, dtype=np.float16)
-          moe["shared_experts"]["wo"]["kernel"] = np.zeros(stack_shape + shared_wo.shape, dtype=np.float16)
+            moe["MoeBlock_0"]["gate"]["bias"] = np.zeros(stack_shape + gate_bias.shape, dtype=gate_bias.dtype)
+          moe["MoeBlock_0"]["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=gate.dtype)
+          moe["shared_experts"]["wi_0"]["kernel"] = np.zeros(stack_shape + shared_wi_0.shape, dtype=shared_wi_0.dtype)
+          moe["shared_experts"]["wi_1"]["kernel"] = np.zeros(stack_shape + shared_wi_1.shape, dtype=shared_wi_1.dtype)
+          moe["shared_experts"]["wo"]["kernel"] = np.zeros(stack_shape + shared_wo.shape, dtype=shared_wo.dtype)
 
         if q_lora_rank != 0:
           moe["MoeBlock_0"]["gate"]["bias"][layer_idx, ...] = gate_bias
@@ -601,8 +616,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
         moe["shared_experts"]["wo"]["kernel"][layer_idx, ...] = shared_wo
 
       # re-order
-      if q_lora_rank != 0:
-        moe["MoeBlock_0"]["gate"]["bias"] = np.transpose(moe["MoeBlock_0"]["gate"]["bias"], axes=(1, 0))
       moe["MoeBlock_0"]["gate"]["kernel"] = np.transpose(moe["MoeBlock_0"]["gate"]["kernel"], axes=(1, 0, 2))
       moe["shared_experts"]["wi_0"]["kernel"] = np.transpose(moe["shared_experts"]["wi_0"]["kernel"], axes=(1, 0, 2))
       moe["shared_experts"]["wi_1"]["kernel"] = np.transpose(moe["shared_experts"]["wi_1"]["kernel"], axes=(1, 0, 2))
@@ -610,30 +623,21 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
 
       for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
         for k in tqdm(range(num_experts), desc="experts", leave=False):
-          wi_0 = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-          wi_1 = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-          wo = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
+          wi_0 = _to_numpy(
+              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"], weight_dtype
+          ).transpose()
+          wi_1 = _to_numpy(
+              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"], weight_dtype
+          ).transpose()
+          wo = _to_numpy(
+              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"], weight_dtype
+          ).transpose()
 
           if moe["MoeBlock_0"]["wi_0"] is None:
             stack_shape = (num_experts, layer_value)
-            moe["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=np.float16)
-            moe["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=np.float16)
-            moe["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=np.float16)
+            moe["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=wi_0.dtype)
+            moe["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=wi_1.dtype)
+            moe["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=wo.dtype)
           moe["MoeBlock_0"]["wi_0"][k, layer_idx, ...] = wi_0
           moe["MoeBlock_0"]["wi_1"][k, layer_idx, ...] = wi_1
           moe["MoeBlock_0"]["wo"][k, layer_idx, ...] = wo
@@ -679,57 +683,41 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
     }
 
     # MTP unique components
-    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_embedding_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale"].to(torch.float16).numpy()
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_embedding_norm"]["scale"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale"], weight_dtype
     )
-    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_hidden_state_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_hidden_state_norm.scale"].to(torch.float16).numpy()
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_hidden_state_norm"]["scale"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_hidden_state_norm.scale"], weight_dtype
     )
-    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_projection"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_projection.kernel"].to(torch.float16).numpy().transpose()
-    )
-    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_final_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_final_norm.scale"].to(torch.float16).numpy()
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_projection"]["kernel"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_projection.kernel"], weight_dtype
+    ).transpose()
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_final_norm"]["scale"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_final_norm.scale"], weight_dtype
     )
 
     # MTP internal transformer layer - Attention and Norms
     mtp_transformer_layer = jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_transformer_layer"]
-    mtp_transformer_layer["pre_self_attention_layer_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.pre_self_attention_layer_norm.scale"]
-        .to(torch.float16)
-        .numpy()
+    mtp_transformer_layer["pre_self_attention_layer_norm"]["scale"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.pre_self_attention_layer_norm.scale"], weight_dtype
     )
-    mtp_transformer_layer["post_self_attention_layer_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.post_self_attention_layer_norm.scale"]
-        .to(torch.float16)
-        .numpy()
+    mtp_transformer_layer["post_self_attention_layer_norm"]["scale"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.post_self_attention_layer_norm.scale"], weight_dtype
     )
 
     mtp_attn_block = mtp_transformer_layer["self_attention"]
-    mtp_attn_block["kv_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.kv_norm.scale"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    mtp_attn_block["wkv_a"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_a.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    wkv_b = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_b.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    out = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.out.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
+    mtp_attn_block["kv_norm"]["scale"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.kv_norm.scale"], weight_dtype
+    ).transpose()
+    mtp_attn_block["wkv_a"]["kernel"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_a.kernel"], weight_dtype
+    ).transpose()
+    wkv_b = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_b.kernel"], weight_dtype
+    ).transpose()
+    out = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.out.kernel"], weight_dtype
+    ).transpose()
     mtp_attn_block["wkv_b"]["kernel"] = np.reshape(
         wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)]
     )
@@ -745,91 +733,70 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
     else:
       mtp_attn_block.update({"query": {"kernel": None}})
     if q_lora_rank != 0:
-      mtp_attn_block["q_norm"]["scale"] = (
-          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale"]
-          .to(torch.float16)
-          .numpy()
+      mtp_attn_block["q_norm"]["scale"] = _to_numpy(
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale"], weight_dtype
       )
-      mtp_attn_block["wq_a"]["kernel"] = (
-          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_a.kernel"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
-      )
-      wq_b = (
-          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_b.kernel"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
-      )
+      mtp_attn_block["wq_a"]["kernel"] = _to_numpy(
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_a.kernel"], weight_dtype
+      ).transpose()
+      wq_b = _to_numpy(
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_b.kernel"], weight_dtype
+      ).transpose()
       mtp_attn_block["wq_b"]["kernel"] = np.reshape(
           wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
       )
     else:
-      query = (
-          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.query.kernel"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
-      )
+      query = _to_numpy(
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.query.kernel"], weight_dtype
+      ).transpose()
       mtp_attn_block["query"]["kernel"] = np.reshape(
           query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
       )
 
     # MTP internal transformer layer - MoE Block
     moe = mtp_transformer_layer["DeepSeekMoeBlock_0"]
-    moe["MoeBlock_0"]["gate"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    moe["shared_experts"]["wi_0"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    moe["shared_experts"]["wi_1"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    moe["shared_experts"]["wo"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
+    moe["MoeBlock_0"]["gate"]["kernel"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"],
+        weight_dtype,
+    ).transpose()
+    moe["shared_experts"]["wi_0"]["kernel"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"],
+        weight_dtype,
+    ).transpose()
+    moe["shared_experts"]["wi_1"]["kernel"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"],
+        weight_dtype,
+    ).transpose()
+    moe["shared_experts"]["wo"]["kernel"] = _to_numpy(
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wo.kernel"],
+        weight_dtype,
+    ).transpose()
     if q_lora_rank != 0:
       moe["MoeBlock_0"]["gate"].update({"bias": None})
-      moe["MoeBlock_0"]["gate"]["bias"] = (
-          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
-      )
+      moe["MoeBlock_0"]["gate"]["bias"] = _to_numpy(
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"],
+          weight_dtype,
+      ).transpose()
 
     experts_wi0, experts_wi1, experts_wo = [], [], []
     for k in range(num_experts):
       experts_wi0.append(
-          chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
+          _to_numpy(
+              chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"],
+              weight_dtype,
+          ).transpose()
       )
       experts_wi1.append(
-          chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
+          _to_numpy(
+              chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"],
+              weight_dtype,
+          ).transpose()
       )
       experts_wo.append(
-          chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
-          .to(torch.float16)
-          .numpy()
-          .transpose()
+          _to_numpy(
+              chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"],
+              weight_dtype,
+          ).transpose()
       )
 
     moe["MoeBlock_0"]["wi_0"] = np.stack(experts_wi0)
@@ -842,7 +809,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
   return jax_weights
 
 
-def _convert_to_jax_weights(base_model_path, model_size, mem_info, enable_mtp=False) -> dict:
+def _convert_to_jax_weights(base_model_path, model_size, mem_info, enable_mtp=False, weight_dtype="float16") -> dict:
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and output jax_weights ready for MaxText.
@@ -852,6 +819,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info, enable_mtp=Fa
       model_size: Model size key in MODEL_PARAMS_DICT.
       mem_info: A process instance used for memory tracking.
       enable_mtp: Whether to enable MTP conversion.
+      weight_dtype: "float16" or "float32" to cast every weight, or "keep" (see `_to_numpy`).
 
   Returns:
       The converted JAX weights.
@@ -859,7 +827,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info, enable_mtp=Fa
   model_params = MODEL_PARAMS_DICT[model_size]
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   max_logging.log(f"Loading the base model from {base_model_path}")
-  return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info, enable_mtp)
+  return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info, enable_mtp, weight_dtype)
 
 
 def main() -> None:
@@ -871,6 +839,12 @@ def main() -> None:
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   parser.add_argument("--enable_mtp", type=str2bool, required=False, default=False, help="Enable MTP layer conversion.")
+  parser.add_argument(
+      "--weight_dtype",
+      choices=[*WEIGHT_DTYPES, "keep"],
+      default="float16",
+      help="Stored dtype of every weight, or 'keep' for each tensor's source dtype with bf16 stored as float16.",
+  )
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
@@ -881,7 +855,7 @@ def main() -> None:
   mem_info = psutil.Process()
   save_weights_to_checkpoint(
       args.maxtext_model_path,
-      _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info, args.enable_mtp),
+      _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info, args.enable_mtp, args.weight_dtype),
       args.simulated_cpu_devices_count,
       args.use_ocdbt,
       args.use_zarr3,

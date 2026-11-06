@@ -16,30 +16,30 @@
 
 from typing import Any
 
-from flax import linen as nn
 from flax import nnx
-from flax.linen import initializers as linen_initializers
 import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
-from maxtext.common.common_types import Array, DType, ShardMode
-from maxtext.layers import nnx_wrappers
-from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
+from maxtext.common.common_types import Array, DType, ShardMode, is_fp8_dtype
+from maxtext.layers.initializers import Initializer
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import truncate_out_sharding
 
 
-def _align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-  """Reshards a 1-D norm scale to match the sharding of the axis it normalizes.
+def align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+  """Reshards a 1-D per-feature scale to match the sharding of the axis it scales.
 
-  The scale is stored with the `kernel_axes` layout, which is picked for the
-  usual case of normalizing over the embedding axis (`norm` -> `tensor`). A
-  per-head QK norm instead normalizes over `head_dim`, which is unsharded while
-  the neighbouring `heads` axis is the one on `tensor`. Multiplying those
-  directly under `ShardMode.EXPLICIT` would place `tensor` on two axes of the
-  result, which JAX rejects, so align the scale with the activation instead.
+  A scale is stored with whatever layout its declared axes give it, which is
+  picked for the usual case of scaling the embedding axis (`norm` -> `tensor`).
+  A per-head QK norm instead normalizes over `head_dim`, which is unsharded
+  while the neighbouring `heads` axis is the one on `tensor`; Gemma 4's router
+  scale is declared `embed` (-> `fsdp`) but multiplies an activation whose last
+  axis is `activation_embed` (-> `tensor`). Multiplying either pair directly
+  under `ShardMode.EXPLICIT` puts one mesh axis on two axes of the result, or
+  two different axes on the same one, which JAX rejects -- so align the scale
+  with the activation instead.
 
   This is a no-op whenever the two already agree, which includes every
   auto-sharding-equivalent layout for the ordinary layer norms.
@@ -68,7 +68,7 @@ class RMSNorm(nnx.Module):
       weight_dtype: Any = jnp.float32,
       shard_mode: ShardMode = ShardMode.AUTO,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.ones,
+      scale_init: Initializer = jax.nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       scale_offset: float = 0.0,
       with_scale: bool = True,
@@ -78,7 +78,7 @@ class RMSNorm(nnx.Module):
     self.num_features = num_features
     self.epsilon = epsilon
     self.dtype = dtype
-    self.weight_dtype = weight_dtype
+    self.weight_dtype = dtype if is_fp8_dtype(weight_dtype) else weight_dtype
     self.shard_mode = shard_mode
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
@@ -87,7 +87,7 @@ class RMSNorm(nnx.Module):
     self.with_scale = with_scale
     if self.with_scale:
       self.scale = nnx.Param(
-          scale_init(rngs.params(), (num_features,), weight_dtype),
+          scale_init(rngs.params(), (num_features,), self.weight_dtype),
           out_sharding=kernel_axes,
       )
     else:
@@ -117,10 +117,25 @@ class RMSNorm(nnx.Module):
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())
 
-    scale = jnp.asarray(scale, self.dtype)
-    effective_scale = scale + self.scale_offset
+    scale_fp32 = jnp.asarray(scale, jnp.float32)
+    effective_scale = scale_fp32
+    if self.scale_offset != 0.0:
+      # The offset constant must carry the scale's `reduced` axes (e.g. a pipeline stage weight under
+      # pipeline_unreduced_weight_grads): JAX rejects mixing a reduced operand with a replicated one.
+      offset = jnp.asarray(self.scale_offset, jnp.float32)
+      scale_reduced = jax.typeof(scale_fp32).sharding.spec.reduced
+      if scale_reduced:
+        offset = jax.sharding.reshard(offset, jax.sharding.PartitionSpec(reduced=scale_reduced))
+      effective_scale = scale_fp32 + offset
     if self.shard_mode == ShardMode.EXPLICIT:
-      effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
+      effective_scale = align_scale_with_normalized_axis(effective_scale, y)
+
+    if self.scale_offset != 0.0:
+      normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
+      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
+      return jnp.asarray(y, self.dtype)
+
+    effective_scale = jnp.asarray(effective_scale, self.dtype)
     return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
 
 
@@ -157,17 +172,13 @@ def Qwen3NextRMSNorm(
     *,
     rngs: nnx.Rngs,
 ):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
+  """Used for input and post attention layernorms in Qwen3NextDecoderLayer.
 
   This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `scale` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-
+  1. The learnable scale parameter `scale` is initialized to ZEROS.
+  2. The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
+     This matches the PyTorch implementation of Qwen3NextRMSNorm.
   """
-
   return nnx.data(
       RMSNorm(
           num_features=num_features,
@@ -176,7 +187,7 @@ def Qwen3NextRMSNorm(
           weight_dtype=weight_dtype,
           shard_mode=shard_mode if shard_mode is not None else ShardMode.AUTO,
           kernel_axes=kernel_axes if kernel_axes is not None else (),
-          scale_init=linen_initializers.zeros,
+          scale_init=jax.nn.initializers.zeros,
           scale_offset=1.0,
           parameter_memory_host_offload=bool(parameter_memory_host_offload),
           rngs=rngs,
@@ -217,7 +228,7 @@ class Qwen3NextRMSNormGated(nnx.Module):
         RMSNorm(
             num_features=num_features,
             epsilon=self.epsilon,
-            dtype=dtype,
+            dtype=jnp.float32,
             weight_dtype=weight_dtype,
             shard_mode=shard_mode,
             scale_init=nnx.initializers.ones,
@@ -251,36 +262,6 @@ class Qwen3NextRMSNormGated(nnx.Module):
     return gated_states.astype(self.dtype)
 
 
-def rms_norm(
-    num_features: int,
-    epsilon: float = 1e-6,
-    dtype: Any = jnp.float32,
-    weight_dtype: Any = jnp.float32,
-    shard_mode: ShardMode = ShardMode.AUTO,
-    kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.ones,
-    name: None | str = None,
-    parameter_memory_host_offload: bool = False,
-    with_scale: bool = True,
-):
-  """Creates a RMSNorm module."""
-  module = nnx_wrappers.to_linen(
-      RMSNorm,
-      num_features=num_features,
-      epsilon=epsilon,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      shard_mode=shard_mode,
-      kernel_axes=kernel_axes,
-      scale_init=scale_init,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      with_scale=with_scale,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-  return module
-
-
 def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
   """L2 normalization function. Normalizes a vector to have a length of 1.
 
@@ -295,11 +276,3 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
   inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
   return x * inv_norm
-
-
-Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
-    RMSNorm,
-    base_metadata_fn=variable_to_logically_partitioned,
-    scale_init=linen_initializers.zeros,
-    scale_offset=1.0,
-)
