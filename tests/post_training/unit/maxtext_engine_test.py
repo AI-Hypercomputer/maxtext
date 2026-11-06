@@ -29,6 +29,7 @@ from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.common import checkpoint_context
+from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.configs import types as config_types
 from maxtext.training_engine import abstract_engine
@@ -2458,6 +2459,125 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       # when `fwd_only` queued its computation.
       write_metrics.assert_called_once()
       self.assertIsNone(t._throttler._pending_metrics)
+
+  def test_state_setter_syncs_model_and_optimizer_and_resets_compiled_state(self):
+    """Assigning `engine.state = ...` updates `engine.model` and `engine.optimizer` and resets compilation."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(
+        lambda m, *a, **k: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(m.weights[...]), denominator=jnp.array(1.0)),
+            {},
+        ),
+        has_aux=True,
+    )
+    t.compile()
+    t.fwd_bwd(DummyPayload())
+    self.assertTrue(t._compiled)
+    self.assertIsNotNone(t._compiled_fwd_bwd)
+    self.assertIsNotNone(t._compiled_update)
+
+    new_model = DummyNNXModel()
+    new_model.weights.set_value(jnp.array([10.0, 20.0]))
+    new_optimizer = nnx.Optimizer(new_model, optax.sgd(0.05), wrt=nnx.Param)
+    new_state = train_state_nnx.TrainStateNNX(new_model, new_optimizer)
+
+    t.state = new_state
+    self.assertIs(t.model, new_model)
+    self.assertIs(t.optimizer, new_optimizer)
+    self.assertFalse(t._compiled)
+    self.assertIsNone(t._compiled_fwd_bwd)
+    self.assertIsNone(t._compiled_update)
+    self.assertIsNone(t._model_graphdef)
+    self.assertIsNone(t._state_graphdef)
+    self.assertFalse(t.has_accumulated_grads)
+    self.assertIsNone(t._accumulated_grads)
+    self.assertIsNone(t._accumulated_denominator)
+    self.assertEqual(t.micro_step_count, 0)
+    self.assertEmpty(t._cached_losses)
+
+  def test_setters_reset_in_flight_accumulation(self):
+    """Assigning model, optimizer, or state resets any in-flight gradient accumulation."""
+    for setter_kind in ("state", "model", "optimizer"):
+      with self.subTest(setter=setter_kind):
+        t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+        t.with_loss_fn(
+            lambda m, *a, **k: (
+                abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(m.weights[...]), denominator=jnp.array(1.0)),
+                {},
+            ),
+            has_aux=True,
+        )
+        t.fwd_bwd(DummyPayload())
+        self.assertTrue(t.has_accumulated_grads)
+        self.assertEqual(t.micro_step_count, 1)
+        self.assertNotEmpty(t._cached_losses)
+
+        if setter_kind == "state":
+          new_model = DummyNNXModel()
+          new_model.weights.set_value(jnp.array([10.0, 20.0]))
+          new_optimizer = nnx.Optimizer(new_model, optax.sgd(0.05), wrt=nnx.Param)
+          t.state = train_state_nnx.TrainStateNNX(new_model, new_optimizer)
+        elif setter_kind == "model":
+          new_model = DummyNNXModel()
+          new_model.weights.set_value(jnp.array([10.0, 20.0]))
+          t.model = new_model
+        else:
+          t.optimizer = nnx.Optimizer(t.model, optax.sgd(0.05), wrt=nnx.Param)
+
+        self.assertFalse(t.has_accumulated_grads)
+        self.assertIsNone(t._accumulated_grads)
+        self.assertIsNone(t._accumulated_denominator)
+        self.assertEqual(t.micro_step_count, 0)
+        self.assertEmpty(t._cached_losses)
+
+        # Calling update does not apply any old gradients.
+        current_step = t.train_step
+        self.assertEqual(t.update(), current_step)
+
+  def test_state_setter_clears_model_and_optimizer_when_lacking_them(self):
+    """Assigning `engine.state` to None or an object lacking model/optimizer does not retain old ones."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.assertIsNotNone(t.model)
+    self.assertIsNotNone(t.optimizer)
+
+    class IncompleteState:
+      pass
+
+    t.state = IncompleteState()
+    self.assertIsNone(t.model)
+    self.assertIsNone(t.optimizer)
+
+    t.state = None
+    self.assertIsNone(t.model)
+    self.assertIsNone(t.optimizer)
+
+  def test_settle_state_places_and_shards_in_a_single_pass(self):
+    """`_settle_state` places unplaced leaves on the mesh and shards optimizer state in a single pass."""
+    cfg = self.setup_config(shard_optimizer_over_data=True, shard_mode="explicit")
+    with (
+        mock.patch.object(maxtext_engine, "_zero1_active", return_value=None),
+        mock.patch.object(
+            maxtext_engine.train_utils,
+            "create_training_optimizer",
+            return_value=(lambda step: jnp.array(0.001), optax.adam(0.01)),
+        ),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+      _ = t.state
+      with mock.patch("jax.device_put", wraps=jax.device_put) as mock_put:
+        t._settle_state()
+        first_pass_calls = mock_put.call_count
+        self.assertGreater(first_pass_calls, 0)
+        # Verify that optimizer moment leaves received Zero-1 sharding (carrying the 'data' axis).
+        opt_shardings = [
+            leaf.sharding.spec
+            for leaf in jax.tree.leaves(nnx.state(t.state.optimizer))
+            if hasattr(leaf, "sharding") and leaf.ndim > 0
+        ]
+        self.assertTrue(any("data" in jax.tree.leaves(tuple(spec)) for spec in opt_shardings))
+        # Second call is a no-op because all leaves already carry target shardings.
+        t._settle_state()
+        self.assertEqual(mock_put.call_count, first_pass_calls)
 
 
 class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
