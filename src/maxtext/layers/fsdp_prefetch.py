@@ -212,6 +212,17 @@ def _sc_rs_padded_minor_size(n):
   return k * 128
 
 
+def _pad_unreduced(x, pad_width, axes):
+  """Zero-pads `x`, which is unreduced over the mesh `axes`, so that the result stays unreduced.
+
+  `jax.lax.pad` requires the padding value to be unreduced over the same mesh axes as the operand,
+  so the zero padding value is cast to unreduced over `axes` first (padding with zeros does not
+  change the sum over `axes`).
+  """
+  zero = jax.lax.pcast(jax.lax.pcast(jnp.zeros((), x.dtype), axes, to="varying"), axes, to="unreduced")
+  return jax.lax.pad(x, zero, [(lo, hi, 0) for lo, hi in pad_width])
+
+
 def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=False):
   """Reduce-scatters a gathered-weight gradient `g` over its FSDP mesh axes.
 
@@ -242,7 +253,7 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=Fa
     if padded_minor is not None and padded_minor > orig_minor:
       pad_width = [(0, 0)] * x.ndim
       pad_width[minor_dim] = (0, padded_minor - orig_minor)
-      x = jnp.pad(x, pad_width)
+      x = _pad_unreduced(x, pad_width, tuple(ax) + tuple(extra))
       x = _pin_scatter_dim_major(x, dim)
     x = jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
     if extra:
