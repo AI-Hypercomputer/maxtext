@@ -346,6 +346,26 @@ class _AttemptOutcome:
   scale_up: bool = False
 
 
+def _slice_down_cause(error: BaseException) -> Exception | None:
+  """Returns the slice-down `JaxRuntimeError` that `error` was raised from, or None.
+
+  Libraries can re-raise the error of a slice that went down as their own exception type. Orbax v1, for example,
+  raises any error of a checkpoint load as `NoEntryError("... incompatible handler ...")`, with the original error as
+  its cause. pathwaysutils only retries a `JaxRuntimeError`, so the chain of causes is searched for one.
+
+  Args:
+    error: The exception that ended the attempt.
+  """
+  seen = set()
+  cause = error.__cause__ or error.__context__
+  while cause is not None and id(cause) not in seen:
+    seen.add(id(cause))
+    if isinstance(cause, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(cause):
+      return cause
+    cause = cause.__cause__ or cause.__context__
+  return None
+
+
 def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=None):
   """Decorator for elastic retry.
 
@@ -366,6 +386,9 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
 
   The device memory of a failed attempt is freed by JAX once the attempt has unwound and nothing references its
   arrays any more; nothing is deleted explicitly.
+
+  An error that a library raised because a slice went down is retried even if the library re-raised it as another
+  exception type, as long as the original `JaxRuntimeError` is in its chain of causes.
 
   Args:
     config: Config object.
@@ -421,6 +444,12 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
       callback_fn(scale_up=scale_up)
 
   def effective_pre_callback():
+    # pathwaysutils makes a device of a live slice the default device with `jax.default_device`, which only applies
+    # to the thread that runs the attempt. Other threads keep JAX's default, the first device, which can be on a
+    # slice that went down. For example, Orbax restores a checkpoint on a thread of its own, and with colocated Python
+    # an array it puts on the default device there fails with `DATA_LOSS`. Make the live device the default of every
+    # thread.
+    jax.config.update("jax_default_device", elastic_manager.default_device)
     if retry_cache is not None:
       # Objects built for other slices are stale after a resize.
       retry_cache.clear_if_slices_changed(frozenset(elastic_manager.active_slice_indices))
@@ -462,6 +491,16 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
         # pathwaysutils runs the elastic event callback next; let it know this was a scale-up.
         outcome.scale_up = True
         raise
+      except jax.errors.JaxRuntimeError:
+        # pathwaysutils decides whether a slice went down.
+        raise
+      except Exception as e:
+        cause = _slice_down_cause(e)
+        if cause is None:
+          raise
+        max_logging.log(f"Elastic utils: {type(e).__name__} was raised because a slice went down; retrying.")
+        # Raise the slice-down error itself, which pathwaysutils retries. `e` stays in the chain for the traceback.
+        raise jax.errors.JaxRuntimeError(str(cause)) from e
 
     retried_func = pathways_retry(attempt)
 
@@ -470,9 +509,12 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
       if retry_cache is not None:
         # The cache lives for one elastic run, so a later run in the same process starts empty.
         retry_cache.reset(enabled=True)
+      # Every attempt changes the default device of the process (see `effective_pre_callback`); restore it afterwards.
+      default_device = jax.config.jax_default_device
       try:
         return retried_func(*args, **kwargs)
       finally:
+        jax.config.update("jax_default_device", default_device)
         if retry_cache is not None:
           retry_cache.reset(enabled=False)
         # A scale-up that ended the run (retries exhausted) must not label the next run's first event.
