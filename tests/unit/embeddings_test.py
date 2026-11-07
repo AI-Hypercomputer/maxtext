@@ -14,6 +14,7 @@
 
 """Tests for embeddings.py."""
 
+import os
 import sys
 import unittest
 from flax import nnx
@@ -475,6 +476,114 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
         default_outputs.shape
     )
     np.testing.assert_allclose(outputs, expected_interleaved, atol=1e-5)
+
+  def _complex64_reference(self, layer, inputs, position):
+    """The complex64 rotation the default (pairwise=False) path used before the float32 rewrite."""
+    freqs = layer._gather_freqs_cis(position)  # pylint: disable=protected-access
+    if layer.interleave:
+      b, s, n, h = inputs.shape
+      pairs = inputs.reshape(b, s, n, h // 2, 2)
+      first_half, second_half = pairs[..., 0], pairs[..., 1]
+    else:
+      first_half, second_half = jnp.split(inputs, 2, axis=-1)
+    rotated = jnp.multiply(first_half + 1j * second_half, freqs)
+    output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+    if layer.attention_scaling:
+      output = output * (0.1 * np.log(layer.rope_factor) + 1.0)
+    return output.astype(layer.fprop_dtype)
+
+  @staticmethod
+  def _rotation_is_bitwise():
+    """Whether the float32 rotation must be bitwise equal to the complex64 multiply on this backend.
+
+    Both compute (ac - bd, ad + bc) in float32, so they are bitwise equal unless the compiler
+    contracts a product and a subtraction into one FMA in one program and not in the other.
+    TPU does not; XLA:CPU does on FMA hardware. Run on CPU with XLA_FLAGS=--xla_cpu_max_isa=AVX
+    (no FMA) to check bitwise equality there.
+    """
+    return jax.devices()[0].platform == "tpu" or "--xla_cpu_max_isa=AVX" in os.environ.get("XLA_FLAGS", "")
+
+  def _check_rotation(self, out, ref):
+    self.assertEqual(out.dtype, jnp.float32)
+    self.assertEqual(ref.dtype, jnp.float32)
+    out, ref = np.asarray(out), np.asarray(ref)
+    if self._rotation_is_bitwise():
+      np.testing.assert_array_equal(out, ref)
+    else:
+      # An FMA changes ac - bd by at most about one float32 ulp of the products, i.e. of max |ref|.
+      np.testing.assert_allclose(out, ref, rtol=0, atol=2**-21 * float(np.max(np.abs(ref))))
+
+  def _default_layer(self, interleave, attention_scaling=False):
+    return embeddings.YarnRotaryEmbedding(
+        embedding_dims=64,
+        mesh=self.mesh,
+        max_position_embeddings=16384,
+        original_max_position_embeddings=4096,
+        interleave=interleave,
+        attention_scaling=attention_scaling,
+        fprop_dtype=jnp.float32,
+        rngs=self.rngs,
+    )
+
+  def test_default_path_matches_complex64_under_jit(self):
+    """Under jit, the float32 cos/sin rotation equals the old complex64 multiply (see _rotation_is_bitwise)."""
+    position = jnp.broadcast_to(jnp.arange(64, dtype=jnp.int32)[None, :] * 37, (2, 64))
+    for dtype in (jnp.float32, jnp.bfloat16):
+      inputs = jax.random.normal(jax.random.PRNGKey(3), (2, 64, 4, 64), dtype=dtype)
+      for interleave in (True, False):
+        for attention_scaling in (False, True):
+          with self.subTest(dtype=dtype.__name__, interleave=interleave, attention_scaling=attention_scaling):
+            layer = self._default_layer(interleave, attention_scaling)
+            out = jax.jit(lambda x, p, l=layer: l(x, position=p))(inputs, position)
+            ref = jax.jit(lambda x, p, l=layer: self._complex64_reference(l, x, p))(inputs, position)
+            self._check_rotation(out, ref)
+
+  def test_default_path_has_no_complex_multiply(self):
+    """The default path rotates in float32, so op-by-op (disable_jit) runs compile no complex64 multiply."""
+
+    def complex_muls(jaxpr):
+      found = []
+      for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "mul" and any(jnp.issubdtype(v.aval.dtype, jnp.complexfloating) for v in eqn.outvars):
+          found.append(eqn)
+        for param in eqn.params.values():
+          sub = getattr(param, "jaxpr", param)
+          if hasattr(sub, "eqns"):
+            found.extend(complex_muls(sub))
+      return found
+
+    for interleave in (True, False):
+      layer = embeddings.YarnRotaryEmbedding(
+          embedding_dims=64,
+          mesh=self.mesh,
+          max_position_embeddings=16384,
+          original_max_position_embeddings=4096,
+          interleave=interleave,
+          rngs=self.rngs,
+      )
+      inputs = jnp.ones((1, 8, 2, 64), dtype=jnp.bfloat16)
+      position = jnp.arange(8, dtype=jnp.int32)[None, :]
+      closed = jax.make_jaxpr(lambda x, p, l=layer: l(x, position=p))(inputs, position)
+      self.assertEqual(complex_muls(closed.jaxpr), [], msg=f"interleave={interleave}")
+
+  def test_default_path_runs_under_disable_jit(self):
+    """Op by op (jax.disable_jit), the rotation runs and equals the old complex64 multiply run the same way.
+
+    The eager result is compared with the eager complex64 reference, not with the jit result: under jit
+    XLA constant-folds the frequency table (pow, cos, sin) on the host, so the table itself can differ
+    from the eager table by an ulp. That gap predates this rotation and does not depend on it.
+    """
+    inputs = jax.random.normal(jax.random.PRNGKey(5), (2, 16, 4, 64), dtype=jnp.bfloat16)
+    position = jnp.broadcast_to(jnp.arange(16, dtype=jnp.int32)[None, :], (2, 16))
+    for interleave in (True, False):
+      with self.subTest(interleave=interleave):
+        layer = self._default_layer(interleave)
+        with jax.disable_jit():
+          eager_out = layer(inputs, position=position)
+          eager_ref = self._complex64_reference(layer, inputs, position)
+        self._check_rotation(eager_out, eager_ref)
+        jit_out = jax.jit(lambda x, p, l=layer: l(x, position=p))(inputs, position)
+        np.testing.assert_allclose(np.asarray(eager_out), np.asarray(jit_out), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

@@ -635,8 +635,8 @@ class YarnRotaryEmbedding(nnx.Module):
        when `rope_factor > 1`. This scaling can be applied within this layer (if `attention_scaling=True`)
        or externally.
   - RoPE Implementation Details (General):
-    - Arithmetic: Uses complex number arithmetic by default. `pairwise=True` uses real number arithmetic
-      on (real, imag) pairs instead; the resulting embeddings are equivalent.
+    - Arithmetic: Uses float32 real arithmetic equal to complex multiplication by default. `pairwise=True`
+      rotates (real, imag) pairs in place instead; the resulting embeddings are equivalent.
     - Input Layout: Supports both interleaved (`interleave=True`, e.g., [real1, img1, real2, img2]) and
       concatenated (`interleave=False`, e.g., [real1, real2, img1, img2]) formats.
     - Output Layout: Returns concatenated format ([real, imag]) by default, or interleaved format when
@@ -880,10 +880,7 @@ class YarnRotaryEmbedding(nnx.Module):
           rotated_pairs = pairs * cos + swapped * sin * sign
           output = rotated_pairs.reshape(b, s, n, h)
     else:
-      if self.direct_position_freqs:
-        freqs = _cis(self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
-      else:
-        freqs = self._gather_freqs_cis(position)  # shape: [B, S, 1, half_dim]
+      cos, sin = self._cos_sin(position)  # shape: [B, S, 1, half_dim]
       if self.interleave:
         # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
         # Convert the last dimension into a complex representation.
@@ -896,14 +893,16 @@ class YarnRotaryEmbedding(nnx.Module):
         # Inputs with concatenated format [real1, real2, ..., img1, img2, ...] at last dimension
         first_half, second_half = jnp.split(inputs, 2, axis=-1)
 
-      inputs_complex = first_half + 1j * second_half  # shape: [b, s, n, half_dim]
-      # Apply the rotary transformation via complex multiplication.
-      rotated = jnp.multiply(inputs_complex, freqs)  # shape: [b, s, n, half_dim]
-
-      # Convert the complex result back to a real tensor.
-      # Split the complex number into its real and imaginary parts.
+      # Rotate (first_half + i * second_half) by (cos + i * sin) in float32 real arithmetic:
+      # (a + bi)(c + di) = (ac - bd) + (ad + bc)i. Same float32 math as the complex64 multiply it
+      # replaces (bitwise equal under jit), but with no complex64 op: under jax.disable_jit() a complex64
+      # multiply of a replicated and a sharded operand is compiled on its own and crashes the TPU compiler.
+      first_half = first_half.astype(jnp.float32)
+      second_half = second_half.astype(jnp.float32)
+      real = first_half * cos - second_half * sin  # shape: [b, s, n, half_dim]
+      imag = first_half * sin + second_half * cos  # shape: [b, s, n, half_dim]
       # [real1, real2, ..., img1, img2, ...]
-      output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+      output = jnp.concatenate([real, imag], axis=-1)
 
     if self.attention_scaling:
       attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * math.log(self.rope_factor) + 1.0)
