@@ -49,6 +49,11 @@ on:
       is_scheduled_run:
         required: true
         type: boolean
+      newly_added_only:
+        description: 'Run only the tests that the pull request added or modified'
+        required: false
+        type: boolean
+        default: false
       xla_python_client_mem_fraction:
         required: true
         type: string
@@ -183,6 +188,9 @@ jobs:
           }
           trap cleanup_tpu_locks TERM INT
 
+          # tests/conftest.py and newly_added_detection run git on this checkout, which another UID may own.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -202,12 +210,27 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
+          elif [ "${INPUTS_NEWLY_ADDED_ONLY}" == "true" ]; then
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and newly_added"
           else
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
             else
               FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or newly_added)"
             fi
+          fi
+          if [ "${INPUTS_NEWLY_ADDED_ONLY}" == "true" ]; then
+            # If the touched tests cannot be listed, fail instead of passing without running them.
+            if ! CHANGED_TESTS=$(python3 tests/utils/newly_added_detection.py --flavor "${INPUTS_FLAVOR}"); then
+              echo "::error::newly_added_detection failed (see above), so the tests that this PR touched are unknown."
+              exit 1
+            fi
+            if [ -z "${CHANGED_TESTS}" ]; then
+              echo "No test that this PR touched runs in ${INPUTS_FLAVOR}; nothing to run."
+              exit 0
+            fi
+            echo "Tests that this PR touched and ${INPUTS_FLAVOR} runs:"
+            echo "${CHANGED_TESTS}"
           fi
           # TODO: Use package data for testing and remove the env vars
           MAXTEXT_REPO_ROOT=$(pwd)
@@ -294,6 +317,9 @@ jobs:
               rm -f "${JUNIT_XML}"
             fi
             if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
+              if [ "${INPUTS_NEWLY_ADDED_ONLY}" == "true" ]; then
+                echo "::warning::pytest selected none of the tests listed above: their modules skipped themselves during collection, or tests/conftest.py and newly_added_detection disagree."
+              fi
               echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
             elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then
               exit "$PYTEST_EXIT_CODE"
@@ -302,6 +328,7 @@ jobs:
 
         env:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_NEWLY_ADDED_ONLY: ${{ inputs.newly_added_only }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_FLAVOR: ${{ inputs.flavor }}
@@ -381,7 +408,9 @@ jobs:
           flags: ${{ inputs.is_scheduled_run && 'scheduled' || 'regular' }}
           verbose: true
       - name: Upload Test Results XML
-        if: always()
+        # Not for a run of only the touched tests: their timings include XLA compiles that a full run shares
+        # across a test class, which track_performance.yml would report as regressions against its baseline.
+        if: ${{ always() && !inputs.newly_added_only }}
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
