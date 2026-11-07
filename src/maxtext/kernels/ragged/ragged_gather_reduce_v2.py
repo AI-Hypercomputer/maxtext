@@ -416,8 +416,9 @@ def main_kernel(
       grid=(num_row_blocks,),
       in_specs=row_pipeline_in_specs,
       out_specs=(),
+      _explicit_indices=True,
   )
-  def row_pipeline(*args):
+  def row_pipeline(row_step: pltpu.PipelineStep, *args):
     src_indices_refs = args[:num_row_subchunks]
     topk_weights_refs = args[num_row_subchunks : 2 * num_row_subchunks]
     # pylint: disable=unbalanced-tuple-unpacking
@@ -432,7 +433,7 @@ def main_kernel(
         sem_sc,
     ) = args[-8:]
 
-    row_block_id = pl.program_id(0)
+    row_block_id = row_step.index[0]
 
     # Destination output row of each source row in this block.
     dst_indices_list = [
@@ -531,10 +532,10 @@ def main_kernel(
             ),
         ),
         out_specs=(),
+        _explicit_indices=True,
     )
-    def col_pipeline(gather_ref, sem_inner):
-      s = pl.program_id(0)
-      c = pl.program_id(1)
+    def col_pipeline(col_step: pltpu.PipelineStep, gather_ref, sem_inner):
+      s, c = col_step.index
       col_hbm_start = col_start + c * col_chunk_size
       send_sem = sem_inner.at[1]
 

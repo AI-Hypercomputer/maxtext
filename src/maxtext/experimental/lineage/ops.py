@@ -1755,6 +1755,7 @@ def quantize_tile(x: jax.Array, inv_scale: jax.Array, qtype: jt.DTypeLike) -> ja
 
 
 def _ragged_silu_mul_kernel(
+    step: pltpu.PipelineStep,
     x_ref: Any,
     y_ref: Any,
     c_ref: Any,
@@ -1763,6 +1764,7 @@ def _ragged_silu_mul_kernel(
     out_scale_ref: Any = None,
 ) -> None:
   """Kernel body for ragged_silu_mul."""
+  del step  # Unused.
   act = silu_mul_tile(x_ref[...], y_ref[...], c_ref[...], x_ref.dtype)
   if out_scale_ref is not None:
     inv_scale = 1.0 / out_scale_ref[0].astype(jnp.float32)
@@ -1836,6 +1838,7 @@ def _ragged_silu_mul_fwd_pipeline(
             pl.BlockSpec((block_size_tokens, 1), lambda i, j: (i, 0)),
         ],
         out_specs=pl.BlockSpec((block_size_tokens, block_size_hidden), lambda i, j: (i, j)),
+        _explicit_indices=True,
     )(x_ref, x_ref, c_ref, out_ref)
 
 
@@ -1891,6 +1894,7 @@ def _pallas_ragged_silu_mul(
 
 
 def _ragged_silu_mul_bwd_kernel(
+    step: pltpu.PipelineStep,
     g_ref: Any,
     x_ref: Any,
     y_ref: Any,
@@ -1925,14 +1929,14 @@ def _ragged_silu_mul_bwd_kernel(
   dy_ref[...] = dy
 
   if amax_vmem_ref is not None and num_tokens_ref is not None:
-    row_idx = pl.program_id(0) * dx.shape[0] + jax.lax.broadcasted_iota(jnp.int32, (dx.shape[0], 1), 0)
+    row_idx = step.index[0] * dx.shape[0] + jax.lax.broadcasted_iota(jnp.int32, (dx.shape[0], 1), 0)
     valid = row_idx < num_tokens_ref[0]
     tile_abs = jnp.where(valid, jnp.maximum(jnp.abs(dx), jnp.abs(dy)), 0)
     tile_max = jnp.max(tile_abs, axis=0).astype(jnp.float32)
     amax_vmem_ref[0] = jnp.maximum(amax_vmem_ref[0], tile_max)
 
   # dc is reduced over the hidden dim, which is tiled along grid axis 1.
-  @pl.when(pl.program_id(1) == 0)
+  @pl.when(step.index[1] == 0)
   def _init():
     dc_ref[...] = jnp.zeros_like(dc_ref)
 
@@ -1992,6 +1996,7 @@ def _ragged_silu_mul_bwd_pipeline(
         grid=(pl.cdiv(num_tokens, block_size_tokens), num_hidden_blocks),
         in_specs=[hidden_spec, g0_spec, g1_spec, coeffs_spec],
         out_specs=[hidden_spec, dy_spec, coeffs_spec],
+        _explicit_indices=True,
     )(g_ref, x_ref, x_ref, c_ref, dxy_ref, dxy_ref, dc_ref)
 
   if amax_smem_ref is not None and amax_vmem_ref is not None:
@@ -2177,6 +2182,7 @@ def ragged_silu_mul_bwd(
 
 
 def _ragged_absmax_kernel(
+    step: pltpu.PipelineStep,
     x_ref: Any,
     *,
     num_tokens_ref: Any,
@@ -2186,7 +2192,7 @@ def _ragged_absmax_kernel(
   x_val = x_ref[...]
   abs_x = jnp.abs(x_val.astype(jnp.float32))
   block_tokens = x_val.shape[0]
-  rem = num_tokens_ref[0] - pl.program_id(0) * block_tokens
+  rem = num_tokens_ref[0] - step.index[0] * block_tokens
   abs_x = jnp.where(
       (rem >= block_tokens) | (jax.lax.broadcasted_iota(jnp.int32, x_val.shape, 0) < rem),
       abs_x,
@@ -2200,6 +2206,7 @@ def _ragged_absmax_kernel(
 
 
 def _ragged_quantize_kernel(
+    step: pltpu.PipelineStep,
     x_ref: Any,
     out_ref: Any,
     *,
@@ -2214,7 +2221,7 @@ def _ragged_quantize_kernel(
     inv_scale = inv_scale[None]
   q = jnp.clip(x_val.astype(jnp.float32) * inv_scale, -fmax, fmax).astype(out_ref.dtype)
   block_tokens = x_val.shape[0]
-  rem = num_tokens_ref[0] - pl.program_id(0) * block_tokens
+  rem = num_tokens_ref[0] - step.index[0] * block_tokens
   q = jnp.where(
       (rem >= block_tokens) | (jax.lax.broadcasted_iota(jnp.int32, x_val.shape, 0) < rem),
       q,
@@ -2251,6 +2258,7 @@ def _ragged_quantize_pipeline(
         grid=(pl.cdiv(num_tokens, block_size_tokens),),
         in_specs=[x_spec],
         out_specs=x_spec,
+        _explicit_indices=True,
     )(x_ref, out_ref)
 
 
@@ -2284,6 +2292,7 @@ def _ragged_absmax_quantize_pipeline(
         ),
         grid=(num_blocks,),
         in_specs=[x_spec],
+        _explicit_indices=True,
     )(x_ref)
     amax = jnp.max(amax_ref[...], keepdims=True)
     scale_out_ref[...] = jnp.where(amax > 0, amax / fmax, 1.0)
@@ -2297,6 +2306,7 @@ def _ragged_absmax_quantize_pipeline(
         grid=(num_blocks,),
         in_specs=[x_spec],
         out_specs=x_spec,
+        _explicit_indices=True,
     )(x_ref, out_ref)
 
 

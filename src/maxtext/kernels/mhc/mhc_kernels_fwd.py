@@ -39,7 +39,8 @@ def _coeff_fwd(
 
   num_params = len(jax.tree.leaves(coeff_params))
 
-  def pipeline_body(x_ref, *refs):
+  def pipeline_body(step: pltpu.PipelineStep, x_ref, *refs):
+    del step  # Unused.
     ref_iter = iter(refs)
     param_refs = common.MhcCoeffParams(*(next(ref_iter) for _ in range(num_params)))
     permutations_ref = next(ref_iter)
@@ -77,6 +78,7 @@ def _coeff_fwd(
       ),
       out_specs=output_specs,
       dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+      _explicit_indices=True,
   )
 
   with common.tpu_mesh_context():
@@ -111,7 +113,8 @@ def _pre_apply_fwd(
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def pipeline_body(x_ref, h_pre_ref, output_ref):
+  def pipeline_body(step: pltpu.PipelineStep, x_ref, h_pre_ref, output_ref):
+    del step  # Unused.
     output_ref[...] = common.pre_apply(x_ref[...], h_pre_ref[...])
 
   spec_x = common.token_block_spec((tokens, streams, embedding), config.block_size)
@@ -124,6 +127,7 @@ def _pre_apply_fwd(
       in_specs=(spec_x, spec_h_pre),
       out_specs=spec_out,
       dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+      _explicit_indices=True,
   )
 
   with common.tpu_mesh_context():
@@ -151,7 +155,15 @@ def _post_apply_fwd(
   tokens, streams, embedding = x.shape
   dims = common.MhcDims(tokens=tokens, streams=streams, embedding=embedding)
 
-  def pipeline_body(x_ref, layer_output_ref, h_post_ref, residual_ref, output_ref):
+  def pipeline_body(
+      step: pltpu.PipelineStep,
+      x_ref,
+      layer_output_ref,
+      h_post_ref,
+      residual_ref,
+      output_ref,
+  ):
+    del step  # Unused.
     output_ref[...] = common.post_apply(
         x_ref[...],
         layer_output_ref[...],
@@ -175,6 +187,7 @@ def _post_apply_fwd(
       ),
       out_specs=spec_x,
       dimension_semantics=common.PARALLEL_DIMENSION_SEMANTICS,
+      _explicit_indices=True,
   )
 
   with common.tpu_mesh_context():
