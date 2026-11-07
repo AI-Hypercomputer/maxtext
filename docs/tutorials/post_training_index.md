@@ -66,7 +66,7 @@ Pathways supercharges RL with:
 
 ## Getting started
 
-Start your Post-Training journey through quick experimentation with [Python Notebooks](../guides/run_python_notebook) or our Production level tutorials for [SFT](./posttraining/sft_on_multi_host) and [RL](./posttraining/rl_on_multi_host).
+Start your Post-Training journey through quick experimentation with [Python Notebooks](../guides/run_python_notebook.md) or our Production level tutorials for [SFT](./posttraining/sft_on_multi_host.md) and [RL](./posttraining/rl_on_multi_host.md).
 
 ## More tutorials
 
