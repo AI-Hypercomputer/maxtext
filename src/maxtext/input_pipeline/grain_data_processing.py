@@ -20,9 +20,11 @@ import re
 import sys
 from pathlib import Path
 import functools
+from typing import Any
 import ml_collections
 from concurrent import futures
 import json
+from dataclasses import dataclass
 
 import jax
 import numpy as np
@@ -38,6 +40,42 @@ from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
+
+
+@dataclass(frozen=True)
+class FileInstruction:
+  """File instruction for Grain ArrayRecordDataSource to bypass remote index discovery."""
+
+  filename: str
+  skip: int
+  take: int
+  examples_in_shard: int
+
+
+@functools.lru_cache(maxsize=16)
+def extract_file_instructions(pattern: str) -> tuple[FileInstruction, ...]:
+  """Pre-resolves file paths and extracts FileInstruction metadata on the coordinator."""
+  # No hf_access_token here: the callers skip single hf:// patterns, and an hf:// mixture component that fails to
+  # resolve makes them fall back to the raw pattern.
+  files = find_data_files(pattern)
+
+  # Initialize data source on coordinator once to inspect file headers
+  ds = grain.ArrayRecordDataSource(files)
+  instructions = []
+  for ri in ds._read_instructions:  # pylint: disable=protected-access
+    instructions.append(
+        FileInstruction(
+            filename=ri.filename,
+            skip=ri.start,
+            take=ri.num_records,
+            examples_in_shard=ri.num_records,
+        )
+    )
+  max_logging.log(
+      f"Extracted {len(instructions)} FileInstructions on coordinator "
+      f"(total records: {sum(inst.take for inst in instructions)})"
+  )
+  return tuple(instructions)
 
 
 def construct_hf_dataset_path(hf_path: str, hf_train_files: str | None = None, split: str = "train") -> str:
@@ -89,7 +127,7 @@ def find_data_files(data_file_pattern, hf_access_token=None):
     data_files = [f"hf://{f}" for f in fs.glob(stripped_pattern)]
   else:
     # Local files
-    data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
+    data_files = sorted(glob.glob(str(Path(data_file_pattern).expanduser().resolve())))
   if not data_files:
     if data_file_pattern.startswith("hf://") and "/**/*.parquet" in data_file_pattern:
       raise FileNotFoundError(
@@ -159,6 +197,71 @@ def _make_mmap_multiprocessing_options(dataset, config, grain_worker_count, grai
   return grain.MultiprocessingOptions(num_workers=grain_worker_count, per_worker_buffer_size=grain_per_worker_buffer_size)
 
 
+def _parse_mixture(pattern) -> tuple[list[Any], list[float]] | None:
+  """Returns (patterns, normalized weights) if `pattern` is a mixture, else None."""
+  if (
+      isinstance(pattern, tuple)
+      and len(pattern) == 2
+      and isinstance(pattern[0], (list, tuple))
+      and isinstance(pattern[1], (list, tuple))
+      and len(pattern[0]) == len(pattern[1])
+  ):
+    return list(pattern[0]), list(pattern[1])
+  if not isinstance(pattern, str) or ";" not in pattern:
+    return None
+  patterns, raw_weights = zip(*[p.split(",") for p in pattern.split(";")])
+  assert len(patterns) == len(raw_weights), "Number of data file patterns and weights must match"
+  weights = [float(w) for w in raw_weights]
+  total_weight = sum(weights)
+  return list(patterns), [round(w / total_weight, 4) for w in weights]
+
+
+def _maybe_preresolve_arrayrecord_files(files, config, mixture_config_path=None):
+  """Resolves ArrayRecord `files` into FileInstructions once, on the controller, for colocated Python runs.
+
+  With colocated python data input, every colocated host runs get_ds_fn, so without FileInstructions each host globs
+  the files and opens every one of them to count its records. Across elastic restarts in the same controller process,
+  `extract_file_instructions` is cached in-process. This assumes that the controller sees the same paths as the hosts,
+  as it does for gs:// paths; if resolving fails here, the hosts resolve the raw pattern themselves.
+
+  Args:
+    files: the Grain file pattern, possibly a `;`-separated mixture of patterns with weights.
+    config: the MaxText config.
+    mixture_config_path: the JSON mixture config, if any.
+
+  Returns:
+    FileInstructions for a single pattern, `(FileInstructions of each pattern, normalized weights)` for a mixture, or
+    `files` itself when it isn't pre-resolved.
+  """
+  if (
+      getattr(config, "grain_file_type", None) != "arrayrecord"
+      or not getattr(config, "colocated_python_data_input", False)
+      or not isinstance(files, str)
+      or not files
+      or files.startswith("hf://")
+      # Not pre-resolved yet: get_datasets reads the mixture config and resolves each of its paths itself.
+      or mixture_config_path
+  ):
+    return files
+  try:
+
+    def extract_fn(pat):
+      return multihost_dataloading.call_with_transient_retry(functools.partial(extract_file_instructions, pat))
+
+    mixture = _parse_mixture(files)
+    if mixture is None:
+      return extract_fn(files)
+    patterns, weights = mixture
+    with futures.ThreadPoolExecutor(max_workers=config.grain_data_source_max_workers) as executor:
+      return list(executor.map(extract_fn, patterns)), weights
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.warning(
+        f"Could not pre-resolve {files!r} into FileInstructions on the controller ({type(e).__name__}: {e}). Every"
+        " host that runs get_ds_fn will glob and open the files itself."
+    )
+    return files
+
+
 def get_datasets(
     data_file_pattern,
     data_file_type,
@@ -183,11 +286,13 @@ def get_datasets(
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
-      files = find_data_files(pattern, hf_access_token=hf_access_token)
       reader_options = (
           {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
       )
-      source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
+      data_files = (
+          pattern if isinstance(pattern, (list, tuple)) else find_data_files(pattern, hf_access_token=hf_access_token)
+      )
+      source = grain.ArrayRecordDataSource(data_files, reader_options=reader_options)
       return grain.MapDataset.source(source)
 
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
@@ -222,11 +327,12 @@ def get_datasets(
 
       dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
       return dataset
-    elif ";" in data_file_pattern:
-      data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
-      assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
-      weights = [float(weight) for weight in weights]
-      weights = [round(weight / sum(weights), 4) for weight in weights]
+
+    mixture = _parse_mixture(data_file_pattern)
+    is_mixture = mixture is not None
+
+    if is_mixture:
+      data_file_patterns, weights = mixture
 
       # Parallelize file finding (globbing), data source creation, and dataset wrapping
       # File finding and source creation are I/O-bound operations that release the GIL
@@ -251,7 +357,7 @@ def get_datasets(
       dataset = grain.IterDataset.mix(dataset_list, weights)
       return dataset
     else:
-      # Single pattern case - no need for parallelization
+      # Single pattern case or pre-resolved FileInstruction case
       dataset = create_dataset_from_pattern(data_file_pattern)
       dataset = _apply_mapdataset_transforms(
           dataset,
@@ -873,6 +979,10 @@ def make_grain_train_iterator(
   ):
     grain_train_files = construct_tfds_tfrecord_path(config.dataset_path, config.dataset_name, config.train_split)
 
+  grain_train_files = _maybe_preresolve_arrayrecord_files(
+      grain_train_files, config, mixture_config_path=config.grain_train_mixture_config_path
+  )
+
   get_ds_fn = functools.partial(
       get_datasets,
       grain_train_files,
@@ -1020,6 +1130,8 @@ def make_grain_eval_iterator(
       and config.eval_split
   ):
     grain_eval_files = construct_tfds_tfrecord_path(config.dataset_path, config.eval_dataset_name, config.eval_split)
+
+  grain_eval_files = _maybe_preresolve_arrayrecord_files(grain_eval_files, config)
 
   get_ds_fn = functools.partial(
       get_datasets,

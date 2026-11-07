@@ -184,3 +184,23 @@ class GcsUtilsTest(unittest.TestCase):
 
     with self.assertRaises(PermissionError):
       gcs_utils.mkdir_and_check_permissions("gs://valid_bucket/some/dir")
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  def test_gcs_glob_pattern_lists_under_literal_prefix(self, mock_storage_client):
+    """Lists only under the part of the pattern before its first glob metacharacter (`*?[{` or an escape)."""
+    blob = mock.Mock()
+    blob.name = "data/train-00000.array_record"
+    list_blobs = mock_storage_client.return_value.list_blobs
+    list_blobs.return_value = [blob]
+    for glob_pattern, prefix in (
+        ("data/train-*.array_record", "data/train-"),
+        ("data/train-0000?.array_record", "data/train-0000"),
+        ("data/train-[0-9]*.array_record", "data/train-"),
+        ("data/{train,eval}-*.array_record", "data/"),
+        ("data/train\\*-*.array_record", "data/train"),
+        ("**/*.array_record", None),
+    ):
+      with self.subTest(glob_pattern=glob_pattern):
+        files = gcs_utils.gcs_glob_pattern(f"gs://bucket/{glob_pattern}")
+        list_blobs.assert_called_with("bucket", prefix=prefix, match_glob=glob_pattern)
+        self.assertEqual(files, ["gs://bucket/data/train-00000.array_record"])

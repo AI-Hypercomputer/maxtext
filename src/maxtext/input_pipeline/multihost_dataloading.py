@@ -26,7 +26,9 @@ import time
 import json
 import weakref
 import os
+import random
 import signal
+import socket
 
 from etils import epath
 
@@ -357,6 +359,48 @@ def _state_file(directory_array) -> epath.Path:
   return epath.Path(directory) / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
 
 
+def _host_label() -> str:
+  """Returns this host's name for logs: `$NODE_NAME` if set (e.g. by a Kubernetes deployment), else the hostname."""
+  return os.environ.get("NODE_NAME") or socket.gethostname()
+
+
+_TRANSIENT_ERROR_TYPE_NAMES = frozenset(
+    {"NameResolutionError", "MaxRetryError", "ConnectionError", "RetryError", "ServiceUnavailable", "TransportError"}
+)
+
+
+def _is_transient_data_setup_error(err: BaseException) -> bool:
+  """Returns whether `err` is a temporary DNS or connection error worth retrying during dataset initialization."""
+  seen: set[int] = set()
+  cur: BaseException | None = err
+  while cur is not None and id(cur) not in seen:
+    seen.add(id(cur))
+    if (
+        isinstance(cur, (socket.gaierror, ConnectionError, TimeoutError))
+        or type(cur).__name__ in _TRANSIENT_ERROR_TYPE_NAMES
+    ):
+      return True
+    cur = cur.__cause__ or cur.__context__
+  return False
+
+
+def call_with_transient_retry(fn, *, attempts=5, base_delay_s=2.0, max_delay_s=60.0, sleep=None):
+  """Calls `fn()`, retrying temporary DNS and connection failures with full-jitter exponential backoff."""
+  sleep = sleep or time.sleep
+  for i in range(attempts - 1):
+    try:
+      return fn()
+    except Exception as e:
+      if not _is_transient_data_setup_error(e):
+        raise
+      delay = random.uniform(0, min(max_delay_s, base_delay_s * 2**i))
+      max_logging.warning(
+          f"RemoteIterator data setup hit {type(e).__name__}: {e}; retry {i+1}/{attempts-1} in {delay:.1f}s"
+      )
+      sleep(delay)
+  return fn()
+
+
 class RemoteIterator:
   "iterator class for using colocated python class"
 
@@ -401,6 +445,7 @@ class RemoteIterator:
     self.global_shape = global_shape
     self.checkpoint_path = checkpoint_path
     self.elastic = elastic
+    self._first_batch_pending = False
     _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIterator initiated")
 
@@ -434,18 +479,46 @@ class RemoteIterator:
 
   def reset(self):
     """Rebuilds the iterator for this host's data shard, from the start of the data."""
-    ds = self.get_ds_fn(dataloading_host_index=self.shard_index, dataloading_host_count=self.shard_count)
+    # Each colocated host logs its setup times, to find the slow hosts that hold up the first step.
+    start = time.monotonic()
+    ds = call_with_transient_retry(
+        lambda: self.get_ds_fn(dataloading_host_index=self.shard_index, dataloading_host_count=self.shard_count)
+    )
+    ds_init_s = time.monotonic() - start
+    start = time.monotonic()
     if self.elastic:
       # The ElasticIterator built by `preprocessing_fn` shards the data itself.
-      self.dataloader = self.preprocessing_fn(dataset=ds, shard_index=self.shard_index, shard_count=self.shard_count)
+      self.dataloader = call_with_transient_retry(
+          lambda: self.preprocessing_fn(dataset=ds, shard_index=self.shard_index, shard_count=self.shard_count)
+      )
     else:
-      self.dataloader = self.preprocessing_fn(dataset=ds)
+      self.dataloader = call_with_transient_retry(lambda: self.preprocessing_fn(dataset=ds))
+    preprocess_s = time.monotonic() - start
+    max_logging.log(
+        f"RemoteIterator timings host={_host_label()} shard={self.shard_index}/{self.shard_count}"
+        f" ds_init_s={ds_init_s:.3f} preprocess_s={preprocess_s:.3f}"
+    )
     if hasattr(self.dataloader, "as_numpy_iterator"):
       self.iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
       self.iterator = iter(self.dataloader)
     else:
       raise ValueError("Type error: dataloader should be Iterable.")
+    self._first_batch_pending = True
+
+  def _next_local_batch(self):
+    """Returns this host's next batch, logging how long it took if it's the first batch since `reset()`."""
+    if not self._first_batch_pending:
+      return next(self.iterator)
+    start = time.monotonic()
+    local_data = next(self.iterator)
+    first_batch_s = time.monotonic() - start
+    max_logging.log(
+        f"RemoteIterator first batch host={_host_label()} shard={self.shard_index}/{self.shard_count}"
+        f" first_batch_s={first_batch_s:.3f}"
+    )
+    self._first_batch_pending = False
+    return local_data
 
   def close(self, dummy_array=None):
     if hasattr(self, "iterator"):
@@ -461,7 +534,7 @@ class RemoteIterator:
 
   def get_next(self, dummy_array):
     """Gets the next batch of data and forms a global array."""
-    local_data = next(self.iterator)
+    local_data = self._next_local_batch()
 
     def form_global_array_colocated_python(path, array, devices, global_shape, sharding):
       try:
