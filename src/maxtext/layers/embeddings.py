@@ -95,13 +95,22 @@ class Embed(nnx.Module):
     self.dtype = dtype
     self.attend_dtype = attend_dtype
     embed_weight_dtype = get_weight_dtype(self.config, "token_embedder")
+    default_axes = ("vocab", "embed_vocab")
+    init_value = embedding_init(
+        rngs.params(),
+        (self.num_embeddings, self.num_features),
+        embed_weight_dtype,
+    )
+    # Only the token table (num_embeddings == vocab_size) moves to vocab-on-FSDP storage.
+    vocab_on_fsdp = getattr(config, "embedding_vocab_on_fsdp", False) and num_embeddings == config.vocab_size
+    if vocab_on_fsdp:
+      # Random bits from a sharded RngBitGenerator depend on its output sharding, so draw the
+      # table under the default sharding and let XLA reshard it: initial values stay identical.
+      default_pspec = logical_to_mesh_axes(default_axes, mesh, rules=getattr(config, "logical_axis_rules", None))
+      init_value = jax.lax.with_sharding_constraint(init_value, NamedSharding(mesh, default_pspec))
     self.embedding = nnx.Param(
-        embedding_init(
-            rngs.params(),
-            (self.num_embeddings, self.num_features),
-            embed_weight_dtype,
-        ),
-        sharding=("vocab", "embed_vocab"),
+        init_value,
+        sharding=("vocab_fsdp", "embed_vocab_replicated") if vocab_on_fsdp else default_axes,
     )
 
   def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN, lookup_fn: Any = None) -> Array:
