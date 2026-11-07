@@ -665,21 +665,16 @@ class Attention(nnx.Module):
     qkv_proj = self.qkv_proj(inputs, out_sharding)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
 
-    # Since fused QKV projection places all heads along the same axis which could be tensor
-    # parallel partitioned, we must use shard_map to split into equally partitioned Q, K, V arrays.
-    q_bshd = self._logical_to_mesh_axes(self.query_axis_names)
-    k_bshd = self._logical_to_mesh_axes(self.key_axis_names)
-    v_bshd = self._logical_to_mesh_axes(self.value_axis_names)
-
-    @jax.shard_map(mesh=self.mesh, in_specs=(q_bshd,), out_specs=(q_bshd, k_bshd, v_bshd))
-    def split_qkv(qkv_proj: Array) -> tuple[Array, Array, Array]:
-      num_local_heads = qkv_proj.shape[2]
-      num_query_heads = (num_local_heads * self.num_query_heads) // (self.num_query_heads + 2 * self.num_kv_heads)
-      num_kv_heads = (num_local_heads - num_query_heads) // 2
-
-      return tuple(jnp.split(qkv_proj, [num_query_heads, num_query_heads + num_kv_heads], axis=2))
-
-    return split_qkv(qkv_proj)
+    # The fused kernel stores heads globally as [Q_0..Q_{nq-1} | K_0..K_{nkv-1} | V_0..V_{nkv-1}] on the `heads`
+    # axis, which is sharded over tensor parallelism. A contiguous shard of that axis is therefore not a
+    # proportional [Q | K | V] slice (e.g. MHA with 8 heads at TP=2: shard 0 holds Q_0..Q_7 and K_0..K_3), so the
+    # split has to use the global head boundaries. The partitioner moves heads between devices as needed, and the
+    # usual Q / K / V shardings are re-applied afterwards.
+    query, key, value = jnp.split(qkv_proj, [self.num_query_heads, self.num_query_heads + self.num_kv_heads], axis=2)
+    query = self._maybe_shard_with_logical(query, self.query_axis_names)
+    key = self._maybe_shard_with_logical(key, self.key_axis_names)
+    value = self._maybe_shard_with_logical(value, self.value_axis_names)
+    return query, key, value
 
   @property
   def out_head_dim(self) -> int:
