@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794041016409,
+  "lastUpdate": 1794055688647,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -65658,6 +65658,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4413.322000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "ff629bbc618dab659ff90f465388f450a690008f",
+          "message": "Fix multi-host reshard_train_state with scanned NNX RNG keys (scan_layers=True).\n\n# Description\n\nWhen `shard_optimizer_over_data=True` (ZeRO-1) and `scan_layers=True` run on multi-host (`jax.process_count() > 1`), `reshard_train_state` previously called `jax.device_put(state, state_mesh_shardings)` directly on a `TrainState` PyTree containing scanned typed PRNG keys (`rngs.{params,dropout,aqt}.key` of shape `(num_layers,)`).\n\nIn JAX (`jax._src.sharding_impls.logical_sharding`), a 1D replicated `PRNGKeyArray` reports `NamedSharding(mesh, P(None,))` as its `.sharding` because `logical_sharding` pads `phys_sharding.spec` to `len(phys_shape)` with `None` before slicing off the inner key shape's dimensions. Meanwhile, `get_nnx_var_named_sharding_with_scan_axis` assigns `NamedSharding(mesh, P())` to unannotated NNX variables. Because `jax.device_put` checks `src_sharding == dst_sharding` (rather than `is_equivalent_to`) for its fast-path short-circuit and `PRNGKeyArray` does not take `ArrayImpl`'s multi-host resharding path, `jax.device_put` falls through to the `is_fully_addressable` check and raises `ValueError` on multi-host runs before step 0.\n\nOn multi-controller runs (`not enable_single_controller`), `_device_put_with_raw_keys` unwraps typed PRNG keys via `jax.random.key_data`, appends `None` dimensions for the inner key shape via `_raw_key_sharding`, executes a single `jax.device_put` call across all leaves (preserving zero-copy HBM reuse for unchanged model parameters and already-equivalent scanned RNG keys on both single-process and multi-process runs), and re-wraps the keys via `jax.random.wrap_key_data`.\n\n# Tests\n\n* `pytest tests/unit/sharding_reshard_train_state_test.py`: unit and two-process distributed regression tests verifying `reshard_train_state` across `nnx.RngKey`-wrapped and bare typed keys and across two JAX CPU processes (`gloo`), including zero-copy buffer reuse (`unsafe_buffer_pointer()`) for `P(None,)` -> `P()` and multi-host resharding for `P(None,)` -> `P(\"data\")`.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1016160810",
+          "timestamp": "2026-11-07T08:00:13Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/ff629bbc618dab659ff90f465388f450a690008f"
+        },
+        "date": 1794055687896,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 260.05399999999986,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 65.41000000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2121.7019999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 140.7409999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 164.178,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4657.304999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1599.6350000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 209.19500000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4482.613,
             "unit": "sec"
           },
           {
