@@ -21,12 +21,32 @@ fi
 run_id=$1
 use_pathways=${2:-false}
 export MODEL_NAME='gpt-oss-20b'
+TOKENIZER_PATH='unsloth/gpt-oss-20b-BF16'
 
 # Non-Googlers please remember to point BASE_OUTPUT_DIRECTORY to the GCS paths where you have the scanned and unscanned checkpoints stored
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-# Step 1: Run SFT on the converted checkpoint
+# Step 1: Run inference on the pre-converted checkpoint
+python3 -m maxtext.inference.vllm_decode \
+    model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.5 \
+    prompt='Suggest some famous landmarks in London.' \
+    decode_sampling_temperature=0.0 \
+    max_target_length=256 \
+    max_num_batched_tokens=256 \
+    use_chat_template=True \
+    scan_layers=false \
+    prefuse_moe_weights=True \
+    ici_tensor_parallelism=4 \
+    ici_data_parallelism=8 \
+    weight_dtype=bfloat16 \
+    enable_single_controller=${use_pathways}
+
+# Step 2: Run SFT on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
@@ -39,3 +59,22 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False
+
+# Step 3: Run inference on the checkpoint produced by the SFT run
+python3 -m maxtext.inference.vllm_decode \
+    model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/2/model_params \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.5 \
+    prompt='Suggest some famous landmarks in London.' \
+    decode_sampling_temperature=0.0 \
+    max_target_length=256 \
+    max_num_batched_tokens=256 \
+    use_chat_template=True \
+    scan_layers=true \
+    prefuse_moe_weights=True \
+    ici_tensor_parallelism=4 \
+    ici_data_parallelism=8 \
+    weight_dtype=bfloat16 \
+    enable_single_controller=${use_pathways}
