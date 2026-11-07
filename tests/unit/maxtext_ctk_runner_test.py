@@ -15,6 +15,7 @@
 """Unit tests for Cluster Toolkit (gcluster) benchmark runner and configs."""
 
 import argparse
+import copy
 import subprocess
 import unittest
 from unittest import mock
@@ -27,6 +28,10 @@ from benchmarks.maxtext_ctk_runner import (
     LibTpuType,
     PathwaysConfig,
     WorkloadConfig,
+    _build_args_from_config,
+    _get_config_tuning_params,
+    _resolve_tuning_params,
+    build_user_command,
     generate_workload_cmd,
     wait_for_workload_completion,
 )
@@ -402,6 +407,102 @@ class CtkRunnerTest(unittest.TestCase):
     ret = args_helper._handle_delete(cluster_config, user="alice")  # pylint: disable=protected-access
     self.assertEqual(ret, 1)
     mock_system.assert_not_called()
+
+
+class CtkRunnerTuningOverridesTest(unittest.TestCase):
+  """Tests for WorkloadConfig.extra_tuning_params (elastic/goodput/checkpoint/data-input overrides)."""
+
+  _ELASTIC_OVERRIDES = {
+      "elastic_enabled": True,
+      "enable_single_controller": True,
+      "elastic_min_slice_count": 1,
+      "enable_pathways_goodput": True,
+      "enable_goodput_recording": True,
+      "goodput_upload_interval_seconds": 30,
+      "monitor_goodput": True,
+      "enable_checkpointing": True,
+      "async_checkpointing": True,
+      "enable_checkpoint_cloud_logger": True,
+      "checkpoint_period": 10,
+      "colocated_python_data_input": True,
+      "tokenizer_path": "src/maxtext/assets/tokenizers/tokenizer.llama2",
+      "dataset_type": "grain",
+      "grain_train_files": "gs://my-bucket/data/*.array_record",
+      "profiler": None,
+  }
+
+  def _wl_config(self, extra_tuning_params=None, pathways=False, model=None):
+    # Deep-copy the shared module-level model so tests never leak state into each other.
+    model = copy.deepcopy(model or trillium_configs.default_basic_1)
+    return WorkloadConfig(
+        model=model,
+        num_slices=2,
+        device_type="v6e-256",
+        base_output_directory="gs://my-bucket/outputs",
+        base_docker_image=None if pathways else "maxtext_base_image",
+        libtpu_type=LibTpuType.MAXTEXT,
+        pathways_config=PathwaysConfig(runner_image="runner:latest") if pathways else None,
+        generate_metrics_and_upload_to_big_query=False,
+        extra_tuning_params=extra_tuning_params,
+    )
+
+  def test_no_extra_tuning_params_renders_like_before(self):
+    wl_config = self._wl_config()
+    expected = "".join(f"{k}={v} " for k, v in wl_config.model.tuning_params.items())
+    self.assertEqual(_get_config_tuning_params(wl_config), expected)
+
+  def test_extra_tuning_params_override_and_unset(self):
+    shared_params_before = dict(trillium_configs.default_basic_1.tuning_params)
+    wl_config = self._wl_config(
+        {"enable_checkpointing": True, "enable_single_controller": False, "profiler": None, "missing_key": None},
+        pathways=True,
+    )
+    params = _resolve_tuning_params(wl_config)
+    self.assertIs(params["enable_checkpointing"], True)  # beats model.tuning_params (False)
+    self.assertIs(params["enable_single_controller"], False)  # beats BASE_PATHWAYS_TUNING_PARAMS (True)
+    self.assertNotIn("profiler", params)  # None removes the key
+    self.assertNotIn("missing_key", params)  # unsetting an absent key is a no-op
+    self.assertEqual(wl_config.model.tuning_params["enable_checkpointing"], False)
+    self.assertEqual(trillium_configs.default_basic_1.tuning_params, shared_params_before)
+
+  def test_build_user_command_elastic_goodput_ckpt_grain(self):
+    wl_config = self._wl_config(dict(self._ELASTIC_OVERRIDES), pathways=True)
+    cmd = build_user_command(name="pw-run", wl_config=wl_config)
+    train_args = cmd.split("python3 -m maxtext.trainers.pre_train.train", 1)[1]
+    for expected in (
+        "elastic_enabled=True",
+        "enable_single_controller=True",
+        "elastic_min_slice_count=1",
+        "enable_pathways_goodput=True",
+        "enable_goodput_recording=True",
+        "goodput_upload_interval_seconds=30",
+        "monitor_goodput=True",
+        "enable_checkpointing=True",
+        "async_checkpointing=True",
+        "enable_checkpoint_cloud_logger=True",
+        "checkpoint_period=10",
+        "colocated_python_data_input=True",
+        "tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.llama2",
+        "dataset_type=grain",
+        "grain_train_files='gs://my-bucket/data/*.array_record'",  # glob is quoted for the container shell
+    ):
+      self.assertIn(f" {expected} ", train_args)
+    self.assertNotIn("enable_checkpointing=False", train_args)
+    self.assertNotIn("dataset_type=synthetic", train_args)
+    self.assertNotIn("profiler=", train_args)
+
+  def test_override_unsafe_chars_raise(self):
+    for bad_value in ('a"b', "a'b", "a`b", "a\\b"):
+      with self.subTest(bad_value=bad_value):
+        with self.assertRaises(ValueError):
+          _get_config_tuning_params(self._wl_config({"run_tag": bad_value}))
+
+  def test_build_args_from_config_uses_overrides(self):
+    wl_config = self._wl_config({"dataset_type": "grain", "per_device_batch_size": 4})
+    args = _build_args_from_config(wl_config)
+    self.assertEqual(args["dataset"], "grain")
+    self.assertEqual(args["global_batch_size"], 4 * 256 * 2)
+    self.assertIn('"dataset_type": "grain"', args["tuning_params"])
 
 
 if __name__ == "__main__":

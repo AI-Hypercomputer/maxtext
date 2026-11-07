@@ -13,11 +13,13 @@
 # limitations under the License.
 
 """
-This module provides utility functions for custom argument parsing 
+This module provides utility functions for custom argument parsing
 and defines a comprehensive set of command-line arguments for configuring a machine learning workload.
 """
 
 import argparse
+from collections.abc import Callable
+import re
 
 
 def parse_int_list(arg):
@@ -40,6 +42,47 @@ def str2bool(v):
     return False
   else:
     raise argparse.ArgumentTypeError("Boolean value expected (e.g., True or False).")
+
+
+# (MaxText key, argparse type, help). Each entry becomes a `--<key>` CLI flag and a
+# UserConfig field. None (the default) means "don't emit", so the model config /
+# base.yml value applies.
+MAXTEXT_FLAG_SPECS: tuple[tuple[str, Callable, str], ...] = (
+    # Elastic training
+    ("elastic_enabled", str2bool, "Enable elastic training (Pathways)."),
+    ("enable_single_controller", str2bool, "Enable single-controller mode."),
+    ("elastic_min_slice_count", int, "Min slices to keep training; -1 = pause-resume, 1 = replica-resize."),
+    # Goodput
+    ("enable_pathways_goodput", str2bool, "Enable Pathways goodput."),
+    ("enable_goodput_recording", str2bool, "Record goodput events."),
+    ("goodput_upload_interval_seconds", int, "Goodput upload interval in seconds."),
+    ("monitor_goodput", str2bool, "Run the goodput monitor."),
+    # Checkpointing
+    ("enable_checkpointing", str2bool, "Enable checkpointing."),
+    ("async_checkpointing", str2bool, "Use async checkpointing."),
+    ("enable_checkpoint_cloud_logger", str2bool, "Enable checkpoint cloud logger."),
+    ("checkpoint_period", int, "Checkpoint every N steps."),
+    # Colocated Python data input / dataset
+    ("colocated_python_data_input", str2bool, "Use colocated Python for data input (Pathways)."),
+    ("tokenizer_path", str, "Tokenizer path."),
+    ("dataset_type", str, "Dataset type, e.g. synthetic, grain, tfds, hf."),
+    ("grain_train_files", str, "Grain train file pattern, e.g. gs://bucket/*.array_record."),
+)
+MAXTEXT_FLAG_NAMES = tuple(spec[0] for spec in MAXTEXT_FLAG_SPECS)
+
+_OVERRIDE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
+
+
+class _KeyValueAction(argparse.Action):
+  """Repeatable KEY=VALUE flag merged into a dict. An empty VALUE maps to None (unset)."""
+
+  def __call__(self, parser, namespace, values, option_string=None):
+    key, sep, value = values.partition("=")
+    if not sep or not _OVERRIDE_KEY_RE.fullmatch(key):
+      parser.error(f"{option_string} expects KEY=VALUE, got {values!r}")
+    merged = dict(getattr(namespace, self.dest, None) or {})  # copy; never mutate the default
+    merged[key] = value if value != "" else None
+    setattr(namespace, self.dest, merged)
 
 
 def add_arguments(parser: argparse.ArgumentParser):
@@ -176,6 +219,19 @@ def add_arguments(parser: argparse.ArgumentParser):
       action="store_true",
       default=False,
       help="Skip gcluster prerequisite and dependency validation during workload execution",
+  )
+
+  # MaxText training overrides (elastic training, goodput, checkpointing, data input)
+  overrides_group = parser.add_argument_group("MaxText training overrides")
+  for name, arg_type, help_text in MAXTEXT_FLAG_SPECS:
+    overrides_group.add_argument(f"--{name}", type=arg_type, default=None, help=help_text)
+  overrides_group.add_argument(
+      "--maxtext_override",
+      dest="maxtext_overrides",
+      action=_KeyValueAction,
+      default={},
+      metavar="KEY=VALUE",
+      help="Extra MaxText key=value override (repeatable). An empty VALUE removes the key, e.g. 'profiler='.",
   )
 
   # Other configurations
