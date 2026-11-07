@@ -287,6 +287,7 @@ EXCLUDED_FILES=(
   '^\.agents/'
   '^\.gemini/'
   '\.github/workflows/update_changelog.yml$'
+  '^\.github/workflows/ci_pulse_publish\.yml$'
   '^\.github/scripts/'
   '^tools/'
   '^tests/dev/'
