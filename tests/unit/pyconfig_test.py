@@ -300,6 +300,19 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.base_emb_dim, 1024)  # override
     self.assertEqual(config.base_mlp_dim, 24576)  # unchanged
 
+  def test_nested_audio_overrides_preserve_model_defaults(self):
+    """A partial audio override retains the rest of the selected backend's settings."""
+    config = pyconfig.initialize(
+        ["", get_test_config_path()],
+        skip_jax_distributed_system=True,
+        model_name="qwen3-omni-30b-a3b",
+        override_model_config=True,
+        audio_output_config={"talker": {"num_hidden_layers": 1}},
+    )
+    self.assertEqual(config.audio_output_config["talker"]["num_hidden_layers"], 1)
+    self.assertEqual(config.audio_output_config["talker"]["hidden_size"], 1024)
+    self.assertEqual(config.audio_output_config["code2wav"]["hidden_size"], 1024)
+
   def test_overriding_model_raises_error(self):
     """Test that overriding a model config with override_model_config=False raises an error."""
     with self.assertRaises(ValueError):
