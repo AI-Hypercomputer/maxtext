@@ -130,10 +130,10 @@ def drop_layer_axis(specs: Any) -> Any:
 # 8x8x8: MLA heads on core, EP over (x, core), FSDP over (y, z).
 _MLA_8X8X8 = dsv3_types.DSv3MLAWeightsPytree(
     q_down=P(None, ("y", "z"), None),
-    # q_up carries its FSDP axes on its q_lora dim: 64 ways divide its 192-wide
-    # head dim but not the 32-wide even/odd rope halves that
-    # `init_dsv3_mla_weights` slices out of it, and JAX cannot slice a sharded
-    # dim into pieces its mesh axes do not divide.
+    # q_up carries its FSDP axes on its q_lora dim: 64 ways over its 192-wide
+    # head dim would leave 3-row shards on the minor TPU tile dim, and
+    # `init_dsv3_mla_weights` temporarily replicates the trailing axis while
+    # permuting RoPE channels.
     q_up=P(None, ("y", "z"), "core", None),
     q_norm_scale=P(None, None),
     kv_down=P(None, ("y", "z"), None),
@@ -298,9 +298,10 @@ _SPARSE_4X8X8 = dsv3_types.DSv3SparseLayerWeightsPytree(
 )
 
 # 4x4x8: the 4x8x8 layout, except q_up carries its 16-way FSDP over (x, y) on
-# its 192-wide head dim (as k_up and v_up do): 16 ways divide the 32-wide
-# even/odd rope halves in `init_dsv3_mla_weights`, whereas sharding q_lora
-# (1536 / 16 = 96) pads the 128-wide minor TPU tile dim by 33%.
+# its 192-wide head dim (as k_up and v_up do), whereas sharding q_lora
+# (1536 / 16 = 96) pads the 128-wide minor TPU tile dim by 33%;
+# `init_dsv3_mla_weights` temporarily replicates the trailing axis while
+# permuting RoPE channels.
 _MLA_4X4X8 = dataclasses.replace(_MLA_4X8X8, q_up=P(None, None, "core", ("x", "y")))
 _SPARSE_4X4X8 = dataclasses.replace(_SPARSE_4X8X8, mla=_MLA_4X4X8)
 
