@@ -2441,6 +2441,21 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "raidan"):
       t.prepare_weight_sync(staging_transport="raidan")
 
+  def test_purge_raiden_buffers_and_release_weight_sync(self):
+    """`_purge_raiden_buffers` releases staged Raiden buffers and `release_weight_sync` invokes it."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.assertEqual(t._purge_raiden_buffers(), 0)  # pylint: disable=protected-access
+
+    mock_sync = mock.MagicMock()
+    mock_sync.release_buffers.return_value = 3
+    mock_sync.metrics.return_value = {"transferred": 3}
+    t._raiden_sync = mock_sync  # pylint: disable=protected-access
+    self.assertEqual(t._purge_raiden_buffers(), 3)  # pylint: disable=protected-access
+
+    mock_sync.release_buffers.return_value = 0
+    self.assertTrue(t.release_weight_sync())
+    self.assertEqual(mock_sync.release_buffers.call_count, 2)
+
   def _sharded_batch_spec(self, engine, axis="data"):
     """A data sharding whose batch dim is actually sharded.
 
