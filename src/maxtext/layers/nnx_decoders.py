@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Module for decoder layers"""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -65,6 +66,7 @@ from maxtext.models import (
     ming,
     mistral,
     mixtral,
+    muse_spark,
     olmo3,
     qwen2,
     qwen3,
@@ -633,6 +635,18 @@ class NNXDecoder(nnx.Module):
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
     self.is_ming = self.config.decoder_block == DecoderBlockType.MING
     self.is_hy4 = self.config.decoder_block == DecoderBlockType.HY4
+    self.is_muse_spark = self.config.decoder_block == DecoderBlockType.MUSE_SPARK
+
+    if self.is_muse_spark:
+      self.embed_norm = muse_spark.MuseSparkRMSNorm(
+          num_features=config.emb_dim,
+          epsilon=config.normalization_layer_epsilon,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
+          with_scale=False,
+          rngs=rngs,
+      )
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -757,6 +771,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_ming(rngs)
     elif self.is_hy4:
       self._init_scanned_hy4(rngs)
+    elif self.is_muse_spark:
+      self._init_scanned_muse_spark(rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -1011,6 +1027,20 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
 
+  def _init_scanned_muse_spark(self, rngs):
+    """Initializes Muse-Spark scanned layers: unrolls prefix layers and scans homogeneous 4-layer MoE cycles."""
+    config = self.config
+    num_prefix_layers, num_blocks, remainder_start = muse_spark.scan_layout(config)
+    for layer_idx in list(range(num_prefix_layers)) + list(range(remainder_start, config.num_decoder_layers)):
+      self._create_and_register_layer(muse_spark.MuseSparkDecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx)
+    if num_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          muse_spark.MuseSparkScannableBlock,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
+
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
     config = self.config
@@ -1087,6 +1117,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.MING,
           DecoderBlockType.HY4,
+          DecoderBlockType.MUSE_SPARK,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1514,6 +1545,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
         DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
         DecoderBlockType.HY4: get_scannable(hy4.Hy4DecoderLayer, hy4.Hy4ScannableBlock),
+        DecoderBlockType.MUSE_SPARK: get_scannable(muse_spark.MuseSparkDecoderLayer, muse_spark.MuseSparkScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1704,6 +1736,14 @@ class NNXDecoder(nnx.Module):
           shard_mode=self.config.shard_mode,
           rngs=rngs,
       )
+    elif self.config.decoder_block == DecoderBlockType.MUSE_SPARK:
+      return functools.partial(
+          muse_spark.MuseSparkRMSNorm,
+          num_features=num_features,
+          shard_mode=self.config.shard_mode,
+          with_scale=True,
+          rngs=rngs,
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -1829,7 +1869,10 @@ class NNXDecoder(nnx.Module):
       # `token_embedder` is outside the scanned decoder loop; wrap `.at[inputs].get(...)` so its
       # backward FSDP gradient reduction uses an explicit SparseCore `reduce-scatter`.
       lookup_fn = functools.partial(fsdp_prefetch.explicit_fsdp_embed_lookup, mesh=self.mesh)
-    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode, lookup_fn=lookup_fn)
+    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode, lookup_fn=lookup_fn)
+    if self.is_muse_spark:
+      y = self.embed_norm(y)
+    return y
 
   def _reduce_mhc_streams(self, y):
     """Collapses a 4D mHC hidden state down to 3D.
@@ -1970,6 +2013,11 @@ class NNXDecoder(nnx.Module):
         )
       else:
         logits = self.logits_dense(y, out_sharding=out_sharding, kernel_all_gather_fn=kernel_all_gather_fn)
+      if self.is_muse_spark:
+        logits = logits * cfg.muse_spark_output_multiplier
+      if cfg.final_logits_soft_cap:
+        logits = logits / cfg.final_logits_soft_cap
+        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
@@ -2427,6 +2475,8 @@ class NNXDecoder(nnx.Module):
           y = self._apply_ming_scanned_blocks(y, layer_args, layer_kwargs)
         elif self.is_hy4:
           y = self._apply_hy4_scanned_blocks(y, layer_args, layer_kwargs)
+        elif self.is_muse_spark:
+          y = self._apply_muse_spark_scanned_blocks(y, layer_args, layer_kwargs, kv_caches=kv_caches)
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -2681,27 +2731,52 @@ class NNXDecoder(nnx.Module):
 
     expert_indices = None
     try:
+      if self.is_muse_spark and cfg.scan_layers:
+        num_prefix_layers, num_blocks, remainder_start = muse_spark.scan_layout(cfg)
+        expert_indices_list = []
+        for i in range(num_prefix_layers):
+          lyr = getattr(self, f"layers_{i}", None)
+          moe_blk = getattr(lyr, "moe_block", None)
+          if moe_blk is not None and hasattr(moe_blk, "selected_experts"):
+            expert_indices_list.append(jnp.expand_dims(moe_blk.selected_experts[...], axis=0))
+        if num_blocks > 0 and hasattr(self, "scanned_blocks"):
+          cycle_experts = [
+              getattr(self.scanned_blocks, f"layers_{sub_id}").moe_block.selected_experts[...]
+              for sub_id in range(cfg.inhomogeneous_layer_cycle_interval)
+              if hasattr(getattr(self.scanned_blocks, f"layers_{sub_id}").moe_block, "selected_experts")
+          ]
+          if cycle_experts:
+            stacked = jnp.stack(cycle_experts, axis=1)
+            expert_indices_list.append(jnp.reshape(stacked, (-1,) + stacked.shape[2:]))
+        for i in range(remainder_start, cfg.num_decoder_layers):
+          lyr = getattr(self, f"layers_{i}", None)
+          moe_blk = getattr(lyr, "moe_block", None)
+          if moe_blk is not None and hasattr(moe_blk, "selected_experts"):
+            expert_indices_list.append(jnp.expand_dims(moe_blk.selected_experts[...], axis=0))
+        if expert_indices_list:
+          expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+      else:
 
-      def _path_sort_key(path):
-        key = []
-        for part in path:
-          nums = re.findall(r"\d+", str(part))
-          key.append(int(nums[0]) if nums else str(part))
-        return tuple(key)
+        def _path_sort_key(path):
+          key = []
+          for part in path:
+            nums = re.findall(r"\d+", str(part))
+            key.append(int(nums[0]) if nums else str(part))
+          return tuple(key)
 
-      intermediates = nnx.state(self, nnx.Intermediate)
-      flat_items = [
-          (path, val.value if hasattr(val, "value") else val)
-          for path, val in intermediates.flat_state()
-          if path and str(path[-1]) == "selected_experts"
-      ]
-      flat_items.sort(key=lambda item: _path_sort_key(item[0]))
-      expert_indices_list = [v for _, v in flat_items]
-      if expert_indices_list:
-        # Scanned blocks already carry a leading layer axis (3D); sequential
-        # layers are 2D and need that axis added before concatenating.
-        expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
-        expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+        intermediates = nnx.state(self, nnx.Intermediate)
+        flat_items = [
+            (path, val.value if hasattr(val, "value") else val)
+            for path, val in intermediates.flat_state()
+            if path and str(path[-1]) == "selected_experts"
+        ]
+        flat_items.sort(key=lambda item: _path_sort_key(item[0]))
+        expert_indices_list = [v for _, v in flat_items]
+        if expert_indices_list:
+          # Scanned blocks already carry a leading layer axis (3D); sequential
+          # layers are 2D and need that axis added before concatenating.
+          expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
+          expert_indices = jnp.concatenate(expert_indices_list, axis=0)
     except Exception:  # pylint: disable=broad-exception-caught
       expert_indices = None
 
@@ -2869,6 +2944,98 @@ class NNXDecoder(nnx.Module):
 
     for layer_idx in range(remainder_start, cfg.num_decoder_layers):
       y, prev_indexer_mask = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y, prev_indexer_mask)
+
+    return y
+
+  def _apply_muse_spark_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
+    """Applies Muse-Spark scanned decoder blocks: unrolled prefix layers, scanned cycles, unrolled remainder."""
+    cfg = self.config
+    cycle = cfg.inhomogeneous_layer_cycle_interval
+    num_prefix_layers, num_blocks, remainder_start = muse_spark.scan_layout(cfg)
+    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    policy = self.get_remat_policy() if use_remat else None
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
+    base_kwargs = dict(layer_kwargs)
+    routed_experts = base_kwargs.pop("forced_routed_experts", None)
+    if routed_experts is not None and kv_caches is not None and num_blocks > 0:
+      raise NotImplementedError(
+          "Forced routing is not supported together with externally-managed (vLLM) kv_caches in scanned layers."
+      )
+    fre_per_layer = (
+        forced_routed_experts_per_layer(routed_experts, cfg.num_decoder_layers) if routed_experts is not None else None
+    )
+
+    per_layer_metadata = None
+    per_block_kwargs = None
+    attention_metadata = base_kwargs.get("attention_metadata")
+    if kv_caches is not None and isinstance(attention_metadata, dict):
+      del base_kwargs["attention_metadata"]
+      per_layer_metadata = [layer_attention_metadata(attention_metadata, lyr) for lyr in range(cfg.num_decoder_layers)]
+      if num_blocks > 0:
+        scanned_metadata = per_layer_metadata[num_prefix_layers:remainder_start]
+        per_block_kwargs = [
+            {"attention_metadata": block_metadata}
+            for block_metadata in maxtext_utils.prepare_kv_caches_for_scan(
+                scanned_metadata, num_blocks, cycle, stack=False
+            )
+        ]
+
+    def apply_unrolled_layer(layer, inputs, layer_idx: int):
+      kw = dict(base_kwargs)
+      if fre_per_layer is not None:
+        kw["forced_routed_experts"] = fre_per_layer[layer_idx]
+      if kv_caches is not None:
+        kw["kv_cache"] = kv_caches[layer_idx]
+      if per_layer_metadata is not None:
+        kw["attention_metadata"] = per_layer_metadata[layer_idx]
+      if use_remat and kv_caches is None:
+        decoder_segment_ids, decoder_positions, deterministic, model_mode = layer_args
+        out_y, out_kv = self._apply_layer_with_remat(
+            layer,
+            inputs,
+            policy,
+            prevent_cse,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            **kw,
+        )
+      else:
+        out_y, out_kv = layer(inputs, *layer_args, **kw)
+      if kv_caches is not None and out_kv is not None:
+        kv_caches[layer_idx] = out_kv
+      return out_y
+
+    for layer_idx in range(num_prefix_layers):
+      y = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y, layer_idx)
+
+    if num_blocks > 0 and hasattr(self, "scanned_blocks"):
+      fre_scanned = None
+      if fre_per_layer is not None:
+        fre_scanned = jnp.reshape(
+            fre_per_layer[num_prefix_layers:remainder_start],
+            (num_blocks, cycle) + fre_per_layer.shape[1:],
+        )
+      scanned_kv_slice = kv_caches[num_prefix_layers:remainder_start] if kv_caches is not None else None
+      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(scanned_kv_slice, num_blocks, cycle, stack=False)
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=num_blocks,
+          kv_caches_stacked=grouped_kv_caches,
+          metadata_axis_name="scanned_blocks",
+          forced_routed_experts_scanned=fre_scanned,
+          per_iteration_kwargs=per_block_kwargs,
+          **base_kwargs,
+      )
+      if scanned_kv_slice is not None:
+        maxtext_utils.update_kv_caches_after_scan(scanned_kv_slice, grouped_kv_caches, num_blocks, cycle, stacked=False)
+        kv_caches[num_prefix_layers:remainder_start] = scanned_kv_slice
+
+    for layer_idx in range(remainder_start, cfg.num_decoder_layers):
+      y = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y, layer_idx)
 
     return y
 
@@ -3291,6 +3458,13 @@ class NNXDecoder(nnx.Module):
 
       if hasattr(self, "pipeline_module"):
         _add(getattr(self.pipeline_module, "layers", None))
+    elif self.is_muse_spark and self.config.scan_layers:
+      num_prefix_layers, _, remainder_start = muse_spark.scan_layout(self.config)
+      for i in range(num_prefix_layers):
+        _add(getattr(self, f"layers_{i}", None))
+      _append_scanned("scanned_blocks")
+      for i in range(remainder_start, self.config.num_decoder_layers):
+        _add(getattr(self, f"layers_{i}", None))
     else:
       if hasattr(self, "pipeline_module"):
         _add(getattr(self.pipeline_module, "layers", None))

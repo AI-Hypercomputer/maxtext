@@ -1666,6 +1666,68 @@ def HY4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def MUSE_SPARK_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace weights path and weights shape for meta-models/Muse-Spark-Open-816B-A42B."""
+  tcfg = config.get("text_config", config)
+  hidden_size = tcfg["hidden_size"]
+  intermediate_size = tcfg["intermediate_size"]
+  moe_hidden_size = tcfg.get("moe_hidden_size", hidden_size)
+  moe_intermediate_size = tcfg["moe_intermediate_size"]
+  num_hidden_layers = tcfg["num_hidden_layers"]
+  num_attention_heads = tcfg["num_attention_heads"]
+  num_key_value_heads = tcfg["num_key_value_heads"]
+  head_dim = tcfg.get("head_dim", hidden_size // num_attention_heads)
+  num_local_experts = tcfg["num_local_experts"]
+  vocab_size = tcfg["vocab_size"]
+  mlp_layer_types = tcfg.get("mlp_layer_types", ["sparse"] * num_hidden_layers)
+
+  mapping = {
+      "model.language_model.embed_tokens.weight": [vocab_size, hidden_size],
+      "model.language_model.norm.weight": [hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+  }
+
+  for i in range(num_hidden_layers):
+    pfx = f"model.language_model.layers.{i}"
+    is_moe = i < len(mlp_layer_types) and mlp_layer_types[i] == "sparse"
+    mapping.update(
+        {
+            f"{pfx}.input_layernorm.weight": [hidden_size],
+            f"{pfx}.self_attn.q_proj.weight": [num_attention_heads * head_dim, hidden_size],
+            f"{pfx}.self_attn.k_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+            f"{pfx}.self_attn.v_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+            f"{pfx}.self_attn.gate_proj.weight": [num_attention_heads * head_dim, hidden_size],
+            f"{pfx}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * head_dim],
+            f"{pfx}.post_attention_residual_gate.gate": [hidden_size],
+            f"{pfx}.pre_feedforward_layernorm.weight": [hidden_size],
+            f"{pfx}.post_feedforward_layernorm.weight": [hidden_size],
+            f"{pfx}.post_feedforward_residual_gate.gate": [hidden_size],
+        }
+    )
+    if is_moe:
+      mapping.update(
+          {
+              f"{pfx}.mlp.gate.weight": [num_local_experts, hidden_size],
+              f"{pfx}.mlp.gate.e_score_correction_bias": [num_local_experts],
+              f"{pfx}.mlp.pre_expert_proj.weight": [moe_hidden_size, hidden_size],
+              f"{pfx}.mlp.pre_expert_norm.weight": [moe_hidden_size],
+              f"{pfx}.mlp.experts.gate_up_proj": [num_local_experts, 2 * moe_intermediate_size, moe_hidden_size],
+              f"{pfx}.mlp.experts.down_proj": [num_local_experts, moe_hidden_size, moe_intermediate_size],
+              f"{pfx}.mlp.experts.post_expert_norm.weight": [moe_hidden_size],
+              f"{pfx}.mlp.post_expert_proj.weight": [hidden_size, moe_hidden_size],
+          }
+      )
+    else:
+      mapping.update(
+          {
+              f"{pfx}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+              f"{pfx}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+              f"{pfx}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+          }
+      )
+  return mapping
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1718,4 +1780,5 @@ HF_SHAPE = {
     "qwen3.8-flash-next": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
     "qwen3.8-flash-next-mini": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_HF_WEIGHTS_TO_SHAPE,
+    "muse-spark-816b-a42b": MUSE_SPARK_HF_WEIGHTS_TO_SHAPE,
 }

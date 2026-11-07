@@ -64,6 +64,44 @@ SAFE_TENSORS_WEIGHTS_FILE = "model.safetensors"
 SAFE_TENSORS_INDEX_FILE = "model.safetensors.index.json"
 DEFAULT_MAX_SHARD_SIZE = 1024 * 1024 * 1024 * 3  # 3GB default
 
+# Router state bf16 cannot hold exactly: the fp32 routing bias and integer
+# token-to-expert ids (bf16 rounds integers above 256).
+FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+FULL_PRECISION_SUBSTRINGS = (
+    "-attn_hc-",
+    "-ffn_hc-",
+    "-hc_head-",
+    "-self_attention-sinks",
+    "-self_attention-indexer-k_norm-",
+    "-self_attention-indexer-weights_proj-",
+)
+# Weights that a specific MaxText model keeps in float32, keyed by model name.
+MODEL_FULL_PRECISION_SUBSTRINGS = {
+    # `MuseSparkPreTrainedModel._keep_in_fp32_modules_strict` keeps router kernels/biases and residual gates in fp32.
+    "muse-spark-816b-a42b": (
+        "-moe_block-gate-kernel",
+        "-moe_block-gate-bias",
+        "-post_attention_residual_gate-gate",
+        "-post_feedforward_residual_gate-gate",
+    ),
+}
+
+
+def param_save_dtype(mt_param_key_or_keys, save_dtype: Any, model_name: str = "") -> Any:
+  """Returns float32 for full-precision router/HC/sink/indexer/gate state when saving bfloat16."""
+  raw_dtype = getattr(save_dtype, "value", save_dtype)
+  try:
+    is_bf16 = raw_dtype == "bfloat16" or jnp.dtype(raw_dtype) == jnp.bfloat16
+  except TypeError:
+    is_bf16 = False
+  if not is_bf16:
+    return save_dtype
+  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
+  substrings = FULL_PRECISION_SUBSTRINGS + MODEL_FULL_PRECISION_SUBSTRINGS.get(model_name, ())
+  if any(k.startswith(FULL_PRECISION_PREFIXES) or any(sub in k for sub in substrings) for k in keys):
+    return "float32"
+  return save_dtype
+
 
 def _get_local_directory(output_dir: str) -> str:
   """Determines the local directory for saving files."""
@@ -261,6 +299,9 @@ def process_maxtext_param(
 
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
+  target_save_dtype = param_save_dtype(
+      maxtext_param_key, maxtext_config.weight_dtype, getattr(maxtext_config, "model_name", "")
+  )
 
   # Case 1: Unscanned
   if not isinstance(hf_target_paths, list):
@@ -272,7 +313,7 @@ def process_maxtext_param(
         output_weights,
         current_hook_fns,
         hf_shape_map,
-        save_dtype=maxtext_config.weight_dtype,
+        save_dtype=target_save_dtype,
     )
     return output_weights
 
@@ -308,7 +349,7 @@ def process_maxtext_param(
           output_weights,
           current_hook_fns,
           hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
+          save_dtype=target_save_dtype,
       )
 
     return output_weights
@@ -332,7 +373,7 @@ def process_maxtext_param(
           output_weights,
           current_hook_fns,
           hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
+          save_dtype=target_save_dtype,
       )
       return
     axis_to_slice = axes[level] - level
@@ -882,16 +923,30 @@ def load_orbax_checkpoint(config) -> dict:
   # Create a mesh with all devices for unsharded restoration
   devices = np.array(jax.devices()).reshape((-1,))
   single_device_mesh = jax.sharding.Mesh(devices, ("x",))
+  model_name = getattr(config, "model_name", "")
 
-  def create_restore_args(tree_metadata):
+  def _checkpoint_path_to_param_key(path_tuple) -> str:
+    parts = param_key_parts_from_path(path_tuple)
+    if parts and parts[0] == "base":
+      parts = parts[1:]
+    if len(parts) >= 2 and parts[0] == "params" and (parts[1] == "params" or f"{parts[1]}-" in FULL_PRECISION_PREFIXES):
+      parts = parts[1:]
+    if parts and not (parts[0] == "params" or f"{parts[0]}-" in FULL_PRECISION_PREFIXES):
+      parts = ["params"] + parts
+    return "-".join(parts)
+
+  def create_restore_args(path_tuple, tree_metadata):
     """Create restore args for unsharded restoration."""
     if hasattr(tree_metadata, "shape"):
       restore_dtype = None
       if hasattr(tree_metadata, "dtype") and tree_metadata.dtype is not None:
         try:
           orig_dtype = jnp.dtype(tree_metadata.dtype)
-          if jnp.issubdtype(orig_dtype, jnp.floating) and getattr(config, "weight_dtype", None) is not None:
-            restore_dtype = jnp.dtype(config.weight_dtype)
+          target_weight_dtype = getattr(config, "weight_dtype", None)
+          if jnp.issubdtype(orig_dtype, jnp.floating) and target_weight_dtype is not None:
+            mt_key = _checkpoint_path_to_param_key(path_tuple)
+            effective_dtype = param_save_dtype(mt_key, target_weight_dtype, model_name)
+            restore_dtype = jnp.dtype(effective_dtype)
           else:
             restore_dtype = orig_dtype
         except (TypeError, ValueError):
@@ -901,7 +956,7 @@ def load_orbax_checkpoint(config) -> dict:
           dtype=restore_dtype,
       )
     elif isinstance(tree_metadata, dict):
-      return {k: create_restore_args(v) for k, v in tree_metadata.items()}
+      return {k: create_restore_args(path_tuple + (k,), v) for k, v in tree_metadata.items()}
     else:
       return None
 
@@ -923,8 +978,8 @@ def load_orbax_checkpoint(config) -> dict:
           checkpoint_tree = filtered_tree
           max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
 
-    restore_args = jax.tree_util.tree_map(
-        lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+    restore_args = jax.tree_util.tree_map_with_path(
+        lambda p, x: create_restore_args(p, x) if hasattr(x, "shape") else None,
         checkpoint_tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
@@ -1122,11 +1177,12 @@ def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | No
     model_classes = [Qwen3OmniMoeForConditionalGeneration]
   # 2. For all other models, use AutoModel cascade logic
   else:
-    from transformers import AutoModel  # pylint: disable=import-outside-toplevel
+    from transformers import AutoModel, AutoModelForImageTextToText  # pylint: disable=import-outside-toplevel
     # Fallback cascade:
     # 1. AutoModelForCausalLM (Standard text-only LLMs)
-    # 2. Base AutoModel (Final fallback)
-    model_classes = [AutoModelForCausalLM, AutoModel]
+    # 2. AutoModelForImageTextToText (Multimodal VLMs with LM head, e.g. Muse-Spark)
+    # 3. Base AutoModel (Final fallback)
+    model_classes = [AutoModelForCausalLM, AutoModelForImageTextToText, AutoModel]
 
   # Note: transformers deprecates `torch_dtype` in favor of standard `dtype` in model loading
   last_exception = None

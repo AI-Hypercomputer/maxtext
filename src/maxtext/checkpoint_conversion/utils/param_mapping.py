@@ -5424,6 +5424,201 @@ def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
   return hooks
 
 
+def _muse_spark_scan_layout(n_layers: int, cycle: int, first_num_dense: int, num_experts: int, scan_layers: bool):
+  """Computes `(num_prefix, num_blocks, rem_start)` matching `muse_spark.scan_layout`."""
+  if not scan_layers or num_experts <= 1 or cycle <= 0:
+    return n_layers, 0, n_layers
+  align = n_layers % cycle
+  if first_num_dense <= align:
+    num_prefix = align
+  else:
+    extra = first_num_dense - align
+    num_prefix = align + ((extra + cycle - 1) // cycle) * cycle
+  num_prefix = min(n_layers, num_prefix)
+  num_blocks = (n_layers - num_prefix) // cycle
+  rem_start = num_prefix + num_blocks * cycle
+  return num_prefix, num_blocks, rem_start
+
+
+def MUSE_SPARK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter keys to HuggingFace safetensors keys for meta-models/Muse-Spark-Open-816B-A42B."""
+
+  def _get(cfg, key, default=None):
+    if isinstance(cfg, dict):
+      return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+  tcfg = _get(config, "text_config", config)
+  n_layers = int(
+      getattr(maxtext_config, "num_decoder_layers", None)
+      or getattr(maxtext_config, "base_num_decoder_layers", None)
+      or _get(tcfg, "num_hidden_layers", 62)
+  )
+  first_num_dense = int(getattr(maxtext_config, "first_num_dense_layers", 0) or 0)
+  cycle = int(getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 4) or 4)
+  num_experts = int(getattr(maxtext_config, "num_experts", _get(tcfg, "num_local_experts", 256)))
+
+  mapping = {
+      "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.language_model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+
+  def _add_layer(prefix: str, get_hf_key, is_moe: bool):
+    mapping[f"{prefix}-input_layernorm-scale"] = get_hf_key("input_layernorm.weight")
+    mapping[f"{prefix}-self_attention-query-kernel"] = get_hf_key("self_attn.q_proj.weight")
+    mapping[f"{prefix}-self_attention-key-kernel"] = get_hf_key("self_attn.k_proj.weight")
+    mapping[f"{prefix}-self_attention-value-kernel"] = get_hf_key("self_attn.v_proj.weight")
+    mapping[f"{prefix}-self_attention-gate_proj-kernel"] = get_hf_key("self_attn.gate_proj.weight")
+    mapping[f"{prefix}-self_attention-out-kernel"] = get_hf_key("self_attn.o_proj.weight")
+    mapping[f"{prefix}-post_attention_residual_gate-gate"] = get_hf_key("post_attention_residual_gate.gate")
+    mapping[f"{prefix}-pre_feedforward_layernorm-scale"] = get_hf_key("pre_feedforward_layernorm.weight")
+    mapping[f"{prefix}-post_feedforward_layernorm-scale"] = get_hf_key("post_feedforward_layernorm.weight")
+    mapping[f"{prefix}-post_feedforward_residual_gate-gate"] = get_hf_key("post_feedforward_residual_gate.gate")
+
+    if is_moe:
+      mapping[f"{prefix}-moe_block-gate-kernel"] = get_hf_key("mlp.gate.weight")
+      mapping[f"{prefix.replace('params-', 'MoEBiasVar-')}-moe_block-gate-bias"] = get_hf_key(
+          "mlp.gate.e_score_correction_bias"
+      )
+      mapping[f"{prefix}-moe_block-pre_expert_proj-kernel"] = get_hf_key("mlp.pre_expert_proj.weight")
+      mapping[f"{prefix}-moe_block-pre_expert_norm-scale"] = get_hf_key("mlp.pre_expert_norm.weight")
+      mapping[(f"{prefix}-moe_block-wi_0", f"{prefix}-moe_block-wi_1")] = get_hf_key("mlp.experts.gate_up_proj")
+      mapping[f"{prefix}-moe_block-wo"] = get_hf_key("mlp.experts.down_proj")
+      mapping[f"{prefix}-moe_block-post_expert_norm-scale"] = get_hf_key("mlp.experts.post_expert_norm.weight")
+      mapping[f"{prefix}-moe_block-post_expert_proj-kernel"] = get_hf_key("mlp.post_expert_proj.weight")
+    else:
+      mapping[f"{prefix}-mlp-wi_0-kernel"] = get_hf_key("mlp.gate_proj.weight")
+      mapping[f"{prefix}-mlp-wi_1-kernel"] = get_hf_key("mlp.up_proj.weight")
+      mapping[f"{prefix}-mlp-wo-kernel"] = get_hf_key("mlp.down_proj.weight")
+
+  def _make_unrolled_hf_key_fn(layer_idx: int):
+    return lambda target: f"model.language_model.layers.{layer_idx}.{target}"
+
+  def _make_scanned_hf_key_fn(layer_indices):
+    return lambda target: [f"model.language_model.layers.{idx}.{target}" for idx in layer_indices]
+
+  num_prefix, num_blocks, rem_start = _muse_spark_scan_layout(n_layers, cycle, first_num_dense, num_experts, scan_layers)
+
+  if not scan_layers or num_blocks == 0:
+    for i in range(n_layers):
+      _add_layer(
+          f"params-decoder-layers_{i}",
+          _make_unrolled_hf_key_fn(i),
+          is_moe=(num_experts > 1 and i >= first_num_dense),
+      )
+  else:
+    for i in range(num_prefix):
+      _add_layer(
+          f"params-decoder-layers_{i}",
+          _make_unrolled_hf_key_fn(i),
+          is_moe=(num_experts > 1 and i >= first_num_dense),
+      )
+    for j in range(cycle):
+      block_indices = [num_prefix + b * cycle + j for b in range(num_blocks)]
+      _add_layer(
+          f"params-decoder-scanned_blocks-layers_{j}",
+          _make_scanned_hf_key_fn(block_indices),
+          is_moe=True,
+      )
+    for i in range(rem_start, n_layers):
+      _add_layer(
+          f"params-decoder-layers_{i}",
+          _make_unrolled_hf_key_fn(i),
+          is_moe=(num_experts > 1 and i >= first_num_dense),
+      )
+
+  return mapping
+
+
+def MUSE_SPARK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Parameter transformation hooks for meta-models/Muse-Spark-Open-816B-A42B."""
+
+  def _get(cfg, key, default=None):
+    if isinstance(cfg, dict):
+      return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+  tcfg = _get(config, "text_config", config)
+  n_layers = int(
+      getattr(maxtext_config, "num_decoder_layers", None)
+      or getattr(maxtext_config, "base_num_decoder_layers", None)
+      or _get(tcfg, "num_hidden_layers", 62)
+  )
+  first_num_dense = int(getattr(maxtext_config, "first_num_dense_layers", 0) or 0)
+  cycle = int(getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 4) or 4)
+  num_experts = int(getattr(maxtext_config, "num_experts", _get(tcfg, "num_local_experts", 256)))
+
+  def reshape_kernel(input_tensor, target_shape=None):
+    if saving_to_hf:
+      if target_shape is not None:
+        flipped_target_shape = np.flip(np.array(target_shape))
+        return input_tensor.reshape(flipped_target_shape).T
+      return input_tensor.T
+    return input_tensor.T.reshape(target_shape) if target_shape is not None else input_tensor.T
+
+  def transpose_expert(input_tensor, target_shape=None):
+    del target_shape
+    return input_tensor.swapaxes(-1, -2)
+
+  def process_wi_0_wi_1(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      wi_0, wi_1 = input_tensor
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up.swapaxes(-1, -2)
+    leading = input_tensor.shape[:-2]
+    half_m = input_tensor.shape[-2] // 2
+    k = input_tensor.shape[-1]
+    reshaped = input_tensor.reshape(*leading, 2, half_m, k)
+    perm = tuple(range(len(leading))) + (len(leading) + 2, len(leading) + 1, len(leading))
+    return reshaped.transpose(perm)
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": reshape_kernel,
+  }
+
+  def _attach_layer_hooks(prefix: str, is_moe: bool):
+    for k in ("query", "key", "value", "gate_proj", "out"):
+      hooks[f"{prefix}-self_attention-{k}-kernel"] = reshape_kernel
+    if is_moe:
+      hooks[f"{prefix}-moe_block-gate-kernel"] = reshape_kernel
+      hooks[f"{prefix}-moe_block-pre_expert_proj-kernel"] = reshape_kernel
+      hooks[(f"{prefix}-moe_block-wi_0", f"{prefix}-moe_block-wi_1")] = process_wi_0_wi_1
+      hooks[f"{prefix}-moe_block-wo"] = transpose_expert
+      hooks[f"{prefix}-moe_block-post_expert_proj-kernel"] = reshape_kernel
+    else:
+      for k in ("wi_0", "wi_1", "wo"):
+        hooks[f"{prefix}-mlp-{k}-kernel"] = reshape_kernel
+
+  num_prefix, num_blocks, rem_start = _muse_spark_scan_layout(n_layers, cycle, first_num_dense, num_experts, scan_layers)
+
+  if not scan_layers or num_blocks == 0:
+    for i in range(n_layers):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_moe=(num_experts > 1 and i >= first_num_dense),
+      )
+  else:
+    for i in range(num_prefix):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_moe=(num_experts > 1 and i >= first_num_dense),
+      )
+    for j in range(cycle):
+      _attach_layer_hooks(
+          f"params-decoder-scanned_blocks-layers_{j}",
+          is_moe=True,
+      )
+    for i in range(rem_start, n_layers):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_moe=(num_experts > 1 and i >= first_num_dense),
+      )
+
+  return hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5488,6 +5683,7 @@ PARAM_MAPPING = {
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "muse-spark-816b-a42b": MUSE_SPARK_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -5556,6 +5752,7 @@ HOOK_FNS = {
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "muse-spark-816b-a42b": MUSE_SPARK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {
