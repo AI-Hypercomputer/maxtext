@@ -826,6 +826,8 @@ logical_axis_rules: [
                       ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
                       ['embed', ['fsdp', 'context', 'context_usp_ulysses', 'expert']],
+                      ['vit_embed_cp', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+                      ['vit_embed', ['fsdp', 'fsdp_transpose', 'expert']],
                       ['norm', ['tensor']],
                       ['layers', 'stage'],
                       ['diloco', 'diloco'],
@@ -1121,6 +1123,7 @@ olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
 olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
 olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-core filter)
 olmo_segment_eos_token_id: -1 # >= 0: number EOS-delimited documents in inputs_segmentation (OLMo-core's EMo segments); -1: one segment per instance
+olmo_reset_positions_on_segment: false # reset inputs_position to 0 at each EOS segment boundary when olmo_segment_eos_token_id >= 0
 olmo_global_indices_path: '' # OLMo-core global indices (uint32) to train in its batch order instead of data_shuffle_seed
 
 # Training loop
@@ -1287,6 +1290,7 @@ skip_step_scaling_factor: 6.0
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
 # If empty (default), all parameters are trained.
 trainable_parameters_mask: []
+frozen_parameters_mask: []
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -1623,6 +1627,19 @@ posemb_type_for_vit: "learn"
 # Set it to avoid unnecessary padding if you know the maximum number of images per example.
 max_num_images_per_example: -1
 vision_output_length: -1 # The output length (number of soft tokens) from vision encoder, used in Gemma4.
+olmo_vit_feature_layers: [24, 18]
+olmo_vit_remat_blocks: true
+olmo_vit_crop_chunk_size: 0
+olmo_vit_cp_shard_crops: true
+olmo_image_patch_token_id: 100280
+olmo_connector_mlp_hidden_size: 9728
+olmo_connector_pool_size: 4
+olmo_max_crops_per_seq: 64
+olmo_max_pooled_patches_per_seq: 0
+olmo_vision_lr_scale: 0.1
+olmo_connector_lr_scale: 2.0
+olmo_per_component_grad_clip: false
+olmo_trainable_embedding_row_range: []
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408

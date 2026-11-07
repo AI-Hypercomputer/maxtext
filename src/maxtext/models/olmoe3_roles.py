@@ -103,6 +103,8 @@ HIDDEN_VECTOR = "hidden_vector"
 HIDDEN_HEAD_SHARED_VECTOR = "hidden_head_shared_vector"
 OUTPUT_MATRIX = "output_matrix"
 OUTPUT_VECTOR = "output_vector"
+VISION_ENCODER = "vision_encoder"
+VISION_CONNECTOR = "vision_connector"
 MATRIX_ROLES = (HIDDEN_MATRIX, HIDDEN_READOUT_MATRIX, OUTPUT_MATRIX)
 LM_HEAD_KEY = "logits_dense/kernel"
 
@@ -129,6 +131,10 @@ def layer_kind(config, layer):
 def classify(config, path, shape=None, base_config=None):
   """The `ParamRole` of the parameter at `path` (a '/'-joined path); raises if there's no rule for it. `base_config`
   is only read under `head_dim_transfer` (readouts by output width)."""
+  if "OLMo35VisionEncoder" in path:
+    return ParamRole(VISION_ENCODER)
+  if "OLMo35VisionConnector" in path:
+    return ParamRole(VISION_CONNECTOR)
   if path.endswith("token_embedder/embedding"):
     return ParamRole(INPUT_EMBEDDING)
   if path.endswith("decoder/embedding_norm/scale"):

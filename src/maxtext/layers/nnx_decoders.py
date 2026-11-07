@@ -18,6 +18,7 @@
 
 import functools
 import inspect
+import os
 import re
 from typing import Any
 import warnings
@@ -36,6 +37,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MultimodalInput,
     ShardMode,
+    VisionEncoderBlockType,
     get_weight_dtype,
 )
 from maxtext.configs.types import check_forced_routing_support
@@ -1638,7 +1640,21 @@ class NNXDecoder(nnx.Module):
       audio_masks = multimodal_input.audio_masks
 
       if image_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in {
+        if (
+            cfg.decoder_block == DecoderBlockType.OLMOE3
+            or getattr(cfg, "vision_encoder_block", None) == VisionEncoderBlockType.OLMO35
+        ):
+          from maxtext.models import olmoe3_vision  # pylint: disable=import-outside-toplevel
+
+          y = olmoe3_vision.merge_olmo35_image_embeddings(
+              text_embeddings=y,
+              decoder_input_tokens=decoder_input_tokens,
+              image_embeddings=image_embeddings,
+              patch_token_id=cfg.olmo_image_patch_token_id,
+              mesh=self.mesh,
+              config=cfg,
+          )
+        elif cfg.model_name in {
             "gemma3-4b",
             "gemma3-12b",
             "gemma3-27b",
@@ -2352,7 +2368,32 @@ class NNXDecoder(nnx.Module):
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
         dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
 
+        @jax.custom_vjp
+        def _olmoe3_bwd_layer_fence(state_in, y_in):
+          return state_in, y_in
+
+        def _olmoe3_bwd_layer_fence_fwd(state_in, y_in):
+          return (state_in, y_in), ()
+
+        def _olmoe3_bwd_layer_fence_bwd(_, cts):
+          leaves, treedef = jax.tree.flatten(cts)
+          real_idx = [i for i, v in enumerate(leaves) if isinstance(v, jax.Array) and v.dtype != jax.dtypes.float0]
+          if real_idx:
+            fenced = jax.lax.optimization_barrier([leaves[i] for i in real_idx])
+            for i, fv in zip(real_idx, fenced):
+              leaves[i] = fv
+          return jax.tree.unflatten(treedef, leaves)
+
+        _olmoe3_bwd_layer_fence.defvjp(_olmoe3_bwd_layer_fence_fwd, _olmoe3_bwd_layer_fence_bwd)
+        use_bwd_fence = (
+            self.is_olmoe3
+            and cfg.remat_policy != "none"
+            and os.environ.get("OLMOE3_BWD_LAYER_FENCE", "1") == "1"
+        )
+
         def pure_layer_fn(graphdef_in, state_in, y_in, kv_in, valid_kwargs):
+          if use_bwd_fence:
+            state_in, y_in = _olmoe3_bwd_layer_fence(state_in, y_in)
           if cfg.parameter_memory_host_offload:
             state_in = jax.tree.map(
                 lambda x: jax.device_put(x, max_utils.device_space()),

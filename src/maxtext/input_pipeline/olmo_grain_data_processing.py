@@ -92,6 +92,7 @@ def _make_loader_for_host(
     process_indices: List[int],
     seed: int,
     global_indices_path: str = "",
+    is_eval: bool = False,
 ):
   """Construct an OLMo grain DataLoader for the current data-loading host."""
   index = load_index(config.olmo_index_path)
@@ -106,11 +107,16 @@ def _make_loader_for_host(
   shard_index = process_indices.index(this_proc)
   shard_count = len(process_indices)
 
-  per_host_batch = config.global_batch_size_to_load // shard_count
-  if per_host_batch * shard_count != config.global_batch_size_to_load:
-    raise ValueError(
-        f"global_batch_size_to_load={config.global_batch_size_to_load} is not " f"divisible by shard_count={shard_count}"
-    )
+  # MultiHostDataLoadIterator and PlaceHolderDataIterator always split each host's local batch
+  # across its local devices using global_batch_size_to_load // jax.process_count() (even when
+  # per_device_batch_size < 1.0 selects a subset of hosts len(process_indices) < jax.process_count()).
+  global_load = config.global_batch_size_to_load_eval if is_eval else config.global_batch_size_to_load
+  num_procs = jax.process_count()
+  per_host_batch = global_load // num_procs
+  if per_host_batch * num_procs != global_load:
+    raise ValueError(f"global_batch_size_to_load={global_load} is not divisible by jax.process_count()={num_procs}")
+  if getattr(config, "expansion_factor_real_data", -1) > 1:
+    per_host_batch = int(per_host_batch // config.expansion_factor_real_data)
 
   # Resume = step counter from the latest checkpoint (if any) × per-host
   # batch. Our sampler is stateless, so this single integer is enough to
@@ -142,6 +148,7 @@ def _make_loader_for_host(
       shard_count=shard_count,
       apply_ngram_filter=getattr(config, "olmo_apply_ngram_filter", True),
       segment_eos_token_id=int(getattr(config, "olmo_segment_eos_token_id", -1)),
+      reset_positions_on_segment=bool(getattr(config, "olmo_reset_positions_on_segment", False)),
       shift_to_inputs_targets=True,
       path_remap=_build_path_remap(config),
       grain_worker_count=worker_count,
@@ -229,6 +236,7 @@ def make_olmo_grain_eval_iterator(config, global_mesh, process_indices):
       # Distinct seed so eval doesn't overlap train batch order. Eval always shuffles with the seed, even
       # when training follows olmo_global_indices_path.
       seed=int(getattr(config, "data_shuffle_seed", 0)) ^ 0x1F1F1F1F,
+      is_eval=True,
   )
   return multihost_dataloading.MultiHostDataLoadIterator(
       loader,

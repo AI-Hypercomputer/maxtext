@@ -41,6 +41,7 @@ with the canonical pools min=top_k, max=eval=num_experts).
 import contextlib
 import contextvars
 import functools
+import os
 from typing import Any
 
 from jax.sharding import Mesh, PartitionSpec
@@ -436,6 +437,12 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
       q_in, k_in, v_in = (
           checkpoint_name(t, n) for t, n in ((q_in, "query_proj"), (k_in, "key_proj"), (v_in, "value_proj"))
       )
+    cp_axis = getattr(self.config, "context_sharding", "context")
+    cp_size = self.mesh.shape.get(cp_axis, 1) if self.mesh is not None else 1
+    if cp_size > 1:
+      return self._cp_forward(
+          x, q_in, k_in, v_in, f_in, g_in, b_in, q_conv, k_conv, v_conv, decoder_segment_ids, cp_axis, cp_size
+      )
     if self._use_flat_head_layout(seq_len):
       return self._flat_head_forward(q_in, k_in, v_in, f_in, g_in, b_in, q_conv, k_conv, v_conv, decoder_segment_ids)
     q = causal_depthwise_conv(q_in, q_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
@@ -492,6 +499,218 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
           )
       else:
         out = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta, resets)
+
+    gate = jax.nn.sigmoid(self.g_proj_2(g_in).reshape(batch, seq_len, heads, dv))
+    out = self.o_norm(out.astype(x.dtype)) * gate
+    out = self.w_out(out.reshape(batch, seq_len, heads * dv))
+    out = checkpoint_name(out, "out_proj")
+    return out
+
+  def _cp_forward(
+      self,
+      x: jnp.ndarray,
+      q_in: jnp.ndarray,
+      k_in: jnp.ndarray,
+      v_in: jnp.ndarray,
+      f_in: jnp.ndarray,
+      g_in: jnp.ndarray,
+      b_in: jnp.ndarray,
+      q_conv: jnp.ndarray,
+      k_conv: jnp.ndarray,
+      v_conv: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray,
+      cp_axis: str,
+      cp_size: int,
+  ) -> jnp.ndarray:
+    """Ulysses Context Parallelism for KDA along ``cp_axis`` (1D head or 2D head x value).
+
+    All six input projections, ``f_proj_2``, ``g_proj_2``, ``o_norm``, and ``w_out``
+    execute sequence-parallel on ``T_local = T / CP``. For ``CP <= H``, one fused
+    ``all_to_all`` exchanges ``[B_loc, T/CP, H, 3*dk+dv] -> [B_loc, T, H/CP, 3*dk+dv]``.
+    For ``CP > H`` (e.g. ``CP = 16, 32`` with ``H = 8, dv = 512``), each head's linear
+    value columns are additionally partitioned into ``v_splits = CP // H`` independent
+    slices ``dv_loc = dv // v_splits`` before ``o_norm`` (exact across document resets).
+    """
+    cfg = self.config
+    heads, dk, dv = self.num_heads, self.head_k_dim, self.head_v_dim
+    if cp_size <= heads:
+      if heads % cp_size != 0:
+        raise ValueError(
+            f"OLMoE3 KDA Ulysses context parallelism requires gdn_num_value_heads ({heads}) "
+            f"to be divisible by context_parallel_size ({cp_size})."
+        )
+      v_splits = 1
+      h_loc = heads // cp_size
+      dv_loc = dv
+    else:
+      v_splits = cp_size // heads
+      if cp_size % heads != 0 or dv % v_splits != 0:
+        raise ValueError(
+            f"OLMoE3 KDA 2D Ulysses requires context_parallel_size ({cp_size}) to be a multiple of "
+            f"gdn_num_value_heads ({heads}) with v_splits={cp_size}/{heads} dividing head_v_dim ({dv})."
+        )
+      h_loc = 1
+      dv_loc = dv // v_splits
+
+    use_pallas_fused = cfg.kda_chunked_impl == "subblock" and cfg.kda_pallas_fused
+    if use_pallas_fused and dv_loc % 128 != 0:
+      raise ValueError(
+          f"OLMoE3 KDA Pallas chunk_kda requires dv_loc = {dv} // {v_splits} = {dv_loc} to be divisible by 128."
+      )
+
+    batch, seq_len, _ = x.shape
+    raw_g = self.f_proj_2(f_in)
+    beta_scale = 2.0 if cfg.kda_allow_neg_eigval else 1.0
+    beta = beta_scale * jax.nn.sigmoid(b_in.astype(jnp.float32))
+
+    batch_axes = nn.logical_to_mesh_axes(("activation_batch",), cfg.logical_axis_rules)[0]
+    has_segments = decoder_segment_ids is not None
+    if v_splits == 1:
+      packed_in = jnp.concatenate(
+          [
+              q_in.reshape(batch, seq_len, heads, dk),
+              k_in.reshape(batch, seq_len, heads, dk),
+              v_in.reshape(batch, seq_len, heads, dv),
+              raw_g.reshape(batch, seq_len, heads, dk),
+          ],
+          axis=-1,
+      )
+      beta_cp = beta
+      q_conv_h = q_conv.reshape(heads, dk, -1)
+      k_conv_h = k_conv.reshape(heads, dk, -1)
+      v_conv_h = v_conv.reshape(heads, dv, -1)
+      a_log_h = self.A_log[...]
+      dt_bias_h = self.dt_bias[...].reshape(heads, dk)
+    else:
+      qkrg = jnp.concatenate(
+          [
+              q_in.reshape(batch, seq_len, heads, dk),
+              k_in.reshape(batch, seq_len, heads, dk),
+              raw_g.reshape(batch, seq_len, heads, dk),
+          ],
+          axis=-1,
+      )
+      packed_in = jnp.concatenate(
+          [
+              jnp.repeat(qkrg, v_splits, axis=2),
+              v_in.reshape(batch, seq_len, cp_size, dv_loc),
+          ],
+          axis=-1,
+      )
+      beta_cp = jnp.repeat(beta, v_splits, axis=2)
+      q_conv_h = jnp.repeat(q_conv.reshape(heads, dk, -1), v_splits, axis=0)
+      k_conv_h = jnp.repeat(k_conv.reshape(heads, dk, -1), v_splits, axis=0)
+      v_conv_h = v_conv.reshape(cp_size, dv_loc, -1)
+      a_log_h = jnp.repeat(self.A_log[...], v_splits, axis=0)
+      dt_bias_h = jnp.repeat(self.dt_bias[...].reshape(heads, dk), v_splits, axis=0)
+
+    in_specs = [
+        PartitionSpec(batch_axes, cp_axis, None, None),  # packed_in
+        PartitionSpec(batch_axes, cp_axis, None),  # beta_cp
+        PartitionSpec(cp_axis, None, None),  # q_conv_h
+        PartitionSpec(cp_axis, None, None),  # k_conv_h
+        PartitionSpec(cp_axis, None, None),  # v_conv_h
+        PartitionSpec(cp_axis),  # a_log_h
+        PartitionSpec(cp_axis, None),  # dt_bias_h
+    ]
+    if has_segments:
+      in_specs.append(PartitionSpec(batch_axes, cp_axis))
+
+    save = cfg.remat_policy == "custom" and cfg.kda_fused != "remat"
+    chunk = cfg.gdn_chunk_size
+    state_dtype_jnp = jnp.float32 if cfg.gdn_state_dtype == "float32" else jnp.bfloat16
+    inv_prec = getattr(jax.lax.Precision, cfg.kda_inverse_precision.upper())
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=tuple(in_specs),
+        out_specs=PartitionSpec(batch_axes, cp_axis, None, None),
+        check_vma=False,
+    )
+    def _run_cp(packed_, beta_, qc_, kc_, vc_, alog_, dtb_, *seg_arg):
+      b_loc, t_loc = packed_.shape[0], packed_.shape[1]
+      packed_full = jax.lax.all_to_all(packed_, axis_name=cp_axis, split_axis=2, concat_axis=1, tiled=True)
+      beta_full = jax.lax.all_to_all(beta_, axis_name=cp_axis, split_axis=2, concat_axis=1, tiled=True)
+      t_full = packed_full.shape[1]
+      seg_full = (
+          jax.lax.all_gather(seg_arg[0].astype(jnp.int32), axis_name=cp_axis, axis=1, tiled=True)
+          if has_segments
+          else None
+      )
+
+      if v_splits == 1:
+        q_f = packed_full[..., :dk].reshape(b_loc, t_full, h_loc * dk)
+        k_f = packed_full[..., dk : 2 * dk].reshape(b_loc, t_full, h_loc * dk)
+        v_f = packed_full[..., 2 * dk : 2 * dk + dv_loc].reshape(b_loc, t_full, h_loc * dv_loc)
+        rg_f = packed_full[..., 2 * dk + dv_loc :]
+      else:
+        q_f = packed_full[..., :dk].reshape(b_loc, t_full, h_loc * dk)
+        k_f = packed_full[..., dk : 2 * dk].reshape(b_loc, t_full, h_loc * dk)
+        rg_f = packed_full[..., 2 * dk : 3 * dk]
+        v_f = packed_full[..., 3 * dk :].reshape(b_loc, t_full, h_loc * dv_loc)
+
+      q = causal_depthwise_conv(q_f, qc_.reshape(h_loc * dk, -1), seg_full).reshape(b_loc, t_full, h_loc, dk)
+      k = causal_depthwise_conv(k_f, kc_.reshape(h_loc * dk, -1), seg_full).reshape(b_loc, t_full, h_loc, dk)
+      v = causal_depthwise_conv(v_f, vc_.reshape(h_loc * dv_loc, -1), seg_full).reshape(b_loc, t_full, h_loc, dv_loc)
+
+      q = _l2_normalize(q.astype(jnp.float32)) * (dk**-0.5)
+      k = _l2_normalize(k.astype(jnp.float32))
+      log_decay = -jnp.exp(alog_).reshape(1, 1, h_loc, 1) * jax.nn.softplus(
+          rg_f.astype(jnp.float32) + dtb_.reshape(1, 1, h_loc, dk)
+      )
+      if seg_full is None:
+        resets = jnp.zeros((b_loc, t_full), dtype=bool)
+      else:
+        prev_ids = jnp.pad(seg_full, ((0, 0), (1, 0)), constant_values=-1)[:, :t_full]
+        resets = seg_full != prev_ids
+
+      if chunk > 0 and t_full % chunk == 0:
+        if use_pallas_fused:
+          out_full = kda.chunk_kda(
+              q,
+              k,
+              v,
+              log_decay,
+              beta_full,
+              resets=resets,
+              chunk_size=chunk,
+              state_dtype=state_dtype_jnp,
+              layout="token_major" if cfg.kda_fused_token_major else "chunk_major",
+              outer_block=cfg.kda_outer_block or None,
+              inverse_precision=inv_prec,
+              output_dtype=x.dtype,
+              save_residuals=cfg.kda_fused_residuals if save else False,
+              state_stride=cfg.kda_fused_state_stride,
+          )
+        elif cfg.kda_chunked_impl == "subblock":
+          out_full = _delta_rule_chunked_subblock(
+              q,
+              k,
+              v,
+              log_decay,
+              beta_full,
+              resets,
+              chunk,
+              cfg.gdn_state_dtype,
+              sub_block=cfg.kda_sub_block,
+              intra_vjp=cfg.kda_intra_custom_vjp,
+              inverse_precision=inv_prec,
+          )
+        else:
+          out_full = _delta_rule_chunked(
+              q, k, v.astype(jnp.float32), log_decay, beta_full, resets, chunk, cfg.gdn_state_dtype
+          )
+      else:
+        out_full = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta_full, resets)
+
+      out_loc = jax.lax.all_to_all(out_full.astype(x.dtype), axis_name=cp_axis, split_axis=1, concat_axis=2, tiled=True)
+      return out_loc.reshape(b_loc, t_loc, heads, dv) if v_splits > 1 else out_loc
+
+    call_args = [packed_in, beta_cp, q_conv_h, k_conv_h, v_conv_h, a_log_h, dt_bias_h]
+    if has_segments:
+      call_args.append(decoder_segment_ids.astype(jnp.int32))
+    out = _run_cp(*call_args)
 
     gate = jax.nn.sigmoid(self.g_proj_2(g_in).reshape(batch, seq_len, heads, dv))
     out = self.o_norm(out.astype(x.dtype)) * gate
@@ -2003,6 +2222,25 @@ class OLMoE3ScannableBlock(nnx.Module):
       previous_chunk=None,
       slot: None | int = None,
   ):
+    @jax.custom_vjp
+    def _olmoe3_scan_bwd_layer_fence(state_in, x_in):
+      return state_in, x_in
+
+    def _olmoe3_scan_bwd_layer_fence_fwd(state_in, x_in):
+      return (state_in, x_in), ()
+
+    def _olmoe3_scan_bwd_layer_fence_bwd(_, cts):
+      leaves, treedef = jax.tree.flatten(cts)
+      real_idx = [idx for idx, v in enumerate(leaves) if isinstance(v, jax.Array) and v.dtype != jax.dtypes.float0]
+      if real_idx:
+        fenced = jax.lax.optimization_barrier([leaves[idx] for idx in real_idx])
+        for idx, fv in zip(real_idx, fenced):
+          leaves[idx] = fv
+      return jax.tree.unflatten(treedef, leaves)
+
+    _olmoe3_scan_bwd_layer_fence.defvjp(_olmoe3_scan_bwd_layer_fence_fwd, _olmoe3_scan_bwd_layer_fence_bwd)
+    use_bwd_fence = self.remat_layers and os.environ.get("OLMOE3_BWD_LAYER_FENCE", "1") == "1"
+
     x = carry
     for i in range(self.config.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
@@ -2013,6 +2251,8 @@ class OLMoE3ScannableBlock(nnx.Module):
       graphdef, state = nnx.split(layer)
 
       def run_layer(state_in, x_in, graphdef=graphdef, args=args):
+        if use_bwd_fence:
+          state_in, x_in = _olmoe3_scan_bwd_layer_fence(state_in, x_in)
         merged = nnx.merge(graphdef, state_in)
         out, _ = merged(x_in, *args)
         return out, nnx.state(merged)

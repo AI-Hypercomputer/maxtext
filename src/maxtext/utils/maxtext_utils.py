@@ -150,22 +150,52 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
     )
   else:
     batch_shape = (global_batch_size, config.max_target_length)
+  def _sh(key):
+    return batch_sharding[key] if isinstance(batch_sharding, dict) else batch_sharding
+
   shaped_batch = {}
-  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("inputs"))
   # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
   position_shape = batch_shape + (3,) if config.use_mrope and config.use_multimodal else batch_shape
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=_sh("inputs_position"))
+  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(
+      batch_shape, jnp.int32, sharding=_sh("inputs_segmentation")
+  )
+  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("targets"))
+  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("targets_position"))
+  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(
+      batch_shape, jnp.int32, sharding=_sh("targets_segmentation")
+  )
   if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
-    shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-    shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+    shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("inputs"))
+    shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("targets"))
   if config.use_multimodal:
+    is_olmo_mm = (
+        getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+        == "olmo35"
+    )
     batch_size = config.micro_batch_size_to_eval_on if is_eval else config.micro_batch_size_to_train_on
     is_video = getattr(config, "video_max_grid_t", None) is not None
-    if is_video:
+    if is_olmo_mm:
+      image_shape = mm_processor.get_dummy_image_shape_for_init(config, batch_size=global_batch_size)
+      img_sz = config.image_size_for_vit
+      img_h, img_w = tuple(img_sz) if isinstance(img_sz, (list, tuple)) else (int(img_sz), int(img_sz))
+      patch = config.patch_size_for_vit
+      pool_h, pool_w = (img_h // patch + 1) // 2, (img_w // patch + 1) // 2
+      n_crops = int(config.olmo_max_crops_per_seq)
+      n_pooled = (
+          int(config.olmo_max_pooled_patches_per_seq)
+          if getattr(config, "olmo_max_pooled_patches_per_seq", 0) > 0
+          else n_crops * pool_h * pool_w
+      )
+      pool_size = int(getattr(config, "olmo_connector_pool_size", 4))
+      shaped_batch["images"] = jax.ShapeDtypeStruct(
+          batch_shape[:-1] + image_shape[1:], config.dtype_mm, sharding=_sh("images")
+      )
+      shaped_batch["pooled_patches_idx"] = jax.ShapeDtypeStruct(
+          batch_shape[:-1] + (n_pooled, pool_size), jnp.int32, sharding=_sh("pooled_patches_idx")
+      )
+    elif is_video:
       max_t = config.video_max_grid_t
       max_h = config.video_max_grid_h
       max_w = config.video_max_grid_w
@@ -174,16 +204,16 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       channels = config.num_channels_for_vit
       video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
       video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
-      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
-      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
-      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
+      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=_sh("images"))
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=_sh("inputs"))
+      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=_sh("inputs"))
     else:
       image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
-      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=_sh("images"))
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
       if "llama4" in config.model_name:
-        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=_sh("inputs"))
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
@@ -973,9 +1003,68 @@ def calculate_engram_tflops(config):
   return learnable_tflops, attention_tflops
 
 
+def calculate_olmo35_vision_layers_tflops_per_device(config):
+  """Calculate non-redundant algorithmic TFLOPs per device for OLMo 3.5 Vision (SigLIP2-SO400M/14-378 + Connector)."""
+  b_seq = config.per_device_batch_size
+  img_sz = config.image_size_for_vit
+  img_h, img_w = tuple(img_sz) if isinstance(img_sz, (list, tuple)) else (int(img_sz), int(img_sz))
+  patch = config.patch_size_for_vit
+  channels = config.num_channels_for_vit
+  d_vit = config.hidden_size_for_vit
+  mlp_vit = config.intermediate_size_for_vit
+  num_layers = config.num_hidden_layers_for_vit
+  n_crops = int(getattr(config, "olmo_max_crops_per_seq", 64))
+  n_patches = (img_h // patch) * (img_w // patch)
+  pool_h, pool_w = (img_h // patch + 1) // 2, (img_w // patch + 1) // 2
+  n_pooled = (
+      int(config.olmo_max_pooled_patches_per_seq)
+      if getattr(config, "olmo_max_pooled_patches_per_seq", 0) > 0
+      else n_crops * pool_h * pool_w
+  )
+  n_active_pooled = min(n_pooled, config.max_target_length)
+  pool_size = int(getattr(config, "olmo_connector_pool_size", 4))
+  d_conn_in = d_vit * max(1, len(getattr(config, "olmo_vit_feature_layers", [24, 18])))
+  mlp_conn = int(getattr(config, "olmo_connector_mlp_hidden_size", 9728))
+  d_lm = config.emb_dim
+
+  b_crops = b_seq * n_crops
+  patch_embed_flops = 2 * b_crops * n_patches * (channels * patch * patch) * d_vit
+  vit_qkv_proj_flops = 4 * (2 * b_crops * n_patches * d_vit * d_vit) * num_layers
+  vit_mlp_flops = 2 * (2 * b_crops * n_patches * d_vit * mlp_vit) * num_layers
+  vit_attn_flops = 4 * b_crops * (n_patches**2) * d_vit * num_layers
+  vit_weight_flops = patch_embed_flops + vit_qkv_proj_flops + vit_mlp_flops
+
+  # OLMo35PoolingCrossAttention projects wq (d_conn_in -> d_vit), wk/wv over pool_size (d_conn_in -> d_vit),
+  # runs 1-query x pool_size cross-attention over d_vit, then wo (d_vit -> d_vit), and OLMo35ConnectorMLP
+  # runs SwiGLU w1/w3 (d_vit -> mlp_conn) + w2 (mlp_conn -> d_lm).
+  b_pool = b_seq * n_active_pooled
+  conn_pool_weight_flops = 2 * b_pool * ((1 + 2 * pool_size) * d_conn_in * d_vit + d_vit * d_vit)
+  conn_pool_attn_flops = 4 * b_pool * pool_size * d_vit
+  conn_mlp_flops = 2 * b_pool * (2 * d_vit * mlp_conn + mlp_conn * d_lm)
+  conn_weight_flops = conn_pool_weight_flops + conn_mlp_flops
+
+  if config.freeze_vision_encoder_params:
+    learnable_weight_flops = vit_weight_flops + 3 * conn_weight_flops
+    total_attn_flops = vit_attn_flops + 3 * conn_pool_attn_flops
+  else:
+    learnable_weight_flops = 3 * (vit_weight_flops + conn_weight_flops)
+    total_attn_flops = 3 * (vit_attn_flops + conn_pool_attn_flops)
+
+  learnable_weight_tflops = learnable_weight_flops / 1e12
+  total_attn_tflops = total_attn_flops / 1e12
+  return learnable_weight_tflops + total_attn_tflops, learnable_weight_tflops, total_attn_tflops
+
+
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
-  if config.model_name.startswith("gemma3"):
+  if (
+      getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+      == "olmo35"
+  ):
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = (
+        calculate_olmo35_vision_layers_tflops_per_device(config)
+    )
+  elif config.model_name.startswith("gemma3"):
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_gemma3_vision_layers_tflops_per_device(
         config
     )
@@ -1827,11 +1916,47 @@ def setup_initial_state(
     # Always build the concrete init state, then overlay whatever we loaded. Anything the
     # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
     # value, so restore doesn't depend on knowing exactly what was saved.
-    state = jax.jit(
-        lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-        in_shardings=None,
-        out_shardings=state_mesh_shardings,
-    )()
+    if config.optimizer_memory_host_offload and not config.parameter_memory_host_offload:
+      device_init_shardings = jax.tree.map(
+          lambda s: s.with_memory_kind("device") if isinstance(s, NamedSharding) else s,
+          state_mesh_shardings,
+          is_leaf=lambda x: isinstance(x, NamedSharding),
+      )
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),
+          in_shardings=None,
+          out_shardings=device_init_shardings,
+      )()
+
+      def _move_leaf_to_target_memory_kind(arr, target_sharding):
+        if not isinstance(arr, jax.Array) or not isinstance(target_sharding, NamedSharding):
+          return arr
+        if arr.sharding.memory_kind == target_sharding.memory_kind:
+          return arr
+        dev_to_data = {s.device: s.data for s in arr.addressable_shards}
+        local_bufs = [
+            jax.device_put(
+                dev_to_data[dev],
+                jax.sharding.SingleDeviceSharding(dev, memory_kind=target_sharding.memory_kind),
+            )
+            for dev in target_sharding.addressable_devices_indices_map(arr.shape)
+        ]
+        return jax.make_array_from_single_device_arrays(
+            arr.shape, target_sharding, local_bufs, dtype=arr.dtype
+        )
+
+      state = jax.tree.map(
+          _move_leaf_to_target_memory_kind,
+          state,
+          state_mesh_shardings,
+          is_leaf=lambda x: isinstance(x, (jax.Array, NamedSharding)),
+      )
+    else:
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )()
     if raw_params and native:
       # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
       lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
@@ -2027,10 +2152,24 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     )
     state_mesh_shardings.optimizer = optimizer_sharding
   if is_training and config.optimizer_memory_host_offload:
+    def _maybe_move_opt_leaf_to_host(path, aval, sh_val):
+      if not isinstance(sh_val, NamedSharding) or not hasattr(aval, "shape"):
+        return sh_val
+      if len(aval.shape) < 3:
+        return sh_val
+      try:
+        local_shape = sh_val.shard_shape(aval.shape)
+      except Exception:  # pylint: disable=broad-except
+        return sh_val
+      if len(local_shape) >= 2 and local_shape[-1] >= 128 and (local_shape[-1] % 128 == 0):
+        return maxtext_utils_nnx.move_memory_to_host(path, sh_val)
+      return sh_val
+
     optimizer_sharding = jax.tree_util.tree_map_with_path(
-        maxtext_utils_nnx.move_memory_to_host,
+        _maybe_move_opt_leaf_to_host,
+        abstract_state.optimizer,
         state_mesh_shardings.optimizer,
-        is_leaf=lambda x: isinstance(x, NamedSharding),
+        is_leaf=lambda x: isinstance(x, (jax.ShapeDtypeStruct, NamedSharding)),
     )
     state_mesh_shardings.optimizer = optimizer_sharding
   if is_training and config.parameter_memory_host_offload:
@@ -2103,29 +2242,49 @@ def add_config_to_summary_writer(config, summary_writer):
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 
-def tpu_8x8xz_expert_mesh(physical_mesh, ep_size, ici_parallelism):
-  """Maps a single-slice `(8, 8, Z)` TPU v4 torus onto contiguous expert groups, or returns None.
+def tpu_8x8xz_expert_mesh(physical_mesh, ep_size, ici_parallelism, cp_size=1):
+  """Maps a single-slice `(8, 8, Z)` TPU v4 torus onto contiguous `(context, expert)` groups, or returns None.
 
-  Every expert group is a closed `8 x 8` X-Y torus stacked `ep_size // 64` deep along Z, and data parallelism
-  runs along the remaining Z extent: EP=64 -> `(8, 8, 1)` planes, EP=128 -> `(8, 8, 2)`, EP=256 -> `(8, 8, 4)`.
-  This covers `8x8x8` (v4-1024), `8x8x16` (v4-2048), and `8x8x48` (v4-6144 re-sliced, 3,072 chips), where
-  EP=64 planes with DP=48 measured 2,117 ms/step for olmoe3-3p5b-e256k8-sh2x.
-
-  For EP=64, `OLMOE3_EP64_SUBMESH=4x4x4` selects `4 x 4 x 4` cubes instead of planes and `=8x8x1` selects planes.
-  The default keeps cubes on `8x8x8` / `8x8x16` (their previous layout) and uses planes elsewhere.
+  Every expert group is a closed `8 x 8` X-Y torus stacked `group_z` deep along Z, and data parallelism
+  runs along the remaining Z extent:
+    - CP=1, EP in (64, 128, 256) or CP=4, EP=64: EP=64 -> `(8, 8, 1)` planes (or `4x4x4` cubes), EP=128 -> `(8, 8, 2)`,
+      EP=256 -> `(8, 8, 4)`.
+    - CP*EP == 256 with CP in (8, 16, 32) and EP in (8, 16, 32) (when `Z % 4 == 0`, e.g. `8x8x8`, `8x8x16`, `8x8x48`):
+      each 256-chip `(context, expert)` group occupies one contiguous `(8W, 8W, 4)` single-optical-cube Z-layer,
+      placing `CP=8` on closed `X=8W` (`EP=32` on `Y=8W x Z=4`), `CP=32` on `X=8W x Z=4` (`EP=8` on closed `Y=8W`),
+      and `CP=16` on `X=8W x Z_a=2` (`EP=16` on `Y=8W x Z_b=2`).
 
   Args:
     physical_mesh: Device array shaped like the physical torus (from `mesh_utils._get_physical_tpu_mesh`).
     ep_size: ICI expert parallelism.
-    ici_parallelism: ICI mesh shape; the expert axis must be the minor-most non-trivial axis.
+    ici_parallelism: ICI mesh shape; `(context, expert)` must be the minor-most non-trivial axes when `cp_size > 1`.
+    cp_size: ICI context parallelism (defaults to 1).
 
   Returns:
     The device array reshaped to `ici_parallelism`, or None if the torus is not `(8, 8, Z)` or Z does not split.
   """
   shape = tuple(physical_mesh.shape)
-  if len(shape) != 3 or shape[:2] != (8, 8) or ep_size not in (64, 128, 256):
+  if len(shape) != 3 or shape[:2] != (8, 8):
     return None
   z_dim = shape[2]
+  if cp_size in (8, 16, 32) and ep_size in (8, 16, 32) and cp_size * ep_size == 256 and z_dim % 4 == 0:
+    if cp_size == 8 and ep_size == 32:
+      return np.reshape(
+          np.transpose(physical_mesh.reshape(8, 8, z_dim // 4, 4), (2, 0, 1, 3)),
+          ici_parallelism,
+      )
+    if cp_size == 32 and ep_size == 8:
+      return np.reshape(
+          np.transpose(physical_mesh.reshape(8, 8, z_dim // 4, 4), (2, 0, 3, 1)),
+          ici_parallelism,
+      )
+    if cp_size == 16 and ep_size == 16:
+      return np.reshape(
+          np.transpose(physical_mesh.reshape(8, 8, z_dim // 4, 2, 2), (2, 0, 3, 1, 4)),
+          ici_parallelism,
+      )
+  if ep_size not in (64, 128, 256):
+    return None
   ep_z = ep_size // 64
   if z_dim % ep_z != 0:
     return None
@@ -2200,13 +2359,14 @@ def create_device_mesh(config, devices=None):
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
     ep_size = getattr(config, "ici_expert_parallelism", 1)
+    cp_size = getattr(config, "ici_context_parallelism", 1)
     used_multislice_cuboid = False
     # Per-slice EP cuboids for OLMoE3 only, so other models' multi-slice meshes are unchanged.
     if (
         config.decoder_block == DecoderBlockType.OLMOE3
         and devices[0].platform == "tpu"
         and num_devices_per_slice in (64, 128, 256, 512, 1024, 2048, 3072)
-        and ep_size in (64, 128, 256)
+        and ep_size in (8, 16, 32, 64, 128, 256)
         and "expert" in config.mesh_axes
         and ici_parallelism[config.mesh_axes.index("expert")] == ep_size
         and all(x == 1 for x in ici_parallelism[config.mesh_axes.index("expert") + 1 :])
@@ -2224,18 +2384,9 @@ def create_device_mesh(config, devices=None):
         slice_meshes = []
         for s_idx in sorted(by_slice):
           pm = _src_mesh_utils._get_physical_tpu_mesh(by_slice[s_idx])  # pylint: disable=protected-access
-          if pm.shape in ((8, 8, 8), (8, 8, 16)) and ep_size in (128, 256):
-            ep_z = ep_size // 64
-            z_dim = pm.shape[2]
-            sm = np.reshape(np.transpose(np.reshape(pm, (8, 8, z_dim // ep_z, ep_z)), (2, 0, 1, 3)), ici_parallelism)
-            slice_meshes.append(sm)
-          elif pm.shape in ((8, 8, 8), (8, 8, 16)) and ep_size == 64:
-            z_dim = pm.shape[2]
-            sm = np.reshape(
-                np.transpose(np.reshape(pm, (2, 4, 2, 4, z_dim // 4, 4)), (0, 2, 4, 1, 3, 5)),
-                ici_parallelism,
-            )
-            slice_meshes.append(sm)
+          sm_88z = tpu_8x8xz_expert_mesh(pm, ep_size, ici_parallelism, cp_size=cp_size)
+          if sm_88z is not None:
+            slice_meshes.append(sm_88z)
           elif pm.shape == (4, 4, 8) and ep_size == 128:
             sm = np.reshape(pm, ici_parallelism)
             slice_meshes.append(sm)
@@ -2270,20 +2421,34 @@ def create_device_mesh(config, devices=None):
         )
   else:
     ep_size = getattr(config, "ici_expert_parallelism", 1)
+    cp_size = getattr(config, "ici_context_parallelism", 1)
     used_cuboid_ep = False
+    cp_right_before_ep = (
+        cp_size == 1
+        or (
+            "context" in config.mesh_axes
+            and "expert" in config.mesh_axes
+            and ici_parallelism[config.mesh_axes.index("context")] == cp_size
+            and all(
+                x == 1
+                for x in ici_parallelism[config.mesh_axes.index("context") + 1 : config.mesh_axes.index("expert")]
+            )
+        )
+    )
     if (
         devices[0].platform == "tpu"
         and num_devices in (64, 128, 256, 512, 1024, 2048, 3072)
-        and ep_size in (64, 128, 256)
+        and ep_size in (8, 16, 32, 64, 128, 256)
         and "expert" in config.mesh_axes
         and ici_parallelism[config.mesh_axes.index("expert")] == ep_size
         and all(x == 1 for x in ici_parallelism[config.mesh_axes.index("expert") + 1 :])
+        and cp_right_before_ep
     ):
       # pylint: disable-next=g-import-not-at-top,import-outside-toplevel,protected-access
       from jax._src import mesh_utils as _src_mesh_utils
 
       physical_mesh = _src_mesh_utils._get_physical_tpu_mesh(devices)  # pylint: disable=protected-access
-      mesh_8x8xz = tpu_8x8xz_expert_mesh(physical_mesh, ep_size, ici_parallelism)
+      mesh_8x8xz = tpu_8x8xz_expert_mesh(physical_mesh, ep_size, ici_parallelism, cp_size=cp_size)
       if mesh_8x8xz is not None:
         mesh = mesh_8x8xz
         used_cuboid_ep = True

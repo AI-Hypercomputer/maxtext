@@ -52,7 +52,40 @@ def _get_path_mask_fn(patterns, match_returns_true=True):
 
 def get_adamw_mask(config):
   """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
-  return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
+  patterns = list(getattr(config, "adamw_mask", None) or [])
+  if getattr(config, "use_multimodal", False) and (
+      getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+      == "olmo35"
+  ):
+    patterns.extend(["OLMo35VisionEncoder", "OLMo35VisionConnector"])
+  if getattr(config, "olmo_trainable_embedding_row_range", None):
+    patterns.append("token_embedder")
+  return _get_path_mask_fn(patterns, match_returns_true=False)
+
+
+def _scale_olmo35_vision_updates(vis_scale: float, conn_scale: float) -> optax.GradientTransformation:
+  """Scales parameter updates for OLMo35VisionEncoder and OLMo35VisionConnector (both have wd=0)."""
+
+  def init_fn(params):
+    del params
+    return optax.EmptyState()
+
+  def update_fn(updates, state, params=None):
+    del params
+
+    def _scale_leaf(path, u):
+      if u is None:
+        return None
+      p_str = jax.tree_util.keystr(path, simple=True, separator="/")
+      if "OLMo35VisionConnector" in p_str:
+        return u if conn_scale == 1.0 else (u * jnp.asarray(conn_scale, dtype=u.dtype))
+      if "OLMo35VisionEncoder" in p_str:
+        return u if vis_scale == 1.0 else (u * jnp.asarray(vis_scale, dtype=u.dtype))
+      return u
+
+    return jax.tree_util.tree_map_with_path(_scale_leaf, updates), state
+
+  return optax.GradientTransformation(init_fn, update_fn)
 
 
 def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
@@ -128,43 +161,60 @@ def skip_step_on_spikes(
     loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
     grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
 
-    # Check if the current metrics are within the allowed thresholds
-    is_loss_ok = (loss - loss_mean) <= scaling_factor * loss_std
+    # Check if the current metrics are finite and within the allowed thresholds.
+    # Non-finite loss or grad_norm (e.g. fp32 norm overflow on untrained embedding rows) must
+    # ALWAYS be skipped even during warmup, and must never be written into the rolling buffers
+    # where `inf`/`nan` would poison `mean`/`std` for the next `interval` steps.
+    loss_f32 = jnp.asarray(loss, dtype=jnp.float32)
+    is_finite = jnp.isfinite(loss_f32)
+    is_loss_ok = (loss_f32 - loss_mean) <= scaling_factor * loss_std
     if grad_norm is not None:
-      is_grad_norm_ok = (grad_norm - grad_norm_mean) <= scaling_factor * grad_norm_std
+      gn_f32 = jnp.asarray(grad_norm, dtype=jnp.float32)
+      is_finite = jnp.logical_and(is_finite, jnp.isfinite(gn_f32))
+      is_grad_norm_ok = (gn_f32 - grad_norm_mean) <= scaling_factor * grad_norm_std
       is_ok = jnp.logical_and(is_loss_ok, is_grad_norm_ok)
     else:
+      gn_f32 = None
       is_ok = is_loss_ok
 
-    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum)
+    # Only enforce statistical spike skip if we have at least half the interval filled (or 2 elements minimum),
+    # but ALWAYS skip non-finite steps even during warmup.
     min_history = max(2, interval // 2)
-    is_warmup = (count + 1) < min_history
-    is_ok = jnp.logical_or(is_warmup, is_ok)
+    is_warmup = count < min_history
+    is_ok = jnp.logical_and(is_finite, jnp.logical_or(is_warmup, is_ok))
 
     # Conditionally execute the inner optimizer to prevent momentum poisoning
     def do_update():
       return inner_opt.update(updates, state["inner_state"], params, **extra_args)
 
+    out_updates_struct = jax.eval_shape(do_update)[0]
+
     def skip_update():
       # b/500923599: Investigate logging compatible with jax.jit, jax.lax.cond, and Pathway
-      inner_updates = jax.tree_util.tree_map(jnp.zeros_like, updates)
+      # Match `do_update`'s exact leaf dtypes (e.g. float32 master updates when incoming grads are bfloat16).
+      inner_updates = jax.tree_util.tree_map(
+          lambda u, s: jnp.zeros_like(u, dtype=s.dtype), updates, out_updates_struct
+      )
       return inner_updates, state["inner_state"]
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
 
-    # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    # Update rolling buffers only on finite steps (append finite spikes so regime shifts can adapt,
+    # while leaving rolling history and valid sample count untouched when `inf`/`nan` occurs).
     idx = count % interval
-    new_losses = losses.at[idx].set(loss)
+    safe_loss = jnp.where(is_finite, loss_f32, losses[idx])
+    new_losses = losses.at[idx].set(safe_loss)
 
     new_grad_norms = grad_norms
-    if grad_norm is not None:
-      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+    if gn_f32 is not None:
+      safe_gn = jnp.where(is_finite, gn_f32, grad_norms[idx])
+      new_grad_norms = grad_norms.at[idx].set(safe_gn)
 
     new_state = {
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": count + 1,
+        "count": jnp.where(is_finite, count + 1, count),
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state
@@ -263,6 +313,16 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
+  is_olmo_mm = getattr(config, "use_multimodal", False) and (
+      getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+      == "olmo35"
+  )
+  if is_olmo_mm and not getattr(config, "completedp_base_model_name", ""):
+    vis_scale = float(getattr(config, "olmo_vision_lr_scale", 0.1))
+    conn_scale = float(getattr(config, "olmo_connector_lr_scale", 2.0))
+    if vis_scale != 1.0 or conn_scale != 1.0:
+      base_opt = optax.chain(base_opt, _scale_olmo35_vision_updates(vis_scale, conn_scale))
+
   if getattr(config, "skip_step_on_spikes", False):
     base_opt = skip_step_on_spikes(
         base_opt,
@@ -270,18 +330,33 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
         scaling_factor=config.skip_step_scaling_factor,
     )
 
-  # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
+  # Parameter freezing: support both whitelist (`trainable_parameters_mask`) and blacklist (`frozen_parameters_mask`,
+  # plus `OLMo35VisionEncoder` when `freeze_vision_encoder_params` is True).
+  trainable_patterns = list(getattr(config, "trainable_parameters_mask", None) or [])
+  frozen_patterns = list(getattr(config, "frozen_parameters_mask", None) or [])
+  if is_olmo_mm and getattr(config, "freeze_vision_encoder_params", False):
+    frozen_patterns.append("OLMo35VisionEncoder")
+
+  if trainable_patterns or frozen_patterns:
+    compiled_trainable = [re.compile(p) for p in trainable_patterns]
+    compiled_frozen = [re.compile(p) for p in frozen_patterns]
+
+    def _param_label_tree(params):
+      def _label(path, _):
+        p_str = jax.tree_util.keystr(path, simple=True, separator="/")
+        if compiled_trainable and not any(p.search(p_str) for p in compiled_trainable):
+          return "frozen"
+        if compiled_frozen and any(p.search(p_str) for p in compiled_frozen):
+          return "frozen"
+        return "trainable"
+
+      return jax.tree_util.tree_map_with_path(_label, params)
+
+    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer
+    # so frozen parameters do not allocate momentum/variance state in HBM.
     return optax.multi_transform(
         {"trainable": base_opt, "frozen": optax.set_to_zero()},
-        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
+        _param_label_tree,
     )
 
   return base_opt

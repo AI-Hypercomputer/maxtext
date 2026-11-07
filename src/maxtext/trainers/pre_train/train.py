@@ -239,7 +239,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # A multimodal model may receive a text-only batch while retaining its vision
   # parameters in the model and checkpoints. Only pass image inputs when present.
   encoder_images = data.get("images") if config.use_multimodal else None
-  encoder_image_masks = data.get("image_masks") if config.use_multimodal else None
+  encoder_image_masks = data.get("pooled_patches_idx", data.get("image_masks")) if config.use_multimodal else None
   is_video = "video_grid_thw" in data
   encoder_kwargs: EncoderKwargs
   if is_video:
@@ -337,6 +337,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if is_block_diffusion:
       xent = xent * targets_loss_mask
       z_loss = z_loss * targets_loss_mask
+    elif "loss_weights" in data and data["loss_weights"] is not None:
+      token_weights = data["loss_weights"].astype(jnp.float32) * (data["targets_segmentation"] != 0)
+      xent = xent * token_weights
+      z_loss = z_loss * token_weights
     else:
       xent = xent * (data["targets_segmentation"] != 0)
       z_loss = z_loss * (data["targets_segmentation"] != 0)
@@ -347,6 +351,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if is_block_diffusion:
     assert targets_loss_mask is not None
     total_weights = jnp.sum(targets_loss_mask)
+  elif "loss_weights" in data and data["loss_weights"] is not None:
+    total_weights = jnp.sum(data["loss_weights"].astype(jnp.float32) * (data["targets_segmentation"] != 0))
   else:
     total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide xent_sum
@@ -729,10 +735,52 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # log_step_diagnostics: the updated router biases and this step's bias updates (see step_diagnostics).
   diag_bias_values, diag_bias_updates = [], []
 
+  row_range = getattr(config, "olmo_trainable_embedding_row_range", None)
+  if row_range and len(row_range) == 2:
+    row_start, row_end = int(row_range[0]), int(row_range[1])
+
+    def _mask_embed_rows(path, g):
+      p_str = jax.tree_util.keystr(path, simple=True, separator="/")
+      if "token_embedder/embedding" in p_str and hasattr(g, "shape") and len(g.shape) >= 2:
+        row_ids = jnp.arange(g.shape[0], dtype=jnp.int32)[:, None]
+        keep = (row_ids >= row_start) & (row_ids < row_end)
+        return jnp.where(keep, g, jnp.zeros_like(g))
+      return g
+
+    raw_grads = jax.tree_util.tree_map_with_path(_mask_embed_rows, raw_grads)
+
+  raw_grad_norm = max_utils.l2norm_pytree(raw_grads) if config.skip_step_on_spikes else None
+
   if config.gradient_clipping_threshold > 0:
-    grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
+    if getattr(config, "olmo_per_component_grad_clip", False):
+      grads = raw_grads
+      for group_pred in (
+          lambda s: "OLMo35VisionConnector" in s,
+          lambda s: "OLMo35VisionEncoder" in s,
+          lambda s: "token_embedder" in s,
+          lambda s: ("OLMo35VisionConnector" not in s) and ("OLMo35VisionEncoder" not in s) and ("token_embedder" not in s),
+      ):
+        group_tree = jax.tree_util.tree_map_with_path(
+            lambda p, g, pred=group_pred: g if pred(jax.tree_util.keystr(p, simple=True, separator="/")) else jnp.zeros_like(g),
+            raw_grads,
+        )
+        clipped_group = maxtext_utils.apply_gradient_clipping(group_tree, None, config.gradient_clipping_threshold)
+        grads = jax.tree_util.tree_map_with_path(
+            lambda p, cur, cg, pred=group_pred: cg if pred(jax.tree_util.keystr(p, simple=True, separator="/")) else cur,
+            grads,
+            clipped_group,
+        )
+    else:
+      grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
+  if config.skip_step_on_spikes:
+    grads = jax.tree_util.tree_map(
+        lambda g: jnp.where(jnp.isfinite(g), g, jnp.zeros_like(g))
+        if hasattr(g, "dtype") and jnp.issubdtype(g.dtype, jnp.inexact)
+        else g,
+        grads,
+    )
   if config.optimizer_memory_host_offload:
     # state.optimizer is an NNX Optimizer module; state_mesh_shardings.optimizer
     # is an NNX State. Use nnx.state() to get a compatible State for device_put.
@@ -745,11 +793,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     new_opt_state = jax.device_put(opt_state, device_opt_shardings)
     nnx.update(state.optimizer, new_opt_state)
   if config.skip_step_on_spikes:
-    # The skip-step optimizer is a GradientTransformationExtraArgs that reads
-    # loss/grad_norm to decide whether to zero the update on a spike. nnx
-    # Optimizer.update forwards these kwargs to tx.update.
-    grad_norm = max_utils.l2norm_pytree(grads)
-    state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+    # Pass pre-clip `raw_grad_norm` so spikes clamped by gradient clipping or overflowed to `inf`
+    # in fp32 norm calculation are accurately detected and skipped before momentum updates.
+    state.apply_gradients(grads, loss=loss, grad_norm=raw_grad_norm)
   else:
     state.apply_gradients(grads)
   new_state = state

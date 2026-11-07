@@ -46,6 +46,10 @@ _MODEL_TO_BLOCKS = {
     # Weaver
     "weaver-mini": ("qwen3_vl", "qwen3"),
     "weaver-max": ("qwen3_vl", "qwen3"),
+    # OLMo 3.5 Vision (SigLIP2-SO400M/14-378 + OLMoE3)
+    "olmo35-small": ("olmo35", "olmoe3"),
+    "olmo35-small-e256k8-sh2x": ("olmo35", "olmoe3"),
+    "olmoe3-30m": ("olmo35", "olmoe3"),
 }
 
 
@@ -286,6 +290,16 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
+  elif vision_block in ["olmo35"]:
+    if hasattr(model_name, "image_size_for_vit"):
+      img_sz = model_name.image_size_for_vit
+      img_h, img_w = tuple(img_sz) if isinstance(img_sz, (list, tuple)) else (int(img_sz), int(img_sz))
+      patch = model_name.patch_size_for_vit
+      channels = model_name.num_channels_for_vit
+      n_crops = getattr(model_name, "olmo_max_crops_per_seq", num_image_per_sequence)
+      image_shape = (batch_size, n_crops, (img_h // patch) * (img_w // patch), channels * patch * patch)
+    else:
+      image_shape = (batch_size, num_image_per_sequence, 729, 588)
   return image_shape
 
 

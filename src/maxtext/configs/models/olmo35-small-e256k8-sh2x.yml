@@ -74,3 +74,17 @@ emo_eval_document_expert_pool: 256
 # the tokens), and vocab tiles cut along the sequence (no all-gather of the hidden states at one sequence per device).
 moe_global_load_balancing: true
 vocab_tiling_seq_major: true
+
+# Multimodal vision encoder & connector defaults (SigLIP2-SO400M/14-378 truncated to 25 blocks + 9,728 SwiGLU connector;
+# inactive until use_multimodal=true is set).
+vision_encoder_block: "olmo35"
+image_size_for_vit: 378
+patch_size_for_vit: 14
+hidden_size_for_vit: 1152
+intermediate_size_for_vit: 4304
+num_attention_heads_for_vit: 16
+num_hidden_layers_for_vit: 25
+olmo_vit_feature_layers: [24, 18]
+olmo_connector_mlp_hidden_size: 9728
+olmo_connector_pool_size: 4
+olmo_image_patch_token_id: 100280

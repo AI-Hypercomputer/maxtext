@@ -14,6 +14,7 @@
 
 """Module for encoder layers."""
 
+import functools
 import jax
 from flax import nnx
 from jax.sharding import Mesh
@@ -85,6 +86,17 @@ class VisionEncoder(nnx.Module):
           self, encoder_name, qwen3_vl_vision.Qwen3VLVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
+    elif self.vision_encoder_block == VisionEncoderBlockType.OLMO35:
+      from maxtext.models import olmoe3_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "OLMo35VisionEncoder_0"
+      projector_name = "OLMo35VisionConnector_0"
+      setattr(
+          self, encoder_name, olmoe3_vision.OLMo35VisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
+      setattr(
+          self, projector_name, olmoe3_vision.OLMo35VisionConnector(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
     else:
       supported_blocks = [block.value for block in VisionEncoderBlockType if block != VisionEncoderBlockType.NONE]
       raise ValueError(
@@ -105,6 +117,44 @@ class VisionEncoder(nnx.Module):
     return encoder_name, projector_name
 
   def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
+    cp_axis = getattr(self.config, "context_sharding", "context")
+    cp_size = self.mesh.shape.get(cp_axis, 1) if self.mesh is not None else 1
+    if (
+        self.vision_encoder_block == VisionEncoderBlockType.OLMO35
+        and bool(getattr(self.config, "olmo_vit_remat_blocks", True))
+        and not self.config.freeze_vision_encoder_params
+        and cp_size > 1
+    ):
+      @jax.custom_vjp
+      def _vit_bwd_fence(st_in, imgs_in):
+        return st_in, imgs_in
+
+      def _vit_bwd_fence_fwd(st_in, imgs_in):
+        return (st_in, imgs_in), ()
+
+      def _vit_bwd_fence_bwd(_, cts):
+        leaves, treedef = jax.tree.flatten(cts)
+        real_idx = [i for i, v in enumerate(leaves) if isinstance(v, jax.Array) and v.dtype != jax.dtypes.float0]
+        if real_idx:
+          fenced = jax.lax.optimization_barrier([leaves[i] for i in real_idx])
+          for i, fv in zip(real_idx, fenced):
+            leaves[i] = fv
+        return jax.tree.unflatten(treedef, leaves)
+
+      _vit_bwd_fence.defvjp(_vit_bwd_fence_fwd, _vit_bwd_fence_bwd)
+      graphdef, state = nnx.split(self)
+
+      @functools.partial(jax.checkpoint, prevent_cse=True)
+      def _remat_olmo_vision(st_in, imgs_in, masks_in):
+        st_in, imgs_in = _vit_bwd_fence(st_in, imgs_in)
+        mod = nnx.merge(graphdef, st_in)
+        enc = getattr(mod, mod.encoder_name)
+        proj = getattr(mod, mod.projector_name)
+        feats = enc(imgs_in, deterministic=deterministic)
+        return proj(feats, masks_in)
+
+      return _remat_olmo_vision(state, input_images, input_masks), None
+
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
     if self.vision_encoder_block.value.startswith("qwen3") and input_masks is not None:
@@ -127,7 +177,10 @@ class VisionEncoder(nnx.Module):
 
     # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
     projector = getattr(self, self.projector_name)
-    embeddings = projector(embeddings)
+    if self.vision_encoder_block == VisionEncoderBlockType.OLMO35:
+      embeddings = projector(embeddings, input_masks)
+    else:
+      embeddings = projector(embeddings)
 
     return embeddings, deep_feats
 

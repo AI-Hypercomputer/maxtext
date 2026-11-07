@@ -117,9 +117,16 @@ def betas(config, base_config):
   return scaled
 
 
-def role_multipliers(role, r, rt, heads=1.0):
+def role_multipliers(role, r, rt, heads=1.0, config=None):
   """(lr, eps, weight decay) multipliers of a parameter with `role` and width ratio `r` (1 for non-matrices).
   `heads`: for a head-shared vector under `head_dim_transfer`, (H / H_base) / m_N; else 1."""
+  s = rt.s
+  if role == roles.VISION_ENCODER:
+    vis_scale = float(getattr(config, "olmo_vision_lr_scale", 0.1)) if config is not None else 0.1
+    return vis_scale * s, 1.0, 0.0
+  if role == roles.VISION_CONNECTOR:
+    conn_scale = float(getattr(config, "olmo_connector_lr_scale", 2.0)) if config is not None else 2.0
+    return conn_scale * s, 1.0, 0.0
   hidden_lr = rt.m_l ** (rt.alpha - 1)
   hidden_eps = rt.m_l**-rt.alpha / rt.m_n
   if role in (roles.INPUT_EMBEDDING, roles.INPUT_VECTOR):
@@ -138,7 +145,6 @@ def role_multipliers(role, r, rt, heads=1.0):
     lr, eps, wd = 1.0, 1.0, 1.0
   else:
     raise NotImplementedError(role)
-  s = rt.s
   return lr * s, eps / s, wd * s
 
 
@@ -152,7 +158,7 @@ def multipliers(config, base_config, params):
     heads = 1.0
     if role.role == roles.HIDDEN_HEAD_SHARED_VECTOR and config.head_dim_transfer:
       heads = roles.head_count(config, role.sub) / roles.head_count(base_config, role.sub) / rt.m_n
-    return role_multipliers(role.role, r, rt, heads)
+    return role_multipliers(role.role, r, rt, heads, config=config)
 
   tree = roles.classify_tree(config, params, base_config=base_config)
   triples = jax.tree.map(of, tree, is_leaf=lambda x: isinstance(x, roles.ParamRole))

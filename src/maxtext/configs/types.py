@@ -2986,6 +2986,13 @@ class OlmoGrainDataset(BaseModel):
           "OLMo-core's EMo router does (an EOS starts the next segment), offset by one; -1 keeps one segment per instance."
       ),
   )
+  olmo_reset_positions_on_segment: bool = Field(
+      False,
+      description=(
+          "olmo_grain: when True alongside olmo_segment_eos_token_id >= 0, reset inputs_position to 0 at the start "
+          "of each EOS-delimited segment so Scalable Softmax log(pos + 1) matches each segment's causal span."
+      ),
+  )
   olmo_global_indices_path: PathStr = Field(
       "",
       description=(
@@ -3454,6 +3461,13 @@ class Optimizer(BaseModel):
       description=(
           "List of parameter names/patterns to train. If non-empty, all other parameters will be frozen, "
           "example: ['.*indexer.*']. If empty (default), all parameters are trained."
+      ),
+  )
+  frozen_parameters_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to freeze while training all other parameters, "
+          "example: ['logits_dense']. Evaluated alongside trainable_parameters_mask."
       ),
   )
 
@@ -4009,6 +4023,67 @@ class VisionTower(BaseModel):
   vision_output_length: int = Field(
       -1,
       description="The output length (number of soft tokens) from the vision encoder.",
+  )
+  olmo_vit_feature_layers: list[int] = Field(
+      [24, 18],
+      description="0-indexed ViT block indices whose hidden states are concatenated for OLMo 3.5 vision.",
+  )
+  olmo_vit_remat_blocks: bool = Field(
+      True,
+      description="Apply per-block jax.checkpoint inside OLMo35VisionEncoder.",
+  )
+  olmo_vit_crop_chunk_size: int = Field(
+      0,
+      description="If > 0, scan OLMo35VisionEncoder over chunks of this many crops to bound peak ViT HBM/VMEM.",
+  )
+  olmo_vit_cp_shard_crops: bool = Field(
+      True,
+      description="Under Context Parallelism, encode N_crops // CP crops per CP rank and AllGather.",
+  )
+  olmo_image_patch_token_id: int = Field(
+      100280,
+      description="Token ID of <im_patch> where OLMo 3.5 connector features are added (+=) after embedding_norm.",
+  )
+  olmo_connector_mlp_hidden_size: int = Field(
+      9728,
+      description="SwiGLU hidden width of OLMo35VisionConnector (9,728 in OLMo-core #916).",
+  )
+  olmo_connector_pool_size: int = Field(
+      4,
+      description="Patch group pool size in OLMo35VisionConnector (2x2 = 4).",
+  )
+  olmo_max_crops_per_seq: int = Field(
+      64,
+      description="Maximum number of 378x378 image crops per packed sequence for OLMo 3.5 multimodal training.",
+  )
+  olmo_max_pooled_patches_per_seq: int = Field(
+      0,
+      description=(
+          "Maximum number of 2x2 pooled patch groups per sequence; 0 defaults to "
+          "olmo_max_crops_per_seq * ((H // p + 1) // 2) * ((W // p + 1) // 2)."
+      ),
+  )
+  olmo_vision_lr_scale: float = Field(
+      0.1,
+      description="Learning rate multiplier for OLMo35VisionEncoder parameters relative to LM LR (0.1 in OLMo-core).",
+  )
+  olmo_connector_lr_scale: float = Field(
+      2.0,
+      description="Learning rate multiplier for OLMo35VisionConnector parameters relative to LM LR (2.0 in OLMo-core).",
+  )
+  olmo_per_component_grad_clip: bool = Field(
+      False,
+      description=(
+          "Clip OLMo35VisionConnector, OLMo35VisionEncoder, token_embedder, and decoder gradients "
+          "independently to gradient_clipping_threshold."
+      ),
+  )
+  olmo_trainable_embedding_row_range: list[int] = Field(
+      default_factory=list,
+      description=(
+          "Optional [start_row, end_row] slice of token_embedder/embedding to train while freezing all other rows "
+          "(e.g. [100278, 100284] in OLMo 3.5 Bridge alignment)."
+      ),
   )
 
 
@@ -6231,8 +6306,14 @@ class MaxTextConfig(
           "weaver-mini",
           "weaver-max",
           "weaver-mini-diffuser",
+          "olmo35-small",
+          "olmo35-small-e256k8-sh2x",
+          "olmoe3-30m",
       )
-      if self.model_name not in valid_mm_models and self.model_name != "default":
+      is_olmo_mm = (
+          self.decoder_block == DecoderBlockType.OLMOE3 or self.vision_encoder_block == VisionEncoderBlockType.OLMO35
+      )
+      if self.model_name not in valid_mm_models and self.model_name != "default" and not is_olmo_mm:
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
       if self.use_sft:
         if not self.sft_train_on_completion_only:
@@ -6523,6 +6604,13 @@ class MaxTextConfig(
         raise ValueError(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
             f"({self.interleave_moe_layer_step})"
+        )
+    if self.decoder_block == DecoderBlockType.OLMOE3:
+      olmoe3_cp_size = self.ici_context_parallelism * self.dcn_context_parallelism
+      if olmoe3_cp_size > 1 and self.context_parallel_load_balance:
+        raise ValueError(
+            "OLMoE3 context parallelism requires context_parallel_load_balance=False: KDA carries a causal "
+            "recurrence, so sequence order across context-parallel ranks must remain contiguous."
         )
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,

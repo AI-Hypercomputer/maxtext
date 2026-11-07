@@ -1,0 +1,166 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OLMo 3.5 Small (`olmo35-small-e256k8-sh2x`: 72.58B total / 4.12B active, 40L 7:1 KDA:FA, E=256 top-8)
+# 256K long-context text & mixed multimodal mid-training recipe on TPU v4.
+#
+# Defaults below target 3,072 TPU v4 chips (`8x8x48` single slice) at 25.17M tokens/step (< 32M):
+#   DP=12, CP=32 (2D 8H x 4V Ulysses), EP=8, FSDP=1, ZeRO-1=true, per_device_batch_size=0.03125
+#   -> 96 sequences x 262,144 tokens = 25,165,824 tokens/step (8,192 tokens/chip, zero PCIe offload).
+#
+# Common scale overrides:
+#   - 3,072 chips (`3x v4-2048` DCN @ 25.17M tok/step):
+#       dcn_data_parallelism=3 ici_data_parallelism=4 ici_context_parallelism=32 ici_expert_parallelism=8 per_device_batch_size=0.03125
+#   - 3,072 chips (`8x8x48` @ 50.33M / 100.66M tok/step):
+#       ici_data_parallelism=12 ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625   # 50.33M
+#       ici_data_parallelism=12 ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125    # 100.66M
+#   - 512 chips (`8x8x8` v4-1024 @ 16.78M tok/step < 32M):
+#       ici_data_parallelism=2  ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125 num_vocab_tiling=16 moe_a2a_token_chunks=8
+#   - 512 chips (`8x8x8` v4-1024 @ 4.19M tok/step, per-chip replica of 3K 25.17M recipe):
+#       ici_data_parallelism=2  ici_context_parallelism=32 ici_expert_parallelism=8  per_device_batch_size=0.03125
+#   - 128 chips (`4x4x8` v4-256 @ 4.19M tok/step, zero optimizer offload):
+#       ici_data_parallelism=1  ici_context_parallelism=8  ici_expert_parallelism=16 per_device_batch_size=0.125 decoder_layer_input=offload num_vocab_tiling=16 moe_a2a_token_chunks=16
+#   - Mixed multimodal 256K (add SigLIP2-SO400M 25L + Connector):
+#       use_multimodal=true olmo_max_crops_per_seq=128 olmo_vit_cp_shard_crops=true olmo_vit_remat_blocks=true
+
+base_config: "base.yml"
+model_name: "olmo35-small-e256k8-sh2x"
+
+# -------------- Sequence & Packing --------------
+max_target_length: 262144
+packing: true
+olmo_segment_eos_token_id: 100257
+olmo_apply_ngram_filter: true
+olmoe3_segments_for_emo_only: false
+emo_enabled: false
+load_balance_loss_weight: 0.01
+moe_aux_loss_reduction: "sum"
+moe_global_load_balancing: true
+context_parallel_load_balance: false
+
+# -------------- Strict FP32 Master / Router / KDA State Precision --------------
+dtype: "bfloat16"
+dtype_mm: "bfloat16"
+grad_dtype: "bfloat16"
+weight_dtype: "float32"
+cast_params_to_compute_dtype: true
+mu_dtype: "float32"
+float32_gate_logits: true
+gdn_state_dtype: "float32"
+kda_conv_in_compute_dtype: false
+matmul_precision: "default"
+
+# -------------- Scanned 5x8L Stack & Rematerialization --------------
+scan_layers: true
+olmoe3_per_layer_remat: true
+remat_policy: "custom"
+decoder_layer_input: "device"
+moe_routing_maps: "device"
+moe_routing: "device"
+context: "device"
+
+# -------------- 3D Torus Sharding (`cp-as-ep` + ZeRO-1, Zero Offload) --------------
+custom_mesh_and_rule: "cp-as-ep"
+allow_split_physical_axes: true
+shard_exp_on_fsdp: false
+ici_data_parallelism: 12
+ici_fsdp_parallelism: 1
+ici_context_parallelism: 32
+ici_expert_parallelism: 8
+shard_optimizer_over_data: true
+optimizer_memory_host_offload: false
+per_device_batch_size: 0.03125
+gradient_accumulation_steps: 1
+
+# -------------- TPU v4 MoE, KDA, Attention & Vocab Tiling Kernels --------------
+megablox: true
+sparse_matmul: true
+use_tokamax_gmm: false
+use_gmm_v2: false
+moe_fused_swiglu_gmm: true
+moe_a2a_pipeline_chunks: false
+moe_fused_swiglu_bwd_tile_batch_seq: 256
+moe_fused_swiglu_bwd_tile_embed_dim: 768
+moe_fused_swiglu_bwd_tile_mlp_dim: 768
+moe_fused_swiglu_dwo_tile_embed_dim: 768
+moe_fused_swiglu_dwo_tile_mlp_dim: 768
+wi_tile_fwd_batch_seq: 512
+wi_tile_fwd_embed_dim: 768
+wi_tile_fwd_mlp_dim: 768
+wi_tile_dlhs_batch_seq: 512
+wi_tile_dlhs_embed_dim: 384
+wi_tile_dlhs_mlp_dim: 1536
+wi_tile_drhs_batch_seq: 512
+wi_tile_drhs_embed_dim: 768
+wi_tile_drhs_mlp_dim: 768
+wo_tile_fwd_batch_seq: 512
+wo_tile_fwd_embed_dim: 384
+wo_tile_fwd_mlp_dim: 1536
+wo_tile_dlhs_batch_seq: 512
+wo_tile_dlhs_embed_dim: 768
+wo_tile_dlhs_mlp_dim: 768
+wo_tile_drhs_batch_seq: 512
+wo_tile_drhs_embed_dim: 384
+wo_tile_drhs_mlp_dim: 768
+capacity_factor: -1
+moe_lean_routing: true
+moe_topk_pallas: true
+moe_a2a_expert_major: true
+moe_a2a_token_chunks: 4
+ragged_buffer_factor: 1.125
+
+use_tokamax_kda: false
+kda_chunked_impl: "subblock"
+kda_sub_block: 16
+gdn_chunk_size: 128
+kda_pallas_fused: true
+kda_fused_token_major: true
+kda_outer_block: 32
+kda_inverse_precision: "high"
+kda_fused_input_proj: true
+kda_flat_head_layout: true
+kda_fused_state_stride: 0
+
+attention: "flash"
+use_tokamax_splash: false
+
+fused_lm_head_ce: true
+fused_lm_head_ce_block_t: 512
+fused_lm_head_ce_block_v: 1024
+fused_lm_head_ce_block_t_bwd: 512
+fused_lm_head_ce_block_v_bwd: 128
+logits_dot_in_fp32: false
+vocab_tiling_seq_major: true
+num_vocab_tiling: 8
+
+# -------------- Multimodal Defaults (Enable via use_multimodal=true) --------------
+use_multimodal: false
+vision_encoder_block: "olmo35"
+freeze_vision_encoder_params: false
+olmo_max_crops_per_seq: 128
+olmo_vit_cp_shard_crops: true
+olmo_vit_remat_blocks: true
+olmo_vit_crop_chunk_size: 4
+olmo_per_component_grad_clip: true
+
+# -------------- Optimizer & Schedule --------------
+opt_type: "adamw"
+learning_rate: 1.5e-4
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.0e-8
+adam_weight_decay: 0.1
+adamw_mask: ["token_embedder/embedding"]
+gradient_clipping_threshold: 1.0
+skip_step_on_spikes: true

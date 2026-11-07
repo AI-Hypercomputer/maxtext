@@ -256,7 +256,7 @@ class Transformer(nnx.Module):
     deepstack_visual_embeds = None
     if getattr(self.config, "use_multimodal", False) and encoder_images is not None:
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(  # pyrefly: ignore[not-callable]
-          input_images=encoder_images, deterministic=not enable_dropout
+          input_images=encoder_images, input_masks=encoder_image_masks, deterministic=not enable_dropout
       )
       bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
           self.config, decoder_input_tokens, is_video=False

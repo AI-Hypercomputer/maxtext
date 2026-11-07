@@ -22,7 +22,7 @@ logical_axis_rules: [
                       # ==========================================
                       # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'expert', 'context']],
                       # Vocab Weights
                       ['vocab', []],
                       ['embed_vocab', ['fsdp', 'context', 'expert']],
@@ -76,4 +76,6 @@ logical_axis_rules: [
                       ['layers', 'stage'],
                       ['embed', ['fsdp', 'context', 'expert']],
                       ['embed_attn', ['fsdp', 'context', 'expert']],
+                      ['vit_embed_cp', ['fsdp', 'context', 'expert']],
+                      ['vit_embed', ['fsdp', 'expert']],
                   ]

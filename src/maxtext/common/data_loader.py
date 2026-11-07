@@ -94,7 +94,12 @@ class DataLoader:
     example_batch = self.load_next_batch_pre_sharding()
     if self.config.enable_diloco:
       example_batch = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
-    return jax.device_put(example_batch, self.input_data_shardings)
+    target_shardings = self.input_data_shardings
+    if isinstance(target_shardings, dict) and isinstance(example_batch, dict):
+      if set(example_batch.keys()) != set(target_shardings.keys()):
+        default_sharding = target_shardings["inputs"]
+        target_shardings = {k: target_shardings.get(k, default_sharding) for k in example_batch}
+    return jax.device_put(example_batch, target_shardings)
 
   def check_example_batch(self):
     if self.config.max_checkify:

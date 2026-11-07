@@ -21,7 +21,7 @@ from typing import Any
 import jax
 from jax import lax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from flax import nnx
 
@@ -124,6 +124,15 @@ class Embed(nnx.Module):
         _maybe_move_embedding_to_device(self.embedding.get_value(), self.config),
         self.dtype,
     )
+    cp_axis = getattr(cfg, "context_sharding", "context")
+    if (
+        self.mesh is not None
+        and self.mesh.shape.get(cp_axis, 1) > 1
+        and cfg.shard_mode != ShardMode.EXPLICIT
+    ):
+      # Gather the small [V, D] embedding table cleanly once rather than involuntarily
+      # replicating the [B, T, D] output activation across overlapping CP/EP mesh axes.
+      embedding = jax.lax.with_sharding_constraint(embedding, NamedSharding(self.mesh, PartitionSpec(None, None)))
 
     output_axis_names = (
         (

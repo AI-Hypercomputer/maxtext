@@ -48,6 +48,45 @@ def get_input_data_sharding(config, mesh, rules=None):
     data_sharding = create_sharding(mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=rules)
   else:
     data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
+  if getattr(config, "use_multimodal", False) and (
+      getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+      == "olmo35"
+  ):
+    batch_axes = (
+        ["diloco", config.input_data_sharding_logical_axes[0]]
+        if config.enable_diloco
+        else [config.input_data_sharding_logical_axes[0]]
+    )
+    cp_axis = getattr(config, "context_sharding", "context")
+    cp_size = mesh.shape.get(cp_axis, 1) if mesh is not None else 1
+    n_crops = int(getattr(config, "olmo_max_crops_per_seq", 0))
+    crop_axis = (
+        config.input_data_sharding_logical_axes[1]
+        if (
+            bool(getattr(config, "olmo_vit_cp_shard_crops", False))
+            and cp_size > 1
+            and n_crops > 0
+            and n_crops % cp_size == 0
+            and len(config.input_data_sharding_logical_axes) > 1
+        )
+        else None
+    )
+    img_sharding = create_sharding(mesh, batch_axes + [crop_axis, None, None], rules=rules)
+    pool_sharding = create_sharding(mesh, batch_axes + [None, None], rules=rules)
+    shardings = {
+        "inputs": data_sharding,
+        "inputs_position": data_sharding,
+        "inputs_segmentation": data_sharding,
+        "targets": data_sharding,
+        "targets_position": data_sharding,
+        "targets_segmentation": data_sharding,
+        "images": img_sharding,
+        "pooled_patches_idx": pool_sharding,
+    }
+    ds_type = getattr(getattr(config, "dataset_type", None), "value", str(getattr(config, "dataset_type", "")))
+    if ds_type == "olmo_grain":
+      shardings.pop("targets_position", None)
+    return shardings
   return data_sharding
 
 
@@ -917,7 +956,10 @@ def maybe_update_params_sharding_with_opt_nnx(
 
   def _update_model_var(path, var):
     if path in mu_lookup:
-      return var.replace(mu_lookup[path])
+      mu_sharding = mu_lookup[path]
+      if getattr(mu_sharding, "memory_kind", None) == "pinned_host" and not config.parameter_memory_host_offload:
+        mu_sharding = mu_sharding.with_memory_kind("device")
+      return var.replace(mu_sharding)
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
@@ -971,15 +1013,30 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
 def reshard_train_state(state, state_mesh_shardings, enable_single_controller: bool):
   """Reshards a train state to `state_mesh_shardings`.
 
-  Under a single controller (Pathways), `jax.device_put` of a distributed state to a new
-  sharding can stage the data through the controller host (at 3,072 TPU v4 chips the
-  controller RSS grew past 187 GB before compilation). A jitted identity with
-  `out_shardings` performs the same reshard on the accelerators. Multi-controller runs
-  keep `jax.device_put`.
+  Under a single controller (Pathways) or multi-host McJAX (`jax.process_count() > 1`),
+  `jax.device_put` to a multi-host `NamedSharding` either stages through the controller host
+  or raises `ValueError: device_put's second argument must be a Device or a Sharding which
+  represents addressable devices`. Resharding only leaves whose sharding actually differs via
+  `jax.jit` works on both single-controller and multi-controller meshes while leaving already-placed
+  `pinned_host` optimizer moments untouched.
   """
-  if enable_single_controller:
-    return jax.jit(lambda s: s, out_shardings=state_mesh_shardings)(state)
-  return jax.device_put(state, state_mesh_shardings)
+  del enable_single_controller
+  flat_state, treedef = jax.tree.flatten(state, is_leaf=lambda x: isinstance(x, (jax.Array, NamedSharding)))
+  flat_shardings = treedef.flatten_up_to(state_mesh_shardings)
+  changed_indices = [
+      i
+      for i, (leaf, target) in enumerate(zip(flat_state, flat_shardings))
+      if isinstance(leaf, jax.Array) and isinstance(target, NamedSharding) and leaf.sharding != target
+  ]
+  if not changed_indices:
+    return state
+  changed_arrays = [flat_state[i] for i in changed_indices]
+  changed_targets = [flat_shardings[i] for i in changed_indices]
+  resharded = jax.jit(lambda xs: xs, out_shardings=changed_targets)(changed_arrays)
+  out_flat = list(flat_state)
+  for idx, arr in zip(changed_indices, resharded):
+    out_flat[idx] = arr
+  return treedef.unflatten(out_flat)
 
 
 def logical_axis_rules_pp_act_as_dp(logical_rules):

@@ -520,8 +520,9 @@ class ShiftToInputsTargets(grain.transforms.Map):
   the whole instance.
   """
 
-  def __init__(self, segment_eos_token_id: int = -1):
+  def __init__(self, segment_eos_token_id: int = -1, reset_positions_on_segment: bool = False):
     self.segment_eos_token_id = int(segment_eos_token_id)
+    self.reset_positions_on_segment = bool(reset_positions_on_segment)
 
   def map(self, element: Dict[str, Any]) -> Dict[str, Any]:
     """Convert ``tokens`` into ``inputs`` / ``targets`` / segmentation tensors."""
@@ -529,12 +530,18 @@ class ShiftToInputsTargets(grain.transforms.Map):
     L = tokens.shape[0]  # == sequence_length from the index
     instance_mask = bool(element.get("instance_mask", True))
     seg_value = np.int32(1) if instance_mask else np.int32(0)
+    starts = None
     if self.segment_eos_token_id >= 0:
       starts = (tokens == self.segment_eos_token_id).astype(np.int32)
       starts[0] = 0
       segments = 1 + np.cumsum(starts, dtype=np.int32)
     else:
       segments = np.ones(L, dtype=np.int32)
+
+    positions = np.arange(L, dtype=np.int32)
+    if self.reset_positions_on_segment and starts is not None:
+      seg_start_idx = np.maximum.accumulate(np.where(starts != 0, positions, 0)).astype(np.int32)
+      positions = positions - seg_start_idx
 
     # Output rank-2 (batch, seq) tensors of length L (= max_target_length).
     # The TPU splash-attention kernel requires q_seq_len to be divisible by
@@ -558,7 +565,7 @@ class ShiftToInputsTargets(grain.transforms.Map):
     return {
         "inputs": inputs,
         "targets": targets,
-        "inputs_position": np.arange(L, dtype=np.int32),
+        "inputs_position": positions,
         "inputs_segmentation": segments,
         "targets_segmentation": targets_seg,
     }
@@ -573,6 +580,7 @@ def make_olmo_grain_data_loader(
     shard_count: int,
     apply_ngram_filter: bool = True,
     segment_eos_token_id: int = -1,
+    reset_positions_on_segment: bool = False,
     shift_to_inputs_targets: bool = True,
     path_remap: Optional[Dict[str, str]] = None,
     grain_worker_count: int = 0,
@@ -633,7 +641,7 @@ def make_olmo_grain_data_loader(
   if apply_ngram_filter:
     ops.append(NgramFilterTransform())
   if shift_to_inputs_targets:
-    ops.append(ShiftToInputsTargets(segment_eos_token_id))
+    ops.append(ShiftToInputsTargets(segment_eos_token_id, reset_positions_on_segment=reset_positions_on_segment))
   ops.append(grain.transforms.Batch(batch_size=batch_size, drop_remainder=True))
 
   # Both samplers already shard by host (shard_index/shard_count). Handing Grain a real

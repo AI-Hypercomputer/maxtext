@@ -77,6 +77,9 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   """
   labels = data["targets"]
   segmentation = data["targets_segmentation"]
+  has_float_weights = "loss_weights" in data and data["loss_weights"] is not None
+  if has_float_weights:
+    segmentation = data["loss_weights"].astype(jnp.float32) * (segmentation != 0).astype(jnp.float32)
   deterministic = not config.enable_dropout if is_train else True
   model_mode = "train"
 
@@ -202,8 +205,9 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
           chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
       )
 
-      masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
-      masked_z_loss = jnp.sum(chunk_z_loss * (segmentation_chunk != 0))
+      w_mask = segmentation_chunk if has_float_weights else (segmentation_chunk != 0)
+      masked_xent = jnp.sum(chunk_xent * w_mask)
+      masked_z_loss = jnp.sum(chunk_z_loss * w_mask)
 
       return (loss_accumulator + masked_xent, z_loss_accumulator + masked_z_loss), None
 
@@ -246,7 +250,8 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       chunk_logits = _logits_for_chunk(input_head_params, chunk_other_params, chunk_rest, input_hidden_chunk)
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
       xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier)
-      return jnp.sum(xent * (input_segmentation_chunk != 0))
+      w_mask = input_segmentation_chunk if has_float_weights else (input_segmentation_chunk != 0)
+      return jnp.sum(xent * w_mask)
 
     def _bwd_scan_body(grad_head_acc, chunk_data):
       hidden_chunk, label_chunk, segmentation_chunk = chunk_data
@@ -351,10 +356,19 @@ def fused_lm_head_ce_nnx_loss(model, hidden_states, data, config, is_train):
   y = y.astype(config.dtype)
   kernel = decoder.logits_dense.kernel[...]
 
-  token_spec = create_sharding(mesh, ("activation_embed_and_logits_batch", "activation_length")).spec
+  token_sharding = create_sharding(mesh, ("activation_embed_and_logits_batch", "activation_length"))
+  token_spec = token_sharding.spec
   w_spec = create_sharding(mesh, ("embed_vocab", "vocab")).spec
   labels = data["targets"]
   weights = (data["targets_segmentation"] != 0).astype(jnp.float32)
+  if "loss_weights" in data and data["loss_weights"] is not None:
+    loss_w = maybe_shard_with_name(
+        data["loss_weights"].astype(jnp.float32),
+        token_sharding,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+    )
+    weights = loss_w * weights
 
   loss, z_loss = fused_ce.sharded_fused_linear_cross_entropy(
       y,

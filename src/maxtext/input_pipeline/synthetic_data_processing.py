@@ -83,13 +83,33 @@ class SyntheticDataIterator:
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
+    is_olmo_mm = getattr(config, "use_multimodal", False) and (
+        getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+        == "olmo35"
+    )
+    tok_upper = (
+        min(config.vocab_size, int(config.olmo_image_patch_token_id)) if is_olmo_mm else config.vocab_size
+    )
     tokens = jax.random.randint(
         jax.random.PRNGKey(0),
         (config.global_batch_size_to_load, config.max_target_length + 1),
         0,
-        config.vocab_size,
+        tok_upper,
         dtype=jnp.int32,
     )
+    if is_olmo_mm:
+      img_sz = config.image_size_for_vit
+      img_h, img_w = tuple(img_sz) if isinstance(img_sz, (list, tuple)) else (int(img_sz), int(img_sz))
+      patch = config.patch_size_for_vit
+      pool_h, pool_w = (img_h // patch + 1) // 2, (img_w // patch + 1) // 2
+      n_crops = int(config.olmo_max_crops_per_seq)
+      n_pooled = (
+          int(config.olmo_max_pooled_patches_per_seq)
+          if getattr(config, "olmo_max_pooled_patches_per_seq", 0) > 0
+          else n_crops * pool_h * pool_w
+      )
+      n_active_pooled = min(n_pooled, max(1, config.max_target_length // 4))
+      tokens = tokens.at[:, :n_active_pooled].set(int(config.olmo_image_patch_token_id))
 
     sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
     batch_positions = jnp.broadcast_to(
@@ -135,6 +155,39 @@ class SyntheticDataIterator:
     output["targets"] = tokens[:, 1:]
     output["targets_position"] = positions[:, 1:]
     output["targets_segmentation"] = segmentation
+    if getattr(config, "use_multimodal", False) and (
+        getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+        == "olmo35"
+    ):
+      b_load = config.global_batch_size_to_load
+      img_sz = config.image_size_for_vit
+      img_h, img_w = tuple(img_sz) if isinstance(img_sz, (list, tuple)) else (int(img_sz), int(img_sz))
+      patch = config.patch_size_for_vit
+      channels = config.num_channels_for_vit
+      n_patches = (img_h // patch) * (img_w // patch)
+      pool_h, pool_w = (img_h // patch + 1) // 2, (img_w // patch + 1) // 2
+      n_crops = int(config.olmo_max_crops_per_seq)
+      n_pooled = (
+          int(config.olmo_max_pooled_patches_per_seq)
+          if getattr(config, "olmo_max_pooled_patches_per_seq", 0) > 0
+          else n_crops * pool_h * pool_w
+      )
+      pool_size = int(getattr(config, "olmo_connector_pool_size", 4))
+      n_active_pooled = min(n_pooled, max(1, config.max_target_length // 4))
+      output["images"] = jax.random.normal(
+          jax.random.PRNGKey(1),
+          (b_load, n_crops, n_patches, channels * patch * patch),
+          dtype=config.dtype_mm,
+      )
+      active_idx = (
+          jnp.arange(n_active_pooled * pool_size, dtype=jnp.int32) % max(1, n_crops * n_patches)
+      ).reshape(1, n_active_pooled, pool_size)
+      if n_pooled > n_active_pooled:
+        pad_idx = jnp.full((1, n_pooled - n_active_pooled, pool_size), -1, dtype=jnp.int32)
+        base_idx = jnp.concatenate([active_idx, pad_idx], axis=1)
+      else:
+        base_idx = active_idx
+      output["pooled_patches_idx"] = jnp.broadcast_to(base_idx, (b_load, n_pooled, pool_size))
     if config.enable_diloco:
       output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
     return output
@@ -178,6 +231,29 @@ class PlaceHolderDataIterator:
         "targets_position": neg_ones,
         "targets_segmentation": neg_ones,
     }
+    ds_type = getattr(getattr(config, "dataset_type", None), "value", str(getattr(config, "dataset_type", "")))
+    if ds_type == "olmo_grain":
+      batch.pop("targets_position", None)
+    if config.use_multimodal and (
+        getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+        == "olmo35"
+    ):
+      img_sz = config.image_size_for_vit
+      img_h, img_w = tuple(img_sz) if isinstance(img_sz, (list, tuple)) else (int(img_sz), int(img_sz))
+      patch = config.patch_size_for_vit
+      channels = config.num_channels_for_vit
+      n_crops = int(getattr(config, "olmo_max_crops_per_seq", 64))
+      n_patches = (img_h // patch) * (img_w // patch)
+      pool_h, pool_w = (img_h // patch + 1) // 2, (img_w // patch + 1) // 2
+      n_pooled = (
+          int(config.olmo_max_pooled_patches_per_seq)
+          if getattr(config, "olmo_max_pooled_patches_per_seq", 0) > 0
+          else n_crops * pool_h * pool_w
+      )
+      pool_size = int(getattr(config, "olmo_connector_pool_size", 4))
+      mm_np_dtype = jnp.dtype(config.dtype_mm)
+      batch["images"] = np.zeros((batch_size, n_crops, n_patches, channels * patch * patch), dtype=mm_np_dtype)
+      batch["pooled_patches_idx"] = np.full((batch_size, n_pooled, pool_size), -1, dtype=np.int32)
 
     def infinite_iterator():
       while True:

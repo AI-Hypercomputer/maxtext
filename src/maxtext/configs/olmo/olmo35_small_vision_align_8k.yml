@@ -1,0 +1,153 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OLMo 3.5 Small (`olmo35-small-e256k8-sh2x` + 25L SigLIP2-SO400M/14-378 + 9,728 SwiGLU Connector)
+# 8K Vision Alignment recipe (Stage 2 Joint default; one-line CLI switch for Stage 1 Bridge).
+#
+# Defaults target 512 TPU v4 chips (`8x8x8` v4-1024):
+#   DP=8, CP=1, EP=64, FSDP=1, ZeRO-1=true, per_device_batch_size=1.0 (512 seqs = 4.19M tok/step, 64 crops/seq;
+#   EP=64 cleanly divides d_vit=1,152 to shard all 25L SigLIP2 weights 64-way across each 8x8x1 plane).
+#   For exact 128-seq (1.05M tok/step) Stage 1/2 batch on 128 chips (`v4-256`):
+#     ici_data_parallelism=2 ici_expert_parallelism=64 per_device_batch_size=1.0
+#   For Stage 1 Connector Bridge (freeze 25L SigLIP2 + 40L LM, train Connector + 6 special <im_*> rows):
+#     freeze_vision_encoder_params=true trainable_parameters_mask="['OLMo35VisionConnector','token_embedder']" \
+#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 learning_rate=1.0e-3
+
+base_config: "base.yml"
+model_name: "olmo35-small-e256k8-sh2x"
+
+max_target_length: 8192
+packing: true
+olmoe3_segments_for_emo_only: false
+emo_enabled: false
+load_balance_loss_weight: 0.01
+moe_aux_loss_reduction: "sum"
+moe_global_load_balancing: true
+
+# Strict FP32 precision
+dtype: "bfloat16"
+dtype_mm: "bfloat16"
+grad_dtype: "bfloat16"
+weight_dtype: "float32"
+cast_params_to_compute_dtype: true
+mu_dtype: "float32"
+float32_gate_logits: true
+gdn_state_dtype: "float32"
+kda_conv_in_compute_dtype: false
+matmul_precision: "default"
+
+# Scanned 5x8L stack + custom remat
+scan_layers: true
+olmoe3_per_layer_remat: true
+remat_policy: "custom"
+decoder_layer_input: "device"
+kda_fused_state_stride: 0
+moe_routing_maps: "device"
+moe_routing: "device"
+context: "device"
+
+# Sharding (512 TPU v4 chips default; zero offload, EP=64 shards 25L SigLIP2 64-way)
+custom_mesh_and_rule: "cp-as-ep"
+allow_split_physical_axes: true
+shard_exp_on_fsdp: false
+ici_data_parallelism: 8
+ici_fsdp_parallelism: 1
+ici_context_parallelism: 1
+ici_expert_parallelism: 64
+shard_optimizer_over_data: true
+optimizer_memory_host_offload: false
+per_device_batch_size: 1.0
+
+# Multimodal Stage 2 Joint settings
+use_multimodal: true
+vision_encoder_block: "olmo35"
+freeze_vision_encoder_params: false
+frozen_parameters_mask: ["logits_dense"]
+olmo_max_crops_per_seq: 64
+olmo_vit_cp_shard_crops: false
+olmo_vit_remat_blocks: true
+olmo_vit_crop_chunk_size: 16
+olmo_vision_lr_scale: 0.2
+olmo_connector_lr_scale: 1.0
+olmo_per_component_grad_clip: true
+
+# TPU v4 MoE, KDA, Attention & Vocab Tiling
+megablox: true
+sparse_matmul: true
+use_tokamax_gmm: false
+use_gmm_v2: false
+moe_fused_swiglu_gmm: true
+moe_a2a_pipeline_chunks: false
+moe_fused_swiglu_bwd_tile_batch_seq: 256
+moe_fused_swiglu_bwd_tile_embed_dim: 768
+moe_fused_swiglu_bwd_tile_mlp_dim: 768
+moe_fused_swiglu_dwo_tile_embed_dim: 768
+moe_fused_swiglu_dwo_tile_mlp_dim: 768
+wi_tile_fwd_batch_seq: 512
+wi_tile_fwd_embed_dim: 768
+wi_tile_fwd_mlp_dim: 768
+wi_tile_dlhs_batch_seq: 512
+wi_tile_dlhs_embed_dim: 384
+wi_tile_dlhs_mlp_dim: 1536
+wi_tile_drhs_batch_seq: 512
+wi_tile_drhs_embed_dim: 768
+wi_tile_drhs_mlp_dim: 768
+wo_tile_fwd_batch_seq: 512
+wo_tile_fwd_embed_dim: 384
+wo_tile_fwd_mlp_dim: 1536
+wo_tile_dlhs_batch_seq: 512
+wo_tile_dlhs_embed_dim: 768
+wo_tile_dlhs_mlp_dim: 768
+wo_tile_drhs_batch_seq: 512
+wo_tile_drhs_embed_dim: 384
+wo_tile_drhs_mlp_dim: 768
+capacity_factor: -1
+moe_lean_routing: true
+moe_topk_pallas: true
+moe_a2a_expert_major: true
+moe_a2a_token_chunks: 4
+ragged_buffer_factor: 1.125
+
+use_tokamax_kda: false
+kda_chunked_impl: "subblock"
+kda_sub_block: 16
+gdn_chunk_size: 128
+kda_pallas_fused: true
+kda_fused_token_major: true
+kda_outer_block: 32
+kda_inverse_precision: "high"
+kda_fused_input_proj: true
+kda_flat_head_layout: true
+
+attention: "flash"
+use_tokamax_splash: false
+fused_lm_head_ce: true
+fused_lm_head_ce_block_t: 512
+fused_lm_head_ce_block_v: 1024
+fused_lm_head_ce_block_t_bwd: 512
+fused_lm_head_ce_block_v_bwd: 128
+logits_dot_in_fp32: false
+vocab_tiling_seq_major: true
+num_vocab_tiling: 8
+
+# Optimizer
+opt_type: "adamw"
+learning_rate: 5.0e-5
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.0e-8
+adam_weight_decay: 0.1
+adamw_mask: ["token_embedder/embedding"]
+gradient_clipping_threshold: 1.0
+skip_step_on_spikes: true

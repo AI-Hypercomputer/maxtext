@@ -34,16 +34,21 @@ from maxtext.utils.sharding import remove_size_one_mesh_axis
 def get_process_loading_real_data(
     data_sharding, global_batch_size_to_load, global_batch_size_to_train_on, max_target_length, mesh
 ):
-  """Get list of processes loading data from GCS when expansion_factor_real_data != -1"""
-  data_sharding_pspec = remove_size_one_mesh_axis(P(*data_sharding), mesh)
-  sharding = jax.sharding.NamedSharding(mesh, data_sharding_pspec)
+  """Get deterministic sorted list of processes whose P(mesh.axis_names) rows overlap [0, global_batch_size_to_train_on)."""
+  # MultiHostDataLoadIterator always forms its global array on P(mesh.axis_names) before
+  # DataLoader reshards to data_sharding and train_step slices [:global_batch_size_to_train_on].
+  # Selecting hosts on P(mesh.axis_names) prevents -1 PlaceHolderDataIterator rows from landing
+  # inside [:global_batch_size_to_train_on] when data_sharding permutes mesh axes (e.g., cp-as-ep).
+  del data_sharding
+  sharding = jax.sharding.NamedSharding(mesh, P(mesh.axis_names))
   devices_indices_map = sharding.devices_indices_map((global_batch_size_to_load, max_target_length))
   batch_cutoff = global_batch_size_to_train_on
   process_loading_real_data = set()
   for p, indices in devices_indices_map.items():
-    if not indices[0].stop or indices[0].stop <= batch_cutoff:
+    start = indices[0].start or 0
+    if not indices[0].stop or start < batch_cutoff:
       process_loading_real_data.add(p.process_index)
-  return list(process_loading_real_data)
+  return sorted(process_loading_real_data)
 
 
 def create_process_specific_iterator(

@@ -169,6 +169,7 @@ class VisionEncoderBlockType(enum.Enum):
   GEMMA4 = "gemma4"
   QWEN3_5 = "qwen3_5"
   QWEN3_VL = "qwen3_vl"
+  OLMO35 = "olmo35"
 
 
 class AttentionType(enum.Enum):
