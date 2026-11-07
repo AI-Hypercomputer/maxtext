@@ -217,3 +217,4 @@ class CustomRule(enum.Enum):
   EXPERT_ON_FSDP_EP = "expert-on-fsdp-ep"
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
   FSDP_AS_DP_FOR_ATTN_RF = "fsdp-as-dp-for-attn-rf"  # fsdp-as-dp-for-attn with the router weight sharded on fsdp
+  TP_AS_EP = "tp-as-ep"  # Tensor axis joins expert parallelism in the routed MoE
