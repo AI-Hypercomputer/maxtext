@@ -14,6 +14,8 @@
 
 """Tests for kernels"""
 
+import copy
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -31,12 +33,14 @@ from maxtext.checkpoint_conversion.to_maxtext import (
     convert_hf_lora_key_to_maxtext,
     _process_and_stack_weights,
 )
+from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils.hf_shape import (
     GEMMA4_HF_WEIGHTS_TO_SHAPE,
     _get_gemma4_layer_attention_dims,
 )
 from maxtext.checkpoint_conversion.utils.utils import (
     _recursive_update,
+    config_to_json_string,
     load_orbax_checkpoint,
 )
 
@@ -102,6 +106,51 @@ class HFCheckpointConversionTest(unittest.TestCase):
     self.assertEqual(hf_config.rope_scaling["mscale"], 0.707)
     self.assertEqual(hf_config.rope_scaling["mscale_all_dim"], 0.707)
     self.assertTrue(hf_config.rope_scaling["truncate"])
+
+  def _export_olmo3_config(self, model_name):
+    """Builds the Olmo 3 config.json that to_huggingface writes."""
+    hf_config = copy.deepcopy(hf_model_configs.HF_MODEL_CONFIGS[model_name])
+    if model_name != "olmo3-7b-pt":
+      max_config = SimpleNamespace(
+          beta_fast=32.0,
+          beta_slow=1.0,
+          rope_factor=8.0,
+          original_max_position_embeddings=8192,
+          rope_max_timescale=500000,
+          rope_truncate=True,
+      )
+      _apply_yarn_rope_config(hf_config, max_config)
+    return json.loads(config_to_json_string(hf_config))
+
+  def test_apply_yarn_rope_config_per_layer_type_rope_parameters(self):
+    exported = self._export_olmo3_config("olmo3-7b")
+    full_attention = exported["rope_parameters"]["full_attention"]
+    self.assertEqual(full_attention["rope_type"], "yarn")
+    self.assertEqual(full_attention["factor"], 8.0)
+    self.assertEqual(full_attention["attention_factor"], 1.2079441541679836)
+    self.assertEqual(exported["rope_parameters"]["sliding_attention"]["rope_type"], "default")
+    self.assertNotIn("factor", exported["rope_parameters"])
+
+  def test_olmo3_exported_config_matches_model_repos(self):
+    for model_name in ("olmo3-7b", "olmo3-32b"):
+      with self.subTest(model_name=model_name):
+        exported = self._export_olmo3_config(model_name)
+        self.assertEqual(exported["eos_token_id"], 100257)
+        self.assertEqual(exported["max_position_embeddings"], 65536)
+        self.assertEqual(exported["rope_theta"], 500000)
+        self.assertEqual(exported["rope_scaling"]["rope_type"], "yarn")
+        self.assertEqual(exported["rope_scaling"]["attention_factor"], 1.2079441541679836)
+        self.assertEqual(exported["rope_scaling"]["original_max_position_embeddings"], 8192)
+
+    exported = self._export_olmo3_config("olmo3-7b-pt")
+    self.assertEqual(exported["eos_token_id"], 100257)
+    self.assertEqual(exported["max_position_embeddings"], 8192)
+    self.assertEqual(exported["rope_theta"], 500000)
+    self.assertIsNone(exported.get("rope_scaling"))
+
+  def test_config_to_json_string_leaves_flat_rope_configs_unchanged(self):
+    hf_config = hf_model_configs.HF_MODEL_CONFIGS["llama3.1-8b"]
+    self.assertEqual(config_to_json_string(hf_config), hf_config.to_json_string())
 
 
 class MaxTextToHFLoRAConversionTest(unittest.TestCase):
