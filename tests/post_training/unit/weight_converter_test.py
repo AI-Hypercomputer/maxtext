@@ -1517,6 +1517,67 @@ class TargetFreeConversionTest(unittest.TestCase):
     with self.assertRaisesRegex(weight_converter.ConversionPlanError, "not an FP8-quantized MoE expert weight"):
       converter.convert(_source_tree(True), target_state=target)
 
+  def test_case_25_bf16_trainer_to_fp4_moe_rollout(self):
+    """Tests BF16 trainer to FP4 MoE rollout (per-channel and K-block) and parity with fake_quantize_moe_weight_fp4."""
+    from maxtext.layers import quantizations  # pylint: disable=import-outside-toplevel
+
+    for k_blocks in (1, 2):
+      with self.subTest(k_blocks=k_blocks):
+        source = _source_tree(True)
+        target = _target_tree(fused=True)
+        for layer in range(NUM_LAYERS):
+          moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+          moe["wi"] = jnp.zeros((EXPERTS, EMB, MOE_DIM * 2), dtype=jnp.float4_e2m1fn)
+          moe["wi_scale"] = jnp.ones((EXPERTS, k_blocks, MOE_DIM * 2), dtype=jnp.float32)
+          moe["wo"] = jnp.zeros((EXPERTS, MOE_DIM, EMB), dtype=jnp.float4_e2m1fn)
+          moe["wo_scale"] = jnp.ones((EXPERTS, k_blocks, EMB), dtype=jnp.float32)
+
+        converter = MaxTextToMaxTextConverter(_config(), moe_fused_layout=MoEFusedLayout.CONCAT, fp4_moe=True)
+        out = converter.convert(source, target)
+
+        wi_q = out["decoder"]["layers_0"]["moe_block"]["wi"].value
+        wi_s = out["decoder"]["layers_0"]["moe_block"]["wi_scale"].value
+        wo_q = out["decoder"]["layers_0"]["moe_block"]["wo"].value
+        wo_s = out["decoder"]["layers_0"]["moe_block"]["wo_scale"].value
+        self.assertEqual(wi_q.dtype, jnp.float4_e2m1fn)
+        self.assertEqual(wo_q.dtype, jnp.float4_e2m1fn)
+        self.assertEqual(wi_s.shape, (EXPERTS, k_blocks, MOE_DIM * 2))
+        self.assertEqual(wo_s.shape, (EXPERTS, k_blocks, EMB))
+
+        # Verify exact numerical parity between Trainer fake_quantize_moe_weight_fp4 and Rollout dequantized weight
+        src_wo = jnp.take(source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]["wo"], 0, axis=SCAN_AXIS).astype(
+            jnp.bfloat16
+        )
+        block_size = None if k_blocks == 1 else (MOE_DIM // k_blocks)
+        fake_q_wo = quantizations.fake_quantize_moe_weight_fp4(src_wo, block_size=block_size)
+        rollout_deq_wo = quantizations.dequantize_weight(wo_q, wo_s, compute_dtype=jnp.bfloat16)
+        np.testing.assert_array_equal(np.asarray(rollout_deq_wo), np.asarray(fake_q_wo))
+
+  def test_case_26_target_free_fp4_moe_conversion(self):
+    """Tests target-free WeightConverter with fp4_moe=True (per-channel and K-block)."""
+    for moe_block_size, expected_wi_k, expected_wo_k in ((None, 1, 1), (2, EMB // 2, MOE_DIM // 2)):
+      with self.subTest(moe_block_size=moe_block_size):
+        cfg = _config(
+            inhomogeneous_layer_cycle_interval=CYCLE,
+            num_decoder_layers=NUM_LAYERS,
+            prefuse_moe_weights=True,
+            fp4_moe=True,
+            moe_weight_block_size=moe_block_size,
+        )
+        source = _source_tree(True)
+        converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp4_moe=True)
+        out = converter.convert(source, target_state=None)
+        out_root = out["base"] if "base" in out else out
+        moe_0 = out_root["decoder"]["layers_0"]["moe_block"]
+        wi = getattr(moe_0["wi"], "value", moe_0["wi"])
+        wi_scale = getattr(moe_0["wi_scale"], "value", moe_0["wi_scale"])
+        wo = getattr(moe_0["wo"], "value", moe_0["wo"])
+        wo_scale = getattr(moe_0["wo_scale"], "value", moe_0["wo_scale"])
+        self.assertEqual(wi.dtype, jnp.float4_e2m1fn)
+        self.assertEqual(wo.dtype, jnp.float4_e2m1fn)
+        self.assertEqual(wi_scale.shape, (EXPERTS, expected_wi_k, MOE_DIM * 2))
+        self.assertEqual(wo_scale.shape, (EXPERTS, expected_wo_k, EMB))
+
 
 if __name__ == "__main__":
   unittest.main()
