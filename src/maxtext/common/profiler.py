@@ -26,6 +26,7 @@ import weakref
 
 from flax import nnx
 import jax
+from jax.experimental import multihost_utils
 
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 
@@ -46,6 +47,7 @@ class Profiler:
     self.output_path = ""
     self.upload_all_profiler_results = config.upload_all_profiler_results
     self.profile_cleanly = config.profile_cleanly
+    self.profiler_sync_delay_ms = config.profiler_sync_delay_ms
     self.xplane_trace_active = False
     self.profile_period = config.profile_periodically_period
     self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
@@ -100,7 +102,27 @@ class Profiler:
     nsys profiler becomes no-op when libcudart.so is not available on the system."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
+    self._start(optional_postfix)
+    if self.mode != "" and self.profiler_sync_delay_ms >= 0:
+      self._sync_devices()
 
+  def _sync_devices(self):
+    """Synchronizes the devices of all processes once the profiler has started.
+
+    Starting the profiler takes a different amount of time in each process;
+    without a barrier, the first collective of the profiled step would absorb
+    that skew. The device-side delay before the barrier lets each host enqueue
+    the profiled step before the devices start it, as in steady state. Called in
+    every process, including those that do not profile, and does not wait for
+    the devices.
+    """
+    if not hasattr(multihost_utils, "wait_and_sync_devices_async"):
+      max_logging.warning("This version of JAX cannot synchronize devices after starting the profiler")
+      return
+    multihost_utils.wait_and_sync_devices_async(delay_ms=self.profiler_sync_delay_ms)
+
+  def _start(self, optional_postfix):
+    """Starts the profiler, in the processes that profile."""
     if self.managed_mldiagnostics and self.mode == "xplane":
       # Handle the special profiling logic for managed_mldiagnostics
       if self.prof is None:
