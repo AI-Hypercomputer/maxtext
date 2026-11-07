@@ -26,7 +26,7 @@ from unittest import mock
 
 # Ensure tunix C-extension / protobuf initializes before transformers/orbax
 try:
-  import tunix.experimental.weight_sync.raiden_synchronizer  # pylint: disable=unused-import
+  import tunix.dist_rl.weight_sync.raiden_synchronizer  # pylint: disable=unused-import
 except ImportError:
   pass
 
@@ -79,7 +79,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
     meta.mesh_axes = (1, 1)
     return meta
 
-  @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
+  @mock.patch("tunix.dist_rl.weight_sync.raiden_synchronizer.RaidenSynchronizer")
   def test_single_synchronizer_creation_and_binding(self, mock_sync_cls):
     mock_sync = mock.MagicMock()
     mock_sync.active = True
@@ -106,7 +106,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
     mock_sync.d2h.assert_called_once()
     mock_sync.work_unit_metadata_all.assert_called_once()
 
-  @mock.patch("tunix.experimental.weight_sync.raiden_synchronizer.RaidenSynchronizer")
+  @mock.patch("tunix.dist_rl.weight_sync.raiden_synchronizer.RaidenSynchronizer")
   def test_rebind_reuses_single_sync_instance(self, mock_sync_cls):
     mock_sync = mock.MagicMock()
     mock_sync.active = True

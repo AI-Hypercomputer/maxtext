@@ -104,11 +104,16 @@ class Embed(nnx.Module):
         sharding=("vocab", "embed_vocab"),
     )
 
-  def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
+  def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN, lookup_fn: Any = None) -> Array:
     """Embeds the inputs along the last dimension.
 
     Args:
       inputs: input data, all dimensions are considered batch dimensions.
+      model_mode: operational mode (e.g. MODEL_MODE_TRAIN, MODEL_MODE_PREFILL).
+      lookup_fn: optional custom lookup callable `(embedding, inputs, out_sharding) -> output`.
+        Used by `fsdp_prefetch` (`explicit_fsdp_embed_lookup`) to wrap `.at[inputs].get(...)`
+        with a custom backward pass that offloads the embedding gradient `reduce-scatter` to
+        SparseCore (`token_embedder` sits outside the scanned decoder loop).
 
     Returns:
       Output which is embedded input data.  The output shape follows the input,
@@ -148,6 +153,8 @@ class Embed(nnx.Module):
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
+    elif lookup_fn is not None:
+      output = lookup_fn(embedding, inputs, out_sharding)
     else:
       output = embedding.at[inputs].get(out_sharding=out_sharding)
 

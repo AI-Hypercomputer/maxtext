@@ -17,6 +17,7 @@
 import math
 import glob
 import re
+import sys
 from pathlib import Path
 import functools
 import ml_collections
@@ -24,6 +25,7 @@ from concurrent import futures
 import json
 
 import jax
+import numpy as np
 
 import grain.python as grain
 from grain.experimental import ElasticIterator
@@ -131,10 +133,15 @@ def _apply_mapdataset_transforms(
   return dataset
 
 
-def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0):
-  """Build the configuration used by the Megatron-compatible data sources."""
+def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0, batch_size=None):
+  """Build the configuration used by the Megatron-compatible data sources.
+
+  `batch_size` is the replica's global batch per step; with several data replicas per process it sets the blend
+  window (the step batch of all replicas) that keeps each replica's share of an mmap_npy blend mixed.
+  """
   if config.grain_file_type not in ("mmap", "mmap_npy"):
     return None
+  _, num_replicas = input_pipeline_utils.get_data_replica(config)
   return MMapDatasetConfig(
       max_target_length=config.max_target_length,
       eod_id=config.mmap_eod_id,
@@ -145,6 +152,7 @@ def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None,
       seed=seed,
       split_ratio=split_ratio,
       split_index=split_index,
+      blend_shard_window=batch_size * num_replicas if batch_size and num_replicas > 1 else None,
   )
 
 
@@ -339,6 +347,7 @@ def get_datasets(
         seed=dataset_config.seed,
         split=dataset_config.split_ratio,
         split_index=dataset_config.split_index,
+        blend_shard_window=dataset_config.blend_shard_window,
     )
   else:
     raise ValueError(
@@ -753,24 +762,87 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
-def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
-  """Applies preprocessing_fn then wraps the result with ElasticIterator.
+class _PaddedBatchMapDataset(grain.MapDataset):
+  """Pads each `logical_batch_size` step with zero-filled elements up to `physical_batch_size`."""
 
-  When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
+  _MUTATES_ELEMENT_SPEC = False
+
+  def __init__(self, parent: grain.MapDataset, logical_batch_size: int, physical_batch_size: int):
+    super().__init__(parent)
+    self._logical_batch_size = logical_batch_size
+    self._physical_batch_size = physical_batch_size
+    self.offset = 0
+    self._pad = None
+
+  def __len__(self) -> int:
+    parent_steps = max(0, (len(self._parent) - self.offset) // self._logical_batch_size)
+    return min(parent_steps, sys.maxsize // self._physical_batch_size) * self._physical_batch_size
+
+  def __getitem__(self, index):
+    if isinstance(index, slice):
+      return self.slice(index)
+    step, rem = divmod(index, self._physical_batch_size)
+    if rem < self._logical_batch_size:
+      return self._parent[self.offset + step * self._logical_batch_size + rem]
+    if self._pad is None:
+      self._pad = jax.tree.map(np.zeros_like, self._parent[0])
+    return jax.tree.map(np.copy, self._pad)
+
+
+class _PaddedElasticIterator(ElasticIterator):
+  """`ElasticIterator` that pads `logical_batch_size` steps up to `physical_batch_size`."""
+
+  def __init__(self, ds: grain.MapDataset, *, logical_batch_size: int, physical_batch_size: int, **kwargs):
+    self._logical_batch_size = logical_batch_size
+    self._padded_ds = _PaddedBatchMapDataset(ds, logical_batch_size, physical_batch_size)
+    super().__init__(self._padded_ds, global_batch_size=physical_batch_size, **kwargs)
+
+  def __iter__(self):  # pylint: disable=non-iterator-returned
+    # OSS Grain 0.2.x returns `_default_iterator` from `__iter__`, which would bypass `get_state`/`set_state`.
+    return self
+
+  def close(self) -> None:
+    for attr in ("base_iterator", "_default_iterator"):
+      if (it := self.__dict__.pop(attr, None)) is not None:
+        it.close()
+
+  def get_state(self) -> dict[str, int]:
+    steps = super().get_state()["global_next_index"] // self._global_batch_size
+    return {"global_next_index": self._padded_ds.offset + steps * self._logical_batch_size}
+
+  def set_state(self, state: dict[str, int]) -> None:
+    steps, self._padded_ds.offset = divmod(state["global_next_index"], self._logical_batch_size)
+    super().set_state({"global_next_index": steps * self._global_batch_size})
+
+
+def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
+  """Applies `preprocessing_fn` and wraps the result in `ElasticIterator` (padding to physical batch if needed).
+
+  ElasticIterator gives each shard `global_batch_size // shard_count` rows. The shards of `get_dataloading_shard`
+  cover every data replica, so its global batch is that of all replicas.
   """
   ds = preprocessing_fn(dataset=dataset)
-  return ElasticIterator(
-      ds,
-      global_batch_size=config.global_batch_size_to_load,
-      shard_options=grain.ShardOptions(
+  physical_batch_size = input_pipeline_utils.get_all_replicas_batch_size(config, config.global_batch_size_to_load)
+  logical_batch_size = (
+      input_pipeline_utils.get_all_replicas_batch_size(config, config.logical_global_batch_size_to_load)
+      if config.logical_global_batch_size_to_load
+      else physical_batch_size
+  )
+  common_kwargs = {
+      "shard_options": grain.ShardOptions(
           shard_index=shard_index if shard_index is not None else jax.process_index(),
           shard_count=shard_count if shard_count is not None else jax.process_count(),
       ),
-      read_options=grain.ReadOptions(
+      "read_options": grain.ReadOptions(
           num_threads=config.grain_num_threads,
           prefetch_buffer_size=config.grain_prefetch_buffer_size,
       ),
-      multiprocessing_options=mp_opts,
+      "multiprocessing_options": mp_opts,
+  }
+  if logical_batch_size == physical_batch_size:
+    return ElasticIterator(ds, global_batch_size=physical_batch_size, **common_kwargs)
+  return _PaddedElasticIterator(
+      ds, logical_batch_size=logical_batch_size, physical_batch_size=physical_batch_size, **common_kwargs
   )
 
 
@@ -785,8 +857,9 @@ def make_grain_train_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  # The mmap_npy index is sharded among every data replica, so it holds the samples of all of them.
   mmap_npy_num_samples = (
-      config.steps * config.global_batch_size_to_load
+      config.steps * input_pipeline_utils.get_all_replicas_batch_size(config, config.global_batch_size_to_load)
       if config.grain_file_type == "mmap_npy" and getattr(config, "steps", 0) > 0
       else None
   )
@@ -796,6 +869,7 @@ def make_grain_train_iterator(
       seed=config.data_shuffle_seed,
       split_ratio=config.mmap_npy_split or None,
       split_index=0,
+      batch_size=config.global_batch_size_to_load,
   )
 
   grain_train_files = config.grain_train_files
@@ -874,9 +948,10 @@ def make_grain_train_iterator(
   if 0 < config.expansion_factor_real_data < 1:
     num_dataloader_to_restore = int(1 / config.expansion_factor_real_data)
     train_dataloader_list = []
-    dataloading_host_count = len(process_indices) * num_dataloader_to_restore
     for i in range(num_dataloader_to_restore):
-      dataloading_host_index = len(process_indices) * i + process_indices.index(jax.process_index())
+      dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+          config, process_indices, shard_offset=i, shards_per_host=num_dataloader_to_restore
+      )
       train_ds = get_ds_fn(
           dataloading_host_index=dataloading_host_index,
           dataloading_host_count=dataloading_host_count,
@@ -889,8 +964,7 @@ def make_grain_train_iterator(
     ]
 
   # Default non-colocated, expansion_factor_real_data >=1 path
-  shard_index = process_indices.index(jax.process_index())
-  shard_count = len(process_indices)
+  shard_index, shard_count = input_pipeline_utils.get_dataloading_shard(config, process_indices)
   train_ds = get_ds_fn(
       dataloading_host_index=shard_index,
       dataloading_host_count=shard_count,
@@ -941,7 +1015,11 @@ def make_grain_eval_iterator(
       eval_rounds = -(-config.steps // eval_interval)
     else:
       eval_rounds = 1
-    mmap_npy_eval_num_samples = eval_rounds * config.eval_steps * config.global_batch_size_to_load_eval
+    mmap_npy_eval_num_samples = (
+        eval_rounds
+        * config.eval_steps
+        * input_pipeline_utils.get_all_replicas_batch_size(config, config.global_batch_size_to_load_eval)
+    )
 
   dataset_config = _build_dataset_config(
       config,
@@ -949,6 +1027,7 @@ def make_grain_eval_iterator(
       seed=config.data_shuffle_seed,
       split_ratio=config.mmap_npy_split or None,
       split_index=1 if config.mmap_npy_split else 0,
+      batch_size=config.global_batch_size_to_load_eval,
   )
 
   grain_eval_files = config.grain_eval_files
@@ -998,9 +1077,10 @@ def make_grain_eval_iterator(
   )
 
   if not config.colocated_python_data_input:
+    dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(config, process_indices)
     eval_ds = get_ds_fn(
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
     )
     eval_dataloader = preprocessing_fn(dataset=eval_ds)
     return multihost_dataloading.MultiHostDataLoadIterator(
@@ -1014,5 +1094,6 @@ def make_grain_eval_iterator(
         global_mesh,
         global_shape,
         checkpoint_path=config.checkpoint_dir,
-        elastic=config.grain_use_elastic_iterator,
+        # The eval pipeline is not wrapped in an ElasticIterator.
+        elastic=False,
     )

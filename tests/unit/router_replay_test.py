@@ -145,6 +145,7 @@ class DummyConfig:
     self.fuse_expert_scales = False
     self.n_routing_groups = -1
     self.topk_routing_group = 1
+    self.float32_weight_sum = True
 
 
 class DummyRoutedMoE:

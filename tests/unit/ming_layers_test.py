@@ -19,6 +19,8 @@ fla's naive PyTorch references, and gated RMSNorm and short convolution use test
 implementations (`_load_remote_modules`). This avoids relying on version-specific CPU fallbacks in
 fla. All tests run on CPU in float32 with small layer dimensions and explicit weight copies.
 
+Audio shape, token handling, and prompt tests also run locally without fetching the HF reference.
+
 No checkpoints, logits or data files are needed: weights are random.
 Only the HF remote code is fetched (`MING_HF_PATH` may point at a local HF directory).
 
@@ -31,14 +33,17 @@ Run:
 """
 
 import os
+import tempfile
 import sys
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import torch
 from torch import nn
+from transformers import AutoProcessor
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 MING_HF_MODEL_ID = "inclusionAI/Ming-3.0-audio-tiny"
@@ -156,6 +161,7 @@ from jax.sharding import Mesh  # pylint: disable=wrong-import-position
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN  # pylint: disable=wrong-import-position
 from maxtext.configs import pyconfig  # pylint: disable=wrong-import-position
 from maxtext.models import ming  # pylint: disable=wrong-import-position
+from maxtext.multimodal import processor_ming  # pylint: disable=wrong-import-position
 from maxtext.utils import maxtext_utils  # pylint: disable=wrong-import-position
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT  # pylint: disable=wrong-import-position
 
@@ -192,6 +198,11 @@ def make_config(model_mode_overrides=None, **kwargs):
       topk_routing_group=TOPK_GROUPS,
       vocab_size=VOCAB,
       base_num_decoder_layers=4,
+      d_model_for_audio=A_D,
+      encoder_attention_heads_for_audio=A_HEADS,
+      encoder_ffn_dim_for_audio=A_FFN,
+      encoder_layers_for_audio=A_LAYERS,
+      output_dim_for_audio=EMB,
       per_device_batch_size=1,
       max_target_length=32,
       max_prefill_predict_length=16,
@@ -354,6 +365,34 @@ def copy_decoder_layer(hf, mt):
     copy_moe(hf.mlp, mt.moe_block)
   else:
     copy_mlp(hf.mlp, mt.mlp)
+
+
+def set_layernorm(jax_ln, torch_ln):
+  jax_ln.scale.value = t2j(torch_ln.weight)
+  jax_ln.bias.value = t2j(torch_ln.bias)
+
+
+def copy_whisper(hf_audio, mt_enc):
+  """Copies the HF whisper encoder into MingWhisperEncoder."""
+  set_conv1d(mt_enc.conv1, hf_audio.conv1)
+  set_conv1d(mt_enc.conv2, hf_audio.conv2)
+  mt_enc.positional_embedding.value = t2j(hf_audio.positional_embedding)
+  for i, blk in enumerate(hf_audio.blocks):
+    m = getattr(mt_enc, f"blocks_{i}")
+    set_layernorm(m.attn_ln, blk.attn_ln)
+    set_layernorm(m.mlp_ln, blk.mlp_ln)
+    for n in ("query", "key", "value", "out"):
+      set_dense(getattr(m.attn, n), getattr(blk.attn, n))
+    set_dense(m.mlp_fc1, blk.mlp[0])
+    set_dense(m.mlp_fc2, blk.mlp[2])
+  set_layernorm(mt_enc.ln_post, hf_audio.ln_post)
+
+
+def copy_projector(hf_proj, mt_proj):
+  convs = [m for m in hf_proj if isinstance(m, torch.nn.Conv1d)]
+  for i, c in enumerate(convs):
+    set_conv1d(getattr(mt_proj, f"conv_{i}"), c)
+  set_dense(mt_proj.linear, hf_proj[-1])
 
 
 def causal_mask(batch, seq):
@@ -530,6 +569,175 @@ class TorchShortConvolutionTest(unittest.TestCase):
           outputs.append(out)
         torch.testing.assert_close(torch.cat(outputs, dim=1), full)
         torch.testing.assert_close(cache, x[:, -width:].transpose(1, 2))
+
+
+# Audio shape and token handling checks (no publisher HF setup required).
+@pytest.mark.parametrize("length", [1, 17, 2999, 3000, 3001, 6001])
+def test_projected_token_count(length):
+  """Preprocessing and encoder/projector agree at chunk and stride boundaries."""
+  expected = sum(
+      ming.projector_out_length(ming.whisper_conv_out_length(chunk), 3)
+      for chunk in ming.audio_chunk_lengths(length, 3000)
+  )
+  assert processor_ming.get_num_audio_tokens(length) == expected
+
+
+def test_audio_token_expansion_and_offsets():
+  output = SimpleNamespace(audio_lengths=np.array([3], dtype=np.int32))
+  pad = processor_ming.AUDIO_PAD_ID
+  tokens = np.array([11, pad, 12], dtype=np.int32)
+  np.testing.assert_array_equal(processor_ming.add_extra_tokens_for_ming(tokens, output), [11, pad, pad, pad, 12])
+  assert processor_ming.get_audio_offsets_ming(output) == 2
+  with pytest.raises(ValueError, match="1D array"):
+    processor_ming.add_extra_tokens_for_ming(tokens[None], output)
+  with pytest.raises(ValueError, match="Found 0"):
+    processor_ming.add_extra_tokens_for_ming(np.array([11, 12]), output)
+
+
+@pytest.mark.parametrize("output", [None, SimpleNamespace(), SimpleNamespace(audio_lengths=None)])
+def test_audio_tokens_without_lengths(output):
+  tokens = np.array([11, 12], dtype=np.int32)
+  assert processor_ming.get_audio_offsets_ming(output) == 0
+  assert processor_ming.add_extra_tokens_for_ming(tokens, output) is tokens
+
+
+@pytest.mark.parametrize("shape", [(4, 128), (0, 4, 128)])
+def test_audio_encoder_rejects_invalid_shape(shape):
+  encoder = ming.MingWhisperEncoder(make_config(), None, rngs=nnx.Rngs(0))
+  with pytest.raises(ValueError, match="expected mel features"):
+    encoder(jnp.zeros(shape))
+
+
+def test_audio_encoder_and_projector_preserve_batch_order():
+  config = make_config(ming_audio_chunk_size=16)
+  encoder = ming.MingWhisperEncoder(config, None, rngs=nnx.Rngs(0))
+  projector = ming.MingAudioProjector(config, rngs=nnx.Rngs(1))
+  features = jnp.arange(2 * 17 * 128, dtype=jnp.float32).reshape((2, 17, 128)) / 1000
+
+  batched = projector(encoder(features), mel_length=features.shape[1])
+  separate = jnp.concatenate(
+      [projector(encoder(features[i : i + 1]), mel_length=features.shape[1]) for i in range(features.shape[0])],
+      axis=0,
+  )
+
+  assert batched.shape[0] == 2
+  np.testing.assert_allclose(np.asarray(batched), np.asarray(separate), atol=1e-5, rtol=1e-5)
+
+
+def test_prompt_places_audio_before_text():
+  prompt = processor_ming.reformat_prompt_ming("transcribe", num_audios=1)
+  assert prompt.index(processor_ming.AUDIO_PAD_TOKEN) < prompt.index("transcribe")
+  assert processor_ming.reformat_prompt_ming("<|audio|>transcribe", num_audios=1) == prompt
+
+
+class MingAudioTest(unittest.TestCase):
+  """Whisper encoder + projector and audio preprocessing vs HF."""
+
+  def create_tempdir_path(self):
+    tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+    self.addCleanup(tmp.cleanup)
+    return tmp.name
+
+  @classmethod
+  def setUpClass(cls):
+    torch.set_grad_enabled(False)
+    pytest.importorskip("whisper")
+    pytest.importorskip("torchaudio")
+    global TEXT_MOD, AUDIO_MOD  # pylint: disable=global-statement
+    audio_cls = get_class_from_dynamic_module(
+        "modeling_bailing_moe_v3_audio.BailingMoeV3AudioForConditionalGeneration", HF_PATH
+    )
+    AUDIO_MOD = sys.modules[audio_cls.__module__]
+    text_module = sys.modules[AUDIO_MOD.BailingMoeV3Model.__module__]
+    TEXT_MOD = text_module
+    text_module.FusedRMSNormGated = TorchRMSNormGated
+    text_module.chunk_kda = _torch_kda
+    text_module.fused_recurrent_kda = _torch_kda
+    cls.config = make_config()
+    cls.mesh = make_mesh(cls.config)
+
+  def _hf_audio_model(self, seed=0):
+    """A small BailingMoeV3AudioForConditionalGeneration (only audio parts are exercised)."""
+    audio_cfg = {
+        "n_mels": 128,
+        "n_audio_ctx": 3000,
+        "n_audio_state": A_D,
+        "n_audio_head": A_HEADS,
+        "n_audio_layer": A_LAYERS,
+        "downsampler_kernel_size_list": [3, 3, 3],
+        "downsampler_stride_list": [2, 2, 2],
+    }
+    text_cfg = make_hf_text_config().to_dict()
+    text_cfg["num_hidden_layers"] = 1
+    cfg = AUDIO_MOD.BailingMoeV3AudioConfig(text_config=text_cfg, audio_config=audio_cfg, norm_query_embeds=True)
+    cfg.text_config._attn_implementation = "eager"  # pylint: disable=protected-access
+    model = AUDIO_MOD.BailingMoeV3AudioForConditionalGeneration(cfg).eval()
+    # whisper blocks hardcode mlp hidden = 4 * n_state
+    self.assertEqual(model.model.audio.blocks[0].mlp[0].out_features, A_FFN)
+    randomize_(model.model.audio, seed=seed)
+    randomize_(model.linear_proj_audio, seed=seed + 1)
+    return model
+
+  def _check_audio(self, mel_length, seed):
+    """Compares HF and MaxText audio features for random mel input of `mel_length` frames."""
+    hf = self._hf_audio_model(seed)
+    enc = ming.MingWhisperEncoder(self.config, self.mesh, rngs=nnx.Rngs(0))
+    proj = ming.MingAudioProjector(self.config, rngs=nnx.Rngs(0))
+    copy_whisper(hf.model.audio, enc)
+    copy_projector(hf.linear_proj_audio, proj)
+    mel = np.random.RandomState(seed).randn(1, mel_length, 128).astype(np.float32)
+    ref = hf._get_audio_features(torch.tensor(mel), torch.tensor([[mel_length]]))  # pylint: disable=protected-access
+    out = proj(enc(jnp.asarray(mel)), mel_length=mel_length)
+    self.assertEqual(out.shape[1], processor_ming.get_num_audio_tokens(mel_length))
+    assert_close(out, ref, atol=5e-4, rtol=5e-4, msg=f"audio features (mel_length={mel_length})")
+
+  def test_audio_encoder_single_chunk(self):
+    self._check_audio(248, seed=10)
+
+  def test_audio_encoder_multi_chunk(self):
+    # 2 chunks: 3000 + 457 mel frames; the short chunk is zero-padded without a mask, like HF.
+    self._check_audio(3457, seed=11)
+
+  def test_resample_matches_torchaudio(self):
+    import torchaudio  # pylint: disable=import-outside-toplevel
+
+    wav = np.random.RandomState(0).randn(2, 24000 + 123).astype(np.float32)
+    ref = torchaudio.functional.resample(torch.tensor(wav), 24000, 16000).numpy()
+    out = processor_ming.resample(wav, 24000, 16000)
+    self.assertEqual(out.shape, ref.shape)
+    np.testing.assert_allclose(out, ref, atol=1e-5, rtol=1e-4)
+
+  def test_preprocessing_matches_hf_processor(self):
+    import soundfile as sf  # pylint: disable=import-outside-toplevel
+
+    # Synthetic 2.5 s stereo clip at 24 kHz (exercises resampling to 16 kHz and channel averaging).
+    t = np.arange(int(2.5 * 24000)) / 24000
+    rng = np.random.RandomState(0)
+    wav = np.stack([np.sin(2 * np.pi * 440 * t), 0.5 * np.sin(2 * np.pi * 1234 * t)], axis=1)
+    wav = (0.3 * wav + 0.01 * rng.randn(*wav.shape)).astype(np.float32)
+    audio_file = os.path.join(self.create_tempdir_path(), "synthetic.wav")
+    sf.write(audio_file, wav, 24000, subtype="FLOAT")
+
+    proc = AutoProcessor.from_pretrained(HF_PATH, trust_remote_code=True, use_fast=False)
+    prompt = "Please answer the question in the audio."
+    messages = [{"role": "user", "content": [{"type": "audio", "audio": audio_file}, {"type": "text", "text": prompt}]}]
+    hf_inputs = proc(messages)
+
+    audio_values, _, num_tokens = processor_ming.preprocess_audio_ming(audio_file)
+    np.testing.assert_allclose(audio_values, hf_inputs["audio_feats"].numpy(), atol=2e-4, rtol=1e-4)
+
+    hf_prompt = proc.tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
+    mt_prompt = processor_ming.reformat_prompt_ming(prompt, num_audios=1)
+    self.assertEqual(mt_prompt, hf_prompt)
+    ids = np.asarray(proc.tokenizer(mt_prompt)["input_ids"], dtype=np.int32)
+
+    class _Out:
+      audio_lengths = np.asarray([num_tokens])
+
+    expanded = processor_ming.add_extra_tokens_for_ming(ids, _Out())
+    np.testing.assert_array_equal(expanded, hf_inputs["input_ids"][0].numpy())
 
 
 class MingScanTest(unittest.TestCase):

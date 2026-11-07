@@ -59,6 +59,7 @@ from maxtext.models import (
     gemma4_small,
     gpt3,
     gpt_oss,
+    hy4,
     llama2,
     llama4,
     ming,
@@ -74,7 +75,7 @@ from maxtext.models import (
 )
 
 from maxtext.multimodal import utils as mm_utils
-from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
+from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, pipeline_utils, sharding
 from maxtext.utils.sharding import create_sharding
 
 # ------------------------------------------------------------------------------
@@ -631,9 +632,16 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
     self.is_ming = self.config.decoder_block == DecoderBlockType.MING
+    self.is_hy4 = self.config.decoder_block == DecoderBlockType.HY4
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
+          config=config,
+          mesh=self.mesh,
+          rngs=self.rngs,
+      )
+    elif config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.HY4:
+      self.hc_head = hy4.Hy4HyperHead(
           config=config,
           mesh=self.mesh,
           rngs=self.rngs,
@@ -677,10 +685,12 @@ class NNXDecoder(nnx.Module):
         rngs=rngs,
     )
 
-    if self.is_deepseek:
-      self._init_pipeline_deepseek(decoder_block_classes, rngs)
-    else:
-      self._init_pipeline_generic(decoder_block_classes, rngs)
+    # The layers outside the pipeline run under the PP-as-DP rules (see __call__), so build them under those rules too.
+    with sharding.pp_act_as_dp_construction_rules(config):
+      if self.is_deepseek:
+        self._init_pipeline_deepseek(decoder_block_classes, rngs)
+      else:
+        self._init_pipeline_generic(decoder_block_classes, rngs)
 
   def _init_pipeline_deepseek(self, decoder_block_classes, rngs):
     """Initializes DeepSeek dense and MoE layers outside pipeline."""
@@ -745,6 +755,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_qwen3_hybrid(rngs, mesh)
     elif self.is_ming:
       self._init_scanned_ming(rngs)
+    elif self.is_hy4:
+      self._init_scanned_hy4(rngs)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -985,6 +997,20 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
 
+  def _init_scanned_hy4(self, rngs):
+    """Initializes Hy4 scanned layers: unrolls prefix dense layer(s) and scans homogeneous 4-layer MoE cycles."""
+    config = self.config
+    num_prefix_layers, num_blocks, remainder_start = hy4.scan_layout(config)
+    for layer_idx in list(range(num_prefix_layers)) + list(range(remainder_start, config.num_decoder_layers)):
+      self._create_and_register_layer(hy4.Hy4DecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx)
+    if num_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          hy4.Hy4ScannableBlock,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
+
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
     config = self.config
@@ -1060,6 +1086,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.MING,
+          DecoderBlockType.HY4,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1102,15 +1129,16 @@ class NNXDecoder(nnx.Module):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
     cfg = self.config
     base_stage_cls = decoder_blocks[1] if self.is_deepseek else decoder_blocks[0]
+    stage_mesh = pipeline_utils.pipeline_stage_mesh(self.mesh, cfg.shard_mode)
 
     if cfg.num_layers_per_pipeline_stage == 1:
-      return self._create_single_layer(base_stage_cls, rngs)
+      return self._create_single_layer(base_stage_cls, rngs, mesh=stage_mesh)
     elif cfg.scan_layers_per_stage:
       return NNXScannedPipelineStage(
           base_stage_cls,
           cfg.num_layers_per_pipeline_stage,
           cfg,
-          self.mesh,
+          stage_mesh,
           self.quant,
           self.model_mode,
           rngs=rngs,
@@ -1119,7 +1147,7 @@ class NNXDecoder(nnx.Module):
         base_stage_cls,
         cfg.num_layers_per_pipeline_stage,
         cfg,
-        self.mesh,
+        stage_mesh,
         self.quant,
         self.model_mode,
         rngs=rngs,
@@ -1131,11 +1159,11 @@ class NNXDecoder(nnx.Module):
     layer = self._create_single_layer(layer_cls, rngs, **layer_kwargs)
     setattr(self, attr_name, layer)
 
-  def _create_single_layer(self, decoder_layer_class, rngs, **kwargs):
+  def _create_single_layer(self, decoder_layer_class, rngs, mesh=None, **kwargs):
     """Helper to create a single layer."""
     return decoder_layer_class(
         config=self.config,
-        mesh=self.mesh,
+        mesh=self.mesh if mesh is None else mesh,
         quant=self.quant,
         model_mode=self.model_mode,
         rngs=rngs,
@@ -1485,6 +1513,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
         DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
+        DecoderBlockType.HY4: get_scannable(hy4.Hy4DecoderLayer, hy4.Hy4ScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1648,6 +1677,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
         DecoderBlockType.MING,
+        DecoderBlockType.HY4,
     }:
       return functools.partial(
           RMSNorm,
@@ -1771,7 +1801,7 @@ class NNXDecoder(nnx.Module):
           raise ValueError(f"Unsupported model_name for video: {cfg.model_name}")
 
       if audio_embeddings is not None and cfg.use_audio:
-        if cfg.model_name in {"qwen3-omni-30b-a3b"}:
+        if cfg.model_name in {"qwen3-omni-30b-a3b", "ming-3.0-audio-tiny"}:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=audio_embeddings,
@@ -1794,7 +1824,12 @@ class NNXDecoder(nnx.Module):
 
   def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
     """Looks up the token embeddings, before dropout and positional embeddings."""
-    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    lookup_fn = None
+    if self.config.prefetch_fsdp_weights and self.config.shard_mode == ShardMode.EXPLICIT:
+      # `token_embedder` is outside the scanned decoder loop; wrap `.at[inputs].get(...)` so its
+      # backward FSDP gradient reduction uses an explicit SparseCore `reduce-scatter`.
+      lookup_fn = functools.partial(fsdp_prefetch.explicit_fsdp_embed_lookup, mesh=self.mesh)
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode, lookup_fn=lookup_fn)
 
   def _reduce_mhc_streams(self, y):
     """Collapses a 4D mHC hidden state down to 3D.
@@ -1813,11 +1848,27 @@ class NNXDecoder(nnx.Module):
     cfg = self.config
     if cfg.mhc_expansion_rate <= 1 or y.ndim < 4:
       return y
-    if self.is_deepseek4:
+    if self.is_deepseek4 or self.is_hy4:
       return self.hc_head(y)
     # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
     _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
     return mhc_reduce_fn(y)
+
+  def _reshard_activations_to_rules(self, y):
+    """Under EXPLICIT sharding, reshards the [batch, length, embed] activations to the logical axis rules in context.
+
+    The PP-as-DP rules add 'stage' to the batch sharding of the decoder layers outside the pipeline, and the carry of a
+    scanned layer stack must keep its type, sharding included, so the activations enter those layers in that layout.
+    """
+    if self.config.shard_mode != ShardMode.EXPLICIT:
+      return y
+    return sharding.maybe_shard_with_logical(
+        y,
+        ("activation_batch", "activation_length", "activation_embed"),
+        self.mesh,
+        self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+    )
 
   def apply_decoder_norm(self, y, reduce_mhc=True):
     """Applies the decoder's final normalization (`decoder_norm`) to a hidden state.
@@ -1833,9 +1884,15 @@ class NNXDecoder(nnx.Module):
     if reduce_mhc:
       y = self._reduce_mhc_streams(y)
     if self.config.shard_mode == ShardMode.EXPLICIT:
+      # Under pipeline parallelism the hidden state stays split over 'stage' like the logits (stage acts as data).
+      batch_axis = (
+          "activation_embed_and_logits_batch"
+          if getattr(self.config, "using_pipeline_parallelism", False)
+          else "activation_batch"
+      )
       norm_out_sharding = create_sharding(
           self.mesh,
-          ("activation_batch", "activation_length", "activation_embed"),
+          (batch_axis, "activation_length", "activation_embed"),
       )
     else:
       norm_out_sharding = None
@@ -1879,7 +1936,12 @@ class NNXDecoder(nnx.Module):
       # Use the transpose of embedding matrix for logit transform.
       embedding_table = shared_embedding.embedding[...]
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
-      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
+      # Release the head's input and embedding cotangents together, so the backward pass does not keep
+      # the [batch, length, vocab] dlogits alive until the embedding-gradient matmul (see max_utils.tie_cotangents).
+      y_head, head_table = y, embedding_table
+      if cfg.tie_lm_head_cotangents:
+        y_head, head_table = max_utils.tie_cotangents(y, embedding_table)
+      logits = attend_on_embedding(y_head, head_table, attend_dtype, self.config, out_sharding)
 
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
@@ -1893,7 +1955,21 @@ class NNXDecoder(nnx.Module):
         y = sharding.maybe_shard_with_logical(
             y, head_in_axes, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
         )
-      logits = self.logits_dense(y, out_sharding=out_sharding)
+      kernel_all_gather_fn = None
+      if head_in_axes is None and cfg.prefetch_fsdp_weights and cfg.shard_mode == ShardMode.EXPLICIT:
+        # `logits_dense` is outside the scanned decoder loop; wrap its FSDP all-gather so the
+        # backward weight gradient uses an explicit SparseCore `reduce-scatter`.
+        kernel_all_gather_fn = functools.partial(fsdp_prefetch.explicit_fsdp_weight, mesh=self.mesh)
+      # Release the head's input and weight cotangents together, so the backward pass does not keep
+      # the [batch, length, vocab] dlogits alive until the weight-gradient matmul (see max_utils.tie_cotangents).
+      if cfg.tie_lm_head_cotangents:
+        head_graphdef, head_state = nnx.split(self.logits_dense)
+        y_head, head_state = max_utils.tie_cotangents(y, head_state)
+        logits = nnx.merge(head_graphdef, head_state)(
+            y_head, out_sharding=out_sharding, kernel_all_gather_fn=kernel_all_gather_fn
+        )
+      else:
+        logits = self.logits_dense(y, out_sharding=out_sharding, kernel_all_gather_fn=kernel_all_gather_fn)
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
@@ -2039,6 +2115,7 @@ class NNXDecoder(nnx.Module):
       multimodal_input: None | MultimodalInput = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings=None,
+      skip_lm_head: bool = False,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -2127,6 +2204,7 @@ class NNXDecoder(nnx.Module):
         # Pre-pipeline: dense layers + outside-pipeline MoE layers under PP-as-DP axis rules.
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
         with self.mesh, logical_axis_rules(logical_axis_rules_pp_as_dp):
+          y = self._reshard_activations_to_rules(y)
           if cfg.scan_layers:
             if getattr(self, "dense_layers", None) is not None and cfg.first_num_dense_layers > 0:
               y, self.dense_layers, _ = self._apply_layers_sequentially(
@@ -2203,6 +2281,7 @@ class NNXDecoder(nnx.Module):
               self.mesh,
               logical_axis_rules(logical_axis_rules_pp_as_dp),
           ):
+            y = self._reshard_activations_to_rules(y)
             if cfg.scan_layers and hasattr(self, "layers_outside_pipeline"):
               remaining = cfg.num_decoder_layers - cfg.pipeline_parallel_layers
               y, self.layers_outside_pipeline, _ = self._apply_layers_sequentially(
@@ -2346,6 +2425,8 @@ class NNXDecoder(nnx.Module):
           )
         elif self.is_ming:
           y = self._apply_ming_scanned_blocks(y, layer_args, layer_kwargs)
+        elif self.is_hy4:
+          y = self._apply_hy4_scanned_blocks(y, layer_args, layer_kwargs)
         else:
           cycle_interval = cfg.inhomogeneous_layer_cycle_interval
           scan_length = int(cfg.num_decoder_layers / cycle_interval)
@@ -2409,16 +2490,19 @@ class NNXDecoder(nnx.Module):
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
+          layer_out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
+          out_y, out_kv = layer_out[:2]
+          out_indexer_mask = layer_out[2] if len(layer_out) > 2 else None
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
             new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
-            return out_y, out_kv, state_out, new_graphdef
+            return out_y, out_kv, out_indexer_mask, state_out, new_graphdef
           else:
-            return out_y, out_kv, state_out, graphdef_in
+            return out_y, out_kv, out_indexer_mask, state_out, graphdef_in
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+        prev_indexer_mask = None
 
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
@@ -2494,10 +2578,17 @@ class NNXDecoder(nnx.Module):
                 routed_experts[:, :, lyr, :] if routed_experts.ndim == 4 else routed_experts
             )
 
+          if self.is_hy4:
+            current_kwargs["prev_indexer_mask"] = prev_indexer_mask
+
           if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
+            y, kv_cache, prev_indexer_mask, new_state, new_graphdef = checkpointed_fn(
+                graphdef, state, y, kv_cache, current_kwargs
+            )
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
+            y, kv_cache, prev_indexer_mask, new_state, new_graphdef = pure_layer_fn(
+                graphdef, state, y, kv_cache, current_kwargs
+            )
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)
@@ -2560,6 +2651,10 @@ class NNXDecoder(nnx.Module):
         and getattr(cfg, "indexer_loss_scaling_factor", 0.0) > 0.0
         and not getattr(cfg, "indexer_sparse_training", False)
     ) and model_mode == MODEL_MODE_TRAIN:
+      logits = None
+
+    elif skip_lm_head:
+      hidden_state = self._reduce_mhc_streams(hidden_state)
       logits = None
 
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
@@ -2726,6 +2821,54 @@ class NNXDecoder(nnx.Module):
     # 3. Unrolled remainder layers
     for layer_idx in range(remainder_start, cfg.num_decoder_layers):
       y, _ = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y)
+
+    return y
+
+  def _apply_hy4_scanned_blocks(self, y, layer_args, layer_kwargs):
+    """Applies Hy4 scanned decoder blocks: unrolled prefix layers, scanned 4-layer cycles, unrolled remainder."""
+    cfg = self.config
+    num_prefix_layers, num_blocks, remainder_start = hy4.scan_layout(cfg)
+    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    policy = self.get_remat_policy() if use_remat else None
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
+
+    def apply_unrolled_layer(layer, inputs, prev_indexer_mask=None):
+      kw = dict(layer_kwargs)
+      kw["prev_indexer_mask"] = prev_indexer_mask
+      if use_remat:
+        decoder_segment_ids, decoder_positions, deterministic, model_mode = layer_args
+        out = self._apply_layer_with_remat(
+            layer,
+            inputs,
+            policy,
+            prevent_cse,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            **kw,
+        )
+      else:
+        out = layer(inputs, *layer_args, **kw)
+      return out[0], out[2]
+
+    prev_indexer_mask = None
+    for layer_idx in range(num_prefix_layers):
+      y, prev_indexer_mask = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y, prev_indexer_mask)
+
+    if num_blocks > 0 and hasattr(self, "scanned_blocks"):
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          **layer_kwargs,
+      )
+      prev_indexer_mask = None
+
+    for layer_idx in range(remainder_start, cfg.num_decoder_layers):
+      y, prev_indexer_mask = apply_unrolled_layer(getattr(self, f"layers_{layer_idx}"), y, prev_indexer_mask)
 
     return y
 

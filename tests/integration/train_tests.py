@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for train.py with various configs"""
+import importlib
 import json
 import os
 import tempfile
@@ -738,6 +739,50 @@ class TrainTests(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_moe_block_deepseek4_hash_and_routed_bias(self):
+    """Runs real TE MoE kernels for DSv4 hash routing and top-k routed-bias updates."""
+    gpu_device = jax.devices("gpu")[0]
+    compute_capability = getattr(gpu_device, "compute_capability", None)
+    try:
+      if float(compute_capability) < 10.0:
+        pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+    except Exception:  # pylint: disable=broad-exception-caught
+      pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+
+    train_main(
+        TrainTests.CONFIGS["synthetic"]
+        + [
+            "model_name=deepseek4-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=3",
+            "first_num_hash_layers=1",
+            "compress_ratios=[0,4,128]",
+            "attention=dot_product",
+            "quantization=te_no_quant",
+            "base_emb_dim=32",
+            "base_num_kv_heads=1",
+            "head_dim=32",
+            "num_experts=4",
+            "num_experts_per_tok=2",
+            "shared_experts=1",
+            "base_moe_mlp_dim=32",
+            "routed_bias=True",
+            "routed_bias_update_rate=0.125",
+            "load_balance_loss_weight=0.0",
+            "sparse_matmul=True",
+            "megablox=False",
+            "prefuse_moe_weights=True",
+            "te_moe_block=True",
+            "te_gmm_quantization=te_no_quant",
+            "hardware=gpu_multiprocess",
+            "ici_fsdp_parallelism=1",
+            "ici_expert_parallelism=-1",
+            "enable_tensorboard=False",
+        ]
+    )
+
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"])
@@ -990,6 +1035,50 @@ class TrainTests(unittest.TestCase):
       with open(metrics_file, "rt", encoding="utf8") as f:
         return [json.loads(line)["learning/loss"] for line in f if line.strip()]
 
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_mhc_matches_baseline(self):
+    """TE mHC kernels must train close to the MaxText mHC path.
+
+    The two are not bit-identical: TE runs Sinkhorn in the log domain without the
+    1e-6 epsilons MaxText adds after the softmax and each normalization, uses TF32
+    GEMMs unless matmul_precision is HIGHEST, and fuses ops into Triton kernels with
+    different accumulation order. Hence the loose tolerance.
+    """
+    # A TE install mismatched with this JAX or CUDA runtime fails at import
+    # time with more than ModuleNotFoundError (all pytest.importorskip catches
+    # by default in pytest >= 9.1): dlopen/symbol errors raise ImportError or
+    # OSError, missing CUDA libs raise RuntimeError, and XLA FFI mismatches
+    # raise JaxRuntimeError (a RuntimeError subclass).
+    try:
+      importlib.import_module("transformer_engine.jax.mhc")
+    except (ImportError, OSError, RuntimeError) as e:
+      self.skipTest(f"TE JAX mHC is not usable: {type(e).__name__}: {e}")
+    mhc_model = [
+        "model_name=deepseek-custom",
+        "override_model_config=True",
+        "hardware=gpu",
+        "attention=dot_product",
+        "mhc_expansion_rate=4",
+        "engram_layers=[]",
+        "use_indexer=False",
+        "base_emb_dim=256",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=512",
+        "base_moe_mlp_dim=128",
+        "base_num_decoder_layers=2",
+        "first_num_dense_layers=1",
+        "num_experts=4",
+        "vocab_size=1024",
+        "max_target_length=128",
+        "per_device_batch_size=1",
+    ]
+    baseline_losses = self._losses("mhc_baseline", mhc_model, ["te_mhc=False"])
+    te_losses = self._losses("mhc_te", mhc_model, ["te_mhc=True"])
+    self.assertEqual(len(te_losses), len(baseline_losses))
+    np.testing.assert_allclose(te_losses, baseline_losses, rtol=2e-2)
+
   def _qwen3_losses(self, run_name, extra_args):
     """Trains a tiny Qwen3 model for a few steps and returns its per-step losses."""
     return self._losses(run_name, self._qwen3_overrides, extra_args)
@@ -1081,11 +1170,12 @@ class TrainTests(unittest.TestCase):
         "gpt_oss_tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
     }
     # gpt3's bias reshard reassociates the bias-gradient reductions (~5e-5 by step 2 on
-    # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism.
+    # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism,
+    # growing to ~1.8e-5 by step 2 once the axis places one expert per device (tpu7x-8).
     # Under tensor parallelism gpt-oss is bit-for-bit on a four-way axis, but once the
     # axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate and
     # it drifts ~5e-6 by step 2.
-    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-5, "gpt_oss_tensor": 1e-4}
+    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-4, "gpt_oss_tensor": 1e-4}
     for case, model_args in _GPT_MODELS.items():
       with self.subTest(case=case):
         args = model_args + parallelism[case]
@@ -1215,11 +1305,13 @@ class TrainTests(unittest.TestCase):
         "tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
         "expert": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
     }
-    # Under tensor parallelism the two modes are bit-for-bit. Under expert parallelism
-    # pinning the activations reassociates the reductions inside the MoE block, so the
-    # loss drifts by a few ULPs by the third step. The drift is ~5e-7 at this size but
-    # grows with the expert dimensions, so leave the bound loose.
-    rtol = {"tensor": 1e-6, "expert": 1e-4}
+    # Under tensor parallelism the two modes are bit-for-bit on a four-way axis, but once
+    # the axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate
+    # and the loss drifts ~4e-6 by step 2. Under expert parallelism pinning the
+    # activations reassociates the reductions inside the MoE block, so the loss drifts by
+    # a few ULPs by the third step. The drift is ~5e-7 at this size but grows with the
+    # expert dimensions, so leave the bound loose.
+    rtol = {"tensor": 1e-5, "expert": 1e-4}
     for name, parallelism_args in parallelism.items():
       with self.subTest(parallelism=name):
         auto_losses = self._losses(f"llama4_{name}_auto", self._llama4_overrides, parallelism_args + ["shard_mode=auto"])

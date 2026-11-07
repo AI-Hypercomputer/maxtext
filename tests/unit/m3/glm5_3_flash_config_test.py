@@ -25,10 +25,10 @@ from absl.testing import absltest
 import jax
 from jax.sharding import PartitionSpec as P
 from maxtext.configs import pyconfig
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Config
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Sharding
+from maxtext.m3.configs.glm5_3_flash_config import validate_no_packing
 from maxtext.m3.core import sharding as m3_sharding
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Config
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Sharding
-from maxtext.m3.models.glm5_3_flash.glm5_config import validate_no_packing
 import numpy as np
 
 
@@ -57,6 +57,9 @@ class Glm5ConfigTest(absltest.TestCase):
     self.assertEqual((c.scan_layers, c.kda_implementation), (True, "mosaic"))
     self.assertEqual((c.moe_lb_loss_weight, c.mlp_clamp_limit), (0.001, 10.0))
     self.assertEqual(c.remat_policy, "full")
+    self.assertEqual(c.dsa_attention_implementation, "dense_mask")
+    self.assertEqual(c.router_param_dtype, "float32")
+    self.assertEqual(c.weight_dtype, "float32")
     assert c.layer_types is not None and c.indexer_types is not None
     self.assertEqual((len(c.layer_types), set(c.indexer_types)), (45, {"full"}))
     self.assertEqual(c.layer_types.count("linear_attention"), 34)
@@ -64,8 +67,9 @@ class Glm5ConfigTest(absltest.TestCase):
 
   def test_import_glm5_config_does_not_import_tokamax(self):
     cfg_mod = Glm5Config.__module__
-    pkg_mod = cfg_mod.rsplit(".", 1)[0]
-    saved_modules = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith((pkg_mod, "tokamax"))}
+    m3_root = cfg_mod.rsplit(".", 2)[0]
+    pkg_mod = f"{m3_root}.models.glm5_3_flash"
+    saved_modules = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith((cfg_mod, pkg_mod, "tokamax"))}
     try:
       importlib.import_module(cfg_mod)
       importlib.import_module(pkg_mod)
@@ -189,6 +193,18 @@ class Glm5ConfigTest(absltest.TestCase):
     overridden_qk = Glm5Config.from_maxtext_config(Glm5Config(), qk_nope_head_dim=128)
     self.assertEqual(overridden_qk.qk_head_dim, 128)
 
+  def test_dsa_attention_implementation(self):
+    c_default = Glm5Config()
+    self.assertEqual(c_default.dsa_attention_implementation, "dense_mask")
+    c_dense = Glm5Config(dsa_attention_implementation="dense_mask")
+    self.assertEqual(c_dense.dsa_attention_implementation, "dense_mask")
+    c_mini = Glm5Config.mini_config(dsa_attention_implementation="dense_mask")
+    self.assertEqual(c_mini.dsa_attention_implementation, "dense_mask")
+
+    dummy_cfg = pyconfig.initialize(["", "src/maxtext/configs/base.yml", "model_name=glm5.3-flash"])
+    c_from = Glm5Config.from_maxtext_config(dummy_cfg, dsa_attention_implementation="dense_mask")
+    self.assertEqual(c_from.dsa_attention_implementation, "dense_mask")
+
   def test_loud_guards(self):
     for kwargs, pat in (
         ({"packing": True}, "packing=True"),
@@ -215,12 +231,54 @@ class Glm5ConfigTest(absltest.TestCase):
         ),
         ({"mlp_clamp_limit": 0.0}, "mlp_clamp_limit must be > 0.0"),
         ({"mlp_clamp_limit": -1.0}, "mlp_clamp_limit must be > 0.0"),
+        (
+            {"dsa_attention_implementation": cast(Any, ["dense_mask"])},
+            "dsa_attention_implementation must be a str",
+        ),
+        (
+            {"dsa_attention_implementation": cast(Any, None)},
+            "dsa_attention_implementation must be a str",
+        ),
+        (
+            {"dsa_attention_implementation": cast(Any, 123)},
+            "dsa_attention_implementation must be a str",
+        ),
+        (
+            {"dsa_attention_implementation": "tokamax_splash"},
+            "dsa_attention_implementation must be one of",
+        ),
+        (
+            {"dsa_attention_implementation": "gather_scan"},
+            "dsa_attention_implementation must be one of",
+        ),
+        (
+            {"dsa_attention_implementation": "flash"},
+            "dsa_attention_implementation must be one of",
+        ),
+        (
+            {"dsa_attention_implementation": "bad"},
+            "dsa_attention_implementation must be one of",
+        ),
         ({"qk_rope_head_dim": 64}, "NoPE"),
         ({"rope_parameters": {"type": "yarn"}}, "NoPE"),
         ({"num_key_value_heads": 32}, r"num_key_value_heads.*must equal"),
         ({"linear_num_value_heads": 32}, r"linear_num_key_heads.*must equal"),
         ({"linear_value_head_dim": 64}, r"linear_key_head_dim.*must equal"),
         ({"remat_policy": "bogus"}, "remat_policy must be 'none' or 'full'"),
+        (
+            {"router_param_dtype": "bfloat16"},
+            "router_param_dtype must be 'float32'",
+        ),
+        (
+            {"router_param_dtype": cast(Any, 123)},
+            "router_param_dtype must be 'float32'",
+        ),
+        (
+            {"router_param_dtype": cast(Any, None)},
+            "router_param_dtype must be 'float32'",
+        ),
+        ({"weight_dtype": "int8"}, "weight_dtype must be one of"),
+        ({"weight_dtype": cast(Any, 123)}, "weight_dtype must be one of"),
     ):
       with self.assertRaisesRegex(ValueError, pat):
         Glm5Config(**cast(dict[str, Any], kwargs))
@@ -374,6 +432,14 @@ class Glm5ConfigTest(absltest.TestCase):
     c_custom = Glm5Config.from_maxtext_config(cfg_custom)
     self.assertEqual(c_custom.moe_lb_loss_weight, 0.05)
     self.assertEqual(c_custom.mlp_clamp_limit, 8.0)
+    self.assertEqual(c.dsa_attention_implementation, "dense_mask")
+    c_dense = Glm5Config.from_maxtext_config(pyconfig.initialize(argv), dsa_attention_implementation="dense_mask")
+    self.assertEqual(c_dense.dsa_attention_implementation, "dense_mask")
+    with self.assertRaisesRegex(ValueError, "dsa_attention_implementation must be one of"):
+      Glm5Config.from_maxtext_config(
+          pyconfig.initialize(argv),
+          dsa_attention_implementation="tokamax_splash",
+      )
 
     d4 = ["routed_bias_update_rate=0.01", "decoder_block=deepseek"]
     d3 = ["indexer_loss_scaling_factor=0.1", "max_target_length=4096"]

@@ -18,6 +18,7 @@ import contextlib
 import io
 import json
 import os
+import pathlib
 import tempfile
 import unittest
 from unittest import mock
@@ -449,6 +450,57 @@ class ProcessTestResultsTest(unittest.TestCase):
         "test-results-decoupled-targeted.xml",
     ]
     self.assertEqual(find_missing_shards(files), {})
+
+  def test_main_prunes_stale_entries(self):
+    """Completed flavors prune deleted/skipped tests while keeping failed tests and untouched flavors."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = pathlib.Path(tmpdir)
+      (root / "test-results-tpu-unit-1of1.xml").write_text(
+          "<testsuite>"
+          '<testcase name="t_pass" classname="m.C" time="22.0"/>'
+          '<testcase name="t_fail" classname="m.C" time="1.0"><failure/></testcase>'
+          '<testcase name="t_skip" classname="m.C" time="0.0"><skipped/></testcase>'
+          "</testsuite>",
+          encoding="utf-8",
+      )
+      baseline_path = root / "baseline.json"
+      save_path = root / "new_baseline.json"
+      baseline_path.write_text(
+          json.dumps(
+              {
+                  "tpu-unit::m.C.t_pass": 20.0,
+                  "tpu-unit::m.C.t_fail": 30.0,
+                  "tpu-unit::m.C.t_skip": 15.0,
+                  "tpu-unit::m.C.t_deleted": 45.0,
+                  "gpu-unit::m.G.t_gpu": 12.0,
+              }
+          ),
+          encoding="utf-8",
+      )
+
+      self.assertEqual(self._run_main([tmpdir, "--baseline", str(baseline_path), "--save-baseline", str(save_path)]), 0)
+      self.assertEqual(
+          json.loads(save_path.read_text(encoding="utf-8")),
+          {"tpu-unit::m.C.t_pass": 22.0, "tpu-unit::m.C.t_fail": 30.0, "gpu-unit::m.G.t_gpu": 12.0},
+      )
+
+  def test_corrupt_shard_skips_benchmark_and_baseline_save(self):
+    """A flavor with a corrupt shard XML must not emit partial dashboard totals or overwrite the baseline."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = pathlib.Path(tmpdir)
+      (root / "test-results-tpu-unit-1of2.xml").write_text(
+          '<testsuite><testcase name="t1" classname="m.C" time="20.0"/></testsuite>',
+          encoding="utf-8",
+      )
+      (root / "test-results-tpu-unit-2of2.xml").write_text("<testsuite><unclosed", encoding="utf-8")
+      bench_path = root / "bench.json"
+      save_path = root / "new_baseline.json"
+      self.assertEqual(
+          self._run_main([tmpdir, "--save-baseline", str(save_path), "--output-benchmark", str(bench_path)]),
+          1,
+      )
+      self.assertFalse(bench_path.exists())
+      self.assertFalse(save_path.exists())
 
 
 if __name__ == "__main__":

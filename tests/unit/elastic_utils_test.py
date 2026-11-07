@@ -14,6 +14,7 @@
 
 """Unit tests for Elastic Training utility functions."""
 
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, create_autospec
 from absl.testing import parameterized
@@ -31,10 +32,12 @@ class MockJaxRuntimeError(Exception):
 class FakeDevice:
   """Fake Device object."""
 
-  def __init__(self, slice_index=0, process_index=0, task_id=0):
+  def __init__(self, slice_index=0, process_index=0, task_id=0, client=None):
     self.slice_index = slice_index
     self.process_index = process_index
     self.task_id = task_id
+    # A client without attributes, unless given.
+    self.client = client if client is not None else SimpleNamespace()
 
 
 class FakeConfig:
@@ -68,7 +71,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.original_max_logging = elastic_utils.max_logging
     self.original_elastic = elastic_utils.elastic
     self.original_manager_class = pathwaysutils.elastic.manager.Manager
-    self.original_scale_up_signal_error = getattr(pathwaysutils.elastic.manager, "ScaleUpSignalError", None)
+    self.original_scale_up_signal_error = pathwaysutils.elastic.manager.ScaleUpSignalError
 
     # Initialize fakes as mocks
     self.fake_gcs_utils = create_autospec(gcs_utils)
@@ -88,6 +91,7 @@ class ElasticUtilsTest(parameterized.TestCase):
         0: [FakeDevice()],
         1: [FakeDevice()],
     }
+    self.fake_jax.devices.return_value = [FakeDevice()]
     self.fake_jax.process_index.return_value = 0
 
     # Inject fakes into elastic_utils namespace
@@ -112,9 +116,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     elastic_utils.max_logging = self.original_max_logging
     elastic_utils.elastic = self.original_elastic
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
-    pathwaysutils.elastic.manager.ScaleUpSignalError = (  # pyrefly: ignore[bad-assignment]
-        self.original_scale_up_signal_error,
-    )
+    pathwaysutils.elastic.manager.ScaleUpSignalError = self.original_scale_up_signal_error
     elastic_utils.elastic_manager = None
     elastic_utils.pending_reinit_recorder = None
     elastic_utils.pending_elastic_event_type = None
@@ -149,6 +151,45 @@ class ElasticUtilsTest(parameterized.TestCase):
     config.elastic_enabled = True
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
     self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def test_elastic_enabled_with_client_supports_elastic(self):
+    """The client's `supports_elastic` attribute enables elastic training without the Pathways check."""
+    config = FakeConfig()
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+    self.fake_jax.devices.return_value = [FakeDevice(client=SimpleNamespace(supports_elastic=True))]
+    self.assertTrue(elastic_utils.elastic_enabled(config))
+
+    config.elastic_enabled = False
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+    config.elastic_enabled = True
+    self.fake_jax.devices.return_value = [FakeDevice(client=SimpleNamespace(supports_elastic=False))]
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def test_elastic_enabled_without_devices_or_client(self):
+    config = FakeConfig()
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+
+    self.fake_jax.devices.return_value = []
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+    self.fake_jax.devices.return_value = [SimpleNamespace()]
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def test_record_slice_state_with_client_supports_elastic(self):
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0, 1}
+    self.fake_elastic.get_active_slice_indices.return_value = {0, 1}
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+    fake_recorder = Mock()
+
+    # Neither Pathways nor a client with `supports_elastic`: nothing is recorded.
+    elastic_utils.record_slice_state(fake_recorder)
+    fake_recorder.record_elastic_slice_counts.assert_not_called()
+
+    self.fake_jax.devices.return_value = [FakeDevice(client=SimpleNamespace(supports_elastic=True))]
+    elastic_utils.record_slice_state(fake_recorder)
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=2, total_slices=2)
 
   def test_clean_up_checkpoints_no_checkpoints(self):
     self.fake_gcs_utils.gcs_list_directories.return_value = []
@@ -219,9 +260,9 @@ class ElasticUtilsTest(parameterized.TestCase):
     config = FakeConfig()
     config.elastic_enabled = False
     msg = (
-        "Elastic training requires the Pathways backend, and elastic_enabled"
-        " must be set to True: current config.elastic_enabled: False, pathways"
-        " backend used: True"
+        "Elastic training requires a backend that supports it, and"
+        " elastic_enabled must be set to True: current config.elastic_enabled:"
+        " False, backend supports_elastic: True"
     )
     with self.assertRaisesRegex(ValueError, msg):
       elastic_utils.elastic_retry(config)
@@ -231,9 +272,9 @@ class ElasticUtilsTest(parameterized.TestCase):
     config = FakeConfig()
     config.elastic_enabled = True
     msg = (
-        "Elastic training requires the Pathways backend, and elastic_enabled"
-        " must be set to True: current config.elastic_enabled: True, pathways"
-        " backend used: False"
+        "Elastic training requires a backend that supports it, and"
+        " elastic_enabled must be set to True: current config.elastic_enabled:"
+        " True, backend supports_elastic: False"
     )
     with self.assertRaisesRegex(ValueError, msg):
       elastic_utils.elastic_retry(config)

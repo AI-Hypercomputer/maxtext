@@ -115,6 +115,41 @@ class ZeroGenLogitsCheckerTest(parameterized.TestCase):
       with self.assertRaises(SystemExit):
         checker.main(bad_args, model=fake_model)
 
+  def test_synthetic_golden_batch_and_evaluate_masked_prefill_parity(self):
+    toks, segs, mask = checker.synthetic_golden_batch(
+        checker.GOLDEN_BATCH_TEXT,
+        vocab_size=32000,
+        seq_len=64,
+        pad_token_id=0,
+        batch_size=2,
+        target_start_fraction=0.5,
+    )
+    self.assertEqual(toks.shape, (2, 64))
+    self.assertEqual(segs.shape, (2, 64))
+    self.assertEqual(mask.shape, (2, 64))
+    self.assertTrue(np.any(mask))
+
+    np.random.seed(42)
+    logits = np.random.randn(2, 64, 128).astype(np.float32)
+    exp_idx = [np.zeros((2, 64, 4), dtype=np.int32)]
+    dsa_idx = [np.zeros((2, 64, 2), dtype=np.int32)]
+    single_logits = [logits[0], logits[1]]
+    res = checker.evaluate_masked_prefill_parity(
+        jax_logits=logits,
+        ref_logits=logits.copy(),
+        target_mask=mask,
+        jax_expert_indices=exp_idx,
+        ref_expert_indices=exp_idx,
+        jax_dsa_indices=dsa_idx,
+        ref_dsa_indices=dsa_idx,
+        single_row_logits=single_logits,
+        decoder_segment_ids=segs,
+    )
+    self.assertTrue(res["all_passed"])
+    self.assertTrue(res["tier_1a_passed"])
+    self.assertTrue(res["tier_1b_passed"])
+    self.assertTrue(res["batch_determinism_passed"])
+
 
 if __name__ == "__main__":
   absltest.main()

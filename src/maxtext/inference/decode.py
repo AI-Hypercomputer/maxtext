@@ -124,6 +124,8 @@ def main(argv: Sequence[str]) -> None:
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
         num_videos=getattr(processor_outputs, "num_videos", 0),
+        audio_placeholder=config.audio_placeholder,
+        num_audios=getattr(processor_outputs, "num_audios", 0),
     )
 
   metadata = engine.get_tokenizer()

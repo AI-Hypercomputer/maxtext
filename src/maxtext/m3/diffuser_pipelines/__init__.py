@@ -12,4 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-shape Ahead-of-Time (AOT) compiled executable cache."""
+"""Diffusion pipelines (checkpoint loading, denoising loop, VAE decode), driven by `maxtext/inference/sample.py`.
+
+Import the modules directly (`pipeline_utils`, `wan_pipeline`): this package imports nothing eagerly, so
+`import maxtext.m3.diffuser_pipelines` works without the diffusion dependencies (diffusers, transformers).
+"""

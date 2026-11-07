@@ -71,7 +71,8 @@ python3 -m maxtext.trainers.pre_train.train \
     checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} \
     scan_layers=false \
-    use_multimodal=false
+    use_multimodal=false \
+    ici_expert_parallelism=8
 
 # Step 3: Run inference on the checkpoint generated from the previous run
     python3 -m maxtext.inference.decode \

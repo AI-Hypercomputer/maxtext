@@ -833,6 +833,68 @@ class TrainableParametersMaskTest(parameterized.TestCase):
     # When no trainable mask is provided, nothing is frozen by this mechanism
     self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
 
+  def test_get_optimizer_with_trainable_mask_and_skip_step_on_spikes(self):
+    """get_optimizer keeps opt_state['is_skipped'] at top level when masking parameters."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_mask_and_skip",
+        "trainable_parameters_mask=['.*indexer.*']",
+        "skip_step_on_spikes=True",
+        "skip_step_interval=4",
+        "skip_step_scaling_factor=1.0",
+    ]
+    config = pyconfig.initialize(argv)
+    opt = optimizers.get_optimizer(config, lambda _: 1.0)
+
+    params = {"indexer": jnp.ones((2, 2)), "kernel": jnp.ones((2, 2))}
+    grads = {"indexer": jnp.ones((2, 2)) * 0.5, "kernel": jnp.ones((2, 2)) * 0.5}
+    opt_state = opt.init(params)
+
+    self.assertIsInstance(opt_state, dict)
+    self.assertIn("is_skipped", opt_state)
+    self.assertIsInstance(opt_state["inner_state"], optax.PartitionState)
+    inner_states = opt_state["inner_state"].inner_states
+    self.assertIsInstance(inner_states["frozen"], optax.MaskedState)
+    self.assertIsInstance(inner_states["frozen"].inner_state, optax.EmptyState)
+    self.assertIsInstance(inner_states["trainable"], optax.MaskedState)
+    self.assertIsInstance(inner_states["trainable"].inner_state[0].mu["kernel"], optax.MaskedNode)
+
+    normal_kwargs = {"loss": jnp.array(1.0), "grad_norm": jnp.array(1.0)}
+    for _ in range(2):
+      updates, opt_state = opt.update(grads, opt_state, params, **normal_kwargs)
+      self.assertFalse(bool(opt_state["is_skipped"]))
+      self.assertFalse(bool(jnp.all(updates["indexer"] == 0)))
+      self.assertTrue(bool(jnp.all(updates["kernel"] == 0)))
+
+    spike_kwargs = {"loss": jnp.array(100.0), "grad_norm": jnp.array(1.0)}
+    updates, opt_state = opt.update(grads, opt_state, params, **spike_kwargs)
+    self.assertTrue(bool(opt_state["is_skipped"]))
+    self.assertTrue(bool(jnp.all(updates["indexer"] == 0)))
+    self.assertTrue(bool(jnp.all(updates["kernel"] == 0)))
+
+  def test_apply_trainable_parameters_mask_warns_on_empty_or_full_freeze(self):
+    """apply_trainable_parameters_mask logs warnings at WARNING level when 0 or all params freeze."""
+    params = {"indexer": jnp.ones((2, 2)), "kernel": jnp.ones((2, 2))}
+
+    cfg_none_frozen = pyconfig.initialize(
+        ["", get_test_config_path(), "run_name=test_warn_none", "trainable_parameters_mask=['.*']"]
+    )
+    opt_none_frozen = optimizers.apply_trainable_parameters_mask(optax.sgd(0.1), cfg_none_frozen)
+    with patch.object(optimizers.max_logging, "warning") as mock_warning:
+      opt_none_frozen.init(params)
+      mock_warning.assert_called_once()
+      self.assertIn("froze nothing", mock_warning.call_args[0][0])
+
+    cfg_all_frozen = pyconfig.initialize(
+        ["", get_test_config_path(), "run_name=test_warn_all", "trainable_parameters_mask=['nonexistent']"]
+    )
+    opt_all_frozen = optimizers.apply_trainable_parameters_mask(optax.sgd(0.1), cfg_all_frozen)
+    with patch.object(optimizers.max_logging, "warning") as mock_warning:
+      opt_all_frozen.init(params)
+      mock_warning.assert_called_once()
+      self.assertIn("froze EVERY parameter", mock_warning.call_args[0][0])
+
 
 class SkipStepOnSpikesTest(parameterized.TestCase):
   """Tests for the skip_step_on_spikes optimizer wrapper."""

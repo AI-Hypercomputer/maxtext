@@ -31,6 +31,13 @@ import numpy as np
 
 import pathwaysutils  # pylint: disable=unused-import
 
+# Triton (used by te_mhc) segfaults when its native library is loaded after TensorFlow's, so load
+# it first when it is installed.
+try:
+  import triton  # pylint: disable=unused-import
+except ImportError:
+  pass
+
 try:
   import tensorflow as tf
 
@@ -628,7 +635,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       return loss, (aux, non_param_rest)
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
-    (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+    # Potentially mark model's loops for double buffering on GPUs.
+    with max_utils.model_loop_unroll_context(config):
+      (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
     nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
@@ -928,8 +937,6 @@ def training_loop_iteration(
   dump_hlo_upload_all = immutable_data["dump_hlo_upload_all"]
 
   prof.maybe_activate_profiler(step, state)
-  if config.elastic_enabled:
-    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
     example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
@@ -976,8 +983,7 @@ def training_loop_iteration(
   completed_step = step + 1
 
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
-  # Snapshot mode: copy the state and the data iterator position to host memory when due, and always before the
-  # scale-up interrupt at the top of the next step, so that the next attempt resumes from here.
+  # Snapshot mode: copy the state and the data iterator position to host memory when due.
   snapshotting.maybe_save_snapshot(snapshotter, config, state, step, checkpoint_manager, data_iterator)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
@@ -1054,6 +1060,10 @@ def training_loop_iteration(
   if not ran_eval:
     mllog_utils.step_end(config, completed_step)
 
+  if config.elastic_enabled and completed_step < immutable_data["steps"]:
+    # Scale up only right after backing up this step. After the last step there is nothing left to scale up for.
+    snapshotting.maybe_back_up_and_scale_up(snapshotter, config, state, step, checkpoint_manager, data_iterator)
+
   # Pack mutated state back to dicts
   jax_device_state["state"] = state
   python_vars["last_step_completion"] = last_step_completion
@@ -1120,11 +1130,9 @@ def build_first_phase_graphdef(config, jit_model, state):
   return jit_model_first_phase
 
 
-def aot_compile_step(p_step, lower_args, compiler_options, prefix):
+def aot_compile_step(p_step, lower_args, compiler_options=None, prefix=""):
   """Lowers and compiles p_step ahead of time (warms the executable cache) and prints its memory stats."""
-  compiled = p_step.lower(*lower_args).compile(compiler_options=compiler_options)
-  max_utils.print_compiled_memory_stats(compiled.memory_analysis(), prefix=prefix)
-  return compiled
+  return train_utils.aot_compile_step(p_step, lower_args, compiler_options=compiler_options, prefix=prefix)
 
 
 def make_synthetic_batch(config, shaped_batch, seed=0):
@@ -1355,7 +1363,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
-      state = jax.device_put(state, state_mesh_shardings)
+      state = sharding.reshard_train_state(state, state_mesh_shardings, config.enable_single_controller)
     if config.enable_diloco:
       # The DiLoCo train step takes (state, batch, rng), like the inner NNX step.
       lower_args = (state, shaped_batch, init_rng)
@@ -1369,9 +1377,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       # compile would only add a third full compilation on top of the profiling
       # compile and the FDO recompile; skip it and its memory stats.
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
-      compiled_stats = compiled.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_stats, prefix="train")
+      aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
       precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
@@ -1394,9 +1400,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
         eval_lower_args = (state, shaped_eval_batch, init_rng)
       else:
         eval_lower_args = (state, shaped_eval_batch)
-      compiled_eval = p_eval_step.lower(*eval_lower_args).compile(compiler_options=compiler_options)
-      compiled_eval_stats = compiled_eval.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
+      aot_compile_step(p_eval_step, eval_lower_args, compiler_options, prefix="eval")
       precompiled_eval = True
       if p_eval_step_dropless is not None:
         aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")
@@ -1595,7 +1599,8 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     metric_logger_instance.flush_metrics_and_cleanup()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
-      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      train_batch_size = config.logical_global_batch_size_to_train_on or config.global_batch_size_to_train_on
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * train_batch_size
       # Only reached when eval never hit target_eval_loss; a converged run already
       # logged RUN_STOP with status "success" from eval_stop.
       mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
@@ -1668,7 +1673,7 @@ def get_train_func(config, recorder, argv):
       elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
       if elastic_retry_cache.snapshotter is not None and not scale_up:
         # A save that was running when the slice went down may be stuck on it; start over with a new snapshotter
-        # that keeps the last completed snapshot. Before a scale-up nothing is in flight: `maybe_save_snapshot`
+        # that keeps the last completed snapshot. Before a scale-up nothing is in flight: `maybe_back_up_and_scale_up`
         # waited for the last save.
         elastic_retry_cache.snapshotter = snapshotting.reset_snapshotter(elastic_retry_cache.snapshotter)
 

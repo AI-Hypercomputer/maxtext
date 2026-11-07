@@ -16,6 +16,7 @@
 import os
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from flax import linen as nn
@@ -112,6 +113,43 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
 
     # Compare total loss aggregation
     self.assertTrue(jnp.allclose(total_loss_with_z, total_loss_no_z + z_loss_only, rtol=1e-5, atol=1e-8))
+
+  def test_cross_entropy_gradient(self):
+    """The custom gradient matches optax's and keeps the logits' dtype."""
+    logits = random.normal(random.PRNGKey(0), (2, 3, 50))
+    targets = random.randint(random.PRNGKey(1), (2, 3), 0, 50)
+    one_hot_targets = jax.nn.one_hot(targets, 50)
+
+    def loss(logits):
+      return jnp.sum(max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)[0])
+
+    expected = jax.grad(lambda l: jnp.sum(optax.softmax_cross_entropy_with_integer_labels(l, targets)))(logits)
+    np.testing.assert_allclose(jax.grad(loss)(logits), expected, rtol=1e-5, atol=1e-7)
+    self.assertEqual(jax.grad(loss)(logits.astype(jnp.bfloat16)).dtype, jnp.bfloat16)
+
+
+class MaxUtilsTieCotangents(unittest.TestCase):
+  """Tests for tie_cotangents in max_utils.py"""
+
+  def test_tie_cotangents_matches_untied(self):
+    """Tying the cotangents changes neither the values nor the gradients, and adds the barrier."""
+    x = random.normal(random.PRNGKey(0), (4, 8))
+    w = {"kernel": random.normal(random.PRNGKey(1), (8, 16))}
+
+    def loss(x, w, tie):
+      if tie:
+        x, w = max_utils.tie_cotangents(x, w)
+      return jnp.sum(jnp.tanh(x @ w["kernel"]) ** 2)
+
+    tied_x, tied_w = max_utils.tie_cotangents(x, w)
+    np.testing.assert_array_equal(tied_x, x)
+    np.testing.assert_array_equal(tied_w["kernel"], w["kernel"])
+    np.testing.assert_array_equal(max_utils.tie_cotangents(x), x)
+    tied_grads = jax.grad(loss, argnums=(0, 1))(x, w, True)
+    untied_grads = jax.grad(loss, argnums=(0, 1))(x, w, False)
+    jax.tree.map(np.testing.assert_array_equal, tied_grads, untied_grads)
+    tied_grad_jaxpr = jax.make_jaxpr(jax.grad(lambda x, w: loss(x, w, True), argnums=(0, 1)))(x, w)
+    self.assertIn("optimization_barrier", str(tied_grad_jaxpr))
 
 
 class MaxUtilsCustomMesh(unittest.TestCase):
@@ -792,6 +830,31 @@ class TestReorderSequence(unittest.TestCase):
     np.testing.assert_array_equal(
         reordered["targets_loss_mask"],
         max_utils.reorder_sequence(targets_loss_mask, 2),
+    )
+
+
+class TestResolveReorderStrategy(unittest.TestCase):
+  """Tests for resolve_reorder_strategy in max_utils.py"""
+
+  def test_resolve_reorder_strategy(self):
+    def config(**overrides):
+      defaults = {
+          "context_parallel_reorder_strategy": ReorderStrategy.AUTO,
+          "packing": True,
+          "context_parallel_strategy": "ring",
+          "hardware": "gpu",
+      }
+      return SimpleNamespace(**{**defaults, **overrides})
+
+    resolve = max_utils.resolve_reorder_strategy
+    # AUTO means STRIPED only for packed ring attention on GPU, and DUAL_CHUNK_SWAP otherwise.
+    self.assertEqual(resolve(config()), ReorderStrategy.STRIPED)
+    self.assertEqual(resolve(config(hardware="tpu")), ReorderStrategy.DUAL_CHUNK_SWAP)
+    self.assertEqual(resolve(config(packing=False)), ReorderStrategy.DUAL_CHUNK_SWAP)
+    # An explicit strategy is returned as is.
+    self.assertEqual(
+        resolve(config(context_parallel_reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP)),
+        ReorderStrategy.DUAL_CHUNK_SWAP,
     )
 
 

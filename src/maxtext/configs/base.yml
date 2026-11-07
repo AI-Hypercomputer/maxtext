@@ -55,6 +55,9 @@ enable_checkpointing: true
 save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
+# Deadline (seconds) for the background half of an async save: storage writes and
+# finalization. None uses Orbax's default (or 3600s when enable_continuous_checkpointing is true).
+async_checkpointing_timeout_secs: None
 checkpoint_period: 10_000
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false
@@ -133,8 +136,12 @@ dtype: "bfloat16"
 # 'fp8' for 8-bit floating-point gemms on nvidia gpus.
 # 'nanoo_fp8' for 8-bit floating-point gemms on amd mi300/mi325 gpus.
 # 'fp8_full' for fp8 quantization with static scaling.
+# 'multipass' for qwix multi-pass residual quantization (see qwix_multipass_mode below).
 # 'serve_fp8_weight' to load and use FP8 checkpoint directly at inference time.
+# 'jax_mxfp8' / 'jax_mxfp4' for OCP MX training through jax.nn.scaled_dot_general.
 quantization: ""
+# For 'jax_mxfp8' / 'jax_mxfp4': the gradient format, '' (same as the operands), 'mxfp8' or 'mxfp4'.
+jax_mx_gradient_mode: ""
 # used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
 # choose one of default, high, and highest.
@@ -182,6 +189,13 @@ quantization_local_shard_count: -1
 # 1 = no tiling; >1 makes XLA all-reduce the full weight gradient under FSDP instead of reduce-scattering it.
 # Applies to quantization=int8, fp8, etc.; ignored by fp8_full, which never tiles weight gradients (same as 1).
 qwix_bwd_weight_grad_tile_count: 1
+# quantization=multipass only: qwix multi-pass mode of the forward, activation-gradient (dlhs) and weight-gradient (drhs) matmuls,
+# e.g. 'three_pass_fp8', 'four_pass_int4', 'three_pass_fp8_fp4/fp4_fp4/fp4'. "" leaves that matmul unquantized; set at least one.
+qwix_multipass_mode: ""
+qwix_dlhs_multipass_mode: ""
+qwix_drhs_multipass_mode: ""
+# quantization=multipass only: block size along the contraction axis of the forward matmul. null = one scale per channel.
+qwix_multipass_tile_size: null
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
 weight_sparsity_n: null
 # The 'M' in N:M sparsity, representing the number of values in each block.
@@ -227,6 +241,10 @@ logits_via_embedding: false
 normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
+# Release the LM head's input and weight cotangents together in the backward pass (an optimization barrier), so the
+# [batch, length, vocab] dlogits is not kept alive until the weight-gradient matmul. Enabling it may increase
+# step time while potentially reducing peak memory.
+tie_lm_head_cotangents: false
 # Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the transpose back into
 # the gradient dot and the weight gradient comes out in the kernel's stored orientation. Without the region that
 # fold never happens under shard_mode: explicit, because the Sharding custom-call on every dot output is a barrier
@@ -277,6 +295,8 @@ mtp_norm_main_hidden_state: false
 # mixture of experts (moe)
 num_experts: 1
 num_experts_per_tok: 1
+fp8_moe: false
+fp8_moe_fake_quant: false
 megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
@@ -298,6 +318,7 @@ ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer
 eval_ragged_buffer_factor: -1.0 # evaluation override for ragged_buffer_factor.
 # When the ragged buffer would drop tokens: None = drop them; step = replay the whole train step with a
 # dropless buffer; layer = per MoE layer, lax.cond into a chunked dropless branch (no step replay).
+# step requires use_ring_of_experts=True; layer works with ring of experts and with the ragged all-to-all path.
 # Valid values: None, step, layer
 moe_dropless_fallback: None
 retry_dropless_first_steps: 0 # with moe_dropless_fallback=step, run steps with step - start_step < N directly with the dropless program (no normal attempt). 0 = off.
@@ -506,6 +527,12 @@ pipeline_bsw_phase_split: false
 #   pipeline_bsw_no_carry the re-gather becomes cheap: -27 GiB at the same step time). Routing biases / quantization
 #   state are not cast.
 pipeline_bsw_in_compute_dtype: false
+# pipeline_unreduced_weight_grads (shard_mode=explicit only): tag the gathered weights `reduced` over the activation batch
+#   axes. Each microbatch's weight gradient is then an `unreduced` partial sum, accumulated over the repeat and reduced
+#   once, at the transpose of the weight prefetch (a reduce-scatter back onto the FSDP-sharded parameters). Without the
+#   tag JAX reduces the gradient in every microbatch iteration and relies on XLA's while-loop all-reduce code motion to
+#   sink it out of the loop. Numerically identical.
+pipeline_unreduced_weight_grads: false
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -565,6 +592,10 @@ param_scan_axis: 1
 # never saved and are re-gathered for the backward pass. See docs/guides/optimization/fsdp_prefetch.md for the
 # recommended XLA flags.
 prefetch_fsdp_weights: false
+# With prefetch_fsdp_weights, defer each layer's weight-gradient reduce-scatters to the next layer's backward step
+# and run them on the SparseCore dedicated to FSDP collectives. Hides them at the cost of extra HBM. Inhomogeneous
+# blocks prefetched per sub-layer defer them to the next sub-layer's step.
+prefetch_fsdp_defer_grad_reduce_scatter: false
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
@@ -962,6 +993,9 @@ per_device_batch_size: 12.0
 # When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job.
 # Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md#using-grain
 expansion_factor_real_data: -1.0
+# Data-parallel replicas fed by one process, each with its own input pipeline; each loads a slice of the host shard.
+num_data_replicas_per_process: 1
+data_replica_index: 0
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
@@ -1320,7 +1354,7 @@ abort_on_inf_loss: true # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: false
-goodput_job_name: ""
+goodput_job_name: "" # Optional: override for the Goodput log name (goodput_<name>). Defaults to run_name
 monitor_goodput: false
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: false
@@ -1497,6 +1531,7 @@ dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
+local_context_parallel_strategy: "" # Optional override for LOCAL_SLIDING layers: "" or "halo" (TPU-only, requires attention=flash and use_tokamax_splash=True)
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
 
@@ -1650,6 +1685,9 @@ weight_sync_debug: false
 use_raiden_ffi: null
 # Weight load format for vLLM in converter validation
 vllm_load_format: "dummy"
+# Enable FP8 MoE for the rollout
+rollout_fp8_moe: false
+
 # When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 
@@ -1678,6 +1716,9 @@ mhc_pallas_kernel_fwd_block_size: 256
 mhc_pallas_kernel_bwd_block_size: 128
 # Feature block size for backward pass of MHC Pallas kernel.
 mhc_pallas_kernel_bwd_feature_block_size: 1024
+# Whether to use Transformer Engine's fused Triton kernels for (Sinkhorn) mHC on NVIDIA GPUs.
+# Requires mhc_expansion_rate=4 and enable_mhc_lite=False.
+te_mhc: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
@@ -1727,3 +1768,7 @@ elastic_snapshot_interval: 10
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+# How the global batch size behaves when training on fewer than all slices of the job: "scaled" keeps
+# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_padded" keeps the global
+# batch size of all slices by rounding up per_device_batch_size and padding the extra rows with zero segmentation.
+elastic_global_batch_size_mode: "scaled"

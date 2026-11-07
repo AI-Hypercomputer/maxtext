@@ -71,10 +71,15 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     train_micro_batch_size=1 \
     num_test_batches=2 \
     model_name=${MODEL_NAME} \
+    ici_expert_parallelism=8 \
+    ici_fsdp_parallelism=2 \
+    ici_tensor_parallelism=2 \
+    allow_split_physical_axes=True \
     enable_single_controller=True \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
-    rollout_tensor_parallelism=4 \
+    rollout_expert_parallelism=8 \
+    rollout_tensor_parallelism=2 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "log_config": false, "allow_split_physical_axes": true, "prefuse_moe_weights": true}}' \
     remat_policy=full \

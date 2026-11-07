@@ -1300,6 +1300,16 @@ class TestCalculateTokensTrainingPerDevice(unittest.TestCase):
     result = maxtext_utils.calculate_tokens_training_per_device(cfg)
     self.assertEqual(result, 128 * 2 * 4)
 
+  def test_constant_padded_mode_uses_logical_training_batch(self):
+    cfg = MagicMock()
+    cfg.max_target_length = 128
+    cfg.per_device_batch_size = 7.0
+    cfg.gradient_accumulation_steps = 1
+    cfg.logical_global_batch_size_to_train_on = 100
+    cfg.num_target_devices = 16
+    result = maxtext_utils.calculate_tokens_training_per_device(cfg)
+    self.assertEqual(result, 128 * 100 / 16)
+
 
 class TestCalculateIndexerMaskRatio(unittest.TestCase):
   """Tests for calculate_indexer_mask_ratio."""

@@ -56,8 +56,10 @@ load_balance_loss_weight: 0.0001
 # DeepSeek-V3 sequence-wise balance loss (V3 Eqs 17-20) on the Sqrt(Softplus) affinities.
 moe_use_megatron_seq_aux_loss: true
 log_moe_bias_norms: false
+float32_gate_logits: true
 
 # --- Attention configuration ---
+attention: "dot_product"
 attention_type: 'compressed'
 use_indexer: true
 q_lora_rank: 16

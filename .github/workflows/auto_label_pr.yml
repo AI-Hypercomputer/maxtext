@@ -12,54 +12,65 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow automatically adds a "pull ready" label to a PR
-# when it has received at least 2 approving reviews and all checks have passed.
-# It runs on pull request review events, workflow run completion events for the "MaxText Package Tests" workflow,
-# and can also be triggered manually via workflow dispatch.
+# This workflow automatically adds a "pull ready" label to a PR that is not a draft and not from a fork, has
+# received at least 2 approving reviews and has a single commit. It doesn't wait for the checks: Copybara imports
+# the PR only after they pass. If the PR still has `skip-ci-tests` and no passing "All Required Tests Passed" run on
+# its head commit, it also removes `skip-ci-tests` with the repo's GitHub App token, which starts the full CI run
+# (a label removed with GITHUB_TOKEN would start no run). It does the same when someone adds "pull ready" by hand,
+# e.g. a maintainer on a PR from a fork. After a push, it removes a "pull ready" label that no longer applies.
 
 name: Add Pull Ready Label
 
 on:
-  # zizmor: ignore[dangerous-triggers]
-  workflow_run:
-    workflows: ["MaxText Package Tests"]
-    types: [completed]
+  # zizmor: ignore[dangerous-triggers] Never checks out or executes PR code; only reads PR metadata
+  # and updates labels via numeric PR IDs.
+  pull_request_target:
+    types: [labeled, synchronize, ready_for_review]
   pull_request_review:
-  pull_request_review_comment:
+    types: [submitted]
   workflow_dispatch:
+    inputs:
+      pull_number:
+        description: "Pull request number"
+        required: true
+        type: number
+
+permissions: {}
 
 jobs:
   AddPullReady:
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'pull ready'
     permissions:
       checks: read
       pull-requests: write
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Add Pull Request Label
+      - name: Decide label updates
+        id: decide
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
-            let pull_number = -1
-            if (context.payload.pull_request !== undefined) {
-              pull_number = context.payload.pull_request.number
-            } else if (context.payload.workflow_run !== undefined) {
-              if (context.payload.workflow_run.pull_requests.length === 0) {
-                core.setFailed("This workflow is NOT running within a PR's context")
-                return
-              }
-              console.log(context.payload.workflow_run.pull_requests)
-              pull_number = context.payload.workflow_run.pull_requests[0].number
-            } else {
-              core.setFailed("This workflow is running within an invalid context")
+            const pull_number = context.payload.pull_request?.number ?? Number(context.payload.inputs?.pull_number)
+            if (!Number.isInteger(pull_number) || pull_number <= 0) {
+              core.setFailed("No valid pull request number in event payload")
               return
             }
 
-            const decision_query = `
+            const query = `
               query($owner: String!, $repo: String!, $pull_number: Int!) {
                 repository(owner: $owner, name: $repo) {
                   pullRequest(number: $pull_number) {
-                    reviewDecision # Fetches the overall review status
+                    reviewDecision
+                    isDraft
+                    isCrossRepository
+                    headRefOid
+                    commits { totalCount }
+                    labels(first: 100) { nodes { name } }
                     reviews(last: 100) {
                       nodes {
                         state
@@ -69,65 +80,124 @@ jobs:
                   }
                 }
               }
-            `;
-
-            const decision_result = await github.graphql(decision_query, {
+            `
+            const { repository: { pullRequest } } = await github.graphql(query, {
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: pull_number
-            });
-
-            const pullRequest = decision_result.repository.pullRequest;
-            const uniqueApprovers = new Set(
-              pullRequest.reviews.nodes
-                .filter(r => r.state === 'APPROVED')
-                .map(r => r.author.login)
-            );
-
-            if (pullRequest.reviewDecision !== 'APPROVED' || uniqueApprovers.size < 2) {
-              core.info(`PR is not ready. Decision: ${pullRequest.reviewDecision}, Approvals: ${uniqueApprovers.size}`);
-              return;
-            }
-
-            const commits = await github.rest.pulls.listCommits({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pull_number,
-              per_page: 100,
+              pull_number,
             })
-            // Check that the number of commits in the PR is 1.
-            if (commits.data.length !== 1) {
-              core.setFailed("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
-              return
+
+            const labels = new Set(pullRequest.labels.nodes.map(l => l.name))
+            const hasSkipCi = labels.has('skip-ci-tests')
+            const hasPullReady = labels.has('pull ready')
+
+            const needsFullCi = async () => {
+              if (!hasSkipCi) return false
+              const runs = await github.paginate(github.rest.checks.listForRef, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pullRequest.headRefOid,
+                check_name: 'All Required Tests Passed',
+                per_page: 100,
+              })
+              return !runs.some(r => r.status === 'completed' && r.conclusion === 'success')
             }
 
-            const last_commit_sha = commits.data.slice(-1)[0].sha
-
-            const { data: checkRuns } = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: last_commit_sha,
-            });
-
-            if (checkRuns.check_runs.length === 0) {
-              core.info("Not adding pull ready because no check runs are associated with the last commit: " + last_commit_sha)
-              return
-            }
-
-            for (const checkRun of checkRuns.check_runs) {
-              // Ignore the current running workflow and test duration tracking
-              if (checkRun.name.endsWith(context.job) || checkRun.name.includes('Track Test Duration')) continue
-
-              if (checkRun.status !== 'completed' || !['success', 'skipped'].includes(checkRun.conclusion)) {
-                core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);
-                return; // Exit without failing
+            // 1. Manual "pull ready" added (collaborator or maintainer on a fork PR):
+            //    run full CI first if not already green; Copybara waits on required_check_runs.
+            if (context.eventName === 'pull_request_target' && context.payload.action === 'labeled') {
+              if (!pullRequest.isDraft && await needsFullCi()) {
+                core.setOutput('remove_skip_ci_tests', 'true')
+                core.setOutput('pull_number', pull_number)
               }
+              return
             }
 
-            console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
-            await github.rest.issues.addLabels({
-              issue_number: pull_number,
-              labels: ["pull ready"],
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            })
+            const uniqueApprovers = new Set(
+              pullRequest.reviews.nodes.filter(r => r.state === 'APPROVED').map(r => r.author?.login).filter(Boolean)
+            )
+            const approved = pullRequest.reviewDecision === 'APPROVED' && uniqueApprovers.size >= 2
+            const singleCommit = pullRequest.commits.totalCount === 1
+            const autoEligible = !pullRequest.isDraft && !pullRequest.isCrossRepository && approved && singleCommit
+
+            // 2. New commit pushed: strip stale "pull ready" if PR is a fork, draft, unapproved, or >1 commit.
+            if (context.eventName === 'pull_request_target' && context.payload.action === 'synchronize' && hasPullReady && !autoEligible) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pull_number,
+                  name: 'pull ready',
+                })
+                core.info('Removed stale "pull ready" after new push')
+              } catch (error) {
+                // Someone else removed it in the meantime.
+                if (error.status !== 404) throw error
+                core.info('"pull ready" is already gone')
+              }
+              return
+            }
+
+            if (!autoEligible) {
+              if (approved && !singleCommit) {
+                core.setFailed('Not adding pull ready because the PR has more than one commit. Please squash your commits.')
+              } else {
+                core.info(`PR not auto-eligible (draft=${pullRequest.isDraft}, fork=${pullRequest.isCrossRepository}, approvals=${uniqueApprovers.size}, commits=${pullRequest.commits.totalCount})`)
+              }
+              return
+            }
+
+            // 3. Auto-eligible (2 approvals + 1 commit): add "pull ready" and trigger full CI if needed.
+            if (!hasPullReady) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pull_number,
+                labels: ['pull ready'],
+              })
+            }
+            if (await needsFullCi()) {
+              core.setOutput('remove_skip_ci_tests', 'true')
+              core.setOutput('pull_number', pull_number)
+            }
+
+      - name: Mint App token
+        id: app_token
+        if: steps.decide.outputs.remove_skip_ci_tests == 'true' && vars.APP_ID != ''
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
+      - name: Remove skip-ci-tests (starts the full CI)
+        if: steps.decide.outputs.remove_skip_ci_tests == 'true'
+        env:
+          # Never GITHUB_TOKEN: a label removed with it would not start the CI run.
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          PR_NUMBER: ${{ steps.decide.outputs.pull_number }}
+        run: |
+          if [[ ! "${PR_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "::error::The decide step gave no valid PR number."
+            exit 1
+          fi
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::warning::No GitHub App is configured (vars.APP_ID), so 'skip-ci-tests' stays on PR #${PR_NUMBER}. A maintainer can remove it to run all tests."
+            exit 0
+          fi
+          # Retries transient GitHub errors, like add_skip_ci_tests_label.yml.
+          for attempt in 1 2 3 4 5; do
+            if output=$(gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/skip-ci-tests" --silent 2>&1); then
+              echo "Removed 'skip-ci-tests' from PR #${PR_NUMBER}; full CI starts now."
+              exit 0
+            elif [[ "${output}" == *"(HTTP 404)"* ]]; then
+              echo "'skip-ci-tests' is already gone from PR #${PR_NUMBER}."
+              exit 0
+            fi
+            if (( attempt < 5 )); then
+              echo "Attempt ${attempt} to remove 'skip-ci-tests' failed (${output}); retrying in $(( attempt * 10 )) seconds."
+              sleep $(( attempt * 10 ))
+            fi
+          done
+          echo "::error::Could not remove 'skip-ci-tests': ${output}"
+          exit 1

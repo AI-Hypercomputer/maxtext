@@ -35,9 +35,10 @@ python3 -m maxtext.inference.vllm_decode \
     scan_layers=true \
     enable_single_controller=True \
     ici_tensor_parallelism=4 \
-    ici_expert_parallelism=2 \
-    ici_data_parallelism=2 \
-    prompt="Suggest some famous landmarks in London."
+    ici_expert_parallelism=4 \
+    ici_data_parallelism=1 \
+    prompt="Suggest some famous landmarks in London." \
+    weight_dtype=bfloat16
 
 # Step 2: Run SFT starting from the pre-converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -56,7 +57,8 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
     ici_expert_parallelism=8 \
-    opt_type=sgd
+    opt_type=sgd \
+    allow_split_physical_axes=True
 
 
 # Step 3: Run inference on the checkpoint produced by the SFT run
@@ -69,6 +71,7 @@ python3 -m maxtext.inference.vllm_decode \
     scan_layers=true \
     enable_single_controller=True \
     ici_tensor_parallelism=4 \
-    ici_expert_parallelism=2 \
-    ici_data_parallelism=2 \
-    prompt="Suggest some famous landmarks in London."
+    ici_expert_parallelism=4 \
+    ici_data_parallelism=1 \
+    prompt="Suggest some famous landmarks in London." \
+    weight_dtype=bfloat16

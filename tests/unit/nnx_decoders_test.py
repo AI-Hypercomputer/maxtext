@@ -2860,16 +2860,16 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
           self.assertEqual(gathers, [], name)
           continue
         self.assertEqual(len(gathers), 1, name)
-        self.assertIn('xla_explicit_fsdp = "yes"', gathers[0], name)
         self.assertIn('name = "fsdp"', gathers[0], name)
         if axes[0] == "exp":
           checked["routed"] += 1
           self.assertNotIn('name = "expert"', gathers[0], name)
-          self.assertEqual(tuple(out.sharding.spec)[0], "expert", name)
+          self.assertEqual(out.sharding.spec.partitions[0], "expert", name)
         else:
           checked["co_sharded"] += 1
           self.assertIn('name = "expert"', gathers[0], name)
-          self.assertNotIn("expert", str(out.sharding.spec), name)
+          # The gathered weight is replicated over `expert` (typed `reduced` over the gathered axes).
+          self.assertNotIn("expert", str(out.sharding.spec.partitions), name)
     # wi_0/wi_1/wo of both sub-layers; the GDN, attention, router and shared-expert kernels.
     self.assertEqual(checked["routed"], 6)
     self.assertGreaterEqual(checked["co_sharded"], 14)
@@ -2926,10 +2926,9 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
           hlo = jax.jit(gather).trace(w).lower(lowering_platforms=("tpu",)).as_text()
         gathers = [line for line in hlo.splitlines() if "stablehlo.all_gather" in line]
         self.assertEqual(len(gathers), 1, name)
-        self.assertIn('xla_explicit_fsdp = "yes"', gathers[0], name)
         self.assertIn("all_gather_dim = 0", gathers[0], name)
         self.assertNotIn('name = "expert"', gathers[0], name)
-        self.assertEqual(tuple(out.sharding.spec)[0], "expert", name)
+        self.assertEqual(out.sharding.spec.partitions[0], "expert", name)
         # The flat weight must not get the minor-dim layout pin that 3D `wo` needs.
         self.assertFalse(
             fsdp_prefetch._needs_minor_dim_layout_pin(  # pylint: disable=protected-access

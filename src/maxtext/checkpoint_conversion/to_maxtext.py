@@ -67,7 +67,7 @@ from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
+from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, single_stack_axis, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
@@ -149,14 +149,22 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
 # Router state bf16 cannot hold exactly: the fp32 routing bias and integer
 # token-to-expert ids (bf16 rounds integers above 256).
 _FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+_FULL_PRECISION_SUBSTRINGS = (
+    "-attn_hc-",
+    "-ffn_hc-",
+    "-hc_head-",
+    "-self_attention-sinks",
+    "-self_attention-indexer-k_norm-",
+    "-self_attention-indexer-weights_proj-",
+)
 
 
 def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
-  """Returns float32 for full-precision router state when saving bfloat16."""
+  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
   if save_dtype not in ("bfloat16", DType.BFLOAT16):
     return save_dtype
   keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
-  if any(k.startswith(_FULL_PRECISION_PREFIXES) for k in keys):
+  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
     return "float32"
   return save_dtype
 
@@ -512,22 +520,7 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
-  axis_to_stack = 0
-  if config.scan_layers:
-    key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
-    is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
-    is_unscanned_moe = "MoeBlock" in key_str and not any(
-        s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
-    )
-    if not (is_var_collection or is_unscanned_moe):
-      # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
-      # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
-      # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
-      # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
-      axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
-  else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
-    axis_to_stack = 0
+  axis_to_stack = single_stack_axis(mt_key, config, target_shape)
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.

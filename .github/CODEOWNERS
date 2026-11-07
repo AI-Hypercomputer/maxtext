@@ -7,6 +7,9 @@ src/maxtext/checkpoint_conversion @parambole @shuningjin @RissyRan @jiangjy1982 
 src/maxtext/layers @parambole @shuningjin @RissyRan @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @jesselu-google @NuojCheng @xibinliu @aireenmei @igorts-git @darisoy
 src/maxtext/models @parambole @shuningjin @RissyRan @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @jesselu-google @NuojCheng @xibinliu @aireenmei @igorts-git @darisoy
 
+# m3
+src/maxtext/m3/ @bvandermoon @hengtaoguo
+
 # Features
 src/maxtext/experimental/rl @A9isha @khatwanimohit @gagika @shralex @darisoy @shuwenf @igorts-git
 src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @shralex @darisoy @shuwenf @igorts-git

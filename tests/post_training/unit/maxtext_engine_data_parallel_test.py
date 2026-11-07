@@ -776,23 +776,18 @@ class EquivalenceTest(absltest.TestCase):
 
 
 class LifecycleTest(absltest.TestCase):
-  """The two events that outlive a compilation: a checkpoint restore, and a recompile."""
+  """The two events that outlive a compilation: a checkpoint restore between steps, and a recompile."""
 
   __test__ = False
 
-  def test_a_mid_step_checkpoint_round_trip_resumes_where_it_left_off(self):
-    """Saving mid-step must write the gradient total, not one replica's partial.
+  def test_a_step_boundary_checkpoint_round_trip_keeps_the_moments_sharded(self):
+    """A checkpoint restored between steps puts the Zero-1 moments back sharded over the data axis.
 
-    Orbax cannot serialize an unreduced array at all -- `device_indices_map` is undefined for
-    one -- so `save_checkpoint` reduces first, and `restore_checkpoint` puts the accumulator
-    back on the layout `_compiled_fwd_bwd_accum` was built against. Restoring does not
-    recompile, so the moments have to land back sharded too: `_compiled_update` was built
-    against sharded ones and would die on an `in_shardings` mismatch, and if it somehow did
-    not, the optimizer would quietly be replicated for the rest of the run.
-
-    Both halves are checked on one interrupted run, and the proof that the value written was
-    the right one is that finishing the step from the restored state lands on exactly the
-    weights of the uninterrupted `_ZERO1` run.
+    Restoring does not recompile, so the moments have to land back sharded: `_compiled_update`
+    was built against sharded ones and would die on an `in_shardings` mismatch, and if it somehow
+    did not, the optimizer would quietly be replicated for the rest of the run. The proof that the
+    restored state is the saved one is that the next step from it lands on exactly the weights of
+    the uninterrupted `_ZERO1` run. A save attempted mid-step is rejected.
     """
     # `enterContext` is the `with` pylint is asking for, scoped to the test rather than a block.
     output_dir = self.enterContext(tempfile.TemporaryDirectory())  # pylint: disable=consider-using-with
@@ -810,23 +805,20 @@ class LifecycleTest(absltest.TestCase):
       for micro in range(3):
         engine.fwd_bwd(_batch(cfg, micro))
       engine.update()
-      # Then interrupt the second step two micro-batches in, with no update() yet.
-      engine.fwd_bwd(_batch(cfg, 3))
-      engine.fwd_bwd(_batch(cfg, 4))
-      self.assertTrue(
-          jax.tree.leaves(engine._accumulated_grads)[0].sharding.spec.unreduced,  # pylint: disable=protected-access
-          "the accumulator is not unreduced, so this is not exercising the reduce-on-save",
-      )
       engine.save_checkpoint(metadata={"marker": 1}, force=True)
       engine._checkpoint_manager.wait_until_finished()  # pylint: disable=protected-access
 
-      engine.restore_checkpoint()
+      self.assertEqual(engine.restore_checkpoint(), {"marker": 1})
       restored = _moments(engine)
       self.assertNotEmpty(restored, "no moments came back, so nothing below is checked")
       for path, leaf in restored.items():
         self.assertIn(_DATA, _axes(leaf.sharding.spec), f"{path} came back replicated from the checkpoint")
 
-      # Finish the interrupted step from the restored state.
+      # The second step from the restored state, with a save attempted partway through it.
+      engine.fwd_bwd(_batch(cfg, 3))
+      with self.assertRaisesRegex(ValueError, "Mid-step checkpointing is not supported"):
+        engine.save_checkpoint(metadata={"marker": 2}, force=True)
+      engine.fwd_bwd(_batch(cfg, 4))
       engine.fwd_bwd(_batch(cfg, 5))
       engine.update()
       resumed = _params(engine)

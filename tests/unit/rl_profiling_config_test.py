@@ -245,5 +245,38 @@ class RLProfilingConfigTest(parameterized.TestCase):
     self.assertEqual(cfg.managed_mldiagnostics_dir, "/tmp/local/run1/managed-mldiagnostics")
 
 
+class RLDerivedStepsConfigTest(absltest.TestCase):
+  """`train_steps` is a declared, derived field on `RLConfig` (not an attribute injected by the validator)."""
+
+  def test_train_steps_is_a_declared_field(self):
+    self.assertIn("train_steps", types.RLConfig.model_fields)
+    self.assertNotIn("train_steps", types.MaxTextConfig.model_fields)
+
+  def test_train_steps_is_derived_and_drives_steps_and_lr_schedule(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50, num_epoch=2)
+    expected = int(cfg.dataset.num_batches * cfg.rl.num_iterations * cfg.dataset.train_fraction * cfg.num_epoch)
+    self.assertEqual(cfg.train_steps, 100)
+    self.assertEqual(cfg.train_steps, expected)
+    self.assertEqual(cfg.steps, cfg.train_steps)
+    # learning_rate_schedule_steps == -1 (the default) is promoted to train_steps.
+    self.assertEqual(cfg.learning_rate_schedule_steps, cfg.train_steps)
+
+  def test_explicit_learning_rate_schedule_steps_is_preserved(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50, learning_rate_schedule_steps=500)
+    self.assertEqual(cfg.train_steps, 50)
+    self.assertEqual(cfg.learning_rate_schedule_steps, 500)
+
+  def test_user_supplied_train_steps_is_overwritten_by_derived_value(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50, train_steps=7)
+    self.assertEqual(cfg.train_steps, 50)
+
+  def test_train_steps_survives_model_dump_round_trip(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50)
+    dumped = cfg.model_dump()
+    self.assertIn("train_steps", dumped)
+    self.assertEqual(dumped["train_steps"], 50)
+    self.assertEqual(types.RLConfig(**dumped).train_steps, 50)
+
+
 if __name__ == "__main__":
   absltest.main()

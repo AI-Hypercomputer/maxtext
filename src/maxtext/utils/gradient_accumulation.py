@@ -14,17 +14,16 @@
 
 """Functions for gradient accumulation (GA)"""
 
-import contextlib
 import functools
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.xla_metadata import set_xla_metadata
 from jax.sharding import NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode
 from maxtext.layers.moe import load_balance_updates_from_counts
+from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_name
 
 
@@ -115,7 +114,9 @@ def gradient_accumulation_loss_and_grad(
   # token capacity, so the cotangents carry the GA=1 magnitude, and fold S back into the final division below.
   # The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
   use_tunix_ga = getattr(config, "use_tunix_gradient_accumulation", False)
-  token_capacity = getattr(config, "global_batch_size_to_train_on", 0) * getattr(config, "max_target_length", 0)
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  batch_size = logical_batch if isinstance(logical_batch, int) else getattr(config, "global_batch_size_to_train_on", 0)
+  token_capacity = batch_size * getattr(config, "max_target_length", 0)
   loss_scale = 1.0 / float(token_capacity) if (token_capacity > 0 and not use_tunix_ga) else 1.0
 
   # functools.wraps keeps _loss_fn's signature visible, which nnx.value_and_grad needs to resolve is_train=.
@@ -131,20 +132,7 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-    # Scope double-buffering to model scans, not the enclosing gradient
-    # accumulation scan. `_xla_loop_unroll_strategy` is only read by XLA:GPU
-    # (https://github.com/openxla/xla/pull/43468); enable it with
-    # JAX_OPTIMIZATION_LEVEL=O1 and
-    # XLA_FLAGS="--xla_gpu_enable_while_loop_unrolling=WHILE_LOOP_UNROLLING_MANUAL_UNROLL".
-    # Skip on TPU/CPU: `set_xla_metadata` pre-populates frontend attributes on
-    # every traced op, causing XLA's CallInliner to drop `_xla_compute_type`
-    # from `compute_on("device")` calls and XLA:TPU to auto-offload those
-    # collectives to SparseCore.
-    loop_unroll_ctx = (
-        set_xla_metadata(_xla_loop_unroll_strategy="double-buffer")
-        if getattr(config, "hardware", "tpu") in ("gpu", "gpu_multiprocess")
-        else contextlib.nullcontext()
-    )
+    loop_unroll_ctx = max_utils.model_loop_unroll_context(config)
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.

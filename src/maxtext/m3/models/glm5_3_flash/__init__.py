@@ -14,10 +14,10 @@
 
 """GLM-5.3-Flash training bringup package for MaxText."""
 
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Config
-from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5Sharding
-from maxtext.m3.models.glm5_3_flash.glm5_config import MTP_LAYER_INDEX
-from maxtext.m3.models.glm5_3_flash.glm5_config import validate_no_packing
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Config
+from maxtext.m3.configs.glm5_3_flash_config import Glm5Sharding
+from maxtext.m3.configs.glm5_3_flash_config import MTP_LAYER_INDEX
+from maxtext.m3.configs.glm5_3_flash_config import validate_no_packing
 
 __all__ = [
     "Glm5Config",

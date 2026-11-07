@@ -21,16 +21,23 @@ Sections:
   * Qwen Sparse Attention and indexer
   * Sparse MoE block
   * SplitMix64 n-gram hashing and PLE
+  * Decoder backbone, scan parity, and m3 registration
+  * MTP draft block and integrated loss
 """
 
+import types
 from typing import Any
 import unittest
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
+from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=no-name-in-module
+from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
 import numpy as np
 import pytest
 
@@ -49,6 +56,12 @@ except ImportError:
   configuration_qwen4_exp = None
   modeling_qwen4_exp = None
   _HAS_QWEN4_EXP = False
+
+
+def _assert_allclose_to_scale(actual: Any, desired: Any, rtol: float = 1e-4, atol_scale: float = 1e-5) -> None:
+  """Like assert_allclose, with atol relative to max|desired| (gradients here reach O(100s))."""
+  desired = np.asarray(desired)
+  np.testing.assert_allclose(np.asarray(actual), desired, rtol=rtol, atol=atol_scale * float(np.abs(desired).max()))
 
 
 # =================================================================================================
@@ -419,6 +432,92 @@ class Qwen3_8GDNTest(absltest.TestCase):
     jax_out = np.array(jax_gdn(jnp.array(x)))
     np.testing.assert_allclose(jax_out, pt_out, rtol=1e-5, atol=1e-5)
 
+  def test_block_doubling_unit_lower_inverse_parity_and_validation(self):
+    """Verifies the block-doubling unit-lower inverse matches solve_triangular / fp64 in kernel and layer."""
+    rng = np.random.default_rng(7)
+    for c_size in (16, 64):
+      raw = rng.standard_normal((2, 3, c_size, c_size), dtype=np.float32) * 0.1
+      s_mat = jnp.tril(jnp.array(raw), k=-1)
+      rhs = jnp.array(rng.standard_normal((2, 3, c_size, 24), dtype=np.float32))
+      expected = jax.scipy.linalg.solve_triangular(
+          jnp.eye(c_size, dtype=jnp.float32) + s_mat, rhs, lower=True, unit_diagonal=True
+      )
+      actual = jnp.matmul(
+          modeling_qwen3_8_flash_next._block_doubling_unit_lower_inverse(s_mat, c_size),  # pylint: disable=protected-access
+          rhs,
+          precision=jax.lax.Precision.HIGHEST,
+      )
+      np.testing.assert_allclose(np.array(actual), np.array(expected), rtol=1e-5, atol=1e-5)
+
+    # Correlated keys + weak decay: entries of (I+S) stay <= 1 but the Neumann powers N^(2^j) blow up to 1e7+, so a
+    # product-form inverse cancels catastrophically in float32. Block doubling must stay accurate vs an fp64 solve.
+    d_k = 32
+    for c_size in (16, 48, 64):
+      rhs64 = rng.standard_normal((c_size, 24))
+      for case_name, key_cos, beta_val, g_val in (
+          ("identical_keys_weak_decay", 1.0, 0.9, -0.05),
+          ("correlated_keys_weak_decay", 0.5, 0.9, -0.05),
+          ("identical_keys_no_decay", 1.0, 1.0, 0.0),
+      ):
+        with self.subTest(case_name=case_name, chunk_size=c_size):
+          base = rng.standard_normal((1, d_k))
+          keys = np.sqrt(key_cos) * base + np.sqrt(1.0 - key_cos) * rng.standard_normal((c_size, d_k))
+          keys = keys / np.linalg.norm(keys, axis=-1, keepdims=True)
+          g_cumsum = np.cumsum(np.full((c_size,), g_val))
+          decay = np.tril(np.exp(np.tril(g_cumsum[:, None] - g_cumsum[None, :])), k=-1)
+          s64 = np.tril((beta_val * keys) @ keys.T * decay, k=-1)
+          s32 = jnp.array(s64, dtype=jnp.float32)
+          expected = np.linalg.solve(np.eye(c_size) + s64, rhs64)
+          actual = jnp.matmul(
+              modeling_qwen3_8_flash_next._block_doubling_unit_lower_inverse(s32, c_size),  # pylint: disable=protected-access
+              jnp.array(rhs64, dtype=jnp.float32),
+              precision=jax.lax.Precision.HIGHEST,
+          )
+          np.testing.assert_allclose(np.array(actual), expected, rtol=1e-5, atol=1e-5)
+
+    with self.assertRaises(ValueError):
+      q0 = jnp.zeros((1, 16, 2, 16), dtype=jnp.float32)
+      b0 = jnp.zeros((1, 16, 2), dtype=jnp.float32)
+      modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(q0, q0, q0, b0, b0, chunk_inverse="invalid")
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+          output_gate_activation="silu", chunk_inverse="invalid", rngs=nnx.Rngs(0)
+      )
+
+    emb_dim = 64
+    kw = {
+        "emb_dim": emb_dim,
+        "num_k_heads": 2,
+        "num_v_heads": 4,
+        "head_k_dim": 32,
+        "head_v_dim": 32,
+        "chunk_size": 16,
+        "output_gate_activation": "silu",
+        "dtype": jnp.float32,
+        "weight_dtype": jnp.float32,
+    }
+    mod_solve = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(**kw, chunk_inverse="solve", rngs=nnx.Rngs(5))
+    mod_block_doubling = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+        **kw, chunk_inverse="block_doubling", rngs=nnx.Rngs(5)
+    )
+    nnx.update(mod_block_doubling, nnx.state(mod_solve))
+
+    x = jnp.array(rng.standard_normal((2, 70, emb_dim), dtype=np.float32))
+    out_s, st_s = mod_solve(x, output_final_state=True)
+    out_n, st_n = mod_block_doubling(x, output_final_state=True)
+    np.testing.assert_allclose(np.array(out_n), np.array(out_s), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(st_n), np.array(st_s), rtol=1e-5, atol=1e-5)
+
+    def loss_fn(mod: modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet, inp: jax.Array) -> jax.Array:
+      out = mod(inp)
+      assert isinstance(out, jax.Array)
+      return jnp.sum(out * jnp.arange(1, emb_dim + 1, dtype=jnp.float32))
+
+    _, (grads_s, dx_s) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(mod_solve, x)
+    _, (grads_n, dx_n) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(mod_block_doubling, x)
+    _assert_allclose_to_scale(dx_n, dx_s)
+    _assert_allclose_to_scale(grads_n.in_proj_qkv.kernel[...], grads_s.in_proj_qkv.kernel[...])
+
 
 # =================================================================================================
 # Gated DeltaNet recurrence numerics
@@ -470,6 +569,87 @@ class Qwen3_8GDNNumericsTest(absltest.TestCase):
     grads = jax.grad(loss_fn, argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
     for grad in grads:
       self.assertTrue(np.all(np.isfinite(np.array(grad))))
+
+  def test_block_doubling_chunked_scan_numerics_long_seq_and_grad(self):
+    """Checks the block-doubling chunk inverse matches solve_triangular at seq_len=8192 and under large decay."""
+    rng = np.random.default_rng(2027)
+    b, seq_len, h, d_k, d_v = 1, 8192, 2, 32, 32
+    q, k, v = (jnp.array(rng.standard_normal((b, seq_len, h, d), dtype=np.float32) * 0.1) for d in (d_k, d_k, d_v))
+    beta = jnp.array(rng.uniform(0.1, 0.9, size=(b, seq_len, h)).astype(np.float32))
+    g = jnp.array(-rng.uniform(0.01, 0.2, size=(b, seq_len, h)).astype(np.float32))
+
+    solve_out, solve_state = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+        q, k, v, g, beta, chunk_size=64, output_final_state=True, chunk_inverse="solve"
+    )
+    block_doubling_out, block_doubling_state = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+        q, k, v, g, beta, chunk_size=64, output_final_state=True, chunk_inverse="block_doubling"
+    )
+    np.testing.assert_allclose(np.array(block_doubling_out), np.array(solve_out), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(block_doubling_state), np.array(solve_state), rtol=1e-5, atol=1e-5)
+
+    s_short = 128
+    q_s, k_s, v_s = (x[:, :s_short] for x in (q, k, v))
+    beta_s = beta[:, :s_short]
+    g_s = jnp.full((b, s_short, h), -5.0, dtype=jnp.float32)
+
+    def make_loss(inv_mode: str):
+      def _loss(q_in: jax.Array, k_in: jax.Array, v_in: jax.Array, g_in: jax.Array, b_in: jax.Array) -> jax.Array:
+        out, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+            q_in, k_in, v_in, g_in, b_in, chunk_size=64, chunk_inverse=inv_mode
+        )
+        return jnp.sum(out)
+
+      return _loss
+
+    grads_solve = jax.grad(make_loss("solve"), argnums=(0, 1, 2, 3, 4))(q_s, k_s, v_s, g_s, beta_s)
+    grads_block_doubling = jax.grad(make_loss("block_doubling"), argnums=(0, 1, 2, 3, 4))(q_s, k_s, v_s, g_s, beta_s)
+    for g_solve, g_block_doubling in zip(grads_solve, grads_block_doubling):
+      self.assertTrue(np.all(np.isfinite(np.array(g_block_doubling))))
+      np.testing.assert_allclose(np.array(g_block_doubling), np.array(g_solve), rtol=1e-5, atol=1e-5)
+
+  def test_block_doubling_chunk_inverse_correlated_keys_weak_decay(self):
+    """Checks the MXU chunk inverse matches solve_triangular for correlated keys with weak decay.
+
+    Identical or strongly correlated l2-normed keys with beta ~0.9 and g ~-0.05 keep (I+S)^-1 at O(1) while the
+    Neumann powers N^(2^j) grow past 1e7, which breaks a product-form inverse in float32; the block-doubling inverse
+    must stay at solve parity in outputs, final state and gradients.
+    """
+    rng = np.random.default_rng(2028)
+    b, s, h, d_k, d_v = 1, 256, 2, 32, 32
+    base_key = rng.standard_normal((1, 1, h, d_k)).astype(np.float32)
+    q = jnp.array(rng.standard_normal((b, s, h, d_k), dtype=np.float32))
+    v = jnp.array(rng.standard_normal((b, s, h, d_v), dtype=np.float32) * 0.1)
+    beta = jnp.full((b, s, h), 0.9, dtype=jnp.float32)
+    g = jnp.full((b, s, h), -0.05, dtype=jnp.float32)
+
+    def make_loss(inv_mode: str):
+      def _loss(q_in: jax.Array, k_in: jax.Array, v_in: jax.Array, g_in: jax.Array, b_in: jax.Array) -> jax.Array:
+        out, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+            q_in, k_in, v_in, g_in, b_in, chunk_size=64, chunk_inverse=inv_mode
+        )
+        return jnp.sum(out)
+
+      return _loss
+
+    for case_name, key_noise in (("identical_keys", 0.0), ("correlated_keys", 0.3)):
+      with self.subTest(case_name=case_name):
+        k = jnp.array(base_key + key_noise * rng.standard_normal((b, s, h, d_k)).astype(np.float32))
+        results = {
+            inv_mode: modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+                q, k, v, g, beta, chunk_size=64, output_final_state=True, chunk_inverse=inv_mode
+            )
+            for inv_mode in ("solve", "block_doubling")
+        }
+        for got, want in zip(results["block_doubling"], results["solve"]):
+          self.assertTrue(np.all(np.isfinite(np.array(got))))
+          np.testing.assert_allclose(np.array(got), np.array(want), rtol=1e-4, atol=1e-4)
+        grads_solve = jax.grad(make_loss("solve"), argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+        grads_block_doubling = jax.grad(make_loss("block_doubling"), argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+        for g_solve, g_block_doubling in zip(grads_solve, grads_block_doubling):
+          self.assertTrue(np.all(np.isfinite(np.array(g_block_doubling))))
+          # Two different fp32 inverse algorithms through a 256-step recurrence differ by accumulation-order noise
+          # (~1e-7 absolute); the product-form inverse this guards against is off by O(1) here.
+          _assert_allclose_to_scale(g_block_doubling, g_solve, atol_scale=1e-4)
 
 
 # =================================================================================================
@@ -720,6 +900,168 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(num_query_heads=5, num_kv_heads=2, rngs=nnx.Rngs(0))
 
+  def test_indexer_reshape_mask_mode_bit_exact_parity(self):
+    """Verifies mask_mode='reshape' is bit-identical to 'gather' across budget and packing modes."""
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(mask_mode="invalid", rngs=nnx.Rngs(0))
+
+    b, emb_dim = 2, 64
+    rng = np.random.default_rng(7)
+    rope = modeling_qwen3_8_flash_next.Qwen3_8RotaryEmbedding(32, 0.25, 10000.0, (2, 1, 1))
+
+    # Case 1: s <= token_budget (unpacked and packed)
+    s_short = 32
+    x_short = jnp.array(rng.standard_normal((b, s_short, emb_dim), dtype=np.float32))
+    pos_short = jnp.tile(jnp.arange(s_short), (b, 1))
+    cos_s, sin_s = rope(x_short, pos_short)
+
+    idx_gather_le = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="gather", rngs=nnx.Rngs(3)
+    )
+    idx_reshape_le = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="reshape", rngs=nnx.Rngs(3)
+    )
+    nnx.update(idx_reshape_le, nnx.state(idx_gather_le))
+
+    seg_short = jnp.ones((b, s_short), dtype=jnp.int32).at[0, 16:28].set(2).at[0, 28:].set(0)
+    mask_short = jnp.ones((b, s_short), dtype=jnp.int32).at[1, 24:].set(0)
+    for seg_in, mask_in in ((None, None), (seg_short, None), (seg_short, mask_short)):
+      m_g, b_g = idx_gather_le(x_short, (cos_s, sin_s), attention_mask=mask_in, segment_ids=seg_in)
+      m_r, b_r = idx_reshape_le(x_short, (cos_s, sin_s), attention_mask=mask_in, segment_ids=seg_in)
+      np.testing.assert_array_equal(np.array(m_r), np.array(m_g))
+      np.testing.assert_array_equal(np.array(b_r), np.array(b_g))
+
+    m_none, b_none = idx_reshape_le(x_short, (cos_s, sin_s), return_token_mask=False)
+    self.assertIsNone(m_none)
+    np.testing.assert_array_equal(np.array(b_none), np.array(idx_gather_le(x_short, (cos_s, sin_s))[1]))
+
+    # Case 2: s > token_budget (unpacked non-multiple of compress_ratio, and packed fallback)
+    s_long = 70
+    x_long = jnp.array(rng.standard_normal((b, s_long, emb_dim), dtype=np.float32))
+    pos_long = jnp.tile(jnp.arange(s_long), (b, 1))
+    cos_l, sin_l = rope(x_long, pos_long)
+
+    idx_gather_gt = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="gather", rngs=nnx.Rngs(5)
+    )
+    idx_reshape_gt = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+        emb_dim, 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="reshape", rngs=nnx.Rngs(5)
+    )
+    nnx.update(idx_reshape_gt, nnx.state(idx_gather_gt))
+
+    m_g_unpacked, b_g_unpacked = idx_gather_gt(x_long, (cos_l, sin_l))
+    m_r_unpacked, b_r_unpacked = idx_reshape_gt(x_long, (cos_l, sin_l))
+    np.testing.assert_array_equal(np.array(m_r_unpacked), np.array(m_g_unpacked))
+    np.testing.assert_array_equal(np.array(b_r_unpacked), np.array(b_g_unpacked))
+
+    seg_long = jnp.ones((b, s_long), dtype=jnp.int32).at[0, 30:60].set(2).at[0, 60:].set(0)
+    m_g_packed, b_g_packed = idx_gather_gt(x_long, (cos_l, sin_l), segment_ids=seg_long)
+    m_r_packed, b_r_packed = idx_reshape_gt(x_long, (cos_l, sin_l), segment_ids=seg_long)
+    np.testing.assert_array_equal(np.array(m_r_packed), np.array(m_g_packed))
+    np.testing.assert_array_equal(np.array(b_r_packed), np.array(b_g_packed))
+
+  def test_indexer_reshape_packed_multi_doc_parity(self):
+    """Verifies gather-free packed reshape matches gather bit-identically at S=64 and S=512 with >=3 unequal docs."""
+    b, emb_dim = 2, 64
+    rng = np.random.default_rng(29)
+    rope = modeling_qwen3_8_flash_next.Qwen3_8RotaryEmbedding(32, 0.25, 10000.0, (2, 1, 1))
+
+    for s, budget, doc_splits_b0, doc_splits_b1 in (
+        (64, 16, (0, 17, 39, 58), (0, 11, 29, 53, 64)),
+        (512, 64, (0, 93, 247, 419, 490), (0, 130, 311, 477, 512)),
+    ):
+      with self.subTest(seq_len=s, token_budget=budget):
+        x = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+        pos = jnp.tile(jnp.arange(s), (b, 1))
+        cos, sin = rope(x, pos)
+
+        seg_np = np.zeros((b, s), dtype=np.int32)
+        for doc_id, (start, end) in enumerate(zip(doc_splits_b0[:-1], doc_splits_b0[1:]), start=1):
+          seg_np[0, start:end] = doc_id
+        for doc_id, (start, end) in enumerate(zip(doc_splits_b1[:-1], doc_splits_b1[1:]), start=1):
+          seg_np[1, start:end] = doc_id
+        seg = jnp.array(seg_np)
+        attn_mask = (seg != 0).astype(jnp.int32)
+
+        idx_gather = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+            emb_dim, 2, 1, 32, budget, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="gather", rngs=nnx.Rngs(31)
+        )
+        idx_reshape = modeling_qwen3_8_flash_next.Qwen3_8QSAIndexer(
+            emb_dim, 2, 1, 32, budget, 4, 1e-6, jnp.float32, jnp.float32, mask_mode="reshape", rngs=nnx.Rngs(31)
+        )
+        nnx.update(idx_reshape, nnx.state(idx_gather))
+
+        for mask_in in (None, attn_mask):
+          m_g, b_g = idx_gather(x, (cos, sin), attention_mask=mask_in, segment_ids=seg)
+          m_r, b_r = idx_reshape(x, (cos, sin), attention_mask=mask_in, segment_ids=seg)
+          np.testing.assert_array_equal(np.array(m_r), np.array(m_g))
+          np.testing.assert_array_equal(np.array(b_r), np.array(b_g))
+
+  def test_flash_attention_kernel_parity_and_validation(self):
+    """Verifies attention_kernel='flash' matches 'dense' when s <= token_budget and rejects s > token_budget."""
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(attention_kernel="invalid", rngs=nnx.Rngs(0))
+
+    args_16 = (64, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    flash_16 = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_16, attention_kernel="flash", rngs=nnx.Rngs(0))
+    with self.assertRaises(ValueError):
+      flash_16(jnp.zeros((1, 32, 64), dtype=jnp.float32))
+
+    b, s, emb_dim = 2, 32, 64
+    args_64 = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32)
+    dense_attn = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_64, attention_kernel="dense", rngs=nnx.Rngs(11))
+    flash_attn = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        *args_64, indexer_mask_mode="reshape", attention_kernel="flash", rngs=nnx.Rngs(11)
+    )
+    nnx.update(flash_attn, nnx.state(dense_attn))
+
+    rng = np.random.default_rng(19)
+    x = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+    pos = jnp.tile(jnp.arange(s), (b, 1))
+    mask_2d = jnp.ones((b, s), dtype=jnp.int32).at[0, 26:].set(0).at[1, 29:].set(0)
+    seg_2d = jnp.ones((b, s), dtype=jnp.int32).at[0, 12:24].set(2).at[0, 24:].set(0).at[1, 20:].set(2)
+
+    for case_name, mask_in, seg_in in (
+        ("unpacked", None, None),
+        ("mask_2d", mask_2d, None),
+        ("packed_seg", None, seg_2d),
+    ):
+      with self.subTest(case_name=case_name):
+        # Padding positions attend to nothing under flash; only non-padding outputs must match dense.
+        valid = jnp.ones((b, s), dtype=bool)
+        if mask_in is not None:
+          valid &= mask_in != 0
+        if seg_in is not None:
+          valid &= seg_in != 0
+        out_d, blk_d = dense_attn(
+            x, position_ids=pos, attention_mask=mask_in, segment_ids=seg_in, return_selected_blocks=True
+        )
+        out_f, blk_f = flash_attn(
+            x, position_ids=pos, attention_mask=mask_in, segment_ids=seg_in, return_selected_blocks=True
+        )
+        np.testing.assert_array_equal(np.array(blk_f), np.array(blk_d))
+        self.assertTrue(np.all(np.isfinite(np.array(out_f))))
+        np.testing.assert_allclose(
+            np.array(out_f)[np.array(valid)], np.array(out_d)[np.array(valid)], rtol=1e-4, atol=1e-4
+        )
+
+        def loss_fn(
+            mod: modeling_qwen3_8_flash_next.Qwen3_8SparseAttention,
+            inp: jax.Array,
+            mask_in: jax.Array | None = mask_in,
+            seg_in: jax.Array | None = seg_in,
+            valid: jax.Array = valid,
+        ) -> jax.Array:
+          out = mod(inp, position_ids=pos, attention_mask=mask_in, segment_ids=seg_in)
+          assert isinstance(out, jax.Array)
+          return jnp.sum(jnp.where(valid[:, :, None], out, 0.0) * jnp.arange(1, emb_dim + 1, dtype=jnp.float32))
+
+        _, (grads_d, dx_d) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(dense_attn, x)
+        _, (grads_f, dx_f) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(flash_attn, x)
+        self.assertTrue(np.all(np.isfinite(np.array(dx_f))))
+        _assert_allclose_to_scale(dx_f, dx_d)
+        _assert_allclose_to_scale(grads_f.q_proj.kernel[...], grads_d.q_proj.kernel[...])
+
 
 # =================================================================================================
 # Sparse MoE block
@@ -813,6 +1155,54 @@ class Qwen3_8MoETest(absltest.TestCase):
     actual_skewed = experts(x, skewed_idx, top_k_w)
     expected_skewed = experts.reference_forward(x, skewed_idx, top_k_w)
     np.testing.assert_allclose(actual_skewed, expected_skewed, rtol=1e-5, atol=1e-5)
+
+  def test_experts_shard_map_matches_reference_forward_on_cpu_mesh(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+    n, d, m, e, k = 16, 32, 16, 12, 2
+    experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(7)
+    )
+    x = jax.random.normal(jax.random.key(11), (n, d))
+    top_k_idx = jax.random.randint(jax.random.key(12), (n, k), 0, e)
+    top_k_w = jax.random.uniform(jax.random.key(13), (n, k))
+    top_k_w = top_k_w / jnp.sum(top_k_w, axis=-1, keepdims=True)
+
+    def ref_loss_fn(mod, inp):
+      return jnp.sum(mod.reference_forward(inp, top_k_idx, top_k_w) * jnp.arange(1, d + 1, dtype=jnp.float32))
+
+    ref_out = experts.reference_forward(x, top_k_idx, top_k_w)
+    ref_loss, (ref_grads, ref_dx) = nnx.value_and_grad(ref_loss_fn, argnums=(0, 1))(experts, x)
+
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("fsdp",))
+    token_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None))
+    weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "fsdp", None))
+
+    x_sharded = jax.device_put(x, token_sharding)
+    idx_sharded = jax.device_put(top_k_idx, token_sharding)
+    w_sharded = jax.device_put(top_k_w, token_sharding)
+    experts.gate_up_proj.value = jax.device_put(experts.gate_up_proj.value, weight_sharding)
+    experts.down_proj.value = jax.device_put(experts.down_proj.value, weight_sharding)
+
+    with jax.set_mesh(mesh):
+      actual_out = jax.jit(lambda mod, inp, idx, w: mod(inp, idx, w))(experts, x_sharded, idx_sharded, w_sharded)
+
+      def sharded_loss_fn(mod, inp):
+        return jnp.sum(mod(inp, idx_sharded, w_sharded) * jnp.arange(1, d + 1, dtype=jnp.float32))
+
+      actual_loss, (actual_grads, actual_dx) = jax.jit(nnx.value_and_grad(sharded_loss_fn, argnums=(0, 1)))(
+          experts, x_sharded
+      )
+
+    np.testing.assert_allclose(np.asarray(actual_out), np.asarray(ref_out), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(actual_loss), np.asarray(ref_loss), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(actual_dx), np.asarray(ref_dx), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(actual_grads.gate_up_proj.value), np.asarray(ref_grads.gate_up_proj.value), rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual_grads.down_proj.value), np.asarray(ref_grads.down_proj.value), rtol=1e-5, atol=1e-5
+    )
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_pytorch_moe_weight_copy_parity(self):
@@ -927,6 +1317,63 @@ class Qwen3_8MoETest(absltest.TestCase):
         grads.shared_expert_gate.kernel,
     ):
       self.assertTrue(jnp.any(jnp.asarray(getattr(g, "value", g)) != 0.0))
+
+  def test_experts_tokamax_gmm_matches_reference_and_default(self):
+    """Verifies use_tokamax_gmm=True matches jax.lax.ragged_dot and the per-token reference, forward and backward."""
+    n, d, m, e, k = 12, 32, 16, 8, 2
+    experts_default = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=e,
+        emb_dim=d,
+        moe_mlp_dim=m,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        use_tokamax_gmm=False,
+        rngs=nnx.Rngs(9),
+    )
+    experts_tokamax = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=e,
+        emb_dim=d,
+        moe_mlp_dim=m,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        use_tokamax_gmm=True,
+        rngs=nnx.Rngs(9),
+    )
+    nnx.update(experts_tokamax, nnx.state(experts_default))
+
+    x = jax.random.normal(jax.random.key(21), (n, d))
+    top_k_idx = jax.random.randint(jax.random.key(22), (n, k), 0, e)
+    top_k_w = jax.random.uniform(jax.random.key(23), (n, k))
+    top_k_w = top_k_w / jnp.sum(top_k_w, axis=-1, keepdims=True)
+
+    ref_out = experts_default.reference_forward(x, top_k_idx, top_k_w)
+    def_out = experts_default(x, top_k_idx, top_k_w)
+    tok_out = experts_tokamax(x, top_k_idx, top_k_w)
+    np.testing.assert_allclose(tok_out, ref_out, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(tok_out, def_out, rtol=1e-5, atol=1e-5)
+
+    skewed_idx = jnp.zeros((n, k), dtype=jnp.int32).at[:, 1].set(1)
+    np.testing.assert_allclose(
+        experts_tokamax(x, skewed_idx, top_k_w),
+        experts_default.reference_forward(x, skewed_idx, top_k_w),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    def loss_fn(mod: modeling_qwen3_8_flash_next.Qwen3_8Experts, inp: jax.Array) -> jax.Array:
+      return jnp.sum(mod(inp, top_k_idx, top_k_w) * jnp.arange(1, d + 1, dtype=jnp.float32))
+
+    _, (grads_def, dx_def) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_default, x)
+    _, (grads_tok, dx_tok) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_tokamax, x)
+    np.testing.assert_allclose(dx_tok, dx_def, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(grads_tok.gate_up_proj.value, grads_def.gate_up_proj.value, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(grads_tok.down_proj.value, grads_def.down_proj.value, rtol=1e-5, atol=1e-5)
+
+    moe_def = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=False)
+    moe_tok = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=True)
+    nnx.update(moe_tok, nnx.state(moe_def))
+    x_3d = x.reshape(3, 4, d)
+    np.testing.assert_allclose(moe_tok(x_3d), moe_def(x_3d), rtol=1e-5, atol=1e-5)
 
 
 # =================================================================================================
@@ -1129,6 +1576,786 @@ class Qwen3_8PLETest(absltest.TestCase):
     out_masked = mod(h_3d, input_ids, conv_mask=mask)
     np.testing.assert_allclose(out_masked[0, 0], 0.0, atol=1e-6)
     self.assertFalse(np.allclose(out_masked[1, 0], 0.0, atol=1e-3))
+
+
+# =================================================================================================
+# Decoder backbone, scan parity, and m3 registration
+# =================================================================================================
+
+
+def _get_mini_config(
+    scan_layers: bool = False,
+    dtype: str = "float32",
+    weight_dtype: str = "float32",
+    **kwargs,
+):
+  """Builds a test config initialized from qwen3.8-flash-next-mini.yml."""
+  return pyconfig.initialize(
+      [None, f"{maxtext_globals.MAXTEXT_CONFIGS_DIR}/base.yml"],
+      model_name="qwen3.8-flash-next-mini",
+      override_model_config=True,
+      scan_layers=scan_layers,
+      packing=False,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      run_name="backbone_test",
+      **kwargs,
+  )
+
+
+def _copy_hf_weights_to_jax(hf_model, jax_model):
+  """Copies weights from PyTorch Qwen4ExpForCausalLM to Qwen3_8FlashNextModel."""
+  d, pm = jax_model.decoder, hf_model.model
+
+  def to_j(t, tr=False):
+    return jnp.array(t.detach().cpu().numpy().T if tr else t.detach().cpu().numpy())
+
+  def cp(dst, src, *keys, tr=True, attr="kernel"):
+    for k in keys:
+      getattr(getattr(dst, k), attr)[...] = to_j(getattr(src, k).weight, tr)
+
+  d.token_embedder.embedding[...] = to_j(pm.embed_tokens.weight)
+  jax_model.lm_head.kernel[...] = to_j(hf_model.lm_head.weight, True)
+  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "input_mix_weight_down", "input_mix_weight_up")
+  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "hc_norm", tr=False, attr="scale")
+  for i in range(d.num_layers):
+    jl, pl = getattr(d, f"layers_{i}"), pm.layers[i]
+    for jh, ph in (
+        (jl.attn_hyper_connection, pl.attn_hyper_connection),
+        (jl.mlp_hyper_connection, pl.mlp_hyper_connection),
+    ):
+      cp(jh, ph, "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight")
+      cp(jh, ph, "hc_norm", tr=False, attr="scale")
+    if jl.ple is not None:
+      jl.ple.ple_embedding.ngram_embedding.embedding[...] = to_j(pl.ple.ple_embedding.ngram_embedding.weight)
+      jl.ple.conv1d.kernel[...] = jnp.array(pl.ple.conv1d.weight.detach().cpu().permute(2, 1, 0).numpy())
+      cp(jl.ple, pl.ple, "norm_key", "norm_query", "norm_conv", tr=False, attr="scale")
+      cp(jl.ple, pl.ple, "key_proj", "value_proj")
+    if jl.layer_type == "linear_attention":
+      cp(jl.linear_attn, pl.linear_attn, "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
+      jl.linear_attn.A_log[...], jl.linear_attn.dt_bias[...] = to_j(pl.linear_attn.A_log), to_j(pl.linear_attn.dt_bias)
+      cp(jl.linear_attn, pl.linear_attn, "norm", tr=False, attr="scale")
+      jl.linear_attn.conv1d.kernel[...] = jnp.array(pl.linear_attn.conv1d.weight.detach().cpu().permute(2, 1, 0).numpy())
+    else:
+      cp(jl.self_attn, pl.self_attn, "q_proj", "k_proj", "v_proj", "o_proj")
+      cp(jl.self_attn, pl.self_attn, "q_norm", "k_norm", tr=False, attr="scale")
+      cp(jl.self_attn.indexer, pl.self_attn.indexer, "q_layernorm", "k_layernorm", tr=False, attr="scale")
+      cp(jl.self_attn.indexer, pl.self_attn.indexer, "index_qk_proj")
+    for d_l, w in (
+        (jl.mlp.gate.linear, pl.mlp.gate.weight),
+        (jl.mlp.shared_expert_gate, pl.mlp.shared_expert_gate.weight),
+    ):
+      d_l.kernel[...] = to_j(w, True)
+    for k in ("gate_up_proj", "down_proj"):
+      getattr(jl.mlp.experts, k)[...] = jnp.swapaxes(to_j(getattr(pl.mlp.experts, k)), -1, -2)
+    cp(jl.mlp.shared_expert, pl.mlp.shared_expert, "gate_proj", "up_proj", "down_proj")
+
+
+def _make_matching_hf_config(c) -> Any:
+  """Constructs matching HuggingFace configuration from MaxText mini config."""
+  if configuration_qwen4_exp is None:
+    raise RuntimeError("transformers qwen4_exp not available")
+  l = int(c.num_decoder_layers)
+  rp = {
+      "rope_theta": float(c.rope_max_timescale),
+      "partial_rotary_factor": float(c.partial_rotary_factor),
+      "mrope_interleaved": True,
+      "mrope_section": list(c.mrope_section),
+  }
+  return configuration_qwen4_exp.Qwen4ExpTextConfig(
+      vocab_size=int(c.vocab_size),
+      hidden_size=int(c.emb_dim),
+      num_hidden_layers=l,
+      head_dim=int(c.head_dim),
+      num_attention_heads=int(c.num_query_heads),
+      num_key_value_heads=int(c.num_kv_heads),
+      hc_count=int(c.hc_count),
+      shared_expert_intermediate_size=int(c.mlp_dim),
+      moe_intermediate_size=int(c.moe_mlp_dim),
+      attention_bias=False,
+      num_experts=int(c.num_experts),
+      num_experts_per_tok=int(c.num_experts_per_tok),
+      hc_lowrank=int(c.hc_lowrank),
+      norm_topk_prob=bool(c.norm_topk_prob),
+      output_gate_type=str(c.gdn_output_gate_activation),
+      attention_dropout=0.0,
+      layer_types=(["linear_attention"] * 3 + ["full_attention"]) * (l // 4),
+      rope_parameters=rp,
+      ple_layer_ids=[2],
+      linear_num_key_heads=int(c.gdn_num_key_heads),
+      linear_num_value_heads=int(c.gdn_num_value_heads),
+      linear_key_head_dim=int(c.gdn_key_head_dim),
+      linear_value_head_dim=int(c.gdn_value_head_dim),
+      linear_conv_kernel_dim=int(c.gdn_conv_kernel_dim),
+      indexer_compress_ratio=int(c.index_select_block_size),
+      indexer_n_heads=int(c.index_n_heads),
+      indexer_kv_heads=int(c.index_kv_heads),
+      indexer_head_dim=int(c.index_head_dim),
+      indexer_budget=int(c.index_select_budget),
+      rms_norm_eps=float(c.normalization_layer_epsilon),
+      seed=int(c.ple_seed),
+      ple_embed_dim=int(c.ple_embed_dim),
+      ple_conv_kernel_size=int(c.ple_conv_kernel_size),
+      ngram_size=int(c.ngram_size),
+      heads_per_ngram=int(c.heads_per_ngram),
+      ngram_vocab_size_base=int(c.ngram_vocab_size_base),
+      eos_token_id=int(c.ple_eos_token_id),
+      make_ngram_vocab_size_divisible_by=int(c.make_ngram_vocab_size_divisible_by),
+  )
+
+
+@pytest.mark.cpu_only
+class Qwen3_8BackboneTest(absltest.TestCase):
+  """Backbone tests for scanned/unscanned parity and PyTorch reference match."""
+
+  def test_scanned_vs_unscanned_parity_2_cycles(self):
+    """Verifies scanned vs unscanned parity, 2-segment inputs, and registry dispatch."""
+    cu, cs = (_get_mini_config(scan_layers=s, base_num_decoder_layers=8) for s in (False, True))
+    mu, ms = (m3_models.create_model(c, mesh=None) for c in (cu, cs))
+    self.assertIsInstance(mu, modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel)
+    self.assertTrue({"qwen3.8-flash-next", "qwen3.8-flash-next-mini"}.issubset(m3_models.MODEL_REGISTRY))
+    modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(mu, ms)
+    toks = jnp.array([[3, 17, 42, 88, 3, 50, 61, 99]], dtype=jnp.int32)
+    pos, cmask = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (1, 8)), jnp.ones((1, 8), dtype=jnp.int32)
+    (lu, au), (ls, as_) = (m(toks, decoder_positions=pos, decoder_segment_ids=cmask, return_aux=True) for m in (mu, ms))
+    # 8 fp32 layers of GDN + MoE + QSA accumulate rounding near 1e-5, so cross-path checks use atol=5e-5.
+    np.testing.assert_allclose(lu, ls, atol=5e-5, rtol=1e-5)
+    jax.tree.map(lambda u, s: np.testing.assert_allclose(u, s, atol=5e-5, rtol=1e-5), au, as_)
+    s2 = cmask.at[:, 4:].set(2)
+    np.testing.assert_allclose(mu(toks, decoder_segment_ids=s2), ms(toks, decoder_segment_ids=s2), atol=5e-5, rtol=1e-5)
+
+    logits_hs, pre_mixer = mu(toks, decoder_positions=pos, decoder_segment_ids=cmask, return_hidden_states=True)
+    self.assertEqual(pre_mixer.shape, (1, 8, int(cu.hc_count) * int(cu.emb_dim)))
+    np.testing.assert_allclose(
+        mu.lm_head(mu.decoder.hyper_connection_mixer.mix_input(pre_mixer)), logits_hs, atol=1e-5, rtol=1e-5
+    )
+    np.testing.assert_allclose(logits_hs, lu, atol=1e-5, rtol=1e-5)
+
+  def test_scanned_vs_unscanned_bfloat16_parity(self):
+    """Verifies scanned vs unscanned parity under bfloat16."""
+    cu = _get_mini_config(
+        scan_layers=False,
+        base_num_decoder_layers=4,
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        num_experts=2,
+        num_experts_per_tok=2,
+        index_select_budget=64,
+    )
+    cs = _get_mini_config(
+        scan_layers=True,
+        base_num_decoder_layers=4,
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        num_experts=2,
+        num_experts_per_tok=2,
+        index_select_budget=64,
+    )
+    mu, ms = (m3_models.create_model(c, mesh=None) for c in (cu, cs))
+    modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(mu, ms)
+    toks = jnp.array([[3, 17, 42, 88]], dtype=jnp.int32)
+    pos, cmask = jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (1, 4)), jnp.ones((1, 4), dtype=jnp.int32)
+    out_u = mu(toks, decoder_positions=pos, decoder_segment_ids=cmask)
+    out_s = ms(toks, decoder_positions=pos, decoder_segment_ids=cmask)
+    self.assertEqual(out_u.dtype, jnp.bfloat16)
+    self.assertEqual(out_s.dtype, jnp.bfloat16)
+    self.assertTrue(jnp.all(jnp.isfinite(out_u)))
+    self.assertTrue(jnp.all(jnp.isfinite(out_s)))
+    np.testing.assert_allclose(out_u, out_s, atol=1e-1, rtol=1e-1)
+
+  def test_scanned_cycles_fail_fast_validation(self):
+    """Verifies fail-fast validation in scanned cycle construction."""
+    with self.assertRaises(ValueError):
+      c = _get_mini_config(scan_layers=True, ple_layer_id=2)
+      m3_models.create_model(c, mesh=None)
+    with self.assertRaises(ValueError):
+      c = _get_mini_config(scan_layers=True, inhomogeneous_layer_cycle_interval=2)
+      m3_models.create_model(c, mesh=None)
+    with self.assertRaises(ValueError):
+      c = _get_mini_config(scan_layers=True, base_num_decoder_layers=6)
+      m3_models.create_model(c, mesh=None)
+
+  def test_copy_unscanned_to_scanned_validation(self):
+    """Verifies copy_unscanned_to_scanned rejects mismatched layer counts and PLE placement."""
+    ms = m3_models.create_model(_get_mini_config(scan_layers=True, base_num_decoder_layers=4), mesh=None)
+    for cu in (
+        _get_mini_config(scan_layers=False, base_num_decoder_layers=8),
+        _get_mini_config(scan_layers=False, base_num_decoder_layers=4, ple_layer_id=2),
+    ):
+      with self.assertRaises(ValueError):
+        modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(m3_models.create_model(cu, mesh=None), ms)
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(ms, ms)
+
+  def test_scan_remat_matches_no_remat(self):
+    """Verifies the checkpointed scanned cycle (remat) matches the uncheckpointed one (loss and gradients)."""
+    cfgs = [_get_mini_config(scan_layers=True, base_num_decoder_layers=8, remat_policy=p) for p in ("full", "none")]
+    m_remat, m_plain = (m3_models.create_model(c, mesh=None) for c in cfgs)
+    nnx.update(m_plain, nnx.state(m_remat))
+    self.assertTrue(m_remat.decoder.remat)
+    self.assertFalse(m_plain.decoder.remat)
+    toks = jnp.array([[3, 17, 42, 88, 3, 50, 61, 99]], dtype=jnp.int32)
+    targets = jnp.array([[17, 42, 88, 3, 50, 61, 99, 5]], dtype=jnp.int32)
+    seg = jnp.ones((1, 8), dtype=jnp.int32).at[:, 4:].set(2)
+
+    def loss_fn(model):
+      loss, _ = modeling_qwen3_8_flash_next.compute_total_loss(
+          model, toks, targets, segment_ids=seg, router_aux_coeff=0.01, use_mtp=False
+      )
+      return loss
+
+    def loss_and_grad(model, expect_remat):
+      with mock.patch.object(jax, "checkpoint", wraps=jax.checkpoint) as checkpoint:
+        out = nnx.value_and_grad(loss_fn)(model)
+      # The scan body is the only jax.checkpoint in the model, so only the remat path may wrap it.
+      self.assertEqual(checkpoint.called, expect_remat)
+      return out
+
+    (l_remat, g_remat), (l_plain, g_plain) = loss_and_grad(m_remat, True), loss_and_grad(m_plain, False)
+    np.testing.assert_allclose(l_remat, l_plain, atol=1e-6, rtol=1e-6)
+    # Recomputing the cycle in the backward pass changes XLA's fusion/accumulation order, so allow f32 noise.
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, atol=1e-4, rtol=1e-4), g_remat, g_plain)
+
+  def test_shard_batch_skips_indivisible_batches(self):
+    """Verifies shard_batch constrains evenly divisible batches and leaves indivisible ones unconstrained."""
+    if len(jax.devices()) < 4:
+      self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("fsdp",))
+    with jax.set_mesh(mesh):
+      for batch, constrained in ((8, True), (3, False), (1, False)):
+        jaxpr = str(jax.make_jaxpr(modeling_qwen3_8_flash_next.shard_batch)(jnp.zeros((batch, 16))))
+        self.assertEqual("sharding_constraint" in jaxpr, constrained, msg=f"batch={batch}")
+
+  @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
+  def test_pytorch_full_model_weight_copy_parity(self):
+    """Verifies fp32 forward parity against HuggingFace Qwen4ExpForCausalLM."""
+    self.assertIsNotNone(torch)
+    self.assertIsNotNone(modeling_qwen4_exp)
+    self.assertIsNotNone(configuration_qwen4_exp)
+    cu, cs = (_get_mini_config(scan_layers=s, base_num_decoder_layers=8) for s in (False, True))
+    mu, ms = (m3_models.create_model(c, mesh=None) for c in (cu, cs))
+    torch.manual_seed(0)
+    hf_model = modeling_qwen4_exp.Qwen4ExpForCausalLM(_make_matching_hf_config(cu)).eval()
+    with torch.no_grad():
+      for layer in hf_model.model.layers:
+        if hasattr(layer, "ple") and layer.ple is not None:
+          layer.ple.conv1d.weight.normal_(std=0.02)
+      for mod in hf_model.modules():
+        if type(mod).__name__.endswith("RMSNorm") and hasattr(mod, "weight") and mod.weight is not None:
+          mod.weight.normal_(std=0.02)
+    _copy_hf_weights_to_jax(hf_model, mu)
+    modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(mu, ms)
+    input_ids = np.array([[10, 20, 3, 40, 50, 60, 3, 70], [5, 3, 15, 25, 35, 45, 55, 65]], dtype=np.int64)
+    hf_masks = {}
+    for idx in (3, 7):
+      hf_model.model.layers[idx].self_attn.indexer.register_forward_hook(
+          lambda _, __, o, i=idx: hf_masks.__setitem__(i, o)
+      )
+    pt_out = hf_model(torch.from_numpy(input_ids), output_router_logits=True)
+    (lu, au), (ls, as_) = (m(jnp.array(input_ids, dtype=jnp.int32), return_aux=True) for m in (mu, ms))
+    for out in (lu, ls):
+      np.testing.assert_allclose(np.array(out), pt_out.logits.detach().cpu().numpy(), atol=5e-5, rtol=1e-5)
+    for i, topk in enumerate(
+        torch.topk(l.view(2, 8, -1), k=2, dim=-1).indices.cpu().numpy() for l in pt_out.router_logits
+    ):
+      for aux in (au, as_):
+        np.testing.assert_array_equal(np.array(aux[i]["router_indices"]), topk)
+    for l_idx in (3, 7):
+      mask, jax_b = hf_masks[l_idx].detach().cpu().numpy(), np.array(au[l_idx]["selected_block_indices"])
+      mask = mask if mask.dtype == bool else (mask == 0.0)
+      for b, q in ((b, q) for b in range(2) for q in range(3, 8)):
+        hf_sel = {m for m in range((q + 1) // 4) if np.all(mask[b, 0, q, m * 4 : (m + 1) * 4])}
+        self.assertEqual(hf_sel, {int(idx) for idx in jax_b[b, q] if idx >= 0})
+
+  def test_kernel_path_flags_match_defaults_end_to_end(self):
+    """Verifies the TPU kernel-path config flags match the reference paths end-to-end on the mini backbone."""
+    common_kw = {
+        "scan_layers": True,
+        "base_num_decoder_layers": 4,
+        "num_experts": 2,
+        "num_experts_per_tok": 2,
+        "use_ple_layer": False,
+        "index_select_budget": 64,
+        "sparse_matmul": True,
+    }
+    cfg_default = _get_mini_config(**common_kw)
+    self.assertEqual(
+        (
+            cfg_default.gdn_chunk_inverse,
+            cfg_default.qsa_indexer_mask,
+            cfg_default.qsa_attention_kernel,
+            cfg_default.use_tokamax_gmm,
+        ),
+        ("block_doubling", "gather", "dense", False),
+    )
+    # Reference paths (triangular solve, gather mask, dense attention, dense MoE) vs. the TPU kernel paths.
+    cfg_base = _get_mini_config(**common_kw, gdn_chunk_inverse="solve")
+    cfg_opt = _get_mini_config(
+        **common_kw,
+        gdn_chunk_inverse="block_doubling",
+        qsa_indexer_mask="reshape",
+        qsa_attention_kernel="flash",
+        use_tokamax_gmm=True,
+    )
+    mod_base = m3_models.create_model(cfg_base, mesh=None)
+    mod_opt = m3_models.create_model(cfg_opt, mesh=None)
+    nnx.update(mod_opt, nnx.state(mod_base))
+
+    toks = jnp.array([[3, 17, 42, 88, 3, 50, 61, 99]], dtype=jnp.int32)
+    pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (1, 8))
+    seg = jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32)
+
+    (logits_base, aux_base) = mod_base(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    (logits_opt, aux_opt) = mod_opt(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    np.testing.assert_allclose(np.array(logits_opt), np.array(logits_base), rtol=1e-4, atol=1e-4)
+    jax.tree.map(
+        lambda b, o: np.testing.assert_allclose(np.array(o), np.array(b), rtol=1e-4, atol=1e-4), aux_base, aux_opt
+    )
+
+
+# =================================================================================================
+# MTP draft block and integrated loss
+# =================================================================================================
+
+
+# pylint: disable=no-name-in-module
+
+
+def _create_mini_config(
+    num_layers: int = 4, mtp_num_layers: int = 1, scan_layers: bool = False, dtype=jnp.float32, **kwargs: Any
+) -> types.SimpleNamespace:
+  """Creates a mini-twin config SimpleNamespace for fast MTP and loss unit testing."""
+  base = {
+      "emb_dim": 64,
+      "num_decoder_layers": num_layers,
+      "vocab_size": 128,
+      "eos_token_id": 127,
+      "ple_eos_token_id": 127,
+      "hc_count": 4,
+      "hc_lowrank": 16,
+      "scan_layers": scan_layers,
+      "dtype": dtype,
+      "weight_dtype": dtype,
+      "normalization_layer_epsilon": 1e-6,
+      "inhomogeneous_layer_cycle_interval": 4,
+      "gdn_num_key_heads": 2,
+      "gdn_num_value_heads": 4,
+      "gdn_key_head_dim": 16,
+      "gdn_value_head_dim": 16,
+      "gdn_conv_kernel_dim": 4,
+      "gdn_chunk_size": 16,
+      "num_query_heads": 4,
+      "num_kv_heads": 1,
+      "head_dim": 16,
+      "partial_rotary_factor": 0.25,
+      "rope_max_timescale": 1e4,
+      "mrope_section": (1, 1, 0),
+      "index_n_heads": 2,
+      "index_kv_heads": 1,
+      "index_head_dim": 16,
+      "index_select_budget": 32,
+      "index_select_block_size": 4,
+      "moe_mlp_dim": 32,
+      "mlp_dim": 32,
+      "num_experts": 4,
+      "num_experts_per_tok": 2,
+      "norm_topk_prob": True,
+      "routed_scaling_factor": 1.0,
+      "use_ple_layer": False,
+      "heads_per_ngram": 2,
+      "ple_seed": 0,
+      "ple_kernel_size": 3,
+      "split_ngram_parts": 2,
+      "ple_hash_seed": 0,
+      "ngram_vocab_size_base": 500,
+      "mtp_num_layers": mtp_num_layers,
+      "mtp_num_streams": 4,
+      "mtp_loss_scaling_factor": 0.1,
+      "load_balance_loss_weight": 0.001,
+      "gdn_output_gate_activation": "silu",
+      "gdn_chunk_inverse": "block_doubling",
+      "qsa_indexer_mask": "gather",
+      "qsa_attention_kernel": "dense",
+      "ple_layer_ids": [],
+  }
+  base.update(kwargs)
+  return types.SimpleNamespace(**base)
+
+
+def _copy_layer_and_mixer_weights(pt_layer, pt_mixer, jx_layer, jx_mixer):
+  """Copies decoder layer and mixer parameters from PyTorch to JAX modules."""
+
+  def to_j(t, tr=False):
+    return jnp.array(t.detach().cpu().numpy().T if tr else t.detach().cpu().numpy())
+
+  def cp(dst, src, *keys, tr=True, attr="kernel"):
+    for k in keys:
+      getattr(getattr(dst, k), attr).value = to_j(getattr(src, k).weight, tr)
+
+  for jh, ph in (
+      (jx_layer.attn_hyper_connection, pt_layer.attn_hyper_connection),
+      (jx_layer.mlp_hyper_connection, pt_layer.mlp_hyper_connection),
+  ):
+    cp(jh, ph, "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight")
+    cp(jh, ph, "hc_norm", tr=False, attr="scale")
+  cp(jx_layer.self_attn, pt_layer.self_attn, "q_proj", "k_proj", "v_proj", "o_proj")
+  cp(jx_layer.self_attn, pt_layer.self_attn, "q_norm", "k_norm", tr=False, attr="scale")
+  cp(jx_layer.self_attn.indexer, pt_layer.self_attn.indexer, "q_layernorm", "k_layernorm", tr=False, attr="scale")
+  cp(jx_layer.self_attn.indexer, pt_layer.self_attn.indexer, "index_qk_proj")
+  for d_l, w in (
+      (jx_layer.mlp.gate.linear, pt_layer.mlp.gate.weight),
+      (jx_layer.mlp.shared_expert_gate, pt_layer.mlp.shared_expert_gate.weight),
+  ):
+    d_l.kernel.value = to_j(w, True)
+  for k in ("gate_up_proj", "down_proj"):
+    getattr(jx_layer.mlp.experts, k).value = jnp.swapaxes(to_j(getattr(pt_layer.mlp.experts, k)), -1, -2)
+  cp(jx_layer.mlp.shared_expert, pt_layer.mlp.shared_expert, "gate_proj", "up_proj", "down_proj")
+  cp(jx_mixer, pt_mixer, "input_mix_weight_down", "input_mix_weight_up")
+  cp(jx_mixer, pt_mixer, "hc_norm", tr=False, attr="scale")
+
+
+@pytest.mark.cpu_only
+class Qwen3_8MTPLossTest(absltest.TestCase):
+
+  def test_mtp_block_shapes_and_parity(self):
+    cfg = _create_mini_config()
+    block = modeling_qwen3_8_flash_next.Qwen3_8MTPBlock(cfg, rngs=nnx.Rngs(params=0))
+    self.assertEqual((block.pre_fc_norm_embedding.scale.shape, block.pre_fc_norm_hidden.scale.shape), ((64,), (256,)))
+    self.assertEqual((block.fc_embedding.kernel.shape, block.fc_hidden.kernel.shape), ((64, 64), (64, 64)))
+    b, s, c, d = 2, 8, 4, 64
+    hc_hidden = jax.random.normal(jax.random.PRNGKey(1), (b, s, c * d))
+    next_embeds = jax.random.normal(jax.random.PRNGKey(2), (b, s, d))
+    out = block(hc_hidden, next_embeds)
+    assert isinstance(out, jax.Array)
+    self.assertEqual(out.shape, (b, s, d))
+    e_proj = block.fc_embedding(block.pre_fc_norm_embedding(next_embeds))
+    h_proj = block.fc_hidden(block.pre_fc_norm_hidden(hc_hidden).reshape(b, s, c, d))
+    h_mtp_in = (h_proj + jnp.expand_dims(e_proj, axis=-2)).reshape(b, s, c * d)
+    ref_out = block.hyper_connection_mixer.mix_input(block.layers_0(h_mtp_in, return_aux=False))
+    np.testing.assert_allclose(out, ref_out, rtol=1e-5, atol=1e-5)
+
+  @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
+  def test_pytorch_weight_copy_parity(self):
+    assert torch is not None and modeling_qwen4_exp is not None and configuration_qwen4_exp is not None
+    cfg, (b, s, c, dim) = _create_mini_config(), (2, 4, 4, 64)
+    rp = {
+        "rope_theta": float(cfg.rope_max_timescale),
+        "partial_rotary_factor": float(cfg.partial_rotary_factor),
+        "mrope_interleaved": True,
+        "mrope_section": list(cfg.mrope_section),
+    }
+    hf_cfg = configuration_qwen4_exp.Qwen4ExpTextConfig(
+        vocab_size=cfg.vocab_size,
+        hidden_size=dim,
+        num_hidden_layers=4,
+        head_dim=cfg.head_dim,
+        num_attention_heads=cfg.num_query_heads,
+        num_key_value_heads=cfg.num_kv_heads,
+        hc_count=c,
+        shared_expert_intermediate_size=cfg.mlp_dim,
+        moe_intermediate_size=cfg.moe_mlp_dim,
+        attention_bias=False,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        hc_lowrank=cfg.hc_lowrank,
+        norm_topk_prob=cfg.norm_topk_prob,
+        output_gate_type=cfg.gdn_output_gate_activation,
+        attention_dropout=0.0,
+        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+        rope_parameters=rp,
+        ple_layer_ids=[],
+        linear_num_key_heads=cfg.gdn_num_key_heads,
+        linear_num_value_heads=cfg.gdn_num_value_heads,
+        linear_key_head_dim=cfg.gdn_key_head_dim,
+        linear_value_head_dim=cfg.gdn_value_head_dim,
+        linear_conv_kernel_dim=cfg.gdn_conv_kernel_dim,
+        indexer_compress_ratio=cfg.index_select_block_size,
+        indexer_n_heads=cfg.index_n_heads,
+        indexer_kv_heads=cfg.index_kv_heads,
+        indexer_head_dim=cfg.index_head_dim,
+        indexer_budget=cfg.index_select_budget,
+        rms_norm_eps=cfg.normalization_layer_epsilon,
+        seed=cfg.ple_seed,
+    )
+    torch.manual_seed(42)
+    pt_norm_emb, pt_norm_hid = (
+        modeling_qwen4_exp.Qwen4ExpTextRMSNorm(d, group_size=None, eps=1e-6) for d in (dim, c * dim)
+    )
+    pt_fc_emb, pt_fc_hid = (torch.nn.Linear(dim, dim, bias=False) for _ in range(2))
+    pt_layer = modeling_qwen4_exp.Qwen4ExpTextDecoderLayer(hf_cfg, layer_idx=3)
+    pt_mixer = modeling_qwen4_exp.Qwen4ExpTextGatedResidual(hf_cfg, use_combine=False)
+
+    with torch.no_grad():
+      for p in (*pt_layer.parameters(), *pt_mixer.parameters()):
+        p.normal_(std=0.02)
+
+    jx_block = modeling_qwen3_8_flash_next.Qwen3_8MTPBlock(cfg, rngs=nnx.Rngs(params=0))
+    jx_block.pre_fc_norm_embedding.scale.value = jnp.array(pt_norm_emb.weight.detach().cpu().numpy())
+    jx_block.pre_fc_norm_hidden.scale.value = jnp.array(pt_norm_hid.weight.detach().cpu().numpy())
+    jx_block.fc_embedding.kernel.value = jnp.array(pt_fc_emb.weight.detach().cpu().numpy().T)
+    jx_block.fc_hidden.kernel.value = jnp.array(pt_fc_hid.weight.detach().cpu().numpy().T)
+    _copy_layer_and_mixer_weights(pt_layer, pt_mixer, jx_block.layers_0, jx_block.hyper_connection_mixer)
+
+    pt_hc, pt_nxt = torch.randn(b, s, c * dim), torch.randn(b, s, dim)
+    pt_fused = pt_fc_hid(pt_norm_hid(pt_hc).view(b, s, c, dim)) + pt_fc_emb(pt_norm_emb(pt_nxt)).unsqueeze(-2)
+    pt_mtp_in = pt_fused.view(b, s, c * dim)
+    cos, sin = modeling_qwen4_exp.Qwen4ExpTextRotaryEmbedding(hf_cfg)(
+        pt_mtp_in, torch.arange(s).unsqueeze(0).expand(b, -1)
+    )
+    mask = torch.tril(torch.ones((b, 1, s, s), dtype=torch.bool))
+    pt_mask = torch.where(mask, torch.zeros((), dtype=torch.float32), torch.finfo(torch.float32).min)
+    pt_out = pt_mixer(pt_layer(pt_mtp_in, position_embeddings=(cos, sin), attention_mask=pt_mask)).detach().cpu().numpy()
+
+    jx_out = np.array(
+        jx_block(
+            jnp.array(pt_hc.numpy()),
+            jnp.array(pt_nxt.numpy()),
+            positions=jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s)),
+        )
+    )
+    self.assertGreater(np.max(np.abs(pt_out)), 0.0)
+    np.testing.assert_allclose(jx_out, pt_out, rtol=1e-5, atol=1e-5)
+
+  def test_checkpoint_pinned_shape_contract(self):
+    cfg = _create_mini_config(
+        emb_dim=2560,
+        hc_count=4,
+        hc_lowrank=320,
+        head_dim=256,
+        mrope_section=(11, 11, 10),
+        index_head_dim=128,
+        num_query_heads=24,
+        num_kv_heads=2,
+        index_n_heads=4,
+        index_kv_heads=1,
+        num_experts=512,
+        num_experts_per_tok=10,
+        moe_mlp_dim=640,
+        mlp_dim=640,
+        use_ple_layer=True,
+    )
+    shapes = nnx.eval_shape(lambda: modeling_qwen3_8_flash_next.Qwen3_8MTPBlock(cfg, rngs=nnx.Rngs(params=0)))
+    self.assertIsNone(shapes.layers_0.ple)
+    self.assertEqual((shapes.fc_embedding.kernel.shape, shapes.fc_hidden.kernel.shape), ((2560, 2560), (2560, 2560)))
+    self.assertEqual(
+        (shapes.pre_fc_norm_embedding.scale.shape, shapes.pre_fc_norm_hidden.scale.shape), ((2560,), (10240,))
+    )
+    self.assertEqual(
+        (
+            shapes.hyper_connection_mixer.hc_norm.scale.shape,
+            shapes.hyper_connection_mixer.input_mix_weight_down.kernel.shape,
+            shapes.hyper_connection_mixer.input_mix_weight_up.kernel.shape,
+        ),
+        ((10240,), (10240, 320), (320, 10240)),
+    )
+    self.assertEqual(
+        (shapes.layers_0.self_attn.q_norm.scale.shape, shapes.layers_0.self_attn.k_norm.scale.shape), ((256,), (256,))
+    )
+    self.assertEqual(
+        (
+            shapes.layers_0.self_attn.indexer.q_layernorm.scale.shape,
+            shapes.layers_0.self_attn.indexer.k_layernorm.scale.shape,
+        ),
+        ((128,), (128,)),
+    )
+    self.assertEqual(
+        (
+            shapes.layers_0.mlp.experts.gate_up_proj.shape,
+            shapes.layers_0.mlp.experts.down_proj.shape,
+            shapes.layers_0.mlp.gate.linear.kernel.shape,
+            shapes.layers_0.mlp.shared_expert_gate.kernel.shape,
+            shapes.layers_0.mlp.shared_expert.gate_proj.kernel.shape,
+            shapes.layers_0.mlp.shared_expert.up_proj.kernel.shape,
+            shapes.layers_0.mlp.shared_expert.down_proj.kernel.shape,
+        ),
+        (
+            (512, 2560, 1280),
+            (512, 640, 2560),
+            (2560, 512),
+            (2560, 1),
+            (2560, 640),
+            (2560, 640),
+            (640, 2560),
+        ),
+    )
+
+  def test_phase_gating(self):
+    cfg = _create_mini_config()
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    self.assertIsNotNone(model.mtp)
+    tokens = jax.random.randint(jax.random.PRNGKey(3), (2, 8), 0, 128)
+    self.assertEqual(model(tokens, return_mtp=False).shape, (2, 8, 128))
+    logits, mtp_logits = model(tokens, return_mtp=True)
+    self.assertEqual((logits.shape, mtp_logits.shape), ((2, 8, 128), (2, 8, 128)))
+    logits_aux, aux_dict = model(tokens, return_mtp=True, return_aux=True)
+    self.assertEqual(logits_aux.shape, (2, 8, 128))
+    self.assertTrue({"layer_aux", "mtp_logits", "mtp_aux"}.issubset(aux_dict))
+    self.assertIn("router_probs", aux_dict["mtp_aux"])
+
+  def test_cross_entropy_loss(self):
+    logits, targets = jnp.zeros((2, 4, 8), dtype=jnp.float32), jnp.zeros((2, 4), dtype=jnp.int32)
+    np.testing.assert_allclose(modeling_qwen3_8_flash_next.cross_entropy_loss(logits, targets), np.log(8.0), rtol=1e-5)
+    mask = jnp.array([[1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]], dtype=jnp.float32)
+    np.testing.assert_allclose(
+        modeling_qwen3_8_flash_next.cross_entropy_loss(logits, targets, mask=mask), np.log(8.0), rtol=1e-5
+    )
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.cross_entropy_loss(jnp.array([]), jnp.array([]))
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.cross_entropy_loss(jnp.zeros((2, 4, 8)), jnp.zeros((2, 5), dtype=jnp.int32))
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.cross_entropy_loss(
+          jnp.zeros((2, 4, 8)), jnp.zeros((2, 4), dtype=jnp.int32), mask=jnp.zeros((2, 5))
+      )
+
+  def test_router_load_balancing_loss(self):
+    b, s, e = 2, 4, 4
+    r_probs, r_idx = jnp.full((b, s, e), 1.0 / e, dtype=jnp.float32), jnp.tile(
+        jnp.array([0, 1], dtype=jnp.int32), (b, s, 1)
+    )
+    aux = [{"router_probs": r_probs, "router_indices": r_idx}]
+    lb_loss = modeling_qwen3_8_flash_next.router_load_balancing_loss(aux, num_experts=e)
+    self.assertTrue(jnp.isfinite(lb_loss) and lb_loss > 0.0)
+    for bad_aux in (None, [], [{"bad": 1}]):
+      with self.assertRaises(ValueError):
+        modeling_qwen3_8_flash_next.router_load_balancing_loss(bad_aux, 4)
+
+  def test_router_load_balancing_loss_hf_equivalence(self):
+    b, s, e, k = 2, 8, 4, 2
+    rng = np.random.default_rng(42)
+    layer_aux = []
+    for _ in range(3):
+      logits = rng.standard_normal((b, s, e)).astype(np.float32)
+      probs = np.exp(logits) / np.sum(np.exp(logits), axis=-1, keepdims=True)
+      indices = np.argsort(-probs, axis=-1)[:, :, :k].astype(np.int32)
+      layer_aux.append({"router_probs": jnp.array(probs), "router_indices": jnp.array(indices)})
+    mtp_logits = rng.standard_normal((b, s, e)).astype(np.float32)
+    mtp_probs = np.exp(mtp_logits) / np.sum(np.exp(mtp_logits), axis=-1, keepdims=True)
+    mtp_indices = np.argsort(-mtp_probs, axis=-1)[:, :, :k].astype(np.int32)
+    mtp_aux = {"router_probs": jnp.array(mtp_probs), "router_indices": jnp.array(mtp_indices)}
+
+    mask = jnp.array([[1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]], dtype=jnp.float32)
+    mtp_mask = jnp.pad(mask[:, 1:], ((0, 0), (0, 1)))
+
+    aux_dict = {"layer_aux": layer_aux, "mtp_aux": mtp_aux}
+    jax_loss = modeling_qwen3_8_flash_next.router_load_balancing_loss(
+        aux_dict, num_experts=e, mask=mask, mtp_mask=mtp_mask
+    )
+
+    items = [(lay, mask) for lay in layer_aux] + [(mtp_aux, mtp_mask)]
+    tokens_sum = np.zeros(e, dtype=np.float64)
+    probs_sum = np.zeros(e, dtype=np.float64)
+    total_tokens = 0.0
+    for l_aux, l_mask in items:
+      rp = np.array(l_aux["router_probs"], dtype=np.float64)
+      ri = np.array(l_aux["router_indices"])
+      lm = np.array(l_mask, dtype=np.float64)
+      one_hot = np.zeros((*ri.shape, e), dtype=np.float64)
+      np.put_along_axis(one_hot, np.expand_dims(ri, -1), 1.0, axis=-1)
+      tokens_sum += np.sum(one_hot * lm[:, :, None, None], axis=(0, 1, 2))
+      probs_sum += np.sum(rp * lm[:, :, None], axis=(0, 1))
+      total_tokens += np.sum(lm)
+
+    ref_loss = e * np.sum((tokens_sum / total_tokens) * (probs_sum / total_tokens))
+    np.testing.assert_allclose(float(jax_loss), ref_loss, rtol=1e-5, atol=1e-5)
+
+  def test_compute_total_loss_and_gradients(self):
+    cfg = _create_mini_config()
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    inp, tgt = (jax.random.randint(jax.random.PRNGKey(k), (2, 16), 0, 128) for k in (4, 5))
+    (total_l, metrics), grads = nnx.value_and_grad(
+        lambda m: modeling_qwen3_8_flash_next.compute_total_loss(
+            m, inp, tgt, router_aux_coeff=0.001, mtp_loss_coeff=0.1, use_mtp=True
+        ),
+        has_aux=True,
+    )(model)
+    self.assertTrue(jnp.isfinite(total_l))
+    self.assertTrue({"total_loss", "primary_loss", "router_loss", "mtp_loss"}.issubset(metrics))
+    self.assertGreater(jnp.sum(jnp.abs(grads.lm_head.kernel[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.mtp.fc_embedding.kernel[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.layers_0.mlp.experts.gate_up_proj[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.layers_0.mlp.gate.linear.kernel[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.mtp.layers_0.mlp.gate.linear.kernel[...])), 0.0)
+
+  def test_compute_total_loss_single_token(self):
+    cfg = _create_mini_config(num_layers=4)
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    toks = jnp.array([[5]], dtype=jnp.int32)
+    total_l, mets = modeling_qwen3_8_flash_next.compute_total_loss(model, toks, toks, use_mtp=True)
+    self.assertTrue(jnp.isfinite(total_l))
+    self.assertEqual(float(mets["mtp_loss"]), 0.0)
+
+  def test_compute_total_loss_scanned(self):
+    cfg_unscanned = _create_mini_config(num_layers=4, scan_layers=False)
+    cfg_scanned = _create_mini_config(num_layers=4, scan_layers=True)
+    unscanned_model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg_unscanned, rngs=nnx.Rngs(params=0))
+    scanned_model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg_scanned, rngs=nnx.Rngs(params=42))
+    modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(unscanned_model, scanned_model)
+    toks = jax.random.randint(jax.random.PRNGKey(6), (2, 8), 0, 128)
+    loss_u, mets_u = modeling_qwen3_8_flash_next.compute_total_loss(
+        unscanned_model, toks, toks, router_aux_coeff=0.001, use_mtp=True
+    )
+    loss_s, mets_s = modeling_qwen3_8_flash_next.compute_total_loss(
+        scanned_model, toks, toks, router_aux_coeff=0.001, use_mtp=True
+    )
+    self.assertTrue(jnp.isfinite(loss_s))
+    np.testing.assert_allclose(loss_u, loss_s, rtol=1e-5, atol=1e-5)
+    for k, val_u in mets_u.items():
+      np.testing.assert_allclose(val_u, mets_s[k], rtol=1e-5, atol=1e-5)
+
+  def test_packed_document_boundary_mtp_loss(self):
+    cfg = _create_mini_config()
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    toks, seg_ids = jnp.array([[10, 20, 30, 40]], dtype=jnp.int32), jnp.array([[1, 1, 2, 0]], dtype=jnp.int32)
+    toks_modified = jnp.array([[10, 20, 99, 40]], dtype=jnp.int32)
+    _, m1 = modeling_qwen3_8_flash_next.compute_total_loss(model, toks, toks, segment_ids=seg_ids, use_mtp=True)
+    _, m2 = modeling_qwen3_8_flash_next.compute_total_loss(
+        model, toks_modified, toks_modified, segment_ids=seg_ids, use_mtp=True
+    )
+    np.testing.assert_allclose(float(m1["mtp_loss"]), float(m2["mtp_loss"]), rtol=1e-5)
+    _, u1 = modeling_qwen3_8_flash_next.compute_total_loss(model, toks, toks, use_mtp=True)
+    _, u2 = modeling_qwen3_8_flash_next.compute_total_loss(model, toks_modified, toks_modified, use_mtp=True)
+    self.assertNotEqual(float(u1["mtp_loss"]), float(u2["mtp_loss"]))
+
+  def test_document_boundary_next_tokens_masking(self):
+    cfg = _create_mini_config()
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    toks = jnp.array([[10, 20, 30, 40]], dtype=jnp.int32)
+    seg_ids = jnp.array([[1, 1, 2, 0]], dtype=jnp.int32)
+    logits, mtp_logits = model(toks, decoder_segment_ids=seg_ids, return_mtp=True)
+    self.assertEqual(logits.shape, (1, 4, 128))
+    self.assertEqual(mtp_logits.shape, (1, 4, 128))
+    same_seg = (seg_ids != 0) & (seg_ids == jnp.pad(seg_ids[:, 1:], ((0, 0), (0, 1))))
+    self.assertTrue(bool(same_seg[0, 0]))
+    self.assertFalse(bool(same_seg[0, 1]))
+    self.assertFalse(bool(same_seg[0, 2]))
+    self.assertFalse(bool(same_seg[0, 3]))
+
+  def test_validations_and_error_handling(self):
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(_create_mini_config(mtp_num_layers=2), rngs=nnx.Rngs(params=0))
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(_create_mini_config(), rngs=nnx.Rngs(params=0))
+    toks = jnp.array([[1, 2, 3, 4]], dtype=jnp.int32)
+    with self.assertRaises(ValueError):
+      model(toks, return_mtp=True, return_hidden_states=True)
+
+    block = modeling_qwen3_8_flash_next.Qwen3_8MTPBlock(_create_mini_config(), rngs=nnx.Rngs(params=0))
+    with self.assertRaises(ValueError):
+      block(jnp.zeros((2, 4, 100)), jnp.zeros((2, 4, 64)))
+    with self.assertRaises(ValueError):
+      block(jnp.zeros((2, 4, 256)), jnp.zeros((2, 4, 100)))
+
+    cfg_no_aux = _create_mini_config()
+    delattr(cfg_no_aux, "load_balance_loss_weight")
+    model_no_aux = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg_no_aux, rngs=nnx.Rngs(params=0))
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.compute_total_loss(model_no_aux, toks, toks)
+
+    cfg_no_mtp = _create_mini_config()
+    delattr(cfg_no_mtp, "mtp_loss_scaling_factor")
+    model_no_mtp = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg_no_mtp, rngs=nnx.Rngs(params=0))
+    with self.assertRaises(ValueError):
+      modeling_qwen3_8_flash_next.compute_total_loss(model_no_mtp, toks, toks, router_aux_coeff=0.001)
 
 
 if __name__ == "__main__":

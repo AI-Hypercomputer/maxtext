@@ -704,6 +704,28 @@ class CreateMeshTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "zero devices"):
       create_mesh(devices=[])
 
+  def test_custom_axis_names(self):
+    """A model with its own mesh axes (Wan's `context`) names them; sizes resolve against those axes."""
+    axes = ("data", "fsdp", "context", "tensor")
+    mesh = create_mesh(ici={"context": -1}, dcn={"context": -1}, devices=jax.devices()[:1], axis_names=axes)
+    self.assertEqual(mesh.axis_names, axes)
+    self.assertEqual(mesh.devices.shape, (1, 1, 1, 1))
+    # The defaults still apply when their axes are on the mesh.
+    self.assertEqual(create_mesh(devices=jax.devices()[:1], axis_names=axes).axis_names, axes)
+
+  def test_custom_axis_names_reject_names_outside_them(self):
+    with self.assertRaisesRegex(ValueError, r"Unknown ICI mesh axes \['expert'\]"):
+      create_mesh(ici={"expert": -1}, devices=jax.devices()[:1], axis_names=("data", "fsdp", "context", "tensor"))
+
+  @parameterized.named_parameters(
+      ("ici", {"dcn": {"redundant": -1}}, "default ICI layout puts every device on 'fsdp'"),
+      ("dcn", {"ici": {"redundant": -1}}, "default DCN layout puts every device on 'data'"),
+  )
+  def test_defaults_require_their_axis(self, kwargs, message):
+    """`ici` / `dcn` must be given when the default's axis is not on the mesh, rather than guessed."""
+    with self.assertRaisesRegex(ValueError, message):
+      create_mesh(devices=jax.devices()[:1], axis_names=("redundant", "vae_spatial"), **kwargs)
+
 
 @pytest.mark.tpu_only
 class CreateMeshMultiDeviceTest(parameterized.TestCase):

@@ -17,11 +17,13 @@
 
 import collections
 from collections.abc import Iterable
+import contextlib
 import inspect  # for debugging only
 from pathlib import Path
 
 from flax import nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 import jax
 from jax.core import Tracer
 import jax.numpy as jnp
@@ -256,7 +258,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   if spec is None:
     return None
   new_spec = []  # type: ignore
-  for s in spec:
+  for s in spec.partitions:  # a spec carrying reduced/unreduced axes refuses iteration
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
@@ -315,7 +317,7 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   if spec is None or mesh is None or not shape:
     return spec
   new_spec = []
-  for i, s in enumerate(spec):
+  for i, s in enumerate(spec.partitions):  # a tagged spec refuses iteration
     if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)
     else:
@@ -610,7 +612,10 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
     A set of strings, where each string is a mesh axis name used by the
     tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
-  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
+  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')). Read `.partitions`: a spec
+  # carrying reduced/unreduced axes refuses iteration.
+  if isinstance(tensor_sharding_spec, P):
+    tensor_sharding_spec = tensor_sharding_spec.partitions
   tensor_sharding_spec = sum(
       [
           [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
@@ -1038,6 +1043,82 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   return input_state
 
 
+def _is_typed_key(x) -> bool:
+  return isinstance(x, jax.Array) and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+
+
+def _raw_key_sharding(raw: jax.Array, key_sharding: NamedSharding, key_ndim: int) -> NamedSharding:
+  """Sharding for `jax.random.key_data(key)`: the key's spec, with the trailing key-data dims replicated."""
+  spec = tuple(key_sharding.spec) + (None,) * (key_ndim - len(key_sharding.spec))
+  target = NamedSharding(
+      key_sharding.mesh, P(*spec, *([None] * (raw.ndim - key_ndim))), memory_kind=key_sharding.memory_kind
+  )
+  if (
+      getattr(raw, "_committed", False)
+      and isinstance(raw.sharding, NamedSharding)
+      and raw.sharding.is_equivalent_to(target, raw.ndim)
+  ):
+    return raw.sharding
+  return target
+
+
+def _device_put_with_raw_keys(state, state_mesh_shardings):
+  """`jax.device_put` that moves typed PRNG key leaves as raw key data and re-wraps them."""
+  leaves, treedef = jax.tree.flatten(state)
+  targets = treedef.flatten_up_to(state_mesh_shardings)
+  if not any(_is_typed_key(x) and isinstance(s, NamedSharding) for x, s in zip(leaves, targets)):
+    return jax.device_put(state, state_mesh_shardings)
+
+  key_impls = {}
+  put_leaves, put_targets = [], []
+  for i, (x, s) in enumerate(zip(leaves, targets)):
+    if _is_typed_key(x) and isinstance(s, NamedSharding):
+      raw = jax.random.key_data(x)
+      key_impls[i] = jax.random.key_impl(x)
+      put_leaves.append(raw)
+      put_targets.append(_raw_key_sharding(raw, s, x.ndim))
+    else:
+      put_leaves.append(x)
+      put_targets.append(s)
+  out = jax.device_put(put_leaves, put_targets)  # One call for every leaf, as without typed keys.
+  out = [jax.random.wrap_key_data(y, impl=key_impls[i]) if i in key_impls else y for i, y in enumerate(out)]
+  return jax.tree.unflatten(treedef, out)
+
+
+def reshard_train_state(state, state_mesh_shardings, enable_single_controller: bool):
+  """Reshards a train state to `state_mesh_shardings`.
+
+  Under a single controller (Pathways), `jax.device_put` of a distributed state
+  to a new sharding can stage the data through the controller host (at 3,072 TPU
+  v4 chips the controller RSS grew past 187 GB before compilation). A jitted
+  identity with `out_shardings` performs the same reshard on the accelerators.
+
+  Multi-controller runs use `jax.device_put`. The RNG streams `scan_layers`
+  stacks along the layer axis are laid out `P(None,)` while their target is the
+  equivalent `P()`: `jax.device_put` on a typed PRNG key array misses its
+  same-sharding no-op fast path when the `PartitionSpec` spelling differs and,
+  with several JAX processes, raises `ValueError` ("device_put's second argument
+  must be a Device or a Sharding which represents addressable devices"). Typed
+  keys are therefore moved as raw key data (`jax.random.key_data`) and
+  re-wrapped with their original PRNG impl; every other leaf goes through the
+  same single `jax.device_put`. Unlike a jitted identity, this does not allocate
+  new buffers for leaves whose sharding is unchanged. Every process must make
+  this call.
+
+  Args:
+    state: PyTree of train state arrays to reshard.
+    state_mesh_shardings: Target PyTree of `NamedSharding` specs matching
+      `state`.
+    enable_single_controller: Whether Pathways single-controller mode is active.
+
+  Returns:
+    The resharded train state PyTree matching `state_mesh_shardings`.
+  """
+  if enable_single_controller:
+    return jax.jit(lambda s: s, out_shardings=state_mesh_shardings)(state)
+  return _device_put_with_raw_keys(state, state_mesh_shardings)
+
+
 def logical_axis_rules_pp_act_as_dp(logical_rules):
   """Add stage as a physical axes before data for each rule, so stage acts just like data instead of PP.
   This is used when we want to pipeline only a subset of layers, and leave the rest like DP.
@@ -1054,6 +1135,18 @@ def logical_axis_rules_pp_act_as_dp(logical_rules):
       new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
     new_rules.append((key, new_physical_axes))
   return tuple(new_rules)
+
+
+def pp_act_as_dp_construction_rules(config):
+  """Context to construct the modules that run outside the pipeline, under the PP-as-DP rules they run with.
+
+  Under explicit sharding modules resolve some activation shardings once, at construction (e.g. the RoPE frequency
+  sharding), so a module called under `logical_axis_rules_pp_act_as_dp` must be built under it too. Auto mode leaves
+  those shardings unset (None): no-op.
+  """
+  if config.shard_mode != ShardMode.EXPLICIT or not getattr(config, "using_pipeline_parallelism", False):
+    return contextlib.nullcontext()
+  return flax_logical_axis_rules(logical_axis_rules_pp_act_as_dp(config.logical_axis_rules))
 
 
 def get_formatted_sharding_annotations(params, mesh=None):

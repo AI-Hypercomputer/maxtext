@@ -18,7 +18,7 @@ from collections.abc import Mapping
 import json
 import os
 import shutil
-from maxtext.m3.models.glm5_3_flash import glm5_config
+from maxtext.m3.configs import glm5_3_flash_config as glm5_config
 import safetensors.torch
 import torch
 

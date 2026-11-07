@@ -33,7 +33,6 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 
 from maxtext.kernels import attention, sort_activations, megablox
 from maxtext.layers import quantizations
@@ -512,8 +511,8 @@ def init_splash_kernel(config):
       k_layout=attention.splash_attention_kernel.QKVLayout[config.sa_k_layout],
       v_layout=attention.splash_attention_kernel.QKVLayout[config.sa_v_layout],
   )
-  mask = splash_attention_mask.CausalMask(shape=(config.max_target_length, config.max_target_length))
-  multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * config.num_query_heads)
+  mask = attention.splash_attention_kernel.mask_lib.CausalMask(shape=(config.max_target_length, config.max_target_length))
+  multi_head_mask = attention.splash_attention_kernel.mask_lib.MultiHeadMask(masks=(mask,) * config.num_query_heads)
   return attention.splash_attention_kernel.make_splash_mha(
       mask=multi_head_mask,
       head_shards=1,  # the size of the axis if sharding over heads

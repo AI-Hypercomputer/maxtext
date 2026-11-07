@@ -61,6 +61,10 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.deepseek_dequantize 
 Execute the following command to finalize the conversion. Ensure your environment variables (`$BASE_OUTPUT_PATH`, `$HF_TOKEN`, and `$BF16_LOCAL_PATH`) are exported before running. Set `MODEL_NAME` to `deepseek3.2-671b`, `deepseek4-284b`, or `deepseek4-1600b`. Setting `scan_layers=true` generates scanned Orbax format for training and fine-tuning. Setting `scan_layers=false` generates unscanned format in Orbax for decoding.
 
 Canonical pre-converted assets:
+* **DeepSeek V4-Flash (284B)**:
+  * Scanned Checkpoint: `gs://maxtext-deepseek/deepseek4-284b/2026-09-30/scanned/0/items`
+  * Unscanned Checkpoint: `gs://maxtext-deepseek/deepseek4-284b/2026-09-30/unscanned/0/items`
+  * Golden Logits: `gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl`
 * **DeepSeek V4-Pro (1600B)**:
   * Scanned Checkpoint: `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/scanned/0/items`
   * Unscanned Checkpoint: `gs://maxtext-deepseek/deepseek4-1600b/2026-10-03/unscanned/0/items`
@@ -498,23 +502,10 @@ To run MMLU benchmarks and validate the model's performance, follow the instruct
 
 ### Logit comparison for V4-284b
 
-To verify correctness for the DeepSeek V4 model, we compare the logits against the HuggingFace implementation.
-
-Run the forward pass logit checker command below. The test uses `indexer_topk=4` to cover all pathways in the model without excessive sequence lengths in testing. To cover each pathway in the model, we need to set the prompt length such that: sliding window (`prompt_len > sliding_window_size`), HCA (`prompt_len / hca_compression_factor > 1`), and CSA (`prompt_len / csa_compression_factor > indexer_topk`).
-
-**Important Note for Golden Logit Generation**: To generate golden logits with `indexer_topk=4`, you must modify `config.json` in your local HuggingFace checkpoint directory, changing `"index_topk": 512` to `"index_topk": 4` before running the generation script.
-
-One example command to generate golden logits from HuggingFace for DeepSeek V4-Flash (using a prompt length of 512 tokens to trigger sliding window, CSA, and HCA layer requirements):
+Forward-pass logits for DeepSeek V4-Flash (`deepseek4-284b`) are compared against official reference golden logits generated with the unmodified HuggingFace `index_topk=512` hyperparameter (`gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl`):
 
 ```sh
-python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
-    --model-id=deepseek-ai/DeepSeek-V4-Flash \
-    --output-path=golden_data_deepseek4-284b_proper_512.jsonl \
-    --prompts='<Insert prompt here>' \
-    --hf-model-path=$BF16_LOCAL_PATH
-```
-
-```sh
+gcloud storage cp gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl /tmp/golden_data_deepseek4-284b.jsonl
 python3 -m tests.utils.forward_pass_logit_checker \
     src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
@@ -524,7 +515,11 @@ python3 -m tests.utils.forward_pass_logit_checker \
     attention=dot_product \
     per_device_batch_size=1 \
     model_name=deepseek4-284b \
-    max_target_length=1024 \
+    override_model_config=True \
+    indexer_topk=512 \
+    max_target_length=512 \
+    sparse_matmul=True \
+    megablox=False \
     ici_fsdp_parallelism=1 \
     ici_expert_parallelism=-1 \
     weight_dtype=bfloat16 \
@@ -533,15 +528,15 @@ python3 -m tests.utils.forward_pass_logit_checker \
     matmul_precision=highest \
     float32_logits=false \
     float32_qk_product=false \
-    override_model_config=True \
-    indexer_topk=4 \
-    --golden_logits_path=golden_data_deepseek4-284b_proper_512.jsonl \
-    --max_kl_div=0.42
+    --golden_logits_path=/tmp/golden_data_deepseek4-284b.jsonl \
+    --max_kl_div=0.42 \
+    --clip_logits_epsilon=1e-6
 ```
 
 ### Logit comparison for V4-Pro (1600B)
 
 ```sh
+gcloud storage cp gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl /tmp/golden_data_deepseek4-1600b.jsonl
 python3 -m tests.utils.forward_pass_logit_checker \
     src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_PATH} \
@@ -569,7 +564,7 @@ python3 -m tests.utils.forward_pass_logit_checker \
     ici_context_parallelism=1 \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
-    --golden_logits_path=gs://maxtext-test-assets/golden_data_deepseek4-1600b.jsonl \
+    --golden_logits_path=/tmp/golden_data_deepseek4-1600b.jsonl \
     --max_kl_div=0.42 \
     --clip_logits_epsilon=1e-6
 ```
@@ -578,7 +573,7 @@ python3 -m tests.utils.forward_pass_logit_checker \
 
 [`v4-284b/2_test_deepseek.sh`](v4-284b/2_test_deepseek.sh) runs three stages against a converted checkpoint. Each can be skipped with `RUN_LOGIT`, `RUN_PRETRAIN` or `RUN_DECODE=false`.
 
-1. **Logit check**: `forward_pass_logit_checker` on the unscanned checkpoint with `indexer_topk=4`, compared against `gs://maxtext-test-assets/golden_data_deepseek4-284b.jsonl`. Fails if the max per-token KL divergence exceeds `MAX_KL_DIV` (default `0.42`).
+1. **Logit check**: `forward_pass_logit_checker` on the unscanned checkpoint with `indexer_topk=512`, compared against `gs://maxtext-test-assets/golden_data_deepseek4-284b-topk512.jsonl`. Fails if the max per-token KL divergence exceeds `MAX_KL_DIV` (default `0.42`).
 2. **Pre-train**: 20 steps of sparse pre-training (`indexer_sparse_training=true`, `indexer_loss_scaling_factor=1.0`, `max_target_length=4096`) from the scanned checkpoint. Fails unless the final `loss` and `lm_loss` are finite and strictly positive.
 3. **Decode**: `maxtext.inference.decode` on the unscanned checkpoint. Fails unless the output starts with `DECODE_ASSERT`.
 

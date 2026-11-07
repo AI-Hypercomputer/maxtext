@@ -68,6 +68,11 @@ on:
         required: false
         type: boolean
         default: false
+      platform:
+        description: 'Target platform for the Docker image build (e.g., amd64, arm64)'
+        required: false
+        type: string
+        default: ''
     secrets:
       HF_TOKEN:
         required: true
@@ -168,12 +173,14 @@ jobs:
           BUILD_MODE: ${{ inputs.build_mode }}
           IMAGE_NAME: ${{ inputs.image_name }}
           DOCKERFILE: ${{ inputs.dockerfile }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
           echo "device: $DEVICE"
           echo "workflow: $WORKFLOW"
           echo "build_mode: $BUILD_MODE"
           echo "image_name: $IMAGE_NAME"
           echo "dockerfile: $DOCKERFILE"
+          echo "platform: $PLATFORM"
 
       - name: Set up Syft
         id: download_syft
@@ -238,13 +245,26 @@ jobs:
         shell: bash
         env:
           INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
+          INPUTS_PLATFORM: ${{ inputs.platform }}
         run: |
           if [[ "${INPUTS_REPOSITORY_NAME}" == "maxtext-images" ]]; then
             BUILD_REPO="maxtext-images-staging"
           else
             BUILD_REPO="${INPUTS_REPOSITORY_NAME}"
           fi
-          echo "BUILD_REPO=${BUILD_REPO}" >> "$GITHUB_ENV"
+          if [[ -n "${INPUTS_PLATFORM}" ]]; then
+            PLATFORM_ARCH="${INPUTS_PLATFORM#linux/}"
+            DOCKER_PLATFORM="linux/${PLATFORM_ARCH}"
+            TAG_PREFIX="${PLATFORM_ARCH}-"
+          else
+            DOCKER_PLATFORM="linux/amd64"
+            TAG_PREFIX=""
+          fi
+          {
+            echo "BUILD_REPO=${BUILD_REPO}"
+            echo "DOCKER_PLATFORM=${DOCKER_PLATFORM}"
+            echo "TAG_PREFIX=${TAG_PREFIX}"
+          } >> "$GITHUB_ENV"
           echo "build_repo=${BUILD_REPO}" >> "$GITHUB_OUTPUT"
           echo "maxtext_short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -261,7 +281,7 @@ jobs:
         run: |
           echo "Overlay variant selected by the drift guard: ${OVERLAY_VARIANT}"
           IMAGE_PATH="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}"
-          SOURCE_REF="${IMAGE_PATH}:${SOURCE_RUN_ID}"
+          SOURCE_REF="${IMAGE_PATH}:${TAG_PREFIX}${SOURCE_RUN_ID}"
           echo "Looking up source image: ${SOURCE_REF}"
 
           DIGEST=$(gcloud container images describe "${SOURCE_REF}" \
@@ -291,8 +311,9 @@ jobs:
         with:
           push: true
           context: .
+          platforms: ${{ env.DOCKER_PLATFORM }}
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
-          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ github.run_id }}
+          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ env.TAG_PREFIX }}${{ github.run_id }}
           cache-from: type=gha
           provenance: mode=max
           sbom: false
@@ -315,10 +336,11 @@ jobs:
         with:
           push: true
           context: .
+          platforms: ${{ env.DOCKER_PLATFORM }}
           # The drift guard picks the COPY-only fast variant unless code files were removed
           # (or, for post-training, the vLLM adapter changed), see the guard script.
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ needs.drift_guard.outputs.overlay_variant == 'clean' && 'maxtext_code_overlay.Dockerfile' || 'maxtext_code_overlay_fast.Dockerfile' }}
-          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ github.run_id }}
+          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ env.TAG_PREFIX }}${{ github.run_id }}
           provenance: mode=max
           sbom: false
           # No force-compression: the source image's layers pass through untouched, only
@@ -339,11 +361,16 @@ jobs:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
           IMAGE_DIGEST: ${{ steps.build_push.outputs.digest || steps.build_push_fast.outputs.digest }}
           SYFT_CMD: ${{ steps.download_syft.outputs.cmd }}
+          DOCKER_PLATFORM: ${{ env.DOCKER_PLATFORM }}
         run: |
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            echo "::error::Image digest is empty; the Docker build step did not complete or push an image."
+            exit 1
+          fi
           IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST}"
-          echo "Generating SPDX JSON SBOM for ${IMAGE_URI}..."
+          echo "Generating SPDX JSON SBOM for ${IMAGE_URI} (${DOCKER_PLATFORM})..."
 
-          if "${SYFT_CMD}" "registry:${IMAGE_URI}" -o spdx-json=/tmp/sbom.spdx.json; then
+          if "${SYFT_CMD}" "registry:${IMAGE_URI}" --platform "${DOCKER_PLATFORM}" -o spdx-json=/tmp/sbom.spdx.json; then
             echo "Uploading SPDX SBOM reference to Container Analysis / SCILo..."
             gcloud artifacts sbom load \
               --project="${PROJECT_NAME}" \
@@ -407,39 +434,43 @@ jobs:
       - name: Add tags to Docker image
         shell: bash
         run: |
+          TAG_PREFIX=""
+          if [[ -n "${INPUTS_PLATFORM}" ]]; then
+            TAG_PREFIX="${INPUTS_PLATFORM#linux/}-"
+          fi
           STAGING_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}"
           SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}"
-          TEMP_IMG="${SOURCE_IMAGE}:${GITHUB_RUN_ID}"
+          TEMP_IMG="${SOURCE_IMAGE}:${TAG_PREFIX}${GITHUB_RUN_ID}"
 
           # Ensure run_id tag is applied to the digest in the target repository
           gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${TEMP_IMG}" --quiet
 
           # Add date tag
-          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
+          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}${IMAGE_DATE}" --quiet
 
           # Convert date to YYYYMMDD format
           clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
 
           # Add MaxText tag
-          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
 
           # Add Release Candidate tags
           if [[ "${IS_RC}" == "true" ]]; then
-            gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${MAXTEXT_SHA}" --quiet
+            gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}${MAXTEXT_SHA}" --quiet
             if [[ "${INPUTS_REPOSITORY_NAME}" == "maxtext-images" ]]; then
-              gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:latest-rc" --quiet
+              gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}latest-rc" --quiet
             else
-              echo "Skipping :latest-rc tag (functional and performance tests disabled for this run)."
+              echo "Skipping :${TAG_PREFIX}latest-rc tag (functional and performance tests disabled for this run)."
             fi
           fi
 
           # Also keep staging tags in sync when promoting
           if [[ "${BUILD_REPO}" != "${INPUTS_REPOSITORY_NAME}" ]]; then
-            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${IMAGE_DATE}" --quiet
-            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}${IMAGE_DATE}" --quiet
+            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
             if [[ "${IS_RC}" == "true" ]]; then
-              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${MAXTEXT_SHA}" --quiet
-              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:latest-rc" --quiet
+              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}${MAXTEXT_SHA}" --quiet
+              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}latest-rc" --quiet
             fi
           fi
         env:
@@ -451,4 +482,5 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          INPUTS_PLATFORM: ${{ inputs.platform }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}

@@ -27,6 +27,7 @@ Subpackages:
   * `models` — one self-contained file per model family, plus its sharding rules.
   * `train` — m3's own training loop (one of two supported drivers; the other is
     `maxtext.training_engine.maxtext_engine`).
+  * `diffuser_pipelines` — diffusion pipelines (Wan), driven by `maxtext/inference/sample.py`.
 
 This package is under active development and is not yet wired into any MaxText
 entry point. See `README.md` in this directory for the architecture rules that
@@ -36,6 +37,7 @@ contributions must follow.
 __all__ = [
     "configs",
     "core",
+    "diffuser_pipelines",
     "infra",
     "models",
     "train",

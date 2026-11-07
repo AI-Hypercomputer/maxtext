@@ -68,6 +68,8 @@ Each focus area below states which paths it applies to. Apply a focus area only 
 
 !{cat .gemini/commands/maxtext-review-kernels.md}
 
+!{cat .gemini/commands/maxtext-review-performance.md}
+
 -----
 
 ## Step 3: Submit the Review on GitHub
