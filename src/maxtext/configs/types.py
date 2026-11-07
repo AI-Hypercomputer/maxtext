@@ -2234,11 +2234,10 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "With prefetch_fsdp_weights and shard_mode=explicit, issue each layer's weight-gradient"
-          " reduce-scatters at the start of the next layer's backward step, tagged for XLA's FSDP scheduler,"
-          " which runs them on the SparseCore dedicated to FSDP collectives"
-          " (--xla_tpu_explicit_fsdp_dedicated_sparse_core_id) and overlaps them with that layer's backward."
-          " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they run untagged"
-          " on the other SparseCore and complete within their own layer's backward step. For inhomogeneous"
+          " reduce-scatters at the start of the next layer's backward step so they overlap with that layer's"
+          " backward."
+          " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they complete"
+          " within their own layer's backward step. For inhomogeneous"
           " blocks prefetched per sub-layer, the reduce-scatters are deferred to the next sub-layer's step."
       ),
   )

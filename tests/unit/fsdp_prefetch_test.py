@@ -163,8 +163,6 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertIn('name = "fsdp"', gathers[0])
     self.assertNotIn('name = "tensor"', gathers[0])
     self.assertIn("(tensor<2x3xf32>) -> tensor<8x3xf32>", gathers[0])
-    # The tag that lets XLA's FSDP scheduler run the gather on a dedicated SparseCore.
-    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
 
   def test_explicit_mode_gathers_multiple_fsdp_axes_of_one_dim(self):
     mesh = _abstract_mesh((2, 2, 2), ("tensor", "fsdp", "fsdp_transpose"))
@@ -177,7 +175,6 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertIn('name = "fsdp"', gathers[0])
     self.assertIn('name = "fsdp_transpose"', gathers[0])
     self.assertIn("(tensor<3x2xf32>) -> tensor<3x8xf32>", gathers[0])
-    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
 
   def test_explicit_mode_gathers_co_sharded_expert_axis_with_fsdp(self):
     mesh = _abstract_mesh((4, 2), ("fsdp", "expert"))
@@ -190,7 +187,6 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertIn('name = "fsdp"', gathers[0])
     self.assertIn('name = "expert"', gathers[0])
     self.assertIn("(tensor<2x6xf32>) -> tensor<16x6xf32>", gathers[0])
-    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
 
   def test_explicit_mode_preserves_routed_expert_axis(self):
     mesh = _abstract_mesh((4, 2), ("fsdp", "expert"))
@@ -203,7 +199,6 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertIn('name = "fsdp"', gathers[0])
     self.assertNotIn('name = "expert"', gathers[0])
     self.assertIn("(tensor<2x4x6xf32>) -> tensor<2x16x6xf32>", gathers[0])
-    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
 
   def test_explicit_mode_preserves_leading_expert_axis_on_compound_dim(self):
     mesh = _abstract_mesh((2, 4), ("expert", "fsdp"))
@@ -216,7 +211,6 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertIn('name = "fsdp"', gathers[0])
     self.assertNotIn('name = "expert"', gathers[0])
     self.assertIn("(tensor<2x6xf32>) -> tensor<8x6xf32>", gathers[0])
-    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
 
   def test_non_minor_fsdp_axis_falls_back_to_resharding(self):
     mesh = _abstract_mesh((2, 4), ("tensor", "fsdp"))
@@ -270,7 +264,6 @@ class FsdpPrefetchReduceScatterTest(unittest.TestCase):
     self.assertEqual(out.sharding.spec.unreduced, frozenset())
     self.assertEqual(len(scatters), 1)
     self.assertIn("scatter_dimension = 0", scatters[0])
-    self.assertIn('xla_explicit_fsdp = "yes"', scatters[0])
     self.assertIn("(tensor<8x3xf32>) -> tensor<2x3xf32>", scatters[0])
 
   def test_flat_expert_weight_scatters_only_fsdp_of_compound_dim(self):
@@ -281,7 +274,6 @@ class FsdpPrefetchReduceScatterTest(unittest.TestCase):
     self.assertEqual(len(scatters), 1)
     self.assertIn("scatter_dimension = 0", scatters[0])
     self.assertIn("(tensor<8x6xf32>) -> tensor<2x6xf32>", scatters[0])
-    self.assertIn('xla_explicit_fsdp = "yes"', scatters[0])
 
   def test_already_reduced_gradient_falls_back_to_resharding(self):
     """A summed (not unreduced) gradient must not be reduce-scattered again: that would scale it by the FSDP size."""
@@ -601,9 +593,8 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
     grads, ref, hlo = self._grads(num_blocks, num_a, defer=True)
     for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(ref)):
       np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
-    # The kernel gradients are reduce-scattered by the tagged (deferred) reduce-scatter.
+    # The kernel gradients are reduce-scattered by the deferred reduce-scatter.
     self.assertIn("stablehlo.reduce_scatter", hlo)
-    self.assertIn('xla_explicit_fsdp = "yes"', hlo)
     # Deferral only reorders the reduce-scatters: same gradients as without it.
     no_defer, _, _ = self._grads(num_blocks, num_a, defer=False)
     for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(no_defer)):
