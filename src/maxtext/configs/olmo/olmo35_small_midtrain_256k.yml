@@ -23,14 +23,14 @@
 #   - 3,072 chips (`3x v4-2048` DCN @ 25.17M tok/step):
 #       dcn_data_parallelism=3 ici_data_parallelism=4 ici_context_parallelism=32 ici_expert_parallelism=8 per_device_batch_size=0.03125
 #   - 3,072 chips (`8x8x48` @ 50.33M / 100.66M tok/step):
-#       ici_data_parallelism=12 ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625 context=recompute moe_a2a_token_chunks=8  # 50.33M
-#       ici_data_parallelism=12 ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  decoder_layer_input=offload context=recompute num_vocab_tiling=16 moe_a2a_token_chunks=8 olmo_vit_crop_chunk_size=16  # 100.66M
+#       ici_data_parallelism=12 ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625 context=remat moe_a2a_token_chunks=8  # 50.33M
+#       ici_data_parallelism=12 ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  decoder_layer_input=offload context=remat num_vocab_tiling=16 moe_a2a_token_chunks=8 olmo_vit_crop_chunk_size=16  # 100.66M
 #   - 512 chips (`8x8x8` v4-1024 @ 16.78M tok/step < 32M):
-#       ici_data_parallelism=2  ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  decoder_layer_input=offload context=recompute num_vocab_tiling=16 moe_a2a_token_chunks=8 olmo_vit_crop_chunk_size=16
+#       ici_data_parallelism=2  ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  decoder_layer_input=offload context=remat num_vocab_tiling=16 moe_a2a_token_chunks=8 olmo_vit_crop_chunk_size=16
 #   - 512 chips (`8x8x8` v4-1024 @ 4.19M tok/step, per-chip replica of 3K 25.17M recipe):
 #       ici_data_parallelism=2  ici_context_parallelism=32 ici_expert_parallelism=8  per_device_batch_size=0.03125
 #   - 128 chips (`4x4x8` v4-256 @ 4.19M tok/step, zero optimizer offload):
-#       ici_data_parallelism=1  ici_context_parallelism=8  ici_expert_parallelism=16 per_device_batch_size=0.125  decoder_layer_input=offload context=recompute num_vocab_tiling=16 moe_a2a_token_chunks=16 olmo_vit_crop_chunk_size=16
+#       ici_data_parallelism=1  ici_context_parallelism=8  ici_expert_parallelism=16 per_device_batch_size=0.125  decoder_layer_input=offload context=remat num_vocab_tiling=16 moe_a2a_token_chunks=16 olmo_vit_crop_chunk_size=16
 #   - Mixed multimodal 256K (add SigLIP2-SO400M 25L + Connector):
 #       use_multimodal=true olmo_max_crops_per_seq=128 olmo_vit_cp_shard_crops=true olmo_vit_remat_blocks=true
 
