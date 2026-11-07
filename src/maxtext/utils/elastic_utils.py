@@ -37,7 +37,7 @@ def record_slice_state(recorder, active_slices_override: int | None = None) -> N
   if (
       recorder is None
       or not hasattr(recorder, "record_elastic_slice_counts")
-      or not pathwaysutils.is_pathways_backend_used()
+      or not _backend_supports_elastic()
       or elastic_manager is None
   ):
     return
@@ -97,9 +97,27 @@ def record_elastic_reinit_end() -> None:
   pending_reinit_recorder = None
 
 
+def _client_supports_elastic() -> bool:
+  """Returns the `supports_elastic` attribute of the client of JAX's devices, or False if it has none."""
+  devices = jax.devices()
+  if not devices:
+    return False
+  client = getattr(devices[0], "client", None)
+  return bool(getattr(client, "supports_elastic", False))
+
+
+def _backend_supports_elastic() -> bool:
+  """Returns whether JAX's backend supports elastic training.
+
+  The backend's client says so with its `supports_elastic` attribute. Pathways
+  is checked directly until attribute based support is added.
+  """
+  return pathwaysutils.is_pathways_backend_used() or _client_supports_elastic()
+
+
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
-  return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+  return _backend_supports_elastic() and config.elastic_enabled
 
 
 def elastic_snapshot(config) -> bool:
@@ -382,10 +400,10 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
   """
   if not elastic_enabled(config):
     msg = (
-        "Elastic training requires the Pathways backend, and elastic_enabled"
-        " must be set to True: current config.elastic_enabled:"
-        f" {config.elastic_enabled}, pathways backend used:"
-        f" {pathwaysutils.is_pathways_backend_used()}"
+        "Elastic training requires a backend that supports it, and"
+        " elastic_enabled must be set to True: current config.elastic_enabled:"
+        f" {config.elastic_enabled}, backend supports_elastic:"
+        f" {_backend_supports_elastic()}"
     )
     raise ValueError(msg)
 
