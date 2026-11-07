@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.inference import sample
 from maxtext.m3.diffuser_pipelines import pipeline_utils
 from maxtext.m3.diffuser_pipelines import wan_pipeline
 from maxtext.m3.models.wan import WanModel
@@ -89,6 +90,15 @@ class WanPipelineHelpersTest(unittest.TestCase):
     self.assertEqual(mag_ratios.shape, (10,))  # resampled to 5 (cond, uncond) pairs
     *_, mag_ratios = wan_pipeline.init_magcache(10, 0.2, base)
     np.testing.assert_array_equal(mag_ratios, base)  # already the right length
+
+  def test_get_pipeline_class(self):
+    class _Cfg:
+
+      def __init__(self, model_name):
+        self.model_name = model_name
+
+    self.assertIs(sample.get_pipeline_class(_Cfg("wan2.1")), wan_pipeline.WanPipeline2_1)
+    self.assertIs(sample.get_pipeline_class(_Cfg("wan2.2")), wan_pipeline.WanPipeline2_1)
 
 
 if __name__ == "__main__":
