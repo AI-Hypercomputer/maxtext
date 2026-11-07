@@ -3110,6 +3110,20 @@ class Optimizer(BaseModel):
       description="The rolling interval to calculate the mean and standard deviation.",
   )
   skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
+  skip_step_on_nan: bool = Field(
+      False,
+      description=(
+          "MaxTextTrainingEngine only. If True, skip the training step and preserve weights/optimizer state when the"
+          " gradient norm is NaN/Inf."
+      ),
+  )
+  max_grad_norm_spike: NonNegativeFloat = Field(
+      0.0,
+      description=(
+          "MaxTextTrainingEngine only. If positive, skip the training step when the raw gradient norm exceeds this"
+          " threshold."
+      ),
+  )
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
@@ -5272,7 +5286,7 @@ class MaxTextConfig(
     if getattr(self, "eval_per_device_batch_size", 0.0) == 0.0:
       self.eval_per_device_batch_size = self.per_device_batch_size  # pylint: disable=access-member-before-definition
     # The mu_dtype for the AdamW optimizer defaults to the weight_dtype if not specified.
-    if not self.mu_dtype:
+    if not self.mu_dtype:  # pylint: disable=access-member-before-definition
       self.mu_dtype = self.weight_dtype
     # A soft-cap value of 0.0 is treated as disabling the cap.
     if self.attn_logits_soft_cap == 0.0:
