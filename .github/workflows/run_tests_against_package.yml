@@ -69,6 +69,11 @@ on:
         required: false
         type: number
         default: 1
+      test_durations_uploaded:
+        description: 'True when the coordinator uploaded the converted test durations; every shard must then use them'
+        required: false
+        type: boolean
+        default: false
       maxtext_sha:
         description: 'Git SHA to checkout if MaxText is not pre-installed'
         required: false
@@ -163,12 +168,13 @@ jobs:
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Download Converted Test Durations
-        if: inputs.total_workers > 1
+        # Every shard must split the tests with the same durations, or the shards overlap and some tests run nowhere.
+        # So when the coordinator uploaded them, a failed download fails this shard instead of using another split.
+        if: inputs.total_workers > 1 && inputs.test_durations_uploaded
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
           path: ${{ inputs.maxtext_installed && '/deps' || '.' }}
-        continue-on-error: true
       - name: Run Tests
         shell: bash
         run: |
