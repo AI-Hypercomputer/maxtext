@@ -389,22 +389,19 @@ class TrainDistillTest(unittest.TestCase):
 
   def test_optimizer_factory(self):
     """Verifies the optimizer factory injects hyperparams and handles configs."""
-    config = pyconfig.initialize(
-        ["", get_test_config_path()],
-        base_output_directory=self.test_dir,
-        run_name="optimizer_factory_test",
-        learning_rate=1e-3,
-        opt_type="adamw",
-        adam_b1=0.9,
-        adam_b2=0.99,
-        adam_eps=1e-8,
-        adam_eps_root=0.0,
-        adam_weight_decay=0.0,
-        mu_dtype="float32",
-        gradient_clipping_threshold=1.0,
-        warmup_steps_fraction=0.1,
-        learning_rate_final_fraction=0.1,
-    )
+    # Mock config
+    config = mock.Mock(spec=pyconfig.HyperParameters)
+    config.learning_rate = 1e-3
+    config.opt_type = "adamw"
+    config.adam_b1 = 0.9
+    config.adam_b2 = 0.99
+    config.adam_eps = 1e-8
+    config.adam_eps_root = 0.0
+    config.adam_weight_decay = 0.0
+    config.mu_dtype = "float32"
+    config.gradient_clipping_threshold = 1.0
+    config.warmup_steps_fraction = 0.1
+    config.learning_rate_final_fraction = 0.1
 
     # 1. Test Valid Creation
     opt = train_distill.get_distillation_optimizer(config, max_train_steps=100)
@@ -422,14 +419,9 @@ class TrainDistillTest(unittest.TestCase):
     self.assertIn("learning_rate", state.hyperparams)
 
     # 2. Test Muon Rejection
-    muon_config = pyconfig.initialize(
-        ["", get_test_config_path()],
-        base_output_directory=self.test_dir,
-        run_name="optimizer_factory_muon_test",
-        opt_type="muon",
-    )
+    config.opt_type = "muon"
     with self.assertRaisesRegex(ValueError, "Muon optimizer is not currently supported"):
-      train_distill.get_distillation_optimizer(muon_config, max_train_steps=100)
+      train_distill.get_distillation_optimizer(config, max_train_steps=100)
 
   def test_monitored_strategy(self):
     self._test_monitored_strategy(sft_mode=False, feature_loss_type="cosine")
