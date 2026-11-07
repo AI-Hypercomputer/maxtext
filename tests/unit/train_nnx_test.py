@@ -75,6 +75,8 @@ class _Cfg:
   grad_dtype: jnp.dtype = jnp.float32
   record_internal_nn_metrics: bool = False
   skip_step_on_spikes: bool = False
+  skip_step_on_nan: bool = False
+  max_grad_norm_spike: float = 0.0
   shard_mode: int = 0  # ShardMode.AUTO
   debug_sharding: bool = False
   weight_sparsity_n: int = 0
@@ -589,6 +591,44 @@ class TestSkipStepOnSpikesNNX(unittest.TestCase):
     state.apply_gradients(grads, loss=jnp.float32(1e3), grad_norm=jnp.float32(1e3))
     self.assertTrue(self._is_skipped(optimizer))
     after = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    for b, a in zip(before, after):
+      np.testing.assert_allclose(a, b)
+
+  def test_nan_is_skipped_and_params_preserved(self):
+    model = _TinyDecoder(8, hidden=4, rngs=nnx.Rngs(0))
+    tx = optimizers.skip_step_on_spikes(optax.sgd(0.1), interval=4, scaling_factor=6.0)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    state = train_state_nnx.TrainStateNNX(model, optimizer)
+    grads = jax.tree.map(jnp.ones_like, nnx.state(model, nnx.Param))
+
+    before = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    # Step with NaN loss / grad_norm during warmup must be skipped without poisoning parameters.
+    state.apply_gradients(grads, loss=jnp.nan, grad_norm=jnp.nan)
+    self.assertTrue(self._is_skipped(optimizer))
+    after = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    for b, a in zip(before, after):
+      np.testing.assert_allclose(a, b)
+
+  def test_train_step_max_grad_norm_spike_uses_pre_clipping_raw_grad_norm(self):
+    """train_step must check max_grad_norm_spike against raw_grad_norm before gradient clipping."""
+    cfg = _Cfg(
+        skip_step_on_nan=True,
+        max_grad_norm_spike=1e-6,
+        gradient_clipping_threshold=1e-8,  # Clips post-clip grad norm to 1e-8 < 1e-6!
+    )
+    model = _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    tx = optimizers.skip_step_on_nan_or_grad_spike(optax.sgd(0.1), skip_on_nan=True, max_grad_norm_spike=1e-6)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    ts = train_state_nnx.TrainStateNNX(model, optimizer)
+    state_graphdef, state_pure = nnx.split(ts)
+    before = [np.asarray(x) for x in jax.tree_util.tree_leaves(state_pure["model"])]
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    new_state, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+    self.assertEqual(float(metrics["scalar"]["optim/step_skipped"]), 1.0)
+    after = [np.asarray(x) for x in jax.tree_util.tree_leaves(new_state["model"])]
     for b, a in zip(before, after):
       np.testing.assert_allclose(a, b)
 

@@ -81,6 +81,7 @@ from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
 from maxtext.experimental.lineage import lineage_adapter
+from maxtext.optimizers import optimizers
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -666,10 +667,23 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # log_step_diagnostics: the updated router biases and this step's bias updates (see step_diagnostics).
   diag_bias_values, diag_bias_updates = [], []
 
-  if config.gradient_clipping_threshold > 0:
-    grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
+  use_skip_step = bool(
+      config.skip_step_on_spikes
+      or getattr(config, "skip_step_on_nan", False)
+      or getattr(config, "max_grad_norm_spike", 0.0) > 0.0
+  )
+  raw_grad_norm_for_skip = None
+  if use_skip_step:
+    raw_grad_norm_for_skip = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), raw_grads))
+    is_raw_grad_finite = jnp.isfinite(raw_grad_norm_for_skip)
+    grads_to_clip = jax.tree.map(lambda g: jnp.where(is_raw_grad_finite, g, jnp.zeros_like(g)), raw_grads)
   else:
-    grads = raw_grads
+    grads_to_clip = raw_grads
+
+  if config.gradient_clipping_threshold > 0:
+    grads = maxtext_utils.apply_gradient_clipping(grads_to_clip, None, config.gradient_clipping_threshold)
+  else:
+    grads = grads_to_clip
   if config.optimizer_memory_host_offload:
     # state.optimizer is an NNX Optimizer module; state_mesh_shardings.optimizer
     # is an NNX State. Use nnx.state() to get a compatible State for device_put.
@@ -681,12 +695,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     opt_state = nnx.state(state.optimizer)
     new_opt_state = jax.device_put(opt_state, device_opt_shardings)
     nnx.update(state.optimizer, new_opt_state)
-  if config.skip_step_on_spikes:
-    # The skip-step optimizer is a GradientTransformationExtraArgs that reads
-    # loss/grad_norm to decide whether to zero the update on a spike. nnx
-    # Optimizer.update forwards these kwargs to tx.update.
-    grad_norm = max_utils.l2norm_pytree(grads)
-    state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+  has_skip_wrapper = (
+      use_skip_step
+      and optimizers.extract_is_skipped(nnx.to_pure_dict(nnx.state(state.optimizer)).get("opt_state", {})) is not None
+  )
+  pass_kwargs = has_skip_wrapper or bool(config.skip_step_on_spikes)
+  if pass_kwargs:
+    # The skip-step optimizer wrappers are GradientTransformationExtraArgs that read
+    # loss and pre-clipping float32 grad_norm to zero the update on a spike or NaN/Inf.
+    state.apply_gradients(grads, loss=loss, grad_norm=raw_grad_norm_for_skip)
   else:
     state.apply_gradients(grads)
   new_state = state
@@ -801,9 +818,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   # Surface skip-step rejections as a TB metric. The skip-step optimizer stores
   # is_skipped in its opt_state; read it back off the optimizer just updated in place.
-  if config.skip_step_on_spikes:
+  if use_skip_step:
     opt_state = nnx.to_pure_dict(nnx.state(new_state.optimizer)).get("opt_state", {})
-    is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
+    is_skipped = optimizers.extract_is_skipped(opt_state)
     if is_skipped is not None:
       scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
   metrics = {
