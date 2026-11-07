@@ -48,6 +48,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.inference import kvcache
 from maxtext.kernels.attention import gdn_cp
+from maxtext.kernels.attention import gdn_fp8_projections
 from maxtext.kernels.attention import gdn_packing
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
@@ -61,6 +62,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
@@ -143,6 +145,147 @@ def resolve_gdn_cp_mode(
   if (use_head_sharded_cp or use_seq_sharded_cp) and getattr(cfg, "context_parallel_load_balance", False):
     raise ValueError("GDN does not support context_parallel_load_balance.")
   return use_head_sharded_cp, use_seq_sharded_cp
+
+
+_GDN_FP8_LOGGED: set[str] = set()
+_GDN_GATED_NORM_LAYOUT_LOGGED: set[str] = set()
+_GDN_IN_PROJ_KERNEL_ORDER_LOGGED: set[str] = set()
+
+
+def _with_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
+  """Applies an XLA `major_to_minor` layout constraint when `x` is a JAX tracer."""
+  try:
+    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return x
+  if not isinstance(x, jax.core.Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
+
+
+def _pin_row_major_layout(x: Array) -> Array:
+  """Constrains `x` to its default row-major XLA layout under `jit`."""
+  return _with_layout_constraint(x, tuple(range(x.ndim)))
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _forward_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
+  """Constrains `x` to `major_to_minor` in the forward pass only, leaving its backward cotangent unconstrained."""
+  return _with_layout_constraint(x, major_to_minor)
+
+
+def _forward_layout_constraint_fwd(x: Array, major_to_minor: tuple[int, ...]):
+  return _with_layout_constraint(x, major_to_minor), None
+
+
+def _forward_layout_constraint_bwd(_major_to_minor, _res, cotangent):
+  return (cotangent,)
+
+
+_forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layout_constraint_bwd)
+
+
+def _forward_row_major(x: Array) -> Array:
+  """Constrains `x` to row-major layout in the forward pass only."""
+  return _forward_layout_constraint(x, tuple(range(x.ndim)))
+
+
+@jax.custom_vjp
+def _pin_row_major_fwd_and_bwd(x: Array) -> Array:
+  """Constrains `x` to row-major layout in both the forward pass and on its cotangent in the backward pass."""
+  return _pin_row_major_layout(x)
+
+
+def _pin_row_major_fwd_and_bwd_fwd(x: Array):
+  return _pin_row_major_layout(x), None
+
+
+def _pin_row_major_fwd_and_bwd_bwd(_res, cotangent: Array):
+  return (_pin_row_major_layout(cotangent),)
+
+
+_pin_row_major_fwd_and_bwd.defvjp(_pin_row_major_fwd_and_bwd_fwd, _pin_row_major_fwd_and_bwd_bwd)
+
+
+def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
+  """Applies `gdn_gated_norm_layout` around `Qwen3NextRMSNormGated` in training (`x` has shape `(B, S, H_v, D_v)`)."""
+  if mode not in _GDN_GATED_NORM_LAYOUT_LOGGED:
+    _GDN_GATED_NORM_LAYOUT_LOGGED.add(mode)
+    if mode == "token_minor":
+      msg = "GDN output pinned token-minor (0, 2, 3, 1) before the gated norm in forward only"
+    else:
+      where = "in forward and on its cotangent" if mode == "natural_fwd_bwd" else "in forward only"
+      msg = f"GDN gated-norm output pinned row-major {where}"
+    max_logging.log(f"[gdn_gated_norm_layout] mode={mode}: {msg}")
+  if mode == "token_minor":
+    return _forward_layout_constraint(x, (0, 2, 3, 1))
+  if mode == "natural":
+    return _forward_row_major(x)
+  if mode == "natural_fwd_bwd":
+    return _pin_row_major_fwd_and_bwd(x)
+  raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}.")
+
+
+def _gdn_in_proj_kernel_order_columns(kernel: Array, num_k_heads: int, head_k_dim: int, v_dim_per_k_head: int) -> Array:
+  """Permutes `in_proj_qkvz` columns from per-key-head `[q | k | v | z]` groups to flat `[q | k | v | z]` blocks."""
+  rows = kernel.shape[:-1]
+  groups = jnp.reshape(kernel, rows + (num_k_heads, 2 * head_k_dim + 2 * v_dim_per_k_head))
+  bounds = (0, head_k_dim, 2 * head_k_dim, 2 * head_k_dim + v_dim_per_k_head, 2 * head_k_dim + 2 * v_dim_per_k_head)
+  blocks = [jnp.reshape(groups[..., lo:hi], rows + (-1,)) for lo, hi in zip(bounds[:-1], bounds[1:])]
+  return jnp.concatenate(blocks, axis=-1)
+
+
+def _gdn_in_proj_kernel_order_dx(d_qkv: Array, d_z: Array, w_qkv: Array, w_z: Array, precision) -> Array:
+  """Input gradient of the two kernel-order projections as a single float32 sum of both partial products."""
+  dims = (((d_qkv.ndim - 1,), (1,)), ((), ()))
+  return lax.dot_general(d_qkv, w_qkv, dims, precision=precision, preferred_element_type=jnp.float32) + lax.dot_general(
+      d_z, w_z, dims, precision=precision, preferred_element_type=jnp.float32
+  )
+
+
+def _gdn_in_proj_kernel_order_dkernel(x: Array, d_qkv: Array, d_z: Array, w_qkv: Array, w_z: Array, precision) -> Array:
+  """Kernel gradient of the two kernel-order projections concatenated by column."""
+  dims = (((x.ndim - 1,), (0,)), ((), ()))
+
+  def dot(rhs):
+    return lax.dot_general(x, rhs, dims, precision=precision)
+
+  (dw_qkv,) = jax.linear_transpose(dot, w_qkv)(d_qkv)
+  (dw_z,) = jax.linear_transpose(dot, w_z)(d_z)
+  return jnp.concatenate([dw_qkv, dw_z], axis=-1)
+
+
+def _gdn_in_proj_kernel_order_gather(kernel: Array, gathered_sharding) -> Array:
+  if gathered_sharding is None:
+    return kernel
+  return jax.lax.with_sharding_constraint(kernel, gathered_sharding)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, precision, gathered_sharding):
+  """Computes `(x @ kernel[:, :num_qkv], x @ kernel[:, num_qkv:])` sharing one kernel gather."""
+  return _gdn_in_proj_kernel_order_dot_fwd(x, kernel, num_qkv, precision, gathered_sharding)[0]
+
+
+def _gdn_in_proj_kernel_order_dot_fwd(x, kernel, num_qkv, precision, gathered_sharding):
+  gathered = _gdn_in_proj_kernel_order_gather(kernel, gathered_sharding)
+  dims = (((x.ndim - 1,), (0,)), ((), ()))
+  qkv = lax.dot_general(x, gathered[:, :num_qkv], dims, precision=precision)
+  z = lax.dot_general(x, gathered[:, num_qkv:], dims, precision=precision)
+  return (qkv, z), (x, kernel)
+
+
+def _gdn_in_proj_kernel_order_dot_bwd(num_qkv, precision, gathered_sharding, residuals, cotangents):
+  x, kernel = residuals
+  d_qkv, d_z = cotangents
+  gathered = _gdn_in_proj_kernel_order_gather(kernel, gathered_sharding)
+  w_qkv, w_z = gathered[:, :num_qkv], gathered[:, num_qkv:]
+  d_x = _gdn_in_proj_kernel_order_dx(d_qkv, d_z, w_qkv, w_z, precision).astype(x.dtype)
+  d_kernel = _gdn_in_proj_kernel_order_dkernel(x, d_qkv, d_z, w_qkv, w_z, precision).astype(kernel.dtype)
+  return d_x, d_kernel
+
+
+_gdn_in_proj_kernel_order_dot.defvjp(_gdn_in_proj_kernel_order_dot_fwd, _gdn_in_proj_kernel_order_dot_bwd)
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -340,8 +483,12 @@ def jax_chunk_gated_delta_rule(
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
   query = query * scale
 
-  B, seq_len, H, K_dim = key.shape
+  B, seq_len, H_k, K_dim = key.shape
+  H = value.shape[2]
   V_dim = value.shape[-1]
+  if H % H_k != 0:
+    raise ValueError(f"Expected value heads ({H}) to be divisible by key heads ({H_k}).")
+  repeats = H // H_k
 
   pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
   if pad_len > 0:
@@ -361,9 +508,9 @@ def jax_chunk_gated_delta_rule(
 
   num_chunks = query.shape[1] // chunk_size
 
-  # Helper: (B, S, H, D) -> (B, N, H, C, D)
+  # Helper: (B, S, H_x, D) -> (B, N, H_x, C, D)
   def to_chunk(x):
-    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
+    return x.reshape(B, num_chunks, chunk_size, x.shape[2], -1).transpose(0, 1, 3, 2, 4)
 
   # Helper for scalars: (B, S, H) -> (B, N, H, C)
   def to_chunk_scalar(x):
@@ -417,17 +564,16 @@ def jax_chunk_gated_delta_rule(
     m_keep = None
     valid_c = None
 
-  k_beta = k_c * beta_c[..., None]
-
-  # S Matrix Calculation
-  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
-  S = S.astype(jnp.float32)
+  # Compute k_c @ k_c^T at H_k key heads before expanding across grouped value heads.
+  kk = jnp.matmul(k_c, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST).astype(jnp.float32)
+  if repeats > 1:
+    kk = jnp.repeat(kk, repeats, axis=2)
 
   # Apply mask BEFORE exp to prevent 'inf' gradients
   g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
   g_diff = jnp.where(mask_strict, g_diff, -1e30)
 
-  S = S * jnp.exp(g_diff)
+  S = kk * (beta_c.astype(jnp.float32)[..., :, None] * jnp.exp(g_diff))
   S = jnp.where(mask_strict, S, 0.0)
 
   # Inversion (A) - Strictly float32
@@ -444,6 +590,8 @@ def jax_chunk_gated_delta_rule(
   u_chunks = jnp.matmul(A, v_beta.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
   u_chunks = checkpoint_name(u_chunks.astype(compute_dtype), "gdn_chunk_states")
 
+  k_c_v = jnp.repeat(k_c, repeats, axis=2) if repeats > 1 else k_c
+  k_beta = k_c_v * beta_c[..., None]
   g_fwd_factor = jnp.exp(g_cumsum) * m_in if m_in is not None else jnp.exp(g_cumsum)
   k_beta_g = k_beta.astype(jnp.float32) * g_fwd_factor[..., None]
   w_chunks = jnp.matmul(A, k_beta_g, precision=jax.lax.Precision.HIGHEST)
@@ -501,10 +649,20 @@ def jax_chunk_gated_delta_rule(
       valid_c_i = None
     prec = jax.lax.Precision.HIGHEST
 
+    # Compute intra-chunk q @ k^T at H_k key heads before expanding to H value heads.
+    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=prec).astype(jnp.float32)
+    if repeats > 1:
+      attn = jnp.repeat(attn, repeats, axis=1)
+      q_v = jnp.repeat(q, repeats, axis=1)
+      k_v = jnp.repeat(k, repeats, axis=1)
+    else:
+      q_v = q
+      k_v = k
+
     # --- Output Computation ---
     # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
     g_exp_fwd = jnp.exp(g) * m_in_i if m_in_i is not None else jnp.exp(g)
-    q_g = q.astype(jnp.float32) * g_exp_fwd[..., None]
+    q_g = q_v.astype(jnp.float32) * g_exp_fwd[..., None]
     attn_inter = jnp.matmul(q_g, h, precision=prec)
 
     # 2. Delta Rule Subtraction (v_prime and v_new)
@@ -512,11 +670,7 @@ def jax_chunk_gated_delta_rule(
     v_prime = jnp.matmul(w.astype(jnp.float32), h, precision=prec)
     v_new = u.astype(jnp.float32) - v_prime
 
-    # 3. Intra-chunk: q(dtype) @ k(dtype) -> f32
-    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=prec)
-    attn = attn.astype(jnp.float32)
-
-    # Mask before exp
+    # 3. Intra-chunk decay mask
     g_diff = g[..., :, None] - g[..., None, :]
     g_diff = jnp.where(mask_intra, g_diff, -1e30)
 
@@ -544,7 +698,7 @@ def jax_chunk_gated_delta_rule(
       g_diff_exp_state = (jnp.exp(bwd_diff) * m_out_i)[..., None]
     else:
       g_diff_exp_state = jnp.exp(g[..., -1, None] - g)[..., None]
-    k_i_g_diff = k.astype(jnp.float32) * g_diff_exp_state
+    k_i_g_diff = k_v.astype(jnp.float32) * g_diff_exp_state
 
     update_term = jnp.matmul(k_i_g_diff.swapaxes(-1, -2), v_new, precision=prec)
     h_new = h_new + update_term
@@ -557,7 +711,8 @@ def jax_chunk_gated_delta_rule(
     # Sequence is sharded over cp_axis, so a sequential scan over chunks is not
     # available. Fold the local chunks into one affine map, exchange those, then
     # replay locally from the correct incoming state. See kernels/attention/gdn_cp.py.
-    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_scan, g_scan, m_out=m_out_scan, m_keep=m_keep_scan)
+    k_v_scan = jnp.repeat(k_scan, repeats, axis=2) if repeats > 1 else k_scan
+    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_v_scan, g_scan, m_out=m_out_scan, m_keep=m_keep_scan)
     h_in, final_h = gdn_cp.incoming_state(A_loc, B_loc, h_init, cp_axis)
     _, o_chunks = lax.scan(scan_body, h_in, xs)
 
@@ -609,6 +764,15 @@ def jax_ar_gated_delta_rule(
   scale = jax.lax.rsqrt(jnp.array(q.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
   q = q * scale
 
+  attn_intra = jnp.sum(q.astype(jnp.float32) * k.astype(jnp.float32), axis=-1, keepdims=True)
+  if v.shape[1] != q.shape[1]:
+    if v.shape[1] % q.shape[1] != 0:
+      raise ValueError(f"Expected value heads ({v.shape[1]}) to be divisible by key heads ({q.shape[1]}).")
+    repeats = v.shape[1] // q.shape[1]
+    q = jnp.repeat(q, repeats, axis=1)
+    k = jnp.repeat(k, repeats, axis=1)
+    attn_intra = jnp.repeat(attn_intra, repeats, axis=1)
+
   g_exp = jnp.exp(g)[..., None]
   beta_exp = beta[..., None]
 
@@ -627,7 +791,6 @@ def jax_ar_gated_delta_rule(
   q_g = (q.astype(jnp.float32) * g_exp)[..., None, :]  # (B, H, 1, K)
   attn_inter = jnp.matmul(q_g, state, precision=jax.lax.Precision.HIGHEST).squeeze(-2)
 
-  attn_intra = jnp.sum(q.astype(jnp.float32) * k.astype(jnp.float32), axis=-1, keepdims=True)
   core_attn_out = attn_inter + attn_intra * v_new
 
   # State Update: new_state = state * exp(g) + k^T @ v_new
@@ -727,6 +890,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       self.cache = None  # No cache for train mode or when inputs_shape not provided
 
     block_size = getattr(cfg, "weight_block_size", None)
+    logical_rules_cfg = getattr(cfg, "logical_axis_rules", ()) or ()
+    gdn_embed_axis = "embed_gdn" if any(rule[0] == "embed_gdn" for rule in logical_rules_cfg) else "embed_attn"
 
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
@@ -734,7 +899,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
         dtype=cfg.dtype,
         weight_dtype=get_weight_dtype(cfg, "in_proj_qkvz"),
-        kernel_axes=("embed_attn", "gdn_head"),
+        kernel_axes=(gdn_embed_axis, "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
@@ -746,7 +911,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.num_v_heads * 2),
         dtype=cfg.dtype,
         weight_dtype=get_weight_dtype(cfg, "in_proj_ba"),
-        kernel_axes=("embed_attn", "gdn_head"),
+        kernel_axes=(gdn_embed_axis, "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         quant=get_quant(cfg, "in_proj_ba", self.quant),
@@ -799,7 +964,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(in_features,),
         dtype=cfg.dtype,
         weight_dtype=get_weight_dtype(cfg, "out_proj"),
-        kernel_axes=("gdn_head", "embed_attn"),
+        kernel_axes=("gdn_head", gdn_embed_axis),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
@@ -844,6 +1009,93 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         _sharding((KV_BATCH, cp_len, gdn_head_axis, None)),
         _sharding((KV_BATCH, gdn_head_axis, None, None)),
     )
+
+  @staticmethod
+  def _custom_vjp_dense_kernel(dense: DenseGeneral, option: str, name: str) -> Array:
+    """Reads `dense.kernel` cast to `dense.dtype` for custom-VJP projection paths (`gdn_in_proj_kernel_order`, FP8)."""
+    if (
+        dense.quant is not None
+        or getattr(dense, "kernel_scale", None) is not None
+        or getattr(dense, "bias", None) is not None
+        or getattr(dense, "parameter_memory_host_offload", False)
+        or getattr(dense, "use_two_stage_all_gather", False)
+        or getattr(dense, "gathered_kernel_axes", None) is not None
+        or dense.shard_mode == ShardMode.EXPLICIT
+        or len(dense.in_features_shape) != 1
+        or len(dense.out_features_shape) != 1
+    ):
+      raise ValueError(
+          f"{option}=True supports only an unquantized {name} kernel without bias, kept on device,"
+          " without two-stage or gather-once kernel all-gather, in auto shard mode."
+      )
+    if isinstance(dense.kernel, nnx.Variable):
+      kernel = dense.kernel[...]
+    elif hasattr(dense.kernel, "get_value"):
+      kernel = dense.kernel.get_value()
+    elif isinstance(dense.kernel, (dict, nnx.State)) and "value" in dense.kernel:
+      kernel = dense.kernel["value"]
+    else:
+      kernel = dense.kernel
+    return jnp.asarray(kernel, dense.dtype)
+
+  def _gathered_kernel_sharding(self, ndim: int):
+    """Sharding a projection kernel is gathered to before its matmul: replicated, or `None` without a mesh."""
+    return None if self.mesh is None else jax.sharding.NamedSharding(self.mesh, P(*((None,) * ndim)))
+
+  def _fp8_projection_layout(self, batch: int) -> gdn_fp8_projections.ProjectionLayout:
+    """Builds `ProjectionLayout` (kernel gather sharding + token PartitionSpec) for `gdn_fp8_projections`."""
+    if self.mesh is None:
+      return gdn_fp8_projections.ProjectionLayout()
+    logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = get_gdn_cp_sharding_info(self.config, self.mesh)
+    token_spec = logical_to_mesh_axes((KV_BATCH, cp_len), mesh=self.mesh, rules=logical_rules)
+    if cp_axes_active and token_spec[1] is None:
+      token_spec = P(token_spec[0], cp_axis_for_pspec)
+    token_spec = remove_incompatible_mesh_axes_from_partition_spec(
+        token_spec, (batch, 1), self.mesh, dims=(0,), allow_remove_axes=True
+    )
+    return gdn_fp8_projections.ProjectionLayout(
+        gathered_sharding=self._gathered_kernel_sharding(2), mesh=self.mesh, token_spec=token_spec
+    )
+
+  def _fp8_projection(self, dense: DenseGeneral, inputs: Array, name: str) -> Array:
+    """Runs `dense(inputs)` as a dynamic-absmax FP8 matmul (`gdn_fp8_projections`)."""
+    kernel = self._custom_vjp_dense_kernel(dense, "gdn_fp8_projections", name)
+    if inputs.shape[-1] != kernel.shape[0]:
+      raise ValueError(f"{name}: input dimension {inputs.shape[-1]} does not match kernel {kernel.shape[0]}.")
+    x = jnp.asarray(inputs, dense.dtype)
+    (output,) = gdn_fp8_projections.fp8_projection(x, kernel, (), self._fp8_projection_layout(x.shape[0]))
+    if name not in _GDN_FP8_LOGGED:
+      _GDN_FP8_LOGGED.add(name)
+      max_logging.log(
+          f"[gdn_fp8_projections] {name} {x.shape} x {kernel.shape} -> {output.shape}: FP8 matmuls (fwd E4M3 x E4M3,"
+          " dgrad E5M2 x E4M3 reusing forward kernel, wgrad with folded per-token scales)"
+      )
+    return output
+
+  def _in_proj_qkvz_kernel_order(self, hidden_states: Array, head_sharding, fp8: bool = False) -> tuple[Array, Array]:
+    """Runs `in_proj_qkvz` directly in flat `[q | k | v]` + `z` order sharing one kernel gather."""
+    dense = self.in_proj_qkvz
+    kernel = self._custom_vjp_dense_kernel(dense, "gdn_in_proj_kernel_order", "in_proj_qkvz")
+    v_dim_per_k_head = self.v_heads_per_k_head * self.head_v_dim
+    kernel = _gdn_in_proj_kernel_order_columns(kernel, self.num_k_heads, self.head_k_dim, v_dim_per_k_head)
+    num_qkv = 2 * self.key_dim + self.value_dim
+    gathered_sharding = self._gathered_kernel_sharding(kernel.ndim)
+    x = jnp.asarray(hidden_states, dense.dtype)
+    if fp8:
+      qkv, z = gdn_fp8_projections.fp8_projection(x, kernel, (num_qkv,), self._fp8_projection_layout(x.shape[0]))
+    else:
+      qkv, z = _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, lax.Precision(dense.matmul_precision), gathered_sharding)
+    if "logged" not in _GDN_IN_PROJ_KERNEL_ORDER_LOGGED:
+      _GDN_IN_PROJ_KERNEL_ORDER_LOGGED.add("logged")
+      max_logging.log(
+          f"[gdn_in_proj_kernel_order] in_proj_qkvz -> qkv {qkv.shape} + z {z.shape}: one gathered kernel,"
+          " float32-sum input gradient" + (" (FP8 matmuls, gdn_fp8_projections)" if fp8 else "")
+      )
+    qkv = checkpoint_name(qkv, "qkv_proj")
+    z = checkpoint_name(z, "qkv_proj")
+    batch, seq_len = hidden_states.shape[:2]
+    z = jnp.reshape(z, (batch, seq_len, self.num_v_heads, self.head_v_dim), out_sharding=head_sharding)
+    return qkv, z
 
   @staticmethod
   def _mamba_block_table_slots(
@@ -945,78 +1197,96 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
-    # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-    qkvz = checkpoint_name(self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding), "qkv_proj")
+    in_proj_kernel_order = (
+        getattr(cfg, "gdn_in_proj_kernel_order", False) and model_mode == MODEL_MODE_TRAIN and not use_paged_state
+    )
+    use_fp8_projections = (
+        getattr(cfg, "gdn_fp8_projections", False) and model_mode == MODEL_MODE_TRAIN and not use_paged_state
+    )
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
-    # =========================================================================
-    # QKVZ and BA Reshaping and Splitting (shared by both paths)
-    # =========================================================================
-    # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
-    new_shape_qkvz = (
-        batch,
-        seq_len,
-        self.num_k_heads,  # H_k
-        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
-    )
-    # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
-    mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
-    if self.mesh is not None:
-      logical_rules = get_logical_axis_rules()
-      # LENGTH, not None. This with_sharding_constraint told XLA to gather the
-      # full sequence onto every device for the qkvz projection. With ctx=2 at
-      # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
-      # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
-      # and the reason the first version of this patch cut GDN memory but still
-      # lost overall.
-      cp_len = LENGTH if gdn_context_axes(cfg) else None
-      qkvz_pspec = logical_to_mesh_axes(
-          (KV_BATCH, cp_len, gdn_head_axis, None),
-          mesh=self.mesh,
-          rules=logical_rules,
-      )
-      # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
-      qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-          qkvz_pspec,
-          mixed_qkvz.shape,
-          self.mesh,
-          dims=(0,),
-          allow_remove_axes=True,
-      )
-      qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
-      # Under ShardMode.EXPLICIT `with_sharding_constraint` is an assertion rather than
-      # a hint and rejects any layout it has to change, so reshard through the helper.
-      mixed_qkvz = maybe_shard_with_name(
-          mixed_qkvz,
-          qkvz_sharding,
-          shard_mode=cfg.shard_mode,
-          debug_sharding=cfg.debug_sharding,
-      )
+    qkv_kernel_order = None
+    if in_proj_kernel_order:
+      qkv_kernel_order, z = self._in_proj_qkvz_kernel_order(hidden_states, head_sharding, fp8=use_fp8_projections)
+      query = key = value = value_raw = None
+    else:
+      # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
+      if use_fp8_projections:
+        qkvz = self._fp8_projection(self.in_proj_qkvz, hidden_states, "in_proj_qkvz")
+      else:
+        qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+      if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
+        qkvz = _pin_row_major_layout(qkvz)
+      qkvz = checkpoint_name(qkvz, "qkv_proj")
 
-    split_indices_qkvz = [
-        self.head_k_dim,  # D_k
-        2 * self.head_k_dim,  # 2 * D_k
-        2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
-    ]
-    # query: (B, S, H_k, D_k)
-    # key: (B, S, H_k, D_k)
-    # value_raw: (B, S, H_k, V_per_K * D_v)
-    # z_raw: (B, S, H_k, V_per_K * D_v)
-    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+      # =========================================================================
+      # QKVZ Reshaping and Splitting
+      # =========================================================================
+      # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
+      new_shape_qkvz = (
+          batch,
+          seq_len,
+          self.num_k_heads,  # H_k
+          2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+      )
+      # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
+      mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
+      if self.mesh is not None:
+        logical_rules = get_logical_axis_rules()
+        # LENGTH, not None. This with_sharding_constraint told XLA to gather the
+        # full sequence onto every device for the qkvz projection. With ctx=2 at
+        # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
+        # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
+        # and the reason the first version of this patch cut GDN memory but still
+        # lost overall.
+        cp_len = LENGTH if gdn_context_axes(cfg) else None
+        qkvz_pspec = logical_to_mesh_axes(
+            (KV_BATCH, cp_len, gdn_head_axis, None),
+            mesh=self.mesh,
+            rules=logical_rules,
+        )
+        # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
+        qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            qkvz_pspec,
+            mixed_qkvz.shape,
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
+        )
+        qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
+        # Under ShardMode.EXPLICIT `with_sharding_constraint` is an assertion rather than
+        # a hint and rejects any layout it has to change, so reshard through the helper.
+        mixed_qkvz = maybe_shard_with_name(
+            mixed_qkvz,
+            qkvz_sharding,
+            shard_mode=cfg.shard_mode,
+            debug_sharding=cfg.debug_sharding,
+        )
 
-    # value: (B, S, H_v, D_v)
-    value = jnp.reshape(
-        value_raw,
-        (batch, seq_len, self.num_v_heads, self.head_v_dim),
-        out_sharding=head_sharding,
-    )
-    # z: (B, S, H_v, D_v)
-    z = jnp.reshape(
-        z_raw,
-        (batch, seq_len, self.num_v_heads, self.head_v_dim),
-        out_sharding=head_sharding,
-    )
+      split_indices_qkvz = [
+          self.head_k_dim,  # D_k
+          2 * self.head_k_dim,  # 2 * D_k
+          2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
+      ]
+      # query: (B, S, H_k, D_k)
+      # key: (B, S, H_k, D_k)
+      # value_raw: (B, S, H_k, V_per_K * D_v)
+      # z_raw: (B, S, H_k, V_per_K * D_v)
+      query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+
+      # value: (B, S, H_v, D_v)
+      value = jnp.reshape(
+          value_raw,
+          (batch, seq_len, self.num_v_heads, self.head_v_dim),
+          out_sharding=head_sharding,
+      )
+      # z: (B, S, H_v, D_v)
+      z = jnp.reshape(
+          z_raw,
+          (batch, seq_len, self.num_v_heads, self.head_v_dim),
+          out_sharding=head_sharding,
+      )
 
     # BA Reshaping and Splitting
     new_shape_ba = (
@@ -1157,18 +1427,20 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
       return output, (new_conv_state_paged, new_recurrent_state_paged)
 
-    # Flatten head dimensions for concatenation before conv
-    # q: (B, S, K_dim)
-    q = jnp.reshape(query, (batch, seq_len, -1), out_sharding=flat_sharding)
-    # k: (B, S, K_dim)
-    k = jnp.reshape(key, (batch, seq_len, -1), out_sharding=flat_sharding)
-    # v: (B, S, V_dim)
-    v = jnp.reshape(value, (batch, seq_len, -1), out_sharding=flat_sharding)
-
     # =========================================================================
     # STEP B: 1D Convolution
     # =========================================================================
-    qkv = jnp.concatenate([q, k, v], axis=-1)
+    if qkv_kernel_order is not None:
+      qkv = qkv_kernel_order
+    else:
+      # Flatten head dimensions for concatenation before conv
+      # q: (B, S, K_dim)
+      q = jnp.reshape(query, (batch, seq_len, -1), out_sharding=flat_sharding)
+      # k: (B, S, K_dim)
+      k = jnp.reshape(key, (batch, seq_len, -1), out_sharding=flat_sharding)
+      # v: (B, S, V_dim)
+      v = jnp.reshape(value, (batch, seq_len, -1), out_sharding=flat_sharding)
+      qkv = jnp.concatenate([q, k, v], axis=-1)
     if decoder_segment_ids is not None:
       decoder_segment_ids = jnp.broadcast_to(decoder_segment_ids, (batch, seq_len))
       if cfg.shard_mode == ShardMode.EXPLICIT and flat_sharding is not None:
@@ -1323,13 +1595,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       value = jnp.where(mask[..., None, None], value, 0.0)
       g = jnp.where(mask[..., None], g, 0.0)
 
-    if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
-      repeats = self.num_v_heads // self.num_k_heads
-      # query shape after repeat: (B, S, H_v, D_k)
-      query = jnp.repeat(query, repeats, axis=2, out_sharding=head_sharding)
-      # key shape after repeat: (B, S, H_v, D_k)
-      key = jnp.repeat(key, repeats, axis=2, out_sharding=head_sharding)
-
+    # GQA key/query expansion across value-head groups is deferred inside
+    # `jax_chunk_gated_delta_rule` and `jax_ar_gated_delta_rule` so L2 norm,
+    # query scaling, and intra-chunk K @ K^T / Q @ K^T matmuls run at H_k heads.
     chunk_inverse = getattr(cfg, "gdn_chunk_inverse", "block_doubling")
     if seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       core_attn_out, next_recurrent_state = jax_ar_gated_delta_rule(
@@ -1565,16 +1833,28 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
 
     # The normalization and gating is applied per-head on the value dimension.
+    out_proj_token_minor = model_mode == MODEL_MODE_TRAIN and getattr(cfg, "gdn_out_proj_token_minor", False)
+    gated_norm_layout = getattr(cfg, "gdn_gated_norm_layout", "auto") if out_proj_token_minor else "auto"
+    if gated_norm_layout == "token_minor":
+      core_attn_out = _pin_gdn_gated_norm_layout(core_attn_out, gated_norm_layout)
 
     # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
     gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
+    if gated_norm_layout in ("natural", "natural_fwd_bwd"):
+      gated_output_reshaped = _pin_gdn_gated_norm_layout(gated_output_reshaped, gated_norm_layout)
 
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
+    if out_proj_token_minor:
+      gated_output = _forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)
-    output = checkpoint_name(self.out_proj(gated_output, out_sharding=out_sharding), "out_proj")
+    if use_fp8_projections:
+      output = self._fp8_projection(self.out_proj, gated_output, "out_proj")
+    else:
+      output = self.out_proj(gated_output, out_sharding=out_sharding)
+    output = checkpoint_name(output, "out_proj")
 
     return output, active_cache
 
