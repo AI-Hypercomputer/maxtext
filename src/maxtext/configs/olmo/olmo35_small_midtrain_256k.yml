@@ -17,23 +17,29 @@
 #
 # Defaults below target 3,072 TPU v4 chips (`8x8x48` single slice) at 25.17M tokens/step (< 32M):
 #   DP=12, CP=32 (2D 8H x 4V Ulysses), EP=8, FSDP=1, ZeRO-1=true, per_device_batch_size=0.03125
-#   -> 96 sequences x 262,144 tokens = 25,165,824 tokens/step (8,192 tokens/chip, zero PCIe offload).
+#   -> 96 sequences x 262,144 tokens = 25,165,824 tokens/step (8,192 tokens/chip, zero PCIe offload;
+#      Measured 11.87 GiB HBM / 12.26 s text, 14.19 GiB HBM / 12.77 s VLM -> ~21.7h / ~22.6h for 160B tokens).
+#
+# Required environment variables for direct `train.py` launches (prevents legacy 2-stage RS at DP >= 8):
+#   export OLMOE3_ENABLE_2STAGE_RS=0 OLMOE3_FAST_HOST_LOOP=1 OLMOE3_FAST_SC_DEVICE_PUT=1
+# Recommended production flags (avoid ~20-80 min cold XLA recompiles & slow OCDBT merges on 811 GiB ckpts):
+#   jax_compilation_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
 #
 # Common scale overrides:
 #   - 3,072 chips (`3x v4-2048` DCN @ 25.17M tok/step):
 #       dcn_data_parallelism=3 ici_data_parallelism=4 ici_context_parallelism=32 ici_expert_parallelism=8 per_device_batch_size=0.03125
-#   - 3,072 chips (`8x8x48` @ 50.33M / 100.66M tok/step, zero PCIe offload, ~30 min cold compile):
-#       ici_data_parallelism=12 ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625 remat_policy=full moe_a2a_token_chunks=2  # 50.33M
-#       ici_data_parallelism=12 ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  remat_policy=full moe_a2a_token_chunks=2  # 100.66M (27.5 GiB text / 28.4 GiB VLM)
+#   - 3,072 chips (`8x8x48` @ 50.33M / 100.66M tok/step, zero PCIe offload, ~19-26 min cold compile):
+#       ici_data_parallelism=12 ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625 remat_policy=full moe_a2a_token_chunks=2  # 50.33M (Measured 16.61 GiB text / 18.25 GiB VLM, ~18.4h / ~18.8h)
+#       ici_data_parallelism=12 ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  remat_policy=full moe_a2a_token_chunks=2  # 100.66M (Measured 26.45 GiB text / 27.55 GiB VLM, ~15.2h / ~15.5h)
 #   - 512 chips (`8x8x8` v4-1024 @ 16.78M / 8.39M tok/step < 32M, zero PCIe offload):
-#       ici_data_parallelism=2  ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  remat_policy=full moe_a2a_token_chunks=2  # 16.78M
-#       ici_data_parallelism=2  ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625 remat_policy=full moe_a2a_token_chunks=2  # 8.39M (3K 50.33M replica)
+#       ici_data_parallelism=2  ici_context_parallelism=8  ici_expert_parallelism=32 per_device_batch_size=0.125  remat_policy=full moe_a2a_token_chunks=2  # 16.78M (Measured 34.4s text / 35.2s VLM, 14.1% MFU)
+#       ici_data_parallelism=2  ici_context_parallelism=16 ici_expert_parallelism=16 per_device_batch_size=0.0625 remat_policy=full moe_a2a_token_chunks=2  # 8.39M  (Measured 20.8s text / 21.3s VLM, 11.6% MFU)
 #   - 512 chips (`8x8x8` v4-1024 @ 4.19M tok/step, per-chip replica of 3K 25.17M recipe):
-#       ici_data_parallelism=2  ici_context_parallelism=32 ici_expert_parallelism=8  per_device_batch_size=0.03125 moe_a2a_token_chunks=2
+#       ici_data_parallelism=2  ici_context_parallelism=32 ici_expert_parallelism=8  per_device_batch_size=0.03125 moe_a2a_token_chunks=2                  # 4.19M  (Measured 12.3s text / 12.8s VLM, 9.9% / 9.7% MFU)
 #   - 128 chips (`4x4x8` v4-256 @ 4.19M tok/step, zero optimizer offload):
 #       ici_data_parallelism=1  ici_context_parallelism=8  ici_expert_parallelism=16 per_device_batch_size=0.125  decoder_layer_input=offload context=remat num_vocab_tiling=16 moe_a2a_token_chunks=16 olmo_vit_crop_chunk_size=16
 #   - Mixed multimodal 256K (add SigLIP2-SO400M 25L + Connector):
-#       use_multimodal=true olmo_max_crops_per_seq=128 olmo_vit_cp_shard_crops=true olmo_vit_remat_blocks=true olmo_vit_crop_chunk_size=16
+#       use_multimodal=true olmo_max_crops_per_seq=128 olmo_vit_cp_shard_crops=true olmo_vit_remat_blocks=true olmo_vit_crop_chunk_size=16 olmo_use_loss_weights=true
 
 base_config: "base.yml"
 model_name: "olmo35-small-e256k8-sh2x"
@@ -159,7 +165,7 @@ freeze_vision_encoder_params: false
 olmo_max_crops_per_seq: 128
 olmo_vit_cp_shard_crops: true
 olmo_vit_remat_blocks: true
-olmo_vit_crop_chunk_size: 4
+olmo_vit_crop_chunk_size: 16
 olmo_vision_lr_scale: 0.1
 olmo_connector_lr_scale: 2.0
 olmo_use_loss_weights: false  # set true when VLM loader yields per-token float32 loss_weights

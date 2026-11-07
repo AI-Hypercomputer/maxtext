@@ -17,7 +17,11 @@
 #
 # Defaults target 512 TPU v4 chips (`8x8x8` v4-1024):
 #   DP=8, CP=1, EP=64, FSDP=1, ZeRO-1=true, per_device_batch_size=1.0 (512 seqs = 4.19M tok/step, 64 crops/seq;
-#   EP=64 cleanly divides d_vit=1,152 to shard all 25L SigLIP2 weights 64-way across each 8x8x1 plane).
+#   Measured 4,673 ms / 25.38% MFU / 15.46 GiB HBM; EP=64 shards 25L SigLIP2 weights 64-way across each 8x8 plane).
+#   Required environment variables for direct `train.py` launches (prevents legacy 2-stage RS at DP >= 8):
+#     export OLMOE3_ENABLE_2STAGE_RS=0 OLMOE3_FAST_HOST_LOOP=1 OLMOE3_FAST_SC_DEVICE_PUT=1
+#   Recommended production flags:
+#     jax_compilation_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
 #   For exact 128-seq (1.05M tok/step) Stage 1/2 batch on 128 chips (`v4-256`):
 #     ici_data_parallelism=2 ici_expert_parallelism=64 per_device_batch_size=1.0
 #   For Stage 1 Connector Bridge (freeze 25L SigLIP2 + 40L LM, train Connector + 6 special <im_*> rows):
@@ -65,7 +69,7 @@ decoder_layer_input: "device"
 kda_fused_state_stride: 0
 moe_routing_maps: "device"
 moe_routing: "device"
-context: "device"
+context: "remat"
 
 # Sharding (512 TPU v4 chips default; zero offload, EP=64 shards 25L SigLIP2 64-way)
 custom_mesh_and_rule: "cp-as-ep"
