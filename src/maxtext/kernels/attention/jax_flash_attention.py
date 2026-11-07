@@ -163,15 +163,18 @@ def _flash_attention_block_masked_short_seq(
   )
 
   # Initialize `l` (logsumexp) and `m` (max_logits) for the online softmax.
+  # Both are kept in float32 whatever the input dtype. The backward pass
+  # recomputes p = exp(s - logsumexp) from these statistics, so a bfloat16
+  # logsumexp gives a percent-level error in every recomputed probability.
   # `l` is initialized to 0 since no blocks have been processed yet and the sum
   # is 0.
-  l = jnp.zeros((batch_size, num_kv_heads, q_groups, q_seq_len), dtype=data_type)
+  l = jnp.zeros((batch_size, num_kv_heads, q_groups, q_seq_len), dtype=jnp.float32)
   # `m` is initialized to the mask_value so that the first block's maximum logit
   # correctly becomes the running maximum.
   m = jnp.full(
       (batch_size, num_kv_heads, q_groups, q_seq_len),
       mask_value,
-      dtype=data_type,
+      dtype=jnp.float32,
   )
 
   output = jnp.zeros(
@@ -245,17 +248,23 @@ def _flash_attention_block_masked_short_seq(
           p_i_j = must_fuse_call("1")(fuse_this)(q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j)
         else:
           p_i_j = fuse_this(q_slice, k_j_slice, mask_value, broadcasted_mask, m_i_j)
-        l_i_j = p_i_j.sum(axis=-1)
+        l_i_j = p_i_j.sum(axis=-1, dtype=jnp.float32)
         assert m_i_j.shape == m_i_slice.shape
+        # p_i_j above uses the block maximum in the logits dtype; the running
+        # statistics use float32.
+        m_i_j = m_i_j.astype(jnp.float32)
         m_i_new = jnp.maximum(m_i_slice, m_i_j)
         m_i_difference = jnp.exp(m_i_slice - m_i_new)
         m_i_j_difference = jnp.exp(m_i_j - m_i_new)
         l_i_new = m_i_difference * l_i_slice + m_i_j_difference * l_i_j
 
         divider = l_i_new[..., None]
+        # With float32 logits, p_i_j is float32. Cast it to the value dtype so
+        # that P @ V stays a bfloat16 MXU matmul. This is a no-op when the
+        # logits dtype equals the value dtype.
         pv = jnp.einsum(
             "bxhqk,bxkc->bxhqc",
-            p_i_j,
+            p_i_j.astype(v_j_slice.dtype),
             v_j_slice,
             preferred_element_type=data_type,
         )
@@ -267,7 +276,7 @@ def _flash_attention_block_masked_short_seq(
         pv = layout.with_layout_constraint(pv, DLL(major_to_minor=(0, 1, 2, 4, 3)))
         numerator = l_i_slice[..., None] * m_i_difference[..., None] * output_i_slice + m_i_j_difference[..., None] * pv
 
-        output_i_slice_new = numerator / divider
+        output_i_slice_new = (numerator / divider).astype(data_type)
         output = jax.lax.dynamic_update_index_in_dim(output, output_i_slice_new, i * block_q, axis=-2)
         l = jax.lax.dynamic_update_index_in_dim(l, l_i_new, i * block_q, axis=-1)
         m = jax.lax.dynamic_update_index_in_dim(m, m_i_new, i * block_q, axis=-1)
@@ -353,11 +362,12 @@ def _flash_attention_block_masked_long_seq(
       segment_ids=segment_ids,
   )
 
-  l = jnp.zeros((batch_size, num_kv_heads, q_groups, q_seq_len), dtype=data_type)
+  # Keep `l` and `m` in float32; see _flash_attention_block_masked_short_seq.
+  l = jnp.zeros((batch_size, num_kv_heads, q_groups, q_seq_len), dtype=jnp.float32)
   m = jnp.full(
       (batch_size, num_kv_heads, q_groups, q_seq_len),
       mask_value,
-      dtype=data_type,
+      dtype=jnp.float32,
   )
   output = jnp.zeros(
       (
@@ -432,15 +442,22 @@ def _flash_attention_block_masked_long_seq(
             m_i_j,
         ):
           p_i_j = jnp.exp(s_i_j - m_i_j[..., None])
+          # p_i_j above uses the block maximum in the logits dtype; the running
+          # statistics use float32.
+          m_i_j = m_i_j.astype(jnp.float32)
           m_i_new = jnp.maximum(m_i_slice, m_i_j)
           m_i_difference = jnp.exp(m_i_slice - m_i_new)
           m_i_j_difference = jnp.exp(m_i_j - m_i_new)
 
+          # Accumulate in float32 so that the row sum l_i_j (the last column)
+          # keeps full precision. The MXU accumulates in float32 anyway. Cast
+          # p_i_j to the value dtype so that this stays a bfloat16 matmul when
+          # the logits are float32 (a no-op otherwise).
           pv_aug = jnp.einsum(
               "bxhqk,bxkc->bxhqc",
-              p_i_j,
+              p_i_j.astype(v_j_slice.dtype),
               v_j_slice,
-              preferred_element_type=data_type,
+              preferred_element_type=jnp.float32,
           )
           # This forces the layout of the final @V to have better utilization
           # by avoiding using XLU:
@@ -452,7 +469,9 @@ def _flash_attention_block_masked_long_seq(
           l_i_j = pv_aug[..., -1]
 
           l_i_new = m_i_difference * l_i_slice + m_i_j_difference * l_i_j
-          output_i_slice_new = m_i_difference[..., None] * output_i_slice + m_i_j_difference[..., None] * pv
+          output_i_slice_new = (
+              m_i_difference[..., None] * output_i_slice + m_i_j_difference[..., None] * pv
+          ).astype(data_type)
           return output_i_slice_new, l_i_new, m_i_new
 
         if fuse_logits:
@@ -490,7 +509,7 @@ def _flash_attention_block_masked_long_seq(
   # for both MHA (q_groups=1) and GQA (q_groups > 1).
   output = output.reshape((batch_size, num_q_heads, q_seq_len, v_head_dim_size))
   l = l.reshape((batch_size, num_q_heads, q_seq_len))
-  output = output / l[..., None]
+  output = (output / l[..., None]).astype(data_type)
   if not save_residuals:
     # To avoid remat of the output, we can use context=hbm remat policy as in
     # maxtext/configs/types.py
@@ -1531,6 +1550,144 @@ def flash_attention_bwd(
     dv = jnp.squeeze(dv, axis=1)
 
   return dq, dk, dv
+
+
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnames=("block_q", "block_kv", "mask_value", "cap"),
+)
+def flash_attention_block_masked_custom_vjp(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    segment_ids: SegmentIds | None,
+    mask: jax.Array,
+    block_q: int,
+    block_kv: int,
+    mask_value: float,
+    cap: Optional[float] = None,
+) -> Tuple[jax.Array, Dict[str, jax.Array]]:
+  """Block-masked flash attention with a memory-efficient backward pass.
+
+  Differentiating `flash_attention_block_masked` directly makes JAX save the
+  intermediates of every block-loop iteration, which is O(q_seq_len *
+  kv_seq_len) memory. This wrapper saves only the inputs, the output and the
+  logsumexp, and recomputes the attention tiles in `flash_attention_bwd`.
+
+  Args:
+    q: Query tensor with shape (batch_size, num_q_heads, q_seq_len, head_dim).
+    k: Key tensor with shape (batch_size, num_kv_heads, kv_seq_len, head_dim).
+    v: Value tensor with shape (batch_size, num_kv_heads, kv_seq_len,
+      v_head_dim).
+    segment_ids: Optional segment ids with shapes (batch_size, q_seq_len) and
+      (batch_size, kv_seq_len).
+    mask: Boolean runtime mask, either shared with shape (q_seq_len,
+      kv_seq_len) or per batch item with shape (batch_size, q_seq_len,
+      kv_seq_len).
+    block_q: Block size for the query sequence dimension.
+    block_kv: Block size for the key/value sequence dimension.
+    mask_value: The value to use for masked-out attention scores.
+    cap: Optional cap for attention logits.
+
+  Returns:
+    The attention output and a dict of non-differentiable (logsumexp,
+    max_logits) statistics.
+  """
+  out_and_stats, _ = _flash_attention_block_masked_custom_vjp_fwd(
+      q, k, v, segment_ids, mask, block_q, block_kv, mask_value, cap
+  )
+  return out_and_stats
+
+
+def _flash_attention_block_masked_custom_vjp_fwd(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    segment_ids: SegmentIds | None,
+    mask: jax.Array,
+    block_q: int,
+    block_kv: int,
+    mask_value: float,
+    cap: Optional[float],
+) -> Tuple[Tuple[jax.Array, Dict[str, jax.Array]], Tuple[Any, ...]]:
+  """Custom VJP forward rule for flash_attention_block_masked_custom_vjp."""
+  out, stats = flash_attention_block_masked(
+      q,
+      k,
+      v,
+      segment_ids,
+      block_kv=block_kv,
+      block_q=block_q,
+      mask=mask,
+      mask_value=mask_value,
+      cap=cap,
+      save_residuals=True,
+      # The backward pass recomputes the logits in float32 and uses the saved
+      # logsumexp to form p = exp(s - logsumexp). The logsumexp must come from
+      # float32 logits too: with bfloat16 logits the recomputed probabilities
+      # do not sum to 1, and the gradients have about twice the error of
+      # plain autodiff. The MXU accumulates in float32 anyway, so this only
+      # enlarges the per-tile logits buffer.
+      logits_dtype=jnp.float32,
+      # A fully unrolled loop is prohibitive for long runtime-masked
+      # sequences, and the must-fuse wrapper is not needed without autodiff.
+      loop_unroll=False,
+      fuse_logits=False,
+  )
+  assert isinstance(stats, dict)
+  # The boolean mask is the largest residual: batch * q_seq_len * kv_seq_len
+  # bytes per layer (about 128 MiB for a 1K query shard of a 128K sequence).
+  # Count it when you change the sequence length or the remat policy.
+  return (out, stats), (q, k, v, segment_ids, mask, out, stats["logsumexp"])
+
+
+def _flash_attention_block_masked_custom_vjp_bwd(
+    block_q: int,
+    block_kv: int,
+    mask_value: float,
+    cap: Optional[float],
+    res: Tuple[Any, ...],
+    g: Tuple[jax.Array, Dict[str, jax.Array]],
+) -> Tuple[jax.Array, jax.Array, jax.Array, None, None]:
+  """Custom VJP backward rule for flash_attention_block_masked_custom_vjp."""
+  q, k, v, segment_ids, mask, out, logsumexp = res
+  do, _ = g  # The statistics are not differentiable.
+
+  def bwd_one_example(q, k, v, segment_ids, mask, out, do, logsumexp):
+    return flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=out,
+        do=do,
+        logsumexp=logsumexp,
+        mask=mask,
+        segment_ids=segment_ids,
+        mask_value=mask_value,
+        cap=cap,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+        di=jnp.sum(out.astype(jnp.float32) * do.astype(jnp.float32), axis=-1),
+    )
+
+  # Map over the batch so that every example sees a rank-2 mask, which the
+  # backward kernels support for both MHA and GQA.
+  mask_axis = 0 if mask.ndim == 3 else None
+  dq, dk, dv = jax.vmap(bwd_one_example, in_axes=(0, 0, 0, 0, mask_axis, 0, 0, 0))(
+      q, k, v, segment_ids, mask, out, do, logsumexp
+  )
+  # The backward kernels accumulate in float32. Return the cotangents in the
+  # dtype of the primal inputs: JAX accepts a float32 cotangent for a bfloat16
+  # input only through a temporary exception, and float32 cotangents would
+  # otherwise flow into, and enlarge, the backward pass of the projections.
+  return dq.astype(q.dtype), dk.astype(k.dtype), dv.astype(v.dtype), None, None
+
+
+flash_attention_block_masked_custom_vjp.defvjp(
+    _flash_attention_block_masked_custom_vjp_fwd,
+    _flash_attention_block_masked_custom_vjp_bwd,
+)
 
 
 splash_attention_mha_bwd_jax = flash_attention_mha_bwd_jax
