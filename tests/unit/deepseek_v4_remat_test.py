@@ -16,7 +16,9 @@
 
 import functools
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
+from maxtext.models import deepseek4
 from maxtext.utils import maxtext_utils, model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -100,6 +103,127 @@ def _train_step(remat_policy, dropout=False):
       flops,
       [np.asarray(x) for x in jax.tree.leaves(rng_state) if jnp.issubdtype(x.dtype, jnp.integer)],
   )
+
+
+class _LazyStats(nnx.Module):
+  """Stateful submodule created on the first call, like Qwix FP8 statistics."""
+
+  def __init__(self):
+    self.calls = nnx.Variable(jnp.zeros((), dtype=jnp.int32))
+
+
+class _LazyGate(nnx.Module):
+  """Projection with lazy statistics, RNG updates and sown intermediates."""
+
+  def __init__(self):
+    self.kernel = nnx.Param(jnp.arange(16, dtype=jnp.float32).reshape(4, 4) / 16)
+    self.rngs = nnx.Rngs(dropout=1)
+
+  def __call__(self, x):
+    if not hasattr(self, "_stats"):
+      self._stats = _LazyStats()
+    self._stats.calls[...] += 1
+    out = (x + jax.random.uniform(self.rngs.dropout(), x.shape)) @ self.kernel[...]
+    self.sow(nnx.Intermediate, "activation", jnp.sum(out))
+    return out
+
+
+class _LazyLayer(nnx.Module):
+  """Expose the same gate through different NNX container types."""
+
+  def __init__(self, container="module"):
+    self.container = container
+    if container == "list":
+      self.gates = nnx.List([_LazyGate()])
+    elif container == "dict":
+      self.gates = nnx.Dict(gate=_LazyGate())
+    else:
+      self.gate = _LazyGate()
+
+  def __call__(self, x, *, scale=1.0):
+    if self.container == "list":
+      gate = self.gates[0]
+    elif self.container == "dict":
+      gate = self.gates["gate"]
+    else:
+      gate = self.gate
+    return scale * gate(x), None
+
+
+class DeepSeekV4RematNewStateTest(unittest.TestCase):
+  """Exercise lazy graph changes without constructing a full DeepSeek model."""
+
+  def setUp(self):
+    self.config = SimpleNamespace(scan_layers=True, gradient_accumulation_steps=1, hardware="gpu")
+    self.x = jnp.ones((2, 4))
+
+  def _run(self, layer, x):
+    # pylint: disable=protected-access
+    return deepseek4._run_deepseek4_layer_remat(layer, x, config=self.config, scale=0.5)
+
+  def _assert_same_state(self, actual, expected):
+    actual_state = nnx.state(actual)
+    expected_state = nnx.state(expected)
+    self.assertEqual(jax.tree.structure(actual_state), jax.tree.structure(expected_state))
+    for a, b in zip(jax.tree.leaves(actual_state), jax.tree.leaves(expected_state)):
+      if jax.dtypes.issubdtype(a.dtype, jax.dtypes.prng_key):
+        np.testing.assert_array_equal(jax.random.key_data(a), jax.random.key_data(b))
+      else:
+        np.testing.assert_allclose(a, b, rtol=1e-6)
+
+  def test_first_call_creates_submodules_on_original_layer(self):
+    """New submodules work under module attributes, lists and dictionaries."""
+    for container in ("module", "list", "dict"):
+      with self.subTest(container=container):
+        layer, reference = _LazyLayer(container), _LazyLayer(container)
+        actual = self._run(layer, self.x)
+        expected, _ = reference(self.x, scale=0.5)
+        np.testing.assert_allclose(actual, expected, rtol=1e-6)
+        # In particular, the discarded scan must not double-advance RNGs or stats.
+        self._assert_same_state(layer, reference)
+
+  def test_later_calls_remat_with_recreated_intermediates(self):
+    """Popping sown variables between train steps must not disable remat."""
+    layer, reference = _LazyLayer(), _LazyLayer()
+    self._run(layer, self.x)
+    reference(self.x, scale=0.5)
+    original_call = _LazyLayer.__call__
+    for _ in range(2):
+      nnx.pop(layer, nnx.Intermediate)
+      nnx.pop(reference, nnx.Intermediate)
+      with mock.patch.object(_LazyLayer, "__call__", autospec=True, side_effect=original_call) as calls:
+        actual = self._run(layer, self.x)
+      # The layer executes only on the merged copy inside the remat scan.
+      self.assertGreater(calls.call_count, 0)
+      self.assertFalse(any(call.args[0] is layer for call in calls.call_args_list))
+      expected, _ = reference(self.x, scale=0.5)
+      np.testing.assert_allclose(actual, expected, rtol=1e-6)
+      self._assert_same_state(layer, reference)
+
+  def test_gradients_match_plain_call_after_initialization(self):
+    layer, reference = _LazyLayer(), _LazyLayer()
+    self._run(layer, self.x)
+    reference(self.x, scale=0.5)
+    nnx.pop(layer, nnx.Intermediate)
+    nnx.pop(reference, nnx.Intermediate)
+    actual_loss, actual_grads = nnx.value_and_grad(lambda m: jnp.sum(self._run(m, self.x) ** 2))(layer)
+    expected_loss, expected_grads = nnx.value_and_grad(lambda m: jnp.sum(m(self.x, scale=0.5)[0] ** 2))(reference)
+    np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6)
+    self.assertEqual(jax.tree.structure(actual_grads), jax.tree.structure(expected_grads))
+    for actual, expected in zip(jax.tree.leaves(actual_grads), jax.tree.leaves(expected_grads)):
+      np.testing.assert_allclose(actual, expected, rtol=1e-6)
+    self._assert_same_state(layer, reference)
+
+  def test_lazy_creation_and_later_calls_under_jit(self):
+    layer, reference = _LazyLayer(), _LazyLayer()
+    compiled_run = nnx.jit(self._run)
+    for _ in range(3):
+      nnx.pop(layer, nnx.Intermediate)
+      nnx.pop(reference, nnx.Intermediate)
+      actual = compiled_run(layer, self.x)
+      expected, _ = reference(self.x, scale=0.5)
+      np.testing.assert_allclose(actual, expected, rtol=1e-6)
+      self._assert_same_state(layer, reference)
 
 
 class DeepSeekV4RematTest(unittest.TestCase):
