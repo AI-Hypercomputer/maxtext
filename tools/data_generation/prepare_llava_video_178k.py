@@ -117,7 +117,7 @@ def main():
     if not gcs_dest.endswith("/"):
       gcs_dest += "/"
 
-    cmd = ["gsutil", "-m", "cp", "-r", fold_dir, gcs_dest]
+    cmd = ["gcloud", "storage", "cp", "--recursive", fold_dir, gcs_dest]
     print(f"Running command: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
