@@ -380,16 +380,24 @@ def segmented_causal_depthwise_conv1d(
   if active_cp_axes and mesh is not None and conv_state is None and conv_halo_seg is None:
     from maxtext.kernels.attention import gdn_cp  # pylint: disable=import-outside-toplevel
 
-    logical_rules = get_logical_axis_rules()
+    logical_rules = get_logical_axis_rules() or ()
+    cp_ax = active_cp_axes[0] if len(active_cp_axes) == 1 else active_cp_axes
     qkv_pspec = logical_to_mesh_axes((KV_BATCH, LENGTH, gdn_head_axis), mesh=mesh, rules=logical_rules)
+    if qkv_pspec[1] is None:
+      qkv_pspec = P(qkv_pspec[0], cp_ax, *qkv_pspec[2:])
     qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
         qkv_pspec, qkv.shape, mesh, dims=(0,), allow_remove_axes=True
     )
     seg_pspec = P(qkv_pspec[0], qkv_pspec[1])
     cw_pspec = P(None, None, qkv_pspec[2])
     cb_pspec = P(qkv_pspec[2]) if conv_bias is not None else P()
-    cp_ax = active_cp_axes[0] if len(active_cp_axes) == 1 else active_cp_axes
     halo_len = kernel_size - 1
+    if shard_mode == ShardMode.EXPLICIT:
+      qkv = jax.sharding.reshard(qkv, jax.sharding.NamedSharding(mesh, qkv_pspec))
+      conv_weight_3d = jax.sharding.reshard(conv_weight_3d, jax.sharding.NamedSharding(mesh, cw_pspec))
+      if conv_bias is not None:
+        conv_bias = jax.sharding.reshard(conv_bias, jax.sharding.NamedSharding(mesh, cb_pspec))
+      seg_2d = jax.sharding.reshard(seg_2d, jax.sharding.NamedSharding(mesh, seg_pspec))
 
     @functools.partial(
         jax.shard_map,
@@ -401,14 +409,7 @@ def segmented_causal_depthwise_conv1d(
     def _shard_mapped_conv(qkv_loc, cw_loc, cb_loc, seg_loc):
       s_enc_loc, halo_seg, _ = gdn_cp.gather_cp_segment_metadata(seg_loc, cp_ax, kernel_size, has_initial_state=False)
       seg_canon_loc = jnp.maximum(s_enc_loc, 0.0).astype(jnp.int32)
-      n_cp = lax.axis_size(cp_ax)
-      cp_idx = lax.axis_index(cp_ax)
-      perm = [(i, i + 1) for i in range(n_cp - 1)]
-      halo_qkv = (
-          lax.ppermute(qkv_loc[:, -halo_len:, :], axis_name=cp_ax, perm=perm) if halo_len > 0 else qkv_loc[:, :0, :]
-      )
-      if halo_len > 0:
-        halo_qkv = jnp.where(cp_idx == 0, jnp.zeros_like(halo_qkv), halo_qkv)
+      halo_qkv = gdn_cp.halo_exchange_for_conv(qkv_loc, cp_ax, halo_len)
       return _compute_segmented_conv1d_core(
           qkv_loc,
           cw_loc,
@@ -464,6 +465,66 @@ def segmented_causal_depthwise_conv1d(
       conv_halo_seg,
       out_dtype,
   )
+
+
+def cp_causal_depthwise_conv1d(
+    qkv: Array,
+    conv_weight: Array,
+    conv_bias: None | Array,
+    kernel_size: int,
+    dtype: DType,
+    *,
+    mesh: jax.sharding.Mesh,
+    cp_axes: tuple[str, ...],
+    shard_mode: ShardMode = ShardMode.AUTO,
+    gdn_head_axis: str = KV_HEAD,
+) -> Array:
+  """Causal depthwise Conv1D across sequence-sharded CP ranks using neighbor halo exchange."""
+  from maxtext.kernels.attention import gdn_cp  # pylint: disable=import-outside-toplevel
+
+  conv_weight_3d = (
+      conv_weight.astype(jnp.float32) if conv_weight.ndim == 3 else conv_weight[:, None, :].astype(jnp.float32)
+  )
+  logical_rules = get_logical_axis_rules() or ()
+  qkv_pspec = logical_to_mesh_axes((KV_BATCH, LENGTH, gdn_head_axis), mesh=mesh, rules=logical_rules)
+  qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+      qkv_pspec, qkv.shape, mesh, dims=(0,), allow_remove_axes=True
+  )
+  active_cp_axes = tuple(ax for ax in cp_axes if ax in mesh.axis_names and mesh.shape[ax] > 1)
+  cp_ax = active_cp_axes[0] if len(active_cp_axes) == 1 else active_cp_axes
+  if qkv_pspec[1] is None:
+    qkv_pspec = P(qkv_pspec[0], cp_ax, *qkv_pspec[2:])
+  cw_pspec = P(None, None, qkv_pspec[2])
+  cb_pspec = P(qkv_pspec[2]) if conv_bias is not None else P()
+  halo_len = kernel_size - 1
+  if shard_mode == ShardMode.EXPLICIT:
+    qkv = jax.sharding.reshard(qkv, jax.sharding.NamedSharding(mesh, qkv_pspec))
+    conv_weight_3d = jax.sharding.reshard(conv_weight_3d, jax.sharding.NamedSharding(mesh, cw_pspec))
+    if conv_bias is not None:
+      conv_bias = jax.sharding.reshard(conv_bias, jax.sharding.NamedSharding(mesh, cb_pspec))
+
+  @functools.partial(
+      jax.shard_map,
+      mesh=mesh,
+      in_specs=(qkv_pspec, cw_pspec, cb_pspec),
+      out_specs=qkv_pspec,
+      check_vma=False,
+  )
+  def _shard_mapped_unpacked_conv(qkv_loc, cw_loc, cb_loc):
+    seq_loc = qkv_loc.shape[1]
+    if halo_len > 0:
+      halo_qkv = gdn_cp.halo_exchange_for_conv(qkv_loc, cp_ax, halo_len)
+      conv_input_loc = jnp.concatenate([halo_qkv.astype(qkv_loc.dtype), qkv_loc], axis=1)
+    else:
+      conv_input_loc = qkv_loc
+    conv_out_loc = sum(
+        conv_input_loc[:, k : k + seq_loc, :].astype(jnp.float32) * cw_loc[k, 0, :] for k in range(kernel_size)
+    )
+    if cb_loc is not None:
+      conv_out_loc = conv_out_loc + cb_loc.astype(jnp.float32)
+    return conv_out_loc.astype(dtype)
+
+  return _shard_mapped_unpacked_conv(qkv, conv_weight_3d, conv_bias)
 
 
 def prepare_jax_gdn_segment_masks(

@@ -1863,6 +1863,14 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  gdn_cp_mode: Literal["auto", "head", "seq"] = Field(
+      "auto",
+      description=(
+          "Context parallelism mode for Gated Delta Net: 'seq' shards the sequence with cross-rank state "
+          "composition, 'head' transposes via all-to-all to shard key/value head groups across context ranks, "
+          "and 'auto' selects automatically."
+      ),
+  )
   gdn_mamba_block_size: int = Field(
       0,
       description=(
@@ -2447,6 +2455,18 @@ class RematAndOffload(BaseModel):
       description="Remat policy for the attention output.",
   )
   engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
+  gdn: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for Gated Delta Net inputs, intra/inter-chunk states, and core output.",
+  )
+  gdn_states: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for Gated Delta Net intra/inter-chunk states and core output.",
+  )
+  gdn_cp_state: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for Gated Delta Net sequence-CP halo and cross-rank affine state tensors.",
+  )
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
@@ -5616,7 +5636,16 @@ class MaxTextConfig(
           "qkv_proj",
           "attention_out",
           "out_proj",
+          "gdn",
+          "gdn_states",
+          "gdn_cp_state",
       ]
+      if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
+        raise ValueError(
+            "GDN custom remat settings cannot place 'gdn' and 'gdn_states' in different storage tiers "
+            f"(got gdn={self.gdn!r}, gdn_states={self.gdn_states!r}) because both include "
+            "['gdn_core_attn_out', 'gdn_t_inv', 'gdn_chunk_states']."
+        )
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
@@ -6598,7 +6627,12 @@ class MaxTextConfig(
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
-      gdn_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
+      gdn_context_parallel_size = (
+          self.ici_context_parallelism
+          * self.dcn_context_parallelism
+          * self.ici_context_usp_ulysses_parallelism
+          * self.dcn_context_usp_ulysses_parallelism
+      )
       if gdn_context_parallel_size > 1 and self.context_parallel_load_balance:
         raise ValueError(
             "GatedDeltaNet context parallelism requires context_parallel_load_balance=False. The GatedDeltaNet "
@@ -6608,6 +6642,12 @@ class MaxTextConfig(
             "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
             "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
         )
+      if self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        if int(self.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
+          raise ValueError(
+              f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
+              f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+          )
       if (
           not self.packing
           and self.dataset_type == DatasetType.GRAIN
@@ -7334,16 +7374,25 @@ class RLConfig(
           f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
       )
-    if (
-        self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
-        and not self.packing
-        and self.max_seq_token_per_tpu > 0
-    ):
-      raise ValueError(
-          f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
-          "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
-          "in training."
+    if self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+      if not self.packing and self.max_seq_token_per_tpu > 0:
+        raise ValueError(
+            f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
+            "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
+            "in training."
+        )
+      gdn_context_parallel_size = (
+          self.ici_context_parallelism
+          * self.dcn_context_parallelism
+          * self.ici_context_usp_ulysses_parallelism
+          * self.dcn_context_usp_ulysses_parallelism
       )
+      if self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        if int(self.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
+          raise ValueError(
+              f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
+              f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+          )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
@@ -7493,7 +7542,16 @@ class RLConfig(
           "qkv_proj",
           "attention_out",
           "out_proj",
+          "gdn",
+          "gdn_states",
+          "gdn_cp_state",
       ]
+      if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
+        raise ValueError(
+            "GDN custom remat settings cannot place 'gdn' and 'gdn_states' in different storage tiers "
+            f"(got gdn={self.gdn!r}, gdn_states={self.gdn_states!r}) because both include "
+            "['gdn_core_attn_out', 'gdn_t_inv', 'gdn_chunk_states']."
+        )
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 

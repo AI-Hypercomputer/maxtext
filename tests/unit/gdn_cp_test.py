@@ -273,6 +273,252 @@ def _run_end_to_end_checks(mesh, cp_axis):
   assert float(jnp.max(jnp.abs(rolled - reference_out))) > 1e-4
 
 
+def _run_conv_halo_checks(mesh, cp_axis):
+  """Verifies unpacked `cp_causal_depthwise_conv1d` forward + backward against single-device conv."""
+  # pylint: disable=import-outside-toplevel
+  from maxtext.kernels.attention import gdn_packing
+
+  cp_axes = (cp_axis,) if isinstance(cp_axis, str) else cp_axis
+  num_shards = int(np.prod([mesh.shape[name] for name in cp_axes]))
+  batch, seq_per_rank, channels, kernel_size = 2, 6, 16, 4
+  seq = num_shards * seq_per_rank
+  keys = jax.random.split(jax.random.PRNGKey(11), 3)
+  qkv = jax.random.normal(keys[0], (batch, seq, channels), jnp.float32) * 0.2
+  conv_w = jax.random.normal(keys[1], (kernel_size, 1, channels), jnp.float32) * 0.2
+  conv_b = jax.random.normal(keys[2], (channels,), jnp.float32) * 0.1
+
+  def ref_conv(x, w, b):
+    padded = jnp.pad(x, ((0, 0), (kernel_size - 1, 0), (0, 0)))
+    out = sum(padded[:, k : k + seq, :] * w[k, 0, :] for k in range(kernel_size)) + b
+    return out
+
+  def cp_conv(x, w, b):
+    return gdn_packing.cp_causal_depthwise_conv1d(
+        qkv=x,
+        conv_weight=w,
+        conv_bias=b,
+        kernel_size=kernel_size,
+        dtype=jnp.float32,
+        mesh=mesh,
+        cp_axes=cp_axes,
+    )
+
+  ref_out = jax.jit(ref_conv)(qkv, conv_w, conv_b)
+  _, ref_grads = jax.jit(jax.value_and_grad(lambda x, w, b: jnp.sum(jnp.sin(ref_conv(x, w, b))), argnums=(0, 1, 2)))(
+      qkv, conv_w, conv_b
+  )
+  cp_out = jax.jit(cp_conv)(qkv, conv_w, conv_b)
+  _, cp_grads = jax.jit(jax.value_and_grad(lambda x, w, b: jnp.sum(jnp.sin(cp_conv(x, w, b))), argnums=(0, 1, 2)))(
+      qkv, conv_w, conv_b
+  )
+  np.testing.assert_allclose(jax.device_get(cp_out), jax.device_get(ref_out), atol=1e-5, rtol=1e-5)
+  for actual_g, expected_g in zip(cp_grads, ref_grads):
+    np.testing.assert_allclose(jax.device_get(actual_g), jax.device_get(expected_g), atol=1e-5, rtol=1e-5)
+
+
+def _run_qwen3_gdn_layer_cp_checks(devices):
+  """Verifies `Qwen3NextGatedDeltaNet` forward + backward across cp=1, seq-CP, and head-CP."""
+  # pylint: disable=import-outside-toplevel
+  from flax import nnx
+  from flax.linen import partitioning as nn_partitioning
+  from maxtext.common.common_types import MODEL_MODE_TRAIN
+  from maxtext.configs import pyconfig
+  from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
+  from maxtext.utils import maxtext_utils
+
+  base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
+  common_overrides = {
+      "run_name": "gdn_cp_layer_test",
+      "decoder_block": "qwen3_next",
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "matmul_precision": "highest",
+      "base_emb_dim": 32,
+      "gdn_num_key_heads": 4,
+      "gdn_num_value_heads": 8,
+      "gdn_key_head_dim": 16,
+      "gdn_value_head_dim": 16,
+      "gdn_conv_kernel_dim": 4,
+      "gdn_chunk_size": 4,
+      "use_qk_norm_in_gdn": True,
+      "context_parallel_load_balance": False,
+      "enable_checkpointing": False,
+  }
+
+  batch, seq = 2, 16
+  x = jax.random.normal(jax.random.PRNGKey(21), (batch, seq, 32), jnp.float32) * 0.2
+  # Row 0: left-padded single sequence (for unpacked) or multi-doc (for packed).
+  unpacked_seg = jnp.array(
+      [
+          [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+          [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
+      ],
+      dtype=jnp.int32,
+  )
+  packed_seg = jnp.array(
+      [
+          [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 0, 0],
+          [0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+      ],
+      dtype=jnp.int32,
+  )
+
+  def _eval_layer(cfg, mesh, seg_ids, use_custom_remat=False):
+    rules = cfg.logical_axis_rules
+    with nn_partitioning.axis_rules(rules):
+      layer = Qwen3NextGatedDeltaNet(
+          config=cfg, mesh=mesh, dtype=jnp.float32, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(7)
+      )
+      graphdef, state = nnx.split(layer)
+      policy = None
+      if use_custom_remat:
+        save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=save_names,
+            names_which_can_be_offloaded=offload_names,
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
+
+      def forward_only(st, inp):
+        mod = nnx.merge(graphdef, st)
+        out, _ = mod(inp, decoder_segment_ids=seg_ids, model_mode=MODEL_MODE_TRAIN)
+        return out
+
+      run_fn = jax.remat(forward_only, policy=policy) if policy is not None else forward_only
+
+      def loss_fn(st, inp):
+        out = run_fn(st, inp)
+        return jnp.sum(out * jnp.cos(inp)), out
+
+      (_, out), (grad_state, grad_x) = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(state, x)
+      return jax.device_get(out), jax.tree_util.tree_map(jax.device_get, grad_state), jax.device_get(grad_x)
+
+  for packing, seg_ids in ((False, unpacked_seg), (True, packed_seg)):
+    cfg_ref = pyconfig.initialize([None, base_yml], packing=packing, **common_overrides)
+    ref_out, ref_g_state, ref_g_x = _eval_layer(cfg_ref, None, seg_ids)
+
+    # 1D 4-device context mesh: both seq-CP and head-CP.
+    mesh_cp4 = Mesh(devices[:4], ("context",))
+    for cp_mode in ("seq", "head"):
+      cfg_cp4 = pyconfig.initialize(
+          [None, base_yml],
+          packing=packing,
+          ici_context_parallelism=4,
+          gdn_cp_mode=cp_mode,
+          remat_policy="custom",
+          gdn_states="device",
+          gdn_cp_state="device",
+          **common_overrides,
+      )
+      out, g_state, g_x = _eval_layer(cfg_cp4, mesh_cp4, seg_ids, use_custom_remat=cp_mode == "seq")
+      np.testing.assert_allclose(out, ref_out, atol=3e-4, rtol=2e-3)
+      np.testing.assert_allclose(g_x, ref_g_x, atol=5e-4, rtol=3e-3)
+      for g_actual, g_expected in zip(jax.tree_util.tree_leaves(g_state), jax.tree_util.tree_leaves(ref_g_state)):
+        np.testing.assert_allclose(g_actual, g_expected, atol=5e-4, rtol=3e-3)
+
+    # 2D (tensor=2, context=2) mesh: both seq-CP and head-CP.
+    mesh_tp2_cp2 = Mesh(devices[:4].reshape(2, 2), ("tensor", "context"))
+    for cp_mode in ("seq", "head"):
+      cfg_tp_cp = pyconfig.initialize(
+          [None, base_yml],
+          packing=packing,
+          ici_tensor_parallelism=2,
+          ici_context_parallelism=2,
+          gdn_cp_mode=cp_mode,
+          **common_overrides,
+      )
+      out, g_state, g_x = _eval_layer(cfg_tp_cp, mesh_tp2_cp2, seg_ids)
+      np.testing.assert_allclose(out, ref_out, atol=3e-4, rtol=2e-3)
+      np.testing.assert_allclose(g_x, ref_g_x, atol=5e-4, rtol=3e-3)
+      for g_actual, g_expected in zip(jax.tree_util.tree_leaves(g_state), jax.tree_util.tree_leaves(ref_g_state)):
+        np.testing.assert_allclose(g_actual, g_expected, atol=5e-4, rtol=3e-3)
+
+
+def test_gdn_cp_config_and_custom_remat_validation():
+  """Validates `gdn_cp_mode`, DCN CP sizing, and disjoint GDN custom remat expansions."""
+  # pylint: disable=import-outside-toplevel
+  from types import SimpleNamespace
+  from maxtext.configs import pyconfig
+  from maxtext.configs import types as config_types
+  from maxtext.layers.nnx_decoders import NNXDecoder
+  from maxtext.utils import maxtext_utils
+
+  base_yml = os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
+
+  # ICI + DCN + Ulysses context axes multiply into gdn_context_parallel_size and validate head divisibility.
+  with pytest.raises(ValueError, match="divisible by the GatedDeltaNet context-parallel size"):
+    pyconfig.initialize(
+        [None, base_yml],
+        run_name="bad_head_cp",
+        decoder_block="qwen3_next",
+        gdn_num_key_heads=6,
+        gdn_num_value_heads=12,
+        ici_context_parallelism=4,
+        context_parallel_load_balance=False,
+        gdn_cp_mode="head",
+        enable_checkpointing=False,
+    )
+
+  with pytest.raises(ValueError, match="divisible by the GatedDeltaNet context-parallel size"):
+    config_types.MaxTextConfig(
+        run_name="bad_dcn_head_cp",
+        decoder_block="qwen3_next",
+        gdn_num_key_heads=6,
+        gdn_num_value_heads=12,
+        num_slices=2,
+        ici_context_parallelism=2,
+        dcn_context_parallelism=2,
+        context_parallel_load_balance=False,
+        gdn_cp_mode="head",
+        enable_checkpointing=False,
+    )
+
+  with pytest.raises(ValueError, match="divisible by the GatedDeltaNet context-parallel size"):
+    config_types.RLConfig(
+        run_name="bad_rl_head_cp",
+        decoder_block="qwen3_next",
+        gdn_num_key_heads=6,
+        gdn_num_value_heads=12,
+        ici_context_usp_ulysses_parallelism=4,
+        context_parallel_load_balance=False,
+        gdn_cp_mode="head",
+        enable_checkpointing=False,
+    )
+
+  # Conflicting `gdn` and `gdn_states` placements fail fast.
+  with pytest.raises(ValueError, match="cannot place 'gdn' and 'gdn_states' in different storage tiers"):
+    pyconfig.initialize(
+        [None, base_yml],
+        run_name="conflict_remat",
+        decoder_block="qwen3_next",
+        remat_policy="custom",
+        gdn="device",
+        gdn_states="offload",
+        enable_checkpointing=False,
+    )
+
+  # Disjoint `gdn_states='offload'` + `gdn_cp_state='device'` expands cleanly and builds NNXDecoder remat policy.
+  cfg_disjoint = pyconfig.initialize(
+      [None, base_yml],
+      run_name="disjoint_remat",
+      decoder_block="qwen3_next",
+      remat_policy="custom",
+      gdn="remat",
+      gdn_states="offload",
+      gdn_cp_state="device",
+      enable_checkpointing=False,
+  )
+  save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg_disjoint)
+  assert set(save_names).isdisjoint(set(offload_names))
+  assert {"gdn_cp_conv_halo", "gdn_cp_m_local", "gdn_cp_s_in"}.issubset(set(save_names))
+  assert {"gdn_core_attn_out", "gdn_t_inv", "gdn_chunk_states"}.issubset(set(offload_names))
+  assert "gdn_qkv" not in save_names and "gdn_qkv" not in offload_names
+
+  policy = NNXDecoder.get_remat_policy(SimpleNamespace(config=cfg_disjoint))
+  assert callable(policy)
+
+
 if __name__ == "__main__":
   _devices = np.array(jax.devices())
   assert len(_devices) == 8, jax.devices()
@@ -286,4 +532,7 @@ if __name__ == "__main__":
   _run_gradient_checks(Mesh(_devices, ("context",)), "context")
   _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
   _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
+  _run_conv_halo_checks(Mesh(_devices[:4], ("context",)), "context")
+  _run_conv_halo_checks(Mesh(_devices.reshape(2, 4), ("tensor", "context")), "context")
+  _run_qwen3_gdn_layer_cp_checks(_devices)
   print("GDN_CP_CHECKS_PASSED")

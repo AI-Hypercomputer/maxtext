@@ -581,6 +581,9 @@ mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
 engram: 'remat'
+gdn: 'remat'
+gdn_states: 'remat'
+gdn_cp_state: 'remat'
 
 optimizer_memory_host_offload: false
 parameter_memory_host_offload: false
@@ -1652,6 +1655,8 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
+# Context parallelism mode for Gated Delta Net ('auto', 'head', or 'seq')
+gdn_cp_mode: 'auto'
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
