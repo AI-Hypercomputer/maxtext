@@ -20,3 +20,8 @@ If config flags are changed according to the rules above, clearly document this 
 
 ## Documentation and Comments
 * Comments and docstrings must explain the current state of the code from first principles. Do not write comments that describe how the code is different from deleted code, legacy implementations, or prior branches (e.g., avoid "diff-style" explanations comparing against removed paths). A reader who never saw the old code should be able to understand the comment entirely from context.
+
+# Tests
+* Our CI is struggling due to too many tests. Don't add redundant tests. Prefer to use existing test files
+instead of creating new ones. Check and report how long it takes to run the tests in a given file before
+and after your change. Think if the test can be made faster.

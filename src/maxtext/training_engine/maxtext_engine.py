@@ -96,6 +96,17 @@ def _is_jax_dynamic(value: Any) -> bool:
   return any(isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct, np.ndarray, np.generic)) for leaf in leaves)
 
 
+def _normalize_axis_rules(rules: Any) -> Any:
+  """Returns a logical axis rule set as nested tuples, so two spellings of one set compare equal.
+
+  `HyperParameters` turns `logical_axis_rules` into tuples but leaves
+  `logical_axis_rules_for_eval` as the lists the YAML held.
+  """
+  if isinstance(rules, (list, tuple)):
+    return tuple(_normalize_axis_rules(entry) for entry in rules)
+  return rules
+
+
 def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
   """Splits a loss-input batch into traced arrays and closed-over constants.
 
@@ -610,7 +621,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       ValueError: If training_config.model_name is not specified or empty, or if `wrap_with_tunix_adapter`
         is requested without `tokenizer_pad_id` or without a `mesh`.
       NotImplementedError: If `training_config.lora.enable_lora` is True. This engine has no LoRA
-        path and would otherwise full-finetune the base model while the config claims LoRA.
+        path and would otherwise full-finetune the base model while the config claims LoRA. Also
+        if `parameter_memory_host_offload` is set, or if `logical_axis_rules_for_eval` differs from
+        `logical_axis_rules`.
     """
     if not isinstance(training_config, pyconfig.HyperParameters):
       raise TypeError(
@@ -626,10 +639,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         raise ValueError("wrap_with_tunix_adapter=True requires a mesh; the adapter is built under it.")
 
     # This engine has no LoRA path
-    if getattr(getattr(training_config, "lora", None), "enable_lora", False):
+    if training_config.lora.enable_lora:
       raise NotImplementedError(
           "MaxTextTrainingEngine does not support LoRA, but lora.enable_lora=True was set. "
           "This engine trains all parameters, set lora.enable_lora=False to train with this engine."
+      )
+    # This engine has no path that keeps the weights in host memory, so reject the flag rather
+    # than silently leave every weight in HBM.
+    if training_config.parameter_memory_host_offload:
+      raise NotImplementedError("MaxTextTrainingEngine does not support parameter_memory_host_offload; set it to False.")
+    # `train.py` evaluates under `logical_axis_rules_for_eval`; this engine evaluates under the
+    # training rules, so reject a different eval rule set rather than silently ignore it.
+    eval_rules = _normalize_axis_rules(training_config.logical_axis_rules_for_eval or ())
+    if eval_rules and eval_rules != _normalize_axis_rules(training_config.logical_axis_rules):
+      raise NotImplementedError(
+          "MaxTextTrainingEngine evaluates under the training logical_axis_rules and does not support separate "
+          "eval rules, but logical_axis_rules_for_eval differs from them (custom_mesh_and_rule_for_eval="
+          f"{training_config.custom_mesh_and_rule_for_eval.value!r}). Leave custom_mesh_and_rule_for_eval unset, "
+          "or set it to the same value as custom_mesh_and_rule."
       )
     self._config = training_config
     self._mesh = mesh
@@ -746,14 +773,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model to train, adopting a mesh when this engine was given none."""
-    model_or_model_mesh_pair = model_creation_utils.from_pretrained(
-        config=self._config,
-        mesh=self._mesh,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=self._init_rng,
-        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
-        tokenizer_pad_id=tokenizer_pad_id,
-    )
+    # Built under the logical axis rules, which some layers check at `__init__` (Tokamax ring
+    # attention validates its sequence sharding there), and with any caller's `jax.set_mesh`
+    # cleared: under a set mesh, `nnx.eval_shape` in `create_nnx_abstract_model` re-derives each
+    # variable's sharding from its logical names and raises on names the rules leave unmapped.
+    # `from_pretrained` enters the mesh itself where it needs one.
+    with jax.set_mesh(None), logical_axis_rules(self._config.logical_axis_rules):
+      model_or_model_mesh_pair = model_creation_utils.from_pretrained(
+          config=self._config,
+          mesh=self._mesh,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          rng_key=self._init_rng,
+          wrap_with_tunix_adapter=wrap_with_tunix_adapter,
+          tokenizer_pad_id=tokenizer_pad_id,
+      )
     # `from_pretrained` returns `(model, mesh)` only when it had to derive the mesh itself. Adopt the
     # derived one so `self._model` is always a module and `compile()` can still build shardings.
     if self._mesh is not None:
@@ -1234,12 +1267,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _update_kernel(self, state_pure, accumulated_grads, accumulated_denominator, mean_loss):
     """Applies accumulated gradients to update the NNX model state.
 
+    A step whose gradient norm is not finite (`skip_step_on_nan`) leaves the state unchanged.
+
     Returns:
       `(new_state_pure, grad_norm, is_skipped)`. `grad_norm` doubles as the throttler's
-      handle on this update; see the `add_computation` call in `update()`.
+      handle on this update; see the `add_computation` call in `update()`. `is_skipped` is None
+      when no skip rule is on.
     """
     grad_norm = None
-    is_skipped_val = None
+    is_skipped_val = (
+        jnp.array(0.0, dtype=jnp.float32) if self._config.skip_step_on_nan or self._config.skip_step_on_spikes else None
+    )
     if state_pure is not None:
       # Where the gradients have to land before the optimizer can use them. Under Zero-1
       # that is the sharded layout the moments live on; otherwise the plain parameter one.
@@ -1271,21 +1309,27 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
       # overflows on production-size models.
       grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
+      if self._config.skip_step_on_nan:
+        should_skip = jnp.logical_not(jnp.isfinite(grad_norm))
+        # Zeroed, so a non-finite gradient cannot reach the optimizer's arithmetic either.
+        grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
+
       if self._config.gradient_clipping_threshold > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
-      if hasattr(local_state, "apply_gradients"):
+      if isinstance(local_state, train_state_nnx.TrainStateNNX):
         if self._config.skip_step_on_spikes:
           local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
-          opt_obj = getattr(local_state, "optimizer", self._optimizer)
-          if opt_obj is not None:
-            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
-            is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
-            if is_skipped is not None:
-              is_skipped_val = is_skipped.astype(jnp.float32)
         else:
           local_state.apply_gradients(grads)
       _, new_state_pure = nnx.split(local_state)
+      if self._config.skip_step_on_spikes and _OPTIMIZER_STATE_KEY in new_state_pure:
+        opt_state = nnx.to_pure_dict(new_state_pure[_OPTIMIZER_STATE_KEY])["opt_state"]
+        if isinstance(opt_state, dict) and "is_skipped" in opt_state:
+          is_skipped_val = opt_state["is_skipped"].astype(jnp.float32)
+      if self._config.skip_step_on_nan:
+        new_state_pure = jax.tree.map(lambda new, old: jnp.where(should_skip, old, new), new_state_pure, state_pure)
+        is_skipped_val = jnp.where(should_skip, 1.0, is_skipped_val)
       if self._zero1_params_shardings is not None:
         # The one all-gather Zero-1 costs: each replica updated its own slice of every
         # parameter, and the forward pass needs all of them. The moments stay behind,
@@ -1841,9 +1885,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     state_pure = self._read_state_pure()
 
-    # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes`, which is traced
-    # off `self._config`, so otherwise this was seven eager launches per step
-    # (`WeightedMetric.compute()`) feeding an argument the executable does not contain.
+    # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes`, which is traced off
+    # `self._config`; skip reducing cached losses otherwise to avoid eager host-device syncs.
     if not self._config.skip_step_on_spikes:
       mean_loss = None
     elif self._cached_losses:
@@ -1926,14 +1969,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Wait for previous computations to finish before dispatching the next one to TPU.
     self._throttler.wait_for_next()
 
-    if self._compile_requested:
-      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
-      signature = _batch_signature(dynamic_batch, static_batch)
-      if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
-        self._compile_eval_for_batch(dynamic_batch, static_batch)
-      loss, aux = self._compiled_eval(params, rest, dynamic_batch)
-    else:
-      loss, aux = self._eval_kernel(params, rest, batch)
+    # Under `_sharding_ctx`, as in `fwd_bwd`: `jax.jit` is lazy, so the eval kernel may first be
+    # traced here (always, when `compile()` got no dummy data), and it must see the engine's rules.
+    with self._sharding_ctx():
+      if self._compile_requested:
+        dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+        signature = _batch_signature(dynamic_batch, static_batch)
+        if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
+          self._compile_eval_for_batch(dynamic_batch, static_batch)
+        loss, aux = self._compiled_eval(params, rest, dynamic_batch)
+      else:
+        loss, aux = self._eval_kernel(params, rest, batch)
 
     # No metrics attached: eval metrics are buffered by `_eval_metrics_recorder` and written
     # in EVAL mode when `eval_context` exits.
