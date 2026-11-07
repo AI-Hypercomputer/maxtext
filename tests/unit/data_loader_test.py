@@ -130,6 +130,24 @@ class DataLoaderTest(unittest.TestCase):
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
 
+  def test_load_next_batch_propagates_jax_runtime_error(self):
+    """A runtime error must fail the job, not end it as if training had finished."""
+    self.mock_data_iterator.__next__.side_effect = jax.errors.JaxRuntimeError(
+        "UNAVAILABLE: Connection to IFRT proxy server was terminated: UNAVAILABLE: Socket closed"
+    )
+
+    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    with self.assertRaises(jax.errors.JaxRuntimeError):
+      _ = data_loader.load_next_batch()
+
+  def test_load_next_batch_other_exception_stops_training(self):
+    self.mock_data_iterator.__next__.side_effect = ValueError("bad record")
+
+    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    with self.assertRaises(exceptions.StopTraining) as e:
+      _ = data_loader.load_next_batch()
+    self.assertTrue(str(e.exception).startswith("`next(self.data_iterator)` failed"))
+
   @pytest.mark.external_serving
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
