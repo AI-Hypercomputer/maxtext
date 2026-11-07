@@ -421,6 +421,36 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
         mm_processor.reformat_prompt("Tell me a story", "<img>", "llama2-7b", num_images=0), "Tell me a story"
     )
 
+  def test_reformatted_prompt_needs_bos(self):
+    # Gemma 3's chat format starts with <bos>, which `reformat_prompt` leaves to the token ids.
+    for model_name in ("gemma3-4b", "gemma3-12b", "gemma3-27b"):
+      self.assertTrue(mm_processor.reformatted_prompt_needs_bos(model_name), msg=model_name)
+      self.assertFalse(mm_processor.reformat_prompt("Describe", "<img>", model_name, num_images=1).startswith("<bos>"))
+    # Formats that spell out BOS (Gemma 4, Llama 4), have none (Qwen3, Ming), or are left unformatted (text-only).
+    self.assertTrue(mm_processor.reformat_prompt("Describe", "<img>", "gemma4-26b", num_images=1).startswith("<bos>"))
+    for model_name in (
+        "gemma4-26b",
+        "llama4-17b-16e",
+        "qwen3-vl-2b",
+        "maxtext-omni-gemma3-qwen3",
+        "ming-3.0-audio-tiny",
+        "llama2-7b",
+    ):
+      self.assertFalse(mm_processor.reformatted_prompt_needs_bos(model_name), msg=model_name)
+
+  def test_input_pipeline_prepend_bos(self):
+    bos_id = 2
+    # Python lists (Hugging Face datasets) get BOS prepended once.
+    self.assertEqual(input_pipeline_utils.prepend_bos({"q": [105, 2364]}, "q", bos_id)["q"], [2, 105, 2364])
+    self.assertEqual(input_pipeline_utils.prepend_bos({"q": [2, 105, 2364]}, "q", bos_id)["q"], [2, 105, 2364])
+    self.assertEqual(input_pipeline_utils.prepend_bos({"q": []}, "q", bos_id)["q"], [2])
+    # NumPy arrays (Grain) keep their dtype.
+    tokens = input_pipeline_utils.prepend_bos({"q": np.array([105, 2364], dtype=np.int32)}, "q", bos_id)["q"]
+    np.testing.assert_array_equal(tokens, [2, 105, 2364])
+    self.assertEqual(tokens.dtype, np.int32)
+    tokens = input_pipeline_utils.prepend_bos({"q": np.array([2, 105], dtype=np.int32)}, "q", bos_id)["q"]
+    np.testing.assert_array_equal(tokens, [2, 105])
+
   def test_get_vision_and_decoder_block_routing(self):
     # pylint: disable=protected-access
     # Multimodal Qwen3-VL
