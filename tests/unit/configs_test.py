@@ -23,6 +23,8 @@ errors like "Extra inputs are not permitted."
 
 import os
 import functools
+import unittest
+import warnings
 from copy import deepcopy
 
 import pytest
@@ -32,6 +34,7 @@ import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
+from maxtext.configs import pyconfig
 from maxtext.configs import types as pydantic_types
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 
@@ -135,11 +138,11 @@ def test_base_configs(config_file):
 # --- Test Group 2: Gemma Model Family ---
 
 GEMMA_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "gemma-2b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma-7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma2-2b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma2-9b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gemma2-27b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gemma-2b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gemma-7b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gemma2-2b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gemma2-9b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gemma2-27b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-4b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-12b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-27b.yml"),
@@ -161,18 +164,18 @@ LLAMA_CONFIGS = [
     os.path.join(CONFIGS_DIR, "gpu", "models", "llama3_8b.yml"),
     os.path.join(CONFIGS_DIR, "gpu", "models", "llama3_70b.yml"),
     os.path.join(CONFIGS_DIR, "gpu", "models", "llama3.1_405b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama2-7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama2-13b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama2-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3-8b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama3-405b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama2-7b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama2-13b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama2-70b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama3-8b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama3-70b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama3-405b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.1-8b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.1-70b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.1-405b.yml"),
     os.path.join(CONFIGS_DIR, "models", "llama3.3-70b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama4-17b-16e.yml"),
-    os.path.join(CONFIGS_DIR, "models", "llama4-17b-128e.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama4-17b-16e.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "llama4-17b-128e.yml"),
 ]
 
 
@@ -184,10 +187,10 @@ def test_llama_configs(config_file):
 # --- Test Group 4: GPT Model Family ---
 
 GPT_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "gpt3-52k.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt3-6b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt3-22b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "gpt3-175b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gpt3-52k.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gpt3-6b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gpt3-22b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "gpt3-175b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gpt-oss-20b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gpt-oss-120b.yml"),
 ]
@@ -201,8 +204,8 @@ def test_gpt_configs(config_file):
 # --- Test Group 5: DeepSeek Model Family ---
 
 DEEPSEEK_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "deepseek2-16b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek2-236b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "deepseek2-16b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "deepseek2-236b.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-test.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-2dfsdp.yml"),
@@ -221,9 +224,9 @@ def test_deepseek_configs(config_file):
 # --- Test Group 6: Mistral & Mixtral Model Family ---
 
 MISTRAL_CONFIGS = [
-    os.path.join(CONFIGS_DIR, "models", "mistral-7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "mixtral-8x7b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "mixtral-8x22b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "mistral-7b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "mixtral-8x7b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deprecated", "mixtral-8x22b.yml"),
     os.path.join(CONFIGS_DIR, "gpu", "models", "mixtral_8x1b.yml"),
     os.path.join(CONFIGS_DIR, "gpu", "models", "mixtral_8x2b.yml"),
     os.path.join(CONFIGS_DIR, "gpu", "models", "mixtral_8x7b.yml"),
@@ -308,3 +311,25 @@ INFERENCE_CONFIGS = [
 @pytest.mark.parametrize("config_file", INFERENCE_CONFIGS)
 def test_inference_configs(config_file):
   run_config_validation(config_file)
+
+
+class DeprecatedModelConfigTest(unittest.TestCase):
+  """Tests for the deprecated/ model configuration loader and soft-sunset warnings."""
+
+  def test_deprecated_model_config_emits_warning(self):
+    base_yml = os.path.join(CONFIGS_DIR, "base.yml")
+    with self.assertWarns(DeprecationWarning) as cm:
+      cfg = pyconfig.initialize([None, base_yml], model_name="gpt3-52k", run_name="test_deprecated")
+    self.assertEqual(cfg.model_name, "gpt3-52k")
+    self.assertIn("deprecated under the MaxText Model Lifecycle Policy", str(cm.warning))
+
+    with warnings.catch_warnings(record=True) as recorded:
+      warnings.simplefilter("always", DeprecationWarning)
+      active_cfg = pyconfig.initialize([None, base_yml], model_name="qwen3-0.6b", run_name="test_active")
+    self.assertEqual(active_cfg.model_name, "qwen3-0.6b")
+    deprecation_warnings = [
+        w for w in recorded
+        if issubclass(w.category, DeprecationWarning) and "Model config" in str(w.message)
+    ]
+    self.assertEqual(len(deprecation_warnings), 0)
+
