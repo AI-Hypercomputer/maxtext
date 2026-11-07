@@ -681,6 +681,7 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.integration_test
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
