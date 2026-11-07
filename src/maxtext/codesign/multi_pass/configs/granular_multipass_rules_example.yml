@@ -1,0 +1,79 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Granular Multi-Rule Example for Dtype-Agnostic Multi-Pass Emulation
+# Demonstrates mixing different presets, heterogeneous pass dtypes [B, C, D, ...],
+# microscaling (per_block_pow2), Karatsuba INT8 emulation, and per-layer targeting.
+
+multipass_emulation:
+  enabled: True
+  start_step: 0
+  end_step: -1
+  emulate_reference_model: False
+  emulate_teacher_model: False
+  bake_weight_multipass_on_save: False
+  apply_weight_multipass_on_load: False
+  log_diagnostics: True
+
+  # Ordered list of rules (first matching rule for a (module_path, op_name) wins)
+  rules:
+    # Rule 1: Early-to-mid MLP projections (layers 0-13) using 3-pass symmetric triangular
+    # FP8 E4M3 (hh + hl + lh, dropping ll) with per-128-block power-of-two scaling (MX-style)
+    # and backward dlhs + drhs multi-pass emulation.
+    - name: "early_mlp_fp8_x3_block128"
+      layers: "0-13"
+      module_path: ".*mlp/(wi|wi_0|wi_1|wo)$"
+      op_names: ["dot_general"]
+      src_dtype: "bf16"
+      num_passes: 2
+      pass_dtypes: ["fp8_e4m3", "fp8_e4m3"]
+      scale_mode: "per_block_pow2"
+      block_size: 128
+      rounding_mode: "rne"
+      cross_term_mode: "triangular"    # X3: (0,0) + (0,1) + (1,0), drops (1,1)
+      max_pass_degree: 1
+      acc_dtype: "fp32"
+      bwd_mode: "multipass_bwd"
+      emulate_fwd: True
+      emulate_dlhs: True
+      emulate_drhs: True
+
+    # Rule 2: Deep MLP projections (layers 14-27) using heterogeneous pass dtypes:
+    # Pass 0 in FP8 E5M2 (wide dynamic range) and Pass 1 in FP4 E2M1 (residual refinement).
+    - name: "deep_mlp_heterogeneous_e5m2_e2m1"
+      layers: "14-27"
+      module_path: ".*mlp/(wi|wi_0|wi_1|wo)$"
+      op_names: ["dot_general"]
+      lhs: "bf16->[fp8_e5m2,fp4_e2m1]@scale=per_block_pow2:block=128"
+      rhs: "bf16->[fp8_e4m3,fp4_e2m1]@scale=per_channel_pow2"
+      cross_term_mode: "triangular"
+      acc_dtype: "fp32"
+
+    # Rule 3: Attention Q/K/V projections using Henry et al. 3-pass BF16_BF16_F32_X3
+    - name: "attention_qkv_bf16_x3"
+      module_path: ".*self_attention/(query|key|value)$"
+      op_names: ["dot_general"]
+      preset: "BF16_BF16_F32_X3"
+
+    # Rule 4: Attention output projection using 3-pass Karatsuba INT8_INT8_INT32_X3
+    - name: "attention_out_int8_karatsuba_x3"
+      module_path: ".*self_attention/out$"
+      op_names: ["dot_general"]
+      preset: "INT8_INT8_INT32_X3"
+
+    # Rule 5: MoE routed expert weights using asymmetric X2 FP8 E4M3 (1-pass activation, 2-pass weight)
+    - name: "moe_routed_experts_fp8_x2"
+      module_path: ".*routed_experts/(wi_0|wi_1|wo)$"
+      op_names: ["gmm", "ragged_dot", "dot_general"]
+      preset: "F8E4M3_F8E4M3_F32_X2"
