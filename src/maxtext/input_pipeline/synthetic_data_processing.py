@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 
 
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.configs import pyconfig
 from maxtext.utils.diloco_sharding import reshape_first_axis_with_diloco
@@ -85,24 +86,31 @@ class SyntheticDataIterator:
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
+    # When several data replicas share this process (threaded DiLoCo), `global_batch_size_to_load` is one replica's
+    # batch. Build the batch of all replicas and keep this replica's rows, so replica i gets the same rows as replica i
+    # of SPMD DiLoCo, which splits one global batch along its first axis. With one replica this is the full batch.
+    replica_index, num_replicas = input_pipeline_utils.get_data_replica(config)
+    all_replicas_batch_size = batch_size * num_replicas
     tokens = jax.random.randint(
         jax.random.PRNGKey(0),
-        (batch_size, config.max_target_length + 1),
+        (all_replicas_batch_size, config.max_target_length + 1),
         0,
         config.vocab_size,
         dtype=jnp.int32,
     )
 
     sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
-    batch_positions = jnp.broadcast_to(sequence_positions, (batch_size, config.max_target_length + 1))
+    batch_positions = jnp.broadcast_to(sequence_positions, (all_replicas_batch_size, config.max_target_length + 1))
     if config.packing:
       segmentation = _make_packed_segment_ids(
-          batch_size,
+          all_replicas_batch_size,
           config.max_target_length,
           config.max_segments_per_seq,
       )
     else:
-      segmentation = jnp.ones((batch_size, config.max_target_length), dtype=jnp.int32)
+      segmentation = jnp.ones((all_replicas_batch_size, config.max_target_length), dtype=jnp.int32)
+    rows = slice(replica_index * batch_size, (replica_index + 1) * batch_size)
+    tokens, batch_positions, segmentation = tokens[rows], batch_positions[rows], segmentation[rows]
     if is_training and config.logical_global_batch_size_to_load is not None:
       # With `elastic_global_batch_size_mode='constant_padded'`, mask out rows beyond the logical global batch.
       segmentation = segmentation.at[config.logical_global_batch_size_to_load :].set(0)

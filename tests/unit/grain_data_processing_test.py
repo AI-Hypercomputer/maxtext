@@ -876,5 +876,41 @@ class GrainSftPadIdTest(unittest.TestCase):
     self.assertEqual(base_tokenizer.pad_id, 2)
 
 
+class GrainElasticDataReplicaTest(unittest.TestCase):
+  """ElasticIterator with several data replicas per process (num_data_replicas_per_process > 1)."""
+
+  def test_each_replica_gets_its_own_batch(self):
+    num_replicas, replica_batch, steps = 2, 4, 3
+    batches = {}
+    for replica in range(num_replicas):
+      config = SimpleNamespace(
+          global_batch_size_to_load=replica_batch,
+          logical_global_batch_size_to_load=None,
+          num_data_replicas_per_process=num_replicas,
+          data_replica_index=replica,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+      )
+      # The shard arguments make_grain_train_iterator passes on one loading process.
+      with mock.patch.object(input_pipeline_utils.jax, "process_index", return_value=0):
+        shard_index, shard_count = input_pipeline_utils.get_dataloading_shard(config, [0])
+      iterator = iter(
+          grain_data_processing._make_elastic_iterator(  # pylint: disable=protected-access
+              grain.MapDataset.range(64),
+              config,
+              lambda dataset: dataset,
+              shard_index=shard_index,
+              shard_count=shard_count,
+          )
+      )
+      batches[replica] = [next(iterator).tolist() for _ in range(steps)]
+    for replica in range(num_replicas):
+      self.assertEqual([len(b) for b in batches[replica]], [replica_batch] * steps)
+    # Together the replicas read each step's global batch of all replicas, without overlap.
+    for step in range(steps):
+      rows = batches[0][step] + batches[1][step]
+      self.assertEqual(sorted(rows), list(range(step * 8, (step + 1) * 8)))
+
+
 if __name__ == "__main__":
   absltest.main()
