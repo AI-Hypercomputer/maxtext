@@ -14,15 +14,20 @@
 
 """Input pipeline using Grain."""
 
-import math
+from collections.abc import Sequence
+from concurrent import futures
+import dataclasses
+import functools
 import glob
+import itertools
+import json
+import math
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
-import functools
+import zlib
+
 import ml_collections
-from concurrent import futures
-import json
 
 import jax
 import numpy as np
@@ -99,6 +104,123 @@ def find_data_files(data_file_pattern, hf_access_token=None):
     raise FileNotFoundError(f"No files found matching pattern: {data_file_pattern}")
   max_logging.log(f"Found {len(data_files)} files for train/eval with grain")
   return data_files
+
+
+@dataclasses.dataclass(frozen=True)
+class _FileInstruction:
+  """Shard record range matching `grain.ArrayRecordDataSource`'s `FileInstruction` protocol."""
+
+  filename: str
+  skip: int
+  take: int
+  examples_in_shard: int
+
+
+def _parse_arrayrecord_patterns(data_file_pattern, mixture_config_path=None):
+  """Parses ArrayRecord dataset component names, file patterns, and mixture weights."""
+  if mixture_config_path:
+    with open(mixture_config_path, "r", encoding="utf-8") as f:
+      mixture_config = json.load(f)
+    names = list(mixture_config.keys())
+    patterns = [component["path"] for component in mixture_config.values()]
+    weights = [float(component["weight"]) for component in mixture_config.values()]
+    return names, patterns, weights
+  if data_file_pattern and ";" in data_file_pattern:
+    patterns, raw_weights = zip(*[entry.split(",") for entry in data_file_pattern.split(";")])
+    assert len(patterns) == len(raw_weights), "Number of data file patterns and weights must match"
+    return None, list(patterns), [float(weight) for weight in raw_weights]
+  return None, [data_file_pattern] if data_file_pattern else [], None
+
+
+_ARRAYRECORD_RECORD_COUNTS: dict[str, int] = {}
+
+
+@functools.cache
+def _find_arrayrecord_files(pattern: str, hf_access_token: str | None = None) -> tuple[str, ...]:
+  """Lists ArrayRecord files matching `pattern` once per host process."""
+  return tuple(find_data_files(pattern, hf_access_token=hf_access_token))
+
+
+def _count_arrayrecord_file(filename: str) -> int:
+  """Counts records in a single ArrayRecord shard once per host process."""
+  count = _ARRAYRECORD_RECORD_COUNTS.get(filename)
+  if count is None:
+    count = len(grain.ArrayRecordDataSource(filename))
+    _ARRAYRECORD_RECORD_COUNTS[filename] = count
+  return count
+
+
+def _clear_arrayrecord_metadata_cache() -> None:
+  """Clears process-local ArrayRecord file list and record count caches."""
+  _find_arrayrecord_files.cache_clear()
+  _ARRAYRECORD_RECORD_COUNTS.clear()
+
+
+class _ColocatedArrayRecordDatasetLoader:
+  """Resolves ArrayRecord `FileInstruction`s across colocated hosts without controller data access."""
+
+  def __init__(
+      self,
+      get_ds_fn,
+      data_file_pattern: str | None,
+      mixture_config_path: str | None = None,
+      hf_access_token: str | None = None,
+      max_workers: int = 1,
+  ):
+    self._get_ds_fn = get_ds_fn
+    self._data_file_pattern = data_file_pattern
+    self._mixture_config_path = mixture_config_path
+    self._hf_access_token = hf_access_token
+    self._max_workers = max_workers
+    self._files_per_pattern: dict[str, tuple[str, ...]] | None = None
+    self._unique_files: tuple[str, ...] = ()
+    self._file_instructions: dict[str, tuple[_FileInstruction, ...]] | None = None
+
+  def count_local_shards(self, shard_index: int, shard_count: int) -> tuple[int, int, int, list[int]]:
+    """Lists pattern files on this host and counts `unique_files[shard_index::shard_count]`."""
+    _, patterns, _ = _parse_arrayrecord_patterns(self._data_file_pattern, self._mixture_config_path)
+    unique_patterns = list(dict.fromkeys(patterns))
+    if not unique_patterns:
+      self._files_per_pattern = {}
+      self._unique_files = ()
+      return 0, 0, 0, []
+    with futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+      self._files_per_pattern = dict(
+          zip(
+              unique_patterns,
+              executor.map(
+                  functools.partial(_find_arrayrecord_files, hf_access_token=self._hf_access_token),
+                  unique_patterns,
+              ),
+          )
+      )
+      self._unique_files = tuple(sorted(set(itertools.chain.from_iterable(self._files_per_pattern.values()))))
+      local_files = self._unique_files[shard_index::shard_count]
+      local_counts = list(executor.map(_count_arrayrecord_file, local_files)) if local_files else []
+    files_digest = zlib.crc32("\0".join(self._unique_files).encode("utf-8"))
+    return len(self._unique_files), len(unique_patterns), files_digest, local_counts
+
+  def set_shard_counts(self, counts: Sequence[int]) -> None:
+    """Builds per-pattern `_FileInstruction` tuples from the combined cluster shard counts."""
+    if self._files_per_pattern is None:
+      raise RuntimeError("count_local_shards must be called before set_shard_counts.")
+    if len(counts) != len(self._unique_files):
+      raise ValueError(f"Expected {len(self._unique_files)} shard counts, got {len(counts)}.")
+    if not self._files_per_pattern:
+      self._file_instructions = None
+      return
+    _ARRAYRECORD_RECORD_COUNTS.update((filename, int(count)) for filename, count in zip(self._unique_files, counts))
+    instruction_by_file = {
+        filename: _FileInstruction(filename, 0, int(count), int(count))
+        for filename, count in zip(self._unique_files, counts)
+    }
+    self._file_instructions = {
+        pattern: tuple(instruction_by_file[filename] for filename in files)
+        for pattern, files in self._files_per_pattern.items()
+    }
+
+  def __call__(self, **kwargs):
+    return self._get_ds_fn(file_instructions=self._file_instructions, **kwargs)
 
 
 def _apply_mapdataset_transforms(
@@ -184,31 +306,31 @@ def get_datasets(
     dataset_config=None,
     split="train",
     grain_index_storage_option=None,
+    file_instructions=None,
 ):
   """Load a Grain dataset for the selected ``grain_file_type``."""
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
-      files = find_data_files(pattern, hf_access_token=hf_access_token)
+      files = (
+          file_instructions[pattern]
+          if file_instructions is not None
+          else find_data_files(pattern, hf_access_token=hf_access_token)
+      )
       reader_options = (
           {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
       )
       source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
       return grain.MapDataset.source(source)
 
+    names, patterns, weights = _parse_arrayrecord_patterns(data_file_pattern, mixture_config_path)
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
-    if mixture_config_path:
-      with open(mixture_config_path, "r", encoding="utf-8") as f:
-        mixture_config = json.load(f)
-
-      paths = [config["path"] for config in mixture_config.values()]
-      weights = [float(config["weight"]) for config in mixture_config.values()]
-
+    if names is not None and weights is not None:
       executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
-      dataset_list = list(executor.map(create_dataset_from_pattern, paths))
+      dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
       executor.shutdown(wait=True)
 
-      datasets_dict = dict(zip(mixture_config.keys(), dataset_list))
+      datasets_dict = dict(zip(names, dataset_list))
 
       for name, ds in datasets_dict.items():
         datasets_dict[name] = _apply_mapdataset_transforms(
@@ -224,20 +346,17 @@ def get_datasets(
 
       # Normalize weights
       total_weight = sum(weights)
-      weights_dict = {name: weight / total_weight for name, weight in zip(mixture_config.keys(), weights)}
+      weights_dict = {name: weight / total_weight for name, weight in zip(names, weights)}
 
       dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
       return dataset
-    elif ";" in data_file_pattern:
-      data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
-      assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
-      weights = [float(weight) for weight in weights]
+    elif weights is not None:
       weights = [round(weight / sum(weights), 4) for weight in weights]
 
       # Parallelize file finding (globbing), data source creation, and dataset wrapping
       # File finding and source creation are I/O-bound operations that release the GIL
       executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
-      dataset_list = list(executor.map(create_dataset_from_pattern, data_file_patterns))
+      dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
       executor.shutdown(wait=True)
 
       # Apply shuffle, repeat, sharding, and conversion to IterDataset to each dataset before mixing
@@ -258,7 +377,7 @@ def get_datasets(
       return dataset
     else:
       # Single pattern case - no need for parallelization
-      dataset = create_dataset_from_pattern(data_file_pattern)
+      dataset = create_dataset_from_pattern(patterns[0] if patterns else data_file_pattern)
       dataset = _apply_mapdataset_transforms(
           dataset,
           shuffle,
@@ -905,7 +1024,7 @@ def make_grain_train_iterator(
       grain_index_storage_option=getattr(config, "grain_index_storage_option", None),
       mixture_config_path=config.grain_train_mixture_config_path,
       elastic=config.grain_use_elastic_iterator,
-      hf_access_token=getattr(config, "hf_access_token", None),
+      hf_access_token=config.hf_access_token,
       dataset_config=dataset_config,
       split="train",
   )
@@ -932,6 +1051,15 @@ def make_grain_train_iterator(
   # While in other cases, get_ds_fn and preprocessing_fn to produce a data iterator and
   # pass to MultiHostDataLoadIterator
   if config.colocated_python_data_input:
+    count_shards = config.grain_file_type == "arrayrecord"
+    if count_shards:
+      get_ds_fn = _ColocatedArrayRecordDatasetLoader(
+          get_ds_fn,
+          grain_train_files,
+          mixture_config_path=config.grain_train_mixture_config_path,
+          hf_access_token=config.hf_access_token,
+          max_workers=config.grain_data_source_max_workers,
+      )
     if config.grain_use_elastic_iterator:
       preprocessing_fn = functools.partial(_make_elastic_iterator, config=config, preprocessing_fn=preprocessing_fn)
 
@@ -943,6 +1071,7 @@ def make_grain_train_iterator(
         global_shape,
         checkpoint_path=config.checkpoint_dir,
         elastic=config.grain_use_elastic_iterator,
+        count_shards=count_shards,
     )
 
   if 0 < config.expansion_factor_real_data < 1:
@@ -1056,7 +1185,7 @@ def make_grain_eval_iterator(
       grain_prefetch_buffer_size=config.grain_prefetch_buffer_size_eval,
       grain_data_source_max_workers=config.grain_data_source_max_workers,
       grain_index_storage_option=getattr(config, "grain_index_storage_option", None),
-      hf_access_token=getattr(config, "hf_access_token", None),
+      hf_access_token=config.hf_access_token,
       dataset_config=dataset_config,
       split="eval",
   )
@@ -1087,6 +1216,14 @@ def make_grain_eval_iterator(
         eval_dataloader, global_mesh, config.generate_padding_batch_eval
     )
   else:
+    count_shards = config.grain_file_type == "arrayrecord"
+    if count_shards:
+      get_ds_fn = _ColocatedArrayRecordDatasetLoader(
+          get_ds_fn,
+          grain_eval_files,
+          hf_access_token=config.hf_access_token,
+          max_workers=config.grain_data_source_max_workers,
+      )
     global_shape = (config.global_batch_size_to_load_eval, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
         get_ds_fn,
@@ -1096,4 +1233,5 @@ def make_grain_eval_iterator(
         checkpoint_path=config.checkpoint_dir,
         # The eval pipeline is not wrapped in an ElasticIterator.
         elastic=False,
+        count_shards=count_shards,
     )

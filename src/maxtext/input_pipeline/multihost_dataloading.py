@@ -357,6 +357,19 @@ def _state_file(directory_array) -> epath.Path:
   return epath.Path(directory) / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
 
 
+def _mesh_shard(dummy_array) -> tuple[int, int]:
+  """Returns `(shard_index, shard_count)` for this colocated host within `dummy_array`'s mesh."""
+  processes = sorted({device.process_index for device in dummy_array.sharding.device_set})
+  local_processes = {device.process_index for device in dummy_array.sharding.addressable_devices}
+  if len(local_processes) != 1:
+    raise ValueError(
+        "RemoteIterator.build expects this colocated process to address the devices of exactly one host of the"
+        f" mesh, whose processes are {processes}; it addresses devices of processes {sorted(local_processes)}."
+    )
+  (process,) = local_processes
+  return processes.index(process), len(processes)
+
+
 class RemoteIterator:
   "iterator class for using colocated python class"
 
@@ -404,7 +417,21 @@ class RemoteIterator:
     _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIterator initiated")
 
-  def build(self, dummy_array):
+  def count_shards(self, dummy_array):
+    """Counts this host's shard slice and returns `[num_files, num_patterns, digest, shard_index, *counts]`."""
+    shard_index, shard_count = _mesh_shard(dummy_array)
+    num_files, num_patterns, files_digest, local_counts = self.get_ds_fn.count_local_shards(shard_index, shard_count)
+    max_local = (num_files + shard_count - 1) // shard_count
+    row = np.full(4 + max_local, -1, dtype=np.int64)
+    row[:4] = (num_files, num_patterns, files_digest, shard_index)
+    row[4 : 4 + len(local_counts)] = local_counts
+    words = row.view(np.int32).reshape(4 + max_local, 2)
+    devices = list(dummy_array.sharding.addressable_devices)
+    shards = jax.device_put([words[None, :, :] for _ in devices], devices)
+    shape = (*dummy_array.shape, 4 + max_local, 2)
+    return jax.make_array_from_single_device_arrays(shape, dummy_array.sharding, shards)
+
+  def build(self, dummy_array, counts_array=None):
     """Builds the iterator over this host's shard of the data, sharded across the hosts of `dummy_array`'s mesh.
 
     After an elastic slice-down, the hosts that left still count in `jax.process_count()`, so the shard comes from
@@ -412,6 +439,7 @@ class RemoteIterator:
 
     Args:
       dummy_array: An array on the wrapper's CPU mesh.
+      counts_array: Optional replicated int32 array encoding `[num_files, *counts]` as int64 pairs.
 
     Returns:
       `dummy_array`, for the caller to wait on.
@@ -419,16 +447,11 @@ class RemoteIterator:
     Raises:
       ValueError: If this process doesn't address the devices of exactly one host of the mesh.
     """
-    processes = sorted({device.process_index for device in dummy_array.sharding.device_set})
-    local_processes = {device.process_index for device in dummy_array.sharding.addressable_devices}
-    if len(local_processes) != 1:
-      raise ValueError(
-          "RemoteIterator.build expects this colocated process to address the devices of exactly one host of the"
-          f" mesh, whose processes are {processes}; it addresses devices of processes {sorted(local_processes)}."
-      )
-    (process,) = local_processes
-    self.shard_index, self.shard_count = processes.index(process), len(processes)
+    self.shard_index, self.shard_count = _mesh_shard(dummy_array)
     max_logging.log(f"RemoteIterator reads data shard {self.shard_index} of {self.shard_count}")
+    if counts_array is not None:
+      packed = np.ascontiguousarray(np.asarray(counts_array.addressable_data(0))).view(np.int64).reshape(-1)
+      self.get_ds_fn.set_shard_counts(packed[1 : 1 + int(packed[0])].tolist())
     self.reset()
     return dummy_array
 
@@ -518,7 +541,16 @@ class RemoteIteratorWrapper:
   `preprocessing_fn` builds grain's `ElasticIterator` and takes the host's `shard_index` and `shard_count`.
   """
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
+  def __init__(
+      self,
+      get_ds_fn,
+      preprocessing_fn,
+      global_mesh,
+      global_shape,
+      checkpoint_path="",
+      elastic=False,
+      count_shards=False,
+  ):
     self.elastic = elastic
     self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
@@ -537,9 +569,47 @@ class RemoteIteratorWrapper:
         elastic=elastic,  # pyrefly: ignore[unexpected-keyword]
     )
     # Each colocated process needs an array on the mesh to know its data shard.
-    jax.block_until_ready(self.local_iterator.build(self.dummy_array))  # pyrefly: ignore[missing-attribute]
+    counts_array = self._exchange_shard_counts() if count_shards else None
+    built = (
+        self.local_iterator.build(self.dummy_array, counts_array)  # pyrefly: ignore[missing-attribute]
+        if counts_array is not None
+        else self.local_iterator.build(self.dummy_array)  # pyrefly: ignore[missing-attribute]
+    )
+    jax.block_until_ready(built)
     _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIteratorWrapper initiated")
+
+  def _exchange_shard_counts(self) -> jax.Array:
+    """Gathers sharded file record counts from colocated hosts and broadcasts the combined counts."""
+    start = time.perf_counter()
+    raw = np.asarray(self.local_iterator.count_shards(self.dummy_array))  # pyrefly: ignore[missing-attribute]
+    rows = np.ascontiguousarray(raw).view(np.int64).reshape(raw.shape[0], raw.shape[1])
+    num_files = int(rows[0, 0])
+    num_patterns = int(rows[0, 1])
+    if not (np.all(rows[:, 0] == num_files) and np.all(rows[:, 2] == rows[0, 2])):
+      raise ValueError("Colocated hosts resolved inconsistent shard file lists.")
+    shard_count = len({int(h) for h in rows[:, 3]})
+    counts = np.full(num_files, -1, dtype=np.int64)
+    seen_hosts = set()
+    for row in rows:
+      host = int(row[3])
+      if host in seen_hosts:
+        continue
+      seen_hosts.add(host)
+      expected = len(range(host, num_files, shard_count))
+      counts[host::shard_count] = row[4 : 4 + expected]
+    if np.any(counts < 0):
+      raise ValueError("Failed to collect record counts for all shards across colocated hosts.")
+    if num_files > 0:
+      max_logging.log(
+          f"Counted {int(counts.sum())} records across {num_files} files"
+          f" ({num_patterns} pattern(s)) across {shard_count} colocated hosts in {time.perf_counter() - start:.1f}s"
+      )
+    packed = np.empty(1 + num_files, dtype=np.int64)
+    packed[0] = num_files
+    packed[1:] = counts
+    words = packed.view(np.int32).reshape(1 + num_files, 2)
+    return jax.device_put(words, NamedSharding(self.cpu_mesh, PartitionSpec()))
 
   def close(self):
     if hasattr(self, "local_iterator") and hasattr(self.local_iterator, "close") and callable(self.local_iterator.close):
