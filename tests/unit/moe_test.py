@@ -4767,6 +4767,63 @@ class FusedMoeNativeFp8Test(unittest.TestCase):
     ref_np = np.array(ref_out, dtype=np.float32)
     np.testing.assert_allclose(out_np, ref_np, rtol=2e-2, atol=2e-2)
 
+  def test_fp4_moe_matches_bf16_with_dequantized_weights(self):
+    """fp4_moe keeps weight_dtype=bfloat16 and stores only the routed experts in float4_e2m1fn,
+    with either per-channel scales (moe_weight_block_size=None) or K-block scales."""
+    if pltpu.get_tpu_info().generation < 7:
+      self.skipTest("FP4 e2m1fn in gmm_v2 requires TPU v7+.")
+    devices = np.array(jax.devices()).reshape(-1, 1)
+    mesh = Mesh(devices, ("data", "model"))
+
+    def make(c):
+      return moe.RoutedMoE(
+          config=c,
+          num_experts=c.num_experts,
+          num_experts_per_tok=c.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=moe.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          dtype=c.dtype,
+          weight_dtype=c.weight_dtype,
+          quant=quantizations.configure_quantization(c),
+          rngs=nnx.Rngs(params=0),
+      )
+
+    for block_size in (None, 512):
+      with self.subTest(moe_weight_block_size=block_size):
+        overrides = {
+            "weight_dtype": "bfloat16",
+            "quantization": "",
+            "prefuse_moe_weights": True,
+            "weight_block_size": None,
+            "moe_weight_block_size": block_size,
+        }
+        cfg, _ = self._make_config(f"fused_moe_fp4_moe_{block_size}", fp4_moe=True, **overrides)
+        ref_cfg, _ = self._make_config(f"fused_moe_fp4_moe_ref_{block_size}", **overrides)
+
+        model, ref = make(cfg), make(ref_cfg)
+        self.assertEqual(model.wi[...].dtype, jnp.float4_e2m1fn)
+        self.assertEqual(model.wo[...].dtype, jnp.float4_e2m1fn)
+        self.assertEqual(model.gate.kernel[...].dtype, ref.gate.kernel[...].dtype)
+        self.assertEqual(ref.wi[...].dtype, jnp.bfloat16)
+        self.assertIsNone(getattr(ref, "wi_scale", None))
+
+        for name in ("wi", "wo"):
+          q, scale = quantizations.quantize_moe_weight_fp4(getattr(ref, name)[...], block_size=block_size)
+          self.assertEqual(scale.shape, getattr(model, f"{name}_scale")[...].shape)
+          getattr(model, name)[...] = q
+          getattr(model, f"{name}_scale")[...] = scale
+          getattr(ref, name)[...] = quantizations.dequantize_weight(q, scale, jnp.bfloat16)
+        model.gate.kernel[...] = ref.gate.kernel[...]
+
+        inputs = jax.random.normal(jax.random.PRNGKey(14), (1, 16, model.moe_expert_input_dim), dtype=jnp.bfloat16)
+        with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+          out, _, _ = model(inputs)
+          ref_out, _, _ = ref(inputs)
+        out_np = np.array(out, dtype=np.float32)
+        ref_np = np.array(ref_out, dtype=np.float32)
+        np.testing.assert_allclose(out_np, ref_np, rtol=5e-2, atol=5e-2)
+
   def test_sparse_matmul_gmm_v2_flags_dont_crash_under_vllm_rpa(self):
     """Regression test: sparse_matmul=True + use_gmm_v2=True with
     attention=vllm_rpa used to wrap kernels in a QArray that crashed
@@ -5024,14 +5081,14 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
 class RoutedMoEFp8Test(parameterized.TestCase):
   """Unit tests for RoutedMoE FP8 weight storage and dynamic dequantization scales."""
 
-  def _make_fp8_cfg(self, prefuse_moe_weights=True, weight_block_size=None, **overrides):
+  def _make_fp8_cfg(self, prefuse_moe_weights=True, weight_block_size=None, weight_dtype="float8_e4m3fn", **overrides):
     return pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="fp8_moe_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         override_model_config=True,
-        weight_dtype="float8_e4m3fn",
+        weight_dtype=weight_dtype,
         dtype="bfloat16",
         base_emb_dim=128,
         base_mlp_dim=64,
@@ -5062,6 +5119,33 @@ class RoutedMoEFp8Test(parameterized.TestCase):
       self.assertEqual(model.wo[...].dtype, jnp.float8_e4m3fn)
       self.assertEqual(model.wi_scale_axes, (model.wi_kernel_axes[0], None, model.wi_kernel_axes[2]))
       self.assertEqual(model.wo_scale_axes, (model.wo_kernel_axes[0], None, model.wo_kernel_axes[2]))
+
+  def test_fp4_moe_scale_init(self):
+    """fp4_moe supports per-channel (moe_weight_block_size=None) and K-block scale shapes."""
+    for prefuse in (True, False):
+      for moe_block_size in (None, 64):
+        with self.subTest(prefuse=prefuse, moe_weight_block_size=moe_block_size):
+          cfg = self._make_fp8_cfg(
+              prefuse_moe_weights=prefuse,
+              weight_dtype="bfloat16",
+              fp4_moe=True,
+              moe_weight_block_size=moe_block_size,
+          )
+          mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+          model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim)
+
+          wi_out = cfg.base_moe_mlp_dim * (2 if prefuse else 1)
+          wi_k_blocks = 1 if moe_block_size is None else cfg.base_emb_dim // moe_block_size
+          wo_k_blocks = 1 if moe_block_size is None else cfg.base_moe_mlp_dim // moe_block_size
+          wi_scales = [model.wi_scale] if prefuse else [model.wi_0_scale, model.wi_1_scale]
+          for scale in wi_scales:
+            self.assertEqual(scale.shape, (cfg.num_experts, wi_k_blocks, wi_out))
+          self.assertEqual(model.wo_scale.shape, (cfg.num_experts, wo_k_blocks, cfg.base_emb_dim))
+          self.assertEqual(model.wo[...].dtype, jnp.float4_e2m1fn)
+          expected_wi_k_axis = None if wi_k_blocks == 1 else model.wi_kernel_axes[1]
+          expected_wo_k_axis = None if wo_k_blocks == 1 else model.wo_kernel_axes[1]
+          self.assertEqual(model.wi_scale_axes, (model.wi_kernel_axes[0], expected_wi_k_axis, model.wi_kernel_axes[2]))
+          self.assertEqual(model.wo_scale_axes, (model.wo_kernel_axes[0], expected_wo_k_axis, model.wo_kernel_axes[2]))
 
   def test_fp8_prefused_per_expert_scale_init(self):
     """Verifies 1D per-expert scale initialization and sharding when prefuse_moe_weights=True."""
@@ -5601,15 +5685,72 @@ class Fp8MoeFakeQuantTest(unittest.TestCase):
     self.assertTrue(np.any(np.asarray(grads["wo"], np.float32) != 0))
 
   def test_rejects_fp8_moe_and_block_scales(self):
-    for overrides in ({"fp8_moe": True}, {"weight_block_size": 128}):
+    for overrides in ({"fp8_moe": True}, {"weight_block_size": 128}, {"moe_weight_block_size": 128}):
       with self.assertRaisesRegex(ValueError, "fp8_moe_fake_quant"):
         self._make_config("fp8_moe_fake_quant_rejected", fp8_moe_fake_quant=True, **overrides)
 
   def test_fp8_moe_rejects_weight_block_size(self):
     for flag in ("fp8_moe", "rollout_fp8_moe"):
-      with self.subTest(flag=flag):
-        with self.assertRaisesRegex(ValueError, "requires weight_block_size=None"):
-          self._make_config("fp8_moe_block_scale_rejected", **{flag: True, "weight_block_size": 128})
+      for block_flag in ("weight_block_size", "moe_weight_block_size"):
+        with self.subTest(flag=flag, block_flag=block_flag):
+          with self.assertRaisesRegex(ValueError, "requires weight_block_size=None"):
+            self._make_config("fp8_moe_block_scale_rejected", **{flag: True, block_flag: 128})
+
+  def test_fp4_moe_fake_quant_matches_rollout_weights_with_straight_through_grads(self):
+    """fp4_moe_fake_quant forward pass equals a plain model holding the dequantized
+    quantize_moe_weight_fp4(w), and the gradient is the plain model's gradient there."""
+    for block_size in (None, 128):
+      with self.subTest(moe_weight_block_size=block_size):
+        cfg = self._make_config(
+            f"fp4_moe_fake_quant_{block_size}",
+            fp4_moe_fake_quant=True,
+            moe_weight_block_size=block_size,
+        )
+        ref_cfg = self._make_config(f"fp4_moe_fake_quant_ref_{block_size}")
+        mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+        model, ref = self._build_model(cfg, mesh), self._build_model(ref_cfg, mesh)
+
+        rng_model, rng_x = jax.random.split(jax.random.PRNGKey(21))
+        x = jax.random.normal(
+            rng_x,
+            (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim),
+            cfg.dtype,
+        )
+        params = nn.unbox(model.init(rng_model, x)["params"])
+
+        def rollout_weight(w, bs=block_size):
+          q, scale = jax.jit(lambda t: quantizations.quantize_moe_weight_fp4(t, block_size=bs))(w)
+          return quantizations.dequantize_weight(q, scale, w.dtype)
+
+        ref_params = dict(params)
+        for name in ("wi_0", "wi_1", "wo"):
+          ref_params[name] = rollout_weight(params[name])
+          self.assertFalse(np.array_equal(np.asarray(ref_params[name]), np.asarray(params[name])))
+
+        def loss_and_grad(m, p, inputs=x):
+          def loss_fn(p):
+            out, _, _ = m.apply({"params": p}, inputs)
+            return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+          return jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(p)
+
+        with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+          (_, out), grads = loss_and_grad(model, params)
+          (_, ref_out), ref_grads = loss_and_grad(ref, ref_params)
+
+        np.testing.assert_array_equal(np.asarray(out, np.float32), np.asarray(ref_out, np.float32))
+        for name in ("wi_0", "wi_1", "wo"):
+          np.testing.assert_array_equal(np.asarray(grads[name], np.float32), np.asarray(ref_grads[name], np.float32))
+        self.assertTrue(np.any(np.asarray(grads["wo"], np.float32) != 0))
+
+  def test_rejects_fp4_moe_conflicts(self):
+    for overrides in ({"fp4_moe": True}, {"fp8_moe": True}):
+      with self.assertRaisesRegex(ValueError, "fp4_moe_fake_quant"):
+        self._make_config("fp4_moe_fake_quant_rejected", fp4_moe_fake_quant=True, **overrides)
+    with self.assertRaisesRegex(ValueError, "Cannot enable both fp8_moe and fp4_moe"):
+      self._make_config("fp8_and_fp4_moe_rejected", fp8_moe=True, fp4_moe=True)
+    with self.assertRaisesRegex(ValueError, "Cannot enable both fp8_moe_fake_quant and fp4_moe_fake_quant"):
+      self._make_config("fp8_and_fp4_fake_quant_rejected", fp8_moe_fake_quant=True, fp4_moe_fake_quant=True)
 
 
 if __name__ == "__main__":

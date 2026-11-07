@@ -40,6 +40,21 @@ def is_fp8_dtype(dtype: Any) -> bool:
   )
 
 
+def is_fp4_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is 4-bit (FP4 or INT4)."""
+  return dtype in (
+      "float4_e2m1fn",
+      "int4",
+      jnp.float4_e2m1fn,
+      jnp.int4,
+  )
+
+
+def is_quantized_weight_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is a quantized weight dtype (FP8, FP4, or INT4)."""
+  return is_fp8_dtype(dtype) or is_fp4_dtype(dtype)
+
+
 def is_module_unquantized(config: Config, module_name: str) -> bool:
   """Checks whether module_name matches any pattern in config.unquantized_modules."""
   unquantized = getattr(config, "unquantized_modules", None) or ()

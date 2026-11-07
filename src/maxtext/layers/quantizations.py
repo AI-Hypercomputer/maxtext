@@ -187,6 +187,58 @@ def fake_quantize_weight_per_channel(w: Array, channel_axis: int = 2) -> Array:
   return w_q + (w - jax.lax.stop_gradient(w))
 
 
+def quantize_moe_weight_fp4(
+    w: Any,
+    block_size: int | None = None,
+    weight_dtype: DType = jnp.float4_e2m1fn,
+) -> Tuple[Any, Any]:
+  """Per-channel or K-block 4-bit quantization of an (num_experts, in_dim, out_dim) MoE expert weight.
+
+  When `block_size` is None, keeps one absmax scale per expert (axis 0) and output channel (axis 2),
+  reducing over the contracting axis (`(E, 1, N)`). When `block_size` is set, tiles the contracting
+  axis into `in_dim // block_size` blocks (`(E, k_blocks, N)`). Accepts a jax.ShapeDtypeStruct.
+
+  Returns:
+    (quantized weight in `weight_dtype`, float32 scale).
+  """
+  num_experts, in_dim, out_dim = w.shape
+  if block_size is not None and block_size > 0:
+    if in_dim % block_size != 0:
+      raise ValueError(f"MoE contracting dim {in_dim} must be divisible by moe_weight_block_size {block_size}.")
+    k_blocks = in_dim // block_size
+  else:
+    k_blocks = 1
+    block_size = in_dim
+
+  if isinstance(w, jax.ShapeDtypeStruct):
+    return (
+        jax.ShapeDtypeStruct(w.shape, weight_dtype),
+        jax.ShapeDtypeStruct((num_experts, k_blocks, out_dim), jnp.float32),
+    )
+
+  dtype_obj = jnp.dtype(weight_dtype)
+  is_int = jnp.issubdtype(dtype_obj, jnp.integer)
+  qmax = float(jnp.iinfo(dtype_obj).max if is_int else jnp.finfo(dtype_obj).max)
+  w_blocked = w.astype(jnp.float32).reshape(num_experts, k_blocks, block_size, out_dim)
+  max_val = jnp.max(jnp.abs(w_blocked), axis=2, keepdims=True)
+  scale_blocked = jnp.maximum(max_val / qmax, 1e-12).astype(jnp.float32)
+  scaled = jnp.round(w_blocked / scale_blocked) if is_int else (w_blocked / scale_blocked)
+  q_w = jnp.clip(scaled, -qmax, qmax).astype(dtype_obj).reshape(w.shape)
+  return q_w, jnp.squeeze(scale_blocked, axis=2)
+
+
+def fake_quantize_moe_weight_fp4(
+    w: Array,
+    block_size: int | None = None,
+    weight_dtype: DType = jnp.float4_e2m1fn,
+) -> Array:
+  """Rounds `w` to the grid of `quantize_moe_weight_fp4(w)`, with a straight-through gradient."""
+  q, scale = quantize_moe_weight_fp4(w, block_size=block_size, weight_dtype=weight_dtype)
+  q = jax.lax.optimization_barrier(q)
+  w_q = jax.lax.stop_gradient(dequantize_weight(q, scale, compute_dtype=w.dtype))
+  return w_q + (w - jax.lax.stop_gradient(w))
+
+
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
@@ -1577,7 +1629,12 @@ def maybe_quantize_model(model, config):
 # Quantized weight dtypes that tpu-inference's fused MoE kernel (gmm_v2) takes with
 # per-block scales and dequantizes in-kernel. Any other qtype keeps the expert weights
 # unquantized on the fused path.
-FUSED_MOE_KERNEL_WEIGHT_QTYPES = (jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.int8))
+FUSED_MOE_KERNEL_WEIGHT_QTYPES = (
+    jnp.dtype(jnp.float8_e4m3fn),
+    jnp.dtype(jnp.int8),
+    jnp.dtype(jnp.float4_e2m1fn),
+    jnp.dtype(jnp.int4),
+)
 
 
 def get_fused_moe_rule() -> qwix.QuantizationRule | None:

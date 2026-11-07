@@ -960,10 +960,12 @@ class RoutedMoE(nnx.Module):
       is_hash_routing: Whether this layer uses deterministic hash routing instead of top-K routing.
       weight_quant: Optional WeightQuantConfig decoupling weight quantization settings.
     """
-    if weight_quant is not None:
-      weight_dtype = weight_quant.weight_dtype
+    if config and getattr(config, "fp4_moe", False):
+      weight_dtype = jnp.float4_e2m1fn
     elif config and config.fp8_moe:
       weight_dtype = jnp.float8_e4m3fn
+    elif weight_quant is not None:
+      weight_dtype = weight_quant.weight_dtype
     elif ctypes.is_module_unquantized(config, "routed_experts"):
       weight_dtype = ctypes.get_weight_dtype(config, "routed_experts")
       quant = ctypes.get_quant(config, "routed_experts", quant)
@@ -1217,7 +1219,7 @@ class RoutedMoE(nnx.Module):
     else:
       self.per_expert_scale = None
 
-    if not quantizations.in_serve_mode(self.quant) and ctypes.is_fp8_dtype(self.weight_dtype):
+    if not quantizations.in_serve_mode(self.quant) and ctypes.is_quantized_weight_dtype(self.weight_dtype):
       resolved_weight_quant = (
           self.weight_quant
           if self.weight_quant is not None
@@ -1229,6 +1231,7 @@ class RoutedMoE(nnx.Module):
           if resolved_weight_quant is not None
           else getattr(self.config, "weight_block_size", None)
       )
+      moe_block_size = getattr(self.config, "moe_weight_block_size", None)
 
       # Phase 1: Resolve scale shape based on quantization granularity
       # - Block scaling (e.g. weight_block_size=[128, 128] or 128): expert weights with shape
@@ -1237,18 +1240,20 @@ class RoutedMoE(nnx.Module):
       #   For prefused weights (wi), the out_dim is doubled (moe_intermediate_dim * 2).
       # - Per-expert / per-tensor scaling (weight_block_size is None): a 1D scale tensor
       #   with shape (num_experts,) containing one scalar scale per expert.
-      if self.config.fp8_moe and block_size is None:
+      if getattr(self.config, "fp4_moe", False) or (self.config.fp8_moe and block_size is None):
         fused_out_dim = moe_intermediate_dim * 2 if self.config.prefuse_moe_weights else moe_intermediate_dim
-        wi_scale_shape = (num_experts, 1, fused_out_dim)
-        wo_scale_shape = (self.num_experts, 1, self.moe_expert_input_dim)
+        wi_k_blocks = 1 if moe_block_size is None else self.moe_expert_input_dim // moe_block_size
+        wo_k_blocks = 1 if moe_block_size is None else moe_intermediate_dim // moe_block_size
+        wi_scale_shape = (num_experts, wi_k_blocks, fused_out_dim)
+        wo_scale_shape = (self.num_experts, wo_k_blocks, self.moe_expert_input_dim)
         wi_scale_sharding = (
             self.wi_kernel_axes[0],
-            None,
+            None if wi_k_blocks == 1 else self.wi_kernel_axes[1],
             self.wi_kernel_axes[2] if len(self.wi_kernel_axes) > 2 else self.wi_kernel_axes[-1],
         )
         wo_scale_sharding = (
             self.wo_kernel_axes[0],
-            None,
+            None if wo_k_blocks == 1 else self.wo_kernel_axes[1],
             self.wo_kernel_axes[2] if len(self.wo_kernel_axes) > 2 else self.wo_kernel_axes[-1],
         )
       elif block_size is not None:
@@ -5334,7 +5339,8 @@ class RoutedMoE(nnx.Module):
         and not is_fused_moe_path
     )
     is_kernel_quantized = (
-        isinstance(self.quant, quantizations.ServeFp8WeightQuantization) or (cfg and cfg.fp8_moe)
+        isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+        or (cfg and (cfg.fp8_moe or getattr(cfg, "fp4_moe", False)))
     ) and is_fused_moe_path
 
     def _maybe_native_gmm_weight(kernel, scale):
@@ -5353,10 +5359,10 @@ class RoutedMoE(nnx.Module):
 
     def _maybe_native_fused_weight(kernel, scale):
       """Fused (tpu_inference) path: returns (kernel, native_scale). Native
-      (is_kernel_quantized, FP8 kernel, scale present): kernel stays raw FP8,
-      scale is expanded to gmm_v2's rhs_scale layout. Otherwise: kernel is
-      dequantized and native_scale is None."""
-      if is_kernel_quantized and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
+      (is_kernel_quantized, quantized kernel, scale present): kernel stays raw
+      FP8/FP4, scale is expanded to gmm_v2's rhs_scale layout. Otherwise:
+      kernel is dequantized and native_scale is None."""
+      if is_kernel_quantized and ctypes.is_quantized_weight_dtype(kernel.dtype) and scale is not None:
         return kernel, quantizations.prepare_fused_gmm_scale(scale, kernel.shape)
       return linears.dequantize_weight(kernel, scale, self.dtype), None
 
@@ -5397,6 +5403,11 @@ class RoutedMoE(nnx.Module):
       w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
       w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
       wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
+    elif getattr(cfg, "fp4_moe_fake_quant", False) and not is_fused_moe_path:
+      moe_block_size = getattr(cfg, "moe_weight_block_size", None)
+      w0_kernel = quantizations.fake_quantize_moe_weight_fp4(w0_kernel, block_size=moe_block_size)
+      w1_kernel = quantizations.fake_quantize_moe_weight_fp4(w1_kernel, block_size=moe_block_size)
+      wo_kernel = quantizations.fake_quantize_moe_weight_fp4(wo_kernel, block_size=moe_block_size)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
