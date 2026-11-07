@@ -18,6 +18,7 @@ import functools
 
 import jax
 import jax.numpy as jnp
+from maxtext.kernels import gather_reduce_pallas
 from maxtext.kernels import gather_reduce_sc
 
 
@@ -125,3 +126,74 @@ def _unroute_impl(
 
 def _sort_impl(tokens: jax.Array, inds: jax.Array, use_gather_mosaic_kernel: bool) -> jax.Array:
   return tokens[inds, ...]
+
+
+def _sc_topk_sum(tokens: jax.Array, inds: jax.Array, group_size: int) -> jax.Array:
+  """`sum(tokens[inds].reshape(-1, group_size, D), axis=1)` on SparseCore (Pallas kernel; f32 adds, bf16 out)."""
+  width = tokens.shape[1]
+  # The kernel processes whole column chunks of a multiple of 32 columns; its default (3584) is DeepSeek's width.
+  col_chunk_size = 3584 if width % 3584 == 0 else width
+  assert col_chunk_size % 32 == 0, f"unsupported SparseCore gather-reduce width {width}"
+  return gather_reduce_pallas.sc_gather_reduce(
+      tokens.astype(jnp.bfloat16),
+      inds,
+      reduce_group_size=group_size,
+      single_sc=False,  # Split rows over every SparseCore of the device.
+      col_chunk_size=col_chunk_size,
+  )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def gather_topk_rows(tokens: jax.Array, sort_indices: jax.Array, group_size: int) -> jax.Array:
+  """Top-k dispatch `tokens[sort_indices // group_size]` whose backward top-k sum runs on SparseCore.
+
+  `sort_indices` is the permutation that sorts the flat (token, k) slots by
+  expert, so row j of the result is
+  token `sort_indices[j] // group_size`, without materializing the top-k repeat
+  of `tokens`.
+  """
+  return tokens[sort_indices // group_size]
+
+
+def _gather_topk_rows_fwd(tokens, sort_indices, group_size):
+  # The empty array only carries the input dtype to the backward.
+  return gather_topk_rows(tokens, sort_indices, group_size), (
+      sort_indices,
+      jnp.zeros((0,), tokens.dtype),
+  )
+
+
+def _gather_topk_rows_bwd(group_size, residuals, grads):
+  sort_indices, dtype_carrier = residuals
+  return (
+      _sc_topk_sum(grads, jnp.argsort(sort_indices), group_size).astype(dtype_carrier.dtype),
+      None,
+  )
+
+
+gather_topk_rows.defvjp(_gather_topk_rows_fwd, _gather_topk_rows_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def unsort_and_sum(tokens: jax.Array, sort_indices: jax.Array, group_size: int) -> jax.Array:
+  """Top-k combine on SparseCore, the transpose of `gather_topk_rows`: unsort `tokens` and sum each token's rows.
+
+  The backward is the plain gather `grads[sort_indices // group_size]` (no
+  inverse sort).
+  """
+  return _sc_topk_sum(tokens, jnp.argsort(sort_indices), group_size).astype(tokens.dtype)
+
+
+def _unsort_and_sum_fwd(tokens, sort_indices, group_size):
+  return unsort_and_sum(tokens, sort_indices, group_size), (
+      sort_indices,
+      jnp.zeros((0,), tokens.dtype),
+  )
+
+
+def _unsort_and_sum_bwd(group_size, residuals, grads):
+  sort_indices, dtype_carrier = residuals
+  return grads[sort_indices // group_size].astype(dtype_carrier.dtype), None
+
+
+unsort_and_sum.defvjp(_unsort_and_sum_fwd, _unsort_and_sum_bwd)
