@@ -278,8 +278,8 @@ class NgramHashMapping:
     if self.pad_id is not None:
       self.pad_id = int(self.compressed_tokenizer.lookup_table[self.pad_id])
 
-    max_long = np.iinfo(np.int64).max
-    M_max = int(max_long // self.tokenizer_vocab_size)
+    max_int = np.iinfo(np.int32).max
+    M_max = int(max_int // self.tokenizer_vocab_size)
     half_bound = max(1, M_max // 2)
     PRIME_1 = 10007
 
@@ -288,7 +288,7 @@ class NgramHashMapping:
     for layer_id in self.layer_ids:
       base_seed = int(seed + PRIME_1 * int(layer_id))
       g = np.random.default_rng(base_seed)
-      r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      r = g.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int32)
       multipliers = r * 2 + 1
       self.layer_multipliers[layer_id] = multipliers
 
