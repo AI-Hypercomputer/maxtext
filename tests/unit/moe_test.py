@@ -4875,6 +4875,43 @@ def test_moe_dispatch_no_expert_sharding_dense_forward():
   assert out.shape == inputs.shape
 
 
+@pytest.mark.parametrize("capacity_factor", [1.0, -1.0])
+def test_dense_matmul_returns_model_dtype_with_float32_routing_weights(capacity_factor):
+  """dense_matmul returns cfg.dtype when float32_weight_sum keeps the routing weights in float32.
+
+  DeepSeek-V4 routes with float32 gate logits, so the dense routing weights stay float32. The
+  capacity_factor > 0 combine must still return bf16, like the dropless branch, or the scanned
+  decoder layers get a float32 carry (#6077).
+  """
+  cfg = pyconfig.initialize(
+      [None, get_test_config_path()],
+      run_name="moe_dense_float32_routing_weights",
+      enable_checkpointing=False,
+      model_name="deepseek4-tiny",
+      dtype="bfloat16",
+      weight_dtype="bfloat16",
+      megablox=False,
+      sparse_matmul=False,
+      capacity_factor=capacity_factor,
+      float32_gate_logits=True,
+      float32_weight_sum=True,
+      per_device_batch_size=1,
+      max_target_length=16,
+  )
+  devices = maxtext_utils.create_device_mesh(cfg)
+  mesh = Mesh(devices, cfg.mesh_axes)
+  model = make_moe(cfg, mesh, intermediate_dim=cfg.moe_mlp_dim)
+  inputs = jax.random.normal(
+      jax.random.PRNGKey(0),
+      (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim),
+      dtype=jnp.bfloat16,
+  )
+  with mesh:
+    out, _, _ = model(inputs)
+  assert out.shape == inputs.shape
+  assert out.dtype == jnp.bfloat16
+
+
 @pytest.mark.tpu_only
 class FusedMlpMoETest(unittest.TestCase):
   """Tests that prefuse_moe_weights=True and prefuse_moe_weights=False produce identical outputs for MoE."""
