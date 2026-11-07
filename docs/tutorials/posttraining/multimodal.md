@@ -8,14 +8,14 @@ This document provides a guide to use the multimodal functionalities in MaxText 
 
 We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/sft_multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
 
-| Models                       | Input: Text | Input: Image | Input: Video | Input: Audio | Output |
-| :--------------------------- | :---------: | :----------: | :----------: | :----------: | :----: |
-| **Gemma3** (4B/12B/27B)      |      ✓      |      ✓       |              |              |  Text  |
-| **Gemma4** (26B/31B)         |      ✓      |      ✓       |              |              |  Text  |
-| **Llama4** (Scout/Maverick)  |      ✓      |      ✓       |              |              |  Text  |
-| **Qwen3-VL** (2B/4B/30B-A3B) |      ✓      |      ✓       |      ✓       |              |  Text  |
-| **Qwen3-Omni**               |      ✓      |      ✓       |      ✓       |      ✓       |  Text  |
-| **Qwen3.5** (35B/397B)       |      ✓      |      ✓       |      ✓       |              |  Text  |
+| Models                       | Input: Text | Input: Image | Input: Video | Input: Audio |    Output    |
+| :--------------------------- | :---------: | :----------: | :----------: | :----------: | :----------: |
+| **Gemma3** (4B/12B/27B)      |      ✓      |      ✓       |              |              |     Text     |
+| **Gemma4** (26B/31B)         |      ✓      |      ✓       |              |              |     Text     |
+| **Llama4** (Scout/Maverick)  |      ✓      |      ✓       |              |              |     Text     |
+| **Qwen3-VL** (2B/4B/30B-A3B) |      ✓      |      ✓       |      ✓       |              |     Text     |
+| **Qwen3-Omni**               |      ✓      |      ✓       |      ✓       |      ✓       | Text + Audio |
+| **Qwen3.5** (35B/397B)       |      ✓      |      ✓       |      ✓       |              |     Text     |
 
 ## Introduction
 
@@ -198,6 +198,65 @@ Input `<|im_start|>user
 <|im_start|>assistant
 ` -> `A roaring Tyrannosaurus rex animatronic is displayed in a museum exhibit.
 ```
+
+### Decode with Speech Output (Qwen3-Omni)
+
+Qwen3-Omni can also *speak* its answer. The speech stack (HF `talker`: a 20-layer MoE decoder with a residual code
+predictor, plus the `code2wav` vocoder) is part of the same MaxText model and checkpoint when the HF-named flag
+`enable_audio_output=true` is set. Convert the checkpoint with it enabled so the talker weights are included:
+
+```sh
+JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
+    model_name=qwen3-omni-30b-a3b \
+    base_output_directory=${BASE_OUTPUT_PATH?}/unscanned \
+    scan_layers=false use_multimodal=true enable_audio_output=true \
+    --lazy_load_tensors=False
+```
+
+Then add `enable_audio_output=true` to any Qwen3-Omni decode command. The thinker decodes the text answer as
+before, after which the talker turns it into a 24 kHz waveform written to `audio_output_path`:
+
+```sh
+python3 -m maxtext.inference.decode \
+    model_name=qwen3-omni-30b-a3b \
+    tokenizer_path=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+    tokenizer_type=huggingface \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+    per_device_batch_size=1 \
+    scan_layers=false \
+    use_multimodal=true \
+    use_audio_in_video=true \
+    prompt='What can you see and hear? Answer in one short sentence.' \
+    video_path='tests/assets/test_video.mp4' \
+    max_prefill_predict_length=1250 \
+    max_target_length=1280 \
+    add_bos=false \
+    attention='dot_product' \
+    enable_audio_output=true \
+    audio_output_path=answer.wav
+```
+
+Generation options mirror HuggingFace's `generate` arguments: `speaker` (`ethan`, `chelsie`, `aiden`),
+`talker_max_new_tokens` (codec frames, 12.5 per second of audio), `talker_do_sample` with `talker_top_k` /
+`talker_top_p` / `talker_temperature`, and `talker_repetition_penalty`. Decoding also writes
+`<audio_output_path>.thinker_outputs.npz` / `.talker_debug.npz`; `python3 -m maxtext.inference.qwen3_omni_talker_pipeline`
+replays the speech stack from them without re-running the thinker, and `tests/utils/qwen3_omni_talker_hf_reference.py`
+runs the HuggingFace talker on the same inputs for a parity check. Thinker-only checkpoints keep working with the
+default `enable_audio_output=false`.
+
+Audio construction and inference use shared interfaces: `layers/audio_decoders.py` selects the model's named output
+components, and `inference/audio_generation.py` defines the generation request and waveform result.
+`audio_output_type=auto` selects Qwen3-Omni for existing Qwen3-Omni configurations; `audio_output_type=qwen3_omni`
+selects it explicitly. The components remain at the original `talker` and `code2wav` checkpoint roots, so existing
+audio checkpoints need no conversion for this refactor.
+
+To support another audio model, add its component construction and feature requirements to `audio_decoders.py`,
+then implement the shared `AudioGenerator.generate(request)` contract and dispatch it in `audio_generation.py`.
+The implementation owns its conditioning, sampling procedure, and optional codec stages; the shared result contains
+a waveform and sample rate. Decoder features use model-independent names (`input_embeddings`, `hidden_states_N`).
+MaxEngine's `prefill(..., return_features=True)` returns `(prefix, tokens, features)`, keeping captured features outside
+the prefix donated to `insert`; existing prefill callers retain the two-result API. Capture currently supports
+prefill, with selected hidden layers requiring `scan_layers=false`.
 
 ## Supervised Fine-Tuning
 
