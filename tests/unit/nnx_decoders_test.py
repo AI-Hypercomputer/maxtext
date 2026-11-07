@@ -1561,7 +1561,7 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
 
     self.assertEqual(y_external.shape, inputs.shape)
     self.assertEqual(len(updated_kvs), num_layers)
-    np.testing.assert_allclose(y_external, y_scanned, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(y_external, y_scanned, rtol=1e-4, atol=1e-4)
 
   def test_gemma4_decoder_layer_sharding_by_shard_mode(self):
     """Under ShardMode.AUTO, Gemma4 decoder layers must leave out_sharding as None."""

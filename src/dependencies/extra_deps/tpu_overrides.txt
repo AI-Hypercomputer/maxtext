@@ -2,6 +2,7 @@ datasets>=5.0.1
 fsspec==2026.6.0
 gcsfs==2026.6.0
 orbax-checkpoint>=0.12.8
+libtpu==0.0.50 ; platform_machine == 'x86_64' and sys_platform == 'linux'
 markdown>=3.10.2
 oauthlib>=4.0.0
 setuptools>=84.0.0
