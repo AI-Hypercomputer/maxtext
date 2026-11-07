@@ -86,6 +86,8 @@ def get_input_data_sharding(config, mesh, rules=None):
     ds_type = getattr(getattr(config, "dataset_type", None), "value", str(getattr(config, "dataset_type", "")))
     if ds_type == "olmo_grain":
       shardings.pop("targets_position", None)
+    if bool(getattr(config, "olmo_use_loss_weights", False)):
+      shardings["loss_weights"] = data_sharding
     return shardings
   return data_sharding
 

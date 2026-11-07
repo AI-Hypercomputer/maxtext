@@ -2989,8 +2989,37 @@ class OlmoGrainDataset(BaseModel):
   olmo_reset_positions_on_segment: bool = Field(
       False,
       description=(
-          "olmo_grain: when True alongside olmo_segment_eos_token_id >= 0, reset inputs_position to 0 at the start "
-          "of each EOS-delimited segment so Scalable Softmax log(pos + 1) matches each segment's causal span."
+          "When True, reset within-document positions to 0 at each packed segment boundary (in both olmo_grain and "
+          "NoPE Scalable Softmax) so log(pos + 1) matches OLMo-core's intra-document causal span."
+      ),
+  )
+  olmo_segment_eos_ends_document: bool = Field(
+      False,
+      description=(
+          "olmo_grain: when True alongside olmo_segment_eos_token_id >= 0, place each EOS token at the end of its "
+          "own document (1 + cumsum(eos) - eos, matching OLMo-core segment_ids_from_eos / intra-document masking) "
+          "rather than starting the next segment on EOS."
+      ),
+  )
+  olmo_segment_chunk_length: NonNegativeInt = Field(
+      0,
+      description=(
+          "olmo_grain: when > 0 (e.g. 8192), also start a new packed segment at every chunk multiple alongside "
+          "olmo_segment_eos_token_id (matching OLMo-core short-context replay chunk isolation)."
+      ),
+  )
+  olmo_mask_cross_segment_targets: bool = Field(
+      False,
+      description=(
+          "olmo_grain: when True, zero targets_segmentation across document/chunk boundaries (segments[i] != "
+          "segments[i+1]) while preserving intra-document EOS prediction."
+      ),
+  )
+  olmo_use_loss_weights: bool = Field(
+      False,
+      description=(
+          "When True for OLMo 3.5 multimodal batches, shard and consume float32 per-token data['loss_weights'] "
+          "(e.g. masking <im_patch> and prompt tokens to 0.0 while keeping causal inputs_segmentation intact)."
       ),
   )
   olmo_global_indices_path: PathStr = Field(

@@ -1122,8 +1122,12 @@ olmo_index_path: '' # JSON from tools/data_generation/build_olmo_npy_index.py
 olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
 olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
 olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-core filter)
-olmo_segment_eos_token_id: -1 # >= 0: number EOS-delimited documents in inputs_segmentation (OLMo-core's EMo segments); -1: one segment per instance
-olmo_reset_positions_on_segment: false # reset inputs_position to 0 at each EOS segment boundary when olmo_segment_eos_token_id >= 0
+olmo_segment_eos_token_id: -1 # >= 0: number EOS-delimited documents in inputs_segmentation; -1: one segment per instance
+olmo_reset_positions_on_segment: false # reset within-document causal span to 0 at each packed segment boundary (olmo_grain + Scalable Softmax)
+olmo_segment_eos_ends_document: false # true: EOS ends its own document (OLMo-core intra-doc masking); false: legacy EMo segment start
+olmo_segment_chunk_length: 0 # > 0 (e.g. 8192): also split packed segments at fixed chunk multiples for short-context replay
+olmo_mask_cross_segment_targets: false # true: mask cross-document target transitions (EOS_doc_k -> first_tok_doc_{k+1})
+olmo_use_loss_weights: false # true: include float32 per-token loss_weights in OLMo 3.5 multimodal batch sharding & synthetic/placeholder iterators
 olmo_global_indices_path: '' # OLMo-core global indices (uint32) to train in its batch order instead of data_shuffle_seed
 
 # Training loop

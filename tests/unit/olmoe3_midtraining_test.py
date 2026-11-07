@@ -31,12 +31,14 @@ import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 import numpy as np
 
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import olmo_data_grain
 from maxtext.input_pipeline import synthetic_data_processing
 from maxtext.models import olmoe3
 from maxtext.models import olmoe3_vision
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sharding as max_sharding
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _BASE_YML = os.path.join(_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
@@ -508,6 +510,136 @@ class Olmoe3UlyssesKdaAndDataTest(parameterized.TestCase):
     self.assertEqual(cfg_vis_8k.ici_expert_parallelism, 64)
     self.assertEqual(cfg_vis_8k.global_batch_size_to_train_on, 512)
     self.assertEqual(cfg_vis_8k.olmo_max_crops_per_seq, 64)
+    self.assertTrue(cfg_vis_8k.olmo_segment_eos_ends_document)
+    self.assertTrue(cfg_vis_8k.olmo_reset_positions_on_segment)
+    self.assertTrue(cfg_vis_8k.olmo_use_loss_weights)
+    self.assertTrue(cfg_vis_8k.static_loss_cotangent)
+    self.assertAlmostEqual(cfg_vis_8k.z_loss_multiplier, 1e-5, places=10)
+    self.assertTrue(cfg_256k_3k.olmo_segment_eos_ends_document)
+    self.assertTrue(cfg_256k_3k.olmo_reset_positions_on_segment)
+    self.assertTrue(cfg_256k_3k.olmo_loss_denominator_counts_masked_instances)
+    self.assertTrue(cfg_256k_3k.static_loss_cotangent)
+    self.assertAlmostEqual(cfg_256k_3k.z_loss_multiplier, 1e-5, places=10)
+
+  def test_eos_ends_document_chunk_split_and_cross_segment_mask_match_olmo_core(self):
+    # Matches OLMo-core segment_ids_from_eos (eos.cumsum() - eos) + 8K chunk replay split.
+    eos = 100257
+    tokens = np.array([eos, 10, 11, eos, 12, 13, 14, 15, 16, eos, 17, 18], dtype=np.uint32)
+    out = olmo_data_grain.ShiftToInputsTargets(
+        segment_eos_token_id=eos,
+        reset_positions_on_segment=True,
+        segment_eos_ends_document=True,
+        segment_chunk_length=6,
+        mask_cross_segment_targets=True,
+    ).map({"tokens": tokens, "instance_id": 0, "file_id": 0, "instance_mask": True})
+
+    # Without chunk split: eos.cumsum() - eos = [0, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3]
+    # Plus chunk split at index 6 -> starts at [1, 4, 6, 10], segments = [1, 2, 2, 2, 3, 3, 4, 4, 4, 4, 5, 5]
+    expected_seg = np.array([1, 2, 2, 2, 3, 3, 4, 4, 4, 4, 5, 5], dtype=np.int32)
+    expected_pos = np.array([0, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1], dtype=np.int32)
+    # Cross-segment positions i in {0 (1->2), 3 (2->3), 5 (3->4), 9 (4->5)} + trailing pad 11 masked to 0,
+    # while intra-doc EOS predictions at i=2 (11->eos) and i=8 (16->eos) remain active!
+    expected_tgt_seg = np.array([0, 2, 2, 0, 3, 0, 4, 4, 4, 0, 5, 0], dtype=np.int32)
+    np.testing.assert_array_equal(out["inputs_segmentation"], expected_seg)
+    np.testing.assert_array_equal(out["inputs_position"], expected_pos)
+    np.testing.assert_array_equal(out["targets_segmentation"], expected_tgt_seg)
+
+  def test_scalable_softmax_resets_per_packed_document_across_cp1_and_cp4(self):
+    # Verify OLMoE3 Full Attention resets log(pos + 1) per packed document from decoder_segment_ids
+    # (matching OLMo-core _apply_scalable_softmax(q, cu_doc_lens)), even when a custom VLM loader
+    # leaves inputs_position = [0..L-1], under both CP=1 and CP=4.
+    b, seq_len = 2, 64
+    rng = np.random.default_rng(19)
+    half_x = rng.standard_normal((b, seq_len // 2, 128)).astype(np.float32)
+    x_np = np.concatenate([half_x, half_x], axis=1)
+    segs_np = np.concatenate(
+        [np.ones((b, seq_len // 2), np.int32), np.full((b, seq_len // 2), 2, np.int32)], axis=1
+    )
+    mono_pos_np = np.broadcast_to(np.arange(seq_len, dtype=np.int32)[None, :], (b, seq_len)).copy()
+    reset_pos_np = np.concatenate(
+        [np.arange(seq_len // 2, dtype=np.int32), np.arange(seq_len // 2, dtype=np.int32)]
+    )[None, :].repeat(b, axis=0)
+
+    def _run_cp(cp: int, pos_arr: np.ndarray):
+      cfg = pyconfig.initialize([
+          "",
+          _BASE_YML,
+          f"run_name=ut_ssmax_cp{cp}",
+          "base_output_directory=/tmp/ut_ssmax",
+          "dataset_type=synthetic",
+          "model_name=olmo35-tiny-e256k8-sh2x",
+          "override_model_config=True",
+          "base_emb_dim=128",
+          "base_num_query_heads=4",
+          "base_num_kv_heads=2",
+          "head_dim=32",
+          "use_scalable_softmax=True",
+          "attention=dot_product",
+          "dtype=float32",
+          "weight_dtype=float32",
+          f"max_target_length={seq_len}",
+          "olmoe3_segments_for_emo_only=False",
+          "olmo_reset_positions_on_segment=True",
+          "ici_data_parallelism=1",
+          "ici_fsdp_parallelism=1",
+          f"ici_context_parallelism={cp}",
+          "ici_expert_parallelism=1",
+          "context_parallel_load_balance=False",
+          "per_device_batch_size=2.0",
+      ])
+      dev = np.array(jax.devices()[:cp]).reshape(1, 1, cp, 1)
+      mesh = Mesh(dev, ("data", "fsdp", "context", "expert"), axis_types=(AxisType.Auto,) * 4)
+      with jax.set_mesh(mesh):
+        attn = olmoe3.OLMoE3Attention(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=5))
+        # Set nontrivial positive ssmax_scale so span scaling is sharply exercised!
+        attn.attention.ssmax_scale.set_value(jnp.array([1.2, 0.8, 1.5, 0.5], dtype=jnp.float32))
+        x_sh = jax.device_put(x_np, NamedSharding(mesh, PartitionSpec("data", "context", None)))
+        seg_sh = jax.device_put(segs_np, NamedSharding(mesh, PartitionSpec("data", "context")))
+        pos_sh = jax.device_put(pos_arr, NamedSharding(mesh, PartitionSpec("data", "context")))
+        out, _ = jax.jit(lambda m, inp, s, p: m(inp, s, p, True, MODEL_MODE_TRAIN))(attn, x_sh, seg_sh, pos_sh)
+      return np.asarray(out)
+
+    out_cp1_mono = _run_cp(1, mono_pos_np)
+    out_cp1_reset = _run_cp(1, reset_pos_np)
+    out_cp4_mono = _run_cp(4, mono_pos_np)
+    # 1) Monotonic 0..63 inputs_position matches pre-reset 0..31, 0..31 identically:
+    np.testing.assert_allclose(out_cp1_mono, out_cp1_reset, rtol=0.0, atol=1e-6)
+    # 2) Two identical 32-token packed documents produce identical attention outputs (no 2x log(pos+1) explosion!):
+    np.testing.assert_allclose(out_cp1_mono[:, :32, :], out_cp1_mono[:, 32:, :], rtol=1e-5, atol=1e-5)
+    # 3) CP=4 matches CP=1 identically:
+    np.testing.assert_allclose(out_cp4_mono, out_cp1_mono, rtol=1e-5, atol=1e-5)
+
+  def test_vlm_loss_weights_sharding_placeholder_and_im_patch_masking(self):
+    cfg = pyconfig.initialize([
+        "",
+        _VISION_8K_YML,
+        "run_name=ut_vlm_lw",
+        "base_output_directory=/tmp/ut_lw",
+        "dataset_type=synthetic",
+        "max_target_length=64",
+        "olmo_max_crops_per_seq=1",
+        "ici_data_parallelism=1",
+        "ici_expert_parallelism=1",
+        "ragged_buffer_factor=-1",
+        "per_device_batch_size=1.0",
+        "compile_topology=v4-8",
+        "compile_topology_num_slices=1",
+    ])
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1, 1, 1), ("data", "fsdp", "context", "expert"))
+    shardings = max_sharding.get_input_data_sharding(cfg, mesh)
+    ph_batch = next(synthetic_data_processing.PlaceHolderDataIterator.get_place_holder_synthetic_data(cfg))
+    syn_batch = next(synthetic_data_processing.SyntheticDataIterator(cfg, mesh))
+    self.assertIn("loss_weights", shardings)
+    self.assertEqual(set(shardings.keys()), set(ph_batch.keys()))
+    self.assertEqual(set(shardings.keys()), set(syn_batch.keys()))
+    self.assertEqual(syn_batch["loss_weights"].dtype, jnp.float32)
+    patch_tok = int(cfg.olmo_image_patch_token_id)
+    is_patch_tgt = np.asarray(syn_batch["targets"]) == patch_tok
+    lw = np.asarray(syn_batch["loss_weights"])
+    self.assertTrue(np.any(is_patch_tgt))
+    self.assertTrue(np.any(~is_patch_tgt))
+    np.testing.assert_array_equal(lw[is_patch_tgt], 0.0)
+    np.testing.assert_array_equal(lw[~is_patch_tgt], 1.0)
 
 
 if __name__ == "__main__":

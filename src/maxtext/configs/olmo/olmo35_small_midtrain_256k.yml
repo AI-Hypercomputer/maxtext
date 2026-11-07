@@ -37,11 +37,18 @@
 base_config: "base.yml"
 model_name: "olmo35-small-e256k8-sh2x"
 
-# -------------- Sequence & Packing --------------
+# -------------- Sequence, Intra-Document Packing & Loss Normalization --------------
 max_target_length: 262144
 packing: true
 olmo_segment_eos_token_id: 100257
+olmo_segment_eos_ends_document: true
+olmo_reset_positions_on_segment: true
+olmo_segment_chunk_length: 0  # set 8192 if streaming unsplit 8K replay chunks directly
+olmo_mask_cross_segment_targets: false
 olmo_apply_ngram_filter: true
+olmo_loss_denominator_counts_masked_instances: true
+static_loss_cotangent: true
+z_loss_multiplier: 1.0e-5
 olmoe3_segments_for_emo_only: false
 emo_enabled: false
 load_balance_loss_weight: 0.01
@@ -152,6 +159,9 @@ olmo_max_crops_per_seq: 128
 olmo_vit_cp_shard_crops: true
 olmo_vit_remat_blocks: true
 olmo_vit_crop_chunk_size: 4
+olmo_vision_lr_scale: 0.1
+olmo_connector_lr_scale: 2.0
+olmo_use_loss_weights: false  # set true when VLM loader yields per-token float32 loss_weights
 olmo_per_component_grad_clip: true
 
 # -------------- Optimizer & Schedule --------------

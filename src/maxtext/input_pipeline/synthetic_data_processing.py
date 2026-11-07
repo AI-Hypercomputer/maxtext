@@ -188,6 +188,9 @@ class SyntheticDataIterator:
       else:
         base_idx = active_idx
       output["pooled_patches_idx"] = jnp.broadcast_to(base_idx, (b_load, n_pooled, pool_size))
+      if bool(getattr(config, "olmo_use_loss_weights", False)):
+        patch_tok = int(config.olmo_image_patch_token_id)
+        output["loss_weights"] = (output["targets"] != patch_tok).astype(jnp.float32)
     if config.enable_diloco:
       output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
     return output
@@ -254,6 +257,8 @@ class PlaceHolderDataIterator:
       mm_np_dtype = jnp.dtype(config.dtype_mm)
       batch["images"] = np.zeros((batch_size, n_crops, n_patches, channels * patch * patch), dtype=mm_np_dtype)
       batch["pooled_patches_idx"] = np.full((batch_size, n_pooled, pool_size), -1, dtype=np.int32)
+      if bool(getattr(config, "olmo_use_loss_weights", False)):
+        batch["loss_weights"] = np.zeros((batch_size, config.max_target_length), dtype=np.float32)
 
     def infinite_iterator():
       while True:

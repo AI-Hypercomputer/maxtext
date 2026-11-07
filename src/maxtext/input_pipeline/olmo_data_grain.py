@@ -520,9 +520,19 @@ class ShiftToInputsTargets(grain.transforms.Map):
   the whole instance.
   """
 
-  def __init__(self, segment_eos_token_id: int = -1, reset_positions_on_segment: bool = False):
+  def __init__(
+      self,
+      segment_eos_token_id: int = -1,
+      reset_positions_on_segment: bool = False,
+      segment_eos_ends_document: bool = False,
+      segment_chunk_length: int = 0,
+      mask_cross_segment_targets: bool = False,
+  ):
     self.segment_eos_token_id = int(segment_eos_token_id)
     self.reset_positions_on_segment = bool(reset_positions_on_segment)
+    self.segment_eos_ends_document = bool(segment_eos_ends_document)
+    self.segment_chunk_length = int(segment_chunk_length)
+    self.mask_cross_segment_targets = bool(mask_cross_segment_targets)
 
   def map(self, element: Dict[str, Any]) -> Dict[str, Any]:
     """Convert ``tokens`` into ``inputs`` / ``targets`` / segmentation tensors."""
@@ -531,9 +541,19 @@ class ShiftToInputsTargets(grain.transforms.Map):
     instance_mask = bool(element.get("instance_mask", True))
     seg_value = np.int32(1) if instance_mask else np.int32(0)
     starts = None
-    if self.segment_eos_token_id >= 0:
-      starts = (tokens == self.segment_eos_token_id).astype(np.int32)
-      starts[0] = 0
+    if self.segment_eos_token_id >= 0 or self.segment_chunk_length > 0:
+      starts = np.zeros(L, dtype=np.int32)
+      if self.segment_eos_token_id >= 0:
+        if self.segment_eos_ends_document:
+          # Match OLMo-core segment_ids_from_eos (eos.cumsum() - eos): EOS closes
+          # its own document and token i+1 begins the next document at position 0.
+          if L > 1:
+            starts[1:] |= (tokens[:-1] == self.segment_eos_token_id).astype(np.int32)
+        else:
+          starts |= (tokens == self.segment_eos_token_id).astype(np.int32)
+          starts[0] = 0
+      if 0 < self.segment_chunk_length < L:
+        starts[np.arange(self.segment_chunk_length, L, self.segment_chunk_length)] = 1
       segments = 1 + np.cumsum(starts, dtype=np.int32)
     else:
       segments = np.ones(L, dtype=np.int32)
@@ -560,6 +580,8 @@ class ShiftToInputsTargets(grain.transforms.Map):
     targets[-1] = 0  # pad; loss masked below
 
     targets_seg = segments * seg_value
+    if self.mask_cross_segment_targets and L > 1:
+      targets_seg[:-1] = np.where(segments[:-1] == segments[1:], targets_seg[:-1], 0)
     targets_seg[-1] = 0  # never compute loss on the boundary position
 
     return {
@@ -581,6 +603,9 @@ def make_olmo_grain_data_loader(
     apply_ngram_filter: bool = True,
     segment_eos_token_id: int = -1,
     reset_positions_on_segment: bool = False,
+    segment_eos_ends_document: bool = False,
+    segment_chunk_length: int = 0,
+    mask_cross_segment_targets: bool = False,
     shift_to_inputs_targets: bool = True,
     path_remap: Optional[Dict[str, str]] = None,
     grain_worker_count: int = 0,
@@ -641,7 +666,15 @@ def make_olmo_grain_data_loader(
   if apply_ngram_filter:
     ops.append(NgramFilterTransform())
   if shift_to_inputs_targets:
-    ops.append(ShiftToInputsTargets(segment_eos_token_id, reset_positions_on_segment=reset_positions_on_segment))
+    ops.append(
+        ShiftToInputsTargets(
+            segment_eos_token_id,
+            reset_positions_on_segment=reset_positions_on_segment,
+            segment_eos_ends_document=segment_eos_ends_document,
+            segment_chunk_length=segment_chunk_length,
+            mask_cross_segment_targets=mask_cross_segment_targets,
+        )
+    )
   ops.append(grain.transforms.Batch(batch_size=batch_size, drop_remainder=True))
 
   # Both samplers already shard by host (shard_index/shard_count). Handing Grain a real

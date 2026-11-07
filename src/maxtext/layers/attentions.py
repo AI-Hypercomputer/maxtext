@@ -1236,10 +1236,28 @@ class Attention(nnx.Module):
 
     if self.ssmax_scale is not None:
       # log of the number of tokens this query can attend to, times a learned
-      # per-head gain. Positions restart per document under packing, so the span
-      # restarts with them. The first token of a document gets log(1) = 0, which
-      # is what the reference does (it attends to itself alone regardless).
-      span = jnp.log(inputs_positions.astype(jnp.float32) + 1.0)[:, :, jnp.newaxis, jnp.newaxis]
+      # per-head gain. Under intra-document masking (OLMo-core _apply_scalable_softmax),
+      # derive visible lengths directly from decoder_segment_ids when requested so both
+      # olmo_grain and custom VLM loaders restart at log(1) = 0 on every packed document.
+      span_positions = inputs_positions
+      if (
+          model_mode == MODEL_MODE_TRAIN
+          and decoder_segment_ids is not None
+          and bool(getattr(self.config, "olmo_reset_positions_on_segment", False))
+          and getattr(self.config.shard_mode, "value", str(self.config.shard_mode)) != "explicit"
+      ):
+        seg_len = decoder_segment_ids.shape[1]
+        tok_idx = jnp.arange(seg_len, dtype=jnp.int32)[jnp.newaxis, :]
+        is_doc_start = jnp.concatenate(
+            [
+                jnp.ones((decoder_segment_ids.shape[0], 1), dtype=jnp.bool_),
+                decoder_segment_ids[:, 1:] != decoder_segment_ids[:, :-1],
+            ],
+            axis=1,
+        )
+        doc_start = jax.lax.cummax(jnp.where(is_doc_start, tok_idx, 0), axis=1)
+        span_positions = jax.lax.stop_gradient(jnp.where(decoder_segment_ids != 0, tok_idx - doc_start, 0))
+      span = jnp.log(span_positions.astype(jnp.float32) + 1.0)[:, :, jnp.newaxis, jnp.newaxis]
       gain = jnp.asarray(self.ssmax_scale.get_value(), jnp.float32)[jnp.newaxis, jnp.newaxis, :, jnp.newaxis]
       query = (query.astype(jnp.float32) * span * gain).astype(self.dtype)
 

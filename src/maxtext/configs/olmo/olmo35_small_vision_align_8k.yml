@@ -22,13 +22,23 @@
 #     ici_data_parallelism=2 ici_expert_parallelism=64 per_device_batch_size=1.0
 #   For Stage 1 Connector Bridge (freeze 25L SigLIP2 + 40L LM, train Connector + 6 special <im_*> rows):
 #     freeze_vision_encoder_params=true trainable_parameters_mask="['OLMo35VisionConnector','token_embedder']" \
-#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 learning_rate=1.0e-3
+#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 learning_rate=2.0e-4
+#   For optional Perception middle stage (freeze LM, train 25L SigLIP2 + Connector + 6 <im_*> rows):
+#     trainable_parameters_mask="['OLMo35VisionEncoder','OLMo35VisionConnector','token_embedder']" \
+#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 \
+#     learning_rate=5.0e-5 olmo_connector_lr_scale=1.0 olmo_vision_lr_scale=0.06
 
 base_config: "base.yml"
 model_name: "olmo35-small-e256k8-sh2x"
 
 max_target_length: 8192
 packing: true
+olmo_segment_eos_token_id: 100257
+olmo_segment_eos_ends_document: true
+olmo_reset_positions_on_segment: true
+olmo_use_loss_weights: true
+static_loss_cotangent: true
+z_loss_multiplier: 1.0e-5
 olmoe3_segments_for_emo_only: false
 emo_enabled: false
 load_balance_loss_weight: 0.01
