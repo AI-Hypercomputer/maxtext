@@ -1899,11 +1899,32 @@ def setup_initial_state(
     # Always build the concrete init state, then overlay whatever we loaded. Anything the
     # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
     # value, so restore doesn't depend on knowing exactly what was saved.
-    state = jax.jit(
-        lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-        in_shardings=None,
-        out_shardings=state_mesh_shardings,
-    )()
+    if is_training and config.optimizer_memory_host_offload and not config.parameter_memory_host_offload:
+      # Initialize on device first, then move host-offloaded optimizer leaves to pinned_host in a
+      # separate jit; a single jit with mixed memory kinds lets XLA CSE differently sharded zero
+      # broadcasts in pinned_host.
+      device_state_mesh_shardings = jax.tree_util.tree_map(
+          lambda x: x.with_memory_kind("device") if isinstance(x, NamedSharding) else x,
+          state_mesh_shardings,
+          is_leaf=lambda x: isinstance(x, NamedSharding),
+      )
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+          in_shardings=None,
+          out_shardings=device_state_mesh_shardings,
+      )()
+      state = jax.jit(
+          lambda x: x,
+          in_shardings=(device_state_mesh_shardings,),
+          out_shardings=state_mesh_shardings,
+          donate_argnums=(0,),
+      )(state)
+    else:
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )()
     if raw_params and native:
       # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
       lineage_adapter.restore_params(state["model"], raw_params, config, mesh)

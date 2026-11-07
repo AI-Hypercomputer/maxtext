@@ -103,6 +103,14 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"{label}/layer_{layer_num:03d}"] = per_layer[layer_num]
 
 
+def _local_cpu_device():
+  """Returns the process-local CPU device, or None when the CPU backend is unavailable."""
+  try:
+    return jax.local_devices(backend="cpu")[0]
+  except (RuntimeError, IndexError):
+    return None
+
+
 class MetadataKey(enum.Enum):
   PER_DEVICE_TFLOPS = "per_device_tflops"
   PER_DEVICE_TOKENS = "per_device_tokens"
@@ -454,12 +462,11 @@ class MetricLogger:
     the previous call, then queues this step's metrics. The buffer is a queue of length 1: a new
     call means the previous dispatch is already submitted, so its result is safe to materialize.
 
-    For train, record_train_metrics runs eagerly on the current step so the tiny JAX op it
-    enqueues for self.learning_rate_schedule(step) lands on the device queue BEFORE the next
-    iteration dispatches p_train_step. If we deferred it to flush time, lr_schedule(step) would
-    be queued behind the just-dispatched next training step and materializing
-    learning/current_learning_rate at the next flush would have to wait for that next step to
-    finish, doubling the host-side block per iteration and starving the device.
+    For train, record_train_metrics runs eagerly on the current step. When a local CPU backend is
+    available, it evaluates self.learning_rate_schedule(step) on the local CPU so no accelerator op
+    is enqueued between steps; when no CPU backend is initialized (e.g. JAX_PLATFORMS=proxy), it
+    enqueues the op BEFORE the next iteration dispatches p_train_step so materialization remains
+    deferred to flush time without blocking the train loop.
 
     For eval, _accumulate_eval_metrics (which calls float() on JAX arrays) stays deferred to
     _flush_one_buffered_entry so the eval dispatch loop is not serialized.
@@ -537,7 +544,15 @@ class MetricLogger:
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
-    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    # Evaluate the LR schedule on the local CPU when available so it does not launch single-device
+    # accelerator ops between steps; otherwise preserve async deferred materialization.
+    cpu_device = _local_cpu_device()
+    if cpu_device is not None:
+      with jax.default_device(cpu_device):
+        lr = float(self.learning_rate_schedule(step))
+    else:
+      lr = self.learning_rate_schedule(step)
+    metrics["scalar"].update({"learning/current_learning_rate": lr})
     if step >= self.config.rampup_end_step:
       metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
       metrics["scalar"].update(
