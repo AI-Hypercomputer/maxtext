@@ -169,6 +169,8 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
     shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("inputs"))
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("targets"))
+  if getattr(config, "olmo_use_loss_weights", False):
+    shaped_batch["loss_weights"] = jax.ShapeDtypeStruct(batch_shape, jnp.float32, sharding=_sh("loss_weights"))
   if config.use_multimodal:
     is_olmo_mm = (
         getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
