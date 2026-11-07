@@ -1891,9 +1891,9 @@ class Qwen3_8FlashNext(BaseModel):
   gdn_chunk_inverse: Literal["solve", "block_doubling"] = Field(
       "block_doubling",
       description=(
-          "Qwen3.8 GDN chunk-matrix inverse. 'block_doubling' (default) builds the exact inverse from MXU matmuls"
-          " via bottom-up block doubling (TPU-friendly; stable in float32 even for correlated keys with weak decay);"
-          " 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
+          "GDN chunk-matrix inverse (Qwen3-Next, Qwen3.5, Qwen3.8). 'block_doubling' (default) builds the exact"
+          " inverse from MXU matmuls via bottom-up block doubling (TPU-friendly; stable in float32 even for"
+          " correlated keys with weak decay); 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
       ),
   )
   qsa_indexer_mask: Literal["gather", "reshape"] = Field(
@@ -6608,6 +6608,17 @@ class MaxTextConfig(
             "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
             "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
         )
+      if (
+          not self.packing
+          and self.dataset_type == DatasetType.GRAIN
+          and self.grain_file_type in ("mmap", "mmap_npy")
+          and self.reset_attention_mask
+      ):
+        raise ValueError(
+            f"GatedDeltaNet ({self.decoder_block.value}) with grain_file_type={self.grain_file_type!r} and "
+            "reset_attention_mask=True requires packing=True: those rows hold several documents split at EOD, "
+            "and with packing=False GatedDeltaNet ignores their segment IDs in training."
+        )
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
@@ -7322,6 +7333,16 @@ class RLConfig(
       raise ValueError(
           f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
+      )
+    if (
+        self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+        and not self.packing
+        and self.max_seq_token_per_tpu > 0
+    ):
+      raise ValueError(
+          f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
+          "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
+          "in training."
       )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
