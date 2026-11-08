@@ -1583,7 +1583,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     state = jax_device_state["state"]
 
     if immutable_data["save_checkpoint_on_completion"]:
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, is_final=True)
 
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress

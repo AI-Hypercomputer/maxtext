@@ -15,6 +15,7 @@
 """Unit tests for the checkpointing components."""
 
 import os
+import types
 from typing import Any
 from unittest import mock
 
@@ -866,6 +867,96 @@ class CheckpointErrorHandlerTest(parameterized.TestCase):
         checkpointing.maybe_save_checkpoint(self.mock_manager, self.state, config, data_iterator=None, step=1)
       self.assertIn("Checkpointing failed. GCS failure", str(cm.exception))
       self.assertIs(cm.exception.__cause__, original_error)
+
+
+class ColocatedSaveWithoutSlice0Test(parameterized.TestCase):
+  """Colocated Python checkpoint saves are skipped on a mesh without Pathways slice 0."""
+
+  def _config(self, single_controller=True, colocated=True):
+    """A config that checkpoints every 10 steps, with no emergency or continuous checkpointing."""
+    config = mock.Mock()
+    config.checkpoint_period = 10
+    config.enable_diloco = False
+    config.async_checkpointing = True
+    config.enable_continuous_checkpointing = False
+    config.local_checkpoint_period = 0
+    config.enable_emergency_checkpoint = False
+    config.enable_multi_tier_checkpointing = False
+    config.enable_autocheckpoint = False
+    config.save_checkpoint_on_start = False
+    config.enable_single_controller = single_controller
+    config.colocated_python_checkpointing = colocated
+    return config
+
+  def _state(self, slice_indices):
+    """A state whose only leaf is an array on devices of the given Pathways slices."""
+    leaf = mock.create_autospec(jax.Array, instance=True)
+    leaf.sharding.device_set = {mock.Mock(slice_index=i) for i in slice_indices}
+    return {"w": leaf}
+
+  def _manager(self):
+    manager = mock.MagicMock()
+    manager.latest = None
+    manager.checkpoints = []
+    return manager
+
+  @parameterized.named_parameters(
+      ("without_slice_0", [1], True),
+      ("without_slice_0_of_3", [1, 2], True),
+      ("with_slice_0", [0, 1], False),
+      ("only_slice_0", [0], False),
+  )
+  def test_lacks_slice_0(self, slice_indices, expected):
+    self.assertEqual(checkpointing.colocated_save_lacks_slice_0(self._config(), self._state(slice_indices)), expected)
+
+  @parameterized.named_parameters(
+      ("not_single_controller", False, True),
+      ("not_colocated", True, False),
+  )
+  def test_other_modes_never_lack_slice_0(self, single_controller, colocated):
+    config = self._config(single_controller=single_controller, colocated=colocated)
+    self.assertFalse(checkpointing.colocated_save_lacks_slice_0(config, self._state([1])))
+
+  def test_config_without_pathways_flags(self):
+    config = types.SimpleNamespace(checkpoint_period=10)
+    self.assertFalse(checkpointing.colocated_save_lacks_slice_0(config, self._state([1])))
+
+  def test_devices_without_slice_index(self):
+    state = {"w": jnp.zeros((2,))}
+    self.assertFalse(checkpointing.colocated_save_lacks_slice_0(self._config(), state))
+
+  def test_no_arrays(self):
+    self.assertFalse(checkpointing.colocated_save_lacks_slice_0(self._config(), {"step": 3}))
+
+  def test_periodic_save_is_skipped(self):
+    manager = self._manager()
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint") as save,
+        mock.patch.object(checkpointing, "reached_preemption", return_value=False),
+        mock.patch.object(checkpointing.max_logging, "warning") as warning,
+    ):
+      checkpointing.maybe_save_checkpoint(manager, self._state([1]), self._config(), data_iterator=None, step=20)
+    save.assert_not_called()
+    self.assertIn("Cannot save the checkpoint of step 20", warning.call_args.args[0])
+
+  def test_periodic_save_with_slice_0_runs(self):
+    manager = self._manager()
+    with (
+        mock.patch.object(checkpointing, "save_checkpoint", return_value=True) as save,
+        mock.patch.object(checkpointing, "reached_preemption", return_value=False),
+        mock.patch.object(checkpointing.elastic_utils, "maybe_elastic_scale_up"),
+    ):
+      checkpointing.maybe_save_checkpoint(manager, self._state([0, 1]), self._config(), data_iterator=None, step=20)
+    save.assert_called_once()
+
+  def test_final_save_raises(self):
+    manager = self._manager()
+    with mock.patch.object(checkpointing, "save_checkpoint") as save:
+      with self.assertRaisesRegex(RuntimeError, "runs without Pathways slice 0"):
+        checkpointing.maybe_save_checkpoint(
+            manager, self._state([1]), self._config(), data_iterator=None, step=20, is_final=True
+        )
+    save.assert_not_called()
 
 
 class FP8DequantizeOnLoadTest(parameterized.TestCase):
