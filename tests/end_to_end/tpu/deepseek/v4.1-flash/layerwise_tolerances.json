@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "code_parity": {
+    "atol": 1e-05,
+    "rtol": 1e-05,
+    "frob_rel": 1e-05
+  },
+  "fp64_frob_rel": 1e-10,
+  "decoder_layer_fp64_status": "f32-cast-limited",
+  "l3_invariance": {
+    "scan_vs_unscan_max_abs": 1e-07,
+    "remat_forward_max_abs": 0.0,
+    "remat_backward_max_abs": 1e-07
+  },
+  "negative_control_rel_scale": 0.01,
+  "tier_b_reference_gap_conditioning": {
+    "min_cos_sim": 0.99,
+    "max_rel_l2": 0.1
+  },
+  "step1_r4_parity": {
+    "tpu7x_ref": {
+      "lm_loss": 14.351181983947754,
+      "moe_lb_loss": 0.00013060835772193968,
+      "raw_grad_norm": 131.09829711914062
+    },
+    "tau_hw": {
+      "lm_loss": 0.001,
+      "moe_lb_loss": 1e-06,
+      "raw_grad_norm": 0.6554914855957031
+    },
+    "measured_floor_multiplier": 1.5,
+    "negative_control_leaf": "logits_dense"
+  }
+}

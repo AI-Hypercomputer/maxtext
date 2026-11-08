@@ -1,0 +1,164 @@
+{
+  "bundle_index_sha256": "eee491fe186e0a96c088492c0e68dbe629158a23733f21b005823347f4cea7da",
+  "bundle_key_schema": {
+    "l1_forward": {
+      "required_keys": [
+        "tokens",
+        "pixel_values",
+        "image_grid_hw",
+        "image_token_mask",
+        "reference_activation_quant_fp64",
+        "reference_activation_quant_fp32"
+      ],
+      "tri_variant_keys": [
+        "patch_embed_out",
+        "vit_block_out",
+        "vit_norm_out",
+        "aligner_out",
+        "post_merge_embeddings",
+        "h0",
+        "pre_mix0"
+      ]
+    },
+    "l1_vjp": {
+      "dynamic_tri_variant_prefix": "dW_",
+      "required_keys": [
+        "tokens",
+        "image_token_mask",
+        "cotangent_span"
+      ],
+      "tri_variant_keys": [
+        "d_images",
+        "d_embed_tokens"
+      ]
+    },
+    "l2_layer": {
+      "conditional_keys": {
+        "candidates_in": [
+          "{p}candidates_mask_in"
+        ],
+        "compress_kv_in": [
+          "{p}shared_compress_kv_in"
+        ],
+        "has_engram": [
+          "{p}engram_active_rows",
+          "{p}engram_inactive_rows"
+        ],
+        "index_k_in": [
+          "{p}shared_index_k_in"
+        ],
+        "is_index_source": [
+          "{p}ref_indexer_topk",
+          "{p}ref_indexer_margins",
+          "{p}ref_indexer_boundary_ulp"
+        ],
+        "topk_mask_in": [
+          "{p}topk_indices_in"
+        ]
+      },
+      "conditional_tri_variant_keys": {
+        "compress_kv_out": [
+          "{p}compress_kv_out"
+        ],
+        "has_engram": [
+          "{p}h_after_engram"
+        ],
+        "index_k_out": [
+          "{p}index_k_out"
+        ]
+      },
+      "required_keys": [
+        "positions",
+        "tokens",
+        "image_token_mask",
+        "text_pos_mask",
+        "image_pos_mask",
+        "{p}h_in",
+        "{p}pre_mix_in",
+        "{p}ref_topk_experts",
+        "{p}ref_gate_margins",
+        "{p}ref_gate_boundary_ulp"
+      ],
+      "tri_variant_keys": [
+        "{p}h_out",
+        "{p}pre_mix_out",
+        "{p}hc_attn_post_w",
+        "{p}hc_attn_res_w",
+        "{p}hc_attn_in",
+        "{p}attn_norm_out",
+        "{p}attn_out",
+        "{p}h_mid",
+        "{p}hc_ffn_post_w",
+        "{p}hc_ffn_res_w",
+        "{p}hc_ffn_in",
+        "{p}ffn_norm_out",
+        "{p}moe_scores",
+        "{p}moe_biased_scores",
+        "{p}moe_routed_out",
+        "{p}ffn_out"
+      ]
+    },
+    "l4_layer": {
+      "conditional_keys": {
+        "candidates_in": [
+          "{p}candidates_mask_in"
+        ],
+        "compress_kv_in": [
+          "{p}shared_compress_kv_in"
+        ],
+        "has_engram": [
+          "engram_active_rows",
+          "engram_inactive_rows"
+        ],
+        "index_k_in": [
+          "{p}shared_index_k_in"
+        ],
+        "is_index_source": [
+          "ref_indexer_topk",
+          "cotangent_indexer_scores"
+        ],
+        "topk_mask_in": [
+          "{p}topk_indices_in"
+        ]
+      },
+      "conditional_tri_variant_keys": {
+        "has_engram": [
+          "dW_engram_active"
+        ]
+      },
+      "dynamic_tri_variant_prefix": "dW_",
+      "required_keys": [
+        "positions",
+        "tokens",
+        "image_token_mask",
+        "h_in",
+        "pre_mix_in",
+        "ref_topk_experts",
+        "cotangent_h_out",
+        "cotangent_pre_mix_out",
+        "expert_sample_ids",
+        "S_left",
+        "S_right",
+        "S_left_w2",
+        "S_right_w2"
+      ],
+      "tri_variant_keys": [
+        "d_hidden_in",
+        "d_pre_mix_in",
+        "dW_w1_sample",
+        "dW_w2_sample",
+        "dW_w3_sample",
+        "dW_w1_frob",
+        "dW_w2_frob",
+        "dW_w3_frob",
+        "dW_w1_max_abs",
+        "dW_w2_max_abs",
+        "dW_w3_max_abs",
+        "dW_w1_sketch",
+        "dW_w2_sketch",
+        "dW_w3_sketch"
+      ]
+    }
+  },
+  "schema_version": 1
+}
