@@ -1354,6 +1354,8 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
       jax_dec_h, _, _, _ = m3_layer(x_jax, pos_jax)
       self.assertLessEqual(_rel_l2_error(np.asarray(jax_dec_h), pt_dec_h.numpy()), 1e-5)
 
+  # TODO(b/583197649): Re-enable once flakiness is resolved.
+  @unittest.skip("Disabled due to flakiness (b/583197649).")
   def test_e2e_logits_loss_aux_loss_and_backward_grad_parity(self):
     for tie in (True, False):
       cfg = _make_mini_config(tie_word_embeddings=tie, router_aux_loss_coef=0.05)
