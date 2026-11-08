@@ -43,8 +43,14 @@ def register(config=None):
 
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
 
-  # Dynamically apply KVCacheManager patch when registering the adapter
+  # Let vLLM derive mamba cache settings for hybrid GDN models wrapped by
+  # MaxTextForCausalLM. Must run before the VllmConfig is created.
   # pylint: disable=import-outside-toplevel
+  from .adapter import register_hybrid_gdn_vllm_config
+
+  register_hybrid_gdn_vllm_config()
+
+  # Dynamically apply KVCacheManager patch when registering the adapter
   from .adapter import patch_kv_cache_manager
 
   patch_kv_cache_manager()
