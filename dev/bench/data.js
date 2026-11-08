@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794084315816,
+  "lastUpdate": 1794099066471,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -65994,6 +65994,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4473.358999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "19f5698bc391a7cfc55c91d8db34f2d0919a645d",
+          "message": "Training engine: step guards, spike protection and model construction rules\n\n# Description\n\nStep guards, spike protection and model construction rules:\n- skip_step_on_nan (default false) skips a step whose gradient norm is non-finite,\n  leaving the state unchanged and recording step_skipped.\n- skip_step_on_spikes (shared with pre_train runs) previously applied a NaN\n  step during warmup and let NaN into its rolling buffers during warmup and\n  post-warmup; it now skips non-finite steps during warmup too and keeps NaN\n  out of the rolling buffers.\n- The model is built under the logical axis rules with any caller mesh cleared,\n  and eval_step traces under the engine's logical axis rules.\n- parameter_memory_host_offload and a logical_axis_rules_for_eval that differs\n  from the training rules raise NotImplementedError instead of being silently\n  ignored.\n- Add test guidance to training_engine/AGENTS.md.\n\nDifferences from atwigg/mlperf:\n- MLPerf defaults skip_step_on_nan to True and included max_grad_norm_spike.\n  Here skip_step_on_nan defaults to False, and max_grad_norm_spike was omitted\n  because MLPerf training reproduces without it. The MLPerf recipes aren't\n  affected, because Tunix's mlperf launcher passes skip_step_on_nan explicitly.\n- skip_step_on_nan is declared in types.py (relying on its default there\n  rather than duplicating it in base.yml) and read as a typed config field,\n  without MLPerf's getattr(config, ...) fallbacks; no os.environ switches are added.\n\n# Tests\n\n```bash\npython -m pytest tests/unit/optimizers_test.py tests/post_training/unit/maxtext_engine_test.py tests/post_training/unit/maxtext_engine_constructor_test.py -q\n```\nResult: All tests passed:\n- `//third_party/py/maxtext/tests/unit:optimizers_test`: passed\n- `//third_party/py/maxtext/tests/post_training/unit:maxtext_engine_test`: passed (291.8s)\n- `//third_party/py/maxtext/tests/post_training/unit:maxtext_engine_constructor_test`: passed (71.7s)\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nCo-authored-by: Andy Twigg <andy.twigg@gmail.com>\nCo-authored-by: Mohit Khatwani <mohitkhatwani@google.com>\nPiperOrigin-RevId: 1016451169",
+          "timestamp": "2026-11-07T23:29:17Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/19f5698bc391a7cfc55c91d8db34f2d0919a645d"
+        },
+        "date": 1794099065410,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 257.64299999999986,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 64.38499999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2112.511,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 139.1239999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 163.442,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4652.776000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1588.224,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 209.90099999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4422.724000000002,
             "unit": "sec"
           },
           {
