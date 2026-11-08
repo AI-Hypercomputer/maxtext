@@ -87,6 +87,11 @@ on:
         required: false
         type: boolean
         default: false
+      venv_artifact_name:
+        description: 'Optional pre-built venv artifact name'
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -128,8 +133,30 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
+      - name: Download the maxtext venv
+        if: ${{ !inputs.maxtext_installed && inputs.venv_artifact_name != '' }}
+        id: download-venv
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.venv_artifact_name }}
+        continue-on-error: true
+      - name: Extract maxtext venv
+        if: ${{ !inputs.maxtext_installed && steps.download-venv.outcome == 'success' }}
+        shell: bash
+        run: |
+          if ls venv.tar.gz.* >/dev/null 2>&1; then
+            if (set -o pipefail; for f in venv.tar.gz.*; do cat "$f"; rm -f "$f"; done | tar -xzf -); then
+              if [ -f .venv/bin/activate ]; then
+                sed -i "s|VIRTUAL_ENV=.*|VIRTUAL_ENV=\"\$(pwd)/.venv\"|" .venv/bin/activate
+              fi
+              echo "VENV_RESTORED=true" >> "$GITHUB_ENV"
+            else
+              echo "Warning: Failed to extract venv archive; falling back to local install."
+              rm -rf .venv venv.tar.gz.*
+            fi
+          fi
       - name: Install the maxtext wheel
-        if: ${{ !inputs.maxtext_installed }}
+        if: ${{ !inputs.maxtext_installed && env.VENV_RESTORED != 'true' }}
         shell: bash
         run: |
           python3 -m uv venv --seed
@@ -195,7 +222,9 @@ jobs:
             # Use the local virtual environment created in Step 3
             PYTHON_EXE=".venv/bin/python3"
             # Ensure pytest-cov is available and enable coverage flags
-            uv pip install pytest-cov
+            if ! $PYTHON_EXE -c "import pytest_cov" 2>/dev/null; then
+              uv pip install pytest-cov
+            fi
             PYTEST_COV_ARGS="--cov=maxtext --cov-report=xml --cov-report=term"
           fi
           export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
@@ -249,7 +278,9 @@ jobs:
             fi
             SPLIT_ARGS="--class-splits=${INPUTS_TOTAL_WORKERS} --class-group=${INPUTS_WORKER_GROUP}"
           elif [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
-            $PYTHON_EXE -m pip install --quiet pytest-split
+            if ! $PYTHON_EXE -c "import pytest_split" 2>/dev/null; then
+              $PYTHON_EXE -m pip install --quiet pytest-split
+            fi
             if [ -f .test_durations ]; then
               echo "Using downloaded .test_durations with least_duration splitting algorithm."
               SPLIT_ALGO="--splitting-algorithm least_duration"
@@ -258,7 +289,9 @@ jobs:
               SPLIT_ALGO=""
             fi
             if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
-              $PYTHON_EXE -m pip install --quiet pytest-xdist
+              if ! $PYTHON_EXE -c "import xdist" 2>/dev/null; then
+                $PYTHON_EXE -m pip install --quiet pytest-xdist
+              fi
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto ${SPLIT_ALGO}"
             else
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
