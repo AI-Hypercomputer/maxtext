@@ -39,7 +39,7 @@ Command:
   python3 -m tests.utils.run_sharding_dump --model_name <model> --topology <topology> --num_slice <slices>
 
 Example:
-  python3 -m tests.utils.run_sharding_dump --model_name gemma-7b --topology v5p-256 --num_slice 1
+  python3 -m tests.utils.run_sharding_dump --model_name gemma3-4b --topology v5p-256 --num_slice 1
 
 """
 
