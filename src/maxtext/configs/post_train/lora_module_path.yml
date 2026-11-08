@@ -16,6 +16,13 @@
 # These models have been explicitly tested and verified for LoRA.
 
 llama3.1: "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
+# Must precede `qwen3` (first prefix match wins). Scoped to dense Qwen3.5 hybrid
+# models (9b/27b) so MoE variants (35b-a3b/397b-a17b) are unaffected:
+# gated full attention (attention/attention/*) + Gated DeltaNet
+# (attention/in_proj_qkvz, attention/out_proj) + dense MLP.
+# in_proj_ba/conv1d/A_log/dt_bias excluded.
+qwen3.5-27b: "decoder/layers/.*(attention/(attention/(query|key|value|out)|in_proj_qkvz|out_proj)|mlp/(wi_0|wi_1|wo))"
+qwen3.5-9b: "decoder/layers/.*(attention/(attention/(query|key|value|out)|in_proj_qkvz|out_proj)|mlp/(wi_0|wi_1|wo))"
 qwen3: "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
 mistral: "decoder/layers/.*(attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
 deepseek2: "decoder/(dense_layers|moe_stack)/self_attention/(query|out|wkv_a|wkv_b)|decoder/(dense_layers|moe_stack)/(mlp|shared_experts)/(wi_0|wi_1|wo)"

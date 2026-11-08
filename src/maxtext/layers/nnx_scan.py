@@ -141,6 +141,12 @@ def apply_scanned_layers(
   # which are ``nnx.Param`` subclasses -- still has to leave the scan.
   carried_param_paths = {path for path, _ in nnx.to_flat_state(params)}
 
+  broadcast_rest_paths = {
+      path
+      for path, val in nnx.to_flat_state(rest)
+      if hasattr(val, "get_value") and jnp.ndim(val.get_value()) == 0
+  }
+
   def _ensure_stacked(x):
     if hasattr(x, "ndim") and x.ndim == 0:
       return jnp.broadcast_to(x, (length,))
@@ -208,5 +214,15 @@ def apply_scanned_layers(
   if param_scan_axis != 0:
     scanned_new_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, param_scan_axis), scanned_new_params)
 
-  nnx.update(layers, scanned_new_params, scanned_rest)
+  # Newly materialized parameters (e.g. Qwix LoRA adapters) are stacked along
+  # param_scan_axis here; add_scan_metadata sets logical axis names separately.
+  scanned_new_params = jax.tree.map(
+      lambda x: x.replace(param_scan_axis=param_scan_axis) if isinstance(x, nnx.Variable) else x,
+      scanned_new_params,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
+  clean_rest = nnx.from_flat_state(
+      [(path, val) for path, val in nnx.to_flat_state(scanned_rest) if path not in broadcast_rest_paths]
+  )
+  nnx.update(layers, scanned_new_params, clean_rest)
   return final_carry
