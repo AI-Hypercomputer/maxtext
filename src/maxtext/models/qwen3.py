@@ -2140,6 +2140,7 @@ class AttentionWithNorm(nnx.Module):
         shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
+        mesh=mesh,
         rngs=rngs,
     )
 
@@ -2181,6 +2182,7 @@ class AttentionWithNorm(nnx.Module):
         shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
+        mesh=mesh,
         rngs=rngs,
     )
 
@@ -2310,7 +2312,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         num_experts_per_tok=config.num_experts_per_tok,
         mesh=mesh,
         kernel_init=max_initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+        kernel_axes=("embed_router", None) if getattr(config, "moe_use_fused_gmm3d", False) else ("embed", None),
         intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,

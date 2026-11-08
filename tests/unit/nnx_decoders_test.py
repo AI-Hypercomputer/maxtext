@@ -59,6 +59,7 @@ from maxtext.layers import fsdp_prefetch_inhomogeneous
 from maxtext.layers import linears
 from maxtext.layers import nnx_decoders
 from maxtext.layers import nnx_scan
+from maxtext.layers import normalizations
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
@@ -3482,6 +3483,43 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     self.assertEqual(fsdp_prefetch_inhomogeneous._unstack_variable(raw, 3, 0), (raw, raw, raw))
     shared = nnx.Variable(jnp.zeros(()))
     self.assertEqual(fsdp_prefetch_inhomogeneous._unstack_variable(shared, 3, 0), (shared, shared, shared))
+
+
+class TestDeferredNormGradAllreduce(unittest.TestCase):
+  """Tests for the deferred norm-gradient all-reduce (`defer_norm_grad_allreduce`)."""
+
+  def test_defer_norm_grad_allreduce_nnx_decoder_aot(self):
+    base_kw = {
+        "decoder_block": "qwen3",
+        "base_num_decoder_layers": 2,
+        "num_decoder_layers": 2,
+        "base_emb_dim": 64,
+        "base_mlp_dim": 128,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 1,
+        "head_dim": 32,
+        "use_qk_norm": True,
+        "shard_mode": "auto",
+        "vocab_size": 128,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+    }
+    cfg_defer = _make_config(scan_layers=True, defer_norm_grad_allreduce=True, **base_kw)
+    cfg_unscanned = _make_config(scan_layers=False, defer_norm_grad_allreduce=True, **base_kw)
+    axis_sizes = {axis: 1 for axis in cfg_defer.mesh_axes} | {"fsdp": 4}
+    amesh = AbstractMesh(tuple(axis_sizes.values()), tuple(axis_sizes), axis_types=(AxisType.Auto,) * len(axis_sizes))
+    with jax.sharding.use_abstract_mesh(amesh), nn.logical_axis_rules(cfg_defer.logical_axis_rules):
+      dec_scanned = NNXDecoder(config=cfg_defer, mesh=amesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      dec_unscanned = NNXDecoder(config=cfg_unscanned, mesh=amesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      standalone = qwen3.Qwen3DecoderLayer(cfg_defer, amesh, MODEL_MODE_TRAIN, None, nnx.Rngs(0))
+      # The config enables the deferral ...
+      self.assertTrue(normalizations.get_deferred_norm_psum_axes(cfg_defer, amesh))
+    # ... but layers are built with it off: only `NNXDecoder._apply_layers_sequentially` (the path that adds the
+    # post-scan all-reduce) turns it on per call, so prefetch, pipeline and unscanned layers never produce
+    # unreduced scale gradients.
+    for layer in (dec_scanned.layers, dec_unscanned.layers_0, standalone):
+      self.assertFalse(layer.pre_self_attention_layer_norm.defer_scale_grad_allreduce)
+      self.assertFalse(layer.self_attention.defer_qk_norm_grad_allreduce)
 
 
 if __name__ == "__main__":
