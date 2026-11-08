@@ -17,6 +17,7 @@
 # pylint: disable=protected-access
 
 import unittest
+from unittest import mock
 import pytest
 from types import SimpleNamespace
 
@@ -201,6 +202,29 @@ class TestScoreResponses(unittest.TestCase):
     self.assertAlmostEqual(has_correct_format, 1.0)
 
 
+class TestEvaluationSampleCounts(unittest.TestCase):
+  """Check actual denominators without changing evaluate's public result tuple."""
+
+  def test_counts_samples_and_failed_reward_rows(self):
+    cfg = _make_config(eval_mode="pass_at_1")
+    dataset = [{"prompts": ["p0", "p1"], "question": ["q0", "q1"], "answer": ['["1"]', '["2"]']}]
+
+    def reward(prompts, completions, **kwargs):
+      del completions, kwargs
+      if prompts == ["p1"]:
+        raise ValueError("scoring unavailable")
+      return [2.0]
+
+    metadata = {}
+    with (
+        mock.patch.object(evaluate_rl, "generate_responses", return_value=[["a", "b"], ["c"]]),
+        mock.patch.object(evaluate_rl, "score_responses", return_value=(True, True, True)),
+    ):
+      result, _ = evaluate_rl.evaluate(cfg, dataset, None, reward_fns=[reward], metrics=metadata)
+    self.assertEqual(result, (2, 2, 100, 100, 100, 2.0))
+    self.assertEqual(metadata, {"num_samples": 3, "num_reward_samples": 2})
+
+
 class TestComputeRowReward(unittest.TestCase):
   """Tests for _compute_row_reward (per-prompt eval-time reward aggregation)."""
 
@@ -291,6 +315,22 @@ class TestComputeRowReward(unittest.TestCase):
     )
     self.assertEqual(score_sum, 0.0)
     self.assertEqual(count, 0)  # zero count so the caller's mean isn't biased
+
+  def test_invalid_reward_discards_entire_multi_pass_row(self):
+    """A later invalid score must discard earlier scores and all row samples."""
+    for scores in ([], [1.0, 2.0], [float("nan")], [float("inf")], [float("-inf")]):
+      with self.subTest(scores=scores):
+        reward = mock.Mock(side_effect=[[2.5], scores])
+        result = evaluate_rl._compute_row_reward(
+            reward_fns=[reward],
+            prompt="p",
+            question="q",
+            responses=["first", "second"],
+            answer="gold",
+            row_idx=0,
+        )
+        self.assertEqual(reward.call_count, 2)
+        self.assertEqual(result, (0.0, 0))
 
   def test_question_is_forwarded_to_reward_fn(self):
     """Regression: helper must pass `question` through to reward fns.

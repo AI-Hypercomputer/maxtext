@@ -32,6 +32,9 @@ data_shuffle_seed: 42
 # ====== RL ======
 # This config includes RL algorithm variations such as grpo or gspo-token
 rl:
+  # Opt-in actor router entropy and expert-load diagnostics for standard GRPO/GSPO.
+  # Uses valid prompt + completion tokens and does not change the RL loss.
+  record_moe_metrics: false
   # ====== GRPO/GSPO-Token ======
   # The number of times the policy generates multiple responses for a given prompt
   # within a single training step. This corresponds to `G` in Algorithm 1 in the
