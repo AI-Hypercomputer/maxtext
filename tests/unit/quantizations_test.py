@@ -898,5 +898,46 @@ class LogitsProjQwixTest(unittest.TestCase):
       self.assertEqual(rule.additional_qt_config["drhs_grad_calibration_method"], expected_drhs)
 
 
+class DisableChannelwiseAxesQwixRuleTest(unittest.TestCase):
+  """`qwix_disable_channelwise_axes` splits the fp8_full decoder-layer rule so only `gmm` gets per-tensor scales."""
+
+  def _fp8_full_rules(self, *extra):
+    """Returns the fp8_full Qwix rules for a fixed-calibration config with `extra` overrides."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "weight_quantization_calibration_method=fixed,-224,224",
+            "act_quantization_calibration_method=fixed,-224,224",
+            *extra,
+        ],
+        run_name="qwix_disable_channelwise_axes_test",
+        skip_jax_distributed_system=True,
+    )
+    # The decoder-layer rules are appended last, after the router/logits-specific ones.
+    return quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg)
+
+  def test_default_keeps_one_channelwise_rule_for_all_ops(self):
+    rule = self._fp8_full_rules()[-1]
+    self.assertEqual(tuple(rule.op_names), ("dot_general", "gmm", "ragged_dot"))
+    self.assertFalse(rule.disable_channelwise_axes)
+
+  def test_disable_channelwise_axes_only_on_gmm(self):
+    rules = self._fp8_full_rules("qwix_disable_channelwise_axes=true")
+    by_ops = {tuple(r.op_names): r for r in rules[-2:]}
+    self.assertEqual(set(by_ops), {("gmm",), ("dot_general", "ragged_dot")})
+    self.assertTrue(by_ops[("gmm",)].disable_channelwise_axes)
+    self.assertFalse(by_ops[("dot_general", "ragged_dot")].disable_channelwise_axes)
+    # Both halves share the module path, dtypes and calibration; only the scale granularity differs.
+    for rule in by_ops.values():
+      self.assertEqual(rule.module_path, rules[-1].module_path)
+      self.assertEqual(rule.weight_qtype, jnp.float8_e4m3fn)
+      self.assertEqual(rule.bwd_qtype, jnp.float8_e5m2)
+      self.assertEqual(rule.weight_calibration_method, "fixed,-224,224")
+      self.assertEqual(rule.act_calibration_method, "fixed,-224,224")
+
+
 if __name__ == "__main__":
   unittest.main()

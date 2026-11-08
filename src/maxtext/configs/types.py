@@ -680,6 +680,15 @@ class Quantization(BaseModel):
       ),
   )
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
+  qwix_disable_channelwise_axes: bool = Field(
+      False,
+      description="fp8_full only: quantize GMM activations and backward cotangents with one per-tensor scale instead"
+      " of one scale per token row (Qwix QtRule.disable_channelwise_axes). With a dynamic"
+      " bwd_quantization_calibration_method (e.g. absmax), per-row cotangent scales keep the wi_0/wi_1 DLHS"
+      " gradients from being accumulated inside gmm_v2 (moe_accumulate_wi_dlhs) and add a per-row rescale of"
+      " the weight-gradient cotangent; per-tensor scales remove both. Numerics change (coarser cotangent"
+      " scaling): gate on a real-data loss comparison.",
+  )
   use_manual_quantization: bool = Field(
       False,
       description="Whether to use manual quantization for batch split. Only used if `use_batch_split_schedule=True`.",
@@ -1076,6 +1085,61 @@ class SplashAttention(BaseModel):
   sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
   sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
   sa_qk_diag_grid: int = Field(2, description="Maps to qk_diag_grid in SplashConfig.")
+  sa_num_stacked_q_heads: int = Field(
+      1,
+      description="Tokamax Splash forward only (maps to SplashConfig.num_stacked_q_heads): process this many query"
+      " heads of the same KV group per grid step, so each K/V block is loaded once for the group and the QK/PV"
+      " matmuls run with num_stacked_q_heads * block_q rows. Must divide num_query_heads // num_kv_heads."
+      " Numerics-neutral (per-head math is unchanged); costs VMEM like a proportionally larger block_q.",
+  )
+  sa_dq_transposed: bool = Field(
+      False,
+      description="Tokamax Splash fused backward: accumulate dq^T = k^T * ds when k_layout=SEQ_MINOR.",
+  )
+  sa_bwd_fp8_ds: bool = Field(
+      False,
+      description="Tokamax Splash fused backward: quantize ds per-tile to float8_e4m3fn with power-of-2 scale so dk"
+      " and dq run on FP8 MXU.",
+  )
+  sa_bwd_fp8_dov: bool = Field(
+      False,
+      description="Tokamax Splash fused backward: quantize do and p to float8_e4m3fn with power-of-2 scales so dv"
+      " runs on FP8 MXU.",
+  )
+  sa_fwd_pv_fp8: bool = Field(
+      False,
+      description="Tokamax Splash forward: quantize s per-row and v per-tile to float8_e4m3fn with power-of-2 scales"
+      " so s @ v runs on FP8 MXU.",
+  )
+  sa_compact_residuals: bool = Field(
+      False,
+      description="Tokamax Splash forward: write logsumexp directly in compact (num_q_heads, 8, q_seq_len) layout and"
+      " skip dead max_logits.",
+  )
+  sa_bwd_vmem_dkv_gqa: bool = Field(
+      False,
+      description="Tokamax Splash backward: accumulate full-KV dk/dv in VMEM across q_heads_per_kv_head on dynamic"
+      " grid when kv_steps <= 2.",
+  )
+  sa_context_split_device_heads: int = Field(
+      0,
+      description="Number of Splash Attention query heads kept on device HBM (`context_device`, plus logsumexp) while"
+      " remaining heads are offloaded to pinned host (`context_offload`) under `remat_policy=custom`.",
+  )
+  sa_context_offload_fp8: bool = Field(
+      False,
+      description="Quantize offloaded Splash `out[dh:]` per 128-dim row to float8_e4m3fn + bf16 scale on device."
+      " Not storage-only: the attention output itself becomes the dequantized value (so forward and backward see"
+      " the same tensor), i.e. `out[dh:]` reaches the next layer fp8-rounded, in training and in eval.",
+  )
+  sa_diag_band_skip: bool = Field(
+      False,
+      description="Tokamax Splash fused backward only (maps to SplashConfig.diag_band_skip): with sa_qk_diag_skip,"
+      " run the dkv kernel's causal diagonal block as sa_qk_diag_grid kv row-bands, each over only the queries"
+      " it attends to, so the softmax and dv/dp/dk/dq work also skip the strictly-above-diagonal tiles."
+      " Bit-exact. Requires dq_reduction_steps=1 (dq accumulated in VMEM) and square dkv blocks; otherwise the"
+      " kernel silently uses the stock path.",
+  )
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
@@ -1156,8 +1220,9 @@ class SplashAttention(BaseModel):
           "Do not pass decoder segment ids to splash attention, which skips the"
           " per-block segment mask. Only valid when every row is a single"
           " segment: dataset_type='c4_mlperf' with stream chunking for both"
-          " train and eval. Requires attention='flash' and attention_type in"
-          " ('global', 'mla', 'local_sliding', 'chunk')."
+          " train and eval, or dataset_type='synthetic' without packed"
+          " segments (max_segments_per_seq < 2). Requires attention='flash' and"
+          " attention_type in ('global', 'mla', 'local_sliding', 'chunk')."
       ),
   )
   use_max_logit_estimate: int = Field(
@@ -1509,6 +1574,143 @@ class MoEGeneral(BaseModel):
   moe_use_direct_token_gather: bool = Field(
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
+  )
+  moe_use_fused_gmm3d: bool = Field(
+      False,
+      description=(
+          "EP=1 (pure FSDP) sparse_matmul only: run the routed experts with the Lineage fused 3D-layout GMMv2"
+          " kernels (experimental/lineage/gmmv2). Stores gate weights as a single fused `wi` `[E*D, 2*F]` parameter"
+          " rather than separate `(wi_0, wi_1)`, changing the parameter tree layout relative to standard checkpoints."
+      ),
+  )
+  moe_fused_gmm3d_gate_tile_m: int = Field(
+      768,
+      description="tile_m of gather_gate_gmm under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_gate_tile_k: int = Field(
+      1024,
+      description="tile_k of gather_gate_gmm under moe_use_fused_gmm3d (multiple of 1024 dividing emb_dim).",
+  )
+  moe_fused_gmm3d_dgrad_tile_rows: int = Field(
+      256,
+      description="tile_rows of linear_bwd_dgrad under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_dgrad_bucket_rows: int = Field(
+      128,
+      description="bucket_rows of linear_bwd_dgrad under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_dgrad_tile_n: int = Field(
+      512,
+      description="tile_n of linear_bwd_dgrad under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_dx_tile_m: int = Field(
+      512,
+      description="tile_m of gmm_v2 gate_dx under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_dx_tile_k: int = Field(
+      3072,
+      description="tile_k of gmm_v2 gate_dx under moe_use_fused_gmm3d (<=0 or >=2*mlp_dim uses full 2*mlp_dim).",
+  )
+  moe_fused_gmm3d_dx_tile_n: int = Field(
+      2048,
+      description="tile_n of gmm_v2 gate_dx under moe_use_fused_gmm3d (multiple of 1024 dividing emb_dim).",
+  )
+  moe_fused_gmm3d_dw_tile_k: int = Field(
+      1024,
+      description="tile_k of tgmm_v2 gate wgrad under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_gmm_combine: bool = Field(
+      True,
+      description="Use linear_gmm_fp8 + ragged_gather_reduce_tc instead of linear_combine_fwd under"
+      " moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_split_gate_bwd: bool = Field(
+      True,
+      description="Decouple gmm_v2 dx from tgmm_v2 dw_gate instead of gate_bwd_fused under moe_use_fused_gmm3d.",
+  )
+  moe_fused_gmm3d_split_dw_gate: bool = Field(
+      True,
+      description="Split dw_gate into [E,D,F] halves with separate reduce-scatters for TC/SC pipelining.",
+  )
+  moe_fused_gmm3d_dgrad_tile_k: int = Field(
+      1024,
+      description="tile_k of linear_bwd_dgrad under moe_use_fused_gmm3d (1024 or emb_dim).",
+  )
+  moe_fused_gmm3d_prequant_dy: bool = Field(
+      False,
+      description="Pre-quantize dy [N, D] once per token to e5m2 with power-of-2 absmax scale before"
+      " linear_bwd_dgrad.",
+  )
+  moe_fused_gmm3d_early_dwo_rs: bool = Field(
+      False,
+      description="Run linear_bwd_wgrad and dwo reduce-scatter immediately after linear_bwd_dgrad before gate_dx.",
+  )
+  moe_fused_gmm3d_sc_routed_gather: bool = Field(
+      False,
+      description="Issue 2D x_q[token_indices] gather at start of fused MoE bwd so XLA offloads asynchronously to"
+      " SparseCore.",
+  )
+  moe_fused_gmm3d_exact_topk_combine: bool = Field(
+      False,
+      description="Use specialized exact-top_k TensorCore gather-reduce combine kernel in fused MoE fwd and bwd.",
+  )
+  moe_fused_gmm3d_exact_topk_out_2d: bool = Field(
+      False,
+      description="Flatten [block_tokens, D0, D1] -> [block_tokens, D] in VMEM inside exact_topk_gather_reduce_tc to"
+      " avoid HBM reshape_reshape copies.",
+  )
+  moe_fused_gmm3d_wgrad_schedule_mode: int = Field(
+      0,
+      ge=0,
+      le=16,
+      description="Schedule MoE weight gradients and reduce-scatters (RS) earlier via zero-cost scalar NaN guards;"
+      " only read with moe_fused_gmm3d_split_gate_bwd. 0=no guards, 1=dwo before gate_dx, 2=dwo+dwi before"
+      " attention bwd, 3=also finish post-RS dwo+dwi_0 before attention bwd, 4=chained tgmm_v2 before gate_dx with"
+      " the dwo and dwi RSs finished before attention bwd via a dx3d guard, 5=dwo->gate_dx->chained tgmm_v2 before"
+      " attention bwd, 6=dwo_raw before gate_dx + tgmm_v2 after dx3d, 7=dwo RS before tgmm_v2, 8=dwo RS finished"
+      " behind gate_dx before Splash bwd, 9=mode 8 + chained tgmm_v2, 10-12=tgmm_v2 before gate_dx with 0/1/2 RSs"
+      " forced before gate_dx, 13=mode 12 + dwi_1 RS finished before the layer dx via a grad_coeffs guard, 14=mode"
+      " 10 + all 3 RSs finished before the layer dx via grad_coeffs guards, 15=unguarded gate_dx (attention bwd not"
+      " delayed) with dwo_raw before chained tgmm_v2, 16=mode 15 + dwo_raw guarded behind gate_dx + combine_dx).",
+  )
+  moe_fused_gmm3d_inv_perm_combine: bool = Field(
+      False,
+      description="Use O(C) SparseCore inverse-permutation scatter instead of O(C log^2 C) TensorCore bitonic sort"
+      " for exact_topk_gather_reduce_tc src_rows.",
+  )
+  moe_fused_gmm3d_relayout_x_2d_to_3d: bool = Field(
+      False,
+      description="Use Pallas VMEM strided-store relayout kernel for x_q [N, D] -> [N, D//128, 128] instead of XLA"
+      " cross-sublane reshape.",
+  )
+  moe_fused_gmm3d_fused_quant_relayout: bool = Field(
+      False,
+      description="Fuse FP8 quantization + [N, D] -> [N, D//128, 128] relayout in VMEM for x2d to eliminate HBM"
+      " clamp_convert_fusion and SparseCore data-format calls.",
+  )
+  moe_fused_gmm3d_overlap_dcoeffs_scatter: bool = Field(
+      False,
+      description="Issue unique-index dcoeffs SparseCore scatter immediately after linear_bwd_dgrad and overlap it"
+      " behind MoE wgrad + gate_dx.",
+  )
+  moe_packed_routing_sort: bool = Field(
+      False,
+      description="Pack (expert_id << 20) | slot_idx into a single uint32 array for bit-exact single-operand routing"
+      " argsort.",
+  )
+  use_qwen3_fused_qkv: bool = Field(
+      False,
+      description="Fuse Qwen3 QKV projection + QK RMSNorm + RoPE + Splash layout in Pallas kernel.",
+  )
+  use_qwen3_fused_out: bool = Field(
+      False,
+      description="Use custom-VJP FSDP Attention out projection with local absmax quantization and early overlapped"
+      " weight-gradient reduce-scatter.",
+  )
+  qwen3_defer_norm_grad_allreduce: bool = Field(
+      False,
+      description="Defer per-layer RMSNorm and QK-norm scale gradient all-reduces across FSDP/data axes until after"
+      " the decoder layer scan loop.",
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
@@ -5687,6 +5889,35 @@ class MaxTextConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
+      if self.remat_policy != "custom":
+        raise ValueError(
+            "sa_context_split_device_heads and sa_context_offload_fp8 require remat_policy='custom', got"
+            f" remat_policy={self.remat_policy!r}."
+        )
+      if "context_device" not in self.tensors_on_device:
+        self.tensors_on_device.append("context_device")
+      if "context_offload" not in self.tensors_to_offload:
+        self.tensors_to_offload.append("context_offload")
+    if self.sa_num_stacked_q_heads < 1:
+      raise ValueError(f"sa_num_stacked_q_heads must be >= 1, got {self.sa_num_stacked_q_heads}.")
+    if self.sa_num_stacked_q_heads > 1 and self.num_kv_heads > 0:
+      gqa_group = self.num_query_heads // self.num_kv_heads
+      if gqa_group % self.sa_num_stacked_q_heads != 0:
+        raise ValueError(
+            f"sa_num_stacked_q_heads ({self.sa_num_stacked_q_heads}) must divide"
+            f" num_query_heads // num_kv_heads ({gqa_group})."
+        )
+    if self.qwix_disable_channelwise_axes:
+      if self.quantization != "fp8_full" or not self.use_qwix_quantization:
+        raise ValueError(
+            "qwix_disable_channelwise_axes=True requires quantization='fp8_full' and use_qwix_quantization=True."
+        )
+      if not str(self.weight_quantization_calibration_method).lower().startswith("fixed,"):
+        raise ValueError(
+            "qwix_disable_channelwise_axes=True requires fixed weight_quantization_calibration_method,"
+            f" got {self.weight_quantization_calibration_method!r}."
+        )
 
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -6221,6 +6452,27 @@ class MaxTextConfig(
         )
     if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
       raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
+    if self.moe_use_fused_gmm3d:
+      fused_gmm3d_requirements = {
+          "sparse_matmul=True": self.sparse_matmul,
+          "use_tokamax_gmm=True": self.use_tokamax_gmm,
+          "expert_parallelism == 1": self.ici_expert_parallelism * self.dcn_expert_parallelism == 1,
+          "tensor_parallelism == 1": self.ici_tensor_parallelism * self.dcn_tensor_parallelism == 1,
+          "moe_flat_fsdp_weights=True": self.moe_flat_fsdp_weights,
+          "mlp_bias=False": not self.mlp_bias,
+          "prefuse_moe_weights=False": not self.prefuse_moe_weights,
+          "use_ring_of_experts=False": not self.use_ring_of_experts,
+          "num_moe_emb_chunks <= 0": self.num_moe_emb_chunks <= 0,
+          "num_moe_token_chunks <= 1": self.num_moe_token_chunks <= 1,
+          "use_te_grouped_gemm=False": not self.use_te_grouped_gemm,
+          "mlp_activations=['silu','linear']": list(self.mlp_activations) == ["silu", "linear"],
+          "shard_exp_on_fsdp=False": not self.shard_exp_on_fsdp,
+          "use_2d_fsdp_sharding=False": not self.use_2d_fsdp_sharding,
+          "capacity_factor < 0 (dropless)": self.capacity_factor < 0,
+      }
+      unmet = [name for name, ok in fused_gmm3d_requirements.items() if not ok]
+      if unmet:
+        raise ValueError(f"moe_use_fused_gmm3d=True requires: {', '.join(unmet)}.")
     if self.te_moe_disable_cudnn_gmm_fusion and not self.te_moe_block:
       raise ValueError("te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True.")
     if self.num_experts > 1:
@@ -6792,6 +7044,16 @@ class MaxTextConfig(
           "K quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
+    if self.sa_diag_band_skip:
+      if not (self.use_tokamax_splash and self.attention == "flash" and self.sa_qk_diag_skip):
+        raise ValueError(
+            "sa_diag_band_skip requires use_tokamax_splash=True, attention='flash' and sa_qk_diag_skip=True."
+        )
+      if self.dq_reduction_steps != 1:
+        raise ValueError(
+            "sa_diag_band_skip only takes effect with dq_reduction_steps=1 (dq accumulated in VMEM); got"
+            f" dq_reduction_steps={self.dq_reduction_steps}."
+        )
     if self.sa_qproj_bwd_bf16 and not (
         self.quantization == "fp8_full" and self.use_qwix_quantization and not self.use_batch_split_schedule
     ):
@@ -6841,16 +7103,25 @@ class MaxTextConfig(
       def _stream_chunked(tokenize_data: bool) -> bool:
         return self.use_stream_chunking is True or (self.use_stream_chunking is None and not tokenize_data)
 
+      # Synthetic data emits all-ones segment ids unless packing with max_segments_per_seq >= 2
+      # (see input_pipeline/synthetic_data_processing.py), so ignoring them is exact there too.
+      _synthetic_single_segment = self.dataset_type == DatasetType.SYNTHETIC and not (
+          self.packing and self.max_segments_per_seq >= 2
+      )
       if not (
-          self.dataset_type == DatasetType.C4MLPERF
-          and _stream_chunked(self.tokenize_train_data)
-          and (self.eval_interval <= 0 or _stream_chunked(self.tokenize_eval_data))
+          _synthetic_single_segment
+          or (
+              self.dataset_type == DatasetType.C4MLPERF
+              and _stream_chunked(self.tokenize_train_data)
+              and (self.eval_interval <= 0 or _stream_chunked(self.tokenize_eval_data))
+          )
       ):
         raise ValueError(
             "sa_ignore_segment_ids requires dataset_type='c4_mlperf' with"
             " stream chunking for train and eval (use_stream_chunking=True, or"
-            " None with pre-tokenized data); packed sequences need the segment"
-            " mask."
+            " None with pre-tokenized data) or dataset_type='synthetic' without"
+            " packed segments (max_segments_per_seq < 2); packed sequences need"
+            " the segment mask."
         )
       if self.attention != "flash":
         raise ValueError("sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'.")
@@ -7546,6 +7817,16 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
+      if self.remat_policy != "custom":
+        raise ValueError(
+            "sa_context_split_device_heads and sa_context_offload_fp8 require remat_policy='custom', got"
+            f" remat_policy={self.remat_policy!r}."
+        )
+      if "context_device" not in self.tensors_on_device:
+        self.tensors_on_device.append("context_device")
+      if "context_offload" not in self.tensors_to_offload:
+        self.tensors_to_offload.append("context_offload")
 
     _validate_remat_policy(
         self.remat_policy,

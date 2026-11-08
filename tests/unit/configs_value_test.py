@@ -15,6 +15,7 @@
 """Tests for the new pydantic-based configuration system."""
 
 import os
+import sys
 import unittest.mock
 
 from absl.testing import absltest
@@ -22,6 +23,7 @@ from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.layers import quantizations
 from maxtext.utils import globals as maxtext_globals
+from tests.utils.test_helpers import get_test_config_path
 import pydantic
 
 # Path to the base.yml config.
@@ -1674,6 +1676,120 @@ class ConfigTest(absltest.TestCase):
                 remat_policy=remat_val,
                 **bad_kwargs,
             )
+
+
+class Qwen3StackConfigValidationTest(absltest.TestCase):
+  """Cross-field validators of the Qwen3-235B v7x training knobs."""
+
+  _ERRORS = (ValueError, pydantic.ValidationError)
+
+  def _initialize(self, *overrides):
+    return pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", *overrides])
+
+  def test_sa_context_split_requires_custom_remat(self):
+    for overrides in (["sa_context_split_device_heads=4"], ["sa_context_offload_fp8=true"]):
+      with self.subTest(overrides=overrides):
+        with self.assertRaisesRegex(self._ERRORS, "require remat_policy='custom'"):
+          self._initialize("remat_policy=full", *overrides)
+
+  def test_sa_context_split_registers_context_tensors(self):
+    config = self._initialize("remat_policy=custom", "sa_context_split_device_heads=4", "sa_context_offload_fp8=true")
+    self.assertIn("context_device", config.tensors_on_device)
+    self.assertIn("context_offload", config.tensors_to_offload)
+    # Without the context split, the custom policy keeps its plain tensor lists.
+    config = self._initialize("remat_policy=custom")
+    self.assertNotIn("context_device", config.tensors_on_device)
+    self.assertNotIn("context_offload", config.tensors_to_offload)
+
+  def test_sa_num_stacked_q_heads_validation(self):
+    with self.assertRaisesRegex(self._ERRORS, "sa_num_stacked_q_heads must be >= 1"):
+      self._initialize("sa_num_stacked_q_heads=0")
+    # 16 query heads over 4 KV heads: a GQA group of 4 queries per KV head.
+    gqa = ["base_num_query_heads=16", "base_num_kv_heads=4"]
+    with self.assertRaisesRegex(self._ERRORS, "must divide"):
+      self._initialize(*gqa, "sa_num_stacked_q_heads=3")
+    self.assertEqual(self._initialize(*gqa, "sa_num_stacked_q_heads=2").sa_num_stacked_q_heads, 2)
+
+  def test_qwix_disable_channelwise_axes_requirements(self):
+    with self.assertRaisesRegex(self._ERRORS, "requires quantization='fp8_full' and use_qwix_quantization=True"):
+      self._initialize("qwix_disable_channelwise_axes=true")
+    fp8_full = ["quantization=fp8_full", "use_qwix_quantization=true"]
+    with self.assertRaisesRegex(self._ERRORS, "requires fixed weight_quantization_calibration_method"):
+      self._initialize(*fp8_full, "weight_quantization_calibration_method=absmax", "qwix_disable_channelwise_axes=true")
+    config = self._initialize(
+        *fp8_full, "weight_quantization_calibration_method=fixed,-224,224", "qwix_disable_channelwise_axes=true"
+    )
+    self.assertTrue(config.qwix_disable_channelwise_axes)
+
+  def test_moe_fused_gmm3d_wgrad_schedule_mode_bounds(self):
+    for mode in (-1, 17):
+      with self.subTest(mode=mode):
+        with self.assertRaises(pydantic.ValidationError):
+          self._initialize(f"moe_fused_gmm3d_wgrad_schedule_mode={mode}")
+    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=16").moe_fused_gmm3d_wgrad_schedule_mode, 16)
+
+  def test_moe_use_fused_gmm3d_prerequisites(self):
+    # A fully-MoE model: base_moe_mlp_dim must match base_mlp_dim (7168 in base.yml).
+    moe = ["num_experts=8", "num_experts_per_tok=2", "base_moe_mlp_dim=7168"]
+    with self.assertRaisesRegex(self._ERRORS, r"moe_use_fused_gmm3d=True requires: .*use_tokamax_gmm=True"):
+      self._initialize(*moe, "moe_use_fused_gmm3d=true")
+    config = self._initialize(
+        *moe,
+        "sparse_matmul=true",
+        "megablox=true",
+        "use_tokamax_gmm=true",
+        "use_gmm_v2=true",
+        "moe_flat_fsdp_weights=true",
+        "capacity_factor=-1",
+        "moe_use_fused_gmm3d=true",
+    )
+    self.assertTrue(config.moe_use_fused_gmm3d)
+
+  def test_sa_diag_band_skip_prerequisites(self):
+    with self.assertRaisesRegex(self._ERRORS, "sa_diag_band_skip requires use_tokamax_splash=True"):
+      self._initialize("sa_diag_band_skip=true")
+    splash = ["attention=flash", "use_tokamax_splash=true", "sa_qk_diag_skip=true", "sa_diag_band_skip=true"]
+    with self.assertRaisesRegex(self._ERRORS, "only takes effect with dq_reduction_steps=1"):
+      self._initialize(*splash, "dq_reduction_steps=0")
+    self.assertTrue(self._initialize(*splash, "dq_reduction_steps=1").sa_diag_band_skip)
+
+  def test_sa_ignore_segment_ids_accepts_single_segment_synthetic_data(self):
+    base = ["attention=flash", "dataset_type=synthetic", "sa_ignore_segment_ids=true"]
+    self.assertTrue(self._initialize(*base, "packing=true", "max_segments_per_seq=1").sa_ignore_segment_ids)
+    with self.assertRaisesRegex(self._ERRORS, "sa_ignore_segment_ids requires"):
+      self._initialize(*base, "packing=true", "max_segments_per_seq=2")
+
+  def test_rl_config_sa_context_split_requires_custom_remat(self):
+    # Tiny-model overrides that let RLConfig validate quickly on CPU.
+    overrides = {
+        "enable_checkpointing": False,
+        "base_num_decoder_layers": 1,
+        "attention": "dot_product",
+        "max_target_length": 8,
+        "base_emb_dim": 128,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "base_mlp_dim": 256,
+        "max_prefill_predict_length": 4,
+        "model_name": "llama2-7b",
+        "override_model_config": True,
+        "weight_dtype": "bfloat16",
+        "tokenizer_path": "meta-llama/Llama-2-7b",
+    }
+
+    def rl_config(*cli_args):
+      return pyconfig.initialize_pydantic(
+          [sys.argv[0], get_test_config_path("post_train/rl.yml"), *cli_args],
+          config_class=types.RLConfig,
+          run_name="rl_sa_context_split_test",
+          **overrides,
+      )
+
+    with self.assertRaisesRegex(self._ERRORS, "require remat_policy='custom'"):
+      rl_config("remat_policy=full", "sa_context_split_device_heads=2")
+    config = rl_config("remat_policy=custom", "sa_context_split_device_heads=2")
+    self.assertIn("context_device", config.tensors_on_device)
+    self.assertIn("context_offload", config.tensors_to_offload)
 
 
 class MMapDatasetConfigTest(absltest.TestCase):
