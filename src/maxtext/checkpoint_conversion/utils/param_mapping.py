@@ -4751,6 +4751,7 @@ class WAN2_1_HF_TO_MAXTEXT:
       "transformer": "maxtext.m3.models.wan.transformer_wan.WanModel",
       "vae": "maxtext.m3.models.wan.autoencoder_kl_wan.AutoencoderKLWan",
       "text_encoder": "maxtext.m3.models.wan.text_encoder_wan.UMT5EncoderModel",
+      "image_encoder": "maxtext.m3.models.wan.image_encoder_wan.CLIPVisionModel",
   }
   # Transformer params kept in float32 when the rest is cast to `weights_dtype`.
   FP32_PARAM_KEYWORDS = ("norm", "condition_embedder", "scale_shift_table")
@@ -4851,6 +4852,7 @@ class WAN2_1_HF_TO_MAXTEXT:
             f"condition_embedder.image_embedder.{norm}.weight",
         )
         add(f"condition_embedder-image_embedder-{norm}-layer_norm-bias", f"condition_embedder.image_embedder.{norm}.bias")
+      add("condition_embedder-image_embedder-pos_embed", "condition_embedder.image_embedder.pos_embed")  # I2V FLF2V
       add("patch_embedding-kernel", "patch_embedding.weight", conv)
       add("patch_embedding-bias", "patch_embedding.bias")
       add("scale_shift_table", "scale_shift_table")
@@ -4914,6 +4916,28 @@ class WAN2_1_HF_TO_MAXTEXT:
           add(f"{mt}-ffn-{name}-kernel", f"{hf}.1.DenseReluDense.{name}.weight", transpose)
         add(f"{mt}-ffn_norm-scale", f"{hf}.1.layer_norm.weight")
       add("final_norm-scale", "encoder.final_layer_norm.weight")
+
+    elif component == "image_encoder":
+      # HF `CLIPVisionModelWithProjection` (ViT-H/14 in Wan 2.1 I2V).
+      add("embeddings-class_embedding", "vision_model.embeddings.class_embedding")
+      add("embeddings-patch_embedding-kernel", "vision_model.embeddings.patch_embedding.weight", conv)
+      add("embeddings-position_embedding-embedding", "vision_model.embeddings.position_embedding.weight")
+      add("pre_layrnorm-scale", "vision_model.pre_layrnorm.weight")
+      add("pre_layrnorm-bias", "vision_model.pre_layrnorm.bias")
+      for i in range(hf_config["num_hidden_layers"]):
+        mt, hf = f"encoder-layers-{i}", f"vision_model.encoder.layers.{i}"
+        for norm in ("layer_norm1", "layer_norm2"):
+          add(f"{mt}-{norm}-scale", f"{hf}.{norm}.weight")
+          add(f"{mt}-{norm}-bias", f"{hf}.{norm}.bias")
+        for proj in ("q_proj", "k_proj", "v_proj", "out_proj"):
+          add(f"{mt}-self_attn-{proj}-kernel", f"{hf}.self_attn.{proj}.weight", transpose)
+          add(f"{mt}-self_attn-{proj}-bias", f"{hf}.self_attn.{proj}.bias")
+        for fc in ("fc1", "fc2"):
+          add(f"{mt}-mlp-{fc}-kernel", f"{hf}.mlp.{fc}.weight", transpose)
+          add(f"{mt}-mlp-{fc}-bias", f"{hf}.mlp.{fc}.bias")
+      add("post_layernorm-scale", "vision_model.post_layernorm.weight")
+      add("post_layernorm-bias", "vision_model.post_layernorm.bias")
+      add("visual_projection-kernel", "visual_projection.weight", transpose)
 
     else:
       raise ValueError(f"Unknown Wan component: {component}")

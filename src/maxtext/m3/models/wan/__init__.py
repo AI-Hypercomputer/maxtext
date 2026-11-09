@@ -29,6 +29,7 @@
 #     blocks (Wan 720p has 75600 tokens) and has no padding mask.
 # Attention kernels: `tokamax.dot_product_attention` (XLA) and Tokamax's Splash TPU kernel, in `transformer_wan.py`.
 from .autoencoder_kl_wan import AutoencoderKLWan, AutoencoderKLWanCache
+from .image_encoder_wan import CLIPVisionModel, CLIPVisionModelOutput
 from .text_encoder_wan import UMT5EncoderModel
 from .transformer_wan import WanModel
 from .utils_wan import VAE_MESH_AXES, WAN_MESH_AXES, WanSharding

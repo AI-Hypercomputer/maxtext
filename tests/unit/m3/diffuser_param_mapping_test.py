@@ -34,7 +34,7 @@ import transformers
 from maxtext.checkpoint_conversion.to_maxtext_diffusers import convert_diffusers_component, model_init_config
 from maxtext.checkpoint_conversion.utils.param_mapping import DIFFUSERS_PARAM_MAPPING, WAN2_1_HF_TO_MAXTEXT
 from maxtext.checkpoint_conversion.utils.utils import validate_and_filter_param_map_keys
-from maxtext.m3.models.wan import AutoencoderKLWan, UMT5EncoderModel, WanModel
+from maxtext.m3.models.wan import AutoencoderKLWan, CLIPVisionModel, UMT5EncoderModel, WanModel
 from maxtext.m3.models.wan.autoencoder_kl_wan import AutoencoderKLWanCache
 
 try:
@@ -85,6 +85,19 @@ _TEXT_ENCODER_CONFIG = {
     "relative_attention_num_buckets": 8,
     "vocab_size": 64,
 }
+# CLIP vision encoder (ViT-H/14 in Wan 2.1 I2V: hidden_size 1280, 32 layers, 16 heads, image_size 224, patch_size 14).
+_IMAGE_ENCODER_CONFIG = {
+    "hidden_act": "gelu",
+    "hidden_size": 16,
+    "image_size": 28,
+    "intermediate_size": 32,
+    "layer_norm_eps": 1e-5,
+    "num_attention_heads": 2,
+    "num_channels": 3,
+    "num_hidden_layers": 3,
+    "patch_size": 14,
+    "projection_dim": 12,
+}
 
 
 def _abstract_shapes(component, config, scan_layers):
@@ -93,6 +106,8 @@ def _abstract_shapes(component, config, scan_layers):
     model = nnx.eval_shape(lambda: WanModel(**config, rngs=nnx.Rngs(0), scan_layers=scan_layers, **extra))
   elif component == "text_encoder":
     model = nnx.eval_shape(lambda: UMT5EncoderModel(**config, rngs=nnx.Rngs(0)))
+  elif component == "image_encoder":
+    model = nnx.eval_shape(lambda: CLIPVisionModel(**config, rngs=nnx.Rngs(0)))
   else:
     model = nnx.eval_shape(lambda: AutoencoderKLWan(**config, rngs=nnx.Rngs(0)))
   params = nnx.state(model, nnx.Param).to_pure_dict()
@@ -114,14 +129,16 @@ class Wan21ParamMappingTest(parameterized.TestCase):
 
   def test_registered(self):
     self.assertIs(DIFFUSERS_PARAM_MAPPING["wan2.1"], WAN2_1_HF_TO_MAXTEXT)
-    self.assertEqual(set(WAN2_1_HF_TO_MAXTEXT.COMPONENTS), {"transformer", "vae", "text_encoder"})
+    self.assertEqual(set(WAN2_1_HF_TO_MAXTEXT.COMPONENTS), {"transformer", "vae", "text_encoder", "image_encoder"})
 
   @parameterized.named_parameters(
       ("transformer_t2v", "transformer", _TRANSFORMER_CONFIG, False),
       ("transformer_t2v_scanned", "transformer", _TRANSFORMER_CONFIG, True),
       ("transformer_i2v", "transformer", _I2V_CONFIG, False),
+      ("transformer_i2v_scanned", "transformer", _I2V_CONFIG, True),
       ("vae", "vae", _VAE_CONFIG, False),
       ("text_encoder", "text_encoder", _TEXT_ENCODER_CONFIG, False),
+      ("image_encoder", "image_encoder", _IMAGE_ENCODER_CONFIG, False),
   )
   def test_mapping_covers_model(self, component, config, scan_layers):
     target = _abstract_shapes(component, config, scan_layers)
@@ -214,6 +231,37 @@ class UMT5ConversionParityTest(unittest.TestCase):
     np.testing.assert_allclose(np.asarray(jax.jit(model.__call__)(input_ids, mask)), expected, atol=1e-5, rtol=1e-5)
 
 
+@unittest.skipIf(torch is None, "needs torch (Hugging Face reference CLIPVisionModelWithProjection)")
+class CLIPConversionParityTest(unittest.TestCase):
+  """Converts a tiny HF `CLIPVisionModelWithProjection` and compares the NNX `CLIPVisionModel` with it."""
+
+  def test_converted_image_encoder_matches_hf(self):
+    torch.manual_seed(0)
+    hf_model = transformers.CLIPVisionModelWithProjection(
+        transformers.CLIPVisionConfig.from_dict(_IMAGE_ENCODER_CONFIG)
+    ).eval()
+    _randomize_torch_params(hf_model)
+    with tempfile.TemporaryDirectory() as repo_dir:
+      hf_model.save_pretrained(os.path.join(repo_dir, "image_encoder"))
+      state, model_config = convert_diffusers_component(
+          repo_dir, "image_encoder", WAN2_1_HF_TO_MAXTEXT, scan_layers=False, weights_dtype=np.float32
+      )
+    self.assertEqual(model_config["num_hidden_layers"], _IMAGE_ENCODER_CONFIG["num_hidden_layers"])
+
+    model = CLIPVisionModel(**model_config, precision=jax.lax.Precision.HIGHEST, rngs=nnx.Rngs(0))
+    _load_converted(model, state)
+
+    pixel_values = np.random.default_rng(0).standard_normal(
+        (2, 3, _IMAGE_ENCODER_CONFIG["image_size"], _IMAGE_ENCODER_CONFIG["image_size"]), dtype=np.float32
+    )
+    with torch.no_grad():
+      hf_out = hf_model(torch.from_numpy(pixel_values), output_hidden_states=True)
+    out = model(pixel_values, output_hidden_states=True)
+    np.testing.assert_allclose(np.asarray(out.last_hidden_state), hf_out.last_hidden_state.numpy(), atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(out.image_embeds), hf_out.image_embeds.numpy(), atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(out.hidden_states[-2]), hf_out.hidden_states[-2].numpy(), atol=1e-5, rtol=1e-5)
+
+
 def _randomize_torch_params(model):
   """Norm scales init to ones and some biases to zeros: randomize them so the mapping of every param is checked."""
   with torch.no_grad():
@@ -268,6 +316,35 @@ class DiffusersConversionParityTest(unittest.TestCase):
     with torch.no_grad():
       expected = hf_model(
           torch.from_numpy(latents), torch.from_numpy(timestep), torch.from_numpy(text), return_dict=False
+      )[0].numpy()
+    np.testing.assert_allclose(actual, expected, atol=1e-4, rtol=1e-4)
+
+  def test_converted_i2v_transformer_matches_diffusers(self):
+    torch.manual_seed(0)
+    hf_config = dict(_I2V_CONFIG, in_channels=12, patch_size=tuple(_I2V_CONFIG["patch_size"]))
+    hf_model = diffusers.WanTransformer3DModel(**hf_config).eval()
+    _randomize_torch_params(hf_model)
+    state, model_config = _convert(hf_model, "transformer")
+
+    axes = ("data", "fsdp", "context", "tensor")
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1,) * len(axes)), axes)
+    rng = np.random.default_rng(0)
+    latents = rng.standard_normal((2, hf_config["in_channels"], 3, 8, 8), dtype=np.float32)
+    timestep = np.array([10.0, 700.0], np.float32)
+    # diffusers' WanAttnProcessor hardcodes 512 as the text context length when splitting image/text tokens.
+    text = rng.standard_normal((2, 512, hf_config["text_dim"]), dtype=np.float32)
+    image_embeds = rng.standard_normal((2, 5, hf_config["image_dim"]), dtype=np.float32)
+    with jax.set_mesh(mesh), jax.default_matmul_precision("float32"):
+      model = WanModel(**model_config, image_seq_len=5, attention="dot_product", rngs=nnx.Rngs(0))
+      _load_converted(model, state)
+      actual = np.asarray(model(latents, timestep, text, encoder_hidden_states_image=image_embeds))
+    with torch.no_grad():
+      expected = hf_model(
+          torch.from_numpy(latents),
+          torch.from_numpy(timestep),
+          torch.from_numpy(text),
+          encoder_hidden_states_image=torch.from_numpy(image_embeds),
+          return_dict=False,
       )[0].numpy()
     np.testing.assert_allclose(actual, expected, atol=1e-4, rtol=1e-4)
 

@@ -43,6 +43,7 @@ from maxtext.m3.models.wan import (
     WAN_MESH_AXES,
     AutoencoderKLWan,
     AutoencoderKLWanCache,
+    CLIPVisionModel,
     UMT5EncoderModel,
     WanModel,
     WanSharding,
@@ -58,14 +59,6 @@ from transformers import AutoTokenizer
 import html
 import re
 from transformers import CLIPImageProcessor
-
-try:
-  from transformers.models.clip.modeling_flax_clip import FlaxCLIPVisionModel
-except ModuleNotFoundError:
-  try:
-    from transformers import FlaxCLIPVisionModel
-  except ImportError:
-    FlaxCLIPVisionModel = None
 import PIL
 
 # Params whose path matches any of these keywords are kept in float32 by
@@ -409,6 +402,12 @@ def text_encoder_forward_pass(graphdef, state, input_ids, attention_mask):
   return jnp.where(valid[..., None], prompt_embeds, 0).astype(jnp.float32)
 
 
+@partial(jax.jit, static_argnums=(0,))
+def image_encoder_forward_pass(graphdef, state, pixel_values):
+  """CLIPVisionModel penultimate hidden state in float32 (as diffusers' `WanImageToVideoPipeline.encode_image`)."""
+  return nnx.merge(graphdef, state)(pixel_values, output_hidden_states=True).hidden_states[-2].astype(jnp.float32)
+
+
 class WanPipeline(DiffusionPipeline):
   r"""Pipeline for text-to-video generation using Wan.
 
@@ -437,7 +436,7 @@ class WanPipeline(DiffusionPipeline):
       mesh: Mesh,
       config: DiffusionConfig,
       image_processor: Optional[CLIPImageProcessor] = None,
-      image_encoder: Optional[FlaxCLIPVisionModel] = None,
+      image_encoder: Optional[CLIPVisionModel] = None,
       **kwargs,
   ):
     self.tokenizer = tokenizer
@@ -565,21 +564,61 @@ class WanPipeline(DiffusionPipeline):
     return tokenizer
 
   @classmethod
-  def load_image_encoder(cls, config: DiffusionConfig):
-    """Load the CLIP image processor and Flax CLIP vision encoder (WAN 2.1 I2V)."""
-    image_processor = CLIPImageProcessor.from_pretrained(
-        config.pretrained_model_name_or_path, subfolder="image_processor"
-    )
+  def load_image_encoder(
+      cls,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+      config: DiffusionConfig,
+      restored_checkpoint=None,
+  ) -> Tuple[CLIPImageProcessor, CLIPVisionModel]:
+    """Load the CLIP image processor and NNX CLIP vision encoder (WAN 2.1 I2V) from the checkpoint onto `mesh`."""
     try:
-      image_encoder = FlaxCLIPVisionModel.from_pretrained(
-          config.pretrained_model_name_or_path,
-          subfolder="image_encoder",
-          dtype=jnp.float32,
+      image_processor = CLIPImageProcessor.from_pretrained(
+          config.pretrained_model_name_or_path, subfolder="image_processor"
       )
-    except Exception as e:
-      max_logging.error(f"Failed to load FlaxCLIPVisionModel: {e}")
-      raise
-    return image_processor, image_encoder
+    except Exception:  # pylint: disable=broad-exception-caught
+      image_processor = CLIPImageProcessor.from_pretrained(
+          config.pretrained_model_name_or_path, subfolder="image_processor", local_files_only=True
+      )
+
+    ie_params, ie_config = _restored_component(restored_checkpoint, "image_encoder", CLIPVisionModel)
+    dtype = jnp.dtype(jnp.float32)
+
+    def create_model(rngs: nnx.Rngs):
+      return CLIPVisionModel(
+          **ie_config,
+          dtype=dtype,
+          weights_dtype=dtype,
+          precision=jax.lax.Precision.HIGHEST,
+          rngs=rngs,
+      )
+
+    image_encoder = nnx.eval_shape(create_model, rngs=rngs)
+    graphdef, state, rest_of_state = nnx.split(image_encoder, nnx.Param, ...)
+    shardings = dict(nnx.to_flat_state(state_shardings(state, mesh)))
+    state = dict(nnx.to_flat_state(state))
+
+    t_start = time.perf_counter()
+    paths, values = [], []
+    for path, val in flax.traverse_util.flatten_dict(ie_params).items():
+      path = _to_int_path(path[:-1] if path[-1] == "value" else path)
+      if path not in state:
+        raise ValueError(f"Checkpoint image_encoder param {path} is not a CLIPVisionModel param.")
+      paths.append(path)
+      values.append(np.asarray(val).astype(dtype, copy=False))
+    if len(paths) != len(state):
+      missing = sorted(set(state) - set(paths))
+      raise ValueError(f"Checkpoint image_encoder_state misses {len(missing)} params, e.g. {missing[:3]}.")
+    with _DEVICE_PUT_LOCK:
+      arrays = jax.device_put(values, [shardings[path].value for path in paths])
+      jax.block_until_ready(arrays)
+    for path, array in zip(paths, arrays):
+      state[path].value = array
+    num_bytes = sum(v.nbytes for v in values)
+    max_logging.log(
+        f"Image encoder ({num_bytes / 2**30:.1f} GiB {dtype.name}) on device in {time.perf_counter() - t_start:.1f}s"
+    )
+    return image_processor, nnx.merge(graphdef, nnx.from_flat_state(state), rest_of_state)
 
   @classmethod
   def load_vae(
@@ -675,10 +714,11 @@ class WanPipeline(DiffusionPipeline):
     if not isinstance(image, list):
       image = [image]
     image_inputs = self.image_processor(images=image, return_tensors="np")
-    pixel_values = jnp.array(image_inputs.pixel_values)
+    pixel_values = jnp.asarray(image_inputs.pixel_values, dtype=jnp.float32)
 
-    image_encoder_output = self.image_encoder(pixel_values, output_hidden_states=True)
-    image_embeds = image_encoder_output.hidden_states[-2]
+    graphdef, state = nnx.split(self.image_encoder)
+    with jax.set_mesh(self.mesh):
+      image_embeds = image_encoder_forward_pass(graphdef, state, pixel_values)
 
     image_embeds = jnp.repeat(image_embeds, num_videos_per_prompt, axis=0)
     return image_embeds
@@ -987,10 +1027,11 @@ class WanPipeline(DiffusionPipeline):
           mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint
       )
       if cls._needs_image_encoder(config, i2v=i2v):
+        max_logging.log("Loading Image Processor and Image Encoder")
         (
             components["image_processor"],
             components["image_encoder"],
-        ) = cls.load_image_encoder(config)
+        ) = cls.load_image_encoder(mesh=mesh, rngs=rngs, config=config, restored_checkpoint=restored_checkpoint)
 
     if load_scheduler:
       components["scheduler"], components["scheduler_state"] = cls.load_scheduler(
@@ -1001,7 +1042,8 @@ class WanPipeline(DiffusionPipeline):
 
   @classmethod
   def _needs_image_encoder(cls, config: DiffusionConfig, i2v: bool = False) -> bool:
-    return i2v and config.model_name == "wan2.1"
+    is_i2v = i2v or getattr(config, "model_type", "T2V").upper() == "I2V"
+    return is_i2v and config.model_name == "wan2.1"
 
   @abstractmethod
   def _get_num_channel_latents(self) -> int:
@@ -1535,6 +1577,7 @@ class WanPipeline2_1(WanPipeline):
     # hidden behind the transformer conversion time. The mesh/rngs built here are
     # deterministic duplicates of the ones _create_common_components builds
     # (same devices, same seed).
+    is_i2v = getattr(config, "model_type", "T2V").upper() == "I2V"
     common_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     common_future = common_executor.submit(
         cls._create_common_components,
@@ -1543,6 +1586,7 @@ class WanPipeline2_1(WanPipeline):
         load_vae=load_vae,
         load_text_encoder=load_text_encoder,
         load_scheduler=load_scheduler,
+        i2v=is_i2v,
     )
     transformer = None
     try:
@@ -1573,18 +1617,77 @@ class WanPipeline2_1(WanPipeline):
         devices_array=common_components["devices_array"],
         mesh=common_components["mesh"],
         vae_mesh=common_components["vae_mesh"],
+        image_processor=common_components["image_processor"],
+        image_encoder=common_components["image_encoder"],
         config=config,
     )
 
     return pipeline, transformer
 
   def _get_num_channel_latents(self) -> int:
-    return self.transformer.in_channels
+    if getattr(self, "vae", None) is not None and hasattr(self.vae, "z_dim"):
+      return self.vae.z_dim
+    return self.transformer.out_channels if getattr(self, "transformer", None) is not None else 16
+
+  def prepare_latents_i2v(
+      self,
+      image: jax.Array,
+      batch_size: int,
+      dtype: jnp.dtype,
+      height: int = 480,
+      width: int = 832,
+      num_frames: int = 81,
+      num_channels_latents: int = 16,
+      latents: Optional[jax.Array] = None,
+      last_image: Optional[jax.Array] = None,
+      trace: Optional[dict] = None,
+  ) -> Tuple[jax.Array, jax.Array]:
+    """Prepare initial noisy latents [B, 16, F', H', W'] and I2V condition [B, 20, F', H', W']."""
+    num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
+    latent_height = int(height) // self.vae_scale_factor_spatial
+    latent_width = int(width) // self.vae_scale_factor_spatial
+    shape = (
+        batch_size,
+        num_channels_latents,
+        num_latent_frames,
+        latent_height,
+        latent_width,
+    )
+    if latents is None:
+      rng = jax.random.key(self.config.seed)
+      latents = jax.random.normal(rng, shape=shape, dtype=jnp.float32)
+    else:
+      latents = latents.astype(jnp.float32)
+
+    latent_condition, _ = self.prepare_latents_i2v_base(
+        image=image,
+        num_frames=num_frames,
+        dtype=dtype,
+        last_image=last_image,
+        trace=trace,
+    )
+    latent_condition = jnp.transpose(latent_condition, (0, 4, 1, 2, 3))
+    if latent_condition.shape[0] == 1 and batch_size > 1:
+      latent_condition = jnp.repeat(latent_condition, batch_size, axis=0)
+
+    mask_lat_size = jnp.ones((batch_size, 1, num_frames, latent_height, latent_width), dtype=dtype)
+    if last_image is None:
+      mask_lat_size = mask_lat_size.at[:, :, 1:].set(0.0)
+    else:
+      mask_lat_size = mask_lat_size.at[:, :, 1:-1].set(0.0)
+    first_frame_mask = jnp.repeat(mask_lat_size[:, :, 0:1], self.vae_scale_factor_temporal, axis=2)
+    mask_lat_size = jnp.concatenate([first_frame_mask, mask_lat_size[:, :, 1:]], axis=2)
+    mask_lat_size = mask_lat_size.reshape(batch_size, -1, self.vae_scale_factor_temporal, latent_height, latent_width)
+    mask_lat_size = jnp.transpose(mask_lat_size, (0, 2, 1, 3, 4))
+    condition = jnp.concatenate([mask_lat_size, latent_condition], axis=1)
+    return latents, condition
 
   def __call__(
       self,
       prompt: Union[str, List[str]] = None,
       negative_prompt: Union[str, List[str]] = None,
+      image: Optional[PipelineImageInput] = None,
+      last_image: Optional[PipelineImageInput] = None,
       height: int = 480,
       width: int = 832,
       num_frames: int = 81,
@@ -1595,6 +1698,7 @@ class WanPipeline2_1(WanPipeline):
       latents: Optional[jax.Array] = None,
       prompt_embeds: Optional[jax.Array] = None,
       negative_prompt_embeds: Optional[jax.Array] = None,
+      image_embeds: Optional[jax.Array] = None,
       use_cfg_cache: bool = False,
       use_magcache: bool = False,
       magcache_thresh: Optional[float] = None,
@@ -1625,25 +1729,91 @@ class WanPipeline2_1(WanPipeline):
     trace = {}
     t_cond_start = time.perf_counter()
 
-    (
-        latents,
-        prompt_embeds,
-        negative_prompt_embeds,
-        scheduler_state,
-        num_frames,
-    ) = self._prepare_model_inputs(
-        prompt,
-        negative_prompt,
-        height,
-        width,
-        num_frames,
-        num_inference_steps,
-        num_videos_per_prompt,
-        max_sequence_length,
-        latents,
-        prompt_embeds,
-        negative_prompt_embeds,
-    )
+    is_i2v = image is not None or image_embeds is not None or getattr(config, "model_type", "T2V").upper() == "I2V"
+    condition = None
+    if is_i2v:
+      if image is None:
+        raise ValueError("`image` must be provided for Wan 2.1 I2V inference.")
+      self.check_inputs(
+          prompt=prompt,
+          negative_prompt=negative_prompt,
+          height=height,
+          width=width,
+          prompt_embeds=prompt_embeds,
+          negative_prompt_embeds=negative_prompt_embeds,
+      )
+      if num_frames % self.vae_scale_factor_temporal != 1:
+        max_logging.log(
+            f"`num_frames - 1` has to be divisible by {self.vae_scale_factor_temporal}. Rounding to the nearest number."
+        )
+        num_frames = num_frames // self.vae_scale_factor_temporal * self.vae_scale_factor_temporal + 1
+      num_frames = max(num_frames, 1)
+
+      (
+          prompt_embeds,
+          negative_prompt_embeds,
+          image_embeds,
+          effective_batch_size,
+      ) = self._prepare_model_inputs_i2v(
+          prompt=prompt,
+          image=image,
+          negative_prompt=negative_prompt,
+          num_videos_per_prompt=num_videos_per_prompt,
+          max_sequence_length=max_sequence_length,
+          prompt_embeds=prompt_embeds,
+          negative_prompt_embeds=negative_prompt_embeds,
+          image_embeds=image_embeds,
+          last_image=last_image,
+      )
+      image_tensor = jnp.asarray(self.video_processor.preprocess(image, height=height, width=width), dtype=jnp.float32)
+      last_image_tensor = (
+          jnp.asarray(self.video_processor.preprocess(last_image, height=height, width=width), dtype=jnp.float32)
+          if last_image is not None
+          else None
+      )
+      latents_dtype = getattr(config, "activations_dtype", jnp.bfloat16)
+      latents, condition = self.prepare_latents_i2v(
+          image=image_tensor,
+          batch_size=effective_batch_size,
+          dtype=latents_dtype,
+          height=height,
+          width=width,
+          num_frames=num_frames,
+          num_channels_latents=self._get_num_channel_latents(),
+          latents=latents,
+          last_image=last_image_tensor,
+          trace=trace,
+      )
+      data_sharding = NamedSharding(self.mesh, P())
+      if self.config.global_batch_size_to_train_on // self.config.per_device_batch_size == 0:
+        data_sharding = jax.sharding.NamedSharding(self.mesh, P(*self.config.data_sharding))
+      latents = jax.device_put(latents, data_sharding)
+      condition = jax.device_put(condition, data_sharding)
+      scheduler_state = self.scheduler.set_timesteps(
+          self.scheduler_state,
+          num_inference_steps=num_inference_steps,
+          shape=latents.shape,
+      )
+    else:
+      (
+          latents,
+          prompt_embeds,
+          negative_prompt_embeds,
+          scheduler_state,
+          num_frames,
+      ) = self._prepare_model_inputs(
+          prompt,
+          negative_prompt,
+          height,
+          width,
+          num_frames,
+          num_inference_steps,
+          num_videos_per_prompt,
+          max_sequence_length,
+          latents,
+          prompt_embeds,
+          negative_prompt_embeds,
+      )
     latents.block_until_ready()
     prompt_embeds.block_until_ready()
     trace["conditioning"] = time.perf_counter() - t_cond_start
@@ -1676,6 +1846,8 @@ class WanPipeline2_1(WanPipeline):
           latents=latents,
           prompt_embeds=prompt_embeds,
           negative_prompt_embeds=negative_prompt_embeds,
+          condition=condition,
+          image_embeds=image_embeds,
       )
       latents = self._denormalize_latents(latents)
       latents.block_until_ready()
@@ -1713,6 +1885,8 @@ def run_inference_2_1(
     mag_ratios_base: Optional[List[float]] = None,
     config=None,
     use_kv_cache: bool = False,
+    condition: Optional[jnp.array] = None,
+    image_embeds: Optional[jnp.array] = None,
 ):
   """Denoising loop for WAN 2.1 T2V with FasterCache CFG-Cache.
 
@@ -1768,8 +1942,11 @@ def run_inference_2_1(
   # Pre-split embeds once, outside the loop.
   prompt_cond_embeds = prompt_embeds
   prompt_embeds_combined = None
+  image_embeds_combined = None
   if do_cfg:
     prompt_embeds_combined = jnp.concatenate([prompt_embeds, negative_prompt_embeds], axis=0)
+    if image_embeds is not None:
+      image_embeds_combined = jnp.concatenate([image_embeds, image_embeds], axis=0)
 
   # Pre-compute cache schedule and phase-dependent weights.
   # t₀ = midpoint step; before t₀ boost low-freq, after boost high-freq.
@@ -1817,7 +1994,8 @@ def run_inference_2_1(
 
   if use_kv_cache:
     kv_cache, encoder_attention_mask = transformer_obj.compute_kv_cache(
-        prompt_embeds_combined if do_cfg else prompt_cond_embeds
+        prompt_embeds_combined if do_cfg else prompt_cond_embeds,
+        encoder_hidden_states_image=image_embeds_combined if do_cfg else image_embeds,
     )
 
   if use_magcache and do_cfg:
@@ -1846,6 +2024,9 @@ def run_inference_2_1(
 
     def scan_body(carry, t):
       current_latents, current_scheduler_state = carry
+      latent_model_input = (
+          jnp.concatenate([current_latents, condition], axis=1) if condition is not None else current_latents
+      )
 
       if do_cfg:
         timestep = jnp.broadcast_to(t, bsz * 2)
@@ -1853,11 +2034,12 @@ def run_inference_2_1(
             graphdef,
             sharded_state,
             rest_of_state,
-            current_latents,
+            latent_model_input,
             timestep,
             prompt_embeds_combined,
             do_classifier_free_guidance=True,
             guidance_scale=guidance_scale,
+            encoder_hidden_states_image=image_embeds_combined,
             kv_cache=kv_cache,
             rotary_emb=rotary_emb,
             encoder_attention_mask=encoder_attention_mask,
@@ -1868,11 +2050,12 @@ def run_inference_2_1(
             graphdef,
             sharded_state,
             rest_of_state,
-            current_latents,
+            latent_model_input,
             timestep,
             prompt_cond_embeds,
             do_classifier_free_guidance=False,
             guidance_scale=guidance_scale,
+            encoder_hidden_states_image=image_embeds,
             kv_cache=kv_cache,
             rotary_emb=rotary_emb,
             encoder_attention_mask=encoder_attention_mask,
@@ -1902,6 +2085,7 @@ def run_inference_2_1(
       profiler.start()
 
     t = timesteps[step]
+    latent_model_input = jnp.concatenate([latents, condition], axis=1) if condition is not None else latents
 
     if use_magcache and do_cfg:
       timestep = jnp.broadcast_to(t, bsz * 2 if do_cfg else bsz)
@@ -1919,11 +2103,12 @@ def run_inference_2_1(
           graphdef,
           sharded_state,
           rest_of_state,
-          latents,
+          latent_model_input,
           timestep,
           prompt_embeds_combined if do_cfg else prompt_cond_embeds,
           do_classifier_free_guidance=do_cfg,
           guidance_scale=guidance_scale,
+          encoder_hidden_states_image=image_embeds_combined if do_cfg else image_embeds,
           skip_blocks=bool(skip_blocks),
           cached_residual=cached_residual,
           return_residual=True,
@@ -1947,7 +2132,7 @@ def run_inference_2_1(
             graphdef,
             sharded_state,
             rest_of_state,
-            latents,
+            latent_model_input,
             timestep,
             prompt_cond_embeds,
             cached_noise_cond,
@@ -1955,13 +2140,14 @@ def run_inference_2_1(
             guidance_scale=guidance_scale,
             w1=jnp.float32(w1),
             w2=jnp.float32(w2),
+            encoder_hidden_states_image=image_embeds,
             kv_cache=kv_cache_cond,
             rotary_emb=rotary_emb,
             encoder_attention_mask=encoder_attention_mask_cond,
         )
 
       elif do_cfg:
-        latents_doubled = jnp.concatenate([latents] * 2)
+        latents_doubled = jnp.concatenate([latent_model_input] * 2)
         timestep = jnp.broadcast_to(t, bsz * 2)
         (
             noise_pred,
@@ -1975,6 +2161,7 @@ def run_inference_2_1(
             timestep,
             prompt_embeds_combined,
             guidance_scale=guidance_scale,
+            encoder_hidden_states_image=image_embeds_combined,
             kv_cache=kv_cache,
             rotary_emb=rotary_emb,
             encoder_attention_mask=encoder_attention_mask,
@@ -1986,11 +2173,12 @@ def run_inference_2_1(
             graphdef,
             sharded_state,
             rest_of_state,
-            latents,
+            latent_model_input,
             timestep,
             prompt_cond_embeds,
             do_classifier_free_guidance=False,
             guidance_scale=guidance_scale,
+            encoder_hidden_states_image=image_embeds,
             kv_cache=kv_cache,
             rotary_emb=rotary_emb,
             encoder_attention_mask=encoder_attention_mask,
@@ -2004,3 +2192,6 @@ def run_inference_2_1(
         profiler.stop()
 
   return latents
+
+
+WanPipelineI2V_2_1 = WanPipeline2_1

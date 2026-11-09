@@ -102,6 +102,7 @@ class DiffusionPipelineConfig(BaseModel):
   prompt_2: str = ""
   negative_prompt: str = ""
   prompt_file: str = ""
+  image_url: str = ""
   do_classifier_free_guidance: bool = True
   height: int = 720
   width: int = 1280
