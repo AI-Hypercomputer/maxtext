@@ -46,6 +46,40 @@ except Exception:  # pylint: disable=broad-exception-caught
 class TrainCompile(parameterized.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
+  # Directories the tests below write their `compiled_trainstep_file` into (literal "/tmp/test_*" or gettempdir()).
+  _TMP_DIRS = tuple(sorted({"/tmp", gettempdir()}))
+
+  @staticmethod
+  def _tmp_test_files():
+    files = set()
+    for d in filter(os.path.isdir, TrainCompile._TMP_DIRS):
+      files.update(e.path for e in os.scandir(d) if e.name.startswith("test_") and e.is_file(follow_symlinks=False))
+    return files
+
+  def setUp(self):
+    """Registers a cleanup that removes the compiled-trainstep files this test writes to the temp dirs.
+
+    Every AOT test here serializes its executable to a literal `/tmp/test_*` or `gettempdir()/test_*` path
+    (tens to hundreds of MB each) and never reads it back or deletes it; a CI shard runs ~18 of them on a runner
+    whose /tmp lives on the same ~98 GB disk as the checkout, wheel build and pip/JAX caches. Snapshot the temp dirs
+    now and, after the whole test (addCleanup, so a failing test is cleaned too), remove any `test_*` regular file
+    that appeared. Only this module writes `test_*` into the temp dirs. Under pytest-xdist each worker keeps its own
+    snapshot, so a worker may unlink a sibling's file while it is still being written; that is harmless because
+    nothing here opens the file after `save_compiled` returns. Files that pre-existed (or were already removed by a
+    sibling) are left alone.
+    """
+    super().setUp()
+    before = self._tmp_test_files()
+
+    def _remove_new_tmp_files():
+      for path in self._tmp_test_files() - before:
+        try:
+          os.remove(path)
+        except FileNotFoundError:
+          pass
+
+    self.addCleanup(_remove_new_tmp_files)
+
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
