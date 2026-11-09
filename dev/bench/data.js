@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794185734480,
+  "lastUpdate": 1794199826036,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -66666,6 +66666,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 4416.2210000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Abhinav Singh",
+            "username": "abhinavclemson",
+            "email": "abhinavsing@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "25be77b0c694cc96625235a2effbe51295a9aa07",
+          "message": "Count colocated ArrayRecord shards once across colocated hosts.\n\nWith `colocated_python_data_input=True`, every colocated host listed the data files and opened every ArrayRecord shard to count its records whenever it built its iterator: at startup, on every elastic attempt, and on every eval. Doing this simultaneously across all hosts causes hosts × shards GCS reads before training can start.\n\nShard ArrayRecord record counting across the colocated hosts on the iterator's CPU mesh and cache both pattern listings (`functools.cache`) and shard record counts in each colocated sidecar process. Each host lists patterns locally using `config.grain_data_source_max_workers` threads, counts only its assigned `1 / num_hosts` slice of unique shards, and exchanges integer counts through `RemoteIteratorWrapper` before building `FileInstruction` descriptors locally. The controller never reads dataset files or mixture JSONs, each shard is opened once cluster-wide on cold start, and surviving colocated processes open zero shards on subsequent elastic resizes, pause/resumes, or evals. Only colocated input with `grain_file_type=arrayrecord` changes; single patterns, weighted mixtures (`a,w;b,w` and `grain_train_mixture_config_path`), and eval files are covered.\n\nReimplements, using only Grain's public API, the FileInstruction pre-resolution from https://github.com/AI-Hypercomputer/maxtext/pull/4870 (commit https://github.com/AI-Hypercomputer/maxtext/commit/296fec0adc7908d60ddcbe06a65e004c2a122044), later re-proposed in https://github.com/AI-Hypercomputer/maxtext/pull/5019.\n\nPiperOrigin-RevId: 1017016224",
+          "timestamp": "2026-11-09T04:46:27Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/25be77b0c694cc96625235a2effbe51295a9aa07"
+        },
+        "date": 1794199825433,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 258.61199999999985,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 65.353,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2117.0409999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 136.31599999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 163.347,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4709.723999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 340,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1577.1140000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 208.60599999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4483.156999999999,
             "unit": "sec"
           },
           {
