@@ -23,6 +23,7 @@ Checks the `PARAM_MAPPING`, `HOOK_FNS` and `HF_SHAPE` entries against the
 """
 
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -46,22 +47,47 @@ _MINI = "qwen3.8-flash-next-mini"
 _EMBED_KEY = "params-decoder-token_embedder-embedding"
 
 
+_CONFIG_CACHE: dict[tuple[str, bool], Any] = {}
+_PARAM_SHAPES_CACHE: dict[tuple[str, bool], dict[str, tuple[int, ...]]] = {}
+_HOOK_SHAPE_CACHE: dict[tuple[tuple[int, ...], tuple[int, ...], Any], tuple[int, ...]] = {}
+
+
 def _get_config(model_name: str, scan_layers: bool):
   """Builds the MaxText config `to_maxtext` would use for `model_name`."""
-  return pyconfig.initialize(
-      [None, f"{maxtext_globals.MAXTEXT_CONFIGS_DIR}/base.yml"],
-      model_name=model_name,
-      override_model_config=True,
-      scan_layers=scan_layers,
-      dtype="float32",
-      weight_dtype="float32",
-      run_name="checkpoint_conversion_test",
-  )
+  key = (model_name, scan_layers)
+  if key not in _CONFIG_CACHE:
+    _CONFIG_CACHE[key] = pyconfig.initialize(
+        [None, f"{maxtext_globals.MAXTEXT_CONFIGS_DIR}/base.yml"],
+        model_name=model_name,
+        override_model_config=True,
+        scan_layers=scan_layers,
+        dtype="float32",
+        weight_dtype="float32",
+        run_name="checkpoint_conversion_test",
+    )
+  return _CONFIG_CACHE[key]
+
+
+def _fast_empty_init(*_args, **_kwargs):
+  def _init(_key, shape, dtype=jnp.float32):
+    return jnp.empty(shape, dtype)
+
+  return _init
 
 
 def _model_param_shapes(config) -> dict[str, tuple[int, ...]]:
   """Returns {MaxText key: shape} for the abstract model, keyed like `to_maxtext.get_maxtext_model_info`."""
-  model = nnx.eval_shape(lambda: m3_models.create_model(config, mesh=None))
+  cache_key = (str(config.model_name), bool(config.scan_layers))
+  if cache_key in _PARAM_SHAPES_CACHE:
+    return _PARAM_SHAPES_CACHE[cache_key]
+  with (
+      mock.patch.object(nnx.initializers, "lecun_normal", _fast_empty_init),
+      mock.patch.object(nnx.initializers, "normal", _fast_empty_init),
+      mock.patch.object(jax.random, "uniform", lambda _key, shape, dtype=jnp.float32, **_kw: jnp.empty(shape, dtype)),
+      mock.patch.object(nnx.Rngs, "__call__", lambda self: None),
+      mock.patch.object(nnx.Rngs, "__getattr__", lambda self, _name: (lambda: None)),
+  ):
+    model = nnx.eval_shape(lambda: m3_models.create_model(config, mesh=None))
   shapes = {}
   for path, variable in nnx.to_flat_state(nnx.state(model)):
     if isinstance(variable, nnx.RngState):
@@ -69,6 +95,7 @@ def _model_param_shapes(config) -> dict[str, tuple[int, ...]]:
     collection = variablelib.variable_name_from_type(type(variable), allow_register=True)
     key = "-".join([collection, *conversion_utils.param_key_parts_from_path(path)])
     shapes[key] = tuple(variable.get_value().shape)
+  _PARAM_SHAPES_CACHE[cache_key] = shapes
   return shapes
 
 
@@ -94,8 +121,22 @@ def _converted_shape(hf_value, hf_shapes, hook, mt_shape) -> tuple[int, ...]:
   if isinstance(hf_value, tuple):
     shard_shapes = [tuple(hf_shapes[k]) for k in hf_value]
     return (sum(s[0] for s in shard_shapes), *shard_shapes[0][1:])
-  hf_struct = jax.ShapeDtypeStruct(tuple(hf_shapes[hf_value]), jnp.float32)
-  return tuple(jax.eval_shape(lambda x: tensor_handling.apply_hook_fns(x, mt_shape, hook), hf_struct).shape)
+  raw_shape = tuple(hf_shapes[hf_value])
+  if hook is None:
+    return raw_shape
+  mt_shape_tuple = tuple(mt_shape)
+  hook_key = (
+      tuple(getattr(h, "__qualname__", h) for h in hook)
+      if isinstance(hook, list)
+      else getattr(hook, "__qualname__", hook)
+  )
+  cache_key = (raw_shape, mt_shape_tuple, hook_key)
+  if cache_key not in _HOOK_SHAPE_CACHE:
+    hf_struct = jax.ShapeDtypeStruct(raw_shape, jnp.float32)
+    _HOOK_SHAPE_CACHE[cache_key] = tuple(
+        jax.eval_shape(lambda x: tensor_handling.apply_hook_fns(x, mt_shape, hook), hf_struct).shape
+    )
+  return _HOOK_SHAPE_CACHE[cache_key]
 
 
 def _to_maxtext(hf_value, hf_tensors, hook, mt_shape) -> np.ndarray:
@@ -120,6 +161,13 @@ def _conversion_tables(model_name: str, hf_config: Any, config, saving_to_hf: bo
 @pytest.mark.cpu_only
 class Qwen3_8FlashNextCheckpointConversionTest(parameterized.TestCase):
   """Validates the Qwen3.8-Flash-Next conversion tables against the m3 model."""
+
+  @classmethod
+  def tearDownClass(cls):
+    _CONFIG_CACHE.clear()
+    _PARAM_SHAPES_CACHE.clear()
+    _HOOK_SHAPE_CACHE.clear()
+    super().tearDownClass()
 
   @parameterized.product(model_name=(_FULL, _MINI), scan_layers=(False, True))
   def test_mapping_matches_model_params(self, model_name, scan_layers):

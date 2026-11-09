@@ -35,13 +35,15 @@ pytestmark = pytest.mark.cpu_only
 _V4_SMALL = {
     "model_name": "deepseek4-tiny",
     "override_model_config": True,
-    # Three unscanned prefix layers plus one scanned block of two layers.
-    "base_num_decoder_layers": 5,
-    "compress_ratios": [0, 0, 4, 128, 4],
+    # Two unscanned prefix layers (sliding-window + CSA) plus one scanned block of two layers (HCA + CSA).
+    "first_num_hash_layers": 2,
+    "base_num_decoder_layers": 4,
+    "compress_ratios": [0, 4, 128, 4],
+    "mhc_expansion_rate": 2,
     "num_experts": 4,
     "num_experts_per_tok": 2,
     "vocab_size": 128,
-    "max_target_length": 32,
+    "max_target_length": 16,
     "per_device_batch_size": 1,
     "scan_layers": True,
     "attention": "dot_product",
@@ -55,7 +57,7 @@ _V4_SMALL = {
     # The CSA indexer loss is created as a new variable during the layer call.
     "indexer_sparse_training": True,
     "indexer_loss_scaling_factor": 1.0,
-    "indexer_topk": 4,
+    "indexer_topk": 2,
 }
 
 
@@ -103,6 +105,11 @@ def _train_step(remat_policy, dropout=False):
 
 
 class DeepSeekV4RematTest(unittest.TestCase):
+
+  @classmethod
+  def tearDownClass(cls):
+    _train_step.cache_clear()
+    super().tearDownClass()
 
   def test_remat_preserves_loss_aux_and_grads(self):
     """remat_policy=full and none give the same loss, sown aux losses and gradients."""

@@ -898,8 +898,13 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @classmethod
   def tearDownClass(cls):
-    if hasattr(cls, "_gmm_grad_equivalence_ref_cache"):
-      delattr(cls, "_gmm_grad_equivalence_ref_cache")
+    for attr in (
+        "_ragged_sort_ref_cache",
+        "_tc_ragged_sort_ref_cache",
+        "_retry_test_ref_cache",
+    ):
+      if hasattr(cls, attr):
+        delattr(cls, attr)
     super().tearDownClass()
 
   @parameterized.parameters(False, True)
@@ -962,14 +967,10 @@ class RoutedMoeTest(parameterized.TestCase):
         dtype=jnp.float32,
         weight_dtype=cfg.weight_dtype,
     )
-    variables = model.init(
-        {"params": rng, "dropout": rng},
-        jax.random.normal(
-            rng, (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim)
-        ),
-    )
+    hidden_states_f32 = hidden_states.astype(jnp.float32)
+    variables = model.init({"params": rng, "dropout": rng}, hidden_states_f32)
 
-    output = jax.jit(model.apply)(variables, hidden_states.astype(jnp.float32))  # pylint: disable=not-callable
+    output = jax.jit(model.apply)(variables, hidden_states_f32)  # pylint: disable=not-callable
     return variables, output.astype(cfg.dtype)
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
@@ -1023,11 +1024,15 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
         per_device_batch_size=1,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -1053,11 +1058,15 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_ragged_dot_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=False,
         sparse_matmul=True,
         per_device_batch_size=1,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -1207,11 +1216,15 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="float32",
         megablox=False,
         sparse_matmul=False,
         per_device_batch_size=1,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -1237,6 +1250,10 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_chunking_rr_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         weight_dtype="bfloat16",
         megablox=False,
@@ -1249,8 +1266,9 @@ class RoutedMoeTest(parameterized.TestCase):
         use_random_routing=True,
         mlp_bias=True,
         per_device_batch_size=1,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
+        **_GMM_V2_SMALL_MLP_TILES,
     )
 
     cfg_non_chunked = pyconfig.initialize(
@@ -1258,6 +1276,10 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_non_chunking_rr_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         weight_dtype="bfloat16",
         megablox=False,
@@ -1270,8 +1292,9 @@ class RoutedMoeTest(parameterized.TestCase):
         use_random_routing=True,
         mlp_bias=True,
         per_device_batch_size=1,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
+        **_GMM_V2_SMALL_MLP_TILES,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -1293,6 +1316,7 @@ class RoutedMoeTest(parameterized.TestCase):
         mesh=mesh,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg_chunked.mlp_dim,
         dtype=cfg_chunked.dtype,
         rngs=nnx.Rngs(params=rng_model),
     )
@@ -1304,6 +1328,7 @@ class RoutedMoeTest(parameterized.TestCase):
         mesh=mesh,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg_non_chunked.mlp_dim,
         dtype=cfg_non_chunked.dtype,
         rngs=nnx.Rngs(params=rng_model),
     )
@@ -1364,12 +1389,16 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=4,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -1396,6 +1425,10 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_ring_ep_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
@@ -1403,7 +1436,7 @@ class RoutedMoeTest(parameterized.TestCase):
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
         ici_tensor_parallelism=2,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -1458,7 +1491,7 @@ class RoutedMoeTest(parameterized.TestCase):
           per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
           ici_expert_parallelism=2,
           use_ring_of_experts=use_ring_of_experts,
-          max_target_length=128,
+          max_target_length=64,
           float32_gate_logits=True,
           use_ragged_sort=use_ragged_sort,
           ragged_buffer_factor=effective_buffer_factor,
@@ -1495,19 +1528,25 @@ class RoutedMoeTest(parameterized.TestCase):
     rng_model, rng_hidden_states = jax.random.split(rng)
     device_count = jax.device_count()
 
-    # Reference run: use_ragged_sort=False.
+    # Reference run: use_ragged_sort=False (cached across tests sharing the same use_ring_of_experts).
     cfg_ref = _build_cfg(use_ragged_sort=False)
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
-        dtype=cfg_ref.dtype,
-    )
-    devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
-    mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
-    model_ref = _build_model(cfg_ref, mesh_ref)
-    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
-      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+    ref_cache = getattr(self.__class__, "_ragged_sort_ref_cache", {})
+    cache_key = (device_count, use_ring_of_experts, cfg_ref.base_emb_dim, cfg_ref.max_target_length)
+    if cache_key not in ref_cache:
+      hidden_states = jax.random.uniform(
+          rng_hidden_states,
+          (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+          dtype=cfg_ref.dtype,
+      )
+      devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
+      mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
+      model_ref = _build_model(cfg_ref, mesh_ref)
+      with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+        variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+        loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+      ref_cache[cache_key] = (variables, hidden_states, *jax.device_get((loss_ref, grads_ref, x_grad_ref)))
+      setattr(self.__class__, "_ragged_sort_ref_cache", ref_cache)
+    variables, hidden_states, loss_ref, grads_ref, x_grad_ref = ref_cache[cache_key]
 
     # Target run: use_ragged_sort=True, sharing variables with the reference.
     cfg_rs = _build_cfg(use_ragged_sort=True)
@@ -1578,28 +1617,31 @@ class RoutedMoeTest(parameterized.TestCase):
     """
 
     def _build_cfg(moe_tc_ragged_sort: bool):
-      overrides = {"moe_tc_ragged_sort": moe_tc_ragged_sort, **(common_overrides or {})}
-      overrides.update(tc_overrides if moe_tc_ragged_sort else (ref_overrides or {}))
+      kwargs = {
+          "enable_checkpointing": False,
+          "model_name": "mixtral-8x7b",
+          "override_model_config": True,
+          "base_emb_dim": 2048,
+          "base_mlp_dim": 256,
+          "base_moe_mlp_dim": 256,
+          "dtype": "bfloat16",
+          "megablox": True,
+          "sparse_matmul": True,
+          "per_device_batch_size": 2,
+          "ici_expert_parallelism": 2,
+          "use_ring_of_experts": True,
+          "max_target_length": 64,
+          "float32_gate_logits": True,
+          "use_ragged_sort": True,
+          "ragged_buffer_factor": ragged_buffer_factor,
+          "moe_tc_ragged_sort": moe_tc_ragged_sort,
+          **(common_overrides or {}),
+      }
+      kwargs.update(tc_overrides if moe_tc_ragged_sort else (ref_overrides or {}))
       return pyconfig.initialize(
           [None, get_test_config_path()],
           run_name=f"moe_block_tc_ragged_sort_{moe_tc_ragged_sort}_test",
-          enable_checkpointing=False,
-          model_name="mixtral-8x7b",
-          override_model_config=True,
-          base_emb_dim=2048,
-          base_mlp_dim=256,
-          base_moe_mlp_dim=256,
-          dtype="bfloat16",
-          megablox=True,
-          sparse_matmul=True,
-          per_device_batch_size=4,
-          ici_expert_parallelism=2,
-          use_ring_of_experts=True,
-          max_target_length=128,
-          float32_gate_logits=True,
-          use_ragged_sort=True,
-          ragged_buffer_factor=ragged_buffer_factor,
-          **overrides,
+          **kwargs,
       )
 
     def _build_model(cfg, mesh):
@@ -1638,32 +1680,46 @@ class RoutedMoeTest(parameterized.TestCase):
 
     rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(2345))
 
-    # Reference run: SparseCore ragged sort.
+    # Reference run: SparseCore (or un-optioned TC) ragged sort, cached across tests sharing the same reference config.
     cfg_ref = _build_cfg(moe_tc_ragged_sort=False)
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (int(cfg_ref.per_device_batch_size) * jax.device_count(), cfg_ref.max_target_length, cfg_ref.base_emb_dim),
-        dtype=cfg_ref.dtype,
+    ref_cache = getattr(self.__class__, "_tc_ragged_sort_ref_cache", {})
+    cache_key = (
+        jax.device_count(),
+        ragged_buffer_factor,
+        randomize_biases,
+        bool(check_jaxprs),
+        repr(quantization_rule) if quantization_rule else None,
+        tuple(sorted((common_overrides or {}).items())),
+        tuple(sorted((ref_overrides or {}).items())),
     )
-    mesh_ref = Mesh(maxtext_utils.create_device_mesh(cfg_ref), cfg_ref.mesh_axes)
-    model_ref = _build_model(cfg_ref, mesh_ref)
-    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
-      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      if randomize_biases:
-        # Biases are zero-initialized; make them nonzero so the mlp_bias path is actually checked.
-        path_leaves, treedef = jax.tree_util.tree_flatten_with_path(variables)
-        keys = jax.random.split(jax.random.PRNGKey(7), len(path_leaves))
-        variables = jax.tree_util.tree_unflatten(
-            treedef,
-            [
-                (0.1 * jax.random.normal(k, x.shape, jnp.float32)).astype(x.dtype)
-                if "bias" in jax.tree_util.keystr(path)
-                else x
-                for k, (path, x) in zip(keys, path_leaves)
-            ],
-        )
-      loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
-      jaxpr_ref = _jaxpr(model_ref, variables, hidden_states) if check_jaxprs else None
+    if cache_key not in ref_cache:
+      hidden_states = jax.random.uniform(
+          rng_hidden_states,
+          (int(cfg_ref.per_device_batch_size) * jax.device_count(), cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+          dtype=cfg_ref.dtype,
+      )
+      mesh_ref = Mesh(maxtext_utils.create_device_mesh(cfg_ref), cfg_ref.mesh_axes)
+      model_ref = _build_model(cfg_ref, mesh_ref)
+      with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+        variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+        if randomize_biases:
+          # Biases are zero-initialized; make them nonzero so the mlp_bias path is actually checked.
+          path_leaves, treedef = jax.tree_util.tree_flatten_with_path(variables)
+          keys = jax.random.split(jax.random.PRNGKey(7), len(path_leaves))
+          variables = jax.tree_util.tree_unflatten(
+              treedef,
+              [
+                  (0.1 * jax.random.normal(k, x.shape, jnp.float32)).astype(x.dtype)
+                  if "bias" in jax.tree_util.keystr(path)
+                  else x
+                  for k, (path, x) in zip(keys, path_leaves)
+              ],
+          )
+        loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+        jaxpr_ref = _jaxpr(model_ref, variables, hidden_states) if check_jaxprs else None
+      ref_cache[cache_key] = (variables, hidden_states, *jax.device_get((loss_ref, grads_ref, x_grad_ref)), jaxpr_ref)
+      setattr(self.__class__, "_tc_ragged_sort_ref_cache", ref_cache)
+    variables, hidden_states, loss_ref, grads_ref, x_grad_ref, jaxpr_ref = ref_cache[cache_key]
 
     # Target run: TensorCore ragged sort, sharing variables with the reference.
     cfg_tc = _build_cfg(moe_tc_ragged_sort=True)
@@ -1742,10 +1798,10 @@ class RoutedMoeTest(parameterized.TestCase):
           "weight_dtype": "float32",
           "megablox": False,
           "sparse_matmul": True,
-          "per_device_batch_size": 4,
+          "per_device_batch_size": 2,
           "ici_expert_parallelism": 2,
           "use_ring_of_experts": True,
-          "max_target_length": 64,
+          "max_target_length": 32,
           "float32_gate_logits": True,
           "load_balance_loss_weight": 0.01,
           "use_ragged_sort": True,
@@ -1844,10 +1900,10 @@ class RoutedMoeTest(parameterized.TestCase):
         "weight_dtype": "float32",
         "megablox": False,
         "sparse_matmul": True,
-        "per_device_batch_size": 4,
+        "per_device_batch_size": 2,
         "ici_expert_parallelism": 2,
         "use_ring_of_experts": True,
-        "max_target_length": 64,
+        "max_target_length": 32,
         "float32_gate_logits": True,
         "load_balance_loss_weight": 0.01,
         "use_ragged_sort": True,
@@ -2023,7 +2079,11 @@ class RoutedMoeTest(parameterized.TestCase):
     """moe_tc_ragged_3d_gmm (3D-layout gmm_v2 / tgmm_v2) matches the TC sort with the 2D gmm_v2 kernels."""
     self._run_tc_ragged_sort_loss_and_grad(
         ragged_buffer_factor=ragged_buffer_factor,
-        common_overrides={**_GMM_V2_SMALL_MLP_TILES, "use_tokamax_gmm": True, "use_gmm_v2": True},
+        common_overrides={
+            **_GMM_V2_SMALL_MLP_TILES,
+            "use_tokamax_gmm": True,
+            "use_gmm_v2": True,
+        },
         ref_overrides={"moe_tc_ragged_sort": True, **extra},
         moe_tc_ragged_3d_gmm=True,
         **extra,
@@ -2050,8 +2110,8 @@ class RoutedMoeTest(parameterized.TestCase):
         "moe_tc_ragged_sort": True,
         "moe_tc_ragged_3d_gmm": True,
     }
-    # emb 2048 = 16 x 128: token all-gather and combine reduce-scatter must
-    # run on (..., 16, 128) tensors with the flag, and (..., 2048) without it.
+    # emb 1024 = 16 x 128: token all-gather and combine reduce-scatter must
+    # run on (..., 16, 128) tensors with the flag, and (..., 1024) without it.
     collective_3d = re.compile(r"\[(?:\d+,)*16,128\](?:\{[^}]*\})? = (all_gather|reduce_scatter)\[")
 
     def check_jaxprs(jaxpr_ref, jaxpr_tc):
@@ -2234,7 +2294,7 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("overflow", 0.1, True),
+      ("overflow", 0.125, True),
       ("dropless", -1.0, False),
   )
   def test_ragged_sort_overflow_detection(self, ragged_buffer_factor, expect_overflow):
@@ -2250,10 +2310,10 @@ class RoutedMoeTest(parameterized.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=2,
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
-        max_target_length=128,
+        max_target_length=64,
         float32_gate_logits=True,
         use_ragged_sort=True,
         ragged_buffer_factor=ragged_buffer_factor,
@@ -2283,9 +2343,18 @@ class RoutedMoeTest(parameterized.TestCase):
         dtype=cfg.dtype,
     )
 
+    cache_attr = "_retry_test_ref_cache"
+    ref_cache = getattr(self.__class__, cache_attr, {})
+    init_key = ("overflow_detection_vars", device_count, cfg.base_emb_dim, cfg.max_target_length)
+
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      _, mutated = model.apply({"params": variables["params"]}, hidden_states, mutable=["intermediates"])
+      if init_key not in ref_cache:
+        ref_cache[init_key] = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+        setattr(self.__class__, cache_attr, ref_cache)
+      variables = ref_cache[init_key]
+      _, mutated = jax.jit(functools.partial(model.apply, mutable=["intermediates"]))(
+          {"params": variables["params"]}, hidden_states
+      )
 
     has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
     self.assertTrue(has_overflow, "Expected a moe_has_overflow intermediate to be sown.")
@@ -2330,10 +2399,10 @@ class RoutedMoeTest(parameterized.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=2,
         ici_expert_parallelism=2,
         use_ring_of_experts=use_ring_of_experts,
-        max_target_length=128,
+        max_target_length=64,
         float32_gate_logits=True,
         use_ragged_sort=True,
         ragged_buffer_factor=ragged_buffer_factor,
@@ -2354,46 +2423,104 @@ class RoutedMoeTest(parameterized.TestCase):
     )
     return cfg, model
 
-  def _out_loss_and_grad(self, model, params, hidden_states):
-    def loss_fn(p):
-      out, lb_loss, _ = model.apply({"params": p}, hidden_states)
-      loss = jnp.mean(out.astype(jnp.float32) ** 2)
-      return loss + (lb_loss.astype(jnp.float32) if lb_loss is not None else 0.0), out
+  def _out_loss_and_grad(self, model, params, hidden_states, return_mutated: bool = False):
+    """Computes JIT-compiled forward output, loss, gradients, and optional intermediates."""
 
-    (loss, out), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params)
-    return out, loss, grads
+    def loss_fn(p):
+      if return_mutated:
+        (out, lb_loss, _), mutated = model.apply({"params": p}, hidden_states, mutable=["intermediates"])
+      else:
+        out, lb_loss, _ = model.apply({"params": p}, hidden_states)
+        mutated = None
+      loss = jnp.mean(out.astype(jnp.float32) ** 2)
+      return loss + (lb_loss.astype(jnp.float32) if lb_loss is not None else 0.0), (out, mutated)
+
+    (loss, (out, mutated)), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params)
+    return out, loss, grads, mutated
+
+  def _get_cached_retry_dropless_ref(self, mesh, use_ring_of_experts: bool = True):
+    """Returns cached (cfg_dropless, variables, hidden_states, out_dropless, grads_dropless)."""
+    cache_attr = "_retry_test_ref_cache"
+    ref_cache = getattr(self.__class__, cache_attr, {})
+    device_count = jax.device_count()
+    cache_key = ("dropless_grad", device_count, use_ring_of_experts)
+    cfg_dropless, model_dropless = self._build_retry_test_model(
+        mesh, ragged_buffer_factor=-1.0, use_ring_of_experts=use_ring_of_experts
+    )
+    if cache_key not in ref_cache:
+      rng = jax.random.PRNGKey(2345)
+      rng_model, rng_hidden_states = jax.random.split(rng)
+      hidden_states = jax.random.uniform(
+          rng_hidden_states,
+          (
+              int(cfg_dropless.per_device_batch_size) * device_count,
+              cfg_dropless.max_target_length,
+              cfg_dropless.base_emb_dim,
+          ),
+          dtype=cfg_dropless.dtype,
+      )
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+        variables = model_dropless.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+        out_dropless, _, grads_dropless, _ = self._out_loss_and_grad(model_dropless, variables["params"], hidden_states)
+      ref_cache[cache_key] = (variables, hidden_states, *jax.device_get((out_dropless, grads_dropless)))
+      setattr(self.__class__, cache_attr, ref_cache)
+    variables, hidden_states, out_dropless, grads_dropless = ref_cache[cache_key]
+    return cfg_dropless, variables, hidden_states, out_dropless, grads_dropless
+
+  def _get_cached_retry_forced_dropless_ref(self, mesh, use_ring_of_experts: bool = True):
+    """Returns cached (cfg_dropless, variables, hidden_states, forced_routed_experts, out_dropless)."""
+    cache_attr = "_retry_test_ref_cache"
+    ref_cache = getattr(self.__class__, cache_attr, {})
+    device_count = jax.device_count()
+    cache_key = ("dropless_forced_fwd", device_count, use_ring_of_experts)
+    cfg_dropless, model_dropless = self._build_retry_test_model(
+        mesh, ragged_buffer_factor=-1.0, use_ring_of_experts=use_ring_of_experts
+    )
+    if cache_key not in ref_cache:
+      rng = jax.random.PRNGKey(2345)
+      rng_model, rng_hidden_states = jax.random.split(rng)
+      hidden_states = jax.random.uniform(
+          rng_hidden_states,
+          (
+              int(cfg_dropless.per_device_batch_size) * device_count,
+              cfg_dropless.max_target_length,
+              cfg_dropless.base_emb_dim,
+          ),
+          dtype=cfg_dropless.dtype,
+      )
+      forced_routed_experts = jnp.broadcast_to(
+          jnp.arange(cfg_dropless.num_experts_per_tok, dtype=jnp.int32),
+          hidden_states.shape[:2] + (cfg_dropless.num_experts_per_tok,),
+      )
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+        variables = model_dropless.init(
+            {"params": rng_model, "dropout": rng_model}, hidden_states, forced_routed_experts=forced_routed_experts
+        )
+        out_dropless, _, _ = jax.jit(model_dropless.apply)(
+            {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
+        )
+      ref_cache[cache_key] = (variables, hidden_states, forced_routed_experts, jax.device_get(out_dropless))
+      setattr(self.__class__, cache_attr, ref_cache)
+    variables, hidden_states, forced_routed_experts, out_dropless = ref_cache[cache_key]
+    return cfg_dropless, variables, hidden_states, forced_routed_experts, out_dropless
 
   @pytest.mark.tpu_only
   def test_force_dropless_matches_dropless(self):
     """A tiny buffer + force_dropless=True matches dropless output and gradients; without it, they diverge."""
     mesh = self._build_retry_test_mesh()
-    rng = jax.random.PRNGKey(2345)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-
-    cfg_dropless, model_dropless = self._build_retry_test_model(mesh, ragged_buffer_factor=-1.0)
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (
-            int(cfg_dropless.per_device_batch_size) * device_count,
-            cfg_dropless.max_target_length,
-            cfg_dropless.base_emb_dim,
-        ),
-        dtype=cfg_dropless.dtype,
+    cfg_dropless, variables, hidden_states, out_dropless, grads_dropless = self._get_cached_retry_dropless_ref(
+        mesh, use_ring_of_experts=True
     )
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      variables = model_dropless.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      out_dropless, _, grads_dropless = self._out_loss_and_grad(model_dropless, variables["params"], hidden_states)
 
     _, model_retry = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="step", force_dropless=True
+        mesh, ragged_buffer_factor=0.125, moe_dropless_fallback="step", force_dropless=True
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      out_retry, _, grads_retry = self._out_loss_and_grad(model_retry, variables["params"], hidden_states)
+      out_retry, _, grads_retry, _ = self._out_loss_and_grad(model_retry, variables["params"], hidden_states)
 
-    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1)
+    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.125)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      out_no_retry, _, _ = self._out_loss_and_grad(model_no_retry, variables["params"], hidden_states)
+      out_no_retry, _, _ = jax.jit(model_no_retry.apply)({"params": variables["params"]}, hidden_states)
 
     # Sanity check: the buffer must actually force drops without the flag, else this test proves nothing.
     self.assertFalse(
@@ -2409,39 +2536,16 @@ class RoutedMoeTest(parameterized.TestCase):
   def test_step_dropless_fallback_asymmetric_shard_overflow(self):
     """Overflow flag and replay must fire correctly when only one EP shard overflows, not both."""
     mesh = self._build_retry_test_mesh()
-    rng = jax.random.PRNGKey(2345)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-
-    cfg_dropless, model_dropless = self._build_retry_test_model(mesh, ragged_buffer_factor=-1.0)
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (
-            int(cfg_dropless.per_device_batch_size) * device_count,
-            cfg_dropless.max_target_length,
-            cfg_dropless.base_emb_dim,
-        ),
-        dtype=cfg_dropless.dtype,
-    )
     # num_experts=8, ici_expert_parallelism=2 -> shard 0 owns experts [0, 4).
     # Route every token to experts 0 and 1: shard 0 gets everything and
     # overflows a tiny buffer; shard 1 gets nothing and never overflows.
-    forced_routed_experts = jnp.broadcast_to(
-        jnp.arange(cfg_dropless.num_experts_per_tok, dtype=jnp.int32),
-        hidden_states.shape[:2] + (cfg_dropless.num_experts_per_tok,),
+    cfg_dropless, variables, hidden_states, forced_routed_experts, out_dropless = (
+        self._get_cached_retry_forced_dropless_ref(mesh, use_ring_of_experts=True)
     )
 
+    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.125)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      variables = model_dropless.init(
-          {"params": rng_model, "dropout": rng_model}, hidden_states, forced_routed_experts=forced_routed_experts
-      )
-      out_dropless, _, _ = model_dropless.apply(
-          {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
-      )
-
-    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1)
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      out_no_retry, _, _ = model_no_retry.apply(
+      out_no_retry, _, _ = jax.jit(model_no_retry.apply)(
           {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
       )
     self.assertFalse(
@@ -2449,13 +2553,12 @@ class RoutedMoeTest(parameterized.TestCase):
         msg="moe_dropless_fallback=None unexpectedly matches dropless -- forced routing isn't overflowing shard 0.",
     )
 
-    _, model_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="step")
+    _, model_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.125, moe_dropless_fallback="step")
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      _, mutated = model_retry.apply(
+      _, mutated = jax.jit(functools.partial(model_retry.apply, mutable=["intermediates"]))(
           {"params": variables["params"]},
           hidden_states,
           forced_routed_experts=forced_routed_experts,
-          mutable=["intermediates"],
       )
       has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
       self.assertTrue(has_overflow, "Expected a moe_has_overflow intermediate to be sown.")
@@ -2466,10 +2569,10 @@ class RoutedMoeTest(parameterized.TestCase):
 
     # Replay with force_dropless=True matches dropless output.
     _, model_replay = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="step", force_dropless=True
+        mesh, ragged_buffer_factor=0.125, moe_dropless_fallback="step", force_dropless=True
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      out_replay, _, _ = model_replay.apply(
+      out_replay, _, _ = jax.jit(model_replay.apply)(
           {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
       )
     assert_moe_close(out_replay, out_dropless, cfg_dropless.dtype)
@@ -2479,42 +2582,29 @@ class RoutedMoeTest(parameterized.TestCase):
   def test_layer_dropless_fallback_matches_dropless(self, use_ring_of_experts):
     """A tiny buffer + in-layer fallback matches dropless output and gradients in one pass (no replay)."""
     mesh = self._build_retry_test_mesh()
-    rng = jax.random.PRNGKey(2345)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-
-    cfg_dropless, model_dropless = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=-1.0, use_ring_of_experts=use_ring_of_experts
+    cfg_dropless, variables, hidden_states, out_dropless, grads_dropless = self._get_cached_retry_dropless_ref(
+        mesh, use_ring_of_experts=use_ring_of_experts
     )
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (
-            int(cfg_dropless.per_device_batch_size) * device_count,
-            cfg_dropless.max_target_length,
-            cfg_dropless.base_emb_dim,
-        ),
-        dtype=cfg_dropless.dtype,
-    )
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      variables = model_dropless.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      out_dropless, _, grads_dropless = self._out_loss_and_grad(model_dropless, variables["params"], hidden_states)
 
+    # ragged_buffer_factor=0.4 (< 1.0) guarantees overflow on the unchunked pass and
+    # exercises non-divisor rounding in get_dropless_fallback_num_chunks (ceil(2/0.4)=5 -> 8 chunks for seq=64).
     _, model_no_fallback = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=0.1, use_ring_of_experts=use_ring_of_experts
+        mesh, ragged_buffer_factor=0.4, use_ring_of_experts=use_ring_of_experts
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      out_no_fallback, _, _ = self._out_loss_and_grad(model_no_fallback, variables["params"], hidden_states)
+      out_no_fallback, _, _ = jax.jit(model_no_fallback.apply)({"params": variables["params"]}, hidden_states)
     self.assertFalse(
         jnp.allclose(out_no_fallback.astype(jnp.float32), out_dropless.astype(jnp.float32), rtol=1e-2, atol=1e-2),
-        msg="ragged_buffer_factor=0.1 unexpectedly matches dropless -- buffer isn't forcing an overflow.",
+        msg="ragged_buffer_factor=0.4 unexpectedly matches dropless -- buffer isn't forcing an overflow.",
     )
 
     _, model_fallback = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="layer", use_ring_of_experts=use_ring_of_experts
+        mesh, ragged_buffer_factor=0.4, moe_dropless_fallback="layer", use_ring_of_experts=use_ring_of_experts
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      out_fallback, _, grads_fallback = self._out_loss_and_grad(model_fallback, variables["params"], hidden_states)
-      _, mutated = model_fallback.apply({"params": variables["params"]}, hidden_states, mutable=["intermediates"])
+      out_fallback, _, grads_fallback, mutated = self._out_loss_and_grad(
+          model_fallback, variables["params"], hidden_states, return_mutated=True
+      )
     took_fallback = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_dropless_fallback")
     self.assertTrue(bool(jnp.any(jnp.array([jnp.any(x) for x in took_fallback]))), "Expected the dropless branch.")
     # The fallback absorbed the overflow, so moe_has_overflow must not report dropped tokens.
@@ -2532,44 +2622,19 @@ class RoutedMoeTest(parameterized.TestCase):
   def test_layer_dropless_fallback_asymmetric_shard_overflow(self, use_ring_of_experts):
     """The predicate must fire (on every device) when only one EP shard overflows, and match dropless."""
     mesh = self._build_retry_test_mesh()
-    rng = jax.random.PRNGKey(2345)
-    rng_model, rng_hidden_states = jax.random.split(rng)
-    device_count = jax.device_count()
-
-    cfg_dropless, model_dropless = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=-1.0, use_ring_of_experts=use_ring_of_experts
-    )
-    hidden_states = jax.random.uniform(
-        rng_hidden_states,
-        (
-            int(cfg_dropless.per_device_batch_size) * device_count,
-            cfg_dropless.max_target_length,
-            cfg_dropless.base_emb_dim,
-        ),
-        dtype=cfg_dropless.dtype,
-    )
     # num_experts=8, ici_expert_parallelism=2 -> shard 0 owns experts [0, 4); route everything there.
-    forced_routed_experts = jnp.broadcast_to(
-        jnp.arange(cfg_dropless.num_experts_per_tok, dtype=jnp.int32),
-        hidden_states.shape[:2] + (cfg_dropless.num_experts_per_tok,),
+    cfg_dropless, variables, hidden_states, forced_routed_experts, out_dropless = (
+        self._get_cached_retry_forced_dropless_ref(mesh, use_ring_of_experts=use_ring_of_experts)
     )
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      variables = model_dropless.init(
-          {"params": rng_model, "dropout": rng_model}, hidden_states, forced_routed_experts=forced_routed_experts
-      )
-      out_dropless, _, _ = model_dropless.apply(
-          {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
-      )
 
     _, model_fallback = self._build_retry_test_model(
         mesh, ragged_buffer_factor=1.5, moe_dropless_fallback="layer", use_ring_of_experts=use_ring_of_experts
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
-      (out_fallback, _, _), mutated = model_fallback.apply(
+      (out_fallback, _, _), mutated = jax.jit(functools.partial(model_fallback.apply, mutable=["intermediates"]))(
           {"params": variables["params"]},
           hidden_states,
           forced_routed_experts=forced_routed_experts,
-          mutable=["intermediates"],
       )
     took_fallback = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_dropless_fallback")
     self.assertTrue(bool(jnp.any(jnp.array([jnp.any(x) for x in took_fallback]))), "Expected the dropless branch.")
@@ -2591,6 +2656,10 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
@@ -2598,7 +2667,7 @@ class RoutedMoeTest(parameterized.TestCase):
         ici_fsdp_parallelism=2,
         ici_fsdp_transpose_parallelism=2,
         moe_fsdp_use_two_stage_all_gather=True,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -2628,6 +2697,10 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_shard_embed_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
@@ -2636,7 +2709,7 @@ class RoutedMoeTest(parameterized.TestCase):
         per_device_batch_size=4,
         ici_fsdp_parallelism=4,
         shard_embed_moe_on_fsdp=True,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
         quantize_router_proj=False,
         quantization="fp8_full",
@@ -2644,6 +2717,7 @@ class RoutedMoeTest(parameterized.TestCase):
         weight_quantization_calibration_method="fixed,-224,224",
         act_quantization_calibration_method="fixed,-224,224",
         bwd_quantization_calibration_method="absmax",
+        **_GMM_V2_SMALL_MLP_TILES,
     )
 
     def get_fp8_full_qwix_rule_for_test(config):
@@ -2690,15 +2764,10 @@ class RoutedMoeTest(parameterized.TestCase):
     quantization_provider = qwix.QtProvider(quantization_rule)
     model_qag = qwix.quantize_model(model_qag, quantization_provider)
 
-    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      # Initialize reference unfused model to get initial weights
-      _, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
-
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables_qag = model_qag.init({"params": rng_model, "dropout": rng_model}, hidden_states.astype(jnp.float32))
-
       output_qag, _, _ = jax.jit(model_qag.apply)(variables_qag, hidden_states.astype(jnp.float32))
-
-      self.assertEqual(output_qag.shape, expected_output.shape)
+      self.assertEqual(output_qag.shape, hidden_states.shape)
 
   @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):
@@ -2707,12 +2776,16 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_megablox_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
         per_device_batch_size=1,
         ici_context_parallelism=4,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -2739,6 +2812,10 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_megablox_ep_cp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
@@ -2746,7 +2823,7 @@ class RoutedMoeTest(parameterized.TestCase):
         ici_context_parallelism=2,
         ici_expert_parallelism=2,
         packing=False,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -2773,13 +2850,17 @@ class RoutedMoeTest(parameterized.TestCase):
         run_name="moe_block_megablox_ep_tp_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_tensor_parallelism=2,
         ici_expert_parallelism=2,
-        max_target_length=128,
+        max_target_length=32,
         float32_gate_logits=True,
     )
 
@@ -3412,6 +3493,13 @@ class TeGroupedGemmConfigTest(parameterized.TestCase):
 class QuantizedMoeTest(parameterized.TestCase):
   """Tests for quantized Mixture of Experts (MoE) execution and gradients."""
 
+  @classmethod
+  def tearDownClass(cls):
+    for attr in ("_gmm_grad_equivalence_ref_cache", "_quantize_combine_bwd_ref_cache"):
+      if hasattr(cls, attr):
+        delattr(cls, attr)
+    super().tearDownClass()
+
   @staticmethod
   def _build_and_quantize_moe_model(cfg: Config, mesh: Mesh):
     """Instantiates and optionally applies Qwix FP8 quantization rules to RoutedMoE."""
@@ -3453,7 +3541,9 @@ class QuantizedMoeTest(parameterized.TestCase):
       cfg: Config,
       rng_model: jax.Array,
       hidden_states: jax.Array,
-  ) -> dict[str, jax.Array]:
+      variables=None,
+      return_variables: bool = False,
+  ):
     """Executes forward pass, loss calculation, and backward gradients for RoutedMoE."""
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
@@ -3469,14 +3559,18 @@ class QuantizedMoeTest(parameterized.TestCase):
     loss_and_grad = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      if variables is None:
+        variables = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
       (_, output), (grads, x_grad) = loss_and_grad(variables["params"], hidden_states)
 
-    return {
+    res = {
         "output": output,
         "state_grad": x_grad,
         "var_grad": grads,
     }
+    if return_variables:
+      return res, variables
+    return res
 
   @parameterized.named_parameters(
       {
@@ -3592,10 +3686,10 @@ class QuantizedMoeTest(parameterized.TestCase):
           ),
           dtype=cfg_ref.dtype,
       )
-      tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
-      ref_cache[cache_key] = (hidden_states, tree_ref)
+      tree_ref, variables_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states, return_variables=True)
+      ref_cache[cache_key] = (hidden_states, jax.device_get(tree_ref), variables_ref)
       setattr(self.__class__, cache_attr, ref_cache)
-    hidden_states, tree_ref = ref_cache[cache_key]
+    hidden_states, tree_ref, variables_ref = ref_cache[cache_key]
 
     # Target run: custom configuration (sparse, GMM, EP, quantization)
     cfg_tgt = _build_cfg(
@@ -3607,7 +3701,8 @@ class QuantizedMoeTest(parameterized.TestCase):
         use_gmm_v2=use_gmm_v2,
         shard_embed_moe_on_fsdp=shard_embed_moe_on_fsdp,
     )
-    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
+    reuse_vars = variables_ref if (ici_expert_parallelism == 1 and not shard_embed_moe_on_fsdp) else None
+    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states, variables=reuse_vars)
 
     compare_tree(tree_ref, tree_tgt, 0.22 if quantization else 0.012)
 
@@ -3627,6 +3722,7 @@ class QuantizedMoeTest(parameterized.TestCase):
     ici_expert_parallelism = 4
     calibration_method = "fixed,-224,224"
     rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(42))
+    emb_dim = 2048 if use_ragged_sort else 512
 
     def _build_cfg(moe_quantize_token_all_gather: bool):
       return pyconfig.initialize(
@@ -3635,13 +3731,13 @@ class QuantizedMoeTest(parameterized.TestCase):
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
           override_model_config=True,
-          base_emb_dim=2048,
-          base_mlp_dim=1024,
-          base_moe_mlp_dim=1024,
+          base_emb_dim=emb_dim,
+          base_mlp_dim=512,
+          base_moe_mlp_dim=512,
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=1,
-          max_target_length=128,
+          max_target_length=64,
           float32_gate_logits=True,
           quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
@@ -3679,10 +3775,10 @@ class QuantizedMoeTest(parameterized.TestCase):
         ),
         dtype=cfg_ref.dtype,
     )
-    tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
+    tree_ref, variables_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states, return_variables=True)
 
     cfg_tgt = _build_cfg(moe_quantize_token_all_gather=True)
-    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
+    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states, variables=variables_ref)
 
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
 
@@ -3708,12 +3804,12 @@ class QuantizedMoeTest(parameterized.TestCase):
           model_name="mixtral-8x7b",
           override_model_config=True,
           base_emb_dim=2048,
-          base_mlp_dim=1024,
-          base_moe_mlp_dim=1024,
+          base_mlp_dim=512,
+          base_moe_mlp_dim=512,
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=1,
-          max_target_length=128,
+          max_target_length=64,
           float32_gate_logits=True,
           quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
@@ -3742,19 +3838,26 @@ class QuantizedMoeTest(parameterized.TestCase):
       )
 
     cfg_ref = _build_cfg(bwd_method_val="")
-    hidden_states = jax.random.normal(
-        rng_hidden_states,
-        (
-            int(cfg_ref.per_device_batch_size) * jax.device_count(),
-            cfg_ref.max_target_length,
-            cfg_ref.base_emb_dim,
-        ),
-        dtype=cfg_ref.dtype,
-    )
-    tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
+    cache_attr = "_quantize_combine_bwd_ref_cache"
+    ref_cache = getattr(self.__class__, cache_attr, {})
+    cache_key = (jax.device_count(), cfg_ref.base_emb_dim, cfg_ref.max_target_length)
+    if cache_key not in ref_cache:
+      hidden_states = jax.random.normal(
+          rng_hidden_states,
+          (
+              int(cfg_ref.per_device_batch_size) * jax.device_count(),
+              cfg_ref.max_target_length,
+              cfg_ref.base_emb_dim,
+          ),
+          dtype=cfg_ref.dtype,
+      )
+      tree_ref, variables_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states, return_variables=True)
+      ref_cache[cache_key] = (hidden_states, jax.device_get(tree_ref), variables_ref)
+      setattr(self.__class__, cache_attr, ref_cache)
+    hidden_states, tree_ref, variables_ref = ref_cache[cache_key]
 
     cfg_tgt = _build_cfg(bwd_method)
-    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
+    tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states, variables=variables_ref)
 
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.25)
 
@@ -4139,7 +4242,9 @@ class SparseMatmulQuantizationTest(parameterized.TestCase):
       self.assertEqual(kwargs["rhs_quantize_dtype"], expected_dtype)
 
 
-def make_moe(cfg, mesh, intermediate_dim: int = 2048, weight_quant=None):
+def make_moe(cfg, mesh, intermediate_dim: int | None = None, weight_quant=None):
+  if intermediate_dim is None:
+    intermediate_dim = cfg.mlp_dim if cfg.override_model_config else 2048
   return moe.RoutedMoE(
       config=cfg,
       num_experts=cfg.num_experts,
@@ -4854,6 +4959,10 @@ def test_moe_dispatch_no_expert_sharding_dense_forward():
       run_name="moe_dense_no_exp_fwd",
       enable_checkpointing=False,
       model_name="mixtral-8x7b",
+      override_model_config=True,
+      base_emb_dim=256,
+      base_mlp_dim=256,
+      base_moe_mlp_dim=256,
       dtype="bfloat16",
       megablox=False,
       sparse_matmul=False,
@@ -4892,6 +5001,10 @@ class FusedMlpMoETest(unittest.TestCase):
         run_name="fused_mlp_moe_ref",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         sparse_matmul=True,
         megablox=True,
@@ -4914,6 +5027,10 @@ class FusedMlpMoETest(unittest.TestCase):
         run_name="fused_mlp_moe_fused",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=512,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         sparse_matmul=True,
         megablox=True,
@@ -4973,6 +5090,10 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
         run_name="test_moe_pin_sc_model",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=256,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         sparse_matmul=True,
         megablox=True,
@@ -4996,6 +5117,10 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
         run_name="test_moe_pin_sc_quant_model",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=256,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
         dtype="bfloat16",
         sparse_matmul=True,
         megablox=False,

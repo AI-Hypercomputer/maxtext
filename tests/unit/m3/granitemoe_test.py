@@ -30,6 +30,7 @@ import json
 import math
 import re
 import subprocess
+import tempfile
 from typing import Any
 import unittest
 
@@ -828,26 +829,44 @@ class GraniteMoeConformanceTest(absltest.TestCase):
 
   def test_check8_multi_mesh_zero_expert_all_gather_and_8dev_compound_parity(self):
     # Reference single-device forward + backward values in fp32 (Precision.HIGHEST).
-    mesh_1 = m3_sharding.create_mesh(devices=_get_devices(1))
     cfg = _make_mini_config(scan_layers=True, router_aux_loss_coef=0.05)
+    tokens_np = np.random.default_rng(7).integers(0, cfg.vocab_size, size=(8, 4), dtype=np.int32)
+    targets_np = np.random.default_rng(8).integers(0, cfg.vocab_size, size=(8, 4), dtype=np.int32)
+    mask_np = np.ones((8, 4), dtype=np.int32)
+
+    mesh_1 = m3_sharding.create_mesh(devices=_get_devices(1))
     ref_model = modeling_granitemoe.create_granitemoe_model(cfg, mesh=mesh_1, rngs=nnx.Rngs(41))
-    ref_pure = nnx.to_pure_dict(nnx.state(ref_model, nnx.Param))
+    ref_gdef, ref_params_st, ref_rest_st = nnx.split(ref_model, nnx.Param, ...)
+    ref_pure = jax.tree.map(np.asarray, nnx.to_pure_dict(ref_params_st))
 
-    tokens_np = np.random.default_rng(7).integers(0, cfg.vocab_size, size=(8, 8), dtype=np.int32)
-    targets_np = np.random.default_rng(8).integers(0, cfg.vocab_size, size=(8, 8), dtype=np.int32)
-    mask_np = np.ones((8, 8), dtype=np.int32)
+    only_8dev = os.environ.get("GRANITEMOE_ONLY_8DEV_SUBPROCESS") == "1"
+    ref_cache_file = os.environ.get("GRANITEMOE_REF_CACHE_FILE")
+    if only_8dev and ref_cache_file and os.path.exists(ref_cache_file):
+      with np.load(ref_cache_file) as npz:
+        ref_loss = float(npz["__loss__"])
+        ref_aux = {"moe_lb_loss": float(npz["__lb_loss__"])}
+        ref_grad_flat = {k: npz[k] for k in npz.files if not k.startswith("__")}
+    else:
 
-    with jax.sharding.set_mesh(mesh_1):
-      (ref_loss, ref_aux), ref_grads = nnx.value_and_grad(
-          lambda m: modeling_granitemoe.compute_granitemoe_loss(
-              m,
-              tokens=jnp.asarray(tokens_np),
-              decoder_target_tokens=jnp.asarray(targets_np),
-              decoder_target_mask=jnp.asarray(mask_np),
-          ),
-          has_aux=True,
-      )(ref_model)
-      ref_grad_pure = jax.tree.map(np.asarray, nnx.to_pure_dict(ref_grads))
+      @jax.jit
+      def _ref_step(p_dict, t_in, t_tgt, t_msk):
+        def _loss(p_inner):
+          mod = nnx.merge(ref_gdef, p_inner, ref_rest_st)
+          return modeling_granitemoe.compute_granitemoe_loss(
+              mod, tokens=t_in, decoder_target_tokens=t_tgt, decoder_target_mask=t_msk
+          )
+
+        return jax.value_and_grad(_loss, has_aux=True)(p_dict)
+
+      with jax.sharding.set_mesh(mesh_1):
+        (ref_loss, ref_aux), ref_grads = _ref_step(
+            nnx.to_pure_dict(ref_params_st),
+            jnp.asarray(tokens_np),
+            jnp.asarray(targets_np),
+            jnp.asarray(mask_np),
+        )
+        ref_grad_pure = jax.tree.map(np.asarray, ref_grads)
+      ref_grad_flat = checkpoint_mappings_granitemoe._flatten_pure_dict(ref_grad_pure)  # pylint: disable=protected-access
 
     mesh_specs: list[tuple[str, dict[str, int], int]] = [
         ("fsdp2_tp2", {"fsdp": 2, "tensor": 2}, 4),
@@ -858,7 +877,6 @@ class GraniteMoeConformanceTest(absltest.TestCase):
         ("compound_fsdp2_tp2_ep2", {"fsdp": 2, "tensor": 2, "expert": 2}, 8),
     ]
 
-    only_8dev = os.environ.get("GRANITEMOE_ONLY_8DEV_SUBPROCESS") == "1"
     if only_8dev:
       mesh_specs = [("compound_fsdp2_tp2_ep2", {"fsdp": 2, "tensor": 2, "expert": 2}, 8)]
 
@@ -867,22 +885,30 @@ class GraniteMoeConformanceTest(absltest.TestCase):
       if ndev > 4 and avail_devs < ndev:
         if only_8dev:
           self.fail(f"Expected >= {ndev} devices in 8-device subprocess, got {avail_devs}.")
-        child_env = os.environ.copy()
-        cleaned_xla = re.sub(r"--xla_force_host_platform_device_count=\d+", "", child_env.get("XLA_FLAGS", "")).strip()
-        child_env["XLA_FLAGS"] = f"{cleaned_xla} --xla_force_host_platform_device_count={ndev}".strip()
-        child_env["JAX_PLATFORMS"] = "cpu"
-        child_env["GRANITEMOE_ONLY_8DEV_SUBPROCESS"] = "1"
-        proc = subprocess.run(
-            [
-                sys.executable,
-                os.path.abspath(__file__),
-                "GraniteMoeConformanceTest.test_check8_multi_mesh_zero_expert_all_gather_and_8dev_compound_parity",
-            ],
-            env=child_env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as tf:
+          tmp_ref_path = tf.name
+          np.savez(tf, __loss__=np.asarray(ref_loss), __lb_loss__=np.asarray(ref_aux["moe_lb_loss"]), **ref_grad_flat)
+        try:
+          child_env = os.environ.copy()
+          cleaned_xla = re.sub(r"--xla_force_host_platform_device_count=\d+", "", child_env.get("XLA_FLAGS", "")).strip()
+          child_env["XLA_FLAGS"] = f"{cleaned_xla} --xla_force_host_platform_device_count={ndev}".strip()
+          child_env["JAX_PLATFORMS"] = "cpu"
+          child_env["GRANITEMOE_ONLY_8DEV_SUBPROCESS"] = "1"
+          child_env["GRANITEMOE_REF_CACHE_FILE"] = tmp_ref_path
+          proc = subprocess.run(
+              [
+                  sys.executable,
+                  os.path.abspath(__file__),
+                  "GraniteMoeConformanceTest.test_check8_multi_mesh_zero_expert_all_gather_and_8dev_compound_parity",
+              ],
+              env=child_env,
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+        finally:
+          if os.path.exists(tmp_ref_path):
+            os.remove(tmp_ref_path)
         self.assertEqual(
             proc.returncode,
             0,
@@ -924,8 +950,9 @@ class GraniteMoeConformanceTest(absltest.TestCase):
       np.testing.assert_allclose(
           np.asarray(got_aux["moe_lb_loss"]), np.asarray(ref_aux["moe_lb_loss"]), rtol=1e-5, atol=1e-5, err_msg=tag
       )
-      for k_path, g_ref in checkpoint_mappings_granitemoe._flatten_pure_dict(ref_grad_pure).items():  # pylint: disable=protected-access
-        g_got = np.asarray(checkpoint_mappings_granitemoe._flatten_pure_dict(got_grads)[k_path])  # pylint: disable=protected-access
+      got_grad_flat = checkpoint_mappings_granitemoe._flatten_pure_dict(got_grads)  # pylint: disable=protected-access
+      for k_path, g_ref in ref_grad_flat.items():
+        g_got = np.asarray(got_grad_flat[k_path])
         self.assertLessEqual(
             _rel_l2_error(g_got, g_ref),
             1e-5,

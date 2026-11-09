@@ -198,6 +198,13 @@ class UnscanTest(unittest.TestCase):
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "model_name": "llama3.1-8b",
+        "override_model_config": True,
+        "base_emb_dim": 128,
+        "base_mlp_dim": 256,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 2,
+        "base_num_decoder_layers": 6,
+        "vocab_size": 256,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],

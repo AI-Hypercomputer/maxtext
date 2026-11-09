@@ -2229,6 +2229,12 @@ class CudnnFlashJaxInferenceTest(unittest.TestCase):
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cp_generic_cache"):
+      delattr(cls, "_cp_generic_cache")
+    super().tearDownClass()
+
   # Note: if you are changing these configs, please make sure to change the configs in
   # context_parallelism.py as well, since we are using the same configs for both
   # tests to get the same mesh and other config
@@ -2602,6 +2608,93 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(jax.numpy.allclose(output_shared, output_no_share, rtol=1e-04, atol=1e-04, equal_nan=False))
 
+  def _get_cp_generic_ref(self, dtype, max_target_length, packing, need_grad=False):
+    """Returns cached (lnx, decoder_segment_ids, decoder_positions, generic_state, output, grad) for dot_product."""
+    cache = getattr(self.__class__, "_cp_generic_cache", {})
+    key = (str(dtype), max_target_length, packing)
+    entry = cache.get(key)
+    if entry is None:
+      cfg_ref = (
+          self.cfg
+          if max_target_length == self.max_target_length
+          else pyconfig.initialize(
+              [sys.argv[0], get_test_config_path()],
+              **{**self.config_arguments, "max_target_length": max_target_length},
+          )
+      )
+      prev_len = self.max_target_length
+      self.max_target_length = max_target_length
+      try:
+        if packing:
+          lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(dtype)
+        else:
+          lnx, decoder_segment_ids, decoder_positions = self.get_data(dtype)
+      finally:
+        self.max_target_length = prev_len
+      attention_as_mha_generic = Attention(
+          config=cfg_ref,
+          num_query_heads=cfg_ref.num_query_heads,
+          num_kv_heads=cfg_ref.num_kv_heads,
+          head_dim=cfg_ref.head_dim,
+          max_target_length=cfg_ref.max_target_length,
+          max_prefill_predict_length=cfg_ref.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=self.mesh,
+          attention_kernel="dot_product",
+          dtype=dtype,
+          dropout_rate=cfg_ref.dropout_rate,
+          rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+      )
+      generic_state = nnx.state(attention_as_mha_generic)
+      entry = {
+          "lnx": lnx,
+          "seg": decoder_segment_ids,
+          "pos": decoder_positions,
+          "module": attention_as_mha_generic,
+          "state": generic_state,
+          "output": None,
+          "grad": None,
+      }
+      cache[key] = entry
+      setattr(self.__class__, "_cp_generic_cache", cache)
+
+    if not need_grad and entry["output"] is None:
+      out, _ = entry["module"](
+          entry["lnx"],
+          entry["lnx"],
+          decoder_segment_ids=entry["seg"],
+          inputs_positions=entry["pos"],
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      entry["output"] = jax.device_get(out)
+
+    if need_grad and entry["grad"] is None:
+      gdef, state = nnx.split(entry["module"])
+
+      @jax.jit
+      def _generic_out_and_grad(state_in, x_in):
+        def generic_loss(x):
+          m = nnx.merge(gdef, state_in)
+          out, _ = m(
+              x,
+              x,
+              decoder_segment_ids=entry["seg"],
+              inputs_positions=entry["pos"],
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+          return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+        return jax.value_and_grad(generic_loss, has_aux=True)(x_in)
+
+      (_, out), grad = _generic_out_and_grad(state, entry["lnx"])
+      entry["output"] = jax.device_get(out)
+      entry["grad"] = jax.device_get(grad)
+
+    return entry["lnx"], entry["seg"], entry["pos"], entry["state"], entry["output"], entry["grad"]
+
   @parameterized.named_parameters(
       {
           "testcase_name": "cp_no_load_balance",
@@ -2629,17 +2722,9 @@ class AttentionTest(parameterized.TestCase):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 
     num_kv_heads = self.num_kv_heads
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
-    # Dot product
-    mha_generic_output, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        self.dtype, self.max_target_length, packing=False, need_grad=False
     )
-    generic_state = nnx.state(self._attention_as_mha_generic)
 
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
@@ -2790,34 +2875,9 @@ class AttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        rngs=self.nnx_rng,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
     )
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(attention_as_mha_generic)
 
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_as_mha_flash_cp = Attention(
@@ -2847,7 +2907,6 @@ class AttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    mha_generic_output = jax.device_get(mha_generic_output)
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
@@ -2901,26 +2960,9 @@ class AttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        rngs=self.nnx_rng,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
     )
-    generic_state = nnx.state(attention_as_mha_generic)
 
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_as_mha_flash_cp = Attention(
@@ -2941,17 +2983,6 @@ class AttentionTest(parameterized.TestCase):
       )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
-    def generic_loss(lnx):
-      output, _ = attention_as_mha_generic(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
-
     def ring_loss(lnx):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
@@ -2971,10 +3002,8 @@ class AttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       ring_grad = jax.grad(ring_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
     ring_grad = jax.device_get(ring_grad)
 
     self.assertTrue(
@@ -2998,23 +3027,25 @@ class AttentionTest(parameterized.TestCase):
         dtype="float32",
     )
 
-  def _ulysses_test_modules(self, cfg_cp, mesh_cp, lnx):
-    """Builds the dot-product reference and the Ulysses flash attention modules."""
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        rngs=self.nnx_rng,
-    )
+  def _ulysses_test_modules(self, cfg_cp, mesh_cp, lnx, build_generic=False):
+    """Builds the dot-product reference (when requested) and the Ulysses flash attention modules."""
+    attention_as_mha_generic = None
+    if build_generic:
+      attention_as_mha_generic = Attention(
+          config=self.cfg,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=self.mesh,
+          attention_kernel="dot_product",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          rngs=self.nnx_rng,
+      )
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_as_mha_flash_cp = Attention(
           config=cfg_cp,
@@ -3046,20 +3077,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
     )
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
         cfg_cp,
@@ -3070,7 +3092,6 @@ class AttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    mha_generic_output = jax.device_get(mha_generic_output)
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
@@ -3091,23 +3112,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
-
-    def generic_loss(lnx):
-      output, _ = attention_as_mha_generic(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
+    )
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     def ulysses_loss(lnx):
       output, _ = attention_as_mha_flash_cp(
@@ -3120,10 +3129,8 @@ class AttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       ulysses_grad = jax.grad(ulysses_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
     ulysses_grad = jax.device_get(ulysses_grad)
 
     self.assertTrue(
@@ -3215,20 +3222,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
     )
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
         cfg_cp,
@@ -3239,7 +3237,6 @@ class AttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    mha_generic_output = jax.device_get(mha_generic_output)
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
@@ -3259,23 +3256,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
-
-    def generic_loss(lnx):
-      output, _ = attention_as_mha_generic(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
+    )
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     def usp_loss(lnx):
       if context_parallel_load_balance:
@@ -3296,10 +3281,8 @@ class AttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       usp_grad = jax.grad(usp_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
     usp_grad = jax.device_get(usp_grad)
 
     self.assertTrue(
@@ -3462,7 +3445,7 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
@@ -3623,7 +3606,7 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
@@ -5856,7 +5839,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     )
 
     # 5. Autoregressive mode
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 4, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
 
       gdn_idx, _ = gdn(
@@ -6322,6 +6305,12 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
 class CompressedAttentionTest(parameterized.TestCase):
   """Parity and compilation tests for CompressedAttention (DeepSeek-V4)."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_run_compressed_cache"):
+      delattr(cls, "_run_compressed_cache")
+    super().tearDownClass()
+
   def setUp(self):
     """Setup test dependencies and configuration."""
     super().setUp()
@@ -6370,53 +6359,55 @@ class CompressedAttentionTest(parameterized.TestCase):
     # --- Case 1: Unpacked single sequence S=489 ---
     seq_len = 489
     compress_ratio = 128
-    cfg_dot = self._get_test_config(max_target_length=seq_len)
-    cfg_flash = self._get_test_config(max_target_length=seq_len)
+    cfg = self._get_test_config(max_target_length=seq_len)
 
-    attn_dot = self._create_compressed_attention_layer(
-        cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product"
-    )
-    attn_flash = self._create_compressed_attention_layer(
-        cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash"
-    )
+    attn_dot = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel="dot_product")
+    attn_flash = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel="flash")
+    gdef_dot, state_dot = nnx.split(attn_dot)
+    gdef_flash, state_flash = nnx.split(attn_flash)
 
-    batch_size = cfg_dot.global_batch_size_to_train_on
-    x = jax.random.normal(jax.random.PRNGKey(0), (batch_size, seq_len, cfg_dot.base_emb_dim))
+    @jax.jit
+    def dot_out_and_grad(state_in, inp, seg_ids, pos_ids):
+      def loss_fn(x_in):
+        m = nnx.merge(gdef_dot, state_in)
+        out, _ = m(
+            x_in,
+            x_in,
+            decoder_segment_ids=seg_ids,
+            inputs_positions=pos_ids,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        return jnp.mean(out**2), out
+
+      (_, out), grad = jax.value_and_grad(loss_fn, has_aux=True)(inp)
+      return out, grad
+
+    @jax.jit
+    def flash_out_and_grad(state_in, inp, seg_ids, pos_ids):
+      def loss_fn(x_in):
+        m = nnx.merge(gdef_flash, state_in)
+        out, _ = m(
+            x_in,
+            x_in,
+            decoder_segment_ids=seg_ids,
+            inputs_positions=pos_ids,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        return jnp.mean(out**2), out
+
+      (_, out), grad = jax.value_and_grad(loss_fn, has_aux=True)(inp)
+      return out, grad
+
+    batch_size = cfg.global_batch_size_to_train_on
+    x = jax.random.normal(jax.random.PRNGKey(0), (batch_size, seq_len, cfg.base_emb_dim))
     pos = jnp.arange(seq_len, dtype=jnp.int32)[None, :].repeat(batch_size, axis=0)
     seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-    def loss_dot(inp):
-      out, _ = attn_dot(
-          inp,
-          inp,
-          decoder_segment_ids=seg,
-          inputs_positions=pos,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(out**2)
-
-    def loss_flash(inp):
-      out, _ = attn_flash(
-          inp,
-          inp,
-          decoder_segment_ids=seg,
-          inputs_positions=pos,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(out**2)
-
-    out_dot, _ = attn_dot(
-        x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN
-    )
-    out_flash, _ = attn_flash(
-        x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN
-    )
+    out_dot, grad_dot = dot_out_and_grad(state_dot, x, seg, pos)
+    out_flash, grad_flash = flash_out_and_grad(state_flash, x, seg, pos)
     np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
-
-    grad_dot = jax.grad(loss_dot)(x)
-    grad_flash = jax.grad(loss_flash)(x)
 
     self.assertTrue(np.all(np.isfinite(np.array(grad_dot))), "Dot grad contains NaN/Inf for unpacked S=489")
     self.assertTrue(np.all(np.isfinite(np.array(grad_flash))), "Flash grad contains NaN/Inf for unpacked S=489")
@@ -6425,17 +6416,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     # --- Case 2: Packed unaligned sequence L1=200, L2=289 (Total=489) ---
     l1, l2 = 200, 289
     total_len = l1 + l2
-    cfg_dot_packed = self._get_test_config(max_target_length=total_len)
-    cfg_flash_packed = self._get_test_config(max_target_length=total_len)
-
-    attn_dot_packed = self._create_compressed_attention_layer(
-        cfg_dot_packed, compress_ratio=compress_ratio, attention_kernel="dot_product"
-    )
-    attn_flash_packed = self._create_compressed_attention_layer(
-        cfg_flash_packed, compress_ratio=compress_ratio, attention_kernel="flash"
-    )
-
-    x_packed = jax.random.normal(jax.random.PRNGKey(42), (batch_size, total_len, cfg_dot_packed.base_emb_dim))
+    x_packed = jax.random.normal(jax.random.PRNGKey(42), (batch_size, total_len, cfg.base_emb_dim))
     pos_packed = jnp.broadcast_to(
         jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :],
         (batch_size, total_len),
@@ -6445,48 +6426,9 @@ class CompressedAttentionTest(parameterized.TestCase):
         (batch_size, total_len),
     )
 
-    out_dot_p, _ = attn_dot_packed(
-        x_packed,
-        x_packed,
-        decoder_segment_ids=seg_packed,
-        inputs_positions=pos_packed,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    out_flash_p, _ = attn_flash_packed(
-        x_packed,
-        x_packed,
-        decoder_segment_ids=seg_packed,
-        inputs_positions=pos_packed,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out_dot_p, grad_dot_packed = dot_out_and_grad(state_dot, x_packed, seg_packed, pos_packed)
+    out_flash_p, grad_flash_packed = flash_out_and_grad(state_flash, x_packed, seg_packed, pos_packed)
     np.testing.assert_allclose(np.array(out_flash_p), np.array(out_dot_p), rtol=1e-2, atol=1e-2)
-
-    def loss_dot_packed(inp):
-      out, _ = attn_dot_packed(
-          inp,
-          inp,
-          decoder_segment_ids=seg_packed,
-          inputs_positions=pos_packed,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(out**2)
-
-    def loss_flash_packed(inp):
-      out, _ = attn_flash_packed(
-          inp,
-          inp,
-          decoder_segment_ids=seg_packed,
-          inputs_positions=pos_packed,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(out**2)
-
-    grad_dot_packed = jax.grad(loss_dot_packed)(x_packed)
-    grad_flash_packed = jax.grad(loss_flash_packed)(x_packed)
 
     self.assertTrue(
         np.all(np.isfinite(np.array(grad_dot_packed))), "Dot grad contains NaN/Inf for packed unaligned S=489"
@@ -6652,6 +6594,7 @@ class CompressedAttentionTest(parameterized.TestCase):
         max_target_length=total_len,
     )
     attn = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel=attention_kernel)
+    gdef_attn, state_attn = nnx.split(attn)
     batch_size = cfg.global_batch_size_to_train_on
 
     # Generate distinct random tokens for Document 1 and Document 2
@@ -6664,23 +6607,21 @@ class CompressedAttentionTest(parameterized.TestCase):
     seg1 = jnp.ones((batch_size, l1), dtype=jnp.int32)
     seg2 = jnp.ones((batch_size, l2), dtype=jnp.int32)
 
+    @jax.jit
+    def run_attn(state_in, x_in, seg_ids, pos_ids):
+      m = nnx.merge(gdef_attn, state_in)
+      return m(
+          x_in,
+          x_in,
+          decoder_segment_ids=seg_ids,
+          inputs_positions=pos_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+
     # --- 1. UNPACKED (INDEPENDENT) PASSES ---
-    out1_unpacked, _ = attn(
-        x1,
-        x1,
-        decoder_segment_ids=seg1,
-        inputs_positions=pos1,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    out2_unpacked, _ = attn(
-        x2,
-        x2,
-        decoder_segment_ids=seg2,
-        inputs_positions=pos2,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out1_unpacked, _ = run_attn(state_attn, x1, seg1, pos1)
+    out2_unpacked, _ = run_attn(state_attn, x2, seg2, pos2)
     expected_unpacked = jnp.concatenate([out1_unpacked, out2_unpacked], axis=1)  # [B, L1 + L2, D]
 
     # --- 2. PACKED (CONCATENATED) PASS ---
@@ -6688,14 +6629,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     pos_packed = jnp.concatenate([pos1, pos2], axis=1)
     seg_packed = jnp.concatenate([jnp.full_like(seg1, 1), jnp.full_like(seg2, 2)], axis=1)
 
-    out_packed, _ = attn(
-        x_packed,
-        x_packed,
-        decoder_segment_ids=seg_packed,
-        inputs_positions=pos_packed,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out_packed, _ = run_attn(state_attn, x_packed, seg_packed, pos_packed)
 
     # --- 3. ASSERT EXACT NUMERICAL EQUIVALENCE ---
     # Document 1 outputs must match
@@ -6727,14 +6661,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     # --- 4. ADVERSARIAL LEAKAGE CHECK ---
     # Mutating Document 1 by +1000.0 must have zero effect on Document 2 in the packed pass
     x_packed_corrupted = x_packed.at[:, :l1, :].set(x_packed[:, :l1, :] + 1000.0)
-    out_packed_corrupted, _ = attn(
-        x_packed_corrupted,
-        x_packed_corrupted,
-        decoder_segment_ids=seg_packed,
-        inputs_positions=pos_packed,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out_packed_corrupted, _ = run_attn(state_attn, x_packed_corrupted, seg_packed, pos_packed)
 
     np.testing.assert_allclose(
         np.array(out_packed_corrupted[:, l1:, :]),
@@ -6747,6 +6674,10 @@ class CompressedAttentionTest(parameterized.TestCase):
   def _run_compressed_attention(self, compress_ratio, attention_kernel, seq_len=None):
     """Runs CompressedAttention forward pass with specified compression ratio and kernel."""
     target_length = seq_len if seq_len is not None else 512
+    cache = getattr(self.__class__, "_run_compressed_cache", {})
+    cache_key = (compress_ratio, attention_kernel, target_length)
+    if cache_key in cache:
+      return cache[cache_key]
     # Setup test config
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -6825,7 +6756,9 @@ class CompressedAttentionTest(parameterized.TestCase):
     )
 
     self.assertEqual(output.shape, (batch_size, cur_seq_len, embed_dim))
-    return output
+    cache[cache_key] = jax.device_get(output)
+    setattr(self.__class__, "_run_compressed_cache", cache)
+    return cache[cache_key]
 
 
 class KVHeadShardingTest(parameterized.TestCase):

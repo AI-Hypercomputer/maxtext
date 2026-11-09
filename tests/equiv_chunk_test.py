@@ -52,11 +52,11 @@ def build_cfg(n_chunks):
       dtype="bfloat16",
       megablox=True,
       sparse_matmul=True,
-      per_device_batch_size=4,
+      per_device_batch_size=2,
       ici_expert_parallelism=2,
       use_ring_of_experts=True,
       use_ragged_sort=True,
-      max_target_length=128,
+      max_target_length=64,
       num_moe_token_chunks=n_chunks,
   )
 

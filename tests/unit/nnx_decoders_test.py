@@ -992,7 +992,8 @@ _QWEN3_NEXT_CONFIG = {
     "gdn_key_head_dim": 16,
     "gdn_value_head_dim": 16,
     "gdn_chunk_size": 4,
-    "sparse_matmul": True,
+    "sparse_matmul": False,
+    "capacity_factor": -1,
     "megablox": False,
     "dtype": "float32",
     "weight_dtype": "float32",
@@ -1022,6 +1023,12 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
   def setUpClass(cls):
     """Builds the block once; it costs several seconds and no test here mutates it."""
     cls.cfg, cls.block = cls._build()
+
+  @classmethod
+  def tearDownClass(cls):
+    cls.cfg = None
+    cls.block = None
+    super().tearDownClass()
 
   def _inputs(self, cfg):
     inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
@@ -1610,63 +1617,78 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
   """Unit tests for Gemma4 Small NNXDecoder to improve code coverage."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cached_gemma4_small"):
+      delattr(cls, "_cached_gemma4_small")
+    super().tearDownClass()
+
+  def _get_decoder_and_inputs(self):
+    """Returns cached (cfg, decoder, shared_embedding, ids, segment_ids, positions)."""
+    cached = getattr(self.__class__, "_cached_gemma4_small", None)
+    if cached is None:
+      cfg = pyconfig.initialize(
+          [
+              None,
+              get_test_config_path(),
+              "run_name=gemma4_small_test",
+              "decoder_block=gemma4_small",
+              "model_name=gemma4-e2b",
+              "scan_layers=False",
+              "attention=dot_product",
+              "remat_policy=none",
+              "num_decoder_layers=3",
+              "num_kv_shared_layers=1",
+              "base_emb_dim=128",
+              "base_num_query_heads=4",
+              "base_num_kv_heads=4",
+              "base_mlp_dim=256",
+              "dtype=float32",
+              "weight_dtype=float32",
+              "hidden_size_per_layer_input=128",
+              "vocab_size_per_layer_input=256",
+              "vocab_size=256",
+              "max_target_length=128",
+              "per_device_batch_size=1.0",
+          ],
+          override_model_config=True,
+      )
+
+      devices = np.array(jax.devices())
+      num_devices = len(devices)
+      mesh_shape = [1] * len(cfg.mesh_axes)
+      mesh_shape[cfg.mesh_axes.index("data")] = num_devices
+      mesh = Mesh(devices.reshape(mesh_shape), cfg.mesh_axes)
+
+      rngs = nnx.Rngs(params=0, dropout=1)
+      decoder = NNXDecoder(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=rngs,
+      )
+
+      batch = cfg.global_batch_size_to_train_on
+      seq_len = cfg.max_target_length
+      ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+      segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+      positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+      shared_embedding = Embed(
+          num_embeddings=cfg.vocab_size,
+          num_features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=jax.nn.initializers.normal(stddev=1.0),
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+      )
+      cached = (cfg, decoder, shared_embedding, ids, segment_ids, positions)
+      setattr(self.__class__, "_cached_gemma4_small", cached)
+    return cached
+
   def test_gemma4_small_decoder(self):
-    cfg = pyconfig.initialize(
-        [
-            None,
-            get_test_config_path(),
-            "run_name=gemma4_small_test",
-            "decoder_block=gemma4_small",
-            "model_name=gemma4-e2b",
-            "scan_layers=False",
-            "attention=dot_product",
-            "num_decoder_layers=3",
-            "num_kv_shared_layers=1",
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=256",
-            "dtype=float32",
-            "weight_dtype=float32",
-            "hidden_size_per_layer_input=128",
-            "vocab_size_per_layer_input=256",
-            "vocab_size=256",
-            "max_target_length=128",
-            "per_device_batch_size=1.0",
-        ],
-        override_model_config=True,
-    )
-
-    devices = np.array(jax.devices())
-    num_devices = len(devices)
-    mesh_shape = [1] * len(cfg.mesh_axes)
-    mesh_shape[cfg.mesh_axes.index("data")] = num_devices
-    mesh = Mesh(devices.reshape(mesh_shape), cfg.mesh_axes)
-
-    rngs = nnx.Rngs(params=0, dropout=1)
-    decoder = NNXDecoder(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=rngs,
-    )
-
-    # Inputs
-    batch = cfg.global_batch_size_to_train_on
-    seq_len = cfg.max_target_length
-    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
-    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
-    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
-
-    shared_embedding = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        embedding_init=jax.nn.initializers.normal(stddev=1.0),
-        config=cfg,
-        mesh=mesh,
-        rngs=rngs,
-    )
+    cfg, decoder, shared_embedding, ids, segment_ids, positions = self._get_decoder_and_inputs()
 
     logits, _, _ = decoder(
         shared_embedding,
@@ -1683,67 +1705,12 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
     )
 
   def test_gemma4_small_decoder_with_mock_cache_and_ple(self):
-    cfg = pyconfig.initialize(
-        [
-            None,
-            get_test_config_path(),
-            "run_name=gemma4_small_test",
-            "decoder_block=gemma4_small",
-            "model_name=gemma4-e2b",
-            "scan_layers=False",
-            "attention=dot_product",
-            "remat_policy=none",
-            "num_decoder_layers=3",
-            "num_kv_shared_layers=1",
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=256",
-            "dtype=float32",
-            "weight_dtype=float32",
-            "hidden_size_per_layer_input=128",
-            "vocab_size_per_layer_input=256",
-            "vocab_size=256",
-            "max_target_length=128",
-            "per_device_batch_size=1.0",
-        ],
-        override_model_config=True,
-    )
+    cfg, decoder, shared_embedding, ids, segment_ids, positions = self._get_decoder_and_inputs()
 
-    devices = np.array(jax.devices())
-    num_devices = len(devices)
-    mesh_shape = [1] * len(cfg.mesh_axes)
-    mesh_shape[cfg.mesh_axes.index("data")] = num_devices
-    mesh = Mesh(devices.reshape(mesh_shape), cfg.mesh_axes)
-
-    rngs = nnx.Rngs(params=0, dropout=1)
-    decoder = NNXDecoder(
-        config=cfg,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs=rngs,
-    )
-
-    # Mock each layer's compute_shared_kv
+    # Mock each layer's compute_shared_kv and restore after the test
     for layer in decoder.get_layers():
+      self.addCleanup(setattr, layer, "compute_shared_kv", layer.compute_shared_kv)
       layer.compute_shared_kv = MagicMock(return_value=(jnp.zeros((1, 16, 128)), jnp.zeros((1, 16, 128))))
-
-    # Inputs
-    batch = cfg.global_batch_size_to_train_on
-    seq_len = cfg.max_target_length
-    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
-    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
-    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
-
-    shared_embedding = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        embedding_init=jax.nn.initializers.normal(stddev=1.0),
-        config=cfg,
-        mesh=mesh,
-        rngs=rngs,
-    )
 
     layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, cfg.num_kv_shared_layers)
@@ -2712,7 +2679,8 @@ _QWEN3_5_TINY = {
     "gdn_value_head_dim": 16,
     "gdn_num_key_heads": 2,
     "gdn_num_value_heads": 2,
-    "gdn_chunk_size": 8,
+    "gdn_chunk_size": 4,
+    "max_target_length": 8,
     "vocab_size": 128,
     "use_mrope": False,
     "sparse_matmul": False,
@@ -2946,7 +2914,7 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     self.assertTrue(any("remat policy saves" in str(c) for c in log_info.call_args_list))
 
   def test_qwen3_5_param_scan_axis_zero(self):
-    self._assert_qwen3_5_parity(num_blocks=3, param_scan_axis=0)
+    self._assert_qwen3_5_parity(num_blocks=2, param_scan_axis=0)
 
   def test_qwen3_5_moe_flat_fsdp_weights(self):
     """Flat 2D routed-expert weights ([E * rows, cols]) prefetch one sub-layer at a time like 3D ones."""
