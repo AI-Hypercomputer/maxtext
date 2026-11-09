@@ -365,7 +365,8 @@ class TrainTests(unittest.TestCase):
           "max_target_length=128",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -377,7 +378,8 @@ class TrainTests(unittest.TestCase):
           "run_name=runner_test",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           "dataset_type=synthetic",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
@@ -391,7 +393,8 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           "per_device_batch_size=0.25",
           "ici_tensor_parallelism=4",
@@ -407,7 +410,8 @@ class TrainTests(unittest.TestCase):
           "quantization=int8",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -421,7 +425,8 @@ class TrainTests(unittest.TestCase):
           "quantization=fp8",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -435,7 +440,8 @@ class TrainTests(unittest.TestCase):
           "quantization=nanoo_fp8",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -448,7 +454,8 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -462,7 +469,8 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -478,7 +486,8 @@ class TrainTests(unittest.TestCase):
           "quantization=te_fp8_delayedscaling",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -492,7 +501,8 @@ class TrainTests(unittest.TestCase):
           "quantization=te_fp8_currentscaling",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -506,7 +516,8 @@ class TrainTests(unittest.TestCase):
           "quantization=te_mxfp8",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -519,7 +530,8 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           "max_target_length=128",
           "per_device_batch_size=1",
@@ -534,7 +546,8 @@ class TrainTests(unittest.TestCase):
           "run_name=runner_test",
           "steps=2",
           "enable_checkpointing=False",
-          "enable_goodput_recording=False", "monitor_goodput=False",
+          "enable_goodput_recording=False",
+          "monitor_goodput=False",
           "enable_tensorboard=False",
           "dataset_type=hf",
           "hf_path=parquet",
@@ -820,7 +833,8 @@ class TrainTests(unittest.TestCase):
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=2",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_te",
         "packing=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
@@ -841,7 +855,8 @@ class TrainTests(unittest.TestCase):
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=10",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=-1",
         "ici_context_parallelism=2",
@@ -880,7 +895,8 @@ class TrainTests(unittest.TestCase):
         f"dataset_path={self.dataset_path}",
         "steps=10",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=-1",
         "ici_tensor_parallelism=2",
@@ -917,7 +933,8 @@ class TrainTests(unittest.TestCase):
         "optimizer_memory_host_offload=True",  # enable optimizer state offload
         "dataset_type=synthetic",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
     train_main(optimizer_offload)
@@ -944,7 +961,8 @@ class TrainTests(unittest.TestCase):
         "parameter_memory_host_offload=True",  # enable parameter offload
         "dataset_type=synthetic",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
     train_main(parameter_offload)
@@ -963,7 +981,8 @@ class TrainTests(unittest.TestCase):
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=2",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_jax",
         "packing=False",
         "shardy=False",  # The cudnn kernel is not compatible with shardy, see (b/425746362).
@@ -989,7 +1008,8 @@ class TrainTests(unittest.TestCase):
         f"dataset_path={self.dataset_path}",
         "steps=3",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "dataset_type=synthetic",
         "remat_policy=minimal",
         "max_target_length=512",
@@ -1027,7 +1047,8 @@ class TrainTests(unittest.TestCase):
               "learning_rate_schedule_steps=-1",
               "attention=autoselected",
               "enable_checkpointing=False",
-              "enable_goodput_recording=False", "monitor_goodput=False",
+              "enable_goodput_recording=False",
+              "monitor_goodput=False",
           ]
           + list(model_overrides)
           + list(extra_args)
@@ -1526,7 +1547,8 @@ class TrainTests(unittest.TestCase):
             f"dataset_path={self.dataset_path}",
             "steps=3",
             "enable_checkpointing=False",
-            "enable_goodput_recording=False", "monitor_goodput=False",
+            "enable_goodput_recording=False",
+            "monitor_goodput=False",
             "dataset_type=synthetic",
             "remat_policy=minimal",
             "max_target_length=512",
@@ -1665,7 +1687,8 @@ class TrainTests(unittest.TestCase):
         f"dataset_path={self.dataset_path}",
         "steps=10",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "dataset_type=synthetic",
         "attention=cudnn_flash_te",
         "remat_policy=minimal",
@@ -1705,7 +1728,8 @@ class TrainTests(unittest.TestCase):
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=10",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=-1",
         "packing=True",
@@ -1729,7 +1753,8 @@ class TrainTests(unittest.TestCase):
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=1" if rocm_backend else "steps=10",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=-1",
         "ici_context_parallelism=2",
@@ -1776,7 +1801,8 @@ class TrainTests(unittest.TestCase):
         f"dataset_path={self.dataset_path}",
         "steps=1" if rocm_backend else "steps=10",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=-1",
         "ici_context_parallelism=2",
@@ -1813,7 +1839,8 @@ class TrainTests(unittest.TestCase):
         f"dataset_path={self.dataset_path}",
         "steps=5",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False", "monitor_goodput=False",
+        "enable_goodput_recording=False",
+        "monitor_goodput=False",
         "max_target_length=4096",
         "dataset_type=synthetic",
         "remat_policy=minimal",

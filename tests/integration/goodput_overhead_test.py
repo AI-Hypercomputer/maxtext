@@ -117,14 +117,10 @@ class GoodputOverheadTest(unittest.TestCase):
 
       # Exclude compile (step 0) and warm-up (step 1) steps.
       off_steady_step_times = [
-          float(r["perf/step_time_seconds"])
-          for r in off_records
-          if int(r["step"]) >= WARMUP_STEPS_TO_SKIP
+          float(r["perf/step_time_seconds"]) for r in off_records if int(r["step"]) >= WARMUP_STEPS_TO_SKIP
       ]
       on_steady_step_times = [
-          float(r["perf/step_time_seconds"])
-          for r in on_records
-          if int(r["step"]) >= WARMUP_STEPS_TO_SKIP
+          float(r["perf/step_time_seconds"]) for r in on_records if int(r["step"]) >= WARMUP_STEPS_TO_SKIP
       ]
 
       self.assertTrue(len(off_steady_step_times) > 0)
@@ -140,8 +136,7 @@ class GoodputOverheadTest(unittest.TestCase):
       self.assertTrue(
           math.isclose(final_loss_off, final_loss_on, rel_tol=1e-6, abs_tol=1e-6),
           msg=(
-              f"Final loss differs between Goodput OFF ({final_loss_off:.6f}) "
-              f"and Goodput ON ({final_loss_on:.6f})."
+              f"Final loss differs between Goodput OFF ({final_loss_off:.6f}) " f"and Goodput ON ({final_loss_on:.6f})."
           ),
       )
 
