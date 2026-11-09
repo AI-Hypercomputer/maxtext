@@ -7632,5 +7632,128 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
       self.assertFalse(jnp.isnan(out_ar).any())
 
 
+class FusedQKVTensorParallelismTest(parameterized.TestCase):
+  """fused_qkv=True must compute the same attention at every tensor parallelism degree.
+
+  The fused kernel's `heads` axis is sharded over tensor parallelism, so the Q / K / V split must not depend on how
+  that axis is sharded; otherwise query, key and value heads silently get mixed when ici_tensor_parallelism > 1.
+  """
+
+  embed_dim = 16
+  head_dim = 4
+  seq_len = 8
+
+  def setUp(self):
+    super().setUp()
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
+    self.inputs = jax.random.normal(jax.random.PRNGKey(7), (1, self.seq_len, self.embed_dim), dtype=jnp.float32)
+    self.positions = jnp.arange(self.seq_len, dtype=jnp.int32)[None, :]
+
+  def _build(self, tensor_parallelism, fused_qkv, num_query_heads, num_kv_heads):
+    """Returns (config, mesh, attention) on a mesh whose only non-trivial axis is `tensor`."""
+    if len(jax.devices()) < tensor_parallelism:
+      self.skipTest(f"Needs at least {tensor_parallelism} devices.")
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        run_name="fused_qkv_tensor_parallelism_test",
+        enable_checkpointing=False,
+        fused_qkv=fused_qkv,
+        ici_tensor_parallelism=tensor_parallelism,
+        base_emb_dim=self.embed_dim,
+        base_num_query_heads=num_query_heads,
+        base_num_kv_heads=num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.seq_len,
+        max_prefill_predict_length=self.seq_len,
+        per_device_batch_size=1.0,
+        attention="dot_product",
+        dtype="float32",
+        weight_dtype="float32",
+        matmul_precision="float32",
+    )
+    mesh_shape = [tensor_parallelism if axis == "tensor" else 1 for axis in cfg.mesh_axes]
+    mesh = Mesh(np.array(jax.devices()[:tensor_parallelism]).reshape(mesh_shape), cfg.mesh_axes)
+    attention = Attention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        inputs_q_shape=self.inputs.shape,
+        inputs_kv_shape=self.inputs.shape,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        attention_type=cfg.attention_type,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+    return cfg, mesh, attention
+
+  def _forward(self, cfg, mesh, attention):
+    """Runs the attention module in train mode on `self.inputs` under its own mesh and returns the output."""
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      output = attention(
+          self.inputs,
+          self.inputs,
+          inputs_positions=self.positions,
+          model_mode=MODEL_MODE_TRAIN,
+          deterministic=True,
+      )
+    output = output[0] if isinstance(output, tuple) else output
+    return np.asarray(output, dtype=np.float32)
+
+  @parameterized.named_parameters(
+      ("mha_tp2", 8, 8, 2),
+      ("gqa_tp2", 8, 2, 2),
+      ("mha_tp4", 8, 8, 4),
+      ("gqa_tp4", 8, 4, 4),
+  )
+  def test_fused_qkv_is_invariant_to_tensor_parallelism(self, num_query_heads, num_kv_heads, tensor_parallelism):
+    cfg_ref, mesh_ref, attention_ref = self._build(1, True, num_query_heads, num_kv_heads)
+    cfg_tp, mesh_tp, attention_tp = self._build(tensor_parallelism, True, num_query_heads, num_kv_heads)
+    nnx.update(attention_tp, nnx.state(attention_ref, nnx.Param))  # identical weights, only the mesh differs
+
+    np.testing.assert_allclose(
+        self._forward(cfg_tp, mesh_tp, attention_tp),
+        self._forward(cfg_ref, mesh_ref, attention_ref),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+  @parameterized.named_parameters(
+      ("mha_tp2", 8, 8, 2),
+      ("gqa_tp2", 8, 2, 2),
+      ("mha_tp4", 8, 8, 4),
+      ("gqa_tp4", 8, 4, 4),
+  )
+  def test_fused_qkv_matches_separate_projections(self, num_query_heads, num_kv_heads, tensor_parallelism):
+    cfg_fused, mesh_fused, fused = self._build(tensor_parallelism, True, num_query_heads, num_kv_heads)
+    cfg_sep, mesh_sep, separate = self._build(tensor_parallelism, False, num_query_heads, num_kv_heads)
+
+    # Give the separate projections the fused kernel's Q / K / V heads; the fused heads axis is grouped by KV head as
+    # [Q_{g*r} .. Q_{g*r+r-1}, K_g, V_g] for each KV head g, with r = num_query_heads // num_kv_heads.
+    q_per_kv = num_query_heads // num_kv_heads
+    qkv_kernel = np.asarray(fused.qkv_proj.kernel.value)
+    embed_dim, _, head_dim = qkv_kernel.shape
+    grouped = qkv_kernel.reshape(embed_dim, num_kv_heads, q_per_kv + 2, head_dim)
+    separate.query.kernel.value = jnp.asarray(grouped[:, :, :q_per_kv].reshape(embed_dim, num_query_heads, head_dim))
+    separate.key.kernel.value = jnp.asarray(grouped[:, :, q_per_kv])
+    separate.value.kernel.value = jnp.asarray(grouped[:, :, q_per_kv + 1])
+    separate.out.kernel.value = jnp.asarray(np.asarray(fused.out.kernel.value))
+
+    np.testing.assert_allclose(
+        self._forward(cfg_fused, mesh_fused, fused),
+        self._forward(cfg_sep, mesh_sep, separate),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
 if __name__ == "__main__":
   unittest.main()
