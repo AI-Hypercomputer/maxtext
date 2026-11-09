@@ -183,7 +183,8 @@ def scatter_layer_kv_caches(
   The returned list has the same length and order as the physical list the
   runner handed us, which is what its donation / out_shardings expect. Physical
   caches no decoder layer maps to are passed through unchanged. If several
-  layers share one physical cache, the highest-numbered layer's update wins.
+  layers share one physical cache, the highest-numbered layer that updated its
+  cache wins.
   """
   if physical_indices is None:
     return layer_kv_caches
@@ -193,5 +194,7 @@ def scatter_layer_kv_caches(
     )
   updated = list(kv_caches)
   for lyr, idx in enumerate(physical_indices):
+    if layer_kv_caches[lyr] is kv_caches[idx]:  # unchanged alias of a shared cache: keep the owner's update
+      continue
     updated[idx] = layer_kv_caches[lyr]
   return updated
