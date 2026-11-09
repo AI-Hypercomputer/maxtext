@@ -20,9 +20,8 @@ import math
 import os
 import sys
 
-
 # Maximum worker limits by hardware flavor
-MAX_CPU_WORKERS = 4
+MAX_CPU_WORKERS = 5
 MAX_TPU_WORKERS = 3
 MAX_GPU_WORKERS = 3
 DEFAULT_WORKERS = 1
