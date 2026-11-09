@@ -109,6 +109,7 @@ class QuantizationType(str, Enum):
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
   SERVE_FP8_WEIGHT = "serve_fp8_weight"
+  MULTIPASS = "multipass"
 
 
 # The OCP MX recipes that run through jax.nn.scaled_dot_general.
@@ -336,6 +337,7 @@ ModelName = Literal[
     "envy-switch-large",
     "envy-switch-xxl",
     "glm5.3-flash",
+    "granite-3.0-1b-a400m",
     "ming-3.0-audio-tiny",
     "hy4-preview",
 ]
@@ -398,6 +400,14 @@ class Checkpointing(BaseModel):
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
+  async_checkpointing_timeout_secs: PositiveInt | None = Field(
+      None,
+      description=(
+          "Deadline in seconds for the background half of an async checkpoint save (storage writes and"
+          " finalization). A save that outlives it fails. None uses Orbax's default (or 3600s when"
+          " enable_continuous_checkpointing is True)."
+      ),
+  )
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
   enable_single_replica_ckpt_restoring: bool = Field(
@@ -629,6 +639,35 @@ class Quantization(BaseModel):
       description="Qwix: split the contraction axis of each weight-gradient matmul into this many tiles, each with"
       " its own quantization scale. 1 disables tiling. Tiles are summed after the matmul, so under FSDP tiling"
       " makes XLA all-reduce the full weight gradient instead of reduce-scattering it. fp8_full ignores it.",
+  )
+  qwix_multipass_mode: str = Field(
+      "",
+      description=(
+          "`quantization=multipass` only: Qwix multi-pass mode of the forward weight matmuls, e.g. 'three_pass_fp8',"
+          " 'four_pass_int4', 'three_pass_fp8_fp4/fp4_fp4/fp4' (see Qwix's `multipass_dot.MultiPassMode`). Empty"
+          " leaves the forward matmul unquantized."
+      ),
+  )
+  qwix_dlhs_multipass_mode: str = Field(
+      "",
+      description=(
+          "`quantization=multipass` only: multi-pass mode of the activation-gradient matmul (dX = dY @ W^T)."
+          " Empty leaves it unquantized."
+      ),
+  )
+  qwix_drhs_multipass_mode: str = Field(
+      "",
+      description=(
+          "`quantization=multipass` only: multi-pass mode of the weight-gradient matmul (dW = X^T @ dY)."
+          " Empty leaves it unquantized."
+      ),
+  )
+  qwix_multipass_tile_size: PositiveInt | None = Field(
+      None,
+      description=(
+          "`quantization=multipass` only: block size along the contraction axis of the forward matmul. None = one scale"
+          " per channel."
+      ),
   )
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
@@ -1134,6 +1173,8 @@ class SplashAttention(BaseModel):
 class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
+  fp8_moe: bool = Field(False, description="Store MoE weights in fp8 with per-channel scale.")
+  fp8_moe_fake_quant: bool = Field(False, description="Train dense MoE weights with fp8 per-channel fake quantization.")
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
@@ -2193,11 +2234,10 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "With prefetch_fsdp_weights and shard_mode=explicit, issue each layer's weight-gradient"
-          " reduce-scatters at the start of the next layer's backward step, tagged for XLA's FSDP scheduler,"
-          " which runs them on the SparseCore dedicated to FSDP collectives"
-          " (--xla_tpu_explicit_fsdp_dedicated_sparse_core_id) and overlaps them with that layer's backward."
-          " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they run untagged"
-          " on the other SparseCore and complete within their own layer's backward step. For inhomogeneous"
+          " reduce-scatters at the start of the next layer's backward step so they overlap with that layer's"
+          " backward."
+          " Keeps one extra layer of unreduced weight gradients live (more HBM). When False, they complete"
+          " within their own layer's backward step. For inhomogeneous"
           " blocks prefetched per sub-layer, the reduce-scatters are deferred to the next sub-layer's step."
       ),
   )
@@ -2481,6 +2521,18 @@ class DatasetGeneral(BaseModel):
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
+  num_data_replicas_per_process: PositiveInt = Field(
+      1,
+      description=(
+          "Number of independent data-parallel replicas fed by each data-loading process, each with its own input"
+          " pipeline and a `global_batch_size_to_load` of its own. Each replica loads its own slice of the process's"
+          " data shard, so per-host file sharding (e.g. the grain tfrecord/parquet `grain_worker_count` limit) sees"
+          " this many times as many shards. Not supported by colocated_python_data_input, c4_mlperf or olmo_grain."
+      ),
+  )
+  data_replica_index: NonNegativeInt = Field(
+      0, description="Which of the `num_data_replicas_per_process` replicas this input pipeline feeds."
+  )
   reuse_example_batch: int = Field(0, description="For performance testing, repeatedly uses the same batch.")
   generate_padding_batch_train: bool = Field(
       False,
@@ -2495,6 +2547,23 @@ class DatasetGeneral(BaseModel):
   per_device_batch_size_increment: float = Field(2.0, description="Increment for per device batch size for rampup.")
   global_rampup_samples: int = Field(500, description="Target number of training samples for rampup.")
   colocated_python_data_input: bool = Field(False, description="Experimental feature for Pathways.")
+
+  @model_validator(mode="after")
+  def validate_data_replica_index(self) -> "DatasetGeneral":
+    """Checks the data-replica fields; `HyperParameters.replace` re-runs this check."""
+    if self.data_replica_index >= self.num_data_replicas_per_process:
+      raise ValueError(
+          f"data_replica_index ({self.data_replica_index}) must be < num_data_replicas_per_process"
+          f" ({self.num_data_replicas_per_process})."
+      )
+    if self.num_data_replicas_per_process > 1:
+      # These pipelines shard by process only, so every replica would read the same data.
+      if self.colocated_python_data_input:
+        raise ValueError("num_data_replicas_per_process > 1 does not support colocated_python_data_input.")
+      dataset_type = DatasetType(self.dataset_type)  # `HyperParameters.replace` does not coerce strings.
+      if dataset_type in (DatasetType.C4MLPERF, DatasetType.OLMO_GRAIN):
+        raise ValueError(f"num_data_replicas_per_process > 1 does not support dataset_type={dataset_type.value}.")
+    return self
 
 
 class TfdsDataset(BaseModel):
@@ -3041,6 +3110,13 @@ class Optimizer(BaseModel):
       description="The rolling interval to calculate the mean and standard deviation.",
   )
   skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
+  skip_step_on_nan: bool = Field(
+      False,
+      description=(
+          "MaxTextTrainingEngine only. If True, skip the training step and preserve weights/optimizer state when the"
+          " gradient norm is NaN/Inf."
+      ),
+  )
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
@@ -3714,6 +3790,7 @@ class RLCluster(BaseModel):
 class VLLM(BaseModel):
   """vLLM-specific configuration for rollouts."""
 
+  rollout_fp8_moe: bool = Field(False, description="Enable FP8 MoE for the rollout.")
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
@@ -4132,7 +4209,8 @@ class DerivedValues(BaseModel):
 
   checkpoint_dir: None | str = Field(
       None,
-      description="The full path to the checkpoint directory, derived from `run_name`.",
+      description="The full path to the checkpoint directory. Derived from `base_output_directory` and"
+      " `run_name` unless set explicitly, e.g. to a GCSFuse mount of a Rapid bucket that only checkpoints use.",
   )
   metrics_dir: None | str = Field(
       None,
@@ -4924,6 +5002,29 @@ class MaxTextConfig(
       )
     return self
 
+  @model_validator(mode="after")
+  def validate_qwix_multipass_quantization(self) -> "MaxTextConfig":
+    """Validates `quantization=multipass` and its `qwix_*multipass_mode` / `qwix_multipass_tile_size` knobs."""
+    modes = (self.qwix_multipass_mode, self.qwix_dlhs_multipass_mode, self.qwix_drhs_multipass_mode)
+    if self.quantization != QuantizationType.MULTIPASS:
+      if any(modes) or self.qwix_multipass_tile_size is not None:
+        raise ValueError(
+            "qwix_multipass_mode, qwix_dlhs_multipass_mode, qwix_drhs_multipass_mode and qwix_multipass_tile_size"
+            " require quantization='multipass'."
+        )
+      return self
+    if not self.use_qwix_quantization:
+      raise ValueError("quantization='multipass' requires use_qwix_quantization=True.")
+    if not any(modes):
+      raise ValueError(
+          "quantization='multipass' requires at least one of qwix_multipass_mode, qwix_dlhs_multipass_mode or"
+          " qwix_drhs_multipass_mode."
+      )
+    # The residual passes already recover the precision that weight-gradient tiling buys single-pass recipes.
+    if self.qwix_bwd_weight_grad_tile_count > 1:
+      raise ValueError("quantization='multipass' does not support qwix_bwd_weight_grad_tile_count > 1.")
+    return self
+
   def _validate_jax_mx_quantization(self) -> None:
     """Rejects jax_mxfp8 and jax_mxfp4 settings that would silently leave GEMMs unquantized or fail obscurely in JAX."""
     name = QuantizationType(self.quantization).value
@@ -5091,7 +5192,8 @@ class MaxTextConfig(
     # Construct full paths for output directories based on the base directory and run name.
     if self.run_name and self.base_output_directory:
       output_dir = os.path.join(self.base_output_directory, self.run_name)
-      self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
+      if not self.checkpoint_dir:  # pylint: disable=access-member-before-definition
+        self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       self.managed_mldiagnostics_dir = derive_managed_mldiagnostics_dir(
@@ -5108,7 +5210,7 @@ class MaxTextConfig(
         self.mllog_file = ""
     else:
       self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
-          None,
+          self.checkpoint_dir or None,
           None,
           None,
       )
@@ -5177,7 +5279,7 @@ class MaxTextConfig(
     if getattr(self, "eval_per_device_batch_size", 0.0) == 0.0:
       self.eval_per_device_batch_size = self.per_device_batch_size  # pylint: disable=access-member-before-definition
     # The mu_dtype for the AdamW optimizer defaults to the weight_dtype if not specified.
-    if not self.mu_dtype:
+    if not self.mu_dtype:  # pylint: disable=access-member-before-definition
       self.mu_dtype = self.weight_dtype
     # A soft-cap value of 0.0 is treated as disabling the cap.
     if self.attn_logits_soft_cap == 0.0:
@@ -6098,6 +6200,18 @@ class MaxTextConfig(
             "te_moe_block=True does not currently support norm_topk_prob=True "
             "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'."
         )
+      if self.fp8_moe_fake_quant:
+        if self.fp8_moe or self.weight_block_size is not None:
+          raise ValueError(
+              "fp8_moe_fake_quant applies rollout quantize_weight_per_channel directly in bf16 forward; "
+              "requires fp8_moe=False and weight_block_size=None."
+          )
+      if (self.fp8_moe or self.rollout_fp8_moe) and self.weight_block_size is not None:
+        raise ValueError("fp8_moe / rollout_fp8_moe requires weight_block_size=None (per-channel scaling).")
+      if self.te_moe_block and self.routed_bias_update_rate > 0.0:
+        raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
+      if self.te_moe_block and self.norm_topk_prob:
+        raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
       if self.te_moe_block and self.use_random_routing:
         raise ValueError("te_moe_block=True does not support use_random_routing=True.")
       if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
@@ -6965,6 +7079,10 @@ class MaxTextConfig(
       raise ValueError(
           "glm5.3-flash requires use_m3_model=True; legacy decoder_block is not" " supported for GLM-5.3-Flash."
       )
+    if self.model_name == "granite-3.0-1b-a400m" and not self.use_m3_model:
+      raise ValueError(
+          "granite-3.0-1b-a400m requires use_m3_model=True; legacy decoder_block is not supported for GraniteMoe."
+      )
     return self
 
 
@@ -7064,6 +7182,14 @@ class RLConfig(
   )
   max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
   max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
+  train_steps: int = Field(
+      -1,
+      description=(
+          "Total number of RL training steps. Automatically derived as"
+          " dataset.num_batches * rl.num_iterations * dataset.train_fraction * num_epoch;"
+          " any provided value is overwritten."
+      ),
+  )
 
   debug: bool = Field(False, description="Enable debug mode for RL.")
 
@@ -7230,8 +7356,10 @@ class RLConfig(
           f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
       )
 
-    # Set checkpoint_dir based on run_name and base_output_directory.
-    if self.run_name and self.base_output_directory:
+    # Set checkpoint_dir based on run_name and base_output_directory, unless set explicitly.
+    if self.checkpoint_dir:
+      checkpoint_dir = self.checkpoint_dir
+    elif self.run_name and self.base_output_directory:
       checkpoint_dir = os.path.join(self.base_output_directory, self.run_name, "checkpoints", "")
     else:
       checkpoint_dir = os.path.join(os.path.abspath("maxtext_output"), "checkpoints", "")
@@ -7289,14 +7417,14 @@ class RLConfig(
     self.num_slices = 1 if self.cluster.num_trainer_slices == -1 else -1
 
     # Set train_steps based on the number of batches, iterations, train fraction, and epochs.
-    object.__setattr__(
-        self,
-        "train_steps",
-        int(self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch),
+    self.train_steps = int(
+        self.dataset.num_batches * self.rl.num_iterations * self.dataset.train_fraction * self.num_epoch
     )
 
     # Set learning_rate_schedule_steps based on train_steps if not explicitly provided.
-    if self.learning_rate_schedule_steps == -1:
+    # `learning_rate_schedule_steps` is declared on the `Optimizer` mixin; pylint's MRO walk over
+    # RLConfig's many bases does not always reach it, so this is a (nondeterministic) false positive.
+    if self.learning_rate_schedule_steps == -1:  # pylint: disable=access-member-before-definition
       self.learning_rate_schedule_steps = self.train_steps
 
     # Rollout parallelism checks
@@ -7323,7 +7451,7 @@ class RLConfig(
     if train_micro_batch_size <= 0:
       train_micro_batch_size = batch_size
     self.micro_batch_size_to_train_on = train_micro_batch_size
-    self.steps = getattr(self, "train_steps", getattr(self, "num_batches", 10))
+    self.steps = self.train_steps
 
     if self.remat_policy == "custom":
       tensors = [

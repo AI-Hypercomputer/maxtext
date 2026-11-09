@@ -76,6 +76,12 @@ def _get_base_config_args(use_m3: bool, reduced: bool = True, tp: int = 1):
 class Qwen3ComparisonTest(unittest.TestCase):
   """Compares legacy Qwen3 (use_m3_model=false) vs modern M3 Qwen3 (use_m3_model=true)."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cached_parity_models"):
+      delattr(cls, "_cached_parity_models")
+    super().tearDownClass()
+
   def setUp(self):
     """Sets up device allocations for comparison tests."""
     super().setUp()
@@ -150,20 +156,28 @@ class Qwen3ComparisonTest(unittest.TestCase):
       self.assertEqual(val_old.shape, val_new.shape, f"Shape mismatch for {key}: {val_old.shape} vs {val_new.shape}")
       self.assertEqual(val_old.dtype, val_new.dtype, f"Dtype mismatch for {key}: {val_old.dtype} vs {val_new.dtype}")
 
+  def _get_parity_models(self):
+    """Returns cached (cfg_old, mesh, model_old, model_new) with synced parameters."""
+    cached = getattr(self.__class__, "_cached_parity_models", None)
+    if cached is None:
+      cfg_old = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=True))
+      cfg_new = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
+      mesh = self._make_mesh(tp=1)
+      with jax.set_mesh(mesh):
+        rngs = nnx.Rngs(42)
+        model_old = model_creation_utils.create_model(cfg_old, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
+        model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
+        p_old = nnx.state(model_old, nnx.Param)
+        nnx.update(model_new, m3_checkpoint.from_legacy_layer_names(p_old))
+      cached = (cfg_old, mesh, model_old, model_new)
+      setattr(self.__class__, "_cached_parity_models", cached)
+    return cached
+
   def test_forward_numerical_parity(self):
     """Verifies numerical equivalence of forward pass logits under identical parameters."""
-    cfg_old = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=True))
-    cfg_new = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
+    cfg_old, mesh, model_old, model_new = self._get_parity_models()
 
     with jax.set_mesh(mesh):
-      rngs = nnx.Rngs(42)
-      model_old = model_creation_utils.create_model(cfg_old, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-      model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-
-      p_old = nnx.state(model_old, nnx.Param)
-      nnx.update(model_new, m3_checkpoint.from_legacy_layer_names(p_old))
-
       batch_size, seq_len = 2, 8
       tokens = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, cfg_old.vocab_size)
       positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
@@ -176,18 +190,9 @@ class Qwen3ComparisonTest(unittest.TestCase):
 
   def test_loss_and_gradients_parity(self):
     """Verifies numerical parity of cross-entropy loss and parameter gradients."""
-    cfg_old = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=True))
-    cfg_new = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
+    cfg_old, mesh, model_old, model_new = self._get_parity_models()
 
     with jax.set_mesh(mesh):
-      rngs = nnx.Rngs(42)
-      model_old = model_creation_utils.create_model(cfg_old, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-      model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-
-      p_old = nnx.state(model_old, nnx.Param)
-      nnx.update(model_new, m3_checkpoint.from_legacy_layer_names(p_old))
-
       batch_size, seq_len = 2, 8
       tokens = jax.random.randint(jax.random.PRNGKey(1), (batch_size, seq_len), 0, cfg_old.vocab_size)
       targets = jax.random.randint(jax.random.PRNGKey(2), (batch_size, seq_len), 0, cfg_old.vocab_size)

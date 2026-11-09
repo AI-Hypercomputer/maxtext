@@ -130,6 +130,12 @@ class Hy4RematTest(absltest.TestCase):
     cls.config = _make_config()
     cls.mesh = Mesh(maxtext_utils.create_device_mesh(cls.config), cls.config.mesh_axes)
 
+  @classmethod
+  def tearDownClass(cls):
+    cls.config = None
+    cls.mesh = None
+    super().tearDownClass()
+
   def test_indexer_checkpoint_name_and_remat_dce(self):
     batch, seq = self.config.micro_batch_size_to_train_on, 6  # seq=6 > IDX_TOPK=3 triggers active top-k selection
     xj = jnp.asarray(np.random.RandomState(99).randn(batch, seq, EMB).astype(np.float32))
@@ -189,9 +195,9 @@ class Hy4RematTest(absltest.TestCase):
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "relu"), 0)
 
       # 3. Verify loss and gradients match between uncheckpointed, full-remat, and saved-indexer-remat execution.
-      loss_ref, grads_ref = jax.value_and_grad(forward_fn, argnums=(0, 1))(params, xj)
-      loss_full, grads_full = jax.value_and_grad(ckpt_full_fn, argnums=(0, 1))(params, xj)
-      loss_ckpt, grads_ckpt = jax.value_and_grad(ckpt_save_fn, argnums=(0, 1))(params, xj)
+      loss_ref, grads_ref = jax.jit(jax.value_and_grad(forward_fn, argnums=(0, 1)))(params, xj)
+      loss_full, grads_full = jax.jit(jax.value_and_grad(ckpt_full_fn, argnums=(0, 1)))(params, xj)
+      loss_ckpt, grads_ckpt = jax.jit(jax.value_and_grad(ckpt_save_fn, argnums=(0, 1)))(params, xj)
       np.testing.assert_allclose(np.asarray(loss_ckpt), np.asarray(loss_full), rtol=1e-6, atol=1e-6)
       jax.tree.map(
           lambda g_c, g_f: np.testing.assert_allclose(np.asarray(g_c), np.asarray(g_f), rtol=1e-6, atol=1e-6),
@@ -265,9 +271,9 @@ class Hy4RematTest(absltest.TestCase):
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "relu"), 0)
 
       # 3. Verify loss and gradients match across full-remat, saved-indexer-remat, and uncheckpointed execution.
-      loss_ref, grads_ref = jax.value_and_grad(block_forward_fn, argnums=(0, 1))(params, xj)
-      loss_full, grads_full = jax.value_and_grad(ckpt_full_fn, argnums=(0, 1))(params, xj)
-      loss_ckpt, grads_ckpt = jax.value_and_grad(ckpt_save_fn, argnums=(0, 1))(params, xj)
+      loss_ref, grads_ref = jax.jit(jax.value_and_grad(block_forward_fn, argnums=(0, 1)))(params, xj)
+      loss_full, grads_full = jax.jit(jax.value_and_grad(ckpt_full_fn, argnums=(0, 1)))(params, xj)
+      loss_ckpt, grads_ckpt = jax.jit(jax.value_and_grad(ckpt_save_fn, argnums=(0, 1)))(params, xj)
       np.testing.assert_allclose(np.asarray(loss_ckpt), np.asarray(loss_full), rtol=1e-6, atol=1e-6)
       jax.tree.map(
           lambda g_c, g_f: np.testing.assert_allclose(np.asarray(g_c), np.asarray(g_f), rtol=1e-6, atol=1e-6),

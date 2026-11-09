@@ -172,18 +172,25 @@ class TestModel(unittest.TestCase):
         equal_nan=False,
     )
 
+    ar_apply = jax.jit(
+        lambda vars_in, ids_in, pos_in: prefill_model.apply(
+            vars_in,
+            ids_in,
+            pos_in,
+            model_mode=MODEL_MODE_AUTOREGRESSIVE,
+            enable_dropout=False,
+            rngs={"aqt": self.rng},
+            mutable=["cache"],
+        )
+    )
     for idx in range(PREFILL_RANGE, min(PREFILL_RANGE + 3, self.cfg.max_target_length)):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       prefill_transformer_vars.update(partial_cache)
-      ar_logits, partial_cache = prefill_model.apply(
+      ar_logits, partial_cache = ar_apply(
           prefill_transformer_vars,
           ids_idx,
           decoder_positions_idx,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          enable_dropout=False,
-          rngs={"aqt": self.rng},
-          mutable=["cache"],
       )
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]

@@ -15,6 +15,7 @@
 """Hugging Face shape checkpoint conversion utils."""
 
 import math
+from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
 
 def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
@@ -1716,4 +1717,5 @@ HF_SHAPE = {
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
     "qwen3.8-flash-next": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
     "qwen3.8-flash-next-mini": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_HF_WEIGHTS_TO_SHAPE,
 }

@@ -331,6 +331,8 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
         prefuse_moe_weights=False,
         mlp_bias=False,
         decoder_block="qwen3_5",
+        fp8_moe=False,
+        fp8_moe_fake_quant=False,
     )
     serve_quant = quantizations.ServeFp8WeightQuantization()
     self.assertIsNone(get_quant(cfg, "in_proj_ba", serve_quant))

@@ -16,17 +16,42 @@
 
 from collections.abc import Mapping
 import dataclasses
+import importlib
+import os
+import pkgutil
+import tempfile
 from typing import Any, cast
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.m3 import models as m3_models
 from maxtext.m3.core import sharding as m3_sharding
 from tests.unit.m3.conformance import checks
 from tests.unit.m3.conformance import spec
 import numpy as np
+
+
+def discover_model_conformance_specs() -> tuple[str, ...]:
+  """Imports `<family>.conformance_spec` modules under `m3/models` (`m3/README.md` Invariants (1)-(7))."""
+  loaded_modules: list[str] = []
+  for mod_info in pkgutil.iter_modules(m3_models.__path__):
+    if not mod_info.ispkg:
+      continue
+    family_dirs = [os.path.join(base_dir, mod_info.name) for base_dir in m3_models.__path__]
+    has_conformance_spec = False
+    for sub_info in pkgutil.iter_modules(family_dirs):
+      if sub_info.name == "conformance_spec" and not sub_info.ispkg:
+        has_conformance_spec = True
+        break
+    if has_conformance_spec:
+      module_name = f"{m3_models.__name__}.{mod_info.name}.conformance_spec"
+      importlib.import_module(module_name)
+      loaded_modules.append(module_name)
+  return tuple(sorted(loaded_modules))
 
 
 class _NonParamVar(nnx.Variable):
@@ -57,6 +82,8 @@ class _ToyModule(nnx.Module):
     self.gate = nnx.Param(jax.random.normal(k3, (8, 4)))
     if m in ("rng_good_aux", "rng_detached_aux"):
       self.rngs = used_rngs
+    if m == "rng_good_aux":
+      self.unhashable_meta = {"mode": m}
     if m in ("dead_param", "nan_param"):
       fill = jnp.nan if m == "nan_param" else 1.0
       self.unused = nnx.Param(jnp.full((4,), fill, jnp.float32))
@@ -99,6 +126,8 @@ class _ToyModule(nnx.Module):
     elif m in ("cache_arr", "cache_val", "str_cache"):
       c_val = jnp.zeros((4,)) if m == "cache_arr" else "mutated"
       self.cache_var = _NonParamVar(c_val)
+    elif m == "del_non_param" and hasattr(self, "cache_var"):
+      delattr(self, "cache_var")
     scores = jax.nn.softmax(h @ self.gate[...], axis=-1)
     scale = 2.0 if (m == "aux_drift" and is_var) else 1.0
     aux_lb = jnp.mean(scores**2) * scale
@@ -159,28 +188,58 @@ def _toy_spec(
   )
 
 
+_SCANNED_EXPERT_ALL_GATHER_MODES = (
+    "scanned_expert_all_gather",
+    "scanned_4d_expert_all_gather",
+    "scanned_4d_s3_expert_all_gather",
+)
+
+
 class _ShardedExpertSubmodule(nnx.Module):
   """Synthetic MoE expert submodule for multi-device Checks 5-8."""
 
-  def __init__(self, mesh: jax.sharding.Mesh, key: jax.Array, mode: str):
+  def __init__(
+      self,
+      mesh: jax.sharding.Mesh,
+      key: jax.Array,
+      mode: str,
+      stacked_blocks: int | None,
+  ):
     self.mesh = jax.sharding.Mesh(np.flip(mesh.devices), mesh.axis_names) if mode == "private_sub_mesh" else mesh
     k_gu, k_dn = jax.random.split(key)
-    if mode in ("4d_experts", "4d_expert_all_gather"):
-      gu_shape: tuple[int, ...] = (4, 16, 2, 10)
-      gu_spec = jax.sharding.PartitionSpec(None, "fsdp", None, "tensor")
-    elif mode == "unsharded_expert":
-      gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec()
-    elif mode == "no_tensor_axis":
-      gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(None, "fsdp", None)
-    else:
-      gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(None, "fsdp", "tensor")
-    dn_spec = (
-        jax.sharding.PartitionSpec(None, None, "fsdp")
-        if mode == "no_tensor_axis"
-        else jax.sharding.PartitionSpec(None, "tensor", "fsdp")
+    is_4d = mode in (
+        "4d_experts",
+        "4d_expert_all_gather",
+        "scanned_4d_expert_all_gather",
+        "scanned_4d_s3_expert_all_gather",
     )
+    if stacked_blocks is not None:
+      if is_4d:
+        gu_shape: tuple[int, ...] = (stacked_blocks, 4, 16, 2, 10)
+        gu_spec = jax.sharding.PartitionSpec(None, None, "fsdp", None, "tensor")
+      else:
+        gu_shape = (stacked_blocks, 4, 16, 20)
+        gu_spec = jax.sharding.PartitionSpec(None, None, "fsdp", "tensor")
+      dn_shape: tuple[int, ...] = (stacked_blocks, 4, 20, 16)
+      dn_spec = jax.sharding.PartitionSpec(None, None, "tensor", "fsdp")
+    else:
+      if is_4d:
+        gu_shape = (4, 16, 2, 10)
+        gu_spec = jax.sharding.PartitionSpec(None, "fsdp", None, "tensor")
+      elif mode == "unsharded_expert":
+        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec()
+      elif mode == "no_tensor_axis":
+        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(None, "fsdp", None)
+      else:
+        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(None, "fsdp", "tensor")
+      dn_shape = (4, 20, 16)
+      dn_spec = (
+          jax.sharding.PartitionSpec(None, None, "fsdp")
+          if mode == "no_tensor_axis"
+          else jax.sharding.PartitionSpec(None, "tensor", "fsdp")
+      )
     self.gate_up = nnx.Param(jax.random.normal(k_gu, gu_shape) * 0.1, out_sharding=gu_spec)
-    self.down = nnx.Param(jax.random.normal(k_dn, (4, 20, 16)) * 0.1, out_sharding=dn_spec)
+    self.down = nnx.Param(jax.random.normal(k_dn, dn_shape) * 0.1, out_sharding=dn_spec)
 
 
 class _ShardedToyModule(nnx.Module):
@@ -205,7 +264,10 @@ class _ShardedToyModule(nnx.Module):
         jnp.zeros((8,), jnp.float32),
         out_sharding=jax.sharding.PartitionSpec(None),
     )
-    self.cache_none = _NonParamVar(None)
+    self.cache_none = _NonParamVar("active" if mode == "rng_and_str_state" else None)
+    if mode == "rng_and_str_state":
+      self.rngs = rngs
+      self.unhashable_meta = {"mode": mode}
     k0, k1, k2, k3, k4 = jax.random.split(rngs.params(), 5)
     p_init = jax.random.normal(k0, (16, 32)) * 0.1
     if mode == "unsharded_non_named":
@@ -246,7 +308,12 @@ class _ShardedToyModule(nnx.Module):
         jax.random.normal(k2, (16, 4)) * 0.2,
         out_sharding=jax.sharding.PartitionSpec("fsdp", None),
     )
-    self.experts = _ShardedExpertSubmodule(mesh, k3, mode)
+    if mode in _SCANNED_EXPERT_ALL_GATHER_MODES:
+      k3_blocks, k3_suffix = jax.random.split(k3)
+      self.blocks_experts = _ShardedExpertSubmodule(mesh, k3_blocks, mode, stacked_blocks=2)
+      self.experts = _ShardedExpertSubmodule(mesh, k3_suffix, "", stacked_blocks=None)
+    else:
+      self.experts = _ShardedExpertSubmodule(mesh, k3, mode, stacked_blocks=None)
     h_axes = ("fsdp", None) if mode == "no_tensor_axis" else ("fsdp", "tensor")
     self.head = nnx.Param(
         jax.random.normal(k4, (16, 32)) * 0.1,
@@ -256,6 +323,22 @@ class _ShardedToyModule(nnx.Module):
   def __call__(self, x: jax.Array) -> spec.ForwardOutput:
     ft_spec = jax.sharding.PartitionSpec("fsdp", "tensor")
     act_spec = jax.sharding.PartitionSpec("fsdp", None, None)
+    rep_spec = jax.sharding.PartitionSpec()
+
+    def _replicated_dispatch(h_s: jax.Array, p_s: jax.Array, gu_rep: jax.Array, dn_rep: jax.Array) -> jax.Array:
+      gu_rep_3d = gu_rep.reshape(4, 16, 20) if gu_rep.ndim == 4 else gu_rep
+      act_s = jax.nn.silu(jnp.einsum("bsh,ehm->bsem", h_s, gu_rep_3d))
+      return jnp.einsum("bsem,bse,emh->bsh", act_s, p_s, dn_rep)
+
+    def _replicated_moe(h_in: jax.Array, p_in: jax.Array, gu_in: jax.Array, dn_in: jax.Array) -> jax.Array:
+      return jax.shard_map(
+          _replicated_dispatch,
+          mesh=self.mesh,
+          in_specs=(act_spec, act_spec, rep_spec, rep_spec),
+          out_specs=act_spec,
+          check_vma=False,
+      )(h_in, p_in, gu_in, dn_in)
+
     p_w = self.prefix_proj[...]
     if self.mode == "constrain_direct":
       p_w = jax.lax.with_sharding_constraint(p_w, ft_spec)
@@ -332,6 +415,50 @@ class _ShardedToyModule(nnx.Module):
 
       init_scan = (h, jnp.zeros((16, 16), dtype=h.dtype))
       (h, _), _ = jax.lax.scan(_carry_scan_body, init_scan, self.blocks_w[...])
+    elif self.mode in _SCANNED_EXPERT_ALL_GATHER_MODES:
+      gu_stacked = self.blocks_experts.gate_up[...]
+      if self.mode == "scanned_4d_s3_expert_all_gather":
+        gu_stacked = gu_stacked.reshape(2, 4, 16, 20)
+      dn_stacked = self.blocks_experts.down[...]
+
+      def _scanned_expert_step(
+          h_in: jax.Array,
+          w_b: jax.Array,
+          s_b: jax.Array,
+          gu_b: jax.Array,
+          dn_b: jax.Array,
+      ) -> jax.Array:
+        h_blk = jax.lax.with_sharding_constraint(run_blk(h_in, w_b, s_b), act_spec)
+        p_blk = jax.lax.with_sharding_constraint(jax.nn.softmax(h_blk[:, :, :4], axis=-1), act_spec)
+        return h_blk + _replicated_moe(h_blk, p_blk, gu_b, dn_b)
+
+      if self.scan:
+
+        def _scanned_expert_body(
+            carry: jax.Array,
+            xs: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        ) -> tuple[jax.Array, None]:
+          return _scanned_expert_step(carry, xs[0], xs[1], xs[2], xs[3]), None
+
+        h, _ = jax.lax.scan(
+            _scanned_expert_body,
+            h,
+            (
+                self.blocks_w[...],
+                self.blocks_scale[...],
+                gu_stacked,
+                dn_stacked,
+            ),
+        )
+      else:
+        for b_idx in range(2):
+          h = _scanned_expert_step(
+              h,
+              self.blocks_w[...][b_idx],
+              self.blocks_scale[...][b_idx],
+              gu_stacked[b_idx],
+              dn_stacked[b_idx],
+          )
     elif self.scan:
 
       def _scan_body(carry: jax.Array, xs: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, None]:
@@ -347,24 +474,14 @@ class _ShardedToyModule(nnx.Module):
     gu_3d = gu.reshape(4, 16, 20) if gu.ndim == 4 else gu
     dn = self.experts.down[...]
     if self.mode in ("expert_all_gather", "4d_expert_all_gather"):
-
-      def _replicated_dispatch(h_s: jax.Array, p_s: jax.Array, gu_rep: jax.Array, dn_rep: jax.Array) -> jax.Array:
-        act_s = jax.nn.silu(jnp.einsum("bsh,ehm->bsem", h_s, gu_rep))
-        return jnp.einsum("bsem,bse,emh->bsh", act_s, p_s, dn_rep)
-
-      rep_spec = jax.sharding.PartitionSpec()
-      moe_out = jax.shard_map(
-          _replicated_dispatch,
-          mesh=self.mesh,
-          in_specs=(act_spec, act_spec, rep_spec, rep_spec),
-          out_specs=act_spec,
-          check_vma=False,
-      )(h, probs, gu_3d, dn)
+      moe_out = _replicated_moe(h, probs, gu_3d, dn)
     else:
       mid = jax.nn.silu(jnp.einsum("bsh,ehm->bsem", h, gu_3d))
       mid = jax.lax.with_sharding_constraint(mid, jax.sharding.PartitionSpec("fsdp", None, None, "tensor"))
       moe_out = jax.lax.with_sharding_constraint(jnp.einsum("bsem,bse,emh->bsh", mid, probs, dn), act_spec)
     logits = (h + moe_out) @ self.head[...]
+    if self.mode == "rng_and_str_state":
+      logits = logits + 1e-3 * jax.random.normal(self.rngs(), ())
     return spec.ForwardOutput(primary=logits, aux_losses={"moe_lb": aux_lb})
 
 
@@ -405,7 +522,7 @@ def _sharded_toy_spec(mode: str = "", **overrides: Any) -> spec.ConformanceSpec:
   return dataclasses.replace(base, **overrides) if overrides else base
 
 
-class ConformanceTest(absltest.TestCase):
+class ConformanceTest(parameterized.TestCase):
   """Tests `spec` registry, `SkipDeclaration` guards, and Checks 1-8."""
 
   def setUp(self):
@@ -506,6 +623,7 @@ class ConformanceTest(absltest.TestCase):
   def test_check_1_negative_detection(self):
     """Verifies Check 1 catches state/path mismatch and output/grad drift."""
     checks.check_scan_remat_equivalence(_toy_spec(), self.mesh)
+    checks.check_scan_remat_equivalence(_toy_spec("rng_good_aux"), self.mesh)
     for mode, pattern in (
         ("path_mismatch", "state paths/shapes/dtypes differ"),
         ("non_param_mismatch", r"state paths/shapes/dtypes differ.*bias_buf"),
@@ -523,6 +641,7 @@ class ConformanceTest(absltest.TestCase):
   def test_check_2_negative_detection(self):
     """Verifies Check 2 catches bad Params, `rngs=None`, and grad bugs."""
     checks.check_param_and_grad_health(_toy_spec(), self.mesh)
+    checks.check_param_and_grad_health(_toy_spec("rng_good_aux"), self.mesh)
     for mode, pattern in (
         ("rngs_fallback", "accepted rngs=None"),
         ("no_params", r"model has no nnx\.Param"),
@@ -553,6 +672,7 @@ class ConformanceTest(absltest.TestCase):
         (_toy_spec("buf_val"), "non-Param state mutated at bias_buf"),
         (_toy_spec("sow_intermediate"), r"sowed nnx\.Intermediate"),
         (_toy_spec("nan_non_param"), r"non-finite non-Param state"),
+        (_toy_spec("del_non_param"), r"-\['cache_var'\]"),
         (_toy_spec(mut=("unmatched*",)), "unmatched mutable pattern"),
     ):
       with self.assertRaisesRegex(AssertionError, pattern):
@@ -600,6 +720,15 @@ class ConformanceTest(absltest.TestCase):
     with nnx.use_eager_sharding(False):
       for check_id in spec.CheckId:
         self.assertTrue(checks.run_conformance_check(good_spec, check_id))
+    rng_sharded_spec = _sharded_toy_spec("rng_and_str_state")
+    with jax.sharding.set_mesh(driver_mesh):
+      hashable_gdef = nnx.graphdef(good_spec.build_model(driver_mesh, nnx.Rngs(0), True, "none"))
+      unhashable_gdef = nnx.graphdef(rng_sharded_spec.build_model(driver_mesh, nnx.Rngs(0), True, "none"))
+    self.assertIsInstance(hash(hashable_gdef), int)
+    with self.assertRaisesRegex(TypeError, "unhashable type"):
+      hash(unhashable_gdef)
+    for check_id in spec.CheckId:
+      self.assertTrue(checks.run_conformance_check(rng_sharded_spec, check_id))
     skip_id = spec.CheckId.NO_EXPERT_WEIGHT_ALL_GATHER
     ok_skip = spec.SkipDeclaration(spec.SkipStatus.NOT_APPLICABLE, "Dense model.")
     skipped = _sharded_toy_spec("unsharded_expert", skips={skip_id: ok_skip})
@@ -722,9 +851,70 @@ class ConformanceTest(absltest.TestCase):
             _sharded_toy_spec("4d_expert_all_gather"),
             r"full expert weight all-gather of experts\.",
         ),
+        (
+            _sharded_toy_spec(
+                "scanned_expert_all_gather",
+                expert_weight_param_patterns=(r"^blocks_experts\.(gate_up|down)$",),
+            ),
+            r"full expert weight all-gather of blocks_experts\.",
+        ),
+        (
+            _sharded_toy_spec(
+                "scanned_4d_expert_all_gather",
+                expert_weight_param_patterns=(r"^blocks_experts\.gate_up$",),
+            ),
+            r"full expert weight all-gather of blocks_experts\.gate_up",
+        ),
+        (
+            _sharded_toy_spec(
+                "scanned_4d_s3_expert_all_gather",
+                expert_weight_param_patterns=(r"^blocks_experts\.gate_up$",),
+            ),
+            r"full expert weight all-gather of blocks_experts\.gate_up",
+        ),
     ):
       with self.assertRaisesRegex(AssertionError, pattern):
         checks.check_no_expert_weight_all_gather(bad_spec)
+
+  def test_registered_model_conformance_specs_discovery(self):
+    """Verifies dynamic discovery and idempotence (`m3/README.md` Invariants (1)-(7)) on registered models."""
+    loaded_modules = discover_model_conformance_specs()
+    self.assertGreaterEqual(len(loaded_modules), 2)
+    specs = spec.get_registered_conformance_specs()
+    self.assertGreaterEqual(len(specs), 2)
+    self.assertGreaterEqual(len(specs), len(loaded_modules))
+    for s in specs:
+      self.assertIn(s.model_name, m3_models.MODEL_REGISTRY)
+    self.assertEqual(discover_model_conformance_specs(), loaded_modules)
+    self.assertEqual(spec.get_registered_conformance_specs(), specs)
+    self.assertTrue(any(not s.skips for s in specs))
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      broken_pkg_dir = os.path.join(tmp_dir, "synthetic_uninstalled_dep_pkg")
+      os.makedirs(broken_pkg_dir)
+      missing_dep_msg = "synthetic optional dependency missing"
+      with open(os.path.join(broken_pkg_dir, "__init__.py"), "w", encoding="utf-8") as init_file:
+        init_file.write(f"raise ModuleNotFoundError({missing_dep_msg!r})\n")
+      with mock.patch.object(m3_models, "__path__", [*m3_models.__path__, tmp_dir]):
+        self.assertIn(
+            ("synthetic_uninstalled_dep_pkg", True),
+            [(m.name, m.ispkg) for m in pkgutil.iter_modules(m3_models.__path__)],
+        )
+        self.assertEqual(discover_model_conformance_specs(), loaded_modules)
+        with self.assertRaisesRegex(ModuleNotFoundError, missing_dep_msg):
+          importlib.import_module(f"{m3_models.__name__}.synthetic_uninstalled_dep_pkg")
+
+  @parameterized.named_parameters(*((check_id.value, check_id) for check_id in spec.CheckId))
+  def test_registered_model_conformance_spec_check(self, check_id: spec.CheckId):
+    """Runs `check_id` (`m3/README.md` Invariants (1)-(7)) across all registered model specs."""
+    discover_model_conformance_specs()
+    specs = spec.get_registered_conformance_specs()
+    self.assertGreaterEqual(len(specs), 2)
+    for s in specs:
+      with self.subTest(model=s.model_name):
+        self.assertIs(
+            checks.run_conformance_check(s, check_id),
+            check_id not in s.skips,
+        )
 
 
 if __name__ == "__main__":

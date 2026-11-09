@@ -97,13 +97,13 @@ def add_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--server_image",
       type=str,
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server",
+      default="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server",
       help="Docker image for the server.",
   )
   parser.add_argument(
       "--proxy_image",
       type=str,
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
+      default="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server",
       help="Docker image for the proxy server.",
   )
   parser.add_argument(

@@ -19,6 +19,7 @@ import unittest
 
 from absl.testing import absltest
 from maxtext.common import checkpoint_context
+from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import v1 as ocp_v1
 
 
@@ -68,10 +69,17 @@ class TestSaveDecisionPolicy(unittest.TestCase):
 
 
 class TestPreservationPolicy(unittest.TestCase):
+  """build_preservation_policy keeps the latest N checkpoints, or every one for None."""
 
   def test_latest_n(self):
     policy = checkpoint_context.build_preservation_policy(max_to_keep=5)
     self.assertIsInstance(policy, ocp_v1.training.preservation_policies.LatestN)
+    self.assertEqual(policy.n, 5)
+
+  def test_none_keeps_every_checkpoint(self):
+    policy = checkpoint_context.build_preservation_policy(max_to_keep=None)
+    self.assertIsInstance(policy, ocp_v1.training.preservation_policies.LatestN)
+    self.assertIsNone(policy.n)
 
 
 class TestBuildContext(unittest.TestCase):
@@ -96,6 +104,17 @@ class TestBuildContext(unittest.TestCase):
         int(datetime.timedelta(minutes=60).total_seconds()),
     )
 
+  def test_explicit_async_checkpointing_timeout_secs(self):
+    ctx = checkpoint_context.build_context(async_checkpointing_timeout_secs=2400)
+    self.assertEqual(ctx.asynchronous.timeout_secs, 2400)
+
+  def test_continuous_with_explicit_override_uses_override(self):
+    ctx = checkpoint_context.build_context(
+        enable_continuous_checkpointing=True,
+        async_checkpointing_timeout_secs=600,
+    )
+    self.assertEqual(ctx.asynchronous.timeout_secs, 600)
+
   def test_todelete_full_path(self):
     ctx = checkpoint_context.build_context(todelete_full_path="trash")
     self.assertEqual(ctx.deletion.gcs_deletion_options.todelete_full_path, "trash")
@@ -119,7 +138,19 @@ class TestBuildContext(unittest.TestCase):
 
   def test_colocated_python_sets_pathways_impl(self):
     ctx = checkpoint_context.build_context(colocated_python_checkpointing=True)
-    self.assertIsNotNone(ctx.pathways.checkpointing_impl)
+    self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON)
+
+  def test_pathways_persistence_sets_pathways_impl(self):
+    ctx = checkpoint_context.build_context(enable_pathways_persistence=True)
+    self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.PERSISTENCE)
+
+  def test_colocated_python_takes_precedence_over_pathways_persistence(self):
+    ctx = checkpoint_context.build_context(colocated_python_checkpointing=True, enable_pathways_persistence=True)
+    self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON)
+
+  def test_device_host_concurrent_gb_to_transfer_bytes(self):
+    ctx = checkpoint_context.build_context(checkpoint_storage_device_host_concurrent_gb=16)
+    self.assertEqual(ctx.memory.transfer_concurrent_bytes, 16 * _GB)
 
   def test_checkpoint_layout(self):
     ctx = checkpoint_context.build_context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
@@ -129,6 +160,12 @@ class TestBuildContext(unittest.TestCase):
     ctx = checkpoint_context.build_context()
     self.assertTrue(ctx.array.saving.use_ocdbt)
     self.assertTrue(ctx.array.saving.use_zarr3)
+
+  def test_new_options_default_to_the_unchanged_context(self):
+    """The device-to-host budget and Pathways persistence options leave the default Context as it was."""
+    ctx = checkpoint_context.build_context()
+    self.assertEqual(ctx.memory.transfer_concurrent_bytes, ocp_v1.Context().memory.transfer_concurrent_bytes)
+    self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.NO_DISPATCHER)
 
 
 if __name__ == "__main__":

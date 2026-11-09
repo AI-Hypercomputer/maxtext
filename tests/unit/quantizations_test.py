@@ -329,6 +329,12 @@ class QuantizationTest(unittest.TestCase):
 class QuantTest(unittest.TestCase):
   """Tests for quantized model correctness."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cached_base_results_nnx"):
+      delattr(cls, "_cached_base_results_nnx")
+    super().tearDownClass()
+
   def setUp(self):
     self.cfg = self.init_pyconfig()
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -402,22 +408,16 @@ class QuantTest(unittest.TestCase):
       base_model = model_creation_utils.create_model(base_cfg, self.mesh, rngs=nnx.Rngs(0))
 
       def loss_base(model):
-        logits = model(
+        logits_b = model(
             decoder_input_tokens=ids,
             decoder_positions=decoder_positions,
             decoder_segment_ids=decoder_segment_ids,
             enable_dropout=False,
         )
-        return jnp.mean((logits) ** 2)
+        return jnp.mean((logits_b) ** 2), logits_b
 
-      grads_base = nnx.grad(loss_base)(base_model)
-      logits_base = base_model(
-          decoder_input_tokens=ids,
-          decoder_positions=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          enable_dropout=False,
-      )
-      self.__class__._cached_base_results_nnx = (grads_base, logits_base)
+      (_, logits_base), grads_base = nnx.value_and_grad(loss_base, has_aux=True)(base_model)
+      self.__class__._cached_base_results_nnx = jax.device_get((grads_base, logits_base))
 
     grads_base, logits = self.__class__._cached_base_results_nnx
 
@@ -428,15 +428,9 @@ class QuantTest(unittest.TestCase):
           decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
       )
-      return jnp.mean((logits_q) ** 2)
+      return jnp.mean((logits_q) ** 2), logits_q
 
-    grads_quant = nnx.grad(loss_quant)(qt_model)
-    quant_logits = qt_model(
-        decoder_input_tokens=ids,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
-    )
+    (_, quant_logits), grads_quant = nnx.value_and_grad(loss_quant, has_aux=True)(qt_model)
 
     print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
     assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
@@ -450,7 +444,7 @@ class QuantTest(unittest.TestCase):
     # Note: NNX grads structure might contain variables like 'kernel', 'bias'.
     # For simplicity we compare all matching keys.
     def flatten_and_filter(grads_flat):
-      return {k: v for k, v in grads_flat.items() if hasattr(v, "shape") and "quant_stats" not in str(k)}
+      return {k: v[...] for k, v in grads_flat.items() if hasattr(v, "shape") and "quant_stats" not in str(k)}
 
     gb_f = flatten_and_filter(grads_base_flat)
     gq_f = flatten_and_filter(grads_quant_flat)

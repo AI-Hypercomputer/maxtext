@@ -984,6 +984,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # STEP B: 1D Convolution
     # =========================================================================
     qkv = jnp.concatenate([q, k, v], axis=-1)
+    if decoder_segment_ids is not None:
+      # Mask pad positions (segment 0) BEFORE the causal 1D convolution.
+      # Step C masks key/value/g before the delta-rule recurrence, but without
+      # masking here first, conv1d (kernel size 4) smears non-zero pad-token qkv
+      # across the left-padding boundary into the first 3 real tokens, corrupting
+      # the recurrent state S_t across the sequence.
+      qkv = jnp.where((decoder_segment_ids != 0)[..., None], qkv, 0.0)
     batch, seq_len, _ = qkv.shape
     conv_kernel_size = self.config.gdn_conv_kernel_dim
 
@@ -1218,7 +1225,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_conv_state = next_conv_state[:orig_cache_batch]
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
-    next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
+    # `jax_chunk_gated_delta_rule` returns `None` for the final state when it is
+    # called without an `initial_state` (the unsharded `self.mesh is None` train
+    # path), so only cast when a state was actually produced.
+    if next_recurrent_state is not None:
+      next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
@@ -1421,6 +1432,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           matmul_precision=cfg.matmul_precision,
+          shard_mode=cfg.shard_mode,
           rngs=rngs,
       )
     else:
@@ -1470,9 +1482,17 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         out_sharding=out_sharding,
     )
 
-    # 3. Apply the gate for the shared expert. The output is (batch, seq, 1), so it
-    # carries no feature axis to pin and takes the default layout.
-    shared_gate_output = self.shared_expert_gate(hidden_states)
+    # 3. Apply the gate for the shared expert. The output is (batch, seq, 1). Under
+    # tensor parallelism `hidden_states` carries `embed` on `tensor` while the kernel
+    # carries it on `fsdp`/`expert`, and explicit sharding will not pick a layout for a
+    # contraction sharded on both sides, so keep the block's batch and length layout
+    # and replicate the size-1 feature axis.
+    gate_sharding = None
+    if out_sharding is not None:
+      gate_sharding = jax.sharding.NamedSharding(
+          out_sharding.mesh, jax.sharding.PartitionSpec(*out_sharding.spec[:2], None)
+      )
+    shared_gate_output = self.shared_expert_gate(hidden_states, out_sharding=gate_sharding)
 
     # 4. Combine the outputs.
     final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output

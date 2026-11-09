@@ -20,11 +20,8 @@ by hand so that the all-gather (AG) of layer k+1's weights overlaps the compute 
 forward pass, and the AG of layer k-1's weights overlaps the recompute + vjp of layer k in the
 backward pass, followed by a reduce-scatter (RS) of layer k's weight gradients.
 
-The all-gathers are explicit `all_gather`s tagged with the `xla_explicit_fsdp` XLA metadata. On TPUs
-with SparseCores, run with
-  --xla_tpu_enable_fsdp_latency_hiding_scheduler=true
-  --xla_tpu_explicit_fsdp_dedicated_sparse_core_id=0
-so that XLA's FSDP scheduler runs the tagged gathers on a dedicated SparseCore.
+The all-gathers and reduce-scatters are explicit collectives (`all_gather` / `psum_scatter` inside
+`shard_map`).
 
 See `_custom_vjp_prefetch_pipeline` for the design.
 """
@@ -36,7 +33,6 @@ import inspect
 from flax import nnx
 import jax
 from jax import ad_checkpoint
-from jax.experimental import xla_metadata
 from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
@@ -83,18 +79,13 @@ def _expected_unreduced_axes(mesh, src_spec, fsdp_axes):
   return frozenset(fsdp_axes) | frozenset(_extra_batch_axes(mesh, src_spec, fsdp_axes))
 
 
-def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, tag=True):
-  """All-gathers `w` over its FSDP mesh axes with an explicit all_gather tagged `xla_explicit_fsdp`.
-
-  On TPUs that offload all-gathers to the SparseCore, the tag lets XLA's FSDP scheduler
-  (--xla_tpu_enable_fsdp_latency_hiding_scheduler with --xla_tpu_explicit_fsdp_dedicated_sparse_core_id)
-  run these gathers on a dedicated SparseCore. Otherwise they share the SparseCore queue with the
-  layer's own SparseCore work (e.g. MoE token gathers) and must finish before that work can.
+def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False):
+  """All-gathers `w` over its FSDP mesh axes with an explicit all_gather.
 
   With `reduced` (explicit sharding mode, one gathered dimension), the result is typed `reduced` over
   the FSDP axes. The gradient of a reduced value is `unreduced` (per-device partial sums), so the
   backward pass emits no all-reduce for it and `_explicit_fsdp_reduce_scatter` performs the only
-  reduction, tagged so XLA's FSDP scheduler can overlap it like the prefetch all-gathers.
+  reduction.
 
   Returns None (the caller falls back to resharding) if the FSDP axes of a dimension are not its
   minor-most mesh axes, since a tiled gather would then not produce the target layout.
@@ -137,11 +128,7 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, t
     extra = _extra_batch_axes(mesh, in_spec, ax)
 
     def gather_reduced(x):
-      if tag:
-        with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
-          x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
-      else:
-        x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
+      x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
       if extra:
         x = jax.lax.pcast(x, extra if len(extra) > 1 else extra[0], to="reduced")
       return x
@@ -158,11 +145,6 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, t
       x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=i, tiled=True)
     return x
 
-  if tag:
-    with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
-      return jax.shard_map(
-          gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
-      )(w)
   return jax.shard_map(
       gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
   )(w)
@@ -171,8 +153,8 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, t
 def _fsdp_scatter_dim(ndim, mesh, src_spec):
   """Returns (dim, fsdp_axes) of the single dimension a gradient is reduce-scattered over, else None.
 
-  None if no dimension or more than one is FSDP-sharded (chained FSDP collectives must be independent
-  for XLA's FSDP scheduler), or if the FSDP axes of the dimension are not its minor-most mesh axes.
+  None if no dimension or more than one is FSDP-sharded (chained FSDP collectives must be independent),
+  or if the FSDP axes of the dimension are not its minor-most mesh axes.
   """
   spec = tuple(src_spec) + (None,) * (ndim - len(tuple(src_spec)))
   dims = []
@@ -230,14 +212,14 @@ def _sc_rs_padded_minor_size(n):
   return k * 128
 
 
-def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=True):
-  """Reduce-scatters a gathered-weight gradient `g` over its FSDP mesh axes, tagged `xla_explicit_fsdp`.
+def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=False):
+  """Reduce-scatters a gathered-weight gradient `g` over its FSDP mesh axes.
 
   The inverse of the `reduced` `_explicit_fsdp_all_gather`: `g` is `unreduced` over the FSDP axes
   (each device holds a partial sum) with the gathered sharding `gathered_spec`, and the result is the
-  summed gradient with the parameter's FSDP sharding `src_spec`. The tag lets XLA's FSDP scheduler
-  run the reduce-scatter on the dedicated FSDP SparseCore (next to the prefetch all-gathers) and
-  complete it with the next FSDP all-gather, so it overlaps the following layer's backward.
+  summed gradient with the parameter's FSDP sharding `src_spec`. With `pad_minor`, the minor dimension
+  of a 2D gradient is padded (if needed) so the SparseCore reduce-scatter is not decomposed into an
+  all-reduce.
 
   Returns None (the caller falls back to resharding) if `g` is not unreduced over exactly the FSDP
   axes of a single dimension: reduce-scattering an already-reduced gradient would sum it again.
@@ -250,7 +232,7 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=True):
   spec = tuple(src_spec) + (None,) * (g.ndim - len(tuple(src_spec)))
   gathered = tuple(gathered_spec) + (None,) * (g.ndim - len(tuple(gathered_spec)))
   g_spec = jax.typeof(g).sharding.spec
-  minor_dim = 1 - dim if not tag and g.ndim == 2 else None
+  minor_dim = 1 - dim if pad_minor and g.ndim == 2 else None
   orig_minor = g.shape[minor_dim] if minor_dim is not None and gathered[minor_dim] is None else None
   padded_minor = _sc_rs_padded_minor_size(orig_minor) if orig_minor is not None else None
   if padded_minor is None or padded_minor == orig_minor:
@@ -262,11 +244,7 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=True):
       pad_width[minor_dim] = (0, padded_minor - orig_minor)
       x = jnp.pad(x, pad_width)
       x = _pin_scatter_dim_major(x, dim)
-    if tag:
-      with xla_metadata.set_xla_metadata(xla_explicit_fsdp="yes"):
-        x = jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
-    else:
-      x = jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
+    x = jax.lax.psum_scatter(x, ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True)
     if extra:
       x = jax.lax.psum(x, extra if len(extra) > 1 else extra[0])
     if padded_minor is not None and padded_minor > orig_minor:
@@ -298,14 +276,14 @@ def explicit_fsdp_weight(w, mesh):
 
   @jax.custom_vjp
   def _op(x):
-    out = _explicit_fsdp_all_gather(x, mesh, src_spec, gathered_spec, reduced=True, tag=False)
+    out = _explicit_fsdp_all_gather(x, mesh, src_spec, gathered_spec, reduced=True)
     return x if out is None else out
 
   def _fwd(x):
     return _op(x), None
 
   def _bwd(_, g):
-    out = _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, tag=False)
+    out = _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=True)
     if out is not None:
       return (out,)
     return (sharding.maybe_shard_with_name(g, src_sharding, ShardMode.EXPLICIT),)
@@ -667,7 +645,7 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   tag_cache = {}
 
   def tag_flags(leaves):
-    """Per-leaf choice of the tagged, deferred (dedicated SparseCore) reduce-scatter; the same for every layer."""
+    """Per-leaf choice of the deferred reduce-scatter; the same for every layer."""
     if "flags" not in tag_cache:
       flags = []
       for g, s in zip(leaves, layer_shardings):
@@ -897,11 +875,10 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
     flags = rs_fn.tag_flags(leaves)
     return jax.tree_util.tree_unflatten(treedef, [x if f else jnp.zeros((0,), x.dtype) for x, f in zip(leaves, flags)])
 
-  # Tagged (dedicated SparseCore) reduce-scatters of layer k's dW are issued at the start of the next
-  # backward step (layer k-1), so each completes with that step's FSDP all-gather and overlaps its whole
-  # backward. Issued at the end of their own step, XLA's FSDP scheduler would have to complete those of
-  # the last step of each loop iteration before the iteration ends, exposing them. Untagged ones complete
-  # within their own step.
+  # Deferred reduce-scatters of layer k's dW are issued at the start of the next backward step
+  # (layer k-1), so they overlap its whole backward. Issued at the end of their own step, those of the
+  # last step of each loop iteration would have to complete before the iteration ends, exposing them.
+  # The others complete within their own step.
   d_params = jax.tree.map(jnp.zeros_like, params)
   if length == 1:
     d_params = write(d_params, rs_fn(dw), last, "all")

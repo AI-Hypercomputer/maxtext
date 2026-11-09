@@ -1305,16 +1305,16 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
         skip_jax_distributed_system=True,
         model_name="mixtral-8x7b",
         override_model_config=True,
-        base_emb_dim=7168,  # multiple of 1024 so the kernel is fully used
+        base_emb_dim=2048,  # >= 2048 so SparseCore ragged_gather_reduce satisfies num_row_partitions <= 8
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=2,
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
-        max_target_length=128,
+        max_target_length=64,
         float32_gate_logits=True,
         use_ragged_sort=use_ragged_sort,
         ragged_buffer_factor=-1.0,
@@ -1367,10 +1367,8 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
               hidden_states,
               forced_routed_experts=forced,
           )
-        out, _, _ = model.apply(
-            {"params": variables["params"]},
-            hidden_states,
-            forced_routed_experts=forced,
+        out, _, _ = jax.jit(lambda params, x, f: model.apply({"params": params}, x, forced_routed_experts=f))(
+            variables["params"], hidden_states, forced
         )
       return out, variables
 

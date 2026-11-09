@@ -47,7 +47,7 @@
   <rect x="244" y="129" width="282" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
   <text x="385.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">compute_i</text>
   <rect x="226" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
-  <text x="350.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+1)</text>
+  <text x="350.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">FSDP all-gather (prefetch layer i+1)</text>
   <rect x="226.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
   <text x="266.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
   <rect x="309.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
@@ -85,7 +85,7 @@
   <rect x="564" y="129" width="282" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
   <text x="705.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">compute_i+1</text>
   <rect x="546" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
-  <text x="670.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+2)</text>
+  <text x="670.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">FSDP all-gather (prefetch layer i+2)</text>
   <rect x="546.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
   <text x="586.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
   <rect x="629.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
@@ -123,7 +123,7 @@
   <rect x="884" y="129" width="282" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
   <text x="1025.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">compute_i+2</text>
   <rect x="866" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
-  <text x="990.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+3)</text>
+  <text x="990.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">FSDP all-gather (prefetch layer i+3)</text>
   <rect x="866.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
   <text x="906.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
   <rect x="949.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>
@@ -161,7 +161,7 @@
   <rect x="1204" y="129" width="282" height="40" rx="3" fill="none" stroke="#dc2626" stroke-width="2.4"/>
   <text x="1345.0" y="124" font-size="14" font-weight="700" fill="#dc2626" text-anchor="middle">compute_i+3</text>
   <rect x="1186" y="240" width="248" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
-  <text x="1310.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">xla_explicit_fsdp (prefetch layer i+4)</text>
+  <text x="1310.0" y="250" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">FSDP all-gather (prefetch layer i+4)</text>
   <rect x="1186.0" y="274" width="81.3" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
   <text x="1226.7" y="295" font-size="10.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">all-gather wi0</text>
   <rect x="1269.3" y="274" width="81.3" height="34" rx="2" fill="#fde68a" stroke="#eab308" stroke-width="1"/>

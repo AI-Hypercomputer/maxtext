@@ -16,6 +16,7 @@
 
 import functools
 import os
+import pickle
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ import json
 import numpy as np
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import grain.python as grain
@@ -416,6 +418,375 @@ class TestGrainArrayRecordDataSource:
       )
 
     data_source.assert_called_once_with(["data.arrayrecord"], reader_options=expected_reader_options)
+
+
+def _extract_file_instructions(**kwargs):
+  return kwargs["file_instructions"]
+
+
+class ArrayRecordFileInstructionsTest(parameterized.TestCase):
+  """Tests colocated-host-sharded ArrayRecord metadata resolution and caching."""
+
+  # pylint: disable=protected-access
+
+  def setUp(self):
+    super().setUp()
+    grain_data_processing._clear_arrayrecord_metadata_cache()
+    self.addCleanup(grain_data_processing._clear_arrayrecord_metadata_cache)
+
+  @staticmethod
+  def _resolve_on_hosts(
+      data_file_pattern,
+      shard_count=1,
+      mixture_config_path=None,
+      hf_access_token=None,
+      max_workers=2,
+  ):
+    """Simulates colocated hosts counting and exchanging shard counts."""
+    controller_loader = grain_data_processing._ColocatedArrayRecordDatasetLoader(
+        _extract_file_instructions,
+        data_file_pattern,
+        mixture_config_path=mixture_config_path,
+        hf_access_token=hf_access_token,
+        max_workers=max_workers,
+    )
+    host_loaders = [pickle.loads(pickle.dumps(controller_loader)) for _ in range(shard_count)]
+    per_host = [loader.count_local_shards(i, shard_count) for i, loader in enumerate(host_loaders)]
+    num_files, _, digest, _ = per_host[0]
+    if any((nf, dg) != (num_files, digest) for nf, _, dg, _ in per_host):
+      raise ValueError(f"Mismatched shard metadata across hosts: {per_host}")
+    combined = [0] * num_files
+    for host, (_, _, _, local_counts) in enumerate(per_host):
+      combined[host::shard_count] = local_counts
+    for loader in host_loaders:
+      loader.set_shard_counts(combined)
+    return [loader(dataloading_host_index=i, dataloading_host_count=shard_count) for i, loader in enumerate(host_loaders)]
+
+  def test_datasource_uses_file_instructions_without_opening_files(self):
+    instructions = [
+        grain_data_processing._FileInstruction("/no/such/file-0", 0, 3, 3),
+        grain_data_processing._FileInstruction("/no/such/file-1", 0, 5, 5),
+    ]
+    self.assertLen(grain.ArrayRecordDataSource(instructions), 8)
+
+  def test_caches_counts_and_matches_direct_read_across_shards(self):
+    pattern = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "assets/local_datasets/c4_en_dataset_minimal/c4/en/3.0.1/c4-train.array_record-0000[01]-of-00008",
+    )
+    shard_paths = sorted(grain_data_processing.find_data_files(pattern))
+    self.assertLen(shard_paths, 2)
+    shard0_len = len(grain.ArrayRecordDataSource(shard_paths[0]))
+    shard1_len = len(grain.ArrayRecordDataSource(shard_paths[1]))
+    self.assertGreater(shard0_len, 0)
+    self.assertGreater(shard1_len, 0)
+
+    with (
+        mock.patch.object(
+            grain_data_processing, "find_data_files", wraps=grain_data_processing.find_data_files
+        ) as find_files,
+        mock.patch.object(
+            grain_data_processing.grain, "ArrayRecordDataSource", wraps=grain.ArrayRecordDataSource
+        ) as data_source,
+    ):
+      (first,) = self._resolve_on_hosts(pattern, shard_count=1)
+      (second,) = self._resolve_on_hosts(pattern, shard_count=1)
+
+    self.assertEqual(second, first)
+    find_files.assert_called_once_with(pattern, hf_access_token=None)
+    # Each of the two shards is opened once across both resolutions; removing `_ARRAYRECORD_RECORD_COUNTS` fails here.
+    self.assertCountEqual([call.args[0] for call in data_source.call_args_list], shard_paths)
+
+    ds_kwargs = {
+        "shuffle": False,
+        "shuffle_seed": 0,
+        "shuffle_buffer_size": 1,
+        "num_epoch": 1,
+        "dataloading_host_index": 0,
+        "dataloading_host_count": 1,
+        "grain_worker_count": 0,
+        "grain_num_threads": 1,
+        "grain_prefetch_buffer_size": 1,
+        "grain_data_source_max_workers": 1,
+        "elastic": True,
+    }
+    direct_ds = grain_data_processing.get_datasets(pattern, "arrayrecord", **ds_kwargs)
+    instructed_ds = grain_data_processing.get_datasets(pattern, "arrayrecord", file_instructions=first, **ds_kwargs)
+    self.assertLen(instructed_ds, shard0_len + shard1_len)
+    self.assertLen(direct_ds, shard0_len + shard1_len)
+    # Compare every record across both shards, explicitly crossing `shard0_len - 1 -> shard0_len`.
+    self.assertEqual([instructed_ds[i] for i in range(len(direct_ds))], [direct_ds[i] for i in range(len(direct_ds))])
+
+  def test_sharded_counting_across_hosts_and_resize_cache_reuse(self):
+    counts_by_file = {"s0": 2, "s1": 3, "s2": 5, "s3": 7, "s4": 11}
+    opened = []
+
+    def fake_datasource(arg, **_kwargs):
+      opened.append(arg)
+      return [None] * counts_by_file[arg]
+
+    with (
+        mock.patch.object(
+            grain_data_processing, "find_data_files", return_value=["s4", "s1", "s3", "s0", "s2"]
+        ) as find_files,
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource", side_effect=fake_datasource),
+    ):
+      per_host = self._resolve_on_hosts("pat", shard_count=3)
+      # Each of the 5 shards was opened once in total across the 3 hosts (2 + 2 + 1).
+      self.assertCountEqual(opened, list(counts_by_file))
+      expected = {
+          "pat": tuple(
+              grain_data_processing._FileInstruction(f, 0, counts_by_file[f], counts_by_file[f])
+              for f in sorted(counts_by_file)
+          )
+      }
+      self.assertEqual(per_host, [expected, expected, expected])
+
+      # Simulate an elastic resize to 2 surviving hosts in the same sidecar process: 0 additional opens or globs!
+      opened.clear()
+      find_files.reset_mock()
+      resized = self._resolve_on_hosts("pat", shard_count=2)
+      self.assertEqual(opened, [])
+      find_files.assert_not_called()
+      self.assertEqual(resized, [expected, expected])
+
+    with self.assertRaisesRegex(ValueError, "Expected pattern and weight pairs"):
+      grain_data_processing._parse_arrayrecord_patterns("a,0.3;malformed")
+
+  def test_reuses_grain_data_source_max_workers(self):
+    with (
+        mock.patch.object(
+            grain_data_processing, "find_data_files", side_effect=lambda p, hf_access_token=None: [f"{p}0", f"{p}1"]
+        ),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource", return_value=[None] * 4),
+        mock.patch.object(
+            grain_data_processing.futures,
+            "ThreadPoolExecutor",
+            wraps=grain_data_processing.futures.ThreadPoolExecutor,
+        ) as executor_cls,
+    ):
+      (resolved,) = self._resolve_on_hosts("a,0.3;b,0.7", shard_count=1, max_workers=7)
+
+    executor_cls.assert_called_once_with(max_workers=7)
+    self.assertEqual(
+        resolved,
+        {
+            "a": (
+                grain_data_processing._FileInstruction("a0", 0, 4, 4),
+                grain_data_processing._FileInstruction("a1", 0, 4, 4),
+            ),
+            "b": (
+                grain_data_processing._FileInstruction("b0", 0, 4, 4),
+                grain_data_processing._FileInstruction("b1", 0, 4, 4),
+            ),
+        },
+    )
+
+  def test_controller_does_not_access_files_or_mixture_json(self):
+    base_cfg = {
+        "global_batch_size_to_load": 4,
+        "global_batch_size_to_load_eval": 4,
+        "max_target_length": 16,
+        "grain_file_type": "arrayrecord",
+        "grain_train_files": "",
+        "grain_eval_files": "/worker/only/eval.array_record*",
+        "grain_train_mixture_config_path": "/worker/only/mixture.json",
+        "enable_data_shuffling": False,
+        "data_shuffle_seed": 0,
+        "grain_shuffle_buffer_size": 1,
+        "num_epoch": 1,
+        "grain_worker_count": 0,
+        "grain_worker_count_eval": 0,
+        "grain_num_threads": 1,
+        "grain_num_threads_eval": 1,
+        "grain_prefetch_buffer_size": 1,
+        "grain_prefetch_buffer_size_eval": 1,
+        "grain_per_worker_buffer_size": 1,
+        "grain_per_worker_buffer_size_eval": 1,
+        "grain_data_source_max_workers": 6,
+        "grain_use_elastic_iterator": False,
+        "hf_access_token": "hf_tok",
+        "mmap_npy_split": "",
+        "train_data_columns": ("text",),
+        "eval_data_columns": ("text",),
+        "tokenize_train_data": False,
+        "tokenize_eval_data": False,
+        "use_sft": False,
+        "use_multimodal": False,
+        "colocated_python_data_input": True,
+        "checkpoint_dir": "",
+    }
+    mesh = SimpleNamespace(size=4)
+    with (
+        mock.patch.object(grain_data_processing, "_get_pipeline_fn", return_value=lambda **_kw: object()),
+        mock.patch.object(grain_data_processing, "find_data_files", side_effect=AssertionError("Controller globbed")),
+        mock.patch.object(
+            grain_data_processing.grain, "ArrayRecordDataSource", side_effect=AssertionError("Controller opened shard")
+        ),
+        mock.patch("builtins.open", side_effect=AssertionError("Controller read worker mixture JSON")),
+        mock.patch.object(grain_data_processing.multihost_dataloading, "RemoteIteratorWrapper") as wrapper_cls,
+    ):
+      grain_data_processing.make_grain_train_iterator(SimpleNamespace(**base_cfg), mesh, [0])
+      grain_data_processing.make_grain_eval_iterator(SimpleNamespace(**base_cfg), mesh, [0])
+      parquet_cfg = {**base_cfg, "grain_file_type": "parquet", "hf_path": ""}
+      grain_data_processing.make_grain_train_iterator(SimpleNamespace(**parquet_cfg), mesh, [0])
+
+    self.assertEqual(wrapper_cls.call_count, 3)
+    train_call, eval_call, parquet_call = wrapper_cls.call_args_list
+    self.assertIsInstance(
+        pickle.loads(pickle.dumps(train_call.args[0])),
+        grain_data_processing._ColocatedArrayRecordDatasetLoader,
+    )
+    self.assertTrue(train_call.kwargs["count_shards"])
+    self.assertIsInstance(
+        pickle.loads(pickle.dumps(eval_call.args[0])),
+        grain_data_processing._ColocatedArrayRecordDatasetLoader,
+    )
+    self.assertTrue(eval_call.kwargs["count_shards"])
+    self.assertNotIsInstance(parquet_call.args[0], grain_data_processing._ColocatedArrayRecordDatasetLoader)
+    self.assertFalse(parquet_call.kwargs["count_shards"])
+
+  def test_get_datasets_uses_file_instructions_without_listing_files(self):
+    with (
+        mock.patch.object(
+            grain_data_processing, "find_data_files", side_effect=lambda p, hf_access_token=None: [f"{p}0"]
+        ),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource", return_value=[None] * 4),
+    ):
+      (file_instructions,) = self._resolve_on_hosts("a,0.3;b,0.7", shard_count=1)
+
+    with (
+        mock.patch.object(grain_data_processing, "find_data_files", side_effect=AssertionError("Unexpected glob")),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource") as data_source,
+        mock.patch.object(grain_data_processing.grain.MapDataset, "source"),
+        mock.patch.object(grain_data_processing.grain.IterDataset, "mix"),
+    ):
+      grain_data_processing.get_datasets(
+          "a,0.3;b,0.7",
+          "arrayrecord",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+          grain_data_source_max_workers=1,
+          file_instructions=file_instructions,
+      )
+
+    data_source.assert_has_calls(
+        [
+            mock.call(file_instructions["a"], reader_options=None),
+            mock.call(file_instructions["b"], reader_options=None),
+        ],
+        any_order=True,
+    )
+
+  def test_get_datasets_raises_key_error_on_missing_file_instruction_pattern(self):
+    with (
+        mock.patch.object(grain_data_processing, "find_data_files", side_effect=AssertionError("Unexpected glob")),
+        self.assertRaises(KeyError),
+    ):
+      grain_data_processing.get_datasets(
+          "missing_pattern",
+          "arrayrecord",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+          grain_data_source_max_workers=1,
+          file_instructions={"other_pattern": ()},
+      )
+
+  @parameterized.named_parameters(
+      ("fewer_files_than_hosts", "a", 4, {"a": (grain_data_processing._FileInstruction("a0", 0, 3, 3),)}),
+      ("empty_pattern", "", 2, None),
+      ("none_pattern", None, 2, None),
+  )
+  def test_fewer_files_than_hosts_and_empty_pattern(self, pattern, shard_count, expected):
+    with (
+        mock.patch.object(
+            grain_data_processing, "find_data_files", side_effect=lambda p, hf_access_token=None: [f"{p}0"]
+        ),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource", return_value=[None] * 3),
+    ):
+      resolved = self._resolve_on_hosts(pattern, shard_count=shard_count)
+    self.assertEqual(resolved, [expected] * shard_count)
+
+  @parameterized.named_parameters(
+      ("single_pattern", "a", None, ["a"]),
+      ("semicolon_mixture_with_token", "a,0.3;b,0.7", "hf_test_token", ["a", "b"]),
+  )
+  def test_resolves_patterns_with_token(self, pattern, hf_token, expected_keys):
+    with (
+        mock.patch.object(
+            grain_data_processing, "find_data_files", side_effect=lambda p, hf_access_token=None: [f"{p}0"]
+        ) as find_files,
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource", return_value=[None] * 3),
+    ):
+      (resolved,) = self._resolve_on_hosts(pattern, shard_count=1, hf_access_token=hf_token)
+
+    self.assertEqual(
+        resolved,
+        {key: (grain_data_processing._FileInstruction(f"{key}0", 0, 3, 3),) for key in expected_keys},
+    )
+    find_files.assert_has_calls([mock.call(key, hf_access_token=hf_token) for key in expected_keys], any_order=True)
+
+  def test_resolves_mixture_json_on_hosts(self):
+    with tempfile.TemporaryDirectory() as directory:
+      mixture_config_path = os.path.join(directory, "mixture.json")
+      with open(mixture_config_path, "w", encoding="utf-8") as f:
+        json.dump({"x": {"path": "c", "weight": 1}, "y": {"path": "d", "weight": 2}}, f)
+      with (
+          mock.patch.object(
+              grain_data_processing, "find_data_files", side_effect=lambda p, hf_access_token=None: [f"{p}0"]
+          ),
+          mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource", return_value=[None] * 2),
+      ):
+        resolved_per_host = self._resolve_on_hosts("", shard_count=2, mixture_config_path=mixture_config_path)
+
+      resolved = resolved_per_host[0]
+      self.assertEqual(
+          resolved,
+          {
+              "c": (grain_data_processing._FileInstruction("c0", 0, 2, 2),),
+              "d": (grain_data_processing._FileInstruction("d0", 0, 2, 2),),
+          },
+      )
+      with (
+          mock.patch.object(grain_data_processing, "find_data_files", side_effect=AssertionError("Unexpected glob")),
+          mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource") as data_source,
+          mock.patch.object(grain_data_processing.grain.MapDataset, "source"),
+          mock.patch.object(grain_data_processing.grain.IterDataset, "mix"),
+      ):
+        grain_data_processing.get_datasets(
+            "",
+            "arrayrecord",
+            shuffle=False,
+            shuffle_seed=0,
+            shuffle_buffer_size=1,
+            num_epoch=1,
+            dataloading_host_index=0,
+            dataloading_host_count=1,
+            grain_worker_count=0,
+            grain_num_threads=1,
+            grain_prefetch_buffer_size=1,
+            grain_data_source_max_workers=1,
+            mixture_config_path=mixture_config_path,
+            file_instructions=resolved,
+        )
+      data_source.assert_has_calls(
+          [mock.call(resolved["c"], reader_options=None), mock.call(resolved["d"], reader_options=None)],
+          any_order=True,
+      )
 
 
 class GrainArrayRecordProcessingTest(
@@ -874,6 +1245,42 @@ class GrainSftPadIdTest(unittest.TestCase):
     self.assertEqual(masking[0].unk_id, 2)
     self.assertEqual(fmt.call_args.args[3], 2)
     self.assertEqual(base_tokenizer.pad_id, 2)
+
+
+class GrainElasticDataReplicaTest(unittest.TestCase):
+  """ElasticIterator with several data replicas per process (num_data_replicas_per_process > 1)."""
+
+  def test_each_replica_gets_its_own_batch(self):
+    num_replicas, replica_batch, steps = 2, 4, 3
+    batches = {}
+    for replica in range(num_replicas):
+      config = SimpleNamespace(
+          global_batch_size_to_load=replica_batch,
+          logical_global_batch_size_to_load=None,
+          num_data_replicas_per_process=num_replicas,
+          data_replica_index=replica,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+      )
+      # The shard arguments make_grain_train_iterator passes on one loading process.
+      with mock.patch.object(input_pipeline_utils.jax, "process_index", return_value=0):
+        shard_index, shard_count = input_pipeline_utils.get_dataloading_shard(config, [0])
+      iterator = iter(
+          grain_data_processing._make_elastic_iterator(  # pylint: disable=protected-access
+              grain.MapDataset.range(64),
+              config,
+              lambda dataset: dataset,
+              shard_index=shard_index,
+              shard_count=shard_count,
+          )
+      )
+      batches[replica] = [next(iterator).tolist() for _ in range(steps)]
+    for replica in range(num_replicas):
+      self.assertEqual([len(b) for b in batches[replica]], [replica_batch] * steps)
+    # Together the replicas read each step's global batch of all replicas, without overlap.
+    for step in range(steps):
+      rows = batches[0][step] + batches[1][step]
+      self.assertEqual(sorted(rows), list(range(step * 8, (step + 1) * 8)))
 
 
 if __name__ == "__main__":
