@@ -184,6 +184,9 @@ class LoadPlan:
   targets: list[_Target]
   groups: list[list[_Write]]
   unmatched_mt_keys: list[str]  # Mapping entries with no weight in the target tree.
+  # Weights whose mapping has no HF tensor (HF key None): the hook makes the whole value
+  # from nothing (e.g. DeepSeek-V4's `mhc_norm` scales are all ones), as in `to_maxtext`.
+  generated: list[_Target] = dataclasses.field(default_factory=list)
 
 
 def resolve_target_name(mt_key: str, flat_target: dict) -> str | None:
@@ -347,7 +350,7 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
       for key in param_map
       if not isinstance(key, tuple) and tensor_handling.is_variable_collection_key(key)
   } - {None}
-  targets, writes, unmatched = [], [], []
+  targets, writes, unmatched, generated = [], [], [], []
   for mt_key, hf_source in param_map.items():
     # A tuple MaxText key: the hooks give all its weights at once, stacked on a new last axis.
     mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
@@ -381,13 +384,20 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
       )
     if len({(p.shape, p.axes) for p in parts}) > 1:
       raise ValueError(f"The MaxText weights of {mt_key} differ in shape: {[p.shape for p in parts]}.")
+    if hf_source is None:
+      if len(parts) > 1 or parts[0].hooks is None:
+        raise ValueError(f"Param mapping gives no HF tensor for {mt_key}, so it needs exactly one weight and a hook.")
+      generated.append(parts[0])
+      continue
     targets.extend(parts)
     writes.extend(_Write(tuple(parts), index, source) for index, source in _enumerate_sources(hf_source, parts[0]))
 
   groups = collections.defaultdict(list)
   for write in writes:
     groups[_layer_group(write.hf_keys[0])].append(write)
-  return LoadPlan(targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched)
+  return LoadPlan(
+      targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched, generated=generated
+  )
 
 
 @functools.lru_cache(maxsize=None)
@@ -435,6 +445,32 @@ def _check_sources(plan: LoadPlan, hf_metadata: dict):
     max_logging.log(
         f"Skipping {len(plan.unmatched_mt_keys)} param-mapping entries with no weight in the target tree,"
         f" e.g. {plan.unmatched_mt_keys[:5]}."
+    )
+
+
+def _is_float8(dtype) -> bool:
+  return np.dtype(dtype).name.startswith("float8")
+
+
+def _check_float8_sources(plan: LoadPlan, hf_metadata: dict):
+  """Raises if an FP8 HF tensor would be cast into a wider MaxText weight without its scales.
+
+  A hook that gets the tensor together with its scales (a tuple HF source) can dequantize it. A lone
+  FP8 tensor would only be cast, leaving every block off by its scale with nothing to flag it (e.g. an
+  FP8 DeepSeek-V4 export with the bf16-only mapping).
+  """
+  bad = [
+      f"{write.hf_source} -> {write.target.name} ({write.target.dtype})"
+      for group in plan.groups
+      for write in group
+      if isinstance(write.hf_source, str)
+      and _is_float8(hf_metadata[write.hf_source].dtype)
+      and not _is_float8(write.target.dtype)
+  ]
+  if bad:
+    raise ValueError(
+        f"{len(bad)} FP8 HF tensors would be cast into wider MaxText weights without their scales, e.g."
+        f" {bad[:3]}. This param mapping reads no scales for them: load a bf16 export of the checkpoint."
     )
 
 
@@ -504,6 +540,16 @@ def _apply_write(write: _Write, hf_arrays: dict, results: dict):
       results[target.name] = write_fn(results[target.name], part, *write.index)
     else:
       results[target.name] = _cast_fn(target.dtype, target.sharding)(part)
+
+
+def _generate(target: _Target) -> jax.Array:
+  """Makes a weight whose mapping has no HF tensor: the hook gets None and the full shape, as in `to_maxtext`."""
+  x = tensor_handling.apply_hook_fns(None, target.shape, target.hooks)
+  if tuple(x.shape) != target.shape:
+    raise ValueError(
+        f"Hooks for {target.mt_key} made shape {tuple(x.shape)} from no HF tensor, but {target.name} is {target.shape}."
+    )
+  return _cast_fn(target.dtype, target.sharding)(x)
 
 
 def _peak_hbm_gb() -> float | None:
@@ -583,6 +629,7 @@ def load_hf_params_streaming(
     _check_sources(plan, stored)
     plan = _with_stored_names(plan, stored)
     hf_metadata = reader.metadata
+    _check_float8_sources(plan, hf_metadata)
     sizes = [_group_bytes_per_host(group, hf_metadata, min_bytes_to_split) for group in plan.groups]
     spans = pack_groups(sizes, read_bytes_per_host)
     calls = [[write for i in span for write in plan.groups[i]] for span in spans]
@@ -590,9 +637,12 @@ def load_hf_params_streaming(
     max_logging.log(
         f"Streaming {sum(len(g) for g in plan.groups)} HF sources into {len(plan.targets)} MaxText weights"
         f" in {len(calls)} read calls from {path}"
+        + (f"; {len(plan.generated)} more weights come from hooks alone" if plan.generated else "")
     )
 
     results = {t.name: _alloc_fn(t.shape, t.dtype, t.sharding)() for t in plan.targets if t.axes}
+    for target in plan.generated:
+      results[target.name] = _generate(target)
     total_bytes = 0
     # Only reads and their copies into HBM (`fetch`) run on the background thread. The
     # jitted rearranging (`unpack`) and writes stay on this thread in a fixed order, so
@@ -639,6 +689,6 @@ def load_hf_params_streaming(
   flat_restored = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored.update(results)
   restored = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
-  # A Linen tree carries the `params` collection, and maybe others beside it: return it as is.
-  # An NNX pure dict has bare weights: wrap them once.
+  # A Linen tree carries the `params` collection, and maybe others beside it (e.g. DeepSeek-V4's
+  # `MoEBiasVar` and `Tid2EidVar`): return it as is. An NNX pure dict has bare weights: wrap them once.
   return restored if "params" in restored else {"params": restored}
