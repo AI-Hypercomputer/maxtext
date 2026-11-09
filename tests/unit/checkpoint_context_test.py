@@ -96,6 +96,20 @@ class TestBuildContext(unittest.TestCase):
         int(datetime.timedelta(minutes=60).total_seconds()),
     )
 
+  def test_fractional_concurrent_gb_rounds_to_int_bytes(self):
+    ctx = checkpoint_context.build_context(checkpoint_storage_concurrent_gb=0.5)
+    self.assertEqual(ctx.memory.write_concurrent_bytes, int(0.5 * _GB))
+    self.assertIsInstance(ctx.memory.write_concurrent_bytes, int)
+
+  def test_async_timeout_secs_overrides_continuous_timeout(self):
+    ctx = checkpoint_context.build_context(enable_continuous_checkpointing=True, async_timeout_secs=7200)
+    self.assertEqual(ctx.asynchronous.timeout_secs, 7200)
+
+  def test_checkpointables_registry_is_set_on_context(self):
+    registry = ocp_v1.handlers.local_registry(include_global_registry=True)
+    ctx = checkpoint_context.build_context(checkpointables_registry=registry)
+    self.assertIs(ctx.checkpointables.registry, registry)
+
   def test_todelete_full_path(self):
     ctx = checkpoint_context.build_context(todelete_full_path="trash")
     self.assertEqual(ctx.deletion.gcs_deletion_options.todelete_full_path, "trash")
