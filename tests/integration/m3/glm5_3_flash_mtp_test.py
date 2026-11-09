@@ -64,6 +64,7 @@ except (ImportError, ValueError):
   HAS_TUNIX = False
 
 pytestmark = [
+    pytest.mark.integration_test,
     pytest.mark.scheduled_only,
     pytest.mark.skipif(not HAS_TORCH, reason="Torch or transformers not available"),
 ]

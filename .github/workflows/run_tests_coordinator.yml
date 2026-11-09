@@ -280,4 +280,4 @@ jobs:
       test_durations_uploaded: ${{ needs.setup-parameters.outputs.test_durations_uploaded == 'true' }}
       maxtext_sha: ${{ inputs.maxtext_sha }}
       is_update_hlo: ${{ inputs.is_update_hlo }}
-      install_torch_cpu: ${{ inputs.flavor == 'cpu-unit' && inputs.is_scheduled_run }}
+      install_torch_cpu: ${{ (inputs.flavor == 'cpu-unit' || inputs.flavor == 'cpu-integration') && inputs.is_scheduled_run }}

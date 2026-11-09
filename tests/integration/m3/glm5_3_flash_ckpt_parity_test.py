@@ -67,6 +67,7 @@ except ImportError:
   HAS_TORCH = False
 
 pytestmark = [
+    pytest.mark.integration_test,
     pytest.mark.scheduled_only,
     pytest.mark.skipif(not HAS_TORCH, reason="Torch or transformers not available"),
 ]
@@ -1092,7 +1093,9 @@ class Glm5CkptParityTest(parameterized.TestCase):
 
   def test_glm5_config_from_hf_text_config_dict_matches_testdata(self):
     """Verifies complete field mapping and parity check against testdata config.json."""
-    config_path = os.path.join(os.path.dirname(__file__), "testdata", "glm5_3_flash_config.json")
+    config_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "unit", "m3", "testdata", "glm5_3_flash_config.json"
+    )
     with open(config_path, "r", encoding="utf-8") as f:
       data = json.load(f)
     text_cfg_dict = data["text_config"]
