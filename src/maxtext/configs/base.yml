@@ -460,6 +460,7 @@ use_gmm_v2: false
 # Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
+moe_gmm_v2_paired_tiles: false # gmm_v2 (MoE fwd, dlhs): paired-tiles path, two tiles per grid step and tails sharing the rhs block; same result. Requires use_gmm_v2=true.
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
