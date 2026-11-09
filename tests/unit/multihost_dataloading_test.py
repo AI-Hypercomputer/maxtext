@@ -354,6 +354,85 @@ class MultihostDataloadingTest(parameterized.TestCase):
       colocated_call.return_value.block_until_ready.assert_called_once()
     wrapper.local_iterator.set_state.return_value.block_until_ready.assert_called_once()
 
+  def test_remote_iterator_wrapper_exchanges_shard_counts_including_int64(self):
+    if jax.default_backend() == "gpu":
+      self.skipTest("Skipping colocated python tests on GPU")
+    mesh = Mesh(np.array(jax.devices()[:1]), ("x",))
+    large_count = (3 << 32) + 7
+    received = []
+
+    class _CountingLoader:
+
+      def count_local_shards(self, shard_index, shard_count):
+        if (shard_index, shard_count) != (0, 1):
+          raise ValueError(f"Unexpected shard: {(shard_index, shard_count)}")
+        return 2, 1, 99, [large_count, 13]
+
+      def set_shard_counts(self, counts):
+        received.append(counts)
+
+      def __call__(self, dataloading_host_index, dataloading_host_count):
+        del dataloading_host_index, dataloading_host_count
+        return MockElasticDataloader(1)
+
+    wrapper = multihost_dataloading.RemoteIteratorWrapper(
+        get_ds_fn=_CountingLoader(),
+        preprocessing_fn=lambda dataset, shard_index, shard_count: dataset,
+        global_mesh=mesh,
+        global_shape=(1, 1),
+        elastic=True,
+        count_shards=True,
+    )
+    self.addCleanup(wrapper.close)
+    self.assertEqual(received, [[large_count, 13]])
+
+  def test_exchange_shard_counts_combines_multi_host_slices_and_detects_mismatch(self):
+    wrapper = multihost_dataloading.RemoteIteratorWrapper.__new__(multihost_dataloading.RemoteIteratorWrapper)
+    wrapper.cpu_mesh = Mesh(np.array(jax.devices()[:1]), ("x",))
+    wrapper.dummy_array = _fake_mesh_array([8, 9, 10], local_process=8)
+    wrapper.local_iterator = mock.Mock()
+
+    # 3 colocated hosts (4 CPU devices per host = 12 rows) counting 5 shards: [10, 20, 30, 40, 50].
+    host_rows = [
+        [5, 2, 12345, 0, 10, 40],
+        [5, 2, 12345, 1, 20, 50],
+        [5, 2, 12345, 2, 30, -1],
+    ]
+    raw = np.repeat(np.array(host_rows, dtype=np.int64), 4, axis=0).view(np.int32).reshape((12, 6, 2))
+    wrapper.local_iterator.count_shards.return_value = raw
+    counts_array = wrapper._exchange_shard_counts()
+
+    received = []
+
+    class _HostLoader:
+
+      def set_shard_counts(self, counts):
+        received.append(counts)
+
+      def __call__(self, **_kwargs):
+        return MockElasticDataloader(4)
+
+    remote_it = multihost_dataloading.RemoteIterator(
+        get_ds_fn=_HostLoader(),
+        preprocessing_fn=lambda dataset, shard_index, shard_count: dataset,
+        global_shape=(12, 1),
+        checkpoint_path="",
+        elastic=True,
+    )
+    remote_it.build(_fake_mesh_array([8, 9, 10], local_process=9), counts_array)
+    self.assertEqual(received, [[10, 20, 30, 40, 50]])
+
+    missing_host = np.array(host_rows[:2], dtype=np.int64).view(np.int32).reshape((2, 6, 2))
+    wrapper.local_iterator.count_shards.return_value = missing_host
+    with self.assertRaisesRegex(ValueError, "Expected shard counts from 3 colocated hosts"):
+      wrapper._exchange_shard_counts()
+
+    wrapper.dummy_array = _fake_mesh_array([8, 9], local_process=8)
+    bad_rows = np.array([[5, 1, 12345, 0, 10], [5, 1, 99999, 1, 20]], dtype=np.int64).view(np.int32).reshape((2, 5, 2))
+    wrapper.local_iterator.count_shards.return_value = bad_rows
+    with self.assertRaisesRegex(ValueError, "inconsistent shard file lists"):
+      wrapper._exchange_shard_counts()
+
   def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
     """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""
     from jax.experimental.colocated_python.obj_backend import SINGLETON_OBJECT_STORE, _ObjectState
