@@ -26,7 +26,7 @@ import uuid
 from absl.testing import absltest
 from maxtext.trainers.pre_train.train import main as train_main
 import pytest
-from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path
+from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
 
 # Number of total training steps to execute per run.
 TOTAL_STEPS = 30
@@ -57,20 +57,20 @@ class GoodputOverheadTest(unittest.TestCase):
   # @pytest.mark.scheduled_only
   @pytest.mark.external_training
   def test_goodput_on_off_overhead_and_loss_parity(self):
+    base_output_directory = get_test_base_output_directory()
     dataset_path = get_test_dataset_path()
     # Unique run ID per CI invocation so Cloud Logging `goodput_<run_name>` does not
     # mix or accumulate entries from previous 4-hour scheduled runs.
     run_id = f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-      off_output_dir = os.path.join(tmp_dir, "out_nogp")
-      on_output_dir = os.path.join(tmp_dir, "out_gp")
       off_metrics_file = os.path.join(tmp_dir, f"metrics_goodput_off_{run_id}.jsonl")
       on_metrics_file = os.path.join(tmp_dir, f"metrics_goodput_on_{run_id}.jsonl")
 
       common_args = [
           None,
           get_test_config_path(),
+          f"base_output_directory={base_output_directory}",
           f"dataset_path={dataset_path}",
           "dataset_type=synthetic",
           f"steps={TOTAL_STEPS}",
@@ -92,7 +92,6 @@ class GoodputOverheadTest(unittest.TestCase):
           common_args
           + [
               f"run_name=goodput_overhead_off_{run_id}",
-              f"base_output_directory={off_output_dir}",
               "enable_goodput_recording=False",
               "monitor_goodput=False",
               "enable_rolling_window_goodput=False",
@@ -107,7 +106,6 @@ class GoodputOverheadTest(unittest.TestCase):
           common_args
           + [
               f"run_name=goodput_overhead_on_{run_id}",
-              f"base_output_directory={on_output_dir}",
               "enable_goodput_recording=True",
               "monitor_goodput=True",
               "enable_rolling_window_goodput=True",
