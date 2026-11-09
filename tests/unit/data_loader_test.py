@@ -130,6 +130,13 @@ class DataLoaderTest(unittest.TestCase):
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
 
+  def test_non_elastic_error_becomes_stop_training(self):
+    self.mock_data_iterator.__next__.side_effect = RuntimeError("NameResolutionError: storage.googleapis.com")
+
+    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    with self.assertRaisesRegex(exceptions.StopTraining, r"`next\(self\.data_iterator\)` failed"):
+      _ = data_loader.load_next_batch()
+
   @pytest.mark.external_serving
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
