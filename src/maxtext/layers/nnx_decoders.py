@@ -41,7 +41,7 @@ from maxtext.common.common_types import (
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
-from maxtext.layers.attn_res import _apply_attn_res
+from maxtext.layers.attn_res import _apply_attn_res, attn_res_num_buffer_slots, init_attn_res_buffer
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -656,15 +656,11 @@ class NNXDecoder(nnx.Module):
     """Routes layer construction through three main paths: pipeline, scanned non-pipeline, sequential."""
     config = self.config
 
-    if self.is_kimi_linear and (
-        getattr(config, "using_pipeline_parallelism", False) or getattr(config, "scan_layers", False)
-    ):
+    if self.is_kimi_linear and getattr(config, "using_pipeline_parallelism", False):
       # Kimi-K3 layers are heterogeneous (KDA/MLA, dense/MoE, AttnRes block boundaries per
-      # layer index), which neither jax.lax.scan nor the pipeline stage builder can express.
-      raise ValueError(
-          "kimi_linear (Kimi-K3) does not support pipeline parallelism or scan_layers; "
-          "set scan_layers=False and do not enable pipeline parallelism."
-      )
+      # layer index), which the pipeline stage builder cannot express. scan_layers=True is
+      # supported via an unrolled prefix/suffix around scanned cycles (_init_scanned_kimi).
+      raise ValueError("kimi_linear (Kimi-K3) does not support pipeline parallelism; do not enable pipeline parallelism.")
 
     if self.is_gemma4_small:
       # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
@@ -770,8 +766,45 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_ming(rngs)
     elif self.is_hy4:
       self._init_scanned_hy4(rngs)
+    elif self.is_kimi_linear:
+      self._init_scanned_kimi(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
+
+  def _init_scanned_kimi(self, rngs, mesh):
+    """Initializes scanned Kimi-K3 layers: unrolled prefix/suffix layers around scanned cycles.
+
+    See `kimi_k3.kimi_scan_layout`. Unrolled layers keep the unscanned names (`layers_{i}`);
+    the cycles go in `scanned_blocks`, each rematerializing its own sub-layers.
+    """
+    cfg = self.config
+    num_prefix, num_blocks, suffix_start, pattern = kimi_k3.kimi_scan_layout(cfg)
+    layer_spec = kimi_k3.build_kimi_layer_spec(cfg.num_decoder_layers, cfg.full_attn_layers, cfg.first_num_dense_layers)
+    for lyr in list(range(num_prefix)) + list(range(suffix_start, cfg.num_decoder_layers)):
+      is_linear_attn, is_moe = layer_spec[lyr]
+      layer = kimi_k3.KimiK3DecoderLayer(
+          config=cfg,
+          model_mode=self.model_mode,
+          mesh=mesh,
+          rngs=rngs,
+          quant=self.quant,
+          layer_idx=lyr,
+          is_linear_attn=is_linear_attn,
+          is_moe=is_moe,
+      )
+      setattr(self, f"layers_{lyr}", layer)
+    if num_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          kimi_k3.KimiK3ScannableBlock,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+          layer_pattern=pattern,
+          layer_idx_offset=num_prefix,
+          remat_policy_fn=self.get_remat_policy(),
+          apply_internal_remat=True,
+      )
+    self._init_kimi_output_attn_res(rngs)
 
   def _init_scanned_deepseek4(self, rngs):
     """Initializes DeepSeek V4 scanned layers: unrolls prefix hash layers and scans remaining full blocks."""
@@ -1084,7 +1117,11 @@ class NNXDecoder(nnx.Module):
           is_moe=is_moe,
       )
       setattr(self, f"layers_{lyr}", layer)
+    self._init_kimi_output_attn_res(rngs)
 
+  def _init_kimi_output_attn_res(self, rngs):
+    """Creates the final (pre-decoder_norm) AttnRes pooling weights of Kimi-K3."""
+    cfg = self.config
     self.output_attn_res_norm = RMSNorm(
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
@@ -2359,7 +2396,7 @@ class NNXDecoder(nnx.Module):
             previous_chunk=previous_chunk,
             slot=slot,
         )
-      elif cfg.scan_layers:
+      elif cfg.scan_layers and not self.is_kimi_linear:  # Kimi-K3 scans inside _apply_kimi_layers.
         if self.is_deepseek:
           if cfg.engram_layers:
             common_kwargs = {
@@ -3318,44 +3355,35 @@ class NNXDecoder(nnx.Module):
   ):
     """Apply Kimi-K3 decoder layers with Attention Residuals highway."""
     cfg = self.config
-    policy = self.get_remat_policy()
-    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+    if cfg.scan_layers:
+      return self._apply_kimi_scanned_layers(
+          y,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          kv_caches=kv_caches,
+          attention_metadata=attention_metadata,
+          previous_chunk=previous_chunk,
+          slot=slot,
+      )
     block_residual = None
 
     for lyr in range(cfg.num_decoder_layers):
-      layer = getattr(self, f"layers_{lyr}")
       kv_cache = kv_caches[lyr] if kv_caches is not None else None
-
-      if cfg.remat_policy and cfg.remat_policy != "none":
-        y, block_residual, kv_cache = self._apply_layer_with_remat(
-            layer,
-            y,
-            policy,
-            prevent_cse,
-            decoder_segment_ids=decoder_segment_ids,
-            decoder_positions=decoder_positions,
-            deterministic=deterministic,
-            model_mode=model_mode,
-            block_residual=block_residual,
-            previous_chunk=previous_chunk,
-            slot=slot,
-            kv_cache=kv_cache,
-            attention_metadata=attention_metadata,
-        )
-      else:
-        y, block_residual, kv_cache = layer(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-            block_residual=block_residual,
-            previous_chunk=previous_chunk,
-            slot=slot,
-            kv_cache=kv_cache,
-            attention_metadata=attention_metadata,
-        )
-
+      y, block_residual, kv_cache = self._apply_kimi_unrolled_layer(
+          lyr,
+          y,
+          block_residual,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
       if kv_caches is not None and kv_cache is not None:
         kv_caches[lyr] = kv_cache
 
@@ -3367,6 +3395,96 @@ class NNXDecoder(nnx.Module):
         norm_weight=self.output_attn_res_norm.scale.value,
         epsilon=cfg.normalization_layer_epsilon,
         num_blocks=None,
+    )
+    return y, kv_caches
+
+  def _apply_kimi_unrolled_layer(self, lyr, y, block_residual, **layer_kwargs):
+    """Applies Kimi-K3 layer `layers_{lyr}` (with per-layer remat), returning (y, block_residual, kv_cache)."""
+    cfg = self.config
+    layer = getattr(self, f"layers_{lyr}")
+    if cfg.remat_policy and cfg.remat_policy != "none":
+      policy = self.get_remat_policy()
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+      return self._apply_layer_with_remat(layer, y, policy, prevent_cse, block_residual=block_residual, **layer_kwargs)
+    return layer(y, block_residual=block_residual, **layer_kwargs)
+
+  def _apply_kimi_scanned_layers(
+      self,
+      y,
+      *,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      kv_caches=None,
+      attention_metadata=None,
+      previous_chunk=None,
+      slot=None,
+  ):
+    """Scanned Kimi-K3: unrolled prefix, lax.scan over whole cycles, unrolled suffix.
+
+    The AttnRes highway is a fixed-shape `AttnResBuffer` (padded block slots + committed
+    count) so it can ride in the scan carry; block commits inside the scan are decided from
+    the traced layer index.
+    """
+    cfg = self.config
+    if kv_caches is not None:
+      raise NotImplementedError("Kimi-K3 scan_layers=True does not support external kv_caches.")
+    num_prefix, num_blocks, suffix_start, _ = kimi_k3.kimi_scan_layout(cfg)
+    num_slots = attn_res_num_buffer_slots(cfg.num_decoder_layers, cfg.attn_res_block_size)
+    attn_res_state = init_attn_res_buffer(y, num_slots)
+    attn_res_state = attn_res_state._replace(
+        blocks=sharding.maybe_shard_with_logical(
+            attn_res_state.blocks,
+            ("activation_batch", "activation_norm_length", None, "activation_embed"),
+            mesh=self.mesh,
+            shard_mode=cfg.shard_mode,
+            debug_sharding=cfg.debug_sharding,
+        )
+    )
+    layer_kwargs = {
+        "decoder_segment_ids": decoder_segment_ids,
+        "decoder_positions": decoder_positions,
+        "deterministic": deterministic,
+        "model_mode": model_mode,
+        "previous_chunk": previous_chunk,
+        "slot": slot,
+        "attention_metadata": attention_metadata,
+    }
+
+    for lyr in range(num_prefix):
+      y, attn_res_state, _ = self._apply_kimi_unrolled_layer(lyr, y, attn_res_state, **layer_kwargs)
+
+    if num_blocks > 0:
+      carry = (y, attn_res_state, jnp.asarray(num_prefix, jnp.int32))
+      carry, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          carry,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          skip_block_remat=True,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          attention_metadata=attention_metadata,
+      )
+      y, attn_res_state, _ = carry
+
+    for lyr in range(suffix_start, cfg.num_decoder_layers):
+      y, attn_res_state, _ = self._apply_kimi_unrolled_layer(lyr, y, attn_res_state, **layer_kwargs)
+
+    # final output pooling before decoder_norm
+    y = _apply_attn_res(
+        prefix_sum=y,
+        block_residual=attn_res_state.blocks,
+        proj_weight=self.output_attn_res_proj.kernel.value,
+        norm_weight=self.output_attn_res_norm.scale.value,
+        epsilon=cfg.normalization_layer_epsilon,
+        num_blocks=num_slots,
+        num_committed=attn_res_state.count,
     )
     return y, kv_caches
 
@@ -3394,7 +3512,19 @@ class NNXDecoder(nnx.Module):
         if isinstance(val, (nnx.Module, list)):
           _add(val)
 
-    if self.is_deepseek:
+    if self.is_kimi_linear:
+      if self.config.scan_layers:
+        # Unrolled prefix `layers_{i}`, scanned cycles, then the unrolled suffix (see _init_scanned_kimi);
+        # the layer indices are not contiguous, so `_append_unscanned` would stop after the prefix.
+        num_prefix, _, suffix_start, _ = kimi_k3.kimi_scan_layout(self.config)
+        for lyr in range(num_prefix):
+          _add(getattr(self, f"layers_{lyr}", None))
+        _append_scanned("scanned_blocks")
+        for lyr in range(suffix_start, self.config.num_decoder_layers):
+          _add(getattr(self, f"layers_{lyr}", None))
+      else:
+        _append_unscanned("layers")
+    elif self.is_deepseek:
       _append_scanned("dense_layers")
       _append_unscanned("dense_layers")
 

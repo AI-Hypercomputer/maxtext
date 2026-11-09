@@ -86,7 +86,8 @@ rope_type: "yarn"
 
 # General Settings
 decoder_block: "kimi_linear"
-# The hybrid KDA/MLA stack is unscanned-only (checkpoint conversion raises on scan_layers=True).
+# scan_layers=True unrolls layers 0..3 and 92 and scans the 22 [KDA,KDA,KDA,MLA] cycles over
+# layers 4..91 (see kimi_k3.kimi_scan_layout).
 scan_layers: false
 # KDA layers ignore decoder_segment_ids, so packed documents would leak recurrent state.
 packing: false

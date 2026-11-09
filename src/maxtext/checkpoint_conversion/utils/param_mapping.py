@@ -51,11 +51,15 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import re
+from typing import Optional
 import warnings
 import numpy as np
 
 import jax
 import jax.numpy as jnp
+
+from maxtext.models.kimi_k3_layout import KimiScanLayout, kimi_scan_layout_from_spec
 
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -5147,15 +5151,107 @@ def _resolve_kimi_k3_full_attn_layers(config) -> set[int]:
   return full_attn_layers
 
 
-def _check_kimi_k3_unscanned(scan_layers):
-  """Kimi-K3's hybrid KDA/MLA stack is unscanned-only; emit per-layer `layers_{i}` keys."""
-  if scan_layers:
-    raise NotImplementedError("kimi-k3 checkpoint conversion only supports scan_layers=False")
+def _kimi_k3_scan_layout(config, maxtext_config, scan_layers) -> Optional[KimiScanLayout]:
+  """Returns the scanned layer layout for `scan_layers=True`, or None for the unscanned layout.
+
+  The split comes from the same helper as the model (`kimi_k3_layout.kimi_scan_layout_from_spec`):
+  the layer schedule from the HF config, the cycle length from the MaxText config
+  (`inhomogeneous_layer_cycle_interval`, which HF has no equivalent of). Where the MaxText
+  config also carries the schedule, it must agree with the HF config.
+  """
+  if not scan_layers:
+    return None
+  if maxtext_config is None:
+    raise ValueError("kimi-k3 scan_layers=True checkpoint conversion needs the MaxText config (for the scan layout)")
+  config = _kimi_k3_text_config(config)
+  num_layers = int(_kimi_k3_require(config, "num_hidden_layers"))
+  first_num_dense_layers = int(_kimi_k3_require(config, "first_k_dense_replace"))
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+  for mt_name, hf_name, hf_value in (
+      ("num_decoder_layers", "num_hidden_layers", num_layers),
+      ("first_num_dense_layers", "first_k_dense_replace", first_num_dense_layers),
+  ):
+    mt_value = getattr(maxtext_config, mt_name, None)
+    if mt_value is not None and int(mt_value) != hf_value:
+      raise ValueError(f"kimi-k3: MaxText {mt_name}={mt_value} does not match HF {hf_name}={hf_value}")
+  mt_full_attn_layers = getattr(maxtext_config, "full_attn_layers", None)
+  if mt_full_attn_layers is not None and {int(x) for x in mt_full_attn_layers} != full_attn_layers:
+    raise ValueError(
+        f"kimi-k3: MaxText full_attn_layers={sorted(int(x) for x in mt_full_attn_layers)} does not match the HF "
+        f"config's (0-indexed) {sorted(full_attn_layers)}"
+    )
+  cycle = getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None)
+  if cycle is None:
+    raise ValueError("kimi-k3 scan_layers=True needs inhomogeneous_layer_cycle_interval in the MaxText config")
+  layout = kimi_scan_layout_from_spec(num_layers, sorted(full_attn_layers), first_num_dense_layers, int(cycle))
+  param_scan_axis = int(getattr(maxtext_config, "param_scan_axis", 1))
+  if layout.num_blocks and param_scan_axis != 1:
+    # Routed experts are stacked (experts, blocks, ...) on the two leading axes, which is
+    # where `create_scanned_layers` puts the scan axis only for param_scan_axis=1.
+    raise NotImplementedError(f"kimi-k3 scanned checkpoint conversion needs param_scan_axis=1, got {param_scan_axis}")
+  return layout
+
+
+_KIMI_K3_LAYER_KEY = re.compile(r"^(params|MoEBiasVar)-decoder-layers_(\d+)-(.+)$")
+
+
+def _kimi_k3_restack_scanned(per_layer: dict, layout: Optional[KimiScanLayout], merge_fn) -> dict:
+  """Turns an unscanned (`layers_{i}`) Kimi-K3 mapping into the scanned layout.
+
+  Unrolled prefix/suffix layers keep their `layers_{i}` keys. A layer in the scanned region
+  at (block b, sub-layer j) moves to `scanned_blocks-layers_{j}`, and `merge_fn` combines the
+  per-block values (ordered by b) into one entry.
+  """
+  if layout is None:
+    return per_layer
+  out, groups = {}, {}
+  for key, value in per_layer.items():
+    match = _KIMI_K3_LAYER_KEY.match(key) if isinstance(key, str) else None
+    position = layout.scanned_position(int(match.group(2))) if match else None
+    if position is None:
+      out[key] = value
+      continue
+    block, sub_layer = position
+    scanned_key = f"{match.group(1)}-decoder-scanned_blocks-layers_{sub_layer}-{match.group(3)}"
+    groups.setdefault(scanned_key, {})[block] = value
+  for scanned_key, by_block in groups.items():
+    if sorted(by_block) != list(range(layout.num_blocks)):
+      raise ValueError(f"kimi-k3: {scanned_key} is missing scanned blocks: has {sorted(by_block)}")
+    out[scanned_key] = merge_fn(scanned_key, [by_block[b] for b in range(layout.num_blocks)])
+  return out
+
+
+def _kimi_k3_stack_hf_keys(scanned_key, per_block):
+  """Per-block HF keys -> a list over blocks, or for expert lists a nested [expert][block] list.
+
+  The nesting order (experts outer, blocks inner) matches the scanned MaxText tensor, whose two
+  leading axes are (experts, blocks) with param_scan_axis=1 (see `stacked_axes`).
+  """
+  if not isinstance(per_block[0], list):
+    return list(per_block)
+  num_experts = len(per_block[0])
+  if any(len(keys) != num_experts for keys in per_block):
+    raise ValueError(f"kimi-k3: {scanned_key} has a different expert count per scanned block")
+  return [[keys[e] for keys in per_block] for e in range(num_experts)]
+
+
+def _kimi_k3_same_hook(scanned_key, per_block):
+  """Hooks act on one layer's slice, so every stacked layer must share the same hook."""
+  if any(hook is not per_block[0] for hook in per_block):
+    raise ValueError(f"kimi-k3: {scanned_key} stacks layers with different conversion hooks")
+  return per_block[0]
 
 
 def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
-  """Generates parameter mapping from MaxText to Hugging Face for Kimi-K3 (unscanned layers only)."""
-  _check_kimi_k3_unscanned(scan_layers)
+  """Generates parameter mapping from MaxText to Hugging Face for Kimi-K3.
+
+  Unscanned: one `params-decoder-layers_{i}-...` key per layer. With `scan_layers=True`
+  (see `kimi_k3_layout.kimi_scan_layout_from_spec`) the unrolled prefix/suffix layers keep
+  those keys, and each scanned sub-layer `params-decoder-scanned_blocks-layers_{j}-...` maps
+  to the list of HF keys of layers `num_prefix + cycle * b + j` over blocks b (routed experts:
+  a nested [expert][block] list).
+  """
+  layout = _kimi_k3_scan_layout(config, maxtext_config, scan_layers)
   config = _kimi_k3_text_config(config)
   full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
   num_main_layers = int(_kimi_k3_require(config, "num_hidden_layers"))
@@ -5286,7 +5382,7 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               for e in range(num_experts)
           ]
 
-  return mapping
+  return _kimi_k3_restack_scanned(mapping, layout, _kimi_k3_stack_hf_keys)
 
 
 def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -5624,8 +5720,12 @@ def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
 
 
 def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
-  """Transformation hooks for Kimi-K3 parameters (unscanned layers only)."""
-  _check_kimi_k3_unscanned(scan_layers)
+  """Transformation hooks for Kimi-K3 parameters.
+
+  Hooks act on a single layer's (and expert's) slice; with `scan_layers=True` a scanned
+  sub-layer key gets the (shared) hook of the layers it stacks.
+  """
+  layout = _kimi_k3_scan_layout(config, maxtext_config, scan_layers)
   config = _kimi_k3_text_config(config)
 
   # The MLA head dims below are only needed when a hook is called without a target shape
@@ -5770,7 +5870,7 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         for mt_suffix in ("",):
           hooks[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = transpose
 
-  return hooks
+  return _kimi_k3_restack_scanned(hooks, layout, _kimi_k3_same_hook)
 
 
 PARAM_MAPPING = {

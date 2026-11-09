@@ -19,7 +19,9 @@ Everything except the safetensors-index comparison runs on CPU without the HF re
 
 import json
 import os
+import re
 import sys
+import types
 import unittest
 
 import jax.numpy as jnp
@@ -120,11 +122,46 @@ class KimiK3ParamMappingTest(unittest.TestCase):
   def test_not_registered_for_vllm(self):
     self.assertNotIn("kimi-k3", VLLM_HOOK_FNS)
 
-  def test_scan_layers_is_not_implemented(self):
-    with self.assertRaises(NotImplementedError):
+  def test_scan_layers_needs_maxtext_config(self):
+    with self.assertRaisesRegex(ValueError, "MaxText config"):
       PARAM_MAPPING["kimi-k3"](kimi_k3_dict, None, scan_layers=True)
-    with self.assertRaises(NotImplementedError):
+    with self.assertRaisesRegex(ValueError, "MaxText config"):
       HOOK_FNS["kimi-k3"](kimi_k3_dict, None, scan_layers=True, saving_to_hf=False)
+
+  def test_released_scanned_layout(self):
+    """Released model, scan_layers=True: layers 0..3 and 92 unrolled, 22 cycles of 4 stacked."""
+    mt_cfg = types.SimpleNamespace(inhomogeneous_layer_cycle_interval=4, param_scan_axis=1)
+    mapping = PARAM_MAPPING["kimi-k3"](kimi_k3_dict, mt_cfg, scan_layers=True)
+    hooks = HOOK_FNS["kimi-k3"](kimi_k3_dict, mt_cfg, scan_layers=True, saving_to_hf=False)
+    layer_ids = {int(m.group(1)) for k in mapping for m in [re.search(r"-decoder-layers_(\d+)-", k)] if m}
+    self.assertEqual(layer_ids, {0, 1, 2, 3, 92})
+    hf = "language_model.model.layers"
+    self.assertEqual(
+        mapping["params-decoder-scanned_blocks-layers_3-self_attention-wq_a-kernel"],
+        [f"{hf}.{4 + 4 * b + 3}.self_attn.q_a_proj.weight" for b in range(22)],
+    )
+    self.assertEqual(
+        mapping["MoEBiasVar-decoder-scanned_blocks-layers_0-mlp-routed_experts-gate-bias"],
+        [f"{hf}.{4 + 4 * b}.block_sparse_moe.gate.e_score_correction_bias" for b in range(22)],
+    )
+    experts = mapping["params-decoder-scanned_blocks-layers_1-mlp-routed_experts-wo"]
+    self.assertEqual((len(experts), len(experts[0])), (kimi_k3_dict["num_experts"], 22))
+    self.assertEqual(experts[7][5], f"{hf}.{4 + 4 * 5 + 1}.block_sparse_moe.experts.7.w2.weight")
+    # Every scanned key has the per-layer hook of the layers it stacks.
+    self.assertEqual(
+        hooks["params-decoder-scanned_blocks-layers_0-self_attention-A_log"].__name__,
+        self.hooks["params-decoder-layers_4-self_attention-A_log"].__name__,
+    )
+
+    def in_layers(key, layers):
+      m = re.search(r"-decoder-layers_(\d+)-", key)
+      return bool(m) and int(m.group(1)) in layers
+
+    # The scanned region (layers 4..91) collapses onto the keys of its first cycle (4..7).
+    num_scanned = sum(in_layers(k, range(4, 92)) for k in self.mapping)
+    num_first_cycle = sum(in_layers(k, range(4, 8)) for k in self.mapping)
+    self.assertEqual(len(mapping), len(self.mapping) - num_scanned + num_first_cycle)
+    self.assertEqual(set(hooks) - set(mapping), set())
 
   def test_layer_layout_must_be_given(self):
     with self.assertRaisesRegex(ValueError, "full_attn_layers"):
