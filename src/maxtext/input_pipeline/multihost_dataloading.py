@@ -431,13 +431,13 @@ class RemoteIterator:
     shard_index, shard_count = _mesh_shard(dummy_array)
     num_files, num_patterns, files_digest, local_counts = self.get_ds_fn.count_local_shards(shard_index, shard_count)
     max_local = (num_files + shard_count - 1) // shard_count
-    row = np.full(4 + max_local, -1, dtype=np.int64)
-    row[:4] = (num_files, num_patterns, files_digest, shard_index)
-    row[4 : 4 + len(local_counts)] = local_counts
-    words = row.view(np.int32).reshape((4 + max_local, 2))
+    row = np.full(5 + max_local, -1, dtype=np.int64)
+    row[:5] = (num_files, num_patterns, files_digest, shard_index, shard_count)
+    row[5 : 5 + len(local_counts)] = local_counts
+    words = row.view(np.int32).reshape((5 + max_local, 2))
     devices = list(dummy_array.sharding.addressable_devices)
     shards = jax.device_put([words[None, :, :] for _ in devices], devices)
-    shape = (*dummy_array.shape, 4 + max_local, 2)
+    shape = (*dummy_array.shape, 5 + max_local, 2)
     return jax.make_array_from_single_device_arrays(shape, dummy_array.sharding, shards)
 
   def build(self, dummy_array, counts_array: jax.Array | None = None):
@@ -599,7 +599,10 @@ class RemoteIteratorWrapper:
     num_patterns = int(rows[0, 1])
     if not (np.all(rows[:, 0] == num_files) and np.all(rows[:, 2] == rows[0, 2])):
       raise ValueError("Colocated hosts resolved inconsistent shard file lists.")
-    shard_count = len({device.process_index for device in self.dummy_array.sharding.device_set})
+    # The hosts report the host count, because a Pathways controller sees every device as process 0.
+    shard_count = int(rows[0, 4])
+    if np.any(rows[:, 4] != shard_count):
+      raise ValueError(f"Colocated hosts reported different host counts: {sorted(set(rows[:, 4].tolist()))}.")
     hosts = {int(host) for host in rows[:, 3]}
     if hosts != set(range(shard_count)):
       raise ValueError(f"Expected shard counts from {shard_count} colocated hosts, got {sorted(hosts)}.")
@@ -611,7 +614,7 @@ class RemoteIteratorWrapper:
         continue
       seen_hosts.add(host)
       expected = len(range(host, num_files, shard_count))
-      counts[host::shard_count] = row[4 : 4 + expected]
+      counts[host::shard_count] = row[5 : 5 + expected]
     if np.any(counts < 0):
       raise ValueError("Failed to collect record counts for all shards across colocated hosts.")
     if num_files > 0:

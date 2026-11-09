@@ -126,7 +126,7 @@ def _fake_mesh_array(mesh_processes, local_process, value=0):
       device_set=set(devices),
       addressable_devices={d for d in devices if d.process_index == local_process},
   )
-  return mock.Mock(sharding=sharding, addressable_data=lambda unused_index: np.array(value))
+  return mock.Mock(sharding=sharding, shape=(len(devices),), addressable_data=lambda unused_index: np.array(value))
 
 
 def _get_test_mesh_shapes_named():
@@ -389,16 +389,17 @@ class MultihostDataloadingTest(parameterized.TestCase):
   def test_exchange_shard_counts_combines_multi_host_slices_and_detects_mismatch(self):
     wrapper = multihost_dataloading.RemoteIteratorWrapper.__new__(multihost_dataloading.RemoteIteratorWrapper)
     wrapper.cpu_mesh = Mesh(np.array(jax.devices()[:1]), ("x",))
-    wrapper.dummy_array = _fake_mesh_array([8, 9, 10], local_process=8)
+    # A Pathways controller sees every device of the mesh as process 0.
+    wrapper.dummy_array = _fake_mesh_array([0, 0, 0], local_process=0)
     wrapper.local_iterator = mock.Mock()
 
     # 3 colocated hosts (4 CPU devices per host = 12 rows) counting 5 shards: [10, 20, 30, 40, 50].
     host_rows = [
-        [5, 2, 12345, 0, 10, 40],
-        [5, 2, 12345, 1, 20, 50],
-        [5, 2, 12345, 2, 30, -1],
+        [5, 2, 12345, 0, 3, 10, 40],
+        [5, 2, 12345, 1, 3, 20, 50],
+        [5, 2, 12345, 2, 3, 30, -1],
     ]
-    raw = np.repeat(np.array(host_rows, dtype=np.int64), 4, axis=0).view(np.int32).reshape((12, 6, 2))
+    raw = np.repeat(np.array(host_rows, dtype=np.int64), 4, axis=0).view(np.int32).reshape((12, 7, 2))
     wrapper.local_iterator.count_shards.return_value = raw
     counts_array = wrapper._exchange_shard_counts()
 
@@ -422,16 +423,77 @@ class MultihostDataloadingTest(parameterized.TestCase):
     remote_it.build(_fake_mesh_array([8, 9, 10], local_process=9), counts_array)
     self.assertEqual(received, [[10, 20, 30, 40, 50]])
 
-    missing_host = np.array(host_rows[:2], dtype=np.int64).view(np.int32).reshape((2, 6, 2))
+    missing_host = np.array(host_rows[:2], dtype=np.int64).view(np.int32).reshape((2, 7, 2))
     wrapper.local_iterator.count_shards.return_value = missing_host
     with self.assertRaisesRegex(ValueError, "Expected shard counts from 3 colocated hosts"):
       wrapper._exchange_shard_counts()
 
-    wrapper.dummy_array = _fake_mesh_array([8, 9], local_process=8)
-    bad_rows = np.array([[5, 1, 12345, 0, 10], [5, 1, 99999, 1, 20]], dtype=np.int64).view(np.int32).reshape((2, 5, 2))
-    wrapper.local_iterator.count_shards.return_value = bad_rows
+    mixed_counts = np.array([[5, 1, 12345, 0, 2, 10, 30], [5, 1, 12345, 1, 3, 20, 40]], dtype=np.int64)
+    wrapper.local_iterator.count_shards.return_value = mixed_counts.view(np.int32).reshape((2, 7, 2))
+    with self.assertRaisesRegex(ValueError, "different host counts"):
+      wrapper._exchange_shard_counts()
+
+    bad_rows = np.array([[5, 1, 12345, 0, 2, 10], [5, 1, 99999, 1, 2, 20]], dtype=np.int64)
+    wrapper.local_iterator.count_shards.return_value = bad_rows.view(np.int32).reshape((2, 6, 2))
     with self.assertRaisesRegex(ValueError, "inconsistent shard file lists"):
       wrapper._exchange_shard_counts()
+
+  def test_shard_counts_round_trip_with_pathways_controller(self):
+    """Hosts count their shards in `count_shards` and the controller combines them, though it sees one process."""
+    file_counts = [10, 20, 30, 40, 50]
+
+    class _HostLoader:
+
+      def __init__(self):
+        self.received = []
+
+      def count_local_shards(self, shard_index, shard_count):
+        return len(file_counts), 1, 12345, file_counts[shard_index::shard_count]
+
+      def set_shard_counts(self, counts):
+        self.received.append(counts)
+
+      def __call__(self, **_kwargs):
+        return MockElasticDataloader(4)
+
+    mesh_processes = [8, 9, 10]
+    loaders = [_HostLoader() for _ in mesh_processes]
+    remote_iterators = [
+        multihost_dataloading.RemoteIterator(
+            get_ds_fn=loader,
+            preprocessing_fn=lambda dataset, shard_index, shard_count: dataset,
+            global_shape=(12, 1),
+            checkpoint_path="",
+            elastic=True,
+        )
+        for loader in loaders
+    ]
+    # Each host puts its row on its 4 CPU devices; the controller reads the rows of all hosts as one array.
+    with (
+        mock.patch.object(jax, "device_put", lambda arrays, devices: arrays),
+        mock.patch.object(
+            jax, "make_array_from_single_device_arrays", lambda shape, sharding, arrays: np.concatenate(arrays)
+        ),
+    ):
+      raw = np.concatenate(
+          [
+              remote_it.count_shards(_fake_mesh_array(mesh_processes, local_process=process))
+              for remote_it, process in zip(remote_iterators, mesh_processes)
+          ]
+      )
+
+    wrapper = multihost_dataloading.RemoteIteratorWrapper.__new__(multihost_dataloading.RemoteIteratorWrapper)
+    wrapper.cpu_mesh = Mesh(np.array(jax.devices()[:1]), ("x",))
+    # A Pathways controller sees every device of the mesh as process 0.
+    wrapper.dummy_array = _fake_mesh_array([0, 0, 0], local_process=0)
+    wrapper.local_iterator = mock.Mock()
+    wrapper.local_iterator.count_shards.return_value = raw
+    counts_array = wrapper._exchange_shard_counts()
+
+    for remote_it, process in zip(remote_iterators, mesh_processes):
+      remote_it.build(_fake_mesh_array(mesh_processes, local_process=process), counts_array)
+    self.assertEqual([loader.received for loader in loaders], [[file_counts]] * len(mesh_processes))
+    self.assertEqual([(it.shard_index, it.shard_count) for it in remote_iterators], [(0, 3), (1, 3), (2, 3)])
 
   def test_singleton_object_store_cleanup_preserves_mtc_objects(self):
     """Verifies that RemoteIterator initialization preserves MTC objects in SINGLETON_OBJECT_STORE."""
