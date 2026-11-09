@@ -34,6 +34,7 @@ EXCLUDED_PATH_PREFIXES = (
     "tests/",
     ".github/",
     ".gemini/",
+    ".agents/",
     "src/maxtext/training_engine/",
     "src/maxtext/experimental/",
     "experimental/",
@@ -45,6 +46,7 @@ EXCLUDED_PATH_PREFIXES = (
 EXCLUDED_FILES = (
     "pytest.ini",
     "README.md",
+    "AGENTS.md",
     "docs/conf.py",
     "docs/release_notes.md",
     "src/maxtext/version.py",
