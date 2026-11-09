@@ -13,3 +13,5 @@ max_target_length: 1024
 dataset_type: "synthetic"
 steps: 10
 max_segments_per_seq: 32
+enable_goodput_recording: false
+monitor_goodput: false

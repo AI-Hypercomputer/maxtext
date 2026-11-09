@@ -1337,9 +1337,9 @@ abort_on_nan_loss: true # Check for NaN and abort if found in training loss
 abort_on_inf_loss: true # Check for Inf and abort if found in training loss
 
 # Goodput parameters
-enable_goodput_recording: false
+enable_goodput_recording: true
 goodput_job_name: ""
-monitor_goodput: false
+monitor_goodput: true
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: false
 monitor_step_time_deviation: true

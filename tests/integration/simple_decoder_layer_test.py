@@ -39,6 +39,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
             "decoder_block=simple",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
+            "monitor_goodput=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "steps=3",
         ]
@@ -56,6 +57,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
             "decoder_block=simple_mlp",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
+            "monitor_goodput=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "steps=3",
         ]
