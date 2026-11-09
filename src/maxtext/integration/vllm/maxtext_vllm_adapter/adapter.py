@@ -510,6 +510,51 @@ class MaxTextForCausalLM(nnx.Module):
     return positions, 0
 
 
+_HYBRID_GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
+
+
+def _is_hybrid_gdn_hf_config(hf_text_config) -> bool:
+  """Returns True if the HF text config describes a hybrid attention + GDN model."""
+  layer_types = list(getattr(hf_text_config, "layer_types", None) or [])
+  model_type = str(getattr(hf_text_config, "model_type", ""))
+  return "linear_attention" in layer_types or model_type.startswith(_HYBRID_GDN_MODEL_TYPE_PREFIXES)
+
+
+def register_hybrid_gdn_vllm_config():
+  """Registers a vLLM config hook so MaxTextForCausalLM hybrid GDN models get mamba cache settings.
+
+  vLLM deprecated `--mamba-cache-mode` (it "has no effect", vllm#60043):
+  `CacheConfig.mamba_cache_mode` / `mamba_block_size` are now derived from
+  `enable_prefix_caching` by `HybridAttentionMambaModelConfig`, which vLLM only
+  runs for architectures it recognizes as hybrid. `MaxTextForCausalLM` wraps
+  Qwen3.5 / Qwen3-Next GDN hybrids but is not flagged hybrid, so with prefix
+  caching on `mamba_cache_mode` stays "none", `patch_kv_cache_manager` builds a
+  `MambaSpec` with mode "none", and vLLM's `MambaManager` asserts
+  "Mamba prefix caching requires mamba_cache_mode='align'".
+
+  This runs vLLM's own hybrid hook for these models, so prefix caching gives
+  "align" with `mamba_block_size=block_size`, otherwise "none".
+  """
+  # pylint: disable=import-outside-toplevel
+  try:
+    from vllm.model_executor.models import config as vllm_model_config
+  except ImportError as e:
+    # Gracefully handle missing vLLM in standard JAX environments (e.g. unit tests on CPU).
+    max_logging.log(f"Skipping hybrid GDN vLLM config hook (vllm not installed): {e}")
+    return
+
+  class MaxTextHybridGdnConfig(vllm_model_config.VerifyAndUpdateConfig):
+    """vLLM config hook for MaxTextForCausalLM wrapping hybrid GDN models."""
+
+    @staticmethod
+    def verify_and_update_config(vllm_config) -> None:
+      if _is_hybrid_gdn_hf_config(vllm_config.model_config.hf_text_config):
+        vllm_model_config.HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+
+  vllm_model_config.MODELS_CONFIG_MAP["MaxTextForCausalLM"] = MaxTextHybridGdnConfig
+  max_logging.log("Registered vLLM config hook for MaxTextForCausalLM hybrid GDN models.")
+
+
 # Monkey-patch KVCacheManager.get_kv_cache_spec to support GDN/Mamba layers in Pure JAX path.
 def patch_kv_cache_manager():
   """Monkey-patches KVCacheManager to support hybrid Attention + GDN/Mamba models."""

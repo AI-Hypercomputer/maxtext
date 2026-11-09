@@ -82,9 +82,20 @@ from maxtext.utils.sharding import (
 )
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
-from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
+
+
+def _tokamax_gpu_flash_attention():
+  """Returns tokamax's Triton GPU flash attention op.
+
+  Imported lazily: its module imports `jax_triton` at import time, which is not installed on TPU.
+  """
+  from tokamax._src.ops.attention.triton import TritonFlashAttention  # pylint: disable=import-outside-toplevel
+
+  return TritonFlashAttention()
+
+
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
@@ -1814,7 +1825,7 @@ class AttentionOp(nnx.Module):
           if decoder_segment_ids is not None:
             seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
             mask = mask & tokamax_attention_base.Mask(seg_mask[:, None, :, :])
-          gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+          gpu_flash_attn = _tokamax_gpu_flash_attention()
           out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
@@ -1890,7 +1901,7 @@ class AttentionOp(nnx.Module):
       mask = tokamax_attention_base.Mask(
           k_end=lengths[..., None],
       )
-      gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+      gpu_flash_attn = _tokamax_gpu_flash_attention()
       local_out, (local_max, local_sum) = gpu_flash_attn(
           q,
           k,
