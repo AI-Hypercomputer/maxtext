@@ -1960,6 +1960,14 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_tgmm_v2_sub_window_steps: bool = Field(
+      False,
+      description=(
+          "Run the tgmm_v2 (MoE weight-gradient) kernel with several tile_m-row"
+          " accumulation sub-windows per grid step and deeper DMA buffering"
+          " when VMEM allows. Same result; requires use_gmm_v2=true."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):

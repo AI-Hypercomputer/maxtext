@@ -333,6 +333,7 @@ def tgmm_inner_kernel(
     *,
     cfgs: gmm_v2.GmmConfigs,
     num_gm: jax.Array,
+    num_sub: int = 1,
 ):
   """Inner kernel for TGMM computation.
 
@@ -351,6 +352,10 @@ def tgmm_inner_kernel(
     metadata_ref: Contains metadata like group offsets and group IDs.
     cfgs: GmmConfigs object containing kernel configurations.
     num_gm: Total number of group-major tiles along grid axis 2.
+    num_sub: Number of tile_m-row accumulation sub-windows per grid step. With
+      num_sub > 1 the block covers num_sub * tile_m rows and each sub-window
+      gets its own mask, dot and epilogue, in the same order as num_sub separate
+      grid steps would (see _tgmm_step_config).
   """
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
@@ -377,7 +382,7 @@ def tgmm_inner_kernel(
     def load_lhs():
       return tiled_lhs_ref[...]
 
-    lhs_shape = tiled_lhs_ref.shape
+    lhs_shape = tiled_lhs_ref.shape if num_sub == 1 else (tile_m, tiled_lhs_ref.shape[-1])
   if cfgs.rhs_cfgs.is_3d:
     rhs_3d_ref = tiled_rhs_ref.value
     if _window(cfgs.tiles.tile_n, cfgs.dims.size_n):
@@ -392,33 +397,68 @@ def tgmm_inner_kernel(
 
     rhs_shape = (tile_m, cfgs.tiles.tile_n)
   else:
+    # 2D view of the RHS block for the tile_m-row sub-window loads.
+    rhs_2d = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
     tiled_rhs_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
 
     def load_rhs():
       return tiled_rhs_ref[...]  # pyrefly: ignore[bad-index]
 
     rhs_shape = tiled_rhs_ref.shape  # pyrefly: ignore[missing-attribute]
+    if num_sub > 1:
+      rhs_shape = (tile_m, rhs_2d.shape[-1])
+  if num_sub > 1:
+    assert not (cfgs.lhs_cfgs.is_3d or cfgs.rhs_cfgs.is_3d)
   gm_id = step.index[2]
 
-  def _matmul(is_new_group: bool, is_group_changing: bool):
+  def _matmul(
+      is_new_group: bool,
+      is_group_changing: bool,
+      row0=None,
+      rows=tile_m,
+      lower: bool = True,
+      upper: bool = True,
+  ):
 
     # Mask out invalid rows in the LHS/RHS tiles.
     # The DMA loads tiles aligned to sublane boundaries, but the actual group
-    # data may not start/end on those boundaries.
+    # data may not start/end on those boundaries. lower/upper=False drop a
+    # bound the caller knows holds for every row of the window.
     m_start = metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
     m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
     m_start_local = m_start - m_offset
     m_end_local = m_end - m_offset
-    lhs_iota = lax.broadcasted_iota(jnp.int32, lhs_shape, 0)
-    lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
-    lhs_masked = jnp.where(lhs_mask, load_lhs(), 0)
+    w_lhs_shape, w_rhs_shape = lhs_shape, rhs_shape
+    if row0 is not None:
+      # Sub-window rows [row0, row0 + rows) of the block, in its coordinates.
+      m_start_local -= row0
+      m_end_local -= row0
+      w_lhs_shape = (rows, lhs_shape[-1])
+      w_rhs_shape = (rows, rhs_shape[-1])
+      lhs_tile = tiled_lhs_ref[pl.ds(row0, rows), :]
+      rhs_tile = rhs_2d[pl.ds(row0, rows), :]
+    else:
+      lhs_tile = load_lhs()
+      rhs_tile = load_rhs()
+
+    def mask_rows(tile, shape):
+      if not (lower or upper):
+        return tile
+      iota = lax.broadcasted_iota(jnp.int32, (shape[0], 1) if row0 is not None else shape, 0)
+      if lower and upper:
+        mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
+      elif lower:
+        mask = m_start_local <= iota
+      else:
+        mask = iota < m_end_local
+      return jnp.where(mask, tile, 0)
+
+    lhs_masked = mask_rows(lhs_tile, w_lhs_shape)
     # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
     # But without masking both, we sometimes see the result contain NaNs so we
     # decide to mask both to be safe.
-    rhs_iota = lax.broadcasted_iota(jnp.int32, rhs_shape, 0)
-    rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-    rhs_masked = jnp.where(rhs_mask, load_rhs(), 0)
+    rhs_masked = mask_rows(rhs_tile, w_rhs_shape)
 
     acc = jax.lax.dot_general(
         lhs_masked,
@@ -441,20 +481,20 @@ def tgmm_inner_kernel(
       acc_ref[...] = acc
 
   @jax.named_scope("matmul_new_group_and_changing")
-  def matmul_new_group_and_changing():
-    _matmul(is_new_group=True, is_group_changing=True)
+  def matmul_new_group_and_changing(row0=None):
+    _matmul(is_new_group=True, is_group_changing=True, row0=row0)
 
   @jax.named_scope("matmul_new_group")
-  def matmul_new_group():
-    _matmul(is_new_group=True, is_group_changing=False)
+  def matmul_new_group(row0=None):
+    _matmul(is_new_group=True, is_group_changing=False, row0=row0)
 
   @jax.named_scope("matmul")
-  def matmul():
-    _matmul(is_new_group=False, is_group_changing=False)
+  def matmul(row0=None):
+    _matmul(is_new_group=False, is_group_changing=False, row0=row0)
 
   @jax.named_scope("matmul_group_changing")
-  def matmul_group_changing():
-    _matmul(is_new_group=False, is_group_changing=True)
+  def matmul_group_changing(row0=None):
+    _matmul(is_new_group=False, is_group_changing=True, row0=row0)
 
   prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
   is_first_gm = gm_id == 0
@@ -467,26 +507,96 @@ def tgmm_inner_kernel(
   cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
   group_is_changing = jnp.logical_or(is_last_gm, cur_group_id != next_group_id)
 
-  lax.cond(
-      new_group,
-      lambda: lax.cond(
-          group_is_changing,
-          # gm_id is the only one in its group =>
-          # group_size + local_offset ≤ tile_m.
-          matmul_new_group_and_changing,
-          # matmul_new_group: first gm_id of a multi-gm group =>
-          # group spans ≥ 2 gm_ids.
-          matmul_new_group,
-      ),
-      lambda: lax.cond(
-          group_is_changing,
-          # matmul_group_changing: last gm_id of a multi-gm group.
-          matmul_group_changing,
-          # matmul: middle gm_id => group spans ≥ 3 gm_ids =>
-          # group_size + local_offset > 2*tile_m.
-          matmul,
-      ),
-  )
+  if num_sub == 1:
+    lax.cond(
+        new_group,
+        lambda: lax.cond(
+            group_is_changing,
+            # gm_id is the only one in its group =>
+            # group_size + local_offset ≤ tile_m.
+            matmul_new_group_and_changing,
+            # matmul_new_group: first gm_id of a multi-gm group =>
+            # group spans ≥ 2 gm_ids.
+            matmul_new_group,
+        ),
+        lambda: lax.cond(
+            group_is_changing,
+            # matmul_group_changing: last gm_id of a multi-gm group.
+            matmul_group_changing,
+            # matmul: middle gm_id => group spans ≥ 3 gm_ids =>
+            # group_size + local_offset > 2*tile_m.
+            matmul,
+        ),
+    )
+    return
+
+  # The block's rows start at the sublane-aligned m_offset and its sub-windows
+  # are the tile_m-row windows fill_metadata would cut at tile_m: the first
+  # sub-window of a new group stores, the last one of a changing group writes
+  # the output, the rest accumulate in acc_ref. Only non-empty sub-windows run.
+  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+  n_sub = pl.cdiv(m_end - m_offset, tile_m)
+  # A group's last sub-window often holds only a short tail. When its valid
+  # rows fit in the first half_m rows, contract over those rows only: the rest
+  # are masked to zero on both operands and add only zero products, so the
+  # result is unchanged. half_m stays >= 256 (the MXU depth; shorter
+  # contractions cost the same).
+  half_m = tile_m // 2
+  use_half = half_m >= 256 and half_m % cfgs.dims.size_lhs_sublane == 0
+
+  # fill_metadata cuts steps at num_sub * tile_m from the group's start, so a
+  # continuation step starts sublane-aligned (m_start_local == 0) and a step
+  # that does not end its group is exactly num_sub * tile_m rows. Hence only a
+  # group's first sub-window can hold rows below m_start and only its last one
+  # rows at or past m_end; the other bounds hold for every (DMA'd, in-group)
+  # row and are not masked.
+  def last_window(is_new_group, row0):
+    def full():
+      _matmul(is_new_group, True, row0, lower=is_new_group)
+
+    if not use_half:
+      full()
+      return
+    lax.cond(
+        m_end - m_offset - row0 <= half_m,
+        lambda: _matmul(is_new_group, True, row0, rows=half_m, lower=is_new_group),
+        full,
+    )
+
+  def later_window(row0, is_last):
+    lax.cond(
+        is_last,
+        lambda: last_window(False, row0),
+        lambda: _matmul(False, False, row0, lower=False, upper=False),
+    )
+
+  # Sub-windows are unrolled with static row offsets; window i runs only when
+  # i < n_sub, and each window's dot stays inside its own lax.cond branch (a
+  # straight-line chain of window dots reorders the f32 accumulation). Window 0
+  # always runs (a step is never empty) and is the only one that can start a
+  # new group.
+  for i in range(num_sub):
+    row0 = i * tile_m
+    last = jnp.logical_and(group_is_changing, n_sub == i + 1)
+    if i == 0:
+      lax.cond(
+          new_group,
+          functools.partial(
+              lax.cond,
+              last,
+              lambda: last_window(True, 0),
+              lambda: _matmul(True, False, 0, upper=False),
+          ),
+          functools.partial(later_window, 0, last),
+      )
+    else:
+      lax.cond(
+          i < n_sub,
+          functools.partial(later_window, row0, last),
+          lambda: None,
+      )
 
 
 class TgmmIndexMaps:
@@ -532,8 +642,64 @@ class TgmmIndexMaps:
     return (group_id, k_id, n_id)
 
 
+# 2D tgmm (sub-windows per grid step, pipeline depth of the lhs, rhs and out
+# blocks) candidates, most preferred first; the first that fits VMEM is used.
+# On v7x with tile_m 512 and ~1024-row groups: 3 sub-windows (one step per
+# group) cut tgmm 16% and 2 cut 5% at depth 2 (4 tied 3); depth 3 alone cut 15%
+# (depth 4 flat); 3 sub-windows at depth 3 cut 17.5%, 2 at depth 3 16%.
+_TGMM_STEP_CANDIDATES = ((3, 3), (2, 3), (3, 2), (2, 2), (1, 3))
+
+
+def _tgmm_vmem_bytes(
+    cfgs: gmm_v2.GmmConfigs,
+    num_sub: int,
+    num_buffers: int,
+    target_zero_ref_bytes: int,
+) -> int:
+  """VMEM estimate of 2D tgmm with num_sub * tile_m-row blocks, num_buffers deep.
+
+  Mirrors calculate_tgmm_tiling's budget. The lhs transpose cache is one extra
+  buffer of a single tile_m sub-window, since each dot covers one sub-window.
+  """
+  tiles = cfgs.tiles
+  step_m = num_sub * tiles.tile_m
+  out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+  lhs_bytes = jnp.dtype(cfgs.lhs_cfgs.dtype).itemsize
+  ps_bytes = tiles.tile_k * tiles.tile_n * 2 * out_bytes if cfgs.has_partial_sum else 0
+  return (
+      tiles.tile_k * tiles.tile_n * (jnp.dtype(cfgs.acc_dtype).itemsize + num_buffers * out_bytes)
+      + ps_bytes
+      + (num_buffers * step_m + tiles.tile_m) * tiles.tile_k * lhs_bytes
+      + num_buffers * step_m * tiles.tile_n * jnp.dtype(cfgs.rhs_cfgs.dtype).itemsize
+      + target_zero_ref_bytes
+  )
+
+
+def _tgmm_step_config(cfgs: gmm_v2.GmmConfigs, vmem_limit_bytes: int, target_zero_ref_bytes: int) -> Tuple[int, int]:
+  """(num_sub, num_buffers): accumulation sub-windows per grid step and depth.
+
+  Several tile_m-row sub-windows per step cut the grid steps (DMA issue/wait,
+  index-map reads, pipeline bookkeeping) while keeping each dot and the f32
+  accumulation order of one step per tile_m window, so the result is unchanged.
+  Deeper buffering fetches inputs further ahead and defers a finished group's
+  writeback, hiding the DMA burst at group changes. 3D lhs/rhs keep (1, 2).
+  """
+  dims, tiles = cfgs.dims, cfgs.tiles
+  if cfgs.lhs_cfgs.is_3d or cfgs.rhs_cfgs.is_3d:
+    return 1, 2
+  sub_ok = tiles.tile_m % dims.size_lhs_sublane == 0 and dims.size_m > tiles.tile_m
+  for num_sub, num_buffers in _TGMM_STEP_CANDIDATES:
+    if num_sub > 1 and not (sub_ok and dims.size_m > (num_sub - 1) * tiles.tile_m):
+      continue
+    if _tgmm_vmem_bytes(cfgs, num_sub, num_buffers, target_zero_ref_bytes) <= vmem_limit_bytes:
+      return num_sub, num_buffers
+  return 1, 2
+
+
 def generate_tgmm_block_specs(
-    metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs
+    metadata_ref: gmm_v2.MetadataRef,
+    cfgs: gmm_v2.GmmConfigs,
+    num_buffers: int = 2,
 ) -> Tuple[Tuple[pl.BlockSpec, OperandRef, pl.BlockSpec | None], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
   index_map = TgmmIndexMaps(metadata_ref, cfgs)
@@ -544,18 +710,27 @@ def generate_tgmm_block_specs(
   bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
   num_lanes = pltpu.get_tpu_info().num_lanes
   sublane = cfgs.dims.size_lhs_sublane
+  # num_buffers > 2 (2D lhs/rhs only): deep-buffer lhs, rhs and out so inputs
+  # are fetched num_buffers - 1 grid steps ahead and a finished group's
+  # writeback is awaited that much later; the DMA burst at a group change (next
+  # group's inputs plus the [tile_k, tile_n] writeback) then overlaps the
+  # following visits instead of stalling the MXU.
+  pipeline_mode = None
+  if num_buffers != 2:
+    assert not (cfgs.lhs_cfgs.is_3d or cfgs.rhs_cfgs.is_3d)
+    pipeline_mode = pl.Buffered(num_buffers)
   if cfgs.lhs_cfgs.is_3d:
     lhs_tile = cfgs.dims.size_k if _window(cfgs.tiles.tile_k, cfgs.dims.size_k) else cfgs.tiles.tile_k
     lhs_block_shape = (bounded_slice_gm, sublane, lhs_tile // num_lanes, num_lanes)
   else:
     lhs_block_shape = (bounded_slice_gm, sublane, cfgs.tiles.tile_k)
-  lhs_block_spec = pl.BlockSpec(lhs_block_shape, index_map.lhs_index_map)
+  lhs_block_spec = pl.BlockSpec(lhs_block_shape, index_map.lhs_index_map, pipeline_mode=pipeline_mode)
   if cfgs.rhs_cfgs.is_3d:
     rhs_tile = cfgs.dims.size_n if _window(cfgs.tiles.tile_n, cfgs.dims.size_n) else cfgs.tiles.tile_n
     rhs_block_shape = (bounded_slice_gm, sublane, rhs_tile // num_lanes, num_lanes)
   else:
     rhs_block_shape = (bounded_slice_gm, sublane, cfgs.tiles.tile_n)
-  rhs_block_spec = pl.BlockSpec(rhs_block_shape, index_map.rhs_index_map)
+  rhs_block_spec = pl.BlockSpec(rhs_block_shape, index_map.rhs_index_map, pipeline_mode=pipeline_mode)
   rhs_scale_block_spec = None
   if cfgs.rhs_cfgs.has_scale:
     rhs_scale_block_spec = pl.BlockSpec(
@@ -566,6 +741,7 @@ def generate_tgmm_block_specs(
   out_block_spec = pl.BlockSpec(
       (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
+      pipeline_mode=pipeline_mode,
   )
   ps_block_spec = None
   if cfgs.has_partial_sum:
@@ -651,6 +827,8 @@ def tgmm_kernel_main(
     semaphore_ref: jax.Array,  # [1]
     *,
     cfgs,
+    num_sub: int = 1,
+    num_buffers: int = 2,
 ):
   """Main kernel function for TGMM computation.
 
@@ -666,6 +844,8 @@ def tgmm_kernel_main(
     zero_ref: Scratch buffer for zeroing empty groups' output.
     semaphore_ref: DMA semaphore for the zeroing copies.
     cfgs: GmmConfigs object containing kernel configurations.
+    num_sub: Accumulation sub-windows of tiles.tile_m rows per grid step.
+    num_buffers: Pipeline depth of the lhs, rhs and out blocks.
   """
   num_groups_to_zero = 0
   if not cfgs.has_partial_sum:
@@ -679,16 +859,24 @@ def tgmm_kernel_main(
 
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
+  # Grid steps cover num_sub * tile_m rows; tgmm_inner_kernel splits each step
+  # back into the tile_m-row accumulation windows.
+  step_cfgs = cfgs
+  if num_sub > 1:
+    step_cfgs = dataclasses.replace(
+        cfgs,
+        tiles=dataclasses.replace(cfgs.tiles, tile_m=num_sub * cfgs.tiles.tile_m),
+    )
   num_gm = gmm_v2.fill_metadata(
       lhs_group_sizes_ref,
       group_offset_ref,
       metadata_ref,
-      cfgs=cfgs,
+      cfgs=step_cfgs,
   )
 
-  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, step_cfgs, num_buffers)
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm, num_sub=num_sub),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
@@ -749,6 +937,7 @@ def validate_tgmm_inputs(
         "precision",
         "preferred_element_type",
         "acc_dtype",
+        "sub_window_steps",
     ],
 )
 def tgmm_v2(
@@ -765,6 +954,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    sub_window_steps: bool = False,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -785,6 +975,9 @@ def tgmm_v2(
     precision: Unused. Exists for compatibility reasons.
     preferred_element_type: Optional jnp.dtype for the output matrix.
     acc_dtype: Optional jnp.dtype for the accumulator.
+    sub_window_steps: Whether to run 2D lhs/rhs with several tile_m-row
+      accumulation sub-windows per grid step and deeper DMA buffering when VMEM
+      allows (see _tgmm_step_config). Same result.
 
   Returns:
     The result of the transposed grouped matrix multiplication, with shape
@@ -880,8 +1073,16 @@ def tgmm_v2(
     partial_sum_idx = sum(1 for x in leaves if x is not None)
     input_output_aliases = {partial_sum_idx: 0}
 
+  num_sub, num_buffers = 1, 2
+  if sub_window_steps:
+    num_sub, num_buffers = _tgmm_step_config(cfgs, vmem_limit_bytes, target_zero_ref_bytes)
   raw_out = pl.pallas_call(
-      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      functools.partial(
+          tgmm_kernel_main,
+          cfgs=cfgs,
+          num_sub=num_sub,
+          num_buffers=num_buffers,
+      ),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
