@@ -64,6 +64,9 @@ READ_CHUNK_BYTES = safetensors_reader.READ_CHUNK_BYTES
 READ_THREADS = safetensors_reader.READ_THREADS
 MIN_PIECE_BYTES = safetensors_reader.MIN_PIECE_BYTES
 
+# Writes dispatched before waiting for them to finish (see `load_hf_params_streaming`).
+_MAX_WRITES_IN_FLIGHT = 256
+
 _LOAD_MESH_AXES = ("rows", "copies")
 # "model.layers.12.self_attn.q_proj.weight" -> ("model.", "12").
 _LAYER_KEY = re.compile(r"^(.*?\.)?layers\.(\d+)\.")
@@ -449,7 +452,9 @@ def _check_sources(plan: LoadPlan, hf_metadata: dict):
 
 
 def _is_float8(dtype) -> bool:
-  return np.dtype(dtype).name.startswith("float8")
+  """FP8 weights. E8M0 holds power-of-two block scales, which cast to a wider dtype exactly."""
+  name = np.dtype(dtype).name
+  return name.startswith("float8") and "e8m0" not in name
 
 
 def _check_float8_sources(plan: LoadPlan, hf_metadata: dict):
@@ -474,19 +479,42 @@ def _check_float8_sources(plan: LoadPlan, hf_metadata: dict):
     )
 
 
+def _padded_rows(write: _Write, meta: Any, hf_metadata: dict) -> int:
+  """Dim 0 to read an HF tensor with: the target's, if the hooks only zero-pad its rows (else the file's).
+
+  Of the HF tensors one hook combines, only those with as many rows as the first (e.g. a weight and its
+  1x32 scales) are padded; a 32x32 block scale has fewer rows and is read as stored.
+  """
+  hooks = write.target.hooks if isinstance(write.target.hooks, (list, tuple)) else [write.target.hooks]
+  if not meta.shape:
+    return 0
+  if not any(getattr(h, "pads_rows_to_target", False) for h in hooks):
+    return meta.shape[0]
+  if meta.shape[0] != hf_metadata[write.hf_keys[0]].shape[0]:
+    return meta.shape[0]
+  return max(meta.shape[0], write.target.hook_shape[0])
+
+
 def _load_request(call: list[_Write], hf_metadata: dict, min_bytes_to_split: int) -> dict:
   """The request that makes the reader read this call's HF tensors, split by rows."""
   request = {}
   for write in call:
     devices = _devices_of(write.target.sharding)
-    # HF tensors that one hook combines are loaded onto one mesh (see `shared_split_factor`).
+    # Request the file's own dtype: the reader never casts. Reading zero rows past the file's lets a
+    # dim 0 that shares few factors with the chip count (the DeepSeek-V4.1 engram tables) be split over
+    # every chip instead of a few, each holding a big piece.
+    metas = {}
+    for key in write.hf_keys:
+      meta = hf_metadata[key]
+      shape = (_padded_rows(write, meta, hf_metadata),) + tuple(meta.shape)[1:] if meta.shape else ()
+      metas[key] = jax.ShapeDtypeStruct(shape, meta.dtype)
+    # HF tensors that one hook combines are loaded onto one mesh (see `shared_split_factor`), from the
+    # shapes actually read.
     mesh_factor = None
     if len(write.hf_keys) > 1:
-      mesh_factor = shared_split_factor([hf_metadata[k] for k in write.hf_keys], len(devices), min_bytes_to_split)
-    for key in write.hf_keys:
+      mesh_factor = shared_split_factor(list(metas.values()), len(devices), min_bytes_to_split)
+    for key, meta in metas.items():
       if key not in request:
-        meta = hf_metadata[key]
-        # Request the file's own dtype: the reader never casts.
         sharding = choose_load_sharding(meta.shape, meta.dtype, devices, min_bytes_to_split, mesh_factor)
         request[key] = jax.ShapeDtypeStruct(meta.shape, meta.dtype, sharding=sharding)
   return request
@@ -658,8 +686,15 @@ def load_hf_params_streaming(
           future = prefetcher.submit(reader.fetch, requests[call_index + 1])
         hf_arrays = reader.unpack(fetched)
         del fetched
-        for write in call:
+        pending = set()  # Weights written since the last wait.
+        for i, write in enumerate(call):
           _apply_write(write, hf_arrays, results)
+          # Bound the asynchronously dispatched writes: each pending multi-host program holds host memory, and a
+          # read call can hold tens of thousands of HF tensors (e.g. DeepSeek-V4.1's 384 experts per layer).
+          pending.update(t.name for t in write.targets)
+          if (i + 1) % _MAX_WRITES_IN_FLIGHT == 0:
+            jax.block_until_ready([results[name] for name in pending])
+            pending.clear()
         # Finish this call's writes before dropping its HF tensors, so at most one
         # call (two with prefetch) of HF tensors is held in HBM.
         jax.block_until_ready([results[t.name] for write in call for t in write.targets])

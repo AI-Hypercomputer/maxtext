@@ -73,6 +73,7 @@ import collections
 import concurrent.futures
 import contextlib
 import functools
+import json
 import multiprocessing
 import os
 import random
@@ -150,13 +151,61 @@ def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
         raise
 
 
-def get_hf_config_and_mappings(maxtext_config):
-  """Gets HF config and parameter mapping based on the MaxText config."""
+def _hub_files_to_cache(fs, repo_id):
+  """The files of an HF Hub repo to copy to the GCS cache: the safetensors, and config.json if there is one.
+
+  config.json's `quantization_config` decides how the mappings read the tensors.
+  """
+  files = list(fs.glob(f"{repo_id}/*.safetensors"))
+  if fs.exists(f"{repo_id}/config.json"):
+    files.append(f"{repo_id}/config.json")
+  return files
+
+
+# `_checkpoint_quantization_config` result for a checkpoint whose config.json has no `quantization_config`.
+_NOT_QUANTIZED = "not quantized"
+
+
+def _checkpoint_quantization_config(path):
+  """The `quantization_config` in the checkpoint's own config.json.
+
+  Returns the dict (possibly empty), `_NOT_QUANTIZED` if config.json has none, or None if the checkpoint
+  has no config.json. Any other error reading it raises: every host reads config.json on its own, and a
+  host that fell back to the stock config would build different mappings than the others and hang them.
+  """
+  if not path:
+    return None
+  from etils import epath  # pylint: disable=import-outside-toplevel
+
+  config_path = epath.Path(path) / "config.json"
+  if not config_path.exists():
+    return None
+  config = json.loads(config_path.read_text())
+  for section in (config, config.get("text_config") or {}):
+    if isinstance(section.get("quantization_config"), dict):
+      return section["quantization_config"]
+  return _NOT_QUANTIZED
+
+
+def get_hf_config_and_mappings(maxtext_config, path=None):
+  """Gets HF config and parameter mapping based on the MaxText config.
+
+  If the checkpoint at `path` has a config.json, its `quantization_config` (or its absence) overrides the stock
+  config's, so mappings that dequantize on load follow the checkpoint actually being read.
+  """
   model_key = maxtext_config.model_name
   if "-Instruct" in model_key:
     model_key = model_key.replace("-Instruct", "")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
   hf_config_dict = hf_config_obj.to_dict()
+  quantization_config = _checkpoint_quantization_config(path)
+  if quantization_config == _NOT_QUANTIZED:
+    # Drop the stock config's: hooks read it with `config.get("quantization_config", {})`.
+    hf_config_dict.pop("quantization_config", None)
+    if isinstance(hf_config_dict.get("text_config"), dict):
+      hf_config_dict["text_config"].pop("quantization_config", None)
+  elif quantization_config is not None:
+    hf_config_dict["quantization_config"] = quantization_config
 
   param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](
       hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers
@@ -476,7 +525,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
         t_gcs_start = time.time()
         # Only host 0 calls the HF API: anonymous calls from every host of a large job are rate-limited (HTTP 429).
         fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
-        files = fs.glob(f"{repo_id}/*.safetensors")
+        files = _hub_files_to_cache(fs, repo_id)
 
         # List existing blobs to avoid spawning processes for already cached
         # files
@@ -533,7 +582,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
       raise ValueError("base_output_directory with gs:// prefix is required for " "huggingface downloads.")
 
   t_total = time.time()
-  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
+  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config, path)
   max_logging.log(f"[1/2] Mappings derived in {time.time() - t_total:.2f}s")
 
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params

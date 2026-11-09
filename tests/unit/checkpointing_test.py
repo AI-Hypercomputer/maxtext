@@ -14,6 +14,7 @@
 
 """Unit tests for the checkpointing components."""
 
+import json
 import os
 from typing import Any
 from unittest import mock
@@ -572,8 +573,76 @@ class TensorHandlingTest(parameterized.TestCase):
     self.assertEqual(result.sharding, target_leaf.sharding)
 
 
+class CheckpointQuantizationConfigTest(parameterized.TestCase):
+  """safetensors_dynamic takes `quantization_config` from the checkpoint's own config.json."""
+
+  def _write(self, config):
+    directory = self.create_tempdir().full_path
+    with open(os.path.join(directory, "config.json"), "w", encoding="utf-8") as f:
+      f.write(config if isinstance(config, str) else json.dumps(config))
+    return directory
+
+  @parameterized.named_parameters(
+      ("top_level", {"quantization_config": {"weight_block_size": [128, 128]}}, {"weight_block_size": [128, 128]}),
+      ("in_text_config", {"text_config": {"quantization_config": {"fmt": "e4m3"}}}, {"fmt": "e4m3"}),
+      ("explicit_empty", {"quantization_config": {}}, {}),
+      ("none", {"hidden_size": 8}, "not quantized"),
+      ("null", {"quantization_config": None}, "not quantized"),
+      ("null_text_config", {"text_config": None}, "not quantized"),
+  )
+  def test_reads_config_json(self, config, want):
+    got = load_dynamic._checkpoint_quantization_config(self._write(config))  # pylint: disable=protected-access
+    self.assertEqual(got, want)
+
+  def test_no_config_json_is_unknown(self):
+    self.assertIsNone(load_dynamic._checkpoint_quantization_config(self.create_tempdir().full_path))  # pylint: disable=protected-access
+
+  def test_unreadable_config_json_raises(self):
+    """A host must not quietly fall back to the stock config while the others read the checkpoint's."""
+    with self.assertRaises(json.JSONDecodeError):
+      load_dynamic._checkpoint_quantization_config(self._write("{not json"))  # pylint: disable=protected-access
+
+  def test_unquantized_checkpoint_drops_the_stock_config(self):
+    """Hooks read `config.get("quantization_config", {})`, so the key must go, not become None."""
+    seen = {}
+
+    def mapping(hf_config, maxtext_config, scan_layers=False):
+      del maxtext_config, scan_layers
+      seen["config"] = hf_config
+      return {}
+
+    def hooks(hf_config, maxtext_config, scan_layers=False, saving_to_hf=False):
+      del maxtext_config, scan_layers, saving_to_hf
+      block = hf_config.get("quantization_config", {}).get("weight_block_size", 128)
+      text_block = hf_config["text_config"].get("quantization_config", {}).get("weight_block_size", 128)
+      return {"block": block, "text_block": text_block}
+
+    stock = {"quantization_config": {"weight_block_size": [64, 64]}, "text_config": {"quantization_config": {}}}
+    model = "fake-model-for-quantization-config-test"
+    with (
+        mock.patch.dict(load_dynamic.HF_MODEL_CONFIGS, {model: mock.Mock(to_dict=lambda: json.loads(json.dumps(stock)))}),
+        mock.patch.dict(load_dynamic.param_mapping.PARAM_MAPPING, {model: mapping}),
+        mock.patch.dict(load_dynamic.param_mapping.HOOK_FNS, {model: hooks}),
+    ):
+      config = mock.Mock(model_name=model, scan_layers=True)
+      _, got = load_dynamic.get_hf_config_and_mappings(config, self._write({"hidden_size": 8}))
+      self.assertEqual(got, {"block": 128, "text_block": 128})
+      self.assertNotIn("quantization_config", seen["config"])
+      _, got = load_dynamic.get_hf_config_and_mappings(config, self.create_tempdir().full_path)
+      self.assertEqual(got["block"], [64, 64])  # No config.json: the stock config stays.
+
+
 class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
+
+  @parameterized.parameters(True, False)
+  def test_hub_cache_copies_config_json(self, has_config):
+    fs = mock.Mock()
+    fs.glob.return_value = ["org/model/model-1.safetensors", "org/model/model-2.safetensors"]
+    fs.exists.return_value = has_config
+    files = load_dynamic._hub_files_to_cache(fs, "org/model")  # pylint: disable=protected-access
+    want = ["org/model/model-1.safetensors", "org/model/model-2.safetensors"]
+    self.assertEqual(files, want + (["org/model/config.json"] if has_config else []))
 
   @mock.patch("huggingface_hub.HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
@@ -633,11 +702,13 @@ class LoadDynamicTest(parameterized.TestCase):
   ):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.glob.return_value = ["repo/meta-llama/model.safetensors"]
+    mock_fs_instance.exists.return_value = True  # The repo has a config.json, already in the cache.
 
     mock_client_instance = mock_storage_client.return_value
-    mock_blob = mock.MagicMock()
-    mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
-    mock_client_instance.list_blobs.return_value = [mock_blob]
+    blobs = [mock.MagicMock(), mock.MagicMock()]
+    blobs[0].name = "hf_cache/repo_meta-llama/model.safetensors"
+    blobs[1].name = "hf_cache/repo_meta-llama/config.json"
+    mock_client_instance.list_blobs.return_value = blobs
 
     mock_load_streaming.return_value = {"params": {}}
 
@@ -653,7 +724,10 @@ class LoadDynamicTest(parameterized.TestCase):
     config = MockConfig()
 
     path = "repo/meta-llama"
-    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None) as mock_qc:
+      dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    mock_qc.assert_called_once_with("gs://dummy-bucket/hf_cache/repo_meta-llama")
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})
@@ -672,7 +746,9 @@ class LoadDynamicTest(parameterized.TestCase):
     # Only host 0 lists and downloads the repo; the other hosts wait for it and read the GCS cache.
     config = mock.Mock(model_name="llama3.1-8b", hf_access_token=None, base_output_directory="gs://dummy-bucket")
 
-    load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
+    # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
 
     mock_hf_fs.assert_not_called()
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
