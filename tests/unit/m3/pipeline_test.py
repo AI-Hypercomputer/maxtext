@@ -14,8 +14,10 @@
 
 """Tests for the diffusion pipeline helpers (`pipeline_utils.py`, `wan_pipeline.py`)."""
 
+import os
 import types
 import unittest
+from unittest import mock
 
 import pytest
 
@@ -27,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.inference import sample
+from maxtext.m3.configs import config as config_lib
 from maxtext.m3.diffuser_pipelines import pipeline_utils
 from maxtext.m3.diffuser_pipelines import wan_pipeline
 from maxtext.m3.models.wan import WanModel
@@ -34,6 +37,9 @@ from maxtext.m3.models.wan import WanModel
 # pylint: enable=wrong-import-position
 
 _WAN_CONFIG = {"num_layers": 2, "num_attention_heads": 2, "attention_head_dim": 8}
+_WAN_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "src", "maxtext", "m3", "models", "wan", "configs"
+)
 
 
 class PipelineUtilsTest(unittest.TestCase):
@@ -118,6 +124,59 @@ class WanPipelineHelpersTest(unittest.TestCase):
     self.assertEqual(wan22._align_video_size(704, 1280), (704, 1280))  # pylint: disable=protected-access
     self.assertEqual(wan21._align_video_size(720, 1280), (720, 1280))  # pylint: disable=protected-access
     self.assertEqual(wan21._align_video_size(721, 1290), (720, 1280))  # pylint: disable=protected-access
+
+  def test_wan_yml_supported_types(self):
+    """Each Wan model YAML declares the `model_type`s its checkpoint can run; others fail in `get_pipeline_class`."""
+    expected = {
+        "wan2.1-t2v-14b.yml": ("T2V", ["T2V"]),
+        "wan2.1-i2v-14b-480p.yml": ("I2V", ["I2V"]),
+        "wan2.2-t2v-5b.yml": ("T2V", ["T2V"]),
+    }
+    for name, (model_type, supported_types) in expected.items():
+      with self.subTest(name):
+        path = os.path.join(_WAN_CONFIG_DIR, name)
+        cfg = config_lib.initialize(["prog", path, "run_name=t"], unittest=True)
+        self.assertEqual(cfg.model_type, model_type)
+        self.assertEqual(list(cfg.supported_types), supported_types)
+        self.assertIs(sample.get_pipeline_class(cfg), wan_pipeline.WanPipeline2_1)
+        other = "T2V" if model_type == "I2V" else "I2V"
+        with self.assertRaises(NotImplementedError):
+          sample.get_pipeline_class(
+              config_lib.initialize(["prog", path, "run_name=t", f"model_type={other}"], unittest=True)
+          )
+
+  def test_call_pipeline_image_only_for_i2v(self):
+    """`call_pipeline` loads `image_url` and passes `image=` for I2V only; T2V ignores a stray `image_url`."""
+    calls = []
+
+    def _pipeline(**kwargs):
+      calls.append(kwargs)
+
+    def _cfg(model_type, image_url):
+      return types.SimpleNamespace(
+          model_type=model_type,
+          image_url=image_url,
+          num_inference_steps=2,
+          height=480,
+          width=832,
+          num_frames=5,
+          guidance_scale=5.0,
+          use_cfg_cache=False,
+          use_magcache=False,
+          magcache_thresh=0.12,
+          magcache_K=2,
+          retention_ratio=0.2,
+          use_kv_cache=False,
+      )
+
+    with mock.patch.object(sample, "_load_conditioning_image", return_value="IMG") as load:
+      sample.call_pipeline(_cfg("I2V", "http://x/img.jpg"), _pipeline, "p", "n")
+      sample.call_pipeline(_cfg("T2V", "http://x/img.jpg"), _pipeline, "p", "n")
+      load.assert_called_once_with("http://x/img.jpg")
+      with self.assertRaises(ValueError):  # I2V needs an image
+        sample.call_pipeline(_cfg("I2V", ""), _pipeline, "p", "n")
+    self.assertEqual(calls[0]["image"], "IMG")
+    self.assertNotIn("image", calls[1])
 
 
 if __name__ == "__main__":
