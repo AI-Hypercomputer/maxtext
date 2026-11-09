@@ -27,6 +27,9 @@
 #      PR_NUMBER, GITHUB_REPOSITORY and the gh CLI are available; falls back to
 #      `git diff origin/<base>...HEAD` if the API is unavailable, fails, returns no
 #      files, or hits its 3000-file cap.
+#   2a. TPU7X Test Selection: Lists the tpu7x-tests flavors that run a test the PR touched
+#      (run_tpu7x_tests, tpu7x_flavors). The `run-tpu7x` label (RUN_TPU7X=true) or a failed
+#      detection selects every flavor.
 #   3. Empty Diff / Error: If no files are detected or diff fails, runs all core
 #      test suites (excluding expensive notebook tests) as a fail-safe.
 #   4. Default State: All individual test and notebook flags are initialized to 'false'.
@@ -132,7 +135,7 @@ gate_heavy_tests() {
     if [[ "${FLAG_VALUES[run_notebooks]:-}" == "true" ]]; then
       needs_heavy_tests=true
     elif [[ "${FLAG_VALUES[run_tests]:-}" == "true" ]]; then
-      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests run_tpu7x_tests; do
         if [[ "${FLAG_VALUES[$flag]:-}" == "true" ]]; then
           needs_heavy_tests=true
         fi
@@ -270,6 +273,26 @@ fi
 echo "Changed files (source: ${DIFF_SOURCE}):"
 echo "$CHANGED_FILES"
 
+# TPU7X test selection for tpu7x-tests in ci_pipeline.yml. The detector prints a compact JSON array of the
+# flavors that run a test this PR touched, such as ["tpu7x-unit"] or []. It runs as a script because importing
+# tests.utils runs tests/utils/__init__.py, whose imports are not installed here. With the run-tpu7x label, or
+# if detection fails, tpu7x_flavors stays unset and tpu7x-tests runs every flavor.
+TPU7X_FLAVORS_RE='^\[("tpu7x-[a-z0-9-]+"(,"tpu7x-[a-z0-9-]+")*)?\]$'
+RUN_TPU7X_TESTS=true
+if [[ "${RUN_TPU7X:-}" == "true" ]]; then
+  echo "RUN_TPU7X is set, enabling every TPU7X flavor."
+elif ! TPU7X_FLAVORS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" --eligible-flavors) ||
+  [[ ! "$TPU7X_FLAVORS" =~ $TPU7X_FLAVORS_RE ]]; then
+  echo "Warning: TPU7X test detection failed (output: '${TPU7X_FLAVORS:-}'); enabling every TPU7X flavor as a fail-safe."
+elif [[ "$TPU7X_FLAVORS" == "[]" ]]; then
+  echo "No TPU7X flavor runs a test this PR touched."
+  RUN_TPU7X_TESTS=false
+else
+  echo "TPU7X flavors that run a test this PR touched: ${TPU7X_FLAVORS}"
+  emit_flag "tpu7x_flavors" "$TPU7X_FLAVORS"
+fi
+emit_flag "run_tpu7x_tests" "$RUN_TPU7X_TESTS"
+
 if [ -z "$CHANGED_FILES" ]; then
   echo "No files detected or diff failed. Running core test suites (excluding notebooks) as a fail-safe."
   set_test_flags "true" "false"
@@ -392,6 +415,11 @@ if [ ${#FINAL_UNMATCHED_FILES[@]} -gt 0 ]; then
   printf '  - %s\n' "${FINAL_UNMATCHED_FILES[@]}"
   echo "Enabling all test suites except notebook tests as a fallback."
   enable_flags run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests
+fi
+
+if [[ "${RUN_TPU7X:-}" == "true" ]]; then
+  echo "RUN_TPU7X is set, enabling run_tests so that tpu7x-tests can run."
+  enable_flags run_tests
 fi
 
 finish
