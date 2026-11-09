@@ -4920,6 +4920,83 @@ class WAN2_1_HF_TO_MAXTEXT:
     return mapping, hooks
 
 
+# -----------------------------------------------------------------------------
+# Ming-Image (inclusionAI/Ming-Image-0.1-Design): HF -> MaxText parameter mapping.
+# -----------------------------------------------------------------------------
+
+
+class MING_IMAGE_HF_TO_MAXTEXT:
+  """Parameter mapping and hooks for converting Ming-Image checkpoints to MaxText.
+
+  Same interface as `WAN2_1_HF_TO_MAXTEXT`. The checkpoint has five weight sub-folders:
+
+  - `transformer/`: Z-Image style diffusion transformer (`MingImageTransformer`).
+  - `vae/`: `AutoencoderKLQwenImage` = the Wan 2.1 VAE layout with 4 (RGBA) pixel channels, so it reuses the
+    Wan VAE model and mapping.
+  - `mllm/`: BailingMoeV2 MoE language model (only the `model.model.*` text weights are converted; the vision tower,
+    `linear_proj` and `lm_head` are not used for text-to-image).
+  - `connector/`: Qwen2 connector that turns the generation query tokens into DiT caption features.
+  - `mlp/`: conditioning head (learnable query tokens, `proj_in`, `proj_out`, `proj_directvlm`).
+
+  The per-component mappings live next to the models (`maxtext.m3.models.ming_image.*`) and are imported lazily.
+  """
+
+  COMPONENTS = {
+      "transformer": "maxtext.m3.models.ming_image.transformer_ming.MingImageTransformer",
+      "vae": "maxtext.m3.models.wan.autoencoder_kl_wan.AutoencoderKLWan",
+      "mllm": "maxtext.m3.models.ming_image.text_encoder_ming.MingTextEncoder",
+      "connector": "maxtext.m3.models.ming_image.connector_ming.MingConnector",
+      "mlp": "maxtext.m3.models.ming_image.connector_ming.MingConditioner",
+  }
+  # Transformer params kept in float32 when the rest is cast to `weights_dtype`.
+  FP32_PARAM_KEYWORDS = ("norm", "t_embedder", "adaln_modulation", "pad_token")
+
+  @staticmethod
+  def param_mapping(component, hf_config, scan_layers=False):
+    """Returns `{maxtext_key: hf_key | [hf_key per layer]}` for one component."""
+    return MING_IMAGE_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)[0]
+
+  @staticmethod
+  def hook_fns(component, hf_config, scan_layers=False):
+    """Returns `{maxtext_key: hook(weight, target_shape)}` for one component."""
+    return MING_IMAGE_HF_TO_MAXTEXT._build(component, hf_config, scan_layers)[1]
+
+  @staticmethod
+  def param_dtype(component, maxtext_key, weights_dtype):
+    """Storage dtype: transformer -> `weights_dtype` except FP32_PARAM_KEYWORDS; other components keep the source dtype.
+
+    The inference pipeline casts the VAE / text encoder / connector to their configured dtypes when loading.
+    """
+    if component != "transformer":
+      return None
+    keep_fp32 = any(k in maxtext_key.lower() for k in MING_IMAGE_HF_TO_MAXTEXT.FP32_PARAM_KEYWORDS)
+    return np.dtype(np.float32) if keep_fp32 else np.dtype(weights_dtype)
+
+  @staticmethod
+  def _build(component, hf_config, scan_layers):
+    """Builds (param_mapping, hook_fns) for `component`."""
+    # pylint: disable=import-outside-toplevel
+    if component == "vae":
+      return WAN2_1_HF_TO_MAXTEXT._build("vae", hf_config, scan_layers)  # pylint: disable=protected-access
+    if component == "transformer":
+      from maxtext.m3.models.ming_image import transformer_ming
+
+      return transformer_ming.transformer_param_mapping(hf_config, scan_layers)
+    if component == "mllm":
+      from maxtext.m3.models.ming_image import text_encoder_ming
+
+      return text_encoder_ming.mllm_param_mapping(hf_config)
+    if component == "connector":
+      from maxtext.m3.models.ming_image import connector_ming
+
+      return connector_ming.connector_param_mapping(hf_config)
+    if component == "mlp":
+      from maxtext.m3.models.ming_image import connector_ming
+
+      return connector_ming.conditioner_param_mapping(hf_config)
+    raise ValueError(f"Unknown Ming-Image component: {component}")
+
+
 def _qwen3_8_flash_next_hf_config_dict(config):
   """Returns the HF config as a dict, accepting a `PreTrainedConfig` (e.g. `HF_MODEL_CONFIGS[...]`) or a dict."""
   if hasattr(config, "to_dict"):
@@ -5568,4 +5645,5 @@ VLLM_HOOK_FNS = {
 # Diffusers models (multi-component checkpoints), keyed by `model_name`; used by to_maxtext_diffusers.py.
 DIFFUSERS_PARAM_MAPPING = {
     "wan2.1": WAN2_1_HF_TO_MAXTEXT,
+    "ming-image": MING_IMAGE_HF_TO_MAXTEXT,
 }
