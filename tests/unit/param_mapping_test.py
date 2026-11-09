@@ -16,6 +16,8 @@
 
 import unittest
 from unittest import mock
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -450,6 +452,72 @@ class ParamMappingTest(unittest.TestCase):
         tensor_handling.stacked_axes((local_key, local_key.replace("wi_0", "wi_1")), cfg, depth=2),
         tensor_handling.stacked_axes(local_key, cfg, depth=2),
     )
+
+  def test_qwen3_5_hooks_keep_jax_arrays_as_jax_arrays(self):
+    """The HF->MaxText Qwen3.5 hooks that split or join tensors use jnp on `jax.Array`s.
+
+    The HF streaming loader passes sharded `jax.Array`s, which on several hosts can't be copied
+    to host numpy. Each hook must give a `jax.Array` with the same values as for numpy inputs,
+    also when only one tensor of a fused pair is a `jax.Array`.
+    """
+    text_config = {
+        "num_hidden_layers": 4,
+        "num_experts": 3,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 8,
+        "linear_value_head_dim": 8,
+    }
+
+    def hook(weight_dtype, key):
+      maxtext_config = mock.Mock(
+          num_decoder_layers=4,
+          num_experts=3,
+          inhomogeneous_layer_cycle_interval=4,
+          weight_dtype=weight_dtype,
+          weight_block_size=4,
+          use_multimodal=False,
+      )
+      hooks = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+          {"text_config": text_config}, maxtext_config, scan_layers=True
+      )
+      return hooks[key]
+
+    local = "params-decoder-layers-local_layers"
+    rng = np.random.default_rng(0)
+    cases = {
+        # gate_up_proj (experts, 2 * mlp, emb) -> (wi_0, wi_1) stacked on a new last axis.
+        "gate_up": (
+            hook("bfloat16", (f"{local}-mlp-routed_experts-wi_0", f"{local}-mlp-routed_experts-wi_1")),
+            rng.standard_normal((3, 10, 6)).astype(np.float32),
+        ),
+        # (in_proj_qkv, in_proj_z): 2 * H_k * D_k + H_v * D_v and H_v * D_v rows.
+        "qkvz": (
+            hook("bfloat16", f"{local}-attention-in_proj_qkvz-kernel"),
+            (rng.standard_normal((64, 6)).astype(np.float32), rng.standard_normal((32, 6)).astype(np.float32)),
+        ),
+        # Their FP8 block scales, with 4-wide blocks.
+        "qkvz_scale": (
+            hook("float8_e4m3fn", f"{local}-attention-in_proj_qkvz-kernel_scale"),
+            (rng.standard_normal((16, 3)).astype(np.float32), rng.standard_normal((8, 3)).astype(np.float32)),
+        ),
+        # (in_proj_b, in_proj_a): H_v rows each.
+        "ba": (
+            hook("bfloat16", f"{local}-attention-in_proj_ba-kernel"),
+            (rng.standard_normal((4, 6)).astype(np.float32), rng.standard_normal((4, 6)).astype(np.float32)),
+        ),
+    }
+    for name, (hook_fn, x) in cases.items():
+      with self.subTest(name):
+        want = hook_fn(x, None)
+        self.assertIsInstance(want, np.ndarray)
+        inputs = {"all jax": jax.tree.map(jnp.asarray, x)}
+        if isinstance(x, tuple):
+          inputs["second jax"] = (x[0], jnp.asarray(x[1]))
+        for kind, x_jax in inputs.items():
+          got = hook_fn(x_jax, None)
+          self.assertIsInstance(got, jax.Array, kind)
+          np.testing.assert_array_equal(np.asarray(got), want, err_msg=kind)
 
   def test_qwen3_hybrid_mappings_cover_the_scan_remainder(self):
     """Layers past the last whole cycle live in `layers_remainder`, whose local layers stack [local] alone."""
