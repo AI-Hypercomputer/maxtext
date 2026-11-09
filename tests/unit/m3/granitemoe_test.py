@@ -1381,11 +1381,19 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
       jax_dec_h, _, _, _ = m3_layer(x_jax, pos_jax)
       self.assertLessEqual(_rel_l2_error(np.asarray(jax_dec_h), pt_dec_h.numpy()), 1e-5)
 
-  # TODO(b/583197649): Re-enable once flakiness is resolved.
-  @unittest.skip("Disabled due to flakiness (b/583197649).")
-  def test_e2e_logits_loss_aux_loss_and_backward_grad_parity(self):
-    for tie in (True, False):
-      cfg = _make_mini_config(tie_word_embeddings=tie, router_aux_loss_coef=0.05)
+  def _run_e2e_logits_loss_aux_loss_and_backward_grad_parity(
+      self,
+      *,
+      tie_values: tuple[bool, ...] = (True, False),
+      num_hidden_layers: int = 2,
+  ) -> None:
+    """Runs E2E forward logits, masked/unmasked loss, Switch aux loss, and backward gradient parity."""
+    for tie in tie_values:
+      cfg = _make_mini_config(
+          tie_word_embeddings=tie,
+          num_hidden_layers=num_hidden_layers,
+          router_aux_loss_coef=0.05,
+      )
       hf_model, m3_model, mesh = self._build_paired_models(cfg, seed=202 if tie else 303)
       hf_model.train(False)
 
@@ -1418,23 +1426,24 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
         )
 
       try:
-        hf_model.zero_grad(set_to_none=True)
-        tokens_pt = torch.tensor(tokens_np, dtype=torch.long)
-        mask_pt = torch.tensor(attn_mask_np, dtype=torch.long)
-        labels_pt = tokens_pt.clone()
-        labels_pt[mask_pt == 0] = -100
+        with torch.enable_grad():
+          hf_model.zero_grad(set_to_none=True)
+          tokens_pt = torch.tensor(tokens_np, dtype=torch.long)
+          mask_pt = torch.tensor(attn_mask_np, dtype=torch.long)
+          labels_pt = tokens_pt.clone()
+          labels_pt[mask_pt == 0] = -100
 
-        hf_out = hf_model(input_ids=tokens_pt, attention_mask=mask_pt, labels=labels_pt)
-        hf_logits = hf_out.logits.detach().numpy()
-        hf_ce_loss = float(hf_out.loss.detach().item())
-        hf_lb_loss_t = hf_granitemoe_mod.load_balancing_loss_func(
-            tuple(captured_router_logits),
-            cfg.num_local_experts,
-            cfg.num_experts_per_tok,
-            attention_mask=mask_pt,
-        )
-        hf_total_loss = hf_out.loss + cfg.router_aux_loss_coef * hf_lb_loss_t
-        hf_total_loss.backward()
+          hf_out = hf_model(input_ids=tokens_pt, attention_mask=mask_pt, labels=labels_pt)
+          hf_logits = hf_out.logits.detach().numpy()
+          hf_ce_loss = float(hf_out.loss.detach().item())
+          hf_lb_loss_t = hf_granitemoe_mod.load_balancing_loss_func(
+              tuple(captured_router_logits),
+              cfg.num_local_experts,
+              cfg.num_experts_per_tok,
+              attention_mask=mask_pt,
+          )
+          hf_total_loss = hf_out.loss + cfg.router_aux_loss_coef * hf_lb_loss_t
+          hf_total_loss.backward()
       finally:
         for h in hooks:
           h.remove()
@@ -1466,12 +1475,13 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
             for layer in hf_model.model.layers
         ]
         try:
-          out2 = hf_model(input_ids=tokens_pt, labels=tokens_pt)
-          lb2 = hf_granitemoe_mod.load_balancing_loss_func(
-              tuple(captured_unpadded), cfg.num_local_experts, cfg.num_experts_per_tok, attention_mask=None
-          )
-          tot_pt = out2.loss + cfg.router_aux_loss_coef * lb2
-          tot_pt.backward()
+          with torch.enable_grad():
+            out2 = hf_model(input_ids=tokens_pt, labels=tokens_pt)
+            lb2 = hf_granitemoe_mod.load_balancing_loss_func(
+                tuple(captured_unpadded), cfg.num_local_experts, cfg.num_experts_per_tok, attention_mask=None
+            )
+            tot_pt = out2.loss + cfg.router_aux_loss_coef * lb2
+            tot_pt.backward()
         finally:
           for h in hooks2:
             h.remove()
@@ -1510,6 +1520,15 @@ class GraniteMoePyTorchParityAndPerturbTest(absltest.TestCase):
             1e-5,
             msg=f"[tie={tie}] Backward grad mismatch at {key}",
         )
+
+  def test_e2e_logits_loss_aux_loss_and_backward_grad_parity(self):
+    self._run_e2e_logits_loss_aux_loss_and_backward_grad_parity()
+
+  def test_e2e_backward_parity_when_global_torch_grad_disabled(self):
+    # Regression guard for b/583197649: simulate a prior test module on the same `pytest-xdist`
+    # worker leaving autograd disabled without poisoning subsequent tests.
+    with torch.no_grad():
+      self._run_e2e_logits_loss_aux_loss_and_backward_grad_parity(tie_values=(True,), num_hidden_layers=1)
 
   def test_perturb_spec_negative_controls_fire_on_all_6_targets(self):
     cfg = _make_mini_config()
