@@ -390,8 +390,15 @@ class GraniteMoeRealWeightTpuParityTest(absltest.TestCase):
     for layer in self.hf_model_fp32.model.layers:
 
       def _hook(_mod: Any, _inp: Any, out: Any) -> None:
-        r_logits = out[-1].detach().cpu().numpy()  # (B*S, E)
-        tk_idx = torch.topk(out[-1].detach(), k=8, dim=-1).indices.cpu().numpy()  # (B*S, 8)
+        logits_t = out
+        if isinstance(out, tuple):
+          logits_t = next(
+              item
+              for item in out
+              if torch.is_tensor(item) and torch.is_floating_point(item) and item.ndim == 2 and item.shape[-1] == 32
+          )
+        r_logits = logits_t.detach().cpu().numpy()  # (B*S, E)
+        tk_idx = torch.topk(logits_t.detach(), k=8, dim=-1).indices.cpu().numpy()  # (B*S, 8)
         captured_router_logits.append(r_logits.reshape(bsz, seq_len, 32))
         captured_topk_indices.append(tk_idx.reshape(bsz, seq_len, 8))
 

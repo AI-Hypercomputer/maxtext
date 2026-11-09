@@ -413,13 +413,16 @@ class MingTextLayersTest(unittest.TestCase):
           f"Cannot load Ming HF reference from {HF_PATH!r}: {exc}. "
           "Install the missing reference dependencies or set MING_HF_PATH to a local HF model directory."
       ) from exc
-    torch.set_grad_enabled(False)
     cls.hf_cfg = make_hf_text_config()
     cls.config = make_config()
     cls.mesh = make_mesh(cls.config)
-    cls.rope = TEXT_MOD.BailingMoeV3RotaryEmbedding(cls.hf_cfg)
+    with torch.no_grad():
+      cls.rope = TEXT_MOD.BailingMoeV3RotaryEmbedding(cls.hf_cfg)
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     np.random.seed(0)
     torch.manual_seed(0)
 
@@ -640,7 +643,6 @@ class MingAudioTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    torch.set_grad_enabled(False)
     pytest.importorskip("whisper")
     pytest.importorskip("torchaudio")
     global TEXT_MOD, AUDIO_MOD  # pylint: disable=global-statement
@@ -655,6 +657,11 @@ class MingAudioTest(unittest.TestCase):
     text_module.fused_recurrent_kda = _torch_kda
     cls.config = make_config()
     cls.mesh = make_mesh(cls.config)
+
+  def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
 
   def _hf_audio_model(self, seed=0):
     """A small BailingMoeV3AudioForConditionalGeneration (only audio parts are exercised)."""
