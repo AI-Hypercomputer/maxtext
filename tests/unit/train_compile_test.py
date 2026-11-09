@@ -1062,6 +1062,7 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
             "routed_bias=False",
             "override_model_config=True",
+            "base_num_decoder_layers=5",
         )
     )
 
@@ -1178,6 +1179,9 @@ class TrainCompile(parameterized.TestCase):
             "tokenizer_type=huggingface",
             "tokenizer_path=deepseek-ai/DeepSeek-V3.2",
             "hf_access_token=fake",
+            "override_model_config=True",
+            "base_num_decoder_layers=3",
+            "engram_layers=[1]",
         )
     )
 
@@ -1588,6 +1592,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
             "model_name=gemma4-31b",
+            "override_model_config=True",
+            "base_num_decoder_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=32",
@@ -1614,6 +1620,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=gemma4-26b",
+            "override_model_config=True",
+            "base_num_decoder_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=32",
@@ -1643,6 +1651,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
             "model_name=gemma4-e4b",
+            "override_model_config=True",
+            "base_num_decoder_layers=12",
+            "num_kv_shared_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             # E4B has two KV heads, which is as far as the tensor axis can split them,
@@ -1673,6 +1684,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-1024",
             "compile_topology_num_slices=1",
             "model_name=kimi-k2-1t",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=64",
@@ -1743,8 +1757,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-1024",
             "compile_topology_num_slices=1",
             "model_name=llama4-17b-128e",
-            # Only needed so the tokenizer below can replace the model config's default.
+            # Needed so base_num_decoder_layers and the tokenizer below can override the model config.
             "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=64",
