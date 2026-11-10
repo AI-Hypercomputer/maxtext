@@ -175,6 +175,44 @@ class TestGetShardedMuonWeightDimensionNumbersNNX(unittest.TestCase):
     self.assertIn("Muon Dimension Numbers", buf.getvalue())
 
 
+class _RoutedMoeNNXModel(nnx.Module):
+  """Placeholder NNX model with an MoE router and routed experts."""
+
+  def __init__(self):
+    self.MoeBlock_0 = nnx.Module()
+    self.MoeBlock_0.gate = nnx.Module()
+    self.MoeBlock_0.gate.kernel = nnx.Param(jnp.ones((4, 8)))
+    self.MoeBlock_0.wi_0 = nnx.Param(jnp.ones((8, 4, 16)))
+
+
+class TestShardedMuonIncludeRouters(unittest.TestCase):
+  """get_sharded_muon_weight_dimension_numbers honors config.muon_include_routers like the base Muon."""
+
+  def setUp(self):
+    super().setUp()
+    self.model = _RoutedMoeNNXModel()
+    self.mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1, 1)), ("data", "model"))
+
+  def _config(self, include_routers):
+    config = mock.MagicMock()
+    config.logical_axis_rules = ()
+    config.muon_include_routers = include_routers
+    return config
+
+  def test_router_excluded_when_include_routers_false(self):
+    config = self._config(include_routers=False)
+    result = maxtext_muon_utils.get_sharded_muon_weight_dimension_numbers(self.model, config=config, mesh=self.mesh)
+    self.assertIsNone(result["MoeBlock_0"]["gate"]["kernel"])
+    self.assertEqual(_extract_axes(result["MoeBlock_0"]["wi_0"]), ((-2,), (-1,)))
+    base_result = muon_utils.get_muon_weight_dimension_numbers(self.model, config=config)
+    self.assertEqual(_extract_axes(result), _extract_axes(base_result))
+
+  def test_router_included_when_include_routers_true(self):
+    config = self._config(include_routers=True)
+    result = maxtext_muon_utils.get_sharded_muon_weight_dimension_numbers(self.model, config=config, mesh=self.mesh)
+    self.assertEqual(_extract_axes(result["MoeBlock_0"]["gate"]["kernel"]), ((0,), (-1,)))
+
+
 class TestPrintStructureDebug(unittest.TestCase):
   """Tests for _print_structure_debug."""
 

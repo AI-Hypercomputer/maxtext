@@ -50,6 +50,28 @@ class TestCreateScannedLayers(unittest.TestCase):
       )
       self.assertEqual(layers.kernel.value.shape, expected_shape)
 
+  def test_scan_axis_name_is_inserted_into_tuple_and_list_logical_axes(self):
+    """The scan axis name lands at param_scan_axis whether the logical axes are a tuple or a list."""
+
+    class _NamedLayer(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs, logical_axes):
+        del rngs  # Unused.
+        self.kernel = nnx.Param(jnp.zeros((2, 2)), sharding_names=logical_axes)
+
+    for logical_axes in (("embed", "mlp"), ["embed", "mlp"]):
+      with self.subTest(type=type(logical_axes).__name__):
+        layers = nnx_scan.create_scanned_layers(
+            lambda rngs, logical_axes=logical_axes: _NamedLayer(rngs, logical_axes),
+            length=3,
+            param_scan_axis=1,
+            metadata_axis_name="layers",
+            rngs=nnx.Rngs(0),
+        )
+        metadata = layers.kernel.get_metadata()
+        stored = metadata.get("sharding_names", metadata.get("out_sharding"))
+        self.assertEqual(stored, ("embed", "layers", "mlp"))
+
   def test_create_zero_length_returns_none(self):
     """A zero-length stack short-circuits to None."""
     layers = nnx_scan.create_scanned_layers(
