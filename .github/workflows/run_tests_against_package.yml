@@ -142,6 +142,7 @@ jobs:
         if: ${{ !inputs.maxtext_installed }}
         shell: bash
         run: |
+          source .github/scripts/use_airlock_pypi.sh
           python3 -m uv venv --seed
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
