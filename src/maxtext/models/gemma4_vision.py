@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 
-from maxtext.common.common_types import Config, AttentionType
+from maxtext.common.common_types import Config, AttentionType, UntrainableParam
 from maxtext.layers import attentions
 from maxtext.layers import linears
 from maxtext.layers import normalizations
@@ -44,47 +44,15 @@ from maxtext.layers import normalizations
 #
 # This module adds them as OPT-IN, checkpoint-resident, NON-TRAINABLE scalars,
 # gated on ``config.use_clipped_linears_for_vit`` (exact no-op when False).
-# Design: plain ``nnx.Param`` bounds (so they map to the canonical ``params``
-# collection and round-trip through the nnx->linen->orbax checkpoint path), plus
-# a leaf-PATH optimizer-freeze mask so the 448 bounds are excluded from optimizer
-# updates and weight decay without a custom nnx.Variable subclass (subclasses are
-# renamed by the linen bridge and silently dropped from the saved checkpoint).
+# Design: the bounds are ``UntrainableParam``, so they are stored and loaded like any
+# ``nnx.Param`` but get no gradient, optimizer update or weight decay.
 # A NaN sentinel + ``validate_clip_bounds`` hard-fails on a missing/non-finite
 # bound rather than silently degrading to an identity clamp.
 
-# Leaf-name tokens that identify a clip-bound scalar in a flattened params tree.
-_CLIP_LEAF_TOKENS = ("q_clip", "k_clip", "v_clip", "o_clip", "gate_clip", "up_clip", "down_clip")
-_CLIP_BOUND_NAMES = ("input_min", "input_max", "output_min", "output_max")
-
 
 def _mk_clip_bound(init_val=jnp.nan):
-  """A checkpoint-resident scalar clip bound as a plain ``nnx.Param`` (maps to the
-  canonical ``params`` collection; NaN sentinel marks an unloaded bound)."""
-  return nnx.Param(jnp.asarray(init_val, dtype=jnp.float32))
-
-
-def _is_clip_bound_path(path) -> bool:
-  """True iff a flattened-params key path addresses a clip-bound scalar."""
-  s = "/".join(str(getattr(p, "key", p)) for p in path) if not isinstance(path, str) else path
-  return any(tok in s for tok in _CLIP_LEAF_TOKENS) and any(b in s for b in _CLIP_BOUND_NAMES)
-
-
-def clip_optimizer_freeze_mask(params_tree):
-  """Bool pytree (same structure as ``params_tree``): True for TRAINABLE leaves,
-  False for the immutable clip bounds. Feed to ``optax.masked``/``multi_transform``
-  so the bounds get ``set_to_zero()`` updates. Path-based, so it survives the
-  nnx->linen->orbax round-trip regardless of leaf type erasure."""
-  flat = jax.tree_util.tree_flatten_with_path(params_tree)[0]
-  leaves_mask = [not _is_clip_bound_path(path) for path, _ in flat]
-  treedef = jax.tree_util.tree_structure(params_tree)
-  return jax.tree_util.tree_unflatten(treedef, leaves_mask)
-
-
-def _clip_bound_value(bound, dtype):
-  """Read a clip-bound scalar as a constant: stop_gradient defends the bounds from receiving
-  gradient at the clamp use-site (defense in depth alongside the optimizer freeze mask), so clip-bound
-  gradients can never contaminate gradient statistics even if the freeze mask were misconfigured."""
-  return jax.lax.stop_gradient(bound.value).astype(dtype)
+  """A checkpoint-resident scalar clip bound (NaN sentinel marks an unloaded bound)."""
+  return UntrainableParam(jnp.asarray(init_val, dtype=jnp.float32))
 
 
 def _clip_in(x, cb):
@@ -92,7 +60,7 @@ def _clip_in(x, cb):
   if cb is None:
     return x
   xd = x.dtype
-  return jnp.clip(x, _clip_bound_value(cb.input_min, xd), _clip_bound_value(cb.input_max, xd))
+  return jnp.clip(x, cb.input_min.value.astype(xd), cb.input_max.value.astype(xd))
 
 
 def _clip_out(y, cb):
@@ -100,11 +68,11 @@ def _clip_out(y, cb):
   if cb is None:
     return y
   yd = y.dtype
-  return jnp.clip(y, _clip_bound_value(cb.output_min, yd), _clip_bound_value(cb.output_max, yd))
+  return jnp.clip(y, cb.output_min.value.astype(yd), cb.output_max.value.astype(yd))
 
 
 class _ClipBounds(nnx.Module):
-  """Holds the four checkpoint-resident scalar clip bounds as ``nnx.Param`` leaves."""
+  """Holds the four checkpoint-resident scalar clip bounds as ``UntrainableParam`` leaves."""
 
   def __init__(self):
     self.input_min = _mk_clip_bound()

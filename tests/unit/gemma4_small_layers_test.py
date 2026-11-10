@@ -42,6 +42,7 @@ from maxtext.common.common_types import AttentionType
 from maxtext.layers.attentions import Attention
 from maxtext.models import gemma4_small
 from maxtext.models import gemma4_vision as gv
+from maxtext.optimizers import optimizers
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from tests.utils.multimodal_test_utils import assert_all_close_jax_torch, copy_rmsnorm_weights
 
@@ -431,6 +432,10 @@ def _finite_cb(in_lo=-2.5, in_hi=2.5, out_lo=-4.0, out_hi=4.0):
 
 class ClipMathTest(unittest.TestCase):
 
+  def test_clip_bounds_are_untrainable_params(self):
+    cb = gv._make_clip_state()  # pylint: disable=protected-access
+    self.assertEqual(optimizers.untrainable_paths(cb), {"input_min", "input_max", "output_min", "output_max"})
+
   def test_clip_in_matches_jnp_clip(self):
     cb = _finite_cb()
     x = (jax.random.normal(jax.random.PRNGKey(0), (5, 17)) * 6.0).astype(jnp.float32)
@@ -452,18 +457,13 @@ class ClipMathTest(unittest.TestCase):
     self.assertEqual(gv._clip_in(x, cb).dtype, jnp.bfloat16)
 
   def test_bounds_are_stop_gradient(self):
-    # The clamp bound is read through jax.lax.stop_gradient at the use-site, so gradient wrt the bound
-    # value is exactly zero even when the clamp is active. Probe _clip_bound_value directly with a
-    # lightweight bound holder to avoid mutating an nnx Param inside a traced function.
-    class _B:
-
-      def __init__(self, v):
-        self.value = v
-
+    # The bounds are UntrainableParam, so the gradient wrt a bound is zero even when the clamp is active.
+    # pylint: disable=protected-access
     def loss(bound_val):
+      cb = gv._make_clip_state()
+      cb.input_min, cb.input_max = gv._mk_clip_bound(-100.0), gv._mk_clip_bound(bound_val)
       x = jnp.ones((4,), jnp.float32) * 10.0  # above the bound -> clamp active
-      hi = gv._clip_bound_value(_B(bound_val), jnp.float32)
-      return jnp.sum(jnp.clip(x, -100.0, hi))
+      return jnp.sum(gv._clip_in(x, cb))
 
     g = jax.grad(loss)(jnp.asarray(2.5, jnp.float32))
     self.assertEqual(float(g), 0.0)
@@ -493,33 +493,6 @@ class ValidateBoundsTest(unittest.TestCase):
     self.assertIsNone(gv.validate_clip_bounds(None))
 
 
-class FreezeMaskTest(unittest.TestCase):
-
-  def test_freeze_mask_polarity_and_count(self):
-    tree = {
-        "vision_encoder": {
-            "layer_0": {
-                "attention": {
-                    "q_clip": {"input_min": 1.0, "input_max": 1.0, "output_min": 1.0, "output_max": 1.0},
-                    "query": {"kernel": 1.0},
-                },
-                "mlp": {"gate_clip": {"input_min": 1.0, "output_max": 1.0}, "wi_0": {"kernel": 1.0}},
-            }
-        },
-        "decoder": {"layer_0": {"norm": {"scale": 1.0}}},
-    }
-    mask = gv.clip_optimizer_freeze_mask(tree)
-    flat = jax.tree_util.tree_flatten_with_path(mask)[0]
-    n_clip = 0
-    for path, v in flat:
-      is_clip = gv._is_clip_bound_path(path)
-      # clip leaves -> False (frozen); everything else -> True (trainable)
-      self.assertEqual(bool(v), (not is_clip))
-      if is_clip:
-        n_clip += 1
-    self.assertEqual(n_clip, 6)  # q_clip(4) + gate_clip(2)
-
-
 class SymbolsTest(unittest.TestCase):
 
   def test_expected_counts_constants(self):
@@ -529,7 +502,6 @@ class SymbolsTest(unittest.TestCase):
   def test_public_symbols_present(self):
     for sym in (
         "validate_all_vision_clip_bounds",
-        "clip_optimizer_freeze_mask",
         "Gemma4ClippedMlpBlock",
         "Gemma4Attention",
     ):

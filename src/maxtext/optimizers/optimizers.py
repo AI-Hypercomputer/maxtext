@@ -330,12 +330,7 @@ def apply_trainable_parameters_mask(base_opt, config):
   # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
   trainable_patterns = config.trainable_parameters_mask
   freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  # Gemma-4 vision clipped-linears: the 448 clip bounds are checkpoint-resident, immutable state and must
-  # NEVER receive optimizer updates, weight decay, or momentum/variance slots. Freeze them via a leaf-PATH
-  # mask (robust to the nnx->linen bridge's type erasure). This composes with any trainable_parameters_mask:
-  # a parameter is "trainable" only if it is trainable under the whitelist AND is not a clip bound.
-  freeze_clip_bounds = bool(getattr(config, "use_clipped_linears_for_vit", False))
-  if freeze_mask_fn is None and not freeze_clip_bounds:
+  if freeze_mask_fn is None:
     return base_opt
 
   has_logged = False
@@ -351,14 +346,7 @@ def apply_trainable_parameters_mask(base_opt, config):
     up front. Log the counts once so the intent is checkable against the run log.
     """
     nonlocal has_logged
-    frozen_mask = freeze_mask_fn(params) if freeze_mask_fn else jax.tree_util.tree_map(lambda _: False, params)
-    if freeze_clip_bounds:
-      # clip_optimizer_freeze_mask returns True for trainable leaves, False for clip bounds.
-      from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
-
-      clip_trainable = gemma4_vision.clip_optimizer_freeze_mask(params)
-      frozen_mask = jax.tree_util.tree_map(lambda f, t: bool(f) or not bool(t), frozen_mask, clip_trainable)
-    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", frozen_mask)
+    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
     if not has_logged:
       has_logged = True
       leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
