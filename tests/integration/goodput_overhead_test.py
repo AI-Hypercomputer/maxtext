@@ -19,7 +19,6 @@ import json
 import math
 import os
 import statistics
-import sys
 import tempfile
 import unittest
 import uuid
@@ -27,6 +26,7 @@ import warnings
 
 from absl.testing import absltest
 from maxtext.trainers.pre_train.train import main as train_main
+from maxtext.utils import max_logging
 import pytest
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
 
@@ -162,20 +162,8 @@ class GoodputOverheadTest(unittest.TestCase):
             f"of {SOFT_WARNING_OVERHEAD_RATIO * 100:.3f}% (1.2x empirical max {EMPIRICAL_OVERHEAD_RATIO * 100:.3f}%), "
             f"though it remains within the {MAX_ALLOWED_OVERHEAD_RATIO * 100:.1f}% blocking limit."
         )
-        # Emit Python UserWarning (shown in pytest warnings summary without failing the test).
+        max_logging.log(f"WARNING: {warn_msg}")
         warnings.warn(warn_msg, UserWarning)
-        # Emit GitHub Actions workflow warning annotation directly to uncaptured stdout.
-        print(
-            f"\n::warning file=tests/integration/goodput_overhead_test.py,"
-            f"title=Goodput Overhead Soft Threshold Exceeded::{warn_msg}\n",
-            file=sys.__stdout__,
-            flush=True,
-        )
-        # Append to GitHub Job Summary if running in GitHub Actions.
-        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary_path:
-          with open(summary_path, "a", encoding="utf-8") as sf:
-            sf.write(f"\n> [!WARNING]\n> **Goodput Overhead Soft Warning**: {warn_msg}\n")
 
       # 3. Level 2 (Hard Blocking CI Failure): steady-state mean step time overhead > 2.0%.
       self.assertLessEqual(
