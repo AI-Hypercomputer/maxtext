@@ -60,8 +60,7 @@ class GoodputOverheadTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
-  # TODO(yenke): Uncomment @pytest.mark.scheduled_only after verifying via workflow_dispatch / PR CI.
-  # @pytest.mark.scheduled_only
+  @pytest.mark.scheduled_only
   @pytest.mark.external_training
   def test_goodput_on_off_overhead_and_loss_parity(self):
     base_output_directory = get_test_base_output_directory()
