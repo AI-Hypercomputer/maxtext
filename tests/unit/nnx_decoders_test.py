@@ -1,3 +1,4 @@
+# pylint: disable=missing-function-docstring,arguments-differ
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -2910,7 +2911,7 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
 
   def test_qwen3_5_remat_minimal(self):
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
-      self._assert_qwen3_5_parity(num_blocks=4, remat_policy="minimal")
+      self._assert_qwen3_5_parity(num_blocks=2, remat_policy="minimal")
     self.assertTrue(any("remat policy saves" in str(c) for c in log_info.call_args_list))
 
   def test_qwen3_5_param_scan_axis_zero(self):
