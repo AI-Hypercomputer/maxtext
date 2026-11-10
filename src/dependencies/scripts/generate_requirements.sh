@@ -110,6 +110,17 @@ if [[ -n "$OVERRIDE_REQUIREMENTS" ]]; then
     echo "override-dependencies = ["
     grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$' | sed 's/.*/"&",/' | sed 's/^/  /'
     echo "]"
+    if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
+      echo ""
+      echo "[[tool.uv.index]]"
+      echo 'name = "pytorch-cpu"'
+      echo 'url = "https://download.pytorch.org/whl/cpu"'
+      echo "explicit = true"
+      echo ""
+      echo "[tool.uv.sources]"
+      echo 'torch = { index = "pytorch-cpu" }'
+      echo 'torchvision = { index = "pytorch-cpu" }'
+    fi
   } >> "$ARTIFACT_DIR/pyproject.toml"
 
   mapfile -t _pkgs < <(grep -v '^\s*#' "$OVERRIDE_REQUIREMENTS" | grep -v '^\s*$')
@@ -138,10 +149,13 @@ if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
 
   echo "=== Adding tpu-inference and vllm requirements to lock file ==="
   # Exclude tpu-inference (handled separately), nixl (CUDA-only, not needed for TPU),
-  # and setuptools (<81.0.0 in vllm conflicts with setuptools>=84.0.0 security floor).
+  # setuptools (<81.0.0 in vllm conflicts with setuptools>=84.0.0 security floor),
+  # and transformers/tokenizers (vllm>=0.32 requests transformers>=5.16.1 and
+  # tokenizers>=0.23.2, which require safetensors>=0.8.0 and conflict with
+  # google-tunix's safetensors<0.8 cap; transformers/tokenizers are seeded by the JAX lock).
   mapfile -t _vllm_pkgs < <(
     expand_requirements "$WORK_DIR/vllm/requirements/tpu.txt" \
-      | grep -viE '^(tpu-inference|nixl|setuptools([=<>!~; ]|$))' \
+      | grep -viE '^(tpu-inference|nixl|(setuptools|transformers|tokenizers)([=<>!~; ]|$))' \
       | strip_exact_pins
   )
   mapfile -t _tpu_pkgs < <(
@@ -157,7 +171,8 @@ if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
     --resolution=lowest \
     --directory "$ARTIFACT_DIR" \
     "${_vllm_pkgs[@]}" \
-    "${_tpu_pkgs[@]}"
+    "${_tpu_pkgs[@]}" \
+    "${_pkgs[@]}"
 fi
 
 echo "=== Exporting updated lock to generated requirements ==="
@@ -194,8 +209,8 @@ if [[ "$HARDWARE" == "tpu" && "$GENERATED_REQUIREMENTS" == *post-train* ]]; then
   sed -i '/^cuda-/d' "$ARTIFACT_DIR/$GENERATED_REQUIREMENTS"
 
   # Replace torch and torchvision with +cpu versions (must use == for local version labels)
-  sed -i 's/^\(torch\)>=\([0-9.]*\)\(.*\)$/\1==\2+cpu\3/' "$ARTIFACT_DIR/$GENERATED_REQUIREMENTS"
-  sed -i 's/^\(torchvision\)>=\([0-9.]*\)\(.*\)$/\1==\2+cpu\3/' "$ARTIFACT_DIR/$GENERATED_REQUIREMENTS"
+  sed -i '/^torch\(vision\)\?>=.*sys_platform == .darwin./d' "$ARTIFACT_DIR/$GENERATED_REQUIREMENTS"
+  sed -i 's/^\(torch\(vision\)\?\)>=\([0-9.]*\)\(+cpu\)\?\( ; .*\)\?$/\1==\3+cpu/' "$ARTIFACT_DIR/$GENERATED_REQUIREMENTS"
 fi
 
 echo "Updated generated requirements: $ARTIFACT_DIR/$GENERATED_REQUIREMENTS"

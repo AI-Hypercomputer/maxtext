@@ -1,11 +1,15 @@
+certifi>=2026.10.18
 datasets>=5.0.1
+filelock>=4.2.1
 fsspec==2026.6.0
 gcsfs==2026.6.0
 orbax-checkpoint>=0.12.8
 markdown>=3.10.2
-oauthlib>=4.0.0
+oauthlib>=4.0.1
+pillow>=13.0.0
 setuptools>=84.0.0
 urllib3>=2.8.0
+virtualenv>=21.15.1
 werkzeug>=3.1.9
 wheel>=0.48.0
-xprof>=2.23.1
+xprof==2.24.0

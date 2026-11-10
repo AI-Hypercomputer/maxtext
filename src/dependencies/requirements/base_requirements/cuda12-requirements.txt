@@ -1,3 +1,4 @@
 -r requirements.txt
+diffusers>=0.42.1
 flax>=0.12.12
 transformer-engine[jax]
