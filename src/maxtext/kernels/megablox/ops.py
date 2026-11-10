@@ -101,6 +101,7 @@ def gmm(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    gmm_v2_small_tail_dot: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -158,7 +159,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 26),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -188,6 +189,7 @@ def gmm(
       fuse_3d_dlhs_ps,
       tc_routing,
       tc_unsort_cfg,
+      gmm_v2_small_tail_dot,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -250,6 +252,7 @@ def _gmm_fwd(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    gmm_v2_small_tail_dot: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -331,6 +334,7 @@ def _gmm_fwd(
         partial_sum,
         quantization_rule,
         out_is_3d=out_is_3d,
+        small_tail_dot=gmm_v2_small_tail_dot,
     )
   else:
     out = _fwd_run_megablox(
@@ -527,6 +531,7 @@ def _fwd_run_tokamax_v2(
     partial_sum: jnp.ndarray | None,
     quantization_rule: qwix.QtRule | None = None,
     out_is_3d: bool = False,
+    small_tail_dot: bool = False,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   rhs_operand = rhs
@@ -569,6 +574,7 @@ def _fwd_run_tokamax_v2(
       lhs_scale=lhs_scale,
       maybe_quantize_lhs=maybe_quantize_lhs,
       out_is_3d=out_is_3d,
+      small_tail_dot=small_tail_dot,
   )
 
   # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
@@ -633,6 +639,7 @@ def _gmm_bwd(
     out_is_3d: bool,
     fuse_3d_dlhs_ps: bool,
     tc_unsort_cfg: TcUnsortCfg | None,
+    gmm_v2_small_tail_dot: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -755,6 +762,7 @@ def _gmm_bwd(
       use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
       dlhs_is_3d=lhs_is_3d,
       fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+      small_tail_dot=gmm_v2_small_tail_dot,
   )
 
   # 4. DRHS Gradient Execution
@@ -978,6 +986,7 @@ def _compute_dlhs(
     use_dlhs_transpose_rhs: bool = False,
     dlhs_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    small_tail_dot: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices.
 
@@ -1008,6 +1017,7 @@ def _compute_dlhs(
         use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
         out_is_3d=dlhs_is_3d,
         fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+        small_tail_dot=small_tail_dot,
     )
   else:
     dlhs = _dlhs_run_megablox(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, interpret, lhs_vma_axes)
@@ -1086,6 +1096,7 @@ def _dlhs_run_tokamax_v2(
     use_dlhs_transpose_rhs: bool = False,
     out_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    small_tail_dot: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
@@ -1133,6 +1144,7 @@ def _dlhs_run_tokamax_v2(
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
       zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
+      small_tail_dot=small_tail_dot,
   )
 
   if not can_fuse_scale:
