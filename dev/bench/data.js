@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794275222086,
+  "lastUpdate": 1794285648262,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -67298,6 +67298,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3135.1749999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 341,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "c01ebcc8786ca29d4980e863087ef927881737d0",
+          "message": "Training engine: separate accumulate kernel and gradient casting\n\n# Description\n\nSeparate accumulate kernel and gradient casting:\n- Split fwd_bwd_accum into fwd_bwd and a separate accumulate kernel that donates\n  the running sums. Every micro-batch runs the same fwd_bwd executable, and XLA\n  cannot fold the add into the backward pass. KERNEL_NAMES is now\n  (\"fwd_bwd\", \"accumulate\", \"update\").\n- Gradients are summed in grad_dtype, divided once by the total denominator in at\n  least float32, and applied in the update.\n- Update memory_report.py (and maxtext_engine_xaot_test.py) to account for the\n  grad_dtype-sized gradient accumulator (ACCUMULATOR) alongside fwd_bwd and the\n  separate accumulate kernel.\n- cast_grads_after_all_reduce leaves gradients that fwd_bwd reduces only by an\n  all-reduce in the parameters' dtype, and casts them as they join the running\n  sum. Kept in DataTypes (types.py) and base.yml because it was actively used in\n  MLPerf v6.1 Qwen3.5-397B and MaxTextTrainingEngine consumes MaxTextConfig\n  rather than CompileConfig.\n- _normalize_loss_output scales maxtext loss_fn's normalized aux losses\n  (moe_lb_loss, indexer_loss, mtp_loss) by total_weights in float32, matching\n  train.py's gradient-accumulation objective.\n- metrics._validate_metric accepts numeric and bool dtypes via jnp.issubdtype\n  (_has_numeric_dtype) so bfloat16 metrics and WeightedMetrics are accepted\n  alongside numpy types.\n- Consolidate GradCastTest into maxtext_engine_data_parallel_test.py (rather than\n  adding maxtext_engine_grad_cast_test.py, which previously took 363.6s), merge\n  redundant compiles in test_moving_the_cast_changes_no_number_on_cpu (from 12\n  to 8 compiles), and add a mid-step compile_kernels() regression test in\n  LifecycleTest.\n\nDifferences from atwigg/mlperf:\n- grad_accumulation_dtype was omitted/removed because MLPerf results reproduce\n  without adding a new config flag. Gradients accumulate directly in grad_dtype.\n- Checkpoints are taken only between steps (PR #6049), so the accumulator's\n  checkpoint restore target (_accumulated_grads_restore_target) and the\n  intra-step checkpoint test (maxtext_engine_checkpoint_test.py) are not\n  ported.\n- Not ported: the MoE dropless overflow/retry path (dropless_*, retry_*),\n  prepare_fwd_bwd_input / PreparedFwdBwdInput / wait_for_device, model_scope,\n  and the fp8 flags.\n- fwd_bwd and update keep PR 5999's explicit signatures; MLPerf's **kwargs are\n  not adopted.\n- cast_grads_after_all_reduce is declared in types.py and base.yml and read as a\n  typed config field, without MLPerf's getattr(config, ...) fallbacks; no\n  os.environ switches are added.\n- The uncast-gradient caches (_uncast_grad_mask, _cast_uncast_grads) are\n  cleared in _reset_compiled_state when the model or state is replaced, so a\n  mask from an earlier compile is never applied to a new parameter tree (they\n  stay intact on _disable_pure_state because the compiled kernels remain active\n  across pure-state fallback).\n\n# Tests\n\n```bash\npython -m pytest tests/post_training/unit/maxtext_engine_data_parallel_test.py tests/post_training/unit/maxtext_engine_packing_test.py tests/post_training/unit/maxtext_engine_frozen_grad_test.py -q\n```\nVerified via pyink, pylint, codespell, and Copybara/TAP build checks after updating.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nCo-authored-by: Leilei Wu <lewu@google.com>\nCo-authored-by: Rohan Bierneni <rbierneni@google.com>\nCo-authored-by: Param Bole <parambole@google.com>\nPiperOrigin-RevId: 1017800446",
+          "timestamp": "2026-11-10T02:10:02Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/c01ebcc8786ca29d4980e863087ef927881737d0"
+        },
+        "date": 1794285647375,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 255.85699999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 62.388000000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2103.031,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 134.12699999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 168.274,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3093.461,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 341,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1598.0769999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 212.94099999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 75,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3157.7350000000006,
             "unit": "sec"
           },
           {
