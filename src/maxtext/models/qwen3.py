@@ -1630,7 +1630,7 @@ class Qwen3NextScannableBlock(nnx.Module):
   @property
   def _remat_enabled(self):
     """Whether the block rematerializes its own layers."""
-    return self.apply_internal_remat and self.config.remat_policy != "none"
+    return self.apply_internal_remat and bool(self.config.remat_policy) and self.config.remat_policy != "none"
 
   def _scan_local_layers(self, y, layer_kwargs, forced_routed_experts=None):
     """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized jax.lax.scan."""

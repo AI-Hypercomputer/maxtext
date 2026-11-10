@@ -436,7 +436,25 @@ class TestNNXDecoderRematPolicy(unittest.TestCase):
     )
 
   def test_remat_policy_none_returns_none(self):
-    self.assertIsNone(self.decoder.get_remat_policy())
+    cfg = _make_config(remat_policy="none")
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertIsNone(decoder.get_remat_policy())
+
+  def test_remat_enabled(self):
+    """`_remat_enabled()` tells "none" apart from "full", which `get_remat_policy()` cannot."""
+    for remat_policy, override, expected in (
+        ("none", None, False),
+        ("full", None, True),
+        ("minimal", None, True),
+        ("none", "full", True),
+    ):
+      with self.subTest(remat_policy=remat_policy, override=override):
+        cfg = _make_config(remat_policy=remat_policy)
+        decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), rngs=nnx.Rngs(params=0, dropout=1))
+        if override is not None:
+          decoder.remat_policy_override = override
+        self.assertEqual(decoder._remat_enabled(), expected)  # pylint: disable=protected-access
 
   def test_remat_policy_full_returns_none(self):
     cfg = _make_config(remat_policy="full")
@@ -748,6 +766,116 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
+
+# ---------------------------------------------------------------------------
+# 6b. remat_policy=none must not apply jax.checkpoint
+# ---------------------------------------------------------------------------
+
+
+def _count_checkpoint_eqns(jaxpr) -> int:
+  """Counts `jax.checkpoint` equations in `jaxpr`, including nested sub-jaxprs."""
+  count = 0
+  for eqn in jaxpr.eqns:
+    # The `jax.checkpoint` primitive name differs across JAX versions. If it changes again, the
+    # `remat_policy=full` cases below fail, so the `none` cases cannot pass for the wrong reason.
+    if eqn.primitive.name in ("remat2", "checkpoint"):
+      count += 1
+    for param in eqn.params.values():
+      for sub in param if isinstance(param, (list, tuple)) else (param,):
+        if hasattr(sub, "eqns"):
+          count += _count_checkpoint_eqns(sub)
+        elif hasattr(getattr(sub, "jaxpr", None), "eqns"):
+          count += _count_checkpoint_eqns(sub.jaxpr)
+  return count
+
+
+_GEMMA3_REMAINDER_CONFIG = {
+    "run_name": "gemma3_remat_none_test",
+    "decoder_block": "gemma3",
+    "model_name": "gemma3-4b",
+    "base_num_decoder_layers": 7,  # One full 6-layer attention pattern plus a 1-layer remainder.
+    "base_emb_dim": 128,
+    "base_num_query_heads": 4,
+    "base_num_kv_heads": 4,
+    "base_mlp_dim": 256,
+    "vocab_size": 256,
+    "max_target_length": 16,
+}
+
+
+class TestNNXDecoderRematNone(unittest.TestCase):
+  """`remat_policy=none` must not wrap decoder layers in `jax.checkpoint`.
+
+  pyconfig turns the string "none" into Python `None`, and `get_remat_policy()` returns `None`
+  for both "none" and "full"; `jax.checkpoint(policy=None)` is full remat.
+  """
+
+  def _count_checkpoints(self, scan_layers, remat_policy, remat_policy_override=None, **overrides):
+    cfg = _make_config(**{"scan_layers": scan_layers, "remat_policy": remat_policy, **overrides})
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    if remat_policy_override is not None:
+      decoder.remat_policy_override = remat_policy_override
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jnp.zeros((batch, seq_len), jnp.int32)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+    graphdef, state = nnx.split((decoder, shared_embedding))
+
+    def forward(state):
+      merged_decoder, merged_embedding = nnx.merge(graphdef, state)
+      logits, _, _ = merged_decoder(
+          merged_embedding,
+          ids,
+          positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return logits
+
+    return _count_checkpoint_eqns(jax.make_jaxpr(forward)(state).jaxpr)
+
+  def test_remat_none_does_not_checkpoint(self):
+    """Default decoder: no `jax.checkpoint` with `remat_policy=none`, scanned or unscanned."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        self.assertEqual(self._count_checkpoints(scan_layers, "none"), 0)
+
+  def test_remat_full_checkpoints(self):
+    """Default decoder: `remat_policy=full` still applies `jax.checkpoint`."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        self.assertGreater(self._count_checkpoints(scan_layers, "full"), 0)
+
+  def test_remat_policy_override_full_checkpoints(self):
+    """`remat_policy_override="full"` (dropless retry program) re-enables remat over `remat_policy=none`."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        self.assertGreater(self._count_checkpoints(scan_layers, "none", remat_policy_override="full"), 0)
+
+  def test_scanned_qwen3_next_with_remainder(self):
+    """Scanned Qwen3-Next blocks (internal remat) and the remainder block follow `remat_policy`."""
+    overrides = {**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": 5, "inhomogeneous_layer_cycle_interval": 2}
+    self.assertEqual(self._count_checkpoints(True, "none", **overrides), 0)
+    self.assertGreater(self._count_checkpoints(True, "full", **overrides), 0)
+
+  def test_scanned_gemma3_with_remainder(self):
+    """The scanned Gemma3 remainder layer follows `remat_policy`."""
+    self.assertEqual(self._count_checkpoints(True, "none", **_GEMMA3_REMAINDER_CONFIG), 0)
+    self.assertGreater(self._count_checkpoints(True, "full", **_GEMMA3_REMAINDER_CONFIG), 0)
 
 
 class TestNNXDecoderServeFp8WeightForwardPass(unittest.TestCase):
