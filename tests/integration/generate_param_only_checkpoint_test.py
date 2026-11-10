@@ -65,8 +65,6 @@ def run_e2e_test_flow(
       f"base_output_directory={base_output_directory}",
       "async_checkpointing=False",
       "enable_checkpointing=True",
-      "enable_goodput_recording=False",
-      "monitor_goodput=False",
       f"hardware={hardware}",
       "max_target_length=128",
       "per_device_batch_size=1",

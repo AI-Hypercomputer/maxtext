@@ -55,8 +55,6 @@ def get_resharding_command(run_date, steps, metrics_file, base_output_directory,
           f"dataset_path={dataset_path}",
           "dataset_type=synthetic",
           "grain_worker_count=0",
-          "enable_goodput_recording=False",
-          "monitor_goodput=False",
       ]
       + model_params
       + parallelism_args

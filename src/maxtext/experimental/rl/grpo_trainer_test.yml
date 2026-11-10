@@ -12,5 +12,3 @@ logits_dot_in_fp32: true
 prompt: "Hello world this is a test"
 init_weights_seed: 42
 enable_dropout: false
-enable_goodput_recording: false
-monitor_goodput: false

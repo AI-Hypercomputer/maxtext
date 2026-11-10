@@ -94,8 +94,6 @@ def get_checkpointing_command(
           f"dataset_type={dataset_type}",
           "async_checkpointing=False",
           f"attention={attention_type}",
-          "enable_goodput_recording=False",
-          "monitor_goodput=False",
       ]
       + model_params
       + pathways_command

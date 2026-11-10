@@ -12,5 +12,3 @@ dataset_type: "synthetic"
 head_dim: 128
 per_device_batch_size: 1
 steps: 10
-enable_goodput_recording: false
-monitor_goodput: false

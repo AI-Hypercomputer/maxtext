@@ -19,9 +19,11 @@ import json
 import math
 import os
 import statistics
+import sys
 import tempfile
 import unittest
 import uuid
+import warnings
 
 from absl.testing import absltest
 from maxtext.trainers.pre_train.train import main as train_main
@@ -33,7 +35,12 @@ TOTAL_STEPS = 30
 # Sample unprofiled steady-state steps 18–29 (12 steps), excluding compile/warm-up (steps 0–4),
 # the XProf profiling window (steps 5–14), and post-profiler settling (steps 15–17).
 WARMUP_STEPS_TO_SKIP = 18
-# Maximum allowed relative increase in mean steady-state step time when Goodput is ON (2%).
+# Single-run maximum empirical overhead (+0.163% on unprofiled steady-state steps 18–29).
+EMPIRICAL_OVERHEAD_RATIO = 0.00163
+# Soft warning multiplier (1.2x empirical max = ~0.196% overhead): emits non-blocking CI warning.
+WARNING_MULTIPLIER = 1.2
+SOFT_WARNING_OVERHEAD_RATIO = EMPIRICAL_OVERHEAD_RATIO * WARNING_MULTIPLIER
+# Hard blocking threshold: maximum allowed relative increase in mean steady-state step time (2.0%).
 MAX_ALLOWED_OVERHEAD_RATIO = 0.02
 
 
@@ -148,7 +155,30 @@ class GoodputOverheadTest(unittest.TestCase):
           ),
       )
 
-      # 2. Verify steady-state mean step time overhead <= 2%.
+      # 2. Level 1 (Soft Non-Blocking Warning): overhead > 1.2x empirical max (~0.196%) and <= 2.0%.
+      if SOFT_WARNING_OVERHEAD_RATIO < overhead_ratio <= MAX_ALLOWED_OVERHEAD_RATIO:
+        warn_msg = (
+            f"Goodput ON steady-state overhead ({overhead_ratio * 100:.3f}%, "
+            f"mean_on={mean_on:.4f}s vs mean_off={mean_off:.4f}s) exceeded the soft warning threshold "
+            f"of {SOFT_WARNING_OVERHEAD_RATIO * 100:.3f}% (1.2x empirical max {EMPIRICAL_OVERHEAD_RATIO * 100:.3f}%), "
+            f"though it remains within the {MAX_ALLOWED_OVERHEAD_RATIO * 100:.1f}% blocking limit."
+        )
+        # Emit Python UserWarning (shown in pytest warnings summary without failing the test).
+        warnings.warn(warn_msg, UserWarning)
+        # Emit GitHub Actions workflow warning annotation directly to uncaptured stdout.
+        print(
+            f"\n::warning file=tests/integration/goodput_overhead_test.py,"
+            f"title=Goodput Overhead Soft Threshold Exceeded::{warn_msg}\n",
+            file=sys.__stdout__,
+            flush=True,
+        )
+        # Append to GitHub Job Summary if running in GitHub Actions.
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+          with open(summary_path, "a", encoding="utf-8") as sf:
+            sf.write(f"\n> [!WARNING]\n> **Goodput Overhead Soft Warning**: {warn_msg}\n")
+
+      # 3. Level 2 (Hard Blocking CI Failure): steady-state mean step time overhead > 2.0%.
       self.assertLessEqual(
           overhead_ratio,
           MAX_ALLOWED_OVERHEAD_RATIO,

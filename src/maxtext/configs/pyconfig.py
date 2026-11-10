@@ -583,6 +583,14 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
 
+  # Disable Goodput recording and monitoring by default inside test runners
+  # unless the test explicitly passes them via CLI, kwargs, or M_* env vars.
+  if "pytest" in sys.modules or "unittest" in sys.modules or os.environ.get("MAXTEXT_TEST_DISABLE_GOODPUT") == "1":
+    explicit_overrides = cli_keys | kwargs_keys | env_keys
+    for goodput_key in ("enable_goodput_recording", "monitor_goodput"):
+      if goodput_key not in explicit_overrides:
+        raw_keys_dict[goodput_key] = False
+
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 
   if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get("use_jax_splash"):

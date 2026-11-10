@@ -62,7 +62,6 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "steps=10",
             "enable_checkpointing=false",
             "enable_goodput_recording=False",
-            "monitor_goodput=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         )
     )  # need to pass relative path to tokenizer
@@ -90,7 +89,6 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "checkpoint_period=50",
             "async_checkpointing=False",
             "enable_goodput_recording=False",
-            "monitor_goodput=False",
             "skip_jax_distributed_system=True",
         )
     )
@@ -112,7 +110,6 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "checkpoint_period=50",
             "async_checkpointing=False",
             "enable_goodput_recording=False",
-            "monitor_goodput=False",
             "skip_jax_distributed_system=True",
         )
     )

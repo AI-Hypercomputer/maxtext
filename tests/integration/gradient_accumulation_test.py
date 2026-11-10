@@ -60,7 +60,6 @@ class GradientAccumulationTest(unittest.TestCase):
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
-        "monitor_goodput=False",
         "decoder_block=simple",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
@@ -156,7 +155,6 @@ class GradientAccumulationTest(unittest.TestCase):
             "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off).
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
-            "monitor_goodput=False",
             "base_emb_dim=128",
             "base_num_decoder_layers=1",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",

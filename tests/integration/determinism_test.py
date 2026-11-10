@@ -54,8 +54,6 @@ class DeterminismTests(unittest.TestCase):
         get_test_config_path(),
         "steps=2",
         "enable_checkpointing=False",
-        "enable_goodput_recording=False",
-        "monitor_goodput=False",
         "enable_data_shuffling=True",
         "enable_dropout=False",
         f"base_output_directory={get_test_base_output_directory()}",

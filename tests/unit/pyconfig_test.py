@@ -1044,6 +1044,61 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(cfg_override.weight_dtype, jnp.float32)
     self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
 
+  def test_goodput_disabled_by_default_in_test_runners_with_explicit_overrides(self):
+    """Verifies Goodput is disabled by default inside test runners unless explicitly overridden."""
+    # 1. Default inside test runner: disabled even though base.yml defaults to True.
+    cfg_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(cfg_default.enable_goodput_recording)
+    self.assertFalse(cfg_default.monitor_goodput)
+
+    # 2. Explicit kwargs override enables Goodput inside test runner.
+    cfg_kwargs = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_goodput_recording=True,
+        monitor_goodput=True,
+    )
+    self.assertTrue(cfg_kwargs.enable_goodput_recording)
+    self.assertTrue(cfg_kwargs.monitor_goodput)
+
+    # 3. Explicit CLI override enables Goodput inside test runner.
+    cfg_cli = pyconfig.initialize(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+            get_test_config_path(),
+            "enable_goodput_recording=True",
+            "monitor_goodput=True",
+        ],
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(cfg_cli.enable_goodput_recording)
+    self.assertTrue(cfg_cli.monitor_goodput)
+
+    # 4. Explicit M_* environment variable override enables Goodput inside test runner.
+    orig_rec = os.environ.get("M_ENABLE_GOODPUT_RECORDING")
+    orig_mon = os.environ.get("M_MONITOR_GOODPUT")
+    try:
+      os.environ["M_ENABLE_GOODPUT_RECORDING"] = "true"
+      os.environ["M_MONITOR_GOODPUT"] = "true"
+      cfg_env = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_env.enable_goodput_recording)
+      self.assertTrue(cfg_env.monitor_goodput)
+    finally:
+      if orig_rec is None:
+        os.environ.pop("M_ENABLE_GOODPUT_RECORDING", None)
+      else:
+        os.environ["M_ENABLE_GOODPUT_RECORDING"] = orig_rec
+      if orig_mon is None:
+        os.environ.pop("M_MONITOR_GOODPUT", None)
+      else:
+        os.environ["M_MONITOR_GOODPUT"] = orig_mon
+
 
 if __name__ == "__main__":
   unittest.main()
