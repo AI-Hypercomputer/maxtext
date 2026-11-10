@@ -27,6 +27,7 @@ from absl.testing import parameterized
 from flax import nnx
 from flax import struct
 import jax
+from jax.experimental.layout import Format
 import jax.numpy as jnp
 from maxtext.common import checkpoint_context
 from maxtext.common import train_state_nnx
@@ -2597,6 +2598,219 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         np.asarray(t._accumulated_denominator), np.float32(3 * 257.0)  # pylint: disable=protected-access
     )
 
+  @staticmethod
+  def _memory_kinds(tree):
+    return {leaf.sharding.memory_kind for leaf in jax.tree.leaves(tree) if hasattr(leaf, "sharding")}
+
+  def test_optimizer_offload_preserves_numerics(self):
+    """Offload moves bytes only: two steps give bit-identical weights and moments."""
+    trained = []
+    for offload in (False, True):
+      t = self._adam_engine(optimizer_memory_host_offload=offload)
+      t.compile(DummyPayload())
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_state_on_device_without_offload(self):
+    """Without the flag, the optimizer state stays in device memory."""
+    t = self._adam_engine()
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device"})
+
+  def test_update_reoffloads_restored_optimizer_state(self):
+    """`_settle_state` after a restore re-offloads moments so compiled `update()` sees pinned_host."""
+    t = self._adam_engine(optimizer_memory_host_offload=True)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    # What a restore that lands on the device leaves behind before `_settle_state` runs.
+    on_device = jax.tree.map(
+        lambda x: jax.device_put(x, Format(None, x.sharding.with_memory_kind("device"))),
+        nnx.state(t.state.optimizer),
+    )
+    nnx.update(t.state.optimizer, on_device)
+    t._invalidate_pure_state()  # pylint: disable=protected-access
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device"})
+    t._settle_state()  # pylint: disable=protected-access
+    t._refresh_pure_state()  # pylint: disable=protected-access
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_restore_checkpoint_offloads_optimizer_state_before_and_after_restore(self):
+    """`restore_checkpoint` offloads optimizer state both before and after restore."""
+    for compile_before_restore in (False, True):
+      with self.subTest(compile_before_restore=compile_before_restore):
+        t = self._adam_engine(enable_checkpointing=True, optimizer_memory_host_offload=True)
+        if compile_before_restore:
+          t.compile(DummyPayload())
+        mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
+        self._mock_saved_checkpoint(mock_orbax_mgr, custom_metadata={"additional_metadata": {"step": 3}})
+
+        seen_pre_restore_kinds = []
+
+        def fake_restore(step, abstract_checkpointables, engine=t, seen=None):
+          del step, abstract_checkpointables
+          assert seen is not None
+          seen.append(self._memory_kinds(nnx.state(engine.state.optimizer)))
+          restored_opt = jax.tree.map(
+              lambda x: jax.device_put(x, Format(None, x.sharding.with_memory_kind("device")))
+              if hasattr(x, "sharding")
+              else x,
+              nnx.state(engine.state.optimizer, nnx.optimizer.OptState),
+          )
+          return {
+              "model_params": nnx.state(engine.state.model),
+              "optimizer_state": restored_opt,
+          }
+
+        mock_orbax_mgr.load_checkpointables.side_effect = (
+            lambda step, abstract_checkpointables, f=fake_restore, s=seen_pre_restore_kinds: f(
+                step, abstract_checkpointables, seen=s
+            )
+        )
+
+        self.assertEqual(t.restore_checkpoint(), {"step": 3})
+        expected_pre = [{"pinned_host"}]
+        self.assertEqual(seen_pre_restore_kinds, expected_pre)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+        if not compile_before_restore:
+          t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_offload_on_eager_path(self):
+    """`optimizer_memory_host_offload` also applies on the eager path, where `compile()` is never called.
+
+    It changes placement only: two eager steps give the same weights and moments with it off.
+    """
+    trained = []
+    for offload in (False, True):
+      t = self._adam_engine(optimizer_memory_host_offload=offload)
+      expected = {"pinned_host"} if offload else {"device"}
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        # Off HBM from the first forward pass, as a compile would have moved it.
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+      self.assertFalse(t._compiled)  # pylint: disable=protected-access
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+
+  def test_optimizer_offload_settles_at_init(self):
+    """Optimizer state is offloaded in `__init__` before any `compile`, `eval_step`, or `fwd_bwd`."""
+    without_offload = self._adam_engine(optimizer_memory_host_offload=False)
+    self.assertEqual(self._memory_kinds(nnx.state(without_offload.state.optimizer)), {"device"})
+
+    t = self._adam_engine(optimizer_memory_host_offload=True)
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+
+    # Deferred `compile(None)` and step-0 `eval_step` keep optimizer state offloaded.
+    t.compile(None)
+    t.eval_step(DummyPayload())
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_offload_on_eager_path_skips_zero1(self):
+    """Eager `fwd_bwd`/`update` with host offload skips Zero-1 even when config enables Zero-1."""
+    data_parallelism = min(2, jax.device_count())
+    tensor_parallelism = jax.device_count() // data_parallelism
+    trained = []
+    for offload in (False, True):
+      cfg = self.setup_config(
+          gradient_clipping_threshold=0.0,
+          optimizer_memory_host_offload=offload,
+          shard_optimizer_over_data=True,
+          shard_mode="explicit",
+          ici_fsdp_parallelism=1,
+          ici_data_parallelism=data_parallelism,
+          ici_tensor_parallelism=tensor_parallelism,
+      )
+      mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+      with (
+          mock.patch.object(maxtext_engine, "_zero1_active", return_value=None),
+          mock.patch.object(
+              maxtext_engine.train_utils,
+              "create_training_optimizer",
+              return_value=(lambda step: jnp.array(0.1), optax.adam(0.1)),
+          ),
+      ):
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(self._weighted_loss_fn)
+        expected_kind = {"pinned_host"} if offload else {"device"}
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected_kind)
+        for _ in range(2):
+          t.fwd_bwd(DummyPayload())
+          self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected_kind)
+          t.update()
+          self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected_kind)
+        opt_specs = [
+            leaf.sharding.spec
+            for leaf in jax.tree.leaves(nnx.state(t.state.optimizer))
+            if isinstance(getattr(leaf, "sharding", None), jax.sharding.NamedSharding) and leaf.ndim > 0
+        ]
+        if offload:
+          self.assertTrue(opt_specs)
+        self.assertFalse(any("data" in jax.tree.leaves(tuple(spec)) for spec in opt_specs))
+        self.assertFalse(t._compiled)  # pylint: disable=protected-access
+        trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+
+  def test_update_after_state_setter_swaps_optimizer(self):
+    """The `state` setter drops the previous compile's optimizer shardings.
+
+    Replacing `state` clears any accumulated gradients and compiled shardings, so the next
+    `fwd_bwd`/`update` step works cleanly with the new optimizer (SGD replacing Adam) on both the
+    compiled and eager paths, with and without offload.
+    """
+    for offload in (False, True):
+      with self.subTest(offload=offload):
+        expected = {"pinned_host"} if offload else {"device"}
+
+        # Compiled path: `state` setter drops compiled state so the next step recompiles for SGD.
+        t = self._adam_engine(optimizer_memory_host_offload=offload)
+        t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        before = np.asarray(t.state.model.weights[...])
+
+        t.state = train_state_nnx.TrainStateNNX(t.model, nnx.Optimizer(t.model, optax.sgd(0.1), wrt=nnx.Param))
+        self.assertIsNone(t._optimizer_device_shardings)  # pylint: disable=protected-access
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        # `_weighted_loss_fn`'s gradient is 2.0 per element, so SGD at 0.1 moves each weight by 0.2.
+        np.testing.assert_allclose(before - np.asarray(t.state.model.weights[...]), [0.2, 0.2], atol=1e-6)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+
+        # Eager path: `update()` runs eagerly against the new optimizer tree after `state` is swapped.
+        eager = self._adam_engine(optimizer_memory_host_offload=offload)
+        eager.fwd_bwd(DummyPayload())
+        eager.update()
+        before_eager = np.asarray(eager.state.model.weights[...])
+
+        eager.state = train_state_nnx.TrainStateNNX(
+            eager.model, nnx.Optimizer(eager.model, optax.sgd(0.1), wrt=nnx.Param)
+        )
+        eager.fwd_bwd(DummyPayload())
+        eager.update()
+        np.testing.assert_allclose(before_eager - np.asarray(eager.state.model.weights[...]), [0.2, 0.2], atol=1e-6)
+        self.assertEqual(self._memory_kinds(nnx.state(eager.state.optimizer)), expected)
+
   def test_maxtext_loss_aux_losses_are_scaled_into_the_differentiated_sum(self):
     """`maxtext_train.loss_fn`'s normalized aux losses are weighted by the token count, as its own objective is.
 
@@ -2945,7 +3159,17 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
 
   def test_settle_state_places_and_shards_in_a_single_pass(self):
     """`_settle_state` places unplaced leaves on the mesh and shards optimizer state in a single pass."""
-    cfg = self.setup_config(shard_optimizer_over_data=True, shard_mode="explicit")
+    data_parallelism = min(2, jax.device_count())
+    tensor_parallelism = jax.device_count() // data_parallelism
+    cfg = self.setup_config(
+        shard_optimizer_over_data=True,
+        shard_mode="explicit",
+        ici_fsdp_parallelism=1,
+        ici_data_parallelism=data_parallelism,
+        ici_tensor_parallelism=tensor_parallelism,
+    )
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
     with (
         mock.patch.object(maxtext_engine, "_zero1_active", return_value=None),
         mock.patch.object(
@@ -3085,6 +3309,17 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     for engine, (rules, abstract_mesh) in zip((deferred, eager), seen):
       self.assertEqual(rules, self.mock_config.logical_axis_rules)
       self.assertEqual(abstract_mesh, engine._mesh.abstract_mesh)  # pylint: disable=protected-access
+
+  def test_zero1_sharding_keeps_memory_kind(self):
+    """`add_data_to_sharding` builds a fresh sharding; the memory kind must survive it."""
+    mesh = self.mock_from_pretrained.return_value[1]
+    base = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None)).with_memory_kind("pinned_host")
+    target = maxtext_engine._zero1_sharding(  # pylint: disable=protected-access
+        mesh, jax.ShapeDtypeStruct((4,), jnp.float32), base
+    )
+    self.assertIsNotNone(target)
+    self.assertIn("data", jax.tree.leaves(tuple(target.spec)))
+    self.assertEqual(target.memory_kind, "pinned_host")
 
   def _nan_loss_fn(self, model, *_args, **_kwargs):
     """A loss whose gradient is NaN in every element."""
