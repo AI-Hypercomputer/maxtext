@@ -404,6 +404,8 @@ jobs:
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
+        matrix:
+          group: [1, 2]
     with:
       device_type: tpu
       device_name: v6e-4
@@ -416,6 +418,8 @@ jobs:
       container_resource_option: "--init --privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+      total_workers: '2'
+      worker_group: ${{ matrix.group }}
 
   all_tests_passed:
     # auto_label_pr.yml and Copybara match this check name; Copybara imports a "pull ready" PR once any run of it

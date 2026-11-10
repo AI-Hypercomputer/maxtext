@@ -282,6 +282,12 @@ jobs:
           trap cleanup_tpu_locks TERM INT
 
           if [ "${TOTAL_WORKERS}" -gt 1 ]; then
+            # Pathways jobs upload no test results, so balance on the durations of the matching non-Pathways flavor.
+            if [[ "${PYTEST_MARKER}" == *"not integration_test"* ]]; then
+              DURATIONS_FLAVOR="tpu-unit"
+            else
+              DURATIONS_FLAVOR="tpu-integration"
+            fi
             CANDIDATE_URLS=(
               "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/dev/bench/per_test_baseline.json"
             )
@@ -290,11 +296,25 @@ jobs:
             fi
             for URL in "${CANDIDATE_URLS[@]}"; do
               if curl -sSf -H "User-Agent: github-actions" "${URL}" -o per_test_baseline.json; then
-                .venv/bin/python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor tpu-unit
+                .venv/bin/python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor "${DURATIONS_FLAVOR}"
                 break
               fi
             done
-            SPLIT_ARGS="--class-splits=${TOTAL_WORKERS} --class-group=${WORKER_GROUP}"
+            if [ "${DURATIONS_FLAVOR}" = "tpu-unit" ]; then
+              # Whole test classes stay on one shard (tests/utils/class_split.py), as in the non-Pathways tpu-unit flavor.
+              SPLIT_ARGS="--class-splits=${TOTAL_WORKERS} --class-group=${WORKER_GROUP}"
+            else
+              # Integration tests split per test, as in the non-Pathways tpu-integration flavor: TrainTests alone
+              # takes longer than an even shard share, so a class-level split could not balance the shards.
+              .venv/bin/python3 -m pip install --quiet pytest-split
+              if [ -f .test_durations ]; then
+                SPLIT_ALGO="--splitting-algorithm least_duration"
+              else
+                echo "Warning: .test_durations not found. Falling back to default split."
+                SPLIT_ALGO=""
+              fi
+              SPLIT_ARGS="--splits ${TOTAL_WORKERS} --group ${WORKER_GROUP} ${SPLIT_ALGO}"
+            fi
           else
             SPLIT_ARGS=""
           fi
