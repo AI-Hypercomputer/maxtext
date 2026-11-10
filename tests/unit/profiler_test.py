@@ -55,6 +55,7 @@ class ProfilerTest(unittest.TestCase):
         xprof_e2e_enable_fw_throttle_event=True,
         xprof_e2e_enable_fw_power_level_event=True,
         xprof_e2e_enable_fw_thermal_event=True,
+        enable_continuous_profiling=True,
     )
 
     with patch("jax.profiler.ProfileOptions") as mock_options_cls:
@@ -73,6 +74,7 @@ class ProfilerTest(unittest.TestCase):
           "e2e_enable_fw_throttle_event": True,
           "e2e_enable_fw_power_level_event": True,
           "e2e_enable_fw_thermal_event": True,
+          "enable_continuous_profiling": True,
       }
       self.assertEqual(prof.profiling_options.advanced_configuration, expected_advanced_config)
 
@@ -168,6 +170,29 @@ class ProfilerTest(unittest.TestCase):
 
     step = 28  # Corresponds to 1 after the third period ended.
     assert not prof.should_deactivate_periodic_profile(step)
+
+  @pytest.mark.tpu_only
+  @patch("jax.profiler.stop_trace")
+  @patch("jax.profiler.start_trace")
+  def test_deactivate_only_stops_a_running_trace(self, mock_start_trace, mock_stop_trace):
+    """train_loop calls deactivate() when training stops early, also after the trace has ended."""
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        run_name="test_deactivate_only_stops_a_running_trace",
+        base_output_directory="/tmp",
+        profiler="xplane",
+    )
+    prof = profiler.Profiler(config)
+
+    prof.deactivate()
+    mock_stop_trace.assert_not_called()
+
+    prof.activate()
+    prof.deactivate()
+    prof.deactivate()
+    mock_start_trace.assert_called_once()
+    mock_stop_trace.assert_called_once()
 
 
 if __name__ == "__main__":

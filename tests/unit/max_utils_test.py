@@ -16,6 +16,7 @@
 import os
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from flax import linen as nn
@@ -113,6 +114,43 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     # Compare total loss aggregation
     self.assertTrue(jnp.allclose(total_loss_with_z, total_loss_no_z + z_loss_only, rtol=1e-5, atol=1e-8))
 
+  def test_cross_entropy_gradient(self):
+    """The custom gradient matches optax's and keeps the logits' dtype."""
+    logits = random.normal(random.PRNGKey(0), (2, 3, 50))
+    targets = random.randint(random.PRNGKey(1), (2, 3), 0, 50)
+    one_hot_targets = jax.nn.one_hot(targets, 50)
+
+    def loss(logits):
+      return jnp.sum(max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)[0])
+
+    expected = jax.grad(lambda l: jnp.sum(optax.softmax_cross_entropy_with_integer_labels(l, targets)))(logits)
+    np.testing.assert_allclose(jax.grad(loss)(logits), expected, rtol=1e-5, atol=1e-7)
+    self.assertEqual(jax.grad(loss)(logits.astype(jnp.bfloat16)).dtype, jnp.bfloat16)
+
+
+class MaxUtilsTieCotangents(unittest.TestCase):
+  """Tests for tie_cotangents in max_utils.py"""
+
+  def test_tie_cotangents_matches_untied(self):
+    """Tying the cotangents changes neither the values nor the gradients, and adds the barrier."""
+    x = random.normal(random.PRNGKey(0), (4, 8))
+    w = {"kernel": random.normal(random.PRNGKey(1), (8, 16))}
+
+    def loss(x, w, tie):
+      if tie:
+        x, w = max_utils.tie_cotangents(x, w)
+      return jnp.sum(jnp.tanh(x @ w["kernel"]) ** 2)
+
+    tied_x, tied_w = max_utils.tie_cotangents(x, w)
+    np.testing.assert_array_equal(tied_x, x)
+    np.testing.assert_array_equal(tied_w["kernel"], w["kernel"])
+    np.testing.assert_array_equal(max_utils.tie_cotangents(x), x)
+    tied_grads = jax.grad(loss, argnums=(0, 1))(x, w, True)
+    untied_grads = jax.grad(loss, argnums=(0, 1))(x, w, False)
+    jax.tree.map(np.testing.assert_array_equal, tied_grads, untied_grads)
+    tied_grad_jaxpr = jax.make_jaxpr(jax.grad(lambda x, w: loss(x, w, True), argnums=(0, 1)))(x, w)
+    self.assertIn("optimization_barrier", str(tied_grad_jaxpr))
+
 
 class MaxUtilsCustomMesh(unittest.TestCase):
   """Tests for the is_valid_custom_mesh function in max_utils.py"""
@@ -160,6 +198,13 @@ class UnscanTest(unittest.TestCase):
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "model_name": "llama3.1-8b",
+        "override_model_config": True,
+        "base_emb_dim": 128,
+        "base_mlp_dim": 256,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 2,
+        "base_num_decoder_layers": 6,
+        "vocab_size": 256,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -417,6 +462,13 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     mock_init.assert_not_called()
 
   @mock.patch("jax.distributed.initialize")
+  def test_skip_flag_without_hardware_key_exits_early(self, mock_init):
+    raw_keys = self._base_keys(skip_jax_distributed_system=True)
+    raw_keys.pop("hardware")
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_not_called()
+
+  @mock.patch("jax.distributed.initialize")
   def test_single_controller_exits_early(self, mock_init):
     max_utils.maybe_initialize_jax_distributed_system(self._base_keys(enable_single_controller=True))
     mock_init.assert_not_called()
@@ -443,10 +495,12 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
     mock_gpu_init.assert_called_once_with(raw_keys)
 
+  @mock.patch("jax.config.update")
   @mock.patch("maxtext.utils.max_utils.initialize_jax_for_cpu")
-  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init):
+  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init, mock_config_update):
     raw_keys = self._base_keys(hardware="cpu")
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_config_update.assert_called_once_with("jax_platforms", "cpu")
     mock_cpu_init.assert_called_once_with(raw_keys)
 
   @mock.patch("jax.distributed.initialize")
@@ -599,6 +653,19 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
     mock_init.assert_not_called()
 
+  def test_tpu_checkpoint_load_without_checkpointing_calls_jax_init(self):
+    # Loading a checkpoint on multi-host needs the distributed system even when saving is off.
+    for load_keys in (
+        {"load_parameters_path": "gs://bucket/ckpt/0/items"},
+        {"load_full_state_path": "gs://bucket/ckpt/0/items"},
+        {"source_checkpoint_layout": "safetensors_dynamic"},
+    ):
+      with self.subTest(**load_keys), mock.patch("jax.distributed.initialize") as mock_init:
+        max_utils.maybe_initialize_jax_distributed_system(self._base_keys(enable_checkpointing=False, **load_keys))
+        mock_init.assert_called_once_with(
+            initialization_timeout=self._base_keys()["jax_distributed_initialization_timeout"]
+        )
+
 
 class TestReorderSequence(unittest.TestCase):
   """Tests for reorder_sequence optimization in max_utils.py"""
@@ -683,6 +750,67 @@ class TestReorderSequence(unittest.TestCase):
                 msg=f"Failed for cp_size={cp_size}, to_contiguous={to_contiguous}, shape={shape}, seq_dim={seq_dim}",
             )
 
+  def test_reorder_gradient_parity(self):
+    """Verifies backward gradient autodiff through reorder_sequence is non-nan and bit-exact."""
+    key = random.key(42)
+
+    # Sweep configurations
+    cp_sizes = [2, 4, 8]
+    to_contiguous_options = [False, True]
+
+    # Test cases: (shape, seq_dim)
+    test_cases = [
+        ((64,), 0),  # 1D
+        ((2, 128, 4, 8), 1),  # 4D (standard B, S, H, D)
+        ((256, 2, 4, 8), 0),  # 4D (S, B, H, D)
+        ((2, 4, 8, 128), -1),  # Negative seq_dim (last dimension)
+        ((2, 128, 4, 8), -3),  # Negative seq_dim (-3 corresponding to S)
+    ]
+
+    for cp_size in cp_sizes:
+      for to_contiguous in to_contiguous_options:
+        for shape, seq_dim in test_cases:
+          with self.subTest(
+              cp_size=cp_size,
+              to_contiguous=to_contiguous,
+              shape=shape,
+              seq_dim=seq_dim,
+          ):
+            key, subkey = random.split(key)
+            x = random.normal(subkey, shape, dtype=jnp.float32)
+            config = f"cp_size={cp_size}, to_contiguous={to_contiguous}, shape={shape}, seq_dim={seq_dim}"
+
+            # The sweep parameters are bound as default arguments so that each closure
+            # captures the current iteration's values instead of the loop variables.
+            def loss_fn_ref(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous):
+              return jnp.sum(
+                  self._old_reorder_sequence(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous) ** 2
+              )
+
+            def loss_fn_opt(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous):
+              return jnp.sum(
+                  max_utils.reorder_sequence(t, cp_size=cp_size, seq_dim=seq_dim, to_contiguous=to_contiguous) ** 2
+              )
+
+            grad_ref = jax.grad(loss_fn_ref)(x)
+            grad_opt = jax.grad(loss_fn_opt)(x)
+
+            # Assert gradients are non-nan and finite
+            self.assertFalse(
+                jnp.any(jnp.isnan(grad_opt)),
+                msg=f"NaN detected in gradients for {config}",
+            )
+            self.assertFalse(
+                jnp.any(jnp.isinf(grad_opt)),
+                msg=f"Inf detected in gradients for {config}",
+            )
+
+            # Assert bit-exact mathematical gradient parity
+            self.assertTrue(
+                jnp.allclose(grad_ref, grad_opt, rtol=1e-5, atol=1e-6),
+                msg=f"Gradient parity mismatch for {config}",
+            )
+
   def test_reorder_roundtrip(self):
     # If we reorder to load-balanced (to_contiguous=False) and then restore (to_contiguous=True),
     # we should get back the exact original tensor. Also tests negative seq_dim.
@@ -722,6 +850,31 @@ class TestReorderSequence(unittest.TestCase):
     np.testing.assert_array_equal(
         reordered["targets_loss_mask"],
         max_utils.reorder_sequence(targets_loss_mask, 2),
+    )
+
+
+class TestResolveReorderStrategy(unittest.TestCase):
+  """Tests for resolve_reorder_strategy in max_utils.py"""
+
+  def test_resolve_reorder_strategy(self):
+    def config(**overrides):
+      defaults = {
+          "context_parallel_reorder_strategy": ReorderStrategy.AUTO,
+          "packing": True,
+          "context_parallel_strategy": "ring",
+          "hardware": "gpu",
+      }
+      return SimpleNamespace(**{**defaults, **overrides})
+
+    resolve = max_utils.resolve_reorder_strategy
+    # AUTO means STRIPED only for packed ring attention on GPU, and DUAL_CHUNK_SWAP otherwise.
+    self.assertEqual(resolve(config()), ReorderStrategy.STRIPED)
+    self.assertEqual(resolve(config(hardware="tpu")), ReorderStrategy.DUAL_CHUNK_SWAP)
+    self.assertEqual(resolve(config(packing=False)), ReorderStrategy.DUAL_CHUNK_SWAP)
+    # An explicit strategy is returned as is.
+    self.assertEqual(
+        resolve(config(context_parallel_reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP)),
+        ReorderStrategy.DUAL_CHUNK_SWAP,
     )
 
 

@@ -15,13 +15,28 @@
 """Unit tests for input_pipeline_utils."""
 
 import dataclasses
+import types
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 import numpy as np
 
-from maxtext.input_pipeline.input_pipeline_utils import BlockDiffusionCorruption, compute_file_sharding, PadOrTrimToMaxLength
+from maxtext.input_pipeline.input_pipeline_utils import (
+    BlockDiffusionCorruption,
+    compute_file_sharding,
+    PadOrTrimToMaxLength,
+    SFTPromptMasking,
+)
 from maxtext.multimodal import utils as mm_utils
+
+import pytest
+
+from maxtext.input_pipeline import input_pipeline_utils
+from maxtext.input_pipeline.input_pipeline_utils import (
+    MegatronSplitInputsTargets,
+    megatron_min_segment_length,
+)
 
 
 class BlockDiffusionPaddingTest(unittest.TestCase):
@@ -40,7 +55,15 @@ class BlockDiffusionPaddingTest(unittest.TestCase):
 
     self.assertEqual(
         tuple(field.name for field in dataclasses.fields(transform)),
-        ("block_size", "mask_id", "min_noise", "logit_alignment", "canvas_policy", "axis"),
+        (
+            "block_size",
+            "mask_id",
+            "min_noise",
+            "logit_alignment",
+            "canvas_policy",
+            "axis",
+            "completion_only",
+        ),
     )
     self.assertNotEqual(dataclasses.asdict(transform), dataclasses.asdict(other))
     self.assertIn("block_size=4", repr(transform))
@@ -113,6 +136,149 @@ class BlockDiffusionPaddingTest(unittest.TestCase):
           },
           np.random.default_rng(0),
       )
+
+
+class BlockDiffusionSFTInputTest(unittest.TestCase):
+  """Checks completion roles remain separate from corruption and validity."""
+
+  def _prepared_batch(self):
+    """Builds a block-aligned conversation with two completion spans."""
+    clean = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=8,
+        unk_id=0,
+        training_objective="block_diffusion",
+    ).map(
+        {
+            "messages": [[11, 12], [21, 22], [31], [41]],
+            "is_prompt": [True, False, True, False],
+        }
+    )
+    return PadOrTrimToMaxLength(
+        max_length=8,
+        pad_id=7,
+        config=SimpleNamespace(training_objective="block_diffusion"),
+    ).map(clean)
+
+  def test_role_mask_preserves_clean_targets_and_padding(self):
+    batch = self._prepared_batch()
+
+    np.testing.assert_array_equal(batch["inputs"], batch["targets"])
+    np.testing.assert_array_equal(batch["completion_mask"], [0, 0, 1, 1, 0, 1, 0, 0])
+    np.testing.assert_array_equal(batch["targets_segmentation"], [1, 1, 1, 1, 1, 1, 0, 0])
+    self.assertNotIn("completion_mask_segmentation", batch)
+    self.assertNotIn("completion_mask_position", batch)
+
+  def test_prompt_masking_rejects_unsupported_objective(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported training objective"):
+      SFTPromptMasking(
+          text_column_name="messages",
+          completion_only=True,
+          max_target_length=8,
+          training_objective="unsupported",
+      )
+
+  def test_completion_only_corruption_never_supervises_prompt(self):
+    batch = self._prepared_batch()
+    output = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=1.0,
+        completion_only=True,
+        axis=0,
+    ).random_map(batch, np.random.default_rng(0))
+
+    completion = batch["completion_mask"] != 0
+    self.assertFalse(output["corruption_mask"][~completion].any())
+    self.assertFalse(output["targets_loss_mask"][~completion].any())
+    np.testing.assert_array_equal(output["targets"], batch["targets"])
+
+  def test_completion_only_corruption_requires_role_mask(self):
+    batch = self._prepared_batch()
+    del batch["completion_mask"]
+
+    with self.assertRaisesRegex(ValueError, "explicit completion_mask"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_none_role_mask(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = None
+
+    with self.assertRaisesRegex(ValueError, "non-None completion_mask"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_mismatched_role_mask_shape(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = batch["completion_mask"][:-1]
+
+    with self.assertRaisesRegex(ValueError, "completion_mask must match inputs shape"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_role_mask_on_padding(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"][6] = 1
+
+    with self.assertRaisesRegex(ValueError, "subset of valid target positions"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_completion_only_corruption_rejects_future_prompt_in_block(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = np.asarray([0, 0, 1, 1, 1, 0, 0, 0], dtype=np.int32)
+
+    with self.assertRaisesRegex(ValueError, "prompt token after a completion token"):
+      BlockDiffusionCorruption(
+          block_size=4,
+          mask_id=99,
+          completion_only=True,
+          axis=0,
+      ).random_map(batch, np.random.default_rng(0))
+
+  def test_full_token_corruption_treats_none_role_mask_as_absent(self):
+    batch = self._prepared_batch()
+    batch["completion_mask"] = None
+
+    output = BlockDiffusionCorruption(
+        block_size=4,
+        mask_id=99,
+        min_noise=1.0,
+        axis=0,
+    ).random_map(batch, np.random.default_rng(0))
+
+    self.assertTrue(output["corruption_mask"][:6].all())
+    self.assertFalse(output["corruption_mask"][6:].any())
+
+  def test_causal_sft_contract_is_unchanged(self):
+    batch = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=True,
+        max_target_length=4,
+        unk_id=0,
+    ).map({"messages": [[11, 12], [21, 22]], "is_prompt": [True, False]})
+
+    np.testing.assert_array_equal(batch["inputs"], [11, 12, 21, 22])
+    np.testing.assert_array_equal(batch["targets"], [0, 0, 21, 22])
+    self.assertNotIn("completion_mask", batch)
 
 
 class ComputeFileShardingNormalCaseTest(unittest.TestCase):
@@ -203,6 +369,155 @@ class ComputeFileShardingUndersizedCaseTest(unittest.TestCase):
     self.assertIsNone(row_shard)
 
 
+class GenerateDocSegmentIdsTest(unittest.TestCase):
+  """Direct tests for mmap EOD-aware segmentation."""
+
+  def test_reset_attention_mask_keeps_eod_in_previous_segment(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(eod_id=99, reset_attention_mask=True)
+    result = transform.map({"inputs": np.array([10, 99, 20, 21, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 2, 2, 2, 3], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 0, 1, 2, 0], dtype=np.int32))
+
+  def test_no_attention_reset_can_mask_eod_loss(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(
+        eod_id=99,
+        reset_attention_mask=False,
+        eod_mask_loss=True,
+    )
+    result = transform.map({"targets": np.array([10, 99, 20, 99], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["targets_segmentation"], np.array([1, 0, 1, 0], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_position"], np.array([0, 1, 2, 3], dtype=np.int32))
+
+  def test_short_eod_segments_are_merged(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(
+        eod_id=99,
+        reset_attention_mask=True,
+        min_segment_length=3,
+    )
+    result = transform.map({"inputs": np.array([10, 99, 20, 99, 30, 31, 32], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
+
+  def test_empty_columns_get_empty_annotations(self):
+    transform = input_pipeline_utils.GenerateDocSegmentIds(eod_id=99)
+    result = transform.map({"inputs": np.array([], dtype=np.int32)})
+
+    self.assertEqual(result["inputs_segmentation"].shape, (0,))
+    self.assertEqual(result["inputs_position"].shape, (0,))
+
+
+class MegatronSplitInputsTargetsTest(unittest.TestCase):
+  """Direct tests for mmap_npy L+1 sample splitting."""
+
+  def test_split_preserves_final_real_target_and_positions(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(eod_id=99)
+    result = transform.map({"text": np.array([10, 99, 20, 21, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs"], np.array([10, 99, 20, 21, 99], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets"], np.array([99, 20, 21, 99, 30], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_segmentation"], np.ones(5, dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 0, 1, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["targets_position"], result["inputs_position"])
+
+  def test_eod_mask_loss_masks_by_input_token(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(eod_id=99, eod_mask_loss=True)
+    result = transform.map({"text": np.array([10, 99, 20, 99, 30], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["targets_segmentation"], np.array([1, 0, 1, 0], dtype=np.int32))
+
+  def test_no_attnmask_dataset_id_disables_reset_for_that_sample(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_id=99,
+        reset_attention_mask=True,
+        no_attnmask_dataset_ids={7},
+    )
+    result = transform.map({"text": np.array([10, 99, 20, 30], dtype=np.int32), "dataset_id": np.int32(7)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.ones(3, dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2], dtype=np.int32))
+
+  def test_short_segments_are_merged_after_split(self):
+    transform = input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_id=99,
+        reset_attention_mask=True,
+        min_segment_length=3,
+    )
+    result = transform.map({"text": np.array([10, 99, 20, 99, 30, 31, 32, 40], dtype=np.int32)})
+
+    np.testing.assert_array_equal(result["inputs_segmentation"], np.array([1, 1, 1, 1, 2, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(result["inputs_position"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32))
+
+
+def _cfg(reset_attention_mask: bool, divisor: int, max_target_length: int = 4096):
+  return SimpleNamespace(
+      reset_attention_mask=reset_attention_mask,
+      packing_max_segments_per_sample=divisor,
+      max_target_length=max_target_length,
+  )
+
+
+class TestMegatronMinSegmentLength:
+  """``megatron_min_segment_length`` returns ``max_target_length // divisor`` only when merging is active."""
+
+  def test_default_divisor_matches_prior_hardcoded_25(self):
+    # Prior behavior used a hardcoded 25; the default config value preserves that.
+    cfg = _cfg(reset_attention_mask=True, divisor=25, max_target_length=4096)
+    assert megatron_min_segment_length(cfg) == 4096 // 25
+
+  @pytest.mark.parametrize(
+      "divisor,max_target_length,expected",
+      [
+          (50, 4096, 4096 // 50),
+          (10, 8192, 8192 // 10),
+          (1, 4096, 4096),
+          (100, 4097, 4097 // 100),  # integer division (truncates)
+      ],
+  )
+  def test_custom_divisor(self, divisor, max_target_length, expected):
+    cfg = _cfg(reset_attention_mask=True, divisor=divisor, max_target_length=max_target_length)
+    assert megatron_min_segment_length(cfg) == expected
+
+  @pytest.mark.parametrize("divisor", [0, -1, -25])
+  def test_non_positive_divisor_disables_merging(self, divisor):
+    cfg = _cfg(reset_attention_mask=True, divisor=divisor)
+    assert megatron_min_segment_length(cfg) == 0
+
+  @pytest.mark.parametrize("divisor", [0, 25, 50])
+  def test_reset_attention_mask_false_returns_zero(self, divisor):
+    # reset_attention_mask=False short-circuits regardless of divisor.
+    cfg = _cfg(reset_attention_mask=False, divisor=divisor)
+    assert megatron_min_segment_length(cfg) == 0
+
+
+class MegatronSplitDatasetIdTest(unittest.TestCase):
+
+  def _element(self, with_id=True):
+    el = {"text": np.arange(9, dtype=np.int32)}  # seq_len = 8 after split
+    if with_id:
+      el["dataset_id"] = np.int32(3)
+    return el
+
+  def test_emits_per_token_dataset_id_when_enabled(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
+    result = t.map(self._element())
+    self.assertIn("dataset_id", result)
+    self.assertEqual(result["dataset_id"].shape, (8,))
+    self.assertTrue(np.all(result["dataset_id"] == 3))
+    self.assertEqual(result["dataset_id"].dtype, np.int32)
+
+  def test_omits_dataset_id_when_disabled(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=False)
+    self.assertNotIn("dataset_id", t.map(self._element()))
+
+  def test_omits_when_element_has_no_dataset_id(self):
+    t = MegatronSplitInputsTargets(eod_id=0, emit_dataset_id=True)
+    self.assertNotIn("dataset_id", t.map(self._element(with_id=False)))
+
+
 class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
   """Unit tests for PadOrTrimToMaxLength image padding behaviors."""
 
@@ -236,6 +551,149 @@ class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
     # None pixel_values raises ValueError
     with self.assertRaisesRegex(ValueError, "must have pixel_values"):
       unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
+
+
+class FixPadTokenIfNeededTest(unittest.TestCase):
+  """Tests for fix_pad_token_if_needed and SFT completion EOS loss masking."""
+
+  def test_remaps_ds4_pad_token_via_get_vocab(self):
+    vocab = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+    class _DummyTokenizer:
+      """Dummy tokenizer with get_vocab."""
+
+      def __init__(self):
+        self._pad_token = "<｜end▁of▁sentence｜>"
+        self.pad_token_id = 1
+        self.eos_token_id = 1
+
+      @property
+      def pad_token(self):
+        return self._pad_token
+
+      @pad_token.setter
+      def pad_token(self, value):
+        self._pad_token = value
+        self.pad_token_id = vocab[value]
+
+      def get_vocab(self):
+        return vocab
+
+    tok = _DummyTokenizer()
+    self.assertTrue(input_pipeline_utils.fix_pad_token_if_needed(tok))
+    self.assertEqual(tok.pad_token, "<｜▁pad▁｜>")
+    self.assertEqual(tok.pad_token_id, 2)
+    self.assertEqual(tok.eos_token_id, 1)
+
+  def test_remaps_ds4_pad_token_via_convert_tokens_to_ids(self):
+    vocab = {"<｜begin▁of▁sentence｜>": 0, "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2}
+
+    class _DummyTokenizerNoGetVocab:
+      """Dummy tokenizer with convert_tokens_to_ids only."""
+
+      def __init__(self):
+        self._pad_token = "<｜end▁of▁sentence｜>"
+        self.pad_token_id = 1
+        self.eos_token_id = 1
+
+      @property
+      def pad_token(self):
+        return self._pad_token
+
+      @pad_token.setter
+      def pad_token(self, value):
+        self._pad_token = value
+        self.pad_token_id = vocab[value]
+
+      def convert_tokens_to_ids(self, token):
+        return vocab.get(token)
+
+    tok = _DummyTokenizerNoGetVocab()
+    self.assertTrue(input_pipeline_utils.fix_pad_token_if_needed(tok))
+    self.assertEqual(tok.pad_token, "<｜▁pad▁｜>")
+    self.assertEqual(tok.pad_token_id, 2)
+
+  def test_tokenizer_without_ds4_pad_token_is_unchanged(self):
+    tok_pad_equals_eos = types.SimpleNamespace(
+        pad_token="<eos>",
+        pad_token_id=1,
+        eos_token="<eos>",
+        eos_token_id=1,
+        get_vocab=lambda: {"<bos>": 0, "<eos>": 1, "hello": 2},
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_pad_equals_eos))
+    self.assertEqual(tok_pad_equals_eos.pad_token, "<eos>")
+    self.assertEqual(tok_pad_equals_eos.pad_token_id, 1)
+
+    tok_standard = types.SimpleNamespace(
+        pad_token="<pad>",
+        pad_token_id=0,
+        eos_token="<eos>",
+        eos_token_id=1,
+        get_vocab=lambda: {"<pad>": 0, "<eos>": 1, "<｜▁pad▁｜>": 2},
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_standard))
+    self.assertEqual(tok_standard.pad_token, "<pad>")
+    self.assertEqual(tok_standard.pad_token_id, 0)
+
+    tok_unk_fallback = types.SimpleNamespace(
+        pad_token="<eos>",
+        pad_token_id=1,
+        eos_token="<eos>",
+        eos_token_id=1,
+        unk_token_id=0,
+        convert_tokens_to_ids=lambda _tok: 0,
+    )
+    self.assertFalse(input_pipeline_utils.fix_pad_token_if_needed(tok_unk_fallback))
+    self.assertEqual(tok_unk_fallback.pad_token, "<eos>")
+    self.assertEqual(tok_unk_fallback.pad_token_id, 1)
+
+  def test_completion_eos_is_weighted_only_when_pad_differs_from_eos(self):
+    # Prompt [BOS=0, 10, 11], completion [20, 21, EOS=1].
+    example = {"text": [[0, 10, 11], [20, 21, 1]], "is_prompt": [True, False]}
+    weighted_eos = {}
+    for pad_id in (1, 2):
+      masked = input_pipeline_utils.SFTPromptMasking(
+          text_column_name="text", completion_only=True, max_target_length=8, unk_id=pad_id
+      ).map(dict(example))
+      masked["targets_segmentation"] = np.ones_like(masked["targets"])
+      shifted = input_pipeline_utils.ShiftData(ignored_ids=[pad_id, 0], axis=0).map(masked)
+      weighted_eos[pad_id] = int(((shifted["targets"] == 1) & (shifted["targets_segmentation"] != 0)).sum())
+    # pad_id == eos_id drops the completion EOS from the loss; the remapped pad id keeps it.
+    self.assertEqual(weighted_eos, {1: 0, 2: 1})
+
+
+class GetDataloadingShardTest(unittest.TestCase):
+  """Tests for input_pipeline_utils.get_dataloading_shard."""
+
+  def _shard(self, process_index, process_indices, replicas=1, replica=0, **kwargs):
+    config = SimpleNamespace(num_data_replicas_per_process=replicas, data_replica_index=replica)
+    with mock.patch.object(input_pipeline_utils.jax, "process_index", return_value=process_index):
+      return input_pipeline_utils.get_dataloading_shard(config, process_indices, **kwargs)
+
+  def test_one_replica_matches_host_position(self):
+    self.assertEqual(self._shard(5, [1, 3, 5, 7]), (2, 4))
+
+  def test_replicas_split_the_host_shard(self):
+    shards = {self._shard(p, [0, 1], replicas=2, replica=r) for p in (0, 1) for r in (0, 1)}
+    self.assertEqual(shards, {(0, 4), (1, 4), (2, 4), (3, 4)})
+
+  def test_multiple_shards_per_host(self):
+    self.assertEqual(self._shard(1, [0, 1], replicas=2, replica=1, shard_offset=1, shards_per_host=3), (7, 12))
+
+  def test_config_without_replica_fields_loads_one_replica(self):
+    with mock.patch.object(input_pipeline_utils.jax, "process_index", return_value=3):
+      self.assertEqual(input_pipeline_utils.get_dataloading_shard(SimpleNamespace(), [1, 3]), (1, 2))
+
+  def test_rejects_replica_index_out_of_range(self):
+    for replicas, replica in ((2, 2), (2, -1), (0, 0)):
+      with self.subTest(replicas=replicas, replica=replica), self.assertRaisesRegex(ValueError, "data_replica_index"):
+        self._shard(0, [0], replicas=replicas, replica=replica)
+
+  def test_all_replicas_batch_size(self):
+    config = SimpleNamespace(num_data_replicas_per_process=4, data_replica_index=1)
+    self.assertEqual(input_pipeline_utils.get_all_replicas_batch_size(config, 6), 24)
+    self.assertEqual(input_pipeline_utils.get_all_replicas_batch_size(SimpleNamespace(), 6), 6)
 
 
 if __name__ == "__main__":

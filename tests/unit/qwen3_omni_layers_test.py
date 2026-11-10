@@ -36,9 +36,10 @@ from maxtext.layers.embeddings import (
     Qwen3OmniMoeVisionPosEmbedInterpolate as JaxQwen3OmniMoeVisionPosEmbedInterpolate,
     Qwen3OmniMoeVisionRotaryEmbedding as JaxQwen3OmniMoeVisionRotaryEmbedding,
 )
-from maxtext.layers.decoders import deepstack_process
+from maxtext.layers.nnx_decoders import deepstack_process
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.multimodal.processor_qwen3_omni import (
+    get_video_second_per_grid,
     maybe_pad_video_values_to_max_grid,
     preprocess_video,
 )
@@ -88,6 +89,15 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 
 # Initialize config once for all tests
 base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+
+
+def test_video_second_per_grid_uses_sampled_fps():
+  assert get_video_second_per_grid(sample_fps=2.0, temporal_patch_size=2) == 1.0
+  assert get_video_second_per_grid(sample_fps=4.0, temporal_patch_size=2) == 0.5
+  with pytest.raises(ValueError, match="sample_fps must be positive"):
+    get_video_second_per_grid(sample_fps=0.0, temporal_patch_size=2)
+
+
 jax_config = pyconfig.initialize(
     ["", base_config_path],
     model_name="qwen3-omni-30b-a3b",
@@ -143,8 +153,6 @@ torch_audio_encoder_config = Qwen3OmniMoeAudioEncoderConfig(
 )
 torch_audio_encoder_config._attn_implementation = "eager"  # pylint: disable=protected-access
 
-torch.set_grad_enabled(False)
-
 
 def create_torch_vision_encoder():
   """Create and configure PyTorch vision encoder."""
@@ -168,6 +176,9 @@ class BaseVisionTestCase(unittest.TestCase):
   """Base class for vision tests with common setup."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.config = jax_config
     setup_test_seeds()
 
@@ -1017,6 +1028,9 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
   """Test MaxText Qwen3 Omni preprocessor against HuggingFace reference."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
     self.image_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_image.jpg")
     self.video_path = os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets", "test_video.mp4")
@@ -1135,6 +1149,9 @@ class TestMaxTextAudioAttentionVsPyTorch(unittest.TestCase):
   """Test that MaxText's Attention module matches PyTorch's audio attention implementation."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.batch_size = 1
     self.seq_length = 16
     self.config = jax_config
@@ -1214,6 +1231,9 @@ class TestAudioEncoderLayer(unittest.TestCase):
   """Test MaxText AudioEncoderLayer against PyTorch implementation."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.config = jax_config
     self.torch_config = torch_audio_encoder_config
     np.random.seed(42)
@@ -1287,6 +1307,9 @@ class TestPositionalEmbedding(unittest.TestCase):
   """Tests for PositionalEmbedding implementation."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.length = 100
     self.channels = 512
     self.max_timescale = 10000.0
@@ -1326,6 +1349,9 @@ class TestAudioEncoder(unittest.TestCase):
   """Test AudioEncoder (convs + transformer, no projector) against PyTorch implementation."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.config = jax_config
     self.torch_config = torch_audio_encoder_config
     np.random.seed(42)
@@ -1402,6 +1428,9 @@ class TestAudioModel(unittest.TestCase):
   """Test full AudioModel end-to-end against PyTorch implementation."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     self.config = jax_config
     self.torch_config = torch_audio_encoder_config
     np.random.seed(42)

@@ -36,8 +36,7 @@ if [[ "${CKPT_PATH,,}" == *lora* ]]; then
         base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
         use_multimodal=${USE_MULTIMODAL} \
         scan_layers=${SCAN_LAYERS} \
-        enable_nnx=True \
-        pure_nnx_decoder=True
+        skip_jax_distributed_system=true
 
 else
     python3 -m maxtext.checkpoint_conversion.to_huggingface \
@@ -46,6 +45,7 @@ else
         load_parameters_path=${CKPT_PATH} \
         base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
         use_multimodal=${USE_MULTIMODAL} \
-        scan_layers=${SCAN_LAYERS}
+        scan_layers=${SCAN_LAYERS} \
+        skip_jax_distributed_system=true
 
 fi

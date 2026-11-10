@@ -16,21 +16,19 @@
 
 import dataclasses
 import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
+from absl.testing import absltest
+from flax import nnx
+import flax.linen as nn
+from flax.training import train_state
 import jax
 import jax.numpy as jnp
-import numpy as np
-import flax.linen as nn
-from flax import nnx
 from jax.sharding import Mesh
-from orbax import checkpoint as ocp
-import pytest
-
-from flax.training import train_state
+from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -38,10 +36,21 @@ from maxtext.utils.model_creation_utils import (
     _align_checkpoint_to_model_shapes,
     _fix_restore_args_for_shape_mismatch,
     _fuse_moe_weights,
+    _fuse_moe_halves_concatenated,
+    _fused_moe_kernel_uses_ep,
+    _logical_partition_specs,
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
 )
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
+from orbax import checkpoint as ocp
+import pytest
+
+if "maxtext" in sys.modules and not hasattr(sys.modules["maxtext"], "utils"):
+  setattr(sys.modules["maxtext"], "utils", sys.modules["maxtext.src.maxtext.utils"])
+  sys.modules.setdefault("maxtext.utils", sys.modules["maxtext.src.maxtext.utils"])
+  sys.modules.setdefault("maxtext.utils.model_creation_utils", model_creation_utils)
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +80,14 @@ def _make_restore_arg(global_shape):
       global_shape=global_shape,
       shape=global_shape,
       sharding=sharding,
-      dtype=jnp.float32,
+      dtype=jnp.dtype(jnp.float32),
   )
+
+
+def _restore_as_zeros(path, item=None, **kw):
+  """Fake `ckptr.restore`: returns `item` with fresh arrays (from_pretrained frees the originals)."""
+  del path, kw
+  return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype) if isinstance(x, jax.Array) else x, item)
 
 
 def _make_config(**kwargs):
@@ -195,6 +210,27 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
     out = _align_checkpoint_to_model_shapes(ckpt, model, ("a", "b"))
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ckpt))
 
+  def test_transposed_2d_shapes_align_correctly(self):
+    """Transposed 2D arrays must transpose to align ckpt (2, 3) to model (3, 2)."""
+    ckpt = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    model = jnp.zeros((3, 2), dtype=jnp.float32)
+    out = _align_checkpoint_to_model_shapes(ckpt, model, ("moe_layers", "expert"))
+    out_np = np.asarray(out)
+    self.assertEqual(out_np.shape, (3, 2))
+    np.testing.assert_array_equal(out_np, np.asarray(ckpt.T))
+
+  def test_transposed_2d_shapes_with_sharded_model(self):
+    """Transposed 2D arrays should align and assume the model array's sharding."""
+    mesh = jax.sharding.Mesh(jax.local_devices()[:1], ("x",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None))
+    ckpt = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    model = jax.device_put(jnp.zeros((3, 2), dtype=jnp.float32), sharding)
+    out = _align_checkpoint_to_model_shapes(ckpt, model, ("moe_layers", "expert"))
+    out_np = np.asarray(out)
+    self.assertEqual(out_np.shape, (3, 2))
+    self.assertEqual(out.sharding, sharding)
+    np.testing.assert_array_equal(out_np, np.asarray(ckpt.T))
+
   def test_kv_heads_repeat_layout(self):
     """KV-head axis must use jnp.repeat: [h0, h0, h1, h1], NOT [h0, h1, h0, h1]."""
     # Distinguishable per-head values so the layout assertion is unambiguous.
@@ -288,11 +324,15 @@ class TestFuseMoeWeights(unittest.TestCase):
   Otherwise zeros land between wi_0's data and wi_1's data, corrupting the boundary.
   """
 
+  def setUp(self):
+    super().setUp()
+    self.config = unittest.mock.MagicMock(attention="dot_product")
+
   def test_no_op_when_model_has_unfused_wi(self):
     """If model has wi_0/wi_1 (not fused), the helper returns the ckpt tree unchanged."""
     ckpt = {"wi_0": np.ones((2, 4, 3), dtype=np.float32), "wi_1": 2 * np.ones((2, 4, 3), dtype=np.float32)}
     model = {"wi_0": np.zeros((2, 4, 3), dtype=np.float32), "wi_1": np.zeros((2, 4, 3), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertIn("wi_0", out)
     self.assertIn("wi_1", out)
     self.assertNotIn("wi", out)
@@ -304,7 +344,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     ckpt = {"wi_0": wi_0, "wi_1": wi_1}
     # Model has fused wi of last-dim 6 = 2 * 3 (no MLP padding).
     model = {"wi": np.zeros((2, 4, 6), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
     np.testing.assert_array_equal(out["wi"][..., 3:], wi_1)
@@ -320,7 +360,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     ckpt = {"wi_0": wi_0, "wi_1": wi_1}
     # Model has fused wi of last-dim 8 = 2 * 4 (each half padded from 3 → 4).
     model = {"wi": np.zeros((2, 4, 8), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["wi"].shape, (2, 4, 8))
     # First half: wi_0_data (3 cols) then 1 col of zeros.
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
@@ -336,9 +376,98 @@ class TestFuseMoeWeights(unittest.TestCase):
     other = np.full((2, 4), 7.0, dtype=np.float32)
     ckpt = {"layers": {"0": {"moe": {"wi_0": wi_0, "wi_1": wi_1}, "other": other}}}
     model = {"layers": {"0": {"moe": {"wi": np.zeros((2, 4, 6), dtype=np.float32)}, "other": other}}}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["layers"]["0"]["moe"]["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["layers"]["0"]["other"], other)
+
+
+class TestFusedMoeKernelUsesEp(unittest.TestCase):
+  """_fused_moe_kernel_uses_ep must match `use_ep` in `RoutedMoE.fused_moe_matmul`."""
+
+  def _uses_ep(self, attention, mesh_shape):
+    return _fused_moe_kernel_uses_ep(types.SimpleNamespace(attention=attention), types.SimpleNamespace(shape=mesh_shape))
+
+  def test_tensor_parallel_only(self):
+    self.assertFalse(self._uses_ep("vllm_rpa", {"data": 1, "model": 4, "expert": 1}))
+
+  def test_expert_parallel_axes(self):
+    self.assertTrue(self._uses_ep("vllm_rpa", {"model": 2, "expert": 2}))
+    self.assertTrue(self._uses_ep("vllm_batched_rpa", {"model": 2, "attn_dp_expert": 2}))
+    self.assertTrue(self._uses_ep("vllm_rpa", {"model": 2, "dcp": 2}))
+
+  def test_non_vllm_attention(self):
+    self.assertFalse(self._uses_ep("dot_product", {"model": 2, "expert": 2}))
+
+  def test_missing_config_or_mesh(self):
+    self.assertFalse(_fused_moe_kernel_uses_ep(None, types.SimpleNamespace(shape={"expert": 2})))
+    self.assertFalse(_fused_moe_kernel_uses_ep(types.SimpleNamespace(attention="vllm_rpa"), None))
+
+
+class TestFuseMoeWeightsFusedKernelLayout(unittest.TestCase):
+  """The prefused wi layout must match how tpu-inference's fused MoE kernel splits it into gate/up.
+
+  The TP kernel splits each shard of the fused axis, so each shard holds [gate_i | up_i]. The
+  expert-parallel kernel splits the whole fused axis in half, so it needs [gate | up], with each
+  half keeping the per-shard MLP-dim padding that `wo` gets.
+  """
+
+  # Checkpoint halves are (experts, embed, mlp) = (2, 3, 8); the model pads mlp to 16 per half.
+  _E, _D, _H, _PADDED_H = 2, 3, 8, 16
+
+  def _make_mesh(self, expert, model):
+    num_devices = expert * model
+    if jax.device_count() < num_devices:
+      self.skipTest(f"Requires >= {num_devices} devices.")
+    devices = np.array(jax.devices()[:num_devices]).reshape(expert, model)
+    return Mesh(devices, ("expert", "model"))
+
+  def _fuse(self, mesh, padded_h):
+    wi_0 = np.arange(1, self._E * self._D * self._H + 1, dtype=np.float32).reshape(self._E, self._D, self._H)
+    wi_1 = -wi_0
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
+    model = {"wi": jax.device_put(jnp.zeros((self._E, self._D, 2 * padded_h), dtype=jnp.float32), sharding)}
+    config = types.SimpleNamespace(attention="vllm_rpa")
+    out = _fuse_moe_weights({"wi_0": wi_0, "wi_1": wi_1}, model, config)
+    return wi_0, wi_1, np.asarray(out["wi"])
+
+  @staticmethod
+  def _pad_each_shard(arr, n_shards, padded_size):
+    """Splits the last axis into n_shards chunks and zero-pads each chunk at its tail."""
+    pad = (padded_size - arr.shape[-1]) // n_shards
+    pad_width = [(0, 0)] * (arr.ndim - 1) + [(0, pad)]
+    return [np.pad(chunk, pad_width) for chunk in np.split(arr, n_shards, axis=-1)]
+
+  def test_tensor_parallel_interleaves_gate_and_up_per_shard(self):
+    mesh = self._make_mesh(expert=1, model=4)
+    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
+    gate = self._pad_each_shard(wi_0, 4, self._PADDED_H)
+    up = self._pad_each_shard(wi_1, 4, self._PADDED_H)
+    expected = np.concatenate([chunk for pair in zip(gate, up) for chunk in pair], axis=-1)
+    np.testing.assert_array_equal(out, expected)
+
+  def test_expert_parallel_concatenates_gate_and_up(self):
+    mesh = self._make_mesh(expert=2, model=2)
+    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
+    gate = self._pad_each_shard(wi_0, 2, self._PADDED_H)
+    up = self._pad_each_shard(wi_1, 2, self._PADDED_H)
+    np.testing.assert_array_equal(out, np.concatenate(gate + up, axis=-1))
+
+  def test_expert_parallel_without_padding_is_plain_concat(self):
+    mesh = self._make_mesh(expert=2, model=2)
+    wi_0, wi_1, out = self._fuse(mesh, self._H)
+    np.testing.assert_array_equal(out, np.concatenate([wi_0, wi_1], axis=-1))
+
+  def test_expert_parallel_embed_slices_match_single_pass(self):
+    """Building [gate | up] in uneven embed slices gives the same array and sharding as one pass."""
+    mesh = self._make_mesh(expert=2, model=2)
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
+    wi_0 = np.arange(2 * 5 * 8, dtype=np.float32).reshape(2, 5, 8)
+    wi_1 = -wi_0
+    wi_model = jax.device_put(jnp.zeros((2, 5, 32), dtype=jnp.float32), sharding)
+    single_pass = _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards=2, num_slices=1)
+    sliced = _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards=2, num_slices=2)  # 3 + 2 rows
+    self.assertTrue(sliced.sharding.is_equivalent_to(sharding, sliced.ndim))
+    np.testing.assert_array_equal(np.asarray(sliced), np.asarray(single_pass))
 
 
 @pytest.mark.tpu_only
@@ -449,7 +578,7 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     _, abstract_state = nnx.split(module)
     specs = nnx.get_partition_spec(abstract_state)
 
-    # Mirror the unwrap done in from_pretrained.
+    # Mirror the unwrap done in _logical_partition_specs.
     logical_axes_tree = jax.tree.map(
         lambda v: v.get_value(),
         specs,
@@ -470,6 +599,101 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     self.assertEqual(out_np.shape, (2, 6, 4))
     np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
     np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+
+
+class TestLogicalSpecsIgnoreAmbientRules(unittest.TestCase):
+  """``_logical_partition_specs`` must return logical names even under a caller's active rules.
+
+  ``nnx.get_partition_spec`` rewrites ``out_sharding`` through the ambient
+  ``flax.core.spmd`` rules. Callers of ``from_pretrained`` that hold rules open
+  (the vLLM adapter, Tunix) would turn ``"mlp_moe"`` into mesh axes, and the
+  zero-pad dispatch in ``_align_checkpoint_to_model_shapes`` would fall back
+  to divisibility-based repeat (silent k-fold duplication) or raise.
+  """
+
+  _TRAINER_RULES = (("exp", None), ("mlp_moe", "x"), ("embed_moe", None))
+
+  def setUp(self):
+    super().setUp()
+
+    class _TinyMoE(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wo = nnx.Param(
+            jax.random.normal(rngs.params(), (2, 4, 4), dtype=jnp.float32),
+            sharding=("exp", "mlp_moe", "embed_moe"),
+        )
+
+    devices = jax.local_devices()[:1]
+    self.mesh = jax.sharding.Mesh(devices, ("x",), axis_types=(jax.sharding.AxisType.Explicit,))
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      module = nnx.eval_shape(lambda: _TinyMoE(nnx.Rngs(params=0)))
+    _, self.abstract_state = nnx.split(module)
+
+  def _specs_under_trainer_rules(self):
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      return _logical_partition_specs(self.abstract_state)
+
+  def test_specs_are_logical_under_trainer_rules(self):
+    # Negative control: the raw flax call rewrites mlp_moe into the mesh axis.
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      raw = nnx.get_partition_spec(self.abstract_state)["wo"].get_value()
+    self.assertEqual(tuple(raw), (None, "x", None))
+
+    specs = self._specs_under_trainer_rules()
+    wo_axes = specs["wo"]
+    self.assertIsInstance(wo_axes, jax.sharding.PartitionSpec)
+    self.assertNotIsInstance(wo_axes, nnx.Variable)
+    self.assertEqual(tuple(wo_axes), ("exp", "mlp_moe", "embed_moe"))
+
+  def test_specs_match_no_rules_path(self):
+    with jax.sharding.set_mesh(self.mesh):
+      baseline = _logical_partition_specs(self.abstract_state)
+    self.assertEqual(tuple(self._specs_under_trainer_rules()["wo"]), tuple(baseline["wo"]))
+
+  def test_specs_ignore_per_variable_sharding_rules(self):
+    # flax also honours Variable-local rules even when no ambient rules are active.
+    local_rules = self._TRAINER_RULES
+
+    class _LocalRulesMoE(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wo = nnx.Param(
+            jax.random.normal(rngs.params(), (2, 4, 4), dtype=jnp.float32),
+            sharding=("exp", "mlp_moe", "embed_moe"),
+            sharding_rules=local_rules,
+        )
+
+    with jax.sharding.set_mesh(self.mesh):
+      module = nnx.eval_shape(lambda: _LocalRulesMoE(nnx.Rngs(params=0)))
+      _, state = nnx.split(module)
+      self.assertEqual(tuple(nnx.get_partition_spec(state)["wo"].get_value()), (None, "x", None))
+      self.assertEqual(tuple(_logical_partition_specs(state)["wo"]), ("exp", "mlp_moe", "embed_moe"))
+
+  def test_exact_multiple_zero_pads_instead_of_repeating_under_rules(self):
+    # 4 -> 8 is the silent case: a repeat would also produce the right shape.
+    wo_axes = self._specs_under_trainer_rules()["wo"]
+    ckpt = jnp.ones((2, 4, 4), dtype=jnp.float32)
+    model = jnp.zeros((2, 8, 4), dtype=jnp.float32)
+    out_np = np.asarray(_align_checkpoint_to_model_shapes(ckpt, model, wo_axes))
+    self.assertEqual(out_np.shape, (2, 8, 4))
+    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 4, 4), dtype=np.float32))
+
+  def test_non_multiple_zero_pads_instead_of_raising_under_rules(self):
+    wo_axes = self._specs_under_trainer_rules()["wo"]
+    ckpt = jnp.ones((2, 4, 4), dtype=jnp.float32)
+    model = jnp.zeros((2, 6, 4), dtype=jnp.float32)
+    out_np = np.asarray(_align_checkpoint_to_model_shapes(ckpt, model, wo_axes))
+    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+
+  def test_physical_mesh_tuple_is_not_a_registered_axis(self):
+    # Physical mesh tuples are not logical names and must hit the unregistered-axis error.
+    ckpt = jnp.ones((3,), dtype=jnp.float32)
+    model = jnp.zeros((4,), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, "not registered in _VLLM_REPEAT_AXES"):
+      _align_checkpoint_to_model_shapes(ckpt, model, (("attn_dp", "model"),))
 
 
 class TestGetTransformerModel(unittest.TestCase):
@@ -527,6 +751,14 @@ class TestCreateModel(unittest.TestCase):
     """Default model_mode is MODEL_MODE_TRAIN."""
     model = model_creation_utils.create_model(self.config, self.mesh)
     self.assertIsInstance(model, nn.Module)
+
+  def test_m3_disabled_by_default(self):
+    self.assertFalse(self.config.use_m3_model)
+
+  def test_m3_rejects_unsupported_model(self):
+    config = _make_config(use_m3_model=True)
+    with self.assertRaisesRegex(ValueError, "Model 'default' does not support the m3 backend"):
+      model_creation_utils.create_model(config, self.mesh)
 
 
 class TestFromConfig(unittest.TestCase):
@@ -626,8 +858,16 @@ class TestCreateNnxModel(unittest.TestCase):
   """Tests for from_pretrained()."""
 
   def setUp(self):
+    super().setUp()
     self.config = _make_config()
     self.mesh = _make_mesh(self.config)
+    self._meta_patcher = patch.object(
+        model_creation_utils.checkpointing,
+        "load_checkpoint_metadata",
+        return_value={},
+    )
+    self._meta_patcher.start()
+    self.addCleanup(self._meta_patcher.stop)
 
   def test_no_checkpoint_returns_model_and_mesh(self):
     """Without load_parameters_path, should return the model cleanly."""
@@ -657,6 +897,79 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic(self, mock_load):
+    """source_checkpoint_layout=safetensors_dynamic loads through the training loader, not Orbax."""
+
+    def fake_load(*args, **kwargs):
+      abstract_state = args[5]
+      return None, jax.tree.map(lambda x: jax.device_put(jnp.full(x.shape, 0.5, x.dtype), x.sharding), abstract_state)
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic")
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+
+    self.assertEqual(mock_load.call_args.kwargs["source_checkpoint_layout"], "safetensors_dynamic")
+    self.assertEqual(mock_load.call_args.args[2], "/fake/hf_repo")
+    for leaf in jax.tree.leaves(nnx.state(model, nnx.Param)):
+      np.testing.assert_array_equal(leaf, np.full(leaf.shape, 0.5, leaf.dtype))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic_frees_initial_weights(self, mock_load):
+    """The model's initial weights are deleted before the loader places its copy."""
+    model = model_creation_utils.from_pretrained(_make_config(), self.mesh)
+    initial = jax.tree.leaves(nnx.state(model, nnx.Param))
+    deleted_before_load = []
+
+    def fake_load(*args, **kwargs):
+      deleted_before_load.extend(leaf.is_deleted() for leaf in initial)
+      abstract_state = args[5]
+      return None, jax.tree.map(lambda x: jax.device_put(jnp.zeros(x.shape, x.dtype), x.sharding), abstract_state)
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic")
+    model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), cfg)  # pylint: disable=protected-access
+
+    self.assertTrue(initial)
+    self.assertTrue(all(deleted_before_load))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic_keeps_custom_vision_projector(self, mock_load):
+    """A custom vision projector, which has no HF weights, keeps its random init."""
+    projector = {
+        "use_multimodal": True,
+        "model_name": "qwen3-vl-2b",
+        "override_model_config": True,
+        "scan_layers": False,
+        "vision_projector_type": "customized_vision_projector",
+        "vision_connector_num_layers": 2,
+        "vision_connector_activation": "gelu",
+        "vision_connector_use_bias": True,
+    }
+    model = model_creation_utils.from_pretrained(_make_config(**projector), self.mesh)
+
+    def is_custom(path):
+      return "custom_linear" in jax.tree_util.keystr(path)
+
+    params = jax.tree_util.tree_flatten_with_path(nnx.state(model, nnx.Param))[0]
+    custom_init = {jax.tree_util.keystr(path): np.asarray(leaf) for path, leaf in params if is_custom(path)}
+
+    def fake_load(*args, **kwargs):
+      # As the loader does, return the weights it has no HF tensors for unmaterialized.
+      return None, jax.tree_util.tree_map_with_path(
+          lambda path, x: x if is_custom(path) else jax.device_put(jnp.full(x.shape, 0.5, x.dtype), x.sharding),
+          args[5],
+      )
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic", **projector)
+    model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), cfg)  # pylint: disable=protected-access
+
+    self.assertTrue(custom_init)
+    for path, leaf in jax.tree_util.tree_flatten_with_path(nnx.state(model, nnx.Param))[0]:
+      expected = custom_init[jax.tree_util.keystr(path)] if is_custom(path) else np.full(leaf.shape, 0.5, leaf.dtype)
+      np.testing.assert_array_equal(leaf, expected)
+
   # ---- checkpoint loading: mocked paths ----
 
   def _make_linen_metadata_mock(self):
@@ -682,7 +995,7 @@ class TestCreateNnxModel(unittest.TestCase):
     # matches the model's own state — regardless of the exact leaf count.
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -691,6 +1004,196 @@ class TestCreateNnxModel(unittest.TestCase):
     cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/nnx_ckpt")
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
+
+  def test_checkpoint_uses_value_wrapper(self):
+    fn = model_creation_utils._checkpoint_uses_value_wrapper  # pylint: disable=protected-access
+    param_state = nnx.state(model_creation_utils.from_pretrained(self.config, self.mesh), nnx.Param)
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+
+    pure = jax.tree.map(fake_meta, nnx.to_pure_dict(param_state))
+    self.assertFalse(fn(pure, param_state))
+
+    wrapped = jax.tree.map(lambda a: {"value": fake_meta(a)}, nnx.to_pure_dict(param_state))
+    self.assertTrue(fn(wrapped, param_state))
+
+    # Value-wrapped AQT serve-mode tree: QTensor leaves under "value" previously misdetected as pure-dict.
+    wrapped_qtensor = jax.tree.map(lambda a: {"value": fake_meta(a)}, nnx.to_pure_dict(param_state))
+    wo_shape = tuple(param_state["decoder"]["layers"]["mlp"]["wo"]["kernel"].get_value().shape)
+    qtensor_leaf = {
+        "value": {
+            "qvalue": _FakeArrayMetadata(wo_shape),
+            "scale": {"0": _FakeArrayMetadata((1,))},
+        }
+    }
+    wrapped_qtensor["decoder"]["layers"]["mlp"]["wo"]["kernel"] = qtensor_leaf
+    wrapped_qtensor["decoder"]["layers"]["mlp"]["qrhs"] = {"frozen": qtensor_leaf}
+    self.assertTrue(fn(wrapped_qtensor, param_state))
+
+    self.assertTrue(fn({"renamed": {"value": _FakeArrayMetadata((4, 4))}}, param_state))
+    self.assertFalse(fn({"renamed": _FakeArrayMetadata((4, 4))}, param_state))
+    # With no resolvable nnx.Param path, the fallback scan must not mistake a submodule that is
+    # itself named `value` (the attention V projection) for a 'value' wrapper.
+    self.assertIn("value", pure["decoder"]["layers"]["self_attention"])
+    self.assertFalse(fn({"renamed": pure}, param_state))
+    self.assertTrue(fn({"renamed": wrapped}, param_state))
+    self.assertTrue(fn({"renamed": {"qrhs": {"frozen": qtensor_leaf}}}, param_state))
+    self.assertFalse(fn({}, param_state))
+    self.assertFalse(fn(None, param_state))
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_pure_dict_nnx_checkpoint(self, mock_ocp):
+    """Pure-dict NNX checkpoint: leaves are arrays directly without 'value' wrapper."""
+    params = nnx.to_pure_dict(
+        nnx.state(
+            model_creation_utils.from_pretrained(self.config, self.mesh),
+            nnx.Param,
+        )
+    )
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+    metadata = MagicMock()
+    metadata.item_metadata.tree = jax.tree.map(fake_meta, params)
+
+    def restore_fn(path, item=None, **kw):
+      restored = _restore_as_zeros(path, item, **kw)
+      restored["decoder"]["decoder_norm"]["scale"] = restored["decoder"]["decoder_norm"]["scale"] + 7.0
+      return restored
+
+    mock_ckptr = self._mock_ocp_for_restore(mock_ocp, metadata, restore_fn)
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="gs://fake/pure_dict_ckpt",
+    )
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    item = mock_ckptr.restore.call_args.kwargs["item"]
+    scale_target = item["decoder"]["decoder_norm"]["scale"]
+    self.assertTrue(hasattr(scale_target, "shape"))
+    self.assertNotIsInstance(scale_target, dict)
+    leaf_keys = [getattr(path[-1], "key", path[-1]) for path, _ in jax.tree_util.tree_flatten_with_path(item)[0]]
+    self.assertNotIn("value", leaf_keys)
+    np.testing.assert_array_equal(np.asarray(model.decoder.decoder_norm.scale[...]), 7.0)
+    np.testing.assert_array_equal(np.asarray(model.decoder.layers.mlp.wo.kernel[...]), 0.0)
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_value_wrapped_nnx_checkpoint(self, mock_ocp):
+    """Value-wrapped NNX checkpoint: leaves are stored under a 'value' dictionary."""
+    params = nnx.to_pure_dict(
+        nnx.state(
+            model_creation_utils.from_pretrained(self.config, self.mesh),
+            nnx.Param,
+        )
+    )
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+    metadata = MagicMock()
+    metadata.item_metadata.tree = jax.tree.map(lambda a: {"value": fake_meta(a)}, params)
+
+    def restore_fn(path, item=None, **kw):
+      restored = _restore_as_zeros(path, item, **kw)
+      restored["decoder"]["decoder_norm"]["scale"]["value"] = restored["decoder"]["decoder_norm"]["scale"]["value"] + 7.0
+      return restored
+
+    mock_ckptr = self._mock_ocp_for_restore(mock_ocp, metadata, restore_fn)
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="gs://fake/wrapped_nnx_ckpt",
+    )
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    item = mock_ckptr.restore.call_args.kwargs["item"]
+    scale_target = item["decoder"]["decoder_norm"]["scale"]
+    self.assertIsInstance(scale_target, dict)
+    self.assertIn("value", scale_target)
+    self.assertTrue(hasattr(scale_target["value"], "shape"))
+    leaf_keys = {getattr(path[-1], "key", path[-1]) for path, _ in jax.tree_util.tree_flatten_with_path(item)[0]}
+    self.assertEqual(leaf_keys, {"value"})
+    np.testing.assert_array_equal(np.asarray(model.decoder.decoder_norm.scale[...]), 7.0)
+    np.testing.assert_array_equal(np.asarray(model.decoder.layers.mlp.wo.kernel[...]), 0.0)
+
+  def test_apply_m3_default_named_sharding(self):
+    mesh = jax.sharding.Mesh(jax.local_devices()[:1], ("data",))
+    dummy_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+    def _make_states():
+      # Paths mirror Qwen3_8FlashNextModel: scanned Qwen3_8CycleBlock params live under
+      # `decoder.cycles.{gdn_0,gdn_1,gdn_2,qsa_3}` with a leading cycle axis (4 cycles here).
+      shapes = {
+          "lm_head": {"kernel": (32, 64)},
+          "decoder": {
+              "token_embedder": {"embedding": (6, 64)},
+              "cycles": {
+                  "gdn_0": {"mlp": {"experts": {"gate_up_proj": (4, 8, 32, 64)}}},
+                  "qsa_3": {"self_attn": {"q_proj": {"kernel": (4, 16, 32)}}},
+              },
+          },
+      }
+      is_shape = lambda x: isinstance(x, tuple)  # pylint: disable=unnecessary-lambda-assignment
+      abs_state = nnx.State(
+          jax.tree.map(lambda s: nnx.Param(jax.ShapeDtypeStruct(s, jnp.float32)), shapes, is_leaf=is_shape)
+      )
+      sharding_state = nnx.State(jax.tree.map(lambda _: nnx.Param(dummy_sharding), shapes, is_leaf=is_shape))
+      return abs_state, sharding_state
+
+    cases = [
+        (
+            "single_fsdp",
+            jax.sharding.AbstractMesh((4,), ("fsdp",)),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec(None, "fsdp"),
+            jax.sharding.PartitionSpec(None, "fsdp", None, None),
+            jax.sharding.PartitionSpec(None, "fsdp", None),
+        ),
+        (
+            "data_2_fsdp_4",
+            jax.sharding.AbstractMesh((2, 4), ("data", "fsdp")),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec(None, "fsdp"),
+            jax.sharding.PartitionSpec(None, "fsdp", None, None),
+            jax.sharding.PartitionSpec(None, "fsdp", None),
+        ),
+        (
+            "data_4_fsdp_2",
+            jax.sharding.AbstractMesh((4, 2), ("data", "fsdp")),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec("fsdp", None),
+            jax.sharding.PartitionSpec(None, "fsdp", None, None),
+            jax.sharding.PartitionSpec(None, "fsdp", None),
+        ),
+        (
+            "fsdp_and_fsdp_transpose",
+            jax.sharding.AbstractMesh((2, 2), ("fsdp", "fsdp_transpose")),
+            jax.sharding.PartitionSpec(("fsdp", "fsdp_transpose"), None),
+            jax.sharding.PartitionSpec(None, ("fsdp", "fsdp_transpose")),
+            jax.sharding.PartitionSpec(None, ("fsdp", "fsdp_transpose"), None, None),
+            jax.sharding.PartitionSpec(None, ("fsdp", "fsdp_transpose"), None),
+        ),
+        (
+            "tensor_fallback",
+            jax.sharding.AbstractMesh((4, 2), ("data", "tensor")),
+            jax.sharding.PartitionSpec("tensor", None),
+            jax.sharding.PartitionSpec("tensor", None),
+            jax.sharding.PartitionSpec(None, "tensor", None, None),
+            jax.sharding.PartitionSpec(None, "tensor", None),
+        ),
+        (
+            "pure_data_unchanged",
+            jax.sharding.AbstractMesh((4,), ("data",)),
+            jax.sharding.PartitionSpec(),
+            jax.sharding.PartitionSpec(),
+            jax.sharding.PartitionSpec(),
+            jax.sharding.PartitionSpec(),
+        ),
+    ]
+
+    for name, target_mesh, exp_lm_head, exp_embed, exp_moe, exp_attn in cases:
+      with self.subTest(mesh=name):
+        abs_state, sharding_state = _make_states()
+        result = model_creation_utils._apply_m3_default_named_sharding(  # pylint: disable=protected-access
+            abs_state, sharding_state, target_mesh
+        )
+        res_dict = nnx.to_pure_dict(result)
+        cycles = res_dict["decoder"]["cycles"]
+        self.assertEqual(res_dict["lm_head"]["kernel"].spec, exp_lm_head)
+        self.assertEqual(res_dict["decoder"]["token_embedder"]["embedding"].spec, exp_embed)
+        self.assertEqual(cycles["gdn_0"]["mlp"]["experts"]["gate_up_proj"].spec, exp_moe)
+        self.assertEqual(cycles["qsa_3"]["self_attn"]["q_proj"]["kernel"].spec, exp_attn)
 
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_linen_checkpoint(self, mock_ocp):
@@ -701,7 +1204,7 @@ class TestCreateNnxModel(unittest.TestCase):
     # matches the model's own state — regardless of the exact leaf count.
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -711,12 +1214,51 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
+  def _mock_ocp_for_restore(self, mock_ocp, metadata, restore_fn):
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = metadata
+    mock_ckptr.restore.side_effect = restore_fn
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+    return mock_ckptr
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_linen_checkpoint_restores_side_collection(self, mock_ocp):
+    """Variables stored in a collection beside "params" (e.g. Tid2EidVar) are restored."""
+    params = nnx.to_pure_dict(nnx.state(model_creation_utils.from_pretrained(self.config, self.mesh), nnx.Param))
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+    side_meta = {"decoder": {"decoder_norm": {"scale": fake_meta(params["decoder"]["decoder_norm"]["scale"])}}}
+    metadata = MagicMock()
+    metadata.item_metadata.tree = {"params": {"params": jax.tree.map(fake_meta, params), "SideVar": side_meta}}
+
+    def restore_fn(path, item=None, **kw):
+      restored = _restore_as_zeros(path, item, **kw)
+      restored["params"]["SideVar"] = jax.tree.map(lambda x: x + 7.0, restored["params"]["SideVar"])
+      return restored
+
+    mock_ckptr = self._mock_ocp_for_restore(mock_ocp, metadata, restore_fn)
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/linen_side_ckpt")
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIn("SideVar", mock_ckptr.restore.call_args.kwargs["item"]["params"])
+    np.testing.assert_array_equal(np.asarray(model.decoder.decoder_norm.scale[...]), 7.0)
+    np.testing.assert_array_equal(np.asarray(model.decoder.layers.mlp.wo.kernel[...]), 0.0)
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_checkpoint_missing_variable_raises(self, mock_ocp):
+    """A variable freed before restore but absent from the checkpoint fails at load time."""
+    self._mock_ocp_for_restore(mock_ocp, self._make_linen_metadata_mock(), lambda path, item=None, **kw: item)
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/linen_missing_ckpt")
+    with self.assertRaisesRegex(ValueError, "has no value for"):
+      model_creation_utils.from_pretrained(cfg, self.mesh)
+
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_checkpoint_with_custom_vision_projector(self, mock_ocp):
     """NNX checkpoint loading with customized_mlp vision projector runs _free_device_memory cleanly."""
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -774,7 +1316,7 @@ class TestCreateNnxModel(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -795,7 +1337,7 @@ class TestCreateNnxModel(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
@@ -924,6 +1466,20 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     self.assertIn("Configuration mismatch", str(context.exception))
 
   @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_safetensors_dynamic_skips_metadata(self, mock_load_meta):
+    """A safetensors_dynamic source has no Orbax metadata to read."""
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="hf://org/repo",
+        source_checkpoint_layout="safetensors_dynamic",
+    )
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    mock_load_meta.assert_not_called()
+    self.assertIs(synced_cfg, cfg)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
   @patch("maxtext.utils.model_creation_utils.max_logging.log")
   def test_sync_log_and_early_return(self, mock_log, mock_load_meta):
     """Test that we log only when auto-resolution actually changes scan_layers, and early return otherwise."""
@@ -946,12 +1502,18 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
 
 
-if __name__ == "__main__":
-  unittest.main()
-
-
 class TestFromPretrainedAuth(unittest.TestCase):
   """Tests for Hugging Face authentication in from_pretrained."""
+
+  def setUp(self):
+    super().setUp()
+    self._meta_patcher = patch.object(
+        model_creation_utils.checkpointing,
+        "load_checkpoint_metadata",
+        return_value={},
+    )
+    self._meta_patcher.start()
+    self.addCleanup(self._meta_patcher.stop)
 
   def _make_nnx_metadata_mock(self):
     meta = MagicMock()
@@ -977,7 +1539,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
@@ -1010,7 +1572,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
 
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
-    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ckptr.restore.side_effect = _restore_as_zeros
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
     mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
@@ -1045,3 +1607,7 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+if __name__ == "__main__":
+  absltest.main()

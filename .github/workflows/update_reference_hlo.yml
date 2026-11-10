@@ -25,17 +25,13 @@ permissions:
 jobs:
   build-wheel:
     uses: ./.github/workflows/build_package.yml
-    with:
-      device_type: tpu
-      device_name: v6e-4
-      cloud_runner: linux-x86-n2-16-buildkit
 
   run-tests:
     needs: build-wheel
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: cpu-integration
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       is_scheduled_run: false
       maxtext_sha: ${{ github.sha }}
       is_update_hlo: true

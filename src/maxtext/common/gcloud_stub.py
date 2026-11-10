@@ -148,8 +148,9 @@ def jetstream():
       if importlib.util.find_spec(mod) is None:
         if is_decoupled():
           print("[DECOUPLED NO-OP] jetstream: dependency missing; using stubs.")
-          return _jetstream_stubs()
-        raise ModuleNotFoundError(mod)
+        else:
+          print("[NO-OP] jetstream: dependency missing; using stubs.")
+        return _jetstream_stubs()
     from jetstream.core import config_lib  # type: ignore  # pylint: disable=import-outside-toplevel
     from jetstream.engine import engine_api, token_utils, tokenizer_api  # type: ignore  # pylint: disable=import-outside-toplevel
     from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
@@ -173,11 +174,12 @@ def jetstream():
     token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
     setattr(token_params_ns, "_IS_STUB", False)
     return config_lib, engine_api, token_utils, tokenizer_api, token_params_ns
-  except ModuleNotFoundError:
+  except (ModuleNotFoundError, ImportError) as e:
     if is_decoupled():
       print("[DECOUPLED NO-OP] jetstream: dependency missing; using stubs.")
-      return _jetstream_stubs()
-    raise
+    else:
+      print(f"[NO-OP] jetstream: dependency missing ({e}); using stubs.")
+    return _jetstream_stubs()
 
 
 # ---------------- GCS -----------------
@@ -312,6 +314,12 @@ def _goodput_stubs():
     def start_step_deviation_uploader(self):
       print("[DECOUPLED NO-OP] goodput step deviation uploader skipped.")
 
+    def start_rolling_window_goodput_uploader(self, *_a, **_k):
+      print("[DECOUPLED NO-OP] rolling window goodput uploader skipped.")
+
+    def stop_rolling_window_goodput_uploader(self, *_a, **_k):
+      print("[DECOUPLED NO-OP] rolling window goodput uploader stop skipped.")
+
   monitoring_ns = SimpleNamespace(GCPOptions=_StubMonitoringOptions, GoodputMonitor=_StubGoodputMonitor)
   goodput_ns = SimpleNamespace(GoodputRecorder=_StubGoodputRecorder)
   return goodput_ns, monitoring_ns, True
@@ -330,6 +338,7 @@ def goodput_modules():
       _goodput_stubs,
       label="ml_goodput_measurement",
       stub_if_decoupled=False,
+      stub_on_error_when_not_decoupled=True,
   )
 
 

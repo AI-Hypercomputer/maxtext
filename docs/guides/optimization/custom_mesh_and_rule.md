@@ -51,9 +51,21 @@ This rule utilizes the `data`, `stage`, `fsdp`, and `expert` axes. Its defining 
 
 Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes the `context` axis in the mesh layout alongside `data`, `stage`, `fsdp`, and `expert`. While context sharding is mapped to the `context` axis globally, within MoE components, this `context` axis dynamically shifts to perform expert parallelism instead of FSDP. This custom rule supports using CP and EP together.
 
+### `tp-as-ep.yml`
+
+Similar in philosophy to `cp-as-ep.yml`, but for the `tensor` axis. Attention and dense layers keep using `tensor` for tensor parallelism, while inside the routed MoE the `tensor` axis joins `expert` as expert parallelism (`exp` maps to `['expert', 'tensor']`). Routed expert weights are no longer sharded on their hidden (`mlp`) dimension, and tokens entering the MoE are split over `tensor` on the sequence dimension (through the `activation_norm_length_routed` / `activation_embed_routed` rules, which every other rule set keeps equal to the residual rules) so each expert x tensor shard dispatches distinct tokens. This removes tensor-axis collectives from expert-expanded activations, which helps fine-grained MoE models whose per-expert hidden dimension is small. It requires `sparse_matmul=True`, `mlp_bias=False`, tensor parallelism > 1, and `num_experts` divisible by expert x tensor parallelism.
+
 ### `ep-as-dp.yml`
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
+
+### `fsdp-as-dp-for-attn.yml`
+
+Built on `ep-as-dp.yml` for large-scale training where the FSDP rank is large enough that small-weight all-gathers become latency bound. Attention weights (`q_lora`, `kv_lora`, `embed_attn`) are sharded on the smaller `expert` axis and replicated over `fsdp` / `fsdp_transpose`, the tiny MoE router weight (`embed_router`) is fully replicated (`[]`), and the larger routed and shared expert weights remain sharded on `fsdp` / `fsdp_transpose`.
+
+### `fsdp-as-dp-for-attn-rf.yml`
+
+Identical to `fsdp-as-dp-for-attn.yml` except that the MoE router weight (`embed_router`) is sharded on `fsdp` (as in `ep-as-dp.yml`) instead of being fully replicated. With a replicated router, GSPMD reduces the `bf16[embed, num_experts]` router gradient with a synchronous TensorCore all-reduce over every device inside the backward scan loop; sharding it on `fsdp` does not remove the reduction (the gradient is still a partial sum over every batch axis, including `expert`), but splits it into a reduce-scatter over `fsdp` plus an all-reduce of only the `[embed / fsdp, num_experts]` shard over the remaining batch axes (`data`, `fsdp_transpose`, `expert`), at the cost of a small forward/remat all-gather. Prefer this variant at large FSDP ranks when the router-gradient all-reduce shows up as exposed time in the backward pass.
 
 ### `shard-exp-on-fsdp`
 

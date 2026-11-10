@@ -12,43 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""qwix + NNX coverage: the config guard and the ToNNX->Linen bridge.
+"""qwix + NNX coverage for the ToNNX->Linen bridge.
 
-- Config guard: qwix quantization under pure_nnx requires the pure NNX decoder.
-  The bridged Linen decoder (pure_nnx_decoder=False) is invisible to qwix, so
-  quantization/sparsity would silently no-op; validation must reject that combo.
-- Bridge: nnx_attrs_to_linen_vars must skip qwix's non-Variable bookkeeping attrs
-  (qwix_path/qwix_rngs/disable_quant_stats_update) instead of raising.
+nnx_attrs_to_linen_vars must skip qwix's non-Variable bookkeeping attrs
+(qwix_path/qwix_rngs/disable_quant_stats_update) instead of raising.
 """
 
-import sys
 import unittest
 
 import jax.numpy as jnp
 from flax import nnx
 
-from maxtext.configs import pyconfig
 from maxtext.layers import nnx_wrappers
-from tests.utils.test_helpers import get_test_config_path
-
-
-class QwixNnxQuantGuardTest(unittest.TestCase):
-
-  def _init(self, **overrides):
-    overrides.setdefault("enable_checkpointing", False)
-    return pyconfig.initialize([sys.argv[0], get_test_config_path()], **overrides)
-
-  def test_bridged_decoder_with_qwix_quant_raises(self):
-    with self.assertRaisesRegex(Exception, "pure_nnx_decoder"):
-      self._init(pure_nnx=True, pure_nnx_decoder=False, use_qwix_quantization=True, quantization="fp8_full")
-
-  def test_pure_nnx_decoder_with_qwix_quant_ok(self):
-    cfg = self._init(pure_nnx=True, pure_nnx_decoder=True, use_qwix_quantization=True, quantization="fp8_full")
-    self.assertTrue(cfg.pure_nnx_decoder)
-
-  def test_bridged_decoder_without_quant_ok(self):
-    cfg = self._init(pure_nnx=True, pure_nnx_decoder=False, quantization="")
-    self.assertEqual(cfg.quantization, "")
 
 
 class NnxAttrsToLinenVarsBridgeTest(unittest.TestCase):

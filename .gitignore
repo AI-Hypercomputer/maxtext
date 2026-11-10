@@ -149,10 +149,13 @@ dmypy.json
 .idea
 
 # Gemini CLI
-.gemini/
+.gemini/*
 !.gemini/commands/
+!.gemini/config.yaml
+.agents/
 gha-creds-*.json
 
 # vscode workspace
 maxtext.code-workspace
 maxtext_output/
+maxtext_local_output/

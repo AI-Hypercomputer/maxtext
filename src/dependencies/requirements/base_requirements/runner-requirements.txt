@@ -1,5 +1,9 @@
 google-cloud-filestore
 kubernetes
+oauthlib>=4.0.0
 omegaconf
 packaging==24.2
+setuptools>=84.0.0
+werkzeug>=3.1.9
+wheel>=0.48.0
 xpk>=1.8.0

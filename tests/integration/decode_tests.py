@@ -22,11 +22,16 @@ import pytest
 from absl.testing import absltest
 from contextlib import redirect_stdout
 
+from maxtext.common.gcloud_stub import jetstream
 from maxtext.inference.decode import main as decode_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
 pytestmark = [pytest.mark.tpu_only, pytest.mark.external_serving, pytest.mark.integration_test]
+
+config_lib, _, _, _, _ = jetstream()
+if getattr(config_lib, "_IS_STUB", False):
+  pytest.skip("JetStream is not installed (stubbed)", allow_module_level=True)
 
 
 class DecodeTests(unittest.TestCase):
@@ -81,7 +86,7 @@ class DecodeTests(unittest.TestCase):
       "decode_sampling": [
           None,
           get_test_config_path(),
-          "base_output_directory=gs://runner-maxtext-logs",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
           f"load_parameters_path={GEMMA_2B_CKPT_PATH}",
           "per_device_batch_size=1",
@@ -99,7 +104,7 @@ class DecodeTests(unittest.TestCase):
       "deepseek32": [  # tests decode for deepseek3.2-671b full EP
           None,
           get_test_config_path(),
-          "base_output_directory=gs://runner-maxtext-logs",
+          f"base_output_directory={_base_output_directory}",
           "run_name=decode",
           "model_name=deepseek3.2-671b",
           "override_model_config=True",

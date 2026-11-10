@@ -19,8 +19,6 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, VisionEncoderBlockType
-from maxtext.layers import nnx_wrappers
-from maxtext.layers import initializers
 from maxtext.layers import linears
 
 
@@ -238,6 +236,14 @@ class AudioEncoder(nnx.Module):
       setattr(self, encoder_name, qwen3.Qwen3OmniAudioEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs))
       setattr(self, projector_name, qwen3.Qwen3OmniAudioProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
+    elif self.config.model_name in ["ming-3.0-audio-tiny"]:
+      from maxtext.models import ming  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "MingWhisperEncoder_0"
+      projector_name = "MingAudioProjector_0"
+      setattr(self, encoder_name, ming.MingWhisperEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs))
+      setattr(self, projector_name, ming.MingAudioProjector(config=self.config, rngs=self.rngs))
+      return encoder_name, projector_name
     else:
       raise ValueError(f"No AudioEncoder implemented for {self.config.model_name} yet")
 
@@ -251,38 +257,10 @@ class AudioEncoder(nnx.Module):
 
     # audio projector layer
     projector = getattr(self, self.projector_name)
-    embeddings = projector(embeddings)
+    if self.config.model_name in ["ming-3.0-audio-tiny"]:
+      # Ming encodes <=30 s chunks independently; the projector keeps only each chunk's valid frames.
+      embeddings = projector(embeddings, mel_length=input_audio.shape[1])
+    else:
+      embeddings = projector(embeddings)
 
     return embeddings
-
-
-def vision_encoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates a VisionEncoder module."""
-  module = nnx_wrappers.to_linen(
-      VisionEncoder,
-      config=config,
-      mesh=mesh,
-      name="vision_encoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module
-
-
-def audio_encoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates an AudioEncoder module."""
-  module = nnx_wrappers.to_linen(
-      AudioEncoder,
-      config=config,
-      mesh=mesh,
-      name="audio_encoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module

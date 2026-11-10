@@ -1,0 +1,27 @@
+This directory is undergoing significant refactoring.
+Our current goal is to port code from the `atwigg/mlperf` branch into `main`.
+However, we want to fix some hacks that were added during the MLPerf rush.
+Some hacky features that were added in the MLPerf branch are not going to be ported. Consult with the user which features they want to keep.
+
+Here are the refactoring rules:
+
+## APIs and code structure
+* We want to preserve the `AbstractTrainer` APIs. The MLPerf branch added several new APIs. Any API change must be clearly justified in PR descriptions.
+
+## Configs
+The execution scripts for this code currently live in the Tunix `atwigg/mlperf` branch under the `experimental` directory. Check if the features that we are porting were actually used in the final MLPerf submission.
+
+* Place config flags in the categories that they belong to (e.g., checkpointing settings in `Checkpointing`, rollout-specific settings in `vllm` such as `vllm.rollout_fp8_moe`, etc.).
+* Place config flags that are specific to `maxtext_engine` and Tunix (such as `CompileConfig` for standalone AOT compilation) in `src/maxtext/configs/maxtext_engine_types.py` rather than flooding `src/maxtext/configs/base.yml` or `src/maxtext/configs/types.py`.
+* MaxText should be configured using Pydantic config and not via environment variables. Replace environment variables with config flags.
+* AI agents tend to use defensive `getattr(config, "flag_name", None)`. We should directly use `config.flag_name` instead. Some unit tests might need to be updated to use Pydantic to avoid test failures.
+
+If config flags are changed according to the rules above, clearly document this in the PR description so that the execution scripts can be updated accordingly.
+
+## Documentation and Comments
+* Comments and docstrings must explain the current state of the code from first principles. Do not write comments that describe how the code is different from deleted code, legacy implementations, or prior branches (e.g., avoid "diff-style" explanations comparing against removed paths). A reader who never saw the old code should be able to understand the comment entirely from context.
+
+# Tests
+* Our CI is struggling due to too many tests. Don't add redundant tests. Prefer to use existing test files
+instead of creating new ones. Check and report how long it takes to run the tests in a given file before
+and after your change. Think if the test can be made faster.

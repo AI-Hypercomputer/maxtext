@@ -26,7 +26,7 @@ export DATASET_PATH=gs://maxtext-dataset
 
 # Run pre-training - dropping implementation
 python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=mixtral-8x7b hardware=gpu \
-    base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH} dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} \
     run_name=dropping_pre_training async_checkpointing=false \
     attention=cudnn_flash_te capacity_factor=1.25 dtype=bfloat16 \
     enable_checkpointing=false ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \
@@ -38,7 +38,7 @@ echo "Finished pre-training"
 # Run fine-tuning - dropping implementation
 python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=mixtral-8x7b hardware=gpu \
     load_parameters_path=${SCANNED_CHECKPOINT} \
-    base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH} dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} \
     run_name=dropping_pre_training async_checkpointing=true \
     attention=cudnn_flash_te capacity_factor=1.25 dtype=bfloat16 \
     ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \

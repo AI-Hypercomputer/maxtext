@@ -19,7 +19,6 @@ import unittest
 from absl.testing import absltest
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 
@@ -29,13 +28,8 @@ class Train(unittest.TestCase):
 
   def setUp(self):
     """Set up test fixtures before each test method."""
-    decoupled = is_decoupled()
     self.dataset_path = get_test_dataset_path()
-    self.base_output_directory = (
-        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
-        if decoupled
-        else get_test_base_output_directory()
-    )
+    self.base_output_directory = get_test_base_output_directory()
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
@@ -151,6 +145,42 @@ class Train(unittest.TestCase):
             "max_target_length=128",
             "dataset_type=synthetic",
             "steps=2",
+            "enable_checkpointing=False",
+            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+            "enable_goodput_recording=False",
+            "enable_checkpoint_cloud_logger=False",
+            "monitor_goodput=False",
+            "scan_layers=False",
+        ]
+    )
+
+  def test_qwen3_custom_moe_explicit_shardmode(self):
+    test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
+    train_main(  # pyrefly: ignore[bad-argument-type]
+        [  # pyrefly: ignore[bad-argument-type]
+            None,
+            get_test_config_path(),
+            "model_name=qwen3-custom-30b-a3b",
+            "override_model_config=True",
+            f"base_output_directory={self.base_output_directory}",
+            "run_name=runner_test",
+            f"dataset_path={self.dataset_path}",
+            "base_emb_dim=256",
+            "attention_output_dim=256",
+            "moe_expert_input_dim=256",
+            "base_mlp_dim=256",
+            "base_moe_mlp_dim=256",
+            "head_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "num_experts=4",  # Reduced from 128
+            "num_experts_per_tok=2",  # Reduced from 8
+            "base_num_decoder_layers=2",
+            "per_device_batch_size=2",
+            "max_target_length=128",
+            "dataset_type=synthetic",
+            "steps=2",
+            "shard_mode=explicit",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",

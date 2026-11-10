@@ -53,9 +53,6 @@ from transformers.models.gemma4.modeling_gemma4 import (
 )
 
 
-torch.set_grad_enabled(False)
-
-
 # ---------------------------------------------------------------------------
 # Test config — small E2B-shaped variant, dimensions trimmed to keep tests fast.
 # ---------------------------------------------------------------------------
@@ -230,6 +227,11 @@ class Gemma4SmallParityBase(unittest.TestCase):
     cls.torch_config = _build_torch_text_config(cls.jax_config)
     cls.torch_config._attn_implementation = "eager"  # pylint: disable=protected-access
     cls.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("data",))
+
+  def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
 
 
 class TestGemma4SmallPLE(Gemma4SmallParityBase):

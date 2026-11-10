@@ -20,13 +20,14 @@ import functools
 import math
 from typing import Any, Sequence
 
-from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from maxtext.kernels import megablox, sort_activations
 from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
+from maxtext.utils import max_utils
+from maxtext.utils.sharding import logical_to_spec
 import qwix.pallas as qpl
 import tokamax
 
@@ -959,7 +960,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           use_qwix_quantization=config.use_qwix_quantization,
           use_tokamax_backend=config.use_tokamax_gmm,
           weight_gather_axes=weight_gather_axes,
-          qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[0],
+          qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[-1],
       )
     else:
       output = tokamax.ragged_dot(
@@ -976,10 +977,25 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   wi_gather_axes = []
   wo_gather_axes = []
 
+  if max_utils.is_eval(config):
+    wi_tile_fwd_batch_seq = config.eval_wi_tile_fwd_batch_seq
+    wi_tile_fwd_embed_dim = config.eval_wi_tile_fwd_embed_dim
+    wi_tile_fwd_mlp_dim = config.eval_wi_tile_fwd_mlp_dim
+    wo_tile_fwd_batch_seq = config.eval_wo_tile_fwd_batch_seq
+    wo_tile_fwd_embed_dim = config.eval_wo_tile_fwd_embed_dim
+    wo_tile_fwd_mlp_dim = config.eval_wo_tile_fwd_mlp_dim
+  else:
+    wi_tile_fwd_batch_seq = config.wi_tile_fwd_batch_seq
+    wi_tile_fwd_embed_dim = config.wi_tile_fwd_embed_dim
+    wi_tile_fwd_mlp_dim = config.wi_tile_fwd_mlp_dim
+    wo_tile_fwd_batch_seq = config.wo_tile_fwd_batch_seq
+    wo_tile_fwd_embed_dim = config.wo_tile_fwd_embed_dim
+    wo_tile_fwd_mlp_dim = config.wo_tile_fwd_mlp_dim
+
   wi_tile_size = (
-      config.wi_tile_fwd_batch_seq,  # m (LHS batch)
-      config.wi_tile_fwd_embed_dim,  # k  (contracting)
-      config.wi_tile_fwd_mlp_dim,  # n (RHS batch)
+      wi_tile_fwd_batch_seq,  # m (LHS batch)
+      wi_tile_fwd_embed_dim,  # k  (contracting)
+      wi_tile_fwd_mlp_dim,  # n (RHS batch)
       config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
       config.wi_tile_dlhs_mlp_dim,  # k (contracting)
       config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
@@ -989,9 +1005,9 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   )
 
   wo_tile_size = (
-      config.wo_tile_fwd_batch_seq,  # m (LHS batch)
-      config.wo_tile_fwd_mlp_dim,  # k (contracting)
-      config.wo_tile_fwd_embed_dim,  # n (RHS batch)
+      wo_tile_fwd_batch_seq,  # m (LHS batch)
+      wo_tile_fwd_mlp_dim,  # k (contracting)
+      wo_tile_fwd_embed_dim,  # n (RHS batch)
       config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
       config.wo_tile_dlhs_embed_dim,  # k (contracting)
       config.wo_tile_dlhs_mlp_dim,  # n (RHS)
@@ -1002,8 +1018,8 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
 
   if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
-    w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
-    wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
+    w0_pspec = logical_to_spec(gating_pspec)
+    wo_pspec = logical_to_spec(linear_pspec)
     ignored_axes = ("expert", "tensor")
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
@@ -1154,8 +1170,8 @@ def process_activations(
   )
   if config.quantization and config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
-    gating_pspec = nn.logical_to_mesh_axes(gating_pspec)
-    linear_pspec = nn.logical_to_mesh_axes(linear_pspec)
+    gating_pspec = logical_to_spec(gating_pspec)
+    linear_pspec = logical_to_spec(linear_pspec)
   else:
     gating_pspec = jax.sharding.PartitionSpec(None, None, expert_axis_name)
     linear_pspec = jax.sharding.PartitionSpec(None, expert_axis_name, None)

@@ -71,9 +71,8 @@ _TX = optax.adam(1e-3)
 
 
 def _config():
-  """Minimal config with the fields save/restore reads for a pure_nnx run."""
+  """Minimal config with the fields save/restore reads for an NNX run."""
   return SimpleNamespace(
-      pure_nnx=True,
       enable_diloco=False,
       enable_checkpointing=True,
       enable_continuous_checkpointing=False,

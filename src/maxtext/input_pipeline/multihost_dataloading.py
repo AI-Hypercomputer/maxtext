@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pylint: disable=unused-import
+# pylint: disable=unused-import, broad-exception-caught, protected-access, import-outside-toplevel
 """SPMD Multihost Dataloading Utilities.
 
 Adapted from Sholto's:
@@ -21,8 +21,12 @@ https://github.com/sholtodouglas/multihost_dataloading
 from functools import partial
 from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
+import gc
 import time
 import json
+import weakref
+import os
+import signal
 
 from etils import epath
 
@@ -45,6 +49,148 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 
 from maxtext.utils import max_logging
+
+_GLOBAL_REMOTE_ITERATORS = weakref.WeakSet()
+_GLOBAL_MULTIHOST_ITERATORS = weakref.WeakSet()
+
+
+def _close_iterator(it):
+  """Safely closes an iterator or dataloader, handling nested Grain/TF iterators."""
+  if it is None:
+    return
+  if hasattr(it, "close") and callable(it.close):
+    try:
+      it.close()
+    except Exception as e:
+      max_logging.log(f"CLEANUP: error closing iterator: {e}")
+  elif hasattr(it, "_iterator") and hasattr(it._iterator, "close") and callable(it._iterator.close):
+    try:
+      it._iterator.close()
+    except Exception as e:
+      max_logging.log(f"CLEANUP: error closing underlying _iterator: {e}")
+
+
+def _terminate_worker(w):
+  try:
+    if hasattr(w, "terminate") and callable(w.terminate):
+      w.terminate()
+      if hasattr(w, "join") and callable(w.join):
+        w.join(timeout=0.2)
+  except Exception:
+    pass
+
+
+def _terminate_iterator_workers(obj):
+  """Terminates multiprocessing workers directly associated with an iterator or dataloader."""
+  if obj is None:
+    return
+  candidates = [obj]
+  for attr in ("_iterator", "_parent"):
+    try:
+      val = getattr(obj, attr, None)
+      if val is not None:
+        candidates.append(val)
+    except Exception:
+      pass
+  try:
+    parents = getattr(obj, "_parents", None)
+    if parents and isinstance(parents, (list, tuple)):
+      candidates.extend(p for p in parents if p is not None)
+  except Exception:
+    pass
+  for c in candidates:
+    workers = getattr(c, "_workers", None) or getattr(c, "workers", None)
+    if workers and isinstance(workers, (list, tuple)):
+      for w in workers:
+        _terminate_worker(w)
+    pool = getattr(c, "_pool", None)
+    if pool and hasattr(pool, "terminate") and callable(pool.terminate):
+      try:
+        pool.terminate()
+      except Exception:
+        pass
+
+
+def _cleanup_orphaned_multiprocessing_processes():
+  """Cleans up multiprocessing spawn and resource tracker processes orphaned under PID 1."""
+  current_pid = os.getpid()
+  # If running as PID 1 in a container, direct children are healthy workers, not orphans.
+  if current_pid == 1:
+    return
+
+  try:
+    if not os.path.exists("/proc"):
+      return
+
+    orphan_pids = []
+    for entry in os.listdir("/proc"):
+      if not entry.isdigit():
+        continue
+      pid = int(entry)
+      if pid in (current_pid, 1):
+        continue
+      try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+          cmd = f.read().decode("utf-8", errors="ignore")
+        if "multiprocessing.spawn" not in cmd and "multiprocessing.resource_tracker" not in cmd:
+          continue
+
+        ppid = None
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+          for line in f:
+            if line.startswith("PPid:"):
+              ppid = int(line.split()[1])
+              break
+
+        if ppid == 1:
+          max_logging.log(f"CLEANUP: Terminating orphaned multiprocessing process {pid} (PPid=1)")
+          try:
+            os.kill(pid, signal.SIGTERM)
+          except ProcessLookupError:
+            continue
+          except Exception as e:
+            max_logging.log(f"CLEANUP: SIGTERM failed for {pid}: {e}")
+          orphan_pids.append(pid)
+      except (FileNotFoundError, ProcessLookupError, PermissionError):
+        continue
+      except Exception as e:
+        max_logging.log(f"CLEANUP: Error checking PID {pid}: {e}")
+
+    if not orphan_pids:
+      return
+
+    time.sleep(0.05)
+
+    for pid in orphan_pids:
+      try:
+        os.kill(pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+      except Exception as e:
+        max_logging.log(f"CLEANUP: SIGKILL failed for {pid}: {e}")
+  except Exception as e:
+    max_logging.log(f"CLEANUP: Failed scanning /proc: {e}")
+
+
+def cleanup_all_iterators():
+  """Cleans up all registered global multihost and remote iterators."""
+  max_logging.log(
+      f"CLEANUP: Cleaning up {len(_GLOBAL_MULTIHOST_ITERATORS)} multihost iterators "
+      f"and {len(_GLOBAL_REMOTE_ITERATORS)} remote iterators"
+  )
+  for it in list(_GLOBAL_MULTIHOST_ITERATORS):
+    try:
+      if hasattr(it, "close"):
+        it.close()
+    except Exception as e:
+      max_logging.log(f"CLEANUP Error: {e}")
+  for it in list(_GLOBAL_REMOTE_ITERATORS):
+    try:
+      if hasattr(it, "close"):
+        it.close()
+    except Exception as e:
+      max_logging.log(f"CLEANUP Error: {e}")
+  _cleanup_orphaned_multiprocessing_processes()
 
 
 def _build_global_shape_and_sharding(
@@ -96,8 +242,10 @@ class MultiHostDataLoadIterator:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
     self.out_of_data = False
     self.last_local_data = None
+    self._reset_and_unread = False
     self.generate_padding_batch = generate_padding_batch
     self.expansion_loading_factor_for_grain = expansion_loading_factor_for_grain
+    _GLOBAL_MULTIHOST_ITERATORS.add(self)
 
   def reset(self):
     if hasattr(self.dataloader, "as_numpy_iterator"):
@@ -108,12 +256,31 @@ class MultiHostDataLoadIterator:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
     self.out_of_data = False
     self.last_local_data = None
+    self._reset_and_unread = True
+
+  def close(self):
+    if hasattr(self, "local_iterator"):
+      _close_iterator(self.local_iterator)
+      _terminate_iterator_workers(self.local_iterator)
+    if hasattr(self, "dataloader"):
+      _close_iterator(self.dataloader)
+      _terminate_iterator_workers(self.dataloader)
+    _cleanup_orphaned_multiprocessing_processes()
+
+  def __del__(self):
+    self.close()
 
   def __iter__(self):
-    self.reset()
+    # A for loop starts from the first batch. Skip the rebuild when `reset()` was just
+    # called and nothing has been read since (e.g. the eval loop in train.py resets the
+    # iterator explicitly, because wrappers such as `_ReorderedDataIterator` do not reset
+    # in `__iter__`); building a second tf.data iterator would discard the first one.
+    if not self._reset_and_unread:
+      self.reset()
     return self
 
   def __next__(self):
+    self._reset_and_unread = False
     return self._get_next_batch_sharded()
 
   def _get_next_batch_sharded(self) -> jax.Array:
@@ -179,27 +346,152 @@ def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
   return colocated_python.colocated_cpu_devices(mesh)
 
 
+# Colocated calls only take arrays, so checkpoint directories are passed to them as UTF-8 bytes, zero-padded to one
+# size so that the calls keep the same input shape.
+_MAX_DIRECTORY_BYTES = 4096
+
+
+def _state_file(directory_array) -> epath.Path:
+  """Returns this colocated host's iterator state file in the directory encoded by `RemoteIteratorWrapper`."""
+  directory = np.asarray(directory_array.addressable_data(0)).tobytes().rstrip(b"\0").decode()
+  return epath.Path(directory) / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
+
+
+def _mesh_shard(dummy_array) -> tuple[int, int]:
+  """Returns `(shard_index, shard_count)` for this host within the mesh."""
+  processes = sorted({device.process_index for device in dummy_array.sharding.device_set})
+  local_processes = {device.process_index for device in dummy_array.sharding.addressable_devices}
+  if len(local_processes) != 1:
+    raise ValueError(
+        "RemoteIterator.build expects this colocated process to address the"
+        f" devices of exactly one host of the mesh, whose processes are"
+        f" {processes}; it addresses devices of processes"
+        f" {sorted(local_processes)}."
+    )
+  (process,) = local_processes
+  return processes.index(process), len(processes)
+
+
 class RemoteIterator:
   "iterator class for using colocated python class"
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=False):
+    # Step 1: Clean up any previous RemoteIterator stored in SINGLETON_OBJECT_STORE on the worker
+    try:
+      from jax.experimental.colocated_python.obj_backend import SINGLETON_OBJECT_STORE
+
+      with SINGLETON_OBJECT_STORE._lock:
+        uids_to_del = []
+        for uid, state in list(SINGLETON_OBJECT_STORE._storage.items()):
+          if state.obj is not None and state.obj is not self:
+            if isinstance(state.obj, RemoteIterator) or state.obj.__class__.__name__ == "RemoteIterator":
+              if hasattr(state.obj, "close") and callable(state.obj.close):
+                try:
+                  state.obj.close()
+                except Exception:
+                  pass
+              uids_to_del.append(uid)
+        for uid in uids_to_del:
+          SINGLETON_OBJECT_STORE._storage.pop(uid, None)
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup SINGLETON_OBJECT_STORE in RemoteIterator: {e}")
+
+    # Step 2: Clean up module-level iterators
+    try:
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup old iterators in RemoteIterator: {e}")
+
+    # Step 3: Clean up any orphaned multiprocessing processes reparented to PID 1
+    _cleanup_orphaned_multiprocessing_processes()
+
+    # Step 4: Collect garbage
+    try:
+      gc.collect()
+    except Exception:
+      pass
+
     self.get_ds_fn = get_ds_fn
     self.preprocessing_fn = preprocessing_fn
     self.global_shape = global_shape
     self.checkpoint_path = checkpoint_path
     self.elastic = elastic
-    self.reset()
+    _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIterator initiated")
 
+  def count_shards(self, dummy_array: jax.Array) -> jax.Array:
+    """Counts this host's shard slice and returns metadata and local counts.
+
+    Args:
+      dummy_array: An array on the wrapper's CPU mesh.
+
+    Returns:
+      A JAX array on `dummy_array.sharding` encoding shard metadata and counts.
+    """
+    shard_index, shard_count = _mesh_shard(dummy_array)
+    num_files, num_patterns, files_digest, local_counts = self.get_ds_fn.count_local_shards(shard_index, shard_count)
+    max_local = (num_files + shard_count - 1) // shard_count
+    row = np.full(4 + max_local, -1, dtype=np.int64)
+    row[:4] = (num_files, num_patterns, files_digest, shard_index)
+    row[4 : 4 + len(local_counts)] = local_counts
+    words = row.view(np.int32).reshape((4 + max_local, 2))
+    devices = list(dummy_array.sharding.addressable_devices)
+    shards = jax.device_put([words[None, :, :] for _ in devices], devices)
+    shape = (*dummy_array.shape, 4 + max_local, 2)
+    return jax.make_array_from_single_device_arrays(shape, dummy_array.sharding, shards)
+
+  def build(self, dummy_array, counts_array: jax.Array | None = None):
+    """Builds the iterator over this host's shard of the data, sharded across the hosts of `dummy_array`'s mesh.
+
+    After an elastic slice-down, the hosts that left still count in `jax.process_count()`, so the shard comes from
+    the processes of the mesh's devices, which only a method that receives an array on the mesh can see.
+
+    Args:
+      dummy_array: An array on the wrapper's CPU mesh.
+      counts_array: Optional replicated int32 array encoding
+        `[num_files, *counts]` as int64 word pairs.
+
+    Returns:
+      `dummy_array`, for the caller to wait on.
+
+    Raises:
+      ValueError: If this process doesn't address the devices of exactly one host of the mesh.
+    """
+    self.shard_index, self.shard_count = _mesh_shard(dummy_array)
+    max_logging.log(f"RemoteIterator reads data shard {self.shard_index} of {self.shard_count}")
+    if counts_array is not None:
+      raw = np.asarray(counts_array.addressable_data(0))
+      packed = np.ascontiguousarray(raw).view(np.int64).reshape(-1)
+      self.get_ds_fn.set_shard_counts(packed[1 : 1 + int(packed[0])].tolist())
+    self.reset()
+    return dummy_array
+
   def reset(self):
-    ds = self.get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
-    dataloader = self.preprocessing_fn(dataset=ds)
-    if hasattr(dataloader, "as_numpy_iterator"):
-      self.iterator = dataloader.as_numpy_iterator()
-    elif isinstance(dataloader, Iterable):
-      self.iterator = iter(dataloader)
+    """Rebuilds the iterator for this host's data shard, from the start of the data."""
+    ds = self.get_ds_fn(dataloading_host_index=self.shard_index, dataloading_host_count=self.shard_count)
+    if self.elastic:
+      # The ElasticIterator built by `preprocessing_fn` shards the data itself.
+      self.dataloader = self.preprocessing_fn(dataset=ds, shard_index=self.shard_index, shard_count=self.shard_count)
+    else:
+      self.dataloader = self.preprocessing_fn(dataset=ds)
+    if hasattr(self.dataloader, "as_numpy_iterator"):
+      self.iterator = self.dataloader.as_numpy_iterator()
+    elif isinstance(self.dataloader, Iterable):
+      self.iterator = iter(self.dataloader)
     else:
       raise ValueError("Type error: dataloader should be Iterable.")
+
+  def close(self, dummy_array=None):
+    if hasattr(self, "iterator"):
+      _close_iterator(self.iterator)
+      _terminate_iterator_workers(self.iterator)
+    if hasattr(self, "dataloader"):
+      _close_iterator(self.dataloader)
+      _terminate_iterator_workers(self.dataloader)
+    _cleanup_orphaned_multiprocessing_processes()
+
+  def __del__(self):
+    self.close()
 
   def get_next(self, dummy_array):
     """Gets the next batch of data and forms a global array."""
@@ -227,42 +519,50 @@ class RemoteIterator:
         local_data,
     )
 
-  def save_state(self, step_array):
-    """Saves the iterator state to a file."""
-    step = step_array.addressable_data(0).item()
-    directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
-    if self.elastic:
-      # ElasticIterator state is a single global scalar shared by all shards,
-      # so we write one fixed file (from process 0 only) and every process
-      # reads the same file on restore — this survives elastic resizes that
-      # change `jax.process_count()`.
-      if jax.process_index() == 0:
-        directory.mkdir(parents=True, exist_ok=True)
-        filename = directory / "process_0.json"
-        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))  # pyrefly: ignore[missing-attribute]
-      return step_array
-    directory.mkdir(parents=True, exist_ok=True)
-    filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
+  def save_state(self, directory_array):
+    """Writes this host's iterator state. The controller saves the state of an elastic iterator instead."""
     state = json.dumps(self.iterator.get_state(), indent=4)  # pyrefly: ignore[missing-attribute]
-    filename.write_text(state)
-    return step_array
+    _state_file(directory_array).write_text(state)
+    return directory_array
 
-  def restore_state(self, step_array):
-    step = step_array.addressable_data(0).item()
-    directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
-    if self.elastic:
-      filename = directory / "process_0.json"
-    else:
-      filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
-    state = json.loads(filename.read_text())
-    self.iterator.set_state(state)  # pyrefly: ignore[missing-attribute]
-    return step_array
+  def restore_state(self, directory_array):
+    """Restores this host's iterator state."""
+    self.iterator.set_state(json.loads(_state_file(directory_array).read_text()))  # pyrefly: ignore[missing-attribute]
+    return directory_array
+
+  def get_state(self, dummy_array):
+    # Reinterpret int64 as two int32 words since JAX truncates int64 to int32 when x64 is disabled.
+    words = np.array([self.iterator.get_state()["global_next_index"]], dtype=np.int64).view(
+        np.int32
+    )  # pyrefly: ignore[missing-attribute]
+    devices = list(dummy_array.sharding.addressable_devices)
+    shards = jax.device_put([words[None, :] for _ in devices], devices)
+    return jax.make_array_from_single_device_arrays((*dummy_array.shape, 2), dummy_array.sharding, shards)
+
+  def set_state(self, index_array):
+    index = int(np.asarray(index_array.addressable_data(0)).view(np.int64).item())
+    self.iterator.set_state({"global_next_index": index})  # pyrefly: ignore[missing-attribute]
+    return index_array
 
 
 class RemoteIteratorWrapper:
-  """Wrapper for RemoteIterator that handles device placement."""
+  """Wrapper for RemoteIterator that handles device placement.
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
+  Each colocated host reads one shard of the data, among the hosts of `global_mesh`. With `elastic=True`,
+  `preprocessing_fn` builds grain's `ElasticIterator` and takes the host's `shard_index` and `shard_count`.
+  """
+
+  def __init__(
+      self,
+      get_ds_fn,
+      preprocessing_fn,
+      global_mesh,
+      global_shape,
+      checkpoint_path="",
+      elastic=False,
+      count_shards: bool = False,
+  ):
+    self.elastic = elastic
     self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
@@ -279,7 +579,63 @@ class RemoteIteratorWrapper:
         checkpoint_path,
         elastic=elastic,  # pyrefly: ignore[unexpected-keyword]
     )
+    # Each colocated process needs an array on the mesh to know its data shard.
+    counts_array = self._exchange_shard_counts() if count_shards else None
+    built = (
+        self.local_iterator.build(self.dummy_array, counts_array)  # pyrefly: ignore[missing-attribute]
+        if counts_array is not None
+        else self.local_iterator.build(self.dummy_array)  # pyrefly: ignore[missing-attribute]
+    )
+    jax.block_until_ready(built)
+    _GLOBAL_REMOTE_ITERATORS.add(self)
     max_logging.log("RemoteIteratorWrapper initiated")
+
+  def _exchange_shard_counts(self) -> jax.Array:
+    """Gathers and broadcasts sharded record counts across hosts."""
+    start = time.perf_counter()
+    raw = np.asarray(self.local_iterator.count_shards(self.dummy_array))  # pyrefly: ignore[missing-attribute]
+    rows = np.ascontiguousarray(raw).view(np.int64).reshape((raw.shape[0], raw.shape[1]))
+    num_files = int(rows[0, 0])
+    num_patterns = int(rows[0, 1])
+    if not (np.all(rows[:, 0] == num_files) and np.all(rows[:, 2] == rows[0, 2])):
+      raise ValueError("Colocated hosts resolved inconsistent shard file lists.")
+    shard_count = len({device.process_index for device in self.dummy_array.sharding.device_set})
+    hosts = {int(host) for host in rows[:, 3]}
+    if hosts != set(range(shard_count)):
+      raise ValueError(f"Expected shard counts from {shard_count} colocated hosts, got {sorted(hosts)}.")
+    counts = np.full(num_files, -1, dtype=np.int64)
+    seen_hosts = set()
+    for row in rows:
+      host = int(row[3])
+      if host in seen_hosts:
+        continue
+      seen_hosts.add(host)
+      expected = len(range(host, num_files, shard_count))
+      counts[host::shard_count] = row[4 : 4 + expected]
+    if np.any(counts < 0):
+      raise ValueError("Failed to collect record counts for all shards across colocated hosts.")
+    if num_files > 0:
+      elapsed = time.perf_counter() - start
+      max_logging.log(
+          f"Counted {int(counts.sum())} records across {num_files} files"
+          f" ({num_patterns} pattern(s)) across {shard_count} colocated hosts"
+          f" in {elapsed:.1f}s"
+      )
+    packed = np.empty(1 + num_files, dtype=np.int64)
+    packed[0] = num_files
+    packed[1:] = counts
+    words = packed.view(np.int32).reshape((1 + num_files, 2))
+    return jax.device_put(words, NamedSharding(self.cpu_mesh, PartitionSpec()))
+
+  def close(self):
+    if hasattr(self, "local_iterator") and hasattr(self.local_iterator, "close") and callable(self.local_iterator.close):
+      try:
+        self.local_iterator.close(self.dummy_array)
+      except Exception as e:
+        max_logging.log(f"RemoteIteratorWrapper.close() ignored exception: {e}")
+
+  def __del__(self):
+    self.close()
 
   def __iter__(self):
     return self
@@ -292,14 +648,31 @@ class RemoteIteratorWrapper:
     # use tree_map is out is a dict
     return jax.device_put(out, self.tpu_sharding)
 
-  def save_state(self, step):
-    replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
-    step_array = jnp.array(step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.save_state(step_array)  # pyrefly: ignore[missing-attribute]
+  def _encode_directory(self, directory) -> jax.Array:
+    path = os.fspath(directory).encode().ljust(_MAX_DIRECTORY_BYTES, b"\0")
+    return jax.device_put(np.frombuffer(path, dtype=np.uint8), NamedSharding(self.cpu_mesh, PartitionSpec()))
 
-  def restore_state(self, step):
-    replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
-    step_array = jnp.array(step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, replicated_cpu_sharding)
-    self.local_iterator.restore_state(step_array)  # pyrefly: ignore[missing-attribute]
+  def save_state(self, directory):
+    """Has each colocated host write its iterator state into the checkpoint directory `directory`."""
+    directory_array = self._encode_directory(directory)
+    # Colocated calls run asynchronously: wait for the writes, so they're done before Orbax commits the checkpoint.
+    jax.block_until_ready(self.local_iterator.save_state(directory_array))  # pyrefly: ignore[missing-attribute]
+
+  def restore_state(self, directory):
+    """Has each colocated host restore its iterator state from the checkpoint directory `directory`."""
+    directory_array = self._encode_directory(directory)
+    jax.block_until_ready(self.local_iterator.restore_state(directory_array))  # pyrefly: ignore[missing-attribute]
+
+  def get_state(self) -> dict[str, int]:
+    if not self.elastic:
+      raise ValueError("RemoteIteratorWrapper.get_state requires elastic=True.")
+    index_array = self.local_iterator.get_state(self.dummy_array)  # pyrefly: ignore[missing-attribute]
+    return {"global_next_index": int(np.asarray(index_array[0]).view(np.int64).item())}
+
+  def set_state(self, state: dict[str, int]) -> None:
+    if not self.elastic:
+      raise ValueError("RemoteIteratorWrapper.set_state requires elastic=True.")
+    words = np.array([state["global_next_index"]], dtype=np.int64).view(np.int32)
+    index_array = jax.device_put(words, NamedSharding(self.cpu_mesh, PartitionSpec()))
+    # Wait for the colocated call, so that a failed restore raises here rather than going unnoticed.
+    jax.block_until_ready(self.local_iterator.set_state(index_array))  # pyrefly: ignore[missing-attribute]

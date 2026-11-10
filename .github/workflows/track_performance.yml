@@ -52,18 +52,23 @@ jobs:
 
       - name: Process Test Results (Limits, Regressions, and Dashboard Formatting)
         env:
-          HEAD_REF: ${{ github.head_ref }}
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: |
+          # Only PR runs fail on a regression; scheduled, release and manual runs only report it.
           EXTRA_ARGS=()
-          if { [ "$EVENT_NAME" = "schedule" ] && [ "$REF" = "refs/heads/main" ]; } || [ "$HEAD_REF" = "ci/test-duration-tracking" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ]; then
             EXTRA_ARGS+=("--warn-only")
           fi
-          python3 tests/utils/process_test_results.py test-results \
+          # Only scheduled runs on main write the baseline and the dashboard data that the steps below publish.
+          if [ "$EVENT_NAME" = "schedule" ] && [ "$REF" = "refs/heads/main" ]; then
+            EXTRA_ARGS+=(
+              "--save-baseline" "new_per_test_baseline.json"
+              "--output-benchmark" "benchmark-results.json"
+            )
+          fi
+          python3 tools/dev/process_test_results.py test-results \
             --baseline per_test_baseline.json \
-            --save-baseline new_per_test_baseline.json \
-            --output-benchmark benchmark-results.json \
             "${EXTRA_ARGS[@]}"
 
       - name: Push per-test baseline to gh-pages
@@ -86,6 +91,9 @@ jobs:
           git worktree remove gh-pages
 
       - name: Track Test Durations (Macro-level Dashboard)
+        # Only scheduled runs on main write benchmark-results.json, and not when no flavor has dashboard totals (e.g.
+        # every one is CPU or partial). PR runs are judged by the suite check in process_test_results.py instead.
+        if: ${{ hashFiles('benchmark-results.json') != '' }}
         uses: benchmark-action/github-action-benchmark@3d3bca03e83647895ef4f911fa57de3c7a391aaf # v1.13.0
         with:
           name: MaxText Test Execution Times
@@ -94,7 +102,8 @@ jobs:
           github-token: ${{ github.token }}
           alert-threshold: '115%'
           comment-on-alert: true
-          fail-on-alert: ${{ github.ref != 'refs/heads/main' && github.head_ref != 'ci/test-duration-tracking' }}
+          # Like the checks above on these runs, an alert is reported (a commit comment) without failing the run.
+          fail-on-alert: false
           auto-push: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
           gh-pages-branch: 'gh-pages'
           benchmark-data-dir-path: 'dev/bench'

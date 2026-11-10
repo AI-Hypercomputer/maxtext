@@ -96,6 +96,12 @@ class TestSinkhorn(unittest.TestCase):
 class TestMHC(parameterized.TestCase):
   """Test for MHC module"""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cached_moe_layer"):
+      delattr(cls, "_cached_moe_layer")
+    super().tearDownClass()
+
   def _setup_mhc(
       self,
       rate,
@@ -103,6 +109,7 @@ class TestMHC(parameterized.TestCase):
       use_mhc_pallas_kernel=False,
       mhc_pallas_kernel_fwd_block_size=None,
       mhc_pallas_kernel_bwd_block_size=None,
+      mhc_pallas_kernel_bwd_feature_block_size=None,
       dim=16,
       sequence_length=7,
       per_device_batch_size=None,
@@ -141,6 +148,8 @@ class TestMHC(parameterized.TestCase):
       kwargs["mhc_pallas_kernel_fwd_block_size"] = mhc_pallas_kernel_fwd_block_size
     if mhc_pallas_kernel_bwd_block_size is not None:
       kwargs["mhc_pallas_kernel_bwd_block_size"] = mhc_pallas_kernel_bwd_block_size
+    if mhc_pallas_kernel_bwd_feature_block_size is not None:
+      kwargs["mhc_pallas_kernel_bwd_feature_block_size"] = mhc_pallas_kernel_bwd_feature_block_size
     if dtype is not None:
       kwargs["dtype"] = dtype
       kwargs["weight_dtype"] = dtype
@@ -180,24 +189,27 @@ class TestMHC(parameterized.TestCase):
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
-      layer = moe.RoutedMoE(
-          config=self.config,
-          num_experts=self.config.num_experts,
-          num_experts_per_tok=self.config.num_experts_per_tok,
-          mesh=self.mesh,
-          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", "mlp"),
-          intermediate_dim=self.config.base_mlp_dim,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          rngs=self.rngs,
-      )
+      layer = getattr(self.__class__, "_cached_moe_layer", None)
+      if layer is None:
+        layer = moe.RoutedMoE(
+            config=self.config,
+            num_experts=self.config.num_experts,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            mesh=self.mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=self.config.base_mlp_dim,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            rngs=self.rngs,
+        )
+        setattr(self.__class__, "_cached_moe_layer", layer)
 
       b, s, k, d = self.x.shape
       output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
       # metadata includes load_balance_loss & moe_bias_updates
       self.assertLen(metadata, 2)
-      for key, value in metadata.items():
+      for key, value in metadata.items():  # pyrefly: ignore[missing-attribute]
         self.assertIsNotNone(value, f"Key '{key}' has a value of None")
       self.assertEqual(output.shape, (b, s, k, d))
 
@@ -401,7 +413,6 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=use_mhc_pallas_kernel,
         dim=128,
         sequence_length=256,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -453,12 +464,14 @@ class TestMHC(parameterized.TestCase):
           self.assertIsNotNone(config_pre)
           self.assertEqual(config_pre.block_size, 256)
           self.assertEqual(config_pre.bwd_block_size, 128)
+          self.assertEqual(config_pre.bwd_feature_block_size, 1024)
 
           _, kwargs_post = mock_post.call_args
           config_post = kwargs_post.get("config")
           self.assertIsNotNone(config_post)
           self.assertEqual(config_post.block_size, 256)
           self.assertEqual(config_post.bwd_block_size, 128)
+          self.assertEqual(config_post.bwd_feature_block_size, 1024)
         else:
           mock_pre.assert_not_called()
           mock_post.assert_not_called()
@@ -473,9 +486,9 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=True,
         mhc_pallas_kernel_fwd_block_size=128,
         mhc_pallas_kernel_bwd_block_size=64,
+        mhc_pallas_kernel_bwd_feature_block_size=512,
         dim=128,
         sequence_length=128,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -526,12 +539,14 @@ class TestMHC(parameterized.TestCase):
         self.assertIsNotNone(config_pre)
         self.assertEqual(config_pre.block_size, 128)
         self.assertEqual(config_pre.bwd_block_size, 64)
+        self.assertEqual(config_pre.bwd_feature_block_size, 512)
 
         _, kwargs_post = mock_post.call_args
         config_post = kwargs_post.get("config")
         self.assertIsNotNone(config_post)
         self.assertEqual(config_post.block_size, 128)
         self.assertEqual(config_post.bwd_block_size, 64)
+        self.assertEqual(config_post.bwd_feature_block_size, 512)
 
         self.assertEqual(output.shape, self.x.shape)
 
@@ -588,6 +603,7 @@ class TestMHC(parameterized.TestCase):
           use_mhc_pallas_kernel=True,
           mhc_pallas_kernel_fwd_block_size=128,
           mhc_pallas_kernel_bwd_block_size=64,
+          mhc_pallas_kernel_bwd_feature_block_size=256,
           dim=128,
           sequence_length=128,
           per_device_batch_size=1,

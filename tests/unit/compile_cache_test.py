@@ -55,7 +55,8 @@ def test_train_step_cache_hit():
         "base_mlp_dim=16",
         "base_num_decoder_layers=1",
         "head_dim=64",
-        "max_target_length=64",
+        "max_target_length=16",
+        "per_device_batch_size=1",
         "vocab_size=32",
         "sharding_tolerance=0.1",
     ]
@@ -67,8 +68,9 @@ def test_train_step_cache_hit():
         get_test_config_path(),
         f"base_output_directory={_base_output_directory}",
         "run_name=compile_cache_test_cpu",
-        "steps=2",
+        "steps=1",
         "enable_checkpointing=False",
+        "enable_tensorboard=False",
         "enable_goodput_recording=False",
         "dataset_type=synthetic",
         "hardware=cpu",
@@ -80,7 +82,12 @@ def test_train_step_cache_hit():
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_COMPILATION_CACHE"] = "true"
     env["JAX_COMPILATION_CACHE_DIR"] = temp_dir
+    env["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0.0"
     env["JAX_LOG_COMPILES"] = "1"
+    # The tiny model used here compiles in well under JAX's default 1 second
+    # minimum compile time for writing to the persistent cache, so lower the
+    # threshold to ensure the cache is actually populated.
+    env["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
 
     print("Running CPU training subprocess:", " ".join(cmd))
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
@@ -112,6 +119,16 @@ def test_train_step_cache_hit():
         "This indicates a cache miss where AOT compilation and runtime execution generated different keys, "
         "causing train_step to be compiled twice (double-compilation regression)."
     )
+
+    print("Running second CPU training subprocess:", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
+
+    captured_logs = result.stderr
+
+    # Print captured logs for debugging (will be shown by pytest if assert fails)
+    print("=== Captured Subprocess Stderr ===")
+    print(captured_logs)
+    print("===================================")
 
     assert "Persistent compilation cache hit for 'jit_train_step'" in captured_logs, (
         "Did not find 'Persistent compilation cache hit for 'jit_train_step'' in logs. "

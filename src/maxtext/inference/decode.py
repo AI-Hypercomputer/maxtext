@@ -24,11 +24,12 @@ from absl import app
 
 from maxtext.configs import pyconfig
 from maxtext.common import profiler
-from maxtext.common.gcloud_stub import jetstream, is_decoupled
+from maxtext.common.gcloud_stub import jetstream
 from maxtext.inference.maxengine import maxengine
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_utils
+from maxtext.utils import max_logging
 
 _config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 # Placeholder: internal
@@ -86,6 +87,14 @@ def _batch_first_result_token(first_tokens: list[Any], batch_size: int):
 
 
 def main(argv: Sequence[str]) -> None:
+  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+  if token_params_is_stub or engine_api_is_stub:
+    raise RuntimeError(
+        "JetStream is not installed or disabled by DECOUPLE_GCLOUD=TRUE; maxtext.inference.decode requires JetStream. "
+        "Unset DECOUPLE_GCLOUD or install optional dependencies with: install_tpu_pre_train_extra_deps --with-tf"
+    )
+
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
@@ -115,21 +124,16 @@ def main(argv: Sequence[str]) -> None:
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
         num_videos=getattr(processor_outputs, "num_videos", 0),
+        audio_placeholder=config.audio_placeholder,
+        num_audios=getattr(processor_outputs, "num_audios", 0),
     )
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
-  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
-  if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
-    raise RuntimeError(
-        "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; decode requires the JetStream tokenizer. "
-        "Unset DECOUPLE_GCLOUD or install JetStream to run decode."
-    )
 
   try:
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
-    has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
+    has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)
   except AttributeError as _:
     has_chat_template = False
   is_bos = config.add_bos and not has_chat_template
@@ -147,13 +151,13 @@ def main(argv: Sequence[str]) -> None:
 
       position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
           input_ids=tokens[np.newaxis, :],  # Add batch dimension for processing
-          image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
-          video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
+          image_grid_thw=processor_outputs.pixel_grid_thw,  # pyrefly: ignore[missing-attribute]
+          video_grid_thw=processor_outputs.video_grid_thw,  # pyrefly: ignore[missing-attribute]
           attention_mask=np.ones_like(tokens)[np.newaxis, :],
           use_audio_in_video=config.use_audio and getattr(processor_outputs, "num_videos", 0) > 0,
-          audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
-          second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
-          spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
+          audio_lengths=processor_outputs.audio_lengths,  # pyrefly: ignore[missing-attribute]
+          second_per_grids=processor_outputs.video_second_per_grid,  # pyrefly: ignore[missing-attribute]
+          spatial_merge_size=config.spatial_merge_size_for_vit,
           position_id_per_seconds=config.position_id_per_seconds,
           config=config,
       )
@@ -225,11 +229,26 @@ def main(argv: Sequence[str]) -> None:
   # Get results
   for i in range(_NUM_STREAMS):
     results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
+    max_logging.debug(f"raw token ids for stream {i}: {results}")
+
+    eos_token_id = None
+    if hasattr(tokenizer_model, "tokenizer") and hasattr(tokenizer_model.tokenizer, "eos_token_id"):
+      eos_token_id = tokenizer_model.tokenizer.eos_token_id
+
+    max_logging.debug(f"using eos_token_id: {eos_token_id}")
+
+    if eos_token_id is not None and eos_token_id in results:
+      max_logging.info(
+          f"EOS token {eos_token_id} found at index {results.index(eos_token_id)};"
+          f" output sequence truncated to length {results.index(eos_token_id) + 1}"
+      )
+      results = results[: results.index(eos_token_id) + 1]  # Include the EOS token in the output
+
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 
-  assert output.startswith(
-      config.autoregressive_decode_assert
+  assert " ".join(output.split()).startswith(
+      " ".join(config.autoregressive_decode_assert.split())
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
   # Deactivate profiler

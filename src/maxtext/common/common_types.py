@@ -14,6 +14,7 @@
 
 """Common types."""
 import enum
+import fnmatch
 from typing import Any, Sequence
 
 import numpy as np
@@ -27,6 +28,42 @@ Array = jnp.ndarray
 PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
+
+
+def is_fp8_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is FP8."""
+  return dtype in (
+      "float8_e4m3fn",
+      "float8_e5m2",
+      jnp.float8_e4m3fn,
+      jnp.float8_e5m2,
+  )
+
+
+def is_module_unquantized(config: Config, module_name: str) -> bool:
+  """Checks whether module_name matches any pattern in config.unquantized_modules."""
+  unquantized = getattr(config, "unquantized_modules", None) or ()
+  if isinstance(unquantized, str):
+    unquantized = (unquantized,)
+  leaf_name = module_name.rsplit(".", 1)[-1]
+  return any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized)
+
+
+def get_weight_dtype(config: Config, module_name: str) -> DType:
+  """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
+  if not is_fp8_dtype(config.weight_dtype):
+    return config.weight_dtype
+  if is_module_unquantized(config, module_name):
+    return config.dtype
+  return config.weight_dtype
+
+
+def get_quant(config: Config, module_name: str, quant: Any) -> Any:
+  """Resolves quantization object for a submodule, returning None if in unquantized_modules."""
+  if is_module_unquantized(config, module_name):
+    return None
+  return quant
+
 
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
@@ -118,6 +155,9 @@ class DecoderBlockType(enum.Enum):
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
   ENVY = "envy"
+  WEAVER = "weaver"
+  MING = "ming"
+  HY4 = "hy4"
 
 
 class VisionEncoderBlockType(enum.Enum):
@@ -164,6 +204,8 @@ class HyperConnectionType(enum.Enum):
 
 
 class CustomRule(enum.Enum):
+  """Custom mesh and logical axis rule sets, each backed by a yml in configs/custom_mesh_and_rule."""
+
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
@@ -172,3 +214,7 @@ class CustomRule(enum.Enum):
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
+  EXPERT_ON_FSDP_EP = "expert-on-fsdp-ep"
+  FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
+  FSDP_AS_DP_FOR_ATTN_RF = "fsdp-as-dp-for-attn-rf"  # fsdp-as-dp-for-attn with the router weight sharded on fsdp
+  TP_AS_EP = "tp-as-ep"  # Tensor axis joins expert parallelism in the routed MoE

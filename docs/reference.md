@@ -64,5 +64,6 @@ reference/performance_metrics
 reference/models
 reference/architecture
 reference/core_concepts
+reference/mtp_cp_packing
 reference/api.rst
 ```

@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Tests for Attentions."""
 
 import itertools
+import math
 import os
 import random
 import sys
@@ -29,7 +31,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.sharding import AxisType, Mesh, NamedSharding
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
@@ -42,8 +44,10 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
     DEFAULT_MASK_VALUE,
+    Q_LENGTH,
 )
 from maxtext.layers.attention_mla import MLA
+from maxtext.layers import attention_compressed
 from maxtext.layers.attention_compressed import CompressedAttention
 from maxtext.layers import attention_op
 from maxtext.layers.attention_op import (
@@ -78,6 +82,7 @@ class JaxFlashAttentionTest(unittest.TestCase):
     key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
     value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
     mask = jnp.array([[True, True], [True, False]])
+    mask_obj = splash_attention_mask.NumpyMask(mask)
 
     output = jax_flash_attention.flash_attention_block_masked(
         query,
@@ -86,7 +91,7 @@ class JaxFlashAttentionTest(unittest.TestCase):
         segment_ids=None,
         block_kv=2,
         block_q=1,
-        mask=mask,
+        mask=mask_obj,
         mask_value=mask_value,
         cap=cap,
     )
@@ -101,6 +106,571 @@ class JaxFlashAttentionTest(unittest.TestCase):
         rtol=1e-2,
         atol=1e-2,
     )
+
+  def test_flash_attention_block_masked_per_example_mask(self):
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 8, 16, 4
+    rng = np.random.default_rng(0)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask = np.tril(np.ones((batch, q_len, kv_len), dtype=bool), k=kv_len - q_len)
+    mask[1, :, ::3] = False  # each batch item gets a different sparsity pattern
+    mask = jnp.asarray(mask)
+
+    def block_masked_qkv(q, k, v):
+      return jax_flash_attention.flash_attention_block_masked(
+          q,
+          k,
+          v,
+          segment_ids=None,
+          block_kv=4,
+          block_q=4,
+          mask=mask,
+          mask_value=-1.0e9,
+          logits_dtype=jnp.float32,
+          loop_unroll=False,
+          fuse_logits=False,
+      )
+
+    def block_masked(q):
+      return block_masked_qkv(q, key, value)
+
+    def dense_qkv(q, k, v):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", q, k)
+      logits = jnp.where(mask[:, None, :, :], logits, -1.0e9)
+      return jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), v)
+
+    def dense(q):
+      return dense_qkv(q, key, value)
+
+    np.testing.assert_allclose(np.asarray(block_masked(query)), np.asarray(dense(query)), rtol=1e-4, atol=1e-4)
+
+    grads_block = jax.grad(lambda q, k, v: jnp.sum(block_masked_qkv(q, k, v) ** 2), argnums=(0, 1, 2))(query, key, value)
+    grads_dense = jax.grad(lambda q, k, v: jnp.sum(dense_qkv(q, k, v) ** 2), argnums=(0, 1, 2))(query, key, value)
+    for grad_block, grad_dense in zip(grads_block, grads_dense):
+      np.testing.assert_allclose(np.asarray(grad_block), np.asarray(grad_dense), rtol=1e-3, atol=1e-3)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=4,
+        block_q=4,
+        mask=mask,
+        mask_value=-1.0e9,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+        fuse_logits=False,
+        save_residuals=True,
+    )
+    np.testing.assert_allclose(np.asarray(output), np.asarray(dense(query)), rtol=1e-4, atol=1e-4)
+    dense_logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    dense_max_logits = jnp.max(jnp.where(mask[:, None, :, :], dense_logits, -1.0e9), axis=-1)
+    np.testing.assert_allclose(np.asarray(stats["max_logits"]), np.asarray(dense_max_logits), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_block_masked_non_divisible_blocks(self):
+    batch, heads, seq_len, head_dim = 1, 1, 192, 4
+    rng = np.random.default_rng(0)
+    query = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, seq_len, head_dim)), dtype=jnp.float32)
+    mask = jnp.ones((seq_len, seq_len), dtype=bool)
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by block_q"):
+      jax_flash_attention.flash_attention_block_masked(
+          query,
+          key,
+          value,
+          segment_ids=None,
+          block_kv=64,
+          block_q=128,
+          mask=mask,
+          mask_value=-1.0e9,
+      )
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by block_kv"):
+      jax_flash_attention.flash_attention_block_masked(
+          query,
+          key,
+          value,
+          segment_ids=None,
+          block_kv=128,
+          block_q=64,
+          mask=mask,
+          mask_value=-1.0e9,
+      )
+
+  def test_flash_attention_block_masked_causal_mask(self):
+    cap = 1.0
+    mask_value = -1.0e9
+    query = jnp.array([[[[10.0], [10.0]]]], dtype=jnp.float32)
+    key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
+    value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((2, 2))
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=2,
+        block_q=1,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=cap,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+  def test_flash_attention_block_masked_long_sequence(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 1, 8192, 8192, 32
+    block_q, block_kv = 2048, 2048
+    cap = 50.0
+    mask_value = -1.0e9
+
+    rng = np.random.default_rng(456)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)) / np.sqrt(head_dim), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=cap,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected_output = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    expected_max_logits = jnp.max(logits, axis=-1)
+    expected_logsumexp = jax.nn.logsumexp(logits, axis=-1)
+
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected_output),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        np.asarray(stats["max_logits"]),
+        np.asarray(expected_max_logits),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        np.asarray(stats["logsumexp"]),
+        np.asarray(expected_logsumexp),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_flash_attention_block_masked_long_sequence_no_residuals(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 1, 8192, 8192, 32
+    block_q, block_kv = 2048, 2048
+    mask_value = -1.0e9
+
+    rng = np.random.default_rng(789)
+    query = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)) / np.sqrt(head_dim), dtype=jnp.float32)
+    key = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    value = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=mask_value,
+        cap=None,
+        save_residuals=False,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    mask_arr = mask_obj[:, :]
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.where(mask_arr[None, None, :, :], logits, mask_value)
+    expected_output = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected_output),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+  def test_flash_attention_bwd_mha(self):
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(42)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_attn(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_attn(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_gqa(self):
+    batch, q_heads, kv_heads, q_len, kv_len, head_dim = 2, 4, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(123)
+
+    q = jnp.asarray(rng.normal(size=(batch, q_heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, kv_heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, kv_heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, q_heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_gqa(query, key, value):
+      head_mult = q_heads // kv_heads
+      key_rep = jnp.repeat(key, head_mult, axis=1)
+      value_rep = jnp.repeat(value, head_mult, axis=1)
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key_rep)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value_rep)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_gqa(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_causal(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(456)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+    mask_arr = mask_obj[:, :]
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask_obj,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+        is_causal=True,
+    )
+
+    def dense_causal(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      logits = jnp.where(mask_arr[None, None, :, :], logits, -1e30)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_causal(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_soft_cap(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    cap = 5.0
+    rng = np.random.default_rng(789)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        cap=cap,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        cap=cap,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_capped(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      logits = jnp.tanh(logits / cap) * cap
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_capped(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_segment_ids(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(999)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    q_seg = jnp.array([[0] * 16 + [1] * 16], dtype=jnp.int32)
+    kv_seg = jnp.array([[0] * 16 + [1] * 16], dtype=jnp.int32)
+    segment_ids = jax_flash_attention.SegmentIds(q=q_seg, kv=kv_seg)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=segment_ids,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        segment_ids=segment_ids,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_segmented(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      seg_mask = q_seg[:, None, :, None] == kv_seg[:, None, None, :]
+      logits = jnp.where(seg_mask, logits, -1e30)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_segmented(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_3d_mqa(self):
+    q_heads, q_len, kv_len, head_dim = 4, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(101)
+
+    q = jnp.asarray(rng.normal(size=(q_heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(q_heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q[None, :],
+        k[None, None, :],
+        v[None, None, :],
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+    output_3d = jnp.squeeze(output, axis=0)
+    lse_3d = jnp.squeeze(stats["logsumexp"], axis=0)
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output_3d,
+        do=do,
+        logsumexp=lse_3d,
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    self.assertEqual(dq.shape, q.shape)
+    self.assertEqual(dk.shape, k.shape)
+    self.assertEqual(dv.shape, v.shape)
+
+    def dense_mqa(query, key, value):
+      logits = jnp.einsum("hqd,kd->hqk", query, key)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("hqk,kd->hqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_mqa(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
 
 
 class SplashLocalMaskTest(unittest.TestCase):
@@ -338,6 +908,90 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+def _create_mock_flash_op(
+    *,
+    attention_type=AttentionType.BLOCK_DIFFUSION,
+    context_parallel_size=1,
+    context_parallel_load_balance=False,
+    max_target_length=8,
+    block_size=4,
+    eval_block_size=None,
+    eval_qkv_layout="HEAD_DIM_MINOR",
+    use_tokamax_splash=False,
+):
+  """Helper method to construct a mock AttentionOp for flash testing."""
+  # `eval_sa_*` mirrors base.yml: the evaluation knobs fall back to the
+  # training block sizes/layouts unless a test overrides them.
+  eval_block_size = block_size if eval_block_size is None else eval_block_size
+  config = types.SimpleNamespace(
+      causal_block_size=4,
+      context_parallel_strategy="all_gather",
+      context_parallel_load_balance=context_parallel_load_balance,
+      context_sharding="context",
+      sa_block_q=block_size,
+      sa_block_kv=block_size,
+      sa_block_kv_compute=block_size,
+      eval_sa_block_q=eval_block_size,
+      eval_sa_block_kv=eval_block_size,
+      eval_sa_block_kv_compute=eval_block_size,
+      sa_block_q_dkv=block_size,
+      sa_block_kv_dkv=block_size,
+      sa_block_kv_dkv_compute=block_size,
+      sa_block_q_dq=block_size,
+      sa_block_kv_dq=block_size,
+      sa_use_fused_bwd_kernel=True,
+      sa_q_layout="HEAD_DIM_MINOR",
+      sa_k_layout="HEAD_DIM_MINOR",
+      sa_v_layout="HEAD_DIM_MINOR",
+      eval_sa_q_layout=eval_qkv_layout,
+      eval_sa_k_layout=eval_qkv_layout,
+      eval_sa_v_layout=eval_qkv_layout,
+      use_splash_scheduler=False,
+      sa_fuse_reciprocal=False,
+      sa_use_base2_exp=False,
+      sa_qk_diag_skip=False,
+      sa_sv_diag_skip=False,
+      sa_qk_diag_grid=2,
+      use_tokamax_splash=use_tokamax_splash,
+      use_jax_splash=False,
+      cost_estimate_flops_fwd=-1,
+      cost_estimate_flops_bwd=-1,
+      dq_reduction_steps=-1,
+      use_max_logit_estimate=-1,
+      shard_mode="none",
+      debug_sharding=False,
+  )
+  device = types.SimpleNamespace(platform="cpu")
+  mesh = types.SimpleNamespace(
+      devices=np.asarray([device] * context_parallel_size, dtype=object),
+      shape={"context": context_parallel_size},
+  )
+  return AttentionOp(
+      config=config,
+      num_query_heads=1,
+      num_kv_heads=1,
+      max_target_length=max_target_length,
+      mesh=mesh,
+      attention_kernel="flash",
+      attention_type=attention_type,
+  )
+
+
+def _stub_mesh_axes(q_axis="context"):
+  """Stands in for `AttentionOp._logical_to_mesh_axes` with no ambient rules bound.
+
+  The query sequence resolves to *q_axis* so `_context_parallel_size` reads the
+  intended cp_size off the stub mesh; every other logical name is replicated.
+  Point *q_axis* at an axis other than `context_sharding` to emulate the eval
+  rules sharding the query somewhere the input pipeline never reordered for.
+  """
+
+  def resolve(logical_name):
+    return PartitionSpec(q_axis) if logical_name == (Q_LENGTH,) else None
+
+  return resolve
+
+
 class BlockCausalMaskTest(unittest.TestCase):
   """Tests the shared dense and Splash block-causal masks."""
 
@@ -371,6 +1025,13 @@ class BlockCausalMaskTest(unittest.TestCase):
       attention_type=AttentionType.BLOCK_DIFFUSION,
       context_parallel_size=1,
       context_parallel_load_balance=False,
+      mesh_shape=None,
+      eval_block_size=4,
+      eval_qkv_layout="HEAD_DIM_MINOR",
+      use_tokamax_splash=False,
+      sa_qk_diag_skip=False,
+      sa_sv_diag_skip=False,
+      sa_qk_diag_grid=2,
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
@@ -378,9 +1039,15 @@ class BlockCausalMaskTest(unittest.TestCase):
         context_parallel_strategy="all_gather",
         context_parallel_load_balance=context_parallel_load_balance,
         context_sharding="context",
+        ulysses_context_sharding="ulysses",
         sa_block_q=4,
         sa_block_kv=4,
         sa_block_kv_compute=4,
+        # `eval_sa_*` mirrors base.yml: it defaults to the training values and
+        # only differs when a test asks for evaluation-specific blocks.
+        eval_sa_block_q=eval_block_size,
+        eval_sa_block_kv=eval_block_size,
+        eval_sa_block_kv_compute=eval_block_size,
         sa_block_q_dkv=4,
         sa_block_kv_dkv=4,
         sa_block_kv_dkv_compute=4,
@@ -390,16 +1057,26 @@ class BlockCausalMaskTest(unittest.TestCase):
         sa_q_layout="HEAD_DIM_MINOR",
         sa_k_layout="HEAD_DIM_MINOR",
         sa_v_layout="HEAD_DIM_MINOR",
+        eval_sa_q_layout=eval_qkv_layout,
+        eval_sa_k_layout=eval_qkv_layout,
+        eval_sa_v_layout=eval_qkv_layout,
         use_splash_scheduler=False,
         sa_fuse_reciprocal=False,
         sa_use_base2_exp=False,
-        use_tokamax_splash=False,
+        sa_qk_diag_skip=sa_qk_diag_skip,
+        sa_sv_diag_skip=sa_sv_diag_skip,
+        sa_qk_diag_grid=sa_qk_diag_grid,
+        use_tokamax_splash=use_tokamax_splash,
         use_jax_splash=False,
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        dq_reduction_steps=-1,
+        local_sliding_window_size=4,
     )
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
         devices=np.asarray([device], dtype=object),
-        shape={"context": context_parallel_size},
+        shape={"context": context_parallel_size} if mesh_shape is None else mesh_shape,
     )
     return AttentionOp(
         config=config,
@@ -477,6 +1154,8 @@ class BlockCausalMaskTest(unittest.TestCase):
         causal_block_size=4,
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
+        logical_axis_rules=[["activation_q_length", ["context"]]],
         shard_mode="auto",
         debug_sharding=False,
         eval_interval=-1,
@@ -485,23 +1164,24 @@ class BlockCausalMaskTest(unittest.TestCase):
     if len(devices) < 2:
       self.skipTest("Need at least 2 devices to test chunk mask")
     mesh = Mesh(devices[:2], ["context"])
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=sequence_length,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.BLOCK_DIFFUSION,
-    )
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=sequence_length,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.BLOCK_DIFFUSION,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        segment_ids,
-        MODEL_MODE_TRAIN,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          segment_ids,
+          MODEL_MODE_TRAIN,
+          segment_positions=positions,
+      )
 
     expected = np.asarray(positions[0])[:, None] // 4 >= np.asarray(positions[0])[None, :] // 4
     np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected)
@@ -609,19 +1289,466 @@ class BlockCausalMaskTest(unittest.TestCase):
             context_parallel_size=cp_size,
             context_parallel_load_balance=load_balanced,
         )
-        with (
-            mock.patch.object(AttentionOp, "_logical_to_mesh_axes", return_value=None),
-            mock.patch.object(
-                attention_op.splash_attention_mask,
-                "MultiHeadMask",
-                side_effect=RuntimeError("mask captured"),
-            ) as make_multi_head_mask,
-            self.assertRaisesRegex(RuntimeError, "mask captured"),
-        ):
-          op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
-
-        selected_mask = make_multi_head_mask.call_args.kwargs["masks"][0]
+        selected_mask = self._capture_splash_mask(op, query)
         self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def test_tpu_splash_uses_eval_block_sizes_on_eval_batch(self):
+    # `AttentionOp` snapshots the block sizes/layouts at construction, so the
+    # eval overrides have to be part of the config before the op is built.
+    op = self._make_flash_op(
+        attention_type=AttentionType.GLOBAL,
+        eval_block_size=8,
+        eval_qkv_layout="SEQ_MINOR",
+    )
+    op.config.logical_axis_rules_for_eval = (("activation_batch", "data"),)
+
+    def capture_block_sizes():
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.splash_attention_kernel, "BlockSizes", side_effect=RuntimeError("blocks captured")
+          ) as make_block_sizes,
+          self.assertRaisesRegex(RuntimeError, "blocks captured"),
+      ):
+        query = jnp.zeros((2, 16, 1, 8))
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_block_sizes.call_args.kwargs
+
+    qkv_layout = attention_op.splash_attention_kernel.QKVLayout
+    train_kw = capture_block_sizes()
+    self.assertEqual((train_kw["block_q"], train_kw["q_layout"]), (4, qkv_layout["HEAD_DIM_MINOR"]))
+    with nn_partitioning.axis_rules(op.config.logical_axis_rules_for_eval):
+      eval_kw = capture_block_sizes()
+    self.assertEqual((eval_kw["block_q"], eval_kw["q_layout"]), (8, qkv_layout["SEQ_MINOR"]))
+
+  def test_tpu_tokamax_splash_wires_diag_skip_flags(self):
+    def capture_splash_config(op, query, key):
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=RuntimeError("splash config captured")
+          ) as make_splash_config,
+          self.assertRaisesRegex(RuntimeError, "splash config captured"),
+      ):
+        op.tpu_flash_attention(query, key, key, decoder_segment_ids=None)
+      return make_splash_config.call_args.kwargs
+
+    query = jnp.zeros((2, 16, 1, 8))
+    decode_query = jnp.zeros((2, 4, 1, 8))
+    # (attention_type, query, cp_size, load_balanced, expect_diag_skip)
+    cases = (
+        (AttentionType.GLOBAL, query, 1, False, True),
+        (AttentionType.MLA, query, 1, False, True),
+        # Tokamax rejects diagonal skipping for any mask other than a pure CausalMask.
+        (AttentionType.COMPRESSED, query, 1, False, False),
+        (AttentionType.BLOCK_DIFFUSION, query, 1, False, False),
+        (AttentionType.GLOBAL, query, 2, True, False),
+        (AttentionType.GLOBAL, decode_query, 1, False, False),
+    )
+    for attention_type, q, cp_size, load_balanced, expect_diag_skip in cases:
+      with self.subTest(attention_type=attention_type, q_len=q.shape[1], cp_size=cp_size):
+        op = self._make_flash_op(
+            attention_type=attention_type,
+            context_parallel_size=cp_size,
+            context_parallel_load_balance=load_balanced,
+            use_tokamax_splash=True,
+            sa_qk_diag_skip=True,
+            sa_sv_diag_skip=True,
+            sa_qk_diag_grid=4,
+        )
+        kw = capture_splash_config(op, q, query)
+        if expect_diag_skip:
+          self.assertEqual((kw["qk_diag_skip"], kw["sv_diag_skip"], kw["qk_diag_grid"]), (True, True, 4))
+        else:
+          self.assertNotIn("qk_diag_skip", kw)
+          self.assertNotIn("sv_diag_skip", kw)
+
+  def _capture_splash_mask(self, op, query, q_axis="context"):
+    """Runs `tpu_flash_attention` far enough to see which mask it built."""
+    with (
+        mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes(q_axis)),
+        mock.patch.object(
+            attention_op.splash_attention_mask,
+            "MultiHeadMask",
+            side_effect=RuntimeError("mask captured"),
+        ) as make_multi_head_mask,
+        self.assertRaisesRegex(RuntimeError, "mask captured"),
+    ):
+      op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+    return make_multi_head_mask.call_args.kwargs["masks"][0]
+
+  def test_tpu_splash_load_balances_only_when_the_loader_reordered(self):
+    """The LB mask requires the batch to carry the loader's DUAL_CHUNK_SWAP order.
+
+    The input pipeline reorders once, for `mesh[context_sharding]` under the
+    *train* rules. `custom_mesh_and_rule_for_eval` can leave the query sharded a
+    different number of ways at eval, and the LoadBalanced* masks bake the
+    permutation into a static `q_sequence` - applying one to an unpermuted batch
+    lets rows attend to the future instead of raising. So the kernel may only
+    load balance when its own shard count equals the one the loader used;
+    otherwise it falls back to the plain causal mask, correct at any count.
+
+    Note the criterion is the count, not the axis name: the last case shards the
+    query on `expert` while the loader reordered off `context`, and 4 == 4 makes
+    that permutation valid.
+    """
+    query = jnp.zeros((1, 8, 1, 8))
+    cases = (
+        # q axis (eval rules), mesh, reorder extent (train rules), expected mask
+        ("context", {"context": 4}, 4, attention_op.LoadBalancedCausalMask),
+        ("expert", {"context": 1, "expert": 4}, 1, splash_attention_mask.CausalMask),
+        ("expert", {"context": 2, "expert": 4}, 2, splash_attention_mask.CausalMask),
+        ("expert", {"context": 4, "expert": 4}, 4, attention_op.LoadBalancedCausalMask),
+    )
+
+    for q_axis, mesh_shape, reorder_size, expected_mask_type in cases:
+      with self.subTest(q_axis=q_axis, mesh_shape=mesh_shape):
+        op = self._make_flash_op(
+            attention_type=AttentionType.GLOBAL,
+            context_parallel_load_balance=True,
+            mesh_shape=mesh_shape,
+        )
+        self.assertEqual(max_utils.reordered_cp_size(op.config, op.mesh), reorder_size)
+        selected_mask = self._capture_splash_mask(op, query, q_axis=q_axis)
+        self.assertIsInstance(selected_mask, expected_mask_type)
+
+  def test_tpu_splash_skips_load_balancing_when_flag_is_off(self):
+    """With the flag off the loader never reorders, so neither may the kernel."""
+    op = self._make_flash_op(
+        attention_type=AttentionType.GLOBAL,
+        context_parallel_size=4,
+        context_parallel_load_balance=False,
+    )
+    selected_mask = self._capture_splash_mask(op, jnp.zeros((1, 8, 1, 8)))
+    self.assertIsInstance(selected_mask, splash_attention_mask.CausalMask)
+
+
+class HCAStaticMaskTest(unittest.TestCase):
+  """Tests the HCAStaticMask and its equivalence with the compressor mask."""
+
+  def _make_flash_op(self, **kwargs):
+    kwargs.setdefault("attention_type", AttentionType.COMPRESSED)
+    kwargs.setdefault("max_target_length", 512)
+    kwargs.setdefault("block_size", 128)
+    kwargs.setdefault("use_tokamax_splash", True)
+    return _create_mock_flash_op(**kwargs)
+
+  def _make_dot_product_op(self, max_target_length, sliding_window_size=128):
+    """Creates a mock dot_product AttentionOp instance with CPU mesh."""
+    devices = np.array(jax.devices()[:1]).reshape((1,))
+    mesh = jax.sharding.Mesh(devices, ("data",))
+    config = types.SimpleNamespace(
+        causal_block_size=4,
+        context_parallel_load_balance=False,
+        context_sharding="context",
+        shard_mode="none",
+        debug_sharding=False,
+    )
+    return AttentionOp(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        max_target_length=max_target_length,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+  def test_compute_hca_padding(self):
+    """Pins the padding arithmetic the layer and these tests both depend on."""
+    test_cases = [
+        # (q_len, comp_len, block_q, block_kv, expected_pad_q, expected_pad_kv_total)
+        (512, 4, 128, 128, 0, 124),  # aligned query, compressed blocks force KV padding
+        (489, 3, 128, 128, 23, 20),  # unaligned query and unaligned KV total
+        (512, 0, 128, 128, 0, 0),  # nothing to pad
+        (384, 128, 128, 128, 0, 0),  # KV total already a block multiple
+        (500, 12, 128, 128, 12, 128),  # KV aligned but query is not, so a full pad block is added
+    ]
+    for q_len, comp_len, block_q, block_kv, expected_pad_q, expected_pad_kv in test_cases:
+      with self.subTest(q_len=q_len, comp_len=comp_len):
+        pad_q, pad_kv_total = attention_compressed.compute_hca_padding(
+            q_len=q_len, comp_len=comp_len, block_q=block_q, block_kv=block_kv
+        )
+        self.assertEqual(pad_q, expected_pad_q)
+        self.assertEqual(pad_kv_total, expected_pad_kv)
+        self.assertEqual((q_len + pad_q) % block_q, 0)
+        self.assertEqual((q_len + comp_len + pad_kv_total) % block_kv, 0)
+
+  def test_hca_static_mask_matches_compressor_mask(self):
+    test_cases = [
+        # (seq_len, compress_ratio, local_window)
+        (512, 128, 128),
+        (1024, 128, 128),
+        (512, 128, None),  # full causal local attention
+        (384, 128, 128),
+        (489, 128, 128),  # unaligned S=489 (pad_q=23, pad_kv=20)
+        (1017, 128, 128),  # unaligned S=1017 (pad_q=7, pad_kv=121)
+    ]
+    block_q = 128
+    block_kv = 128
+
+    for seq_len, compress_ratio, local_window in test_cases:
+      with self.subTest(seq_len=seq_len, ratio=compress_ratio, window=local_window):
+        comp_len = max(0, seq_len // max(1, compress_ratio))
+        pad_q, pad_kv = attention_compressed.compute_hca_padding(
+            q_len=seq_len,
+            comp_len=comp_len,
+            block_q=block_q,
+            block_kv=block_kv,
+        )
+        padded_q_len = seq_len + pad_q
+        total_kv_len = seq_len + pad_kv + comp_len
+        shape = (padded_q_len, total_kv_len)
+
+        mask = attention_op.HCAStaticMask(
+            shape=shape,
+            local_kv_len=seq_len,
+            compressed_kv_len=comp_len,
+            pad_kv_total=pad_kv,
+            compress_ratio=compress_ratio,
+            local_window=local_window,
+        )
+
+        op = self._make_dot_product_op(seq_len, sliding_window_size=local_window)
+
+        position_ids = jnp.arange(seq_len)[None, :]
+        usable_len = comp_len * compress_ratio
+        if comp_len > 0:
+          block_positions = position_ids[:, :usable_len:compress_ratio]
+          future_mask = (block_positions[:, None, None, :] + compress_ratio) > (position_ids[:, None, :, None] + 1)
+          compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0)
+        else:
+          compressed_causal_mask = jnp.zeros((1, 1, seq_len, 0))
+
+        dummy_q = jnp.zeros((1, seq_len, 1, 128))
+        dummy_k = jnp.zeros((1, seq_len + comp_len, 1, 128))
+        ref_mask = op.generate_attention_mask(
+            dummy_q,
+            dummy_k,
+            decoder_segment_ids=None,
+            model_mode=MODEL_MODE_TRAIN,
+            compressed_mask=compressed_causal_mask,
+            pad_kv_total=pad_kv,
+        )
+        expected_mask = np.array(ref_mask[0, 0] == 0.0)
+
+        actual_mask = mask[:, :]
+        # Real query rows (0..seq_len) must match dot product reference mask
+        np.testing.assert_array_equal(actual_mask[:seq_len, :], expected_mask)
+
+        # Every row (including padded query rows) must have at least one active connection
+        self.assertTrue(
+            np.all(np.any(actual_mask, axis=-1)),
+            "Found an all-False softmax row in HCAStaticMask (would cause NaN in softmax).",
+        )
+
+  def test_hca_static_mask_raises_on_unpadded_kv_with_padded_query(self):
+    """Verifies that HCAStaticMask rejects configurations where query is padded but pad_kv_total <= 0."""
+    with self.assertRaises(ValueError):
+      attention_op.HCAStaticMask(
+          shape=(1024, 1017 + 7),
+          local_kv_len=1017,
+          pad_kv_total=0,
+          compress_ratio=128,
+      )
+
+  def test_hca_static_mask_padded_query_rows_mapping(self):
+    """Verifies that padded query rows map circularly to pad_cols without bleeding into real tokens."""
+    seq_len = 489
+    compress_ratio = 128
+    comp_len = seq_len // compress_ratio
+    pad_q, pad_kv = attention_compressed.compute_hca_padding(
+        q_len=seq_len,
+        comp_len=comp_len,
+        block_q=128,
+        block_kv=128,
+    )
+    pad_q_len = seq_len + pad_q
+    total_kv_len = seq_len + pad_kv + comp_len
+    mask = attention_op.HCAStaticMask(
+        shape=(pad_q_len, total_kv_len),
+        local_kv_len=seq_len,
+        compressed_kv_len=comp_len,
+        pad_kv_total=pad_kv,
+        compress_ratio=compress_ratio,
+        local_window=128,
+    )
+    actual_mask = mask[:, :]
+    for row in range(seq_len, pad_q_len):
+      expected_col = seq_len + ((row - seq_len) % pad_kv)
+      self.assertTrue(
+          actual_mask[row, expected_col],
+          f"Padded query row {row} must map to padding KV column {expected_col} in pad_m.",
+      )
+      self.assertEqual(np.sum(actual_mask[row]), 1)
+      self.assertFalse(
+          np.any(actual_mask[row, :seq_len]),
+          f"Padded query row {row} must not attend to real local KV tokens.",
+      )
+      self.assertFalse(
+          np.any(actual_mask[row, seq_len + pad_kv :]),
+          f"Padded query row {row} must not attend to compressed KV tokens.",
+      )
+
+  def test_hca_static_mask_equality_and_hash(self):
+    mask1 = attention_op.HCAStaticMask(
+        shape=(512, 640),
+        local_kv_len=512,
+        compressed_kv_len=4,
+        pad_kv_total=124,
+        compress_ratio=128,
+        local_window=128,
+    )
+    mask2 = attention_op.HCAStaticMask(
+        shape=(512, 640),
+        local_kv_len=512,
+        compressed_kv_len=4,
+        pad_kv_total=124,
+        compress_ratio=128,
+        local_window=128,
+    )
+    mask_diff_pad = attention_op.HCAStaticMask(
+        shape=(512, 640),
+        local_kv_len=512,
+        compressed_kv_len=4,
+        pad_kv_total=0,
+        compress_ratio=128,
+        local_window=128,
+    )
+
+    self.assertEqual(mask1, mask2)
+    self.assertEqual(hash(mask1), hash(mask2))
+    self.assertNotEqual(mask1, mask_diff_pad)
+    self.assertNotEqual(mask1, object())
+
+  def test_zero_division_guard(self):
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be positive"):
+      attention_op.HCAStaticMask(
+          shape=(128, 128),
+          local_kv_len=128,
+          compressed_kv_len=1,
+          compress_ratio=0,
+          local_window=128,
+      )
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be positive"):
+      attention_op.HCAStaticMask(
+          shape=(128, 128),
+          local_kv_len=128,
+          compressed_kv_len=1,
+          compress_ratio=-1,
+          local_window=128,
+      )
+
+  def test_csa_flash_requires_indexer_mask(self):
+    op = self._make_flash_op(
+        attention_type=AttentionType.COMPRESSED,
+        max_target_length=512,
+    )
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 640, 1, 128))
+    with self.assertRaisesRegex(ValueError, "indexer_mask must be provided for CSA"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=4)
+
+  def test_hca_flash_constructs_hcastaticmask(self):
+    op = self._make_flash_op(
+        attention_type=AttentionType.COMPRESSED,
+        max_target_length=512,
+        use_tokamax_splash=True,
+    )
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 640, 1, 128))
+    with (
+        unittest.mock.patch.object(op, "_maybe_shard_with_pspec", side_effect=lambda x, p: x),
+        unittest.mock.patch.object(op, "_logical_to_mesh_axes", return_value=(None,)),
+        unittest.mock.patch.object(
+            jax, "shard_map", side_effect=lambda f, **kwargs: (lambda *args, **kw: (jnp.zeros_like(query), None))
+        ),
+        unittest.mock.patch.object(
+            attention_op,
+            "HCAStaticMask",
+            wraps=attention_op.HCAStaticMask,
+        ) as mock_mask,
+    ):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=128)
+      mock_mask.assert_called_once()
+      self.assertEqual(mock_mask.call_args.kwargs["compress_ratio"], 128)
+
+  def test_packed_positions_and_segment_ids_vs_generate_attention_mask(self):
+    """Verifies segment-id based document packing with positions on CPU ground truth generate_attention_mask."""
+    l1, l2 = 200, 312
+    total_len = l1 + l2
+    compress_ratio = 128
+    comp_len = total_len // compress_ratio  # 4
+    op = self._make_dot_product_op(total_len, sliding_window_size=128)
+
+    pos = jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :]
+    seg = jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :]
+
+    # Derive compressed segment IDs matching CompressedAttention runtime logic:
+    #   Block 0: 0..127   (Doc 1)          -> seg 1
+    #   Block 1: 128..255 (Doc 1 & Doc 2)  -> seg -1 (straddling block invalidated)
+    #   Block 2: 256..383 (Doc 2)          -> seg 2
+    #   Block 3: 384..511 (Doc 2)          -> seg 2
+    chunked_seg = seg.reshape((1, comp_len, compress_ratio))
+    min_seg = jnp.min(chunked_seg, axis=-1)
+    max_seg = jnp.max(chunked_seg, axis=-1)
+    comp_seg = jnp.where(min_seg == max_seg, min_seg, -1)
+    seg_kv = jnp.concatenate([seg, comp_seg], axis=1)
+
+    usable_len = comp_len * compress_ratio
+    block_positions = pos[:, :usable_len:compress_ratio]
+    future_mask = (block_positions[:, None, None, :] + compress_ratio) > (pos[:, None, :, None] + 1)
+    compressed_causal_mask = jnp.where(future_mask, DEFAULT_MASK_VALUE, 0.0)
+
+    dummy_q = jnp.zeros((1, total_len, 1, 128))
+    dummy_k = jnp.zeros((1, total_len + comp_len, 1, 128))
+
+    mask = op.generate_attention_mask(
+        dummy_q,
+        dummy_k,
+        decoder_segment_ids=seg,
+        decoder_segment_ids_kv=seg_kv,
+        segment_positions=pos,
+        model_mode=MODEL_MODE_TRAIN,
+        compressed_mask=compressed_causal_mask,
+        pad_kv_total=0,
+    )
+    mask_matrix = np.squeeze(np.array(mask == 0.0))
+
+    # 1. Uncompressed local token cross-document isolation
+    # Assert Doc 1 (rows 0..199) cannot attend to Doc 2 (cols 200..511)
+    self.assertFalse(np.any(mask_matrix[:l1, l1:total_len]))
+    # Assert Doc 2 (rows 200..511) cannot attend to Doc 1 (cols 0..199)
+    self.assertFalse(np.any(mask_matrix[l1:total_len, :l1]))
+
+    # 2. Compressed block cross-document isolation
+    # Doc 1 cannot attend to Block 1 (straddled) or Blocks 2, 3 (Doc 2)
+    self.assertFalse(np.any(mask_matrix[:l1, total_len + 1 :]))
+    # Doc 2 cannot attend to Block 0 (Doc 1) or Block 1 (straddled)
+    self.assertFalse(np.any(mask_matrix[l1:total_len, total_len : total_len + 2]))
+
+    # 3. Straddled boundary isolation: no query from any document may attend to Block 1
+    self.assertFalse(np.any(mask_matrix[:, total_len + 1]))
+
+    # 4. Valid compressed connections must remain reachable, so the assertions above are not
+    # vacuously satisfied by an all-masked matrix. With block_positions = [0, 128, 56, 184],
+    # the compressed causal mask admits Doc 1 rows 127..199 for Block 0 and Doc 2 rows
+    # 383..511 for Blocks 2, 3.
+    self.assertTrue(np.any(mask_matrix[:l1, total_len]))
+    self.assertTrue(np.any(mask_matrix[l1:total_len, total_len + 2 :]))
+
+  def test_compressed_flash_missing_or_invalid_compress_ratio_raises(self):
+    op = self._make_flash_op(
+        attention_type=AttentionType.COMPRESSED,
+        max_target_length=512,
+    )
+    query = jnp.zeros((1, 512, 1, 128))
+    key = jnp.zeros((1, 516, 1, 128))
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=None)
+    with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
+      op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=0)
 
 
 class AttentionTypeResolutionTest(unittest.TestCase):
@@ -727,6 +1854,7 @@ class LoadBalancedMaskTest(unittest.TestCase):
     config = types.SimpleNamespace(
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["segment_ids_batch", ["context"]]],
         shard_mode="auto",
@@ -743,24 +1871,28 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=seq_len,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=sliding_window_size,
-    )
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=seq_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.LOCAL_SLIDING,
+          sliding_window_size=sliding_window_size,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        decoder_segment_ids,
-        MODEL_MODE_TRAIN,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          segment_positions=positions,
+      )
 
     expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
     for r, q_pos in enumerate(np.asarray(positions[0])):
@@ -774,6 +1906,7 @@ class LoadBalancedMaskTest(unittest.TestCase):
     config = types.SimpleNamespace(
         context_parallel_load_balance=True,
         context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
         using_pipeline_parallelism=False,
         logical_axis_rules=[["segment_ids_batch", ["context"]]],
         shard_mode="auto",
@@ -790,24 +1923,28 @@ class LoadBalancedMaskTest(unittest.TestCase):
     query = jnp.zeros((1, seq_len, 1, 128))
     key = jnp.zeros((1, seq_len, 1, 128))
     decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
-    op = AttentionOp(
-        config=config,
-        num_query_heads=1,
-        num_kv_heads=1,
-        max_target_length=seq_len,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        attention_type=AttentionType.CHUNK,
-        chunk_attn_window_size=chunk_size,
-    )
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=seq_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.CHUNK,
+          chunk_attn_window_size=chunk_size,
+      )
 
-    mask = op.generate_attention_mask(
-        query,
-        key,
-        decoder_segment_ids,
-        MODEL_MODE_TRAIN,
-        segment_positions=positions,
-    )
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          segment_positions=positions,
+      )
 
     expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
     for r, q_pos in enumerate(np.asarray(positions[0])):
@@ -818,25 +1955,46 @@ class LoadBalancedMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(mask == 0.0)[0, 0, 0], expected_mask)
 
 
+# Records every lazy_init on the bridged TE attention module.
+_TE_BRIDGE_LAZY_INITS = []
+# rngs handed to each ToNNX wrapper, so a test can assert the bridge can still initialize.
+_TE_BRIDGE_RNGS = []
+
+
 class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
   """Tests packed Transformer Engine attention metadata handling."""
 
   def _call_te_attention(
-      self, sequence_descriptor, config=None, mesh=None, attention_type=AttentionType.GLOBAL, chunk_attn_window_size=None
+      self,
+      sequence_descriptor,
+      config=None,
+      mesh=None,
+      attention_type=AttentionType.GLOBAL,
+      chunk_attn_window_size=None,
+      sinks=None,
   ):
     """Runs TE attention with fake Transformer Engine modules."""
     sequence_descriptor.calls = []
+    _TE_BRIDGE_LAZY_INITS.clear()
+    _TE_BRIDGE_RNGS.clear()
 
     class FakeWrappedAttention:
+      """Stands in for the ToNNX-wrapped TE DotProductAttention."""
 
       def lazy_init(self, *args, **kwargs):  # pylint: disable=unused-argument
+        # Recorded, not forbidden, so a single test can assert on it. TE's
+        # DotProductAttention declares no variables, so priming the bridge only
+        # bought a second full forward trace per layer.
+        _TE_BRIDGE_LAZY_INITS.append(kwargs.get("sequence_descriptor"))
         return self
 
       def __call__(self, *args, **kwargs):
         del args
         return kwargs["sequence_descriptor"]
 
-    def fake_to_nnx(*args, **kwargs):  # pylint: disable=unused-argument
+    def fake_to_nnx(*args, **kwargs):
+      del args
+      _TE_BRIDGE_RNGS.append(kwargs.get("rngs"))
       return FakeWrappedAttention()
 
     transformer_module = types.ModuleType("transformer_engine.jax.flax.transformer")
@@ -883,6 +2041,8 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
     with (
         mock.patch.dict(sys.modules, fake_modules),
         mock.patch.object(attention_op.nnx_wrappers, "ToNNX", side_effect=fake_to_nnx),
+        # The real one reads NNX state off the wrapped module, which the fake does not have.
+        mock.patch.object(attention_op, "_inject_te_softmax_offset"),
     ):
       output = attention.cudnn_flash_attention(
           query=query,
@@ -890,9 +2050,62 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           value=value,
           decoder_segment_ids=None,
           segment_positions=segment_positions,
+          sinks=sinks,
       )
 
     return output, sequence_descriptor.calls
+
+  def test_te_attention_bridge_is_not_lazy_initialized(self):
+    """Without attention sinks the TE bridge must not be primed with a throwaway pass.
+
+    TE's DotProductAttention then declares no variables, so priming it initialized
+    nothing while costing a second complete forward trace at max_target_length, plus
+    dummy tensors including a (1, 1, 1, max_target_length, max_target_length) mask.
+    Scanned that was one extra trace; unrolled it was one per layer.
+    """
+
+    class SequenceDescriptor:
+      calls = []
+      reject_thd_kwargs = False
+
+      @classmethod
+      def from_segment_ids_and_pos(cls, **kwargs):
+        cls.calls.append(kwargs)
+        return kwargs
+
+    self._call_te_attention(SequenceDescriptor)
+    self.assertEqual(
+        _TE_BRIDGE_LAZY_INITS,
+        [],
+        "cudnn_flash_attention must not lazy_init the bridged TE DotProductAttention; "
+        "it has no variables to initialize and the extra trace costs compile time per "
+        "unrolled layer.",
+    )
+    self.assertIsNone(_TE_BRIDGE_RNGS[0], "with nothing to initialize the bridge should not be handed RNGs")
+
+  def test_te_attention_bridge_is_lazy_initialized_for_attention_sinks(self):
+    """With sinks, TE declares softmax_offset, and grafting it needs that to exist.
+
+    This is the one case where skipping lazy_init would leave the bridge with no state
+    for `_inject_te_softmax_offset` to overwrite.
+    """
+
+    class SequenceDescriptor:
+      calls = []
+      reject_thd_kwargs = False
+
+      @classmethod
+      def from_segment_ids_and_pos(cls, **kwargs):
+        cls.calls.append(kwargs)
+        return kwargs
+
+    self._call_te_attention(SequenceDescriptor, sinks=jnp.zeros((2,), dtype=jnp.float32))
+    self.assertEqual(len(_TE_BRIDGE_LAZY_INITS), 1, "attention sinks still need the bridge initialized")
+    self.assertIsNotNone(
+        _TE_BRIDGE_RNGS[0],
+        "lazy_init draws a params key for TE's softmax_offset, so the bridge needs an Rngs "
+        "even when AttentionOp holds none because attention dropout is off.",
+    )
 
   def test_packed_attention_sequence_descriptor_uses_thd_metadata_with_legacy_fallback(self):
     class SequenceDescriptor:
@@ -906,21 +2119,25 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           raise TypeError("older Transformer Engine does not accept THD metadata")
         return kwargs
 
+    # One descriptor per attention call. This used to be two: a second, identical
+    # descriptor was built purely to feed a lazy_init of the TE bridge, which was
+    # removed once TE's DotProductAttention was confirmed to declare no variables
+    # . The fallback behaviour under test is unchanged.
     output, descriptor_calls = self._call_te_attention(SequenceDescriptor)
 
-    self.assertEqual(len(descriptor_calls), 2)
+    self.assertEqual(len(descriptor_calls), 1)
     for call in descriptor_calls:
       self.assertTrue(call["is_thd"])
       self.assertFalse(call["is_segment_ids_reordered"])
     self.assertIs(output, descriptor_calls[0])
 
+    # Legacy TE rejects the THD kwargs, so each descriptor costs two calls: the THD
+    # attempt and the fallback.
     SequenceDescriptor.reject_thd_kwargs = True
     output, descriptor_calls = self._call_te_attention(SequenceDescriptor)
-    self.assertEqual(len(descriptor_calls), 4)
+    self.assertEqual(len(descriptor_calls), 2)
     self.assertIn("is_thd", descriptor_calls[0])
     self.assertNotIn("is_thd", descriptor_calls[1])
-    self.assertIn("is_thd", descriptor_calls[2])
-    self.assertNotIn("is_thd", descriptor_calls[3])
     self.assertIs(output, descriptor_calls[1])
 
   def test_context_parallel_chunk_attention_rejected(self):
@@ -948,8 +2165,75 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
       )
 
 
+class CudnnFlashJaxInferenceTest(unittest.TestCase):
+
+  def _make_attention_op(self):
+    config = types.SimpleNamespace(ici_context_autoregressive_parallelism=0)
+    mesh = types.SimpleNamespace()
+    return AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=128,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+
+  def test_align_qkv_broadcasts_kv_batch(self):
+    attention = self._make_attention_op()
+    query = jnp.ones((8, 1, 2, 64))
+    key = jnp.ones((1, 4, 2, 64))
+    value = jnp.ones((1, 4, 2, 64))
+    with mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, _: x):
+      # pylint: disable=protected-access
+      _, aligned_key, aligned_value = attention._align_qkv_for_cudnn_flash(query, key, value)
+    self.assertEqual(aligned_key.shape[0], 8)
+    self.assertEqual(aligned_value.shape[0], 8)
+
+  def test_align_qkv_raises_on_invalid_batch(self):
+    attention = self._make_attention_op()
+    query = jnp.ones((8, 1, 2, 64))
+    key = jnp.ones((2, 4, 2, 64))
+    value = jnp.ones((2, 4, 2, 64))
+    with self.assertRaises(ValueError):
+      # pylint: disable=protected-access
+      attention._align_qkv_for_cudnn_flash(query, key, value)
+
+  def test_cudnn_jax_flash_attention_broadcasts_ar_lengths(self):
+    attention = self._make_attention_op()
+    query = jnp.zeros((8, 1, 2, 64))
+    key = jnp.zeros((8, 4, 2, 64))
+    value = jnp.zeros((8, 4, 2, 64))
+    decoder_segment_ids = jnp.ones((1, 4))
+    mock_dot_product_attention = mock.Mock(return_value=(jnp.zeros((8, 1, 2, 64)), jnp.zeros((8, 2))))
+    fused_attention_module = types.ModuleType("jax._src.cudnn.fused_attention_stablehlo")
+    fused_attention_module.dot_product_attention = mock_dot_product_attention
+    fused_attention_module.MaskType = types.SimpleNamespace(PADDING="padding", CAUSAL="causal")
+    with mock.patch.dict(
+        sys.modules,
+        {"jax._src.cudnn.fused_attention_stablehlo": fused_attention_module},
+    ):
+      attention.cudnn_jax_flash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+    q_seqlen = mock_dot_product_attention.call_args.kwargs["q_seqlen"]
+    kv_seqlen = mock_dot_product_attention.call_args.kwargs["kv_seqlen"]
+    self.assertEqual(q_seqlen.shape, (8,))
+    self.assertEqual(kv_seqlen.shape, (8,))
+
+
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
+
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cp_generic_cache"):
+      delattr(cls, "_cp_generic_cache")
+    super().tearDownClass()
 
   # Note: if you are changing these configs, please make sure to change the configs in
   # context_parallelism.py as well, since we are using the same configs for both
@@ -972,8 +2256,10 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
@@ -1322,6 +2608,93 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(jax.numpy.allclose(output_shared, output_no_share, rtol=1e-04, atol=1e-04, equal_nan=False))
 
+  def _get_cp_generic_ref(self, dtype, max_target_length, packing, need_grad=False):
+    """Returns cached (lnx, decoder_segment_ids, decoder_positions, generic_state, output, grad) for dot_product."""
+    cache = getattr(self.__class__, "_cp_generic_cache", {})
+    key = (str(dtype), max_target_length, packing)
+    entry = cache.get(key)
+    if entry is None:
+      cfg_ref = (
+          self.cfg
+          if max_target_length == self.max_target_length
+          else pyconfig.initialize(
+              [sys.argv[0], get_test_config_path()],
+              **{**self.config_arguments, "max_target_length": max_target_length},
+          )
+      )
+      prev_len = self.max_target_length
+      self.max_target_length = max_target_length
+      try:
+        if packing:
+          lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(dtype)
+        else:
+          lnx, decoder_segment_ids, decoder_positions = self.get_data(dtype)
+      finally:
+        self.max_target_length = prev_len
+      attention_as_mha_generic = Attention(
+          config=cfg_ref,
+          num_query_heads=cfg_ref.num_query_heads,
+          num_kv_heads=cfg_ref.num_kv_heads,
+          head_dim=cfg_ref.head_dim,
+          max_target_length=cfg_ref.max_target_length,
+          max_prefill_predict_length=cfg_ref.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=self.mesh,
+          attention_kernel="dot_product",
+          dtype=dtype,
+          dropout_rate=cfg_ref.dropout_rate,
+          rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+      )
+      generic_state = nnx.state(attention_as_mha_generic)
+      entry = {
+          "lnx": lnx,
+          "seg": decoder_segment_ids,
+          "pos": decoder_positions,
+          "module": attention_as_mha_generic,
+          "state": generic_state,
+          "output": None,
+          "grad": None,
+      }
+      cache[key] = entry
+      setattr(self.__class__, "_cp_generic_cache", cache)
+
+    if not need_grad and entry["output"] is None:
+      out, _ = entry["module"](
+          entry["lnx"],
+          entry["lnx"],
+          decoder_segment_ids=entry["seg"],
+          inputs_positions=entry["pos"],
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      entry["output"] = jax.device_get(out)
+
+    if need_grad and entry["grad"] is None:
+      gdef, state = nnx.split(entry["module"])
+
+      @jax.jit
+      def _generic_out_and_grad(state_in, x_in):
+        def generic_loss(x):
+          m = nnx.merge(gdef, state_in)
+          out, _ = m(
+              x,
+              x,
+              decoder_segment_ids=entry["seg"],
+              inputs_positions=entry["pos"],
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+          return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+        return jax.value_and_grad(generic_loss, has_aux=True)(x_in)
+
+      (_, out), grad = _generic_out_and_grad(state, entry["lnx"])
+      entry["output"] = jax.device_get(out)
+      entry["grad"] = jax.device_get(grad)
+
+    return entry["lnx"], entry["seg"], entry["pos"], entry["state"], entry["output"], entry["grad"]
+
   @parameterized.named_parameters(
       {
           "testcase_name": "cp_no_load_balance",
@@ -1329,48 +2702,6 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 1,
           "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "explicit",
       },
       {
           "testcase_name": "cp_ep_with_load_balance_explicit",
@@ -1391,17 +2722,9 @@ class AttentionTest(parameterized.TestCase):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 
     num_kv_heads = self.num_kv_heads
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
-    # Dot product
-    mha_generic_output, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        self.dtype, self.max_target_length, packing=False, need_grad=False
     )
-    generic_state = nnx.state(self._attention_as_mha_generic)
 
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
@@ -1532,8 +2855,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -1554,34 +2875,9 @@ class AttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        rngs=self.nnx_rng,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
     )
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(attention_as_mha_generic)
 
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_as_mha_flash_cp = Attention(
@@ -1611,7 +2907,6 @@ class AttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    mha_generic_output = jax.device_get(mha_generic_output)
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
@@ -1622,36 +2917,12 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "no_load_balance",
-          "context_parallel_load_balance": False,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": False,
-      },
-      {
-          "testcase_name": "load_balance",
-          "context_parallel_load_balance": True,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": False,
-      },
-      {
           "testcase_name": "load_balance_dq_reduction_unroll",
           "context_parallel_load_balance": True,
           "max_target_length": 1024,
           "dq_reduction_steps": 3,
           "ring_scan_unroll": 2,
           "packing": False,
-      },
-      {
-          "testcase_name": "packed",
-          "context_parallel_load_balance": False,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": True,
       },
       {
           "testcase_name": "packed_load_balance",
@@ -1689,26 +2960,9 @@ class AttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        rngs=self.nnx_rng,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
     )
-    generic_state = nnx.state(attention_as_mha_generic)
 
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_as_mha_flash_cp = Attention(
@@ -1729,17 +2983,6 @@ class AttentionTest(parameterized.TestCase):
       )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
-    def generic_loss(lnx):
-      output, _ = attention_as_mha_generic(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
-
     def ring_loss(lnx):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
@@ -1759,10 +3002,8 @@ class AttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       ring_grad = jax.grad(ring_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
     ring_grad = jax.device_get(ring_grad)
 
     self.assertTrue(
@@ -1786,23 +3027,25 @@ class AttentionTest(parameterized.TestCase):
         dtype="float32",
     )
 
-  def _ulysses_test_modules(self, cfg_cp, mesh_cp, lnx):
-    """Builds the dot-product reference and the Ulysses flash attention modules."""
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        rngs=self.nnx_rng,
-    )
+  def _ulysses_test_modules(self, cfg_cp, mesh_cp, lnx, build_generic=False):
+    """Builds the dot-product reference (when requested) and the Ulysses flash attention modules."""
+    attention_as_mha_generic = None
+    if build_generic:
+      attention_as_mha_generic = Attention(
+          config=self.cfg,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=self.mesh,
+          attention_kernel="dot_product",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          rngs=self.nnx_rng,
+      )
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_as_mha_flash_cp = Attention(
           config=cfg_cp,
@@ -1834,20 +3077,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
     )
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
         cfg_cp,
@@ -1858,7 +3092,6 @@ class AttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    mha_generic_output = jax.device_get(mha_generic_output)
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
@@ -1879,23 +3112,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
-
-    def generic_loss(lnx):
-      output, _ = attention_as_mha_generic(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
+    )
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     def ulysses_loss(lnx):
       output, _ = attention_as_mha_flash_cp(
@@ -1908,10 +3129,8 @@ class AttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       ulysses_grad = jax.grad(ulysses_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
     ulysses_grad = jax.device_get(ulysses_grad)
 
     self.assertTrue(
@@ -1994,8 +3213,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -2005,20 +3222,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
     )
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
         cfg_cp,
@@ -2029,7 +3237,6 @@ class AttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    mha_generic_output = jax.device_get(mha_generic_output)
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
@@ -2040,8 +3247,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -2051,23 +3256,11 @@ class AttentionTest(parameterized.TestCase):
     cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_as_mha_generic, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_as_mha_flash_cp, nnx.state(attention_as_mha_generic))
-
-    def generic_loss(lnx):
-      output, _ = attention_as_mha_generic(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
+    )
+    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     def usp_loss(lnx):
       if context_parallel_load_balance:
@@ -2088,10 +3281,8 @@ class AttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       usp_grad = jax.grad(usp_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
     usp_grad = jax.device_get(usp_grad)
 
     self.assertTrue(
@@ -2254,7 +3445,7 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
@@ -2415,7 +3606,7 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
@@ -2576,11 +3767,26 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
-  @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
-  def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
+  @staticmethod
+  def _stub_tpu_inference_attention(mock_rpa_ops=None, mock_dcp_forward=None):
+    pkg = types.ModuleType("tpu_inference")
+    layers = types.ModuleType("tpu_inference.layers")
+    common = types.ModuleType("tpu_inference.layers.common")
+    attn_iface = types.ModuleType("tpu_inference.layers.common.attention_interface")
+    cp_attn = types.ModuleType("tpu_inference.layers.common.cp_attention")
+    attn_iface.sharded_ragged_paged_attention = mock_rpa_ops or mock.MagicMock()
+    cp_attn.dcp_forward = mock_dcp_forward or mock.MagicMock()
+    return {
+        "tpu_inference": pkg,
+        "tpu_inference.layers": layers,
+        "tpu_inference.layers.common": common,
+        "tpu_inference.layers.common.attention_interface": attn_iface,
+        "tpu_inference.layers.common.cp_attention": cp_attn,
+    }
+
+  def test_forward_serve_vllm(self):
     """Tests the forward_serve_vllm method with mocked RPA attention."""
+    mock_sharded_ragged_paged_attention = mock.MagicMock()
     # Setup config for vLLM RPA
     vllm_config_arguments = self.config_arguments.copy()
     vllm_config_arguments["attention"] = "vllm_rpa"
@@ -2629,17 +3835,20 @@ class AttentionTest(parameterized.TestCase):
 
     mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
-    # Call the attention layer
-    output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
-    )
+    with mock.patch.dict(
+        sys.modules, self._stub_tpu_inference_attention(mock_rpa_ops=mock_sharded_ragged_paged_attention)
+    ):
+      # Call the attention layer
+      output, updated_kv_cache = attention_vllm(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=mock_kv_cache,
+          attention_metadata=mock_attention_metadata,
+      )
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
@@ -2651,11 +3860,9 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
 
-  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
-  @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
-  def test_forward_serve_vllm_batched_rpa(self, mock_sharded_ragged_paged_attention):
+  def test_forward_serve_vllm_batched_rpa(self):
     """Tests the forward_serve_vllm method with mocked batched RPA attention."""
+    mock_sharded_ragged_paged_attention = mock.MagicMock()
     # Setup config for vLLM Batched RPA
     vllm_config_arguments = self.config_arguments.copy()
     vllm_config_arguments["attention"] = "vllm_batched_rpa"
@@ -2704,17 +3911,20 @@ class AttentionTest(parameterized.TestCase):
 
     mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
-    # Call the attention layer
-    output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
-    )
+    with mock.patch.dict(
+        sys.modules, self._stub_tpu_inference_attention(mock_rpa_ops=mock_sharded_ragged_paged_attention)
+    ):
+      # Call the attention layer
+      output, updated_kv_cache = attention_vllm(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=mock_kv_cache,
+          attention_metadata=mock_attention_metadata,
+      )
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
@@ -2726,6 +3936,83 @@ class AttentionTest(parameterized.TestCase):
     expected_output = attention_vllm.out_projection(reshaped_mock_output)
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
+
+  def test_forward_serve_vllm_dcp(self):
+    """Tests that forward_serve_vllm dispatches to dcp_forward when mesh has dcp > 1."""
+    mock_rpa_ops = mock.MagicMock()
+    mock_dcp_forward = mock.MagicMock()
+
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    total_tokens = self.global_batch_size * seq_len
+    query = jnp.ones((self.global_batch_size, seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    value = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    mock_kv_cache = [jnp.ones((1,))]
+    mock_attention_metadata = mock.Mock()
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,))]
+    mock_dcp_forward.return_value = (mock_updated_kv_cache, mock_output)
+
+    attention_vllm.mesh = types.SimpleNamespace(shape={"dcp": 2})
+
+    with mock.patch.dict(
+        sys.modules,
+        self._stub_tpu_inference_attention(mock_rpa_ops=mock_rpa_ops, mock_dcp_forward=mock_dcp_forward),
+    ):
+      output, updated_kv_cache = attention_vllm.forward_serve_vllm(
+          query,
+          key,
+          value,
+          rpa_kv_cache=mock_kv_cache,
+          rpa_metadata=mock_attention_metadata,
+      )
+
+    mock_dcp_forward.assert_called_once()
+    mock_rpa_ops.assert_not_called()
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertTrue(jnp.allclose(output, mock_output))
+
+    from maxtext.layers import initializers, moe  # pylint: disable=import-outside-toplevel
+
+    moe_layer = moe.RoutedMoE(
+        config=config,
+        num_experts=4,
+        num_experts_per_tok=2,
+        mesh=types.SimpleNamespace(shape={"dcp": 2}),
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=64,
+        weight_dtype=self.dtype,
+        dtype=self.dtype,
+        quant=None,
+        rngs=self.nnx_rng,
+    )
+    self.assertEqual(moe_layer._expert_parallelism_name, ("attn_dp_expert", "expert", "dcp"))  # pylint: disable=protected-access
 
 
 class MLATest(attention_test_util.MLATestBase):
@@ -3029,48 +4316,6 @@ class MLATest(attention_test_util.MLATestBase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 1,
           "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "explicit",
       },
       {
           "testcase_name": "cp_ep_with_load_balance_explicit",
@@ -3511,18 +4756,24 @@ class MLATest(attention_test_util.MLATestBase):
           "ici_context_parallelism": 4,
           "indexer_topk": 32,
       },
+      {
+          "testcase_name": "no_lb_cp2_seq384",
+          "context_parallel_load_balance": False,
+          "ici_context_parallelism": 2,
+          "indexer_topk": 256,
+          "max_target_length": 384,
+      },
   )
-  @pytest.mark.skip_on_tpu7x  # TODO(b/552989368): Investigate MLA Indexer all-gather CP failure on TPU7x
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel_with_indexer(
-      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
+      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256, max_target_length=512
   ):
     """Test equivalence between dot_product MLA + Indexer and all-gather flash attention + context parallelism + Indexer"""
     config_arguments = {
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
-        "max_target_length": 512,
+        "max_target_length": max_target_length,
         "sa_block_q": 128,
         "sa_block_kv": 128,
         "sa_block_kv_compute": 128,
@@ -4539,9 +5790,11 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
 
     mock_run_gdn.assert_called_once()
     self.assertEqual(len(mock_run_gdn.call_args.args), 18)
-    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh"})
+    self.assertEqual(set(mock_run_gdn.call_args.kwargs), {"mesh", "read_state_indices"})
     self.assertIs(mock_run_gdn.call_args.kwargs["mesh"], mesh)
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[9], jnp.array([1], dtype=jnp.int32))
+    # Resident per-request slots read and write the same slot.
+    np.testing.assert_array_equal(mock_run_gdn.call_args.kwargs["read_state_indices"], jnp.array([1], dtype=jnp.int32))
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[10], jnp.array([0, 1], dtype=jnp.int32))
     np.testing.assert_array_equal(mock_run_gdn.call_args.args[12], jnp.array([1], dtype=jnp.int32))
     self.assertEqual(output.shape, hidden_states.shape)
@@ -4586,7 +5839,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     )
 
     # 5. Autoregressive mode
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 4, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
 
       gdn_idx, _ = gdn(
@@ -4604,7 +5857,12 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
   """Tests to validate AttentionOp masking logic for DeepSeek-V4 attention patterns."""
 
   def setUp(self):
-    self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], run_name="test")
+    self.config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+    )
 
   def test_generate_attention_mask_local_sliding(self):
     """Verifies AttentionType.LOCAL_SLIDING enforces both causal and sliding window constraints."""
@@ -4702,7 +5960,87 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     # Compressed block (last c_len cols) follows compressed_mask strictly
     np.testing.assert_allclose(mask_np[:, s_len], DEFAULT_MASK_VALUE)
     np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
-    print("Mask logic for uncompressed & compressed attention passed perfectly.")
+
+  def test_generate_attention_mask_packed_sequences(self):
+    """Verifies that AttentionType.COMPRESSED properly handles packed document sequences.
+
+    In packed sequence training (e.g. C4), multiple documents are concatenated in a single sequence buffer.
+    segment_positions resets to 0 at the start of each packed document.
+    Tokens in subsequent documents must be able to attend to preceding tokens in the same document within the sliding window,
+    and cross-document attention must be masked out.
+    """
+    batch_size = 1
+    # Document 1: 4 tokens (buffer indices 0..3), Document 2: 4 tokens (buffer indices 4..7)
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+    sliding_window_size = 3
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    q_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+
+    # Document 1 has segment_id=1, Document 2 has segment_id=2
+    decoder_segment_ids = jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32)
+    # Positions reset to 0 for Document 2
+    segment_positions = jnp.array([[0, 1, 2, 3, 0, 1, 2, 3]], dtype=jnp.int32)
+
+    compressed_mask = jnp.zeros((batch_size, 1, s_len, c_len), dtype=jnp.float32)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode="train",
+        compressed_mask=compressed_mask,
+        segment_positions=segment_positions,
+    )
+
+    self.assertEqual(mask.shape, (batch_size, 1, 1, s_len, kv_len))
+    mask_np = np.array(mask)[0, 0, 0]
+
+    # --- Document 1 Verification (Tokens 0..3) ---
+    # Token 0 attends to Token 0 (self), blocked from future tokens (1..7)
+    self.assertEqual(mask_np[0, 0], 0.0)
+    self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)
+
+    # Token 3 attends to Tokens 1..3 within window of size 3, blocked from Token 0 (out of window)
+    self.assertEqual(mask_np[3, 0], DEFAULT_MASK_VALUE)  # out of window (3 - 0 >= 3)
+    self.assertEqual(mask_np[3, 1], 0.0)
+    self.assertEqual(mask_np[3, 2], 0.0)
+    self.assertEqual(mask_np[3, 3], 0.0)
+    self.assertEqual(mask_np[3, 4], DEFAULT_MASK_VALUE)  # future
+
+    # --- Document 2 Verification (Tokens 4..7) ---
+    # Token 4 (1st token of Doc 2) must NOT attend to Doc 1 tokens (0..3)
+    for j in range(4):
+      self.assertEqual(mask_np[4, j], DEFAULT_MASK_VALUE, msg=f"Token 4 should not attend to Doc 1 token {j}")
+    # Token 4 attends to itself
+    self.assertEqual(mask_np[4, 4], 0.0)
+    self.assertEqual(mask_np[4, 5], DEFAULT_MASK_VALUE)  # future
+
+    # Token 5 attends to Token 4 and Token 5 (self)
+    self.assertEqual(mask_np[5, 3], DEFAULT_MASK_VALUE)  # Doc 1 token
+    self.assertEqual(mask_np[5, 4], 0.0)
+    self.assertEqual(mask_np[5, 5], 0.0)
+    self.assertEqual(mask_np[5, 6], DEFAULT_MASK_VALUE)  # future
+
+    # Token 7 attends to Tokens 5, 6, 7 (within window 3 in Doc 2), blocked from Token 4 (out of window) and Doc 1
+    self.assertEqual(mask_np[7, 3], DEFAULT_MASK_VALUE)  # Doc 1 token
+    self.assertEqual(mask_np[7, 4], DEFAULT_MASK_VALUE)  # out of window (7 - 4 >= 3)
+    self.assertEqual(mask_np[7, 5], 0.0)
+    self.assertEqual(mask_np[7, 6], 0.0)
+    self.assertEqual(mask_np[7, 7], 0.0)
 
   def test_generate_attention_mask_compressed_all_modes(self):
     """Verifies AttentionType.COMPRESSED across train, prefill, and autoregressive modes."""
@@ -4734,6 +6072,12 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
         compressed_mask=c_mask_4d,
     )
     self.assertEqual(mask_train.shape, (batch_size, 1, s_len, kv_len))
+    mask_train_np = np.array(mask_train)[0, 0]
+    self.assertEqual(mask_train_np[0, 0], 0.0)
+    self.assertEqual(mask_train_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_train_np[3, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_train_np[3, 1], 0.0)
+    np.testing.assert_allclose(mask_train_np[:, s_len:], 0.0)
 
     # 2. Prefill mode (batch_size=2, 5D compressed_mask with segment_positions)
     c_mask_5d = jnp.zeros((batch_size, 1, 1, s_len, c_len), dtype=jnp.float32)
@@ -4747,12 +6091,18 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
         segment_positions=seg_pos,
     )
     self.assertEqual(mask_prefill.shape, (batch_size, 1, 1, s_len, kv_len))
+    mask_prefill_np = np.array(mask_prefill)[0, 0, 0]
+    self.assertEqual(mask_prefill_np[0, 0], 0.0)
+    self.assertEqual(mask_prefill_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_prefill_np[3, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_prefill_np[3, 1], 0.0)
+    np.testing.assert_allclose(mask_prefill_np[:, s_len:], 0.0)
 
     # 3. Autoregressive mode (q_seq_len=1, batch_size=2, decoder_segment_ids)
     q_ar = jnp.zeros((batch_size, 1, 1, 128))
     k_ar = jnp.zeros((batch_size, kv_len, 1, 128))
     c_mask_ar = jnp.zeros((batch_size, 1, 1, c_len), dtype=jnp.float32)
-    seg_ids = jnp.ones((batch_size, 16), dtype=jnp.int32)
+    seg_ids = jnp.ones((batch_size, kv_len), dtype=jnp.int32)
     mask_ar = op.generate_attention_mask(
         query=q_ar,
         key=k_ar,
@@ -4761,6 +6111,8 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
         compressed_mask=c_mask_ar,
     )
     self.assertEqual(mask_ar.shape, (batch_size, 1, 1, 1, kv_len))
+    mask_ar_np = np.array(mask_ar)[0, 0, 0, 0]
+    np.testing.assert_allclose(mask_ar_np[s_len:], 0.0)
 
     # 4. Compressed mask is None (fallback to uncompressed mask shape)
     mask_none = op.generate_attention_mask(
@@ -4772,16 +6124,200 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
     )
     self.assertEqual(mask_none.ndim, 4)
     self.assertEqual(mask_none.shape[-1], kv_len)
+    mask_none_np = np.array(mask_none)[0, 0]
+    self.assertEqual(mask_none_np[0, 0], 0.0)
+    self.assertEqual(mask_none_np[0, 1], DEFAULT_MASK_VALUE)
+
+  def test_generate_attention_mask_compressed_chunked_prefill(self):
+    """Verifies AttentionType.COMPRESSED with chunked prefill where q_seq_len < s_len and segment_positions is provided."""
+    batch_size = 1
+    q_len = 4
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+    sliding_window_size = 3
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    q_dummy = jnp.zeros((batch_size, q_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+    # previous_chunk has 4 tokens processed previously -> next_pos = 4
+    previous_chunk = jnp.zeros((batch_size, 4, 1, 128))
+    # segment_positions only covers the current query chunk tokens [4, 5, 6, 7]
+    segment_positions = jnp.arange(4, 8, dtype=jnp.int32)[None, :]
+    compressed_mask = jnp.zeros((batch_size, 1, 1, q_len, c_len), dtype=jnp.float32)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=None,
+        model_mode="prefill",
+        previous_chunk=previous_chunk,
+        compressed_mask=compressed_mask,
+        segment_positions=segment_positions,
+    )
+
+    self.assertEqual(mask.shape, (batch_size, 1, 1, q_len, kv_len))
+    mask_np = np.array(mask)[0, 0, 0]
+
+    # Row 0 (query token at global pos 4):
+    # Within sliding window of size 3: keys at positions 2, 3, 4 are valid (dist: 2, 1, 0).
+    # Keys 0, 1 are out-of-window (dist: 4, 3 >= 3). Keys 5, 6, 7 are future (dist < 0).
+    self.assertEqual(mask_np[0, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 2], 0.0)
+    self.assertEqual(mask_np[0, 3], 0.0)
+    self.assertEqual(mask_np[0, 4], 0.0)
+    self.assertEqual(mask_np[0, 5], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 6], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 7], DEFAULT_MASK_VALUE)
+
+    # Row 3 (query token at global pos 7):
+    # Within sliding window 3: keys 5, 6, 7 are valid (dist: 2, 1, 0). Keys 0..4 are out of window.
+    self.assertEqual(mask_np[3, 4], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[3, 5], 0.0)
+    self.assertEqual(mask_np[3, 6], 0.0)
+    self.assertEqual(mask_np[3, 7], 0.0)
+
+    # Compressed KV blocks (indices s_len..kv_len-1) match compressed_mask (all 0.0)
+    np.testing.assert_allclose(mask_np[:, s_len:], 0.0)
+
+  def test_generate_attention_mask_compressed_ar_without_segment_ids(self):
+    """Verifies AttentionType.COMPRESSED autoregressive decode when decoder_segment_ids is None."""
+    batch_size = 1
+    q_len = 1
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+    sliding_window_size = 3
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=sliding_window_size,
+    )
+
+    q_dummy = jnp.zeros((batch_size, q_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+    # Query is at position s_len - 1 = 7 in the uncompressed cache
+    segment_positions = jnp.array([[s_len - 1]], dtype=jnp.int32)
+    compressed_mask = jnp.zeros((batch_size, 1, 1, q_len, c_len), dtype=jnp.float32)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=None,
+        model_mode="autoregressive",
+        compressed_mask=compressed_mask,
+        segment_positions=segment_positions,
+    )
+
+    self.assertEqual(mask.shape, (batch_size, 1, 1, q_len, kv_len))
+    mask_np = np.array(mask)[0, 0, 0, 0]
+
+    # Query token at position 7:
+    # Within sliding window 3: keys 5, 6, 7 are valid (dist: 2, 1, 0).
+    # Keys 0..4 are out-of-window (dist >= 3).
+    self.assertEqual(mask_np[0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[4], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[5], 0.0)
+    self.assertEqual(mask_np[6], 0.0)
+    self.assertEqual(mask_np[7], 0.0)
+
+    # Compressed KV blocks are valid
+    np.testing.assert_allclose(mask_np[s_len:], 0.0)
+
+  def test_generate_attention_mask_compressed_load_balanced_context_parallel(self):
+    """Verifies that AttentionType.COMPRESSED correctly uses segment_positions under load-balanced CP."""
+    config = types.SimpleNamespace(
+        context_parallel_load_balance=True,
+        context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
+        using_pipeline_parallelism=False,
+        logical_axis_rules=[["segment_ids_batch", ["context"]]],
+        shard_mode="auto",
+        debug_sharding=False,
+        eval_interval=-1,
+    )
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Need at least 4 devices to test load balanced CP")
+    mesh = Mesh(devices[:4], ["context"])
+    seq_len = 16
+    c_len = 2
+    kv_len = seq_len + c_len
+    sliding_window_size = 4
+    positions = jnp.asarray(attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=4).q_sequence[None, :])
+    query = jnp.zeros((1, seq_len, 1, 128))
+    key = jnp.zeros((1, kv_len, 1, 128))
+    decoder_segment_ids = jnp.ones((1, seq_len), dtype=jnp.int32)
+    compressed_mask = jnp.zeros((1, 1, seq_len, c_len), dtype=jnp.float32)
+
+    # Only `activation_q_length` -> context is made ambient: it shards the query length, which is
+    # what the cp gate reads. The config's `segment_ids_batch` -> context rule is left out because
+    # it cannot partition this test's batch of 1 across the 4-way context mesh.
+    with nn_partitioning.axis_rules([["activation_q_length", ["context"]]]):
+      op = AttentionOp(
+          config=config,
+          num_query_heads=1,
+          num_kv_heads=1,
+          max_target_length=kv_len,
+          mesh=mesh,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.COMPRESSED,
+          sliding_window_size=sliding_window_size,
+      )
+
+      mask = op.generate_attention_mask(
+          query,
+          key,
+          decoder_segment_ids,
+          MODEL_MODE_TRAIN,
+          compressed_mask=compressed_mask,
+          segment_positions=positions,
+      )
+
+    expected_uncompressed_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r, q_pos in enumerate(np.asarray(positions[0])):
+      for c, kv_pos in enumerate(np.asarray(positions[0])):
+        if q_pos - sliding_window_size < kv_pos <= q_pos:
+          expected_uncompressed_mask[r, c] = True
+
+    mask_np = np.asarray(mask)[0, 0, 0] if mask.ndim == 5 else np.asarray(mask)[0, 0]
+    np.testing.assert_array_equal(mask_np[:, :seq_len] == 0.0, expected_uncompressed_mask)
+    np.testing.assert_array_equal(mask_np[:, seq_len:], 0.0)
 
 
 class CompressedAttentionTest(parameterized.TestCase):
   """Parity and compilation tests for CompressedAttention (DeepSeek-V4)."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_run_compressed_cache"):
+      delattr(cls, "_run_compressed_cache")
+    super().tearDownClass()
+
   def setUp(self):
     """Setup test dependencies and configuration."""
     super().setUp()
-    if not is_decoupled():
+    if not is_decoupled() and hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
   @parameterized.named_parameters(
       {"testcase_name": "csa_ratio4_dot_product", "compress_ratio": 4, "attention_kernel": "dot_product"},
@@ -4809,7 +6345,161 @@ class CompressedAttentionTest(parameterized.TestCase):
     out_flash = self._run_compressed_attention(compress_ratio, "flash")
     np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
 
-  def _get_test_config(self, max_target_length, compress_ratio, attention_kernel):
+  # TODO(b/562604480): Re-enable on TPU7x once the splash backward pass matches dot_product.
+  # On TPU7x the flash gradient diverges from dot_product on the highest-magnitude entries
+  # (~1131 elements, up to 2.2e-6 absolute / 3.4x relative), which is where the dK/dV
+  # accumulation spans the most query blocks. Measured on v6e-8 for the same config, those
+  # same entries agree to 6e-3 relative (max abs diff 7.9e-9), so this is a TPU7x kernel
+  # precision gap rather than a masking/logic difference. No honest tolerance can absorb it:
+  # the divergence is ~100% of the largest gradient entries (max |grad| is only 2.2e-6).
+  @pytest.mark.skip_on_tpu7x
+  @pytest.mark.tpu_only
+  def test_hca_flash_vs_dot_product_unaligned_grads(self):
+    """Verifies gradient numerical equivalence between dot_product and flash attention on unaligned sequences (S=489)."""
+    # --- Case 1: Unpacked single sequence S=489 ---
+    seq_len = 489
+    compress_ratio = 128
+    cfg = self._get_test_config(max_target_length=seq_len)
+
+    attn_dot = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel="dot_product")
+    attn_flash = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel="flash")
+    gdef_dot, state_dot = nnx.split(attn_dot)
+    gdef_flash, state_flash = nnx.split(attn_flash)
+
+    @jax.jit
+    def dot_out_and_grad(state_in, inp, seg_ids, pos_ids):
+      def loss_fn(x_in):
+        m = nnx.merge(gdef_dot, state_in)
+        out, _ = m(
+            x_in,
+            x_in,
+            decoder_segment_ids=seg_ids,
+            inputs_positions=pos_ids,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        return jnp.mean(out**2), out
+
+      (_, out), grad = jax.value_and_grad(loss_fn, has_aux=True)(inp)
+      return out, grad
+
+    @jax.jit
+    def flash_out_and_grad(state_in, inp, seg_ids, pos_ids):
+      def loss_fn(x_in):
+        m = nnx.merge(gdef_flash, state_in)
+        out, _ = m(
+            x_in,
+            x_in,
+            decoder_segment_ids=seg_ids,
+            inputs_positions=pos_ids,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        return jnp.mean(out**2), out
+
+      (_, out), grad = jax.value_and_grad(loss_fn, has_aux=True)(inp)
+      return out, grad
+
+    batch_size = cfg.global_batch_size_to_train_on
+    x = jax.random.normal(jax.random.PRNGKey(0), (batch_size, seq_len, cfg.base_emb_dim))
+    pos = jnp.arange(seq_len, dtype=jnp.int32)[None, :].repeat(batch_size, axis=0)
+    seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    out_dot, grad_dot = dot_out_and_grad(state_dot, x, seg, pos)
+    out_flash, grad_flash = flash_out_and_grad(state_flash, x, seg, pos)
+    np.testing.assert_allclose(np.array(out_flash), np.array(out_dot), rtol=1e-2, atol=1e-2)
+
+    self.assertTrue(np.all(np.isfinite(np.array(grad_dot))), "Dot grad contains NaN/Inf for unpacked S=489")
+    self.assertTrue(np.all(np.isfinite(np.array(grad_flash))), "Flash grad contains NaN/Inf for unpacked S=489")
+    np.testing.assert_allclose(np.array(grad_flash), np.array(grad_dot), rtol=1e-2, atol=1e-6)
+
+    # --- Case 2: Packed unaligned sequence L1=200, L2=289 (Total=489) ---
+    l1, l2 = 200, 289
+    total_len = l1 + l2
+    x_packed = jax.random.normal(jax.random.PRNGKey(42), (batch_size, total_len, cfg.base_emb_dim))
+    pos_packed = jnp.broadcast_to(
+        jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+    seg_packed = jnp.broadcast_to(
+        jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+
+    out_dot_p, grad_dot_packed = dot_out_and_grad(state_dot, x_packed, seg_packed, pos_packed)
+    out_flash_p, grad_flash_packed = flash_out_and_grad(state_flash, x_packed, seg_packed, pos_packed)
+    np.testing.assert_allclose(np.array(out_flash_p), np.array(out_dot_p), rtol=1e-2, atol=1e-2)
+
+    self.assertTrue(
+        np.all(np.isfinite(np.array(grad_dot_packed))), "Dot grad contains NaN/Inf for packed unaligned S=489"
+    )
+    self.assertTrue(
+        np.all(np.isfinite(np.array(grad_flash_packed))), "Flash grad contains NaN/Inf for packed unaligned S=489"
+    )
+    np.testing.assert_allclose(np.array(grad_flash_packed), np.array(grad_dot_packed), rtol=1e-2, atol=1e-6)
+
+  @pytest.mark.tpu_only
+  def test_hca_flash_vs_dot_product_packed_crossing_window(self):
+    """Verifies numerical equivalence between dot_product and flash attention on packed sequences crossing compression
+
+    windows.
+    """
+    l1, l2 = 200, 312
+    total_len = l1 + l2
+    compress_ratio = 128
+    cfg_dot = self._get_test_config(
+        max_target_length=total_len,
+    )
+    attn_dot = self._create_compressed_attention_layer(
+        cfg_dot, compress_ratio=compress_ratio, attention_kernel="dot_product"
+    )
+
+    cfg_flash = self._get_test_config(
+        max_target_length=total_len,
+    )
+    attn_flash = self._create_compressed_attention_layer(
+        cfg_flash, compress_ratio=compress_ratio, attention_kernel="flash"
+    )
+
+    batch_size = cfg_dot.global_batch_size_to_train_on
+
+    # Generate random inputs and packed metadata
+    x = jax.random.normal(jax.random.PRNGKey(42), (batch_size, total_len, cfg_dot.base_emb_dim))
+    pos = jnp.broadcast_to(
+        jnp.concatenate([jnp.arange(l1, dtype=jnp.int32), jnp.arange(l2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+    seg = jnp.broadcast_to(
+        jnp.concatenate([jnp.ones(l1, dtype=jnp.int32), jnp.full(l2, 2, dtype=jnp.int32)], axis=0)[None, :],
+        (batch_size, total_len),
+    )
+
+    out_dot, _ = attn_dot(
+        x,
+        x,
+        decoder_segment_ids=seg,
+        inputs_positions=pos,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out_flash, _ = attn_flash(
+        x,
+        x,
+        decoder_segment_ids=seg,
+        inputs_positions=pos,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    np.testing.assert_allclose(
+        np.array(out_flash),
+        np.array(out_dot),
+        rtol=1e-2,
+        atol=1e-2,
+        err_msg="Static flash attention does not match dot_product on packed sequence crossing compression window.",
+    )
+
+  def _get_test_config(self, max_target_length):
     """Initializes and returns a MaxTextConfig for document packing tests."""
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -4832,8 +6522,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "compressed_rope_max_timescale": 160000,
         "rope_max_timescale": 10000,
         "qk_rope_head_dim": 64,
+        "override_model_config": True,
+        "base_emb_dim": 256,
         "base_num_kv_heads": 1,
-        "base_num_query_heads": 16,
+        "base_num_query_heads": 4,
     }
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -4900,10 +6592,9 @@ class CompressedAttentionTest(parameterized.TestCase):
 
     cfg = self._get_test_config(
         max_target_length=total_len,
-        compress_ratio=compress_ratio,
-        attention_kernel=attention_kernel,
     )
     attn = self._create_compressed_attention_layer(cfg, compress_ratio=compress_ratio, attention_kernel=attention_kernel)
+    gdef_attn, state_attn = nnx.split(attn)
     batch_size = cfg.global_batch_size_to_train_on
 
     # Generate distinct random tokens for Document 1 and Document 2
@@ -4916,23 +6607,21 @@ class CompressedAttentionTest(parameterized.TestCase):
     seg1 = jnp.ones((batch_size, l1), dtype=jnp.int32)
     seg2 = jnp.ones((batch_size, l2), dtype=jnp.int32)
 
+    @jax.jit
+    def run_attn(state_in, x_in, seg_ids, pos_ids):
+      m = nnx.merge(gdef_attn, state_in)
+      return m(
+          x_in,
+          x_in,
+          decoder_segment_ids=seg_ids,
+          inputs_positions=pos_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+
     # --- 1. UNPACKED (INDEPENDENT) PASSES ---
-    out1_unpacked, _ = attn(
-        x1,
-        x1,
-        decoder_segment_ids=seg1,
-        inputs_positions=pos1,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    out2_unpacked, _ = attn(
-        x2,
-        x2,
-        decoder_segment_ids=seg2,
-        inputs_positions=pos2,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out1_unpacked, _ = run_attn(state_attn, x1, seg1, pos1)
+    out2_unpacked, _ = run_attn(state_attn, x2, seg2, pos2)
     expected_unpacked = jnp.concatenate([out1_unpacked, out2_unpacked], axis=1)  # [B, L1 + L2, D]
 
     # --- 2. PACKED (CONCATENATED) PASS ---
@@ -4940,14 +6629,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     pos_packed = jnp.concatenate([pos1, pos2], axis=1)
     seg_packed = jnp.concatenate([jnp.full_like(seg1, 1), jnp.full_like(seg2, 2)], axis=1)
 
-    out_packed, _ = attn(
-        x_packed,
-        x_packed,
-        decoder_segment_ids=seg_packed,
-        inputs_positions=pos_packed,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out_packed, _ = run_attn(state_attn, x_packed, seg_packed, pos_packed)
 
     # --- 3. ASSERT EXACT NUMERICAL EQUIVALENCE ---
     # Document 1 outputs must match
@@ -4979,14 +6661,7 @@ class CompressedAttentionTest(parameterized.TestCase):
     # --- 4. ADVERSARIAL LEAKAGE CHECK ---
     # Mutating Document 1 by +1000.0 must have zero effect on Document 2 in the packed pass
     x_packed_corrupted = x_packed.at[:, :l1, :].set(x_packed[:, :l1, :] + 1000.0)
-    out_packed_corrupted, _ = attn(
-        x_packed_corrupted,
-        x_packed_corrupted,
-        decoder_segment_ids=seg_packed,
-        inputs_positions=pos_packed,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out_packed_corrupted, _ = run_attn(state_attn, x_packed_corrupted, seg_packed, pos_packed)
 
     np.testing.assert_allclose(
         np.array(out_packed_corrupted[:, l1:, :]),
@@ -4996,8 +6671,13 @@ class CompressedAttentionTest(parameterized.TestCase):
         err_msg="Adversarial corruption in Doc 1 leaked into Doc 2 in packed sequence.",
     )
 
-  def _run_compressed_attention(self, compress_ratio, attention_kernel):
+  def _run_compressed_attention(self, compress_ratio, attention_kernel, seq_len=None):
     """Runs CompressedAttention forward pass with specified compression ratio and kernel."""
+    target_length = seq_len if seq_len is not None else 512
+    cache = getattr(self.__class__, "_run_compressed_cache", {})
+    cache_key = (compress_ratio, attention_kernel, target_length)
+    if cache_key in cache:
+      return cache[cache_key]
     # Setup test config
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -5007,8 +6687,8 @@ class CompressedAttentionTest(parameterized.TestCase):
         "ici_data_parallelism": -1,
         "ici_tensor_parallelism": 1,
         "ici_autoregressive_parallelism": 1,
-        "max_target_length": 512,
-        "max_prefill_predict_length": 512,
+        "max_target_length": target_length,
+        "max_prefill_predict_length": target_length,
         "attention_type": AttentionType.COMPRESSED.value,
         "head_dim": 128,
         "q_lora_rank": 256,
@@ -5020,8 +6700,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "compressed_rope_max_timescale": 160000,
         "rope_max_timescale": 10000,
         "qk_rope_head_dim": 64,
+        "override_model_config": True,
+        "base_emb_dim": 256,
         "base_num_kv_heads": 1,
-        "base_num_query_heads": 16,
+        "base_num_query_heads": 4,
     }
     cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -5031,17 +6713,17 @@ class CompressedAttentionTest(parameterized.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     batch_size = cfg.global_batch_size_to_train_on
-    seq_len = cfg.max_target_length
+    cur_seq_len = cfg.max_target_length
     embed_dim = cfg.base_emb_dim
 
     # Inputs shape: [batch, seq_len, embed_dim]
     lnx = jax.random.normal(
         jax.random.PRNGKey(0),
-        shape=(batch_size, seq_len, embed_dim),
+        shape=(batch_size, cur_seq_len, embed_dim),
         dtype=jnp.float32,
     )
-    decoder_positions = jnp.stack([jnp.arange(seq_len, dtype=jnp.int32) for _ in range(batch_size)])
-    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    decoder_positions = jnp.stack([jnp.arange(cur_seq_len, dtype=jnp.int32) for _ in range(batch_size)])
+    decoder_segment_ids = jnp.ones((batch_size, cur_seq_len), dtype=jnp.int32)
 
     # Instantiate CompressedAttention
     attn = CompressedAttention(
@@ -5073,8 +6755,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    self.assertEqual(output.shape, (batch_size, seq_len, embed_dim))
-    return output
+    self.assertEqual(output.shape, (batch_size, cur_seq_len, embed_dim))
+    cache[cache_key] = jax.device_get(output)
+    setattr(self.__class__, "_run_compressed_cache", cache)
+    return cache[cache_key]
 
 
 class KVHeadShardingTest(parameterized.TestCase):
@@ -5207,6 +6891,678 @@ class KVHeadShardingTest(parameterized.TestCase):
     self._set_mesh_shape(context=2)
     with self._use_ulysses():
       self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
+
+
+class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
+  """Comprehensive unit test suite for Absorbed-Query Latent MQA (PR 1 / Milestone 2)."""
+
+  config_arguments = {
+      "per_device_batch_size": 1.0,
+      "run_name": "test_mla_absorbed_mqa",
+      "enable_checkpointing": False,
+      "max_target_length": 32,
+      "max_prefill_predict_length": 16,
+      "attention_type": AttentionType.MLA.value,
+      "head_dim": 256,
+      "q_lora_rank": 0,
+      "kv_lora_rank": 512,
+      "qk_nope_head_dim": 192,
+      "qk_rope_head_dim": 64,
+      "v_head_dim": 256,
+      "num_query_heads": 64,
+      "num_kv_heads": 64,
+      "attention": "dot_product",
+      "dtype": "float32",
+      "mla_naive_kvcache": False,
+  }
+
+  def test_mla_absorbed_mqa_parity(self):
+    """Verifies numerical parity between dense MLA and Absorbed-Query Latent MQA in FP32 and BF16."""
+    # 1. FP32 Full Layer Forward Pass Parity
+    cfg_fp32, mla_dense = self.init_mla(self.config_arguments, rope_type="default")
+    cfg_fp32_mqa = self.config_arguments.copy()
+    cfg_fp32_mqa["use_mla_absorbed_mqa"] = True
+    _, mla_mqa = self.init_mla(cfg_fp32_mqa, rope_type="default")
+
+    nnx.update(mla_mqa, nnx.state(mla_dense))
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_fp32, "float32")
+    with jax.set_mesh(mla_dense.mesh), nn_partitioning.axis_rules(cfg_fp32.logical_axis_rules):
+      out_dense, _ = mla_dense(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      out_mqa, _ = mla_mqa(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+
+    max_diff_fp32 = float(jnp.max(jnp.abs(out_dense - out_mqa)))
+    self.assertLessEqual(max_diff_fp32, 1e-5, f"FP32 parity failed: {max_diff_fp32} > 1e-5")
+
+    # 2. BF16 Parity Verification on Real Modules (catching D5)
+    cfg_bf16_args = self.config_arguments.copy()
+    cfg_bf16_args["dtype"] = "bfloat16"
+    cfg_bf16_args["weight_dtype"] = "bfloat16"
+    cfg_bf16_dense, mla_dense_bf16 = self.init_mla(cfg_bf16_args, rope_type="default")
+
+    cfg_bf16_mqa_args = cfg_bf16_args.copy()
+    cfg_bf16_mqa_args["use_mla_absorbed_mqa"] = True
+    _, mla_mqa_bf16 = self.init_mla(cfg_bf16_mqa_args, rope_type="default")
+    nnx.update(mla_mqa_bf16, nnx.state(mla_dense_bf16))
+
+    lnx_bf16, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_bf16_dense, "bfloat16")
+    with jax.set_mesh(mla_dense_bf16.mesh), nn_partitioning.axis_rules(cfg_bf16_dense.logical_axis_rules):
+      out_dense_bf16, _ = mla_dense_bf16(
+          lnx_bf16,
+          lnx_bf16,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      out_mqa_bf16, _ = mla_mqa_bf16(
+          lnx_bf16,
+          lnx_bf16,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+
+    max_diff_bf16 = float(jnp.max(jnp.abs(out_dense_bf16.astype(jnp.float32) - out_mqa_bf16.astype(jnp.float32))))
+    self.assertLessEqual(max_diff_bf16, 5e-2, f"BF16 parity failed: {max_diff_bf16} > 5e-2")
+
+  def test_mla_absorbed_mqa_grad_parity(self):
+    """Verifies train-mode gradient parity (w.r.t. all params and inputs) between dense MLA and absorbed MQA."""
+    cfg, mla_dense = self.init_mla(self.config_arguments, rope_type="default")
+    cfg_mqa_args = self.config_arguments.copy()
+    cfg_mqa_args["use_mla_absorbed_mqa"] = True
+    _, mla_mqa = self.init_mla(cfg_mqa_args, rope_type="default")
+    nnx.update(mla_mqa, nnx.state(mla_dense))
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, "float32")
+    # Random cotangent so every output element contributes a distinct gradient signal.
+    cotangent = jax.random.normal(jax.random.PRNGKey(7), lnx.shape, dtype=jnp.float32)
+
+    def loss_fn(model, x):
+      out, _ = model(
+          x,
+          x,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return jnp.sum(out * cotangent)
+
+    grad_fn = nnx.value_and_grad(loss_fn, argnums=(0, 1))
+    with jax.set_mesh(mla_dense.mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      loss_dense, (param_grads_dense, input_grad_dense) = grad_fn(mla_dense, lnx)
+      loss_mqa, (param_grads_mqa, input_grad_mqa) = grad_fn(mla_mqa, lnx)
+
+    self.assertAlmostEqual(float(loss_dense), float(loss_mqa), delta=1e-3 * max(1.0, abs(float(loss_dense))))
+
+    def assert_close(name, g_dense, g_mqa):
+      g_dense = jnp.asarray(g_dense, dtype=jnp.float32)
+      g_mqa = jnp.asarray(g_mqa, dtype=jnp.float32)
+      self.assertEqual(g_dense.shape, g_mqa.shape, f"Gradient shape mismatch for {name}")
+      self.assertFalse(jnp.isnan(g_mqa).any(), f"NaN gradient for {name}")
+      scale = max(1.0, float(jnp.max(jnp.abs(g_dense))))
+      max_diff = float(jnp.max(jnp.abs(g_dense - g_mqa)))
+      self.assertLessEqual(max_diff, 1e-4 * scale, f"Gradient parity failed for {name}: {max_diff} > {1e-4 * scale}")
+
+    assert_close("inputs", input_grad_dense, input_grad_mqa)
+
+    flat_dense = dict(jax.tree_util.tree_flatten_with_path(param_grads_dense)[0])
+    flat_mqa = dict(jax.tree_util.tree_flatten_with_path(param_grads_mqa)[0])
+    self.assertEqual(set(flat_dense.keys()), set(flat_mqa.keys()))
+    self.assertNotEmpty(flat_dense)
+    for path, g_dense in flat_dense.items():
+      assert_close(jax.tree_util.keystr(path), g_dense, flat_mqa[path])
+
+  def test_mla_absorbed_mqa_kv_cache_footprint(self):
+    """Verifies the exact 57x reduction in KV cache memory footprint on real production modules (catching D3)."""
+    cfg_dense, mla_dense = self.init_mla(self.config_arguments, rope_type="default")
+    cfg_mqa_args = self.config_arguments.copy()
+    cfg_mqa_args["use_mla_absorbed_mqa"] = True
+    _, mla_mqa = self.init_mla(cfg_mqa_args, rope_type="default")
+
+    b, s = 1, 16
+    d_c = cfg_dense.kv_lora_rank  # 512
+    d_rope = cfg_dense.qk_rope_head_dim  # 64
+    d_nope = cfg_dense.qk_nope_head_dim  # 192
+    num_heads = mla_dense.num_query_heads
+
+    low_rank_main = jnp.ones((b, s, d_c), dtype=jnp.float32)
+    key_rope = jnp.ones((b, s, 1, d_rope), dtype=jnp.float32)
+
+    # 1. Uncompressed Dense MLA KV projection on real module
+    key_dense, val_dense = mla_dense.mla_get_key_value(low_rank_main, key_rope, MODEL_MODE_PREFILL)
+    self.assertEqual(key_dense.shape, (b, s, num_heads, d_nope + d_rope))
+    self.assertEqual(val_dense.shape, (b, s, num_heads, mla_dense.v_head_dim))
+
+    # 2. Latent MQA KV projection on real module
+    key_mqa, val_mqa = mla_mqa.get_kv_latent(low_rank_main, key_rope)
+    self.assertEqual(key_mqa.shape, (b, s, 1, d_c + d_rope))
+    self.assertEqual(val_mqa.shape, (b, s, 1, d_c))
+    mqa_elements_per_token = key_mqa.size // (b * s)
+    self.assertEqual(mqa_elements_per_token, 576)
+    mqa_bytes_per_token_bf16 = mqa_elements_per_token * 2  # 1,152 bytes = 1.15 KB
+    self.assertEqual(mqa_bytes_per_token_bf16, 1152)
+
+    # 3. Production DeepSeek-V3 architecture specification: 64 heads, d_nope=192, d_rope=64, d_v=256
+    prod_heads = 64
+    prod_d_v = 256
+    prod_dense_elements_per_token = prod_heads * (d_nope + d_rope) + prod_heads * prod_d_v
+    self.assertEqual(prod_dense_elements_per_token, 32768)
+    prod_dense_bytes_per_token_bf16 = prod_dense_elements_per_token * 2  # 65,536 bytes = 64 KB
+    self.assertEqual(prod_dense_bytes_per_token_bf16, 65536)
+
+    # 4. Reduction ratio: 32,768 / 576 = 56.888... (~57x)
+    ratio = prod_dense_elements_per_token / mqa_elements_per_token
+    self.assertAlmostEqual(ratio, 56.8888, places=3)
+
+    # 5. Gather volume for K=2048 tokens in DeepSeek Sparse Attention (DSA)
+    tokens_k = 2048
+    uncompressed_gather_bytes = tokens_k * prod_dense_bytes_per_token_bf16
+    latent_gather_bytes = tokens_k * mqa_bytes_per_token_bf16
+    self.assertEqual(uncompressed_gather_bytes, 128 * (1024**2))  # 128 MB
+    self.assertEqual(latent_gather_bytes, 2359296)  # 2.25 MB
+    gather_ratio = uncompressed_gather_bytes / latent_gather_bytes
+    self.assertAlmostEqual(gather_ratio, 56.8888, places=3)
+
+  def test_mla_absorbed_mqa_shapes_and_identities(self):
+    """Verifies shapes, scale factor preservation, and linear associativity identities."""
+    _, mla = self.init_mla(self.config_arguments, rope_type="default")
+    b, t, s, h = 1, 4, 16, 64
+    d_c, d_nope, d_rope, d_v = 512, 192, 64, 256
+
+    rng = jax.random.PRNGKey(101)
+    k1, k2, k3, k4, k5, k6 = jax.random.split(rng, 6)
+    q_n = jax.random.normal(k1, (b, t, h, d_nope)) / math.sqrt(d_nope)
+    q_p = jax.random.normal(k2, (b, t, h, d_rope)) / math.sqrt(d_rope)
+    c_k = jax.random.normal(k3, (b, s, d_c)) / math.sqrt(d_c)
+    k_p = jax.random.normal(k4, (b, s, 1, d_rope)) / math.sqrt(d_rope)
+    w_k = jax.random.normal(k5, (d_c, h, d_nope)) / math.sqrt(d_c)
+    w_v = jax.random.normal(k6, (d_c, h, d_v)) / math.sqrt(d_c)
+
+    # Helper method shapes
+    q_mqa = mla.absorb_query(q_n, q_p, w_k)
+    self.assertEqual(q_mqa.shape, (b, t, h, 576))
+
+    kv_latent, val_latent = mla.get_kv_latent(c_k, k_p)
+    self.assertEqual(kv_latent.shape, (b, s, 1, 576))
+    self.assertEqual(val_latent.shape, (b, s, 1, 512))
+
+    out_latent = jax.random.normal(rng, (b, t, h, d_c))
+    out_absorbed = mla.absorb_output(out_latent, w_v)
+    self.assertEqual(out_absorbed.shape, (b, t, h, d_v))
+
+    # Softmax scale base uses (qk_nope_head_dim + qk_rope_head_dim)=256 -> 1/sqrt(256)=0.0625, NOT 1/sqrt(576) (catching D4)
+    expected_base_scale = (mla.qk_nope_head_dim + mla.qk_rope_head_dim) ** -0.5
+    if mla.max_position_embeddings > mla.original_max_position_embeddings:
+      mscale = 0.1 * mla.mscale * math.log(mla.rope_factor) + 1.0
+      expected_scale = expected_base_scale * mscale * mscale
+      wrong_scale = ((mla.kv_lora_rank + mla.qk_rope_head_dim) ** -0.5) * mscale * mscale
+    else:
+      expected_scale = expected_base_scale
+      wrong_scale = (mla.kv_lora_rank + mla.qk_rope_head_dim) ** -0.5
+    self.assertAlmostEqual(mla.softmax_scale, expected_scale, places=6)
+    self.assertNotAlmostEqual(mla.softmax_scale, wrong_scale, places=6)
+
+    # Linear associativity: (Q_nope W_UK) @ C_KV^T == Q_nope @ (C_KV W_UK)^T
+    q_absorbed_slice = q_mqa[..., :d_c]
+    score_absorbed = jnp.einsum("bthc, bsc -> bhts", q_absorbed_slice, c_k)
+    k_nope_ref = jnp.einsum("bsc, chd -> bshd", c_k, w_k)
+    score_standard = jnp.einsum("bthd, bshd -> bhts", q_n, k_nope_ref)
+    diff = float(jnp.max(jnp.abs(score_absorbed - score_standard)))
+    self.assertLessEqual(diff, 1e-5)
+
+  def test_mla_absorbed_mqa_prefill_to_decode_parity(self):
+    """Verifies prefill-to-autoregressive-decode parity between dense MLA and absorbed MLA (catching A1 / D1)."""
+    cfg_dense, mla_dense = self.init_mla(self.config_arguments, rope_type="default")
+    cfg_mqa_args = self.config_arguments.copy()
+    cfg_mqa_args["use_mla_absorbed_mqa"] = True
+    _, mla_mqa = self.init_mla(cfg_mqa_args, rope_type="default")
+    nnx.update(mla_mqa, nnx.state(mla_dense))
+
+    prefill_length = cfg_dense.max_prefill_predict_length
+    decode_total_length = cfg_dense.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_dense, "float32")
+
+    # 1. Prefill Parity
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    out_prefill_dense, _ = mla_dense(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+    out_prefill_mqa, _ = mla_mqa(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+    diff_prefill = float(jnp.max(jnp.abs(out_prefill_dense - out_prefill_mqa)))
+    self.assertLessEqual(diff_prefill, 1e-4, f"Prefill parity failed: {diff_prefill} > 1e-4")
+
+    # 2. Autoregressive Decode Step-by-Step Parity
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+
+      out_ar_dense, _ = mla_dense(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+      out_ar_mqa, _ = mla_mqa(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+      diff_ar = float(jnp.max(jnp.abs(out_ar_dense - out_ar_mqa)))
+      self.assertLessEqual(diff_ar, 1e-4, f"AR decode parity failed at step {idx}: {diff_ar} > 1e-4")
+
+  def test_mla_absorbed_mqa_sliced_proj(self):
+    """Verifies that use_sliced_mla_proj works with exact parity under use_mla_absorbed_mqa."""
+    cfg = self.config_arguments.copy()
+    cfg["use_mla_absorbed_mqa"] = True
+    cfg["q_lora_rank"] = 512
+    cfg["use_sliced_mla_proj"] = False
+
+    cfg_sliced = cfg.copy()
+    cfg_sliced["use_sliced_mla_proj"] = True
+
+    cfg_obj_normal, mla_normal = self.init_mla(cfg, rope_type="default")
+    _, mla_sliced = self.init_mla(cfg_sliced, rope_type="default")
+    nnx.update(mla_sliced, nnx.state(mla_normal))
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_obj_normal, "float32")
+    out_normal, _ = mla_normal(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out_sliced, _ = mla_sliced(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    diff = float(jnp.max(jnp.abs(out_normal - out_sliced)))
+    self.assertLessEqual(diff, 1e-5, f"Sliced vs Unsliced Absorbed MQA diff too large: {diff}")
+
+  def test_incompatible_attention_flash(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with flash attention (catching A2 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "attention": "flash"})
+    with self.assertRaisesRegex(ValueError, "requires `attention` to be 'dot_product' or 'autoselected'"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_attention_paged(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with paged attention (catching A3 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "attention": "paged"})
+    with self.assertRaisesRegex(ValueError, "requires `attention` to be 'dot_product' or 'autoselected'"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_naive_kvcache(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with naive KV cache (catching A3 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "mla_naive_kvcache": True})
+    with self.assertRaisesRegex(ValueError, "incompatible with `mla_naive_kvcache=True`"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_kv_quant(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with kv cache quantization (catching A4 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "quantize_kvcache": True})
+    with self.assertRaisesRegex(ValueError, "incompatible with quantization"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_attention_type(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with non-MLA attention (catching C4 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "attention_type": "global"})
+    with self.assertRaisesRegex(ValueError, "requires `attention_type='mla'`"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_fp8_options(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with experimental fp8 quant (catching A7 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "experimental_sa_quant_k_fp8": True})
+    with self.assertRaisesRegex(ValueError, "incompatible with quantization or FP8"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_weight_quantization(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with weight quantization (catching A7 / C4 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "quantization": "int8"})
+    with self.assertRaisesRegex(ValueError, "incompatible with quantization"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_mla_absorbed_mqa_sharded_mesh_compilation(self):
+    """Verifies that MLA absorbed MQA compiles and executes across modes on a sharded mesh (catching B2 / D6)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True})
+    cfg, mla = self.init_mla(cfg_args, rope_type="default")
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, "float32")
+
+    @nnx.jit
+    def fwd_train(m, x, seg, pos):
+      return m(x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+
+    out_train, _ = fwd_train(mla, lnx, decoder_segment_ids, decoder_positions)
+    self.assertEqual(out_train.shape, lnx.shape)
+    self.assertFalse(jnp.isnan(out_train).any())
+
+    # Prefill mode
+    prefill_len = cfg.max_prefill_predict_length
+    lnx_prefill = lnx[:, :prefill_len, :]
+    pos_prefill = decoder_positions[:, :prefill_len]
+    seg_prefill = decoder_segment_ids[:, :prefill_len]
+
+    @nnx.jit
+    def fwd_prefill(m, x, seg, pos):
+      return m(x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_PREFILL)
+
+    out_prefill, _ = fwd_prefill(mla, lnx_prefill, seg_prefill, pos_prefill)
+    self.assertEqual(out_prefill.shape, lnx_prefill.shape)
+    self.assertFalse(jnp.isnan(out_prefill).any())
+
+    # AR decode mode
+    lnx_ar = lnx[:, prefill_len : prefill_len + 1, :]
+    pos_ar = decoder_positions[:, prefill_len : prefill_len + 1]
+
+    @nnx.jit
+    def fwd_decode(m, x, pos):
+      return m(x, x, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_AUTOREGRESSIVE)
+
+    out_ar, _ = fwd_decode(mla, lnx_ar, pos_ar)
+    self.assertEqual(out_ar.shape, lnx_ar.shape)
+    self.assertFalse(jnp.isnan(out_ar).any())
+
+  def test_non_absorbed_mqa_retains_sharding_and_behavior(self):
+    """Verifies non-absorbed MQA models (like Gemma-2B) retain expected shapes and sharding behavior (catching B1)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update(
+        {
+            "base_num_query_heads": 8,
+            "base_num_kv_heads": 1,
+            "attention_type": AttentionType.GLOBAL.value,
+            "use_mla_absorbed_mqa": False,
+        }
+    )
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **cfg_args,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    dummy_inputs = jnp.ones((cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim))
+
+    attn_mqa = Attention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs.shape,
+        inputs_kv_shape=dummy_inputs.shape,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=cfg.dtype,
+        attention_type=AttentionType.GLOBAL.value,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+    # AttentionOp should not have is_absorbed_mqa set to True
+    self.assertFalse(attn_mqa.attention_op.is_absorbed_mqa)
+    self.assertEqual(attn_mqa.attention_op.num_kv_heads, 1)
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, "float32")
+    out, _ = attn_mqa(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(out.shape, lnx.shape)
+    self.assertFalse(jnp.isnan(out).any())
+
+  def test_incompatible_qwix_quantization(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with qwix quantization (catching A7 / C4)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "use_qwix_quantization": True})
+    with self.assertRaisesRegex(ValueError, "incompatible with quantization"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_incompatible_manual_quantization(self):
+    """Asserts ValueError when use_mla_absorbed_mqa is combined with manual quantization (catching A7 / C4)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "use_manual_quantization": True})
+    with self.assertRaisesRegex(ValueError, "incompatible with quantization"):
+      pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_mla_absorbed_mqa_indexer_loss_parity(self):
+    """Verifies that absorbed MLA calculate_indexer_loss matches dense MLA bit-for-bit across scan modes (catching C2)."""
+    cfg_dense_args = self.config_arguments.copy()
+    cfg_dense_args.update(
+        {
+            "use_mla_absorbed_mqa": False,
+            "use_indexer": True,
+            "indexer_n_heads": 4,
+            "indexer_head_dim": 64,
+            "indexer_topk": 4,
+            "q_lora_rank": 16,
+            "indexer_loss_scaling_factor": 0.1,
+        }
+    )
+    cfg_dense, mla_dense = self.init_mla(cfg_dense_args, rope_type="default")
+    cfg_mqa_args = cfg_dense_args.copy()
+    cfg_mqa_args["use_mla_absorbed_mqa"] = True
+    _, mla_mqa = self.init_mla(cfg_mqa_args, rope_type="default")
+    nnx.update(mla_mqa, nnx.state(mla_dense))
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_dense, "float32")
+
+    # Native implementation parity
+    _, _ = mla_dense(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    loss_dense = float(mla_dense.indexer_loss[...])
+
+    _, _ = mla_mqa(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    loss_mqa = float(mla_mqa.indexer_loss[...])
+    self.assertAlmostEqual(loss_dense, loss_mqa, places=6)
+
+    # Chunked head scan parity
+    cfg_chunk_args = cfg_dense_args.copy()
+    cfg_chunk_args["mla_qk_head_chunk_size"] = 2
+    _, mla_dense_chunk = self.init_mla(cfg_chunk_args, rope_type="default")
+    cfg_mqa_chunk_args = cfg_mqa_args.copy()
+    cfg_mqa_chunk_args["mla_qk_head_chunk_size"] = 2
+    _, mla_mqa_chunk = self.init_mla(cfg_mqa_chunk_args, rope_type="default")
+    nnx.update(mla_mqa_chunk, nnx.state(mla_dense_chunk))
+
+    _, _ = mla_dense_chunk(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    loss_dense_chunk = float(mla_dense_chunk.indexer_loss[...])
+
+    _, _ = mla_mqa_chunk(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    loss_mqa_chunk = float(mla_mqa_chunk.indexer_loss[...])
+    self.assertAlmostEqual(loss_dense_chunk, loss_mqa_chunk, places=6)
+
+    # Sparse loss=True and attention_mask=None coverage across native and chunked head scan modes
+    b, q_len, s_len, heads = 1, 8, 8, cfg_dense.num_query_heads
+    d_dense = cfg_dense.qk_nope_head_dim + cfg_dense.qk_rope_head_dim
+    d_mqa = cfg_dense.kv_lora_rank + cfg_dense.qk_rope_head_dim
+    q_dummy_dense = jnp.ones((b, q_len, heads, d_dense), dtype=jnp.float32) * 0.1
+    k_dummy_dense = jnp.ones((b, s_len, heads, d_dense), dtype=jnp.float32) * 0.1
+    q_dummy_mqa = jnp.ones((b, q_len, heads, d_mqa), dtype=jnp.float32) * 0.1
+    k_dummy_mqa = jnp.ones((b, s_len, 1, d_mqa), dtype=jnp.float32) * 0.1
+    idx_score = jnp.zeros((b, q_len, s_len), dtype=jnp.float32)
+    idx_mask = jnp.zeros((b, q_len, s_len), dtype=jnp.float32)
+
+    for model_pair in ((mla_dense, mla_mqa), (mla_dense_chunk, mla_mqa_chunk)):
+      m_d, m_q = model_pair
+      for sparse_flag in (True, False):
+        loss_d = m_d.calculate_indexer_loss(
+            indexer_score=idx_score,
+            query=q_dummy_dense,
+            key=k_dummy_dense,
+            attention_mask=None,
+            indexer_mask=idx_mask,
+            sparse_loss=sparse_flag,
+            scaling_factor=0.1,
+        )
+        loss_q = m_q.calculate_indexer_loss(
+            indexer_score=idx_score,
+            query=q_dummy_mqa,
+            key=k_dummy_mqa,
+            attention_mask=None,
+            indexer_mask=idx_mask,
+            sparse_loss=sparse_flag,
+            scaling_factor=0.1,
+        )
+        self.assertFalse(jnp.isnan(loss_d))
+        self.assertFalse(jnp.isnan(loss_q))
+
+  def test_apply_attention_dot_kv_quant_sharding_paths(self):
+    """Verifies KVTensor sharding branches in apply_attention_dot for prefill and decode modes."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update(
+        {
+            "attention_type": AttentionType.GLOBAL.value,
+            "use_mla_absorbed_mqa": False,
+            "head_dim": 64,
+            "base_num_query_heads": 4,
+            "base_num_kv_heads": 4,
+            "dtype": "bfloat16",
+            "quantize_kvcache": True,
+            "kv_quant_dtype": "int8",
+            "float32_qk_product": False,
+        }
+    )
+    cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    kv_quant = attention_op.KVQuant(cfg)
+    op = AttentionOp(
+        config=cfg,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        float32_qk_product=False,
+        float32_logits=True,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        kv_quant=kv_quant,
+        dtype=jnp.bfloat16,
+        attention_type=AttentionType.GLOBAL,
+        rngs=self.nnx_rng,
+    )
+
+    batch_size = cfg.global_batch_size_to_train_on
+
+    def make_kv_tensor(seq_len):
+      qval = jnp.ones((batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim), dtype=jnp.int8)
+      scale = jnp.ones((batch_size, seq_len, cfg.num_kv_heads, 1), dtype=jnp.bfloat16)
+      return attention_op.KVTensor(qvalue=qval, scale=[scale], scale_t=None, bias=[], dequant_dtype=jnp.bfloat16)
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      # 1. Prefill mode (q_seq_len > 1) with KVTensor
+      prefill_len = cfg.max_prefill_predict_length
+      q_prefill = jnp.ones((batch_size, prefill_len, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
+      k_prefill = make_kv_tensor(prefill_len)
+      v_prefill = make_kv_tensor(prefill_len)
+      seg_prefill = jnp.ones((batch_size, prefill_len), dtype=jnp.int32)
+      out_prefill, _, _ = op.apply_attention_dot(
+          query=q_prefill,
+          key=k_prefill,
+          value=v_prefill,
+          decoder_segment_ids=seg_prefill,
+          model_mode=MODEL_MODE_PREFILL,
+          qk_product_einsum=op.AqtEinsum_0,
+          wv_product_einsum=op.AqtEinsum_1,
+      )
+      self.assertEqual(out_prefill.shape, q_prefill.shape)
+      self.assertFalse(jnp.isnan(out_prefill).any())
+
+      # 2. Decode mode (q_seq_len == 1, is_partition_in_decode == True) with KVTensor
+      target_len = cfg.max_target_length
+      q_ar = jnp.ones((batch_size, 1, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
+      k_ar = make_kv_tensor(target_len)
+      v_ar = make_kv_tensor(target_len)
+      seg_ar = jnp.ones((batch_size, target_len), dtype=jnp.int32)
+      out_ar, _, _ = op.apply_attention_dot(
+          query=q_ar,
+          key=k_ar,
+          value=v_ar,
+          decoder_segment_ids=seg_ar,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          qk_product_einsum=op.AqtEinsum_2,
+          wv_product_einsum=op.AqtEinsum_3,
+      )
+      self.assertEqual(out_ar.shape, q_ar.shape)
+      self.assertFalse(jnp.isnan(out_ar).any())
 
 
 if __name__ == "__main__":

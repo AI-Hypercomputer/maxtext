@@ -96,8 +96,8 @@ class MaxEngineTest(unittest.TestCase):
   # default. test_basic_prefill_nnx / test_basic_decode_nnx below cover the NNX path.
 
   def _init_nnx_pyconfig(self, **kwargs):
-    """Same as init_pyconfig but with the NNX flags turned on."""
-    return self.init_pyconfig(pure_nnx=True, enable_nnx=True, pure_nnx_decoder=True, **kwargs)
+    """Same as init_pyconfig (NNX is the only path now)."""
+    return self.init_pyconfig(**kwargs)
 
   def _build_nnx_params(self, cfg, mesh):
     """Materialize an NNX Transformer and return its nnx.Param state."""
@@ -173,7 +173,7 @@ class MaxEngineTest(unittest.TestCase):
       )
 
   def test_quantize_passes_gate_for_nnx(self):
-    """pure_nnx + quantization (convert-on-load) reaches the actual machinery in train mode."""
+    """NNX + quantization (convert-on-load) reaches the actual machinery in train mode."""
     # checkpoint_is_quantized defaults to False — full-precision on disk, AQT
     # quantizes per-forward against the loaded kernel (train mode).
     cfg = self._init_nnx_pyconfig(quantization="int8")
@@ -187,7 +187,7 @@ class MaxEngineTest(unittest.TestCase):
       pass  # any other failure (e.g. checkpoint not found) is fine for this test
 
   def test_load_pre_quantized_nnx_passes_quant_gate(self):
-    """pure_nnx + quantization + checkpoint_is_quantized=True clears the load gate."""
+    """NNX + quantization + checkpoint_is_quantized=True clears the load gate."""
     cfg = self._init_nnx_pyconfig(quantization="int8", checkpoint_is_quantized=True)
     engine = maxengine.MaxEngine(cfg, jax.devices())
     self.assertEqual(engine._nnx_quant_mode_str, "serve")  # pylint: disable=protected-access
@@ -219,7 +219,7 @@ class MaxEngineTest(unittest.TestCase):
     self.assertTrue(jnp.all(jnp.isfinite(prefill_result["logits"])))
 
   def test_lora_load_single_adapter_reaches_loader_on_nnx(self):
-    """pure_nnx + LoRA: load_single_adapter dispatches to the NNX loader.
+    """NNX + LoRA: load_single_adapter dispatches to the NNX loader.
 
     A nonexistent adapter path should raise FileNotFoundError from the
     loader itself. A NotImplementedError here would mean the dispatch

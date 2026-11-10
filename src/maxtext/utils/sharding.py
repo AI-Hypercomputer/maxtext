@@ -15,20 +15,23 @@
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText and sharding related."""
 
+import collections
 from collections.abc import Iterable
+import contextlib
 import inspect  # for debugging only
 from pathlib import Path
 
-from flax import linen as nn, nnx
+from flax import nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
+from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 import jax
 from jax.core import Tracer
+import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P, reshard
 from maxtext.common.common_types import ShardMode
 from maxtext.configs import pyconfig
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-import optax
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
 _ACTIVATION_SHARDINGS_DUMP = []
@@ -54,6 +57,71 @@ def get_input_data_sharding(config, mesh, rules=None):
 def get_logical_axis_rules():
   """Get the logical axis rules for the flax model"""
   return flax_get_logical_axis_rules()
+
+
+class _UnassignedAxis:
+  """Marks a logical dimension that no rule has mapped to a mesh axis yet."""
+
+  def __repr__(self):
+    return "UnassignedAxis"
+
+  def __bool__(self):
+    return False
+
+
+_UNASSIGNED_AXIS = _UnassignedAxis()
+
+
+def _mesh_axes_free(new_assignment, existing_assignments):
+  """True if none of the mesh axes in `new_assignment` is used in `existing_assignments`."""
+  new = set(jax.tree_util.tree_leaves(new_assignment))
+  existing = set(jax.tree_util.tree_leaves(existing_assignments))
+  new.discard(P.UNCONSTRAINED)
+  new.discard(None)
+  return not existing.intersection(new)
+
+
+def logical_to_spec(logical_names, rules=None):
+  """Maps logical dimension names to a PartitionSpec using the logical axis rules.
+
+  Rules are (logical name, mesh axes) pairs in priority order. A dimension takes
+  the first matching rule whose mesh axes no other dimension uses yet;
+  dimensions no rule assigns are left unsharded. Without `rules`, uses the ones
+  set by `logical_axis_rules`. Same behavior as Flax's
+  `flax.linen.logical_to_mesh_axes`.
+  """
+  if logical_names is None:
+    return None
+  if rules is None:
+    rules = get_logical_axis_rules()
+  counts = collections.Counter(logical_names)
+  # None and special values like PartitionSpec.UNCONSTRAINED may repeat.
+  dups = tuple(k for k, v in counts.items() if v > 1 and isinstance(k, str))
+  if dups:
+    raise ValueError(f"Unsupported: Dimensions {dups} occur more than once in array names.")
+  if not isinstance(rules, (tuple, list)):
+    raise ValueError("Unknown axis rule specification type.")
+  result = [(_UNASSIGNED_AXIS if isinstance(name, str) else name) for name in logical_names]
+  for rule_logical_name, rule_mesh_axes in rules:
+    if rule_logical_name in logical_names:
+      pos = logical_names.index(rule_logical_name)
+      if _mesh_axes_free(rule_mesh_axes, result) and result[pos] is _UNASSIGNED_AXIS:
+        result[pos] = rule_mesh_axes
+  return P(*(None if x is _UNASSIGNED_AXIS else x for x in result))
+
+
+def with_logical_constraint(x, logical_axes):
+  """Constrains `x` to `logical_axes` when a global mesh is set; otherwise returns `x`.
+
+  Port of `flax.linen.with_logical_constraint` for one array and the rules set by
+  `logical_axis_rules`. Like the Flax call it only applies under a global mesh
+  (`jax.set_mesh`); MaxEngine enters its mesh with `with mesh:`, so there it does
+  nothing. Use `maybe_shard_with_logical` for a constraint that always applies.
+  """
+  rules = get_logical_axis_rules()
+  if not rules or logical_axes is None or jax.sharding.get_abstract_mesh().empty:
+    return x
+  return jax.lax.with_sharding_constraint(x, logical_to_spec(logical_axes, rules))
 
 
 def _get_sharding_desc(inputs, extra_stack_level):
@@ -190,7 +258,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   if spec is None:
     return None
   new_spec = []  # type: ignore
-  for s in spec:
+  for s in spec.partitions:  # a spec carrying reduced/unreduced axes refuses iteration
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
@@ -207,6 +275,16 @@ def mesh_axes_for_dim(axis_names):
   if isinstance(axis_names, str):
     return (axis_names,)
   return tuple(axis for axis in axis_names if axis is not None)
+
+
+def batch_mesh_axes(mesh, rules=None):
+  """Returns the mesh axes of size > 1 that the activation batch dimension is sharded over."""
+  spec = logical_to_mesh_axes(("activation_batch",), mesh, rules=rules)
+  # A rule that resolves to a rank-0 spec leaves no dimension to read, so there is nothing the
+  # batch is sharded over.
+  if spec is None or not spec.partitions:
+    return frozenset()
+  return frozenset(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
 
 
 def mesh_axes_size(mesh, axes, *, label):
@@ -239,7 +317,7 @@ def adjust_pspec_for_indivisible_shapes(spec: P, shape: tuple[int, ...], mesh) -
   if spec is None or mesh is None or not shape:
     return spec
   new_spec = []
-  for i, s in enumerate(spec):
+  for i, s in enumerate(spec.partitions):  # a tagged spec refuses iteration
     if i >= len(shape) or s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)
     else:
@@ -359,10 +437,33 @@ def nnx_construct_named_sharding(abs_var_state: nnx.State, mesh) -> nnx.State:
   )
 
 
+class CompoundLogicalAxis(tuple):
+  """Logical name of one dimension sharded over several logical axes, e.g. CompoundLogicalAxis(("exp", "embed_moe")).
+
+  The dimension is sharded over the concatenation of the mesh axes each name resolves to. Only this type is resolved
+  this way: a plain tuple entry keeps Flax's meaning (already-physical mesh axes, passed through unchanged).
+  """
+
+
+# NNX walks every tuple as a pytree node, so JAX must flatten this subclass too (it treats unregistered ones as leaves).
+jax.tree_util.register_pytree_node(
+    CompoundLogicalAxis, lambda x: (tuple(x), None), lambda _, children: CompoundLogicalAxis(children)
+)
+
+
 def logical_to_mesh_axes(logical_names, mesh, rules=None):
   """Remove size one mesh axes given logical names."""
-  tensor_spec = nn.logical_to_mesh_axes(logical_names, rules=rules)
-  return remove_size_one_mesh_axis(tensor_spec, mesh)
+  if logical_names is None or not any(isinstance(name, CompoundLogicalAxis) for name in logical_names):
+    return remove_size_one_mesh_axis(logical_to_spec(logical_names, rules=rules), mesh)
+  groups = [tuple(name) if isinstance(name, CompoundLogicalAxis) else (name,) for name in logical_names]
+  # Resolve all names in one call so a mesh axis is still used by at most one logical name.
+  flat_spec = list(logical_to_spec(tuple(n for group in groups for n in group), rules=rules))
+  grouped = []
+  for group in groups:
+    resolved, flat_spec = flat_spec[: len(group)], flat_spec[len(group) :]
+    axes = [ax for item in resolved if item is not None for ax in ((item,) if isinstance(item, str) else item)]
+    grouped.append(None if not axes else axes[0] if len(axes) == 1 else tuple(axes))
+  return remove_size_one_mesh_axis(P(*grouped), mesh)
 
 
 def logical_to_mesh(tree, mesh, rules=None):
@@ -389,7 +490,90 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
 
 def create_sharding(mesh, logical_names, rules=None):
   """Create NamedSharding with given logical names."""
-  return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
+  spec = logical_to_mesh_axes(logical_names, mesh, rules=rules)
+  if spec is None:
+    spec = P()
+  return NamedSharding(mesh, spec)
+
+
+def vocab_parallel_one_hot(targets, num_classes, mesh, logical_axes, shard_mode, *, dtype=jnp.float32):
+  """One-hot `targets` directly in the logits' layout, without gathering the vocab axis.
+
+  `jax.nn.one_hot` grows the class axis out of `targets`, so it inherits the targets'
+  batch sharding and produces a [batch, length, vocab] array laid out across the wrong
+  mesh axis for a vocab-parallel LM head -- reconciling the two would cost an all-to-all
+  the size of the logits. Comparing a vocab-sharded iota against the targets builds the
+  same matrix shard-locally instead: every device only ever holds the columns of the
+  vocab it owns, and the only traffic is the gather of the integer targets, which are
+  vocab_size times smaller than what they expand into.
+
+  Args:
+    targets: integer label array, [batch, length].
+    num_classes: vocabulary size.
+    mesh: JAX device mesh.
+    logical_axes: logical axes of the logits this will be multiplied with.
+    shard_mode: auto or explicit shard mode.
+    dtype: dtype of the returned one-hot array.
+
+  Returns:
+    A [batch, length, num_classes] one-hot array sharded like the logits.
+  """
+  out_sharding = create_sharding(mesh, logical_axes)
+  targets = maybe_shard_with_pspec(targets, P(*out_sharding.spec[: targets.ndim]), mesh, shard_mode)
+  shape = (*targets.shape, num_classes)
+  if shard_mode == ShardMode.EXPLICIT:
+    vocab_ids = jax.lax.broadcasted_iota(targets.dtype, shape, targets.ndim, out_sharding=out_sharding)
+  else:
+    # `out_sharding` only accepts explicit mesh axes, so under auto the iota is laid out
+    # by constraining it after the fact and letting GSPMD sink the sharding into it.
+    vocab_ids = maybe_shard_with_pspec(
+        jax.lax.broadcasted_iota(targets.dtype, shape, targets.ndim), out_sharding.spec, mesh, shard_mode
+    )
+  return (vocab_ids == targets[..., None]).astype(dtype)
+
+
+def lm_head_logical_axes(vocab_parallel: bool):
+  """Logical axes for the untied LM head, in the orientation `lm_head_fsdp_as_vocab_tp` selects.
+
+  The default orientation shards the [embed, vocab] kernel on the FSDP axes along
+  `embed`, so every step all-gathers the whole kernel forward and reduce-scatters a
+  same-sized weight gradient back. The vocab-parallel orientation replicates `embed`
+  and puts the FSDP axes on `vocab` instead: both collectives move onto the hidden
+  state, which carries batch*length*emb_dim elements against the kernel's
+  emb_dim*vocab_size, and the weight gradient becomes purely local. The price is that
+  the logits come out sharded on vocab, so the loss has to build its one-hot
+  targets in that layout (see `vocab_parallel_one_hot` above).
+
+  Args:
+    vocab_parallel: whether to return the vocab-parallel orientation.
+
+  Returns:
+    A (input_axes, kernel_axes, output_axes) triple of logical-axis tuples.
+    `input_axes` is None in the default orientation, where the head takes the hidden
+    state in whatever layout the final norm produced it.
+  """
+  if vocab_parallel:
+    return (
+        ("activation_embed_and_logits_batch_no_fsdp", "activation_length", "activation_embed"),
+        ("embed_vocab_replicated", "vocab_fsdp"),
+        ("activation_embed_and_logits_batch_no_fsdp", "activation_length", "activation_vocab_fsdp"),
+    )
+  return (
+      None,
+      ("embed_vocab", "vocab"),
+      ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+  )
+
+
+def _truncate_pspec(pspec: P, out_ndim: int) -> P:
+  """Drop trailing entries of a PartitionSpec, keeping any unreduced/reduced annotation.
+
+  Slicing a PartitionSpec directly raises once it carries an unreduced/reduced set — and
+  the annotation describes a cross-replica state of the whole array, not of a particular
+  dimension, so it has to survive the truncation. Gradient accumulation marks gradients
+  unreduced over "data" before resharding them, which is how such specs get here.
+  """
+  return P(*pspec.partitions[:out_ndim], unreduced=pspec.unreduced, reduced=pspec.reduced)
 
 
 def truncate_out_sharding(out_sharding, out_ndim: int):
@@ -400,11 +584,11 @@ def truncate_out_sharding(out_sharding, out_ndim: int):
     if len(out_sharding.spec) > out_ndim:
       return NamedSharding(
           out_sharding.mesh,
-          P(*out_sharding.spec[:out_ndim]),
+          _truncate_pspec(out_sharding.spec, out_ndim),
       )
   elif isinstance(out_sharding, P):
     if len(out_sharding) > out_ndim:
-      return P(*out_sharding[:out_ndim])
+      return _truncate_pspec(out_sharding, out_ndim)
   elif isinstance(out_sharding, (tuple, list)):
     if len(out_sharding) > out_ndim:
       return tuple(out_sharding[:out_ndim])
@@ -428,7 +612,10 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
     A set of strings, where each string is a mesh axis name used by the
     tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
-  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
+  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')). Read `.partitions`: a spec
+  # carrying reduced/unreduced axes refuses iteration.
+  if isinstance(tensor_sharding_spec, P):
+    tensor_sharding_spec = tensor_sharding_spec.partitions
   tensor_sharding_spec = sum(
       [
           [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
@@ -662,7 +849,12 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     raise AssertionError(f"Could not shard {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
   pspec = sharding.spec
 
-  if "data" in jax.tree.leaves(pspec):
+  # `tuple(pspec)`, not `pspec`: a PartitionSpec is a pytree *leaf*, so flattening one gives
+  # back the spec itself and this guard never fired. Its entries are what have to be walked,
+  # and they nest -- a dimension sharded over two axes is a tuple. Without this, a leaf
+  # already sharded over "data" gets a second one and `NamedSharding` rejects the result
+  # outright (`DuplicateSpecError: P(('data', 'data'), None)`).
+  if "data" in jax.tree.leaves(tuple(pspec)):
     return sharding
 
   for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
@@ -698,26 +890,7 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       - updated_state_mesh_shardings: State mesh shardings with updated params field
         (unchanged if shard_optimizer_over_data is False)
   """
-  if config.pure_nnx:
-    return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
-  prev_params_shardings = state_mesh_shardings.params
-  if config.shard_optimizer_over_data:
-    if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
-      sharded_fp32_params = state_mesh_shardings.opt_state.mu
-    elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
-        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
-    ):
-      sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
-    else:
-      raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():  # pyrefly: ignore[missing-attribute]
-      # When quantization=fp8 is enabled the sharded_fp32_params
-      # are not wrapped in `params`. Here we wrap them back.
-      sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)  # pyrefly: ignore[bad-unpacking]
-    )  # pyrefly: ignore[bad-unpacking]
-  return prev_params_shardings, state_mesh_shardings
+  return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
 
 
 def maybe_update_params_sharding_with_opt_nnx(
@@ -779,43 +952,43 @@ def maybe_update_params_sharding_with_opt_nnx(
     # state_mesh_shardings.optimizer contains the sharding for the nnx.Optimizer
     opt_state = state_mesh_shardings.optimizer.opt_state
 
-    def find_adam_mu(obj):
-      # 1. Direct hit on ScaleByAdamState (Linen path or unflattened NNX)
-      if isinstance(obj, optax.ScaleByAdamState):
-        return obj.mu
-
-      # 2. Check for flattened ScaleByAdamState (nnx.State/dict)
-      # These nodes contain 'mu', 'nu', and 'count' as keys.
-      if hasattr(obj, "__getitem__") and "mu" in obj and "nu" in obj:
-        return obj["mu"]
-
-      # 3. Recursive search through containers (nnx.State, dict, list, tuple)
-      values = None
-      if hasattr(obj, "values"):  # Handles nnx.State and dict
-        values = obj.values()
+    def collect_mu_trees(obj, out):
+      if isinstance(obj, nnx.Variable):
+        return
+      if hasattr(obj, "get") and "mu" in obj:
+        out.append(obj["mu"])
+      elif hasattr(obj, "values"):
+        for v in obj.values():
+          collect_mu_trees(v, out)
       elif isinstance(obj, (list, tuple)):
-        values = obj
+        for v in obj:
+          collect_mu_trees(v, out)
 
-      if values:
-        for v in values:
-          res = find_adam_mu(v)
-          if res is not None:
-            return res
-      return None
-
-    sharded_fp32_params = find_adam_mu(opt_state)
+    mu_trees = []
+    collect_mu_trees(opt_state, mu_trees)
+    sharded_fp32_params = mu_trees or None
   if sharded_fp32_params is None:
     actual_type = type(state_mesh_shardings.optimizer.get("opt_state", "None"))
-    raise NotImplementedError(f"Could not find Adam optimizer state in: {actual_type}")
+    raise NotImplementedError(f"Could not find Adam/Muon optimizer state in: {actual_type}")
 
   # Update model parameter sharding to match the mu (first moment) sharding.
   # This ensures parameter sharding is consistent with the Zero-1 distributed layout.
   # Build a path → new_PS lookup from sharded_fp32_params (mu), then update model_shardings
   # at those paths while preserving rngs and any other non-Param variables.
-  mu_leaves_with_paths = list(
-      jax.tree_util.tree_leaves_with_path(sharded_fp32_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
-  )
-  mu_lookup = {path: mu_var.get_value() for path, mu_var in mu_leaves_with_paths}
+  mu_lookup = {}
+  for mu_tree in mu_trees:
+    for path, mu_var in jax.tree_util.tree_leaves_with_path(mu_tree, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+      if not isinstance(mu_var, nnx.Variable):
+        continue
+      mu_value = mu_var.get_value()
+      # A partitioned optimizer (e.g. Muon: a 'muon' branch owning the 2D
+      # weights plus an 'adam' fallback owning the rest) holds one param-mirroring mu
+      # per branch, with optax MaskedNode at every position the branch does NOT own —
+      # so each param's sharding must come from whichever branch actually tracks it,
+      # and MaskedNode placeholders must never overwrite a real param sharding.
+      if not isinstance(mu_value, NamedSharding):
+        continue  # skip MaskedNode / other non-sharding placeholders
+      mu_lookup.setdefault(path, mu_value)
 
   def _update_model_var(path, var):
     if path in mu_lookup:
@@ -851,8 +1024,6 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   """
   if not config.shard_optimizer_over_data:
     return state_mesh_shardings
-  if not config.pure_nnx:
-    return state_mesh_shardings.replace(params=params_shardings)
   # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
   # types) and overlay params_shardings under input_state.model.
   input_state = jax.tree_util.tree_map(
@@ -872,6 +1043,82 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   return input_state
 
 
+def _is_typed_key(x) -> bool:
+  return isinstance(x, jax.Array) and jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+
+
+def _raw_key_sharding(raw: jax.Array, key_sharding: NamedSharding, key_ndim: int) -> NamedSharding:
+  """Sharding for `jax.random.key_data(key)`: the key's spec, with the trailing key-data dims replicated."""
+  spec = tuple(key_sharding.spec) + (None,) * (key_ndim - len(key_sharding.spec))
+  target = NamedSharding(
+      key_sharding.mesh, P(*spec, *([None] * (raw.ndim - key_ndim))), memory_kind=key_sharding.memory_kind
+  )
+  if (
+      getattr(raw, "_committed", False)
+      and isinstance(raw.sharding, NamedSharding)
+      and raw.sharding.is_equivalent_to(target, raw.ndim)
+  ):
+    return raw.sharding
+  return target
+
+
+def _device_put_with_raw_keys(state, state_mesh_shardings):
+  """`jax.device_put` that moves typed PRNG key leaves as raw key data and re-wraps them."""
+  leaves, treedef = jax.tree.flatten(state)
+  targets = treedef.flatten_up_to(state_mesh_shardings)
+  if not any(_is_typed_key(x) and isinstance(s, NamedSharding) for x, s in zip(leaves, targets)):
+    return jax.device_put(state, state_mesh_shardings)
+
+  key_impls = {}
+  put_leaves, put_targets = [], []
+  for i, (x, s) in enumerate(zip(leaves, targets)):
+    if _is_typed_key(x) and isinstance(s, NamedSharding):
+      raw = jax.random.key_data(x)
+      key_impls[i] = jax.random.key_impl(x)
+      put_leaves.append(raw)
+      put_targets.append(_raw_key_sharding(raw, s, x.ndim))
+    else:
+      put_leaves.append(x)
+      put_targets.append(s)
+  out = jax.device_put(put_leaves, put_targets)  # One call for every leaf, as without typed keys.
+  out = [jax.random.wrap_key_data(y, impl=key_impls[i]) if i in key_impls else y for i, y in enumerate(out)]
+  return jax.tree.unflatten(treedef, out)
+
+
+def reshard_train_state(state, state_mesh_shardings, enable_single_controller: bool):
+  """Reshards a train state to `state_mesh_shardings`.
+
+  Under a single controller (Pathways), `jax.device_put` of a distributed state
+  to a new sharding can stage the data through the controller host (at 3,072 TPU
+  v4 chips the controller RSS grew past 187 GB before compilation). A jitted
+  identity with `out_shardings` performs the same reshard on the accelerators.
+
+  Multi-controller runs use `jax.device_put`. The RNG streams `scan_layers`
+  stacks along the layer axis are laid out `P(None,)` while their target is the
+  equivalent `P()`: `jax.device_put` on a typed PRNG key array misses its
+  same-sharding no-op fast path when the `PartitionSpec` spelling differs and,
+  with several JAX processes, raises `ValueError` ("device_put's second argument
+  must be a Device or a Sharding which represents addressable devices"). Typed
+  keys are therefore moved as raw key data (`jax.random.key_data`) and
+  re-wrapped with their original PRNG impl; every other leaf goes through the
+  same single `jax.device_put`. Unlike a jitted identity, this does not allocate
+  new buffers for leaves whose sharding is unchanged. Every process must make
+  this call.
+
+  Args:
+    state: PyTree of train state arrays to reshard.
+    state_mesh_shardings: Target PyTree of `NamedSharding` specs matching
+      `state`.
+    enable_single_controller: Whether Pathways single-controller mode is active.
+
+  Returns:
+    The resharded train state PyTree matching `state_mesh_shardings`.
+  """
+  if enable_single_controller:
+    return jax.jit(lambda s: s, out_shardings=state_mesh_shardings)(state)
+  return _device_put_with_raw_keys(state, state_mesh_shardings)
+
+
 def logical_axis_rules_pp_act_as_dp(logical_rules):
   """Add stage as a physical axes before data for each rule, so stage acts just like data instead of PP.
   This is used when we want to pipeline only a subset of layers, and leave the rest like DP.
@@ -888,6 +1135,18 @@ def logical_axis_rules_pp_act_as_dp(logical_rules):
       new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
     new_rules.append((key, new_physical_axes))
   return tuple(new_rules)
+
+
+def pp_act_as_dp_construction_rules(config):
+  """Context to construct the modules that run outside the pipeline, under the PP-as-DP rules they run with.
+
+  Under explicit sharding modules resolve some activation shardings once, at construction (e.g. the RoPE frequency
+  sharding), so a module called under `logical_axis_rules_pp_act_as_dp` must be built under it too. Auto mode leaves
+  those shardings unset (None): no-op.
+  """
+  if config.shard_mode != ShardMode.EXPLICIT or not getattr(config, "using_pipeline_parallelism", False):
+    return contextlib.nullcontext()
+  return flax_logical_axis_rules(logical_axis_rules_pp_act_as_dp(config.logical_axis_rules))
 
 
 def get_formatted_sharding_annotations(params, mesh=None):
@@ -955,6 +1214,30 @@ def get_formatted_sharding_annotations(params, mesh=None):
 
 
 FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
+
+# Mesh axes that act as FSDP weight-sharding axes when they follow `fsdp` or `fsdp_transpose` on
+# the same weight dimension (e.g. `embed` / `embed_attn` / `q_lora` / `kv_lora` in `base.yml`,
+# where `expert` and `context` co-shard non-routed weights alongside `fsdp`).
+# Under the `ep-as-dp` custom rule (`custom_mesh_and_rule=ep-as-dp`), non-routed weights are
+# already replicated over `expert`, so `expert` is absent from their PartitionSpec and including
+# it here is a safe no-op, while routed MoE weights have `expert` alone on the `exp` dimension
+# (with no FSDP axis) and keep `expert` sharded.
+FSDP_CO_AXES = FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert")
+
+
+def fsdp_axes_for_dim(entry):
+  """Returns the mesh axes in a PartitionSpec entry that should be gathered over FSDP.
+
+  If the dimension contains at least one axis in `FSDP_MESH_AXES`, returns all axes in
+  `FSDP_CO_AXES` from the first FSDP axis onward. Dimensions without an FSDP axis (such as the
+  MoE routed expert dimension `'expert'`) and axes preceding the first FSDP axis (such as
+  `'expert'` in `('expert', 'fsdp')`) are left untouched.
+  """
+  axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+  first_fsdp = next((i for i, a in enumerate(axes) if a in FSDP_MESH_AXES), None)
+  if first_fsdp is None:
+    return ()
+  return tuple(a for a in axes[first_fsdp:] if a in FSDP_CO_AXES)
 
 
 def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
@@ -1067,6 +1350,35 @@ def remove_mesh_axes_from_sharding(sharding_tree, axes_to_remove):
       return jax.sharding.NamedSharding(
           named_sharding.mesh,
           remove_mesh_axes_from_partition_spec(named_sharding.spec, axes_to_remove),
+      )
+    return named_sharding
+
+  return jax.tree.map(_peel, sharding_tree)
+
+
+def remove_fsdp_from_partition_spec(pspec):
+  """Return `pspec` with each dimension's FSDP (and co-sharded) axes removed.
+
+  Unlike `remove_mesh_axes_from_partition_spec(pspec, FSDP_CO_AXES)`, which strips `FSDP_CO_AXES`
+  unconditionally from every dimension (and would strip `'expert'` from the MoE routed expert
+  dimension), this only peels co-sharded axes (`'context'`, `'context_usp_ulysses'`, `'expert'`)
+  on dimensions where they follow an `FSDP_MESH_AXES` axis (`'fsdp'` or `'fsdp_transpose'`).
+  """
+  for i, entry in enumerate(pspec):
+    to_remove = fsdp_axes_for_dim(entry)
+    if to_remove:
+      pspec = remove_mesh_axes_from_partition_spec(pspec, to_remove, dims=(i,))
+  return pspec
+
+
+def remove_fsdp_from_sharding(sharding_tree):
+  """Recursively traverses a sharding tree removing each dimension's FSDP (and co-sharded) axes."""
+
+  def _peel(named_sharding):
+    if isinstance(named_sharding, jax.sharding.NamedSharding):
+      return jax.sharding.NamedSharding(
+          named_sharding.mesh,
+          remove_fsdp_from_partition_spec(named_sharding.spec),
       )
     return named_sharding
 

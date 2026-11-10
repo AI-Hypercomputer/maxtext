@@ -30,8 +30,8 @@ import pytest
 from tempfile import gettempdir, NamedTemporaryFile
 
 
-from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path
 
 # Enable JAX compilation cache for testing to speed up AOT compilation
@@ -45,6 +45,40 @@ except Exception:  # pylint: disable=broad-exception-caught
 @pytest.mark.tpu_backend
 class TrainCompile(parameterized.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
+
+  # Directories the tests below write their `compiled_trainstep_file` into (literal "/tmp/test_*" or gettempdir()).
+  _TMP_DIRS = tuple(sorted({"/tmp", gettempdir()}))
+
+  @staticmethod
+  def _tmp_test_files():
+    files = set()
+    for d in filter(os.path.isdir, TrainCompile._TMP_DIRS):
+      files.update(e.path for e in os.scandir(d) if e.name.startswith("test_") and e.is_file(follow_symlinks=False))
+    return files
+
+  def setUp(self):
+    """Registers a cleanup that removes the compiled-trainstep files this test writes to the temp dirs.
+
+    Every AOT test here serializes its executable to a literal `/tmp/test_*` or `gettempdir()/test_*` path
+    (tens to hundreds of MB each) and never reads it back or deletes it; a CI shard runs ~18 of them on a runner
+    whose /tmp lives on the same ~98 GB disk as the checkout, wheel build and pip/JAX caches. Snapshot the temp dirs
+    now and, after the whole test (addCleanup, so a failing test is cleaned too), remove any `test_*` regular file
+    that appeared. Only this module writes `test_*` into the temp dirs. Under pytest-xdist each worker keeps its own
+    snapshot, so a worker may unlink a sibling's file while it is still being written; that is harmless because
+    nothing here opens the file after `save_compiled` returns. Files that pre-existed (or were already removed by a
+    sibling) are left alone.
+    """
+    super().setUp()
+    before = self._tmp_test_files()
+
+    def _remove_new_tmp_files():
+      for path in self._tmp_test_files() - before:
+        try:
+          os.remove(path)
+        except FileNotFoundError:
+          pass
+
+    self.addCleanup(_remove_new_tmp_files)
 
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
@@ -127,6 +161,7 @@ class TrainCompile(parameterized.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=2",
+            "per_device_batch_size=1",
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",
@@ -286,6 +321,7 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "ici_context_parallelism=4",
             "global_parameter_scale=32",
+            "base_num_decoder_layers=2",
             "per_device_batch_size=0.25",
             "max_target_length=65536",
             "allow_split_physical_axes=true",
@@ -327,6 +363,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "ici_expert_parallelism=8",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
             "megablox=False",
             "sparse_matmul=False",
             "capacity_factor=1",
@@ -416,6 +454,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=True",
@@ -427,6 +468,68 @@ class TrainCompile(parameterized.TestCase):
             "dtype=bfloat16",
         )
     )
+
+  def test_moe_x_sorted_device(self):
+    """moe_x_sorted=device under the custom remat policy on the ring-of-experts sparse_matmul path."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_x_sorted_device.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-16",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
+            "ici_expert_parallelism=4",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "use_ring_of_experts=True",
+            "use_random_routing=True",
+            "attention=flash",
+            "dtype=bfloat16",
+            "remat_policy=custom",
+            "moe_x_sorted=device",
+        )
+    )
+
+  def test_moe_x_sorted_rejects_emb_chunking(self):
+    """moe_x_sorted != remat is rejected with num_moe_emb_chunks > 0, whose path does not tag the routed input."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_x_sorted_emb_chunking.pickle")
+    with self.assertRaisesRegex(ValueError, "moe_x_sorted=device is not supported with num_moe_emb_chunks"):
+      train_compile_main(
+          (
+              "",
+              get_test_config_path(),
+              f"compiled_trainstep_file={compiled_trainstep_file}",
+              "compile_topology=v5p-8",
+              "use_iota_embed=true",
+              "compile_topology_num_slices=1",
+              "model_name=deepseek3-test",
+              "ici_expert_parallelism=4",
+              "sparse_matmul=True",
+              "megablox=False",
+              "use_tokamax_gmm=True",
+              "use_gmm_v2=True",
+              "num_moe_emb_chunks=7",
+              "use_ring_of_experts=True",
+              "per_device_batch_size=2",
+              "max_target_length=1024",
+              "attention=flash",
+              "dtype=bfloat16",
+              "weight_dtype=bfloat16",
+              "scan_layers=True",
+              "remat_policy=custom",
+              "moe_x_sorted=device",
+          )
+      )
 
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
@@ -494,10 +597,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_moe_pp_bf16(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
     train_compile_main(
@@ -543,6 +643,31 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_moe_deepseek_prefetch_fsdp_weights(self):
+    """AOT test for FSDP weight prefetching (prefetch_fsdp_weights) on a scanned DeepSeek MoE model."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_prefetch_fsdp_weights.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-tiny",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=1",
+            "max_target_length=128",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "prefetch_fsdp_weights=True",
+        )
+    )
+
   def test_moe_emb_chunking(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking.pickle")
@@ -555,6 +680,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=False",
@@ -583,6 +711,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=False",
@@ -600,6 +731,7 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.integration_test
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
@@ -612,6 +744,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=1",
@@ -647,10 +782,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_moe_deepseek_pipeline_subset(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
         (
@@ -673,10 +805,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_pipeline_subset(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Test not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Not supported for the NNX decoder.")
     compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
     train_compile_main(
         (
@@ -725,6 +854,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
@@ -746,6 +877,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
@@ -754,6 +887,37 @@ class TrainCompile(parameterized.TestCase):
             "sparse_matmul=False",
             "capacity_factor=-1",
             "attention=flash",
+        )
+    )
+
+  @parameterized.named_parameters(
+      ("expert_parallelism", "ici_expert_parallelism=8"),
+      ("tensor_parallelism", "ici_tensor_parallelism=8"),
+  )
+  def test_moe_gpt_oss_20b_explicit_sharding(self, parallelism):
+    """AOT test for gpt-oss under explicit sharding, on the sparse_matmul path."""
+    compiled_trainstep_file = f"/tmp/test_moe_gpt_oss_20b_explicit_sharding_{parallelism}.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-16",
+            "compile_topology_num_slices=1",
+            "model_name=gpt-oss-20b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            "ici_fsdp_parallelism=1",
+            parallelism,
         )
     )
 
@@ -767,7 +931,31 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=gpt3-6b",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
             "per_device_batch_size=1",
+        )
+    )
+
+  @parameterized.named_parameters(("fused_qkv", True), ("unfused_qkv", False))
+  def test_gpt3_6b_explicit_sharding(self, fused_qkv):
+    """AOT test for gpt3 under explicit sharding, with tensor parallelism on the heads axis."""
+    compiled_trainstep_file = f"/tmp/test_gpt3_6b_explicit_sharding_{fused_qkv}"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=gpt3-6b",
+            "per_device_batch_size=1",
+            "shard_mode=explicit",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
+            f"fused_qkv={fused_qkv}",
+            "ici_fsdp_parallelism=1",
+            "ici_tensor_parallelism=4",
         )
     )
 
@@ -797,6 +985,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
             "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1",
             "max_target_length=1024",
         )
@@ -828,27 +1018,13 @@ class TrainCompile(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "linen_scanned_dot_product",
+          "testcase_name": "scanned_dot_product",
           "scan_layers": "true",
-          "enable_nnx": "False",
           "attention": "dot_product",
       },
       {
-          "testcase_name": "linen_scanned_flash",
+          "testcase_name": "scanned_flash",
           "scan_layers": "true",
-          "enable_nnx": "False",
-          "attention": "flash",
-      },
-      {
-          "testcase_name": "nnx_scanned_dot_product",
-          "scan_layers": "true",
-          "enable_nnx": "True",
-          "attention": "dot_product",
-      },
-      {
-          "testcase_name": "nnx_scanned_flash",
-          "scan_layers": "true",
-          "enable_nnx": "True",
           "attention": "flash",
       },
   )
@@ -856,11 +1032,10 @@ class TrainCompile(parameterized.TestCase):
   def test_deepseek4(
       self,
       scan_layers,
-      enable_nnx,
       attention="dot_product",
   ):
-    # test deepseek4 compile across Linen and NNX
-    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{enable_nnx}_{attention}.pickle"
+    # test deepseek4 compile.
+    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}_{attention}.pickle"
     train_compile_main(
         (
             "",
@@ -885,9 +1060,6 @@ class TrainCompile(parameterized.TestCase):
             "sa_block_kv_dq=128",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
-            f"enable_nnx={enable_nnx}",
-            f"pure_nnx={enable_nnx}",
-            f"pure_nnx_decoder={enable_nnx}",
             "routed_bias=False",
             "override_model_config=True",
         )
@@ -904,13 +1076,14 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
-            "per_device_batch_size=4",
+            "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
             # override
             "override_model_config=True",
+            "base_num_decoder_layers=2",
             "engram_layers=[]",
             # dense warmup
             "indexer_sparse_training=False",
@@ -930,13 +1103,14 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
-            "per_device_batch_size=4",
+            "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
             # override
             "override_model_config=True",
+            "base_num_decoder_layers=2",
             "engram_layers=[]",
             # sparse training
             "indexer_sparse_training=True",
@@ -972,13 +1146,14 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
-            "per_device_batch_size=4",
+            "per_device_batch_size=1",
             "scan_layers=True",
             "attention=flash",
             "use_tokamax_splash=True",
             "max_target_length=1024",
             # override
             "override_model_config=True",
+            "base_num_decoder_layers=2",
             "mhc_expansion_rate=4",
             "engram_layers=[]",
         )
@@ -1007,10 +1182,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_circular_pipeline_ag_per_repeat_ep_ds(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_ag_per_repeat_ep_ds.pickle")
     train_compile_main(
@@ -1050,6 +1222,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
@@ -1082,6 +1257,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
@@ -1111,6 +1289,8 @@ class TrainCompile(parameterized.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
             "base_num_decoder_layers=2",
             "per_device_batch_size=2",
             "max_target_length=1024",
@@ -1130,12 +1310,174 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=qwen3.5-397b-a17b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "sparse_matmul=True",
             "megablox=True",
             "attention=flash",
             "use_tokamax_splash=True",
+        )
+    )
+
+  def test_qwen3_8(self):
+    """AOT test for qwen3-8 at full width, truncated to two 4-layer [GDN x3, full-attention] cycles.
+
+    Needs expert parallelism: under pure FSDP, gathering one layer's 512 routed experts in fp32 exceeds v5p HBM.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_8.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.8-2.4t-a95b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
+            "ici_expert_parallelism=8",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+        )
+    )
+
+  def test_qwen3_next_explicit_sharding(self):
+    """AOT test for qwen3-next under explicit sharding, at FSDP 32 x expert 8.
+
+    `Qwen3NextScannableBlock` nests two `jax.lax.scan`s, whose carry layout has
+    to stay
+    invariant across iterations; that only holds if the decoder layer returns
+    the
+    layout it was handed.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+        )
+    )
+
+  def test_qwen3_next_explicit_sharding_zero1(self):
+    """AOT test for qwen3-next under explicit sharding with ZeRO-1 and gradient accumulation."""
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=2",
+            "shard_optimizer_over_data=True",
+        )
+    )
+
+  def test_qwen3_5_explicit_sharding(self):
+    """AOT test for qwen3-5 under explicit sharding, at FSDP 32 x expert 8.
+
+    Explicit sharding type-checks every operation's layout instead of letting
+    GSPMD
+    infer one, so a missing `out_sharding` fails the trace here rather than
+    silently
+    costing a collective at a scale a real test cannot reach.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_5_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-397b-a17b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            # Qwen3.5 defaults to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
+        )
+    )
+
+  def test_qwen3_5_explicit_sharding_zero1(self):
+    """AOT test for qwen3-5 under explicit sharding with ZeRO-1 and gradient accumulation.
+
+    ZeRO-1 shards the optimizer moments over "data", so the parameters are
+    all-gathered
+    in bf16 once before the accumulation scan rather than once per microbatch;
+    that
+    reshard only type-checks if the decoder pins its activation layouts. Four
+    layers is
+    one full `inhomogeneous_layer_cycle_interval`, which covers both attention
+    variants
+    while staying small enough to hold data-parallel replicas of the parameters.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_5_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-35b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "shard_mode=explicit",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=2",
+            "shard_optimizer_over_data=True",
+            "tokenizer_type=tiktoken",
+            (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
         )
     )
 
@@ -1190,20 +1532,235 @@ class TrainCompile(parameterized.TestCase):
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",
-            "ici_data_parallelism=4",
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
             "shard_optimizer_over_data=true",
             "shard_mode=explicit",
         )
     )
 
-  def test_vocab_tiling_bf16_nnx(self):
-    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp).
+  def test_qwen2_explicit_sharding_zero1(self):
+    """AOT test for Qwen2 under explicit sharding with ZeRO-1 and gradient accumulation.
 
-    Sets `pure_nnx`/`enable_nnx`/`pure_nnx_decoder` explicitly so the NNX AOT
-    path is covered regardless of the default values. Once those defaults flip
-    to True, `test_vocab_tiling_bf16` above will already exercise this same
-    path via defaults.
+    Explicit sharding type-checks every operation's layout rather than letting GSPMD infer
+    one, so a missing `out_sharding` in the Qwen2 decoder fails the trace here rather than
+    silently costing a collective at a scale we cannot reach in a test.
     """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen2_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=qwen2.5-7b",
+            "override_model_config=True",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "attention=flash",
+            "shard_mode=explicit",
+            # ZeRO-1 needs a "data" axis to shard the moments over, and MaxTextConfig
+            # rejects combining it with FSDP.
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            # The Qwen2.5 configs default to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
+  def test_gemma4_dense_explicit_sharding(self):
+    """AOT test for gemma4-31b at full size under explicit sharding.
+
+    The dense Gemma 4 block scans five local-sliding layers and one global layer with a
+    wider head, so this checks that both attention variants and the surrounding norms
+    agree on a layout at a scale a test cannot run.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_gemma4_dense_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=gemma4-31b",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=32",
+            "ici_tensor_parallelism=4",
+            "attention=flash",
+            "shard_mode=explicit",
+            "tokenizer_type=sentencepiece",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
+        )
+    )
+
+  def test_gemma4_moe_explicit_sharding(self):
+    """AOT test for gemma4-26b at full size under explicit sharding.
+
+    Covers the Gemma 4 MoE block -- the scaled router, the unscaled gate norm and the
+    shared expert -- at FSDP 32 x expert 8.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_gemma4_moe_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=gemma4-26b",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=32",
+            "ici_expert_parallelism=8",
+            # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            "tokenizer_type=sentencepiece",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
+        )
+    )
+
+  def test_gemma4_small_explicit_sharding(self):
+    """AOT test for gemma4-e4b under explicit sharding.
+
+    The E2B/E4B block adds per-layer embeddings and KV sharing on top of gemma4, and
+    builds its stack in a Python loop rather than a scan.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_gemma4_small_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=1",
+            "model_name=gemma4-e4b",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            # E4B has two KV heads, which is as far as the tensor axis can split them,
+            # and a 4x4x2 physical mesh is the smallest one that can carry a two-way axis.
+            "ici_fsdp_parallelism=16",
+            "ici_tensor_parallelism=2",
+            "scan_layers=False",
+            "attention=flash",
+            "shard_mode=explicit",
+            "tokenizer_type=sentencepiece",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
+        )
+    )
+
+  def test_kimi_k2_explicit_sharding(self):
+    """AOT test for Kimi-K2 at full size under explicit sharding.
+
+    Kimi-K2 runs on the deepseek decoder block, so this is the large-scale explicit-sharding
+    check for MLA attention and the shared-expert, sigmoid-routed MoE. The mesh is FSDP 64 x
+    expert 8, both of which have to divide the v5p-1024 physical mesh.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_kimi_k2_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-1024",
+            "compile_topology_num_slices=1",
+            "model_name=kimi-k2-1t",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=64",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            # Kimi-K2 defaults to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
+  def test_llama4_explicit_sharding_zero1(self):
+    """AOT test for Llama4 under explicit sharding with ZeRO-1 and gradient accumulation.
+
+    Explicit sharding type-checks every operation's layout rather than letting GSPMD infer
+    one, so a missing `out_sharding` in the Llama4 decoder fails the trace here rather than
+    silently costing a collective at a scale we cannot reach in a test.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_llama4_explicit_sharding_zero1.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=llama4-17b-16e",
+            "override_model_config=True",
+            # ZeRO-1 replicates the parameters over the data axis, so the full 16-expert
+            # model does not fit in HBM. Keep four experts and eight layers, which with a
+            # MoE step of 2 still covers both the dense and the MoE layer variant.
+            "base_num_decoder_layers=8",
+            "interleave_moe_layer_step=2",
+            "num_experts=4",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "attention=flash",
+            "remat_policy=full",
+            "shard_mode=explicit",
+            # ZeRO-1 needs a "data" axis to shard the moments over, and MaxTextConfig
+            # rejects combining it with FSDP.
+            "ici_data_parallelism=-1",
+            "ici_fsdp_parallelism=1",
+            "gradient_accumulation_steps=4",
+            "shard_optimizer_over_data=True",
+            # The Llama4 configs default to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
+  def test_llama4_17b_128e_explicit_sharding(self):
+    """AOT test for Llama4 Maverick at full size under explicit sharding.
+
+    The 128-expert config interleaves dense and MoE layers, so this covers both layer
+    variants at a scale where the expert axis is actually sharded. The mesh is FSDP 64 x
+    expert 8, both of which have to divide the v5p-1024 physical mesh.
+    """
+    compiled_trainstep_file = os.path.join(gettempdir(), "test_llama4_17b_128e_explicit_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-1024",
+            "compile_topology_num_slices=1",
+            "model_name=llama4-17b-128e",
+            # Only needed so the tokenizer below can replace the model config's default.
+            "override_model_config=True",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=64",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "shard_mode=explicit",
+            # The Llama4 configs default to a HuggingFace tokenizer that is not vendored.
+            "tokenizer_type=tiktoken",
+            f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+        )
+    )
+
+  def test_vocab_tiling_bf16_nnx(self):
+    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp)."""
     compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16_nnx.pickle"
     train_compile_main(
         (
@@ -1212,14 +1769,13 @@ class TrainCompile(parameterized.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
             "base_num_decoder_layers=2",
             "per_device_batch_size=2",
             "max_target_length=1024",
             "num_vocab_tiling=4",
             "weight_dtype=bfloat16",
-            "pure_nnx=true",
-            "enable_nnx=true",
-            "pure_nnx_decoder=true",
         )
     )
 
@@ -1245,9 +1801,6 @@ class TrainCompile(parameterized.TestCase):
             "attention=dot_product",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
-            "enable_nnx=True",
-            "pure_nnx=True",
-            "pure_nnx_decoder=True",
             "override_model_config=True",
         )
     )

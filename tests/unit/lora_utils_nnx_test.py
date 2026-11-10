@@ -29,6 +29,7 @@ from maxtext.utils.lora_utils import (
     get_lora_abstract_state_nnx,
     unapply_lora_from_base_params,
     unapply_lora_from_base_params_nnx,
+    setup_initial_lora_state,
 )
 
 
@@ -322,6 +323,15 @@ class TestGetLoraAnnotations(unittest.TestCase):
     self.assertEqual(mapped["sharded_leaf"], ("data", "model"))
     self.assertIsNone(mapped["non_sharded_leaf"])
     self.assertIsNone(mapped["none_leaf"])
+
+
+class TestSetupInitialLoraState(unittest.TestCase):
+
+  def test_without_adapter_path_returns_nothing(self):
+    result = setup_initial_lora_state(
+        data_iterator=None, tx=None, config=None, mesh=None, checkpoint_manager=None, lora_adapter_path=""
+    )
+    self.assertEqual(result, (None, None, None))
 
 
 if __name__ == "__main__":

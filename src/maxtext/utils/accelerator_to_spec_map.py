@@ -15,8 +15,9 @@
 """Static map of TPU names such as v4-8 to properties such as chip layout."""
 
 """ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-IF YOU MODIFY THIS FILE YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO
-UserFacingNameToSystemCharacteristics in xpk/xpk.py !!!!! """
+IF YOU MODIFY THIS FILE YOU SHOULD ALSO CHECK THAT THE LAUNCHERS SUPPORT THE SAME
+ACCELERATORS: AcceleratorShorthandMap in Cluster Toolkit (pkg/config/hardware.go) and,
+for legacy XPK, src/xpk/core/system_characteristics.py !!!!! """
 
 from dataclasses import dataclass
 
@@ -118,6 +119,15 @@ UserFacingNameToSystemCharacteristics = {
     "tpu7x-10368": SystemCharacteristics("tpu", "tpu7x:12x12x36", "default", (2, 2, 1), 10368, (True, True, True)),
     "tpu7x-10496": SystemCharacteristics("tpu", "tpu7x:4x8x164", "default", (2, 2, 1), 10496, (True, True, True)),
     "tpu7x-10752": SystemCharacteristics("tpu", "tpu7x:12x16x28", "default", (2, 2, 1), 10752, (True, True, True)),
+    # Non-canonical slice shapes, named by shape since the chip count alone maps to the canonical shape above.
+    "tpu7x-4x4x128": SystemCharacteristics("tpu", "tpu7x:4x4x128", "default", (2, 2, 1), 4096, (True, True, True)),
+    "tpu7x-4x8x128": SystemCharacteristics("tpu", "tpu7x:4x8x128", "default", (2, 2, 1), 8192, (True, True, True)),
+    "tpu7x-4x8x64": SystemCharacteristics("tpu", "tpu7x:4x8x64", "default", (2, 2, 1), 4096, (True, True, True)),
+    "tpu7x-8x8x32": SystemCharacteristics("tpu", "tpu7x:8x8x32", "default", (2, 2, 1), 4096, (True, True, True)),
+    "tpu7x-8x8x64": SystemCharacteristics("tpu", "tpu7x:8x8x64", "default", (2, 2, 1), 8192, (True, True, True)),
+    "tpu7x-8x16x32": SystemCharacteristics("tpu", "tpu7x:8x16x32", "default", (2, 2, 1), 8192, (True, True, True)),
+    "tpu7x-4x32x32": SystemCharacteristics("tpu", "tpu7x:4x32x32", "default", (2, 2, 1), 8192, (True, True, True)),
+    "tpu7x-8x8x128": SystemCharacteristics("tpu", "tpu7x:8x8x128", "default", (2, 2, 1), 16384, (True, True, True)),
     "tpu7x-10880": SystemCharacteristics("tpu", "tpu7x:4x20x68", "default", (2, 2, 1), 10880, (True, True, True)),
     "tpu7x-11008": SystemCharacteristics("tpu", "tpu7x:4x8x172", "default", (2, 2, 1), 11008, (True, True, True)),
     "tpu7x-11136": SystemCharacteristics("tpu", "tpu7x:4x12x116", "default", (2, 2, 1), 11136, (True, True, True)),

@@ -88,6 +88,7 @@ if [ "${USE_MULTIMODAL}" = "false" ]; then
         model_name=${MODEL_NAME} \
         use_multimodal=${USE_MULTIMODAL} \
         scan_layers=false \
+        dtype=float32 \
         --hf_model_path=${HF_GOLDEN_MODEL} \
         --max_kl_div=0.05 \
         --run_hf_model=true \

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 # This scripts takes a docker image that already contains the MaxText dependencies, copies the local source code in and
 # uploads that image into GCR. Once in GCR the docker image can be used for development.
 
-# For instructions on building and uploading the MaxText Docker image, please refer to the https://maxtext.readthedocs.io/en/latest/build_maxtext.html.
+# For instructions on building and uploading the MaxText Docker image, please refer to https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html.
 
 # Each time you update the `maxtext_base_image`` via `build_maxtext_docker_image`, there will be a slow upload process.
 # However, if you are simply changing local code and not updating dependencies, uploading just takes a few seconds.
@@ -128,6 +128,11 @@ if [[ "${CLOUD_IMAGE_NAME}" == *"/"* ]]; then
   export FULL_IMAGE_PATH="${CLOUD_IMAGE_NAME}"
 else
   # Otherwise, default to GCR
+  echo "================================================================================================================================"
+  echo "WARNING: Google Container Registry (gcr.io) is deprecated and will be shut down."
+  echo "To upload to Artifact Registry instead, please provide full URI in CLOUD_IMAGE_NAME (e.g. us-docker.pkg.dev/project/repo/image)."
+  echo "Falling back to legacy gcr.io/${PROJECT}/${CLOUD_IMAGE_NAME}..."
+  echo "================================================================================================================================"
   export FULL_IMAGE_PATH="gcr.io/${PROJECT}/${CLOUD_IMAGE_NAME}"
 fi
 
@@ -150,5 +155,5 @@ echo "==========================================================================
 echo "Your image is available at:"
 echo "👉 ${FULL_IMAGE_PATH}"
 echo ""
-echo "You can copy-paste the path above directly into your XPK or GKE workload configurations."
+echo "You can copy-paste the path above directly into 'gcluster job submit --image' or your GKE workload configurations."
 echo "========================================================================================================="

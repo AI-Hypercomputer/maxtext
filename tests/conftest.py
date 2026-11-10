@@ -116,7 +116,9 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
   import maxtext  # pylint: disable=unused-import
 
 from maxtext.common.gcloud_stub import is_decoupled
+from tests.utils import class_split
 from tests.utils.newly_added_detection import get_changed_tests
+from tests.utils.newly_added_detection import is_changed_item
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
 if is_decoupled():
@@ -157,9 +159,8 @@ def pytest_collection_modifyitems(config, items):
   changed_tests = get_changed_tests()  # set[(file_path, test_name)]
   if changed_tests:
     for item in items:
-      item_file = item.nodeid.split("::", 1)[0]
-      base_name = getattr(item, "originalname", item.name)
-      if (item_file, base_name) in changed_tests or (item_file, item.name) in changed_tests:
+      # Matches the def name too, so absl parameterized tests (collected as test_x_bf16 or test_x0) are marked.
+      if is_changed_item(item, changed_tests):
         item.add_marker(pytest.mark.newly_added)
 
   decoupled = is_decoupled()
@@ -207,6 +208,11 @@ def pytest_collection_modifyitems(config, items):
       item.add_marker(pytest.mark.cpu_only)
 
 
+def pytest_addoption(parser):
+  """Registers the class-level shard split options; pass them as --opt=value (see tests/utils/class_split.py)."""
+  class_split.pytest_addoption(parser)
+
+
 def pytest_configure(config):
   """Registers custom pytest markers dynamically."""
   for m in [
@@ -221,23 +227,33 @@ def pytest_configure(config):
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
+  class_split.pytest_configure(config)
 
 
 @pytest.fixture(autouse=True, scope="module")
 def clear_jax_compilation_cache():
-  """Clears JAX compilation caches and forces garbage collection after each test module.
+  """Clears JAX in-memory compilation caches and forces GC when a worker leaves a test module.
 
-  Prevents XLA memory accumulation and compilation cache buildup across
-  long test runs while preserving intra-module compilation cache reuse.
+  Runs on every backend. xdist workers are long-lived processes that interleave many modules, so
+  this bounds how much jit/tracing cache a worker carries forward, at the cost of re-compiles when
+  it returns to a module. Intra-module cache reuse is preserved; the persistent on-disk cache is
+  not touched. This caps cache growth; it does not reclaim memory a worker holds for other reasons.
   """
   yield
   try:
-    has_accelerator = any(d.platform in ("tpu", "gpu", "proxy") for d in jax.devices())
-    if has_accelerator:
-      jax.clear_caches()
-      gc.collect()
+    jax.clear_caches()
+    gc.collect()
   except Exception:  # pylint: disable=broad-exception-caught
     pass
+
+
+@pytest.fixture(autouse=True)
+def restore_jax_remove_size_one_mesh_axis_from_type():
+  """Saves and restores jax_remove_size_one_mesh_axis_from_type around each test item."""
+  previous_flag = getattr(jax.config, "jax_remove_size_one_mesh_axis_from_type", None)
+  yield
+  if previous_flag is not None:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", previous_flag)
 
 
 @pytest.fixture(autouse=True)
@@ -249,7 +265,7 @@ def handle_skip_on_tpu7x(request):
     except Exception:  # pylint: disable=broad-exception-caught
       is_tpu7x = False
     if is_tpu7x:
-      pytest.skip("AOT tests do not support TPU7x platform")
+      pytest.skip("Skipped: test is marked skip_on_tpu7x (unsupported or under investigation on TPU7x)")
 
 
 @pytest.fixture(autouse=True)

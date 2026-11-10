@@ -16,27 +16,17 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, cast
-
-from jax.sharding import Mesh
-import jax.numpy as jnp
-
-from flax import linen as nn
 from flax import nnx
-
-from maxtext.common.common_types import Config, Array
-from maxtext.layers import initializers as max_initializers
-from maxtext.layers import nnx_wrappers
-from maxtext.layers.normalizations import Qwen3NextRMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.utils import max_utils
-
+from maxtext.common.common_types import get_weight_dtype
+from maxtext.layers.linears import MlpBlock
 from maxtext.models.qwen3 import (
-    Qwen3NextGatedDeltaNet,
+    Qwen3NextDecoderLayer,
     Qwen3NextFullAttention,
+    Qwen3NextGatedDeltaNet,
+    Qwen3NextScannableBlock,
     Qwen3NextSparseMoeBlock,
 )
-
+from maxtext.utils import max_utils
 
 # -----------------------------------------
 # Qwen3.5 Layer Implementations
@@ -55,64 +45,23 @@ class Qwen3_5SparseMoEBlock(Qwen3NextSparseMoeBlock):
   """Shares same MoE code as Qwen3-Next"""
 
 
-class Qwen3_5ScannableBlock(nnx.Module):
+class Qwen3_5ScannableBlock(Qwen3NextScannableBlock):
   """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers."""
 
-  def __init__(self, config: Config, mesh: Mesh, model_mode: str, quant=None, *, rngs: nnx.Rngs):
-    self.config = config
-    self.mesh = mesh
-    self.model_mode = model_mode
-    self.quant = quant
-    self.rngs = rngs
-    cfg = self.config
-
-    # Explicitly instantiate Qwen3_5DecoderLayer here
-    for i in range(cfg.inhomogeneous_layer_cycle_interval):
-      layer_rngs = self.rngs.fork()
-      layer_name = f"layer_{i}"
-      layer = Qwen3_5DecoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          layer_idx=i,
-          rngs=layer_rngs,
-      )
-      setattr(self, layer_name, layer)
-
-  def __call__(
-      self,
-      carry: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      slot: None | int = None,
-  ) -> tuple[Array, None]:
-    cfg = self.config
-    x = carry
-
-    for i in range(cfg.inhomogeneous_layer_cycle_interval):
-      layer = getattr(self, f"layer_{i}")
-      x, _ = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          slot,
-      )
-
-    return x, None
+  def _make_decoder_layer(self, *, layer_idx, is_full_attention_layer, rngs):
+    return Qwen3_5DecoderLayer(
+        config=self.config,
+        mesh=self.mesh,
+        model_mode=self.model_mode,
+        quant=self.quant,
+        layer_idx=layer_idx,
+        is_full_attention_layer=is_full_attention_layer,
+        rngs=rngs,
+    )
 
 
-class Qwen3_5DecoderLayer(nnx.Module):
-  """
-  This layer is a hybrid, capable of functioning as either:
-  1. A standard attention + MoE layer.
-  2. A linear attention + MoE layer.
+class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
+  """Qwen3.5 hybrid decoder layer.
 
   Attributes:
     config: The model configuration object.
@@ -122,134 +71,59 @@ class Qwen3_5DecoderLayer(nnx.Module):
     quant: Optional quantization configuration.
   """
 
-  def __init__(
-      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
-  ):
-    self.config = config
-    self.mesh = mesh
-    self.model_mode = model_mode
-    self.layer_idx = layer_idx
-    self.quant = quant
+  def _norm_weight_dtype(self):
+    return get_weight_dtype(self.config, "norm")
+
+  def _make_full_attention(self, *, rngs: nnx.Rngs):
+    return Qwen3_5FullAttention(
+        config=self.config,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        layer_idx=self.layer_idx,
+        rngs=rngs,
+    )
+
+  def _make_linear_attention(self, *, rngs: nnx.Rngs):
     cfg = self.config
-    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-
-    # First LayerNorm, applied before the attention block.
-    self.input_layernorm = Qwen3NextRMSNorm(
-        num_features=cfg.emb_dim,
-        epsilon=cfg.normalization_layer_epsilon,
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, self.model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, cfg.emb_dim)
+    return Qwen3_5GatedDeltaNet(
+        config=cfg,
+        inputs_shape=dummy_inputs_shape,
+        mesh=self.mesh,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        model_mode=self.model_mode,
+        quant=self.quant,
         rngs=rngs,
     )
 
-    # Determine the type of attention mechanism for the current layer.
-    is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
-
-    # Conditionally instantiate either the Linear Attention or Full Attention block.
-    if is_full_attention_layer:
-      self.attention = Qwen3_5FullAttention(
-          config=cfg,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=model_mode,
-          layer_idx=self.layer_idx,
-          rngs=rngs,
-      )
-    else:
-      batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
-      dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
-      self.attention = Qwen3_5GatedDeltaNet(
-          config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
-      )
-
-    # Second LayerNorm, applied before the MoE block.
-    self.post_attention_layernorm = Qwen3NextRMSNorm(
-        num_features=cfg.emb_dim,
-        epsilon=cfg.normalization_layer_epsilon,
+  def _make_mlp(self, *, rngs: nnx.Rngs):
+    cfg = self.config
+    if getattr(cfg, "num_experts", 1) > 1:
+      return Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    return MlpBlock(
+        config=cfg,
+        mesh=self.mesh,
+        in_features=cfg.emb_dim,
+        intermediate_dim=cfg.mlp_dim,
+        activations=tuple(cfg.mlp_activations),
+        intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "mlp"),
+        quant=self.quant,
+        model_mode=self.model_mode,
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3_5SparseMoEBlock`.
-    self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
-
-  def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      slot: None | int = None,
-      kv_cache: None | dict[str, Array] = None,
-      attention_metadata: None | dict[str, Any] = None,
-  ):
-    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
-    if isinstance(inputs, tuple):
-      inputs = inputs[0]
-    residual = inputs
-
-    # First LayerNorm, applied before the attention block.
-    hidden_states = self.input_layernorm(inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
-
-    # Conditionally apply either the Linear Attention or Full Attention block.
-    if isinstance(self.attention, Qwen3_5FullAttention):
-      attention_output, new_kv_cache = cast(Qwen3_5FullAttention, self.attention)(
-          hidden_states,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          kv_cache=kv_cache,
-          attention_metadata=attention_metadata,
-      )
-    else:
-      attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
-          hidden_states,
-          model_mode=model_mode,
-          kv_cache=kv_cache,
-          decoder_segment_ids=decoder_segment_ids,
-          attention_metadata=attention_metadata,
-      )
-
-    # First residual connection after attention
-    hidden_states = residual + attention_output
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
-
-    # Prepare for the MoE block by capturing the new residual
-    residual = hidden_states
-
-    # Second LayerNorm, applied before the MoE block.
-    hidden_states = self.post_attention_layernorm(hidden_states)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
-
-    # Instantiate and call our `Qwen3_5SparseMoEBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
-
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
-
-    # Final residual connection (after the MoE block)
-    layer_output = residual + mlp_output
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        self.activation_axis_names,
+  def _apply_mlp(self, hidden_states, deterministic, forced_routed_experts):
+    if getattr(self.config, "num_experts", 1) > 1:
+      return super()._apply_mlp(hidden_states, deterministic, forced_routed_experts)
+    # A dense MLP routes nothing, so there is no routing to replay and no load-balance loss.
+    mlp_output = self.mlp(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
     )
-    return layer_output, new_kv_cache
-
-
-Qwen3_5DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3_5DecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-
-Qwen3_5ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Qwen3_5ScannableBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
+    return mlp_output, None

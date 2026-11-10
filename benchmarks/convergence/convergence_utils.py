@@ -56,6 +56,7 @@ class DatasetHParams:
   add_bos: bool
   add_eos: bool
   eval_dataset_name: str = None
+  grain_file_type: str = None
 
 
 @dataclasses.dataclass
@@ -119,7 +120,8 @@ def setup_dataset(model: MaxTextModel, params: DatasetHParams):
   model.tuning_params["dataset_path"] = params.dataset_path
   model.tuning_params["dataset_name"] = params.dataset_name
   model.tuning_params["dataset_type"] = params.dataset_type
-  model.tuning_params["dataset_name"] = params.dataset_name
+  if params.grain_file_type:
+    model.tuning_params["grain_file_type"] = params.grain_file_type
   if params.eval_dataset_name:
     model.tuning_params["eval_dataset_name"] = params.eval_dataset_name
   model.tuning_params["train_split"] = params.train_split

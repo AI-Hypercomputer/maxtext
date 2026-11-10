@@ -241,6 +241,78 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
+  @parameterized.named_parameters(
+      ("dense_9b", "qwen3.5-9b", 32, 0),
+      ("moe_35b", "qwen3.5-35b-a3b", 0, 40),
+      ("moe_397b", "qwen3.5-397b-a17b", 0, 60),
+  )
+  def test_qwen3_5_dense_moe_layers(self, model_name, dense_layers, moe_layers):
+    """Qwen3.5 uses either dense FFNs or MoE FFNs in every decoder layer."""
+    cfg = self._initialize_model_config(model_name)
+    self.assertEqual(maxtext_utils.get_dense_moe_layers(cfg), (dense_layers, moe_layers))
+
+  def test_qwen3_5_9b_flops(self):
+    """Test Qwen3.5-9B dense model Flops calculation"""
+    cfg = self._initialize_model_config(
+        "qwen3.5-9b",
+        max_target_length=4096,
+        per_device_batch_size=1,
+    )
+    kwargs = cfg.get_keys()
+
+    # 1. Calculate Attention TFLOPs
+    attention_tflops = self.compute_qwen3_next_attention_flops_per_device(kwargs)
+
+    # 2. Calculate Learnable Weight Active Params
+    emb_dim = kwargs["base_emb_dim"]
+    vocab = kwargs["vocab_size"]
+    N = kwargs["base_num_decoder_layers"]
+
+    # Dense MLP Active Params (per layer)
+    # FFN uses SwiGLU (3 matrices: gate_proj, up_proj, down_proj)
+    mlp_dim = kwargs["base_mlp_dim"]
+    params_dense_mlp = 3 * emb_dim * mlp_dim
+
+    # Full Attention Params (per full layer)
+    Hq = kwargs["base_num_query_heads"]
+    Hkv = kwargs["base_num_kv_heads"]
+    Hd = kwargs["head_dim"]
+    params_full_attn = (emb_dim * (Hq + 2 * Hkv) * Hd) + (Hq * Hd * emb_dim)
+
+    # GDN Linear Attention Params (per linear layer)
+    Hk_g = kwargs["gdn_num_key_heads"]
+    Hv_g = kwargs["gdn_num_value_heads"]
+    Dk_g = kwargs["gdn_key_head_dim"]
+    Dv_g = kwargs["gdn_value_head_dim"]
+    K_conv = kwargs["gdn_conv_kernel_dim"]
+
+    K_dim = Hk_g * Dk_g
+    V_dim = Hv_g * Dv_g
+
+    params_gdn_proj = (emb_dim * (2 * K_dim + 2 * V_dim)) + (emb_dim * 2 * Hv_g) + (V_dim * emb_dim)
+    params_gdn_conv = (2 * K_dim + V_dim) * K_conv
+    params_gdn_layer = params_gdn_proj + params_gdn_conv
+
+    # Total Active Params
+    num_full = N // kwargs["inhomogeneous_layer_cycle_interval"]
+    num_linear = N - num_full
+
+    total_active_params = (
+        (vocab * emb_dim)
+        + (num_full * (params_full_attn + params_dense_mlp))
+        + (num_linear * (params_gdn_layer + params_dense_mlp))
+    )
+
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    weight_tflops = 6 * B * S * total_active_params / 1e12
+
+    golden_tflops = weight_tflops + attention_tflops
+
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
   def test_llama2_7b_flops(self):
     """Test Llama2 7b Flops calculation with default parameters"""
     cfg = self._initialize_model_config(
@@ -430,16 +502,40 @@ class FlopCalculation(parameterized.TestCase):
     self.assertFlopsAlmostEqual(calculated_total, golden_total_flops)
     self.assertFlopsAlmostEqual(calculated_weight, golden_weight_flops)
 
-  def test_deepseek4_mtp_validation(self):
-    """Test that DeepSeek-V4 with MTP layers raises a ValueError"""
-    with self.assertRaises(ValueError):
-      self._initialize_model_config(
-          "deepseek4-284b",
-          max_target_length=4096,
-          per_device_batch_size=4,
-          attention="dot_product",
-          mtp_num_layers=1,
-      )
+  def test_deepseek4_mtp_flops(self):
+    """Test that DeepSeek-V4 supports MTP layers and accounts for their FLOPs."""
+    common_kwargs = {
+        "max_target_length": 4096,
+        "per_device_batch_size": 4,
+        "attention": "dot_product",
+    }
+    cfg_no_mtp = self._initialize_model_config("deepseek4-284b", mtp_num_layers=0, **common_kwargs)
+    cfg_with_mtp = self._initialize_model_config("deepseek4-284b", mtp_num_layers=1, **common_kwargs)
+
+    tflops_no_mtp, _, _ = calculate_tflops_training_per_device(cfg_no_mtp)
+    tflops_with_mtp, _, _ = calculate_tflops_training_per_device(cfg_with_mtp)
+
+    # The auxiliary MTP layer is real extra compute, so it must show up in the estimate.
+    self.assertGreater(tflops_with_mtp, tflops_no_mtp)
+
+  def test_deepseek4_1600b_flops(self):
+    """Test DeepSeek V4 1600B MFU FLOP calculation"""
+    cfg = self._initialize_model_config(
+        "deepseek4-1600b",
+        max_target_length=4096,
+        per_device_batch_size=1,
+        attention="dot_product",
+    )
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+
+    # DeepSeek-V4-Pro has ~48.4B active parameters per token (6 routed + 1 shared expert).
+    golden_param_size = 48.4e9
+    calculated_total, calculated_weight, calculated_attn = calculate_tflops_training_per_device(cfg, log=False)
+    golden_weight_flops = 6 * B * S * golden_param_size / 1e12
+    golden_total_flops = golden_weight_flops + calculated_attn
+    self.assertFlopsAlmostEqual(calculated_total, golden_total_flops)
+    self.assertFlopsAlmostEqual(calculated_weight, golden_weight_flops)
 
   def test_custom_engram_flops(self):
     """Test model with Engram Flops calculation"""
@@ -953,6 +1049,117 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_total_tflops)
 
+  def test_hy4_preview_flops(self):
+    """Checks HY4 dense/MoE layer counts and its periodic full-indexer/iHC FLOPs."""
+    config = self._initialize_model_config(
+        "hy4-preview",
+        max_target_length=4096,
+        per_device_batch_size=1,
+        use_dpo=False,
+        mtp_num_layers=0,
+    )
+    batch_size = config.per_device_batch_size
+    seq_len = config.max_target_length
+    emb_dim = config.emb_dim
+    num_layers = config.num_decoder_layers
+    num_dense_layers = config.first_num_dense_layers
+    num_moe_layers = num_layers - num_dense_layers
+
+    self.assertEqual(maxtext_utils.get_dense_moe_layers(config), (num_dense_layers, num_moe_layers))
+
+    dense_ffn_flops = (
+        2 * batch_size * seq_len * emb_dim * config.mlp_dim * (len(config.mlp_activations) + 1) * num_dense_layers
+    )
+    router_flops_per_layer = 2 * batch_size * seq_len * emb_dim * config.num_experts
+    expert_flops_per_layer = (
+        2
+        * batch_size
+        * seq_len
+        * emb_dim
+        * config.moe_mlp_dim
+        * (len(config.mlp_activations) + 1)
+        * (config.shared_experts + config.num_experts_per_tok)
+    )
+    ffn_flops = dense_ffn_flops + num_moe_layers * (router_flops_per_layer + expert_flops_per_layer)
+
+    qk_head_dim_sum = config.qk_nope_head_dim + config.qk_rope_head_dim
+    q_flops = (
+        2
+        * batch_size
+        * seq_len
+        * (emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+    )
+    kv_flops = (
+        2
+        * batch_size
+        * seq_len
+        * (
+            emb_dim * (config.kv_lora_rank + config.qk_rope_head_dim)
+            + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
+        )
+    )
+    output_projection_flops = 2 * batch_size * seq_len * emb_dim * config.num_query_heads * config.v_head_dim
+    indexer_projection_per_layer, indexer_scoring_per_layer = maxtext_utils.calculate_indexer_tflops_per_device(config)
+    num_full_indexer_layers = (
+        num_dense_layers
+        + (num_moe_layers + config.inhomogeneous_layer_cycle_interval - 1) // config.inhomogeneous_layer_cycle_interval
+    )
+    indexer_mask_ratio = maxtext_utils.calculate_indexer_mask_ratio(config.indexer_topk, seq_len)
+    attention_per_layer = (
+        2
+        * batch_size
+        * seq_len
+        * seq_len
+        * config.num_query_heads
+        * (qk_head_dim_sum + config.v_head_dim)
+        * indexer_mask_ratio
+    )
+
+    hc_rate = config.mhc_expansion_rate
+    tokens = batch_size * seq_len
+    hc_block = (
+        2 * tokens * (hc_rate * emb_dim) * (2 * hc_rate) + 2 * tokens * hc_rate * emb_dim + tokens * hc_rate * emb_dim
+    )
+    hc_head = 2 * tokens * (hc_rate * emb_dim) * hc_rate + 2 * tokens * hc_rate * emb_dim
+    hc_flops = 2 * num_layers * hc_block + hc_head
+    embedding_flops = 2 * batch_size * seq_len * emb_dim * config.vocab_size
+    expected_weight = (
+        (ffn_flops + (q_flops + kv_flops + 2 * output_projection_flops) * num_layers + hc_flops + embedding_flops)
+        * 3
+        / 10**12
+        * config.gradient_accumulation_steps
+    )
+    expected_weight += (
+        indexer_projection_per_layer * num_full_indexer_layers / 10**12 * config.gradient_accumulation_steps
+    )
+    expected_attention = (
+        (attention_per_layer * num_layers * 3 + indexer_scoring_per_layer * num_full_indexer_layers)
+        / 10**12
+        * config.gradient_accumulation_steps
+    )
+
+    total, weight, attention = calculate_tflops_training_per_device(config, log=False)
+    self.assertAlmostEqual(weight, expected_weight, delta=expected_weight * 1e-9)
+    self.assertAlmostEqual(attention, expected_attention, delta=expected_attention * 1e-9)
+    self.assertAlmostEqual(total, expected_weight + expected_attention, delta=total * 1e-9)
+
+    # seq_len <= indexer_topk bypasses the indexer: dense causal attention and no indexer FLOPs,
+    # so weight FLOPs are the non-indexer weight FLOPs scaled linearly by sequence length.
+    short_seq_len = config.indexer_topk
+    short_config = self._initialize_model_config(
+        "hy4-preview", max_target_length=short_seq_len, per_device_batch_size=batch_size
+    )
+    _, short_weight, short_attention = calculate_tflops_training_per_device(short_config, log=False)
+    indexer_weight = indexer_projection_per_layer * num_full_indexer_layers / 10**12 * config.gradient_accumulation_steps
+    expected_short_weight = (expected_weight - indexer_weight) * short_seq_len / seq_len
+    expected_short_attention = (
+        (3 * num_layers * batch_size * short_seq_len**2 * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim))
+        / 10**12
+        * config.gradient_accumulation_steps
+    )
+    self.assertAlmostEqual(short_weight, expected_short_weight, delta=expected_short_weight * 1e-9)
+    self.assertAlmostEqual(short_attention, expected_short_attention, delta=expected_short_attention * 1e-9)
+
   def test_mtp_moe_flops(self):
     """Test model with MTP modules on an MoE architecture (DeepSeek)."""
     # Inject MTP modules during initialization
@@ -1236,6 +1443,37 @@ class FlopCalculation(parameterized.TestCase):
     plus expected attention flops for various standard models with a long sequence length.
     """
     self._verify_long_sequence_flops(model_name)
+
+
+class DeepSeekV4ProConfigSmokeTest(unittest.TestCase):
+  """Validates deepseek4-1600b config and component initialization."""
+
+  def test_deepseek4_1600b_config(self):
+    cfg = pyconfig.initialize_pydantic(
+        ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-1600b", "enable_checkpointing=false"]
+    )
+    self.assertEqual(cfg.model_name, "deepseek4-1600b")
+    self.assertEqual(cfg.emb_dim, 7168)
+    self.assertEqual(cfg.num_decoder_layers, 61)
+    self.assertEqual(cfg.num_experts, 384)
+    self.assertEqual(cfg.num_experts_per_tok, 6)
+    self.assertEqual(cfg.indexer_topk, 1024)
+    self.assertEqual(cfg.mhc_expansion_rate, 4)
+    self.assertTrue(cfg.float32_gate_logits)
+    self.assertTrue(cfg.indexer_sparse_training)
+
+  def test_deepseek4_284b_config(self):
+    cfg = pyconfig.initialize_pydantic(
+        ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-284b", "enable_checkpointing=false"]
+    )
+    self.assertEqual(cfg.model_name, "deepseek4-284b")
+    self.assertEqual(cfg.emb_dim, 4096)
+    self.assertEqual(cfg.num_decoder_layers, 43)
+    self.assertEqual(cfg.num_experts, 256)
+    self.assertEqual(cfg.num_experts_per_tok, 6)
+    self.assertEqual(cfg.indexer_topk, 512)
+    self.assertEqual(cfg.mhc_expansion_rate, 4)
+    self.assertTrue(cfg.float32_gate_logits)
 
 
 if __name__ == "__main__":

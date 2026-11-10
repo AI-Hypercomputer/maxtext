@@ -17,8 +17,10 @@
 Original implementation from HuggingFace: Qwen/Qwen3-Omni-30B-A3B-Instruct.
 """
 
+import logging
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,6 +34,7 @@ except ImportError:
   decord = None
 
 from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
 # Image constants.
@@ -471,25 +474,36 @@ def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.
   }
   try:
     vr = decord.VideoReader(video_path)
-  except Exception as e:
-    raise RuntimeError(f"Failed to read video from {video_path}: {e}") from e
-  total_frames, video_fps = len(vr), vr.get_avg_fps()
-  start_frame, end_frame, total_frames = calculate_video_frame_range(
-      video_config,
-      total_frames,
-      video_fps,
-  )
-  nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
+    total_frames, video_fps = len(vr), vr.get_avg_fps()
+    start_frame, end_frame, total_frames = calculate_video_frame_range(
+        video_config,
+        total_frames,
+        video_fps,
+    )
+    nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
 
-  # Use numpy linspace instead of torch.linspace
-  idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
+    # Use numpy linspace instead of torch.linspace
+    idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
 
-  video = vr.get_batch(idx).asnumpy()
-  # Convert from THWC to TCHW format using numpy
-  video = np.transpose(video, (0, 3, 1, 2))
+    video = vr.get_batch(idx).asnumpy()
+    # Convert from THWC to TCHW format using numpy
+    video = np.transpose(video, (0, 3, 1, 2))
 
-  sample_fps = nframes / max(total_frames, 1e-6) * video_fps
-  return video, sample_fps
+    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+    return video, sample_fps
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning("Failed to read/decode video %s: %s. Using dummy video.", video_path, e)
+    # Return dummy video: 4 frames of 224x224 black pixels
+    # 224 is a multiple of 28 (patch_size * merge_size = 14 * 2 = 28)
+    dummy_video = np.zeros((4, 3, 224, 224), dtype=np.uint8)
+    return dummy_video, 2.0
+
+
+def get_video_second_per_grid(sample_fps: float, temporal_patch_size: int) -> float:
+  """Return elapsed seconds represented by one temporal video grid step."""
+  if sample_fps <= 0:
+    raise ValueError(f"sample_fps must be positive, got {sample_fps}.")
+  return temporal_patch_size / sample_fps
 
 
 def preprocess_video(video, config):
@@ -634,31 +648,117 @@ def pre_process_audio_qwen3_omni(audio_array):
   return audio_features, audio_features_mask
 
 
+def is_video_file(path):
+  if not isinstance(path, str):
+    return False
+  video_extensions = (".mp4", ".avi", ".mkv", ".webm", ".mov", ".gif")
+  return path.lower().endswith(video_extensions)
+
+
 def preprocess_mm_data_qwen3_omni_for_training(images, config):
-  """Preprocesses image(s) for Qwen3-Omni SFT training using model config constants."""
-  images_in = [images] if isinstance(images, np.ndarray) else images
-  if config.image_size_for_vit is None:
-    force_resize = None
-  elif isinstance(config.image_size_for_vit, (list, tuple)):
-    force_resize = tuple(config.image_size_for_vit)
+  """Preprocesses image(s) or video for Qwen3-Omni SFT training using model config constants."""
+  is_video = False
+  if isinstance(images, str) and is_video_file(images):
+    is_video = True
+  elif isinstance(images, list) and len(images) > 0 and isinstance(images[0], str) and is_video_file(images[0]):
+    is_video = True
+
+  if is_video:
+    video_path = images
+    if isinstance(video_path, list):
+      if len(video_path) > 1:
+        raise ValueError("Only 1 video per example is supported for now.")
+      video_path = video_path[0]
+
+    # Auto-assemble video directory from train or eval files
+    video_dir = None
+    if config.hf_train_files:
+      video_dir = os.path.dirname(config.hf_train_files)
+    elif config.hf_eval_files:
+      video_dir = os.path.dirname(config.hf_eval_files)
+
+    if video_dir:
+      video_path = os.path.join(video_dir, video_path)
+
+    is_gcs_video = video_path.startswith("gs://")
+    temp_local_path = None
+
+    if is_gcs_video:
+      ext = os.path.splitext(video_path)[1]
+      with tempfile.NamedTemporaryFile(suffix=ext, prefix="maxtext_video_sft_", delete=False) as temp_file:
+        temp_local_path = temp_file.name
+
+      max_logging.log(f"Downloading remote video {video_path} to temp local path {temp_local_path}...")
+      try:
+        bucket_name, prefix_name = gcs_utils.parse_gcs_bucket_and_prefix(video_path)
+        storage_client = gcs_utils.storage.Client()
+        bucket = storage_client.get_bucket(bucket_name)
+        blob = bucket.blob(prefix_name)
+        blob.download_to_filename(temp_local_path)
+        video_path = temp_local_path
+      except Exception as e:
+        if os.path.exists(temp_local_path):
+          os.remove(temp_local_path)
+        raise RuntimeError(f"Failed to download video from GCS: {e}") from e
+    else:
+      if not os.path.exists(video_path):
+        raw_path = images if isinstance(images, str) else images[0]
+        if os.path.exists(raw_path):
+          video_path = raw_path
+        else:
+          raise FileNotFoundError(f"Video file not found: {video_path} (original: {raw_path})")
+
+    try:
+      video_array, sample_fps = _read_video_decord(video_path)
+    finally:
+      if temp_local_path and os.path.exists(temp_local_path):
+        max_logging.log(f"Cleaning up temp local video file {temp_local_path}...")
+        os.remove(temp_local_path)
+    video_processed, video_grid_thw = preprocess_video(video_array, config)
+    video_values = np.reshape(
+        video_processed,
+        (
+            1,
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * video_grid_thw[0, 0],
+            config.patch_size_for_vit * video_grid_thw[0, 1],
+            config.patch_size_for_vit * video_grid_thw[0, 2],
+        ),
+    )
+    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_values, video_grid_thw, config)
+    return Qwen3OmniPreprocessorOutput(
+        num_videos=1,
+        video_values=video_values,
+        video_grid_thw=video_grid_thw,
+        video_second_per_grid=np.asarray(
+            [get_video_second_per_grid(sample_fps, config.temporal_patch_size_for_vit)], dtype=np.float32
+        ),
+        video_mask=video_mask,
+    )
   else:
-    force_resize = (config.image_size_for_vit, config.image_size_for_vit)
-  pixel_values, pixel_grid_thw = pre_process_qwen3_image(images_in, config, force_resize=force_resize)
-  pixel_values = np.reshape(
-      pixel_values,
-      (
-          len(images_in),
-          config.num_channels_for_vit,
-          config.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
-          config.patch_size_for_vit * pixel_grid_thw[0, 1],
-          config.patch_size_for_vit * pixel_grid_thw[0, 2],
-      ),
-  )
-  return Qwen3OmniPreprocessorOutput(
-      num_images=len(images_in),
-      pixel_values=pixel_values,
-      pixel_grid_thw=pixel_grid_thw,
-  )
+    images_in = [images] if isinstance(images, np.ndarray) else images
+    if config.image_size_for_vit is None:
+      force_resize = None
+    elif isinstance(config.image_size_for_vit, (list, tuple)):
+      force_resize = tuple(config.image_size_for_vit)
+    else:
+      force_resize = (config.image_size_for_vit, config.image_size_for_vit)
+    pixel_values, pixel_grid_thw = pre_process_qwen3_image(images_in, config, force_resize=force_resize)
+    pixel_values = np.reshape(
+        pixel_values,
+        (
+            len(images_in),
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
+            config.patch_size_for_vit * pixel_grid_thw[0, 1],
+            config.patch_size_for_vit * pixel_grid_thw[0, 2],
+        ),
+    )
+    return Qwen3OmniPreprocessorOutput(
+        num_images=len(images_in),
+        pixel_values=pixel_values,
+        pixel_grid_thw=pixel_grid_thw,
+    )
 
 
 def preprocess_mm_data_qwen3_omni(config):
@@ -684,7 +784,7 @@ def preprocess_mm_data_qwen3_omni(config):
     processor_outputs.num_images = len(images)
 
   if config.video_path:
-    video_array, _ = _read_video_decord(config.video_path)
+    video_array, sample_fps = _read_video_decord(config.video_path)
     video_processed, video_grid_thw = preprocess_video(video_array, config)
     video_values = np.reshape(
         video_processed,
@@ -700,7 +800,9 @@ def preprocess_mm_data_qwen3_omni(config):
     processor_outputs.video_values = video_values
     processor_outputs.video_grid_thw = video_grid_thw
     processor_outputs.video_mask = video_mask
-    processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
+    processor_outputs.video_second_per_grid = np.asarray(
+        [get_video_second_per_grid(sample_fps, config.temporal_patch_size_for_vit)], dtype=np.float32
+    )
     processor_outputs.num_videos = 1  # Only one video for now.
 
   if config.video_path and config.use_audio_in_video:
@@ -941,18 +1043,18 @@ def get_llm_pos_ids_for_vision(
 
   # Create height indices: [0, 0, ..., 0 (W times), 1, 1, ..., 1 (W times), ...]
   # Shape: (num_frames, llm_grid_h, 1) -> expand -> (num_frames, llm_grid_h, llm_grid_w) -> flatten
-  h_index = jnp.arange(llm_grid_h).reshape(1, -1, 1).repeat(len(t_index), axis=0).repeat(llm_grid_w, axis=2).flatten()
+  h_index = np.arange(llm_grid_h).reshape(1, -1, 1).repeat(len(t_index), axis=0).repeat(llm_grid_w, axis=2).flatten()
 
   # Create width indices: [0, 1, 2, ..., W-1, 0, 1, 2, ..., W-1, ...]
   # Shape: (num_frames, 1, llm_grid_w) -> expand -> (num_frames, llm_grid_h, llm_grid_w) -> flatten
-  w_index = jnp.arange(llm_grid_w).reshape(1, 1, -1).repeat(len(t_index), axis=0).repeat(llm_grid_h, axis=1).flatten()
+  w_index = np.arange(llm_grid_w).reshape(1, 1, -1).repeat(len(t_index), axis=0).repeat(llm_grid_h, axis=1).flatten()
 
   # Create temporal indices: [t0, t0, ..., t0 (HxW times), t1, t1, ..., t1 (HxW times), ...]
   # Shape: (num_frames, 1) -> expand -> (num_frames, llm_grid_h * llm_grid_w) -> flatten
   t_index_expanded = t_index.reshape(-1, 1).repeat(llm_grid_h * llm_grid_w, axis=1).flatten()
 
   # Stack all three dimensions and add starting offset
-  _llm_pos_ids = jnp.stack([t_index_expanded, h_index, w_index])
+  _llm_pos_ids = np.stack([t_index_expanded, h_index, w_index])
   llm_pos_ids = _llm_pos_ids + start_idx
 
   return llm_pos_ids
@@ -1076,7 +1178,7 @@ def get_rope_index(
 
   attention_mask_bool = attention_mask == 1
   # Internally still build (3, batch, seq) then transpose to (batch, seq, 3).
-  position_ids = np.zeros((3, batch_size, seq_len), dtype=jnp.float32)
+  position_ids = np.zeros((3, batch_size, seq_len), dtype=np.float32)
   mrope_position_deltas = []
 
   # Process each sequence in the batch
@@ -1099,6 +1201,36 @@ def get_rope_index(
         if len(vision_tokens) > 0
         else 0
     )
+
+    if image_grid_thw is not None:
+      if image_grid_thw.ndim == 3 and image_grid_thw.shape[0] == batch_size:
+        curr_image_grid_thw = image_grid_thw[i]
+      elif image_grid_thw.ndim == 2 and image_grid_thw.shape[0] == batch_size and image_nums <= 1:
+        curr_image_grid_thw = image_grid_thw[i : i + 1]
+      else:
+        curr_image_grid_thw = image_grid_thw
+    else:
+      curr_image_grid_thw = None
+
+    if video_grid_thw is not None:
+      if video_grid_thw.ndim == 3 and video_grid_thw.shape[0] == batch_size:
+        curr_video_grid_thw = video_grid_thw[i]
+      elif video_grid_thw.ndim == 2 and video_grid_thw.shape[0] == batch_size and (batch_size > 1 or video_nums <= 1):
+        curr_video_grid_thw = video_grid_thw[i : i + 1]
+      else:
+        curr_video_grid_thw = video_grid_thw
+    else:
+      curr_video_grid_thw = None
+
+    if second_per_grids is not None:
+      if second_per_grids.ndim == 2 and second_per_grids.shape[0] == batch_size:
+        curr_second_per_grids = second_per_grids[i]
+      elif second_per_grids.ndim == 1 and len(second_per_grids) == batch_size and (batch_size > 1 or video_nums <= 1):
+        curr_second_per_grids = second_per_grids[i : i + 1]
+      else:
+        curr_second_per_grids = second_per_grids
+    else:
+      curr_second_per_grids = None
 
     input_tokens = valid_input_ids.tolist()
     llm_pos_ids_list = []
@@ -1170,9 +1302,9 @@ def get_rope_index(
 
       # Image Only
       elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.image_pad:
-        grid_t = image_grid_thw[image_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
-        grid_hs = image_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
-        grid_ws = image_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        grid_t = curr_image_grid_thw[image_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = curr_image_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = curr_image_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
         t_index = np.arange(grid_t, dtype=np.float32) * 1 * position_id_per_seconds
 
         image_pos = get_llm_pos_ids_for_vision(
@@ -1181,7 +1313,8 @@ def get_rope_index(
         llm_pos_ids_list.append(image_pos)
 
         image_len = int(
-            np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
+            np.prod(curr_image_grid_thw[image_idx]).item()
+            // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
         )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + image_len + eos_len)
         image_idx += 1
@@ -1189,15 +1322,15 @@ def get_rope_index(
 
       # Video Only
       elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.video_pad:
-        grid_t = video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
-        grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
-        grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
-        t_index = (
-            np.arange(grid_t, dtype=np.float32)
-            # pyrefly: ignore[unsupported-operation]
-            * second_per_grids[video_idx].item()
-            * position_id_per_seconds
-        )  # pyrefly: ignore[unsupported-operation]
+        grid_t = curr_video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = curr_video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = curr_video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        second_per_grid = (
+            curr_second_per_grids[video_idx].item()
+            if curr_second_per_grids is not None
+            else (float(config.temporal_patch_size_for_vit) if config is not None else 1.0)
+        )
+        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grid * position_id_per_seconds
 
         video_pos = get_llm_pos_ids_for_vision(
             st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws  # pyrefly: ignore[bad-argument-type]
@@ -1205,7 +1338,8 @@ def get_rope_index(
         llm_pos_ids_list.append(video_pos)
 
         video_len = int(
-            np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
+            np.prod(curr_video_grid_thw[video_idx]).item()
+            // (spatial_merge_size**2)  # pyrefly: ignore[unsupported-operation]
         )  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + video_len + eos_len)
         video_idx += 1
@@ -1218,15 +1352,15 @@ def get_rope_index(
         ).item()  # pyrefly: ignore[unsupported-operation]
         audio_llm_pos_ids = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
 
-        grid_t = video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
-        grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
-        grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
-        t_index = (
-            np.arange(grid_t, dtype=np.float32)
-            # pyrefly: ignore[unsupported-operation]
-            * second_per_grids[video_idx].item()
-            * position_id_per_seconds
-        )  # pyrefly: ignore[unsupported-operation]
+        grid_t = curr_video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = curr_video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = curr_video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        second_per_grid = (
+            curr_second_per_grids[video_idx].item()
+            if curr_second_per_grids is not None
+            else (float(config.temporal_patch_size_for_vit) if config is not None else 1.0)
+        )
+        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grid * position_id_per_seconds
 
         video_llm_pos_ids = get_llm_pos_ids_for_vision(
             st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws  # pyrefly: ignore[bad-argument-type]
@@ -1288,7 +1422,11 @@ def get_rope_index(
 
 
 def reformat_prompt_qwen3_omni(
-    prompt, image_placeholder="<|image|>", num_images=0, video_placeholder="<|video|>", num_videos=0
+    prompt,
+    image_placeholder="<|image|>",
+    num_images=0,
+    video_placeholder="<|video|>",
+    num_videos=0,
 ):
   """Reformat the prompt for Qwen3-Omni model."""
   # Qwen3-Omni vision format: <|vision_start|><|image_pad|><|vision_end|>

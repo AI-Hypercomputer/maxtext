@@ -20,6 +20,7 @@ import unittest.mock
 from absl.testing import absltest
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.layers import quantizations
 from maxtext.utils import globals as maxtext_globals
 import pydantic
 
@@ -95,6 +96,237 @@ class ConfigTest(absltest.TestCase):
     argv = ["", _BASE_CONFIG_PATH, "steps=-5"]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
+
+  def test_mtp_norm_main_hidden_state_rejects_unsupported_combinations(self):
+    """`mtp_norm_main_hidden_state` is rejected with vocab tiling or expanded mHC streams."""
+    base = ["", _BASE_CONFIG_PATH, "run_name=test", "mtp_num_layers=1", "mtp_norm_main_hidden_state=True"]
+    pyconfig.initialize(base)
+    with self.assertRaisesRegex(ValueError, "num_vocab_tiling"):
+      pyconfig.initialize(base + ["num_vocab_tiling=2"])
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate"):
+      pyconfig.initialize(base + ["mhc_expansion_rate=2"])
+
+  def test_enable_mllog_without_eval_warns(self):
+    """enable_mllog with eval_interval <= 0 is allowed (for measuring eval impact) and logs a warning."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=-1"]
+    with unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning:
+      config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+    self.assertTrue(
+        any("enable_mllog=True with eval_interval=" in str(call.args[0]) for call in mock_warning.call_args_list)
+    )
+
+  def test_splash_diag_skip_rejects_invalid_grid(self):
+    for grid in (1, 3, 6):
+      with self.subTest(grid=grid):
+        argv = ["", _BASE_CONFIG_PATH, "run_name=test", f"sa_qk_diag_grid={grid}"]
+        with self.assertRaisesRegex(pydantic.ValidationError, "sa_qk_diag_grid must be a power of 2"):
+          pyconfig.initialize(argv)
+
+  def test_splash_diag_skip_rejects_non_square_eval_blocks(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_tokamax_splash=True",
+        "sa_qk_diag_skip=True",
+        "custom_mesh_and_rule_for_eval=pure-fsdp",
+        "eval_sa_block_q=512",
+        "eval_sa_block_kv=512",
+        "eval_sa_block_kv_compute=256",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "require square eval blocks"):
+      pyconfig.initialize(argv)
+
+  def test_splash_diag_skip_warns_when_disabled(self):
+    common = ["", _BASE_CONFIG_PATH, "run_name=test", "use_tokamax_splash=True", "sa_sv_diag_skip=True"]
+    # (overrides, expected warning substring or None)
+    cases = (
+        ([], None),
+        (["attention_type=full"], "attention_type='full'"),
+        (["ici_context_parallelism=2", "context_parallel_load_balance=True"], "load-balanced all_gather"),
+        (["ici_context_parallelism=2", "context_parallel_load_balance=False"], None),
+    )
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for overrides, expected in cases:
+      with self.subTest(overrides=overrides):
+        with (
+            unittest.mock.patch("jax.devices", return_value=mock_devices),
+            unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning,
+        ):
+          pyconfig.initialize(common + overrides)
+        messages = [str(call.args[0]) for call in mock_warning.call_args_list if "sa_sv_diag_skip" in str(call.args[0])]
+        if expected is None:
+          self.assertEqual(messages, [])
+        else:
+          self.assertTrue(any(expected in m for m in messages), messages)
+
+  def test_enable_mllog_accepted_with_eval(self):
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=1"]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+
+  def test_te_moe_block_rejects_unsupported_options_during_config_validation(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_no_quant",
+        # Prevent the general EP validation from masking the more specific
+        # te_moe_block/use_random_routing incompatibility under test.
+        "override_logical_axis_rules": True,
+    }
+    invalid_configs = (
+        (
+            {"norm_topk_prob": True},
+            "te_moe_block=True does not currently support norm_topk_prob=True "
+            "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'.",
+        ),
+        ({"use_random_routing": True}, "te_moe_block=True does not support use_random_routing=True."),
+        (
+            {"decoder_block": types.DecoderBlockType.LLAMA4},
+            "te_moe_block=True does not currently support Llama4 routing semantics.",
+        ),
+        (
+            {"te_gmm_quantization": ""},
+            "te_gmm_quantization must be specified when te_moe_block=True.",
+        ),
+    )
+
+    for overrides, expected_error in invalid_configs:
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError) as context:
+          types.MaxTextConfig(**{**common_config, **overrides})
+        self.assertIn(expected_error, str(context.exception))
+
+  def test_te_moe_disable_cudnn_gmm_fusion_requires_te_moe_block(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_gmm_quantization": "te_no_quant",
+        "override_logical_axis_rules": True,
+    }
+
+    self.assertFalse(types.MaxTextConfig(**common_config).te_moe_disable_cudnn_gmm_fusion)
+    self.assertTrue(
+        types.MaxTextConfig(
+            **common_config, te_moe_block=True, te_moe_disable_cudnn_gmm_fusion=True
+        ).te_moe_disable_cudnn_gmm_fusion
+    )
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True"
+    ):
+      types.MaxTextConfig(**common_config, te_moe_disable_cudnn_gmm_fusion=True)
+
+  def test_te_moe_quantized_weight_gather_validation(self):
+    common = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_mxfp8",
+        "te_moe_quantize_before_fsdp_all_gather": True,
+        "override_logical_axis_rules": True,
+    }
+    self.assertTrue(types.MaxTextConfig(**common).te_moe_quantize_before_fsdp_all_gather)
+    self.assertFalse(
+        types.MaxTextConfig(
+            **{**common, "te_moe_quantize_before_fsdp_all_gather": False}
+        ).te_moe_quantize_before_fsdp_all_gather
+    )
+    for overrides in (
+        {"te_gmm_quantization": "te_no_quant"},
+        {"use_2d_fsdp_sharding": True},
+        {"te_moe_quantize_before_fsdp_all_gather": "invalid"},
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError):
+          types.MaxTextConfig(**{**common, **overrides})
+
+  def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_no_quant",
+    }
+
+    # TE accepts the native worst-case sentinel and a finite factor even when
+    # EP is not enabled in the MaxText logical rules.
+    for factor in (-1.0, 0.0, 1.0, 1.5):
+      with self.subTest(factor=factor):
+        config = types.MaxTextConfig(**common_config, ragged_buffer_factor=factor)
+        self.assertEqual(config.ragged_buffer_factor, factor)
+
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**common_config, ragged_buffer_factor=0.5)
+    self.assertIn("te_moe_block=True requires ragged_buffer_factor >= 1.0", str(context.exception))
+
+    # Native ring-of-experts keeps its existing ragged-sort restriction, while
+    # TE MoEBlock bypasses that native implementation and its validation.
+    native_ring_config = {
+        **common_config,
+        "te_moe_block": False,
+        "te_gmm_quantization": "",
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**native_ring_config)
+    self.assertIn("Ragged buffer factor is currently only supported with", str(context.exception))
+
+    te_ring_config = {**native_ring_config, "te_moe_block": True, "te_gmm_quantization": "te_no_quant"}
+    config = types.MaxTextConfig(**te_ring_config)
+    self.assertEqual(config.ragged_buffer_factor, 1.5)
+
+  def test_moe_dropless_fallback_modes(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 8,
+        "base_mlp_dim": 64,
+        "base_moe_mlp_dim": 64,
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "use_ragged_sort": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    for mode in (None, "step", "layer"):
+      with self.subTest(moe_dropless_fallback=mode):
+        config = types.MaxTextConfig(**common_config, moe_dropless_fallback=mode)
+        self.assertEqual(config.moe_dropless_fallback, mode)
+
+    # YAML/CLI "none" reaches pydantic as None, so it must mean "off".
+    for raw in ("none", "None"):
+      with self.subTest(raw=raw):
+        raw_keys = {**common_config, "moe_dropless_fallback": raw}
+        kwargs = pyconfig._prepare_for_pydantic(raw_keys)  # pylint: disable=protected-access
+        self.assertIsNone(types.MaxTextConfig(**kwargs).moe_dropless_fallback)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.MaxTextConfig(**common_config, moe_dropless_fallback="both")
+
+    # The ragged all-to-all path (no ring of experts) supports the in-layer fallback, not the step replay.
+    a2a_config = {**common_config, "use_ring_of_experts": False}
+    self.assertEqual(types.MaxTextConfig(**a2a_config, moe_dropless_fallback="layer").moe_dropless_fallback, "layer")
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**a2a_config, moe_dropless_fallback="step")
+    self.assertIn("only supported with use_ring_of_experts=True", str(context.exception))
 
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
@@ -237,6 +469,30 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(config.use_indexer)
     self.assertEqual(config.attention_type, "mla")
 
+  def test_indexer_all_gather_context_parallelism_rejects_attention_sink(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "attention_sink=True",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=all_gather",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "does not support attention sinks"):
+        pyconfig.initialize(argv)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -302,6 +558,72 @@ class ConfigTest(absltest.TestCase):
         with unittest.mock.patch("jax.devices", return_value=mock_devices):
           with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
             pyconfig.initialize(argv)
+
+  def test_compressed_attention_rejects_context_parallelism(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "compress_ratios=[0, 128]",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "Context parallelism .* is not supported with attention_type='compressed'"):
+        pyconfig.initialize(argv)
+
+  def test_compressed_attention_allows_context_parallelism_when_all_ratios_are_zero(self):
+    """A compress_ratio of 0 downgrades the layer to local sliding, so CP stays legal."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "compress_ratios=[0, 0]",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+    self.assertEqual(config.attention_type, "compressed")
+
+  def test_compressed_attention_rejects_unsupported_dq_reduction_steps(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "requires dq_reduction_steps to be 0 or 3"):
+        pyconfig.initialize(base_args + ["dq_reduction_steps=2"])
+      # 0 (unset) and 3 both remain valid.
+      for valid in ("dq_reduction_steps=0", "dq_reduction_steps=3"):
+        with self.subTest(valid=valid):
+          pyconfig.initialize(base_args + [valid])
 
   def test_tpu_ulysses_config_validation_accepts_initial_config(self):
     argv = [
@@ -680,6 +1002,20 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.training_objective, "causal_lm")
     self.assertEqual(config.block_diffusion_mask_id, -1)
 
+  def test_cpu_hardware_disables_megablox(self):
+    """Tests that megablox is automatically disabled when hardware=cpu."""
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "hardware=cpu",
+            "megablox=True",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+    self.assertFalse(config.megablox)
+
   def test_block_diffusion_pretraining_config(self):
     config = pyconfig.initialize(
         [
@@ -735,7 +1071,6 @@ class ConfigTest(absltest.TestCase):
         ({"num_vocab_tiling": 2}, "vocabulary tiling"),
         ({"dataset_type": "grain"}, "dataset_type='hf'"),
         ({"use_dpo": True}, "DPO"),
-        ({"use_sft": True}, "pre-training only"),
         ({"use_multimodal": True}, "text-only"),
         ({"block_diffusion_logit_alignment": "shifted"}, "seed_and_mask"),
         ({"block_diffusion_canvas_policy": "seed_and_mask"}, "same_position/all_masked"),
@@ -754,6 +1089,31 @@ class ConfigTest(absltest.TestCase):
         argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
         with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
           pyconfig.initialize(argv)
+
+  def test_block_diffusion_sft_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=8",
+            "block_diffusion_mask_id=100",
+            "vocab_size=256",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "use_sft=True",
+            "sft_train_on_completion_only=True",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertTrue(config.use_sft)
+    self.assertTrue(config.sft_train_on_completion_only)
 
   def test_shifted_block_diffusion_requires_seeded_canvas(self):
     config = pyconfig.initialize(
@@ -843,6 +1203,89 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_elastic_snapshot_mode_config(self):
+    """Snapshot mode is the default, takes an interval, and is rejected where it can't work."""
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test"])
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 10)
+    # Without elastic training the kind is inert, whatever the data pipeline.
+    pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "dataset_type=tfds"])
+    # Elastic runs outside the snapshot envelope opt out explicitly.
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "elastic_enabled=true",
+            "enable_single_controller=true",
+            "dataset_type=tfds",
+            "elastic_backup_kind=checkpoint",
+        ]
+    )
+    self.assertEqual(config.elastic_backup_kind, "checkpoint")
+
+    config = pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test", "elastic_backup_kind=snapshot", "elastic_snapshot_interval=25"]
+    )
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 25)
+
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "elastic_snapshot_interval=0"])
+
+    snapshot_argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "elastic_enabled=true",
+        "enable_single_controller=true",
+        "elastic_backup_kind=snapshot",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "not supported with DiLoCo"):
+      pyconfig.initialize(snapshot_argv + ["enable_diloco=true"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "enable_rampup_batch_size"):
+      pyconfig.initialize(
+          snapshot_argv
+          + [
+              "enable_rampup_batch_size=true",
+              "per_device_batch_size=4",
+              "per_device_batch_size_start=1",
+              "per_device_batch_size_increment=1",
+              "global_rampup_samples=100",
+          ]
+      )
+    # Synthetic data needs no iterator position; real data needs grain's ElasticIterator.
+    pyconfig.initialize(snapshot_argv + ["dataset_type=synthetic"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=tfds"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=grain", "grain_train_files=/x/*"])
+    pyconfig.initialize(
+        snapshot_argv
+        + [
+            "dataset_type=grain",
+            "grain_train_files=/x/*",
+            "grain_use_elastic_iterator=true",
+            "grain_file_type=arrayrecord",
+            "packing=false",
+            "colocated_python_data_input=true",
+        ]
+    )
+
+  def test_te_moe_dispatch_remat_location(self):
+    """Dispatch outputs participate in the custom remat policy."""
+    name = "te_moe_dispatch_remat_location"
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "remat_policy=custom"]
+    default_config = pyconfig.initialize(argv)
+    self.assertEqual(getattr(default_config, name), types.RematLocation.REMAT)
+    for location in ("remat", "device", "offload"):
+      with self.subTest(location=location):
+        config = pyconfig.initialize(argv + [f"{name}={location}"])
+        self.assertEqual(name in config.tensors_on_device, location == "device")
+        self.assertEqual(name in config.tensors_to_offload, location == "offload")
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv + [f"{name}=invalid"])
+
   def test_indexer_cutoff_threshold_remat_policy(self):
     """Tests custom remat policy and validation for indexer_cutoff_threshold."""
     # 1. Verify custom remat policy puts indexer_cutoff_threshold on device
@@ -886,8 +1329,8 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       pyconfig.initialize(argv_invalid)
 
-  def test_sliced_mla_proj_disallows_quantization(self):
-    """Tests that use_sliced_mla_proj=True is incompatible with quantization."""
+  def test_sliced_mla_proj_disallows_non_qwix_quantization(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with module-level (non-Qwix) quantization."""
     argv = [
         "",
         _BASE_CONFIG_PATH,
@@ -895,8 +1338,272 @@ class ConfigTest(absltest.TestCase):
         "use_sliced_mla_proj=true",
         "quantization=int8",
     ]
-    with self.assertRaises(pydantic.ValidationError):
+    with self.assertRaisesRegex(pydantic.ValidationError, "only supported via Qwix interception"):
       pyconfig.initialize(argv)
+
+  def test_sliced_mla_proj_allows_qwix_quantization(self):
+    """Tests that use_sliced_mla_proj=True is allowed with Qwix interception quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=int8",
+        "use_qwix_quantization=true",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.use_sliced_mla_proj)
+    self.assertTrue(config.use_qwix_quantization)
+
+  def test_sliced_mla_proj_disallows_qwix_quantization_with_batch_split(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with batch-split Qwix quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=fp8_full",
+        "use_qwix_quantization=true",
+        "use_batch_split_schedule=true",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "only supported via Qwix interception"):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_accepts_valid_config(self):
+    """Tests valid serve_fp8_weight configuration."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertEqual(config.quantization, "serve_fp8_weight")
+
+  def test_serve_fp8_weight_threads_act_calibration_method(self):
+    """Tests that serve_fp8_weight picks up act_quantization_calibration_method."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "act_quantization_calibration_method=fixed,-224,224",
+    ]
+    quant = quantizations.configure_quantization(pyconfig.initialize(argv))
+    self.assertIsInstance(quant, quantizations.ServeFp8WeightQuantization)
+    self.assertEqual(quant.act_calibration_method, "fixed,-224,224")
+
+  def test_serve_fp8_weight_requires_fp8_weight_dtype(self):
+    """Tests that serve_fp8_weight requires an FP8 weight_dtype."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=bfloat16",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "requires weight_dtype to be an FP8 dtype"):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_rejects_qwix_quantization(self):
+    """Tests that serve_fp8_weight rejects use_qwix_quantization=True."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "use_qwix_quantization=true",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with use_qwix_quantization=True"):
+      pyconfig.initialize(argv)
+
+  def test_load_mesh_config_from_package_resources_when_not_on_disk(self):
+    """Tests custom_mesh_and_rule falls back to pkgutil.get_data in archives."""
+    # pylint: disable=protected-access
+    with unittest.mock.patch("os.path.exists", return_value=False):
+      mesh_cfg = types.MaxTextConfig._load_mesh_config_from_yaml("ep-as-dp")
+      self.assertEqual(
+          mesh_cfg.get("mesh_axes"),
+          ["data", "fsdp", "fsdp_transpose", "expert"],
+      )
+      with self.assertRaisesRegex(ValueError, "Custom mesh config file not found"):
+        types.MaxTextConfig._load_mesh_config_from_yaml("nonexistent-rule")
+
+  def _elastic_config(self, *extra_argv, num_live_devices=16):
+    """Initializes an elastic config on five 4-device slices, by default with one of them down."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "enable_single_controller=true"]
+    all_devices = [unittest.mock.MagicMock(slice_index=i // 4) for i in range(20)]
+    with (
+        unittest.mock.patch("jax.devices", return_value=all_devices),
+        unittest.mock.patch.object(types.elastic_utils, "ensure_elastic_manager_initialized"),
+        unittest.mock.patch.object(types.elastic_utils, "live_devices", return_value=all_devices[:num_live_devices]),
+    ):
+      return pyconfig.initialize(argv + ["elastic_enabled=true", *extra_argv])
+
+  def test_elastic_constant_padded_mode_scaling_and_rounding(self):
+    for pdbs, logical, physical in ((5, 100, 112), (4, 80, 80)):
+      with self.subTest(per_device_batch_size=pdbs):
+        cfg = self._elastic_config("elastic_global_batch_size_mode=constant_padded", f"per_device_batch_size={pdbs}")
+        self.assertEqual(
+            (
+                cfg.logical_global_batch_size_to_load,
+                cfg.logical_global_batch_size_to_train_on,
+                cfg.global_batch_size_to_load,
+                cfg.global_batch_size_to_train_on,
+                cfg.eval_per_device_batch_size,
+                cfg.global_batch_size_to_load_eval,
+            ),
+            (logical, logical, physical, physical, pdbs, 16 * pdbs),
+        )
+
+    # Plain ceil(3 * 20 / 16) = 4 fails (4 * 16) % 6 == 0; vocab step=3 rounds per_device_batch_size up to 6.
+    vocab_cfg = self._elastic_config(
+        "elastic_global_batch_size_mode=constant_padded",
+        "per_device_batch_size=3",
+        "max_target_length=16",
+        "num_vocab_tiling=6",
+    )
+    self.assertEqual((vocab_cfg.logical_global_batch_size_to_train_on, vocab_cfg.per_device_batch_size), (60, 6.0))
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "divisible by the number of vocab tiles"):
+      self._elastic_config(
+          "elastic_global_batch_size_mode=constant_padded",
+          "per_device_batch_size=5",
+          "max_target_length=16",
+          "num_vocab_tiling=6",
+      )
+
+    # Pipeline step=2 from non_batch_devices=4 rounds 5 -> 6 on 16 live devices (stage=4, data=4) and 7 -> 8 on 12 live
+    # devices, while keeping eval_per_device_batch_size synchronized.
+    pp_flags = (
+        "elastic_global_batch_size_mode=constant_padded",
+        "per_device_batch_size=4",
+        "ici_pipeline_parallelism=4",
+        "pipeline_delay_activation_forwarding=true",
+        "base_num_decoder_layers=8",
+        "eval_interval=5",
+    )
+    for live_devs, expected_pdbs in ((16, 6.0), (12, 8.0)):
+      pp_cfg = self._elastic_config(*pp_flags, num_live_devices=live_devs)
+      self.assertEqual(
+          (
+              pp_cfg.logical_global_batch_size_to_train_on,
+              pp_cfg.per_device_batch_size,
+              pp_cfg.eval_per_device_batch_size,
+              pp_cfg.micro_batch_size_to_train_on,
+              pp_cfg.micro_batch_size_to_eval_on,
+          ),
+          (80, expected_pdbs, expected_pdbs, 96, 96),
+      )
+
+    # 20 job devices (stage=4, data=5) with per_device_batch_size=1 and 5 microbatches cannot shard over data=5.
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError), "must be divisible by the activation_batch sharding size"
+    ):
+      self._elastic_config(
+          "elastic_global_batch_size_mode=constant_padded",
+          "per_device_batch_size=1",
+          "ici_pipeline_parallelism=4",
+          "num_pipeline_microbatches=5",
+          "base_num_decoder_layers=8",
+      )
+
+  def test_elastic_constant_padded_mode_default_no_live_slice_and_aot_compile(self):
+    default_cfg = self._elastic_config("per_device_batch_size=5")
+    self.assertEqual(
+        (
+            default_cfg.elastic_global_batch_size_mode,
+            default_cfg.logical_global_batch_size_to_load,
+            default_cfg.global_batch_size_to_load,
+        ),
+        (types.ElasticGlobalBatchSizeMode.SCALED, None, 80),
+    )
+    with self.assertRaises(pydantic.ValidationError):
+      self._elastic_config("elastic_global_batch_size_mode=invalid_mode")
+
+    no_live = self._elastic_config(
+        "elastic_global_batch_size_mode=constant_padded", "per_device_batch_size=5", num_live_devices=0
+    )
+    self.assertEqual((no_live.logical_global_batch_size_to_load, no_live.per_device_batch_size), (100, 5))
+
+    for aot_flags in (
+        ("compile_topology=v5e-32", "compile_topology_num_slices=2"),
+        ("internal_compile=true", "internal_compile_num_devices=64"),
+    ):
+      aot = self._elastic_config("elastic_global_batch_size_mode=constant_padded", "per_device_batch_size=5", *aot_flags)
+      self.assertEqual(
+          (aot.num_target_devices, aot.logical_global_batch_size_to_load, aot.global_batch_size_to_load),
+          (64, 320, 320),
+      )
+
+  def test_elastic_constant_padded_mode_rejects_unsupported_configs(self):
+    keep = ("elastic_backup_kind=checkpoint", "elastic_global_batch_size_mode=constant_padded")
+    for extra, error_regex in (
+        ("per_device_batch_size=0.5", "requires an integer `per_device_batch_size >= 1`"),
+        ("per_device_batch_size=1.5", "requires an integer `per_device_batch_size >= 1`"),
+        ("dataset_type=tfds", "requires synthetic data"),
+        ("dataset_type=grain grain_train_files=/x/*", "requires synthetic data"),
+        ("subslice_shape=2,2", "not supported with `subslice_shape`"),
+        ("expansion_factor_real_data=2", "requires `expansion_factor_real_data` to be -1 or 1"),
+        ("expansion_factor_real_data=0.5", "requires `expansion_factor_real_data` to be -1 or 1"),
+        (
+            "ici_pipeline_parallelism=4 base_num_decoder_layers=8 eval_interval=5"
+            " per_device_batch_size=4 eval_per_device_batch_size=6",
+            "requires `eval_per_device_batch_size` to match `per_device_batch_size`",
+        ),
+        (
+            "enable_rampup_batch_size=true per_device_batch_size=4 per_device_batch_size_start=1"
+            " per_device_batch_size_increment=1 global_rampup_samples=100",
+            "not supported with `enable_rampup_batch_size=True`",
+        ),
+        ("enable_diloco=true", "not supported with DiLoCo"),
+        ("use_dpo=true packing=false", "not supported with DPO"),
+        ("num_experts=4", "not supported with MoE"),
+        (
+            "use_indexer=true attention_type=mla q_lora_rank=1536 attention=dot_product"
+            " indexer_topk=8 max_target_length=64 indexer_loss_scaling_factor=0.1",
+            "not supported with `indexer_loss_scaling_factor > 0`",
+        ),
+        ("use_qk_clip=true attention_type=mla decoder_block=deepseek", "not supported with QK-Clip"),
+        (
+            "use_tunix_gradient_accumulation=true gradient_accumulation_steps=2",
+            "not supported with `use_tunix_gradient_accumulation=True` when `gradient_accumulation_steps > 1`",
+        ),
+    ):
+      with self.subTest(extra=extra), self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+        self._elastic_config(*keep, *extra.split())
+
+    for extra in (
+        "use_tunix_gradient_accumulation=true gradient_accumulation_steps=1 per_device_batch_size=5",
+        "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
+        " packing=false colocated_python_data_input=false per_device_batch_size=5",
+        "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
+        " packing=false colocated_python_data_input=true per_device_batch_size=5",
+    ):
+      cfg = self._elastic_config(*keep, *extra.split())
+      self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
+
+
+class MMapDatasetConfigTest(absltest.TestCase):
+  """Tests for mmap-specific configuration defaults and accepted values."""
+
+  def test_default_is_25_preserving_prior_behavior(self):
+    config = types.MMapDataset()
+    self.assertEqual(config.packing_max_segments_per_sample, 25)
+
+  def test_custom_value_is_accepted(self):
+    config = types.MMapDataset(packing_max_segments_per_sample=64)
+    self.assertEqual(config.packing_max_segments_per_sample, 64)
+
+  def test_zero_disables_merging_round_trip(self):
+    config = types.MMapDataset(packing_max_segments_per_sample=0)
+    self.assertEqual(config.packing_max_segments_per_sample, 0)
 
 
 if __name__ == "__main__":

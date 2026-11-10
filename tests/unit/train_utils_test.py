@@ -16,6 +16,7 @@
 
 import itertools
 import pathlib
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -23,15 +24,19 @@ from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock
 
+from absl.testing import absltest
 import grain
 import jax
 import numpy as np
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from orbax.checkpoint import v1 as ocp
+import pytest
 
 from maxtext.common import grain_utility
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.utils import max_utils
+from maxtext.utils import sharding
 from maxtext.utils import train_utils
 from maxtext.utils.train_utils import (
     validate_train_config,
@@ -131,12 +136,12 @@ class TestReorderedDataIterator(unittest.TestCase):
       view = train_utils._ReorderedDataIterator(lambda batch: batch * 10, iterator)
       self.assertEqual(next(view), 0)
       self.assertEqual(next(view), 10)
-      ocp.save_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable_v1(iterator)})
+      ocp.save_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable(iterator)})
       self.assertTrue((path / "iter" / "process_0-of-1.json").exists())
 
       restored = iter(grain.MapDataset.range(10).to_iter_dataset())
       restored_view = train_utils._ReorderedDataIterator(lambda batch: batch * 10, restored)
-      ocp.load_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable_v1(restored)})
+      ocp.load_checkpointables(str(path), {"iter": grain_utility.GrainCheckpointable(restored)})
       self.assertEqual(next(restored_view), 20)
 
   def test_eval_view_consume_reset_consume(self):
@@ -152,6 +157,70 @@ class TestReorderedDataIterator(unittest.TestCase):
 
     self.assertEqual(first_pass, [100, 101])
     self.assertEqual(second_pass, first_pass)
+
+  def test_eval_reset_then_for_loop_builds_one_iterator(self):
+    """train.py resets the eval iterator and then runs a for loop over it: one local iterator per eval."""
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    batches = [{"x": np.full((len(jax.devices()), 2), i, dtype=np.int32)} for i in range(2)]
+
+    class _CountingLoader:
+      builds = 0
+
+      def __iter__(self):
+        _CountingLoader.builds += 1
+        return iter(batches)
+
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(_CountingLoader(), mesh)
+    self.assertEqual(_CountingLoader.builds, 1)
+    for _ in range(2):
+      eval_iterator.reset()
+      self.assertEqual([int(b["x"][0, 0]) for b in eval_iterator], [0, 1])
+    self.assertEqual(_CountingLoader.builds, 3)
+    # A for loop without an explicit reset still starts from the first batch.
+    self.assertEqual([int(b["x"][0, 0]) for b in eval_iterator], [0, 1])
+    self.assertEqual(_CountingLoader.builds, 4)
+
+
+class TestEvalCachePrefill(unittest.TestCase):
+  """Tests for start_eval_cache_prefill (eval_cache_prefill_in_background)."""
+
+  # pylint: disable=protected-access
+
+  @staticmethod
+  def _counting_tf_dataset(reads):
+    """A tf.data pipeline shaped like the c4_mlperf eval loader (... -> cache -> prefetch) that counts source reads."""
+    tf = pytest.importorskip("tensorflow")
+
+    def _read(x):
+      reads.append(int(x))
+      return np.full((jax.local_device_count(), 2), int(x), dtype=np.int32)
+
+    ds = tf.data.Dataset.range(3)
+    ds = ds.map(lambda x: {"x": tf.py_function(_read, [x], tf.int32)})
+    return ds.cache().prefetch(1)
+
+  def test_prefill_commits_tf_data_cache_through_reorder_view(self):
+    reads = []
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(self._counting_tf_dataset(reads), mesh)
+    view = train_utils._ReorderedDataIterator(lambda batch: batch, eval_iterator)
+
+    thread = train_utils.start_eval_cache_prefill(view)
+    self.assertIsNotNone(thread)
+    thread.join(timeout=60)
+    self.assertFalse(thread.is_alive())
+    self.assertEqual(reads, [0, 1, 2])
+    # The eval loop resets and re-iterates the same dataset object: the cache is now served from memory.
+    view.reset()
+    self.assertEqual(len(list(itertools.islice(view, 3))), 3)
+    self.assertEqual(reads, [0, 1, 2])
+
+  def test_prefill_skips_non_tf_data_loaders(self):
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    batches = [{"x": np.zeros((len(jax.devices()), 2), dtype=np.int32)}]
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(batches, mesh)
+    self.assertIsNone(train_utils.start_eval_cache_prefill(eval_iterator))
+    self.assertIsNone(train_utils.start_eval_cache_prefill(_FakeIterator([1])))
 
 
 class TestValidateTrainConfig(unittest.TestCase):
@@ -363,5 +432,154 @@ class TestValidateCompletedSteps(unittest.TestCase):
     )
 
 
+class TestCompileXlaFlags(unittest.TestCase):
+  """Tests that compile_xla_flags are applied to JIT and AOT-compiled train/eval steps without step-0 recompilation."""
+
+  # pylint: disable=protected-access
+
+  @staticmethod
+  def _make_compile_config(compile_xla_flags: str):
+    """Builds a minimal config namespace for jit_train_and_eval_step and aot_compile_step."""
+    return SimpleNamespace(
+        enable_diloco=False,
+        compiled_trainstep_file="",
+        logical_axis_rules=(("batch", "data"),),
+        logical_axis_rules_for_eval=(("batch", "data"),),
+        shard_mode="auto",
+        input_data_sharding_logical_axes=("batch",),
+        compile_xla_flags=compile_xla_flags,
+    )
+
+  @staticmethod
+  def _dummy_train_step(model, config, state_mesh_shardings, params_shardings, state, batch):
+    del model, config, state_mesh_shardings, params_shardings
+    return {"w": state["w"] + batch["inputs"]}, {"loss": jax.numpy.sum(batch["inputs"])}
+
+  @staticmethod
+  def _dummy_eval_step(model, config, state, batch):
+    del model, config
+    return {"eval_loss": jax.numpy.sum(state["w"] * batch["inputs"])}
+
+  def test_jit_train_and_eval_step_attaches_compile_xla_flags(self):
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = self._make_compile_config("--xla_cpu_enable_fast_math=False --xla_sc_disable_megacore_partitioning=true")
+    state = {"w": jax.device_put(np.ones((len(jax.devices()), 4), dtype=np.float32), replicated)}
+    state_shardings = {"w": replicated}
+
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model=None,
+        mesh=mesh,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        train_step=self._dummy_train_step,
+        eval_step=self._dummy_eval_step,
+        eval_data_iterator=[1],
+        params_shardings=state_shardings,
+    )
+
+    expected_kvs = (
+        ("xla_cpu_enable_fast_math", "False"),
+        ("xla_sc_disable_megacore_partitioning", "true"),
+    )
+    self.assertEqual(p_train_step._jit_info.compiler_options_kvs, expected_kvs)
+    self.assertEqual(p_eval_step._jit_info.compiler_options_kvs, expected_kvs)
+
+  def test_aot_compile_step_and_step0_use_option_compiled_executable(self):
+    pxla = sys.modules["jax._src.interpreters.pxla"]
+
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = self._make_compile_config("--xla_cpu_enable_fast_math=False")
+    compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+    batch_shape = (len(jax.devices()), 4)
+    state = {"w": jax.device_put(np.ones(batch_shape, dtype=np.float32), replicated)}
+    state_shardings = {"w": replicated}
+
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model=None,
+        mesh=mesh,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        train_step=self._dummy_train_step,
+        eval_step=self._dummy_eval_step,
+        eval_data_iterator=[1],
+        params_shardings=state_shardings,
+    )
+
+    data_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
+    shaped_batch = {"inputs": jax.ShapeDtypeStruct(batch_shape, jax.numpy.float32, sharding=data_sharding)}
+    real_batch = {"inputs": jax.device_put(np.ones(batch_shape, dtype=np.float32), data_sharding)}
+
+    expected_kvs = (("xla_cpu_enable_fast_math", "False"),)
+    aot_compile_fn = getattr(train_utils, "aot_compile_step", None)
+    self.assertIsNotNone(aot_compile_fn, "train_utils.aot_compile_step must be defined")
+
+    with mock.patch.object(
+        pxla.UnloadedMeshExecutable, "from_hlo", wraps=pxla.UnloadedMeshExecutable.from_hlo
+    ) as from_hlo_spy:
+      with jax.set_mesh(mesh):
+        compiled_train = aot_compile_fn(p_train_step, (state, shaped_batch), compiler_options, prefix="train")
+        compiled_eval = aot_compile_fn(p_eval_step, (state, shaped_batch), compiler_options, prefix="eval")
+
+        self.assertEqual(from_hlo_spy.call_count, 2)
+        for call in from_hlo_spy.call_args_list:
+          self.assertEqual(call.kwargs["compiler_options_kvs"], expected_kvs)
+
+        # The option-compiled executables must be cached on the lowered MeshComputation objects.
+        self.assertIs(p_train_step.lower(state, shaped_batch)._lowering._executable, compiled_train._executable)
+        self.assertIs(p_eval_step.lower(state, shaped_batch)._lowering._executable, compiled_eval._executable)
+
+        # Executing step 0 must reuse the option-compiled executables without recompiling.
+        new_state, train_metrics = p_train_step(state, real_batch)
+        eval_metrics = p_eval_step(new_state, real_batch)
+        jax.block_until_ready((new_state, train_metrics, eval_metrics))
+
+        self.assertEqual(from_hlo_spy.call_count, 2)
+
+  def test_empty_compile_xla_flags_caches_executable_without_recompiling(self):
+    pxla = sys.modules["jax._src.interpreters.pxla"]
+
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = self._make_compile_config("")
+    compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+    batch_shape = (len(jax.devices()), 4)
+    state = {"w": jax.device_put(np.ones(batch_shape, dtype=np.float32), replicated)}
+    state_shardings = {"w": replicated}
+
+    p_train_step, _ = train_utils.jit_train_and_eval_step(
+        config,
+        model=None,
+        mesh=mesh,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        train_step=self._dummy_train_step,
+        params_shardings=state_shardings,
+    )
+    self.assertEqual(p_train_step._jit_info.compiler_options_kvs, ())
+
+    data_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
+    shaped_batch = {"inputs": jax.ShapeDtypeStruct(batch_shape, jax.numpy.float32, sharding=data_sharding)}
+    real_batch = {"inputs": jax.device_put(np.ones(batch_shape, dtype=np.float32), data_sharding)}
+
+    aot_compile_fn = getattr(train_utils, "aot_compile_step", None)
+    self.assertIsNotNone(aot_compile_fn, "train_utils.aot_compile_step must be defined")
+
+    with mock.patch.object(
+        pxla.UnloadedMeshExecutable, "from_hlo", wraps=pxla.UnloadedMeshExecutable.from_hlo
+    ) as from_hlo_spy:
+      with jax.set_mesh(mesh):
+        compiled_train = aot_compile_fn(p_train_step, (state, shaped_batch), compiler_options, prefix="train")
+        self.assertEqual(from_hlo_spy.call_count, 1)
+        self.assertIs(p_train_step.lower(state, shaped_batch)._lowering._executable, compiled_train._executable)
+
+        new_state, _ = p_train_step(state, real_batch)
+        jax.block_until_ready(new_state)
+        self.assertEqual(from_hlo_spy.call_count, 1)
+
+
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

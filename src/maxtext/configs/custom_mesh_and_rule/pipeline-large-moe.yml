@@ -41,8 +41,10 @@ logical_axis_rules: [
                       ['activation_q_length', ['context']],
                       ['activation_embed_attn', ['tensor']],
                       ['activation_norm_length', ['context']],
+                      ['activation_norm_length_routed', ['context']],
                       ['activation_norm_length_moe', ['context']],
                       ['activation_embed', ['tensor']],
+                      ['activation_embed_routed', ['tensor']],
                       ['activation_embed_moe', ['tensor']],
                       ['activation_mlp', ['tensor']],
                       ['activation_mlp_moe', ['tensor']],
@@ -63,6 +65,7 @@ logical_axis_rules: [
                       ['embed_attn', ['fsdp', 'expert']], # remove context from embed sharding
                       ['embed_vocab', ['fsdp', 'expert']],
                       ['embed_moe', ['fsdp']],
+                      ['embed_router', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],
                       ['norm', ['tensor']],

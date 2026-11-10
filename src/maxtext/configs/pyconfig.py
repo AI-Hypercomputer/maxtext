@@ -89,7 +89,7 @@ def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[s
   # if passing at least two arguments via list (no kwargs), then we have to specify
   # first one as either "" or python script like train_rl.py or train.py
   # the second argument is the yaml file
-  if len(argv) >= 2 and argv[1].endswith(".yml"):
+  if len(argv) >= 2 and argv[1].lower().endswith((".yml", ".yaml")):
     return resolve_config_path(argv[1]), argv[2:]
   module = _module_from_path(argv[0]) if len(argv) > 0 else None
   if module not in _CONFIG_FILE_MAPPING:
@@ -310,7 +310,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
 
     if key == "tokenizer_path" and new_value is None:
       try:
-        new_value = HF_IDS[raw_keys["model_name"]]
+        model_name = raw_keys.get("model_name", "default")
+        new_value = HF_IDS[model_name]
+        if model_name != "default":
+          pydantic_kwargs["_auto_hf_tokenizer"] = True
       except KeyError:
         new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
         max_logging.warning(
@@ -320,6 +323,9 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         )
 
     pydantic_kwargs[key] = new_value
+
+  if pydantic_kwargs.pop("_auto_hf_tokenizer", False):
+    pydantic_kwargs["tokenizer_type"] = "huggingface"
 
   return pydantic_kwargs
 
@@ -337,10 +343,16 @@ class HyperParameters:
     final_dict["dtype"] = jnp.dtype(final_dict["dtype"])
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
+    final_dict["rollout_weight_dtype"] = (
+        final_dict["weight_dtype"]
+        if not final_dict["rollout_weight_dtype"]
+        else jnp.dtype(final_dict["rollout_weight_dtype"])
+    )
     final_dict["mu_dtype"] = (
         final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
     )
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
+    final_dict["logical_axis_rules_for_eval"] = _lists_to_tuples(final_dict["logical_axis_rules_for_eval"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])
 
     final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])
@@ -374,6 +386,25 @@ class HyperParameters:
   def get_keys(self) -> dict[str, Any]:
     """Returns the configuration as a flat dictionary for backward compatibility."""
     return self._flat_config
+
+  def replace(self, **updates: Any) -> "HyperParameters":
+    """Returns a copy with `updates` applied verbatim.
+
+    Validation and derived fields are not recomputed, so callers must pass consistent values for every field they
+    change (e.g. both a batch size and the global batch sizes derived from it). In particular, changing `run_name`
+    keeps the paths derived from the old one: `checkpoint_dir`, `metrics_dir`, `tensorboard_dir`,
+    `managed_mldiagnostics_dir`, `mllog_file`, `dump_hlo_gcs_dir` and `dump_jaxpr_gcs_dir`. Only the data-replica
+    checks (`DatasetGeneral.validate_data_replica_index`) are re-run.
+
+    Raises:
+      ValueError: If a key is not a config field, or the data-replica fields are inconsistent.
+    """
+    unknown = sorted(set(updates) - set(type(self._pydantic_config).model_fields))
+    if unknown:
+      raise ValueError(f"Unknown config fields: {unknown}.")
+    pydantic_config = self._pydantic_config.model_copy(update=updates, deep=True)
+    pydantic_config.validate_data_replica_index()
+    return HyperParameters(pydantic_config)
 
 
 def _handle_config_exception(e: Exception):

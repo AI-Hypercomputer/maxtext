@@ -509,7 +509,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       # 2. Gather Student unnormalized logits at the Teacher's exact Top-K indices
       s_logits_sparse = jnp.take_along_axis(
           s_logits, teacher_output.top_k_indices, axis=-1  # pyrefly: ignore[bad-argument-type]
-      )  # pyrefly: ignore[bad-argument-type]
+      )
 
       # 3. Normalize Student probabilities only over the exact same Top-K subset
       log_s_T_sparse = jax.nn.log_softmax(s_logits_sparse / temperature, axis=-1)
@@ -561,7 +561,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
       feature_loss = beta_feature * self.feature_loss_fn(  # pyrefly: ignore[not-callable]
           s_features_sliced, t_features_sliced, mask
-      )  # pyrefly: ignore[not-callable]
+      )
 
     total_loss = base_logit_loss + feature_loss
 
@@ -652,7 +652,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
   Model and optimizer are delegated to Tunix's v1 ``Checkpointer`` unchanged.
   The Grain input pipeline is added as an extra ``"iter"`` checkpointable via
-  ``GrainCheckpointable``, which wraps MaxText's ``GrainCheckpointHandler``.
+  ``GrainCheckpointable``, which implements Orbax's ``StatefulCheckpointable``.
   """
 
   def __init__(
@@ -710,9 +710,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
         local_iter = data_iter.local_iterator if hasattr(data_iter, "local_iterator") else data_iter
         grain_iters_to_save.append((local_iter, process_index, process_count_total))
 
-      checkpointables["iter"] = grain_utility.GrainCheckpointable(
-          save_args=grain_utility.GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
-      )
+      checkpointables["iter"] = grain_utility.GrainCheckpointable(grain_iters_to_save)
 
     return self._save_checkpointables(step, checkpointables, force, custom_metadata)
 
@@ -735,7 +733,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     target_model = getattr(model, "student_model", model)
 
     step, custom_metadata = super().maybe_restore(
-        model=target_model,  # pyrefly: ignore[bad-argument-type]
+        model=target_model,
         optimizer=optimizer,
         restore_only_lora_params=restore_only_lora_params,
     )
@@ -763,7 +761,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
       self._checkpointer.load_checkpointables(
           step,
-          {"iter": grain_utility.GrainCheckpointable(restore_args=grain_utility.GrainCheckpointRestore(item=local_iter))},
+          {"iter": grain_utility.GrainCheckpointable(local_iter)},
       )
       # Since Grain restores in-place via set_state(), we return the original object
       return self._iterator
@@ -776,3 +774,10 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     """Blocks until all outstanding checkpoint operations are complete."""
     if self._checkpointer is not None:
       self._checkpointer.wait()
+
+  def close(self) -> None:
+    """Closes the checkpoint manager."""
+    super().close()
+    if getattr(self, "_checkpointer", None) is not None:
+      if hasattr(self._checkpointer, "close"):
+        self._checkpointer.close()

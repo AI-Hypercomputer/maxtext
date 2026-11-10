@@ -16,6 +16,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='qwen3-30b-a3b-base'
 
@@ -46,6 +51,8 @@ python3 -m maxtext.inference.decode \
 # Step 2: Run pre-training starting from the pre-converted checkpoint
 python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH} \
     tokenizer_type="huggingface" \
     load_parameters_path=${SCANNED_CKPT_PATH} \

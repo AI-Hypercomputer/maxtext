@@ -27,45 +27,47 @@ Usage:
 Examples:
   A. Load from a Google Cloud Storage (GCS) directory containing `.safetensors`:
      ```
-     python3 maxtext/trainers/pre_train/train.py \
-         maxtext/configs/base.yml \
+     python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
          load_parameters_path="gs://my-bucket/path/to/safetensors_directory/"
      ```
 
-  B. Load directly from the Hugging Face Hub (automatically cached to GCS):
+  B. Load directly from the Hugging Face Hub (automatically cached to GCS). The repo must match
+     `model_name`:
      ```
-     python3 maxtext/trainers/pre_train/train.py \
-         maxtext/configs/base.yml \
+     python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
-         load_parameters_path="hf://meta-llama/Meta-Llama-3-8B" \
-         hf_access_token="<your_token>" \
+         load_parameters_path="hf://meta-llama/Llama-3.1-8B" \
          base_output_directory="gs://my-bucket/output/"
      ```
 
-  C. Load from Hugging Face Hub using automatic model_name resolution:
+  C. Load from the Hugging Face Hub repo listed in `HF_IDS[model_name]`. Leave
+     `load_parameters_path` unset; an empty value fails config validation.
      ```
-     python3 maxtext/trainers/pre_train/train.py \
-         maxtext/configs/base.yml \
+     python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
-         load_parameters_path="" \
-         hf_access_token="<your_token>" \
          base_output_directory="gs://my-bucket/output/"
      ```
 
 Note:
-  - Hugging Face weights from HF Hub are cached to `base_output_directory`.
-  - When loading from Hugging Face Hub, `base_output_directory` must start with
-    "gs://" and `hf_access_token` is required if downloading gated models.
+  - Weights from the Hugging Face Hub are cached under `<base_output_directory>/hf_cache/`, so
+    `base_output_directory` must start with "gs://".
+  - `hf_access_token` is required if downloading gated models.
+  - Loaded weights use `weight_dtype`, regardless of the checkpoint dtype.
+  - Only the training restore (`load_state_if_possible`) supports this layout; `from_pretrained` does
+    not.
+  - The Pathways backend is not supported.
 """
 
+import collections
 import concurrent.futures
+import contextlib
 import multiprocessing
 import os
 import random
@@ -75,6 +77,7 @@ from flax import nnx
 import flax.traverse_util
 import huggingface_hub
 import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
@@ -82,6 +85,7 @@ from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
+import numpy as np
 from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -157,8 +161,77 @@ def get_hf_config_and_mappings(maxtext_config):
   return param_map_mt_to_hf, hook_fn_map_mt
 
 
-def load_sharded_hf_state(path):
-  """Loads HF state with maximal sharding across TPU mesh to avoid host OOM.
+def _leading_axis_shardings(abstract_state, devices, num_groups=None):
+  """Shards each tensor along its leading axis only, so each process reads one contiguous byte range.
+
+  A safetensors tensor is stored row-major, so a shard is contiguous in the file only if it splits the
+  leading axis alone. A sharding that splits an inner axis makes every process read many small strided
+  ranges, and Orbax then reads whole file spans instead: each host reads almost the whole checkpoint.
+
+  Each leading axis is split across all devices if it divides evenly, else across processes (copies on a
+  process's local devices), else not at all (only small tensors such as norms and routers in practice).
+
+  Args:
+    abstract_state: Tree of `jax.ShapeDtypeStruct` from the checkpoint metadata.
+    devices: All devices.
+    num_groups: If set, splits the devices into this many groups by id instead of one per process. For
+      tests on one process.
+
+  Returns:
+    A tree of `NamedSharding` matching `abstract_state`.
+  """
+  if num_groups is None:
+    by_process = {}
+    for device in devices:
+      by_process.setdefault(device.process_index, []).append(device)
+    groups = [sorted(group, key=lambda d: d.id) for _, group in sorted(by_process.items())]
+  else:
+    ordered = sorted(devices, key=lambda d: d.id)
+    size = len(ordered) // num_groups
+    groups = [ordered[i * size : (i + 1) * size] for i in range(num_groups)]
+  if len({len(group) for group in groups}) != 1 or sum(map(len, groups)) != len(devices):
+    raise ValueError(f"Cannot split {len(devices)} devices into {len(groups)} groups of equal size.")
+  mesh = Mesh(np.array(groups), ("process", "local"))
+  num_processes, num_local = mesh.devices.shape
+
+  def leading_axis_sharding(sds):
+    rows = sds.shape[0] if sds.shape else 1
+    if rows % (num_processes * num_local) == 0:
+      return NamedSharding(mesh, PartitionSpec(("process", "local")))
+    if rows % num_processes == 0:
+      return NamedSharding(mesh, PartitionSpec("process"))
+    return NamedSharding(mesh, PartitionSpec())
+
+  return jax.tree.map(leading_axis_sharding, abstract_state)
+
+
+@contextlib.contextmanager
+def _no_gcs_read_ahead():
+  """Makes gcsfs read only the requested bytes of a `gs://` file within this context.
+
+  Orbax reads each byte range through `epath`, whose `gs://` backend (gcsfs) also reads `default_block_size`
+  (5 MiB) ahead. Each host reads one range per tensor, so a host of DeepSeek-V3 on 128 hosts needed about
+  230 KB per tensor but downloaded 5.3 MB. The class attribute is set because gcsfs instances are cached per
+  thread and Orbax opens files from worker threads. Writes still use blocks of at least 256 KiB.
+  """
+  try:
+    import gcsfs  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    yield
+    return
+  block_size = gcsfs.GCSFileSystem.default_block_size
+  gcsfs.GCSFileSystem.default_block_size = 0
+  try:
+    yield
+  finally:
+    gcsfs.GCSFileSystem.default_block_size = block_size
+
+
+def load_sharded_hf_state(path, num_groups=None):
+  """Loads HF state sharded across the TPU mesh to avoid host OOM.
+
+  On one process, each tensor is sharded as much as possible. On several processes, each tensor is
+  sharded along its leading axis only; see `_leading_axis_shardings`.
 
   Args:
     path: A directory path (either local or GCS starting with gs://) containing
@@ -166,13 +239,21 @@ def load_sharded_hf_state(path):
       "/path/to/safetensors_directory/"). If a Hugging Face Hub ID was used,
       it should already be cached/downloaded to GCS before calling this
       function.
+    num_groups: If set, shards as on several processes, with the devices split into this many groups by
+      id. For tests on one process.
 
   Returns:
     The loaded Hugging Face state dictionary mapping parameter names to
     JAX arrays.
   """
   t0 = time.time()
-  context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
+  multi_process = num_groups is not None or jax.process_count() > 1
+  # Leading-axis shards are contiguous, so never read whole spans: with more than 1024 tensors in a file
+  # (fine-grained MoE), Orbax's automatic choice would otherwise read whole spans again.
+  safetensors_options = ocp_v1.options.SafetensorsOptions(max_over_read_ratio=1.0) if multi_process else None
+  context = ocp_v1.Context(
+      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS, safetensors_options=safetensors_options
+  )
   with context:
     metadata = ocp_v1.pytree_metadata(path)
     simple_abstract_state = metadata.metadata
@@ -180,7 +261,10 @@ def load_sharded_hf_state(path):
     # Distributed Sharded Download: Tell JAX to shard the HF Safetensors download
     # across the entire TPU mesh to avoid Host OOM.
     current_global_devices = jax.devices()
-    shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state, devices=current_global_devices)
+    if multi_process:
+      shardings = _leading_axis_shardings(simple_abstract_state, current_global_devices, num_groups)
+    else:
+      shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state, devices=current_global_devices)
 
     def combine_sharding(sds, single_sharding):
       return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=single_sharding)
@@ -188,17 +272,57 @@ def load_sharded_hf_state(path):
     sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
 
     max_logging.log("Reading raw Safetensors into memory (Distributed Sharded GCS Download)...")
-    hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
+    with _no_gcs_read_ahead():
+      hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
     max_logging.log(f"load_sharded_hf_state took {time.time() - t0:.2f}s")
     return hf_state
+
+
+# Prefix renames from the older multimodal checkpoint layout (e.g. `google/gemma-3-4b-it`) to the names
+# transformers uses after loading, which the param mappings use. Same as transformers' llava renames.
+_LEGACY_HF_PREFIXES = (
+    ("language_model.model.", "model.language_model."),
+    ("language_model.lm_head.", "lm_head."),
+    ("vision_tower.", "model.vision_tower."),
+    ("multi_modal_projector.", "model.multi_modal_projector."),
+)
+
+
+def _hf_keys_in(hf_source):
+  """Yields every HF key in a (possibly nested) list or tuple of HF keys."""
+  if isinstance(hf_source, (list, tuple)):
+    for item in hf_source:
+      yield from _hf_keys_in(item)
+  else:
+    yield hf_source
+
+
+def rename_legacy_hf_keys(hf_state, param_map_mt_to_hf):
+  """Renames HF tensors stored under a legacy prefix to the names the mapping uses.
+
+  A tensor is renamed only if the mapping does not use its stored name but uses the renamed one, so
+  checkpoints already in the mapping's layout are unchanged.
+  """
+  mapped = set(_hf_keys_in(list(param_map_mt_to_hf.values())))
+  for key in [k for k in hf_state if k not in mapped]:
+    for old, new in _LEGACY_HF_PREFIXES:
+      if key.startswith(old) and new + key[len(old) :] in mapped:
+        hf_state[new + key[len(old) :]] = hf_state.pop(key)
+        break
+  return hf_state
 
 
 def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
   """Transforms HF state into MaxText state by applying param mappings and mathematical hooks."""
   t0 = time.time()
 
+  # An HF tensor may feed several MaxText leaves (gemma4 maps `experts.gate_up_proj` to both `wi_0`
+  # and `wi_1`), so each tensor is dropped only after its last use.
+  remaining_uses = collections.Counter(_hf_keys_in(list(param_map_mt_to_hf.values())))
+
   def tensor_getter(key):
-    return hf_state.pop(key)
+    remaining_uses[key] -= 1
+    return hf_state.pop(key) if remaining_uses[key] <= 0 else hf_state[key]
 
   flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored = flat_target.copy()
@@ -207,23 +331,47 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   keys_missed = []
   max_logging.log("Starting fast in-memory Distributed Transformations...")
 
-  for mt_key, hf_source in param_map_mt_to_hf.items():
+  def target_name(mt_key):
     mt_name = mt_key.replace("params-", "").replace("-", ".")
+    candidates = [mt_name, f"params.{mt_name}", mt_key.replace("-", ".")]
+    # A key of another variable collection (DeepSeek `MoEBiasVar-...`, `Tid2EidVar-...`) names a
+    # leaf that the weights state holds without the collection.
+    if tensor_handling.is_variable_collection_key(mt_key):
+      candidates.append(mt_key.partition("-")[2].replace("-", "."))
+    return next((name for name in candidates if name in flat_target), None)
 
-    # Determine the correct key in flat_target
-    check_name = mt_name
-    if check_name not in flat_target:
-      if f"params.{mt_name}" in flat_target:
-        check_name = f"params.{mt_name}"
-      elif mt_key.replace("-", ".") in flat_target:
-        check_name = mt_key.replace("-", ".")
+  # DeepSeek-V3 maps its gate bias both as a weight (`params-...`) and in `MoEBiasVar`, and both keys
+  # name the same leaf. The collection key stacks it along the right axis, so the other is skipped.
+  collection_targets = {
+      target_name(k)
+      for k in param_map_mt_to_hf
+      if not isinstance(k, tuple) and tensor_handling.is_variable_collection_key(k)
+  }
 
-    if check_name not in flat_target:
-      keys_missed.append(mt_name)
+  for mt_key, hf_source in param_map_mt_to_hf.items():
+    # A tuple of MaxText keys is a composite key: one HF source split into several leaves.
+    mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
+    check_names = [target_name(k) for k in mt_keys]
+    if None in check_names:
+      keys_missed.extend(k.replace("params-", "").replace("-", ".") for k, n in zip(mt_keys, check_names) if n is None)
+      continue
+    if (
+        not isinstance(mt_key, tuple)
+        and not tensor_handling.is_variable_collection_key(mt_key)
+        and check_names[0] in collection_targets
+    ):
+      for key in _hf_keys_in([hf_source]):
+        if key is not None:
+          tensor_getter(key)
       continue
 
-    target_leaf = flat_target[check_name]
+    leaves = [flat_target[name] for name in check_names]
     hook_fn = hook_fn_map_mt.get(mt_key)
+    if isinstance(mt_key, tuple):
+      target_leaf = tensor_handling.composite_target_leaf(leaves)
+      hook_fn = tensor_handling.composite_hook_fn(hook_fn, len(leaves))
+    else:
+      target_leaf = leaves[0]
 
     load_fn = get_hf_loading_function(
         hf_source,
@@ -231,13 +379,20 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
         hook_fn,
         target_leaf,
         maxtext_config,
+        mt_keys[0],
     )
 
     # Execute transformation and assign to flat_restored
     t_layer = time.time()
-    flat_restored[check_name] = load_fn()
+    loaded = load_fn()
+    if isinstance(mt_key, tuple):
+      for i, (name, leaf) in enumerate(zip(check_names, leaves)):
+        part = loaded[..., i]
+        flat_restored[name] = jax.device_put(part, leaf.sharding) if hasattr(leaf, "sharding") else part
+    else:
+      flat_restored[check_names[0]] = loaded
 
-    max_logging.log(f"Transformed {check_name} from {hf_source} in {time.time() - t_layer:.4f}s")
+    max_logging.log(f"Transformed {', '.join(check_names)} from {hf_source} in {time.time() - t_layer:.4f}s")
     mapped_count += 1
 
   if mapped_count == 0:
@@ -256,37 +411,47 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 
 
 def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
-  """Main entry point to dynamically build and load safetensors into MaxText format.
+  """Loads HF safetensors and converts them into MaxText weights on device.
 
-  `abstract_params` is the weights of the target state -- Linen's `params` collection, or the
-  NNX params state -- not the full train state; the HF param mappings name weights only.
+  Reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the tensors into
+  the target layout.
 
-  Splits execution into:
-  1. Deriving Mappings
-  2. Loading Sharded arrays directly to TPUs
-  3. Processing the transformations natively on TPUs
+  Args:
+    path: The safetensors source: a `gs://` or local directory, or an HF repo ID with or without the
+      `hf://` prefix. If empty, `HF_IDS[maxtext_config.model_name]` is used. An HF repo is first
+      copied to `<base_output_directory>/hf_cache/` by host 0.
+    abstract_params: The target weights: Linen's `params` collection or the NNX params state, not the
+      full train state.
+    maxtext_config: The MaxText config.
+
+  Returns:
+    A tuple `(None, {"params": weights})`. Each weight has the dtype and sharding of its leaf in
+    `abstract_params`.
+
+  Raises:
+    ValueError: If `maxtext_config` is None, if `path` is empty and `HF_IDS` has no entry for the
+      model, or if an HF repo is used without a `gs://` `base_output_directory`.
   """
   if maxtext_config is None:
     raise ValueError("maxtext_config must be provided for safetensors_dynamic loading.")
 
   model_name = maxtext_config.model_name
-  if "-Instruct" in model_name:
-    model_name = model_name.replace("-Instruct", "")
 
   if not path:
+    # Use the exact name: -Instruct variants have their own HF_IDS entries, and stripping the suffix
+    # would load the base model's weights.
     if model_name not in maxtext_globals.HF_IDS:
-      raise ValueError(f"Unsupported model name for automatic HF repo resolution: {model_name}.")
+      raise ValueError(
+          f"No HF repo for model_name={model_name} in HF_IDS; set load_parameters_path to the safetensors"
+          " location (a gs:// or local directory, or hf://<repo>)."
+      )
     path = maxtext_globals.HF_IDS[model_name]
 
   if path.startswith("hf://"):
     path = path[5:]
 
   if not path.startswith("gs://") and not os.path.isdir(path):
-    fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
     repo_id = path
-
-    files = fs.glob(f"{repo_id}/*.safetensors")
-
     host_id = jax.process_index()
 
     if hasattr(maxtext_config, "base_output_directory") and maxtext_config.base_output_directory.startswith("gs://"):
@@ -297,6 +462,9 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
       if host_id == 0:
         max_logging.log("Dynamic HF Hub Fast DL: Host 0 is downloading to shared GCS" f" Cache: {gcs_cache_dir}")
         t_gcs_start = time.time()
+        # Only host 0 calls the HF API: anonymous calls from every host of a large job are rate-limited (HTTP 429).
+        fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
+        files = fs.glob(f"{repo_id}/*.safetensors")
 
         # List existing blobs to avoid spawning processes for already cached
         # files
@@ -359,7 +527,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
   t1 = time.time()
-  hf_state = load_sharded_hf_state(path)
+  hf_state = rename_legacy_hf_keys(load_sharded_hf_state(path), param_map_mt_to_hf)
   max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
 
   t2 = time.time()

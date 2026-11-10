@@ -28,6 +28,11 @@ on:
       device_name:
         required: true
         type: string
+      repository_name:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'maxtext-images'
       base_image:
         required: true
         type: string
@@ -44,6 +49,11 @@ on:
       is_scheduled_run:
         required: true
         type: boolean
+      newly_added_only:
+        description: 'Run only the tests that the pull request added or modified'
+        required: false
+        type: boolean
+        default: false
       xla_python_client_mem_fraction:
         required: true
         type: string
@@ -64,6 +74,11 @@ on:
         required: false
         type: number
         default: 1
+      test_durations_uploaded:
+        description: 'True when the coordinator uploaded the converted test durations; every shard must then use them'
+        required: false
+        type: boolean
+        default: false
       maxtext_sha:
         description: 'Git SHA to checkout if MaxText is not pre-installed'
         required: false
@@ -90,11 +105,17 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
+        # cpu-unit runs the hardware-agnostic bulk (every test auto-marked cpu_only), and it is the
+        # only job that runs them. On one device a test whose batch is smaller than the mesh, or that
+        # never enters an axis_rules context, passes for the wrong reason; 4 virtual devices make the
+        # sharding real so those bugs surface here instead of on accelerator runners. Also lets the
+        # tests that self-skip below 2 devices actually run.
+        XLA_FLAGS: ${{ inputs.flavor == 'cpu-unit' && '--xla_force_host_platform_device_count=4' || '' }}
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-
@@ -131,9 +152,9 @@ jobs:
               echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
               if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
                 echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || true
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
               else
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
               fi
             fi
             install_tpu_post_train_extra_deps
@@ -151,6 +172,14 @@ jobs:
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
+      - name: Download Converted Test Durations
+        # Every shard must split the tests with the same durations, or the shards overlap and some tests run nowhere.
+        # So when the coordinator uploaded them, a failed download fails this shard instead of using another split.
+        if: inputs.total_workers > 1 && inputs.test_durations_uploaded
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
+          path: ${{ inputs.maxtext_installed && '/deps' || '.' }}
       - name: Run Tests
         shell: bash
         run: |
@@ -164,6 +193,9 @@ jobs:
             exit 143
           }
           trap cleanup_tpu_locks TERM INT
+
+          # tests/conftest.py and newly_added_detection run git on this checkout, which another UID may own.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null || true
 
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
@@ -184,12 +216,27 @@ jobs:
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
+          elif [ "${INPUTS_NEWLY_ADDED_ONLY}" == "true" ]; then
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and newly_added"
           else
             if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
               FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
             else
               FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or newly_added)"
             fi
+          fi
+          if [ "${INPUTS_NEWLY_ADDED_ONLY}" == "true" ]; then
+            # If the touched tests cannot be listed, fail instead of passing without running them.
+            if ! CHANGED_TESTS=$(python3 tests/utils/newly_added_detection.py --flavor "${INPUTS_FLAVOR}"); then
+              echo "::error::newly_added_detection failed (see above), so the tests that this PR touched are unknown."
+              exit 1
+            fi
+            if [ -z "${CHANGED_TESTS}" ]; then
+              echo "No test that this PR touched runs in ${INPUTS_FLAVOR}; nothing to run."
+              exit 0
+            fi
+            echo "Tests that this PR touched and ${INPUTS_FLAVOR} runs:"
+            echo "${CHANGED_TESTS}"
           fi
           # TODO: Use package data for testing and remove the env vars
           MAXTEXT_REPO_ROOT=$(pwd)
@@ -219,14 +266,55 @@ jobs:
               fi
             fi
           fi
-          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
-            $PYTHON_EXE -m pip install --quiet pytest-split
-            if [ "${INPUTS_DEVICE_TYPE}" = "tpu" ]; then
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
+          if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            # CPU flavors run the suite under pytest-xdist inside one container whose cgroup memory
+            # limit (~125 GiB on linux-x86-n4-32) is shared by every worker. A single TrainCompile AOT
+            # compile peaks at 10-16 GB and the worker keeps 6-8 GB afterwards, so -n auto (32 workers)
+            # overcommits the pod: scheduled shards died at 94-99 % progress with no traceback (container
+            # or runner lost, #6052), consistent with hitting that limit. 8 workers leave ~16 GB each.
+            # Keep CPU_XDIST_PARALLELISM in tools/dev/calculate_workers.py in sync.
+            CPU_XDIST_WORKERS=8
+            # glibc otherwise creates up to 8*ncores malloc arenas per process, inflating RSS.
+            export MALLOC_ARENA_MAX=2
+            # Log the actual memory and /tmp budget so a killed shard or a full disk can be diagnosed from
+            # the run log. (/tmp is a 9p mount on the runner's ~98 GB work disk, not tmpfs, so the
+            # TrainCompile pickles are not RAM-resident; tests/unit/train_compile_test.py removes them anyway.)
+            echo "CPU test budget: nproc=$(nproc) xdist_workers=${CPU_XDIST_WORKERS}"
+            echo "cgroup memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
+            free -g || true
+            df -h /tmp || true
+            findmnt -T /tmp 2>/dev/null || mount | grep ' /tmp ' || true
+            echo "cgroup files: $(find /sys/fs/cgroup/ -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || true)"
+          fi
+          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ] && [ "${INPUTS_DEVICE_TYPE}" = "tpu" ] && [[ "${INPUTS_FLAVOR}" == *-unit ]]; then
+            # TPU unit flavors: whole test classes stay on one shard (tests/utils/class_split.py), so the first
+            # test of a class pays its XLA compile in scheduled and PR runs alike. The rest keep pytest-split
+            # below: one integration class (TrainTests) takes longer than an even shard share, CPU durations
+            # are not regression-checked, and GPU has too few test classes to balance.
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations to balance the class-level split."
             else
-              $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+              echo "Warning: .test_durations not found. The class-level split uses equal weights."
             fi
+            SPLIT_ARGS="--class-splits=${INPUTS_TOTAL_WORKERS} --class-group=${INPUTS_WORKER_GROUP}"
+          elif [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-split
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations with least_duration splitting algorithm."
+              SPLIT_ALGO="--splitting-algorithm least_duration"
+            else
+              echo "Warning: .test_durations not found. Falling back to default split."
+              SPLIT_ALGO=""
+            fi
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+              $PYTHON_EXE -m pip install --quiet pytest-xdist
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n ${CPU_XDIST_WORKERS} ${SPLIT_ALGO}"
+            else
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
+            fi
+          elif [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-xdist
+            SPLIT_ARGS="-n ${CPU_XDIST_WORKERS}"
           else
             SPLIT_ARGS=""
           fi
@@ -235,21 +323,67 @@ jobs:
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
           else
+            # The GofN suffix lets process_test_results.py notice a shard that left no result file.
+            JUNIT_XML="test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}of${INPUTS_TOTAL_WORKERS}.xml"
             # shellcheck disable=SC2086
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
-              --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
+              --junitxml="${JUNIT_XML}" \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
-            wait "$PYTEST_PID"
+            MEMWATCH_PID=""
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+              # Sample memory while pytest runs. The scheduled shard deaths leave no log of their own, so these
+              # samples are the only record of how close a shard got to the cgroup limit and of how much
+              # headroom CPU_XDIST_WORKERS leaves (#6052). memory.peak needs kernel >= 5.19 and may not be
+              # emulated by the sandbox; the RSS sum works everywhere (it double-counts shared pages, so it
+              # is an upper bound).
+              mem_sample() {
+                local cur peak rss
+                cur=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo unknown)
+                peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo unknown)
+                rss=$(awk '/^VmRSS:/ {s+=$2} END {printf "%.1fGiB", s/1048576}' /proc/[0-9]*/status 2>/dev/null || echo unknown)
+                echo "[memwatch $(date -u +%H:%M:%S)] memory.current=${cur} memory.peak=${peak} rss_sum=${rss}"
+              }
+              (
+                while kill -0 "$PYTEST_PID" 2>/dev/null; do
+                  mem_sample
+                  # Sleep in 1 s slices so the sampler exits promptly when pytest does (an orphaned `sleep 30`
+                  # would hold the step's stdout open until it expired).
+                  for _ in $(seq 30); do kill -0 "$PYTEST_PID" 2>/dev/null || break; sleep 1; done
+                done
+              ) &
+              MEMWATCH_PID=$!
+            fi
+            PYTEST_EXIT_CODE=0
+            wait "$PYTEST_PID" || PYTEST_EXIT_CODE=$?
+            if [ -n "$MEMWATCH_PID" ]; then
+              kill "$MEMWATCH_PID" 2>/dev/null || true
+              wait "$MEMWATCH_PID" 2>/dev/null || true
+              echo "[memwatch] final: $(mem_sample | sed 's/^\[memwatch [0-9:]*\] //') memory.max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
+            fi
+            if [ "$PYTEST_EXIT_CODE" -eq 2 ] || [ "$PYTEST_EXIT_CODE" -eq 3 ]; then
+              # An interrupted session (e.g. a collection error) still writes a result file, without the test times.
+              # Drop it so process_test_results.py counts this shard as missing instead of saving a near-zero total.
+              rm -f "${JUNIT_XML}"
+            fi
+            if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
+              if [ "${INPUTS_NEWLY_ADDED_ONLY}" == "true" ]; then
+                echo "::warning::pytest selected none of the tests listed above: their modules skipped themselves during collection, or tests/conftest.py and newly_added_detection disagree."
+              fi
+              echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
+            elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then
+              exit "$PYTEST_EXIT_CODE"
+            fi
           fi
 
         env:
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
+          INPUTS_NEWLY_ADDED_ONLY: ${{ inputs.newly_added_only }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_FLAVOR: ${{ inputs.flavor }}
@@ -316,7 +450,7 @@ jobs:
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: reference-hlo
-          path: tests/utils/reference_hlo_*.txt
+          path: ${{ inputs.maxtext_installed && '/deps/tests/utils/reference_hlo_*.txt' || 'tests/utils/reference_hlo_*.txt' }}
           if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
@@ -329,10 +463,12 @@ jobs:
           flags: ${{ inputs.is_scheduled_run && 'scheduled' || 'regular' }}
           verbose: true
       - name: Upload Test Results XML
-        if: always()
+        # Not for a run of only the touched tests: their timings include XLA compiles that a full run shares
+        # across a test class, which track_performance.yml would report as regressions against its baseline.
+        if: ${{ always() && !inputs.newly_added_only }}
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
-          path: test-results-*.xml
+          path: ${{ inputs.maxtext_installed && '/deps/test-results-*.xml' || 'test-results-*.xml' }}
           retention-days: 1
           if-no-files-found: ignore

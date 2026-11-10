@@ -106,8 +106,6 @@ if HAS_TORCH:
 
   # PyTorch text config for multimodal embedder
   torch_text_config = Gemma4TextConfig(hidden_size=jax_config.emb_dim)
-
-  torch.set_grad_enabled(False)
 else:
   torch_vision_config = None
   torch_text_config = None
@@ -202,6 +200,10 @@ class BaseGemma4VisionTestCase(unittest.TestCase):
   """Base class for Gemma 4 vision tests with common setup."""
 
   def setUp(self):
+    super().setUp()
+    if HAS_TORCH:
+      self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+      torch.set_grad_enabled(False)
     self.config = jax_config
     setup_test_seeds()
 
