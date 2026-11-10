@@ -84,6 +84,11 @@ def save_golden_logits(
     from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
     model_class = Qwen3VLForConditionalGeneration
+  elif "muse-spark" in model_id.lower():
+    # muse_spark is registered for AutoModelForImageTextToText only, not AutoModelForCausalLM.
+    from transformers import MuseSparkForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    model_class = MuseSparkForConditionalGeneration
   else:
     from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
 

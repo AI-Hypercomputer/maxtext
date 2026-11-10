@@ -1,0 +1,66 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# meta-models/Muse-Spark-Open-816B-A42B: MuseSparkForConditionalGeneration (text backbone).
+# 62 decoder layers with a 4-layer attention/RoPE cycle where (num_layers - 1 - i) % 4 == 0
+# is full_attention + NoPE and all other layers are sliding_attention (window=2048) + RoPE.
+# All 62 layers use bottlenecked Sparse MoE (8192 -> 4096 -> 256 experts [4096 -> 4096] -> 8192,
+# top-8 sigmoid routing with bias) and learnable temperature-scaled residual gates.
+
+decoder_block: "muse_spark"
+base_emb_dim: 8192
+base_num_decoder_layers: 62
+base_num_query_heads: 128
+base_num_kv_heads: 16
+head_dim: 64
+vocab_size: 202048
+normalization_layer_epsilon: 1.0e-5
+muse_spark_post_norm_eps: 1.0e-8
+muse_spark_qk_scale_factor: 5.4730064863875
+muse_spark_output_multiplier: 0.17677669529663687
+muse_spark_residual_gate_temperature: 0.3
+final_logits_soft_cap: 20.0
+logits_via_embedding: false
+enable_dropout: false
+mlp_activations: ["silu", "linear"]
+inhomogeneous_layer_cycle_interval: 4
+
+# Bottlenecked Sparse MoE (all 62 layers)
+base_mlp_dim: 16384
+first_num_dense_layers: 0
+moe_expert_input_dim: 4096
+base_moe_mlp_dim: 4096
+num_experts: 256
+num_experts_per_tok: 8
+shared_experts: 0
+routed_scaling_factor: 1.0
+routed_score_func: "sigmoid"
+routed_bias: true
+routed_bias_update_rate: 0.0
+norm_topk_prob: true
+float32_gate_logits: true
+
+# Gated GQA + Sliding Window + Non-interleaved RoPE (rope_theta = 500,000)
+attention: "dot_product"
+sliding_window_size: 2048
+rope_type: "default"
+rope_max_timescale: 500_000
+max_position_embeddings: 1048576
+original_max_position_embeddings: 1048576
+rope_interleave: false
+
+# Tokenizer
+tokenizer_type: "huggingface"
+tokenizer_path: "meta-models/Muse-Spark-Open-816B-A42B"
+add_bos: true
