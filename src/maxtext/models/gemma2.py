@@ -343,7 +343,6 @@ class Gemma2DecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if self.config.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, kv_cache
+    # Under scan_layers, vLLM statically unrolls the layers and keeps the kv_cache returned here; the training scan
+    # discards it.
+    return layer_output, kv_cache

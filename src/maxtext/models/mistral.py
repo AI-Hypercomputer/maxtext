@@ -215,7 +215,7 @@ class MistralDecoderLayer(nnx.Module):
 
       stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)  # pyrefly: ignore[unbound-name]
       return (layer_output, stacked_kv_cache, layer_idx + 1), None  # pyrefly: ignore[unbound-name]
-    elif cfg.scan_layers:
-      return layer_output, None
     else:
+      # Under scan_layers, vLLM statically unrolls the layers and keeps the kv_cache returned here; the training
+      # scan discards it.
       return layer_output, kv_cache
