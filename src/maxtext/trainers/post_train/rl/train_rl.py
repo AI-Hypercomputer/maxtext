@@ -434,7 +434,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
 ):
   """Setup RL cluster, trainer, and optimizer."""
   # Setup optimizer
-  optimizer = utils_rl.get_optimizer(trainer_config)
+  optimizer = utils_rl.get_optimizer(trainer_config, actor_model)
 
   # Setup checkpointing
   if trainer_config.enable_checkpointing:

@@ -31,6 +31,7 @@ from math_verify import parse
 
 from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
 
+from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.rl.math_verify_pool import math_verify_pool, verify_math_worker
 from maxtext.utils import max_logging
 
@@ -606,8 +607,8 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
   return False, is_partially_correct
 
 
-def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
-  """Function to obtain an optax optimizer, currently we use adamw.
+def get_optimizer(tmvp_config: Any, model: Any = None) -> optax.GradientTransformation:
+  """Function to obtain an optax optimizer, currently we use adamw. `model`'s UntrainableParam weights are frozen.
 
   The LR schedule length defaults to the actual RL run length
   (`max_train_steps` = num_batches * num_iterations * train_fraction *
@@ -642,6 +643,9 @@ def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
       end_value=0.0,
   )
 
+  # inject_hyperparams reruns make_optimizer inside jit, so read the model once here.
+  frozen_paths = optimizers.untrainable_paths(model)
+
   # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified
   # Grad clipping to prevent large gradients. We find this
@@ -658,7 +662,7 @@ def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
             weight_decay=tmvp_config.adam_weight_decay,
         )
     )
-    return optax.chain(*transforms)
+    return optimizers.freeze_params(optax.chain(*transforms), frozen_paths)
 
   # Wrap the entire optimizer (including gradient clipping) with
   # inject_hyperparams so opt_state.hyperparams['learning_rate'] is at the

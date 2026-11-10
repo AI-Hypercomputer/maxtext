@@ -331,6 +331,23 @@ class TestGetOptimizer(unittest.TestCase):
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)
 
+  def test_weight_decay_skips_untrainable_params(self):
+    """Zero gradients leave weight decay as the only force, which must not reach an UntrainableParam."""
+    import jax  # pylint: disable=import-outside-toplevel
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    from maxtext.common.common_types import UntrainableParam  # pylint: disable=import-outside-toplevel
+
+    config = self._make_optimizer_config()
+    config.learning_rate, config.adam_weight_decay, config.warmup_steps_fraction = 1.0, 0.5, 0.0
+    model = nnx.Dict(kernel=nnx.Param(jnp.ones(3)), bound=UntrainableParam(jnp.ones(3)))
+    optimizer = nnx.Optimizer(model, utils_rl.get_optimizer(config, model), wrt=nnx.Param)
+
+    optimizer.update(model, jax.tree_util.tree_map(jnp.zeros_like, nnx.state(model, nnx.Param)))
+
+    self.assertFalse(jnp.array_equal(model.kernel[...], jnp.ones(3)))
+    self.assertTrue(jnp.array_equal(model.bound[...], jnp.ones(3)))
+
 
 class TestFormatMaxTextMessages(unittest.TestCase):
   """Tests for utils_rl.format_maxtext_messages."""
