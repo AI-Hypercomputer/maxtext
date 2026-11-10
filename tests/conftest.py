@@ -20,6 +20,7 @@ require external integrations or specific hardware (for example `tpu_only`)
 are not marked.
 """
 
+import contextlib
 import gc
 import pytest
 import sys
@@ -254,6 +255,36 @@ def restore_jax_remove_size_one_mesh_axis_from_type():
   yield
   if previous_flag is not None:
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", previous_flag)
+
+
+@contextlib.contextmanager
+def _restore_jax_prng_and_libtpu_env():
+  """Saves and restores global JAX PRNG config and LIBTPU_INIT_ARGS across a scope."""
+  previous_prng = getattr(jax.config, "jax_default_prng_impl", None)
+  previous_libtpu = os.environ.get("LIBTPU_INIT_ARGS")
+  try:
+    yield
+  finally:
+    if previous_prng is not None and getattr(jax.config, "jax_default_prng_impl", None) != previous_prng:
+      jax.config.update("jax_default_prng_impl", previous_prng)
+    if previous_libtpu is None:
+      os.environ.pop("LIBTPU_INIT_ARGS", None)
+    else:
+      os.environ["LIBTPU_INIT_ARGS"] = previous_libtpu
+
+
+@pytest.fixture(autouse=True, scope="class")
+def restore_jax_prng_and_libtpu_env_for_class():
+  """Restores JAX PRNG config and LIBTPU_INIT_ARGS after each test class, covering setUpClass()."""
+  with _restore_jax_prng_and_libtpu_env():
+    yield
+
+
+@pytest.fixture(autouse=True)
+def restore_jax_prng_and_libtpu_env():
+  """Restores JAX PRNG config and LIBTPU_INIT_ARGS after each test item, covering setUp() and tests."""
+  with _restore_jax_prng_and_libtpu_env():
+    yield
 
 
 @pytest.fixture(autouse=True)
