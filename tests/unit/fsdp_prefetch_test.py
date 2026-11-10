@@ -134,6 +134,74 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     self.assertEqual(fsdp_prefetch._sc_rs_padded_minor_size(32768), 36864)  # pylint: disable=protected-access
 
 
+class FsdpPrefetchSparseCoreTest(unittest.TestCase):
+  """Tests for automatic SparseCore pinning and post-scheduler overlap transform registration."""
+
+  def test_on_sparse_core_is_identity_when_disabled_or_for_vectors(self):
+    fn = lambda x: x  # pylint: disable=unnecessary-lambda-assignment
+    self.assertIs(fsdp_prefetch._on_sparse_core(fn, -1), fn)  # pylint: disable=protected-access
+    self.assertIs(fsdp_prefetch._on_sparse_core(fn, None), fn)  # pylint: disable=protected-access
+    # Vectors and narrow minor dims stay with XLA.
+    self.assertIs(fsdp_prefetch._on_sparse_core(fn, 1, jnp.ones((256,))), fn)  # pylint: disable=protected-access
+    self.assertIs(fsdp_prefetch._on_sparse_core(fn, 1, jnp.ones((256, 64))), fn)  # pylint: disable=protected-access
+    self.assertIsNot(fsdp_prefetch._on_sparse_core(fn, 1, jnp.ones((8, 256))), fn)  # pylint: disable=protected-access
+
+  def test_default_sparse_core_id_pins_sc1_on_tpu7x_only(self):
+    def fake_mesh(device_kind):
+      dev = types.SimpleNamespace(device_kind=device_kind, platform="tpu")
+      return types.SimpleNamespace(devices=np.array([dev], dtype=object))
+
+    self.assertEqual(fsdp_prefetch._default_sparse_core_id(fake_mesh("TPU7x")), 1)  # pylint: disable=protected-access
+    self.assertIsNone(fsdp_prefetch._default_sparse_core_id(fake_mesh("TPU v6 lite")))  # pylint: disable=protected-access
+    self.assertIsNone(fsdp_prefetch._default_sparse_core_id(fake_mesh("cpu")))  # pylint: disable=protected-access
+
+  def test_pinned_all_gather_and_dim1_reduce_scatter_lower_to_sparse_core_region(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
+    w = jax.ShapeDtypeStruct((16, 512), jnp.float32, sharding=NamedSharding(mesh, PartitionSpec("fsdp", "tensor")))
+
+    def gather(x, core_id):
+      return fsdp_prefetch._explicit_fsdp_all_gather(  # pylint: disable=protected-access
+          x, mesh, PartitionSpec("fsdp", "tensor"), PartitionSpec(None, "tensor"), reduced=True, sparse_core_id=core_id
+      )
+
+    g = jax.ShapeDtypeStruct(
+        (256, 512),
+        jnp.float32,
+        sharding=NamedSharding(mesh, PartitionSpec(None, None, unreduced=frozenset({"fsdp"}))),
+    )
+
+    def scatter_dim1(x, core_id):
+      return fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+          x, mesh, PartitionSpec(None, "fsdp"), PartitionSpec(None, None), sparse_core_id=core_id
+      )
+
+    with jax.sharding.use_abstract_mesh(mesh):
+      pinned = jax.jit(lambda x: gather(x, 1)).trace(w).lower(lowering_platforms=("tpu",)).as_text()
+      unpinned = jax.jit(lambda x: gather(x, None)).trace(w).lower(lowering_platforms=("tpu",)).as_text()
+      rs_pinned = jax.jit(lambda x: scatter_dim1(x, 1)).trace(g).lower(lowering_platforms=("tpu",)).as_text()
+    # Both collectives run in a SparseCore offload region pinned to SparseCore 1, and the dim-1 2D
+    # reduce-scatter moves the scatter dimension to axis 0 inside the region.
+    self.assertIn('_xla_compute_type = "sparseoffload"', pinned)
+    self.assertRegex(pinned, r"core_ids.{0,8}\[1\]")
+    self.assertNotIn("sparseoffload", unpinned)
+    self.assertIn('_xla_compute_type = "sparseoffload"', rs_pinned)
+    self.assertRegex(rs_pinned, r"core_ids.{0,8}\[1\]")
+    self.assertIn("dimension = 0", rs_pinned)
+
+  def test_overlap_transform_registered_on_tpu_mesh_only(self):
+    def fake_mesh(platform):
+      dev = types.SimpleNamespace(platform=platform, device_kind="TPU7x" if platform == "tpu" else "cpu")
+      return types.SimpleNamespace(devices=np.array([dev], dtype=object))
+
+    from maxtext.experimental.lineage.xla_transforms import max_async_overlap_transform  # pylint: disable=import-outside-toplevel
+
+    with mock.patch.object(max_async_overlap_transform, "register_transform") as register:
+      fsdp_prefetch._register_overlap_transform(fake_mesh("cpu"))  # pylint: disable=protected-access
+      register.assert_not_called()
+      fsdp_prefetch._register_overlap_transform(fake_mesh("tpu"))  # pylint: disable=protected-access
+      register.assert_called_once_with(platforms="tpu")
+
+
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
   """Lowers the FSDP weight all-gather against abstract multi-device meshes (no devices needed)."""
 
