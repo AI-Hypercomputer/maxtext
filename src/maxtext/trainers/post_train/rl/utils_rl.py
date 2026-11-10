@@ -644,7 +644,7 @@ def get_optimizer(tmvp_config: Any, model: Any = None) -> optax.GradientTransfor
   )
 
   # inject_hyperparams reruns make_optimizer inside jit, so read the model once here.
-  frozen_paths = optimizers.untrainable_paths(model)
+  frozen_paths = optimizers.frozen_param_paths(model, tmvp_config)
 
   # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified

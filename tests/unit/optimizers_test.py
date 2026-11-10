@@ -979,6 +979,52 @@ class UntrainableParamWeightDecayTest(parameterized.TestCase):
     self.assertEqual(optimizers.untrainable_paths(nnx.Dict(kernel=nnx.Param(jnp.ones(1)))), frozenset())
 
 
+class _Encoder(nnx.Module):
+  """Laid out like `VisionEncoder` and `AudioEncoder`: the tower under `encoder_name`, plus a projector."""
+
+  def __init__(self):
+    self.encoder_name = "Tower_0"
+    setattr(self, "Tower_0", nnx.Dict(kernel=nnx.Param(jnp.ones((2, 2)))))
+    setattr(self, "Projector_0", nnx.Dict(kernel=nnx.Param(jnp.ones((2, 2)))))
+
+
+class _MultimodalModel(nnx.Module):
+
+  def __init__(self):
+    # Same tower name in both encoders, so each flag must only freeze its own encoder.
+    self.vision_encoder = _Encoder()
+    self.audio_encoder = _Encoder()
+    self.decoder = nnx.Dict(kernel=nnx.Param(jnp.ones((2, 2))))
+
+
+class FreezeEncodersTest(parameterized.TestCase):
+  """`freeze_vision_encoder_params` and `freeze_audio_encoder_params` also keep weight decay off their towers."""
+
+  @parameterized.product(freeze_vision=(True, False), freeze_audio=(True, False), wrapped=(False, True))
+  def test_weight_decay_respects_the_encoder_freeze(self, freeze_vision, freeze_audio, wrapped):
+    argv = ["", get_test_config_path(), "run_name=test_freeze_encoders", "opt_type=adamw", "adam_weight_decay=0.5"]
+    flags = [f"freeze_vision_encoder_params={freeze_vision}", f"freeze_audio_encoder_params={freeze_audio}"]
+    config = pyconfig.initialize(argv + flags)
+    model = _MultimodalModel()
+    # RL wraps the model in TunixMaxTextAdapter, which keeps it under `base`.
+    root = nnx.Dict(base=model) if wrapped else model
+    tx = optimizers.get_optimizer(config, lambda step: 1.0, root)
+    optimizer = nnx.Optimizer(root, tx, wrt=nnx.Param)
+    optimizer.update(root, jax.tree_util.tree_map(jnp.zeros_like, nnx.state(root, nnx.Param)))
+
+    def moved(module):
+      return not jnp.array_equal(module.kernel[...], jnp.ones((2, 2)))
+
+    encoders = {"vision_encoder": freeze_vision, "audio_encoder": freeze_audio}
+    for name, freeze in encoders.items():
+      self.assertEqual(moved(getattr(getattr(model, name), "Tower_0")), not freeze)
+      self.assertTrue(moved(getattr(getattr(model, name), "Projector_0")))
+    self.assertTrue(moved(model.decoder))
+    prefix = "base/" if wrapped else ""
+    expected = {f"{prefix}{name}/Tower_0/kernel" for name, freeze in encoders.items() if freeze}
+    self.assertEqual(optimizers.frozen_param_paths(root, config), expected)
+
+
 class SkipStepOnSpikesTest(parameterized.TestCase):
   """Tests for the skip_step_on_spikes optimizer wrapper."""
 

@@ -433,7 +433,7 @@ class TrainDistillTest(unittest.TestCase):
       train_distill.get_distillation_optimizer(muon_config, max_train_steps=100)
 
   def test_optimizer_weight_decay_skips_untrainable_params(self):
-    """Zero gradients leave weight decay as the only force, which must not reach an UntrainableParam."""
+    """Zero gradients leave weight decay as the only force, which must not reach an UntrainableParam or a frozen tower."""
     config = pyconfig.initialize(
         ["", get_test_config_path()],
         base_output_directory=self.test_dir,
@@ -444,8 +444,11 @@ class TrainDistillTest(unittest.TestCase):
         gradient_clipping_threshold=0.0,
         warmup_steps_fraction=0.0,
         learning_rate_final_fraction=0.1,
+        freeze_vision_encoder_params=True,
     )
-    model = nnx.Dict(kernel=nnx.Param(jnp.ones(3)), bound=UntrainableParam(jnp.ones(3)))
+    # Laid out like VisionEncoder: the tower under `encoder_name`, plus a projector.
+    vision = nnx.Dict(encoder_name="Tower_0", Tower_0=nnx.Param(jnp.ones(3)), Projector_0=nnx.Param(jnp.ones(3)))
+    model = nnx.Dict(kernel=nnx.Param(jnp.ones(3)), bound=UntrainableParam(jnp.ones(3)), vision_encoder=vision)
     tx = train_distill.get_distillation_optimizer(config, max_train_steps=100, model=model)
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
@@ -453,6 +456,8 @@ class TrainDistillTest(unittest.TestCase):
 
     self.assertFalse(jnp.array_equal(model.kernel[...], jnp.ones(3)))
     self.assertTrue(jnp.array_equal(model.bound[...], jnp.ones(3)))
+    self.assertTrue(jnp.array_equal(model.vision_encoder.Tower_0[...], jnp.ones(3)))
+    self.assertFalse(jnp.array_equal(model.vision_encoder.Projector_0[...], jnp.ones(3)))
 
   def test_monitored_strategy(self):
     self._test_monitored_strategy(sft_mode=False, feature_loss_type="cosine")

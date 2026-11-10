@@ -118,7 +118,7 @@ def get_distillation_optimizer(config, max_train_steps, model=None):
   )
 
   # inject_hyperparams reruns the factory inside jit, so read the model once here.
-  frozen_paths = optimizers.untrainable_paths(model)
+  frozen_paths = optimizers.frozen_param_paths(model, config)
 
   # 2. Define Factory (Required for inject_hyperparams)
   def optimizer_factory(learning_rate):

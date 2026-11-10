@@ -61,6 +61,24 @@ def untrainable_paths(model):
   return frozenset("/".join(str(key) for key in path) for path, _ in untrainable)
 
 
+# Encoders whose `freeze_*_params` flag stops the gradient of their tower; their projector stays trainable.
+_ENCODER_FREEZE_FLAGS = {"vision_encoder": "freeze_vision_encoder_params", "audio_encoder": "freeze_audio_encoder_params"}
+
+
+def frozen_param_paths(model, config):
+  """Paths the optimizer must not change: UntrainableParam weights, plus the towers of frozen encoders."""
+  if not isinstance(model, nnx.Module):
+    return frozenset()
+  filters = [UntrainableParam]
+  for node_path, node in nnx.iter_graph(model):
+    flag = _ENCODER_FREEZE_FLAGS.get(node_path[-1]) if node_path else None
+    # The tower is the encoder's child named by `encoder_name`.
+    if flag and getattr(config, flag, False) and isinstance(getattr(node, "encoder_name", None), str):
+      filters.append(nnx.All(nnx.Param, nnx.PathContains(node_path[-1]), nnx.PathContains(node.encoder_name)))
+  frozen = nnx.to_flat_state(nnx.state(model, nnx.Any(*filters)))
+  return frozenset("/".join(str(key) for key in path) for path, _ in frozen)
+
+
 def _leaf_path(path):
   """Path as "a/b/c". At init a leaf is still inside its nnx.Variable, which adds a trailing `value` key."""
   if path and isinstance(path[-1], jax.tree_util.GetAttrKey) and path[-1].name == "value":
@@ -216,7 +234,7 @@ def skip_step_on_spikes(
 
 
 def get_optimizer(config, learning_rate_schedule, model=None, mesh=None, frozen_paths=None):
-  """Create optimizer. `frozen_paths` overrides `untrainable_paths(model)`, for callers that run under jit."""
+  """Create optimizer. `frozen_paths` overrides `frozen_param_paths(model, config)`, for callers that run under jit."""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     base_opt = optax.adamw(
@@ -297,7 +315,9 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None, frozen_
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
-  base_opt = freeze_params(base_opt, untrainable_paths(model) if frozen_paths is None else frozen_paths)
+  if frozen_paths is None:
+    frozen_paths = frozen_param_paths(model, config)
+  base_opt = freeze_params(base_opt, frozen_paths)
 
   # Apply `trainable_parameters_mask` before `skip_step_on_spikes` so `skip_step_on_spikes`
   # stays the outermost transformation: callers expect `opt_state` to be a top-level dict
