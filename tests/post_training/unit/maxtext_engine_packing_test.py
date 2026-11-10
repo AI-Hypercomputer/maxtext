@@ -66,6 +66,7 @@ import pytest
 
 import jax
 import jax.numpy as jnp
+from absl.testing import absltest
 from flax import nnx
 from jax.sharding import Mesh
 
@@ -151,6 +152,7 @@ def _tiny_cfg(seq_len, run_name, **overrides):
   return pyconfig.initialize(
       [sys.argv[0], get_test_config_path(), "attention=dot_product"],
       override_model_config=True,
+      logits_via_embedding=False,
       **overrides,
       model_name=_MODEL_NAME,
       base_emb_dim=64,
@@ -169,7 +171,10 @@ def _tiny_cfg(seq_len, run_name, **overrides):
       # algebraic identity, so bf16 rounding would only blur the signal.
       dtype="float32",
       weight_dtype="float32",
+      grad_dtype="float32",
+      matmul_precision="highest",
       enable_checkpointing=False,
+      enable_tensorboard=False,
       log_config=False,
       skip_jax_distributed_system=True,
       run_name=run_name,
@@ -366,6 +371,7 @@ class _GrpoConfig:
   temperature: float = 1.0
   kl_loss_mode: str = "low_var_kl"
   kl_clamp_value: float | None = None
+  epsilon_c: float | None = None
   # Tunix's AlgorithmConfig default. Inert here: these examples carry no old_per_token_logps.
   use_rollout_logps: bool = True
 
@@ -483,7 +489,7 @@ def _packed_row(tokens, advantages, slots, scored_lens=None):
 def _grpo_model_input(algo_config):
   """`grpo_loss_fn`'s keyword arguments, exactly as the orchestrator builds them.
 
-  Mirrors `tunix/experimental/orchestrator/algorithm_adapter.py::_algo_model_input`,
+  Mirrors `tunix/rl/algo_core.py::_algo_model_input`,
   which passes the payload straight through. Using tunix's loss unadapted is the
   point: an adapter written for the test could paper over a mismatch the real
   pipeline would hit.
@@ -1064,10 +1070,9 @@ class PackedCompiledPathTest(unittest.TestCase):
     self.assertTrue(engine._compiled, "the first packed fwd_bwd must compile")  # pylint: disable=protected-access
     grads = _grads_after(engine, self.payload)
 
-    # Two micro-batches, because the branch has two kernels and only the second
-    # one reaches `_compiled_fwd_bwd_accum` -- the one that donates the live
-    # accumulator, which is where packing's extra static (`num_segments`) has to
-    # agree between the kernel and the batch or the donation is rejected.
+    # Two micro-batches, because only the second reaches `_compiled_accumulate`,
+    # which donates the live accumulator and adds the packed gradients to it; the
+    # summed denominator shows both micro-batches were counted.
     self.assertEqual(float(np.asarray(engine._accumulated_denominator)), 2 * _NUM_SEQ)  # pylint: disable=protected-access
     self.assertLess(_rel_l2(grads, self.eager_grads), self._COMPILED_TOL)
 
@@ -1086,7 +1091,7 @@ class PackedCompiledPathTest(unittest.TestCase):
 
     # `jax.jit` wrappers before, XLA executables after.
     self.assertIsInstance(engine._compiled_fwd_bwd, jax.stages.Compiled)  # pylint: disable=protected-access
-    self.assertIsInstance(engine._compiled_fwd_bwd_accum, jax.stages.Compiled)  # pylint: disable=protected-access
+    self.assertIsInstance(engine._compiled_accumulate, jax.stages.Compiled)  # pylint: disable=protected-access
     self.assertIsInstance(engine._compiled_update, jax.stages.Compiled)  # pylint: disable=protected-access
 
     with (
@@ -1103,8 +1108,8 @@ class PackedCompiledPathTest(unittest.TestCase):
     recompile.assert_not_called()
     # Both halves, because either alone is satisfied by the wrong thing: a run
     # that quietly stayed eager also never recompiles, and a run that rebuilt the
-    # kernel also ends up calling one.
-    executable.assert_called_once()
+    # kernel also ends up calling one. Once per micro-batch.
+    self.assertEqual(executable.call_count, 2)
 
     self.assertEqual(step, 1)
     self.assertLess(_rel_l2(grads, self.eager_grads), self._COMPILED_TOL)
@@ -1261,4 +1266,4 @@ class ClosedFormPackedLossTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

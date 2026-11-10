@@ -48,6 +48,7 @@ from typing import Any
 import unittest
 from unittest import mock
 
+from absl import app
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -68,6 +69,14 @@ pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
 _REQUIRED_DEVICES = 4
 _SENTINEL = "MAXTEXT_ENGINE_FROZEN_GRAD_TESTS_PASSED"
 _RAN = re.compile(rf"{_SENTINEL} ran=(\d+)")
+_CHILD_ENV = "_MAXTEXT_FROZEN_GRAD_CHILD"
+_IN_CHILD = os.environ.get(_CHILD_ENV) == "1"
+if _IN_CHILD:
+  os.environ["XLA_FLAGS"] = (
+      f"{os.environ.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}"
+  ).strip()
+  os.environ["JAX_PLATFORMS"] = "cpu"
+_MULTI_DEVICE_BASE = parameterized.TestCase if _IN_CHILD else object
 
 # The kernel the mask freezes, and the trainable kernel the control stops by mistake. Paths are written
 # the way `trainable_parameters_mask` matches them (`optimizers.get_path_mask_fn`).
@@ -102,14 +111,14 @@ def _moe_rig_cfg(**kwargs) -> pyconfig.HyperParameters:
       model_name="qwen3.5-35b-a3b",
       num_experts=4,
       num_experts_per_tok=2,
-      base_emb_dim=256,
+      base_emb_dim=64,
       base_num_query_heads=2,
       base_num_kv_heads=2,
-      head_dim=256,
-      partial_rotary_factor=0.25,
-      base_mlp_dim=256,
-      base_moe_mlp_dim=256,
-      vocab_size=1000,
+      head_dim=64,
+      partial_rotary_factor=1.0,
+      base_mlp_dim=64,
+      base_moe_mlp_dim=64,
+      vocab_size=32,
       max_target_length=8,
       max_prefill_predict_length=8,
       per_device_batch_size=1.0,
@@ -136,23 +145,28 @@ def _moe_rig_payload(first_token: int = 10) -> abstract_engine.RLTrainerPayload:
   )
 
 
-@pytest.mark.post_training
-@pytest.mark.cpu_only
-def test_frozen_gradients_on_a_four_device_cpu_mesh():
+class FrozenGradSubprocessTest(absltest.TestCase):
   """Runs `FrozenGradientTest` in a child process with four CPU devices."""
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}".strip()
-  env["JAX_PLATFORMS"] = "cpu"
-  repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-  env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
 
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+  @pytest.mark.post_training
+  @pytest.mark.cpu_only
+  def test_frozen_gradients_on_a_four_device_cpu_mesh(self):
+    """Runs `FrozenGradientTest` in a child process with four CPU devices."""
+    env = os.environ.copy()
+    env[_CHILD_ENV] = "1"
+    env["XLA_FLAGS"] = (f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}").strip()
+    env["JAX_PLATFORMS"] = "cpu"
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
 
-  report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert result.returncode == 0, report
-  ran = _RAN.search(result.stdout)
-  assert ran, f"the child did not report a completed run\n{report}"
-  assert int(ran.group(1)) > 0, f"every test in the child skipped\n{report}"
+    cmd = [sys.executable, __file__] if sys.executable else [sys.argv[0]]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+
+    report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    self.assertEqual(result.returncode, 0, report)
+    ran = _RAN.search(result.stdout)
+    self.assertIsNotNone(ran, f"the child did not report a completed run\n{report}")
+    self.assertGreater(int(ran.group(1)), 0, f"every test in the child skipped\n{report}")
 
 
 def _config(**overrides) -> pyconfig.HyperParameters:
@@ -177,14 +191,14 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "attention": "dot_product",
       "ici_tensor_parallelism": 1,
       "per_device_batch_size": 1,
-      "vocab_size": 128,
-      "base_emb_dim": 64,
-      "base_mlp_dim": 128,
+      "vocab_size": 32,
+      "base_emb_dim": 32,
+      "base_mlp_dim": 48,
       "base_num_decoder_layers": 2,
-      "base_num_query_heads": 4,
-      "base_num_kv_heads": 4,
+      "base_num_query_heads": 2,
+      "base_num_kv_heads": 2,
       "head_dim": 16,
-      "max_target_length": 32,
+      "max_target_length": 8,
       "opt_type": "adamw",
       "learning_rate": 0.01,
       "gradient_clipping_threshold": _CLIP,
@@ -415,10 +429,8 @@ class _FrozenGradientChecks:
     np.testing.assert_array_equal(run["weights"][frozen], run["initial"][frozen], err_msg="the frozen leaf moved")
 
 
-class FrozenGradientTest(_FrozenGradientChecks, parameterized.TestCase):
+class FrozenGradientTest(_FrozenGradientChecks, _MULTI_DEVICE_BASE):
   """The tiny decoder with one kernel frozen, against the same engine computing its gradient."""
-
-  __test__ = False  # collected only via the subprocess entry point at the top of this file.
 
   def test_fwd_bwd_drops_the_frozen_kernels_weight_gradient(self):
     """One `dot_general` fewer, shaped like the frozen kernel, and none added: its weight gradient is never computed.
@@ -472,7 +484,8 @@ class FrozenRouterTest(_FrozenGradientChecks, absltest.TestCase):
     self._assert_frozen_gradient_skipped_and_nothing_else_changed(run, reference, _ROUTER)
 
 
-if __name__ == "__main__":
+def _main(argv):
+  """Runs `FrozenGradientTest` inside the child subprocess."""
   if jax.device_count() < _REQUIRED_DEVICES:
     raise SystemExit(
         f"needs {_REQUIRED_DEVICES} devices, got {jax.device_count()}; run this through pytest, which sets "
@@ -480,11 +493,18 @@ if __name__ == "__main__":
     )
   _loader = unittest.defaultTestLoader
   _suite = (
-      _loader.loadTestsFromNames(sys.argv[1:], sys.modules[__name__])
-      if len(sys.argv) > 1
+      _loader.loadTestsFromNames(argv[1:], sys.modules[__name__])
+      if len(argv) > 1
       else _loader.loadTestsFromTestCase(FrozenGradientTest)
   )
   _result = unittest.TextTestRunner(verbosity=2).run(_suite)
   if not _result.wasSuccessful():
     sys.exit(1)
   print(f"{_SENTINEL} ran={_result.testsRun - len(_result.skipped)}")
+
+
+if __name__ == "__main__":
+  if _IN_CHILD:
+    app.run(_main, argv=[sys.argv[0]])
+  else:
+    absltest.main()

@@ -126,6 +126,10 @@ save_config_to_gcs: false
 
 # gradient dtype
 grad_dtype: "float32"
+# MaxTextTrainingEngine only: gradients that its forward/backward pass sums across devices by an all-reduce alone
+# (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass in the
+# parameters' dtype and are cast to grad_dtype when they join the running sum, after the all-reduce.
+cast_grads_after_all_reduce: false
 
 # activation dtypes.
 dtype: "bfloat16"

@@ -236,7 +236,7 @@ class _LiveKernels:
 
   _ATTRIBUTES = {
       "fwd_bwd": "_compiled_fwd_bwd",
-      "fwd_bwd_accum": "_compiled_fwd_bwd_accum",
+      "accumulate": "_compiled_accumulate",
       "update": "_compiled_update",
   }
 
@@ -306,8 +306,8 @@ class EngineAotParityTest(parameterized.TestCase):
   def _live(self, cfg, mesh, micro_batches: int = 2):
     """Runs one full optimizer step and returns the engine plus its dispatched kernels.
 
-    Two micro-batches: the accumulating kernel is traced lazily, so a single-micro-batch run
-    would leave `fwd_bwd_accum` with nothing on the live side to compare against.
+    Two micro-batches: `accumulate` runs only from the second on, so a single-micro-batch run
+    would leave it with nothing on the live side to compare against.
     """
     engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
     engine.compile(_batch(cfg, 0))
@@ -434,7 +434,7 @@ class EngineAotParityTest(parameterized.TestCase):
     `nnx.Optimizer` builds optax's `count` and its own `step` with `jnp.zeros` under no mesh, so
     they reach the first update uncommitted and come back from it committed -- a second argument
     signature, and a second compile of the largest kernel in the engine. `_settle_state`
-    settles them up front; this pins it.
+    settles them up front; this pins it, for every dispatch of every kernel over both steps.
     """
     cfg, mesh = _config_and_mesh()
 
@@ -443,11 +443,15 @@ class EngineAotParityTest(parameterized.TestCase):
       engine.fwd_bwd(_batch(cfg, micro))
     engine.update()
 
+    # Two micro-batches per step: `fwd_bwd` runs for each, `accumulate` for the second.
+    per_step = {"fwd_bwd": 2, "accumulate": 1, "update": 1}
+    self.assertEqual(sorted(kernels.calls), sorted(per_step))
     for name, calls in kernels.calls.items():
-      self.assertLen(calls, 2, f"{name} should have been dispatched once per step")
-      first, second = (jax.tree_util.tree_flatten_with_path(call)[0] for call in calls)
-      differing = [jax.tree_util.keystr(path) for (path, a), (_, b) in zip(first, second) if a != b]
-      self.assertEmpty(differing, f"{name} is dispatched with a different signature on the second step")
+      self.assertLen(calls, 2 * per_step[name], f"{name} should have been dispatched {per_step[name]}x per step")
+      first, *later = (jax.tree_util.tree_flatten_with_path(call)[0] for call in calls)
+      for index, call in enumerate(later, start=1):
+        differing = [jax.tree_util.keystr(path) for (path, a), (_, b) in zip(first, call) if a != b]
+        self.assertEmpty(differing, f"{name} dispatch {index} has a different signature from the first")
 
   def test_zero1_and_the_deferred_all_reduce_engage_on_both_paths(self):
     """Guards the two parameterizations that would otherwise pass by both doing nothing."""
@@ -473,11 +477,13 @@ class EngineAotParityTest(parameterized.TestCase):
     compiled = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh).compile_kernels(_abstract(_batch(cfg, 0)))
 
     self.assertLen(compiled, len(maxtext_engine_compile.KERNEL_NAMES))
-    for kernel in compiled.values():
+    for name, kernel in compiled.items():
       module = re.search(r"^HloModule (\S+?),", kernel.as_text(), re.MULTILINE)
       self.assertIsNotNone(module, "the executable has no module name to match against")
       self.assertRegex(module.group(1), maxtext_engine_compile.HLO_DUMP_DEFAULTS["dump_hlo_local_module_name"])
       self.assertIn(maxtext_engine_compile.HLO_DUMP_DEFAULTS["dump_hlo_module_name"], module.group(1))
+      # The name the empty-dump error tells the user to match.
+      self.assertEqual(module.group(1), f"jit_{name}")
 
 
 class AbstractMaxTextEngineTest(absltest.TestCase):
@@ -608,7 +614,7 @@ class Qwen3TopologyTest(absltest.TestCase):
     """
     local_dir = os.path.join(self.create_tempdir().full_path, "xla_dump")
 
-    with self.assertRaisesRegex(FileNotFoundError, "matched none of the engine's kernels"):
+    with self.assertRaisesRegex(FileNotFoundError, "matched none of the engine's kernels") as raised:
       maxtext_engine_compile.main(
           _script_argv(
               "run_name=engine_aot_dump_test",
@@ -617,6 +623,11 @@ class Qwen3TopologyTest(absltest.TestCase):
               "dump_hlo_local_module_name=jit_train_step",
           )
       )
+    # The names to match are the modules XLA actually writes, which
+    # `test_the_hlo_dump_filters_match_the_names_xla_gives_the_kernels` pins as `jit_<kernel>`.
+    for name in maxtext_engine_compile.KERNEL_NAMES:
+      self.assertIn(f"jit_{name}", str(raised.exception))
+    self.assertNotIn("jit_first_kernel", str(raised.exception))
 
   def test_diloco_is_refused_rather_than_silently_reported_on(self):
     """The engine has no outer step, so these numbers would describe a different run."""
@@ -747,14 +758,14 @@ class MemoryReportTest(absltest.TestCase):
   def test_state_not_passed_added_to_the_kernels_that_run_beside_it(self):
     """What a kernel runs beside without being passed it is in HBM while it runs, so it is added to its total.
 
-    `fwd_bwd` and `fwd_bwd_accum` are not passed the optimizer; `update` is
-    passed all of it.
+    `fwd_bwd` is not passed the optimizer; `accumulate` is passed neither
+    model nor optimizer; `update` is passed all of it.
     """
     optimizer = {"mu": _aval(8 * _MIB), "nu": _aval(8 * _MIB)}
     compiled = _kernels(
         fwd_bwd={"argument_size_in_bytes": 100 * _MIB},
-        fwd_bwd_accum={
-            "argument_size_in_bytes": 105 * _MIB,
+        accumulate={
+            "argument_size_in_bytes": 10 * _MIB,
             "output_size_in_bytes": 5 * _MIB,
             "alias_size_in_bytes": 5 * _MIB,
         },
@@ -763,12 +774,12 @@ class MemoryReportTest(absltest.TestCase):
 
     rows = _by_kernel(memory_report.memory_report(compiled, _state(optimizer)))
 
-    self.assertEqual(rows["fwd_bwd"].not_passed, ("optimizer",))
-    self.assertEqual(rows["fwd_bwd"].device_not_passed, 16 * _MIB)
-    self.assertEqual(rows["fwd_bwd"].device_total, 116 * _MIB)
-    self.assertEqual(rows["fwd_bwd_accum"].not_passed, ("optimizer",))
-    self.assertEqual(rows["fwd_bwd_accum"].device_not_passed, 16 * _MIB)
-    self.assertEqual(rows["fwd_bwd_accum"].device_total, 105 * _MIB + 16 * _MIB)
+    self.assertEqual(rows["fwd_bwd"].not_passed, ("optimizer", memory_report.ACCUMULATOR))
+    self.assertEqual(rows["fwd_bwd"].device_not_passed, 16 * _MIB + 5 * _MIB)
+    self.assertEqual(rows["fwd_bwd"].device_total, 121 * _MIB)
+    self.assertEqual(rows["accumulate"].not_passed, ("model", "optimizer"))
+    self.assertEqual(rows["accumulate"].device_not_passed, 64 * _MIB + 16 * _MIB)
+    self.assertEqual(rows["accumulate"].device_total, 10 * _MIB + 64 * _MIB + 16 * _MIB)
     # The update's own arguments already include all of it; adding it again double-counts it.
     self.assertEqual(rows["update"].not_passed, ())
     self.assertEqual(rows["update"].device_not_passed, 0)
@@ -873,8 +884,8 @@ class MemoryReportTest(absltest.TestCase):
 
         self.assertEqual(rows["fwd_bwd"].device_not_passed, 0)
         self.assertEqual(rows["fwd_bwd"].host_not_passed, 16 * _MIB)
-        self.assertEqual(rows["fwd_bwd_accum"].device_not_passed, 0)
-        self.assertEqual(rows["fwd_bwd_accum"].host_not_passed, 16 * _MIB)
+        self.assertEqual(rows["accumulate"].device_not_passed, 64 * _MIB)
+        self.assertEqual(rows["accumulate"].host_not_passed, 16 * _MIB)
 
   def test_device_and_unset_memory_kind_count_as_device(self):
     """A concrete mesh reports `device`; an abstract one, or a leaf not yet placed, reports None."""
@@ -938,11 +949,10 @@ class MemoryReportTest(absltest.TestCase):
             "argument_size_in_bytes": 40 * _GIB,
             "temp_size_in_bytes": 20 * _GIB,
         },
-        fwd_bwd_accum={
-            "argument_size_in_bytes": int(42.5 * _GIB),
+        accumulate={
+            "argument_size_in_bytes": int(2.5 * _GIB),
             "output_size_in_bytes": int(1.25 * _GIB),
             "alias_size_in_bytes": int(1.25 * _GIB),
-            "temp_size_in_bytes": int(18.75 * _GIB),
         },
         update={"argument_size_in_bytes": 50 * _GIB},
     )
@@ -951,14 +961,20 @@ class MemoryReportTest(absltest.TestCase):
     cases = (
         (
             on_device,
-            ("TRAIN-KERNEL DEVICE PEAK: 70.00 GiB (fwd_bwd_accum 61.25 +" " optimizer state 8.75 not passed to it)"),
+            " ".join(
+                (
+                    "TRAIN-KERNEL DEVICE PEAK: 70.00 GiB (fwd_bwd 60.00 + optimizer state + gradient accumulator 10.00",
+                    "not passed to it)",
+                )
+            ),
         ),
         (
             on_host,
-            (
-                "TRAIN-KERNEL DEVICE PEAK: 61.25 GiB (fwd_bwd_accum 61.25 +"
-                " optimizer state 0.00 not passed to it; 8.75 GiB more of it"
-                " is on host)"
+            " ".join(
+                (
+                    "TRAIN-KERNEL DEVICE PEAK: 61.25 GiB (fwd_bwd 60.00 + optimizer state + gradient accumulator",
+                    "1.25 not passed to it; 8.75 GiB more of it is on host)",
+                )
             ),
         ),
     )
@@ -1022,7 +1038,7 @@ class MemoryReportTest(absltest.TestCase):
     row = next(line for line in lines if line.startswith("fwd_bwd "))
 
     self.assertEqual(row.split()[: len(expected) + 1], ["fwd_bwd", *expected.values()])
-    self.assertTrue(row.endswith("   optimizer"), row)
+    self.assertTrue(row.endswith(f"   optimizer, {memory_report.ACCUMULATOR}"), row)
     # Right-aligned: each cell ends where its header ends, in this order left to right.
     position = len("kernel")
     for name, cell in expected.items():
@@ -1075,6 +1091,10 @@ class MemoryReportTest(absltest.TestCase):
     no_analysis.memory_analysis = lambda: None
     with self.assertRaisesRegex(ValueError, "has no memory analysis"):
       memory_report.memory_report({"update": no_analysis}, _state({}))
+    with self.assertRaisesRegex(ValueError, "accumulate was not compiled"):
+      memory_report.memory_report({"fwd_bwd": _Compiled()}, _state({}))
+    with self.assertRaisesRegex(ValueError, "accumulate has no memory analysis"):
+      memory_report.memory_report({"fwd_bwd": _Compiled(), "accumulate": no_analysis}, _state({}))
 
   def test_every_kernel_has_state_entry(self):
     """A kernel added to the engine must be classified here, or the report refuses to run."""
@@ -1167,11 +1187,10 @@ class CompiledMemoryReportTest(absltest.TestCase):
   def test_report_matches_xla_allocation(self):
     """The report's bytes match XLA's, and each kernel is charged with what it runs beside.
 
-    `update` donates the whole train state and `fwd_bwd_accum` the running
-    gradient
-    sum, so their aliases are XLA's own counts of those. `fwd_bwd` and
-    `fwd_bwd_accum`
-    are not passed the optimizer.
+    `update` donates the whole train state and `accumulate` the running
+    gradient sum, so their aliases are XLA's own counts of those. `fwd_bwd` is
+    not passed the optimizer, and `accumulate` is passed neither model nor
+    optimizer.
     """
     state = self._engine.train_state_avals()
     model, optimizer = _subtree_bytes(state, "model"), _subtree_bytes(state, "optimizer")
@@ -1183,16 +1202,36 @@ class CompiledMemoryReportTest(absltest.TestCase):
     self.assertGreater(optimizer, 0)
     self.assertEqual(rows["update"].alias, model + optimizer)
     self.assertEqual(rows["update"].device_not_passed, 0)
-    self.assertEqual(rows["fwd_bwd_accum"].alias, gradient_sum)
-    self.assertEqual(rows["fwd_bwd_accum"].device_not_passed, optimizer)
+    self.assertEqual(rows["accumulate"].alias, gradient_sum)
+    self.assertEqual(rows["accumulate"].device_not_passed, model + optimizer)
     self.assertGreaterEqual(rows["fwd_bwd"].argument, model)
     self.assertLess(
         rows["fwd_bwd"].argument,
         model + optimizer,
         "the optimizer is among fwd_bwd's arguments",
     )
-    self.assertEqual(rows["fwd_bwd"].device_not_passed, optimizer)
-    self.assertGreaterEqual(rows["fwd_bwd_accum"].output, gradient_sum)
+    # Sized by what `accumulate` returns, which is the donated sum plus XLA's output tuple.
+    self.assertEqual(rows["fwd_bwd"].device_not_passed, optimizer + rows["accumulate"].output)
+    self.assertGreaterEqual(rows["accumulate"].output, gradient_sum)
+
+  # CPU only: the report counts logical shard bytes, while a TPU executable's buffers also carry
+  # tiled-layout padding, so the byte counts are exactly equal only on XLA:CPU.
+  @pytest.mark.cpu_only
+  def test_accumulator_is_sized_in_grad_dtype(self):
+    """The running gradient sum is sized in `grad_dtype` independently of weight dtype."""
+    cfg = _config("weight_dtype=bfloat16", "grad_dtype=float32", data_parallelism=1)
+    engine, micro_batch = maxtext_engine_compile._engine_and_micro_batch(cfg, maxtext_utils.get_mesh_from_config(cfg))
+    compiled = engine.compile_kernels(micro_batch)
+    state = engine.train_state_avals()
+    params, _ = nnx.split_state(state["model"], nnx.Param, ...)
+    leaves = jax.tree.leaves(params)
+    self.assertTrue(all(leaf.dtype == jnp.bfloat16 for leaf in leaves), "the weights are not narrower than the sum")
+    # The parameters' bytes in float32, plus the float32 denominator.
+    float32_sum = 2 * sum(memory_report.per_device_bytes(leaf)[0] for leaf in leaves) + 4
+    rows = _by_kernel(memory_report.memory_report(compiled, state))
+
+    self.assertEqual(rows["accumulate"].alias, float32_sum)
+    self.assertGreaterEqual(rows["fwd_bwd"].device_not_passed - _subtree_bytes(state, "optimizer"), float32_sum)
 
   def test_train_state_avals_returns_copy(self):
     """The engine's cached state is re-placed in place on a recompile, so a caller must not share it."""
@@ -1235,7 +1274,7 @@ class CompiledMemoryReportTest(absltest.TestCase):
     self.assertGreater(verdict[0], raw[-1])
     self.assertRegex(
         lines[verdict[0]],
-        r"^TRAIN-KERNEL DEVICE PEAK: \d+\.\d\d GiB" r" \((fwd_bwd|fwd_bwd_accum|update)\b",
+        r"^TRAIN-KERNEL DEVICE PEAK: \d+\.\d\d GiB" r" \((fwd_bwd|accumulate|update)\b",
     )
     for name in maxtext_engine_compile.KERNEL_NAMES:
       self.assertLen(
@@ -1899,9 +1938,10 @@ class Zero1MemoryReportTest(absltest.TestCase):
 
     self.assertIsNotNone(engine._zero1_params_shardings, "Zero-1 never engaged")
     model = _subtree_bytes(state, "model")
-    optimizer = rows["fwd_bwd"].device_not_passed
+    # `accumulate` runs beside the whole train state: its `+state` less the model is the optimizer as counted.
+    optimizer = rows["accumulate"].device_not_passed - model
     self.assertEqual(rows["update"].alias, model + optimizer)
-    self.assertEqual(rows["fwd_bwd_accum"].device_not_passed, optimizer)
+    self.assertEqual(rows["fwd_bwd"].device_not_passed, optimizer + rows["accumulate"].output)
     # The pre-compile, unsharded optimizer is ~4x larger and does not match XLA's count.
     self.assertNotEqual(rows["update"].alias, model + unsharded)
     self.assertGreater(unsharded, 3 * optimizer)
