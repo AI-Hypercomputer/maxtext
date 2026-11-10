@@ -24,7 +24,6 @@ from typing import Any
 
 from etils import epath
 from flax import nnx
-from flax.nnx import variablelib
 from flax import struct
 
 
@@ -39,6 +38,7 @@ from maxtext.common.goodput import get_goodput_job_name
 from maxtext.common import grain_utility
 from maxtext.common import snapshotting
 from maxtext.common import train_state_nnx
+from maxtext.common.common_types import variable_collection_name
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline import synthetic_data_processing
 from maxtext.layers import quantizations
@@ -1176,7 +1176,7 @@ def load_params_from_path(
     collection_leaves = collections.defaultdict(dict)
     for path_tuple, leaf in nnx.to_flat_state(abstract_unboxed_params):
       if isinstance(leaf, nnx.Variable):
-        col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
+        col = variable_collection_name(leaf.type)
         val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
       else:
         col = "params"
