@@ -908,10 +908,10 @@ class Gemma4VisionEncoderLayer(nnx.Module):
         rngs=self.rngs,
         precision=config.matmul_precision,
     )
-    self.std_bias = nnx.Param(
+    self.std_bias = UntrainableParam(
         nnx.initializers.zeros(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
     )
-    self.std_scale = nnx.Param(
+    self.std_scale = UntrainableParam(
         nnx.initializers.ones(self.rngs.params(), (config.hidden_size_for_vit,), config.weight_dtype), sharding=(None,)
     )
 

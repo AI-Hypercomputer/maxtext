@@ -469,6 +469,15 @@ class ClipMathTest(unittest.TestCase):
     self.assertEqual(float(g), 0.0)
 
 
+class VisionStdTest(unittest.TestCase):
+
+  def test_std_bias_and_std_scale_are_untrainable(self):
+    config = _init_gate_config(["use_clipped_linears_for_vit=true"])
+    mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("data",))
+    encoder = nnx.eval_shape(lambda: gv.Gemma4VisionEncoderLayer(config, mesh, rngs=nnx.Rngs(0)))
+    self.assertLessEqual({"std_bias", "std_scale"}, optimizers.untrainable_paths(encoder))
+
+
 class ValidateBoundsTest(unittest.TestCase):
 
   def test_accepts_finite_ordered(self):
