@@ -5289,15 +5289,14 @@ class RoutedMoE(nnx.Module):
       and any routed bias updates.
     """
     cfg = self.config
-    inputs = inputs.astype(cfg.dtype)
-
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
 
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
-    routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
+    routing_inputs = (inputs if gate_inputs is None else gate_inputs).astype(gate_dtype)
+    inputs = inputs.astype(cfg.dtype)
 
     if cfg.te_moe_block:
       routing_indices = None

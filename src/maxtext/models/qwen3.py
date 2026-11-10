@@ -1426,7 +1426,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           in_features_shape=cfg.emb_dim,
           out_features_shape=1,
           use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
-          dtype=cfg.dtype,
+          dtype=jnp.float32 if cfg.float32_gate_logits else cfg.dtype,
           weight_dtype=get_weight_dtype(cfg, "shared_expert_gate"),
           quant=get_quant(cfg, "shared_expert_gate", self.quant),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
@@ -1492,10 +1492,17 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       gate_sharding = jax.sharding.NamedSharding(
           out_sharding.mesh, jax.sharding.PartitionSpec(*out_sharding.spec[:2], None)
       )
-    shared_gate_output = self.shared_expert_gate(hidden_states, out_sharding=gate_sharding)
+    gate_inputs = hidden_states.astype(jnp.float32) if self.config.float32_gate_logits else hidden_states
+    shared_gate_output = self.shared_expert_gate(gate_inputs, out_sharding=gate_sharding)
 
     # 4. Combine the outputs.
-    final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+    if self.config.float32_gate_logits and self.config.float32_weight_sum:
+      final_output = (
+          routed_output.astype(jnp.float32)
+          + jax.nn.sigmoid(shared_gate_output) * shared_expert_output.astype(jnp.float32)
+      ).astype(self.config.dtype)
+    else:
+      final_output = routed_output + jax.nn.sigmoid(shared_gate_output).astype(routed_output.dtype) * shared_expert_output
 
     return final_output, load_balance_loss
 
