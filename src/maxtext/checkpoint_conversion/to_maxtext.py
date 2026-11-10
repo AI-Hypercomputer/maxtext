@@ -68,7 +68,17 @@ from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, single_stack_axis, slice_shape, stacked_axes
-from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import (
+    MemoryMonitorTqdm,
+    load_hf_dict_from_safetensors,
+    load_hf_dict_from_transformers,
+    param_key_parts_from_path,
+    param_save_dtype as _param_save_dtype,
+    print_peak_memory,
+    print_ram_usage,
+    save_weights_to_checkpoint,
+    validate_and_filter_param_map_keys,
+)
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
@@ -144,46 +154,6 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
       return tensor.astype(np.float32)
     return tensor
   return np.asarray(tensor)
-
-
-# Router state bf16 cannot hold exactly: the fp32 routing bias and integer
-# token-to-expert ids (bf16 rounds integers above 256).
-_FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
-_FULL_PRECISION_SUBSTRINGS = (
-    "-attn_hc-",
-    "-ffn_hc-",
-    "-hc_head-",
-    "-self_attention-sinks",
-    "-self_attention-indexer-k_norm-",
-    "-self_attention-indexer-weights_proj-",
-)
-
-# Per-model MaxText key suffixes kept in float32: tensors the HF release itself stores in F32.
-# Kimi-K3: the KDA decay/conv/norm parameters (`self_attn.{A_log,dt_bias,{q,k,v}_conv1d.weight,
-# o_norm.weight}`, F32 in the moonshotai/Kimi-K3 safetensors); bf16 would shift exp(A_log).
-_FULL_PRECISION_SUFFIXES_BY_MODEL = {
-    "kimi-k3": (
-        "-self_attention-A_log",
-        "-self_attention-dt_bias",
-        "-self_attention-q_conv1d-kernel",
-        "-self_attention-k_conv1d-kernel",
-        "-self_attention-v_conv1d-kernel",
-        "-self_attention-o_norm-scale",
-    ),
-}
-
-
-def _param_save_dtype(mt_param_key_or_keys, save_dtype: str, model_name: str | None = None) -> str:
-  """Returns float32 for full-precision router/HC/sink/indexer state (and per-model F32 tensors) when saving bfloat16."""
-  if save_dtype not in ("bfloat16", DType.BFLOAT16):
-    return save_dtype
-  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
-  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
-    return "float32"
-  suffixes = _FULL_PRECISION_SUFFIXES_BY_MODEL.get(model_name, ())
-  if suffixes and any(k.endswith(suffixes) for k in keys):
-    return "float32"
-  return save_dtype
 
 
 class LazyHFLoader:
@@ -536,14 +506,16 @@ def _build_single_axis_stacked_tensor(
       The final, assembled NumPy array for the MaxText parameter.
   """
   tensors_to_stack = []
+  sample_shape = target_shape[0] if isinstance(target_shape, list) else target_shape
 
-  axis_to_stack = single_stack_axis(mt_key, config, target_shape)
+  axis_to_stack = single_stack_axis(mt_key, config, sample_shape)
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
-  mt_slice_shape_list = list(target_shape)
-  del mt_slice_shape_list[axis_to_stack]
-  mt_slice_shape = tuple(mt_slice_shape_list)
+  if isinstance(target_shape, list):
+    mt_slice_shape = [s[:axis_to_stack] + s[axis_to_stack + 1 :] for s in target_shape]
+  else:
+    mt_slice_shape = target_shape[:axis_to_stack] + target_shape[axis_to_stack + 1 :]
 
   for hf_key_single in hf_source_keys:
     if isinstance(hf_key_single, (list, tuple)):
