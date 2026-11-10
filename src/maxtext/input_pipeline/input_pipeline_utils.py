@@ -48,9 +48,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, trust_remote_code=False):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, trust_remote_code=trust_remote_code
+  )
   return tokenizer_model
 
 

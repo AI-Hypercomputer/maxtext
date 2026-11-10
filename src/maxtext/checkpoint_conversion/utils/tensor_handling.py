@@ -17,6 +17,7 @@
 import functools
 from functools import partial
 import math
+import re
 from typing import Any, Callable, List
 import jax
 from jax.experimental import multihost_utils
@@ -41,13 +42,30 @@ def is_variable_collection_key(mt_key) -> bool:
   return key_str.partition("-")[0] in VARIABLE_COLLECTIONS
 
 
+_UNROLLED_LAYER_KEY = re.compile(r"(^|-)decoder-layers_\d+-")
+
+
+def is_unrolled_layer_key(mt_key: str | tuple[str, ...]) -> bool:
+  """Whether `mt_key` names a single unrolled decoder layer (`...-decoder-layers_{i}-...`).
+
+  With scan_layers=True, models that unroll some layers (e.g. Kimi-K3's prefix/suffix
+  around its scanned cycles) keep per-layer `layers_{i}` keys. Such a key holds one layer,
+  so a list of HF keys mapped to it is not a layer stack: it is an expert stack, on axis 0
+  exactly as in the unscanned layout.
+  """
+  if isinstance(mt_key, tuple):
+    mt_key = mt_key[0] if mt_key else ""
+  return bool(_UNROLLED_LAYER_KEY.search(mt_key))
+
+
 def single_stack_axis(mt_key, config, target_shape) -> int:
   """Returns the axis of a MaxText weight along which a 1D list of HF tensors is stacked.
 
   With `scan_layers`, layers are stacked along `param_scan_axis`, or along axis 0 if the weight has no such
   axis (e.g. the Llama 3.1 FP8 per-layer `kernel_scale`, shape `(num_layers,)`). Experts are stacked along
   axis 0: those of an unscanned MoE layer, including one outside the scanned stack (e.g. the DeepSeek-V4
-  prefix layers `layers_0`..), and those of `VARIABLE_COLLECTIONS`.
+  prefix layers `layers_0`..), those of `VARIABLE_COLLECTIONS`, and those of an unrolled `layers_{i}` key
+  (e.g. Kimi-K3's prefix/suffix layers around its scanned cycles; see `is_unrolled_layer_key`).
 
   Args:
     mt_key: The MaxText key, or a tuple of keys for a composite key.
@@ -58,7 +76,7 @@ def single_stack_axis(mt_key, config, target_shape) -> int:
   is_unscanned_moe = "MoeBlock" in key_str and not any(
       s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
   )
-  if not config.scan_layers or is_unscanned_moe or is_variable_collection_key(mt_key):
+  if not config.scan_layers or is_unscanned_moe or is_variable_collection_key(mt_key) or is_unrolled_layer_key(mt_key):
     return 0
   return config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
 

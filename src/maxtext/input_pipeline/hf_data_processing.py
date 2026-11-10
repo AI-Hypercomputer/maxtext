@@ -211,6 +211,7 @@ def vision_sft_preprocessing_pipeline(
       legacy=False,
       token=config.hf_access_token,
       extra_special_tokens={},
+      trust_remote_code=getattr(config, "tokenizer_trust_remote_code", False),
   )
   pad_id = _get_pad_id(tokenizer)
 
@@ -361,6 +362,7 @@ def preprocessing_pipeline(
       legacy=False,
       token=hf_access_token,
       extra_special_tokens={},
+      trust_remote_code=getattr(config, "tokenizer_trust_remote_code", False),
   )
 
   dataset = dataset.select_columns(data_column_names)

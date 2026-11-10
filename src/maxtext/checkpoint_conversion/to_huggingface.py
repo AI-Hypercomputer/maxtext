@@ -520,7 +520,8 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
   hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
+  trust_remote_code = getattr(config, "tokenizer_trust_remote_code", False)
+  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token, trust_remote_code=trust_remote_code)
 
   # For multi-modal case:
   processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if config.use_multimodal else None
