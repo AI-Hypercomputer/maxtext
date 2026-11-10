@@ -187,13 +187,23 @@ def _ensure_protos():
     sys.path.insert(0, out)
 
 
+def _strip_fingerprint_prefix(name: str) -> str:
+  """Returns the bare instruction name from a PGLE profile key.
+
+  Newer XLA (openxla/xla#51639) keys profile entries as
+  "<module fingerprint>::<instruction name>"; older XLA uses bare names, which
+  pass through unchanged. The pass looks costs up by bare instruction name.
+  """
+  return name.rpartition("::")[2]
+
+
 def _load_costs_from_fdo(fdo_bytes: bytes) -> dict[str, float]:
   _ensure_protos()
   from tsl.profiler.protobuf import profiled_instructions_pb2 as _pi  # type: ignore  # pylint: disable=import-outside-toplevel
 
   profiled = _pi.ProfiledInstructionsProto()
   profiled.ParseFromString(fdo_bytes)
-  return {c.name: c.cost_us for c in profiled.costs}
+  return {_strip_fingerprint_prefix(c.name): c.cost_us for c in profiled.costs}
 
 
 def _update_profile(fdo_bytes: bytes) -> None:
@@ -1840,6 +1850,24 @@ def _innermost_first_computations(module, schedule) -> tuple[list, set]:
   return result, all_callees
 
 
+# Below this fraction of while-body fusions / custom calls with a PGLE cost, the
+# profile almost certainly does not match the module's instruction names (e.g. a
+# changed profile key format), and the pass would silently make no useful moves.
+_MIN_PROFILE_COVERAGE = 0.5
+
+
+def _low_profile_coverage_message(found: int, total: int, sample_missing: str, sample_key: str) -> str | None:
+  """Returns a warning when too few instructions have a PGLE cost, else None."""
+  if total == 0 or found >= _MIN_PROFILE_COVERAGE * total:
+    return None
+  return (
+      f"only {found}/{total} fusion/custom-call instructions in while bodies have a PGLE cost; "
+      f"the profile's instruction names probably do not match the module (e.g. a changed profile "
+      f"key format), so the pass will treat their costs as zero. Example missing instruction: "
+      f"{sample_missing!r}; example profile key: {sample_key!r}."
+  )
+
+
 def _log_profile_coverage_gaps(module, schedule, module_name: str) -> None:
   """Log fusion/custom-call instructions in while bodies with no PGLE cost
   entry; every cost lookup silently treats a missing one as free."""
@@ -1882,6 +1910,14 @@ def _log_profile_coverage_gaps(module, schedule, module_name: str) -> None:
       total,
       len(missing),
   )
+  warning = _low_profile_coverage_message(
+      total - len(missing),
+      total,
+      missing[0] if missing else "",
+      next(iter(_profile_costs), ""),
+  )
+  if warning:
+    _logger.warning("gpu_collective_overlap_pass [%s]: %s", module_name, warning)
   if missing:
     _logger.info(
         "gpu_collective_overlap_pass [%s]: missing-profile instructions (first 150 of %d): %s",
