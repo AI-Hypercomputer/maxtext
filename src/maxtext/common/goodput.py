@@ -173,6 +173,10 @@ def record_goodput(recorder, event_name, *args):
     record_func = getattr(recorder, event_name, None)
     if record_func:
       record_func(*args)
+      if event_name == RECORD_JOB_END_TIME:
+        flush_func = getattr(recorder, "flush", None)
+        if callable(flush_func):
+          flush_func()
 
 
 def create_goodput_recorder(config):
