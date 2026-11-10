@@ -2,7 +2,7 @@
 
 Two approaches are here:
 
-1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples.
+1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples, and [`deepseek3_671b_tpu7x/`](deepseek3_671b_tpu7x/README.md) for DeepSeek-V3 671B FP8 recipes on TPU7x (Ironwood).
 2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with Cluster Toolkit workloads.
 
 For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
