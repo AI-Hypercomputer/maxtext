@@ -29,7 +29,9 @@ from maxtext.common.common_types import AttentionType
 from maxtext.configs import pyconfig
 from maxtext.layers import embeddings
 from maxtext.layers import nnx_decoders
+from maxtext.models import gemma4
 from maxtext.models import gemma4_small
+from maxtext.optimizers import optimizers
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 
@@ -252,6 +254,22 @@ class Gemma4SmallDecoderRematTest(unittest.TestCase):
         nnx.state(grad_no_remat),
         nnx.state(grad_remat),
     )
+
+
+class Gemma4LayerScalarTest(unittest.TestCase):
+  """`layer_scalar` is a fixed buffer in the HF checkpoints, so the optimizer must not train it."""
+
+  def _untrainable_paths(self, model_name, layer_cls):
+    config = pyconfig.initialize(
+        ["", os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")], model_name=model_name, scan_layers=False
+    )
+    mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("data",))
+    layer = nnx.eval_shape(lambda: layer_cls(config, mesh, common_types.MODEL_MODE_TRAIN, rngs=nnx.Rngs(0)))
+    return optimizers.untrainable_paths(layer)
+
+  def test_layer_scalar_is_untrainable(self):
+    self.assertIn("layer_scalar", self._untrainable_paths("gemma4-e2b", gemma4_small.Gemma4SmallDecoderLayer))
+    self.assertIn("layer_scalar", self._untrainable_paths("gemma4-26b", gemma4.Gemma4DecoderLayer))
 
 
 if __name__ == "__main__":
