@@ -2039,6 +2039,7 @@ class NNXDecoder(nnx.Module):
       multimodal_input: None | MultimodalInput = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings=None,
+      skip_lm_head: bool = False,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -2580,6 +2581,9 @@ class NNXDecoder(nnx.Module):
       logits = self.apply_output_head(
           shared_embedding, hidden_state, deterministic, model_mode, normalize_y=False, reduce_mhc=False
       )
+
+    elif skip_lm_head:
+      logits = None
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
