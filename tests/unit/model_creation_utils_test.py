@@ -37,7 +37,8 @@ from maxtext.utils.model_creation_utils import (
     _fix_restore_args_for_shape_mismatch,
     _fuse_moe_weights,
     _fuse_moe_halves_concatenated,
-    _fused_moe_kernel_uses_ep,
+    _concat_halves_padded_per_shard,
+    _fused_moe_kernel_uses_tp,
     _logical_partition_specs,
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
@@ -381,35 +382,39 @@ class TestFuseMoeWeights(unittest.TestCase):
     np.testing.assert_array_equal(out["layers"]["0"]["other"], other)
 
 
-class TestFusedMoeKernelUsesEp(unittest.TestCase):
-  """_fused_moe_kernel_uses_ep must match `use_ep` in `RoutedMoE.fused_moe_matmul`."""
+class TestFusedMoeKernelUsesTp(unittest.TestCase):
+  """_fused_moe_kernel_uses_tp must be True exactly when `RoutedMoE.fused_moe_matmul` runs with `use_ep` False."""
 
-  def _uses_ep(self, attention, mesh_shape):
-    return _fused_moe_kernel_uses_ep(types.SimpleNamespace(attention=attention), types.SimpleNamespace(shape=mesh_shape))
+  def _uses_tp(self, attention, mesh_shape):
+    return _fused_moe_kernel_uses_tp(types.SimpleNamespace(attention=attention), types.SimpleNamespace(shape=mesh_shape))
 
   def test_tensor_parallel_only(self):
-    self.assertFalse(self._uses_ep("vllm_rpa", {"data": 1, "model": 4, "expert": 1}))
+    self.assertTrue(self._uses_tp("vllm_rpa", {"data": 1, "model": 4, "expert": 1}))
+    self.assertTrue(self._uses_tp("vllm_batched_rpa", {"model": 4}))
 
   def test_expert_parallel_axes(self):
-    self.assertTrue(self._uses_ep("vllm_rpa", {"model": 2, "expert": 2}))
-    self.assertTrue(self._uses_ep("vllm_batched_rpa", {"model": 2, "attn_dp_expert": 2}))
-    self.assertTrue(self._uses_ep("vllm_rpa", {"model": 2, "dcp": 2}))
+    self.assertFalse(self._uses_tp("vllm_rpa", {"model": 2, "expert": 2}))
+    self.assertFalse(self._uses_tp("vllm_batched_rpa", {"model": 2, "attn_dp_expert": 2}))
+    self.assertFalse(self._uses_tp("vllm_rpa", {"model": 2, "dcp": 2}))
 
   def test_non_vllm_attention(self):
-    self.assertFalse(self._uses_ep("dot_product", {"model": 2, "expert": 2}))
+    self.assertFalse(self._uses_tp("dot_product", {"model": 4}))
 
   def test_missing_config_or_mesh(self):
-    self.assertFalse(_fused_moe_kernel_uses_ep(None, types.SimpleNamespace(shape={"expert": 2})))
-    self.assertFalse(_fused_moe_kernel_uses_ep(types.SimpleNamespace(attention="vllm_rpa"), None))
+    self.assertFalse(_fused_moe_kernel_uses_tp(None, types.SimpleNamespace(shape={"model": 4})))
+    self.assertFalse(_fused_moe_kernel_uses_tp(types.SimpleNamespace(attention="vllm_rpa"), None))
 
 
 class TestFuseMoeWeightsFusedKernelLayout(unittest.TestCase):
-  """The prefused wi layout must match how tpu-inference's fused MoE kernel splits it into gate/up.
+  """The prefused wi layout must match how its consumer splits it into gate/up.
 
-  The TP kernel splits each shard of the fused axis, so each shard holds [gate_i | up_i]. The
-  expert-parallel kernel splits the whole fused axis in half, so it needs [gate | up], with each
-  half keeping the per-shard MLP-dim padding that `wo` gets.
+  tpu-inference's TP fused kernel splits each shard of the fused axis, so each shard holds
+  [gate_i | up_i]. Every other consumer (the expert-parallel kernel, `RoutedMoE`'s non-fused
+  paths) splits the whole fused axis in half, so it needs [gate | up], with each half keeping the
+  per-shard MLP-dim padding that `wo` gets.
   """
+
+  _VLLM_CONFIG = types.SimpleNamespace(attention="vllm_rpa")
 
   # Checkpoint halves are (experts, embed, mlp) = (2, 3, 8); the model pads mlp to 16 per half.
   _E, _D, _H, _PADDED_H = 2, 3, 8, 16
@@ -421,14 +426,15 @@ class TestFuseMoeWeightsFusedKernelLayout(unittest.TestCase):
     devices = np.array(jax.devices()[:num_devices]).reshape(expert, model)
     return Mesh(devices, ("expert", "model"))
 
-  def _fuse(self, mesh, padded_h):
+  def _fuse(self, mesh, padded_h, config=_VLLM_CONFIG, model_dtype=jnp.float32, hash_routed=False):
     wi_0 = np.arange(1, self._E * self._D * self._H + 1, dtype=np.float32).reshape(self._E, self._D, self._H)
     wi_1 = -wi_0
     sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
-    model = {"wi": jax.device_put(jnp.zeros((self._E, self._D, 2 * padded_h), dtype=jnp.float32), sharding)}
-    config = types.SimpleNamespace(attention="vllm_rpa")
+    model = {"wi": jax.device_put(jnp.zeros((self._E, self._D, 2 * padded_h), dtype=model_dtype), sharding)}
+    if hash_routed:
+      model["tid2eid"] = jnp.zeros((8, 2), dtype=jnp.float32)
     out = _fuse_moe_weights({"wi_0": wi_0, "wi_1": wi_1}, model, config)
-    return wi_0, wi_1, np.asarray(out["wi"])
+    return wi_0, wi_1, out["wi"]
 
   @staticmethod
   def _pad_each_shard(arr, n_shards, padded_size):
@@ -437,28 +443,93 @@ class TestFuseMoeWeightsFusedKernelLayout(unittest.TestCase):
     pad_width = [(0, 0)] * (arr.ndim - 1) + [(0, pad)]
     return [np.pad(chunk, pad_width) for chunk in np.split(arr, n_shards, axis=-1)]
 
+  def _assert_interleaved(self, wi_0, wi_1, out, n_shards):
+    gate = self._pad_each_shard(wi_0, n_shards, self._PADDED_H)
+    up = self._pad_each_shard(wi_1, n_shards, self._PADDED_H)
+    expected = np.concatenate([chunk for pair in zip(gate, up) for chunk in pair], axis=-1)
+    np.testing.assert_array_equal(np.asarray(out, np.float32), expected)
+
   def test_tensor_parallel_interleaves_gate_and_up_per_shard(self):
     mesh = self._make_mesh(expert=1, model=4)
-    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
-    gate = self._pad_each_shard(wi_0, 4, self._PADDED_H)
-    up = self._pad_each_shard(wi_1, 4, self._PADDED_H)
-    expected = np.concatenate([chunk for pair in zip(gate, up) for chunk in pair], axis=-1)
-    np.testing.assert_array_equal(out, expected)
+    self._assert_interleaved(*self._fuse(mesh, self._PADDED_H), n_shards=4)
+
+  def test_interleaved_layout_is_built_in_the_model_dtype(self):
+    mesh = self._make_mesh(expert=1, model=4)
+    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H, model_dtype=jnp.bfloat16)
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    self._assert_interleaved(wi_0, wi_1, out, n_shards=4)  # The test values are exact in bf16.
+
+  def _assert_concatenated(self, wi_0, wi_1, out, n_shards):
+    gate = self._pad_each_shard(wi_0, n_shards, self._PADDED_H)
+    up = self._pad_each_shard(wi_1, n_shards, self._PADDED_H)
+    np.testing.assert_array_equal(np.asarray(out, np.float32), np.concatenate(gate + up, axis=-1))
 
   def test_expert_parallel_concatenates_gate_and_up(self):
     mesh = self._make_mesh(expert=2, model=2)
-    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
-    gate = self._pad_each_shard(wi_0, 2, self._PADDED_H)
-    up = self._pad_each_shard(wi_1, 2, self._PADDED_H)
-    np.testing.assert_array_equal(out, np.concatenate(gate + up, axis=-1))
+    self._assert_concatenated(*self._fuse(mesh, self._PADDED_H), n_shards=2)
+
+  def test_expert_parallel_with_unsharded_fused_axis_builds_in_embed_slices(self):
+    """With EP alone the fused axis is unsharded, and the fused wi is still built in memory-bounded slices."""
+    mesh = self._make_mesh(expert=2, model=1)
+    with patch(
+        "maxtext.utils.model_creation_utils._fuse_moe_halves_concatenated", wraps=_fuse_moe_halves_concatenated
+    ) as builder:
+      wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
+    builder.assert_called_once()
+    self._assert_concatenated(wi_0, wi_1, out, n_shards=1)
+
+  def test_without_config_concatenates_gate_and_up(self):
+    """Without a config the TP fused kernel cannot be detected, so the halves are not interleaved."""
+    mesh = self._make_mesh(expert=1, model=4)
+    self._assert_concatenated(*self._fuse(mesh, self._PADDED_H, config=None), n_shards=4)
+
+  def test_hash_routed_layer_concatenates_gate_and_up(self):
+    """Hash-routed layers take the non-fused path, which splits wi in half, even under the TP fused kernel."""
+    mesh = self._make_mesh(expert=1, model=4)
+    self._assert_concatenated(*self._fuse(mesh, self._PADDED_H, hash_routed=True), n_shards=4)
+
+  def test_concatenated_layout_is_built_in_the_model_dtype(self):
+    mesh = self._make_mesh(expert=2, model=2)
+    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H, model_dtype=jnp.bfloat16)
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    self._assert_concatenated(wi_0, wi_1, out, n_shards=2)  # The test values are exact in bf16.
 
   def test_expert_parallel_without_padding_is_plain_concat(self):
     mesh = self._make_mesh(expert=2, model=2)
     wi_0, wi_1, out = self._fuse(mesh, self._H)
-    np.testing.assert_array_equal(out, np.concatenate([wi_0, wi_1], axis=-1))
+    np.testing.assert_array_equal(np.asarray(out), np.concatenate([wi_0, wi_1], axis=-1))
+
+  def test_concatenation_rejects_halves_the_shards_do_not_divide(self):
+    mesh = self._make_mesh(expert=1, model=1)
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "model"))
+    half = np.zeros((self._E, self._D, 6), dtype=np.float32)
+    with self.assertRaisesRegex(ValueError, "multiples of the 4 shards"):
+      _concat_halves_padded_per_shard(half, half, n_shards=4, half_dim=8, out_sharding=sharding)
+
+  def test_interleave_rejects_halves_the_shards_do_not_divide(self):
+    mesh = self._make_mesh(expert=1, model=4)
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
+    model = {"wi": jax.device_put(jnp.zeros((self._E, self._D, 2 * self._PADDED_H), dtype=jnp.float32), sharding)}
+    half = np.zeros((self._E, self._D, 6), dtype=np.float32)
+    with self.assertRaisesRegex(ValueError, "multiples of the 4 shards"):
+      _fuse_moe_weights({"wi_0": half, "wi_1": half}, model, self._VLLM_CONFIG)
+
+  def test_sharded_embed_axis_is_fused_in_one_logged_pass(self):
+    mesh = self._make_mesh(expert=1, model=2)
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "model", None))
+    wi_0 = np.arange(2 * 4 * 8, dtype=np.float32).reshape(2, 4, 8)
+    wi_model = jax.device_put(jnp.zeros((2, 4, 16), dtype=jnp.float32), sharding)
+    with patch("maxtext.utils.model_creation_utils.max_logging.info") as info:
+      out = _fuse_moe_halves_concatenated(wi_0, -wi_0, wi_model, n_shards=1, num_slices=2)
+    info.assert_called_once()
+    np.testing.assert_array_equal(np.asarray(out), np.concatenate([wi_0, -wi_0], axis=-1))
 
   def test_expert_parallel_embed_slices_match_single_pass(self):
-    """Building [gate | up] in uneven embed slices gives the same array and sharding as one pass."""
+    """Building [gate | up] in uneven embed slices gives the same array and sharding as one pass.
+
+    Donation is a no-op on CPU, so this does not check that the slices are written into the result buffer in
+    place; the load-time measurements on TPU in #5988 cover that.
+    """
     mesh = self._make_mesh(expert=2, model=2)
     sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
     wi_0 = np.arange(2 * 5 * 8, dtype=np.float32).reshape(2, 5, 8)

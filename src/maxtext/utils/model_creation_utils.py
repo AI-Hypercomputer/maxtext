@@ -328,14 +328,25 @@ _VLLM_FUSED_MOE_ATTENTION = ("vllm_rpa", "vllm_batched_rpa")
 _VLLM_EXPERT_PARALLELISM_AXES = ("attn_dp_expert", "expert", "dcp")
 
 
-def _fused_moe_kernel_uses_ep(config, mesh) -> bool:
-  """Whether tpu-inference's fused MoE kernel runs expert-parallel for this config and mesh.
+def _fused_moe_kernel_uses_tp(config, mesh) -> bool:
+  """Whether MoE layers run through tpu-inference's tensor-parallel fused MoE kernel for this config and mesh.
 
-  Mirrors `use_ep = self.get_expert_parallelism_size() > 1` in `RoutedMoE.fused_moe_matmul`.
+  That kernel is the only consumer of a prefused `wi` that splits each shard of the fused axis into gate and up.
+  The expert-parallel fused kernel and `RoutedMoE`'s non-fused paths (non-vLLM attention, hash-routed layers)
+  split the whole axis in half. Mirrors `use_ep = self.get_expert_parallelism_size() > 1` being False in
+  `RoutedMoE.fused_moe_matmul`.
   """
   if config is None or mesh is None or getattr(config, "attention", None) not in _VLLM_FUSED_MOE_ATTENTION:
     return False
-  return math.prod(mesh.shape.get(axis, 1) for axis in _VLLM_EXPERT_PARALLELISM_AXES) > 1
+  return math.prod(mesh.shape.get(axis, 1) for axis in _VLLM_EXPERT_PARALLELISM_AXES) == 1
+
+
+def _is_hash_routed_moe(model_node) -> bool:
+  """Whether `model_node`, the arrays of a `RoutedMoE`, belongs to a hash-routed layer (it holds `tid2eid`).
+
+  Hash-routed layers never run the fused MoE kernel (see `is_fused_moe_path` in `RoutedMoE.__call__`).
+  """
+  return "tid2eid" in model_node
 
 
 # `_fuse_moe_halves_concatenated` builds the fused wi in this many slices of the embed axis.
@@ -350,7 +361,16 @@ def _sharded_zeros(shape, dtype, out_sharding):
 @partial(jax.jit, donate_argnums=0)
 def _write_embed_slice(fused, part, start):
   """Writes `part` into `fused` at `start` along the embed (second-to-last) axis, reusing `fused`'s buffer."""
-  return jax.lax.dynamic_update_slice_in_dim(fused, part, start, axis=fused.ndim - 2)
+  return jax.lax.dynamic_update_slice_in_dim(fused, part.astype(fused.dtype), start, axis=fused.ndim - 2)
+
+
+def _check_half_splits_into_shards(half_size, half_dim, n_shards):
+  """Raises unless a MoE half of `half_size` can be padded to `half_dim` shard by shard."""
+  if half_size % n_shards or half_dim % n_shards:
+    raise ValueError(
+        f"Cannot pad a MoE half of size {half_size} to {half_dim} shard by shard: both must be multiples of "
+        f"the {n_shards} shards of the fused axis."
+    )
 
 
 @partial(jax.jit, static_argnames=("n_shards", "half_dim", "out_sharding"))
@@ -358,6 +378,7 @@ def _concat_halves_padded_per_shard(wi_0, wi_1, n_shards, half_dim, out_sharding
   """Returns [wi_0 | wi_1] along the last axis, each half zero-padded to `half_dim` at the tail of each shard."""
 
   def _pad(arr):
+    _check_half_splits_into_shards(arr.shape[-1], half_dim, n_shards)
     chunk = arr.shape[-1] // n_shards
     arr = arr.reshape(*arr.shape[:-1], n_shards, chunk)
     arr = jnp.pad(arr, [(0, 0)] * (arr.ndim - 1) + [(0, half_dim // n_shards - chunk)])
@@ -376,9 +397,15 @@ def _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards, num_slices=_FU
   wi_sharding = wi_model.sharding
   embed_axis = wi_model.ndim - 2
   embed_dim = wi_model.shape[embed_axis]
-  if embed_axis < len(wi_sharding.spec) and wi_sharding.spec[embed_axis] is not None:
-    num_slices = 1  # Slices of a sharded embed axis would not match `wi_sharding`.
-  fused = _sharded_zeros(wi_model.shape, jnp.dtype(wi_0.dtype), wi_sharding)
+  if num_slices > 1 and embed_axis < len(wi_sharding.spec) and wi_sharding.spec[embed_axis] is not None:
+    # Slices of a sharded embed axis would not match `wi_sharding`.
+    max_logging.info(
+        f"Fusing MoE wi of shape {wi_model.shape} in one pass instead of {num_slices} embed slices, since its embed "
+        f"axis is sharded ({wi_sharding.spec}); this needs more temporary memory."
+    )
+    num_slices = 1
+  # In the model's dtype rather than the checkpoint's, e.g. half the size for an f32 checkpoint into a bf16 model.
+  fused = _sharded_zeros(wi_model.shape, jnp.dtype(wi_model.dtype), wi_sharding)
   step = -(-embed_dim // num_slices)
   for start in range(0, embed_dim, step):
     stop = min(start + step, embed_dim)
@@ -402,18 +429,19 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
   on a per-shard basis to satisfy kernel constraints.
 
   The per-shard interleave is the layout tpu-inference's TP fused MoE kernel
-  expects: it shards the fused axis and splits each shard into gate/up. When
-  that kernel runs expert-parallel instead (vLLM attention with an expert
-  parallelism size > 1), it does not shard the fused axis and splits the whole
-  axis in half (`gate = wi[..., :H]`, `up = wi[..., H:]`), so the gate and up
-  halves are concatenated rather than interleaved. Each half still keeps the
-  per-shard padding, which matches how `wo` is padded along the MLP dim.
+  expects: it shards the fused axis and splits each shard into gate/up. It is
+  the only consumer that does. The expert-parallel fused kernel and
+  `RoutedMoE`'s non-fused paths (non-vLLM attention, hash-routed layers) split
+  the whole axis in half (`gate = wi[..., :H]`, `up = wi[..., H:]`), so for
+  everything else the gate and up halves are concatenated rather than
+  interleaved. Each half still keeps the per-shard padding, which matches how
+  `wo` is padded along the MLP dim. Both layouts are built in the model's dtype.
 
   Args:
     ckpt_tree: Restored checkpoint tree, possibly holding wi_0/wi_1 pairs.
     model_arrays_tree: Model arrays tree; a fused model holds `wi` instead.
-    config: Model config, used to detect the expert-parallel fused MoE kernel.
-      When None, the per-shard interleaved layout is used.
+    config: Model config, used to detect the TP fused MoE kernel. When None,
+      the halves are concatenated.
   """
   is_vllm_rpa = config is None or config.attention in _VLLM_FUSED_MOE_ATTENTION
 
@@ -458,13 +486,13 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
 
     # Determine the number of shards (TP degree) along the concatenated axis
     n_shards = 1
-    use_ep = False
+    concatenate = False
     wi_sharding = getattr(wi_model, "sharding", None)
     if is_vllm_rpa and isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
-      use_ep = _fused_moe_kernel_uses_ep(config, wi_sharding.mesh)
+      concatenate = not _fused_moe_kernel_uses_tp(config, wi_sharding.mesh) or _is_hash_routed_moe(model_node)
 
     # Target size for a single half (wi_0 or wi_1) AFTER padding
     target_half_dim = wi_model.shape[-1] // 2
@@ -473,6 +501,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
     def _pad_and_chunk(arr, target_total_size):
       shape = arr.shape
       current_total_size = shape[-1]
+      _check_half_splits_into_shards(current_total_size, target_total_size, n_shards)
 
       # Calculate per-shard chunk sizes
       chunk_size = current_total_size // n_shards
@@ -490,8 +519,8 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
 
       return arr_reshaped
 
-    # Expert-parallel kernel: [gate | up] instead of the per-shard interleave below.
-    if use_ep:
+    # Everything but the TP fused kernel: [gate | up] instead of the per-shard interleave below.
+    if concatenate:
       new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
       new_node["wi"] = _fuse_moe_halves_concatenated(ckpt_node["wi_0"], ckpt_node["wi_1"], wi_model, n_shards)
       return new_node
@@ -506,7 +535,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
 
     # Flatten the n_shards dimension back out to match the final model shape, drop wi_0/wi_1.
     new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
-    new_node["wi"] = wi_interleaved.reshape(*wi_model.shape)
+    new_node["wi"] = wi_interleaved.reshape(*wi_model.shape).astype(wi_model.dtype)
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
