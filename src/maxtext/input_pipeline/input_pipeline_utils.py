@@ -1004,26 +1004,28 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       )
 
     # Determine the maximum number of images/masks allowed.
-    image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
-    single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
-
-    # Reserve space for at least one text token.
-    max_num_items = (self.max_length - 1) // single_image_offset
-    if self.max_num_images_per_example > 0:
-      max_num_items = min(self.max_num_images_per_example, max_num_items)
+    positions_tensor = preprocessed_image.image_position_ids
+    if positions_tensor is not None:
+      # Patches are padded to the largest image, so every slot costs as much as the largest image.
+      single_image_offset = mm_processor.get_image_offsets(self.config, None)
+    else:
+      image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
+      single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
+    max_num_items = mm_utils.get_max_num_images(self.max_length, single_image_offset, self.max_num_images_per_example)
 
     image_tensor = preprocessed_image.pixel_values
     mask_tensor = preprocessed_image.pixel_mask
 
-    def _pad(tensor: np.ndarray) -> np.ndarray:
+    def _pad(tensor: np.ndarray, fill_value: int = 0) -> np.ndarray:
       # Validate tensor dimensions.
-      if tensor.ndim in (4, 5):  # Standard or Tiled Image
+      if tensor.ndim in (4, 5) or (positions_tensor is not None and tensor.ndim == 3):  # Image, tiles or patches
         tensor_type = "images"
       elif tensor.ndim == 2:  # Mask
         tensor_type = "masks"
       else:
         raise ValueError(
-            "Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), " f"but got {tensor.ndim} dimensions."
+            "Input tensor must be 2D (mask), 3D (patches with positions), 4D (image), or 5D (tiled image), "
+            f"but got {tensor.ndim} dimensions."
         )
 
       # Assert that the input tensor does not exceed the maximum size.
@@ -1035,7 +1037,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         pad_size = max_num_items - tensor.shape[0]
         pad_shape_suffix = tensor.shape[1:]
         pad_shape = (pad_size,) + pad_shape_suffix
-        pad_tensor = np.zeros(pad_shape, dtype=tensor.dtype)
+        pad_tensor = np.full(pad_shape, fill_value, dtype=tensor.dtype)
 
         if tensor.size > 0:
           tensor = np.concatenate([tensor, pad_tensor], axis=0)
@@ -1049,6 +1051,10 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
     if mask_tensor is not None:
       preprocessed_image.pixel_mask = _pad(mask_tensor)
+
+    if positions_tensor is not None:
+      # Unused image slots get pad positions, so the encoder masks them.
+      preprocessed_image.image_position_ids = _pad(positions_tensor, fill_value=mm_utils.IMAGE_POSITION_PAD_VALUE)
 
     return preprocessed_image
 
@@ -1139,6 +1145,8 @@ class ExtractImagesAndMasks(grain.MapTransform):
     output["images"] = preprocessed_image.pixel_values  # pyrefly: ignore[unsupported-operation]
     if preprocessed_image.pixel_mask is not None:
       output["image_masks"] = preprocessed_image.pixel_mask
+    if preprocessed_image.image_position_ids is not None:
+      output["image_position_ids"] = preprocessed_image.image_position_ids
     # Qwen MRoPE needs per-image (t, h, w) grids to build 3D positions.
     pixel_grid_thw = getattr(preprocessed_image, "pixel_grid_thw", None)
     if pixel_grid_thw is not None:
