@@ -1221,6 +1221,13 @@ class SplashAttention(BaseModel):
           " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
       ),
   )
+  sa_batched_dkv_carriers: bool = Field(
+      False,
+      description=(
+          "Maps to batched_dkv_carriers in SplashConfig: allocate the aliased"
+          " dk/dv carriers already batched under vmap."
+      ),
+  )
   sa_ignore_segment_ids: bool = Field(
       False,
       description=(
