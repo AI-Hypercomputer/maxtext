@@ -612,6 +612,7 @@ def build_training_components(
       add_bos=student_config.add_bos,
       add_eos=student_config.add_eos,
       hf_access_token=student_config.hf_access_token,
+      trust_remote_code=getattr(student_config, "tokenizer_trust_remote_code", False),
   )
   pad_id = tok.pad_id if tok.pad_id is not None else 0
 

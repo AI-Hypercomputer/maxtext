@@ -86,6 +86,14 @@ ATTENTION_QKV_NAMES = (
 
 ATTENTION_OUT_NAMES = ("out",)
 
+# Output-gate projections. Head-expanded (3D unscanned / 4D scanned) in MLA, e.g. Kimi-K3
+# `[emb_dim, num_heads, v_head_dim]`; flat 2D in linear-attention blocks (KDA), which keep the
+# standard mapping.
+ATTENTION_GATE_NAMES = ("g_proj",)
+
+# Path entries of scanned decoder stacks (the scanned layer axis sits at `param_scan_axis`).
+SCANNED_LAYER_NAMES = ("layers", "scanned_blocks", "dense_layers", "moe_layers")
+
 MOE_BLOCK_NAMES = (
     "MoeBlock_0",
     "moe_block",
@@ -135,7 +143,7 @@ def transform_logic(
        maps to reduction axis (-2,) and output axis (-1,).
     4. Head-expanded Attention: QKV and Output projections with 3D/4D shapes
        map to head-aware reduction and output axes:
-       - QKV: reduction (0,), output (-2, -1)
+       - QKV and MLA output gate (g_proj): reduction (0,), output (-2, -1)
        - Out (unflattened): reduction (0, -2), output (-1,)
     5. Standard Weights: Default 2D matrix mapping (0,) and (-1,) for MLPs,
        GDN, shared experts, MHC alpha projections, and dense projections.
@@ -181,11 +189,24 @@ def transform_logic(
     if _is_path_contain_any(ATTENTION_QKV_NAMES, path):
       # [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output (-2, -1)
       return mdn((0,), (-2, -1))
+    if (
+        shape is not None
+        and _is_path_contain_any(ATTENTION_GATE_NAMES, path)
+        and (len(shape) == 4 or (len(shape) == 3 and not _is_path_contain_any(SCANNED_LAYER_NAMES, path)))
+    ):
+      # Head-expanded MLA output gate: [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output
+      # (-2, -1). A 3D gate under a scanned stack is a flat 2D projection with a layer axis (e.g. KDA `g_proj`,
+      # Ming), which falls through to the standard mapping so layers are orthogonalized independently.
+      return mdn((0,), (-2, -1))
     if _is_path_contain_any(ATTENTION_OUT_NAMES, path):
       # Standard attention out projection: [num_heads, (num_layers), head_dim, out_features] -> reduce (0, -2), output (-1,)
       # Note: Qwen3-Next flattens heads into a 2D projection (in_features = num_heads * head_dim),
       # so its out projection is a standard 2D matrix [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
-      if _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4):
+      # Kimi-K3's scanned KDA `out` is a flat [in_features, num_layers, out_features] projection: standard mapping.
+      is_scanned_flat_3d = shape is not None and len(shape) == 3 and "scanned_blocks" in path
+      if not is_scanned_flat_3d and (
+          _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4)
+      ):
         return mdn((0, -2), (-1,))
 
   # Standard 2D matrix weights (dense MLPs, shared experts, GDN, MHC alpha, dense projections, router weights)

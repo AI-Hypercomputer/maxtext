@@ -273,6 +273,7 @@ ModelName = Literal[
     "deepseek4-1600b",
     "deepseek-custom",
     "kimi-k2-1t",
+    "kimi-k3",
     "gemma-7b",
     "gemma-2b",
     "gemma2-2b",
@@ -1349,6 +1350,14 @@ class MoEGeneral(BaseModel):
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
   )
+  moe_router_input_dim: int = Field(
+      -1,
+      description=(
+          "Dimension of the router (gate) input when it differs from the expert input, e.g. a latent MoE that"
+          " routes on the full hidden state but runs experts on a down-projected latent (pass the router input"
+          " as `gate_inputs`). If < 0, defaults to the expert input dim."
+      ),
+  )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
   padded_base_moe_mlp_dim: Optional[int] = Field(
       None,
@@ -1939,6 +1948,105 @@ class Qwen3_8FlashNext(BaseModel):
   ple_eos_token_id: int = Field(248044, description="EOS token ID used for PLE n-gram boundary resets (HF eos_token_id).")
 
 
+class KimiK3(BaseModel):
+  """Configuration specific to Kimi-K3 models.
+
+  `moe_intermediate_size` / `num_shared_experts` mirror the HF names the Kimi-K3 layers read;
+  the generic MoE code reads `base_moe_mlp_dim` / `shared_experts`. When set (not None), each
+  must equal its generic twin, so overriding only one of a pair fails loudly instead of
+  leaving the other stale. Unset is `None` (so an explicit 0 is still validated), and
+  `shared_intermediate_size`, when set, must equal `moe_intermediate_size * num_shared_experts`.
+  """
+
+  attn_res_block_size: PositiveInt = Field(12, description="Attention residual block interval.")
+  full_attn_layers: list[NonNegativeInt] = Field(
+      default_factory=list,
+      description="0-indexed decoder layers that use full (MLA) attention; all others use KDA linear attention.",
+  )
+  routed_expert_hidden_size: NonNegativeInt = Field(0, description="Routed expert projection size for latent MoE.")
+  shared_intermediate_size: NonNegativeInt | None = Field(
+      None,
+      description="Shared expert intermediate size for latent MoE; must equal moe_intermediate_size * num_shared_experts.",
+  )
+  moe_intermediate_size: NonNegativeInt | None = Field(
+      None, description="Routed expert intermediate size read by the Kimi-K3 layers; must equal base_moe_mlp_dim if set."
+  )
+  num_shared_experts: NonNegativeInt | None = Field(
+      None, description="Shared expert count read by the Kimi-K3 layers; must equal shared_experts if set."
+  )
+  short_conv_kernel_size: PositiveInt = Field(4, description="Kernel size for the KDA short convolution.")
+  kda_gate_lower_bound: Optional[float] = Field(
+      -5.0,
+      lt=0.0,
+      description=(
+          "KDA decay-gate lower bound (must be negative). When set, the gate is the bounded sigmoid "
+          "`lb * sigmoid(exp(A_log) * (g + dt_bias))` (as in fla); None selects the softplus gate."
+      ),
+  )
+  kda_chunk_size: int = Field(64, gt=0, description="Chunk size of the KDA chunked (WY) prefill/train core.")
+  kda_compute_dtype: Literal["float32", "bfloat16"] = Field(
+      "float32",
+      description=(
+          "Precision of the KDA q/k/v inputs to the core (and of the q/k L2-norm). The decay gate, its "
+          "cumsum, the chunked WY solve and the recurrent state are always float32, as in fla. The output "
+          "is cast back to `dtype`."
+      ),
+  )
+  kda_kernel: Literal["jax", "tokamax"] = Field(
+      "jax",
+      description=(
+          "KDA chunked core for train/prefill. 'jax' is the in-tree chunked WY scan; 'tokamax' calls "
+          "`tokamax.ops.kimi_delta_attention` (fused gate + q/k L2-norm, custom VJP, varlen segments)."
+      ),
+  )
+  kda_tokamax_implementation: Literal["auto", "mosaic", "xla_chunked", "xla"] = Field(
+      "auto",
+      description=(
+          "tokamax KDA backend when kda_kernel='tokamax'. 'auto' tries the Pallas Mosaic kernel (TPU v6+) "
+          "and falls back to the pure-JAX chunked kernel ('xla_chunked'); 'xla' is the recurrent reference."
+      ),
+  )
+  kda_tokamax_remat_safe: bool = Field(
+      True,
+      description=(
+          "With kda_kernel='tokamax', disable the kernel's debug-only `checkify` input check (process-wide). "
+          "The check is an effect, and JAX never rematerializes effectful ops, so with it every KDA layer "
+          "saves its f32 kernel residuals/output regardless of remat_policy (and lax.scan stacks them)."
+      ),
+  )
+  kda_max_num_segments: int = Field(
+      0,
+      description=(
+          "With kda_kernel='tokamax' in training, a positive value passes `decoder_segment_ids` to the "
+          "kernel so the recurrent state resets at packed-document boundaries; it is the static upper "
+          "bound on documents per sequence (each costs up to chunk_size-1 padded tokens). 0 ignores "
+          "segment ids (state carries across packed documents, like kda_kernel='jax')."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_kimi_k3_alias_pairs(self):
+    """Rejects a Kimi-K3 HF-named field that disagrees with its generic MaxText twin."""
+    for kimi_name, generic_name in (
+        ("moe_intermediate_size", "base_moe_mlp_dim"),
+        ("num_shared_experts", "shared_experts"),
+    ):
+      kimi_value = getattr(self, kimi_name)
+      generic_value = getattr(self, generic_name, None)
+      if kimi_value is not None and generic_value is not None and kimi_value != generic_value:
+        raise ValueError(f"{kimi_name}={kimi_value} must equal {generic_name}={generic_value}; override both together.")
+    if self.shared_intermediate_size is not None:
+      if self.moe_intermediate_size is None or self.num_shared_experts is None:
+        raise ValueError("shared_intermediate_size requires moe_intermediate_size and num_shared_experts to be set.")
+      expected = self.moe_intermediate_size * self.num_shared_experts
+      if self.shared_intermediate_size != expected:
+        raise ValueError(
+            f"shared_intermediate_size={self.shared_intermediate_size} must equal moe_intermediate_size * "
+            f"num_shared_experts = {self.moe_intermediate_size} * {self.num_shared_experts} = {expected}."
+        )
+    return self
+
+
 # ----------------------------------------------------------------------------
 # Default Mesh Axes, Data Sharding, and Logical Axis Rules
 # ----------------------------------------------------------------------------
@@ -2475,6 +2583,14 @@ class Tokenizer(BaseModel):
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
+  tokenizer_trust_remote_code: bool = Field(
+      False,
+      description=(
+          "Passes `trust_remote_code=True` to `transformers.AutoTokenizer` (tokenizer_type 'huggingface' and the "
+          "hf pipeline). Needed for tokenizers that ship their own Python code (e.g. Kimi-K3). This runs code "
+          "from `tokenizer_path`, so only enable it for a trusted tokenizer."
+      ),
+  )
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
   chat_template: str = Field(
@@ -4505,6 +4621,7 @@ class MaxTextConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    KimiK3,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -5936,6 +6053,35 @@ class MaxTextConfig(
       raise ValueError("`grain_use_elastic_iterator=True` requires `packing=False`.")
     if self.use_dpo and self.packing:
       raise ValueError("DPO does not support packing. Set `packing=False`.")
+    if (
+        self.decoder_block == DecoderBlockType.KIMI_LINEAR
+        and self.packing
+        and not (self.kda_kernel == "tokamax" and self.kda_max_num_segments > 0)
+    ):
+      # The JAX KDA core ignores `decoder_segment_ids`, so packed documents would leak recurrent
+      # state into each other in 69 of the 93 layers. The tokamax kernel resets state per segment.
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) packs sequences only with the tokamax KDA kernel: set "
+          "`packing=False`, or `kda_kernel=tokamax` with `kda_max_num_segments > 0`."
+      )
+    elif self.decoder_block == DecoderBlockType.KIMI_LINEAR and self.packing:
+      # Segments past `kda_max_num_segments` are silently zeroed by `_segment_ids_to_cu_seqlens`, so
+      # the input packer must bound segments per sequence to `<= kda_max_num_segments`. TFDS / C4MLPERF
+      # `pack_dataset` has no segment cap.
+      if self.dataset_type in (DatasetType.TFDS, DatasetType.C4MLPERF):
+        dataset_type_str = getattr(self.dataset_type, "value", self.dataset_type)
+        raise ValueError(
+            "decoder_block=kimi_linear (Kimi-K3) with packing=True and kda_kernel=tokamax does not support "
+            f"dataset_type={dataset_type_str!r} because TFDS packing does not bound segments per sequence "
+            f"(`kda_max_num_segments={self.kda_max_num_segments}`). Use dataset_type='grain' or 'hf' with "
+            "`0 < max_segments_per_seq <= kda_max_num_segments`, or set `packing=False`."
+        )
+      if self.max_segments_per_seq is None or not 0 < self.max_segments_per_seq <= self.kda_max_num_segments:
+        raise ValueError(
+            "decoder_block=kimi_linear (Kimi-K3) with packing=True and kda_kernel=tokamax requires "
+            "`0 < max_segments_per_seq <= kda_max_num_segments` (got "
+            f"max_segments_per_seq={self.max_segments_per_seq}, kda_max_num_segments={self.kda_max_num_segments})."
+        )
     if self.grain_use_elastic_iterator and not self.use_truncation:
       raise ValueError(
           "`grain_use_elastic_iterator=True` requires `use_truncation=True`. "
@@ -6439,6 +6585,23 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
+    if self.decoder_block == DecoderBlockType.KIMI_LINEAR and any(
+        deg > 1
+        for deg in (
+            context_parallel_size,
+            self.ici_context_parallelism,
+            self.dcn_context_parallelism,
+            self.ici_context_usp_ulysses_parallelism,
+            self.dcn_context_usp_ulysses_parallelism,
+            self.ici_context_autoregressive_parallelism,
+            self.dcn_context_autoregressive_parallelism,
+        )
+    ):
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) does not support context parallelism yet: "
+          "KDA layers do not propagate recurrent/conv state across sequence shards or unpermute "
+          "load-balanced (DUAL_CHUNK_SWAP) batches."
+      )
     if self.attention_type == AttentionType.COMPRESSED.value:
       # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
       # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
