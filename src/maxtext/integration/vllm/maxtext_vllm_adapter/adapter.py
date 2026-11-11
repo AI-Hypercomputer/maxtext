@@ -19,6 +19,7 @@ from flax import nnx
 from flax.core.spmd import logical_axis_rules
 import jax
 from jax import numpy as jnp
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
 import numpy as np
@@ -649,6 +650,25 @@ def patch_kv_cache_manager():
 
   KVCacheManager.get_kv_cache_spec = patched_get_kv_cache_spec
   max_logging.log("Successfully applied KVCacheManager patch for hybrid GDN models.")
+
+
+def patch_pallas_tpu_reciprocal():
+  """Exposes `pl.reciprocal` as `pltpu.reciprocal` on JAX versions that lack it.
+
+  tpu-inference switched its Pallas kernels from `pl.reciprocal` to `pltpu.reciprocal`
+  (vllm-project/tpu-inference#3810), which JAX only exports starting from v0.11.2. With the
+  JAX 0.11.0 pinned for post-training, kernels that reach that call (e.g. the head_dim=64
+  ragged paged attention kernel used by gpt-oss) fail at trace time with
+  `AttributeError: module 'jax.experimental.pallas.tpu' has no attribute 'reciprocal'`.
+  In both JAX versions the function is `jax._src.pallas.primitives.reciprocal`; only its
+  public export moved, so the alias does not change kernel behavior.
+
+  TODO: Remove once post-training moves to JAX >= 0.11.2.
+  """
+  if hasattr(pltpu, "reciprocal") or not hasattr(pl, "reciprocal"):
+    return
+  pltpu.reciprocal = pl.reciprocal
+  max_logging.log("Aliased pltpu.reciprocal to pl.reciprocal for JAX < 0.11.2 compatibility.")
 
 
 def patch_raiden_worker_h2d():

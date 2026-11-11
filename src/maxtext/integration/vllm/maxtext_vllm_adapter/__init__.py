@@ -43,11 +43,12 @@ def register(config=None):
 
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
 
-  # Dynamically apply KVCacheManager patch when registering the adapter
+  # Dynamically apply runtime compatibility patches when registering the adapter
   # pylint: disable=import-outside-toplevel
-  from .adapter import patch_kv_cache_manager
+  from .adapter import patch_kv_cache_manager, patch_pallas_tpu_reciprocal
 
   patch_kv_cache_manager()
+  patch_pallas_tpu_reciprocal()
 
   if multimodal_handler is not None:
     multimodal_handler.register_processor(MaxTextForCausalLM)
