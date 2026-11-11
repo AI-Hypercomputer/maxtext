@@ -244,6 +244,33 @@ class RLProfilingConfigTest(parameterized.TestCase):
     )
     self.assertEqual(cfg.managed_mldiagnostics_dir, "/tmp/local/run1/managed-mldiagnostics")
 
+  def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
+    cfg = _rl_config("remat_policy=none", run_name="rl_remat_test")
+    self.assertIsNone(cfg.remat_policy)
+
+    for extra_flag, error_regex in (
+        ("prefetch_fsdp_weights=true", "remat_policy='none' is not supported with prefetch_fsdp_weights=True"),
+        ("ici_pipeline_parallelism=2", "remat_policy='none' is not supported with pipeline parallelism"),
+        ("dcn_pipeline_parallelism=2", "remat_policy='none' is not supported with pipeline parallelism"),
+    ):
+      with self.subTest(extra_flag=extra_flag):
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+          _rl_config("remat_policy=none", extra_flag, run_name="rl_remat_test")
+
+    for bad_kwargs, error_regex in (
+        ({"prefetch_fsdp_weights": True}, "prefetch_fsdp_weights=True"),
+        ({"ici_pipeline_parallelism": 2}, "pipeline parallelism"),
+        ({"dcn_pipeline_parallelism": 2}, "pipeline parallelism"),
+    ):
+      with self.subTest(bad_kwargs=bad_kwargs):
+        with self.assertRaisesRegex(pydantic.ValidationError, error_regex):
+          types.RLConfig(
+              model_name="llama2-7b",
+              tokenizer_path="meta-llama/Llama-2-7b",
+              remat_policy="none",
+              **bad_kwargs,
+          )
+
 
 class RLDerivedStepsConfigTest(absltest.TestCase):
   """`train_steps` is a declared, derived field on `RLConfig` (not an attribute injected by the validator)."""

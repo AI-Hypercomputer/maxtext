@@ -1589,6 +1589,74 @@ class ConfigTest(absltest.TestCase):
       cfg = self._elastic_config(*keep, *extra.split())
       self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
 
+  def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
+    """Tests that remat_policy=none is rejected with prefetch_fsdp_weights=True and pipeline parallelism."""
+    base_argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "base_num_decoder_layers=2",
+        "per_device_batch_size=2",
+    ]
+    # Baseline: default remat_policy='full' permits FSDP weight prefetch and pipeline parallelism.
+    self.assertTrue(pyconfig.initialize([*base_argv, "prefetch_fsdp_weights=true"]).prefetch_fsdp_weights)
+    self.assertTrue(
+        pyconfig.initialize(
+            [*base_argv, "compile_topology=v5e-16", "compile_topology_num_slices=1", "ici_pipeline_parallelism=2"]
+        ).using_pipeline_parallelism
+    )
+    self.assertTrue(
+        pyconfig.initialize(
+            [*base_argv, "compile_topology=v5e-16", "compile_topology_num_slices=2", "dcn_pipeline_parallelism=2"]
+        ).using_pipeline_parallelism
+    )
+
+    # Baseline: remat_policy=none succeeds when neither prefetch_fsdp_weights nor pipeline parallelism is enabled.
+    for remat_flag in ("remat_policy=none", "remat_policy=NONE"):
+      cfg = pyconfig.initialize([*base_argv, remat_flag])
+      self.assertIsNone(cfg.remat_policy)
+    direct_ok = types.MaxTextConfig(run_name="test", enable_checkpointing=False, remat_policy="none")
+    self.assertEqual(direct_ok.remat_policy, types.RematPolicy.NONE)
+
+    # pyconfig.initialize (normalizes 'none'/'NONE' -> None before Pydantic validation).
+    for extra_flags, error_regex in (
+        (["remat_policy=none", "prefetch_fsdp_weights=true"], "not supported with prefetch_fsdp_weights=True"),
+        (["remat_policy=NONE", "prefetch_fsdp_weights=true"], "not supported with prefetch_fsdp_weights=True"),
+        (
+            ["remat_policy=none", "compile_topology=v5e-16", "ici_pipeline_parallelism=2"],
+            "not supported with pipeline parallelism",
+        ),
+        (
+            [
+                "remat_policy=none",
+                "compile_topology=v5e-16",
+                "compile_topology_num_slices=2",
+                "dcn_pipeline_parallelism=2",
+            ],
+            "not supported with pipeline parallelism",
+        ),
+    ):
+      with self.subTest(loader="pyconfig", extra_flags=extra_flags):
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+          pyconfig.initialize([*base_argv, *extra_flags])
+
+    # Direct MaxTextConfig instantiation (preserves 'none' / RematPolicy.NONE string without pyconfig normalization).
+    for remat_val in ("none", types.RematPolicy.NONE, None):
+      for bad_kwargs, error_regex in (
+          ({"prefetch_fsdp_weights": True}, "not supported with prefetch_fsdp_weights=True"),
+          ({"ici_pipeline_parallelism": 2}, "not supported with pipeline parallelism"),
+          ({"dcn_pipeline_parallelism": 2}, "not supported with pipeline parallelism"),
+      ):
+        with self.subTest(loader="direct", remat_val=remat_val, bad_kwargs=bad_kwargs):
+          with self.assertRaisesRegex(pydantic.ValidationError, error_regex):
+            types.MaxTextConfig(
+                run_name="test",
+                enable_checkpointing=False,
+                remat_policy=remat_val,
+                **bad_kwargs,
+            )
+
 
 class MMapDatasetConfigTest(absltest.TestCase):
   """Tests for mmap-specific configuration defaults and accepted values."""

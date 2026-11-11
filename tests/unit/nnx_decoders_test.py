@@ -24,6 +24,7 @@ Tests cover:
 """
 
 # pylint: disable=unbalanced-tuple-unpacking
+import collections.abc
 import re
 import sys
 from types import SimpleNamespace
@@ -64,8 +65,10 @@ from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
+from maxtext.models import models
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
+from maxtext.trainers.pre_train import train
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, sharding
 from tests.utils.test_helpers import get_test_config_path
 
@@ -436,7 +439,25 @@ class TestNNXDecoderRematPolicy(unittest.TestCase):
     )
 
   def test_remat_policy_none_returns_none(self):
-    self.assertIsNone(self.decoder.get_remat_policy())
+    cfg = _make_config(remat_policy="none")
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertIsNone(decoder.get_remat_policy())
+
+  def test_remat_enabled(self):
+    """`_remat_enabled()` tells "none" apart from "full", which `get_remat_policy()` cannot."""
+    for remat_policy, override, expected in (
+        ("none", None, False),
+        ("full", None, True),
+        ("minimal", None, True),
+        ("none", "full", True),
+    ):
+      with self.subTest(remat_policy=remat_policy, override=override):
+        cfg = _make_config(remat_policy=remat_policy)
+        decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), rngs=nnx.Rngs(params=0, dropout=1))
+        if override is not None:
+          decoder.remat_policy_override = override
+        self.assertEqual(decoder._remat_enabled(), expected)  # pylint: disable=protected-access
 
   def test_remat_policy_full_returns_none(self):
     cfg = _make_config(remat_policy="full")
@@ -748,6 +769,372 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
+
+# ---------------------------------------------------------------------------
+# 6b. remat_policy=none must not apply jax.checkpoint
+# ---------------------------------------------------------------------------
+
+
+def _collect_checkpoint_policies(jaxpr) -> list[collections.abc.Callable[..., object] | None]:
+  """Returns the `policy` parameter of every `jax.checkpoint` equation in `jaxpr`."""
+  policies = []
+  for eqn in jaxpr.eqns:
+    # The `jax.checkpoint` primitive name differs across JAX versions. If it changes again, the
+    # `remat_policy=full` cases below fail, so the `none` cases cannot pass for the wrong reason.
+    if eqn.primitive.name in ("remat2", "checkpoint"):
+      policies.append(eqn.params.get("policy"))
+    for param in eqn.params.values():
+      for sub in param if isinstance(param, (list, tuple)) else (param,):
+        if hasattr(sub, "eqns"):
+          policies.extend(_collect_checkpoint_policies(sub))
+        elif hasattr(getattr(sub, "jaxpr", None), "eqns"):
+          policies.extend(_collect_checkpoint_policies(sub.jaxpr))
+  return policies
+
+
+def _count_checkpoint_eqns(jaxpr) -> int:
+  """Counts `jax.checkpoint` equations in `jaxpr`, including nested sub-jaxprs."""
+  return len(_collect_checkpoint_policies(jaxpr))
+
+
+_GEMMA3_REMAINDER_CONFIG = {
+    "run_name": "gemma3_remat_none_test",
+    "decoder_block": "gemma3",
+    "model_name": "gemma3-4b",
+    "base_num_decoder_layers": 7,  # One full 6-layer attention pattern plus a 1-layer remainder.
+    "base_emb_dim": 128,
+    "base_num_query_heads": 4,
+    "base_num_kv_heads": 4,
+    "base_mlp_dim": 256,
+    "vocab_size": 256,
+    "max_target_length": 16,
+}
+
+
+_GEMMA4_REMAINDER_CONFIG = {
+    "run_name": "gemma4_remat_none_test",
+    "decoder_block": "gemma4",
+    "base_num_decoder_layers": 7,  # One full 6-layer attention pattern plus a 1-layer remainder.
+    "base_emb_dim": 64,
+    "base_num_query_heads": 2,
+    "base_num_kv_heads": 2,
+    "base_mlp_dim": 128,
+    "vocab_size": 128,
+    "max_target_length": 16,
+}
+
+
+_DEEPSEEK4_SCANNED_CONFIG = {
+    "run_name": "deepseek4_remat_none_test",
+    "model_name": "deepseek4-tiny",
+    "decoder_block": "deepseek4",
+    "base_emb_dim": 64,
+    "base_num_query_heads": 4,
+    "base_num_kv_heads": 1,
+    "base_mlp_dim": 64,
+    "base_moe_mlp_dim": 64,
+    "first_num_hash_layers": 2,
+    "base_num_decoder_layers": 4,  # Two unrolled prefix hash layers plus one scanned 2-layer block.
+    "compress_ratios": [0, 4, 128, 4],
+    "mhc_expansion_rate": 2,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "indexer_topk": 2,
+    "vocab_size": 128,
+    "max_target_length": 16,
+    "sparse_matmul": False,
+    "megablox": False,
+    "dtype": "float32",
+    "weight_dtype": "float32",
+}
+
+
+_HY4_SCANNED_CONFIG = {
+    "run_name": "hy4_remat_none_test",
+    "model_name": "hy4-preview",
+    "decoder_block": "hy4",
+    "base_num_decoder_layers": 6,  # 1 prefix + 1x4 scanned cycle + 1 remainder.
+    "base_emb_dim": 64,
+    "base_mlp_dim": 128,
+    "base_moe_mlp_dim": 64,
+    "base_num_query_heads": 4,
+    "base_num_kv_heads": 4,
+    "head_dim": 16,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "indexer_n_heads": 2,
+    "indexer_head_dim": 16,
+    "indexer_topk": 8,
+    "q_lora_rank": 16,
+    "kv_lora_rank": 16,
+    "qk_nope_head_dim": 8,
+    "qk_rope_head_dim": 8,
+    "v_head_dim": 16,
+    "vocab_size": 128,
+    "max_target_length": 16,
+}
+
+
+class TestNNXDecoderRematNone(unittest.TestCase):
+  """`remat_policy=none` must not wrap decoder layers in `jax.checkpoint`.
+
+  pyconfig turns the string "none" into Python `None`, and `get_remat_policy()` returns `None`
+  for both "none" and "full"; `jax.checkpoint(policy=None)` is full remat.
+  """
+
+  def _count_checkpoints(self, scan_layers, remat_policy, remat_policy_override=None, **overrides):
+    cfg = _make_config(**{"scan_layers": scan_layers, "remat_policy": remat_policy, **overrides})
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    if remat_policy_override is not None:
+      decoder.remat_policy_override = remat_policy_override
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jnp.zeros((batch, seq_len), jnp.int32)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+    graphdef, state = nnx.split((decoder, shared_embedding))
+
+    def forward(state):
+      merged_decoder, merged_embedding = nnx.merge(graphdef, state)
+      logits, _, _ = merged_decoder(
+          merged_embedding,
+          ids,
+          positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return logits
+
+    return _count_checkpoint_eqns(jax.make_jaxpr(forward)(state).jaxpr)
+
+  def test_remat_none_does_not_checkpoint(self):
+    """Default decoder: no `jax.checkpoint` with `remat_policy=none`, scanned or unscanned."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        self.assertEqual(self._count_checkpoints(scan_layers, "none"), 0)
+
+  def test_remat_full_checkpoints(self):
+    """Default decoder: `remat_policy=full` still applies `jax.checkpoint`."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        self.assertGreater(self._count_checkpoints(scan_layers, "full"), 0)
+
+  def test_remat_policy_override_full_checkpoints(self):
+    """`remat_policy_override="full"` (dropless retry program) re-enables remat over `remat_policy=none`."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        self.assertGreater(self._count_checkpoints(scan_layers, "none", remat_policy_override="full"), 0)
+
+  def test_scanned_qwen3_next_with_remainder(self):
+    """Scanned Qwen3-Next blocks (internal remat) and the remainder block follow `remat_policy` and override."""
+    overrides = {**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": 5, "inhomogeneous_layer_cycle_interval": 2}
+    self.assertEqual(self._count_checkpoints(True, "none", **overrides), 0)
+    full_ckpts = self._count_checkpoints(True, "full", **overrides)
+    self.assertGreater(full_ckpts, 1)
+    self.assertEqual(self._count_checkpoints(True, "none", remat_policy_override="full", **overrides), full_ckpts)
+
+  def test_scanned_qwen3_next_with_remainder_grad_and_state_parity(self):
+    """`remat_policy=none` matches `full` in loss, `moe_lb_loss`, gradients, and RNG state on remainder blocks."""
+    overrides = {
+        **_QWEN3_NEXT_CONFIG,
+        "scan_layers": True,
+        "base_num_decoder_layers": 5,
+        "inhomogeneous_layer_cycle_interval": 2,
+        "load_balance_loss_weight": 0.1,
+        "enable_dropout": True,
+        "dropout_rate": 0.1,
+        "matmul_precision": "highest",
+        "float32_qk_product": True,
+        "float32_logits": True,
+    }
+    cfg_full = _make_config(remat_policy="full", **overrides)
+    cfg_none = _make_config(remat_policy="none", **overrides)
+    mesh = _make_mesh(cfg_full)
+
+    model_full = models.Transformer(config=cfg_full, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    model_none = models.Transformer(config=cfg_none, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    nnx.update(model_none, nnx.state(model_full))
+
+    batch = int(cfg_full.global_batch_size_to_train_on)
+    seq_len = cfg_full.max_target_length
+    token_ids = jnp.arange(batch * seq_len, dtype=jnp.int32).reshape(batch, seq_len) % cfg_full.vocab_size
+    data = {
+        "inputs": token_ids,
+        "inputs_position": jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len)),
+        "inputs_segmentation": jnp.ones((batch, seq_len), dtype=jnp.int32),
+        "targets": (token_ids + 1) % cfg_full.vocab_size,
+        "targets_segmentation": jnp.ones((batch, seq_len), dtype=jnp.int32),
+    }
+
+    def run_step(model, cfg):
+      graphdef, params, other = nnx.split(model, nnx.Param, ...)
+
+      def step_fn(p, o):
+        def loss_for_grad(p_in, o_in):
+          merged = nnx.merge(graphdef, p_in, o_in, copy=True)
+          loss, aux = train.loss_fn(merged, cfg, data, None, None, is_train=True)
+          out_other = nnx.state(merged, nnx.Not(nnx.Any(nnx.Param, nnx.Intermediate)))
+          return loss, (aux, out_other)
+
+        (loss, (aux, out_other)), grads = jax.value_and_grad(loss_for_grad, argnums=0, has_aux=True)(p, o)
+        return loss, aux["moe_lb_loss"], grads, out_other
+
+      return jax.jit(step_fn)(params, other)
+
+    loss_f, lb_f, grads_f, other_f = run_step(model_full, cfg_full)
+    loss_n, lb_n, grads_n, other_n = run_step(model_none, cfg_none)
+
+    np.testing.assert_allclose(loss_n, loss_f, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(lb_n, lb_f, rtol=1e-5, atol=1e-5)
+    for (pf, vf), (pn, vn) in zip(nnx.to_flat_state(grads_f), nnx.to_flat_state(grads_n), strict=True):
+      self.assertEqual(pf, pn)
+      np.testing.assert_allclose(vn.get_value(), vf.get_value(), rtol=1e-5, atol=1e-5, err_msg=f"grad {pf}")
+    for (pf, vf), (pn, vn) in zip(nnx.to_flat_state(other_f), nnx.to_flat_state(other_n), strict=True):
+      self.assertEqual(pf, pn)
+      af, an = vf.get_value(), vn.get_value()
+      if hasattr(af, "dtype") and jax.dtypes.issubdtype(af.dtype, jax.dtypes.prng_key):
+        af, an = jax.random.key_data(af), jax.random.key_data(an)
+      np.testing.assert_array_equal(an, af, err_msg=f"state {pf}")
+
+    # Verify `nnx.Intermediate` (`moe_lb_loss`) from `layers_remainder` is preserved and contributes
+    # non-zero router gate gradients rather than being stripped before `train.loss_fn` collects it.
+    cfg_no_lb = _make_config(remat_policy="none", **{**overrides, "load_balance_loss_weight": 0.0})
+    model_no_lb = models.Transformer(config=cfg_no_lb, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    nnx.update(model_no_lb, nnx.state(model_full))
+    _, lb_no_lb, grads_no_lb, _ = run_step(model_no_lb, cfg_no_lb)
+    self.assertEqual(float(lb_no_lb), 0.0)
+    rem_gate_grads = [
+        (p, v.get_value()) for p, v in nnx.to_flat_state(grads_n) if "layers_remainder" in p and "gate" in p
+    ]
+    rem_gate_grads_no_lb = [
+        (p, v.get_value()) for p, v in nnx.to_flat_state(grads_no_lb) if "layers_remainder" in p and "gate" in p
+    ]
+    self.assertGreater(len(rem_gate_grads), 0)
+    for (p1, g_lb), (p2, g_no_lb) in zip(rem_gate_grads, rem_gate_grads_no_lb, strict=True):
+      self.assertEqual(p1, p2)
+      self.assertFalse(np.allclose(g_lb, g_no_lb), f"Expected non-zero moe_lb_loss grad on {p1}")
+
+    # Also verify closing over non-Param `other` state (without copy=True) when dropout is off
+    # does not raise TraceContextError inside `_apply_remainder_block`.
+    cfg_det = _make_config(remat_policy="none", **{**overrides, "enable_dropout": False})
+    model_det = models.Transformer(config=cfg_det, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    gdef_det, params_det, other_det = nnx.split(model_det, nnx.Param, ...)
+    det_loss, _ = jax.jit(
+        jax.value_and_grad(lambda p: train.loss_fn(nnx.merge(gdef_det, p, other_det), cfg_det, data, None, None)[0])
+    )(params_det)
+    self.assertTrue(jnp.isfinite(det_loss))
+
+  def test_scanned_gemma3_with_remainder(self):
+    """The scanned Gemma3 remainder layer follows `remat_policy`."""
+    self.assertEqual(self._count_checkpoints(True, "none", **_GEMMA3_REMAINDER_CONFIG), 0)
+    full_ckpts = self._count_checkpoints(True, "full", **_GEMMA3_REMAINDER_CONFIG)
+    self.assertGreater(full_ckpts, 0)
+    self.assertEqual(
+        self._count_checkpoints(True, "none", remat_policy_override="full", **_GEMMA3_REMAINDER_CONFIG), full_ckpts
+    )
+
+  def test_scanned_gemma4_with_remainder(self):
+    """Scanned Gemma4 blocks (internal remat) and the remainder block follow `remat_policy` and override."""
+    self.assertEqual(self._count_checkpoints(True, "none", **_GEMMA4_REMAINDER_CONFIG), 0)
+    full_ckpts = self._count_checkpoints(True, "full", **_GEMMA4_REMAINDER_CONFIG)
+    self.assertGreater(full_ckpts, 1)
+    self.assertEqual(
+        self._count_checkpoints(True, "none", remat_policy_override="full", **_GEMMA4_REMAINDER_CONFIG), full_ckpts
+    )
+
+  def test_scanned_deepseek4(self):
+    """Scanned DeepSeek-V4 prefix hash layers and 2-layer blocks follow `remat_policy` and override."""
+    self.assertEqual(self._count_checkpoints(True, "none", **_DEEPSEEK4_SCANNED_CONFIG), 0)
+    full_ckpts = self._count_checkpoints(True, "full", **_DEEPSEEK4_SCANNED_CONFIG)
+    self.assertGreater(full_ckpts, 1)
+    self.assertEqual(
+        self._count_checkpoints(True, "none", remat_policy_override="full", **_DEEPSEEK4_SCANNED_CONFIG), full_ckpts
+    )
+
+  def test_remat_policy_override_reset_and_custom_policy(self):
+    """Resetting `remat_policy_override=None` clears child overrides and non-`full` overrides propagate."""
+    overrides = {**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": 5, "inhomogeneous_layer_cycle_interval": 2}
+    cfg = _make_config(scan_layers=True, remat_policy="none", **overrides)
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jnp.zeros((batch, seq_len), jnp.int32)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    def trace_policies():
+      graphdef, state = nnx.split((decoder, shared_embedding))
+
+      def forward(state_in):
+        merged_decoder, merged_embedding = nnx.merge(graphdef, state_in)
+        logits, _, _ = merged_decoder(
+            merged_embedding,
+            ids,
+            positions,
+            decoder_segment_ids=segment_ids,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        return logits
+
+      return _collect_checkpoint_policies(jax.make_jaxpr(forward)(state).jaxpr)
+
+    # Run eagerly once with `remat_policy_override="full"` so child blocks receive the override on `decoder`.
+    decoder.remat_policy_override = "full"
+    decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    full_policies = trace_policies()
+    self.assertGreater(len(full_policies), 1)
+    self.assertTrue(all(p is None for p in full_policies))
+
+    # Resetting `remat_policy_override = None` on the same `decoder` must clear child-block overrides.
+    decoder.remat_policy_override = None
+    self.assertEqual(trace_policies(), [])
+
+    # Overriding with a selective policy must propagate that policy callable rather than `None` (full remat).
+    decoder.remat_policy_override = "save_qkv_proj"
+    custom_policies = trace_policies()
+    self.assertEqual(len(custom_policies), len(full_policies))
+    self.assertTrue(all(p is not None for p in custom_policies))
+
+  def test_scanned_hy4(self):
+    """Scanned Hy4 prefix, 4-layer cycle, and remainder layers follow `remat_policy`."""
+    self.assertEqual(self._count_checkpoints(True, "none", **_HY4_SCANNED_CONFIG), 0)
+    full_ckpts = self._count_checkpoints(True, "full", **_HY4_SCANNED_CONFIG)
+    self.assertGreater(full_ckpts, 0)
+    self.assertEqual(
+        self._count_checkpoints(True, "none", remat_policy_override="full", **_HY4_SCANNED_CONFIG), full_ckpts
+    )
 
 
 class TestNNXDecoderServeFp8WeightForwardPass(unittest.TestCase):

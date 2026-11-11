@@ -280,7 +280,9 @@ class DeepSeek4ScannableBlock(nnx.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
-    if model_mode == "train" and bool(self.config.remat_policy) and self.config.remat_policy != "none":
+    override = getattr(self, "remat_policy_override", None)
+    remat_policy = self.config.remat_policy if override is None else override
+    if model_mode == "train" and bool(remat_policy) and remat_policy != "none":
       call_kwargs = dict(  # pylint: disable=use-dict-literal
           decoder_segment_ids=decoder_segment_ids,
           decoder_positions=decoder_positions,
@@ -292,7 +294,11 @@ class DeepSeek4ScannableBlock(nnx.Module):
           attention_metadata=attention_metadata,
           decoder_input_tokens=decoder_input_tokens,
       )
-      remat_kwargs = {"config": self.config, "policy": self.remat_policy_fn, "prevent_cse": self.prevent_cse_in_remat}
+      if override is None:
+        policy_fn = self.remat_policy_fn
+      else:
+        policy_fn = getattr(self, "scan_safe_remat_policy_fn_override", None)
+      remat_kwargs = {"config": self.config, "policy": policy_fn, "prevent_cse": self.prevent_cse_in_remat}
       y = _run_deepseek4_layer_remat(self.layers_0, y, **remat_kwargs, **call_kwargs)
       y = _run_deepseek4_layer_remat(self.layers_1, y, **remat_kwargs, **call_kwargs)
     else:

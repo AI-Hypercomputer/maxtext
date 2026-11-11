@@ -192,6 +192,9 @@ Each SparseCore executes its offloaded collectives in a single in-order FIFO que
 - FSDP must be in use: when no FSDP mesh axis (`fsdp`, `fsdp_transpose`) spans more than one
   device, there is nothing to prefetch and the regular scan is used.
 - `prefetch_fsdp_defer_grad_reduce_scatter=True` requires `shard_mode=explicit`.
+- `remat_policy='none'` is not supported: the prefetch `custom_vjp` pipeline
+  requires per-layer gradient checkpointing so gathered weights are not
+  retained between the forward and backward pass.
 - `save_fsdp_gathered_weights` has no effect while the prefetch path is active: the prefetch
   pipeline never saves gathered weights.
 - The prefetch path is skipped (the regular scan is used) when KV caches are passed (inference),

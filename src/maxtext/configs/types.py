@@ -143,6 +143,7 @@ class KvQuantAxis(str, Enum):
 class RematPolicy(str, Enum):
   """Available rematerialization (gradient checkpointing) policies."""
 
+  NONE = "none"
   FULL = "full"
   MINIMAL = "minimal"
   SAVE_DOT_WITH_CONTEXT_EXCEPT_MLP = "save_dot_with_context_except_mlp"
@@ -2237,9 +2238,10 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
-          " both the forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer;"
-          " gathered weights are never saved and are re-gathered for the backward pass. Has no effect when no"
-          " FSDP mesh axis spans more than one device. See docs/guides/optimization/fsdp_prefetch.md."
+          " both the forward and backward pass. Requires scan_layers=True and is not supported with"
+          " remat_policy='none'. remat_policy applies to each layer; gathered weights are never saved and are"
+          " re-gathered for the backward pass. Has no effect when no FSDP mesh axis spans more than one device. See"
+          " docs/guides/optimization/fsdp_prefetch.md."
       ),
   )
   prefetch_fsdp_defer_grad_reduce_scatter: bool = Field(
@@ -4441,6 +4443,33 @@ def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_device
   return _resolved_axis_product(mesh_axes, parallelism, num_devices, ("fsdp", "fsdp_transpose"))
 
 
+def _is_remat_disabled(remat_policy: str | None) -> bool:
+  """Returns whether gradient checkpointing is disabled (`remat_policy=none`)."""
+  return not remat_policy or remat_policy.lower() == "none"
+
+
+def _validate_remat_policy(
+    remat_policy: str | None,
+    *,
+    prefetch_fsdp_weights: bool,
+    using_pipeline_parallelism: bool,
+) -> None:
+  """Rejects `remat_policy=none` with execution paths that require checkpointing."""
+  if not _is_remat_disabled(remat_policy):
+    return
+  if prefetch_fsdp_weights:
+    raise ValueError(
+        "remat_policy='none' is not supported with prefetch_fsdp_weights=True; the FSDP weight-prefetch"
+        " custom_vjp pipeline requires per-layer gradient checkpointing so gathered weights are not"
+        " retained between the forward and backward pass."
+    )
+  if using_pipeline_parallelism:
+    raise ValueError(
+        "remat_policy='none' is not supported with pipeline parallelism"
+        " (ici_pipeline_parallelism > 1 or dcn_pipeline_parallelism > 1)."
+    )
+
+
 # ----------------------------------------------------------------------------
 # Main Config Class
 # ----------------------------------------------------------------------------
@@ -5667,6 +5696,11 @@ class MaxTextConfig(
         self.pipeline_parallel_layers = self.num_decoder_layers
 
     self.using_pipeline_parallelism = self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1
+    _validate_remat_policy(
+        self.remat_policy,
+        prefetch_fsdp_weights=self.prefetch_fsdp_weights,
+        using_pipeline_parallelism=bool(self.using_pipeline_parallelism),
+    )
     if self.using_pipeline_parallelism:
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
@@ -7514,6 +7548,12 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    _validate_remat_policy(
+        self.remat_policy,
+        prefetch_fsdp_weights=self.prefetch_fsdp_weights,
+        using_pipeline_parallelism=self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1,
+    )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

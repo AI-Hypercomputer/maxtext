@@ -552,7 +552,7 @@ set_remat_policy_on_pipeline_iterations: true
 set_remat_policy_on_layers_per_stage: false
 
 
-# Choose 'remat_policy' between 'minimal_with_context', 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
+# Choose 'remat_policy' between 'none', 'minimal_with_context', 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
 # 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
@@ -592,9 +592,9 @@ parameter_memory_host_offload: false
 scan_layers: true
 param_scan_axis: 1
 # Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in both the
-# forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer; gathered weights are
-# never saved and are re-gathered for the backward pass. See docs/guides/optimization/fsdp_prefetch.md for the
-# recommended XLA flags.
+# forward and backward pass. Requires scan_layers=True and is not supported with remat_policy='none'. remat_policy
+# applies to each layer; gathered weights are never saved and are re-gathered for the backward pass. See
+# docs/guides/optimization/fsdp_prefetch.md for the recommended XLA flags.
 prefetch_fsdp_weights: false
 # With prefetch_fsdp_weights, defer each layer's weight-gradient reduce-scatters to the next layer's backward step
 # and run them on the SparseCore dedicated to FSDP collectives. Hides them at the cost of extra HBM. Inhomogeneous

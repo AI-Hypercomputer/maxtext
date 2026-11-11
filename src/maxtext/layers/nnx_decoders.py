@@ -19,6 +19,7 @@
 import functools
 import inspect
 import re
+import types
 from typing import Any
 import warnings
 
@@ -788,13 +789,7 @@ class NNXDecoder(nnx.Module):
 
   def _get_deepseek4_remat_policy_and_cse(self):
     """Returns the scan-safe per-layer remat policy and prevent_cse flag for DeepSeek-V4."""
-    # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
-    save_names, offload_names = maxtext_utils.get_save_and_offload_names(self.config)
-    if save_names or offload_names:
-      policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
-    else:
-      policy = self.get_remat_policy()
-    return policy, maxtext_utils.should_prevent_cse_in_remat(self.config)
+    return self._get_scan_safe_remat_policy(), maxtext_utils.should_prevent_cse_in_remat(self.config)
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -1388,9 +1383,10 @@ class NNXDecoder(nnx.Module):
         return new_carry, (new_current_state, updated_kv)
       return new_carry, new_current_state
 
-    if skip_block_remat:
-      # The scanned module applies its own remat internally; wrapping the whole
-      # body again would double-remat and recompute the entire block.
+    if skip_block_remat or not self._remat_enabled():
+      # skip_block_remat: the scanned module applies its own remat internally; wrapping the whole
+      # body again would double-remat and recompute the entire block. Remat off (`remat_policy=none`):
+      # `policy` is None here, which `jax.checkpoint` would treat as full remat.
       layer_fn_wrapped = layer_fn
     else:
       layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
@@ -1541,11 +1537,55 @@ class NNXDecoder(nnx.Module):
       names.append("quantization")
     return jax.checkpoint_policies.save_only_these_names(*names)
 
+  def _effective_remat_policy(self):
+    """Returns `remat_policy_override` when set, otherwise `config.remat_policy`."""
+    override = getattr(self, "remat_policy_override", None)
+    if override is None:
+      return self.config.remat_policy
+    return override
+
+  def _remat_enabled(self) -> bool:
+    """Returns whether decoder layers are wrapped in `jax.checkpoint`.
+
+    `get_remat_policy()` returns `None` both when remat is off (`remat_policy=none`, which pyconfig
+    turns into `None`) and for `remat_policy=full`, where `None` is `jax.checkpoint`'s full-remat
+    policy. So callers cannot tell the two apart from the policy alone.
+    """
+    remat_policy = self._effective_remat_policy()
+    return bool(remat_policy) and remat_policy != "none"
+
+  def _get_scan_safe_remat_policy(self):
+    """Returns a remat policy keeping offloaded residuals on device across trip-count-one scans."""
+    remat_policy = self._effective_remat_policy()
+    if not remat_policy or remat_policy in ("none", "full"):
+      return None
+    # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
+    policy_cfg = types.SimpleNamespace(
+        remat_policy=remat_policy,
+        tensors_on_device=self.config.tensors_on_device,
+        tensors_to_offload=self.config.tensors_to_offload,
+    )
+    save_names, offload_names = maxtext_utils.get_save_and_offload_names(policy_cfg)
+    if save_names or offload_names:
+      return jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
+    return self.get_remat_policy()
+
+  def _sync_remat_policy_override(self, block: nnx.Module) -> None:
+    """Propagates `remat_policy_override` (or clears stale overrides) onto a child block."""
+    override = getattr(self, "remat_policy_override", None)
+    block.remat_policy_override = override
+    if override is None:
+      block.remat_policy_fn_override = None
+      block.scan_safe_remat_policy_fn_override = None
+    else:
+      block.remat_policy_fn_override = self.get_remat_policy()
+      block.scan_safe_remat_policy_fn_override = self._get_scan_safe_remat_policy()
+
   def get_remat_policy(self):
     """Get remat policy for jax.checkpoint."""
     policy = None
     cfg = self.config
-    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    remat_policy = self._effective_remat_policy()
     if remat_policy and remat_policy != "none":
       if remat_policy in {"minimal_with_context", "minimal_flash"}:
         if remat_policy == "minimal_flash":
@@ -2581,7 +2621,7 @@ class NNXDecoder(nnx.Module):
           if self.is_hy4:
             current_kwargs["prev_indexer_mask"] = prev_indexer_mask
 
-          if cfg.remat_policy != "none":
+          if self._remat_enabled():
             y, kv_cache, prev_indexer_mask, new_state, new_graphdef = checkpointed_fn(
                 graphdef, state, y, kv_cache, current_kwargs
             )
@@ -2732,7 +2772,7 @@ class NNXDecoder(nnx.Module):
 
     # 1. Unrolled prefix layers (0, 1, 2)
     is_training = model_mode == MODEL_MODE_TRAIN
-    has_remat_policy = cfg.remat_policy is not None and cfg.remat_policy != "none"
+    has_remat_policy = self._remat_enabled()
     use_remat = is_training and has_remat_policy
     remat_policy_fn, prevent_cse = self._get_deepseek4_remat_policy_and_cse() if use_remat else (None, None)
     for layer_idx in range(num_hash_layers):
@@ -2764,6 +2804,7 @@ class NNXDecoder(nnx.Module):
     num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
     num_full_blocks = num_remaining_layers // 2
     if num_full_blocks > 0 and hasattr(self, "scanned_blocks"):
+      self._sync_remat_policy_override(self.scanned_blocks)
       y, self.scanned_blocks, _ = self._apply_layers_sequentially(
           self.scanned_blocks,
           y,
@@ -2783,7 +2824,7 @@ class NNXDecoder(nnx.Module):
     """Applies Ming scanned decoder blocks: unrolled prefix layers, scanned full cycles, unrolled remainder."""
     cfg = self.config
     num_prefix_layers, num_blocks, remainder_start = ming.scan_layout(cfg)
-    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    use_remat = self._remat_enabled()
     policy = self.get_remat_policy() if use_remat else None
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
 
@@ -2828,7 +2869,7 @@ class NNXDecoder(nnx.Module):
     """Applies Hy4 scanned decoder blocks: unrolled prefix layers, scanned 4-layer cycles, unrolled remainder."""
     cfg = self.config
     num_prefix_layers, num_blocks, remainder_start = hy4.scan_layout(cfg)
-    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    use_remat = self._remat_enabled()
     policy = self.get_remat_policy() if use_remat else None
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
 
@@ -2924,10 +2965,14 @@ class NNXDecoder(nnx.Module):
           out_kv = None
         return out_y, out_kv, nnx.state(merged_layer)
 
-      checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+      remainder_gemma_fn = (
+          jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+          if self._remat_enabled()
+          else pure_gemma_fn
+      )
 
       graphdef, state = nnx.split(self.layers_remainder)
-      y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
+      y, updated_remainder_kv, new_state = remainder_gemma_fn(graphdef, state, y, remainder_kv)
       nnx.update(self.layers_remainder, new_state)
 
       if kv_caches is not None and updated_remainder_kv is not None:
@@ -2998,6 +3043,7 @@ class NNXDecoder(nnx.Module):
       remainder_attention_metadata = tuple(per_layer_metadata[num_scanned_layers:])
 
     if scan_length > 0:
+      self._sync_remat_policy_override(self.layers)
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
       y, self.layers, _ = self._apply_layers_sequentially(
           self.layers,
@@ -3051,6 +3097,7 @@ class NNXDecoder(nnx.Module):
     # activations across iterations (memory + overlap knob).
     block_unroll = max(1, scan_length)
     if scan_length > 0:
+      self._sync_remat_policy_override(self.scanned_blocks)
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
           kv_caches, scan_length, attention_pattern_length, stack=False
       )
@@ -3123,6 +3170,8 @@ class NNXDecoder(nnx.Module):
         return out_res[0], (out_res[1] if len(out_res) > 1 else None)
       return out_res, None
 
+    self._sync_remat_policy_override(block)
+
     if cfg.use_qwix_quantization or cfg.lora.lora_weight_qtype:
       call_kwargs = dict(layer_kwargs)
       if remainder_kv is not None:
@@ -3131,22 +3180,25 @@ class NNXDecoder(nnx.Module):
     else:
 
       def pure_block_fn(graphdef, state_in, y_in, kv_in):
-        merged_layer = nnx.merge(graphdef, state_in)
+        merged_layer = nnx.merge(graphdef, state_in, copy=True)
         call_kwargs = dict(layer_kwargs)
         if kv_in is not None:
           call_kwargs["kv_cache"] = kv_in
         out_y, out_kv = split_output(merged_layer(y_in, *layer_args, **call_kwargs))
-        nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
+        nnx.pop(merged_layer, nnx.RngState)
         return out_y, out_kv, nnx.state(merged_layer)
 
-      checkpointed_block_fn = jax.checkpoint(
-          pure_block_fn,
-          policy=self.get_remat_policy(),
-          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
-      )
+      if self._remat_enabled():
+        remainder_block_fn = jax.checkpoint(
+            pure_block_fn,
+            policy=self.get_remat_policy(),
+            prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
+        )
+      else:
+        remainder_block_fn = pure_block_fn
 
       graphdef, state = nnx.split(block)
-      y, updated_remainder_kv, new_state = checkpointed_block_fn(graphdef, state, y, remainder_kv)
+      y, updated_remainder_kv, new_state = remainder_block_fn(graphdef, state, y, remainder_kv)
       nnx.update(block, new_state)
 
     if kv_caches is not None and updated_remainder_kv is not None:
@@ -3215,7 +3267,7 @@ class NNXDecoder(nnx.Module):
       # When activation rematerialization is enabled (e.g. remat_policy='full' or 'minimal'
       # during training), wrap each unscanned layer in jax.checkpoint to prevent OOMs. When
       # remat is disabled (remat_policy='none' or None), call the layer directly.
-      if cfg.remat_policy and cfg.remat_policy != "none":
+      if self._remat_enabled():
         y, kv_cache = self._apply_layer_with_remat(
             layer,
             y,
