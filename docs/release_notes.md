@@ -22,14 +22,21 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Unreleased
 
-**Last Updated**: 97134f1df
+**Last Updated**: fb39de80e
 
 <!-- Add new unreleased changes below this line -->
+
+## Releases
+
+### v0.2.6
 
 #### Changes
 
 ##### Models
 
+- **GraniteMoE Architecture & M3 Onboarding**: Added GraniteMoE (`granite-3.0-1b-a400m`) support in M3, including pure Flax NNX decoder layers, checkpoint parameter mappings, conformance and real-weight TPU parity tests, and the `model-bringup-m3` agent skill.
+- **M3 Model Conformance & Spec Discovery**: Added CPU conformance specifications for Qwen3-0.6B and GLM-5.3-Flash, wired lazy dynamic spec discovery via `pkgutil.iter_modules` into `conformance_test`, and hardened pure-array NNX transform boundaries and scanned expert all-gather detection.
+- **MoE Router Precision & Qwen3 Shared Experts**: Preserved float32 precision for router inputs in `RoutedMoE` to prevent premature downcasting and wired `float32_gate_logits` to the Qwen3 shared expert gating path for numerical stability.
 - **GLM-5.3-Flash Architecture & Training Integration**: Consolidated the GLM-5.3-Flash model architecture submodules into a single `modeling_glm5_3_flash.py` module and relocated configurations to `src/maxtext/m3/configs/glm5_3_flash_config.py` per M3 single-file-per-model conventions; implemented the Layer-45 NextN Multi-Token Prediction (`G8-mtp`) block and training integration; added dense-mask DSA attention dispatch (`dsa_attention_implementation="dense_mask"`); established explicit `return_aux` contracts and heterogeneous super-block slot alignment; and implemented training loss modules with float32 masked cross-entropy, load-balancing loss, and AdamW optimizer parameter freezing in `glm5_train.py` alongside lazy FLOPs calculations.
 - **GLM-5.3-Flash Checkpoint Conversion & Parity Verification**: Added single-owner checkpoint conversion specifications (`iter_conversion_specs`) with mixed-dtype float32 router parameters and host NumPy FP8 block-128 dequantization in `glm5_ckpt.py`; exported unit test suites to GitHub; and added end-to-end gradient and logits parity test suites across all three decoder block architectures (`l0_kda_dense`, `l3_mla_moe`, `l4_kda_moe`) and real model slices against HuggingFace references.
 - **Qwen3.8-Flash-Next Architecture & Tooling**: Assembled the complete end-to-end Qwen3.8-Flash-Next model architecture with 4-stream Hyper-Connection residuals, heterogeneous 4-layer cycle blocks (3 GDN linear attention + 1 QSA sparse attention), Layer-2 Pre-Layer Embedding (PLE), and 512-expert Sparse MoE feed-forward blocks supporting both unrolled and scanned execution; added TPU kernel paths for GDN, QSA, and MoE; enabled FSDP batch sharding, scan remat, and per-chip MoE dispatch; implemented the Multi-Token Prediction (MTP) draft layer and integrated loss; and added training TFLOPs calculations and checkpoint conversion support.
@@ -51,6 +58,9 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ##### Pre-Training
 
+- **Halo Sliding-Window Context Parallelism & Per-Layer CP**: Added Halo Sliding-Window Context Parallelism (`AttentionOp.tpu_halo_flash_attention`, `local_context_parallel_strategy="halo"`) and per-layer CP strategy resolution across hybrid sliding-window models (`Gemma 2/3/4`, `GPT-OSS`, `OLMo 3`), sequence-sharding Q, K, and V across the context axis and exchanging only the block-aligned W-token K/V halo tail via `lax.ppermute` across contiguous and load-balanced `dual_chunk_swap` layouts.
+- **GPU Tokamax Attention Enhancements**: Supported non-causal attention, sliding window masks, and attention logit soft-capping in the GPU Tokamax ragged attention path (`AttentionOp`).
+- **Threaded DiLoCo Data-Parallel Submesh Replicas**: Added train loop and input pipeline hooks for training data-parallel replicas on submeshes in threaded Streaming DiLoCo, including `setup_train_loop(..., mesh=None)`, centralized shard index calculations (`input_pipeline_utils.get_dataloading_shard`), and per-process replica configuration fields.
 - **JAX Ring Attention**: Implemented JAX Ring Attention across devices using SPMD `ppermute` communication, leveraging JAX Flash Attention forward and backward passes for distributed Context Parallelism.
 - **Threaded Streaming DiLoCo Transfer & Optimization**: Added `FragmentTransfer` and Nesterov outer-step utilities for threaded streaming DiLoCo distributed training, supporting shard-local 1-D parameter fragment extraction, asynchronous mesh transfer, and in-place layer parameter application without cross-device resharding overhead.
 - **Splash Attention Ops**: Promoted Splash Attention kernels out of experimental ops into standard MaxText attention operations.
@@ -65,6 +75,10 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ##### Post-Training
 
+- **MaxText Training Engine Kernel & Gradient Architecture**: Separated forward-backward execution from running gradient accumulation into dedicated kernels donating sums in `grad_dtype`, divided gradients once by total denominators in float32, added `cast_grads_after_all_reduce`, refactored parameter freezing via `trainable_parameters_mask` with public `optimizers.get_path_mask_fn`, and introduced step guards (`skip_step_on_nan`) and spike protection (`skip_step_on_spikes`).
+- **MaxText Training Engine Checkpointing & GRPO AOT Compilation**: Hardened checkpoint save/restore by migrating `MaxTextTrainingEngine` to Orbax v1 `training.Checkpointer` with explicit `checkpoint_dir` support, async save timeouts, and pinned-host optimizer leaf restoration into device memory; and added GRPO ahead-of-time (AOT) compilation with per-device HBM utilization reporting.
+- **Tunix & vLLM Weight Synchronization**: Ported weight conversion and weight synchronization functionalities to align with Tunix APIs, supporting unrolled tensor rank expert detection, bidirectional plan validation, and target-free FP8 MoE rollout quantization.
+- **Tunix Chunked Log-Probabilities & RL Configuration**: Wired up chunked log-probability computation (`skip_lm_head` and `compute_final_logits`) in `TunixMaxTextAdapter`, and declared `RLConfig.train_steps` as an explicit validated Pydantic field across RL workflows.
 - **DeepSeek-V4 LoRA Support**: Added DeepSeek-V4 module paths to `lora_module_path.yml` covering attention projections, shared experts, and HCA/CSA compressor projections, and preserved lazily created LoRA parameters across per-layer rematerialization scans.
 - **Tunix Distributed RL Trainer Alignment**: Updated `AbstractTrainingEngine` and `MaxTextTrainingEngine` to declare explicit argument signatures without `**kwargs` and migrated trainer imports to `tunix.dist_rl`.
 - **DeepSeek-V4 SFT Chat Encoding**: Added native DeepSeek-V4 chat encoding and message formatting to SFT preprocessing in `maxtext/input_pipeline/encoding_dsv4.py`, supporting thinking-mode turn splitting and multi-turn tool calling across Grain and HuggingFace SFT pipelines.
@@ -76,6 +90,7 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ##### Multimodal
 
+- **Wan 2.1 Diffusion Pipelines & Inference**: Added full diffusion inference pipelines (`wan_pipeline.py`), checkpoint conversion utilities (`to_maxtext_diffusers.py`), and a unified `sample.py` inference entrypoint for Wan 2.1 models, while promoting `diffusers` to shared base requirements across all environments.
 - **Wan 2.1 Diffusion Transformer**: Implemented the Wan 2.1 Diffusion Transformer (DiT) model family under `src/maxtext/m3/models/wan/`, including the 3D causal VAE (`autoencoder_kl_wan.py`), UMT5 text encoder (`text_encoder_wan.py`), attention kernels, and ahead-of-time (AOT) cache support for `wan2.1-t2v-14b`.
 - **Ming Whisper Audio Integration & Checkpoint Conversion**: Added audio input processing and inference preprocessing for Ming Whisper under `src/maxtext/multimodal/processor_ming.py`, and added HuggingFace audio checkpoint parameter mappings and golden logit verification utilities for Ming audio models.
 - **Diffusion Schedulers & Multimodal VAE Processors**: Added M3 diffusion model configurations, continuous flow matching (`scheduling_flow_match.py`) and UniPC multistep schedulers (`scheduling_unipc_multistep.py`), multimodal VAE processors (`processor_vae.py`), and added `diffusers` to pre-training requirements for Wan 2.1 diffusion models.
@@ -85,6 +100,16 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ##### Performance
 
+- **Qwix Quantization & M3 Integration**: Added Qwix multi-pass quantization (`MultipassQtProvider`) to MaxText, introduced M3 precision and quantization transforms (`matmul_precision`), and enabled multi-pass Qwix quantization with default multi-device FSDP state sharding for M3 models.
+- **DeepSeek-V3 671B FP8 TPU7x Recipes**: Added pre-training recipes for DeepSeek-V3 671B FP8 (FSDP + EP) on TPU7x targeting 2,048 chips (`2k`), 4,096 chips (`4k`), and 8,192 chips (`8k`) under `benchmarks/deepseek3_671b_tpu7x/`, featuring FP8 Splash Q/K, tuned GMM v2 tiles, and SparseCore all-reduce offload.
+- **FSDP Weight Prefetch Optimizations**: Pinned FSDP prefetch all-gather and reduce-scatter collectives to SparseCore 1 on TPU7x via `jax.experimental.compute_on`, automatically registered `max_async_overlap_transform`, optimized FSDP prefetch under expert parallelism, supported host-offloaded layer inputs (`decoder_layer_input=offload`), and updated documentation ([fsdp prefetch](https://maxtext.readthedocs.io/en/latest/guides/optimization/fsdp_prefetch.html)).
+- **Muon Optimizer Support for Non-Leading Scan Axes**: Extended the Muon optimizer to support scanned parameters where `param_scan_axis != 1`, fixed flag handling, and added comprehensive unit test coverage.
+- **Tensor-Axis Expert Parallelism (tp-as-ep)**: Added the `tp-as-ep.yml` custom mesh and sharding rule preset, sharding routed experts over `(expert, tensor)` to eliminate tensor-axis collectives from MoE blocks while retaining standard layouts for other layers ([custom mesh and rule](https://maxtext.readthedocs.io/en/latest/guides/optimization/custom_mesh_and_rule.html)).
+- **Transformer Engine MoE Support & Fixed Routing Benchmarks**: Integrated Transformer Engine (TE) MoE block support for DeepSeek-V4 changes, and added fixed random-logit routing (`moe_benchmark_routing: fixed_random_logits`) to balance expert utilization during GPU Transformer Engine benchmarking without full router scoring overhead ([benchmark and performance](https://maxtext.readthedocs.io/en/latest/guides/optimization/benchmark_and_performance.html)).
+- **Pipeline Parallelism under Explicit Sharding**: Enabled pipeline parallelism under `shard_mode=explicit`, deferring per-microbatch weight-gradient reductions in JAX using unreduced tags, applying PP-as-DP construction rules, and integrating explicit pipeline execution tests ([shard mode performance](https://maxtext.readthedocs.io/en/latest/guides/optimization/shard_mode_performance.html)).
+- **Hy4 Indexer Activation Rematerialization**: Saved `topk_indices` across activation rematerialization boundaries via `checkpoint_name` in `Hy4Indexer`, allowing JAX dead-code elimination to prune redundant projections and top-k operations during backward passes.
+- **Llama4-Maverick v5p-256 Expert Parallelism Recipe**: Switched the Llama4-Maverick v5p-256 benchmark recipe from FSDP32 x TP4 to FSDP8 x EP16 with dropless fallback, Pallas ragged-sort permute kernels, SparseCore collective offloading, and tuned Tokamax Splash and Megablox tiles.
+- **M3 Named Scope Profiling**: Added `jax.named_scope` tracking across M3 modules and training loops to ensure NNX module and layer names appear distinctly in XProf and TPU execution profiles.
 - **Native Microscaling (MX) FP8 and FP4 Training**: Added native MXFP8 and MXFP4 training support via `jax.nn.scaled_dot_general` in `src/maxtext/layers/quantizations.py`.
 - **Transformer Engine GPU Kernels & Grouped GEMM**: Integrated Transformer Engine (TE) mHC Triton kernels for GPU and added an opt-in TE grouped GEMM backend (`use_te_grouped_gemm`) for sparse MoE execution with per-expert bias fusion.
 - **FSDP Prefetch Inhomogeneous Block Overlap**: Extended `prefetch_fsdp_defer_grad_reduce_scatter` to inhomogeneous decoder blocks (`fsdp_prefetch_inhomogeneous.py`, e.g. Qwen3.5), overlapping each sub-layer's weight-gradient reduce-scatters with preceding sub-layer backward compute.
@@ -109,6 +134,10 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ##### Checkpointing / Goodput
 
+- **Dynamic Safetensors Loading & Multi-Host Sharding**: Fixed and optimized `source_checkpoint_layout=safetensors_dynamic` loading across gpt-oss, Qwen3.5, Qwen3-Next, and Gemma; shared the single-axis stacking rule (`tensor_handling.single_stack_axis`) between loaders and converters; sharded reads along the leading axis on multi-host runs for contiguous reads; and enabled dynamic safetensors loading across standalone entry points outside training restore.
+- **Elastic Training Robustness & Batch Size Modes**: Added `elastic_global_batch_size_mode` (`"scaled"` or `"constant_padded"`) to keep global batch sizes invariant across elastic slice resizes via zero-segmentation row padding; recovered elastic training after losing the slice holding the default device by setting process-wide `jax_default_device` and re-raising slice-down errors as retryable `JaxRuntimeError`s; and switched elastic backend detection to generic feature-based attribute checks.
+- **Colocated ArrayRecord Shard Caching**: Sharded ArrayRecord record counting across colocated hosts on the iterator's CPU mesh, caching pattern listings and shard counts in colocated sidecars to eliminate redundant GCS reads during startup and elastic resizes.
+- **ML Goodput Monitoring & Logging Tools**: Used `get_goodput_job_name` in `setup_checkpoint_logger` to honor custom Goodput job name overrides when initializing Orbax CloudLogger, and added the `maxtext-goodput` agent skill for automated Goodput monitoring and dashboard analysis.
 - **Pure-Dict NNX Checkpoints & M3 Sharding**: Added support for pure-dict NNX checkpoints without intermediate `'value'` wrapping dictionaries, and automated 1D NamedSharding across `fsdp`/`fsdp_transpose` for unpartitioned M3 variables in `model_creation_utils`.
 - **Elastic Training Sharding & In-Memory Snapshots**: Enabled in-memory elastic snapshotting alongside colocated Python data input, sharded colocated elastic dataset iterators across hosts of the current mesh, and restricted incomplete elastic checkpoint cleanup strictly to GCS destinations when checkpointing is enabled to avoid removing valid checkpoints on local and persistent filesystems.
 - **Orbax V1 Goodput Logging Integration**: Required `orbax-checkpoint>=0.12.8` to leverage public `logger` support in `orbax.checkpoint.v1.training.Checkpointer` and automated `RestoreStepStatistics` emission during `load_checkpointables()`, replacing private Orbax internal logger attachments.
@@ -133,6 +162,24 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 #### Bug Fixes
 
+- Aliased `pltpu.reciprocal` to `pl.reciprocal` for vLLM TPU inference on JAX 0.11.0 so non-float32 query kernels do not fail with `AttributeError`.
+- Fixed JetStream chat-template tokenization and encoding compatibility for HuggingFace `transformers>=5.0.0`.
+- Fixed colocated Python ArrayRecord shard count exchange on Pathways by reading host count directly from reported shard count rows instead of inferring from mesh device process indices.
+- Limited GCS glob listings in `gcs_glob_pattern` to the pattern's literal prefix, preventing multi-hour whole-bucket scans during GCS glob evaluations and elastic checkpoint recovery.
+- Fixed PyPI and OS package vulnerabilities in MaxText Docker container images.
+- Hardened reinforcement learning exact-format regex to eliminate catastrophic backtracking on adversarial or malformed generation sequences.
+- Fixed vLLM KV-sharing cache writebacks where untouched sharing aliases overwrote donor caches on models with layer KV sharing (e.g., Gemma 4).
+- Kept FSDP prefetch reduce-scatter minor-dimension padding unreduced to prevent `ShardingTypeError` under newer JAX.
+- Fixed multi-host `reshard_train_state` with scanned NNX PRNG keys (`scan_layers=True`) under ZeRO-1 by moving typed keys as raw data to avoid multi-controller `ValueError` exceptions.
+- Fixed Qwen3-Next shared expert gate under explicit sharding with tensor parallelism to resolve ambiguous sharding conflicts and `ShardingTypeError`.
+- Masked left-padding tokens before conv1d in `Qwen3NextGatedDeltaNet` to prevent causal convolution bleed into real tokens, and guarded unsharded recurrent state casts against `NoneType` crashes.
+- Fixed vLLM memory leak in `from_pretrained` by promptly releasing the restored NNX checkpoint tree during weight alignment, preventing redundant copies of MoE weights from persisting in device HBM.
+- Fixed vLLM fused MoE weights under expert parallelism by packing gate and up projections into a `[gate | up]` layout to prevent corrupted decodes during EP rollout steps.
+- Honored `remat_policy=none` across NNX decoder loops and scannable blocks (`DeepSeek4`, `Gemma4`, `Qwen3-Next`, `Qwen3.5`), resolving full-rematerialization fallbacks when `remat_policy` is `"none"` or `None` ([fsdp prefetch](https://maxtext.readthedocs.io/en/latest/guides/optimization/fsdp_prefetch.html)).
+- Fixed two FP8 MoE training failures under JAX HiJAX unreduced lowering in `quantizations.py` and `megablox/ops.py`.
+- Added fallback to `pkgutil.get_data` in `MaxTextConfig._load_mesh_config_from_yaml` to resolve custom mesh and rule YAML files when running MaxText from zipped archives.
+- Read logical axis names directly in `from_pretrained` checkpoint alignment via variable `out_sharding` metadata to prevent ambient logical rules from causing incorrect weight repetition or alignment failures during vLLM and Tunix loading.
+- Aligned Engram n-gram hashing and causal short convolution (`ShortConv`) with `DUAL_CHUNK_SWAP` Context Parallel load balancing, skipping halo exchanges for width-1 kernels and preserving hash tables as NumPy arrays under JIT.
 - Fixed driver host OOM during Zero-1 train state resharding under Pathways single controller (`enable_single_controller=true`) by replacing host-staged `jax.device_put` with an on-device jitted identity reshard (`sharding.reshard_train_state`).
 - Fixed out-of-memory errors during RL training on models with nested-scanned linear-attention layers by adding `local_layers` to `logical_axis_rules` in `post_train/rl.yml`, and added scanned-layer fallback support to direct-sync coverage validation for Tunix and vLLM rollouts.
 - Fixed DeepSeek-V4 router projection precision by enabling `float32_gate_logits: true` in `deepseek4-284b.yml` and `deepseek4-tiny.yml` to match official fp32 gate projections.
@@ -166,12 +213,14 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 #### Deprecations
 
+- Added automatic fallback resolution to `src/maxtext/configs/models/deprecated/` with a `DeprecationWarning` when loading deprecated model configuration files.
+- Deprecated XPK launcher paths and scripts (`run_distill_xpk.sh`, `xpk_olmo3_7b_stage1.sh`, and `maxtext_xpk_runner.py`) in favor of Cluster Toolkit wrappers ([run maxtext via xpk](https://maxtext.readthedocs.io/en/latest/run_maxtext/run_maxtext_via_xpk.html)).
+- Removed the `pallas_tpu_ops` dependency from MaxText.
+- Migrated Flash Attention callers from deprecated Pallas Triton kernels in Tokamax to the pure Triton kernel implementation.
 - Migrated SparseCore Pallas ragged gather-reduce kernels from `plsc.bitcast` to `lax.bitcast_convert_type` ahead of `plsc.bitcast` deprecation.
 - Removed obsolete `force_on_policy_ratio` and `log_sampler_trainer_agreement` configuration flags from `RLSettings` following agreement fusion unification in Tunix.
 - Removed experimental Lineage hooks from decoder, MTP, and MoE layers, and removed the `lineage_integration` configuration flag.
 - Deprecated calling `from_config()` without explicit `rngs` and deprecated `models.transformer_as_linen` in favor of native Flax NNX module initialization.
-
-## Releases
 
 ### v0.2.5
 
