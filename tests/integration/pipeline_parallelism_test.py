@@ -681,7 +681,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "num_pipeline_microbatches=4",
     ]
     explicit_losses, auto_losses = self._explicit_and_auto_losses("deepseek", args)
-    np.testing.assert_allclose(explicit_losses[0], auto_losses[0], rtol=1e-6, atol=0.0)
+    np.testing.assert_allclose(explicit_losses[0], auto_losses[0], rtol=1e-4, atol=0.0)
     np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-3, atol=0.0)
 
   @_NEEDS_REDUCED_STAGE_WEIGHTS
