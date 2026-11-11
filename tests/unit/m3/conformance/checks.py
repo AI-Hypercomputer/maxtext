@@ -12,22 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-agnostic implementations of MaxText m3 conformance Checks 1-8."""
+"""Model-agnostic implementations of MaxText m3 conformance Checks 1-12."""
 
 from collections.abc import Callable, Mapping, Sequence
 import copy
 import fnmatch
 import functools
 import math
+import os
 import re
+import tempfile
 from typing import Any, cast
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.m3 import models as m3_models
 from maxtext.m3.core import sharding as m3_sharding
 from tests.unit.m3.conformance import spec
 import numpy as np
+import optax
 
 # TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
 # to 1e-5.
@@ -37,9 +41,20 @@ _FP32_TOL = 1e-5
 _AUX_FLOOR = 1e-7
 # TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 4.
 _DRIVER_MESH_DEVICES = 4
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 8.
+_EP_3AXIS_MESH_DEVICES = 8
 # TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 64.
 _MAX_POST_SPLIT_CACHE_ENTRIES = 64
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 1e-3.
+_OPT_LEARNING_RATE = 1e-3
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 0.1.
+_OPT_WEIGHT_DECAY = 0.1
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting to 2.
+_OPT_STEPS = 2
 _DRIVER_MESH_ICI = {"data": 1, "fsdp": 2, "tensor": 2, "expert": 1}
+_EP_2AXIS_MESH_ICI = {"data": 1, "fsdp": 2, "tensor": 1, "expert": 2}
+_EP_3AXIS_MESH_ICI = {"data": 1, "fsdp": 2, "tensor": 2, "expert": 2}
+_EMBED_PARAM_RE = re.compile(r"(embed|tok_embeddings|wte)", re.IGNORECASE)
 _VALID_MESH_AXES = frozenset(m3_sharding.MESH_AXIS_NAMES)
 _PARAM_TAINT_UNARY_PRIMITIVES = frozenset(
     {
@@ -404,6 +419,83 @@ def check_scan_remat_equivalence(
         )
 
 
+def _collect_used_param_paths(
+    jaxpr_like: Any,
+    in_taints: Sequence[str | None],
+    used: set[str],
+) -> None:
+  """Records parameter taint names consumed by leaf primitive operations inside `jaxpr_like`."""
+  jaxpr_obj = jaxpr_like.jaxpr if hasattr(jaxpr_like, "jaxpr") else jaxpr_like
+  local_taint: dict[int, str] = {}
+  for sub_in, src in zip(jaxpr_obj.invars, in_taints, strict=False):
+    if src is not None and type(sub_in).__name__ != "DropVar":
+      local_taint[id(sub_in)] = src
+  for eqn in jaxpr_obj.eqns:
+    prim = eqn.primitive.name
+    eqn_in = [local_taint.get(id(v)) for v in eqn.invars]
+    if prim == "cond" and "branches" in eqn.params:
+      if eqn_in and eqn_in[0] is not None:
+        used.add(eqn_in[0])
+      for branch in eqn.params["branches"]:
+        _collect_used_param_paths(branch, eqn_in[1:], used)
+    elif prim == "while" and "cond_jaxpr" in eqn.params and "body_jaxpr" in eqn.params:
+      c_nc = eqn.params.get("cond_nconsts", 0)
+      b_nc = eqn.params.get("body_nconsts", 0)
+      _collect_used_param_paths(
+          eqn.params["cond_jaxpr"],
+          [*eqn_in[:c_nc], *eqn_in[c_nc + b_nc :]],
+          used,
+      )
+      _collect_used_param_paths(eqn.params["body_jaxpr"], eqn_in[c_nc:], used)
+    elif prim == "scan" and "jaxpr" in eqn.params:
+      _collect_used_param_paths(eqn.params["jaxpr"], eqn_in, used)
+    elif prim in _CALL_HOP_PRIMITIVES or (
+        prim not in _REDUCTION_JAXPR_PRIMITIVES and ("jaxpr" in eqn.params or "call_jaxpr" in eqn.params)
+    ):
+      sub_ref = eqn.params.get("jaxpr") or eqn.params.get("call_jaxpr")
+      if sub_ref is not None:
+        _collect_used_param_paths(sub_ref, eqn_in, used)
+    else:
+      for src in eqn_in:
+        if src is not None:
+          used.add(src)
+      first_src = next((s for s in eqn_in if s is not None), None)
+      if first_src is not None:
+        for out_v in eqn.outvars:
+          if type(out_v).__name__ != "DropVar":
+            local_taint[id(out_v)] = first_src
+
+
+def _used_forward_param_paths(
+    model: nnx.Module,
+    spec_obj: spec.ConformanceSpec,
+    batch: Mapping[str, jax.Array],
+) -> set[str]:
+  """Returns the set of `nnx.Param` paths consumed by leaf primitives in `spec_obj.forward_fn`."""
+  graphdef, params_state, arr_rest, static_rest = nnx.split(model, nnx.Param, _is_jax_array_leaf, ...)
+  params_pure = _to_pure_state(params_state)
+  arr_rest_pure = _to_pure_state(arr_rest)
+  flat_params, _ = jax.tree_util.tree_flatten_with_path(params_pure)
+
+  def _pure_forward(
+      p_pure: Any, a_pure: Any, b_inputs: Mapping[str, jax.Array]
+  ) -> tuple[jax.Array, dict[str, jax.Array]]:
+    merged = nnx.merge(graphdef, p_pure, a_pure, static_rest, copy=True)
+    fwd_out = spec_obj.forward_fn(merged, b_inputs)
+    return fwd_out.primary, {**fwd_out.aux_losses}
+
+  closed_jaxpr = jax.make_jaxpr(_pure_forward)(params_pure, arr_rest_pure, batch)
+  top_jaxpr = closed_jaxpr.jaxpr
+  root_in_taints: list[str | None] = [None] * len(top_jaxpr.invars)
+  for idx, (key_path, _) in enumerate(flat_params):
+    if idx < len(root_in_taints):
+      raw_name = jax.tree_util.keystr(key_path, simple=True, separator=".")
+      root_in_taints[idx] = raw_name.removesuffix(".value").removesuffix(".raw_value")
+  used: set[str] = set()
+  _collect_used_param_paths(top_jaxpr, root_in_taints, used)
+  return used
+
+
 def check_param_and_grad_health(
     spec_obj: spec.ConformanceSpec,
     mesh: jax.sharding.Mesh,
@@ -431,6 +523,7 @@ def check_param_and_grad_health(
         raise AssertionError(f"{name}: unmatched frozen pattern {pat!r}")
     all_vars = _flatten_vars(nnx.state(model))
     batch = spec_obj.build_batch(jax.random.PRNGKey(0), mesh)
+    used_params = _used_forward_param_paths(model, spec_obj, batch) if spec_obj.frozen_param_patterns else set()
     weights = {k: 1.0 for k in spec_obj.aux_losses}
     (loss_val, (primary_val, _)), grads = _jit_eval_value_and_grad(
         model,
@@ -457,6 +550,8 @@ def check_param_and_grad_health(
           issues.append(f"non_finite:{path}")
         elif frz == nz:
           issues.append(f"{'unfrozen' if frz else 'dead'}:{path}")
+        elif frz and path not in used_params:
+          issues.append(f"unused_frozen:{path}")
       elif bad_g or nz:
         issues.append(f"leaky_non_param:{path}")
     if issues:
@@ -615,6 +710,16 @@ def create_conformance_driver_mesh() -> jax.sharding.Mesh:
   if len(devices) < _DRIVER_MESH_DEVICES:
     raise AssertionError(f"Checks require >= {_DRIVER_MESH_DEVICES} JAX devices, got {len(devices)}.")
   return m3_sharding.create_mesh(ici=_DRIVER_MESH_ICI, devices=devices[:_DRIVER_MESH_DEVICES])
+
+
+def create_conformance_ep_mesh() -> jax.sharding.Mesh:
+  """Builds `(data=1, fsdp=2, tensor=1, expert=2)` on 4 devices or `(data=1, fsdp=2, tensor=2, expert=2)` on >=8."""
+  devices = jax.devices()
+  if len(devices) < _DRIVER_MESH_DEVICES:
+    raise AssertionError(f"Checks require >= {_DRIVER_MESH_DEVICES} JAX devices, got" f" {len(devices)}.")
+  if len(devices) >= _EP_3AXIS_MESH_DEVICES:
+    return m3_sharding.create_mesh(ici=_EP_3AXIS_MESH_ICI, devices=devices[:_EP_3AXIS_MESH_DEVICES])
+  return m3_sharding.create_mesh(ici=_EP_2AXIS_MESH_ICI, devices=devices[:_DRIVER_MESH_DEVICES])
 
 
 def _create_single_device_mesh() -> jax.sharding.Mesh:
@@ -986,6 +1091,701 @@ def check_no_expert_weight_all_gather(spec_obj: spec.ConformanceSpec) -> None:
         )
 
 
+def _has_bfloat16_in_jaxpr(jaxpr: jax.extend.core.Jaxpr) -> bool:
+  """Returns True if `jaxpr` or any nested sub-jaxpr contains a `bfloat16` ShapedArray."""
+  for var in (*jaxpr.invars, *jaxpr.outvars, *jaxpr.constvars):
+    if isinstance(var.aval, jax.core.ShapedArray) and var.aval.dtype == jnp.bfloat16:
+      return True
+  for eqn in jaxpr.eqns:
+    for var in (*eqn.invars, *eqn.outvars):
+      if isinstance(var.aval, jax.core.ShapedArray) and var.aval.dtype == jnp.bfloat16:
+        return True
+    for param_val in eqn.params.values():
+      if isinstance(param_val, jax.extend.core.ClosedJaxpr) and _has_bfloat16_in_jaxpr(param_val.jaxpr):
+        return True
+      if isinstance(param_val, jax.extend.core.Jaxpr) and _has_bfloat16_in_jaxpr(param_val):
+        return True
+      if isinstance(param_val, (tuple, list)):
+        for item in param_val:
+          if isinstance(item, jax.extend.core.ClosedJaxpr) and _has_bfloat16_in_jaxpr(item.jaxpr):
+            return True
+          if isinstance(item, jax.extend.core.Jaxpr) and _has_bfloat16_in_jaxpr(item):
+            return True
+  return False
+
+
+def _build_packed_batch_variants(
+    name: str,
+    batch: Mapping[str, jax.Array],
+) -> tuple[
+    dict[str, jax.Array],
+    dict[str, jax.Array],
+    dict[str, jax.Array],
+    np.ndarray,
+]:
+  """Constructs packed `(doc1=1, pad=0, doc2=2, pad=0)` base and perturbed batches."""
+  if "segment_ids" not in batch:
+    raise AssertionError(f"{name}: Check 9 requires 'segment_ids' in build_batch for packing" " isolation")
+  seg_orig = batch["segment_ids"]
+  if not isinstance(seg_orig, jax.Array) or seg_orig.ndim != 2 or seg_orig.shape[1] < 4:
+    raise AssertionError(
+        f"{name}: Check 9 requires 2-D 'segment_ids' with seq_len >= 4, got" f" {getattr(seg_orig, 'shape', None)}"
+    )
+  bsz, seq_len = seg_orig.shape
+  d1_end = max(1, seq_len // 4)
+  pad1_end = max(d1_end + 1, seq_len // 2)
+  d2_end = seq_len - 1
+  if pad1_end >= d2_end:
+    raise AssertionError(f"{name}: seq_len={seq_len} too short for packed doc1/pad/doc2/pad" " layout")
+  seg_row = np.zeros((seq_len,), dtype=np.int32)
+  seg_row[:d1_end] = 1
+  seg_row[pad1_end:d2_end] = 2
+  seg_np = np.broadcast_to(seg_row[None, :], (bsz, seq_len)).copy()
+
+  pos_row = np.zeros((seq_len,), dtype=np.int32)
+  pos_row[:d1_end] = np.arange(d1_end, dtype=np.int32)
+  pos_row[d1_end:pad1_end] = np.arange(pad1_end - d1_end, dtype=np.int32)
+  pos_row[pad1_end:d2_end] = np.arange(d2_end - pad1_end, dtype=np.int32)
+  pos_np = np.broadcast_to(pos_row[None, :], (bsz, seq_len)).copy()
+
+  seg_shd = seg_orig.sharding
+  seg_arr = jax.device_put(jnp.asarray(seg_np, dtype=seg_orig.dtype), seg_shd)
+  pos_arr = jax.device_put(jnp.asarray(pos_np, dtype=seg_orig.dtype), seg_shd)
+
+  base = dict(batch)
+  base["segment_ids"] = seg_arr
+  base["positions"] = pos_arr
+  pert_doc1 = dict(base)
+  pert_pad = dict(base)
+
+  doc1_mask = seg_arr == 1
+  pad_mask = seg_arr == 0
+  if "input_ids" in base:
+    ids = base["input_ids"]
+    ids_shd = ids.sharding
+    base_ids = jnp.where(pad_mask, jnp.zeros_like(ids), jnp.maximum(ids, 1))
+    doc1_alt = jnp.where(doc1_mask, (base_ids % 17) + 31, base_ids)
+    pad_alt = jnp.where(pad_mask, jnp.full_like(base_ids, 23), base_ids)
+    base["input_ids"] = jax.device_put(base_ids, ids_shd)
+    pert_doc1["input_ids"] = jax.device_put(doc1_alt, ids_shd)
+    pert_pad["input_ids"] = jax.device_put(pad_alt, ids_shd)
+  elif "x" in base:
+    x_arr = base["x"]
+    x_shd = x_arr.sharding
+    doc1_mask_3d = doc1_mask[..., None]
+    pad_mask_3d = pad_mask[..., None]
+    base_x = jnp.where(pad_mask_3d, jnp.zeros_like(x_arr), x_arr)
+    doc1_alt_x = jnp.where(doc1_mask_3d, base_x + 3.5, base_x)
+    pad_alt_x = jnp.where(pad_mask_3d, jnp.full_like(base_x, 2.75), base_x)
+    base["x"] = jax.device_put(base_x, x_shd)
+    pert_doc1["x"] = jax.device_put(doc1_alt_x, x_shd)
+    pert_pad["x"] = jax.device_put(pad_alt_x, x_shd)
+  else:
+    raise AssertionError(f"{name}: Check 9b expected 'input_ids' or 'x' in batch, got" f" {sorted(base)}")
+  return base, pert_doc1, pert_pad, seg_np
+
+
+def check_bf16_forward_parity(
+    spec_obj: spec.ConformanceSpec,
+    mesh: jax.sharding.Mesh,
+) -> None:
+  """Check 9a: Enforces `bf16` (`Precision.DEFAULT`) vs `fp32` (`Precision.HIGHEST`) forward parity."""
+  name = spec_obj.model_name
+  if spec_obj.build_bf16_model is None:
+    raise AssertionError(f"{name}: spec.build_bf16_model is None (required for Check 9a)")
+  weights = {k: 1.0 for k in spec_obj.aux_losses}
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
+    fp32_model = spec_obj.build_model(mesh, nnx.Rngs(0), True, "none")
+    bf16_model = spec_obj.build_bf16_model(mesh, nnx.Rngs(0), True, "none")
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), mesh)
+
+    with jax.default_matmul_precision("highest"):
+      fp32_out = spec_obj.forward_fn(fp32_model, batch)
+      _validate_forward_output(spec_obj, fp32_out)
+      fp32_loss = spec_obj.loss_fn(fp32_out, batch, weights)
+
+    gdef_bf16, params_bf16, arr_bf16, static_bf16 = nnx.split(bf16_model, nnx.Param, _is_jax_array_leaf, ...)
+    params_bf16_pure = _to_pure_state(params_bf16)
+    arr_bf16_pure = _to_pure_state(arr_bf16)
+
+    def _bf16_pure_fwd(p_in: Any, a_in: Any, b_in: Mapping[str, jax.Array]) -> jax.Array:
+      merged = nnx.merge(gdef_bf16, p_in, a_in, static_bf16, copy=True)
+      return spec_obj.forward_fn(merged, b_in).primary
+
+    with jax.default_matmul_precision("default"):
+      bf16_closed = jax.make_jaxpr(_bf16_pure_fwd)(params_bf16_pure, arr_bf16_pure, batch)
+      bf16_out = spec_obj.forward_fn(bf16_model, batch)
+      _validate_forward_output(spec_obj, bf16_out)
+      bf16_loss = spec_obj.loss_fn(bf16_out, batch, weights)
+
+    if bf16_out.primary.dtype != jnp.bfloat16 and not _has_bfloat16_in_jaxpr(bf16_closed.jaxpr):
+      raise AssertionError(f"{name}: build_bf16_model forward pass contains no bfloat16" " operations")
+
+    fp32_prim_np = np.asarray(fp32_out.primary, dtype=np.float32)
+    bf16_prim_np = np.asarray(bf16_out.primary, dtype=np.float32)
+    if not bool(np.all(np.isfinite(bf16_prim_np))):
+      raise AssertionError(f"{name}: non-finite bf16 primary output on mesh {mesh.shape}")
+    if not bool(
+        np.allclose(
+            bf16_prim_np,
+            fp32_prim_np,
+            atol=spec_obj.bf16_atol,
+            rtol=spec_obj.bf16_rtol,
+        )
+    ):
+      max_diff = float(np.max(np.abs(bf16_prim_np - fp32_prim_np)))
+      raise AssertionError(
+          f"{name}: bf16 vs fp32 primary drift {max_diff:.4e} exceeds"
+          f" (atol={spec_obj.bf16_atol}, rtol={spec_obj.bf16_rtol})"
+      )
+    for aux_key in spec_obj.aux_losses:
+      fp32_aux_np = np.asarray(fp32_out.aux_losses[aux_key], dtype=np.float32)
+      bf16_aux_np = np.asarray(bf16_out.aux_losses[aux_key], dtype=np.float32)
+      if not bool(np.all(np.isfinite(bf16_aux_np))) or not bool(
+          np.allclose(
+              bf16_aux_np,
+              fp32_aux_np,
+              atol=spec_obj.bf16_atol,
+              rtol=spec_obj.bf16_rtol,
+          )
+      ):
+        raise AssertionError(f"{name}: bf16 vs fp32 aux_loss {aux_key!r} mismatch on mesh")
+    fp32_loss_np = np.asarray(fp32_loss, dtype=np.float32)
+    bf16_loss_np = np.asarray(bf16_loss, dtype=np.float32)
+    if not bool(np.isfinite(bf16_loss_np)) or not bool(
+        np.allclose(
+            bf16_loss_np,
+            fp32_loss_np,
+            atol=spec_obj.bf16_atol,
+            rtol=spec_obj.bf16_rtol,
+        )
+    ):
+      raise AssertionError(f"{name}: bf16 vs fp32 scalar loss mismatch ({bf16_loss_np} vs" f" {fp32_loss_np})")
+
+
+def check_packing_and_padding_isolation(
+    spec_obj: spec.ConformanceSpec,
+    mesh: jax.sharding.Mesh,
+) -> None:
+  """Check 9b: Enforces multi-document packed `segment_ids` (`{1, 0, 2, 0}`) forward and backward isolation."""
+  name = spec_obj.model_name
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
+    fp32_model = spec_obj.build_model(mesh, nnx.Rngs(0), True, "none")
+    fp32_non_param_init = nnx.clone(nnx.state(fp32_model, nnx.Not(nnx.Param)))
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), mesh)
+    batch_base, batch_pert_doc1, batch_pert_pad, seg_np = _build_packed_batch_variants(name, batch)
+    nnx.update(fp32_model, nnx.clone(fp32_non_param_init))
+    out_base = spec_obj.forward_fn(fp32_model, batch_base)
+    _validate_forward_output(spec_obj, out_base)
+    nnx.update(fp32_model, nnx.clone(fp32_non_param_init))
+    out_pert_doc1 = spec_obj.forward_fn(fp32_model, batch_pert_doc1)
+    nnx.update(fp32_model, nnx.clone(fp32_non_param_init))
+    out_pert_pad = spec_obj.forward_fn(fp32_model, batch_pert_pad)
+    nnx.update(fp32_model, nnx.clone(fp32_non_param_init))
+
+    base_np = np.asarray(out_base.primary, dtype=np.float32)
+    pert_doc1_np = np.asarray(out_pert_doc1.primary, dtype=np.float32)
+    pert_pad_np = np.asarray(out_pert_pad.primary, dtype=np.float32)
+    doc2_mask_np = seg_np == 2
+    if not bool(np.array_equal(pert_doc1_np[doc2_mask_np], base_np[doc2_mask_np])):
+      max_leak = float(np.max(np.abs(pert_doc1_np[doc2_mask_np] - base_np[doc2_mask_np])))
+      raise AssertionError(
+          f"{name}: cross-document forward leak into doc 2 when doc 1 perturbed" f" (max={max_leak:.4e})"
+      )
+    if not bool(np.array_equal(pert_pad_np, base_np)):
+      max_pad_leak = float(np.max(np.abs(pert_pad_np - base_np)))
+      raise AssertionError(
+          f"{name}: padding forward leak (0 == 0 segment_ids or unmasked pad" f" output) (max={max_pad_leak:.4e})"
+      )
+    for aux_key in spec_obj.aux_losses:
+      if not bool(
+          np.array_equal(
+              np.asarray(out_pert_pad.aux_losses[aux_key]),
+              np.asarray(out_base.aux_losses[aux_key]),
+          )
+      ):
+        raise AssertionError(f"{name}: padding tokens leaked into aux_loss {aux_key!r}")
+
+    doc2_mask_arr = (batch_base["segment_ids"] == 2).astype(jnp.float32)[..., None]
+    if "x" in batch_base:
+      gdef_x, params_x, arr_x, static_x = nnx.split(fp32_model, nnx.Param, _is_jax_array_leaf, ...)
+      params_x_pure = _to_pure_state(params_x)
+      arr_x_pure = _to_pure_state(arr_x)
+
+      def _doc2_loss_from_x(x_in: jax.Array) -> jax.Array:
+        b_x = dict(batch_base)
+        b_x["x"] = x_in
+        merged_x = nnx.merge(gdef_x, params_x_pure, arr_x_pure, static_x, copy=True)
+        out_x = spec_obj.forward_fn(merged_x, b_x)
+        return jnp.sum(out_x.primary.astype(jnp.float32) * doc2_mask_arr)
+
+      pos_grad_np = np.asarray(jax.grad(_doc2_loss_from_x)(batch_base["x"]), dtype=np.float32)
+    else:
+      bsz, seq_len = seg_np.shape
+      max_probe_id = bsz * seq_len
+      probe_ids_np = np.arange(1, max_probe_id + 1, dtype=np.int32).reshape(bsz, seq_len)
+      probe_batch = dict(batch_base)
+      probe_batch["input_ids"] = jax.device_put(
+          jnp.asarray(probe_ids_np, dtype=batch_base["input_ids"].dtype),
+          batch_base["input_ids"].sharding,
+      )
+      gdef_f, params_f, arr_f, static_f = nnx.split(fp32_model, nnx.Param, _is_jax_array_leaf, ...)
+      params_f_pure = _to_pure_state(params_f)
+      arr_f_pure = _to_pure_state(arr_f)
+
+      def _doc2_loss_from_params(p_in: Any) -> jax.Array:
+        merged_f = nnx.merge(gdef_f, p_in, arr_f_pure, static_f, copy=True)
+        out_f = spec_obj.forward_fn(merged_f, probe_batch)
+        sliced = out_f.primary.astype(jnp.float32)[..., max_probe_id + 1 :]
+        return jnp.sum(sliced * doc2_mask_arr)
+
+      grads_f_pure = jax.grad(_doc2_loss_from_params)(params_f_pure)
+      grad_mod = nnx.merge(gdef_f, grads_f_pure, arr_f, static_f, copy=True)
+      grad_vars = _flatten_vars(nnx.state(grad_mod, nnx.Param))
+      embed_candidates = [
+          (p_str, np.asarray(_unwrap_leaf(v_node), dtype=np.float32))
+          for p_str, v_node in grad_vars
+          if _unwrap_leaf(v_node).ndim == 2 and _unwrap_leaf(v_node).shape[0] > max_probe_id
+      ]
+      named_embeds = [(p_str, g_arr) for p_str, g_arr in embed_candidates if _EMBED_PARAM_RE.search(p_str)]
+      chosen_embeds = named_embeds if named_embeds else embed_candidates
+      if not chosen_embeds:
+        raise AssertionError(f"{name}: Check 9b could not locate 2-D token embedding parameter" " for gradient isolation")
+      embed_grad_np = chosen_embeds[0][1]
+      pos_grad_np = embed_grad_np[probe_ids_np]
+
+    if not bool(np.all(pos_grad_np[seg_np == 1] == 0.0)):
+      max_g_doc1 = float(np.max(np.abs(pos_grad_np[seg_np == 1])))
+      raise AssertionError(f"{name}: non-zero cross-document gradient d(loss_doc2)/d(doc1)" f" (max={max_g_doc1:.4e})")
+    if not bool(np.all(pos_grad_np[seg_np == 0] == 0.0)):
+      max_g_pad = float(np.max(np.abs(pos_grad_np[seg_np == 0])))
+      raise AssertionError(f"{name}: non-zero padding gradient d(loss_doc2)/d(pad)" f" (max={max_g_pad:.4e})")
+    if not bool(np.all(np.isfinite(pos_grad_np[seg_np == 2]))) or not bool(
+        np.any(np.abs(pos_grad_np[seg_np == 2]) > 0.0)
+    ):
+      raise AssertionError(f"{name}: zero or non-finite within-document gradient" " d(loss_doc2)/d(doc2)")
+
+
+def check_expert_parallel_parity(spec_obj: spec.ConformanceSpec) -> None:
+  """Check 9c: Enforces MoE `expert=2` (and 8-device 3-axis) sharding and `fp32` forward parity vs `driver_mesh`."""
+  name = spec_obj.model_name
+  if not spec_obj.expert_weight_param_patterns:
+    raise AssertionError(f"{name}: expert_weight_param_patterns is empty (required for Check 9c)")
+  driver_mesh = create_conformance_driver_mesh()
+  ep_mesh = create_conformance_ep_mesh()
+  weights = {k: 1.0 for k in spec_obj.aux_losses}
+  with jax.sharding.set_mesh(driver_mesh), nnx.use_eager_sharding(True):
+    ref_model = spec_obj.build_model(driver_mesh, nnx.Rngs(0), True, "none")
+    ref_batch = spec_obj.build_batch(jax.random.PRNGKey(0), driver_mesh)
+    with jax.default_matmul_precision("highest"):
+      ref_out = spec_obj.forward_fn(ref_model, ref_batch)
+      _validate_forward_output(spec_obj, ref_out)
+      ref_loss = spec_obj.loss_fn(ref_out, ref_batch, weights)
+
+  with jax.sharding.set_mesh(ep_mesh), nnx.use_eager_sharding(True):
+    ep_model = spec_obj.build_model(ep_mesh, nnx.Rngs(0), True, "none")
+    ep_batch = spec_obj.build_batch(jax.random.PRNGKey(0), ep_mesh)
+    ep_vars = _flatten_vars(nnx.state(ep_model, nnx.Param))
+    _validate_stacked_patterns(spec_obj, ep_vars)
+    ep_paths = [p_str for p_str, _ in ep_vars]
+    matched_expert: set[str] = set()
+    for pat in spec_obj.expert_weight_param_patterns:
+      hits = [p_str for p_str in ep_paths if re.search(pat, p_str)]
+      if not hits:
+        raise AssertionError(f"{name}: unmatched expert_weight_param_patterns entry {pat!r}")
+      matched_expert.update(hits)
+
+    for p_str, v_node in ep_vars:
+      if p_str not in matched_expert:
+        continue
+      arr = _unwrap_leaf(v_node)
+      if not isinstance(arr, jax.Array) or not isinstance(arr.sharding, jax.sharding.NamedSharding):
+        raise AssertionError(f"{name}: expert weight {p_str} must have NamedSharding on ep_mesh")
+      if arr.sharding.mesh is not ep_mesh:
+        raise AssertionError(f"{name}: expert weight {p_str} sharding.mesh is not ep_mesh")
+      axes = _extract_spec_axes(arr.sharding.spec, f"{name}:{p_str}")
+      _assert_valid_axes(axes, f"{name}:{p_str}")
+      if "expert" not in axes:
+        raise AssertionError(
+            f"{name}: expert weight {p_str} PartitionSpec {arr.sharding.spec}"
+            f" does not shard across 'expert' on ep_mesh {ep_mesh.shape}"
+        )
+      global_elems = math.prod(arr.shape)
+      for shard in arr.addressable_shards:
+        if math.prod(shard.data.shape) >= global_elems:
+          raise AssertionError(
+              f"{name}: expert weight {p_str} shard {shard.data.shape} not" f" smaller than global {arr.shape} on ep_mesh"
+          )
+
+    with jax.default_matmul_precision("highest"):
+      ep_out = spec_obj.forward_fn(ep_model, ep_batch)
+      _validate_forward_output(spec_obj, ep_out)
+      ep_loss = spec_obj.loss_fn(ep_out, ep_batch, weights)
+
+    _assert_fp32_parity(ep_out.primary, ref_out.primary, f"{name}.ep.primary")
+    for aux_key in spec_obj.aux_losses:
+      _assert_fp32_parity(
+          ep_out.aux_losses[aux_key],
+          ref_out.aux_losses[aux_key],
+          f"{name}.ep.aux.{aux_key}",
+      )
+    _assert_fp32_parity(ep_loss, ref_loss, f"{name}.ep.loss")
+
+
+class _EngineConfigStub:
+  """Minimal config stub exposing `model_name` for `m3_models.configure_engine`."""
+
+  def __init__(self, model_name: str):
+    self.model_name = model_name
+
+
+class _ConformanceEngineStub:
+  """Minimal `MaxTextTrainingEngine` stub capturing optimizer transforms from `configure_engine`."""
+
+  def __init__(
+      self,
+      model: nnx.Module,
+      model_name: str,
+      base_tx: optax.GradientTransformation,
+  ):
+    self._model = model
+    self._config = _EngineConfigStub(model_name)
+    self._tx = base_tx
+    self._optimizer = self._build_optimizer(base_tx)
+    self.loss_fn: Any = None
+    self.has_aux: bool = False
+    self.gen_model_input_fn: Any = None
+
+  def with_loss_fn(self, loss_fn: Any, has_aux: bool = False) -> "_ConformanceEngineStub":
+    self.loss_fn = loss_fn
+    self.has_aux = has_aux
+    return self
+
+  def with_gen_model_input_fn(self, gen_fn: Any) -> "_ConformanceEngineStub":
+    self.gen_model_input_fn = gen_fn
+    return self
+
+  def _build_optimizer(self, tx: optax.GradientTransformation) -> nnx.Optimizer:
+    return nnx.Optimizer(self._model, tx, wrt=nnx.Param)
+
+
+def _build_check10_optimizer(
+    spec_obj: spec.ConformanceSpec,
+    model: nnx.Module,
+) -> nnx.Optimizer:
+  """Builds the Check 10 AdamW(`lr=1e-3, wd=0.1`) optimizer wired through `configure_engine`."""
+  base_tx = optax.adamw(learning_rate=_OPT_LEARNING_RATE, weight_decay=_OPT_WEIGHT_DECAY)
+  if getattr(model, "mode", "") == "unmasked_weight_decay":
+    return nnx.Optimizer(model, base_tx, wrt=nnx.Param)
+  if spec_obj.model_name in m3_models.MODEL_ENGINE_CONFIG_REGISTRY or spec_obj.model_name in m3_models.MODEL_REGISTRY:
+    engine_stub = _ConformanceEngineStub(model, spec_obj.model_name, base_tx)
+    m3_models.configure_engine(engine_stub)
+    return engine_stub._optimizer  # pylint: disable=protected-access
+  if not spec_obj.frozen_param_patterns:
+    return nnx.Optimizer(model, base_tx, wrt=nnx.Param)
+
+  def _label_fn(path: tuple[Any, ...], unused_v: Any) -> str:
+    p_str = _key_str(path)
+    if any(re.search(pat, p_str) for pat in spec_obj.frozen_param_patterns):
+      return "frozen"
+    return "train"
+
+  masked_tx = optax.multi_transform(
+      {"train": base_tx, "frozen": optax.set_to_zero()},
+      param_labels=lambda params: jax.tree_util.tree_map_with_path(
+          _label_fn,
+          params,
+          is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.Array)),
+      ),
+  )
+  return nnx.Optimizer(model, masked_tx, wrt=nnx.Param)
+
+
+def _make_grad_var_from_map(
+    grads_map: Mapping[str, Any],
+    path: tuple[Any, ...],
+    v_var: Any,
+) -> Any:
+  """Replaces `v_var`'s value with its matching gradient from `grads_map`."""
+  p_str = _key_str(path)
+  g_arr = jnp.asarray(grads_map[p_str], dtype=_unwrap_leaf(v_var).dtype)
+  return v_var.replace(g_arr) if isinstance(v_var, nnx.Variable) else g_arr
+
+
+def check_optimizer_step_and_frozen_weight_decay(
+    spec_obj: spec.ConformanceSpec,
+    mesh: jax.sharding.Mesh,
+) -> None:
+  """Check 10: Runs 2 real AdamW(`wd=0.1`) update steps and verifies frozen params stay bitwise identical."""
+  name = spec_obj.model_name
+  weights = {k: 1.0 for k in spec_obj.aux_losses}
+  with jax.sharding.set_mesh(mesh), nnx.use_eager_sharding(True):
+    model = spec_obj.build_model(mesh, nnx.Rngs(0), True, "none")
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), mesh)
+    init_param_state = nnx.state(model, nnx.Param)
+    init_treedef = jax.tree_util.tree_structure(init_param_state, is_leaf=_is_nnx_variable)
+    init_vars = _flatten_vars(init_param_state)
+    if not init_vars:
+      raise AssertionError(f"{name}: model has 0 nnx.Param variables in Check 10")
+    init_paths = [p_str for p_str, _ in init_vars]
+    init_values: dict[str, np.ndarray] = {}
+    for p_str, v_node in init_vars:
+      arr = _unwrap_leaf(v_node)
+      if not isinstance(arr, jax.Array) or not _is_inexact(arr):
+        raise AssertionError(f"{name}: param {p_str} is not an inexact jax.Array")
+      init_values[p_str] = np.asarray(arr).copy()
+
+    frozen_paths: set[str] = set()
+    for pat in spec_obj.frozen_param_patterns:
+      hits = [p_str for p_str in init_paths if re.search(pat, p_str)]
+      if not hits:
+        raise AssertionError(f"{name}: unmatched frozen_param_patterns entry {pat!r}")
+      frozen_paths.update(hits)
+    trainable_paths = [p_str for p_str in init_paths if p_str not in frozen_paths]
+    if not trainable_paths:
+      raise AssertionError(f"{name}: all nnx.Param variables are frozen; expected >= 1 trainable" " param")
+
+    optimizer = _build_check10_optimizer(spec_obj, model)
+    for step_idx in range(_OPT_STEPS):
+      _, grads_out = _jit_eval_value_and_grad(model, nnx.Param, spec_obj, batch, weights)
+      grads_map = {p: _unwrap_leaf(v) for p, v in _flatten_vars(grads_out)}
+      cur_state_pre = nnx.state(model, nnx.Param)
+      grads_state = jax.tree_util.tree_map_with_path(
+          functools.partial(_make_grad_var_from_map, grads_map),
+          cur_state_pre,
+          is_leaf=_is_nnx_variable,
+      )
+      optimizer.update(model, grads_state)
+      cur_param_state = nnx.state(model, nnx.Param)
+      cur_treedef = jax.tree_util.tree_structure(cur_param_state, is_leaf=_is_nnx_variable)
+      cur_vars = _flatten_vars(cur_param_state)
+      cur_paths = [p_str for p_str, _ in cur_vars]
+      if cur_treedef != init_treedef or cur_paths != init_paths:
+        raise AssertionError(f"{name}: nnx.Param treedef or paths mutated at optimizer step" f" {step_idx + 1}")
+
+    final_vars = _flatten_vars(nnx.state(model, nnx.Param))
+    for p_str, v_node in final_vars:
+      cur_np = np.asarray(_unwrap_leaf(v_node))
+      init_np = init_values[p_str]
+      if not bool(np.all(np.isfinite(cur_np))):
+        raise AssertionError(f"{name}: non-finite nnx.Param {p_str} after {_OPT_STEPS} AdamW" " steps")
+      if p_str in frozen_paths:
+        if not bool(np.array_equal(cur_np, init_np)):
+          max_decay_diff = float(np.max(np.abs(cur_np - init_np)))
+          raise AssertionError(
+              f"{name}: frozen param {p_str} mutated after {_OPT_STEPS}"
+              f" AdamW(wd={_OPT_WEIGHT_DECAY}) steps"
+              f" (max_diff={max_decay_diff:.4e}); optimizer weight_decay mask"
+              " is missing or miswired"
+          )
+      elif bool(np.array_equal(cur_np, init_np)):
+        raise AssertionError(f"{name}: trainable param {p_str} did not update after {_OPT_STEPS}" " AdamW steps")
+
+
+def _load_mmap_slice(
+    mmap_arr: np.ndarray,
+    max_cb_elems: list[int],
+    shard_index: tuple[slice, ...] | None,
+) -> np.ndarray:
+  """Reads a single shard slice from `mmap_arr` and records the max slice element count."""
+  sliced = np.asarray(mmap_arr if shard_index is None else mmap_arr[shard_index])
+  max_cb_elems[0] = max(max_cb_elems[0], int(sliced.size))
+  return sliced
+
+
+def check_sharded_checkpoint_slice_load(spec_obj: spec.ConformanceSpec) -> None:
+  """Check 11: Verifies per-shard slice checkpoint reload without full-tensor replication and bit-exact forward."""
+  name = spec_obj.model_name
+  min_elems = spec_obj.min_sharded_param_elements
+  driver_mesh = create_conformance_driver_mesh()
+  with jax.sharding.set_mesh(driver_mesh), nnx.use_eager_sharding(True):
+    src_model = spec_obj.build_model(driver_mesh, nnx.Rngs(0), True, "none")
+    src_non_param_init = nnx.clone(nnx.state(src_model, nnx.Not(nnx.Param)))
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), driver_mesh)
+    ref_out = spec_obj.forward_fn(src_model, batch)
+    _validate_forward_output(spec_obj, ref_out)
+    src_vars = _flatten_vars(nnx.state(src_model, nnx.Param))
+    _validate_stacked_patterns(spec_obj, src_vars)
+
+    with tempfile.TemporaryDirectory() as ckpt_dir:
+      file_map: dict[str, str] = {}
+      for idx, (path_str, param_node) in enumerate(src_vars):
+        arr = _unwrap_leaf(param_node)
+        if not isinstance(arr, jax.Array):
+          raise AssertionError(f"{name}: {path_str} is not a jax.Array")
+        npy_path = os.path.join(ckpt_dir, f"param_{idx}.npy")
+        np.save(npy_path, np.asarray(arr))
+        file_map[path_str] = npy_path
+
+      dst_model = spec_obj.build_model(driver_mesh, nnx.Rngs(1), True, "none")
+      dst_vars = _flatten_vars(nnx.state(dst_model, nnx.Param))
+      eligible_count = 0
+      for path_str, dst_node in dst_vars:
+        dst_arr = _unwrap_leaf(dst_node)
+        if not isinstance(dst_arr, jax.Array) or not isinstance(dst_arr.sharding, jax.sharding.NamedSharding):
+          raise AssertionError(f"{name}: {path_str} must be NamedSharding jax.Array on" " driver_mesh")
+        if dst_arr.sharding.mesh is not driver_mesh:
+          raise AssertionError(f"{name}: {path_str} sharding.mesh is not driver_mesh")
+        _, unstacked_shape = _resolve_unstacked_shape(spec_obj, path_str, dst_arr.shape)
+        is_eligible = len(unstacked_shape) >= 2 and math.prod(unstacked_shape) >= min_elems
+        mmap_arr = np.load(file_map[path_str], mmap_mode="r")
+        global_elems = math.prod(dst_arr.shape)
+        max_cb_elems = [0]
+        reloaded = jax.make_array_from_callback(
+            dst_arr.shape,
+            dst_arr.sharding,
+            functools.partial(_load_mmap_slice, mmap_arr, max_cb_elems),
+        )
+        if is_eligible:
+          eligible_count += 1
+          if max_cb_elems[0] >= global_elems:
+            raise AssertionError(
+                f"{name}: eligible sharded param {path_str} {dst_arr.shape}"
+                f" read full tensor ({max_cb_elems[0]} >= {global_elems}"
+                " elements) during checkpoint slice load"
+            )
+          if not reloaded.addressable_shards:
+            raise AssertionError(f"{name}: {path_str} has no addressable_shards after reload")
+          for shard in reloaded.addressable_shards:
+            shard_elems = math.prod(shard.data.shape)
+            if shard_elems >= global_elems:
+              raise AssertionError(
+                  f"{name}: {path_str} addressable shard {shard.data.shape} not" f" smaller than global {dst_arr.shape}"
+              )
+        dst_node.set_value(reloaded)
+
+      if eligible_count < 1:
+        raise AssertionError(f"{name}: Check 11 expected >= 1 eligible sharded parameter >=" f" {min_elems} elements")
+      nnx.update(dst_model, src_non_param_init)
+      reloaded_out = spec_obj.forward_fn(dst_model, batch)
+      _validate_forward_output(spec_obj, reloaded_out)
+      if not bool(np.array_equal(np.asarray(reloaded_out.primary), np.asarray(ref_out.primary))):
+        raise AssertionError(f"{name}: reloaded checkpoint forward primary output is not" " bit-exact")
+      for aux_key in spec_obj.aux_losses:
+        if not bool(
+            np.array_equal(
+                np.asarray(reloaded_out.aux_losses[aux_key]),
+                np.asarray(ref_out.aux_losses[aux_key]),
+            )
+        ):
+          raise AssertionError(f"{name}: reloaded checkpoint aux_loss {aux_key!r} is not" " bit-exact")
+
+
+def _extract_param_partition_spec(
+    param_node: Any,
+    context: str,
+) -> jax.sharding.PartitionSpec:
+  """Extracts the `PartitionSpec` from an abstract or concrete `nnx.Param` node."""
+  meta = param_node.get_metadata() if hasattr(param_node, "get_metadata") else {}
+  for attr in ("out_sharding", "sharding"):
+    val = getattr(param_node, attr, None)
+    if val is None and isinstance(meta, Mapping):
+      val = meta.get(attr)
+    if isinstance(val, jax.sharding.PartitionSpec):
+      return val
+    if isinstance(val, jax.sharding.NamedSharding):
+      return val.spec
+    if isinstance(val, tuple):
+      return jax.sharding.PartitionSpec(*val)
+  raw = _unwrap_leaf(param_node)
+  shd = getattr(raw, "sharding", None)
+  if isinstance(shd, jax.sharding.NamedSharding):
+    return shd.spec
+  if isinstance(shd, jax.sharding.PartitionSpec):
+    return shd
+  raise AssertionError(f"{context}: missing PartitionSpec/NamedSharding metadata on full-scale" " parameter")
+
+
+def _compute_vjp_residual_bytes(
+    spec_obj: spec.ConformanceSpec,
+    model: nnx.Module,
+    batch: Mapping[str, jax.Array],
+) -> int:
+  """Computes total bytes of saved backward VJP residuals (`jax.eval_shape(jax.vjp)`)."""
+  gdef, params_state, arr_rest, static_rest = nnx.split(model, nnx.Param, _is_jax_array_leaf, ...)
+  params_pure = _to_pure_state(params_state)
+  arr_rest_pure = _to_pure_state(arr_rest)
+  weights = {k: 1.0 for k in spec_obj.aux_losses}
+
+  def _primal_loss(p_pure: Any) -> jax.Array:
+    merged = nnx.merge(gdef, p_pure, arr_rest_pure, static_rest, copy=True)
+    fwd_out = spec_obj.forward_fn(merged, batch)
+    return spec_obj.loss_fn(fwd_out, batch, weights)
+
+  _, vjp_fn = jax.eval_shape(lambda p: jax.vjp(_primal_loss, p), params_pure)
+  total_bytes = 0
+  for leaf in jax.tree_util.tree_leaves(vjp_fn):
+    shape = getattr(leaf, "shape", None)
+    dtype = getattr(leaf, "dtype", None)
+    if shape is not None and dtype is not None:
+      total_bytes += int(math.prod(shape)) * int(np.dtype(dtype).itemsize)
+  return total_bytes
+
+
+def check_full_scale_topology_aot_and_remat_hbm(
+    spec_obj: spec.ConformanceSpec,
+) -> None:
+  """Check 12: Verifies full-scale 64/128/256-device abstract sharding divisibility and VJP remat residual reduction."""
+  name = spec_obj.model_name
+  if spec_obj.build_full_scale_abstract_model is None:
+    raise AssertionError(f"{name}: spec.build_full_scale_abstract_model is None (required for" " Check 12)")
+  single_mesh = _create_single_device_mesh()
+  for topo_name, axis_sizes in spec_obj.full_scale_topologies:
+    if set(axis_sizes.keys()) != _VALID_MESH_AXES:
+      raise AssertionError(f"{name}: topology {topo_name!r} axes {sorted(axis_sizes)} !=" f" {sorted(_VALID_MESH_AXES)}")
+    abs_mesh = jax.sharding.AbstractMesh(
+        tuple(int(axis_sizes[ax]) for ax in m3_sharding.MESH_AXIS_NAMES),
+        m3_sharding.MESH_AXIS_NAMES,
+    )
+    with jax.sharding.set_mesh(single_mesh), nnx.use_eager_sharding(True):
+      abs_model = spec_obj.build_full_scale_abstract_model(abs_mesh, True, "full")
+    param_vars = _flatten_vars(nnx.state(abs_model, nnx.Param))
+    if not param_vars:
+      raise AssertionError(f"{name}: full-scale abstract model on {topo_name} produced 0" " nnx.Param variables")
+    eligible_sharded = 0
+    for path_str, param_node in param_vars:
+      raw_leaf = _unwrap_leaf(param_node)
+      full_shape = getattr(raw_leaf, "shape", None)
+      if full_shape is None:
+        raise AssertionError(f"{name}: {topo_name}:{path_str} has no shape attribute")
+      pspec = _extract_param_partition_spec(param_node, f"{name}:{topo_name}:{path_str}")
+      axes = _extract_spec_axes(pspec, f"{name}:{topo_name}:{path_str}")
+      _assert_valid_axes(axes, f"{name}:{topo_name}:{path_str}")
+      is_stacked = any(re.search(pat, path_str) for pat in spec_obj.stacked_param_path_patterns)
+      check_shape = full_shape[1:] if (is_stacked and len(pspec) == len(full_shape) - 1) else full_shape
+      if len(pspec) > len(check_shape):
+        raise AssertionError(f"{name}: {topo_name}:{path_str} PartitionSpec {pspec} rank > shape" f" {check_shape}")
+      if len(check_shape) >= 2 and math.prod(check_shape) >= spec_obj.min_sharded_param_elements and axes:
+        eligible_sharded += 1
+      for dim_idx, ax_entry in enumerate(pspec):
+        if ax_entry is None:
+          continue
+        ax_tuple = ax_entry if isinstance(ax_entry, tuple) else (ax_entry,)
+        ways = math.prod(int(axis_sizes[ax]) for ax in ax_tuple if ax is not None)
+        dim_size = int(check_shape[dim_idx])
+        if dim_size % ways != 0:
+          raise AssertionError(
+              f"{name}: IndivisibleError on topology {topo_name}"
+              f" ({dict(axis_sizes)}): param {path_str} shape {full_shape} dim"
+              f" {dim_idx} ({dim_size}) is not divisible by mesh axis product"
+              f" {ways} for spec {pspec}"
+          )
+    if eligible_sharded < 1:
+      raise AssertionError(f"{name}: {topo_name} full-scale model has 0 sharded 2-D+ parameters")
+
+  with jax.sharding.set_mesh(single_mesh), nnx.use_eager_sharding(True):
+    model_none = spec_obj.build_model(single_mesh, nnx.Rngs(0), False, "none")
+    model_full = spec_obj.build_model(single_mesh, nnx.Rngs(0), False, "full")
+    batch = spec_obj.build_batch(jax.random.PRNGKey(0), single_mesh)
+    res_bytes_none = _compute_vjp_residual_bytes(spec_obj, model_none, batch)
+    res_bytes_full = _compute_vjp_residual_bytes(spec_obj, model_full, batch)
+    if res_bytes_full >= res_bytes_none:
+      raise AssertionError(
+          f"{name}: remat='full' did not reduce saved backward VJP residuals vs"
+          f" remat='none' ({res_bytes_full} bytes >= {res_bytes_none} bytes)"
+      )
+
+
 def _bind_single_device(
     check_fn: Callable[[spec.ConformanceSpec, jax.sharding.Mesh], None],
 ) -> Callable[[spec.ConformanceSpec], None]:
@@ -1003,14 +1803,22 @@ _CHECK_RUNNERS: Mapping[spec.CheckId, Callable[[spec.ConformanceSpec], None]] = 
     spec.CheckId.NON_PARAM_STATE_STABILITY: _bind_single_device(check_non_param_state_stability),
     spec.CheckId.AUX_LOSS_GRAD_COUPLING: _bind_single_device(check_aux_loss_grad_coupling),
     spec.CheckId.DRIVER_MESH_AND_AXIS_NAMES: check_driver_mesh_and_axis_names,
-    spec.CheckId.NO_POST_INIT_PARAM_CONSTRAINTS: check_no_post_init_param_constraints,
+    spec.CheckId.NO_POST_INIT_PARAM_CONSTRAINTS: (check_no_post_init_param_constraints),
     spec.CheckId.WEIGHT_SHARDING_COVERAGE: check_weight_sharding_coverage,
     spec.CheckId.NO_EXPERT_WEIGHT_ALL_GATHER: check_no_expert_weight_all_gather,
+    spec.CheckId.BF16_FORWARD_PARITY: _bind_single_device(check_bf16_forward_parity),
+    spec.CheckId.PACKING_AND_PADDING_ISOLATION: _bind_single_device(check_packing_and_padding_isolation),
+    spec.CheckId.EXPERT_PARALLEL_PARITY: check_expert_parallel_parity,
+    spec.CheckId.OPTIMIZER_STEP_AND_FROZEN_WEIGHT_DECAY: _bind_single_device(
+        check_optimizer_step_and_frozen_weight_decay
+    ),
+    spec.CheckId.SHARDED_CHECKPOINT_SLICE_LOAD: (check_sharded_checkpoint_slice_load),
+    spec.CheckId.FULL_SCALE_TOPOLOGY_AOT_AND_REMAT_HBM: (check_full_scale_topology_aot_and_remat_hbm),
 }
 
 
 def run_conformance_check(spec_obj: spec.ConformanceSpec, check_id: spec.CheckId) -> bool:
-  """Dispatches `check_id` across Checks 1-8 (`m3/README.md` Invariants (1)-(7)), respecting `skips`."""
+  """Dispatches `check_id` across Checks 1-12 (`m3/README.md` Invariants (1)-(7)), respecting `skips`."""
   if not isinstance(check_id, spec.CheckId) or check_id not in _CHECK_RUNNERS:
     raise ValueError(f"{spec_obj.model_name}: unsupported check_id {check_id!r}")
   if _should_skip(spec_obj, check_id):
