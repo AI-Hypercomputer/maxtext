@@ -51,6 +51,204 @@ from tests.utils import linen_wrappers
 import pytest
 
 
+class FixedRandomRouterTest(unittest.TestCase):
+  """Pure JAX checks for the benchmark's replacement-logit semantics."""
+
+  def test_gate_random_logits_before_scoring(self):
+    gate = moe.GateLogit(
+        in_features_shape=4,
+        out_features_shape=8,
+        model_name="test",
+        mesh=None,
+        rngs=nnx.Rngs(0),
+        score_func="sigmoid",
+    )
+    inputs = jnp.ones((2, 3, 4))
+    key = jax.random.key(7)
+    output, _ = gate(inputs, routing_key=key)
+    expected = jax.nn.sigmoid(jax.random.normal(key, (2, 3, 8)))
+    np.testing.assert_allclose(output, expected, rtol=1e-6)
+    np.testing.assert_array_equal(output, gate(inputs * 2, routing_key=key)[0])
+
+  def test_constructor_derives_fixed_layer_keys(self):
+    cfg = _tiny_deepseek_config(
+        "fixed_router_keys",
+        te_moe_block=True,
+        te_gmm_quantization="te_no_quant",
+        use_random_routing=True,
+        load_balance_loss_weight=0.0,
+        moe_use_megatron_seq_aux_loss=False,
+        routed_bias_update_rate=0.0,
+        routed_bias=False,
+        megablox=False,
+        prefuse_moe_weights=True,
+        override_logical_axis_rules=True,
+    )
+
+    def build(seed):
+      rngs = nnx.Rngs(seed)
+      expected_key = jax.random.fold_in(rngs.params.key[...], moe.ROUTING_RNG_TAG)
+      layer = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=None,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=16,
+          rngs=rngs,
+      )
+      np.testing.assert_array_equal(jax.random.key_data(layer.fixed_routing_key[...]), jax.random.key_data(expected_key))
+      return jax.random.key_data(layer.fixed_routing_key[...])
+
+    np.testing.assert_array_equal(build(7), build(7))
+    self.assertFalse(np.array_equal(build(7), build(8)))
+
+  def test_native_random_routing_is_unchanged(self):
+    layer = SimpleNamespace(
+        per_expert_scale=None,
+        config=SimpleNamespace(use_random_routing=True, te_moe_block=False),
+        num_experts_per_tok=2,
+    )
+    logits = jnp.arange(48, dtype=jnp.float32).reshape(2, 3, 8)
+    key = jax.random.key(9)
+    actual = moe.RoutedMoE.get_topk(layer, logits, None, rngs=key)
+    expected = moe.random_routing(key, logits, 2)
+    for a, b in zip(actual, expected):
+      np.testing.assert_array_equal(a, b)
+
+  def test_rejects_incompatible_te_random_routing(self):
+    for overrides in (
+        {"is_hash_routing": True},
+        {"load_balance_loss_weight": 0.1},
+        {"routed_bias_update_rate": 0.1},
+        {"routed_bias": True},
+    ):
+      with self.subTest(overrides=overrides):
+        cfg = SimpleNamespace(
+            fp8_moe=False,
+            te_moe_block=True,
+            use_random_routing=True,
+            load_balance_loss_weight=0.0,
+            routed_bias_update_rate=0.0,
+            routed_bias=False,
+        )
+        for key, value in overrides.items():
+          if key != "is_hash_routing":
+            setattr(cfg, key, value)
+        with self.assertRaisesRegex(ValueError, "Fixed random routing"):
+          moe.RoutedMoE(
+              config=cfg,
+              num_experts=8,
+              num_experts_per_tok=2,
+              mesh=None,
+              kernel_init=None,
+              kernel_axes=(),
+              rngs=nnx.Rngs(0),
+              is_hash_routing=overrides.get("is_hash_routing", False),
+          )
+
+  def test_te_routing_map_and_missing_api(self):
+    # Execute the real TE adapter and top-k, mocking only the unavailable TE backend.
+    cfg = SimpleNamespace(
+        te_moe_block=True,
+        use_random_routing=True,
+        custom_mesh_and_rule="default",
+        te_gmm_quantization="te_no_quant",
+        te_moe_disable_cudnn_gmm_fusion=False,
+        float32_gate_logits=True,
+        dtype=jnp.float32,
+        mlp_activations=("silu", "linear"),
+        te_moe_quantize_before_fsdp_all_gather=False,
+        model_name="test",
+        decoder_block="default",
+        norm_topk_prob=False,
+    )
+    gate = moe.GateLogit(in_features_shape=4, out_features_shape=8, model_name="test", mesh=None, rngs=nnx.Rngs(0))
+    layer = SimpleNamespace(
+        config=cfg,
+        quant=SimpleNamespace(get_moe_block_quantizer_sets=lambda *a, **k: (None, None)),
+        is_hash_routing=False,
+        use_gate_bias=False,
+        mesh=SimpleNamespace(shape={"fsdp": 1, "expert": 1}),
+        _expert_parallelism_name="expert",
+        num_experts=8,
+        num_experts_per_tok=2,
+        gate=gate,
+        fixed_routing_key=nnx.Variable(jax.random.key(7)),
+        per_expert_scale=None,
+        wi_kernel_axes=(),
+        wo_kernel_axes=(),
+        dtype=jnp.float32,
+        should_update_load_balance=lambda: False,
+    )
+    layer.get_topk = functools.partial(moe.RoutedMoE.get_topk, layer)
+    inputs = jnp.ones((2, 3, 4))
+    backend = mock.Mock(return_value=(inputs, None, jnp.int32(6), None))
+    te_moe = SimpleNamespace(moe=backend, RouterComputationInfo=SimpleNamespace, RoutingMapInfo=SimpleNamespace)
+    modules = {
+        "transformer_engine": mock.MagicMock(),
+        "transformer_engine.jax": SimpleNamespace(moe=te_moe),
+        "transformer_engine.jax.sharding": SimpleNamespace(MeshResource=SimpleNamespace),
+    }
+    with (
+        mock.patch.dict("sys.modules", modules),
+        mock.patch.object(moe, "_get_te_moe_checkpoint_kwargs", return_value={}),
+        mock.patch.object(moe, "_get_te_moe_weight_layout_kwargs", return_value={}),
+        mock.patch.object(moe.max_utils, "get_te_moe_recv_capacity_per_rank", return_value=64),
+    ):
+      args = (layer, inputs, None, None, None, None, None, None)
+      result = moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
+      np.testing.assert_array_equal(result[0], inputs)
+      info = backend.call_args.kwargs["router_info"]
+      expected_weights, expected_indices = layer.get_topk(*gate(inputs, routing_key=layer.fixed_routing_key[...]))
+      np.testing.assert_array_equal(info.routing_indices, expected_indices)
+      np.testing.assert_allclose(info.routing_weights, expected_weights)
+      self.assertFalse(backend.call_args.kwargs["collect_expert_counts"])
+      self.assertTrue(np.all(np.diff(np.sort(np.asarray(info.routing_indices), axis=-1), axis=-1) > 0))
+      for missing in ("RoutingMapInfo", "RouterComputationInfo"):
+        with self.subTest(missing=missing):
+          saved = getattr(te_moe, missing)
+          delattr(te_moe, missing)
+          with self.assertRaisesRegex(ImportError, "RoutingMapInfo"):
+            moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
+          setattr(te_moe, missing, saved)
+
+  def test_rejects_forced_expert_indices(self):
+    layer = SimpleNamespace(config=SimpleNamespace(dtype=jnp.float32, te_moe_block=True, use_random_routing=True))
+    with self.assertRaisesRegex(ValueError, "forced expert indices"):
+      # Exercise the guard without constructing GPU-dependent expert weights.
+      # pylint: disable=unnecessary-dunder-call
+      moe.RoutedMoE.__call__(layer, jnp.ones((1, 2, 4)), forced_routed_experts=jnp.zeros((1, 2, 2), jnp.int32))
+
+  def test_straight_through_gradient(self):
+    logits = jnp.ones((8, 16))
+    noise = jax.random.normal(jax.random.key(7), logits.shape)
+    cotangent = jnp.arange(logits.size, dtype=jnp.float32).reshape(logits.shape)
+    result, pullback = jax.vjp(moe._replace_router_logits, logits, noise)  # pylint: disable=protected-access
+    grad_logits, grad_noise = pullback(cotangent)
+    np.testing.assert_array_equal(result, noise)
+    np.testing.assert_array_equal(grad_logits, cotangent)
+    np.testing.assert_array_equal(grad_noise, jnp.zeros_like(noise))
+
+  def test_fixed_layer_keys_and_remat(self):
+    layer_keys = jax.random.split(jax.random.key(7), 3)
+    keys = jax.vmap(lambda key: jax.random.fold_in(key, moe.ROUTING_RNG_TAG))(layer_keys)
+
+    def forward(logits, key):
+      noise = jax.random.normal(key, logits.shape)
+      return jnp.sum(jnp.square(moe._replace_router_logits(logits, noise)))  # pylint: disable=protected-access
+
+    logits = jnp.ones((8, 16))
+    samples = jax.vmap(lambda key: jax.random.normal(key, logits.shape))(keys)
+    np.testing.assert_array_equal(samples[0], jax.random.normal(keys[0], logits.shape))
+    self.assertFalse(np.array_equal(samples[0], samples[1]))
+    plain = jax.value_and_grad(forward)(logits, keys[0])
+    rematted = jax.jit(jax.value_and_grad(jax.checkpoint(forward)))(logits, keys[0])
+    for expected, actual in zip(plain, rematted):
+      np.testing.assert_allclose(actual, expected, rtol=1e-6)
+
+
 def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
   """
   Compute the relative norm difference between two pytrees and enforce threshold.
