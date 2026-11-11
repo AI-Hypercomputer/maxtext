@@ -14,13 +14,8 @@
 
 """Fast standalone AOT compiler for the Lineage DeepSeek-V3 train step.
 
-Usage (from the repo root, with `src` on PYTHONPATH):
-  python -m maxtext.experimental.lineage.dsv3_aot_compile \
-      src/maxtext/configs/base.yml model_name=deepseek3-671b-lineage \
-      compile_topology=tpu7x:4x8x8 ...
-
-Replaces `maxtext.trainers.pre_train.train_compile` for Lineage DSv3 AOT
-compilation verification while preserving identical HLO,
+Replaces `//third_party/py/maxtext/src/maxtext/trainers:train_compile` for
+Lineage DSv3 AOT compilation verification while preserving identical HLO,
 parameter/optimizer shardings, and memory analysis output:
   1. Disables runtime `jaxtyping` + `typeguard` checks during lowering.
   2. Loads MaxText YAML + CLI configs directly with PyYAML without importing
@@ -101,6 +96,7 @@ def _resolve_config_path(raw_path: str) -> str:
   candidates = [
       raw_path,
       os.path.join(repo_root, raw_path),
+      os.path.join(repo_root, raw_path.removeprefix("third_party/py/maxtext/")),
       os.path.join(_CONFIGS_DIR, raw_path),
       os.path.join(_CONFIGS_DIR, os.path.basename(raw_path)),
   ]
@@ -516,7 +512,7 @@ def validate_supported(cfg: Any) -> None:
 
   get = functools.partial(getattr, cfg)
   require(get("mtp_num_layers", 0) >= 0, "mtp_num_layers must be >= 0")
-  require(get("shared_experts", 1) == 1, "shared_experts must be 1")
+  require(get("shared_experts", 1) in (0, 1), "shared_experts must be 0 or 1")
   require(
       not get("quantization", None),
       "quantization (AQT/Qwix) is unsupported; use lineage_quantization",
@@ -643,6 +639,7 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       router_bias_dtype=jnp.dtype(router_bias_dtype),
       head_dot_in_fp32=bool(getattr(cfg, "logits_dot_in_fp32", False)),
       cast_logits_to_fp32=bool(getattr(cfg, "cast_logits_to_fp32", True)),
+      num_shared_experts=int(getattr(cfg, "shared_experts", 1)),
   )
   sharding = dsv3_sharding.sharding_config(mesh, variant=getattr(cfg, "lineage_sharding_variant", None) or None)
   if cfg.capacity_factor <= 0:
@@ -669,6 +666,7 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       quant=quant,
       max_async_overlap_transform=bool(getattr(cfg, "lineage_max_async_overlap_transform", True)),
       expert_permutation=("none" if expert_permutation is None else str(expert_permutation)),
+      microbatch_split=str(getattr(cfg, "lineage_microbatch_split", None) or "batch"),
   )
   routed_bias_update_rate = float(cfg.routed_bias_update_rate) if getattr(cfg, "routed_bias", False) else 0.0
   megatron_seq_aux_loss = bool(

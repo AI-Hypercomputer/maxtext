@@ -856,9 +856,7 @@ def gate_bwd_fused(
   if dw_acc is not None:
     want_shape = (num_experts, size_d, size_f)
     if dw_acc.shape != want_shape or dw_acc.dtype != dw_dtype:
-      raise ValueError(
-          f"dw_acc must have shape {want_shape} and dtype {dw_dtype}; got" f" {dw_acc.shape}/{dw_acc.dtype}."
-      )
+      raise ValueError(f"dw_acc must have shape {want_shape} and dtype {dw_dtype}; got" f" {dw_acc.shape}/{dw_acc.dtype}.")
 
   if vmem_limit_bytes is None:
     vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.98)

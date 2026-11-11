@@ -152,8 +152,11 @@ def dsv3_shared_expert(
     w: Shared expert weights.
 
   Returns:
-    Output tokens with the same shape as the input.
+    Output tokens with the same shape as the input; zeros if `w` holds no
+    weights (a model without a shared expert).
   """
+  if w.gate_0 is None and w.gate_1 is None and w.linear is None:
+    return jnp.zeros_like(x)
   assert w.gate_0 is not None
   assert w.gate_1 is not None
   assert w.linear is not None

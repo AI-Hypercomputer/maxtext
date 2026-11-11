@@ -991,9 +991,7 @@ def inner_kernel(
               if cfgs.transpose_rhs:
                 raise NotImplementedError("should_dequantize_after_matmul is not supported with" " transpose_rhs.")
               b_id = (start_k + sub_k) // rhs_qbs  # pyrefly: ignore[unsupported-operation]
-              rhs_scale_replicated = tiled_rhs_ref.get_scale(replicate_size=bucket_m)[
-                  b_id, :, start_n : start_n + col_size
-              ]
+              rhs_scale_replicated = tiled_rhs_ref.get_scale(replicate_size=bucket_m)[b_id, :, start_n : start_n + col_size]
               sub_acc *= rhs_scale_replicated.astype(acc_ref.dtype)
 
             block_acc = sub_acc if block_acc is None else block_acc + sub_acc
@@ -1478,9 +1476,7 @@ def kernel_main(
   pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
 
   if cfgs.zero_init:
-    zero_out_end(
-        out_ref.out, semaphore_ref, zero_size, dims=cfgs.dims
-    )  # pyrefly: ignore[bad-argument-type, unbound-name]
+    zero_out_end(out_ref.out, semaphore_ref, zero_size, dims=cfgs.dims)  # pyrefly: ignore[bad-argument-type, unbound-name]
 
 
 def _kernel_main_into_out(
@@ -1724,9 +1720,7 @@ def calculate_tiling(
 
   if tile_n == 0 or tile_k == 0:
     final_estimate = _gmm_vmem_estimate(tile_m, tile_n, tile_k)
-    raise ValueError(
-        f"Could not find valid tile sizes for {dims=} and" f" {final_estimate=} (limit: {vmem_limit_bytes})."
-    )
+    raise ValueError(f"Could not find valid tile sizes for {dims=} and" f" {final_estimate=} (limit: {vmem_limit_bytes}).")
 
   # TODO(alynie, kyuyeunk): max number of bucket was chosen empirically.
   # Revisit the value to be based on number of instruction memory size.
@@ -2312,9 +2306,7 @@ def gmm_v2(
   if gather_src is not None:
     # Shape-only stand-in for the gathered [padded_size_m, D0, 128] lhs, for
     # the configs; its padding rows are never gathered.
-    lhs = jax.ShapeDtypeStruct(  # pyrefly: ignore[bad-assignment]
-        (padded_size_m, *gather_src.shape[1:]), gather_src.dtype
-    )
+    lhs = jax.ShapeDtypeStruct((padded_size_m, *gather_src.shape[1:]), gather_src.dtype)  # pyrefly: ignore[bad-assignment]
     if glu_coeffs is not None and padded_size_m != size_m:
       glu_coeffs = jnp.pad(glu_coeffs, ((0, padded_size_m - size_m), (0, 0)))
   elif padded_size_m != size_m:

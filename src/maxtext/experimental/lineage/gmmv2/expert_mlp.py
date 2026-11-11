@@ -1162,12 +1162,12 @@ class WeightOnlyFp8Gmm:
   implements neither the fused GLU nor the gathering kernels.
 
   Attributes:
-    base: GMMs to run.
+    base: GMMs to run (an `ExpertGmm3d` or another `dsv3_experts.GmmFn`).
     weight_scale: Static per-tensor scale of the fp8 weights.
     grad_dtype: Dtype of the weight gradients.
   """
 
-  base: ExpertGmm3d
+  base: Any
   weight_scale: float
   grad_dtype: Any = jnp.float32
 

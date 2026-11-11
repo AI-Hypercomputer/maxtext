@@ -294,9 +294,7 @@ def make_tgmm_configs(
           " sub-channel quant blocks along the m (reduction) dimension."
           " Sub-channel quantization is not implemented."
       )
-    assert rhs_scale.shape == (1, 1, size_n), (
-        "expecting rhs_scale.shape to be (1, 1, size_n) but got" f" {rhs_scale.shape}"
-    )
+    assert rhs_scale.shape == (1, 1, size_n), "expecting rhs_scale.shape to be (1, 1, size_n) but got" f" {rhs_scale.shape}"
   if (lhs_scale is None) != (lhs_quant_dtype is None):
     raise ValueError("lhs_scale and lhs_quant_dtype must be given together.")
   if lhs_scale is not None and lhs_scale.shape != (1, 1):

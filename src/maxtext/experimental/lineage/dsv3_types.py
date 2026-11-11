@@ -86,6 +86,9 @@ class DSv3MLAResiduals(NamedTuple):
   kv_down: jax.Array
   context: jax.Array
   splash_out: jax.Array
+  # Microbatch 0's local K/V shards that microbatch 1 attended to, with
+  # sequence-split microbatches (see `dsv3_mla.SeqSplitSplash`).
+  kv_prefix: Any = None
 
 
 class DSv3MoEResiduals(NamedTuple):
@@ -602,9 +605,7 @@ def init_dsv3_moe_routed_expert_weights(
         and len(out_shardings.gate.spec) == expected_flat_rank
     )
     gate_shape = (num_experts * emb_dim, expert_hidden_dim) if flat_routed else (num_experts, emb_dim, expert_hidden_dim)
-    linear_shape = (
-        (num_experts * expert_hidden_dim, emb_dim) if flat_routed else (num_experts, expert_hidden_dim, emb_dim)
-    )
+    linear_shape = (num_experts * expert_hidden_dim, emb_dim) if flat_routed else (num_experts, expert_hidden_dim, emb_dim)
     gate_0 = k_init(
         subkeys[0],
         add_layer_dim(gate_shape),
@@ -1011,7 +1012,10 @@ def init_dsv3_weights(
   out_shardings = out_shardings if out_shardings else DSv3WeightsPytree[ShardingType]()
   subkeys = jax.random.split(rng, 2)
   return DSv3WeightsPytree[ArrayType](
-      dense=init_dsv3_dense_layer_weights(
+      # No dense layer weights for an all-MoE model.
+      dense=DSv3DenseLayerWeightsPytree[ArrayType]()
+      if num_dense_layers == 0
+      else init_dsv3_dense_layer_weights(
           subkeys[0],
           emb_dim,
           cq_dim,

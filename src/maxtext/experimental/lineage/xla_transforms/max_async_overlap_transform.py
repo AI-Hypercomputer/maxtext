@@ -421,9 +421,7 @@ def find_async_pairs(graph: ScheduleGraph) -> list[AsyncPair]:
     operands = graph.operands[name]
     expected = _DONE_TO_START_OPCODE[opcode]
     if not operands or graph.opcodes.get(operands[0]) != expected:
-      raise ScheduleTransformError(
-          f"Async done {name} ({opcode}) has no {expected} as operand 0;" f" operands={operands}."
-      )
+      raise ScheduleTransformError(f"Async done {name} ({opcode}) has no {expected} as operand 0;" f" operands={operands}.")
     pairs.append(AsyncPair(start=operands[0], done=name))
   return pairs
 
@@ -1745,9 +1743,7 @@ def restamp_send_recv_aggregation(serialized_hlo: bytes, computation_names: Iter
     dones = {
         inst.name
         for inst in sequence
-        if inst.opcode in ("send-done", "recv-done")
-        and inst.operand_ids
-        and name_of.get(inst.operand_ids[0]) in transfers
+        if inst.opcode in ("send-done", "recv-done") and inst.operand_ids and name_of.get(inst.operand_ids[0]) in transfers
     }
     free = {
         inst.name

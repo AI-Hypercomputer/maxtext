@@ -1362,9 +1362,7 @@ def linear_bwd_wgrad(
   scalars = (gs, tile_exps.astype(jnp.int32), dy_scale_scalar)
   flops = 2 * size_m * size_d * size_f
   bytes_accessed = (
-      num_d * size_m * size_f
-      + size_m * size_d
-      + num_experts * size_f * size_d * dw_dtype.itemsize * (2 if has_acc else 1)
+      num_d * size_m * size_f + size_m * size_d + num_experts * size_f * size_d * dw_dtype.itemsize * (2 if has_acc else 1)
   )
   dw = pl.pallas_call(
       functools.partial(_wgrad_kernel, st=st),

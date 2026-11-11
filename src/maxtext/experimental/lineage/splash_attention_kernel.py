@@ -475,15 +475,12 @@ class SplashConfig:
       if self.block_q % self.dropout_block_q != 0:
         raise ValueError(f"block_q={self.block_q} must be a multiple of" f" dropout_block_q={self.dropout_block_q}.")
       if self.block_q_dkv is not None and self.block_q_dkv % self.dropout_block_q != 0:
-        raise ValueError(
-            f"block_q_dkv={self.block_q_dkv} must be a multiple of" f" dropout_block_q={self.dropout_block_q}."
-        )
+        raise ValueError(f"block_q_dkv={self.block_q_dkv} must be a multiple of" f" dropout_block_q={self.dropout_block_q}.")
 
       assert self.block_kv_compute is not None
       if self.block_kv_compute % self.dropout_block_kv != 0:
         raise ValueError(
-            f"block_kv_compute={self.block_kv_compute} must be a multiple of"
-            f" dropout_block_kv={self.dropout_block_kv}."
+            f"block_kv_compute={self.block_kv_compute} must be a multiple of" f" dropout_block_kv={self.dropout_block_kv}."
         )
       if self.block_kv_dkv_compute is not None and self.block_kv_dkv_compute % self.dropout_block_kv != 0:
         raise ValueError(
@@ -515,9 +512,7 @@ class SplashConfig:
       # offset 0 are checked in _make_splash_attention.
       assert self.block_kv_compute is not None
       if self.block_q != self.block_kv:
-        raise ValueError(
-            "qk_diag_skip requires block_q == block_kv in the forward; got" f" {self.block_q}/{self.block_kv}."
-        )
+        raise ValueError("qk_diag_skip requires block_q == block_kv in the forward; got" f" {self.block_q}/{self.block_kv}.")
       if self.block_kv % self.block_kv_compute:
         raise ValueError(
             f"qk_diag_skip requires block_kv_compute={self.block_kv_compute}" f" to divide block_kv={self.block_kv}."
@@ -534,8 +529,7 @@ class SplashConfig:
           )
         if self.block_q_dkv % dkv_grid[0] or self.block_kv_dkv_compute % dkv_grid[1]:
           raise ValueError(
-              f"dkv qk_diag_grid {dkv_grid} must divide the dkv blocks"
-              f" {self.block_q_dkv}/{self.block_kv_dkv_compute}."
+              f"dkv qk_diag_grid {dkv_grid} must divide the dkv blocks" f" {self.block_q_dkv}/{self.block_kv_dkv_compute}."
           )
 
     if self.sv_diag_skip:
@@ -834,9 +828,7 @@ def flash_attention_kernel(
 
     exp = jnp.exp2 if config.use_base2_exp else jnp.exp
     if max_logit_estimate is None:
-      s_curr = exp(
-          qk - jnp.tile(m_next, (1, 1, bkv_repeats))
-      )  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+      s_curr = exp(qk - jnp.tile(m_next, (1, 1, bkv_repeats)))  # pyrefly: ignore[bad-argument-type, unsupported-operation]
     else:
       s_curr = exp(qk - max_logit_estimate)  # pyrefly: ignore[unsupported-operation]
     assert s_curr.shape == (num_stacked_q_heads, bq, bkv_compute)
@@ -1020,9 +1012,7 @@ def flash_attention_kernel(
       m_curr = qk.max(axis=-1)[..., None]  # pyrefly: ignore[missing-attribute]
       m_next = jnp.maximum(m_prev, m_curr)
       bkv_repeats = bkv_compute // NUM_LANES
-      s_curr = exp(
-          qk - jnp.tile(m_next, (1, 1, bkv_repeats))
-      )  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+      s_curr = exp(qk - jnp.tile(m_next, (1, 1, bkv_repeats)))  # pyrefly: ignore[bad-argument-type, unsupported-operation]
     else:
       m_next = None
       s_curr = exp(qk - max_logit_estimate)  # pyrefly: ignore[unsupported-operation]
@@ -2570,9 +2560,7 @@ def _splash_attention_bwd_dkv(
     dq_shape = jax.ShapeDtypeStruct(q.shape, _unquantized_dtype(q))
   elif dq_reduction_steps == 3:
     dq_index_map = (
-        (lambda h, g, r, c, *_: (g % 3, h, to_i32(c[g]), 0))
-        if dynamic_grid
-        else unravel(lambda h, i, j: (j % 3, h, i, 0))
+        (lambda h, g, r, c, *_: (g % 3, h, to_i32(c[g]), 0)) if dynamic_grid else unravel(lambda h, i, j: (j % 3, h, i, 0))
     )
     dq_spec = pl.BlockSpec((None, None, bq, head_dim_qk), dq_index_map)
     dq_alias_spec = dq_spec

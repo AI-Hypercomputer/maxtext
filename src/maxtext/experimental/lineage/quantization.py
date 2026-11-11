@@ -168,6 +168,17 @@ class QuantConfig:
     fsdp_weights: If set, fp8 all-gathers of the routed expert weights with bf16
       compute and f32 gradient reductions (see `FsdpWeightQuantRule`). Exclusive
       with `routed_experts` and `mla`.
+    ep_reduce_dtype: If set, the expert-parallel token reductions run in this
+      dtype (e.g. f32): the top-k sums of the expert outputs and of the token
+        gradients are accumulated across MoE chunks in it, and the forward
+        combine reduce-scatter and the backward dispatch reduce-scatter send it;
+        their results are cast back to the activation dtype. The dispatch
+        all-gather and the backward all-gather of the output gradients stay in
+        the activation dtype.
+    grad_reduce_dtype: If set, the gradients of the embedding table, the LM head
+      kernel and the final norm scale, whose forward passes run in the
+      activation dtype, are accumulated and reduced in this dtype (only
+      `jnp.float32` is supported; see `ops.f32_grad`).
   """
 
   routed_experts: GmmQuantRule | None = None
@@ -175,8 +186,12 @@ class QuantConfig:
   combine_qtype: Any | None = None
   combine_per_hop_scaling: bool = False
   fsdp_weights: FsdpWeightQuantRule | None = None
+  ep_reduce_dtype: Any | None = None
+  grad_reduce_dtype: Any | None = None
 
   def __post_init__(self):
+    if self.grad_reduce_dtype not in (None, jnp.float32):
+      raise ValueError("grad_reduce_dtype must be None or jnp.float32, got" f" {self.grad_reduce_dtype!r}.")
     if self.fsdp_weights is not None and (self.routed_experts is not None or self.mla is not None):
       raise ValueError("fsdp_weights is exclusive with routed_experts and mla quantization.")
     if self.combine_qtype is not None and self.combine_qtype != jnp.float8_e4m3fn:
@@ -205,7 +220,14 @@ FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP = dataclasses.replace(
     combine_per_hop_scaling=True,
 )
 # bf16 compute, fp8 routed expert weight all-gathers, f32 gradient reductions.
-FP8_FSDP_AG = QuantConfig(fsdp_weights=FsdpWeightQuantRule())
+FP8_FSDP_AG = QuantConfig(
+    fsdp_weights=FsdpWeightQuantRule(),
+    ep_reduce_dtype=jnp.float32,
+    grad_reduce_dtype=jnp.float32,
+)
+# `FP8_FSDP_AG` with the expert-parallel token reductions in the activation
+# dtype (bf16), e.g. to compare the f32 and bf16 EP reduce-scatters.
+FP8_FSDP_AG_BF16_EP = dataclasses.replace(FP8_FSDP_AG, ep_reduce_dtype=None)
 
 
 def static_quantize(x: jax.Array, qtype: Any, scale: float) -> jax.Array:
@@ -283,9 +305,7 @@ def _xla_absmax_quantize(
   return xq, scale
 
 
-def absmax_quantize(
-    x: jax.Array, qtype: Any, num_valid_rows: jax.Array | int | None = None
-) -> tuple[jax.Array, jax.Array]:
+def absmax_quantize(x: jax.Array, qtype: Any, num_valid_rows: jax.Array | int | None = None) -> tuple[jax.Array, jax.Array]:
   """Dynamically quantizes x with one scale from its first `num_valid_rows`.
 
   Rows past `num_valid_rows` are padding (possibly garbage) and do not affect

@@ -137,26 +137,27 @@ def dsv3(
     )
     expert_permutations = expert_permutations[:num_sparse_layers]
 
-  x = dsv3_dense_layers.dsv3_dense_layers(
-      x,
-      w.dense,
-      yarn_freqs,
-      splash_kernel,
-      qk_head_dim=qk_head_dim,
-      rope_head_dim=rope_head_dim,
-      num_query_heads=num_query_heads,
-      mscale=mscale,
-      kv_lora_rank=kv_lora_rank,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      rope_factor=rope_factor,
-      mesh=mesh,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      axis_mapping=axis_mapping,
-      segment_ids=segment_ids,
-      quant=quant,
-  )
+  if jax.tree.leaves(w.dense):  # Without dense weights (all-MoE), skip.
+    x = dsv3_dense_layers.dsv3_dense_layers(
+        x,
+        w.dense,
+        yarn_freqs,
+        splash_kernel,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        num_query_heads=num_query_heads,
+        mscale=mscale,
+        kv_lora_rank=kv_lora_rank,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mesh=mesh,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        axis_mapping=axis_mapping,
+        segment_ids=segment_ids,
+        quant=quant,
+    )
   x, aux = dsv3_sparse_layers.dsv3_sparse_layers(
       x,
       w.sparse,

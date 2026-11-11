@@ -32,11 +32,13 @@ and `out_sharding`, as the Lineage layers expect.
 from collections.abc import Sequence
 import dataclasses
 import functools
+import math
 from typing import Any, Generic, NamedTuple, TypeVar
 
 import jax
 import jax.numpy as jnp
 import jaxtyping as jt
+import numpy as np
 import typeguard
 
 from maxtext.experimental.lineage import dsv3
@@ -205,6 +207,99 @@ def with_router_bias(
   )
 
 
+def maybe_without_dense_layers(w: dsv3_types.DSv3WeightsPytree, cfg: dsv3_config.DSv3Config) -> dsv3_types.DSv3WeightsPytree:
+  """Returns `w` without dense layer weights if `cfg` has no dense layers.
+
+  The dense layer weights (or shardings) are then all None, and `dsv3.dsv3`
+  skips the dense layer scan (an all-MoE model).
+  """
+  if cfg.model.num_dense_layers:
+    return w
+  return dataclasses.replace(w, dense=dsv3_types.DSv3DenseLayerWeightsPytree())
+
+
+def maybe_without_shared_expert(
+    w: dsv3_types.DSv3SparseLayerWeightsPytree, cfg: dsv3_config.DSv3Config
+) -> dsv3_types.DSv3SparseLayerWeightsPytree:
+  """Returns `w` without shared expert weights if `cfg` has no shared expert.
+
+  The shared expert weights (or shardings) are then all None, and
+  `dsv3_experts.dsv3_shared_expert` contributes zeros.
+  """
+  if cfg.model.num_shared_experts:
+    return w
+  return dataclasses.replace(
+      w,
+      moe=dataclasses.replace(w.moe, shared=dsv3_types.DSv3MoESharedExpertWeightsPytree()),
+  )
+
+
+def _grad_reduce_dtype(cfg: dsv3_config.DSv3Config) -> Any:
+  """`QuantConfig.grad_reduce_dtype` of `cfg`, or None."""
+  return getattr(cfg.kernels.quant, "grad_reduce_dtype", None)
+
+
+def seq_split_permutation(seq_len: int, cp: int) -> np.ndarray:
+  """Token order of sequence-split microbatches (see `dsv3_mla.SeqSplitSplash`).
+
+  The sequence's halves are each cut into `cp` chunks, and CP rank i's local
+  sequence shard is [chunk i of half 0, chunk i of half 1]. Splitting every
+  local shard in two then gives microbatch 0 the first half of the sequence
+  and microbatch 1 the second half, each in order across the CP ranks.
+
+  Args:
+    seq_len: Sequence length.
+    cp: Number of context-parallel (sequence) shards.
+
+  Returns:
+    `perm` such that the permuted sequence is `x[..., perm]`.
+  """
+  if seq_len % (2 * cp):
+    raise ValueError(f"seq_len {seq_len} must be divisible by 2 * cp = {2*cp}.")
+  idx = np.arange(seq_len).reshape(2, cp, seq_len // (2 * cp))
+  return idx.transpose(1, 0, 2).reshape(-1)
+
+
+def seq_split_permute_batch(
+    batch: DSv3Batch,
+    cfg: dsv3_config.DSv3Config,
+    mesh: jax.sharding.Mesh,
+) -> DSv3Batch:
+  """Permutes every per-token field of `batch` by `seq_split_permutation`.
+
+  The loss sums over tokens, so it is unchanged; the positions (and hence
+  RoPE) travel with the tokens, and the causal masks of the microbatches'
+  splash kernels are those of the original order.
+
+  Args:
+    batch: The batch, in the original token order.
+    cfg: Model config.
+    mesh: The device mesh.
+
+  Returns:
+    The batch in the sequence-split token order, except for the segment ids,
+    which stay in the original order.
+  """
+  attention_axes = cfg.sharding.axis_mapping.get("attention", ())
+  if isinstance(attention_axes, str):
+    attention_axes = (attention_axes,)
+  cp = math.prod(mesh.shape[a] for a in attention_axes)
+  perm = seq_split_permutation(batch.inputs.shape[1], cp)
+
+  def _permute(x):
+    # The fields may already be sharded on the sequence; keep their sharding.
+    return x.at[:, perm].get(out_sharding=jax.typeof(x).sharding)
+
+  # The segment ids are only used by the attention masks, which take them in
+  # the original order (`dsv3_mla.seq_split_segment_ids`).
+  return batch._replace(
+      inputs=_permute(batch.inputs),
+      targets=_permute(batch.targets),
+      positions=_permute(batch.positions),
+      target_mask=_permute(batch.target_mask),
+  )
+
+
 def init_kernels(
     positions: jax.Array,
     cfg: dsv3_config.DSv3Config,
@@ -235,7 +330,8 @@ def init_kernels(
       axis_mapping=s.axis_mapping,
       dtype=m.dtype,
   )
-  splash_kernel = dsv3_mla.init_splash_kernel(
+  init_splash = functools.partial(
+      dsv3_mla.init_splash_kernel,
       sa_block_q=k.sa_block_q,
       sa_block_kv=k.sa_block_kv,
       sa_block_kv_compute=k.sa_block_kv_compute,
@@ -245,7 +341,6 @@ def init_kernels(
       sa_q_layout=k.sa_q_layout,
       sa_k_layout=k.sa_k_layout,
       sa_v_layout=k.sa_v_layout,
-      max_target_length=k.max_target_length,
       num_query_heads=m.num_query_heads,
       kernel_out_spec=SPLASH_KERNEL_OUT_SPEC,
       mesh=mesh,
@@ -257,6 +352,20 @@ def init_kernels(
       dq_reduction_steps=k.dq_reduction_steps,
       q_prescaled_log2e=(bool(getattr(getattr(k.quant, "mla", None), "q_prescaled_log2e", False)) or k.q_prescaled_log2e),
   )
+  if k.microbatch_split == "seq":
+    # Microbatch 0 attends causally within the first half of every sequence;
+    # microbatch 1's queries (the second half) attend to all keys up to them.
+    half = k.max_target_length // 2
+    splash_kernel = dsv3_mla.SeqSplitSplash(
+        mb0=init_splash(max_target_length=half),
+        mb1=init_splash(
+            max_target_length=half,
+            kv_target_length=k.max_target_length,
+            causal_offset=half,
+        ),
+    )
+  else:
+    splash_kernel = init_splash(max_target_length=k.max_target_length)
   return yarn_freqs, splash_kernel
 
 
@@ -372,10 +481,19 @@ def dsv3_param_shardings(cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -
   mtp_layer = named_tree(specs.mtp)
   params = DSv3Params[dsv3_types.ShardingType](
       embed=dsv3_embed.DSv3EmbedWeightsPytree(table=named(specs.embed_table)),
-      decoder=dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, None)),
+      decoder=maybe_without_dense_layers(
+          dataclasses.replace(
+              decoder,
+              sparse=maybe_without_shared_expert(with_router_bias(decoder.sparse, None), cfg),
+          ),
+          cfg,
+      ),
       mtp=tuple(
           dsv3_mtp_block.DSv3MTPDepthWeightsPytree(
-              layer=dataclasses.replace(mtp_layer, sparse=with_router_bias(mtp_layer.sparse, None)),
+              layer=dataclasses.replace(
+                  mtp_layer,
+                  sparse=maybe_without_shared_expert(with_router_bias(mtp_layer.sparse, None), cfg),
+              ),
               final_norm_scale=named(specs.final_norm_scale),
           )
           for _ in range(m.num_mtp_layers)
@@ -492,7 +610,10 @@ def init_dsv3_params(
     )
     mtp.append(
         dsv3_mtp_block.DSv3MTPDepthWeightsPytree(
-            layer=dataclasses.replace(layer, sparse=with_router_bias(layer.sparse, None)),
+            layer=dataclasses.replace(
+                layer,
+                sparse=maybe_without_shared_expert(with_router_bias(layer.sparse, None), cfg),
+            ),
             final_norm_scale=dsv3_types.default_scale_init(
                 scale_key,
                 (m.emb_dim,),
@@ -506,7 +627,13 @@ def init_dsv3_params(
   router_bias = jax.reshard(decoder.sparse.moe.router.bias.astype(m.router_bias_dtype), replicated)
   params = DSv3Params[dsv3_types.ArrayType](
       embed=embed,
-      decoder=dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, None)),
+      decoder=maybe_without_dense_layers(
+          dataclasses.replace(
+              decoder,
+              sparse=maybe_without_shared_expert(with_router_bias(decoder.sparse, None), cfg),
+          ),
+          cfg,
+      ),
       mtp=tuple(mtp),
       head=head,
   )
@@ -560,6 +687,7 @@ def dsv3_forward(
             params.embed.table,
             dtype=m.dtype,
             iota_embed=m.iota_embed,
+            grad_dtype=_grad_reduce_dtype(cfg),
         ),
         _named_sharding(s.activation, cfg, mesh),
     )
@@ -627,6 +755,7 @@ def dsv3_lm_head(
       dot_in_fp32=m.head_dot_in_fp32,
       cast_logits_to_fp32=m.cast_logits_to_fp32,
       out_sharding=out_sharding,
+      grad_dtype=_grad_reduce_dtype(cfg),
   )
 
 
@@ -651,7 +780,12 @@ def dsv3_logits(
     The logits `[batch, seq, vocab]`.
   """
   assert params.head.final_norm_scale is not None
-  normed = dsv3_embed.final_norm(hidden, params.head.final_norm_scale, epsilon=cfg.model.norm_epsilon)
+  normed = dsv3_embed.final_norm(
+      hidden,
+      params.head.final_norm_scale,
+      epsilon=cfg.model.norm_epsilon,
+      grad_dtype=_grad_reduce_dtype(cfg),
+  )
   return dsv3_lm_head(params, normed, cfg, mesh=mesh)
 
 
@@ -801,6 +935,12 @@ def dsv3_loss_and_aux(
   if not train:
     cfg, params = eval_config_and_params(cfg, params, mesh)
   m, t, s = cfg.model, cfg.training, cfg.sharding
+  if cfg.kernels.microbatch_split == "seq":
+    if m.num_mtp_layers:
+      raise NotImplementedError(
+          "Sequence-split microbatches do not support MTP (it shifts tokens" " along the permuted sequence)."
+      )
+    batch = seq_split_permute_batch(batch, cfg, mesh)
   token_sharding = _named_sharding(s.token, cfg, mesh)
   # Per-token arrays share the logits' batch / sequence layout.
   inputs = jax.reshard(batch.inputs, token_sharding)
@@ -822,11 +962,17 @@ def dsv3_loss_and_aux(
             kernel=dsv3_embed.collect_head_kernel(
                 params.head.kernel,
                 dtype=jnp.float32 if m.head_dot_in_fp32 else m.dtype,
+                grad_dtype=_grad_reduce_dtype(cfg),
             ),
         ),
     )
   assert params.head.final_norm_scale is not None
-  normed_hidden = dsv3_embed.final_norm(fwd.hidden, params.head.final_norm_scale, epsilon=m.norm_epsilon)
+  normed_hidden = dsv3_embed.final_norm(
+      fwd.hidden,
+      params.head.final_norm_scale,
+      epsilon=m.norm_epsilon,
+      grad_dtype=_grad_reduce_dtype(cfg),
+  )
   logits = dsv3_lm_head(params, normed_hidden, cfg, mesh=mesh)
   with jax.named_scope("main_loss"):
     sums = dsv3_loss.masked_token_loss(
@@ -880,6 +1026,7 @@ def dsv3_loss_and_aux(
               params.embed.table,
               dtype=m.dtype,
               iota_embed=m.iota_embed,
+              grad_dtype=_grad_reduce_dtype(cfg),
           ),
           _named_sharding(s.activation, cfg, mesh),
       )

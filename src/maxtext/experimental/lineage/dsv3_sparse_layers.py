@@ -24,6 +24,7 @@ import jaxtyping as jt
 import typeguard
 
 from maxtext.experimental.lineage import dsv3_expert_shuffle
+from maxtext.experimental.lineage import dsv3_mla
 from maxtext.experimental.lineage import dsv3_sparse_layer
 from maxtext.experimental.lineage import dsv3_types
 from maxtext.experimental.lineage import ops
@@ -190,9 +191,22 @@ def dsv3_sparse_layers(
     dsv3_expert_shuffle.validate_expert_permutations(expert_permutations, num_experts=num_experts, num_layers=num_layers)
     if expert_permutations.shape[0] != num_layers:
       raise ValueError(f"expert_permutations has {expert_permutations.shape[0]} rows," f" expected {num_layers}")
-  mb0, mb1 = ops.split_microbatches(x, mesh=mesh)
-  yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
-  segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
+  # Sequence-split microbatches split every local sequence in two (see
+  # `dsv3_mla.SeqSplitSplash`); otherwise the local batch is split.
+  mb_axis = 1 if dsv3_mla.is_seq_split(splash_kernel) else 0
+  mb0, mb1 = ops.split_microbatches(x, mesh=mesh, axis=mb_axis)
+  if mb_axis == 1:
+    # Each local sequence shard is split, so the per-token inputs must be
+    # sequence-sharded like x first.
+    yarn_freqs = ops.seq_shard_like(yarn_freqs, x)
+  yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh, axis=mb_axis)
+  if mb_axis == 1:
+    # The segment ids stay in the original token order; each microbatch's
+    # attention takes its query / key ids from them
+    # (`dsv3_mla.seq_split_segment_ids`).
+    segment_ids_0 = segment_ids_1 = segment_ids
+  else:
+    segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh, axis=mb_axis)
   fsdp_rule = quant.fsdp_weights if quant else None
   if fsdp_rule is not None:
     # The routed expert weights stay fp8 after their collection; the GMMs
@@ -468,5 +482,5 @@ def dsv3_sparse_layers(
       collect_fn_pre=collect_fn_pre,
       reduce_fn_pre=reduce_fn_pre,
   )
-  out = ops.merge_microbatches(out_mb0, out_mb1, mesh=mesh)
+  out = ops.merge_microbatches(out_mb0, out_mb1, mesh=mesh, axis=mb_axis)
   return out, aux

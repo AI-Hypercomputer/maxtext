@@ -18,18 +18,16 @@ from collections.abc import Mapping
 import dataclasses
 import functools
 import math
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import jax
 import jax.experimental.compute_on
 import jax.numpy as jnp
 import jaxtyping as jt
-
 try:
   from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
 except ImportError:
   from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
-
 import typeguard
 
 from maxtext.experimental.lineage import dsv3_types
@@ -1560,9 +1558,22 @@ def init_splash_kernel(
     diag_band_skip: bool = True,
     dq_reduction_steps: int | None = 1,
     q_prescaled_log2e: bool = False,
+    kv_target_length: int | None = None,
+    causal_offset: int = 0,
 ) -> Any:
-  """Initializes the Splash kernel with the given block sizes."""
+  """Initializes the Splash kernel with the given block sizes.
+
+  The mask is causal over `[max_target_length, kv_target_length]` (square by
+  default) with query i attending to keys `<= i + causal_offset`. A nonzero
+  offset (e.g. microbatch 1 of sequence-split microbatches, see
+  `SeqSplitSplash`) disables the causal-diagonal block skips, which assume a
+  pure causal mask.
+  """
   del num_query_heads
+  if kv_target_length is None:
+    kv_target_length = max_target_length
+  if causal_offset:
+    qk_diag_skip = sv_diag_skip = diag_band_skip = False
   physical_kernel_out_spec = ops.physical_pspec(kernel_out_spec, axis_mapping)
   kernel_out_sharding = jax.sharding.NamedSharding(mesh, physical_kernel_out_spec)
   seq_spec_dim = physical_kernel_out_spec[1]
@@ -1622,7 +1633,7 @@ def init_splash_kernel(
       dq_reduction_steps=effective_dq_reduction_steps,
       q_prescaled_log2e=q_prescaled_log2e,
   )
-  mask = tokamax_splash_mask.CausalMask(shape=(max_target_length, max_target_length))
+  mask = tokamax_splash_mask.CausalMask(shape=(max_target_length, kv_target_length), offset=causal_offset)
   splash_kernel = tokamax_splash_attention_kernel.make_splash_mha(
       mask=mask,
       q_seq_shards=q_seq_shards,
@@ -1649,15 +1660,28 @@ def init_splash_kernel(
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def splash_attention(
     q: jt.Num[jax.Array, "B T N QK_plus_R"],
-    k: jt.Num[jax.Array, "B T N QK_plus_R"],
-    v: jt.Num[jax.Array, "B T N V"],
+    k: jt.Num[jax.Array, "B S N QK_plus_R"],
+    v: jt.Num[jax.Array, "B S N V"],
     splash_kernel: Any,
-    segment_ids: jt.Num[jax.Array, "B T"] | None = None,
+    segment_ids: jt.Num[jax.Array, "B T"] | tokamax_splash_attention_kernel.SegmentIds | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "B T N V"],
     jt.Num[jax.Array, "B N T"],
 ]:
-  """Performs splash attention returning output and context."""
+  """Performs splash attention returning output and context.
+
+  Args:
+    q: Queries.
+    k: Keys.
+    v: Values.
+    splash_kernel: The splash kernel.
+    segment_ids: Optional packed-document segment ids `[B, T]` of the queries
+      and keys, or `SegmentIds` with separate query and key ids (when the keys
+      are not the queries' tokens, e.g. sequence-split microbatches).
+
+  Returns:
+    Tuple of (output, context).
+  """
   query = jnp.transpose(q, axes=(0, 2, 1, 3))
   key = jnp.transpose(k, axes=(0, 2, 1, 3))
   value = jnp.transpose(v, axes=(0, 2, 1, 3))
@@ -1674,7 +1698,10 @@ def splash_attention(
 
   if segment_ids is not None:
     segment_spec = jax.sharding.PartitionSpec(query_spec[0], None)
-    segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(q=segment_ids, kv=segment_ids)
+    if isinstance(segment_ids, tokamax_splash_attention_kernel.SegmentIds):
+      segment_ids_tuple = segment_ids
+    else:
+      segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(q=segment_ids, kv=segment_ids)
     segment_ids_in_spec = tokamax_splash_attention_kernel.SegmentIds(
         q=segment_spec,  # pyrefly: ignore[bad-argument-type]
         kv=segment_spec,  # pyrefly: ignore[bad-argument-type]
@@ -1725,16 +1752,16 @@ def splash_attention_bwd(
     splash_out: jt.Num[jax.Array, "B T N V"],
     context: jt.Num[jax.Array, "B N T"],
     q: jt.Num[jax.Array, "B T N QK_plus_R"],
-    k: jt.Num[jax.Array, "B T N QK_plus_R"],
-    v: jt.Num[jax.Array, "B T N V"],
+    k: jt.Num[jax.Array, "B S N QK_plus_R"],
+    v: jt.Num[jax.Array, "B S N V"],
     splash_kernel: Any,
-    segment_ids: jt.Num[jax.Array, "B T"] | None = None,
+    segment_ids: jt.Num[jax.Array, "B T"] | tokamax_splash_attention_kernel.SegmentIds | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "B T N QK_plus_R"],
-    jt.Num[jax.Array, "B T N QK_plus_R"],
-    jt.Num[jax.Array, "B T N V"],
+    jt.Num[jax.Array, "B S N QK_plus_R"],
+    jt.Num[jax.Array, "B S N V"],
 ]:
-  """Performs backward splash attention."""
+  """Performs backward splash attention (see `splash_attention`)."""
   do = jnp.transpose(grad_splash_out, axes=(0, 2, 1, 3))
   o = jnp.transpose(splash_out, axes=(0, 2, 1, 3))
   query = jnp.transpose(q, axes=(0, 2, 1, 3))
@@ -1753,7 +1780,10 @@ def splash_attention_bwd(
 
   if segment_ids is not None:
     segment_spec = jax.sharding.PartitionSpec(query_spec[0], None)
-    segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(q=segment_ids, kv=segment_ids)
+    if isinstance(segment_ids, tokamax_splash_attention_kernel.SegmentIds):
+      segment_ids_tuple = segment_ids
+    else:
+      segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(q=segment_ids, kv=segment_ids)
     segment_ids_in_spec = tokamax_splash_attention_kernel.SegmentIds(
         q=segment_spec,  # pyrefly: ignore[bad-argument-type]
         kv=segment_spec,  # pyrefly: ignore[bad-argument-type]
@@ -2023,6 +2053,413 @@ def _check_gqa_weights(w: dsv3_types.DSv3MLAWeightsPytree) -> None:
   for name, arr in (("q_up", w.q_up), ("kv_down", w.kv_down), ("out", w.out)):
     if jnp.dtype(arr.dtype).itemsize < 2:
       raise ValueError(f"GQA projections run in bf16, but {name} is {arr.dtype}; use a" " QuantConfig with mla=None.")
+
+
+# --- Sequence-split microbatches ---
+#
+# With sequence-split microbatches, microbatch 0 holds the first half of every
+# sequence and microbatch 1 the second half. The tokens are permuted before the
+# model (see `dsv3_model.seq_split_permutation`) so that each context-parallel
+# shard holds a contiguous chunk of each half: the local sequence shard of CP
+# rank i is [chunk i of half 0, chunk i of half 1]. Splitting it in two locally
+# gives each microbatch a contiguous half of the sequence across the CP ranks,
+# in order. Microbatch 0's attention is causal over its own half. Microbatch
+# 1's queries attend to microbatch 0's keys and values too: microbatch 0 hands
+# its (RoPE'd, narrow) local K/V shard to microbatch 1, and microbatch 1's
+# backward pass returns their gradient to microbatch 0's backward pass.
+
+
+class SeqSplitSplash(NamedTuple):
+  """Splash kernels of sequence-split microbatches.
+
+  Attributes:
+    mb0: Causal kernel of microbatch 0, `[S/2, S/2]`.
+    mb1: Kernel of microbatch 1, `[S/2, S]` causal with offset S/2: its queries
+      attend to microbatch 0's keys and to its own causally.
+  """
+
+  mb0: Any
+  mb1: Any
+
+
+def is_seq_split(splash_kernel: Any) -> bool:
+  """Whether `splash_kernel` holds the kernels of sequence-split microbatches."""
+  return isinstance(splash_kernel, SeqSplitSplash)
+
+
+def microbatch_splash_kernel(splash_kernel: Any, microbatch: int) -> Any:
+  """Returns microbatch `microbatch`'s splash kernel."""
+  if not is_seq_split(splash_kernel):
+    return splash_kernel
+  return splash_kernel.mb0 if microbatch == 0 else splash_kernel.mb1
+
+
+def seq_split_segment_ids(
+    segment_ids: jt.Num[jax.Array, "B S"] | None, microbatch: int
+) -> tokamax_splash_attention_kernel.SegmentIds | None:
+  """Query and key segment ids of a sequence-split microbatch.
+
+  Args:
+    segment_ids: Segment ids `[B, S]` of the whole sequence in the original
+      (unpermuted) token order, not sharded along the sequence.
+    microbatch: The microbatch (0 or 1).
+
+  Returns:
+    `SegmentIds` of the microbatch's queries (its half of the sequence) and
+    keys (the sequence up to the end of its half), or None.
+  """
+  if segment_ids is None:
+    return None
+  half = segment_ids.shape[1] // 2
+  return tokamax_splash_attention_kernel.SegmentIds(
+      q=segment_ids[:, microbatch * half : (microbatch + 1) * half],
+      kv=segment_ids[:, : (microbatch + 1) * half],
+  )
+
+
+def _gqa_qkv_seq_split(
+    x: jt.Num[jax.Array, "B T D"],
+    wq: jt.Num[jax.Array, "D N H"],
+    wkv: jt.Num[jax.Array, "D KV2H"],
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    kv_prefix: tuple[jax.Array, jax.Array] | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array, tuple[jax.Array, jax.Array]]:
+  """GQA q/k/v of one sequence-split microbatch (Ulysses CP layout).
+
+  Like `_gqa_qkv_a2a` (or a plain projection without CP), but also returns
+  this microbatch's local, RoPE'd K/V shard, and prepends `kv_prefix` (the
+  previous microbatch's local K/V shard) to the keys and values.
+
+  Args:
+    x: Normalized microbatch activations `[B, T, D]`, sequence-sharded over the
+      CP axis (if any).
+    wq: Query projection weights, replicated over the CP axis.
+    wkv: Fused key/value projection weights.
+    yarn_freqs: RoPE cos and sin of the microbatch's tokens.
+    mesh: The device mesh.
+    kv_prefix: Optional `(k, v)` local shards `[B, T, KV, H]` of the previous
+      microbatch, sharded like x.
+
+  Returns:
+    q `[B, T_total_q, N, H]` (scaled), k and v `[B, T_total_kv, N, H]` with
+    heads sharded over the CP axis, and this microbatch's local `(k, v)`
+    shards `[B, T, KV, H]`.
+  """
+
+  def _parts(a: jax.Array) -> tuple[Any, ...]:
+    parts = tuple(jax.typeof(a).sharding.spec.partitions)
+    return parts + (None,) * (a.ndim - len(parts))
+
+  batch_axis, seq_axis = _parts(x)[:2]
+  if _parts(wq)[1] is not None:
+    raise NotImplementedError("Sequence-split microbatches need Ulysses CP (head-replicated wq).")
+  head_dim, num_q = wq.shape[-1], wq.shape[-2]
+  num_kv = wkv.shape[-1] // (2 * head_dim)
+  group = num_q // num_kv
+  scale = head_dim**-0.5
+  out_spec = jax.sharding.PartitionSpec(batch_axis, None, seq_axis, None)
+  kv_spec = jax.sharding.PartitionSpec(batch_axis, seq_axis, None, None)
+  cos, sin = yarn_freqs
+  freq_spec = jax.sharding.PartitionSpec(batch_axis, seq_axis, None, None)
+  cos = jax.sharding.reshard(cos, freq_spec)
+  sin = jax.sharding.reshard(sin, freq_spec)
+
+  def _gather(a):
+    if seq_axis is None:
+      return a
+    return jax.lax.all_gather(a, axis_name=seq_axis, axis=1, tiled=True)
+
+  def _local(x, wq, wkv, cos, sin, kv_prefix):
+    with jax.named_scope("gqa_qkv_projection_seq_split"):
+      kv = jnp.einsum("btd,dk->btk", x, wkv)
+      kv = kv.reshape(*kv.shape[:2], 2 * num_kv, head_dim)
+      k_local = yarn(kv[:, :, :num_kv], (cos, sin)).astype(x.dtype)
+      v_local = kv[:, :, num_kv:]
+      q = jnp.einsum("btd,dnh->btnh", x, wq)
+      q = yarn(q, (cos * scale, sin * scale)).astype(x.dtype)
+      if seq_axis is not None:
+        # [B, T/cp, N, H] -> [B, T, N/cp, H].
+        q = jax.lax.all_to_all(q, axis_name=seq_axis, split_axis=2, concat_axis=1, tiled=True)
+      num_local_q = q.shape[2]
+      first = 0 if seq_axis is None else jax.lax.axis_index(seq_axis) * num_local_q
+      kv_head = (first + jnp.arange(num_local_q)) // group
+
+      def _expand(a):
+        # Gathers the sequence and expands the KV heads to this device's query
+        # heads; the gradient's sums over both (the reduce-scatter and the
+        # query-head group sums) run in f32.
+        return ops.f32_grad(
+            lambda a, kv_head: jnp.take(_gather(a), kv_head, axis=2),
+            a,
+            kv_head,
+        )
+
+      k, v = _expand(k_local), _expand(v_local)
+      if kv_prefix is not None:
+        k_pre, v_pre = kv_prefix
+        k = jnp.concatenate([_expand(k_pre), k], axis=1)
+        v = jnp.concatenate([_expand(v_pre), v], axis=1)
+      return q, k, v, (k_local, v_local)
+
+  return jax.shard_map(
+      _local,
+      mesh=mesh,
+      out_specs=(out_spec, out_spec, out_spec, (kv_spec, kv_spec)),
+      check_vma=True,
+  )(x, wq, wkv, cos, sin, kv_prefix)
+
+
+def _gqa_kv_local(
+    x: jt.Num[jax.Array, "B T D"],
+    wkv: jt.Num[jax.Array, "D KV2H"],
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    *,
+    head_dim: int,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+) -> tuple[jax.Array, jax.Array]:
+  """The local `(k, v)` shards `_gqa_qkv_seq_split` returns, alone."""
+  batch_axis, seq_axis = tuple(jax.typeof(x).sharding.spec.partitions)[:2]
+  num_kv = wkv.shape[-1] // (2 * head_dim)
+  kv_spec = jax.sharding.PartitionSpec(batch_axis, seq_axis, None, None)
+  cos, sin = yarn_freqs
+  cos = jax.sharding.reshard(cos, kv_spec)
+  sin = jax.sharding.reshard(sin, kv_spec)
+
+  def _local(x, wkv, cos, sin):
+    kv = jnp.einsum("btd,dk->btk", x, wkv)
+    kv = kv.reshape(*kv.shape[:2], 2 * num_kv, head_dim)
+    k = yarn(kv[:, :, :num_kv], (cos, sin)).astype(x.dtype)
+    return k, kv[:, :, num_kv:]
+
+  return jax.shard_map(_local, mesh=mesh, out_specs=(kv_spec, kv_spec), check_vma=True)(x, wkv, cos, sin)
+
+
+def gqa_microbatch_fwd(
+    x: jt.Num[jax.Array, "B T D"],
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    splash_kernel: Any,
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    kv_prefix: tuple[jax.Array, jax.Array] | None = None,
+    segment_ids: tokamax_splash_attention_kernel.SegmentIds | None = None,
+) -> tuple[jax.Array, tuple[Any, ...], tuple[jax.Array, jax.Array]]:
+  """bf16 GQA forward of one sequence-split microbatch.
+
+  Args:
+    x: Normalized microbatch activations, sequence-sharded over the CP axis.
+    yarn_freqs: RoPE cos and sin of the microbatch's tokens.
+    splash_kernel: The microbatch's splash kernel (see `SeqSplitSplash`).
+    w: GQA weights.
+    mesh: The device mesh.
+    kv_prefix: Microbatch 0's local K/V shards, for microbatch 1.
+    segment_ids: Optional segment ids of the microbatch
+      (`seq_split_segment_ids`).
+
+  Returns:
+    Tuple of (output, residuals in the `dsv3_mla_fwd` layout, this
+    microbatch's local `(k, v)` shards).
+  """
+  _check_gqa_weights(w)
+  q, k, v, kv_local = _gqa_qkv_seq_split(x, w.q_up, w.kv_down, yarn_freqs, mesh=mesh, kv_prefix=kv_prefix)
+  splash_out, context = splash_attention(q, k, v, splash_kernel, segment_ids=segment_ids)
+  out = _gqa_out_projection(splash_out, w.out)
+  placeholder = x[..., :_GQA_RESIDUAL_PLACEHOLDER_DIM]
+  return out, (placeholder, placeholder, context, splash_out), kv_local
+
+
+def _gqa_zero_grads(
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    grad_wq: jax.Array,
+    grad_wkv: jax.Array,
+    grad_w_out: jax.Array,
+) -> dsv3_types.DSv3MLAWeightsPytree:
+  """GQA weight gradients, zero for the unused MLA weight slots."""
+
+  def zeros(a):
+    # The cotangent of a reduced weight is unreduced (`_cotangent_sharding`).
+    if a is None:
+      return None
+    return jnp.zeros(a.shape, a.dtype, out_sharding=_cotangent_sharding(a))
+
+  return dsv3_types.DSv3MLAWeightsPytree(
+      q_down=zeros(w.q_down),
+      q_up=grad_wq,
+      q_norm_scale=zeros(w.q_norm_scale),
+      kv_down=grad_wkv,
+      k_up=zeros(w.k_up),
+      v_up=zeros(w.v_up),
+      kv_norm_scale=zeros(w.kv_norm_scale),
+      out=grad_w_out,
+  )
+
+
+def gqa_microbatch_bwd(
+    grad_out: jt.Num[jax.Array, "B T D"],
+    norm_x: jt.Num[jax.Array, "B T D"],
+    context: jax.Array,
+    splash_out: jax.Array,
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    splash_kernel: Any,
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    kv_prefix: tuple[jax.Array, jax.Array] | None = None,
+    grad_kv_local: tuple[jax.Array, jax.Array] | None = None,
+    segment_ids: tokamax_splash_attention_kernel.SegmentIds | None = None,
+) -> tuple[
+    jax.Array,
+    dsv3_types.DSv3MLAWeightsPytree,
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array] | None,
+]:
+  """bf16 GQA backward of one sequence-split microbatch.
+
+  Rematerializes q, k and v from `norm_x` (and `kv_prefix`) like `_gqa_bwd`.
+
+  Args:
+    grad_out: Cotangent of the output.
+    norm_x: Normalized microbatch activations.
+    context: Splash residual (log-sum-exp).
+    splash_out: Splash output residual.
+    w: GQA weights.
+    yarn_freqs: RoPE cos and sin of the microbatch's tokens.
+    splash_kernel: The microbatch's splash kernel.
+    mesh: The device mesh.
+    kv_prefix: Microbatch 0's local K/V shards, for microbatch 1.
+    grad_kv_local: Optional cotangent of this microbatch's local K/V shards
+      (microbatch 1's gradient of its `kv_prefix`, for microbatch 0).
+    segment_ids: Optional segment ids of the microbatch
+      (`seq_split_segment_ids`).
+
+  Returns:
+    Tuple of (grad_norm_x, grad_w, grad_yarn_freqs (zeros), gradient of
+    `kv_prefix` or None).
+  """
+  _check_gqa_weights(w)
+  _, out_proj_vjp = jax.vjp(_gqa_out_projection, splash_out, w.out)
+  grad_splash_out, grad_w_out = out_proj_vjp(grad_out)
+
+  def _qkv(x, wq, wkv, kv_pre):
+    return _gqa_qkv_seq_split(x, wq, wkv, yarn_freqs, mesh=mesh, kv_prefix=kv_pre)
+
+  (q, k, v, kv_local), qkv_vjp = jax.vjp(_qkv, norm_x, w.q_up, w.kv_down, kv_prefix)
+  grad_q, grad_k, grad_v = splash_attention_bwd(
+      grad_splash_out,
+      splash_out,
+      context,
+      q,
+      k,
+      v,
+      splash_kernel,
+      segment_ids=segment_ids,
+  )
+  if grad_kv_local is None:
+    grad_kv_local = jax.tree.map(jnp.zeros_like, kv_local)
+  grad_norm_x, grad_wq, grad_wkv, grad_kv_prefix = qkv_vjp((grad_q, grad_k, grad_v, grad_kv_local))
+  grad_w = _gqa_zero_grads(w, grad_wq, grad_wkv, grad_w_out)
+  grad_yarn_freqs = tuple(jnp.zeros_like(f) for f in yarn_freqs)
+  return grad_norm_x, grad_w, grad_yarn_freqs, grad_kv_prefix
+
+
+def gqa_seq_split_fwd(
+    x: jt.Num[jax.Array, "B T D"],
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    splash_kernel: SeqSplitSplash,
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    *,
+    mesh: jax.sharding.Mesh,
+    segment_ids: jt.Num[jax.Array, "B S"] | None = None,
+) -> tuple[jax.Array, tuple[Any, ...]]:
+  """GQA of a full (unsplit) sequence in the sequence-split token layout.
+
+  For layers that run the whole local sequence at once (e.g. the dense
+  layers): splits it into the two microbatches, runs them one after the other
+  (microbatch 1 attending to microbatch 0's K/V) and merges their outputs.
+
+  Args:
+    x: Normalized activations in the permuted token layout.
+    yarn_freqs: RoPE cos and sin of the tokens.
+    splash_kernel: The microbatches' splash kernels.
+    w: GQA weights.
+    mesh: The device mesh.
+    segment_ids: Optional segment ids in the original token order (see
+      `seq_split_segment_ids`).
+
+  Returns:
+    Tuple of (output, residuals of both microbatches).
+  """
+  x0, x1 = ops.split_microbatches(x, mesh=mesh, axis=1)
+  yarn0, yarn1 = ops.split_microbatches(ops.seq_shard_like(yarn_freqs, x), mesh=mesh, axis=1)
+  out0, res0, kv0 = gqa_microbatch_fwd(
+      x0,
+      yarn0,
+      splash_kernel.mb0,
+      w,
+      mesh=mesh,
+      segment_ids=seq_split_segment_ids(segment_ids, 0),
+  )
+  out1, res1, _ = gqa_microbatch_fwd(
+      x1,
+      yarn1,
+      splash_kernel.mb1,
+      w,
+      mesh=mesh,
+      kv_prefix=kv0,
+      segment_ids=seq_split_segment_ids(segment_ids, 1),
+  )
+  out = ops.merge_microbatches(out0, out1, mesh=mesh, axis=1)
+  return out, (res0[2], res0[3], res1[2], res1[3])
+
+
+def gqa_seq_split_bwd(
+    grad_out: jt.Num[jax.Array, "B T D"],
+    norm_x: jt.Num[jax.Array, "B T D"],
+    residuals: tuple[Any, ...],
+    w: dsv3_types.DSv3MLAWeightsPytree,
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    splash_kernel: SeqSplitSplash,
+    *,
+    mesh: jax.sharding.Mesh,
+    segment_ids: jt.Num[jax.Array, "B S"] | None = None,
+) -> tuple[jax.Array, dsv3_types.DSv3MLAWeightsPytree, tuple[Any, Any]]:
+  """Backward pass of `gqa_seq_split_fwd`."""
+  context0, splash_out0, context1, splash_out1 = residuals
+  grad_out0, grad_out1 = ops.split_microbatches(grad_out, mesh=mesh, axis=1)
+  x0, x1 = ops.split_microbatches(norm_x, mesh=mesh, axis=1)
+  yarn0, yarn1 = ops.split_microbatches(ops.seq_shard_like(yarn_freqs, norm_x), mesh=mesh, axis=1)
+  head_dim = w.q_up.shape[-1]
+  kv0 = _gqa_kv_local(x0, w.kv_down, yarn0, head_dim=head_dim, mesh=mesh)
+  grad_x1, grad_w1, _, grad_kv0 = gqa_microbatch_bwd(
+      grad_out1,
+      x1,
+      context1,
+      splash_out1,
+      w,
+      yarn1,
+      splash_kernel.mb1,
+      mesh=mesh,
+      kv_prefix=kv0,
+      segment_ids=seq_split_segment_ids(segment_ids, 1),
+  )
+  grad_x0, grad_w0, _, _ = gqa_microbatch_bwd(
+      grad_out0,
+      x0,
+      context0,
+      splash_out0,
+      w,
+      yarn0,
+      splash_kernel.mb0,
+      mesh=mesh,
+      grad_kv_local=grad_kv0,
+      segment_ids=seq_split_segment_ids(segment_ids, 0),
+  )
+  grad_x = ops.merge_microbatches(grad_x0, grad_x1, mesh=mesh, axis=1)
+  grad_w = jax.tree.map(lambda a, b: a + b, grad_w0, grad_w1)
+  grad_yarn_freqs = tuple(jnp.zeros_like(f) for f in yarn_freqs)
+  return grad_x, grad_w, grad_yarn_freqs
 
 
 def _gqa_fwd(
@@ -2601,6 +3038,21 @@ def _dsv3_mla_custom_fwd(
     axis_mapping,
     quant_rule,
 ):
+  if is_seq_split(splash_kernel):
+    if kv_lora_rank != 0:
+      raise NotImplementedError("Sequence-split microbatches support GQA only.")
+    out, seq_split_res = gqa_seq_split_fwd(x, yarn_freqs, splash_kernel, w, mesh=mesh, segment_ids=segment_ids)
+    res = (
+        x,
+        w,
+        yarn_freqs,
+        splash_kernel,
+        segment_ids,
+        None,
+        None,
+        seq_split_res,
+    )
+    return out, res + (None,)
   out, residuals = dsv3_mla_fwd(
       x,
       yarn_freqs,
@@ -2664,6 +3116,18 @@ def _dsv3_mla_custom_bwd(
       context,
       splash_out,
   ) = res
+  if is_seq_split(splash_kernel):
+    grad_x, grad_w, grad_yarn_freqs = gqa_seq_split_bwd(
+        grad_out,
+        x,
+        context,
+        w,
+        yarn_freqs,
+        splash_kernel,
+        mesh=mesh,
+        segment_ids=segment_ids,
+    )
+    return grad_x, grad_yarn_freqs, None, grad_w, None
   grad_x, grad_w, grad_yarn_freqs = dsv3_mla_bwd(
       grad_out,
       x,
@@ -2793,12 +3257,8 @@ def get_yarn_freqs(
   # (Note: We use jnp.arange with float32 for precision.)
   freqs = 1.0 / (rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / rope_head_dim))
 
-  low = (
-      rope_head_dim * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi)) / (2 * math.log(rope_theta))
-  )
-  high = (
-      rope_head_dim * math.log(original_max_position_embeddings / (beta_slow * 2 * math.pi)) / (2 * math.log(rope_theta))
-  )
+  low = rope_head_dim * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi)) / (2 * math.log(rope_theta))
+  high = rope_head_dim * math.log(original_max_position_embeddings / (beta_slow * 2 * math.pi)) / (2 * math.log(rope_theta))
   low = max(math.floor(low), 0)
   high = min(math.ceil(high), rope_head_dim - 1)
   diff = high - low if high > low else 0.001

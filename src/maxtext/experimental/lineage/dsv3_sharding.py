@@ -50,6 +50,8 @@ P = jax.sharding.PartitionSpec
 AxisMapping = Mapping[str, str | tuple[str, ...]]
 
 DCN_AXIS = "dcn"
+# Outer factor of a physical x axis split into two mesh axes (`xo`, `x`).
+X_OUTER_AXIS = "xo"
 # Logical axis names consumed by the Lineage layers.
 LOGICAL_AXES = ("dcn", "attention", "fsdp_attention", "expert", "fsdp_moe")
 
@@ -659,6 +661,303 @@ TOPOLOGY_SHARDING_VARIANTS[((4, 8, 8), "cp4_gqa_a2a")] = TopologySharding(
     ),
 )
 
+# 8x8x16 "cp2_gqa_a2a": GQA with Ulysses (all-to-all) context parallelism 2
+# over core, data parallelism 8 over x and 128-way FSDP over (y, z) for the
+# attention and dense weights; EP 16 over (x, core) and 128-way FSDP over
+# (y, z) for the routed experts. Activations shard their batch over (x, y, z)
+# and their sequence over core. Wq / Wo are replicated over the CP axis (core),
+# which selects the all-to-all attention path. Every weight shard keeps whole
+# 8-row TPU tiles: the routed experts put y on their expert dim  and z on their rows, as on 8x16x16, and the shared expert and
+# MLP weights are FSDP-sharded on whichever of their dims 128 ways divide into
+# whole tiles.
+_MLA_8X8X16_CP2_GQA_A2A = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, ("y", "z"), None),
+    q_up=P(None, ("y", "z"), None, None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, ("y", "z"), None),
+    # The unused GQA placeholder weights.
+    k_up=P(None, None, None, ("y", "z")),
+    v_up=P(None, None, None, ("y", "z")),
+    kv_norm_scale=P(None, None),
+    out=P(None, None, None, ("y", "z")),
+)
+_SPARSE_8X8X16_CP2_GQA_A2A = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X8X16_CP2_GQA_A2A,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core", "y"), "z", None),
+            linear=P(None, ("x", "core", "y"), "z", None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, ("y", "z"), None),
+            gate_1=P(None, ("y", "z"), None),
+            linear=P(None, None, ("y", "z")),
+        ),
+    ),
+)
+TOPOLOGY_SHARDING_VARIANTS[((8, 8, 16), "cp2_gqa_a2a")] = TopologySharding(
+    axis_mapping={
+        "attention": "core",
+        "fsdp_attention": ("x", "y", "z"),
+        # Wq / Wo are replicated over the CP axis core, so they are collected
+        # (and their gradients all-reduced) along it as well.
+        "attention_dp": "core",
+        "expert": ("x", "core"),
+        "fsdp_moe": ("y", "z"),
+    },
+    weights=DSv3WeightShardings(
+        decoder=dsv3_types.DSv3WeightsPytree(
+            dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                pre_attn_norm_scale=P(None, None),
+                mla=_MLA_8X8X16_CP2_GQA_A2A,
+                post_attn_norm_scale=P(None, None),
+                mlp=dsv3_types.DSv3MLPWeightsPytree(
+                    gate_0=P(None, None, ("y", "z")),
+                    gate_1=P(None, None, ("y", "z")),
+                    linear=P(None, ("y", "z"), None),
+                ),
+            ),
+            sparse=_SPARSE_8X8X16_CP2_GQA_A2A,
+        ),
+        mtp=dsv3_types.DSv3MTPWeightsPytree(
+            ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                enorm_scale=P(None),
+                hnorm_scale=P(None),
+                eh_proj=P(("y", "z"), None),
+            ),
+            sparse=drop_layer_axis(_SPARSE_8X8X16_CP2_GQA_A2A),
+        ),
+        embed_table=P(None, ("y", "z")),
+        final_norm_scale=P(None),
+        head_kernel=P(("y", "z"), None),
+    ),
+)
+
+
+# 8x8x16 "ep8_cp2_gqa_a2a": "cp2_gqa_a2a" with EP 8 over (x, core) and 256-way
+# FSDP over (xo, y, z) for the routed experts, on the mesh
+# (dcn, xo, x, y, z, core) = (1, 2, 4, 8, 16, 2) that splits the physical x
+# axis into an outer 2 and an inner 4 (adjacent chips). Attention, dense and
+# shared weights shard as in "cp2_gqa_a2a" (CP 2 over core, DP 8 over
+# (xo, x), FSDP 128 over (y, z)).
+_SPARSE_8X8X16_EP8_CP2_GQA_A2A = dataclasses.replace(
+    _SPARSE_8X8X16_CP2_GQA_A2A,
+    moe=dataclasses.replace(
+        _SPARSE_8X8X16_CP2_GQA_A2A.moe,
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core", X_OUTER_AXIS, "y"), "z", None),
+            linear=P(None, ("x", "core", X_OUTER_AXIS, "y"), "z", None),
+        ),
+    ),
+)
+_CP2_8X8X16 = TOPOLOGY_SHARDING_VARIANTS[((8, 8, 16), "cp2_gqa_a2a")]
+TOPOLOGY_SHARDING_VARIANTS[((8, 8, 16), "ep8_cp2_gqa_a2a")] = TopologySharding(
+    axis_mapping={
+        **_CP2_8X8X16.axis_mapping,
+        "fsdp_attention": (X_OUTER_AXIS, "x", "y", "z"),
+        "expert": ("x", "core"),
+        "fsdp_moe": (X_OUTER_AXIS, "y", "z"),
+    },
+    weights=dataclasses.replace(
+        _CP2_8X8X16.weights,
+        decoder=dataclasses.replace(
+            _CP2_8X8X16.weights.decoder,
+            sparse=_SPARSE_8X8X16_EP8_CP2_GQA_A2A,
+        ),
+        mtp=dataclasses.replace(
+            _CP2_8X8X16.weights.mtp,
+            sparse=drop_layer_axis(_SPARSE_8X8X16_EP8_CP2_GQA_A2A),
+        ),
+    ),
+)
+
+# 4x16x16 "ep8_cp2_gqa_a2a": GQA with Ulysses context parallelism 2 over core,
+# data parallelism 4 over x and 256-way FSDP over (y, z) for the attention and
+# dense weights; EP 8 over (x, core) and 256-way FSDP over (y, z) for the routed
+# experts. Activations shard their batch over (x, y, z) and their sequence over
+# core. As on 8x8x16, the routed experts put y on their expert dim  and z on their rows. The shared expert weights are FSDP-sharded
+# only 16 ways over z (replicated over y): 256 ways over (y, z) would leave
+# shards of only a few rows of their embedding dim, whose f32 gradient
+# reduce-scatters XLA
+# decomposes into SparseCore collective-permutes that crash its TPU
+# latency-hiding scheduler, and their gradient reductions only support
+# sharding along `fsdp_moe` axes (`dsv3_sparse_layer._sc1_reduce_axes`). For
+# the same reason the fused GQA key/value projection `kv_down` ([D, 2 KV H])
+# is FSDP-sharded only over z.
+_MLA_4X16X16_EP8_CP2_GQA_A2A = dataclasses.replace(_MLA_8X8X16_CP2_GQA_A2A, kv_down=P(None, "z", None))
+_SPARSE_4X16X16_EP8_CP2_GQA_A2A = dataclasses.replace(
+    _SPARSE_8X8X16_CP2_GQA_A2A,
+    mla=_MLA_4X16X16_EP8_CP2_GQA_A2A,
+    moe=dataclasses.replace(
+        _SPARSE_8X8X16_CP2_GQA_A2A.moe,
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, "z", None),
+            gate_1=P(None, "z", None),
+            linear=P(None, None, "z"),
+        ),
+    ),
+)
+TOPOLOGY_SHARDING_VARIANTS[((4, 16, 16), "ep8_cp2_gqa_a2a")] = TopologySharding(
+    axis_mapping=dict(_CP2_8X8X16.axis_mapping),
+    weights=dataclasses.replace(
+        _CP2_8X8X16.weights,
+        decoder=dataclasses.replace(
+            _CP2_8X8X16.weights.decoder,
+            dense=dataclasses.replace(
+                _CP2_8X8X16.weights.decoder.dense,
+                mla=_MLA_4X16X16_EP8_CP2_GQA_A2A,
+            ),
+            sparse=_SPARSE_4X16X16_EP8_CP2_GQA_A2A,
+        ),
+        mtp=dataclasses.replace(
+            _CP2_8X8X16.weights.mtp,
+            sparse=drop_layer_axis(_SPARSE_4X16X16_EP8_CP2_GQA_A2A),
+        ),
+    ),
+)
+
+# 4x4x8 "cp2_gqa_a2a" (128 chips): the 8x8x16 "cp2_gqa_a2a" layout with EP 16
+# over the 8-chip z axis and core, and FSDP 16 over (x, y): GQA with Ulysses
+# context parallelism 2 over core and data parallelism over (x, y, z) for the
+# attention and dense weights, which are FSDP-sharded over (x, y); the routed
+# experts put x on their expert dim and y on their
+# rows.
+_MLA_4X4X8_CP2_GQA_A2A = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, ("x", "y"), None),
+    q_up=P(None, ("x", "y"), None, None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, ("x", "y"), None),
+    k_up=P(None, None, None, ("x", "y")),
+    v_up=P(None, None, None, ("x", "y")),
+    kv_norm_scale=P(None, None),
+    out=P(None, None, None, ("x", "y")),
+)
+_SPARSE_4X4X8_CP2_GQA_A2A = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_4X4X8_CP2_GQA_A2A,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("z", "core", "x"), "y", None),
+            linear=P(None, ("z", "core", "x"), "y", None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, ("x", "y"), None),
+            gate_1=P(None, ("x", "y"), None),
+            linear=P(None, None, ("x", "y")),
+        ),
+    ),
+)
+TOPOLOGY_SHARDING_VARIANTS[((4, 4, 8), "cp2_gqa_a2a")] = TopologySharding(
+    axis_mapping={
+        "attention": "core",
+        "fsdp_attention": ("x", "y", "z"),
+        "attention_dp": "core",
+        "expert": ("z", "core"),
+        "fsdp_moe": ("x", "y"),
+    },
+    weights=DSv3WeightShardings(
+        decoder=dsv3_types.DSv3WeightsPytree(
+            dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                pre_attn_norm_scale=P(None, None),
+                mla=_MLA_4X4X8_CP2_GQA_A2A,
+                post_attn_norm_scale=P(None, None),
+                mlp=dsv3_types.DSv3MLPWeightsPytree(
+                    gate_0=P(None, None, ("x", "y")),
+                    gate_1=P(None, None, ("x", "y")),
+                    linear=P(None, ("x", "y"), None),
+                ),
+            ),
+            sparse=_SPARSE_4X4X8_CP2_GQA_A2A,
+        ),
+        mtp=dsv3_types.DSv3MTPWeightsPytree(
+            ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                enorm_scale=P(None),
+                hnorm_scale=P(None),
+                eh_proj=P(("x", "y"), None),
+            ),
+            sparse=drop_layer_axis(_SPARSE_4X4X8_CP2_GQA_A2A),
+        ),
+        embed_table=P(None, ("x", "y")),
+        final_norm_scale=P(None),
+        head_kernel=P(("x", "y"), None),
+    ),
+)
+
+# 4x4x8 "cp2_gqa_a2a_coremajor": "cp2_gqa_a2a" with the expert axes ordered
+# (core, z) instead of (z, core). The EP dispatch all-gathers and combine
+# reduce-scatters then group devices core-major, so a hierarchical
+# reduce-scatter first reduces between the two TensorCores of a chip (die to
+# die) on the full buffer and then over the z ICI ring on half of it, instead
+# of the reverse. The routed experts' expert dim is sharded in the same
+# (core, z) order so that each device holds the experts of its EP rank.
+_SPARSE_4X4X8_CP2_GQA_A2A_COREMAJOR = dataclasses.replace(
+    _SPARSE_4X4X8_CP2_GQA_A2A,
+    moe=dataclasses.replace(
+        _SPARSE_4X4X8_CP2_GQA_A2A.moe,
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("core", "z", "x"), "y", None),
+            linear=P(None, ("core", "z", "x"), "y", None),
+        ),
+    ),
+)
+_CP2_4X4X8 = TOPOLOGY_SHARDING_VARIANTS[((4, 4, 8), "cp2_gqa_a2a")]
+TOPOLOGY_SHARDING_VARIANTS[((4, 4, 8), "cp2_gqa_a2a_coremajor")] = TopologySharding(
+    axis_mapping={**_CP2_4X4X8.axis_mapping, "expert": ("core", "z")},
+    weights=dataclasses.replace(
+        _CP2_4X4X8.weights,
+        decoder=dataclasses.replace(
+            _CP2_4X4X8.weights.decoder,
+            sparse=_SPARSE_4X4X8_CP2_GQA_A2A_COREMAJOR,
+        ),
+        mtp=dataclasses.replace(
+            _CP2_4X4X8.weights.mtp,
+            sparse=drop_layer_axis(_SPARSE_4X4X8_CP2_GQA_A2A_COREMAJOR),
+        ),
+    ),
+)
+# 4x4x4 (64 chips): the 4x4x8 layouts with the 4-chip z axis, i.e. EP 8 over
+# (z, core) (or (core, z)) and FSDP 16 over (x, y).
+for _variant in ("cp2_gqa_a2a", "cp2_gqa_a2a_coremajor"):
+  TOPOLOGY_SHARDING_VARIANTS[((4, 4, 4), _variant)] = TOPOLOGY_SHARDING_VARIANTS[((4, 4, 8), _variant)]
+del _variant
+
+# 4x4x8 / 4x4x4 "cp2_gqa_a2a_fsdpxy": "cp2_gqa_a2a" with the routed experts'
+# rows FSDP-sharded over (x, y) together and their expert dim over the expert
+# axes only, so their FSDP all-gathers and gradient reduce-scatters are single
+# 2D collectives over the x and y links, instead of one 1D collective along x
+# (on the expert dim) and one along y (on the rows).
+_SPARSE_4X4X8_CP2_GQA_A2A_FSDPXY = dataclasses.replace(
+    _SPARSE_4X4X8_CP2_GQA_A2A,
+    moe=dataclasses.replace(
+        _SPARSE_4X4X8_CP2_GQA_A2A.moe,
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("z", "core"), ("x", "y"), None),
+            linear=P(None, ("z", "core"), ("x", "y"), None),
+        ),
+    ),
+)
+for _topology in ((4, 4, 8), (4, 4, 4)):
+  TOPOLOGY_SHARDING_VARIANTS[(_topology, "cp2_gqa_a2a_fsdpxy")] = TopologySharding(
+      axis_mapping=_CP2_4X4X8.axis_mapping,
+      weights=dataclasses.replace(
+          _CP2_4X4X8.weights,
+          decoder=dataclasses.replace(
+              _CP2_4X4X8.weights.decoder,
+              sparse=_SPARSE_4X4X8_CP2_GQA_A2A_FSDPXY,
+          ),
+          mtp=dataclasses.replace(
+              _CP2_4X4X8.weights.mtp,
+              sparse=drop_layer_axis(_SPARSE_4X4X8_CP2_GQA_A2A_FSDPXY),
+          ),
+      ),
+  )
+del _topology
+
 
 def dcn_batch_axis(
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
@@ -731,7 +1030,12 @@ def sharding_config(
   Raises:
     ValueError: If `TOPOLOGY_SHARDINGS` has no entry for that shape.
   """
-  topology = (mesh.shape["x"], mesh.shape["y"], mesh.shape["z"])
+  # A physical x axis may be split into (`xo`, `x`) mesh axes.
+  topology = (
+      mesh.shape.get(X_OUTER_AXIS, 1) * mesh.shape["x"],
+      mesh.shape["y"],
+      mesh.shape["z"],
+  )
   if variant:
     entry = TOPOLOGY_SHARDING_VARIANTS.get((topology, variant))
     if entry is None:
@@ -841,9 +1145,7 @@ def activation_resharded_config(
   if missing:
     raise ValueError(f"activation_axis_mapping lacks logical axes {missing}.")
   for axis in ("dcn", "expert", "fsdp_moe"):
-    if _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) != (
-        _to_axis_tuple(_axis_names(base.axis_mapping[axis]))
-    ):
+    if _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) != (_to_axis_tuple(_axis_names(base.axis_mapping[axis]))):
       raise ValueError(
           f"The activation layout must keep `{axis}`:" f" {activation_axis_mapping[axis]} != {base.axis_mapping[axis]}."
       )
@@ -987,6 +1289,30 @@ def _physical_slice_grid(slice_devices: Sequence[Any]) -> np.ndarray:
   return np.array(sorted(slice_devices, key=_physical_coords), dtype=object).reshape(physical_shape)
 
 
+def _split_physical_shape(ici: Sequence[int], physical: Sequence[int]) -> list[list[int]] | None:
+  """Groups consecutive `ici` entries into factors of the `physical` axes.
+
+  Args:
+    ici: Mesh axis sizes.
+    physical: Physical axis sizes.
+
+  Returns:
+    For each physical axis, the mesh axis sizes that split it (outer first),
+    or None if `ici` does not split `physical` that way.
+  """
+  groups, i = [], 0
+  for dim in physical:
+    group, size = [], 1
+    while size < dim and i < len(ici):
+      group.append(ici[i])
+      size *= ici[i]
+      i += 1
+    if size != dim:
+      return None
+    groups.append(group or [1])
+  return groups if i == len(ici) else None
+
+
 def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequence[Any]) -> np.ndarray:
   """Maps the logical mesh one-to-one onto the physical TPU torus.
 
@@ -996,7 +1322,8 @@ def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequenc
 
   Args:
     ici_parallelism: Per-axis mesh sizes, `(x, y, z, core)` or `(1, x, y, z,
-      core)`.
+      core)`, where a physical axis may be split into consecutive mesh axes
+      (outer first), e.g. `(1, xo, x, y, z, core)`.
     devices: The devices to arrange.
 
   Returns:
@@ -1015,7 +1342,7 @@ def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequenc
           " dcn_parallelism."
       )
     ici = ici[1:]
-  elif len(ici) != 4:
+  elif len(ici) < 4:
     raise ValueError(
         "create_physical_device_mesh requires ici_parallelism ordered"
         f" (x, y, z, core) or (dcn, x, y, z, core), got {list(ici)}."
@@ -1030,13 +1357,18 @@ def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequenc
     )
 
   grids = [_physical_slice_grid(s) for s in slices]
-  for grid in grids:
+  for i, grid in enumerate(grids):
     if ici != grid.shape:
-      raise ValueError(
-          "create_physical_device_mesh requires ici_parallelism"
-          f" {list(ici)} to equal the physical (x, y, z, core)"
-          f" topology {list(grid.shape)}."
-      )
+      if _split_physical_shape(ici, grid.shape) is None:
+        raise ValueError(
+            "create_physical_device_mesh requires ici_parallelism"
+            f" {list(ici)} to equal the physical (x, y, z, core)"
+            f" topology {list(grid.shape)}, or to split its axes into"
+            " consecutive factors."
+        )
+      # E.g. (xo, x, y, z, core) = (2, 4, 8, 16, 2) on an 8x8x16 slice: the
+      # inner factor of a split axis holds physically adjacent chips.
+      grids[i] = grid.reshape(ici)
   if not has_dcn_axis:
     return grids[0]
   return np.stack(grids, axis=0)
@@ -1068,7 +1400,7 @@ def create_device_mesh(
   """
   if dcn_parallelism is not None:
     expected = [len(devices_by_slice(devices))] + [1] * (len(dcn_parallelism) - 1)
-    if len(ici_parallelism) != 5 or list(dcn_parallelism) != expected:
+    if len(ici_parallelism) < 5 or ici_parallelism[0] != 1 or list(dcn_parallelism) != expected:
       raise ValueError(
           "Lineage across several slices requires mesh_axes"
           " ['dcn', 'x', 'y', 'z', 'core'] with ici_parallelism"

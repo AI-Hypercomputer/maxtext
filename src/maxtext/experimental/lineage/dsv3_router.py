@@ -413,6 +413,34 @@ def chunk_group_sizes(
   return (jnp.clip(ends, start, stop) - jnp.clip(begins, start, stop)).astype(group_sizes.dtype)
 
 
+# Default `ragged_gather_reduce_tc` block size (VMEM rows per block).
+_REDUCE_BLOCK_SIZE = 896
+
+
+def reduce_block_size(token_bytes: int | None) -> int:
+  """Returns the gather-reduce block size whose VMEM buffers fit the kernel.
+
+  Args:
+    token_bytes: Bytes of one reduced token row (e.g. `emb_dim * 4` for f32
+      reductions), or None for the default.
+
+  Returns:
+    `_REDUCE_BLOCK_SIZE`, lowered to a multiple of 64 rows if its block buffers
+    of `token_bytes` rows would not fit `ops.ragged_gather_reduce_tc`'s VMEM.
+  """
+  if token_bytes is None:
+    return _REDUCE_BLOCK_SIZE
+  max_rows = ops.ragged_gather_reduce_tc_max_block_size(token_bytes)
+  return max(64, min(_REDUCE_BLOCK_SIZE, max_rows // 64 * 64))
+
+
+def ep_reduce_token_bytes(emb_dim: int, ep_reduce_dtype: jax.typing.DTypeLike | None) -> int | None:
+  """Bytes of one token row reduced in `ep_reduce_dtype`, or None if unset."""
+  if ep_reduce_dtype is None:
+    return None
+  return emb_dim * jnp.dtype(ep_reduce_dtype).itemsize
+
+
 def chunk_reduce_metadata(
     sort_indices: jt.Int[jax.Array, "kNBT"],
     start: jt.Int[jax.Array, ""] | int,
@@ -420,13 +448,28 @@ def chunk_reduce_metadata(
     *,
     capacity: int,
     num_experts_per_tok: int,
+    token_bytes: int | None = None,
 ) -> ops.RaggedGatherReduceMetadata:
-  """Derives the ragged gather reduce routing of one chunk of sorted slots."""
+  """Derives the ragged gather reduce routing of one chunk of sorted slots.
+
+  Args:
+    sort_indices: Sorted slot order of the all-gathered tokens.
+    start: First sorted slot of the chunk.
+    num_tokens: Number of slots in the chunk.
+    capacity: Maximum slots per chunk.
+    num_experts_per_tok: Number of experts selected per token.
+    token_bytes: Optional bytes of one reduced token row, which sizes the
+      reduction blocks (see `reduce_block_size`); None for bf16-sized blocks.
+
+  Returns:
+    The chunk's ragged gather reduce routing.
+  """
   return ops.ragged_gather_reduce_tc_metadata(
       sort_indices // num_experts_per_tok,
       start=start,
       num_tokens=num_tokens,
       top_k=num_experts_per_tok,
+      block_size=reduce_block_size(token_bytes),
       max_num_tokens=capacity,
   )
 
@@ -603,6 +646,7 @@ def _routing_metadata_impl(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     capacity: int,
     router_dtype: jax.typing.DTypeLike | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     RouterMetadata[jax.Array],
     jt.Num[jax.Array, "BT k"],
@@ -681,6 +725,7 @@ def _routing_metadata_impl(
       chunk_num_tokens(jnp.sum(group_sizes, dtype=jnp.int32), 0, capacity),
       capacity=capacity,
       num_experts_per_tok=num_experts_per_tok,
+      token_bytes=ep_reduce_token_bytes(x.shape[-1], ep_reduce_dtype),
   )
 
   metadata = RouterMetadata[jax.Array](
@@ -740,6 +785,7 @@ def dsv3_routing_metadata(
     capacity_factor: float,
     router_dtype: jax.typing.DTypeLike | None = None,
     expert_permutations: jt.Int[jax.Array, "E"] | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     RouterMetadata[jax.Array],
     jt.Num[jax.Array, "BT k"],
@@ -770,6 +816,9 @@ def dsv3_routing_metadata(
       are unaffected; only the metadata (sort order and local group sizes) is
       expressed in physical expert positions so that it matches shuffled routed
       expert weights.
+    ep_reduce_dtype: Optional dtype of the expert-parallel token reductions (see
+      `quantization.QuantConfig.ep_reduce_dtype`), which sizes the gather-reduce
+      blocks of `RouterMetadata.reduce_metadata`.
 
   Returns:
     A tuple of (RouterMetadata, coeffs, aux).
@@ -826,6 +875,7 @@ def dsv3_routing_metadata(
           axis_mapping=axis_mapping,
           capacity=capacity,
           router_dtype=router_dtype,
+          ep_reduce_dtype=ep_reduce_dtype,
       ),
       mesh=mesh,
       out_specs=out_specs,
@@ -1079,8 +1129,11 @@ def _reshape_combined_grads(
     *,
     local_seq_length: int,
     num_experts_per_tok: int,
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
-  """Reshapes the local psum_scatter outputs of the combine."""
+  """Reshapes (and optionally casts) the local psum_scatter outputs."""
+  if out_dtype is not None:
+    grad_x_local = grad_x_local.astype(out_dtype)
   grad_x = jnp.reshape(
       grad_x_local,
       (-1, local_seq_length, grad_x_local.shape[-2] * grad_x_local.shape[-1]),
@@ -1096,6 +1149,7 @@ def _combine_with_coeff_grads_impl(
     num_experts_per_tok: int,
     expert_axis_name: str,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
@@ -1105,6 +1159,7 @@ def _combine_with_coeff_grads_impl(
       grad_coeffs_local,
       local_seq_length=local_seq_length,
       num_experts_per_tok=num_experts_per_tok,
+      out_dtype=out_dtype,
   )
 
 
@@ -1121,8 +1176,12 @@ def dsv3_combine_with_coeff_grads(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     mesh: jax.sharding.Mesh,
     out_specs: jax.sharding.PartitionSpec,
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
   """Transposes the dispatch and the coefficient sort in one psum_scatter.
+
+  The token gradients are reduce-scattered in grad_x_ag's dtype (e.g. f32 with
+  `quantization.QuantConfig.ep_reduce_dtype`) and cast to `out_dtype`, if set.
 
   The token gradients `grad_x_ag` go through the same psum_scatter as
   `dsv3_combine`. The coefficient gradients, already unsorted into
@@ -1140,6 +1199,7 @@ def dsv3_combine_with_coeff_grads(
     axis_mapping: Mapping from logical to physical mesh axes.
     mesh: JAX mesh over which the data and model are sharded.
     out_specs: Output PartitionSpec for the (B, T, D) token gradients.
+    out_dtype: Optional dtype the reduce-scattered token gradients are cast to.
 
   Returns:
     A tuple of the local token gradients (B, T, D) and the local token
@@ -1154,6 +1214,7 @@ def dsv3_combine_with_coeff_grads(
           num_experts_per_tok=num_experts_per_tok,
           expert_axis_name=expert_axis_name,
           axis_mapping=axis_mapping,
+          out_dtype=out_dtype,
       ),
       mesh=mesh,
       out_specs=(out_specs_phys, coeffs_spec),
@@ -1171,6 +1232,7 @@ def _combine_with_coeff_grads_and_reduce_impl(
     expert_axis_name: str,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     reduce_fn: Callable[[list[jax.Array]], list[jax.Array]],
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], list[jax.Array]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads_and_reduce`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
@@ -1186,6 +1248,7 @@ def _combine_with_coeff_grads_and_reduce_impl(
       grad_coeffs_local,
       local_seq_length=local_seq_length,
       num_experts_per_tok=num_experts_per_tok,
+      out_dtype=out_dtype,
   )
   return grad_x, grad_coeffs, reduced
 
@@ -1204,6 +1267,7 @@ def dsv3_combine_with_coeff_grads_and_reduce(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     mesh: jax.sharding.Mesh,
     out_specs: jax.sharding.PartitionSpec,
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], Any]:
   """`dsv3_combine_with_coeff_grads` that also runs a `DeferredReduce`.
 
@@ -1224,6 +1288,7 @@ def dsv3_combine_with_coeff_grads_and_reduce(
     axis_mapping: Mapping from logical to physical mesh axes.
     mesh: JAX mesh over which the data and model are sharded.
     out_specs: Output PartitionSpec for the (B, T, D) token gradients.
+    out_dtype: Optional dtype the reduce-scattered token gradients are cast to.
 
   Returns:
     The outputs of `dsv3_combine_with_coeff_grads`, and the output of
@@ -1240,6 +1305,7 @@ def dsv3_combine_with_coeff_grads_and_reduce(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=out_specs,
+        out_dtype=out_dtype,
     )
     return grad_x, grad_coeffs, None
   out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
@@ -1252,6 +1318,7 @@ def dsv3_combine_with_coeff_grads_and_reduce(
           expert_axis_name=expert_axis_name,
           axis_mapping=axis_mapping,
           reduce_fn=deferred_reduce.local_fn,
+          out_dtype=out_dtype,
       ),
       mesh=mesh,
       out_specs=(out_specs_phys, coeffs_spec, deferred_reduce.out_specs),
@@ -1620,6 +1687,7 @@ def dsv3_combine_impl(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     combine_qtype: Any | None = None,
     combine_per_hop_scaling: bool = False,
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "B T D"]:
   """Combines reduced expert output tokens across devices via psum_scatter."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
@@ -1632,6 +1700,8 @@ def dsv3_combine_impl(
     )
   else:
     (y_local,) = _psum_scatter_sc0(y_ag, axis_name=physical_expert_axis_name)
+  if out_dtype is not None:
+    y_local = y_local.astype(out_dtype)
   return jnp.reshape(
       y_local,
       (-1, local_seq_length, y_local.shape[-2] * y_local.shape[-1]),
@@ -1650,8 +1720,12 @@ def dsv3_combine(
     out_specs: jax.sharding.PartitionSpec,
     combine_qtype: Any | None = None,
     combine_per_hop_scaling: bool = False,
+    out_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "B T D"]:
   """Combines reduced expert output tokens across devices via psum_scatter.
+
+  The reduce-scatter runs in y_ag's dtype (e.g. f32 with
+  `quantization.QuantConfig.ep_reduce_dtype`), unless `combine_qtype` is set.
 
   Args:
     y_ag: Partial top-k reduced expert outputs of shape (NBT, D0, D1).
@@ -1665,6 +1739,7 @@ def dsv3_combine(
     combine_per_hop_scaling: With `combine_qtype`, scale every ring hop by its
       own per-token bound (see
       `quantization.QuantConfig.combine_per_hop_scaling`).
+    out_dtype: Optional dtype the reduce-scattered tokens are cast to.
 
   Returns:
     Combined output tokens of shape (B, T, D).
@@ -1678,6 +1753,7 @@ def dsv3_combine(
           axis_mapping=axis_mapping,
           combine_qtype=combine_qtype,
           combine_per_hop_scaling=combine_per_hop_scaling,
+          out_dtype=out_dtype,
       ),
       mesh=mesh,
       out_specs=out_specs_phys,
@@ -1947,6 +2023,35 @@ def _normalize_coeffs(
   return coeffs_f32.astype(coeffs.dtype)
 
 
+_RANDOM_ROUTING = False
+
+
+def set_random_routing(enabled: bool) -> None:
+  """Routes tokens to (pseudo-)random experts, for benchmarking only.
+
+  Takes effect for functions traced afterwards. The routing is a deterministic
+  hash of the fp32 router projection, so it is independent per token and
+  expert (and therefore load balanced in expectation) and reproducible, and the
+  backward replays it like the regular routing.
+
+  Args:
+    enabled: Whether to route randomly.
+  """
+  global _RANDOM_ROUTING
+  _RANDOM_ROUTING = enabled
+
+
+def _hash_uniform(v: jax.Array) -> jax.Array:
+  """Uniform [0, 1) fp32 values from a bit hash (lowbias32) of fp32 `v`."""
+  b = jax.lax.bitcast_convert_type(v.astype(jnp.float32), jnp.uint32)
+  b ^= b >> 16
+  b *= jnp.uint32(0x7FEB352D)
+  b ^= b >> 15
+  b *= jnp.uint32(0x846CA68B)
+  b ^= b >> 16
+  return (b >> 8).astype(jnp.float32) * jnp.float32(2.0**-24)
+
+
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def expert_selection(
@@ -2055,7 +2160,20 @@ def _expert_selection_impl(
     finfo = jnp.finfo(compute_dtype)
     pre_bias_logits = jax.lax.reduce_precision(pre_bias_logits, exponent_bits=finfo.nexp, mantissa_bits=finfo.nmant)
   logits = pre_bias_logits + jax.lax.stop_gradient(w.bias.astype(compute_dtype))
-
+  if _RANDOM_ROUTING:
+    # Benchmarking only: select experts by scores that are uniform and
+    # independent per token and expert, so the load is balanced in
+    # expectation whatever the weights. The coefficients still come from the
+    # real router scores of the selected experts.
+    logits = _hash_uniform(
+        jnp.tensordot(
+            x.astype(input_dtype),
+            w.kernel.astype(input_dtype),
+            axes=1,
+            preferred_element_type=jnp.float32,
+        )
+    ).astype(compute_dtype)
+    logits = jax.lax.stop_gradient(logits)
   selected_experts, coeffs = expert_indices_and_coeffs(
       logits,
       pre_bias_logits,

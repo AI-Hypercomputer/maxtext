@@ -679,8 +679,8 @@ def w_collect_pipelined_scan(
     reduce_fn_dcn: Optional dual of `collect_fn_dcn` with signature `(grad,
       like) -> grad_reduced`, reducing the gradient of a layer's DCN-collected
       weights to the sharding of `like`, that layer's uncollected weights.
-      Defaults to the VJP of `collect_fn_dcn`; pass it when the gradients
-      differ in dtype from the weights (e.g. f32 gradients of fp8 weights).
+      Defaults to the VJP of `collect_fn_dcn`; pass it when the gradients differ
+      in dtype from the weights (e.g. f32 gradients of fp8 weights).
 
   Returns:
     A tuple of (output, aux) where aux is the stacked auxiliary outputs across
@@ -1175,9 +1175,7 @@ def w_collect_pipelined_scan_prologue_epilogue(
 
   # Peeled final scan body step, whose backward pass primes the pipelined DCN
   # gradient reduction.
-  (carry, w_last, w_aux_last, _), aux_last_sb = _scan_step(
-      (carry, w_curr, w_aux_curr, pre_carry), step_xs(num_layers - 1)
-  )
+  (carry, w_last, w_aux_last, _), aux_last_sb = _scan_step((carry, w_curr, w_aux_curr, pre_carry), step_xs(num_layers - 1))
   aux_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], aux_last_sb))
 
   out, aux_last = epilogue_fn.fwd(carry, w_last, **_w_aux_kwargs(w_aux_last))[0]
@@ -1618,9 +1616,7 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         carry,
     )
     res_curr_0_device, *xs_0_rest = xs_0
-    (carry_for_barrier, w_1_reduced), xs_0_rest = jax.lax.optimization_barrier(
-        ((carry_for_barrier, w_1_reduced), xs_0_rest)
-    )
+    (carry_for_barrier, w_1_reduced), xs_0_rest = jax.lax.optimization_barrier(((carry_for_barrier, w_1_reduced), xs_0_rest))
     xs_0 = (res_curr_0_device, *xs_0_rest)
     carry = jax.tree.map(
         lambda x_in, x_bar: x_in if x_bar is None else x_bar,
@@ -2848,8 +2844,12 @@ def split_microbatches(
     x: AnyJaxArrayOrPyTree,
     *,
     mesh: jax.sharding.Mesh,
+    axis: int = 0,
 ) -> tuple[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree]:
   """Splits the batch into two micro-batches locally in a shard map.
+
+  With `axis=1`, each device's local sequence shard is split in two instead
+  (sequence-split microbatches, see `dsv3_mla.SeqSplitSplash`).
 
   Assumes the first dimension is the batch dimension and splits along it.
   Does not split any other dimensions, including the sequence dimension,
@@ -2871,7 +2871,7 @@ def split_microbatches(
     arr_pspec = getattr(s, "spec", jax.sharding.PartitionSpec())
 
     def _local_split(local_arr):
-      return tuple(jnp.split(local_arr, 2, axis=0))
+      return tuple(jnp.split(local_arr, 2, axis=axis))
 
     return jax.shard_map(
         _local_split,
@@ -2887,14 +2887,87 @@ def split_microbatches(
   return mb0, mb1
 
 
+def f32_grad(
+    fn: Callable[..., Any],
+    x: Any,
+    *consts: Any,
+    compute_dtype: jax.typing.DTypeLike | None = None,
+) -> Any:
+  """`fn(x, *consts)` with x cast to `compute_dtype`, differentiated in f32.
+
+  The forward pass (and its collectives) runs in `compute_dtype` (default:
+  each operand's own dtype). The VJP with respect to x is `fn`'s VJP at x cast
+  to f32 with the cotangent cast to f32, so every accumulation and reduction of
+  the gradient (e.g. the reduce-scatter transposing an all-gather, or the sum
+  over the tokens that use a weight) happens in f32; the gradients are cast to
+  x's dtypes.
+
+  Args:
+    fn: Function `fn(x, *consts)`, polymorphic in the dtypes of x.
+    x: The differentiated operand(s), an array or a pytree of arrays.
+    *consts: Non-differentiated operands (their cotangents are zero).
+    compute_dtype: Dtype of the forward pass.
+
+  Returns:
+    `fn(x, *consts)`, with x cast to `compute_dtype`.
+  """
+
+  def _cast(tree, dtype):
+    return jax.tree.map(lambda a: a.astype(a.dtype if dtype is None else dtype), tree)
+
+  @jax.custom_vjp
+  def _f(x, consts):
+    return fn(_cast(x, compute_dtype), *consts)
+
+  def _fwd(x, consts):
+    return fn(_cast(x, compute_dtype), *consts), (x, consts)
+
+  def _bwd(res, g):
+    x, consts = res
+    _, vjp = jax.vjp(lambda a: fn(a, *consts), _cast(x, jnp.float32))
+    (grad_x,) = vjp(_cast(g, jnp.float32))
+    grad_x = jax.tree.map(lambda gx, a: gx.astype(a.dtype), grad_x, x)
+    return grad_x, None
+
+  _f.defvjp(_fwd, _bwd)
+  return _f(x, consts)
+
+
 @jt.jaxtyped(typechecker=typeguard.typechecked)
+def seq_shard_like(tree: Any, like: jax.Array) -> Any:
+  """Reshards `[B, T, ...]` leaves to `like`'s batch and sequence sharding.
+
+  Sequence-split microbatches (`split_microbatches(axis=1)`) split each local
+  sequence shard, so per-token arrays that are replicated along the sequence
+  (e.g. the YaRN tables) must first be sharded like the activations.
+
+  Args:
+    tree: Pytree of `[B, T, ...]` arrays (or None).
+    like: Activations `[B, T, D]` whose first two dims' sharding to adopt.
+
+  Returns:
+    `tree`, resharded.
+  """
+  batch_axis, seq_axis = tuple(jax.typeof(like).sharding.spec)[:2]
+
+  def _reshard(a):
+    spec = jax.sharding.PartitionSpec(batch_axis, seq_axis, *([None] * (a.ndim - 2)))
+    return jax.sharding.reshard(a, spec)
+
+  return jax.tree.map(_reshard, tree)
+
+
 def merge_microbatches(
     mb0: AnyJaxArrayOrPyTree,
     mb1: AnyJaxArrayOrPyTree,
     *,
     mesh: jax.sharding.Mesh,
+    axis: int = 0,
 ) -> AnyJaxArrayOrPyTree:
-  """Merges two micro-batches back into a single batch in a shard map."""
+  """Merges two micro-batches back into a single batch in a shard map.
+
+  The inverse of `split_microbatches` along the same `axis`.
+  """
   if mb0 is None:
     return None
 
@@ -2906,7 +2979,7 @@ def merge_microbatches(
     arr_pspec = spec0 if spec0 is not None else spec1
 
     def _local_merge(local_arr0, local_arr1):
-      return jnp.concatenate([local_arr0, local_arr1], axis=0)
+      return jnp.concatenate([local_arr0, local_arr1], axis=axis)
 
     return jax.shard_map(
         _local_merge,
@@ -3263,6 +3336,18 @@ _RAGGED_GATHER_REDUCE_TC_VMEM_LIMIT = 64 * 1024 * 1024
 _RAGGED_GATHER_REDUCE_TC_VMEM_BUDGET = 56 * 1024 * 1024
 
 
+def ragged_gather_reduce_tc_max_block_size(token_bytes: int) -> int:
+  """Largest `ragged_gather_reduce_tc` block size whose buffers fit in VMEM.
+
+  Args:
+    token_bytes: VMEM bytes of one token row (padded to whole tiles).
+
+  Returns:
+    The maximum `block_size` for tokens of `token_bytes`.
+  """
+  return _RAGGED_GATHER_REDUCE_TC_VMEM_BUDGET // (_RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS * token_bytes)
+
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class RaggedGatherReduceMetadata:
@@ -3442,9 +3527,7 @@ def ragged_gather_reduce_tc_metadata(
   # budget: count full chunks first, then scan the single straddling chunk.
   chunk = _RAGGED_GATHER_REDUCE_TC_SEARCH_CHUNK
   num_chunks = pl.cdiv(num_indices, chunk)
-  packed_chunks = jnp.pad(packed, (0, num_chunks * chunk - num_indices), constant_values=int_max).reshape(
-      num_chunks, chunk
-  )
+  packed_chunks = jnp.pad(packed, (0, num_chunks * chunk - num_indices), constant_values=int_max).reshape(num_chunks, chunk)
   end_packed = packed_chunks[:, -1]
   threshold = jnp.arange(max_blocks + 1, dtype=jnp.int32) * (block_size - top_k)
   thr_packed = threshold[:, None] << offset_bits
@@ -3629,10 +3712,10 @@ def ragged_gather_reduce_tc(
       ) = args
       o_in_hbm_ref = None
 
-    blocks_smem_ref = blocks_smem_ref
-    src_smem_ref = src_smem_ref
-    tok_smem_ref = tok_smem_ref
-    vmem_ref = vmem_ref
+    blocks_smem_ref = pltpu.annotate(blocks_smem_ref, no_store=True, no_bank_conflict=True)
+    src_smem_ref = pltpu.annotate(src_smem_ref, no_store=True, no_bank_conflict=True)
+    tok_smem_ref = pltpu.annotate(tok_smem_ref, no_store=True, no_bank_conflict=True)
+    vmem_ref = pltpu.annotate(vmem_ref, no_bank_conflict=True, no_hazard=True)
 
     num_blocks = blocks_smem_ref[0]
 
@@ -3956,7 +4039,7 @@ def token_absmax(
   Equivalent to `jnp.max(jnp.abs(x.astype(jnp.float32)), axis=(1, 2))`, which
   XLA emits as a lane-reduction-per-token loop fusion running ~10x below HBM
   roofline for `(num_tokens, 56, 128)` bf16 inputs (~1.5 ms vs ~0.2 ms for 470
-  MB on TPU v7x). When `num_tokens % 128 == 0 and d1 == 128`, outputs a 2D
+  MB on ghostfish). When `num_tokens % 128 == 0 and d1 == 128`, outputs a 2D
   `(num_tokens // 128, 128)` array (zero lane padding, zero post-kernel reduce)
   and reduces `d0` in bf16 before transposing into lanes via XLU.
 
@@ -4156,9 +4239,7 @@ def reduce_scatter_sc0(
     raise ValueError(f"chunk_rows ({chunk_rows}) must be divisible by 2.")
   half_chunk_rows = chunk_rows // 2
   if num_microbatches < 1 or half_chunk_rows % num_microbatches != 0:
-    raise ValueError(
-        f"half_chunk_rows ({half_chunk_rows}) must be divisible by" f" num_microbatches ({num_microbatches})."
-    )
+    raise ValueError(f"half_chunk_rows ({half_chunk_rows}) must be divisible by" f" num_microbatches ({num_microbatches}).")
   mb_rows = half_chunk_rows // num_microbatches
   num_subcores = 16
   if mb_rows % num_subcores != 0:
@@ -4515,7 +4596,7 @@ def reduce_scatter_sc0(
         running_sum_ref,
         d2d_recv_ref,
         c2c_recv_ref,
-        (extra),
+        extra,
     ) = _unpack_refs(refs)
     z = jax.lax.axis_index(ring_axis)
     c = jax.lax.axis_index(core_axis)
@@ -4870,9 +4951,7 @@ def reduce_scatter_sc0(
               if three_way:
                 prev = c_vmem[slot, pl.ds(r, 4), :].astype(jnp.bfloat16).astype(jnp.float32)
                 acc = acc + prev * prev_scale
-              c_vmem[slot, pl.ds(r, 4), :] = (
-                  jnp.clip(acc, -fp8_max, fp8_max).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
-              )
+              c_vmem[slot, pl.ds(r, 4), :] = jnp.clip(acc, -fp8_max, fp8_max).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
 
           return
 

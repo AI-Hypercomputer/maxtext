@@ -280,8 +280,8 @@ def qkv_up_fwd(
   kv_dim = kv_down.shape[2]
   block_t = min(block_t, seq_len)
   block_n = min(block_n, num_heads)
-  # Shrink the head tile to a divisor of the local head count (e.g. 12 local
-  # heads with block_n=8 -> 6).
+  # Shrink the head tile to a divisor of the local head count (e.g. 20 local
+  # heads with block_n=8 -> 4).
   while num_heads % block_n or block_n % min(head_group, block_n):
     block_n -= 1
   assert seq_len % block_t == 0, (seq_len, block_t)

@@ -106,6 +106,7 @@ def embed_tokens_collected(
     *,
     dtype: jax.typing.DTypeLike,
     iota_embed: bool = False,
+    grad_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "*batch D"]:
   """`embed_tokens` that all-gathers the sharded table explicitly.
 
@@ -121,6 +122,8 @@ def embed_tokens_collected(
     dtype: Compute dtype; the table is cast to it before the all-gather.
     iota_embed: Look the rows up with a one-hot matmul instead of a gather
       (`use_iota_embed`).
+    grad_dtype: If set (f32), the table's gradient is accumulated and
+      reduce-scattered in it (`ops.f32_grad`) instead of `dtype`.
 
   Returns:
     The embeddings `[*batch, emb]` in `dtype`, sharded like `tokens` with a
@@ -133,22 +136,35 @@ def embed_tokens_collected(
   tokens_spec = tuple(jax.typeof(tokens).sharding.spec)
   tokens_spec += (None,) * (tokens.ndim - len(tokens_spec))
 
-  def _lookup(tokens_local, table_local):
-    table_local = jnp.asarray(table_local, dtype)
+  def _gathered_lookup(table_local, tokens_local):
     if emb_axes is not None:
       # Stack whole `[emb / shards, vocab]` shards on a new leading dim: the
       # transpose then reduce-scatters whole shards. A tiled gather along the
       # (minor, not tile-aligned) embedding dim is legalized into an all-reduce.
       shards = jax.lax.all_gather(table_local.T, emb_axes, axis=0)
       table_local = shards.reshape(-1, shards.shape[-1]).T
-    return embed_tokens(tokens_local, table_local, dtype=dtype, iota_embed=iota_embed)
+    return embed_tokens(
+        tokens_local,
+        table_local,
+        dtype=table_local.dtype,
+        iota_embed=iota_embed,
+    )
 
-  return jax.shard_map(
-      _lookup,
-      mesh=jax.typeof(table).sharding.mesh,
-      in_specs=(jax.sharding.PartitionSpec(*tokens_spec), table_spec),
-      out_specs=jax.sharding.PartitionSpec(*tokens_spec, None),
-  )(tokens, table)
+  def _lookup(table, tokens):
+    # The table is cast before the call (inside it, the all-gather's transpose
+    # would reduce-scatter the gradient in `dtype`).
+    return jax.shard_map(
+        _gathered_lookup,
+        mesh=jax.typeof(table).sharding.mesh,
+        in_specs=(table_spec, jax.sharding.PartitionSpec(*tokens_spec)),
+        out_specs=jax.sharding.PartitionSpec(*tokens_spec, None),
+    )(table, tokens)
+
+  if grad_dtype is not None:
+    # Outside the `shard_map`: a `custom_vjp` inside it would make the output
+    # varying over the table's axes.
+    return ops.f32_grad(_lookup, table, tokens, compute_dtype=dtype)
+  return _lookup(jnp.asarray(table, dtype), tokens)
 
 
 @jt.jaxtyped(typechecker=typeguard.typechecked)
@@ -184,6 +200,7 @@ def final_norm(
     scale: jt.Num[jax.Array, "D"],
     *,
     epsilon: float,
+    grad_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "*batch D"]:
   """Applies the final RMSNorm, as MaxText's `RMSNorm` without scale offset.
 
@@ -195,11 +212,96 @@ def final_norm(
     x: Hidden states `[*batch, emb]` in the compute dtype.
     scale: Norm scale `[emb]` in any dtype.
     epsilon: Norm epsilon.
+    grad_dtype: If set (f32), the backward pass (including the scale gradient's
+      sum over the tokens) runs in it (`ops.f32_grad`).
 
   Returns:
     The normalized hidden states in the compute dtype.
   """
+  if grad_dtype is not None:
+    return ops.f32_grad(
+        lambda xs: ops.rms_norm(xs[0], jnp.asarray(xs[1], xs[0].dtype), epsilon=epsilon),
+        (x, scale),
+        compute_dtype=x.dtype,
+    )
   return ops.rms_norm(x, jnp.asarray(scale, x.dtype), epsilon=epsilon)
+
+
+def _cotangent_sharding(x: jax.Array) -> jax.sharding.NamedSharding:
+  """The sharding of x's cotangent (unreduced where x is reduced)."""
+  sharding = jax.typeof(x).sharding
+  return sharding.update(spec=sharding.spec.to_ct_spec())
+
+
+def _head_dot_with_wgrad_dtype(
+    x: jax.Array,
+    kernel: jax.Array,
+    *,
+    dot_dtype: jax.typing.DTypeLike,
+    grad_dtype: jax.typing.DTypeLike,
+    precision: jax.lax.Precision,
+    out_sharding: jax.sharding.NamedSharding | None,
+) -> jax.Array:
+  """`x @ kernel` in `dot_dtype` whose kernel gradient is computed in f32.
+
+  The forward pass and the input gradient are those of a `dot_dtype` matmul.
+  The kernel gradient contracts the tokens with `preferred_element_type=
+  grad_dtype`, so the per-device sum over the tokens is not rounded to
+  `dot_dtype`, and is returned in the kernel's dtype.
+
+  Args:
+    x: Hidden states `[*batch, emb]`.
+    kernel: Head kernel `[emb, vocab]`.
+    dot_dtype: Dtype of the matmul operands.
+    grad_dtype: Accumulation and output dtype of the kernel gradient matmul.
+    precision: Matmul precision.
+    out_sharding: Optional sharding of the logits.
+
+  Returns:
+    The logits `[*batch, vocab]` in `dot_dtype`.
+  """
+  batch_dims = tuple(range(x.ndim - 1))
+
+  def _dot(x, kernel):
+    return jax.lax.dot_general(
+        x.astype(dot_dtype),
+        kernel.astype(dot_dtype),
+        (((x.ndim - 1,), (0,)), ((), ())),
+        precision=precision,
+        out_sharding=out_sharding,
+    )
+
+  @jax.custom_vjp
+  def _f(x, kernel):
+    return _dot(x, kernel)
+
+  def _fwd(x, kernel):
+    return _dot(x, kernel), (x, kernel)
+
+  def _bwd(res, g):
+    x, kernel = res
+    g = g.astype(dot_dtype)
+    x_c, kernel_c = x.astype(dot_dtype), kernel.astype(dot_dtype)
+    grad_x = jax.lax.dot_general(
+        g,
+        kernel_c,
+        (((g.ndim - 1,), (1,)), ((), ())),
+        precision=precision,
+        preferred_element_type=jnp.float32,
+        out_sharding=_cotangent_sharding(x),
+    ).astype(x.dtype)
+    grad_kernel = jax.lax.dot_general(
+        x_c,
+        g,
+        ((batch_dims, batch_dims), ((), ())),
+        precision=precision,
+        preferred_element_type=grad_dtype,
+        out_sharding=_cotangent_sharding(kernel),
+    ).astype(kernel.dtype)
+    return grad_x, grad_kernel
+
+  _f.defvjp(_fwd, _bwd)
+  return _f(x, kernel)
 
 
 @jax.named_call
@@ -213,6 +315,7 @@ def lm_head(
     cast_logits_to_fp32: bool = True,
     precision: str = "default",
     out_sharding: jax.sharding.NamedSharding | None = None,
+    grad_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "*batch V"]:
   """Projects hidden states to logits, as MaxText's `logits_dense`.
 
@@ -224,20 +327,35 @@ def lm_head(
     cast_logits_to_fp32: Cast the logits to fp32 (`cast_logits_to_fp32`).
     precision: `jax.lax.Precision` name of the matmul (`matmul_precision`).
     out_sharding: Optional sharding of the logits.
+    grad_dtype: If set (f32), the kernel gradient matmul accumulates and outputs
+      in it (from operands in the matmul dtype), and the kernel gradient is
+      returned in the kernel's dtype (e.g. the f32 kernel of
+      `collect_head_kernel(grad_dtype=...)`) without rounding to the matmul
+      dtype.
 
   Returns:
     The logits `[*batch, vocab]`.
   """
   dot_dtype = jnp.float32 if dot_in_fp32 else dtype
-  inputs = jnp.asarray(x, dot_dtype)
-  weights = jnp.asarray(kernel, dot_dtype)
-  logits = jax.lax.dot_general(
-      inputs,
-      weights,
-      (((inputs.ndim - 1,), (0,)), ((), ())),
-      precision=jax.lax.Precision(precision),
-      out_sharding=out_sharding,
-  )
+  if grad_dtype is not None:
+    logits = _head_dot_with_wgrad_dtype(
+        x,
+        kernel,
+        dot_dtype=dot_dtype,
+        grad_dtype=grad_dtype,
+        precision=jax.lax.Precision(precision),
+        out_sharding=out_sharding,
+    )
+  else:
+    inputs = jnp.asarray(x, dot_dtype)
+    weights = jnp.asarray(kernel, dot_dtype)
+    logits = jax.lax.dot_general(
+        inputs,
+        weights,
+        (((inputs.ndim - 1,), (0,)), ((), ())),
+        precision=jax.lax.Precision(precision),
+        out_sharding=out_sharding,
+    )
   if cast_logits_to_fp32:
     logits = logits.astype(jnp.float32)
   return logits
@@ -249,6 +367,7 @@ def collect_head_kernel(
     kernel: jt.Num[jax.Array, "D V"],
     *,
     dtype: jax.typing.DTypeLike,
+    grad_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "D V"]:
   """All-gathers the LM head kernel, sharded on its embedding dim, explicitly.
 
@@ -260,9 +379,14 @@ def collect_head_kernel(
   Args:
     kernel: Head kernel `[emb, vocab]`, sharded on its embedding dim only.
     dtype: Dtype of the matmul; the kernel is cast to it before the gather.
+    grad_dtype: If set (f32), the kernel is still gathered in `dtype` but
+      returned in `grad_dtype` (holding `dtype` values), so that its gradient
+      reaches the reduction unrounded (see `lm_head(grad_dtype=...)`), and the
+      gradient is reduced in `grad_dtype` (`ops.f32_grad`).
 
   Returns:
-    The kernel in `dtype`, replicated (`reduced`) over every mesh axis: the
+    The kernel in `dtype` (or `grad_dtype`), replicated (`reduced`) over every
+    mesh axis: the
     ones it was sharded on and the ones it was already replicated over (`dcn`,
     and any ICI axes its spec leaves out, e.g. `x` on 8x16x16).
   """
@@ -280,7 +404,6 @@ def collect_head_kernel(
   replicated_axes = tuple(ax for ax in mesh.axis_names if ax not in emb_axes)
 
   def _gather(kernel_local):
-    kernel_local = jnp.asarray(kernel_local, dtype)
     for ax in replicated_axes:
       kernel_local = jax.lax.pcast(kernel_local, ax, to="reduced")
     if not emb_axes:
@@ -292,13 +415,20 @@ def collect_head_kernel(
     return jax.lax.all_gather(kernel_local, emb_axes, axis=0, to="reduced")
 
   out_ndim = 2 if not emb_axes else 3
-  collected = jax.shard_map(
-      _gather,
-      mesh=mesh,
-      in_specs=(spec,),
-      out_specs=jax.sharding.PartitionSpec(*(None,) * out_ndim, reduced=frozenset(emb_axes + replicated_axes)),
-  )(kernel)
-  return collected.reshape(kernel.shape)
+
+  def _collect(kernel):
+    # The kernel is cast before the call (see `embed_tokens_collected`).
+    collected = jax.shard_map(
+        _gather,
+        mesh=mesh,
+        in_specs=(spec,),
+        out_specs=jax.sharding.PartitionSpec(*(None,) * out_ndim, reduced=frozenset(emb_axes + replicated_axes)),
+    )(kernel)
+    return collected.reshape(kernel.shape)
+
+  if grad_dtype is not None:
+    return ops.f32_grad(lambda k: _collect(k).astype(grad_dtype), kernel, compute_dtype=dtype)
+  return _collect(jnp.asarray(kernel, dtype))
 
 
 @jax.named_call

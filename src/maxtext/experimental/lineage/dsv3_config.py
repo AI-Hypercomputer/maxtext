@@ -41,6 +41,7 @@ QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
     "fp8_full_combine_per_hop": quantization.FP8_FULL_COMBINE_PER_HOP,
     "fp8_full_splash_qk_e3_combine_per_hop": (quantization.FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP),
     "fp8_fsdp_ag": quantization.FP8_FSDP_AG,
+    "fp8_fsdp_ag_bf16_ep": quantization.FP8_FSDP_AG_BF16_EP,
 }
 
 
@@ -69,7 +70,7 @@ class DSv3ModelConfig:
   Attributes:
     vocab_size: Vocabulary size `V`.
     emb_dim: Model dim `D`.
-    num_dense_layers: Dense (MLP) decoder layers; at least 2.
+    num_dense_layers: Dense (MLP) decoder layers; 0 or at least 2.
     num_sparse_layers: Sparse (MoE) decoder layers; at least 3.
     num_mtp_layers: Multi-token prediction depths `K` (0 disables MTP).
     num_query_heads: Attention heads `H`.
@@ -82,6 +83,7 @@ class DSv3ModelConfig:
     mscale: YaRN attention scale.
     mlp_dim: Dense layer MLP hidden dim.
     moe_mlp_dim: Routed and shared expert hidden dim.
+    num_shared_experts: Shared experts per MoE layer, 1 or 0 (none).
     num_experts: Routed experts `E`.
     num_experts_per_tok: Routed experts per token.
     n_routing_groups: Device-limited routing groups.
@@ -141,6 +143,7 @@ class DSv3ModelConfig:
   router_bias_dtype: jax.typing.DTypeLike = jnp.bfloat16
   head_dot_in_fp32: bool = False
   cast_logits_to_fp32: bool = True
+  num_shared_experts: int = 1
 
   @property
   def topk_in_group(self) -> int:
@@ -184,6 +187,10 @@ class DSv3KernelConfig:
       around the decoder.
     expert_permutation: Expert permutation algorithm, one of
       `dsv3_expert_shuffle.EXPERT_PERMUTATION_ALGORITHMS`.
+    microbatch_split: How the sparse layers split their two microbatches:
+      `"batch"` (halves of the local batch) or `"seq"` (halves of every
+      sequence; see `dsv3_mla.SeqSplitSplash`), which allows a single local
+      sequence per device.
   """
 
   max_target_length: int
@@ -207,6 +214,11 @@ class DSv3KernelConfig:
   quant: quantization.QuantConfig | None = None
   max_async_overlap_transform: bool = True
   expert_permutation: str = "none"
+  microbatch_split: str = "batch"
+
+  def __post_init__(self):
+    if self.microbatch_split not in ("batch", "seq"):
+      raise ValueError("microbatch_split must be 'batch' or 'seq', got" f" {self.microbatch_split!r}.")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -265,8 +277,8 @@ class DSv3Config:
       ValueError: On the first violated constraint.
     """
     m, k, t = self.model, self.kernels, self.training
-    if m.num_dense_layers < 2:
-      raise ValueError("Lineage's dense layer scan needs at least 2 dense layers, got" f" {m.num_dense_layers}.")
+    if m.num_dense_layers == 1 or m.num_dense_layers < 0:
+      raise ValueError("Lineage's dense layer scan needs 0 (none) or at least 2 dense" f" layers, got {m.num_dense_layers}.")
     if m.num_sparse_layers < 3:
       raise ValueError("Lineage's sparse layer scan needs at least 3 sparse layers, got" f" {m.num_sparse_layers}.")
     if m.num_mtp_layers < 0:

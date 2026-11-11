@@ -22,18 +22,7 @@ from typing import Any, Protocol, overload
 
 import jax
 from jax.experimental import layout as jax_layout
-
-try:
-  from jax.experimental.overlap import program_order
-except ImportError:
-  try:
-    from jax._src.pjit import program_order
-  except ImportError:
-
-    def program_order(*unused_args, **unused_kwargs):
-      return lambda fn: fn
-
-
+from jax.experimental.overlap import program_order
 import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
@@ -194,8 +183,9 @@ def _merge_router_aux(
     aux1: dsv3_types.DSv3RouterAux[Any],
     *,
     mesh: jax.sharding.Mesh,
+    axis: int = 0,
 ) -> dsv3_types.DSv3RouterAux[Any]:
-  """Combines router auxiliary data from two microbatches."""
+  """Combines router auxiliary data from two microbatches split on `axis`."""
   group_sizes = None
   if aux0.group_sizes is not None and aux1.group_sizes is not None:
     group_sizes = aux0.group_sizes + aux1.group_sizes
@@ -206,8 +196,8 @@ def _merge_router_aux(
 
   return dsv3_types.DSv3RouterAux(
       group_sizes=group_sizes,
-      selected_experts=ops.merge_microbatches(aux0.selected_experts, aux1.selected_experts, mesh=mesh),
-      logits=ops.merge_microbatches(aux0.logits, aux1.logits, mesh=mesh),
+      selected_experts=ops.merge_microbatches(aux0.selected_experts, aux1.selected_experts, mesh=mesh, axis=axis),
+      logits=ops.merge_microbatches(aux0.logits, aux1.logits, mesh=mesh, axis=axis),
   )
 
 
@@ -217,6 +207,34 @@ def ubatch_wait(*args: Any) -> Any:
   if len(args) == 1:
     return args[0]
   return args
+
+
+def _mb_axis(splash_kernel: Any) -> int:
+  """The axis the microbatches split: 1 (sequence) or 0 (batch)."""
+  return 1 if dsv3_mla.is_seq_split(splash_kernel) else 0
+
+
+def _seq_split_kv(outputs_mla: tuple[Any, ...]) -> Any:
+  """Microbatch 0's local K/V shards carried in `outputs_mla`, if any.
+
+  With sequence-split microbatches, microbatch 0's `ubatch_mla` outputs carry
+  its local K/V shards as a third element for microbatch 1's attention (and
+  their gradients flow back in the same slot of the cotangents).
+
+  Args:
+    outputs_mla: `ubatch_mla` outputs (or their cotangents).
+
+  Returns:
+    The K/V shards (or their cotangents), or None.
+  """
+  return outputs_mla[2] if len(outputs_mla) > 2 else None
+
+
+def _mla_out_grads(grad_mla_out: jax.Array, grad_kv: Any) -> tuple[Any, ...]:
+  """Cotangents of `ubatch_mla` outputs `(out, orig_x[, kv])`."""
+  if grad_kv is None:
+    return (grad_mla_out, grad_mla_out)
+  return (grad_mla_out, grad_mla_out, grad_kv)
 
 
 @jax.named_call
@@ -243,19 +261,38 @@ def ubatch_mla(
     norm_fn: NormFn,
     rope_fn: RopeFn,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
-    segment_ids: jt.Num[jax.Array, "B T"] | None = None,
+    # With sequence-split microbatches, the whole sequence's segment ids in
+    # the original token order (see `dsv3_mla.seq_split_segment_ids`).
+    segment_ids: jt.Num[jax.Array, "B T_seg"] | None = None,
     quant_rule: quantization.GmmQuantRule | None = None,
-) -> tuple[
-    tuple[
-        jt.Num[jax.Array, "B T D"],
-        jt.Num[jax.Array, "B T D"],
-    ],
-    dsv3_types.DSv3MLAResiduals,
-]:
-  """Pre-attention norm and MLA, in fp8 with `quant_rule`."""
+    microbatch: int = 0,
+    kv_prefix: tuple[jax.Array, jax.Array] | None = None,
+) -> tuple[tuple[Any, ...], dsv3_types.DSv3MLAResiduals]:
+  """Pre-attention norm and MLA, in fp8 with `quant_rule`.
+
+  With sequence-split microbatches (`dsv3_mla.SeqSplitSplash`), microbatch 0
+  also returns its local K/V shards as a third output, and microbatch 1 takes
+  them as `kv_prefix` (and saves them for its backward pass).
+  """
   orig_x = x
   with jax.named_scope("pre_attn_norm"):
     norm_x = norm_fn(x, pre_attn_norm_scale)
+  if dsv3_mla.is_seq_split(splash_kernel):
+    if quant_rule is not None:
+      raise NotImplementedError("Sequence-split microbatches support bf16 GQA only.")
+    out, mla_residuals, kv_local = dsv3_mla.gqa_microbatch_fwd(
+        norm_x,
+        yarn_freqs,
+        dsv3_mla.microbatch_splash_kernel(splash_kernel, microbatch),
+        w_mla,
+        mesh=mesh,
+        kv_prefix=kv_prefix,
+        segment_ids=dsv3_mla.seq_split_segment_ids(segment_ids, microbatch),
+    )
+    res = dsv3_types.DSv3MLAResiduals(orig_x, *mla_residuals, kv_prefix=kv_prefix)
+    if microbatch == 0:
+      return (out, orig_x, kv_local), res
+    return (out, orig_x), res
   out, mla_residuals = dsv3_mla.dsv3_mla_fwd(
       norm_x,
       yarn_freqs,
@@ -286,6 +323,66 @@ def ubatch_mla(
   return (out, orig_x), res
 
 
+def _ubatch_mla_bwd(
+    grad_out: jax.Array,
+    norm_x: jax.Array,
+    mla_res: dsv3_types.DSv3MLAResiduals,
+    w_mla: dsv3_types.DSv3MLAWeightsPytree,
+    yarn_freqs: tuple[jax.Array, jax.Array],
+    splash_kernel: Any,
+    *,
+    microbatch: int,
+    grad_kv_local: Any = None,
+    **mla_kwargs: Any,
+) -> tuple[jax.Array, dsv3_types.DSv3MLAWeightsPytree, Any, Any]:
+  """MLA backward of a microbatch's `ubatch_mla`.
+
+  Args:
+    grad_out: Cotangent of the MLA output.
+    norm_x: Rematerialized normalized input.
+    mla_res: The microbatch's MLA residuals.
+    w_mla: MLA weights.
+    yarn_freqs: The microbatch's YaRN frequencies.
+    splash_kernel: The splash kernel(s) of the layer.
+    microbatch: The microbatch (0 or 1).
+    grad_kv_local: With sequence-split microbatches, microbatch 0's cotangent of
+      its local K/V shards (from microbatch 1's backward pass).
+    **mla_kwargs: Keyword arguments of `dsv3_mla.dsv3_mla_bwd`.
+
+  Returns:
+    Tuple of (grad_norm_x, grad_w_mla, grad_yarn_freqs, gradient of the
+    microbatch's `kv_prefix` (microbatch 1 with sequence-split microbatches)
+    or None).
+  """
+  if dsv3_mla.is_seq_split(splash_kernel):
+    return dsv3_mla.gqa_microbatch_bwd(
+        grad_out,
+        norm_x,
+        mla_res.context,
+        mla_res.splash_out,
+        w_mla,
+        yarn_freqs,
+        dsv3_mla.microbatch_splash_kernel(splash_kernel, microbatch),
+        mesh=mla_kwargs["mesh"],
+        kv_prefix=mla_res.kv_prefix,
+        grad_kv_local=grad_kv_local,
+        segment_ids=dsv3_mla.seq_split_segment_ids(mla_kwargs.get("segment_ids"), microbatch),
+    )
+  grad_norm_x, grad_w_mla, grad_yarn_freqs = dsv3_mla.dsv3_mla_bwd(
+      grad_out,
+      norm_x,
+      mla_res.q_down,
+      mla_res.kv_down,
+      mla_res.context,
+      mla_res.splash_out,
+      w_mla,
+      yarn_freqs,
+      splash_kernel,
+      **mla_kwargs,
+  )
+  return grad_norm_x, grad_w_mla, grad_yarn_freqs, None
+
+
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def ubatch_norm_and_metadata(
@@ -307,6 +404,7 @@ def ubatch_norm_and_metadata(
     capacity_factor: float,
     router_dtype: jax.typing.DTypeLike | None = None,
     expert_permutations: jt.Int[jax.Array, "E"] | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     tuple[
         tuple[
@@ -340,6 +438,7 @@ def ubatch_norm_and_metadata(
       capacity_factor=capacity_factor,
       router_dtype=router_dtype,
       expert_permutations=expert_permutations,
+      ep_reduce_dtype=ep_reduce_dtype,
   )
   router_metadata = dataclasses.replace(
       router_metadata,
@@ -683,6 +782,7 @@ def _routed_experts_chunked_impl(
     num_experts_per_tok: int,
     gmm_fn: GmmFn,
     quant_rule: quantization.GmmQuantRule | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "NBT D0 D1"],
     jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
@@ -705,10 +805,13 @@ def _routed_experts_chunked_impl(
     gmm_fn: Function to perform Grouped Matrix Multiplication.
     quant_rule: Optional fp8 quantization; x_ag and w_routed must then already
       be quantized (see `dsv3_experts.dsv3_routed_experts_impl`).
+    ep_reduce_dtype: Optional dtype the top-k reduced expert outputs are
+      accumulated (and returned) in, e.g. f32.
 
   Returns:
     Tuple of (top-k reduced expert outputs, bank, bank_offset).
   """
+  token_bytes = dsv3_router.ep_reduce_token_bytes(x_ag.shape[-2] * x_ag.shape[-1], ep_reduce_dtype)
   capacity = metadata.capacity
   num_local_tokens = jnp.sum(metadata.group_sizes, dtype=jnp.int32)
   # With fp8 and a fused-GLU gate GMM that can gather, the gate GMM reads each
@@ -763,6 +866,8 @@ def _routed_experts_chunked_impl(
           gmm_fn=gmm_fn,
           quant_rule=quant_rule,
       )
+      if ep_reduce_dtype is not None:
+        routed_out = routed_out.astype(ep_reduce_dtype)
       y_ag = dsv3_router.unpermute_chunk(
           routed_out,
           reduce_metadata,
@@ -791,6 +896,7 @@ def _routed_experts_chunked_impl(
         dsv3_router.chunk_num_tokens(num_local_tokens, start, capacity),
         capacity=capacity,
         num_experts_per_tok=num_experts_per_tok,
+        token_bytes=token_bytes,
     )
     y_ag, bank, bank_offset = _chunk(
         start,
@@ -825,6 +931,7 @@ def ubatch_expert(
     gmm_fn: GmmFn,
     mesh: jax.sharding.Mesh,
     quant_rule: quantization.GmmQuantRule | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     tuple[
         tuple[
@@ -855,6 +962,7 @@ def ubatch_expert(
           num_experts_per_tok=num_experts_per_tok,
           gmm_fn=gmm_fn,
           quant_rule=quant_rule,
+          ep_reduce_dtype=ep_reduce_dtype,
       ),
       mesh=mesh,
       out_specs=(x_ag_pspec, bank_pspec, offset_pspec),
@@ -908,6 +1016,7 @@ def ubatch_combine(
       out_specs=out_specs,
       combine_qtype=combine_qtype,
       combine_per_hop_scaling=combine_per_hop_scaling,
+      out_dtype=mla_out.dtype,
   )
   shared_x = shared_or_moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(shared_or_moe_in, w_shared)
   combine_out = (
@@ -951,6 +1060,7 @@ def ubatch_expert_bwd(
     quant_rule: quantization.GmmQuantRule | None = None,
     w_routed_q: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None = None,
     grad_y_scale: jt.Num[jax.Array, "num_token_shards 1"] | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "NBT D0 D1"],
     jt.Num[jax.Array, "kNBT"],
@@ -977,6 +1087,7 @@ def ubatch_expert_bwd(
           num_experts_per_tok=num_experts_per_tok,
           gmm_fn=gmm_fn,
           quant_rule=quant_rule,
+          ep_reduce_dtype=ep_reduce_dtype,
       ),
       mesh=mesh,
       out_specs=(
@@ -1020,6 +1131,7 @@ def _routed_experts_chunked_bwd_impl(
     num_experts_per_tok: int,
     gmm_fn: GmmFn,
     quant_rule: quantization.GmmQuantRule | None = None,
+    ep_reduce_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "NBT D0 D1"],
     jt.Num[jax.Array, "kNBT"],
@@ -1051,6 +1163,8 @@ def _routed_experts_chunked_bwd_impl(
     gmm_fn: Function to perform Grouped Matrix Multiplication.
     quant_rule: Optional fp8 quantization; x_ag must then already be quantized
       (see `dsv3_experts.dsv3_routed_experts_bwd_impl`).
+    ep_reduce_dtype: Optional dtype the top-k reduced token gradients are
+      accumulated (and returned) in, e.g. f32.
 
   Returns:
     Tuple of (grad_x_ag, grad_sorted_coeffs (flattened), grad_w_routed, bank,
@@ -1058,6 +1172,7 @@ def _routed_experts_chunked_bwd_impl(
   """
   capacity = metadata.capacity
   num_slots = metadata.sort_indices.shape[0]
+  token_bytes = dsv3_router.ep_reduce_token_bytes(x_ag.shape[-2] * x_ag.shape[-1], ep_reduce_dtype)
   num_local_tokens = jnp.sum(metadata.group_sizes, dtype=jnp.int32)
   bank_offset = bank_offset - dsv3_experts.bank_aligned(num_local_tokens)
   if grad_w_acc is not None:
@@ -1118,6 +1233,8 @@ def _routed_experts_chunked_bwd_impl(
           quant_rule=quant_rule,
           w_routed_q=(None if w_routed_q is None else routed_w_from_tiles(w_routed_q)),
       )
+    if ep_reduce_dtype is not None:
+      grad_x_sorted = grad_x_sorted.astype(ep_reduce_dtype)
     grad_x_ag = dsv3_router.unpermute_chunk(
         grad_x_sorted,
         reduce_metadata,
@@ -1152,6 +1269,7 @@ def _routed_experts_chunked_bwd_impl(
         dsv3_router.chunk_num_tokens(num_local_tokens, start, capacity),
         capacity=capacity,
         num_experts_per_tok=num_experts_per_tok,
+        token_bytes=token_bytes,
     )
     grad_x_ag, grad_w_routed, grad_coeffs, bank = _chunk(
         start,
@@ -1281,6 +1399,7 @@ def dsv3_sparse_layer_prologue_fwd(
       rope_fn=rope_fn,
       axis_mapping=axis_mapping,
       quant_rule=mla_rule,
+      microbatch=0,
   )
   mb1_wait = ubatch_wait(mb1)
 
@@ -1331,7 +1450,8 @@ def dsv3_sparse_layer_prologue_bwd(
 ) -> tuple[Any, dsv3_types.DSv3SparseLayerWeightsPytree]:
   """Performs backward pass for DSv3 sparse layer prologue."""
   (grad_outputs_mla_0, _, _), (grad_mb1, _, _) = grad_outputs
-  grad_out_proj_out, grad_orig_x = grad_outputs_mla_0
+  grad_out_proj_out, grad_orig_x = grad_outputs_mla_0[:2]
+  grad_kv_local_0 = _seq_split_kv(grad_outputs_mla_0)
 
   yarn_freqs_0, _ = yarn_freqs
   segment_ids_0, _ = segment_ids
@@ -1343,16 +1463,15 @@ def dsv3_sparse_layer_prologue_bwd(
   with jax.named_scope("pre_attn_norm"):
     norm_x = norm_fn(res.mb0.mla.orig_x, w.pre_attn_norm_scale)
 
-  grad_norm_x, grad_w_mla, _ = dsv3_mla.dsv3_mla_bwd(
+  grad_norm_x, grad_w_mla, _, _ = _ubatch_mla_bwd(
       grad_out_proj_out,
       norm_x,
-      res.mb0.mla.q_down,
-      res.mb0.mla.kv_down,
-      res.mb0.mla.context,
-      res.mb0.mla.splash_out,
+      res.mb0.mla,
       w.mla,
       yarn_freqs_0,
       splash_kernel,
+      microbatch=0,
+      grad_kv_local=grad_kv_local_0,
       segment_ids=segment_ids_0,
       kv_lora_rank=kv_lora_rank,
       qk_head_dim=qk_head_dim,
@@ -1464,6 +1583,7 @@ def dsv3_sparse_layer_epilogue_fwd(
 ]:
   """Forward pass for DSv3 sparse layer epilogue."""
   quant_rule = quant.routed_experts if quant else None
+  ep_reduce_dtype = quant.ep_reduce_dtype if quant else None
   mla_rule = quant.mla if quant else None
   combine_qtype = quant.combine_qtype if quant else None
   combine_per_hop_scaling = quant.combine_per_hop_scaling if quant else False
@@ -1473,7 +1593,9 @@ def dsv3_sparse_layer_epilogue_fwd(
       bank_1,
       bank_offset_1,
   ) = outputs_mla
-  out_proj_out_curr_0, _ = outputs_mla_curr_0
+  out_proj_out_curr_0 = outputs_mla_curr_0[0]
+  # Microbatch 0's local K/V shards, for microbatch 1's attention.
+  kv_curr_0 = _seq_split_kv(outputs_mla_curr_0)
   x_pspec = jax.typeof(out_proj_out_curr_0).sharding.spec
   local_seq_length = _get_local_dim_size(out_proj_out_curr_0.shape[1], x_pspec[1], mesh)
   _, yarn_freqs_1 = yarn_freqs
@@ -1482,7 +1604,7 @@ def dsv3_sparse_layer_epilogue_fwd(
   @jax.named_call
   @program_order(enforce=False)
   def phase1(outputs_mla_curr_0):
-    out_proj_out_curr_0, orig_x_curr_0 = outputs_mla_curr_0
+    out_proj_out_curr_0, orig_x_curr_0 = outputs_mla_curr_0[:2]
     (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0 = ubatch_norm_and_metadata(
         out_proj_out_curr_0,
         orig_x_curr_0,
@@ -1501,6 +1623,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         capacity_factor=capacity_factor,
         router_dtype=router_dtype,
         expert_permutations=expert_permutations,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0
 
@@ -1534,6 +1657,8 @@ def dsv3_sparse_layer_epilogue_fwd(
         rope_fn=rope_fn,
         axis_mapping=axis_mapping,
         quant_rule=mla_rule,
+        microbatch=1,
+        kv_prefix=kv_curr_0,
     )
     return (outputs_dispatch_curr_0, outputs_mla_curr_1), res_mla_curr_1
 
@@ -1560,6 +1685,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         capacity_factor=capacity_factor,
         router_dtype=router_dtype,
         expert_permutations=expert_permutations,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (
         outputs_dispatch_wait_0,
@@ -1584,6 +1710,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         gmm_fn=gmm_fn,
         mesh=mesh,
         quant_rule=quant_rule,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     outputs_dispatch_curr_1, _ = ubatch_dispatch(
         *outputs_metadata_curr_1,
@@ -1627,6 +1754,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         gmm_fn=gmm_fn,
         mesh=mesh,
         quant_rule=quant_rule,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (
         outputs_combine_curr_0,
@@ -1701,7 +1829,7 @@ def dsv3_sparse_layer_epilogue_fwd(
     (out_mb0_wait, outputs_combine_curr_1), _ = phase7(out_mb0, outputs_expert_wait_1)
     (out_mb0_final, out_mb1), _ = phase8(out_mb0_wait, outputs_combine_curr_1)
 
-    aux = _merge_router_aux(aux_curr_0, aux_curr_1, mesh=mesh)
+    aux = _merge_router_aux(aux_curr_0, aux_curr_1, mesh=mesh, axis=_mb_axis(splash_kernel))
     return (
         ((out_mb0_final, out_mb1), aux),
         (bank_0, bank_1),
@@ -1805,6 +1933,9 @@ def dsv3_sparse_layer_epilogue_bwd(
 ) -> tuple[Any, dsv3_types.DSv3SparseLayerWeightsPytree]:
   """Backward pass for DSv3 sparse layer epilogue."""
   quant_rule = quant.routed_experts if quant else None
+  ep_reduce_dtype = quant.ep_reduce_dtype if quant else None
+  # The EP reductions' results are cast back to the (bf16) activation dtype.
+  ep_out_dtype = None if ep_reduce_dtype is None else jnp.bfloat16
   mla_rule = quant.mla if quant else None
   w_routed_q = None if quant_rule is None else _quantize_routed_weights(w.moe.routed, quant_rule)
   grad_out, grad_aux = grad_outputs
@@ -1833,7 +1964,7 @@ def dsv3_sparse_layer_epilogue_bwd(
     grad_logits = grad_aux.logits
     if jax.typeof(grad_logits).sharding != logits_sharding:
       grad_logits = jax.reshard(grad_logits, logits_sharding)
-    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits, mesh=mesh)
+    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits, mesh=mesh, axis=_mb_axis(splash_kernel))
     grad_aux_0 = dsv3_types.DSv3RouterAux[Any](
         group_sizes=getattr(grad_aux, "group_sizes", None),
         selected_experts=getattr(grad_aux, "selected_experts", None),
@@ -1848,9 +1979,7 @@ def dsv3_sparse_layer_epilogue_bwd(
     grad_aux_0 = grad_aux
     grad_aux_1 = grad_aux
 
-  mla_out_curr_0 = (
-      res.mb0.moe.out_proj_out if res.mb0.moe.orig_x is None else res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
-  )
+  mla_out_curr_0 = res.mb0.moe.out_proj_out if res.mb0.moe.orig_x is None else res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
   with jax.named_scope("post_attn_norm"):
     moe_in_curr_0 = norm_fn(mla_out_curr_0, w.post_attn_norm_scale)
 
@@ -1952,6 +2081,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
         grad_y_scale=grad_y_scale_1,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (
         (x_ag_0, grad_y_ag_0, grad_y_scale_0),
@@ -2019,6 +2149,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
         grad_y_scale=grad_y_scale_0,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
 
     grad_moe_in_routed_1, grad_coeffs_1 = dsv3_router.dsv3_combine_with_coeff_grads(
@@ -2031,6 +2162,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        out_dtype=ep_out_dtype,
     )
     return (
         (
@@ -2079,6 +2211,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        out_dtype=ep_out_dtype,
     )
 
     def _shared_expert_fwd_0(moe_in, w_shared):
@@ -2130,16 +2263,14 @@ def dsv3_sparse_layer_epilogue_bwd(
     with jax.named_scope("pre_attn_norm"):
       norm_x_1 = norm_fn(res.mb1.mla.orig_x, w.pre_attn_norm_scale)
 
-    grad_norm_x_1, grad_w_mla_1, grad_yarn_freqs_1 = dsv3_mla.dsv3_mla_bwd(
+    grad_norm_x_1, grad_w_mla_1, _, grad_kv_prefix_1 = _ubatch_mla_bwd(
         grad_mla_out_total_1,
         norm_x_1,
-        res.mb1.mla.q_down,
-        res.mb1.mla.kv_down,
-        res.mb1.mla.context,
-        res.mb1.mla.splash_out,
+        res.mb1.mla,
         w.mla,
         yarn_freqs_1,
         splash_kernel,
+        microbatch=1,
         segment_ids=segment_ids_1,
         kv_lora_rank=kv_lora_rank,
         qk_head_dim=qk_head_dim,
@@ -2166,7 +2297,7 @@ def dsv3_sparse_layer_epilogue_bwd(
 
     return (
         mb0_wait,
-        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_kv_prefix_1),
     ), ()
 
   @jax.named_call
@@ -2316,7 +2447,7 @@ def dsv3_sparse_layer_epilogue_bwd(
     grad_mla_out_total_1 = grad_mla_out_unpermute_1 + grad_mla_out_norm_1
     (
         mb0_wait_7,
-        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_kv_prefix_1),
     ), _ = phase7(
         (
             grad_moe_in_routed_0,
@@ -2356,7 +2487,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         bank_offset_1,
         grad_pre_attn_norm_scale_1,
         grad_w_mla_1,
-        grad_yarn_freqs_1,
+        grad_kv_prefix_1,
         grad_post_attn_norm_scale_0,
         grad_post_attn_norm_scale_1,
         grad_w_router_0,
@@ -2375,7 +2506,7 @@ def dsv3_sparse_layer_epilogue_bwd(
       bank_offset_1,
       grad_pre_attn_norm_scale_1,
       grad_w_mla_1,
-      _,
+      grad_kv_prefix_1,
       grad_post_attn_norm_scale_0,
       grad_post_attn_norm_scale_1,
       grad_w_router_0,
@@ -2394,7 +2525,7 @@ def dsv3_sparse_layer_epilogue_bwd(
 
   grad_carry = (
       (
-          (grad_mla_out_total_0, grad_mla_out_total_0),
+          _mla_out_grads(grad_mla_out_total_0, grad_kv_prefix_1),
           bank_0,
           bank_offset_0,
       ),
@@ -2497,6 +2628,7 @@ def dsv3_sparse_layer_scan_body_fwd(
 ]:
   """Forward pass for DSv3 sparse layer scan body."""
   quant_rule = quant.routed_experts if quant else None
+  ep_reduce_dtype = quant.ep_reduce_dtype if quant else None
   mla_rule = quant.mla if quant else None
   combine_qtype = quant.combine_qtype if quant else None
   combine_per_hop_scaling = quant.combine_per_hop_scaling if quant else False
@@ -2505,7 +2637,9 @@ def dsv3_sparse_layer_scan_body_fwd(
       (outputs_mla_curr_0, bank_0, bank_offset_0),
       (orig_x_curr_1, bank_1, bank_offset_1),
   ) = outputs_mla_curr
-  out_proj_out_curr_0, _ = outputs_mla_curr_0
+  out_proj_out_curr_0 = outputs_mla_curr_0[0]
+  # Microbatch 0's local K/V shards, for microbatch 1's attention.
+  kv_curr_0 = _seq_split_kv(outputs_mla_curr_0)
   x_pspec = jax.typeof(out_proj_out_curr_0).sharding.spec
   local_seq_length = _get_local_dim_size(out_proj_out_curr_0.shape[1], x_pspec[1], mesh)
   yarn_freqs_0, yarn_freqs_1 = yarn_freqs
@@ -2515,7 +2649,7 @@ def dsv3_sparse_layer_scan_body_fwd(
   @program_order(enforce=False)
   def phase1(outputs_mla_curr_0):
     """Phase 1: mb0 norm, metadata."""
-    out_proj_out_curr_0, orig_x_curr_0 = outputs_mla_curr_0
+    out_proj_out_curr_0, orig_x_curr_0 = outputs_mla_curr_0[:2]
     (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0 = ubatch_norm_and_metadata(
         out_proj_out_curr_0,
         orig_x_curr_0,
@@ -2534,6 +2668,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         capacity_factor=capacity_factor,
         router_dtype=router_dtype,
         expert_permutations=expert_permutations,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0
 
@@ -2568,6 +2703,8 @@ def dsv3_sparse_layer_scan_body_fwd(
         rope_fn=rope_fn,
         axis_mapping=axis_mapping,
         quant_rule=mla_rule,
+        microbatch=1,
+        kv_prefix=kv_curr_0,
     )
     return (outputs_dispatch_curr_0, outputs_mla_curr_1), res_mla_curr_1
 
@@ -2595,6 +2732,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         capacity_factor=capacity_factor,
         router_dtype=router_dtype,
         expert_permutations=expert_permutations,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (
         outputs_dispatch_wait_0,
@@ -2615,6 +2753,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         bank=bank_0,
         bank_offset=bank_offset_0,
         quant_rule=quant_rule,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     outputs_dispatch_curr_1, _ = ubatch_dispatch(
         *outputs_metadata_curr_1,
@@ -2655,6 +2794,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         bank=bank_1,
         bank_offset=bank_offset_1,
         quant_rule=quant_rule,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (
         outputs_combine_curr_0,
@@ -2696,6 +2836,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         rope_fn=rope_fn,
         axis_mapping=axis_mapping,
         quant_rule=mla_rule,
+        microbatch=0,
     )
     outputs_combine_curr_1, _ = ubatch_combine(
         *outputs_expert_curr_1,
@@ -2746,7 +2887,7 @@ def dsv3_sparse_layer_scan_body_fwd(
     (outputs_mla_next_0, outputs_combine_curr_1), res_mla_next_0 = phase7(x_next_0, outputs_expert_wait_1)
     (outputs_mla_next_0_wait, x_next_1), _ = phase8(outputs_mla_next_0, outputs_combine_curr_1)
 
-    aux_curr = _merge_router_aux(aux_curr_0, aux_curr_1, mesh=mesh)
+    aux_curr = _merge_router_aux(aux_curr_0, aux_curr_1, mesh=mesh, axis=_mb_axis(splash_kernel))
     return (
         (
             (outputs_mla_next_0_wait, bank_0, bank_offset_0),
@@ -2892,6 +3033,9 @@ def dsv3_sparse_layer_scan_body_bwd(
     `w_pending_grad_partial` (`None` if it is).
   """
   quant_rule = quant.routed_experts if quant else None
+  ep_reduce_dtype = quant.ep_reduce_dtype if quant else None
+  # The EP reductions' results are cast back to the (bf16) activation dtype.
+  ep_out_dtype = None if ep_reduce_dtype is None else jnp.bfloat16
   mla_rule = quant.mla if quant else None
   w_routed_q = None if quant_rule is None else _quantize_routed_weights(w_curr.moe.routed, quant_rule)
   grad_carry, grad_aux_curr = grad_outputs
@@ -2906,9 +3050,7 @@ def dsv3_sparse_layer_scan_body_bwd(
   assert res.mb1.mla is not None
   assert res.mb1.moe is not None
 
-  mla_out_curr_0 = (
-      res.mb0.moe.out_proj_out if res.mb0.moe.orig_x is None else res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
-  )
+  mla_out_curr_0 = res.mb0.moe.out_proj_out if res.mb0.moe.orig_x is None else res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
   with jax.named_scope("post_attn_norm"):
     moe_in_curr_0 = norm_fn(mla_out_curr_0, w_curr.post_attn_norm_scale)
 
@@ -2927,7 +3069,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_logits_curr = grad_aux_curr.logits
     if jax.typeof(grad_logits_curr).sharding != logits_sharding:
       grad_logits_curr = jax.reshard(grad_logits_curr, logits_sharding)
-    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits_curr, mesh=mesh)
+    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits_curr, mesh=mesh, axis=_mb_axis(splash_kernel))
     grad_aux_0 = dsv3_types.DSv3RouterAux[Any](
         group_sizes=grad_aux_curr.group_sizes,
         selected_experts=grad_aux_curr.selected_experts,
@@ -2965,20 +3107,20 @@ def dsv3_sparse_layer_scan_body_bwd(
   ):
     """Phase 2: mb0 next layer mla backward; mb1 dispatch remat & combine transpose."""
     assert res.mb0.mla is not None
-    grad_out_proj_out_next_0, grad_orig_x_next_0 = grad_outputs_mla_next_0_wait
+    grad_out_proj_out_next_0, grad_orig_x_next_0 = grad_outputs_mla_next_0_wait[:2]
+    grad_kv_local_0 = _seq_split_kv(grad_outputs_mla_next_0_wait)
     with jax.named_scope("pre_attn_norm"):
       norm_x_next_0 = norm_fn(res.mb0.mla.orig_x, w_next.pre_attn_norm_scale)
 
-    grad_norm_x_next_0, grad_w_mla_next_0, grad_yarn_freqs_next_0 = dsv3_mla.dsv3_mla_bwd(
+    grad_norm_x_next_0, grad_w_mla_next_0, grad_yarn_freqs_next_0, _ = _ubatch_mla_bwd(
         grad_out_proj_out_next_0,
         norm_x_next_0,
-        res.mb0.mla.q_down,
-        res.mb0.mla.kv_down,
-        res.mb0.mla.context,
-        res.mb0.mla.splash_out,
+        res.mb0.mla,
         w_next.mla,
         yarn_freqs_0,
         splash_kernel,
+        microbatch=0,
+        grad_kv_local=grad_kv_local_0,
         segment_ids=segment_ids_0,
         kv_lora_rank=kv_lora_rank,
         qk_head_dim=qk_head_dim,
@@ -3094,6 +3236,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
         grad_y_scale=grad_y_scale_1,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
     return (
         (x_ag_0, grad_y_ag_0, grad_y_scale_0),
@@ -3181,6 +3324,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
         grad_y_scale=grad_y_scale_0,
+        ep_reduce_dtype=ep_reduce_dtype,
     )
 
     # Runs the second ICI reduction stage (SparseCore 0) of the attention half
@@ -3200,6 +3344,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        out_dtype=ep_out_dtype,
     )
     return (
         (
@@ -3291,21 +3436,20 @@ def dsv3_sparse_layer_scan_body_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        out_dtype=ep_out_dtype,
     )
 
     with jax.named_scope("pre_attn_norm"):
       norm_x_curr_1 = norm_fn(res.mb1.mla.orig_x, w_curr.pre_attn_norm_scale)
 
-    grad_norm_x_1, grad_w_mla_1, grad_yarn_freqs_1 = dsv3_mla.dsv3_mla_bwd(
+    grad_norm_x_1, grad_w_mla_1, _, grad_kv_prefix_1 = _ubatch_mla_bwd(
         grad_mla_out_total_1,
         norm_x_curr_1,
-        res.mb1.mla.q_down,
-        res.mb1.mla.kv_down,
-        res.mb1.mla.context,
-        res.mb1.mla.splash_out,
+        res.mb1.mla,
         w_curr.mla,
         yarn_freqs_1,
         splash_kernel,
+        microbatch=1,
         segment_ids=segment_ids_1,
         kv_lora_rank=kv_lora_rank,
         qk_head_dim=qk_head_dim,
@@ -3332,7 +3476,7 @@ def dsv3_sparse_layer_scan_body_bwd(
 
     return (
         (grad_moe_in_routed_0, grad_coeffs_0),
-        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_kv_prefix_1),
         w_pending_grad_moe,
     ), ()
 
@@ -3485,7 +3629,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_mla_out_total_1 = grad_mla_out_unpermute_1 + grad_mla_out_norm_1
     (
         (grad_moe_in_routed_0, grad_coeffs_0),
-        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, _),
+        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_kv_prefix_1),
         w_pending_grad_moe,
     ), _ = phase7(
         grad_x_ag_0_w,
@@ -3526,6 +3670,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         grad_w_shared_1,
         w_pending_grad_attention,
         w_pending_grad_moe,
+        grad_kv_prefix_1,
     )
 
   (
@@ -3547,6 +3692,7 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_w_shared_1,
       w_pending_grad_attention,
       w_pending_grad_moe,
+      grad_kv_prefix_1,
   ) = _scan_body_bwd(
       grad_outputs_mla_next_0,
       grad_x_next_1,
@@ -3571,7 +3717,7 @@ def dsv3_sparse_layer_scan_body_bwd(
 
   grad_outputs_mla_curr = (
       (
-          (grad_mla_out_total_0, grad_mla_out_total_0),
+          _mla_out_grads(grad_mla_out_total_0, grad_kv_prefix_1),
           bank_0,
           bank_offset_0,
       ),
@@ -4278,25 +4424,44 @@ def _split_w_attention_moe(
   return attention, moe
 
 
+_SPLIT_SMALL_W_SCATTERS = True
+
+
+def set_split_small_w_scatters(enabled: bool) -> None:
+  """Whether `_w_ici_split_scatters` splits the small reduce-scatters by axis.
+
+  Takes effect for functions traced afterwards. With `False`, the MLA
+  down-projections, `k_up`, `v_up` and the shared experts are reduce-scattered
+  in one multi-axis (e.g. 2D over x and y) reduce-scatter like the large ones.
+
+  Args:
+    enabled: Whether to issue them as one 1D reduce-scatter per axis.
+  """
+  global _SPLIT_SMALL_W_SCATTERS
+  _SPLIT_SMALL_W_SCATTERS = enabled
+
+
 def _w_ici_split_scatters() -> dsv3_types.DSv3SparseLayerWeightsPytree:
   """Returns whether to split each weight gradient's ICI reduce-scatter by axis.
 
   With FSDP over two axes (e.g. `y` and `z`), the small, latency-bound
   reduce-scatters of the MLA down-projections, `k_up`, `v_up` and the shared
   experts are issued as one 1D reduce-scatter per axis (see
-  `ops.reduce_along_axis`), and the large, bandwidth-bound ones of `q_up`, `out`
-  and the routed experts as one 2D reduce-scatter, which uses the links of both
-  axes. The norm scales and router weights are only all-reduced.
+  `ops.reduce_along_axis`), unless `set_split_small_w_scatters(False)`, and the
+  large, bandwidth-bound ones of `q_up`, `out` and the routed experts as one 2D
+  reduce-scatter, which uses the links of both axes. The norm scales and router
+  weights are only all-reduced.
   """
+  small = _SPLIT_SMALL_W_SCATTERS
   return dsv3_types.DSv3SparseLayerWeightsPytree(
       pre_attn_norm_scale=False,
       mla=dsv3_types.DSv3MLAWeightsPytree(
-          q_down=True,
+          q_down=small,
           q_up=False,
           q_norm_scale=False,
-          kv_down=True,
-          k_up=True,
-          v_up=True,
+          kv_down=small,
+          k_up=small,
+          v_up=small,
           kv_norm_scale=False,
           out=False,
       ),
@@ -4308,9 +4473,9 @@ def _w_ici_split_scatters() -> dsv3_types.DSv3SparseLayerWeightsPytree:
               linear=False,
           ),
           shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
-              gate_0=True,
-              gate_1=True,
-              linear=True,
+              gate_0=small,
+              gate_1=small,
+              linear=small,
           ),
       ),
   )
