@@ -3638,6 +3638,13 @@ class MultimodalGeneral(BaseModel):
           "on its own sufficient); no-op for other encoders."
       ),
   )
+  use_native_resolution_for_vit: bool = Field(
+      False,
+      description=(
+          "Gemma-4 vision only: resize each image like the HF processor, keeping its aspect ratio, to at most "
+          "vision_output_length soft tokens. When False, every image is stretched to 672x960 (280 soft tokens)."
+      ),
+  )
   use_bidirectional_image_attn: bool = Field(
       False,
       description=(
@@ -6322,6 +6329,10 @@ class MaxTextConfig(
           f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
     if self.use_multimodal:
+      if self.use_native_resolution_for_vit and self.vision_encoder_block != VisionEncoderBlockType.GEMMA4:
+        raise ValueError(
+            f"use_native_resolution_for_vit requires the Gemma-4 vision encoder, got {self.vision_encoder_block}."
+        )
       # Gemma 4 small (E2B / E4B) multimodal requires the vision-encoder clipped-linears AND the
       # padded-patch masking / position-threading path; gate on the clipped-linears flag.
       if self.model_name in ("gemma4-e2b", "gemma4-e4b") and not self.use_clipped_linears_for_vit:

@@ -16,10 +16,15 @@
 import os
 import types
 import unittest
+from flax import nnx
+import jax
+from jax.sharding import Mesh
+import jax.numpy as jnp
 import numpy as np
 
 from maxtext.common.common_types import DecoderBlockType, VisionEncoderBlockType
 from maxtext.configs import pyconfig
+from maxtext.models.gemma4_vision import Gemma4VisionEncoderLayer
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.multimodal import processor as mm_processor
@@ -27,6 +32,8 @@ from maxtext.multimodal import utils as mm_utils
 from maxtext.multimodal import processor_gemma3
 from maxtext.multimodal import processor_gemma4
 from maxtext.multimodal import processor_llama4
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 class TestTextImageFusionGemma3(unittest.TestCase):
@@ -559,6 +566,211 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       mm_processor.get_image_offsets(unsupported_omni, None)
+
+
+class TestGemma4NativeResolution(unittest.TestCase):
+  """Gemma-4 native-resolution preprocessing."""
+
+  def _native_config(self, vision_output_length=280):
+    return types.SimpleNamespace(
+        model_name="gemma4-e2b",
+        use_multimodal=True,
+        vision_encoder_block=VisionEncoderBlockType.GEMMA4,
+        use_native_resolution_for_vit=True,
+        vision_output_length=vision_output_length,
+    )
+
+  def _native(self, *images):
+    return processor_gemma4.preprocess_mm_data_gemma4(list(images), self._native_config())
+
+  def _pad(self, output, max_length):
+    pad = input_pipeline_utils.PadOrTrimToMaxLength(max_length, 0, config=self._native_config())
+    return pad._pad_image_and_mask(output)  # pylint: disable=protected-access
+
+  def _pyconfig(self, model_name="gemma4-e2b", **kwargs):
+    return pyconfig.initialize(
+        ["", get_test_config_path()], model_name=model_name, scan_layers=False, skip_jax_distributed_system=True, **kwargs
+    )
+
+  def test_size_matches_hf_grids(self):
+    # Source (height, width) -> HF Gemma4ImageProcessor size, transformers 5.12.1.
+    cases = {
+        (672, 960): (672, 960),
+        (536, 640): (720, 864),
+        (536, 536): (768, 768),
+        (160, 640): (384, 1584),
+        (341, 512): (624, 960),
+        (341, 191): (1056, 576),
+        (48, 64): (672, 912),
+        (360, 640): (576, 1056),
+        (10, 100000): (48, 13440),
+        (100000, 10): (13440, 48),
+    }
+    for source, expected in cases.items():
+      size = processor_gemma4.get_aspect_ratio_preserving_size_gemma4(*source, max_soft_tokens=280)
+      self.assertEqual(size, expected, msg=f"source {source}")
+
+  def test_matches_hf_pil_processor(self):
+    try:
+      from transformers.models.gemma4.image_processing_pil_gemma4 import Gemma4ImageProcessorPil  # pylint: disable=import-outside-toplevel
+    except ImportError:
+      self.skipTest("transformers without Gemma-4")
+    hf = Gemma4ImageProcessorPil(patch_size=16, max_soft_tokens=280, pooling_kernel_size=3)
+    rng = np.random.default_rng(0)
+    images = [rng.integers(0, 255, size=shape, dtype=np.uint8) for shape in ((160, 640, 3), (341, 191, 3))]
+    for image in images:
+      out = self._native(image)
+      expected = hf([image], return_tensors="np")
+      np.testing.assert_allclose(out.pixel_values, expected["pixel_values"], atol=1e-6)
+      np.testing.assert_array_equal(out.image_position_ids, expected["image_position_ids"])
+      self.assertEqual(out.num_soft_tokens_per_image.tolist(), expected["num_soft_tokens_per_image"].tolist())
+
+  def test_patches_positions_and_padding(self):
+    # 160x640 resizes to 384x1584: a 24x99 patch grid, 264 soft tokens.
+    out = self._native(np.zeros((160, 640, 3), dtype=np.uint8))
+    self.assertEqual(out.pixel_values.shape, (1, 2520, 768))
+    self.assertEqual(out.num_soft_tokens_per_image.tolist(), [264])
+    positions = out.image_position_ids[0]
+    self.assertEqual(positions[1].tolist(), [1, 0])
+    self.assertEqual(positions[99].tolist(), [0, 1])
+    self.assertEqual(positions[2375].tolist(), [98, 23])
+    np.testing.assert_array_equal(positions[2376:], mm_utils.IMAGE_POSITION_PAD_VALUE)
+
+  def test_resize_keeps_the_image_layout(self):
+    image = np.zeros((160, 640, 3), dtype=np.uint8)
+    image[:, 320:] = 255
+    out = self._native(image)
+    # Mean brightness per patch on the 24x99 grid: left half dark, right half bright.
+    brightness = out.pixel_values[0, :2376].mean(axis=-1).reshape(24, 99)
+    self.assertTrue((brightness[:, :48] < 0.05).all())
+    self.assertTrue((brightness[:, 51:] > 0.95).all())
+
+  def test_patch_layout_is_row_major_pixels(self):
+    # 672x960 is already on the grid, so patches equal the raw pixels.
+    image = np.random.default_rng(1).integers(0, 255, size=(672, 960, 3), dtype=np.uint8)
+    out = self._native(image)
+    expected_second_patch = (image[0:16, 16:32] / 255.0).astype(np.float32).reshape(-1)
+    np.testing.assert_array_equal(out.pixel_values[0, 1], expected_second_patch)
+
+  def test_budget_comes_from_vision_output_length(self):
+    out = processor_gemma4.preprocess_mm_data_gemma4(np.zeros((536, 536, 3), dtype=np.uint8), self._native_config(560))
+    self.assertEqual(out.pixel_values.shape, (1, 560 * 9, 768))
+    self.assertEqual(out.num_soft_tokens_per_image.tolist(), [529])  # 1104x1104: a 23x23 pooled grid
+
+  def test_tokens_expand_per_image(self):
+    placeholder = processor_gemma4.GEMMA4_TOKEN_PLACEHOLDER
+    begin, end = processor_gemma4.GEMMA4_BEGIN_IMAGE_TOKEN, processor_gemma4.GEMMA4_END_IMAGE_TOKEN
+    tokens = np.array([1, placeholder, 2, placeholder, 3, 0, 0], dtype=np.int32)
+    out = processor_gemma4.add_extra_tokens_for_images_gemma4(tokens, num_soft_tokens_per_image=np.array([2, 3]))
+    expected = [1, begin, placeholder, placeholder, end, 2, begin, placeholder, placeholder, placeholder, end, 3, 0, 0]
+    self.assertEqual(out.tolist(), expected)
+    self.assertEqual(out.dtype, np.int32)
+
+  def test_placeholder_count_mismatch_raises(self):
+    tokens = np.array([1, processor_gemma4.GEMMA4_TOKEN_PLACEHOLDER, 2], dtype=np.int32)
+    with self.assertRaises(ValueError):
+      processor_gemma4.add_extra_tokens_for_images_gemma4(tokens, num_soft_tokens_per_image=np.array([2, 3]))
+
+  def test_text_fusion_uses_each_image_token_count(self):
+    placeholder = processor_gemma4.GEMMA4_TOKEN_PLACEHOLDER
+    output = self._native(np.zeros((536, 536, 3), dtype=np.uint8))
+    tokens = mm_processor.prepare_text_for_image_fusion(
+        np.array([1, placeholder, 2]), config=self._native_config(), processor_output=output
+    )
+    self.assertEqual(int((tokens == placeholder).sum()), 256)
+
+  def test_offsets_per_image_and_largest_image(self):
+    output = processor_gemma4.Gemma4PreprocessorOutput(num_soft_tokens_per_image=np.array([256, 264]))
+    self.assertEqual(mm_processor.get_image_offsets(self._native_config(), output), (256 + 1) + (264 + 1))
+    self.assertEqual(mm_processor.get_image_offsets(self._native_config(), None), 281)
+    self.assertEqual(mm_processor.get_image_offsets(self._native_config(560), None), 561)
+
+  def test_two_images_are_padded_per_image(self):
+    out = self._pad(self._native(np.zeros((536, 536, 3), np.uint8), np.zeros((160, 640, 3), np.uint8)), 1024)
+    self.assertEqual(out.pixel_values.shape, (3, 2520, 768))  # (1024 - 1) // 281 slots
+    self.assertEqual(out.image_position_ids.shape, (3, 2520, 2))
+    for slot, num_patches in enumerate((2304, 2376)):
+      self.assertTrue((out.image_position_ids[slot, :num_patches] >= 0).all(), msg=f"slot {slot}")
+      np.testing.assert_array_equal(out.image_position_ids[slot, num_patches:], mm_utils.IMAGE_POSITION_PAD_VALUE)
+    np.testing.assert_array_equal(out.image_position_ids[2], mm_utils.IMAGE_POSITION_PAD_VALUE)
+
+  def test_two_images_reach_their_own_placeholders(self):
+    # 26B's encoder has no clip bounds, which stay NaN until a checkpoint is loaded.
+    config = self._pyconfig(
+        model_name="gemma4-26b",
+        use_multimodal=True,
+        use_native_resolution_for_vit=True,
+        override_model_config=True,
+        vision_output_length=12,
+        hidden_size_for_vit=32,
+        intermediate_size_for_vit=64,
+        num_hidden_layers_for_vit=1,
+        num_attention_heads_for_vit=2,
+        attention="dot_product",
+        dtype="float32",
+        dtype_mm="float32",
+        weight_dtype="float32",
+        matmul_precision="highest",
+    )
+    encoder = Gemma4VisionEncoderLayer(config, Mesh(np.array(jax.devices()[:1]), ("data",)), rngs=nnx.Rngs(0))
+
+    def encode(output):
+      return encoder(output.pixel_values[None], deterministic=True, image_position_ids=output.image_position_ids[None])
+
+    rng = np.random.default_rng(0)
+    images = [rng.integers(0, 256, (100, width, 3), dtype=np.uint8) for width in (100, 400)]
+    output = processor_gemma4.preprocess_mm_data_gemma4(images, config)
+    counts = output.num_soft_tokens_per_image.tolist()
+    self.assertEqual(counts, [9, 6])
+    placeholder = processor_gemma4.GEMMA4_TOKEN_PLACEHOLDER
+    tokens = mm_processor.prepare_text_for_image_fusion(np.array([1, placeholder, 2, placeholder, 3]), config, output)
+    mask = mm_processor.get_bidirectional_mask_vision(config, tokens[None])
+    self.assertEqual(mask[0, : np.flatnonzero(tokens == 2)[0]].sum(), counts[0])
+
+    # (40 - 1) // 13 == 3 slots, so the third one stays empty.
+    pad = input_pipeline_utils.PadOrTrimToMaxLength(40, 0, config=config)
+    embeddings, image_masks = encode(pad._pad_image_and_mask(output))  # pylint: disable=protected-access
+    self.assertEqual(embeddings.shape[1], 3)
+    text = jnp.full((1, len(tokens), embeddings.shape[-1]), 7.0)
+    merged = np.asarray(mm_utils.merge_mm_embeddings(text, embeddings, mask, token_masks=image_masks))[0]
+
+    alone = [
+        np.asarray(encode(processor_gemma4.preprocess_mm_data_gemma4([image], config))[0])[0, 0, :count]
+        for image, count in zip(images, counts)
+    ]
+    np.testing.assert_allclose(merged[mask[0]], np.concatenate(alone), rtol=1e-4, atol=1e-5, equal_nan=False)
+    np.testing.assert_array_equal(merged[~mask[0]], 7.0)
+
+  def test_batch_shape_does_not_depend_on_aspect_ratio(self):
+    # Per-sample counts would give 1099 // 257 == 4 slots (square) vs 1099 // 281 == 3 (full).
+    square = self._native(np.zeros((536, 536, 3), dtype=np.uint8))
+    full = self._native(np.zeros((672, 960, 3), dtype=np.uint8))
+    self.assertEqual(self._pad(square, 1100).pixel_values.shape, self._pad(full, 1100).pixel_values.shape)
+
+  def test_training_preprocess_follows_the_flag(self):
+    image = np.zeros((536, 536, 3), dtype=np.uint8)
+    native = mm_processor.preprocess_image_for_training(image, self._native_config())
+    self.assertEqual(native.num_soft_tokens_per_image.tolist(), [256])
+    fixed_config = self._native_config()
+    fixed_config.use_native_resolution_for_vit = False
+    fixed = mm_processor.preprocess_image_for_training(image, fixed_config)
+    self.assertIsNone(fixed.image_position_ids)
+    self.assertEqual(fixed.pixel_values.shape, (1, 1, 672, 960, 3))
+
+  def test_native_resolution_is_on_for_e2b(self):
+    self.assertTrue(self._pyconfig().use_native_resolution_for_vit)
+
+  def test_rejected_for_other_vision_encoders(self):
+    with self.assertRaisesRegex(ValueError, "use_native_resolution_for_vit requires"):
+      self._pyconfig("gemma3-4b", use_multimodal=True, use_native_resolution_for_vit=True)
+
+  def test_shaped_batch_matches_the_pipeline(self):
+    config = self._pyconfig(use_multimodal=True, use_clipped_linears_for_vit=True, max_target_length=1024)
+    batch = maxtext_utils.get_shaped_batch(config)
+    padded = self._pad(self._native(np.zeros((536, 536, 3), dtype=np.uint8)), config.max_target_length)
+    for key, value in (("images", padded.pixel_values), ("image_position_ids", padded.image_position_ids)):
+      self.assertEqual(batch[key].shape[1:], value.shape, msg=key)
+      self.assertEqual(batch[key].dtype, value.dtype, msg=key)
 
 
 if __name__ == "__main__":

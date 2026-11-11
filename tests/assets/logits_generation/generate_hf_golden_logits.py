@@ -71,6 +71,7 @@ def save_golden_logits(
     trust_remote_code,
     image_paths,
     output_format,
+    native_resolution=False,
 ):
   """save golden logits"""
   if hf_model_path is None:
@@ -119,7 +120,7 @@ def save_golden_logits(
         image = image_file.convert("RGB")
       if model_id.startswith("meta-llama/Llama-4"):
         image = image.resize((336, 336))
-      elif "gemma-4" in model_id.lower():
+      elif "gemma-4" in model_id.lower() and not native_resolution:
         # Force exact dimensions to prevent HF from dynamically padding
         # PIL resize expects (Width, Height). Matches MaxText's [672, 960]
         image = image.resize((960, 672), resample=Image.Resampling.BICUBIC)
@@ -227,6 +228,12 @@ def main(raw_args=None) -> None:
       default="json",
       help="The output format for the golden logits. (json, pickle)",
   )
+  parser.add_argument(
+      "--native-resolution",
+      action="store_true",
+      help="Gemma-4: let the HF processor size the image itself instead of forcing 960x672. "
+      "Pair with use_native_resolution_for_vit=true in MaxText.",
+  )
   args = parser.parse_args(raw_args)
   prompts = args.prompts.split(";")
   image_paths = args.image_paths.split(";") if args.image_paths else []
@@ -247,6 +254,7 @@ def main(raw_args=None) -> None:
       args.trust_remote_code,
       image_paths,
       args.output_format,
+      native_resolution=args.native_resolution,
   )
 
 

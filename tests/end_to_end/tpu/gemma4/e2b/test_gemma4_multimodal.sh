@@ -51,7 +51,7 @@ python3 -m tests.assets.logits_generation.generate_hf_golden_logits \
     --model-id=${MODEL_ID} --hf-model-path=${HF_MODEL} \
     --prompts="${PROMPT}" --image-paths=${IMAGE_PATH} \
     --output-path=${GOLDEN_LOGITS_PATH} \
-    --apply-chat-template --output-format=json
+    --apply-chat-template --output-format=json --native-resolution
 
 # Step 3: MaxText vs HF golden-logit parity on the image path.
 # Uses the same --max_kl_div threshold as the Gemma-4 convert_gemma4.sh checks.
