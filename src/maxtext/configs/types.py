@@ -203,6 +203,7 @@ class DatasetType(str, Enum):
   TFDS = "tfds"
   C4MLPERF = "c4_mlperf"
   OLMO_GRAIN = "olmo_grain"
+  OLMO_MM = "olmo_mm"
 
 
 class SamplingStrategy(str, Enum):
@@ -3015,6 +3016,13 @@ class OlmoGrainDataset(BaseModel):
           "segments[i+1]) while preserving intra-document EOS prediction."
       ),
   )
+  olmo_mask_chunk_boundary_targets_only: bool = Field(
+      False,
+      description=(
+          "olmo_grain: when True alongside olmo_segment_chunk_length > 0, zero targets_segmentation only at "
+          "fixed chunk-boundary transitions (leaving intra-chunk EOS transitions unmasked, matching OLMo-core)."
+      ),
+  )
   olmo_use_loss_weights: bool = Field(
       False,
       description=(
@@ -3022,12 +3030,49 @@ class OlmoGrainDataset(BaseModel):
           "(e.g. masking <im_patch> and prompt tokens to 0.0 while keeping causal inputs_segmentation intact)."
       ),
   )
+  olmo_text_loss_group_weight: float = Field(
+      0.0,
+      description="If > 0 alongside olmo_vision_loss_group_weight > 0, weight text-only sequences in multimodal batches.",
+  )
+  olmo_vision_loss_group_weight: float = Field(
+      0.0,
+      description="If > 0 alongside olmo_text_loss_group_weight > 0, weight vision sequences in multimodal batches.",
+  )
   olmo_global_indices_path: PathStr = Field(
       "",
       description=(
           "Path to OLMo-core's global indices file (headerless uint32 permutation) to train in its batch order "
           "instead of data_shuffle_seed."
       ),
+  )
+  olmo_mm_config_path: PathStr = Field(
+      "",
+      description=(
+          "olmo_mm: path or gs:// URI to an OLMo-core multimodal experiment config.json for live "
+          "MixtureDataLoader streaming."
+      ),
+  )
+  olmo_mm_batches_dir: PathStr = Field(
+      "",
+      description=(
+          "olmo_mm: directory or gs:// URI containing pre-exported OLMo-core multimodal global batches "
+          "(batch_00000.npz, ...)."
+      ),
+  )
+  olmo_mm_work_dir: PathStr = Field(
+      "/tmp/olmo_mm_work",
+      description="olmo_mm: local scratch/cache directory for OLMo-core MixtureDataLoader index preparation.",
+  )
+  olmo_mm_padding_input_token_id: int = Field(
+      -1,
+      description=(
+          "olmo_mm: if >= 0, replace input token IDs where router_token_mask is False with this token ID "
+          "(e.g. 100257 in 256K MT+LC). If -1, auto-detect from olmo_mm_config_path when available."
+      ),
+  )
+  olmo_mm_num_workers: NonNegativeInt = Field(
+      0,
+      description="olmo_mm: number of PyTorch DataLoader workers for live OLMo-core MixtureDataLoader.",
   )
 
 
@@ -4099,6 +4144,28 @@ class VisionTower(BaseModel):
   olmo_connector_lr_scale: float = Field(
       2.0,
       description="Learning rate multiplier for OLMo35VisionConnector parameters relative to LM LR (2.0 in OLMo-core).",
+  )
+  olmo_embedding_lr_scale: float = Field(
+      1.0,
+      description="Learning rate multiplier for token_embedder parameters relative to LM LR (0.2 in 8K Joint, 1.0 in 256K).",
+  )
+  olmo_vision_lr_cosine_alpha_f: float = Field(
+      -1.0,
+      description=(
+          "If >= 0 (e.g. 0.1 in 8K Joint), apply a Cosine decay schedule with final fraction alpha_f to "
+          "OLMo35VisionConnector, OLMo35VisionEncoder, and token_embedder while LM uses config.lr_schedule_type."
+      ),
+  )
+  olmo_connector_warmup_steps: int = Field(
+      -1,
+      description="If > 0 (e.g. 50 in 8K Joint), override warmup steps for OLMo35VisionConnector schedule.",
+  )
+  olmo_hold_final_lr: bool = Field(
+      False,
+      description=(
+          "When True and steps > learning_rate_schedule_steps (e.g. Bridge t_max=250, steps=500), hold "
+          "final_lr = learning_rate * learning_rate_final_fraction after learning_rate_schedule_steps instead of 0.0."
+      ),
   )
   olmo_per_component_grad_clip: bool = Field(
       False,

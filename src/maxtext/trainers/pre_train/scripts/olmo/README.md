@@ -1,4 +1,10 @@
-# OLMo-3 7B stage-1 pretraining launchers
+# OLMo-3 & OLMo 3.5 Training Launchers
+
+> **OLMo 3.5 Multimodal & 256K Mid-Training (`agagik-olmo35-midtraining`):** See
+> [`README_olmo35_midtraining.md`](./README_olmo35_midtraining.md) for the complete 3-stage mid-training guide
+> (`8K Bridge` -> `8K Joint` -> `256K Unified Text MT + Long-Context + Vision`), DCP <-> Orbax checkpoint conversion,
+> `.npz` batch export, and `olmo_grain` `8K` chunk-boundary masking instructions. For OLMo 3.5 Small `8K` pretraining
+> on TPU v4 `8x8x48`, see [`README_v4_8x8x48.md`](./README_v4_8x8x48.md).
 
 End-to-end launchers for reproducing AI2's [OLMo-3-1025-7B](https://huggingface.co/allenai/Olmo-3-1025-7B)
 stage-1 pretraining in MaxText. Hyperparameters mirror OLMo-core's

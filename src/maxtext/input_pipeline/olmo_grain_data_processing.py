@@ -109,14 +109,13 @@ def _make_loader_for_host(
 
   # MultiHostDataLoadIterator and PlaceHolderDataIterator always split each host's local batch
   # across its local devices using global_batch_size_to_load // jax.process_count() (even when
-  # per_device_batch_size < 1.0 selects a subset of hosts len(process_indices) < jax.process_count()).
+  # per_device_batch_size < 1.0 selects a subset of hosts len(process_indices) < jax.process_count(),
+  # where len(process_indices) * (global_load // num_procs) == global_batch_size_to_train_on).
   global_load = config.global_batch_size_to_load_eval if is_eval else config.global_batch_size_to_load
   num_procs = jax.process_count()
   per_host_batch = global_load // num_procs
   if per_host_batch * num_procs != global_load:
     raise ValueError(f"global_batch_size_to_load={global_load} is not divisible by jax.process_count()={num_procs}")
-  if getattr(config, "expansion_factor_real_data", -1) > 1:
-    per_host_batch = int(per_host_batch // config.expansion_factor_real_data)
 
   # Resume = step counter from the latest checkpoint (if any) × per-host
   # batch. Our sampler is stateless, so this single integer is enough to
@@ -152,6 +151,7 @@ def _make_loader_for_host(
       segment_eos_ends_document=bool(getattr(config, "olmo_segment_eos_ends_document", False)),
       segment_chunk_length=int(getattr(config, "olmo_segment_chunk_length", 0)),
       mask_cross_segment_targets=bool(getattr(config, "olmo_mask_cross_segment_targets", False)),
+      mask_chunk_boundary_targets_only=bool(getattr(config, "olmo_mask_chunk_boundary_targets_only", False)),
       shift_to_inputs_targets=True,
       path_remap=_build_path_remap(config),
       grain_worker_count=worker_count,
@@ -194,6 +194,7 @@ def make_olmo_grain_train_iterator(config, global_mesh, process_indices):
           segment_eos_ends_document=bool(getattr(config, "olmo_segment_eos_ends_document", False)),
           segment_chunk_length=int(getattr(config, "olmo_segment_chunk_length", 0)),
           mask_cross_segment_targets=bool(getattr(config, "olmo_mask_cross_segment_targets", False)),
+          mask_chunk_boundary_targets_only=bool(getattr(config, "olmo_mask_chunk_boundary_targets_only", False)),
           shift_to_inputs_targets=True,
           path_remap=_build_path_remap(config),
           grain_worker_count=worker_count,
@@ -221,7 +222,7 @@ def make_olmo_grain_train_iterator(config, global_mesh, process_indices):
       loader,
       global_mesh,
       config.generate_padding_batch_train,
-      expansion_loading_factor_for_grain=config.expansion_factor_real_data,
+      expansion_loading_factor_for_grain=-1,
   )
 
 
@@ -249,5 +250,5 @@ def make_olmo_grain_eval_iterator(config, global_mesh, process_indices):
       loader,
       global_mesh,
       config.generate_padding_batch_eval,
-      expansion_loading_factor_for_grain=config.expansion_factor_real_data,
+      expansion_loading_factor_for_grain=-1,
   )

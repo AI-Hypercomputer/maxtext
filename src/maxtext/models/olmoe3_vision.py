@@ -549,39 +549,159 @@ class OLMo35VisionConnector(nnx.Module):
         rngs=rngs,
     )
 
-  def _forward_connector(self, image_features: jax.Array, pooled_patches_idx: jax.Array) -> jax.Array:
+  def _forward_connector(
+      self,
+      image_features: jax.Array,
+      pooled_patches_idx: jax.Array,
+      act_pspec: PartitionSpec | None = None,
+  ) -> jax.Array:
     b, n_total, dim = image_features.shape
     n_pooled, pool_size = pooled_patches_idx.shape[1], pooled_patches_idx.shape[2]
     valid = pooled_patches_idx >= 0
     safe_idx = jnp.clip(pooled_patches_idx, 0, max(n_total - 1, 0))
     # Gather strictly within axis 1 (n_total) per batch item so axis 0 (B) stays shard-local.
     gather_idx = safe_idx.reshape(b, n_pooled * pool_size, 1)
+    if act_pspec is not None and self.mesh is not None:
+      gather_idx = sharding.maybe_shard_with_pspec(gather_idx, act_pspec, self.mesh, self.config.shard_mode)
     to_pool = jnp.take_along_axis(image_features, gather_idx, axis=1).reshape(b, n_pooled, pool_size, dim)
+    if act_pspec is not None and self.mesh is not None:
+      pool4_pspec = PartitionSpec(act_pspec[0], act_pspec[1], None, None)
+      to_pool = sharding.maybe_shard_with_pspec(to_pool, pool4_pspec, self.mesh, self.config.shard_mode)
     to_pool = jnp.where(valid[..., None], to_pool, jnp.zeros((), dtype=to_pool.dtype))
 
     denom = jnp.maximum(jnp.sum(valid.astype(jnp.int32), axis=-1, keepdims=True), 1).astype(to_pool.dtype)
     query = jnp.sum(to_pool, axis=2) / denom
     pooled = self.pooling(query, to_pool, valid)
+    if act_pspec is not None and self.mesh is not None:
+      pooled = sharding.maybe_shard_with_pspec(pooled, act_pspec, self.mesh, self.config.shard_mode)
     projected = self.projector(pooled)
     row_valid = jnp.any(valid, axis=-1, keepdims=True)
-    return jnp.where(row_valid, projected, jnp.zeros((), dtype=projected.dtype))
+    out = jnp.where(row_valid, projected, jnp.zeros((), dtype=projected.dtype))
+    if act_pspec is not None and self.mesh is not None:
+      out = sharding.maybe_shard_with_pspec(out, act_pspec, self.mesh, self.config.shard_mode)
+    return out
+
+  def _forward_connector_maybe_chunked(
+      self,
+      image_features: jax.Array,
+      pooled_patches_idx: jax.Array,
+      *,
+      cp_sharded: bool = False,
+  ) -> jax.Array:
+    """Pools and projects ``pooled_patches_idx`` ``[B, N_pooled, 4]`` with optional CP sharding and scan chunking."""
+    b_dim, n_pooled, pool_size = pooled_patches_idx.shape
+    chunk = int(getattr(self.config, "olmo_vit_crop_chunk_size", 0))
+    batch_axes = _batch_mesh_spec_entry(self.config, self.mesh)
+    cp_axis = self.config.context_sharding
+    cp_size = self.mesh.shape.get(cp_axis, 1) if (cp_sharded and self.mesh is not None) else 1
+    pooled_per_rank = n_pooled // cp_size if cp_size > 1 else n_pooled
+    remat = bool(getattr(self.config, "olmo_vit_remat_blocks", True))
+
+    chunk_pooled = 0
+    if chunk > 0:
+      for mult in (196, 128, 1):
+        cand = chunk * mult
+        if pooled_per_rank > cand and pooled_per_rank % cand == 0:
+          chunk_pooled = cand
+          break
+
+    if chunk_pooled > 0:
+      n_chunks = pooled_per_rank // chunk_pooled
+      graphdef, state = nnx.split(self)
+      if cp_size > 1:
+        reshaped = pooled_patches_idx.reshape(b_dim, cp_size, n_chunks, chunk_pooled, pool_size)
+        reshaped = sharding.maybe_shard_with_pspec(
+            reshaped,
+            PartitionSpec(batch_axes, cp_axis, None, None, None),
+            self.mesh,
+            self.config.shard_mode,
+        )
+        chunked = jnp.transpose(reshaped, (2, 0, 1, 3, 4))
+        flat_pspec = PartitionSpec(batch_axes, cp_axis, None)
+
+        def _scan_body_cp(carry, idx_chunk):
+          mod = nnx.merge(graphdef, carry)
+          idx_flat = idx_chunk.reshape(b_dim, cp_size * chunk_pooled, pool_size)
+          idx_flat = sharding.maybe_shard_with_pspec(idx_flat, flat_pspec, self.mesh, self.config.shard_mode)
+          out_flat = mod._forward_connector(image_features, idx_flat, act_pspec=flat_pspec)  # pylint: disable=protected-access
+          return carry, out_flat.reshape(b_dim, cp_size, chunk_pooled, -1)
+
+        scan_fn_cp = functools.partial(jax.checkpoint, prevent_cse=False)(_scan_body_cp) if remat else _scan_body_cp
+        _, out_chunks = jax.lax.scan(scan_fn_cp, state, chunked)
+        return jnp.transpose(out_chunks, (1, 2, 0, 3, 4)).reshape(b_dim, n_pooled, -1)
+
+      chunked = jnp.swapaxes(pooled_patches_idx.reshape(b_dim, n_chunks, chunk_pooled, pool_size), 0, 1)
+      flat_pspec = PartitionSpec(batch_axes, None, None) if self.mesh is not None else None
+
+      def _scan_body(carry, idx_chunk):
+        mod = nnx.merge(graphdef, carry)
+        return carry, mod._forward_connector(image_features, idx_chunk, act_pspec=flat_pspec)  # pylint: disable=protected-access
+
+      scan_fn = functools.partial(jax.checkpoint, prevent_cse=False)(_scan_body) if remat else _scan_body
+      _, out_chunks = jax.lax.scan(scan_fn, state, chunked)
+      return jnp.swapaxes(out_chunks, 0, 1).reshape(b_dim, n_pooled, -1)
+
+    flat_pspec = (
+        PartitionSpec(batch_axes, cp_axis if cp_size > 1 else None, None)
+        if self.mesh is not None
+        else None
+    )
+    if not remat:
+      return self._forward_connector(image_features, pooled_patches_idx, act_pspec=flat_pspec)
+
+    graphdef, state = nnx.split(self)
+
+    @functools.partial(jax.checkpoint, prevent_cse=True)
+    def _remat_connector(st, feats, p_idx):
+      mod = nnx.merge(graphdef, st)
+      return mod._forward_connector(feats, p_idx, act_pspec=flat_pspec)  # pylint: disable=protected-access
+
+    return _remat_connector(state, image_features, pooled_patches_idx)
 
   def __call__(self, image_features: jax.Array, pooled_patches_idx: jax.Array | None = None) -> jax.Array:
     """Pools ``image_features`` ``[B, N_total_patches, 2304]`` via ``pooled_patches_idx`` ``[B, N_pooled, 4]``."""
     b, n_total, _ = image_features.shape
     if pooled_patches_idx is None:
       pool_size = int(self.config.olmo_connector_pool_size)
-      if n_total % pool_size != 0:
-        raise ValueError(
-            f"pooled_patches_idx was not provided and total patches ({n_total}) is not divisible by {pool_size}."
+      cfg_pooled = int(getattr(self.config, "olmo_max_pooled_patches_per_seq", 0))
+      if cfg_pooled > 0:
+        n_pooled = cfg_pooled
+        pooled_patches_idx = jnp.broadcast_to(
+            (jnp.arange(n_pooled * pool_size, dtype=jnp.int32) % max(n_total, 1)).reshape(1, n_pooled, pool_size),
+            (b, n_pooled, pool_size),
         )
-      n_pooled = n_total // pool_size
-      pooled_patches_idx = jnp.broadcast_to(
-          jnp.arange(n_total, dtype=jnp.int32).reshape(1, n_pooled, pool_size),
-          (b, n_pooled, pool_size),
-      )
+      else:
+        if n_total % pool_size != 0:
+          raise ValueError(
+              f"pooled_patches_idx was not provided and total patches ({n_total}) is not divisible by {pool_size}."
+          )
+        n_pooled = n_total // pool_size
+        pooled_patches_idx = jnp.broadcast_to(
+            jnp.arange(n_total, dtype=jnp.int32).reshape(1, n_pooled, pool_size),
+            (b, n_pooled, pool_size),
+        )
     else:
       pooled_patches_idx = pooled_patches_idx.astype(jnp.int32)
+
+    cp_axis = self.config.context_sharding
+    cp_size = self.mesh.shape.get(cp_axis, 1) if self.mesh is not None else 1
+    n_pooled = pooled_patches_idx.shape[1]
+    if bool(self.config.olmo_vit_cp_shard_crops) and cp_size > 1 and n_pooled % cp_size == 0:
+      batch_axes = _batch_mesh_spec_entry(self.config, self.mesh)
+      image_features = sharding.maybe_shard_with_pspec(
+          image_features, PartitionSpec(batch_axes, None, None), self.mesh, self.config.shard_mode
+      )
+      pooled_patches_idx = sharding.maybe_shard_with_pspec(
+          pooled_patches_idx, PartitionSpec(batch_axes, cp_axis, None), self.mesh, self.config.shard_mode
+      )
+      out = self._forward_connector_maybe_chunked(image_features, pooled_patches_idx, cp_sharded=True)
+      out = sharding.maybe_shard_with_pspec(
+          out, PartitionSpec(batch_axes, cp_axis, None), self.mesh, self.config.shard_mode
+      )
+      return sharding.maybe_shard_with_pspec(
+          out, PartitionSpec(batch_axes, None, None), self.mesh, self.config.shard_mode
+      )
+
     if self.mesh is not None:
       image_features = sharding.maybe_shard_with_logical(
           image_features, ("activation_batch", None, None), self.mesh, self.config.shard_mode, self.config.logical_axis_rules
@@ -589,17 +709,7 @@ class OLMo35VisionConnector(nnx.Module):
       pooled_patches_idx = sharding.maybe_shard_with_logical(
           pooled_patches_idx, ("activation_batch", None, None), self.mesh, self.config.shard_mode, self.config.logical_axis_rules
       )
-    if not getattr(self.config, "olmo_vit_remat_blocks", True):
-      return self._forward_connector(image_features, pooled_patches_idx)
-
-    graphdef, state = nnx.split(self)
-
-    @functools.partial(jax.checkpoint, prevent_cse=True)
-    def _remat_connector(st, feats, p_idx):
-      mod = nnx.merge(graphdef, st)
-      return mod._forward_connector(feats, p_idx)  # pylint: disable=protected-access
-
-    return _remat_connector(state, image_features, pooled_patches_idx)
+    return self._forward_connector_maybe_chunked(image_features, pooled_patches_idx, cp_sharded=False)
 
 
 def merge_olmo35_image_embeddings(

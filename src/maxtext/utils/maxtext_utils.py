@@ -171,6 +171,8 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
     shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("targets"))
   if getattr(config, "olmo_use_loss_weights", False):
     shaped_batch["loss_weights"] = jax.ShapeDtypeStruct(batch_shape, jnp.float32, sharding=_sh("loss_weights"))
+  if getattr(getattr(config, "dataset_type", None), "value", str(getattr(config, "dataset_type", ""))) == "olmo_mm":
+    shaped_batch["router_token_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=_sh("router_token_mask"))
   if config.use_multimodal:
     is_olmo_mm = (
         getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
@@ -2603,7 +2605,8 @@ def create_learning_rate_schedule(config):
       boundaries.append(warmup_steps + stable_steps + decay_steps)
 
   if constant_zero_steps > 0:
-    constant_schedule = optax.constant_schedule(0.0)
+    tail_lr = final_lr if getattr(config, "olmo_hold_final_lr", False) else 0.0
+    constant_schedule = optax.constant_schedule(tail_lr)
     pieces.append(constant_schedule)
     boundaries.append(config.learning_rate_schedule_steps)
 

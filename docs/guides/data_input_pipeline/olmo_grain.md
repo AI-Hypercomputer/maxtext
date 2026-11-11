@@ -68,6 +68,12 @@ up where it left off — no Grain-iterator-state in the checkpoint.
   ≥ 32 repetitions of any 1–13-gram, per OLMo-core.
 - For mixing pretraining + midtraining, build a combined index by
   concatenating the two .txt mix files.
+- For `256K` mid-training over `8K`-chunked replay streams (`dolmino` + `longermino`), set
+  `olmo_segment_chunk_length: 8192` and `olmo_mask_chunk_boundary_targets_only: true` so attention
+  resets at `8K` chunk boundaries and targets are masked only at synthetic chunk edges (leaving
+  intra-chunk `EOS` transitions supervised). See
+  [`src/maxtext/trainers/pre_train/scripts/olmo/README_olmo35_midtraining.md`](../../../src/maxtext/trainers/pre_train/scripts/olmo/README_olmo35_midtraining.md)
+  for full OLMo 3.5 multimodal (`dataset_type=olmo_mm`) and `256K` mid-training instructions.
 
 ## Troubleshooting
 

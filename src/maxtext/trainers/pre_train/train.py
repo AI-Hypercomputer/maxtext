@@ -292,6 +292,32 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if indexer_losses_state is not None:
     intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
+  if (
+      getattr(config, "olmo_text_loss_group_weight", 0.0) > 0.0
+      and getattr(config, "olmo_vision_loss_group_weight", 0.0) > 0.0
+      and data.get("pooled_patches_idx") is not None
+  ):
+    has_vision = jnp.any(data["pooled_patches_idx"] >= 0, axis=(-2, -1))
+    alpha_txt = float(config.olmo_text_loss_group_weight)
+    alpha_vis = float(config.olmo_vision_loss_group_weight)
+    alpha_sum = alpha_txt + alpha_vis
+    alpha_txt /= alpha_sum
+    alpha_vis /= alpha_sum
+    base_lw = (
+        data["loss_weights"].astype(jnp.float32)
+        if ("loss_weights" in data and data["loss_weights"] is not None)
+        else jnp.ones_like(data["targets"], dtype=jnp.float32)
+    )
+    active_lw = base_lw * (data["targets_segmentation"] != 0).astype(jnp.float32)
+    m_txt = jnp.sum(jnp.where(~has_vision[:, None], active_lw, 0.0))
+    m_vis = jnp.sum(jnp.where(has_vision[:, None], active_lw, 0.0))
+    m_tot = m_txt + m_vis
+    both_present = (m_txt > 0.0) & (m_vis > 0.0)
+    scale_txt = jnp.where(both_present, alpha_txt * m_tot / jnp.maximum(m_txt, 1e-12), 1.0)
+    scale_vis = jnp.where(both_present, alpha_vis * m_tot / jnp.maximum(m_vis, 1e-12), 1.0)
+    seq_w = jnp.where(has_vision, scale_vis, scale_txt)[:, None]
+    data = dict(data, loss_weights=active_lw * seq_w)
+
   is_dense_warmup = config.use_indexer and config.indexer_loss_scaling_factor > 0.0 and not config.indexer_sparse_training
   if is_dense_warmup and is_train:
     # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -352,7 +378,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     assert targets_loss_mask is not None
     total_weights = jnp.sum(targets_loss_mask)
   elif "loss_weights" in data and data["loss_weights"] is not None:
-    total_weights = jnp.sum(data["loss_weights"].astype(jnp.float32) * (data["targets_segmentation"] != 0))
+    total_weights = jnp.sum(jnp.maximum(data["loss_weights"].astype(jnp.float32), 0.0))
   else:
     total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide xent_sum
@@ -366,7 +392,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   manual_gradient_accumulation = (
       config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
   ) or _static_loss_cotangent(config, is_train)
-  olmo_divisor = getattr(config, "olmo_loss_denominator_counts_masked_instances", False) and not is_block_diffusion
+  olmo_divisor = (
+      getattr(config, "olmo_loss_denominator_counts_masked_instances", False)
+      and not is_block_diffusion
+      and not ("loss_weights" in data and data["loss_weights"] is not None)
+  )
   if olmo_divisor and config.use_tunix_gradient_accumulation:
     raise ValueError("olmo_loss_denominator_counts_masked_instances doesn't support use_tunix_gradient_accumulation")
   # The count the gradient is normalized by: OLMo-core's (filtered instances counted) or the trained tokens. Under
@@ -429,6 +459,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       # that use its seq_aux_loss sum over layers (decoder + MTP); otherwise use moe_aux_loss_reduction.
       reduction = "sum" if moe.uses_megatron_seq_aux_loss(config) else getattr(config, "moe_aux_loss_reduction", "mean")
       moe_lb_loss = maxtext_utils.reduce_moe_aux_losses(moe_lb_losses, reduction)
+      if "router_token_mask" in data and data["router_token_mask"] is not None:
+        valid_router_tokens = jnp.maximum(jnp.sum(data["router_token_mask"].astype(jnp.float32)), 1.0)
+        moe_lb_loss = moe_lb_loss * (jnp.asarray(data["inputs"].size, dtype=jnp.float32) / valid_router_tokens)
       loss = _add_aux_loss(loss, moe_lb_loss)
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
@@ -754,12 +787,28 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if config.gradient_clipping_threshold > 0:
     if getattr(config, "olmo_per_component_grad_clip", False):
       grads = raw_grads
-      for group_pred in (
-          lambda s: "OLMo35VisionConnector" in s,
-          lambda s: "OLMo35VisionEncoder" in s,
-          lambda s: "token_embedder" in s,
-          lambda s: ("OLMo35VisionConnector" not in s) and ("OLMo35VisionEncoder" not in s) and ("token_embedder" not in s),
-      ):
+      # Match OLMo-core MultimodalOLMoDDPOptimizer._logical_grad_clip_groups(): when train_embedding_rows
+      # is set (8K Bridge / 8K Joint), lm.embeddings is assigned to scheduler_name="connector" and clipped
+      # jointly with connector.*; when unset (256K MT+LC), embeddings has its own scheduler/clip group.
+      clip_preds = (
+          (
+              lambda s: ("OLMo35VisionConnector" in s) or ("token_embedder" in s),
+              lambda s: "OLMo35VisionEncoder" in s,
+              lambda s: ("OLMo35VisionConnector" not in s)
+              and ("OLMo35VisionEncoder" not in s)
+              and ("token_embedder" not in s),
+          )
+          if (row_range and len(row_range) == 2)
+          else (
+              lambda s: "OLMo35VisionConnector" in s,
+              lambda s: "OLMo35VisionEncoder" in s,
+              lambda s: "token_embedder" in s,
+              lambda s: ("OLMo35VisionConnector" not in s)
+              and ("OLMo35VisionEncoder" not in s)
+              and ("token_embedder" not in s),
+          )
+      )
+      for group_pred in clip_preds:
         group_tree = jax.tree_util.tree_map_with_path(
             lambda p, g, pred=group_pred: g if pred(jax.tree_util.keystr(p, simple=True, separator="/")) else jnp.zeros_like(g),
             raw_grads,

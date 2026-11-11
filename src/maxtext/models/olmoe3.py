@@ -2073,19 +2073,32 @@ class OLMoE3DecoderLayer(nnx.Module):
           input_ids=decoder_segment_ids,
           precomputed_gate_logits=precomputed_gate,
       )
-      if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-        # Reference auxiliary loss adds a router z-loss: 1e-5 * mean(logsumexp(router logits)^2).
+      has_lb = self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None
+      if has_lb or (self.config.use_multimodal and self.config.model_call_mode != "inference"):
+        # Reference auxiliary loss adds a router z-loss: 1e-5 * mean(logsumexp(router logits)^2),
+        # which stays active in OLMo-core multimodal stages (e.g. 8K Bridge) even when lb_loss_weight == 0.0.
         z_loss = jnp.mean(jax.scipy.special.logsumexp(router_logits.astype(jnp.float32), axis=-1) ** 2)
-        if self.config.olmoe3_router_metrics:
-          # [lb, load imbalance, global load imbalance] from the routed MoE (see load_balance_loss).
-          metrics = load_balance_loss
-          load_balance_loss = metrics[0]
-          self.sow(
-              nnx.Intermediate,
-              "olmoe3_router_metrics",
-              jnp.stack([load_balance_loss, _ROUTER_Z_LOSS_WEIGHT * z_loss, metrics[1], metrics[2]]),
-          )
-        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss + _ROUTER_Z_LOSS_WEIGHT * z_loss)
+        if has_lb:
+          if self.config.olmoe3_router_metrics:
+            # [lb, load imbalance, global load imbalance] from the routed MoE (see load_balance_loss).
+            metrics = load_balance_loss
+            load_balance_loss = metrics[0]
+            self.sow(
+                nnx.Intermediate,
+                "olmoe3_router_metrics",
+                jnp.stack([load_balance_loss, _ROUTER_Z_LOSS_WEIGHT * z_loss, metrics[1], metrics[2]]),
+            )
+          total_aux = jnp.asarray(load_balance_loss, dtype=jnp.float32) + _ROUTER_Z_LOSS_WEIGHT * z_loss
+        else:
+          if self.config.olmoe3_router_metrics:
+            zero = jnp.zeros((), dtype=jnp.float32)
+            self.sow(
+                nnx.Intermediate,
+                "olmoe3_router_metrics",
+                jnp.stack([zero, _ROUTER_Z_LOSS_WEIGHT * z_loss, zero, zero]),
+            )
+          total_aux = _ROUTER_Z_LOSS_WEIGHT * z_loss
+        self.sow(nnx.Intermediate, "moe_lb_loss", total_aux)
       ffn_out = ffn_out + self.latent_up(routed)
 
     ffn_branch = self.ffn_out_norm(ffn_out)

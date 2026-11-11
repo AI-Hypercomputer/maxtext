@@ -88,6 +88,8 @@ def get_input_data_sharding(config, mesh, rules=None):
       shardings.pop("targets_position", None)
     if bool(getattr(config, "olmo_use_loss_weights", False)):
       shardings["loss_weights"] = data_sharding
+    if ds_type == "olmo_mm":
+      shardings["router_token_mask"] = data_sharding
     return shardings
   return data_sharding
 

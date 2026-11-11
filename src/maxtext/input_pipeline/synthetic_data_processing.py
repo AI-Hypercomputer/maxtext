@@ -259,6 +259,8 @@ class PlaceHolderDataIterator:
       batch["pooled_patches_idx"] = np.full((batch_size, n_pooled, pool_size), -1, dtype=np.int32)
       if bool(getattr(config, "olmo_use_loss_weights", False)):
         batch["loss_weights"] = np.zeros((batch_size, config.max_target_length), dtype=np.float32)
+      if ds_type == "olmo_mm":
+        batch["router_token_mask"] = np.zeros((batch_size, config.max_target_length), dtype=np.int32)
 
     def infinite_iterator():
       while True:

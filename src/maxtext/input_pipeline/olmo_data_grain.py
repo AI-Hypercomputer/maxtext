@@ -527,12 +527,14 @@ class ShiftToInputsTargets(grain.transforms.Map):
       segment_eos_ends_document: bool = False,
       segment_chunk_length: int = 0,
       mask_cross_segment_targets: bool = False,
+      mask_chunk_boundary_targets_only: bool = False,
   ):
     self.segment_eos_token_id = int(segment_eos_token_id)
     self.reset_positions_on_segment = bool(reset_positions_on_segment)
     self.segment_eos_ends_document = bool(segment_eos_ends_document)
     self.segment_chunk_length = int(segment_chunk_length)
     self.mask_cross_segment_targets = bool(mask_cross_segment_targets)
+    self.mask_chunk_boundary_targets_only = bool(mask_chunk_boundary_targets_only)
 
   def map(self, element: Dict[str, Any]) -> Dict[str, Any]:
     """Convert ``tokens`` into ``inputs`` / ``targets`` / segmentation tensors."""
@@ -582,6 +584,9 @@ class ShiftToInputsTargets(grain.transforms.Map):
     targets_seg = segments * seg_value
     if self.mask_cross_segment_targets and L > 1:
       targets_seg[:-1] = np.where(segments[:-1] == segments[1:], targets_seg[:-1], 0)
+    elif self.mask_chunk_boundary_targets_only and 0 < self.segment_chunk_length < L:
+      chunk_edges = np.arange(self.segment_chunk_length, L, self.segment_chunk_length) - 1
+      targets_seg[chunk_edges] = 0
     targets_seg[-1] = 0  # never compute loss on the boundary position
 
     return {
@@ -606,6 +611,7 @@ def make_olmo_grain_data_loader(
     segment_eos_ends_document: bool = False,
     segment_chunk_length: int = 0,
     mask_cross_segment_targets: bool = False,
+    mask_chunk_boundary_targets_only: bool = False,
     shift_to_inputs_targets: bool = True,
     path_remap: Optional[Dict[str, str]] = None,
     grain_worker_count: int = 0,
@@ -673,6 +679,7 @@ def make_olmo_grain_data_loader(
             segment_eos_ends_document=segment_eos_ends_document,
             segment_chunk_length=segment_chunk_length,
             mask_cross_segment_targets=mask_cross_segment_targets,
+            mask_chunk_boundary_targets_only=mask_chunk_boundary_targets_only,
         )
     )
   ops.append(grain.transforms.Batch(batch_size=batch_size, drop_remainder=True))

@@ -1127,8 +1127,16 @@ olmo_reset_positions_on_segment: false # reset within-document causal span to 0 
 olmo_segment_eos_ends_document: false # true: EOS ends its own document (OLMo-core intra-doc masking); false: legacy EMo segment start
 olmo_segment_chunk_length: 0 # > 0 (e.g. 8192): also split packed segments at fixed chunk multiples for short-context replay
 olmo_mask_cross_segment_targets: false # true: mask cross-document target transitions (EOS_doc_k -> first_tok_doc_{k+1})
+olmo_mask_chunk_boundary_targets_only: false # true: mask only target transitions crossing olmo_segment_chunk_length boundaries (leaving EOS transitions unmasked)
 olmo_use_loss_weights: false # true: include float32 per-token loss_weights in OLMo 3.5 multimodal batch sharding & synthetic/placeholder iterators
+olmo_text_loss_group_weight: 0.0 # > 0: per-sequence loss multiplier for text-only sequences in mixed multimodal batches (e.g. 0.35 in 8K Joint)
+olmo_vision_loss_group_weight: 0.0 # > 0: per-sequence loss multiplier for vision sequences in mixed multimodal batches (e.g. 0.65 in 8K Joint)
 olmo_global_indices_path: '' # OLMo-core global indices (uint32) to train in its batch order instead of data_shuffle_seed
+olmo_mm_config_path: '' # olmo_mm: OLMo-core multimodal experiment config.json for live MixtureDataLoader streaming
+olmo_mm_batches_dir: '' # olmo_mm: directory or gs:// URI of pre-exported batch_XXXXX.npz global batches
+olmo_mm_work_dir: '/tmp/olmo_mm_work' # olmo_mm: local cache directory for OLMo-core MixtureDataLoader preparation
+olmo_mm_padding_input_token_id: -1 # olmo_mm: if >= 0, replace right-padding input token IDs (~router_token_mask) with this ID (-1 = auto from config)
+olmo_mm_num_workers: 0 # olmo_mm: PyTorch DataLoader workers for live OLMo-core MixtureDataLoader
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
@@ -1642,6 +1650,10 @@ olmo_max_crops_per_seq: 64
 olmo_max_pooled_patches_per_seq: 0
 olmo_vision_lr_scale: 0.1
 olmo_connector_lr_scale: 2.0
+olmo_embedding_lr_scale: 1.0
+olmo_vision_lr_cosine_alpha_f: -1.0
+olmo_connector_warmup_steps: -1
+olmo_hold_final_lr: false
 olmo_per_component_grad_clip: false
 olmo_trainable_embedding_row_range: []
 

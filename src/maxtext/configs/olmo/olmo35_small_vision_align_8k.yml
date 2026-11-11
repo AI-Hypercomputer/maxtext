@@ -20,13 +20,18 @@
 #   Measured 4,673 ms / 25.38% MFU / 15.46 GiB HBM; EP=64 shards 25L SigLIP2 weights 64-way across each 8x8 plane).
 #   Required environment variables for direct `train.py` launches (prevents legacy 2-stage RS at DP >= 8):
 #     export OLMOE3_ENABLE_2STAGE_RS=0 OLMOE3_FAST_HOST_LOOP=1 OLMOE3_FAST_SC_DEVICE_PUT=1
-#   Recommended production flags:
-#     jax_compilation_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
+#   Recommended production flags (`dataset_type=olmo_mm` uses seekable byte-range `.npz` slicing across hosts):
+#     dataset_type=olmo_mm olmo_mm_batches_dir=gs://<bucket>/batches/joint_8k jax_compilation_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
+#   Important checkpoint note: Before Stage 1 Bridge, always initialize from a text checkpoint + HF SigLIP2 (`e8e4872`) via:
+#     python -m maxtext.checkpoint_conversion.convert_olmo35_multimodal_checkpoint --mode bridge_init ...
 #   For exact 128-seq (1.05M tok/step) Stage 1/2 batch on 128 chips (`v4-256`):
 #     ici_data_parallelism=2 ici_expert_parallelism=64 per_device_batch_size=1.0
-#   For Stage 1 Connector Bridge (freeze 25L SigLIP2 + 40L LM, train Connector + 6 special <im_*> rows):
+#   For Stage 1 Connector Bridge (freeze 25L SigLIP2 + 40L LM, train Connector + 6 special <im_*> rows; 500 steps, t_max=250):
 #     freeze_vision_encoder_params=true trainable_parameters_mask="['OLMo35VisionConnector','token_embedder']" \
-#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 learning_rate=2.0e-4
+#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 \
+#     olmo_text_loss_group_weight=0.0 olmo_vision_loss_group_weight=0.0 \
+#     learning_rate=2.0e-4 lr_schedule_type=cosine learning_rate_schedule_steps=250 steps=500 warmup_steps_fraction=0.4 \
+#     learning_rate_final_fraction=0.1 olmo_hold_final_lr=true olmo_vision_lr_cosine_alpha_f=-1.0 olmo_connector_lr_scale=1.0 olmo_embedding_lr_scale=1.0
 #   For optional Perception middle stage (freeze LM, train 25L SigLIP2 + Connector + 6 <im_*> rows):
 #     trainable_parameters_mask="['OLMo35VisionEncoder','OLMo35VisionConnector','token_embedder']" \
 #     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 \
@@ -41,6 +46,9 @@ olmo_segment_eos_token_id: 100257
 olmo_segment_eos_ends_document: true
 olmo_reset_positions_on_segment: true
 olmo_use_loss_weights: true
+olmo_text_loss_group_weight: 0.35   # OLMo-core loss_group_weights={"text": 0.35, "vision": 0.65} in 8K Joint (set 0.0 in vision-only Bridge)
+olmo_vision_loss_group_weight: 0.65
+olmo_trainable_embedding_row_range: [100278, 100284]
 static_loss_cotangent: true
 z_loss_multiplier: 1.0e-5
 olmoe3_segments_for_emo_only: false
@@ -83,7 +91,7 @@ shard_optimizer_over_data: true
 optimizer_memory_host_offload: false
 per_device_batch_size: 1.0
 
-# Multimodal Stage 2 Joint settings
+# Multimodal Stage 2 Joint settings (matching joint_8k_config.json: LM 1e-4 linear->0, Connector 2e-5 w=50 cos->0.1, ViT 2e-6 w=100 cos->0.1, Emb rows 2e-5 w=50 cos->0.1 on the Connector schedule group)
 use_multimodal: true
 vision_encoder_block: "olmo35"
 freeze_vision_encoder_params: false
@@ -92,8 +100,11 @@ olmo_max_crops_per_seq: 64
 olmo_vit_cp_shard_crops: false
 olmo_vit_remat_blocks: true
 olmo_vit_crop_chunk_size: 16
-olmo_vision_lr_scale: 0.2
-olmo_connector_lr_scale: 1.0
+olmo_vision_lr_scale: 0.02
+olmo_connector_lr_scale: 0.2
+olmo_embedding_lr_scale: 0.2
+olmo_vision_lr_cosine_alpha_f: 0.1
+olmo_connector_warmup_steps: 50
 olmo_per_component_grad_clip: true
 
 # TPU v4 MoE, KDA, Attention & Vocab Tiling
@@ -155,9 +166,16 @@ logits_dot_in_fp32: false
 vocab_tiling_seq_major: true
 num_vocab_tiling: 8
 
-# Optimizer
+# Optimizer & Schedule (3,500 steps linear decay to 0.0 for LM; cosine decay to 0.1 for Connector/ViT/Embeddings)
 opt_type: "adamw"
-learning_rate: 5.0e-5
+learning_rate: 1.0e-4
+lr_schedule_type: "wsd"
+wsd_decay_style: "linear"
+learning_rate_schedule_steps: 3500
+steps: 3500
+warmup_steps_fraction: 0.0285714286
+wsd_decay_steps_fraction: 0.9714285714
+learning_rate_final_fraction: 0.0
 adam_b1: 0.9
 adam_b2: 0.95
 adam_eps: 1.0e-8

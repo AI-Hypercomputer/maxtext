@@ -58,13 +58,15 @@ def get_adamw_mask(config):
       == "olmo35"
   ):
     patterns.extend(["OLMo35VisionEncoder", "OLMo35VisionConnector"])
-  if getattr(config, "olmo_trainable_embedding_row_range", None):
+  if getattr(config, "olmo_trainable_embedding_row_range", None) or getattr(config, "olmo_embedding_lr_scale", 1.0) != 1.0:
     patterns.append("token_embedder")
   return _get_path_mask_fn(patterns, match_returns_true=False)
 
 
-def _scale_olmo35_vision_updates(vis_scale: float, conn_scale: float) -> optax.GradientTransformation:
-  """Scales parameter updates for OLMo35VisionEncoder and OLMo35VisionConnector (both have wd=0)."""
+def _scale_olmo35_vision_updates(
+    vis_scale: float, conn_scale: float, emb_scale: float = 1.0
+) -> optax.GradientTransformation:
+  """Scales parameter updates for OLMo35VisionEncoder, OLMo35VisionConnector, and token_embedder (all wd=0)."""
 
   def init_fn(params):
     del params
@@ -81,9 +83,89 @@ def _scale_olmo35_vision_updates(vis_scale: float, conn_scale: float) -> optax.G
         return u if conn_scale == 1.0 else (u * jnp.asarray(conn_scale, dtype=u.dtype))
       if "OLMo35VisionEncoder" in p_str:
         return u if vis_scale == 1.0 else (u * jnp.asarray(vis_scale, dtype=u.dtype))
+      if "token_embedder" in p_str:
+        return u if emb_scale == 1.0 else (u * jnp.asarray(emb_scale, dtype=u.dtype))
       return u
 
     return jax.tree_util.tree_map_with_path(_scale_leaf, updates), state
+
+  return optax.GradientTransformation(init_fn, update_fn)
+
+
+def _make_olmo35_cosine_schedule(
+    peak_lr: float,
+    alpha_f: float,
+    warmup_steps: int,
+    schedule_steps: int,
+    total_steps: int,
+    offset: int = 0,
+    hold_final_lr: bool = False,
+) -> optax.Schedule:
+  """Creates a warmup + cosine decay schedule matching OLMo-core ``CosWithWarmup``."""
+  final_lr = peak_lr * alpha_f
+  eff_offset = min(int(offset), int(warmup_steps))
+  eff_warmup = int(warmup_steps) - eff_offset
+  pieces = []
+  boundaries = []
+  if eff_warmup > 0:
+    pieces.append(
+        optax.linear_schedule(
+            init_value=peak_lr * eff_offset / (eff_warmup + eff_offset),
+            end_value=peak_lr,
+            transition_steps=eff_warmup,
+        )
+    )
+    boundaries.append(eff_warmup)
+  cos_steps = int(schedule_steps) - eff_warmup
+  if cos_steps > 0:
+
+    def _cos_fn(step, len_s=cos_steps, i_lr=peak_lr, f_lr=final_lr):
+      pct = step / (len_s - 1) if len_s > 1 else 1.0
+      a = 0.5 * (jnp.cos(jnp.pi * pct) + 1.0)
+      return i_lr * a + f_lr * (1.0 - a)
+
+    pieces.append(_cos_fn)
+    boundaries.append(eff_warmup + cos_steps)
+  if int(total_steps) > int(schedule_steps):
+    pieces.append(optax.constant_schedule(final_lr if hold_final_lr else 0.0))
+    boundaries.append(int(schedule_steps))
+  return optax.join_schedules(pieces, boundaries)
+
+
+def _scale_by_olmo35_group_schedules(
+    base_schedule: optax.Schedule,
+    vis_schedule: optax.Schedule,
+    conn_schedule: optax.Schedule,
+    emb_schedule: optax.Schedule,
+) -> optax.GradientTransformation:
+  """Per-group learning rate schedule scaling with ``ScaleByScheduleState`` matching ``optax.adamw``."""
+
+  def init_fn(params):
+    del params
+    return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
+
+  def update_fn(updates, state, params=None):
+    del params
+    count = state.count
+    base_lr = -1.0 * (base_schedule(count) if callable(base_schedule) else base_schedule)
+    vis_lr = -1.0 * (vis_schedule(count) if callable(vis_schedule) else vis_schedule)
+    conn_lr = -1.0 * (conn_schedule(count) if callable(conn_schedule) else conn_schedule)
+    emb_lr = -1.0 * (emb_schedule(count) if callable(emb_schedule) else emb_schedule)
+
+    def _apply_lr(path, u):
+      if u is None:
+        return None
+      p_str = jax.tree_util.keystr(path, simple=True, separator="/")
+      if "OLMo35VisionConnector" in p_str:
+        return u * jnp.asarray(conn_lr, dtype=u.dtype)
+      if "OLMo35VisionEncoder" in p_str:
+        return u * jnp.asarray(vis_lr, dtype=u.dtype)
+      if "token_embedder" in p_str:
+        return u * jnp.asarray(emb_lr, dtype=u.dtype)
+      return u * jnp.asarray(base_lr, dtype=u.dtype)
+
+    new_updates = jax.tree_util.tree_map_with_path(_apply_lr, updates)
+    return new_updates, optax.ScaleByScheduleState(count=optax.safe_int32_increment(count))
 
   return optax.GradientTransformation(init_fn, update_fn)
 
@@ -224,6 +306,12 @@ def skip_step_on_spikes(
 
 def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   """Create optimizer."""
+  is_olmo_mm = getattr(config, "use_multimodal", False) and (
+      getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
+      == "olmo35"
+  )
+  vis_cos_alpha = float(getattr(config, "olmo_vision_lr_cosine_alpha_f", -1.0))
+
   if getattr(config, "completedp_base_model_name", ""):
     completedp.check_supported(config)
     base = olmoe3_roles.load_base_config(config.completedp_base_model_name)
@@ -233,6 +321,56 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
     if config.olmo_init_method != "nanochat":
       max_logging.warning(f"muP learning rates with olmo_init_method={config.olmo_init_method}; muP expects nanochat.")
     base_opt = mup.mup_adamw(learning_rate_schedule, config, mup.load_base_config(config), mask=get_adamw_mask(config))
+  elif config.opt_type == "adamw" and is_olmo_mm and vis_cos_alpha >= 0.0:
+    vis_scale = float(getattr(config, "olmo_vision_lr_scale", 0.02))
+    conn_scale = float(getattr(config, "olmo_connector_lr_scale", 0.2))
+    emb_scale = float(getattr(config, "olmo_embedding_lr_scale", 0.2))
+    base_warmup = int(round(config.learning_rate_schedule_steps * config.warmup_steps_fraction))
+    conn_warmup = int(getattr(config, "olmo_connector_warmup_steps", -1))
+    if conn_warmup <= 0:
+      conn_warmup = base_warmup
+    has_row_range = bool(getattr(config, "olmo_trainable_embedding_row_range", None))
+    emb_warmup = conn_warmup if has_row_range else base_warmup
+    offset = int(getattr(config, "warmup_step_offset", 0))
+    hold_final = bool(getattr(config, "olmo_hold_final_lr", False))
+    vis_sched = _make_olmo35_cosine_schedule(
+        config.learning_rate * vis_scale,
+        vis_cos_alpha,
+        base_warmup,
+        config.learning_rate_schedule_steps,
+        config.steps,
+        offset=offset,
+        hold_final_lr=hold_final,
+    )
+    conn_sched = _make_olmo35_cosine_schedule(
+        config.learning_rate * conn_scale,
+        vis_cos_alpha,
+        conn_warmup,
+        config.learning_rate_schedule_steps,
+        config.steps,
+        offset=offset,
+        hold_final_lr=hold_final,
+    )
+    emb_sched = _make_olmo35_cosine_schedule(
+        config.learning_rate * emb_scale,
+        vis_cos_alpha,
+        emb_warmup,
+        config.learning_rate_schedule_steps,
+        config.steps,
+        offset=offset,
+        hold_final_lr=hold_final,
+    )
+    base_opt = optax.chain(
+        optax.scale_by_adam(
+            b1=config.adam_b1,
+            b2=config.adam_b2,
+            eps=config.adam_eps,
+            eps_root=config.adam_eps_root,
+            mu_dtype=config.mu_dtype,
+        ),
+        optax.add_decayed_weights(config.adam_weight_decay, mask=get_adamw_mask(config)),
+        _scale_by_olmo35_group_schedules(learning_rate_schedule, vis_sched, conn_sched, emb_sched),
+    )
   elif config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     base_opt = optax.adamw(
@@ -313,15 +451,12 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
-  is_olmo_mm = getattr(config, "use_multimodal", False) and (
-      getattr(getattr(config, "vision_encoder_block", None), "value", str(getattr(config, "vision_encoder_block", "")))
-      == "olmo35"
-  )
-  if is_olmo_mm and not getattr(config, "completedp_base_model_name", ""):
+  if is_olmo_mm and not getattr(config, "completedp_base_model_name", "") and vis_cos_alpha < 0.0:
     vis_scale = float(getattr(config, "olmo_vision_lr_scale", 0.1))
     conn_scale = float(getattr(config, "olmo_connector_lr_scale", 2.0))
-    if vis_scale != 1.0 or conn_scale != 1.0:
-      base_opt = optax.chain(base_opt, _scale_olmo35_vision_updates(vis_scale, conn_scale))
+    emb_scale = float(getattr(config, "olmo_embedding_lr_scale", 1.0))
+    if vis_scale != 1.0 or conn_scale != 1.0 or emb_scale != 1.0:
+      base_opt = optax.chain(base_opt, _scale_olmo35_vision_updates(vis_scale, conn_scale, emb_scale))
 
   if getattr(config, "skip_step_on_spikes", False):
     base_opt = skip_step_on_spikes(
