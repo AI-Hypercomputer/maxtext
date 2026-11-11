@@ -32,9 +32,17 @@ _OPTIMIZER_KEY = maxtext_engine._OPTIMIZER_STATE_KEY  # pylint: disable=protecte
 # passed as arguments.
 STATE_NOT_PASSED = {
     "fwd_bwd": (_OPTIMIZER_KEY,),
-    "fwd_bwd_accum": (_OPTIMIZER_KEY,),
+    "accumulate": (_MODEL_KEY, _OPTIMIZER_KEY),
     "update": (),
 }
+
+# The running gradient sum is not train state, but it stays allocated from an update's first
+# micro-batch until `update` consumes it, so every later micro-batch runs `fwd_bwd` beside it
+# without passing it. It is exactly what `accumulate` returns, so it is sized from that kernel's
+# outputs. Charged whether or not a run accumulates: the caller picks the number of micro-batches
+# per update at run time.
+ACCUMULATOR = "gradient accumulator"
+ACCUMULATOR_NOT_PASSED = ("fwd_bwd",)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,6 +111,23 @@ def _tree_bytes_per_device(tree: Any) -> tuple[int, int]:
   return device, host
 
 
+def _accumulator_bytes(compiled: dict[str, Any]) -> int:
+  """Returns the device bytes of the running gradient sum: what `accumulate` returns.
+
+  Raises:
+    ValueError: If `accumulate` is not among `compiled` or has no memory analysis.
+  """
+  if "accumulate" not in compiled:
+    raise ValueError(
+        "fwd_bwd runs beside the running gradient sum, which is sized by accumulate's outputs, but accumulate "
+        "was not compiled."
+    )
+  stats = compiled["accumulate"].memory_analysis()
+  if stats is None:
+    raise ValueError("accumulate has no memory analysis on this backend, so there is nothing to report.")
+  return stats.output_size_in_bytes
+
+
 def memory_report(compiled: dict[str, Any], state: Any) -> list[KernelMemory]:
   """Computes per-device `KernelMemory` for each compiled kernel, including unpassed resident state.
 
@@ -139,6 +164,9 @@ def memory_report(compiled: dict[str, Any], state: Any) -> list[KernelMemory]:
     if missing:
       raise ValueError(f"The train state has no {missing} subtree, which {name} is expected" " to run alongside.")
     device_not_passed, host_not_passed = _tree_bytes_per_device([state[key] for key in not_passed])
+    if name in ACCUMULATOR_NOT_PASSED:
+      not_passed += (ACCUMULATOR,)
+      device_not_passed += _accumulator_bytes(compiled)
     rows.append(
         KernelMemory(
             kernel=name,
@@ -195,14 +223,15 @@ def format_memory_report(rows: Sequence[KernelMemory]) -> str:
     return f"{num_bytes / _GIB:.2f}"
 
   lines = [
-      ("Engine memory per device, GiB (2^30). resident = arg + out - alias +" " temp: a donated buffer is in"),
-      ("both arg and out, and alias is what they share. +state = what is in" " device memory while the kernel"),
-      ("runs without being one of its arguments, so its memory analysis" " cannot see it: the optimizer state"),
-      ("during fwd_bwd and fwd_bwd_accum. The host columns are the same" " quantities in host memory"),
-      ("(pinned_host), which XLA:CPU counts as device. The peak below is" " these three kernels' only. NOT"),
-      ("included: weight-sync staging (a copy of the parameters in the" " rollout's layout, held until"),
-      ("release_weight_sync), fwd_only scoring, the eval kernel, generated" " code, and anything the caller"),
-      ("holds. It includes fwd_bwd_accum even when" " gradient_accumulation_steps=1 (where only fwd_bwd runs)."),
+      "Engine memory per device, GiB (2^30). resident = arg + out - alias + temp: a donated buffer is in",
+      "both arg and out, and alias is what they share. +state = what is in device memory while the kernel",
+      "runs without being one of its arguments, so its memory analysis cannot see it: train state and, for",
+      "the fwd_bwd of a later micro-batch, the gradient accumulator. The host columns are the same",
+      "quantities in host memory (pinned_host), which XLA:CPU counts as device. The peak below covers",
+      "the reported kernels only. NOT included: weight-sync staging (a copy of the parameters in the rollout's",
+      "layout, held until release_weight_sync), fwd_only scoring, the eval kernel, generated",
+      "code, and anything the caller holds. It assumes gradient accumulation, so fwd_bwd is charged with",
+      "the accumulator even though a step of one micro-batch has none, and accumulate does not run then.",
       _table_line(
           "kernel",
           ((name, width, name) for name, width, _ in _TABLE_COLUMNS),
@@ -215,7 +244,7 @@ def format_memory_report(rows: Sequence[KernelMemory]) -> str:
 
   peak = device_peak(rows)
   if peak.not_passed:
-    held = " + ".join(f"{key} state" for key in peak.not_passed)
+    held = " + ".join(key if key == ACCUMULATOR else f"{key} state" for key in peak.not_passed)
     because = f"{peak.kernel} {gib(peak.resident)} + {held}" f" {gib(peak.device_not_passed)} not passed to it"
     if peak.host_not_passed:
       because += f"; {gib(peak.host_not_passed)} GiB more of it is on host"

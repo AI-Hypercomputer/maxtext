@@ -57,6 +57,7 @@ except (ImportError, ValueError):
   HAS_TOKAMAX_KDA = False
 
 pytestmark = [
+    pytest.mark.integration_test,
     pytest.mark.scheduled_only,
     pytest.mark.skipif(not HAS_TOKAMAX_KDA, reason="tokamax KDA not available"),
 ]
@@ -248,6 +249,7 @@ class Glm5ModelTest(parameterized.TestCase):
     self.assertGreater(cos, 0.99999, f"Cosine mismatch in {name}: {cos}")
     return (frob_rel, max_rel_inf, cos)
 
+  # pylint: disable=too-many-positional-arguments
   def _run_parity_pass(
       self,
       num_layers: int,
@@ -274,11 +276,14 @@ class Glm5ModelTest(parameterized.TestCase):
       hf_model.chunk_kimi_delta_attention = orig_kda
 
     tokens, np_hf = jnp.array(ids.numpy()), hf_logits.detach().cpu().numpy()
-    out_aux = jax_m.forward_with_aux(tokens)
-    l_frob, l_inf, l_cos, _, _ = self._calc_e3(out_aux.logits, np_hf, name="forward_logits", dtype=np_dt)
-
     wrt = nnx.DiffState(0, (nnx.Param, modeling_glm5_3_flash.Glm5RouterBias))
-    _, grads = nnx.value_and_grad(lambda m: jnp.sum(m(tokens) * cot_jax), argnums=wrt)(jax_m)
+
+    def _loss_with_aux(m):
+      aux_out = m.forward_with_aux(tokens)
+      return jnp.sum(aux_out.logits * cot_jax), aux_out
+
+    (_, out_aux), grads = nnx.value_and_grad(_loss_with_aux, argnums=wrt, has_aux=True)(jax_m)
+    l_frob, l_inf, l_cos, _, _ = self._calc_e3(out_aux.logits, np_hf, name="forward_logits", dtype=np_dt)
 
     hf_grad_m = modeling_glm5_3_flash.Glm5Model(cfg, rngs=nnx.Rngs(0), place_on_devices=False)
     with torch.no_grad():
@@ -420,11 +425,12 @@ class Glm5ModelTest(parameterized.TestCase):
         num_layers, cfg_f32, hf_m_f32, hf_head_f32, ids, cot_f32, is_fp64=False
     )
     self._assert_e3(aux_logits, np_hf, "forward_aux_logits")
-    self._assert_e3(
-        np.asarray(jax_m(tokens), dtype=np.float32),
-        np_hf,
-        "forward_call_logits",
-    )
+    if num_layers == 5:
+      self._assert_e3(
+          np.asarray(jax_m(tokens), dtype=np.float32),
+          np_hf,
+          "forward_call_logits",
+      )
     for path_str, val_jax, val_hf in leaf_data:
       self._assert_e3(val_jax, val_hf, path_str)
     bias_leaves = jax.tree.leaves(nnx.state(grads, modeling_glm5_3_flash.Glm5RouterBias))

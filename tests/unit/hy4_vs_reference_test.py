@@ -283,10 +283,15 @@ class Hy4LayersTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    torch.set_grad_enabled(False)
     cls.hf_cfg = make_hf_config()
     cls.config = make_config()
     cls.mesh = Mesh(maxtext_utils.create_device_mesh(cls.config), cls.config.mesh_axes)
+
+  def setUp(self):
+    super().setUp()
+    if HAS_TORCH:
+      self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+      torch.set_grad_enabled(False)
 
   def _inputs_3d(self, batch=1, seq=6, seed=0):
     x = np.random.RandomState(seed).randn(batch, seq, EMB).astype(np.float32)

@@ -27,6 +27,7 @@ from absl.testing import parameterized
 from flax import nnx
 from flax import struct
 import jax
+from jax.experimental.layout import Format
 import jax.numpy as jnp
 from maxtext.common import checkpoint_context
 from maxtext.common import train_state_nnx
@@ -89,7 +90,7 @@ def _nested_tuples(value):
   return tuple(_nested_tuples(v) for v in value) if isinstance(value, (list, tuple)) else value
 
 
-class MaxTextTrainingEngineTest(absltest.TestCase):
+class MaxTextTrainingEngineTest(parameterized.TestCase):
 
   def setUp(self):
     """Sets up test dependencies and mocks."""
@@ -1377,6 +1378,21 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     self.assertEmpty(recorder._metrics_buffer)
 
+    # bfloat16 scalars and WeightedMetrics are accepted (via jnp.issubdtype(..., jnp.floating)).
+    recorder.buffer_metrics(train_step=0, name="bf16_scalar", metric=jnp.array(1.5, dtype=jnp.bfloat16))
+    recorder.buffer_metrics(
+        train_step=0,
+        name="bf16_wm",
+        metric=abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.array(3.0, dtype=jnp.bfloat16),
+            denominator=jnp.array(2.0, dtype=jnp.bfloat16),
+        ),
+    )
+    history = recorder.get_metrics_history(clear_cache=True)
+    self.assertLen(history, 1)
+    np.testing.assert_allclose(history[0].scalar_metrics["bf16_scalar"], [1.5], rtol=1e-2)
+    np.testing.assert_allclose(history[0].weighted_metrics["bf16_wm"].compute(), 1.5, rtol=1e-2)
+
   def test_buffer_metrics_rejects_mixing_scalar_and_weighted_metrics(self):
     """A metric cannot be recorded as both a scalar and a WeightedMetric in the same step."""
     recorder = metrics_module.MetricsRecorder()
@@ -2417,6 +2433,446 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertFalse(cfg.skip_step_on_nan)
     self.assertNotIn("step_skipped", buffer.scalar_metrics)
 
+  @parameterized.named_parameters(("eager", False), ("compiled", True))
+  def test_bf16_grads_divided_by_float32_denominator(self, compiled):
+    """bf16 accumulated gradients are divided by the float32 denominator, not by a bf16 cast of it.
+
+    bf16 holds integers exactly only up to 256, so a denominator of 257 casts to 256. The
+    expected gradient is 256/257 rounded once to bf16 (0.99609375), not 1.0. Checked on both the
+    eager and the compiled path.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    expected = float(jnp.asarray(np.float32(256.0) / np.float32(257.0)).astype(jnp.bfloat16))
+    self.assertEqual(float(jnp.asarray(257.0, jnp.bfloat16)), 256.0, "257 must be unrepresentable in bf16")
+    self.assertNotEqual(expected, 1.0)
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(
+        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.sum(model.weights[...]) * 256.0, denominator=jnp.array(257.0)
+        )
+    )
+    if compiled:
+      t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+    # Both elements equal, so the norm is sqrt(2) times the normalized gradient.
+    np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * expected], rtol=1e-6)
+
+  @parameterized.named_parameters(("eager", False), ("compiled", True))
+  def test_grads_accumulate_in_grad_dtype(self, compiled):
+    """Micro-batch gradients are accumulated in `grad_dtype`, on the eager and the compiled path."""
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    third = np.float32(1.0) / np.float32(3.0)
+    num_micro_batches = 4
+    expected_sum = jnp.zeros((), jnp.bfloat16)
+    for _ in range(num_micro_batches):
+      expected_sum = expected_sum + jnp.asarray(third).astype(jnp.bfloat16)
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(
+        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.sum(model.weights[...]) * third, denominator=jnp.array(1.0)
+        )
+    )
+    if compiled:
+      t.compile(DummyPayload())
+    for _ in range(num_micro_batches):
+      t.fwd_bwd(DummyPayload())
+
+    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+      self.assertEqual(leaf.dtype, jnp.bfloat16)
+      np.testing.assert_array_equal(np.asarray(leaf, np.float32), np.full(leaf.shape, float(expected_sum)))
+
+  _SCALE = np.float32(1.0) / np.float32(13.0)
+  _DENOMINATOR = 3.0
+  _MICRO_BATCHES = 4
+
+  def _run_scaled_micro_batches(self, cfg, compiled):
+    """Folds `_MICRO_BATCHES` micro-batches of gradient `_SCALE` over `_DENOMINATOR` tokens into a fresh engine.
+
+    On the eager path, or through the compiled kernels if `compiled` is set.
+    """
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(
+        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.sum(model.weights[...]) * self._SCALE, denominator=jnp.array(self._DENOMINATOR)
+        )
+    )
+    if compiled:
+      t.compile(DummyPayload())
+    for _ in range(self._MICRO_BATCHES):
+      t.fwd_bwd(DummyPayload())
+    expected_sum = np.float32(0.0)
+    for _ in range(self._MICRO_BATCHES):
+      expected_sum = np.float32(expected_sum + self._SCALE)
+    return t, expected_sum, np.float32(expected_sum / np.float32(self._DENOMINATOR * self._MICRO_BATCHES))
+
+  @parameterized.named_parameters(("eager", False), ("compiled", True))
+  def test_float32_grad_dtype_stays_float32(self, compiled):
+    """Under grad_dtype=float32 the default is float32 end to end: nothing is rounded through bf16.
+
+    Checks the values, not just the dtype, so a bf16 rounding anywhere between the sum and the
+    optimizer fails here.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="float32")
+    t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg, compiled)
+    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+      self.assertEqual(leaf.dtype, jnp.float32)
+      np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
+
+    t.update()
+    grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+    np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * float(expected_mean)], rtol=1e-6)
+
+  @parameterized.named_parameters(("eager", False), ("compiled", True))
+  def test_bf16_weights_accumulate_in_float32(self, compiled):
+    """Accumulates micro-batch gradients in `grad_dtype` (float32) even when parameters are bfloat16."""
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="float32")
+    model = DummyNNXModel()
+    model.weights = nnx.Param(jnp.array([1.0, 2.0], jnp.bfloat16))
+    self.mock_from_pretrained.return_value = (model, self.mock_from_pretrained.return_value[1])
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(self._weighted_loss_fn)
+    if compiled:
+      t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+      self.assertEqual(leaf.dtype, jnp.float32)
+      # 8.0 per element per micro-batch; see `_weighted_loss_fn`.
+      np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, 16.0))
+
+  def test_compiled_micro_batches_share_fwd_bwd_and_accumulate_in_place(self):
+    """Every compiled micro-batch runs the one `fwd_bwd`, and each after the first adds into the donated sum.
+
+    The running sum is never an argument of `fwd_bwd` (see `_accumulate_kernel`), and `accumulate`
+    writes it back in place rather than allocating a second parameter-sized tree.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    with (
+        mock.patch.object(t, "_compiled_fwd_bwd", wraps=t._compiled_fwd_bwd) as fwd_bwd,
+        mock.patch.object(t, "_compiled_accumulate", wraps=t._compiled_accumulate) as accumulate,
+    ):
+      t.fwd_bwd(DummyPayload())
+      accumulate.assert_not_called()
+      first_sum = jax.tree.leaves(t._accumulated_grads)
+      first_denominator = t._accumulated_denominator  # pylint: disable=protected-access
+      t.fwd_bwd(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+
+    self.assertEqual(fwd_bwd.call_count, 3)
+    self.assertEqual(accumulate.call_count, 2)
+    self.assertTrue(all(leaf.is_deleted() for leaf in first_sum), "the running sum was copied, not donated")
+    self.assertTrue(first_denominator.is_deleted(), "the running denominator was copied, not donated")
+    # 8.0 per element and a denominator of 4.0 per micro-batch, summed unreduced; see `_weighted_loss_fn`.
+    np.testing.assert_array_equal(np.asarray(t._accumulated_grads["weights"]), [24.0, 24.0])
+    np.testing.assert_array_equal(np.asarray(t._accumulated_denominator), np.float32(12.0))
+
+  @parameterized.named_parameters(("eager", False), ("compiled", True))
+  def test_denominator_is_summed_exactly_past_bfloat16_precision(self, compiled):
+    """The loss denominator is summed in float32 on both paths, whatever `grad_dtype` is.
+
+    Token counts above 256 are not all representable in bfloat16, and every other test keeps the
+    total small enough that a bfloat16 sum would still be exact -- so this is the one test that sees
+    a denominator summed, or rounded, in the gradients' dtype.
+    """
+    cfg = self.setup_config(grad_dtype="bfloat16")
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(
+        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(257.0)
+        )
+    )
+    if compiled:
+      t.compile(DummyPayload())
+    for _ in range(3):
+      t.fwd_bwd(DummyPayload())
+    # 257 lies between the bfloat16 neighbours 256 and 258.
+    np.testing.assert_array_equal(
+        np.asarray(t._accumulated_denominator), np.float32(3 * 257.0)  # pylint: disable=protected-access
+    )
+
+  @staticmethod
+  def _memory_kinds(tree):
+    return {leaf.sharding.memory_kind for leaf in jax.tree.leaves(tree) if hasattr(leaf, "sharding")}
+
+  def test_optimizer_offload_preserves_numerics(self):
+    """Offload moves bytes only: two steps give bit-identical weights and moments."""
+    trained = []
+    for offload in (False, True):
+      t = self._adam_engine(optimizer_memory_host_offload=offload)
+      t.compile(DummyPayload())
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_state_on_device_without_offload(self):
+    """Without the flag, the optimizer state stays in device memory."""
+    t = self._adam_engine()
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device"})
+
+  def test_update_reoffloads_restored_optimizer_state(self):
+    """`_settle_state` after a restore re-offloads moments so compiled `update()` sees pinned_host."""
+    t = self._adam_engine(optimizer_memory_host_offload=True)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    # What a restore that lands on the device leaves behind before `_settle_state` runs.
+    on_device = jax.tree.map(
+        lambda x: jax.device_put(x, Format(None, x.sharding.with_memory_kind("device"))),
+        nnx.state(t.state.optimizer),
+    )
+    nnx.update(t.state.optimizer, on_device)
+    t._invalidate_pure_state()  # pylint: disable=protected-access
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device"})
+    t._settle_state()  # pylint: disable=protected-access
+    t._refresh_pure_state()  # pylint: disable=protected-access
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_restore_checkpoint_offloads_optimizer_state_before_and_after_restore(self):
+    """`restore_checkpoint` offloads optimizer state both before and after restore."""
+    for compile_before_restore in (False, True):
+      with self.subTest(compile_before_restore=compile_before_restore):
+        t = self._adam_engine(enable_checkpointing=True, optimizer_memory_host_offload=True)
+        if compile_before_restore:
+          t.compile(DummyPayload())
+        mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
+        self._mock_saved_checkpoint(mock_orbax_mgr, custom_metadata={"additional_metadata": {"step": 3}})
+
+        seen_pre_restore_kinds = []
+
+        def fake_restore(step, abstract_checkpointables, engine=t, seen=None):
+          del step, abstract_checkpointables
+          assert seen is not None
+          seen.append(self._memory_kinds(nnx.state(engine.state.optimizer)))
+          restored_opt = jax.tree.map(
+              lambda x: jax.device_put(x, Format(None, x.sharding.with_memory_kind("device")))
+              if hasattr(x, "sharding")
+              else x,
+              nnx.state(engine.state.optimizer, nnx.optimizer.OptState),
+          )
+          return {
+              "model_params": nnx.state(engine.state.model),
+              "optimizer_state": restored_opt,
+          }
+
+        mock_orbax_mgr.load_checkpointables.side_effect = (
+            lambda step, abstract_checkpointables, f=fake_restore, s=seen_pre_restore_kinds: f(
+                step, abstract_checkpointables, seen=s
+            )
+        )
+
+        self.assertEqual(t.restore_checkpoint(), {"step": 3})
+        expected_pre = [{"pinned_host"}]
+        self.assertEqual(seen_pre_restore_kinds, expected_pre)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+        if not compile_before_restore:
+          t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_offload_on_eager_path(self):
+    """`optimizer_memory_host_offload` also applies on the eager path, where `compile()` is never called.
+
+    It changes placement only: two eager steps give the same weights and moments with it off.
+    """
+    trained = []
+    for offload in (False, True):
+      t = self._adam_engine(optimizer_memory_host_offload=offload)
+      expected = {"pinned_host"} if offload else {"device"}
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        # Off HBM from the first forward pass, as a compile would have moved it.
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+      self.assertFalse(t._compiled)  # pylint: disable=protected-access
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+
+  def test_optimizer_offload_settles_at_init(self):
+    """Optimizer state is offloaded in `__init__` before any `compile`, `eval_step`, or `fwd_bwd`."""
+    without_offload = self._adam_engine(optimizer_memory_host_offload=False)
+    self.assertEqual(self._memory_kinds(nnx.state(without_offload.state.optimizer)), {"device"})
+
+    t = self._adam_engine(optimizer_memory_host_offload=True)
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+
+    # Deferred `compile(None)` and step-0 `eval_step` keep optimizer state offloaded.
+    t.compile(None)
+    t.eval_step(DummyPayload())
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_offload_on_eager_path_skips_zero1(self):
+    """Eager `fwd_bwd`/`update` with host offload skips Zero-1 even when config enables Zero-1."""
+    data_parallelism = min(2, jax.device_count())
+    tensor_parallelism = jax.device_count() // data_parallelism
+    trained = []
+    for offload in (False, True):
+      cfg = self.setup_config(
+          gradient_clipping_threshold=0.0,
+          optimizer_memory_host_offload=offload,
+          shard_optimizer_over_data=True,
+          shard_mode="explicit",
+          ici_fsdp_parallelism=1,
+          ici_data_parallelism=data_parallelism,
+          ici_tensor_parallelism=tensor_parallelism,
+      )
+      mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+      with (
+          mock.patch.object(maxtext_engine, "_zero1_active", return_value=None),
+          mock.patch.object(
+              maxtext_engine.train_utils,
+              "create_training_optimizer",
+              return_value=(lambda step: jnp.array(0.1), optax.adam(0.1)),
+          ),
+      ):
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(self._weighted_loss_fn)
+        expected_kind = {"pinned_host"} if offload else {"device"}
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected_kind)
+        for _ in range(2):
+          t.fwd_bwd(DummyPayload())
+          self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected_kind)
+          t.update()
+          self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected_kind)
+        opt_specs = [
+            leaf.sharding.spec
+            for leaf in jax.tree.leaves(nnx.state(t.state.optimizer))
+            if isinstance(getattr(leaf, "sharding", None), jax.sharding.NamedSharding) and leaf.ndim > 0
+        ]
+        if offload:
+          self.assertTrue(opt_specs)
+        self.assertFalse(any("data" in jax.tree.leaves(tuple(spec)) for spec in opt_specs))
+        self.assertFalse(t._compiled)  # pylint: disable=protected-access
+        trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+
+  def test_update_after_state_setter_swaps_optimizer(self):
+    """The `state` setter drops the previous compile's optimizer shardings.
+
+    Replacing `state` clears any accumulated gradients and compiled shardings, so the next
+    `fwd_bwd`/`update` step works cleanly with the new optimizer (SGD replacing Adam) on both the
+    compiled and eager paths, with and without offload.
+    """
+    for offload in (False, True):
+      with self.subTest(offload=offload):
+        expected = {"pinned_host"} if offload else {"device"}
+
+        # Compiled path: `state` setter drops compiled state so the next step recompiles for SGD.
+        t = self._adam_engine(optimizer_memory_host_offload=offload)
+        t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        before = np.asarray(t.state.model.weights[...])
+
+        t.state = train_state_nnx.TrainStateNNX(t.model, nnx.Optimizer(t.model, optax.sgd(0.1), wrt=nnx.Param))
+        self.assertIsNone(t._optimizer_device_shardings)  # pylint: disable=protected-access
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        # `_weighted_loss_fn`'s gradient is 2.0 per element, so SGD at 0.1 moves each weight by 0.2.
+        np.testing.assert_allclose(before - np.asarray(t.state.model.weights[...]), [0.2, 0.2], atol=1e-6)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+
+        # Eager path: `update()` runs eagerly against the new optimizer tree after `state` is swapped.
+        eager = self._adam_engine(optimizer_memory_host_offload=offload)
+        eager.fwd_bwd(DummyPayload())
+        eager.update()
+        before_eager = np.asarray(eager.state.model.weights[...])
+
+        eager.state = train_state_nnx.TrainStateNNX(
+            eager.model, nnx.Optimizer(eager.model, optax.sgd(0.1), wrt=nnx.Param)
+        )
+        eager.fwd_bwd(DummyPayload())
+        eager.update()
+        np.testing.assert_allclose(before_eager - np.asarray(eager.state.model.weights[...]), [0.2, 0.2], atol=1e-6)
+        self.assertEqual(self._memory_kinds(nnx.state(eager.state.optimizer)), expected)
+
+  def test_maxtext_loss_aux_losses_are_scaled_into_the_differentiated_sum(self):
+    """`maxtext_train.loss_fn`'s normalized aux losses are weighted by the token count, as its own objective is.
+
+    Under gradient accumulation `train.py` differentiates `xent_sum + aux * total_weights` per
+    micro-batch, so the engine must rebuild the same unreduced numerator from the aux dict.
+    """
+    aux = {
+        "xent_sum": jnp.array(10.0),
+        "total_weights": jnp.array(4.0),
+        "moe_lb_loss": jnp.array(0.5),
+        "indexer_loss": jnp.array(0.25),
+        "mtp_loss": None,
+    }
+    loss = maxtext_engine._normalize_loss_output((jnp.array(0.0), aux), has_aux=False).primary_loss
+    np.testing.assert_allclose(np.asarray(loss.unreduced_sum), 10.0 + (0.5 + 0.25) * 4.0)
+    np.testing.assert_allclose(np.asarray(loss.denominator), 4.0)
+
+    # bfloat16 aux losses with int32 `total_weights > 256` must promote to float32 rather than
+    # rounding `total_weights` (e.g. 65537 -> 65536 in bfloat16) or losing aux precision.
+    bf16_aux = {
+        "xent_sum": jnp.array(10.0, jnp.float32),
+        "total_weights": jnp.array(65537, jnp.int32),
+        "moe_lb_loss": jnp.array(0.3, jnp.bfloat16),
+        "indexer_loss": jnp.array(0.2, jnp.bfloat16),
+        "mtp_loss": jnp.array(0.1, jnp.bfloat16),
+    }
+    expected_aux = sum(float(jnp.asarray(bf16_aux[k], jnp.float32)) for k in ("moe_lb_loss", "indexer_loss", "mtp_loss"))
+    bf16_loss = maxtext_engine._normalize_loss_output((jnp.array(0.0), bf16_aux), has_aux=False).primary_loss
+    self.assertEqual(bf16_loss.unreduced_sum.dtype, jnp.float32)
+    np.testing.assert_allclose(np.asarray(bf16_loss.unreduced_sum), 10.0 + expected_aux * 65537.0, rtol=1e-6)
+    self.assertEqual(bf16_loss.denominator.dtype, jnp.int32)
+    self.assertEqual(int(bf16_loss.denominator), 65537)
+
+    # Without aux losses the numerator is the cross-entropy sum alone.
+    plain = maxtext_engine._normalize_loss_output(
+        (jnp.array(0.0), {"xent_sum": jnp.array(10.0), "total_weights": jnp.array(4.0)}), has_aux=False
+    ).primary_loss
+    np.testing.assert_allclose(np.asarray(plain.unreduced_sum), 10.0)
+
+  def test_model_and_state_setters_drop_the_compiled_gradient_masks(self):
+    """The cast and freeze masks belong to the parameter tree of the last compile; a setter replaces that tree."""
+    mask_cfg = self.setup_config(trainable_parameters_mask=["^(?!weights).*"], cast_grads_after_all_reduce=True)
+    for setter in ("model", "state"):
+      with self.subTest(setter=setter):
+        self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(mask_cfg)
+        t.with_loss_fn(self._weighted_loss_fn)
+        t.compile(DummyPayload())
+        self.assertIsNotNone(t._freeze_mask)
+        # A one-device mesh has no token axis to all-reduce over, so stand in for what a sharded compile sets.
+        t._uncast_grad_mask = jax.tree.map(lambda _: True, t._freeze_mask)
+        t._cast_uncast_grads = mock.MagicMock()
+
+        new_model = DummyNNXModel()
+        if setter == "model":
+          t.model = new_model
+        else:
+          t.state = train_state_nnx.TrainStateNNX(new_model, nnx.Optimizer(new_model, optax.sgd(0.01), wrt=nnx.Param))
+        self.assertIsNone(t._freeze_mask)
+        self.assertIsNone(t._uncast_grad_mask)
+        self.assertIsNone(t._cast_uncast_grads)
+
   def test_compiled_freeze_mask_survives_a_checkpoint_restore(self):
     """A restore replaces the parameter values, not their paths, so the compiled kernels' freeze mask stays cached."""
     t = maxtext_engine.MaxTextTrainingEngine(
@@ -2703,7 +3159,17 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_settle_state_places_and_shards_in_a_single_pass(self):
     """`_settle_state` places unplaced leaves on the mesh and shards optimizer state in a single pass."""
-    cfg = self.setup_config(shard_optimizer_over_data=True, shard_mode="explicit")
+    data_parallelism = min(2, jax.device_count())
+    tensor_parallelism = jax.device_count() // data_parallelism
+    cfg = self.setup_config(
+        shard_optimizer_over_data=True,
+        shard_mode="explicit",
+        ici_fsdp_parallelism=1,
+        ici_data_parallelism=data_parallelism,
+        ici_tensor_parallelism=tensor_parallelism,
+    )
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
     with (
         mock.patch.object(maxtext_engine, "_zero1_active", return_value=None),
         mock.patch.object(
@@ -2843,6 +3309,17 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     for engine, (rules, abstract_mesh) in zip((deferred, eager), seen):
       self.assertEqual(rules, self.mock_config.logical_axis_rules)
       self.assertEqual(abstract_mesh, engine._mesh.abstract_mesh)  # pylint: disable=protected-access
+
+  def test_zero1_sharding_keeps_memory_kind(self):
+    """`add_data_to_sharding` builds a fresh sharding; the memory kind must survive it."""
+    mesh = self.mock_from_pretrained.return_value[1]
+    base = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None)).with_memory_kind("pinned_host")
+    target = maxtext_engine._zero1_sharding(  # pylint: disable=protected-access
+        mesh, jax.ShapeDtypeStruct((4,), jnp.float32), base
+    )
+    self.assertIsNotNone(target)
+    self.assertIn("data", jax.tree.leaves(tuple(target.spec)))
+    self.assertEqual(target.memory_kind, "pinned_host")
 
   def _nan_loss_fn(self, model, *_args, **_kwargs):
     """A loss whose gradient is NaN in every element."""
@@ -3110,7 +3587,8 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
 
     engine.compile(dummy_payload)
     self.assertTrue(engine._compiled)
-    self.assertEqual(trace_counts, {"fwd_bwd": 2, "update": 1})
+    # One `fwd_bwd` trace: every micro-batch runs the same kernel, and `accumulate` is a kernel of its own.
+    self.assertEqual(trace_counts, {"fwd_bwd": 1, "update": 1})
     traces_after_compile = dict(trace_counts)
     params_before = jax.tree.map(np.asarray, nnx.state(engine.model, nnx.Param))
 

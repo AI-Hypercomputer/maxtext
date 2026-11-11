@@ -72,14 +72,21 @@ def _tiny_qwen35_kwargs(seq_len, batch_size, num_experts, top_k, **overrides):
       "model_name": "qwen3.5-35b-a3b",
       "num_experts": num_experts,
       "num_experts_per_tok": top_k,
-      "base_emb_dim": 256,
+      "base_emb_dim": 64,
       "base_num_query_heads": 2,
       "base_num_kv_heads": 2,
-      "head_dim": 256,
+      "head_dim": 32,
       "partial_rotary_factor": 0.25,
-      "base_mlp_dim": 256,
-      "base_moe_mlp_dim": 256,
-      "vocab_size": 1000,
+      "base_mlp_dim": 64,
+      "base_moe_mlp_dim": 64,
+      "gdn_key_head_dim": 16,
+      "gdn_value_head_dim": 16,
+      "gdn_num_key_heads": 2,
+      "gdn_num_value_heads": 2,
+      "gdn_chunk_size": 4,
+      "use_mrope": False,
+      "remat_policy": "none",
+      "vocab_size": 128,
       "max_target_length": seq_len,
       "max_prefill_predict_length": seq_len,
       "per_device_batch_size": float(batch_size),
@@ -159,7 +166,7 @@ class DummyRoutedMoE:
     self.is_hash_routing = False
     self.per_expert_scale = None if per_expert_scale is None else nnx.Param(jnp.asarray(per_expert_scale))
 
-  def _maybe_shard_with_logical(self, x, spec):
+  def _maybe_shard_with_logical(self, x, spec):  # pylint: disable=unused-argument
     return x
 
   def deepseek_scale_weights(self, weights):
@@ -550,9 +557,10 @@ class TrainerRouterReplayTest(unittest.TestCase):
     train.loss_fn down to RoutedMoE.get_topk, because the model just routes
     normally. This is the assertion that actually pins the plumbing.
     """
-    loss_a = self._loss_for_routing(cfg, seq_len, forced_a)
-    loss_b = self._loss_for_routing(cfg, seq_len, forced_b)
-    loss_none = self._loss_for_routing(cfg, seq_len, None)
+    model = self._build_model(cfg)
+    loss_a = self._loss_for_routing(cfg, seq_len, forced_a, model=model)
+    loss_b = self._loss_for_routing(cfg, seq_len, forced_b, model=model)
+    loss_none = self._loss_for_routing(cfg, seq_len, None, model=model)
     print(f"\n[Router Replay][{label}] a={loss_a} b={loss_b} unforced={loss_none}")
     self.assertNotAlmostEqual(
         loss_a,
@@ -1193,6 +1201,7 @@ class GetTopkForcedRoutingParityTest(unittest.TestCase):
     self._assert_parity(DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4))
 
 
+# pylint: disable=attribute-defined-outside-init
 class RaggedSortGuardTest(unittest.TestCase):
   """permute's standard (non-ragged) branch under forced routing.
 

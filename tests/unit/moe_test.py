@@ -24,6 +24,7 @@ from flax import nnx
 import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
+from jax.extend.core import ClosedJaxpr, Jaxpr
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 import ml_dtypes
@@ -48,6 +49,204 @@ from tests.unit.moe_megatron_aux_loss_test import _tiny_deepseek_config
 from tests.utils.test_helpers import get_test_config_path
 from tests.utils import linen_wrappers
 import pytest
+
+
+class FixedRandomRouterTest(unittest.TestCase):
+  """Pure JAX checks for the benchmark's replacement-logit semantics."""
+
+  def test_gate_random_logits_before_scoring(self):
+    gate = moe.GateLogit(
+        in_features_shape=4,
+        out_features_shape=8,
+        model_name="test",
+        mesh=None,
+        rngs=nnx.Rngs(0),
+        score_func="sigmoid",
+    )
+    inputs = jnp.ones((2, 3, 4))
+    key = jax.random.key(7)
+    output, _ = gate(inputs, routing_key=key)
+    expected = jax.nn.sigmoid(jax.random.normal(key, (2, 3, 8)))
+    np.testing.assert_allclose(output, expected, rtol=1e-6)
+    np.testing.assert_array_equal(output, gate(inputs * 2, routing_key=key)[0])
+
+  def test_constructor_derives_fixed_layer_keys(self):
+    cfg = _tiny_deepseek_config(
+        "fixed_router_keys",
+        te_moe_block=True,
+        te_gmm_quantization="te_no_quant",
+        use_random_routing=True,
+        load_balance_loss_weight=0.0,
+        moe_use_megatron_seq_aux_loss=False,
+        routed_bias_update_rate=0.0,
+        routed_bias=False,
+        megablox=False,
+        prefuse_moe_weights=True,
+        override_logical_axis_rules=True,
+    )
+
+    def build(seed):
+      rngs = nnx.Rngs(seed)
+      expected_key = jax.random.fold_in(rngs.params.key[...], moe.ROUTING_RNG_TAG)
+      layer = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=None,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=16,
+          rngs=rngs,
+      )
+      np.testing.assert_array_equal(jax.random.key_data(layer.fixed_routing_key[...]), jax.random.key_data(expected_key))
+      return jax.random.key_data(layer.fixed_routing_key[...])
+
+    np.testing.assert_array_equal(build(7), build(7))
+    self.assertFalse(np.array_equal(build(7), build(8)))
+
+  def test_native_random_routing_is_unchanged(self):
+    layer = SimpleNamespace(
+        per_expert_scale=None,
+        config=SimpleNamespace(use_random_routing=True, te_moe_block=False),
+        num_experts_per_tok=2,
+    )
+    logits = jnp.arange(48, dtype=jnp.float32).reshape(2, 3, 8)
+    key = jax.random.key(9)
+    actual = moe.RoutedMoE.get_topk(layer, logits, None, rngs=key)
+    expected = moe.random_routing(key, logits, 2)
+    for a, b in zip(actual, expected):
+      np.testing.assert_array_equal(a, b)
+
+  def test_rejects_incompatible_te_random_routing(self):
+    for overrides in (
+        {"is_hash_routing": True},
+        {"load_balance_loss_weight": 0.1},
+        {"routed_bias_update_rate": 0.1},
+        {"routed_bias": True},
+    ):
+      with self.subTest(overrides=overrides):
+        cfg = SimpleNamespace(
+            fp8_moe=False,
+            te_moe_block=True,
+            use_random_routing=True,
+            load_balance_loss_weight=0.0,
+            routed_bias_update_rate=0.0,
+            routed_bias=False,
+        )
+        for key, value in overrides.items():
+          if key != "is_hash_routing":
+            setattr(cfg, key, value)
+        with self.assertRaisesRegex(ValueError, "Fixed random routing"):
+          moe.RoutedMoE(
+              config=cfg,
+              num_experts=8,
+              num_experts_per_tok=2,
+              mesh=None,
+              kernel_init=None,
+              kernel_axes=(),
+              rngs=nnx.Rngs(0),
+              is_hash_routing=overrides.get("is_hash_routing", False),
+          )
+
+  def test_te_routing_map_and_missing_api(self):
+    # Execute the real TE adapter and top-k, mocking only the unavailable TE backend.
+    cfg = SimpleNamespace(
+        te_moe_block=True,
+        use_random_routing=True,
+        custom_mesh_and_rule="default",
+        te_gmm_quantization="te_no_quant",
+        te_moe_disable_cudnn_gmm_fusion=False,
+        float32_gate_logits=True,
+        dtype=jnp.float32,
+        mlp_activations=("silu", "linear"),
+        te_moe_quantize_before_fsdp_all_gather=False,
+        model_name="test",
+        decoder_block="default",
+        norm_topk_prob=False,
+    )
+    gate = moe.GateLogit(in_features_shape=4, out_features_shape=8, model_name="test", mesh=None, rngs=nnx.Rngs(0))
+    layer = SimpleNamespace(
+        config=cfg,
+        quant=SimpleNamespace(get_moe_block_quantizer_sets=lambda *a, **k: (None, None)),
+        is_hash_routing=False,
+        use_gate_bias=False,
+        mesh=SimpleNamespace(shape={"fsdp": 1, "expert": 1}),
+        _expert_parallelism_name="expert",
+        num_experts=8,
+        num_experts_per_tok=2,
+        gate=gate,
+        fixed_routing_key=nnx.Variable(jax.random.key(7)),
+        per_expert_scale=None,
+        wi_kernel_axes=(),
+        wo_kernel_axes=(),
+        dtype=jnp.float32,
+        should_update_load_balance=lambda: False,
+    )
+    layer.get_topk = functools.partial(moe.RoutedMoE.get_topk, layer)
+    inputs = jnp.ones((2, 3, 4))
+    backend = mock.Mock(return_value=(inputs, None, jnp.int32(6), None))
+    te_moe = SimpleNamespace(moe=backend, RouterComputationInfo=SimpleNamespace, RoutingMapInfo=SimpleNamespace)
+    modules = {
+        "transformer_engine": mock.MagicMock(),
+        "transformer_engine.jax": SimpleNamespace(moe=te_moe),
+        "transformer_engine.jax.sharding": SimpleNamespace(MeshResource=SimpleNamespace),
+    }
+    with (
+        mock.patch.dict("sys.modules", modules),
+        mock.patch.object(moe, "_get_te_moe_checkpoint_kwargs", return_value={}),
+        mock.patch.object(moe, "_get_te_moe_weight_layout_kwargs", return_value={}),
+        mock.patch.object(moe.max_utils, "get_te_moe_recv_capacity_per_rank", return_value=64),
+    ):
+      args = (layer, inputs, None, None, None, None, None, None)
+      result = moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
+      np.testing.assert_array_equal(result[0], inputs)
+      info = backend.call_args.kwargs["router_info"]
+      expected_weights, expected_indices = layer.get_topk(*gate(inputs, routing_key=layer.fixed_routing_key[...]))
+      np.testing.assert_array_equal(info.routing_indices, expected_indices)
+      np.testing.assert_allclose(info.routing_weights, expected_weights)
+      self.assertFalse(backend.call_args.kwargs["collect_expert_counts"])
+      self.assertTrue(np.all(np.diff(np.sort(np.asarray(info.routing_indices), axis=-1), axis=-1) > 0))
+      for missing in ("RoutingMapInfo", "RouterComputationInfo"):
+        with self.subTest(missing=missing):
+          saved = getattr(te_moe, missing)
+          delattr(te_moe, missing)
+          with self.assertRaisesRegex(ImportError, "RoutingMapInfo"):
+            moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
+          setattr(te_moe, missing, saved)
+
+  def test_rejects_forced_expert_indices(self):
+    layer = SimpleNamespace(config=SimpleNamespace(dtype=jnp.float32, te_moe_block=True, use_random_routing=True))
+    with self.assertRaisesRegex(ValueError, "forced expert indices"):
+      # Exercise the guard without constructing GPU-dependent expert weights.
+      # pylint: disable=unnecessary-dunder-call
+      moe.RoutedMoE.__call__(layer, jnp.ones((1, 2, 4)), forced_routed_experts=jnp.zeros((1, 2, 2), jnp.int32))
+
+  def test_straight_through_gradient(self):
+    logits = jnp.ones((8, 16))
+    noise = jax.random.normal(jax.random.key(7), logits.shape)
+    cotangent = jnp.arange(logits.size, dtype=jnp.float32).reshape(logits.shape)
+    result, pullback = jax.vjp(moe._replace_router_logits, logits, noise)  # pylint: disable=protected-access
+    grad_logits, grad_noise = pullback(cotangent)
+    np.testing.assert_array_equal(result, noise)
+    np.testing.assert_array_equal(grad_logits, cotangent)
+    np.testing.assert_array_equal(grad_noise, jnp.zeros_like(noise))
+
+  def test_fixed_layer_keys_and_remat(self):
+    layer_keys = jax.random.split(jax.random.key(7), 3)
+    keys = jax.vmap(lambda key: jax.random.fold_in(key, moe.ROUTING_RNG_TAG))(layer_keys)
+
+    def forward(logits, key):
+      noise = jax.random.normal(key, logits.shape)
+      return jnp.sum(jnp.square(moe._replace_router_logits(logits, noise)))  # pylint: disable=protected-access
+
+    logits = jnp.ones((8, 16))
+    samples = jax.vmap(lambda key: jax.random.normal(key, logits.shape))(keys)
+    np.testing.assert_array_equal(samples[0], jax.random.normal(keys[0], logits.shape))
+    self.assertFalse(np.array_equal(samples[0], samples[1]))
+    plain = jax.value_and_grad(forward)(logits, keys[0])
+    rematted = jax.jit(jax.value_and_grad(jax.checkpoint(forward)))(logits, keys[0])
+    for expected, actual in zip(plain, rematted):
+      np.testing.assert_allclose(actual, expected, rtol=1e-6)
 
 
 def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
@@ -131,6 +330,36 @@ def assert_moe_close(actual, expected, dtype):
   np.testing.assert_allclose(
       np.array(actual, dtype=np.float32), np.array(expected, dtype=np.float32), rtol=rtol, atol=atol, equal_nan=False
   )
+
+
+_COLLECTIVE_PRIMITIVES = (
+    "all_gather",
+    "all_to_all",
+    "ppermute",
+    "psum",
+    "psum_scatter",
+    "ragged_all_to_all",
+    "reduce_scatter",
+)
+
+
+def collectives_and_shard_map_out_specs(jaxpr):
+  """Returns (primitive, axis names) for every collective and the shard_map output specs, searching sub-jaxprs."""
+  collectives, out_specs = [], []
+  for eqn in jaxpr.eqns:
+    if eqn.primitive.name in _COLLECTIVE_PRIMITIVES:
+      axis_name = eqn.params.get("axis_name", ())
+      collectives.append((eqn.primitive.name, (axis_name,) if isinstance(axis_name, str) else tuple(axis_name)))
+    elif eqn.primitive.name == "shard_map":
+      out_specs.append(eqn.params["out_specs"][0])
+    for sub in jax.tree_util.tree_leaves(eqn.params, is_leaf=lambda p: isinstance(p, (Jaxpr, ClosedJaxpr))):
+      if isinstance(sub, (Jaxpr, ClosedJaxpr)):
+        sub_collectives, sub_out_specs = collectives_and_shard_map_out_specs(
+            sub.jaxpr if isinstance(sub, ClosedJaxpr) else sub
+        )
+        collectives += sub_collectives
+        out_specs += sub_out_specs
+  return collectives, out_specs
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -2880,6 +3109,174 @@ class RoutedMoeTest(parameterized.TestCase):
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
+  @pytest.mark.tpu_only
+  def test_tp_as_ep_matches_dense_reference(self):
+    """tp-as-ep (tensor axis as expert parallelism) gives the same output as the dense reference."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_tp_as_ep_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        per_device_batch_size=4,
+        ici_tensor_parallelism=2,
+        ici_expert_parallelism=2,
+        custom_mesh_and_rule="tp-as-ep",
+        max_target_length=128,
+        float32_gate_logits=True,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+      actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      assert_moe_close(actual_output, expected_output, cfg.dtype)
+
+  def _tp_as_ep_test_config(self, rule, **overrides):
+    """Small float32 Mixtral on an expert=2 x tensor=2 mesh, with the default rules (rule="") or tp-as-ep."""
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        **{
+            "run_name": f"moe_tp_as_ep_{rule or 'default'}",
+            "enable_checkpointing": False,
+            "model_name": "mixtral-8x7b",
+            "override_model_config": True,
+            "base_emb_dim": 64,
+            "base_mlp_dim": 64,
+            "base_moe_mlp_dim": 64,
+            "dtype": "float32",
+            "weight_dtype": "float32",
+            "megablox": True,
+            "sparse_matmul": True,
+            "per_device_batch_size": 2,
+            "max_target_length": 64,
+            "ici_expert_parallelism": 2,
+            "ici_tensor_parallelism": 2,
+            "float32_gate_logits": True,
+            "custom_mesh_and_rule": rule,
+            **overrides,
+        },
+    )
+
+  def _tp_as_ep_test_model(self, cfg, mesh):
+    return linen_wrappers.to_linen(
+        moe.RoutedMoE,
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+    )
+
+  def test_tp_as_ep_matches_default_loss_and_grads(self):
+    """tp-as-ep gives the same loss and gradients as the default rules, through the CPU-compatible ring-of-experts path."""
+    if jax.device_count() != 4:
+      self.skipTest("tp-as-ep parity test requires exactly 4 devices")
+
+    def _loss_and_grad(cfg, variables, hidden_states):
+      """Returns (variables, (loss, grads)) for a squared-output loss plus the load-balance loss."""
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      model = self._tp_as_ep_test_model(cfg, mesh)
+
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        if variables is None:
+          variables = model.init({"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(0)}, hidden_states)
+        return variables, jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1)))(variables["params"], hidden_states)
+
+    cfg_default = self._tp_as_ep_test_config("", use_ring_of_experts=True)
+    cfg_tp_as_ep = self._tp_as_ep_test_config("tp-as-ep", use_ring_of_experts=True)
+    hidden_states = jax.random.uniform(
+        jax.random.PRNGKey(2345),
+        (
+            int(cfg_default.per_device_batch_size) * jax.device_count(),
+            cfg_default.max_target_length,
+            cfg_default.base_emb_dim,
+        ),
+        dtype=jnp.float32,
+    )
+
+    variables, (loss_default, grads_default) = _loss_and_grad(cfg_default, None, hidden_states)
+    _, (loss_tp_as_ep, grads_tp_as_ep) = _loss_and_grad(cfg_tp_as_ep, variables, hidden_states)
+
+    np.testing.assert_allclose(float(loss_tp_as_ep), float(loss_default), rtol=1e-5)
+    leaves_default, treedef = jax.tree_util.tree_flatten(grads_default)
+    leaves_tp_as_ep, treedef_tp_as_ep = jax.tree_util.tree_flatten(grads_tp_as_ep)
+    self.assertEqual(treedef, treedef_tp_as_ep)
+    for i, (g_default, g_tp_as_ep) in enumerate(zip(leaves_default, leaves_tp_as_ep)):
+      self.assertEqual(g_default.shape, g_tp_as_ep.shape, f"grad shape mismatch at leaf {i}")
+      diff = float(jnp.max(jnp.abs(g_tp_as_ep - g_default)))
+      scale = float(jnp.max(jnp.abs(g_default))) or 1.0
+      self.assertLess(diff / scale, 1e-4, f"grad mismatch at leaf {i}: max abs diff {diff}")
+
+  def test_tp_as_ep_uses_tensor_axis_for_expert_parallelism(self):
+    """tp-as-ep shards experts over (expert, tensor) and removes tensor-axis collectives from the MoE body."""
+    if jax.device_count() != 4:
+      self.skipTest("tp-as-ep sharding test requires exactly 4 devices")
+    hidden_states = jnp.zeros((2 * jax.device_count(), 64, 64), dtype=jnp.float32)
+    collectives, out_specs = {}, {}
+    for rule in ("", "tp-as-ep"):
+      cfg = self._tp_as_ep_test_config(rule)
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      model = self._tp_as_ep_test_model(cfg, mesh)
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        # Trace only: XLA:CPU cannot run ragged_all_to_all, so build zero params from shapes.
+        abstract = jax.eval_shape(functools.partial(model.init, {"params": jax.random.PRNGKey(0)}, hidden_states))
+        params = jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), abstract["params"])
+        jaxpr = jax.make_jaxpr(model.apply)({"params": params}, hidden_states)
+      collectives[rule], out_specs[rule] = collectives_and_shard_map_out_specs(jaxpr.jaxpr)
+
+    cfg = self._tp_as_ep_test_config("tp-as-ep")
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          rngs=nnx.Rngs(params=0),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+    # Default kernel axes; the tp-as-ep rules map them onto expert x tensor with an unsharded mlp dim.
+    self.assertEqual(block.wi_kernel_axes, ("exp", "embed_moe", "mlp_moe"))
+    self.assertEqual(block.wo_kernel_axes, ("exp", "mlp_moe", "embed_moe"))
+    self.assertEqual(block.get_tensor_parallelism_size(), 1)
+    self.assertEqual(block.get_expert_parallelism_size(), 4)
+    self.assertEqual(
+        sharding.logical_to_mesh_axes(block.wi_kernel_axes, mesh, cfg.logical_axis_rules),
+        P(("expert", "tensor"), None, None),
+    )
+
+    self.assertTrue([c for c in collectives[""] if c[1] == ("tensor",)])
+    self.assertFalse([c for c in collectives["tp-as-ep"] if c[1] == ("tensor",)])
+    self.assertIn(("expert", "tensor"), [c[1] for c in collectives["tp-as-ep"]])
+    self.assertEqual(out_specs[""], [P("expert", None, "tensor")])
+    self.assertEqual(out_specs["tp-as-ep"], [P("expert", "tensor", None)])
+
   def test_random_routing(self):
     bs, seq_len, num_experts, num_experts_per_tok = 12, 1024, 8, 2
     rng = jax.random.PRNGKey(0)
@@ -3998,6 +4395,42 @@ class TcRaggedSortConfigTest(parameterized.TestCase):
     msg = "moe_tc_routing_checkpoint=device requires moe_tc_ragged_sort=True and moe_tc_ragged_weights_on_activation=True"
     with self.assertRaisesRegex(ValueError, re.escape(msg)):
       maxtext_types.MaxTextConfig(**{**self._CONFIG_3D, **overrides}, moe_tc_routing_checkpoint="device")
+
+
+class TpAsEpConfigTest(parameterized.TestCase):
+  """custom_mesh_and_rule=tp-as-ep is rejected for settings that ignore or override its shardings."""
+
+  _CONFIG = {
+      "run_name": "tp_as_ep_config_test",
+      "custom_mesh_and_rule": "tp-as-ep",
+      "num_experts": 8,
+      "base_mlp_dim": 64,
+      "base_moe_mlp_dim": 64,
+      "sparse_matmul": True,
+      "ici_expert_parallelism": 2,
+      "ici_tensor_parallelism": 2,
+  }
+
+  def test_accepts_tp_as_ep(self):
+    self.assertEqual(maxtext_types.MaxTextConfig(**self._CONFIG).custom_mesh_and_rule, maxtext_types.CustomRule.TP_AS_EP)
+
+  @parameterized.named_parameters(
+      ("dense_matmul", {"sparse_matmul": False, "megablox": False}, "requires sparse_matmul=True"),
+      ("no_tensor_parallelism", {"ici_tensor_parallelism": 1}, "requires tensor parallelism > 1"),
+      ("shard_exp_on_fsdp", {"shard_exp_on_fsdp": True}, "is not compatible with shard_exp_on_fsdp=True"),
+      ("mlp_bias", {"mlp_bias": True}, "is not compatible with mlp_bias=True"),
+      ("use_2d_fsdp_sharding", {"use_2d_fsdp_sharding": True}, "is not compatible with use_2d_fsdp_sharding=True"),
+      (
+          "use_batch_split_schedule",
+          {"use_batch_split_schedule": True},
+          "is not compatible with use_batch_split_schedule=True",
+      ),
+      ("vllm_attention", {"attention": "vllm_rpa"}, "is not supported with vLLM attention"),
+      ("indivisible_experts", {"num_experts": 6}, "needs num_experts (6) divisible by expert*tensor parallelism (4)"),
+  )
+  def test_rejects_unsupported(self, overrides, msg):
+    with self.assertRaisesRegex(ValueError, re.escape("custom_mesh_and_rule=tp-as-ep " + msg)):
+      maxtext_types.MaxTextConfig(**{**self._CONFIG, **overrides})
 
 
 class GetRaggedBufferFactorTest(parameterized.TestCase):

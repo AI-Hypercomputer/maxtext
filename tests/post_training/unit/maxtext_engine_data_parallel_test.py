@@ -54,10 +54,12 @@ import unittest
 from typing import Any
 from unittest import mock
 
+from absl import app
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
@@ -73,35 +75,46 @@ _REQUIRED_DEVICES = 4
 _DATA = maxtext_engine._DATA_AXIS  # pylint: disable=protected-access
 _SENTINEL = "MAXTEXT_ENGINE_DATA_PARALLEL_TESTS_PASSED"
 _RAN = re.compile(rf"{_SENTINEL} ran=(\d+)")
+_CHILD_ENV = "_MAXTEXT_DP_CHILD"
+_IN_CHILD = os.environ.get(_CHILD_ENV) == "1"
+if _IN_CHILD:
+  os.environ["XLA_FLAGS"] = (
+      f"{os.environ.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}"
+  ).strip()
+  os.environ["JAX_PLATFORMS"] = "cpu"
+_MULTI_DEVICE_BASE = parameterized.TestCase if _IN_CHILD else object
 
 
-@pytest.mark.post_training
-@pytest.mark.cpu_only
-def test_engine_data_parallelism_on_a_four_device_cpu_mesh():
-  """The only test pytest collects here; the classes below run inside the child process.
+class DataParallelSubprocessTest(absltest.TestCase):
+  """Runs the 4-device data-parallel test suites in a child process."""
 
-  See the module docstring for why re-exec is the only option: the device count is fixed
-  when the CPU backend initializes, and something else has already initialized it. The flag
-  is *appended* rather than defaulted so it wins over whatever a sibling module set --
-  XLA takes the last occurrence of a repeated flag.
-  """
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}".strip()
-  env["JAX_PLATFORMS"] = "cpu"
-  # The child imports `tests.utils.test_helpers`, which pytest puts on the path for us and
-  # a bare interpreter does not.
-  repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-  env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
+  @pytest.mark.post_training
+  @pytest.mark.cpu_only
+  def test_engine_data_parallelism_on_a_four_device_cpu_mesh(self):
+    """The only test collected in the parent process; the classes below run inside the child.
 
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+    See the module docstring for why re-exec is the only option: the device count is fixed
+    when the CPU backend initializes, and something else has already initialized it. The flag
+    is *appended* rather than defaulted so it wins over whatever a sibling module set --
+    XLA takes the last occurrence of a repeated flag.
+    """
+    env = os.environ.copy()
+    env[_CHILD_ENV] = "1"
+    env["XLA_FLAGS"] = (f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}").strip()
+    env["JAX_PLATFORMS"] = "cpu"
+    # The child imports `tests.utils.test_helpers`, which pytest puts on the path for us and
+    # a bare interpreter does not.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
 
-  report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert result.returncode == 0, report
-  ran = _RAN.search(result.stdout)
-  # Without this the whole suite could go quietly empty again: an exit status of 0 is also
-  # what a run that skipped everything produces.
-  assert ran, f"the child did not report a completed run\n{report}"
-  assert int(ran.group(1)) > 0, f"every test in the child skipped\n{report}"
+    cmd = [sys.executable, __file__] if sys.executable else [sys.argv[0]]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+
+    report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    self.assertEqual(result.returncode, 0, report)
+    ran = _RAN.search(result.stdout)
+    self.assertIsNotNone(ran, f"the child did not report a completed run\n{report}")
+    self.assertGreater(int(ran.group(1)), 0, f"every test in the child skipped\n{report}")
 
 
 # ---------------------------------------------------------------------------------------
@@ -145,14 +158,14 @@ def _config(**overrides) -> pyconfig.HyperParameters:
       "ici_tensor_parallelism=1",
       "per_device_batch_size=1",
       # Tiny model. These must be the `base_*` names: emb_dim and mlp_dim are derived.
-      "vocab_size=128",
-      "base_emb_dim=64",
-      "base_mlp_dim=128",
-      "base_num_decoder_layers=2",
-      "base_num_query_heads=4",
-      "base_num_kv_heads=4",
+      "vocab_size=32",
+      "base_emb_dim=32",
+      "base_mlp_dim=64",
+      "base_num_decoder_layers=1",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
       "head_dim=16",
-      "max_target_length=32",
+      "max_target_length=16",
       # adamw rather than sgd, which carries no parameter-shaped state at all: Zero-1 would
       # then have nothing to shard and every assertion about it would pass vacuously. A
       # constant schedule with no clipping, so `update()` is the optimizer and nothing else.
@@ -258,20 +271,20 @@ def _gathered_elements(hlo: str) -> int:
 class _KernelHlo:
   """Captures the arguments the engine passes one jitted kernel, to re-lower it later.
 
-  An executable keeps no handle on the lowering it came from, so the only way to read a
-  kernel's optimized HLO is to lower it again, through the jitted wrapper `compile()` built it
-  from. Recording `ShapeDtypeStruct`s rather than the arrays themselves keeps that independent
-  of donation -- `_compiled_update` donates its state, so by the time a test asks for the HLO
-  those buffers are gone.
+  Reads the optimized HLO from the engine's dispatched kernel executable when already compiled,
+  or lowers and compiles a `jax.jit` wrapper from recorded `ShapeDtypeStruct`s rather than the
+  arrays themselves -- `_compiled_update` donates its state and `_compiled_accumulate` the running
+  sum, so by the time a test asks for the HLO those buffers are gone.
 
-  Lowering is lazy and memoized: it is a full XLA compile, and only a third of the tests
-  below want HLO at all. It needs the mesh set, because the fwd/bwd kernels apply the
-  `reduced` tag while tracing, and by then the run that recorded the avals is long over.
+  Lowering is lazy and memoized: when `compile()` has not pre-compiled the wrapper, lowering is a
+  full XLA compile and only a third of the tests below want HLO at all. It needs the mesh set,
+  because `fwd_bwd` applies the `reduced` tag while tracing, and by then the run that recorded the
+  avals is long over.
   """
 
   def __init__(self, engine, kernel: str, attr: str, mesh):
+    del kernel
     self._dispatched = getattr(engine, attr)
-    self._jitted = engine._jitted_kernels[kernel]  # pylint: disable=protected-access
     self._mesh = mesh
     self._avals = None
     self._text = None
@@ -291,8 +304,11 @@ class _KernelHlo:
     if self._avals is None:
       raise AssertionError("kernel was never called, so there is no HLO to read")
     if self._text is None:
-      with jax.set_mesh(self._mesh):
-        self._text = self._jitted.lower(*self._avals).compile().as_text()
+      if isinstance(self._dispatched, jax.stages.Compiled):
+        self._text = self._dispatched.as_text()
+      else:
+        with jax.set_mesh(self._mesh):
+          self._text = self._dispatched.lower(*self._avals).compile().as_text()
     return self._text
 
 
@@ -313,8 +329,8 @@ class _Recipe:
 
 # Probe name -> the engine's name for that kernel, and the attribute it dispatches through.
 _KERNELS = {
-    "first": ("fwd_bwd", "_compiled_fwd_bwd"),
-    "accum": ("fwd_bwd_accum", "_compiled_fwd_bwd_accum"),
+    "fwd_bwd": ("fwd_bwd", "_compiled_fwd_bwd"),
+    "accumulate": ("accumulate", "_compiled_accumulate"),
     "update": ("update", "_compiled_update"),
 }
 
@@ -498,10 +514,8 @@ _SITUATIONS = (
 )
 
 
-class GateTest(parameterized.TestCase):
+class GateTest(_MULTI_DEVICE_BASE):
   """Both gates must decline widely: a tag or a reshard in the wrong place is a hard error."""
-
-  __test__ = False  # collected only via the subprocess entry point at the top of this file.
 
   def _situation(self, overrides, auto_axis_mesh, no_mesh, **extra):
     """Returns `(config, mesh)` for one row of the table above."""
@@ -567,10 +581,8 @@ class GateTest(parameterized.TestCase):
     self.assertEmpty(unreduced["w"].spec.unreduced)
 
 
-class LeafPlacementTest(parameterized.TestCase):
+class LeafPlacementTest(_MULTI_DEVICE_BASE):
   """`_zero1_sharding` places one leaf. Everything Zero-1 moves goes through it."""
-
-  __test__ = False
 
   def _place(self, shape, spec=None):
     mesh = _mesh(shard_optimizer_over_data=True)
@@ -601,7 +613,7 @@ class LeafPlacementTest(parameterized.TestCase):
 # ---------------------------------------------------------------------------------------
 
 
-class EngagementTest(parameterized.TestCase):
+class EngagementTest(_MULTI_DEVICE_BASE):
   """Which features actually turned on in each shared run.
 
   This is the vacuity guard for everything below it: the whole file compares a run with a
@@ -609,8 +621,6 @@ class EngagementTest(parameterized.TestCase):
   pinned here. If the deferral silently stopped engaging, these fail and the HLO tests --
   which would then be comparing two identical baselines -- do not quietly agree.
   """
-
-  __test__ = False
 
   @parameterized.named_parameters(
       ("deferral_only", _BASE, True, False),
@@ -627,32 +637,38 @@ class EngagementTest(parameterized.TestCase):
     self.assertEqual(run.zero1_engaged, zero1, "Zero-1 is not in the state it should be")
 
 
-class CollectivePlacementTest(absltest.TestCase):
+class CollectivePlacementTest(_MULTI_DEVICE_BASE):
   """Where the collectives land. The performance claim of both features, in one place."""
 
-  __test__ = False
-
   def test_micro_batch_kernels_move_only_scalars_across_replicas(self):
-    """The whole point: no parameter-sized all-reduce per micro-batch, only per step."""
+    """The whole point: no parameter-sized all-reduce per micro-batch, only per step.
+
+    `accumulate` adds `unreduced` partial sums, so it must keep them replica-local too: reducing
+    there would put the all-reduce back into every micro-batch after the first.
+    """
     run = _run(_BASE)
-    first = _array_all_reduces(run.hlo("first"))
-    accum = _array_all_reduces(run.hlo("accum"))
+    fwd_bwd = _array_all_reduces(run.hlo("fwd_bwd"))
+    accumulate = _array_all_reduces(run.hlo("accumulate"))
     update = _array_all_reduces(run.hlo("update"))
 
-    self.assertEmpty(first, f"first micro-batch still all-reduces arrays: {first}")
-    self.assertEmpty(accum, f"accumulating micro-batches still all-reduce arrays: {accum}")
+    self.assertEmpty(fwd_bwd, f"every micro-batch still all-reduces arrays: {fwd_bwd}")
+    self.assertEmpty(accumulate, f"the running sum is all-reduced as it accumulates: {accumulate}")
     # Vacuity guard from the other side: the traffic did not vanish, it moved.
     self.assertNotEmpty(update, "no array all-reduce in update() either -- the gradients are never reduced")
 
   def test_without_the_deferral_every_micro_batch_pays(self):
-    """Proves the probe above can fail. Same model, same probe, tag withheld."""
+    """Proves the probe above can fail. Same model, same probe, tag withheld.
+
+    Every micro-batch runs `fwd_bwd`, so that is where the baseline pays; `accumulate` adds
+    gradients that are already reduced, and has nothing to reduce either way.
+    """
     run = _run(_NO_DEFER)
-    first = _array_all_reduces(run.hlo("first"))
-    accum = _array_all_reduces(run.hlo("accum"))
+    fwd_bwd = _array_all_reduces(run.hlo("fwd_bwd"))
+    accumulate = _array_all_reduces(run.hlo("accumulate"))
     update = _array_all_reduces(run.hlo("update"))
 
-    self.assertNotEmpty(first, "baseline should all-reduce the gradients in the first micro-batch")
-    self.assertNotEmpty(accum, "baseline should all-reduce the gradients in every micro-batch")
+    self.assertNotEmpty(fwd_bwd, "baseline should all-reduce the gradients in every micro-batch")
+    self.assertEmpty(accumulate, f"baseline should have nothing to reduce in accumulate: {accumulate}")
     self.assertEmpty(update, f"baseline should have nothing left to reduce in update(): {update}")
 
   def test_zero1_costs_one_all_gather_in_update_and_nothing_per_micro_batch(self):
@@ -666,8 +682,8 @@ class CollectivePlacementTest(absltest.TestCase):
 
     added = {k: _gathered_elements(zero1.hlo(k)) - _gathered_elements(baseline.hlo(k)) for k in _KERNELS}
     self.assertGreater(added["update"], 0, "update() gathers nothing, so the parameters were never sharded")
-    self.assertEqual(added["first"], 0, "Zero-1 added an all-gather to the first micro-batch")
-    self.assertEqual(added["accum"], 0, "Zero-1 added an all-gather to the accumulating micro-batches")
+    self.assertEqual(added["fwd_bwd"], 0, "Zero-1 added an all-gather to every micro-batch")
+    self.assertEqual(added["accumulate"], 0, "Zero-1 added an all-gather to the accumulation")
 
   def test_zero1_composes_with_the_deferred_all_reduce(self):
     """The pair is the point: one reduction per step, on 1/N of the optimizer.
@@ -678,15 +694,13 @@ class CollectivePlacementTest(absltest.TestCase):
     """
     run = _run(_ZERO1)
 
-    self.assertEmpty(_array_all_reduces(run.hlo("first")))
-    self.assertEmpty(_array_all_reduces(run.hlo("accum")))
+    self.assertEmpty(_array_all_reduces(run.hlo("fwd_bwd")))
+    self.assertEmpty(_array_all_reduces(run.hlo("accumulate")))
     self.assertNotEmpty(_array_all_reduces(run.hlo("update")), "the gradients are never reduced at all")
 
 
-class StatePlacementTest(absltest.TestCase):
+class StatePlacementTest(_MULTI_DEVICE_BASE):
   """Where the arrays sit once the run is over. Zero-1's saving, measured directly."""
-
-  __test__ = False
 
   def test_the_optimizer_moments_are_sharded_over_the_data_axis(self):
     """The saving itself: each replica holds and updates 1/N of every moment."""
@@ -728,10 +742,8 @@ class StatePlacementTest(absltest.TestCase):
       self.assertIn(_DATA, _axes(leaf.sharding.spec), f"{path} is not sharded over {_DATA!r}")
 
 
-class EquivalenceTest(absltest.TestCase):
+class EquivalenceTest(_MULTI_DEVICE_BASE):
   """Neither feature is allowed to change a number, only where the arithmetic happens."""
-
-  __test__ = False
 
   def test_deferring_does_not_change_the_weights(self):
     """Same sum, different association order.
@@ -775,10 +787,8 @@ class EquivalenceTest(absltest.TestCase):
     np.testing.assert_allclose(zero1, baseline, rtol=1e-6, err_msg="the norm under Zero-1 is not the global one")
 
 
-class LifecycleTest(absltest.TestCase):
+class LifecycleTest(_MULTI_DEVICE_BASE):
   """The two events that outlive a compilation: a checkpoint restore between steps, and a recompile."""
-
-  __test__ = False
 
   def test_a_step_boundary_checkpoint_round_trip_keeps_the_moments_sharded(self):
     """A checkpoint restored between steps puts the Zero-1 moments back sharded over the data axis.
@@ -850,11 +860,52 @@ class LifecycleTest(absltest.TestCase):
     for path, leaf in moments.items():
       self.assertEqual(_axes(leaf.sharding.spec).count(_DATA), 1, f"{path} was sharded over {_DATA!r} twice")
 
+  def test_compile_kernels_mid_eager_step_keeps_accumulator_sharding_in_sync(self):
+    """`compile_kernels()` partway through an eager step leaves accumulation coherent.
 
-class DeclinedGracefullyTest(absltest.TestCase):
+    When `compile_kernels()` runs between two eager `fwd_bwd` calls under `shard_mode=explicit`,
+    `_compile_for_batch` conforms the live accumulator onto `unreduced` deferral shardings and
+    sets `_reduced_params_shardings`; keeping that dispatch state intact lets the next eager
+    `fwd_bwd` and `update()` finish the step cleanly without `ShardingTypeError`.
+    """
+    cfg, mesh = _rig(shard_optimizer_over_data=True)
+    with jax.set_mesh(mesh):
+      baseline = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+      engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+      try:
+        baseline.fwd_bwd(_batch(cfg, 0))
+        baseline.fwd_bwd(_batch(cfg, 1))
+        baseline.update()
+        expected = _params(baseline)
+
+        before = {path: np.asarray(leaf) for path, leaf in _params(engine).items()}
+        engine.fwd_bwd(_batch(cfg, 0))
+        engine.compile_kernels(_batch(cfg, 0))
+        engine.fwd_bwd(_batch(cfg, 1))
+        step = engine.update()
+        actual = _params(engine)
+      finally:
+        engine.close()
+        baseline.close()
+
+    self.assertEqual(step, 1)
+    self.assertTrue(
+        any(not np.array_equal(np.asarray(actual[k]), before[k]) for k in before),
+        "update() ran without moving any parameter",
+    )
+    self.assertCountEqual(expected, actual)
+    for path, want in expected.items():
+      np.testing.assert_allclose(
+          np.asarray(actual[path]),
+          np.asarray(want),
+          rtol=1e-5,
+          atol=1e-5,
+          err_msg=f"eager step with mid-step compile_kernels diverged: parameter {path}",
+      )
+
+
+class DeclinedGracefullyTest(_MULTI_DEVICE_BASE):
   """A gate that closes has to leave a working engine behind, and say so."""
-
-  __test__ = False
 
   def test_a_tensor_parallel_mesh_still_trains(self):
     """This does not reproduce the crash the deferral gate exists to prevent.
@@ -902,6 +953,218 @@ class DeclinedGracefullyTest(absltest.TestCase):
     self.assertIsNone(engine._zero1_params_shardings)  # pylint: disable=protected-access
 
 
+# ---------------------------------------------------------------------------------------
+# Deferred-cast gradient selection and accumulation (cast_grads_after_all_reduce).
+# ---------------------------------------------------------------------------------------
+
+_GC_FSDP = {"ici_fsdp_parallelism": _REQUIRED_DEVICES, "ici_data_parallelism": 1}
+_GC_DATA = {"ici_fsdp_parallelism": 1, "ici_data_parallelism": _REQUIRED_DEVICES}
+_GC_DEFAULTS = {
+    "shard_mode": "auto",
+    "grad_dtype": "bfloat16",
+    "opt_type": "sgd",
+    "learning_rate": 0.1,
+    **_GC_FSDP,
+}
+_GC_DEFERRED = {**_GC_DATA, "shard_mode": "explicit"}
+_GC_TENSOR = {"ici_fsdp_parallelism": 1, "ici_data_parallelism": 2, "ici_tensor_parallelism": 2}
+_GC_CONTEXT = {
+    "ici_fsdp_parallelism": 1,
+    "ici_data_parallelism": 2,
+    "ici_context_parallelism": 2,
+    "context_parallel_load_balance": False,
+}
+
+
+def _gc_engine(**overrides) -> tuple[maxtext_engine.MaxTextTrainingEngine, pyconfig.HyperParameters]:
+  """An engine compiled against a first batch, built the way Tunix builds it: no outer context."""
+  cfg, mesh = _rig(**{**_GC_DEFAULTS, **overrides})
+  engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+  engine.compile(_batch(cfg, 0))
+  return engine, cfg
+
+
+def _gc_grads_out(engine) -> dict[str, jax.ShapeDtypeStruct]:
+  """The gradients `fwd_bwd` returns, by parameter path, as its compiled executable declares them."""
+  grads = engine._compiled_fwd_bwd.out_info[3]  # pylint: disable=protected-access
+  return {jax.tree_util.keystr(path): leaf for path, leaf in jax.tree_util.tree_leaves_with_path(grads)}
+
+
+def _gc_bits(tree) -> dict[str, np.ndarray]:
+  """Every leaf's raw bits by path, so comparing two trees is bitwise."""
+  out = {}
+  for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+    value = np.asarray(jax.device_get(leaf))
+    out[jax.tree_util.keystr(path)] = value.view(np.uint16 if value.dtype.itemsize == 2 else np.uint32)
+  return out
+
+
+class GradCastTest(_MULTI_DEVICE_BASE):
+  """`cast_grads_after_all_reduce` on the tiny decoder, against the same decoder with the flag off."""
+
+  def _assert_bitwise_equal(self, got: dict, want: dict, what: str):
+    self.assertEqual(set(got), set(want), what)
+    for key, value in want.items():
+      np.testing.assert_array_equal(got[key], value, err_msg=f"{what}: {key}")
+
+  def test_fwd_bwd_returns_the_all_reduced_gradients_uncast(self):
+    """Under fsdp the replicated parameters (the norm scales) are all-reduced and leave uncast; the rest are cast."""
+    engine, _ = _gc_engine(cast_grads_after_all_reduce=True)
+    params = nnx.state(engine.state.model, nnx.Param)
+    replicated = {
+        jax.tree_util.keystr(path): leaf.sharding.is_fully_replicated
+        for path, leaf in jax.tree_util.tree_leaves_with_path(params)
+    }
+    grads = _gc_grads_out(engine)
+    engine.close()
+
+    self.assertEqual(set(grads), set(replicated))
+    for path, grad in grads.items():
+      want = jnp.float32 if replicated[path] else jnp.bfloat16
+      self.assertEqual(grad.dtype, want, f"{path} {grad.shape}")
+    uncast = sorted(path for path, is_replicated in replicated.items() if is_replicated)
+    self.assertTrue(uncast and all("norm" in path for path in uncast), uncast)
+    self.assertLess(len(uncast), len(grads), "no gradient was sharded, so the cast-inside branch never ran")
+
+  def test_selection_follows_sharding_not_size(self):
+    """Pure data parallelism replicates every parameter, so every gradient is all-reduced and leaves uncast."""
+    engine, cfg = _gc_engine(cast_grads_after_all_reduce=True, vocab_size=128, **_GC_DATA)
+    grads = _gc_grads_out(engine)
+    engine.close()
+    embedding = [grad for path, grad in grads.items() if "token_embedder" in path]
+    self.assertLen(embedding, 1)
+    self.assertEqual(int(np.prod(embedding[0].shape)), cfg.vocab_size * cfg.emb_dim)
+    self.assertEqual({str(grad.dtype) for grad in grads.values()}, {"float32"})
+
+  def test_deferred_all_reduce_leaves_nothing_uncast(self):
+    """Under the deferred all-reduce `fwd_bwd` reduces no gradient, so the key casts every one inside it."""
+    engine, _ = _gc_engine(cast_grads_after_all_reduce=True, **_GC_DEFERRED)
+    deferred = engine._unreduced_grad_shardings is not None  # pylint: disable=protected-access
+    grads = _gc_grads_out(engine)
+    engine.close()
+    self.assertTrue(deferred, "the deferral did not engage, so this test checks nothing")
+    self.assertEqual({str(grad.dtype) for grad in grads.values()}, {"bfloat16"})
+
+  def test_selection_follows_the_batch_axes_not_replication(self):
+    """Under data x tensor parallelism a parameter sharded over `tensor` is all-reduced over `data` alone.
+
+    So every gradient leaves uncast, the sharded ones as well as the replicated ones.
+    """
+    engine, _ = _gc_engine(cast_grads_after_all_reduce=True, **_GC_TENSOR)
+    params = nnx.state(engine.state.model, nnx.Param)
+    sharded = [leaf for leaf in jax.tree.leaves(params) if not leaf.sharding.is_fully_replicated]
+    grads = _gc_grads_out(engine)
+    engine.close()
+    self.assertTrue(sharded, "no parameter is sharded over tensor, so this test checks nothing")
+    self.assertEqual({str(grad.dtype) for grad in grads.values()}, {"float32"})
+
+  def test_sequence_axis_counts_as_a_batch_axis(self):
+    """Under context parallelism a parameter sharded over `context` is cast inside; the replicated ones leave uncast."""
+    engine, _ = _gc_engine(cast_grads_after_all_reduce=True, **_GC_CONTEXT)
+    params = nnx.state(engine.state.model, nnx.Param)
+    replicated = {
+        jax.tree_util.keystr(path): leaf.sharding.is_fully_replicated
+        for path, leaf in jax.tree_util.tree_leaves_with_path(params)
+    }
+    grads = _gc_grads_out(engine)
+    engine.close()
+    self.assertFalse(all(replicated.values()), "no parameter is sharded over context, so this test checks nothing")
+    for path, grad in grads.items():
+      self.assertEqual(grad.dtype, jnp.float32 if replicated[path] else jnp.bfloat16, f"{path} {grad.shape}")
+
+  def test_nothing_is_selected_without_a_cast_to_move(self):
+    """With float32 weights and float32 gradients no gradient is cast, so no leaf is selected and nothing is copied."""
+    engine, _ = _gc_engine(cast_grads_after_all_reduce=True, grad_dtype="float32", **_GC_DATA)
+    mask, cast = engine._uncast_grad_mask, engine._cast_uncast_grads  # pylint: disable=protected-access
+    engine.close()
+    self.assertIsNone(mask)
+    self.assertIsNone(cast)
+
+  def test_moving_the_cast_changes_no_number_on_cpu(self):
+    """Verifies delayed-cast plumbing on CPU against flag-off: bf16 running sums and identical weights.
+
+    Unlike TPU -- where keeping the cast after the all-reduce avoids hoisting it ahead of the
+    collective and changes reduction precision -- CPU serves as a regression check that the delayed
+    cast selects the right leaves and updates weights identically when numerics do not diverge.
+    """
+    micro_batches = 3
+    steps = 2
+    on_engine, on_cfg = _gc_engine(cast_grads_after_all_reduce=True)
+    off_engine, off_cfg = _gc_engine()
+    self.assertEqual({str(grad.dtype) for grad in _gc_grads_out(off_engine).values()}, {"bfloat16"})
+
+    try:
+      # pylint: disable=protected-access
+      for step in range(steps):
+        for micro_batch in range(micro_batches):
+          seed = step * micro_batches + micro_batch
+          on_engine.fwd_bwd(_batch(on_cfg, seed))
+          off_engine.fwd_bwd(_batch(off_cfg, seed))
+          dtypes = {str(leaf.dtype) for leaf in jax.tree.leaves(on_engine._accumulated_grads)}
+          self.assertEqual(dtypes, {"bfloat16"}, f"running sum after step {step} micro-batch {micro_batch + 1}")
+          if micro_batch == 0:
+            self._assert_bitwise_equal(
+                _gc_bits(on_engine._accumulated_grads),
+                _gc_bits(off_engine._accumulated_grads),
+                f"running sum after first micro-batch of step {step}",
+            )
+        self._assert_bitwise_equal(
+            _gc_bits(on_engine._accumulated_grads),
+            _gc_bits(off_engine._accumulated_grads),
+            f"running sum before update {step}",
+        )
+        on_engine.update()
+        off_engine.update()
+      # pylint: enable=protected-access
+      self._assert_bitwise_equal(
+          _gc_bits(nnx.state(on_engine.state.model, nnx.Param)),
+          _gc_bits(nnx.state(off_engine.state.model, nnx.Param)),
+          "trained weights",
+      )
+    finally:
+      on_engine.close()
+      off_engine.close()
+
+  def test_pure_state_fallback_keeps_uncast_grad_mask_in_sync_with_compiled_kernels(self):
+    """Verifies `_disable_pure_state` keeps `_uncast_grad_mask` synced with compiled kernels and bf16 sums."""
+    engine, cfg = _gc_engine(cast_grads_after_all_reduce=True)
+    try:
+      self.assertIsNotNone(engine._uncast_grad_mask)  # pylint: disable=protected-access
+      self.assertIsNotNone(engine._cast_uncast_grads)  # pylint: disable=protected-access
+      self.assertTrue(any(jax.tree_util.tree_leaves(engine._uncast_grad_mask)))  # pylint: disable=protected-access
+
+      b0, b1 = _batch(cfg, 0), _batch(cfg, 1)
+      initial_bits = _gc_bits(nnx.state(engine.state.model, nnx.Param))
+
+      engine.fwd_bwd(b0)
+      engine.fwd_bwd(b1)
+      expected_grad_bits = _gc_bits(engine._accumulated_grads)  # pylint: disable=protected-access
+      engine.reset_accumulation()
+
+      engine._disable_pure_state("test")  # pylint: disable=protected-access
+      self.assertIsNone(engine._params_pure)  # pylint: disable=protected-access
+      self.assertIsNotNone(engine._uncast_grad_mask)  # pylint: disable=protected-access
+      self.assertIsNotNone(engine._cast_uncast_grads)  # pylint: disable=protected-access
+
+      engine.fwd_bwd(b0)
+      engine.fwd_bwd(b1)
+      actual_grads = engine._accumulated_grads  # pylint: disable=protected-access
+      self.assertTrue(
+          all(leaf.dtype == jnp.bfloat16 for leaf in jax.tree_util.tree_leaves(actual_grads)),
+          "Accumulated grads must stay in grad_dtype (bfloat16) after pure-state fallback.",
+      )
+      self._assert_bitwise_equal(_gc_bits(actual_grads), expected_grad_bits, "fallback accumulated grads")
+
+      engine.update()
+      updated_bits = _gc_bits(nnx.state(engine.state.model, nnx.Param))
+      self.assertTrue(
+          any(not np.array_equal(initial_val, updated_bits[k]) for k, initial_val in initial_bits.items()),
+          "update() after pure-state fallback must modify parameters.",
+      )
+    finally:
+      engine.close()
+
+
 _SUITE = (
     GateTest,
     LeafPlacementTest,
@@ -911,10 +1174,12 @@ _SUITE = (
     EquivalenceTest,
     LifecycleTest,
     DeclinedGracefullyTest,
+    GradCastTest,
 )
 
 
-if __name__ == "__main__":
+def _main(_argv):
+  """Runs the four-device data-parallel test suites inside the child subprocess."""
   if jax.device_count() < _REQUIRED_DEVICES:
     raise SystemExit(
         f"needs {_REQUIRED_DEVICES} devices, got {jax.device_count()}; run this through pytest, which sets "
@@ -927,3 +1192,10 @@ if __name__ == "__main__":
   if not _result.wasSuccessful():
     sys.exit(1)
   print(f"{_SENTINEL} ran={_result.testsRun - len(_result.skipped)}")
+
+
+if __name__ == "__main__":
+  if _IN_CHILD:
+    app.run(_main, argv=[sys.argv[0]])
+  else:
+    absltest.main()

@@ -1063,7 +1063,9 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
 
 def verify_and_sync_scan_layers(config):
   """Verify and sync scan_layers based on checkpoint metadata."""
-  if not config.load_parameters_path:
+  # A safetensors_dynamic source has no Orbax metadata, and reading it from an hf:// path would call the
+  # HF API from every host.
+  if not config.load_parameters_path or config.source_checkpoint_layout == "safetensors_dynamic":
     return config
 
   custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
@@ -1100,6 +1102,62 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+def _free_device_memory(sharded_state):
+  """Frees the device memory of the model's initial weights, to make room for the loaded ones.
+
+  Skips transient runtime variables (RngState, Cache, Intermediate, BatchStat), which hold runtime state that
+  is not in the checkpoint and must stay valid after the load. Also skips custom layers (`custom_linear`, e.g.
+  a newly attached vision projector), which no checkpoint holds and which keep their random init.
+  """
+
+  def _free(path, node):
+    is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+    if (
+        isinstance(node, nnx.Variable)
+        and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+        and not is_custom
+    ):
+      inner = node.get_value() if hasattr(node, "get_value") else node[...]
+      # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
+      # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
+      # arrays too; the single-leaf case is a 1-element tree.
+      for leaf in jax.tree_util.tree_leaves(inner):
+        if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+          leaf.delete()
+    elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
+      node.delete()
+
+    return node
+
+  jax.tree_util.tree_map_with_path(_free, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+
+
+def _load_safetensors_dynamic(model, sharded_state, config):
+  """Loads HF safetensors into `model` with the on-the-fly converter (`source_checkpoint_layout=safetensors_dynamic`).
+
+  Uses the same loader as training (`checkpointing.load_state_if_possible`). The model's initial weights are
+  freed first, as the Orbax path does, so only the loaded copy is held on device.
+  """
+  param_state = sharded_state.filter(
+      lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+  )
+  abstract_state = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), param_state)
+  _free_device_memory(sharded_state)
+  _, restored_state = checkpointing.load_state_if_possible(
+      None,
+      None,
+      config.load_parameters_path,
+      "",
+      config.checkpoint_storage_concurrent_gb,
+      abstract_state,
+      source_checkpoint_layout="safetensors_dynamic",
+      maxtext_config=config,
+  )
+  # The loader returns the leaves it has no HF weights for (a custom vision projector) unmaterialized. The
+  # model keeps their initial values.
+  nnx.update(model, restored_state.filter(lambda path, var: not isinstance(var.get_value(), jax.ShapeDtypeStruct)))
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1119,7 +1177,8 @@ def from_pretrained(
   scale factors instead of full-precision kernels.
   """
   original_mesh = mesh
-  if config.convert_checkpoint_if_possible and not config.load_parameters_path:
+  loads_safetensors_dynamic = config.source_checkpoint_layout == "safetensors_dynamic"
+  if config.convert_checkpoint_if_possible and not config.load_parameters_path and not loads_safetensors_dynamic:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
       hf_access_token = config.hf_access_token or get_token()
@@ -1201,7 +1260,9 @@ def from_pretrained(
     mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
-    if config.load_parameters_path:
+    if loads_safetensors_dynamic:
+      _load_safetensors_dynamic(model, sharded_state, config)
+    elif config.load_parameters_path:
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -1381,32 +1442,7 @@ def from_pretrained(
         )
         restore_args = {"base": restore_args} if has_base_key else restore_args
 
-      # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-      # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
-      # that is not present in the checkpoint and must remain valid after the restore.
-      def _free_device_memory(path, node):
-        # Check if the path contains any name containing 'custom' which indicates a customized layer.
-        # If yes, skip freeing device memory for this node and its children so they can be
-        # initialized with random values.
-        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
-        if (
-            isinstance(node, nnx.Variable)
-            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
-            and not is_custom
-        ):
-          inner = node.get_value() if hasattr(node, "get_value") else node[...]
-          # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
-          # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
-          # arrays too; the single-leaf case is a 1-element tree.
-          for leaf in jax.tree_util.tree_leaves(inner):
-            if isinstance(leaf, jax.Array) and not leaf.is_deleted():
-              leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
-          node.delete()
-
-        return node
-
-      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      _free_device_memory(sharded_state)
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),

@@ -15,9 +15,10 @@
 """Ahead-of-time (XAOT) compilation of `MaxTextTrainingEngine`'s training step.
 
 `trainers/pre_train/train_compile.py` does this for `train.py`'s single fused `train_step`.
-The engine splits the same work across three kernels -- the first micro-batch's forward/backward
-pass, the accumulating forward/backward pass that folds in later micro-batches, and the optimizer
-update -- so this compiles all three and reports the cost and memory of each.
+The engine splits the same work across three kernels -- the per-micro-batch forward/backward
+pass (`fwd_bwd`), the accumulating pass that folds each step's gradients into the running sum
+(`accumulate`), and the optimizer update (`update`) -- so this compiles all three and reports
+the cost and memory of each.
 
 Nothing is materialized: the weights, the optimizer moments and the batch are all
 `jax.ShapeDtypeStruct`s, and the device mesh is a topology description rather than hardware.
@@ -45,8 +46,8 @@ see `maxtext_engine_types.CompileConfig`).
 In addition to each kernel's raw `memory_analysis()`, `main` prints a per-device memory summary
 table and the overall `TRAIN-KERNEL DEVICE PEAK`. The summary subtracts aliased (donated) buffers
 that XLA counts in both arguments and outputs, and adds state that remains resident in HBM while a
-kernel runs without being passed as an argument (e.g., optimizer state during `fwd_bwd` and
-`fwd_bwd_accum`).
+kernel runs without being passed as an argument (e.g., optimizer state during `fwd_bwd`, and model
+and optimizer state during `accumulate`).
 """
 
 from collections.abc import Sequence
@@ -75,7 +76,7 @@ from maxtext.utils import model_creation_utils
 KERNEL_NAMES = maxtext_engine.KERNEL_NAMES
 
 # Both `dump_hlo` filters default to `jit_train_step`, `train.py`'s fused step; the engine's
-# kernels lower as `jit_<name>` for each of `KERNEL_NAMES` (`jit_fwd_bwd`, `jit_fwd_bwd_accum`,
+# kernels lower as `jit_<name>` for each of `KERNEL_NAMES` (`jit_fwd_bwd`, `jit_accumulate`,
 # `jit_update`), so on those defaults the dump comes back empty.
 HLO_DUMP_DEFAULTS = {
     "dump_hlo_local_module_name": f"jit_({'|'.join(KERNEL_NAMES)})",

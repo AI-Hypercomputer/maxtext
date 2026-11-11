@@ -30,7 +30,9 @@ DEFAULT_WORKERS = 1
 # Right-sizing parameters for fast test suites
 LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD = 16.0
 TARGET_MINUTES_PER_WORKER = 8.0
-CPU_XDIST_PARALLELISM = 16
+# Must match CPU_XDIST_WORKERS (the pytest-xdist -n value for CPU flavors) in
+# .github/workflows/run_tests_against_package.yml.
+CPU_XDIST_PARALLELISM = 8
 
 
 def get_max_workers_for_flavor(flavor: str) -> int:
@@ -68,8 +70,8 @@ def calculate_workers(flavor: str, baseline_data: dict[str, float] | None = None
   if test_count == 0:
     return DEFAULT_WORKERS, [DEFAULT_WORKERS]
 
-  # CPU flavors run under pytest-xdist (-n auto on 32-vCPU runners), so summed per-test
-  # durations reflect CPU-minutes across workers rather than single-VM wall-minutes.
+  # CPU flavors run under pytest-xdist (-n 8, bounded by the runner's memory rather than its vCPUs, see #6052),
+  # so summed per-test durations reflect CPU-minutes across workers rather than single-VM wall-minutes.
   if flavor.startswith("cpu-"):
     effective_minutes = max(max(matching) / 60.0, total_minutes / CPU_XDIST_PARALLELISM)
   else:

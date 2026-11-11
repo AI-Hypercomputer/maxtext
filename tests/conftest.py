@@ -20,6 +20,7 @@ require external integrations or specific hardware (for example `tpu_only`)
 are not marked.
 """
 
+import contextlib
 import gc
 import pytest
 import sys
@@ -118,6 +119,7 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils import class_split
 from tests.utils.newly_added_detection import get_changed_tests
+from tests.utils.newly_added_detection import is_changed_item
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
 if is_decoupled():
@@ -158,9 +160,8 @@ def pytest_collection_modifyitems(config, items):
   changed_tests = get_changed_tests()  # set[(file_path, test_name)]
   if changed_tests:
     for item in items:
-      item_file = item.nodeid.split("::", 1)[0]
-      base_name = getattr(item, "originalname", item.name)
-      if (item_file, base_name) in changed_tests or (item_file, item.name) in changed_tests:
+      # Matches the def name too, so absl parameterized tests (collected as test_x_bf16 or test_x0) are marked.
+      if is_changed_item(item, changed_tests):
         item.add_marker(pytest.mark.newly_added)
 
   decoupled = is_decoupled()
@@ -232,17 +233,17 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True, scope="module")
 def clear_jax_compilation_cache():
-  """Clears JAX compilation caches and forces garbage collection after each test module.
+  """Clears JAX in-memory compilation caches and forces GC when a worker leaves a test module.
 
-  Prevents XLA memory accumulation and compilation cache buildup across
-  long test runs while preserving intra-module compilation cache reuse.
+  Runs on every backend. xdist workers are long-lived processes that interleave many modules, so
+  this bounds how much jit/tracing cache a worker carries forward, at the cost of re-compiles when
+  it returns to a module. Intra-module cache reuse is preserved; the persistent on-disk cache is
+  not touched. This caps cache growth; it does not reclaim memory a worker holds for other reasons.
   """
   yield
   try:
-    has_accelerator = any(d.platform in ("tpu", "gpu", "proxy") for d in jax.devices())
-    if has_accelerator:
-      jax.clear_caches()
-      gc.collect()
+    jax.clear_caches()
+    gc.collect()
   except Exception:  # pylint: disable=broad-exception-caught
     pass
 
@@ -254,6 +255,36 @@ def restore_jax_remove_size_one_mesh_axis_from_type():
   yield
   if previous_flag is not None:
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", previous_flag)
+
+
+@contextlib.contextmanager
+def _restore_jax_prng_and_libtpu_env():
+  """Saves and restores global JAX PRNG config and LIBTPU_INIT_ARGS across a scope."""
+  previous_prng = getattr(jax.config, "jax_default_prng_impl", None)
+  previous_libtpu = os.environ.get("LIBTPU_INIT_ARGS")
+  try:
+    yield
+  finally:
+    if previous_prng is not None and getattr(jax.config, "jax_default_prng_impl", None) != previous_prng:
+      jax.config.update("jax_default_prng_impl", previous_prng)
+    if previous_libtpu is None:
+      os.environ.pop("LIBTPU_INIT_ARGS", None)
+    else:
+      os.environ["LIBTPU_INIT_ARGS"] = previous_libtpu
+
+
+@pytest.fixture(autouse=True, scope="class")
+def restore_jax_prng_and_libtpu_env_for_class():
+  """Restores JAX PRNG config and LIBTPU_INIT_ARGS after each test class, covering setUpClass()."""
+  with _restore_jax_prng_and_libtpu_env():
+    yield
+
+
+@pytest.fixture(autouse=True)
+def restore_jax_prng_and_libtpu_env():
+  """Restores JAX PRNG config and LIBTPU_INIT_ARGS after each test item, covering setUp() and tests."""
+  with _restore_jax_prng_and_libtpu_env():
+    yield
 
 
 @pytest.fixture(autouse=True)

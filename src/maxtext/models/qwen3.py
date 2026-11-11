@@ -1630,11 +1630,18 @@ class Qwen3NextScannableBlock(nnx.Module):
   @property
   def _remat_enabled(self):
     """Whether the block rematerializes its own layers."""
-    return self.apply_internal_remat and self.config.remat_policy != "none"
+    override = getattr(self, "remat_policy_override", None)
+    remat_policy = self.config.remat_policy if override is None else override
+    return self.apply_internal_remat and bool(remat_policy) and remat_policy != "none"
 
   def _scan_local_layers(self, y, layer_kwargs, forced_routed_experts=None):
     """Runs the local (linear attention / GatedDeltaNet) layers via a per-layer rematerialized jax.lax.scan."""
     remat = self._remat_enabled
+    override = getattr(self, "remat_policy_override", None)
+    if override is None:
+      local_remat_policy = self.remat_policy_fn
+    else:
+      local_remat_policy = getattr(self, "remat_policy_fn_override", None)
     if forced_routed_experts is None:
 
       def apply_fn(layer, carry):
@@ -1653,7 +1660,7 @@ class Qwen3NextScannableBlock(nnx.Module):
         apply_fn=apply_fn,
         xs=forced_routed_experts,
         remat=remat,
-        remat_policy=self.remat_policy_fn if remat else None,
+        remat_policy=local_remat_policy if remat else None,
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
     )
 
@@ -1683,11 +1690,15 @@ class Qwen3NextScannableBlock(nnx.Module):
       )
       return (new_hidden_states, new_other), (new_intermediate, created_params)
 
-    global_remat_policy = self.remat_policy_fn
-    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-    if offload_names[0] or offload_names[1]:
-      save_names, offload_to_device = offload_names
-      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+    override = getattr(self, "remat_policy_override", None)
+    if override is not None:
+      global_remat_policy = getattr(self, "scan_safe_remat_policy_fn_override", None)
+    else:
+      global_remat_policy = self.remat_policy_fn
+      offload_names = maxtext_utils.get_save_and_offload_names(cfg)
+      if offload_names[0] or offload_names[1]:
+        save_names, offload_to_device = offload_names
+        global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
     if self._remat_enabled:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)

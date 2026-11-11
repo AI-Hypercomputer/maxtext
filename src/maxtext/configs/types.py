@@ -143,6 +143,7 @@ class KvQuantAxis(str, Enum):
 class RematPolicy(str, Enum):
   """Available rematerialization (gradient checkpointing) policies."""
 
+  NONE = "none"
   FULL = "full"
   MINIMAL = "minimal"
   SAVE_DOT_WITH_CONTEXT_EXCEPT_MLP = "save_dot_with_context_except_mlp"
@@ -532,6 +533,15 @@ class DataTypes(BaseModel):
 
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
+  cast_grads_after_all_reduce: bool = Field(
+      # NOMUTANTS: Default is False; overridden by base.yml and tested in OSS unit tests.
+      False,
+      description=(
+          "MaxTextTrainingEngine only. Gradients that its forward/backward pass sums across devices by an all-reduce "
+          "alone (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass "
+          "in the parameters' dtype and are cast to grad_dtype when they join the running sum, after the all-reduce."
+      ),
+  )
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
@@ -2044,7 +2054,10 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["activation_batch", ["data", "fsdp", "fsdp_transpose", "expert"]],
     ["activation_length", ["context", "context_usp_ulysses"]],
     ["activation_norm_length", ["tensor_sequence", "context", "context_usp_ulysses"]],
+    # `*_routed` rules lay out the routed MoE's shard_map inputs/output and mirror the rule above them.
+    ["activation_norm_length_routed", ["tensor_sequence", "context", "context_usp_ulysses"]],
     ["activation_embed", ["tensor"]],
+    ["activation_embed_routed", ["tensor"]],
     ["activation_stage", "stage"],
     # General Weights
     ["mlp", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
@@ -2225,9 +2238,10 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
-          " both the forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer;"
-          " gathered weights are never saved and are re-gathered for the backward pass. Has no effect when no"
-          " FSDP mesh axis spans more than one device. See docs/guides/optimization/fsdp_prefetch.md."
+          " both the forward and backward pass. Requires scan_layers=True and is not supported with"
+          " remat_policy='none'. remat_policy applies to each layer; gathered weights are never saved and are"
+          " re-gathered for the backward pass. Has no effect when no FSDP mesh axis spans more than one device. See"
+          " docs/guides/optimization/fsdp_prefetch.md."
       ),
   )
   prefetch_fsdp_defer_grad_reduce_scatter: bool = Field(
@@ -4429,6 +4443,33 @@ def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_device
   return _resolved_axis_product(mesh_axes, parallelism, num_devices, ("fsdp", "fsdp_transpose"))
 
 
+def _is_remat_disabled(remat_policy: str | None) -> bool:
+  """Returns whether gradient checkpointing is disabled (`remat_policy=none`)."""
+  return not remat_policy or remat_policy.lower() == "none"
+
+
+def _validate_remat_policy(
+    remat_policy: str | None,
+    *,
+    prefetch_fsdp_weights: bool,
+    using_pipeline_parallelism: bool,
+) -> None:
+  """Rejects `remat_policy=none` with execution paths that require checkpointing."""
+  if not _is_remat_disabled(remat_policy):
+    return
+  if prefetch_fsdp_weights:
+    raise ValueError(
+        "remat_policy='none' is not supported with prefetch_fsdp_weights=True; the FSDP weight-prefetch"
+        " custom_vjp pipeline requires per-layer gradient checkpointing so gathered weights are not"
+        " retained between the forward and backward pass."
+    )
+  if using_pipeline_parallelism:
+    raise ValueError(
+        "remat_policy='none' is not supported with pipeline parallelism"
+        " (ici_pipeline_parallelism > 1 or dcn_pipeline_parallelism > 1)."
+    )
+
+
 # ----------------------------------------------------------------------------
 # Main Config Class
 # ----------------------------------------------------------------------------
@@ -5120,6 +5161,26 @@ class MaxTextConfig(
       if cp_axes:
         self.context_sharding = cp_axes[0]
 
+    if self.custom_mesh_and_rule is CustomRule.TP_AS_EP:
+      # tp-as-ep only rewires the sparse routed-MoE path; reject paths that ignore or override its shardings.
+      if not self.sparse_matmul:
+        raise ValueError("custom_mesh_and_rule=tp-as-ep requires sparse_matmul=True.")
+      if self.attention in ("vllm_rpa", "vllm_batched_rpa"):
+        raise ValueError("custom_mesh_and_rule=tp-as-ep is not supported with vLLM attention.")
+      for flag_name in ("shard_exp_on_fsdp", "use_2d_fsdp_sharding", "use_batch_split_schedule", "mlp_bias"):
+        if getattr(self, flag_name):
+          raise ValueError(f"custom_mesh_and_rule=tp-as-ep is not compatible with {flag_name}=True.")
+      tp_size = self.ici_tensor_parallelism * self.dcn_tensor_parallelism
+      if tp_size == 1:
+        raise ValueError("custom_mesh_and_rule=tp-as-ep requires tensor parallelism > 1.")
+      ep_size = self.ici_expert_parallelism * self.dcn_expert_parallelism
+      # Routed experts are sharded over expert x tensor. Sizes of -1 are resolved at mesh creation, so skip them here.
+      if ep_size > 0 and tp_size > 0 and self.num_experts % (ep_size * tp_size) != 0:
+        raise ValueError(
+            f"custom_mesh_and_rule=tp-as-ep needs num_experts ({self.num_experts}) divisible by "
+            f"expert*tensor parallelism ({ep_size * tp_size})."
+        )
+
     # Skip EP check if logical rule is overridden by user. Otherwise, ensure that EP rank is 1 when EP is disabled.
     if not self.override_logical_axis_rules:
       ep_is_enabled = ep_enabled(self)
@@ -5635,6 +5696,11 @@ class MaxTextConfig(
         self.pipeline_parallel_layers = self.num_decoder_layers
 
     self.using_pipeline_parallelism = self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1
+    _validate_remat_policy(
+        self.remat_policy,
+        prefetch_fsdp_weights=self.prefetch_fsdp_weights,
+        using_pipeline_parallelism=bool(self.using_pipeline_parallelism),
+    )
     if self.using_pipeline_parallelism:
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
@@ -6212,8 +6278,6 @@ class MaxTextConfig(
         raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
       if self.te_moe_block and self.norm_topk_prob:
         raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
-      if self.te_moe_block and self.use_random_routing:
-        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
       if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
         raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
       if self.te_moe_block and not self.te_gmm_quantization:
@@ -7482,6 +7546,12 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    _validate_remat_policy(
+        self.remat_policy,
+        prefetch_fsdp_weights=self.prefetch_fsdp_weights,
+        using_pipeline_parallelism=self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1,
+    )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

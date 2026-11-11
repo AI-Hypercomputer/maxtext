@@ -59,6 +59,7 @@ except (ImportError, ValueError):
   HAS_TOKAMAX_KDA = False
 
 pytestmark = [
+    pytest.mark.integration_test,
     pytest.mark.scheduled_only,
     pytest.mark.skipif(not HAS_TOKAMAX_KDA, reason="tokamax KDA not available"),
 ]

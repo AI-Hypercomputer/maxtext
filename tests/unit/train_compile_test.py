@@ -46,6 +46,40 @@ except Exception:  # pylint: disable=broad-exception-caught
 class TrainCompile(parameterized.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
+  # Directories the tests below write their `compiled_trainstep_file` into (literal "/tmp/test_*" or gettempdir()).
+  _TMP_DIRS = tuple(sorted({"/tmp", gettempdir()}))
+
+  @staticmethod
+  def _tmp_test_files():
+    files = set()
+    for d in filter(os.path.isdir, TrainCompile._TMP_DIRS):
+      files.update(e.path for e in os.scandir(d) if e.name.startswith("test_") and e.is_file(follow_symlinks=False))
+    return files
+
+  def setUp(self):
+    """Registers a cleanup that removes the compiled-trainstep files this test writes to the temp dirs.
+
+    Every AOT test here serializes its executable to a literal `/tmp/test_*` or `gettempdir()/test_*` path
+    (tens to hundreds of MB each) and never reads it back or deletes it; a CI shard runs ~18 of them on a runner
+    whose /tmp lives on the same ~98 GB disk as the checkout, wheel build and pip/JAX caches. Snapshot the temp dirs
+    now and, after the whole test (addCleanup, so a failing test is cleaned too), remove any `test_*` regular file
+    that appeared. Only this module writes `test_*` into the temp dirs. Under pytest-xdist each worker keeps its own
+    snapshot, so a worker may unlink a sibling's file while it is still being written; that is harmless because
+    nothing here opens the file after `save_compiled` returns. Files that pre-existed (or were already removed by a
+    sibling) are left alone.
+    """
+    super().setUp()
+    before = self._tmp_test_files()
+
+    def _remove_new_tmp_files():
+      for path in self._tmp_test_files() - before:
+        try:
+          os.remove(path)
+        except FileNotFoundError:
+          pass
+
+    self.addCleanup(_remove_new_tmp_files)
+
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
@@ -697,6 +731,7 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.integration_test
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
@@ -1027,6 +1062,7 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
             "routed_bias=False",
             "override_model_config=True",
+            "base_num_decoder_layers=5",
         )
     )
 
@@ -1143,6 +1179,9 @@ class TrainCompile(parameterized.TestCase):
             "tokenizer_type=huggingface",
             "tokenizer_path=deepseek-ai/DeepSeek-V3.2",
             "hf_access_token=fake",
+            "override_model_config=True",
+            "base_num_decoder_layers=3",
+            "engram_layers=[1]",
         )
     )
 
@@ -1553,6 +1592,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
             "model_name=gemma4-31b",
+            "override_model_config=True",
+            "base_num_decoder_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=32",
@@ -1579,6 +1620,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=gemma4-26b",
+            "override_model_config=True",
+            "base_num_decoder_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=32",
@@ -1608,6 +1651,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
             "model_name=gemma4-e4b",
+            "override_model_config=True",
+            "base_num_decoder_layers=12",
+            "num_kv_shared_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             # E4B has two KV heads, which is as far as the tensor axis can split them,
@@ -1638,6 +1684,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-1024",
             "compile_topology_num_slices=1",
             "model_name=kimi-k2-1t",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=64",
@@ -1708,8 +1757,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-1024",
             "compile_topology_num_slices=1",
             "model_name=llama4-17b-128e",
-            # Only needed so the tokenizer below can replace the model config's default.
+            # Needed so base_num_decoder_layers and the tokenizer below can override the model config.
             "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=64",

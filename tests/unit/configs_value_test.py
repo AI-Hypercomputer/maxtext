@@ -177,7 +177,7 @@ class ConfigTest(absltest.TestCase):
         "te_moe_block": True,
         "te_gmm_quantization": "te_no_quant",
         # Prevent the general EP validation from masking the more specific
-        # te_moe_block/use_random_routing incompatibility under test.
+        # TE-specific incompatibilities under test.
         "override_logical_axis_rules": True,
     }
     invalid_configs = (
@@ -186,7 +186,6 @@ class ConfigTest(absltest.TestCase):
             "te_moe_block=True does not currently support norm_topk_prob=True "
             "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'.",
         ),
-        ({"use_random_routing": True}, "te_moe_block=True does not support use_random_routing=True."),
         (
             {"decoder_block": types.DecoderBlockType.LLAMA4},
             "te_moe_block=True does not currently support Llama4 routing semantics.",
@@ -202,6 +201,25 @@ class ConfigTest(absltest.TestCase):
         with self.assertRaises(pydantic.ValidationError) as context:
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
+
+  def test_te_moe_block_accepts_random_routing(self):
+    config = types.MaxTextConfig(
+        run_name="test",
+        num_experts=2,
+        base_moe_mlp_dim=7168,
+        first_num_dense_layers=1,
+        sparse_matmul=True,
+        prefuse_moe_weights=True,
+        te_moe_block=True,
+        te_gmm_quantization="te_no_quant",
+        override_logical_axis_rules=True,
+        use_random_routing=True,
+        load_balance_loss_weight=0.0,
+        routed_bias_update_rate=0.0,
+        routed_bias=False,
+    )
+    self.assertTrue(config.te_moe_block)
+    self.assertTrue(config.use_random_routing)
 
   def test_te_moe_disable_cudnn_gmm_fusion_requires_te_moe_block(self):
     common_config = {
@@ -1588,6 +1606,74 @@ class ConfigTest(absltest.TestCase):
     ):
       cfg = self._elastic_config(*keep, *extra.split())
       self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
+
+  def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
+    """Tests that remat_policy=none is rejected with prefetch_fsdp_weights=True and pipeline parallelism."""
+    base_argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "base_num_decoder_layers=2",
+        "per_device_batch_size=2",
+    ]
+    # Baseline: default remat_policy='full' permits FSDP weight prefetch and pipeline parallelism.
+    self.assertTrue(pyconfig.initialize([*base_argv, "prefetch_fsdp_weights=true"]).prefetch_fsdp_weights)
+    self.assertTrue(
+        pyconfig.initialize(
+            [*base_argv, "compile_topology=v5e-16", "compile_topology_num_slices=1", "ici_pipeline_parallelism=2"]
+        ).using_pipeline_parallelism
+    )
+    self.assertTrue(
+        pyconfig.initialize(
+            [*base_argv, "compile_topology=v5e-16", "compile_topology_num_slices=2", "dcn_pipeline_parallelism=2"]
+        ).using_pipeline_parallelism
+    )
+
+    # Baseline: remat_policy=none succeeds when neither prefetch_fsdp_weights nor pipeline parallelism is enabled.
+    for remat_flag in ("remat_policy=none", "remat_policy=NONE"):
+      cfg = pyconfig.initialize([*base_argv, remat_flag])
+      self.assertIsNone(cfg.remat_policy)
+    direct_ok = types.MaxTextConfig(run_name="test", enable_checkpointing=False, remat_policy="none")
+    self.assertEqual(direct_ok.remat_policy, types.RematPolicy.NONE)
+
+    # pyconfig.initialize (normalizes 'none'/'NONE' -> None before Pydantic validation).
+    for extra_flags, error_regex in (
+        (["remat_policy=none", "prefetch_fsdp_weights=true"], "not supported with prefetch_fsdp_weights=True"),
+        (["remat_policy=NONE", "prefetch_fsdp_weights=true"], "not supported with prefetch_fsdp_weights=True"),
+        (
+            ["remat_policy=none", "compile_topology=v5e-16", "ici_pipeline_parallelism=2"],
+            "not supported with pipeline parallelism",
+        ),
+        (
+            [
+                "remat_policy=none",
+                "compile_topology=v5e-16",
+                "compile_topology_num_slices=2",
+                "dcn_pipeline_parallelism=2",
+            ],
+            "not supported with pipeline parallelism",
+        ),
+    ):
+      with self.subTest(loader="pyconfig", extra_flags=extra_flags):
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+          pyconfig.initialize([*base_argv, *extra_flags])
+
+    # Direct MaxTextConfig instantiation (preserves 'none' / RematPolicy.NONE string without pyconfig normalization).
+    for remat_val in ("none", types.RematPolicy.NONE, None):
+      for bad_kwargs, error_regex in (
+          ({"prefetch_fsdp_weights": True}, "not supported with prefetch_fsdp_weights=True"),
+          ({"ici_pipeline_parallelism": 2}, "not supported with pipeline parallelism"),
+          ({"dcn_pipeline_parallelism": 2}, "not supported with pipeline parallelism"),
+      ):
+        with self.subTest(loader="direct", remat_val=remat_val, bad_kwargs=bad_kwargs):
+          with self.assertRaisesRegex(pydantic.ValidationError, error_regex):
+            types.MaxTextConfig(
+                run_name="test",
+                enable_checkpointing=False,
+                remat_policy=remat_val,
+                **bad_kwargs,
+            )
 
 
 class MMapDatasetConfigTest(absltest.TestCase):

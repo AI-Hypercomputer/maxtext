@@ -582,7 +582,10 @@ class MuonDimensionTest(parameterized.TestCase):
   """Unit tests for Muon dimension number generation.
 
   This suite verifies that the automatically generated Muon dimension numbers
-  for various models match their hardcoded reference values.
+  for various models match their hardcoded reference values, written for the
+  `param_scan_axis=1` layout where they coincide with `transform_logic`'s
+  feature-axis view (see `muon_utils_test.TestScannedLayoutDimensionNumbers`
+  for other scan axes).
   """
 
   @parameterized.named_parameters(
@@ -608,7 +611,7 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True)
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, param_scan_axis=1)
     self.assertEqual(actual_output, expected_output)
 
 

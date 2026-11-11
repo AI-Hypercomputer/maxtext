@@ -14,12 +14,19 @@
 
 """Tests for pyconfig."""
 
-import unittest
 import os.path
+import shutil
+import tempfile
+import unittest
+from unittest import mock
+import warnings
+
+import omegaconf
 
 from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig_deprecated import resolve_config_path
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.configs import pyconfig_deprecated
+from maxtext.configs.pyconfig_deprecated import resolve_config_path, resolve_model_config_path
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path
 
 
@@ -134,6 +141,64 @@ class PyconfigTest(unittest.TestCase):
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)
+
+  def test_deprecated_model_config_fallback_and_active_precedence(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmp_base_cfg = os.path.join(tmpdir, "base.yml")
+      shutil.copyfile(os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml"), tmp_base_cfg)
+
+      active_models_dir = os.path.join(tmpdir, "models")
+      deprecated_models_dir = os.path.join(active_models_dir, "deprecated")
+      os.makedirs(deprecated_models_dir, exist_ok=True)
+
+      shutil.copyfile(
+          os.path.join(MAXTEXT_CONFIGS_DIR, "models", "gemma-2b.yml"),
+          os.path.join(deprecated_models_dir, "gemma-2b.yml"),
+      )
+      shutil.copyfile(
+          os.path.join(MAXTEXT_CONFIGS_DIR, "models", "qwen3-0.6b.yml"),
+          os.path.join(active_models_dir, "qwen3-0.6b.yml"),
+      )
+      with open(os.path.join(deprecated_models_dir, "qwen3-0.6b.yml"), "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 99999\n")
+
+      resolved_dep, is_dep = resolve_model_config_path(tmp_base_cfg, "gemma-2b", configs_dir=tmpdir)
+      self.assertEqual(resolved_dep, os.path.join(deprecated_models_dir, "gemma-2b.yml"))
+      self.assertTrue(is_dep)
+
+      resolved_act, is_act = resolve_model_config_path(tmp_base_cfg, "qwen3-0.6b", configs_dir=tmpdir)
+      self.assertEqual(resolved_act, os.path.join(active_models_dir, "qwen3-0.6b.yml"))
+      self.assertFalse(is_act)
+
+      base_raw_keys = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.load(tmp_base_cfg), resolve=True)
+      with mock.patch.object(pyconfig_deprecated, "_DEFAULT_CONFIGS_DIR", tmpdir):
+        dep_raw_keys = dict(base_raw_keys)
+        dep_raw_keys["model_name"] = "gemma-2b"
+        dep_raw_keys["override_model_config"] = False
+        with warnings.catch_warnings(record=True) as caught:
+          warnings.simplefilter("always", DeprecationWarning)
+          pyconfig_deprecated._HyperParameters.update_model_vars(  # pylint: disable=protected-access
+              tmp_base_cfg, dep_raw_keys, tmp_base_cfg, ["model_name"]
+          )
+        self.assertEqual(dep_raw_keys["base_emb_dim"], 2048)
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning) and "gemma-2b" in str(w.message)]
+        self.assertEqual(len(dep_warnings), 1)
+        self.assertIn("MaxText Model Lifecycle Policy", str(dep_warnings[0].message))
+        self.assertEqual(os.path.realpath(dep_warnings[0].filename), os.path.realpath(__file__))
+
+        act_raw_keys = dict(base_raw_keys)
+        act_raw_keys["model_name"] = "qwen3-0.6b"
+        act_raw_keys["override_model_config"] = False
+        with warnings.catch_warnings(record=True) as caught_active:
+          warnings.simplefilter("always", DeprecationWarning)
+          pyconfig_deprecated._HyperParameters.update_model_vars(  # pylint: disable=protected-access
+              tmp_base_cfg, act_raw_keys, tmp_base_cfg, ["model_name"]
+          )
+        self.assertEqual(act_raw_keys["base_emb_dim"], 1024)
+        active_dep_warnings = [
+            w for w in caught_active if issubclass(w.category, DeprecationWarning) and "qwen3-0.6b" in str(w.message)
+        ]
+        self.assertEqual(len(active_dep_warnings), 0)
 
 
 if __name__ == "__main__":
