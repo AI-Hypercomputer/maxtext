@@ -4650,6 +4650,15 @@ def _is_remat_disabled(remat_policy: str | None) -> bool:
   return not remat_policy or remat_policy.lower() == "none"
 
 
+def _qwix_supports_explicit_sharding() -> bool:
+  """Returns whether the installed `qwix` package includes explicit sharding support (google/qwix#455)."""
+  try:
+    from qwix._src.core import dot_general_qt  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return False
+  return hasattr(dot_general_qt.DotGeneralQtConfig, "out_sharding")
+
+
 def _validate_remat_policy(
     remat_policy: str | None,
     *,
@@ -7249,12 +7258,13 @@ class MaxTextConfig(
     if self.moe_flat_fsdp_weights:
       if not (
           self.sparse_matmul
-          and (self.shard_embed_moe_on_fsdp or not self.quantization)
+          and (self.shard_embed_moe_on_fsdp or not self.quantization or self.prefetch_fsdp_weights)
           and ((self.use_tokamax_gmm and self.use_gmm_v2) or self.prefetch_fsdp_weights)
           and not self.prefuse_moe_weights
       ):
         raise ValueError(
-            "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True or unquantized),"
+            "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True,"
+            " prefetch_fsdp_weights=True, or unquantized),"
             " ((use_tokamax_gmm=True and use_gmm_v2=True) or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
         )
       # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
@@ -7402,6 +7412,17 @@ class MaxTextConfig(
       self.decoder_block = DecoderBlockType(self.decoder_block.lower())
     if isinstance(self.shard_mode, str):
       self.shard_mode = ShardMode(self.shard_mode.lower())
+    if (
+        self.prefetch_fsdp_weights
+        and self.shard_mode == ShardMode.EXPLICIT
+        and self.quantization
+        and self.use_qwix_quantization
+        and not _qwix_supports_explicit_sharding()
+    ):
+      raise ValueError(
+          "prefetch_fsdp_weights=True with shard_mode='explicit' and use_qwix_quantization=True requires a qwix"
+          " version that includes google/qwix#455 (explicit sharding support)."
+      )
     if isinstance(self.te_comm_gemm_overlap, str):
       self.te_comm_gemm_overlap = TeCommGemmOverlapPolicy(self.te_comm_gemm_overlap.lower())
 

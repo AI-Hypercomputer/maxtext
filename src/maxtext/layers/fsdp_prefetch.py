@@ -515,6 +515,7 @@ _PrefetchCtx = collections.namedtuple(
         "defer_grad_reduce_scatter",
         "offload_layer_inputs",
         "sparse_core_id",
+        "layout_cache",
     ],
 )
 
@@ -745,28 +746,35 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   rs_fn.tag_flags = tag_flags
 
   # Full remat (no policy): save only each layer's input and recompute the whole layer in the backward pass.
-  remat_layer = None
-  if ctx.remat_policy is not None:
-    remat_layer = jax.checkpoint(layer_pure, policy=ctx.remat_policy, prevent_cse=ctx.prevent_cse)
+  # Tracing `_vjp_residual_layout` once in the forward pass and caching it on `ctx.layout_cache` for the
+  # backward pass avoids re-tracing `remat_layer` in `_bwd` and preserves thread-local function
+  # interceptors active only during `Transformer.__call__` (such as Qwix quantization) in `layout.treedef`.
+  remat_layer = jax.checkpoint(layer_pure, policy=ctx.remat_policy, prevent_cse=ctx.prevent_cse)
 
   def layout_fn(y, w, layer_state):
-    if remat_layer is None:
-      return None
-    layout = _vjp_residual_layout(remat_layer, y, w, layer_state, consts)
-    _log_saved_residuals(layout, w)
-    return layout
+    key = (
+        id(graphdef),
+        ctx.params_treedef,
+        ctx.state_treedef,
+        tuple((jax.typeof(p).shape, jax.typeof(p).dtype) for p in jax.tree_util.tree_leaves(w)),
+    )
+
+    def build():
+      layout = _vjp_residual_layout(remat_layer, y, w, layer_state, consts)
+      if ctx.remat_policy is not None:
+        _log_saved_residuals(layout, w)
+      return layout
+
+    return ctx.layout_cache(key, build)
 
   def fwd_layer(y, w, layer_state, layout):
-    if remat_layer is None:
+    if ctx.remat_policy is None and not layout.saved_avals:
       return layer_fn(y, w, layer_state), ()
     out, vjp_fn = jax.vjp(lambda y_, w_: remat_layer(y_, w_, layer_state, consts), y, w)
     return out, _split_residuals(vjp_fn, layout)
 
   def layer_vjp_fn(y_in, w, layer_state, g_y, saved, layout):
-    if remat_layer is None:
-      _, vjp_fn = jax.vjp(lambda y_, w_: layer_fn(y_, w_, layer_state), y_in, w)
-    else:
-      vjp_fn = _rebuild_vjp(layout, saved, y_in, w, layer_state, consts)
+    vjp_fn = _rebuild_vjp(layout, saved, y_in, w, layer_state, consts)
     return vjp_fn(g_y)  # (dy_in, dW gathered)
 
   return params, state, gather_fn, rs_fn, layout_fn, fwd_layer, layer_vjp_fn
@@ -1090,6 +1098,15 @@ def _default_sparse_core_id(mesh) -> int | None:
   return None
 
 
+def qwix_supports_explicit_sharding() -> bool:
+  """Returns whether the installed `qwix` package includes explicit sharding support (google/qwix#455)."""
+  try:
+    from qwix._src.core import dot_general_qt  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return False
+  return hasattr(dot_general_qt.DotGeneralQtConfig, "out_sharding")
+
+
 def _register_overlap_transform(mesh):
   """Registers the max-async-overlap post-scheduler XLA transform when running on TPU.
 
@@ -1111,6 +1128,14 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
   Returns (graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx), with
   the scan axis of params still at `ctx.scan_axis` (`_prefetch_setup` moves it to the front).
   """
+  uses_qwix = hasattr(layers, "qwix_path") or (
+      bool(getattr(config, "quantization", "")) and bool(getattr(config, "use_qwix_quantization", False))
+  )
+  if config.shard_mode == ShardMode.EXPLICIT and uses_qwix and not qwix_supports_explicit_sharding():
+    raise ValueError(
+        "prefetch_fsdp_weights=True with shard_mode='explicit' and Qwix quantization requires a qwix version that"
+        " includes google/qwix#455 (explicit sharding support)."
+    )
   _register_overlap_transform(mesh)
   graphdef, params, state = nnx.split(layers, nnx.Param, ...)
   scan_axis = config.param_scan_axis
@@ -1144,6 +1169,13 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
   if offload_layer_inputs:
     remat_policy = _keep_layer_inputs_on_device(remat_policy)
 
+  layout_box = {}
+
+  def layout_cache(key, build):
+    if key not in layout_box:
+      layout_box[key] = build()
+    return layout_box[key]
+
   ctx = _PrefetchCtx(
       mesh=mesh,
       shard_mode=config.shard_mode,
@@ -1160,6 +1192,7 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       defer_grad_reduce_scatter=bool(getattr(config, "prefetch_fsdp_defer_grad_reduce_scatter", False)),
       offload_layer_inputs=offload_layer_inputs,
       sparse_core_id=_default_sparse_core_id(mesh),
+      layout_cache=layout_cache,
   )
   return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 
