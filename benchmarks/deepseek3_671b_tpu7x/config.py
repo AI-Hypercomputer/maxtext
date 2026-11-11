@@ -19,11 +19,13 @@ slice it was tuned for, and can be launched with `maxtext_ctk_runner` (Cluster
 Toolkit / `gcluster`). See `benchmark.py` in this directory.
 
 Recipes:
+  * `2k`: 2,048 chips (4,096 TensorCores), one tpu7x 4x16x32 slice.
+    FSDP 512 x EP 8, per_device_batch_size 4 (global batch 16,384 x 4,096).
   * `8k`: 8,192 chips (16,384 TensorCores), one tpu7x 8x32x32 slice.
     FSDP 1024 x EP 16, per_device_batch_size 1 (global batch 16,384 x 4,096).
 """
 
-# TODO: Add the 2k and 4k recipes (new `MaxTextModel` + `RECIPES` entry each).
+# TODO: Add the 4k recipe (new `MaxTextModel` + `RECIPES` entry).
 
 import dataclasses
 
@@ -58,6 +60,205 @@ class Tpu7xRecipe:
   topology: str
   compute_type: str = "tpu7x"
   num_slices: int = 1
+
+
+deepseek3_671b_fp8_tpu7x_2k = _add_to_model_dictionary(
+    tpu7x_deepseek3_model_dict,
+    MaxTextModel(
+        model_name="deepseek3_671b_fp8_tpu7x_2k",
+        model_type="deepseek3-671b",
+        tuning_params={
+            # --- Batch & sequence ---
+            "per_device_batch_size": 4.0,
+            "max_target_length": 4096,
+            "dtype": "bfloat16",
+            "mu_dtype": "bfloat16",
+            "grad_dtype": "bfloat16",
+            # --- Optimizer & LR schedule ---
+            "opt_type": "adamw",
+            "learning_rate": 2.4e-05,
+            "lr_schedule_type": "cosine",
+            "learning_rate_schedule_steps": 12000,
+            "warmup_steps_fraction": 0.00034,
+            "learning_rate_final_fraction": 0.000417,
+            "adam_b1": 0.9,
+            "adam_b2": 0.95,
+            "adam_eps": 1e-08,
+            "adam_weight_decay": 0.1,
+            "gradient_clipping_threshold": 1.0,
+            # --- Evaluation (C4 eval set, ep-as-cp eval mesh) ---
+            "target_eval_loss": 3.6,
+            "eval_interval": 1,
+            "eval_steps": 1,
+            "eval_start_step": 42,
+            "eval_per_device_batch_size": 0.25,
+            "eval_sa_block_q": 512,
+            "eval_sa_block_kv": 512,
+            "eval_sa_block_kv_compute": 512,
+            "eval_local_sa_block_q": 256,
+            "context_parallel_load_balance": False,
+            "custom_mesh_and_rule_for_eval": "ep-as-cp",
+            # --- Dataset & tokenizer ---
+            "dataset_type": "c4_mlperf",
+            "dataset_path": DATASET_PATH_PLACEHOLDER,
+            "dataset_name": "c4/en:3.0.5",
+            "eval_dataset_name": "c4/en:3.0.9",
+            "train_data_columns": "'[ids]'",
+            "eval_data_columns": "'[ids]'",
+            "tokenizer_path": "src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken",
+            "tokenizer_type": "tiktoken",
+            "tokenize_train_data": False,
+            "tokenize_eval_data": False,
+            "data_shuffle_seed": 2767272,
+            "train_shard_in_read": True,
+            "train_interleave_cycle_length": 4,
+            # --- Pre-RUN_START warmups ---
+            "block_state_before_run_start": True,
+            "warm_input_reshard_before_run_start": True,
+            "warmup_programs_in_init": True,
+            # --- Parallelism & sharding (2k: FSDP 512 x EP 8) ---
+            "ici_fsdp_parallelism": 512,
+            "ici_expert_parallelism": 8,
+            "shard_exp_on_fsdp": False,
+            "custom_mesh_and_rule": "ep-as-dp",
+            "allow_split_physical_axes": False,
+            "moe_flat_fsdp_weights": True,
+            # --- MoE backward / routing / RoPE optimizations ---
+            "moe_bwd_prequant_before_unsort": True,
+            "moe_3d_dlhs_partial_sum": True,
+            "moe_combine_bwd_direct_qarray": True,
+            "moe_tc_window_routing": True,
+            "rope_direct_position_freqs": True,
+            "rope_dot_pairwise": True,
+            # --- MoE dispatch, ragged buffers & kernels ---
+            "use_ring_of_experts": True,
+            "use_ragged_sort": True,
+            "moe_tc_ragged_sort": True,
+            "moe_tc_ragged_flatten_block_size": 256,
+            "moe_tc_ragged_weights_on_activation": True,
+            "moe_tc_ragged_3d_gmm": True,
+            "moe_tc_ragged_3d_dispatch": True,
+            "ragged_buffer_factor": 2,
+            "eval_ragged_buffer_factor": 4.0,
+            "log_required_ragged_buffer_factor": False,
+            "moe_dropless_fallback": "step",
+            "num_moe_token_chunks": 2,
+            "use_custom_sort_vjp": True,
+            "moe_pin_sparse_core_all_gathers": True,
+            "moe_pin_sparse_core_ep_all_gathers": True,
+            "moe_ep_all_gather_sparse_core_id": 0,
+            "moe_fsdp_all_gather_sparse_core_id": 0,
+            "megablox": True,
+            "sparse_matmul": True,
+            "use_gmm_v2": True,
+            "merge_gating_gmm": False,
+            "moe_accumulate_chunk_wgrad": True,
+            "moe_accumulate_wi_dlhs": True,
+            "moe_gmm_v2_dlhs_transpose_rhs": True,
+            # --- Router ---
+            "router_topk_matmul_vjp": True,
+            "moe_topk_before_ep_all_gather": True,
+            "use_random_routing": False,
+            "float32_gate_logits": True,
+            "n_routing_groups": 8,
+            "topk_routing_group": 4,
+            "routed_bias": True,
+            "routed_bias_update_rate": 0.001,
+            "load_balance_loss_weight": 0.01,
+            "moe_use_megatron_seq_aux_loss": True,
+            "defer_small_all_reduces": True,
+            # --- Multi-token prediction ---
+            "mtp_num_layers": 1,
+            "mtp_loss_scaling_factor": 0.1,
+            "mtp_reuse_input_embedding": True,
+            # --- FP8 quantization (qwix) ---
+            "use_qwix_quantization": True,
+            "quantization": "fp8_full",
+            "weight_quantization_calibration_method": "fixed,-224,224",
+            "act_quantization_calibration_method": "fixed,-224,224",
+            "bwd_quantization_calibration_method": "fixed,0.00125",
+            "drhs_grad_quantization_calibration_method": "fixed,0.00125",
+            "quantize_mtp": True,
+            "moe_quantize_token_all_gather": True,
+            "shard_embed_moe_on_fsdp": True,
+            "quantize_router_proj": False,
+            "quantize_logits_proj": False,
+            # --- Attention (tokamax splash, FP8 Q/K) ---
+            "attention": "flash",
+            "use_tokamax_splash": True,
+            "sa_use_fused_bwd_kernel": True,
+            "sa_fuse_reciprocal": True,
+            "use_splash_scheduler": False,
+            "sa_use_base2_exp": True,
+            "dq_reduction_steps": 3,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_qk_diag_skip": True,
+            "sa_sv_diag_skip": False,
+            "sa_qk_diag_grid": 4,
+            "sa_block_q_dkv": 1024,
+            "sa_block_kv_dkv": 1024,
+            "sa_block_kv_dkv_compute": 1024,
+            "sa_block_q_dq": 512,
+            "sa_block_kv_dq": 512,
+            "experimental_sa_quant_q_fp8": True,
+            "experimental_sa_quant_k_fp8": True,
+            "sa_qproj_bwd_bf16": False,
+            "sa_dkv_reuse_scaled_q": False,
+            "sa_q_prescaled_log2e": True,
+            "sa_ignore_segment_ids": True,
+            "use_max_logit_estimate": -1,
+            "cost_estimate_flops_fwd": 5000000000000,
+            "cost_estimate_flops_bwd": 5000000000000,
+            "float32_weight_sum": False,
+            "use_sliced_mla_proj": True,
+            "rope_pairwise": True,
+            # --- GMM v2 tiles (train + eval) ---
+            "use_tokamax_gmm": True,
+            "wi_tile_fwd_batch_seq": 512,
+            "wi_tile_fwd_embed_dim": 7168,
+            "wi_tile_fwd_mlp_dim": 2048,
+            "wi_tile_dlhs_batch_seq": 256,
+            "wi_tile_dlhs_embed_dim": 3584,
+            "wi_tile_dlhs_mlp_dim": 2048,
+            "wi_tile_drhs_batch_seq": 1024,
+            "wi_tile_drhs_embed_dim": 1024,
+            "wi_tile_drhs_mlp_dim": 2048,
+            "wo_tile_fwd_batch_seq": 256,
+            "wo_tile_fwd_embed_dim": 7168,
+            "wo_tile_fwd_mlp_dim": 2048,
+            "wo_tile_dlhs_batch_seq": 512,
+            "wo_tile_dlhs_embed_dim": 7168,
+            "wo_tile_dlhs_mlp_dim": 2048,
+            "wo_tile_drhs_batch_seq": 512,
+            "wo_tile_drhs_embed_dim": 7168,
+            "wo_tile_drhs_mlp_dim": 512,
+            "eval_wi_tile_fwd_batch_seq": 256,
+            "eval_wi_tile_fwd_embed_dim": 7168,
+            "eval_wi_tile_fwd_mlp_dim": 2048,
+            "eval_wo_tile_fwd_batch_seq": 256,
+            "eval_wo_tile_fwd_embed_dim": 7168,
+            "eval_wo_tile_fwd_mlp_dim": 2048,
+            # --- Remat ---
+            "remat_policy": "full",
+            "use_iota_embed": True,
+            # --- Checkpoint loading (parameters only; no saves) ---
+            "enable_checkpointing": True,
+            "async_checkpointing": True,
+            "checkpoint_storage_concurrent_gb": 1024,
+            "load_parameters_path": CHECKPOINT_PATH_PLACEHOLDER,
+            "save_checkpoint_on_start": False,
+            "save_checkpoint_on_completion": False,
+            # --- Logging & diagnostics ---
+            "abort_on_nan_loss": True,
+            "abort_on_inf_loss": True,
+            "enable_tensorboard": False,
+            "enable_mllog": True,
+        },
+        xla_flags=(xla_flags.BASE_FLAGS + xla_flags.SINGLE_SPARSE_CORE_ALL_REDUCE),
+    ),
+)
 
 
 deepseek3_671b_fp8_tpu7x_8k = _add_to_model_dictionary(
@@ -277,6 +478,11 @@ deepseek3_671b_fp8_tpu7x_8k = _add_to_model_dictionary(
 
 
 RECIPES = {
+    "2k": Tpu7xRecipe(
+        model=deepseek3_671b_fp8_tpu7x_2k,
+        device_type="tpu7x-4096",
+        topology="4x16x32",
+    ),
     "8k": Tpu7xRecipe(
         model=deepseek3_671b_fp8_tpu7x_8k,
         device_type="tpu7x-16384",

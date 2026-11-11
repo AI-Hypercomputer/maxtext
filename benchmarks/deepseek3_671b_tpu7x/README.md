@@ -6,9 +6,10 @@ These recipes pre-train DeepSeek-V3 671B with FP8 on TPU7x, using FSDP + expert 
 
 | Recipe | Chips | Topology | Mesh | Per-device batch |
 |---|---|---|---|---|
+| `2k` | 2,048 (4,096 TensorCores) | `tpu7x` `4x16x32`, 1 slice | FSDP 512 × EP 8 | 4 |
 | `8k` | 8,192 (16,384 TensorCores) | `tpu7x` `8x32x32`, 1 slice | FSDP 1024 × EP 16 | 1 |
 
-2k and 4k recipes are coming.
+4k recipe is coming.
 
 Main features of the recipes:
 
