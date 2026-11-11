@@ -75,10 +75,8 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
       path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
       abs_val = _get_leaf_value(abs_leaf)
       val_shape = getattr(abs_val, "shape", None)
-      dim_num = muon_utils.to_stacked_layout(
-          muon_utils.transform_logic(path_strings, shape=val_shape, include_routers=include_routers),
-          len(val_shape or ()),
-          muon_utils.get_scan_axes(abs_leaf),
+      dim_num = muon_utils.get_stacked_dimension_numbers(
+          path_strings, val_shape, muon_utils.get_scan_axes(abs_leaf), include_routers
       )
       if dim_num is not None:
         sharding = _extract_sharding(leaf)
