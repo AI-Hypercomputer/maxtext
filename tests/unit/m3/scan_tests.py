@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import scan
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model
@@ -64,6 +65,13 @@ class ScanTest(parameterized.TestCase):
 
   @parameterized.parameters(0, 1, 2)
   def test_qwen3_scan_forward_gradients_and_checkpoint_layout(self, axis):
+    # Parameters are placed from their sharding metadata at construction, which
+    # needs a mesh in scope; one device is enough (README rule 3). The forward
+    # and gradient passes stay under it too: eager grads of mesh-placed
+    # parameters outside the mesh leave a JAX cache entry that later hands that
+    # mesh to unrelated mesh-less arrays (train_nnx_test failed after this test
+    # on the same xdist worker).
+    self.enter_context(jax.set_mesh(create_mesh(devices=jax.devices()[:1])))
     plain = create_qwen3_model(tiny_config(), rngs=nnx.Rngs(0))
     config = tiny_config(True, axis)
     scanned = scan.maybe_apply_scan(create_qwen3_model(config, rngs=nnx.Rngs(0)), config)

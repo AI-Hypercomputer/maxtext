@@ -32,6 +32,17 @@ _TINY = {
         "head_dim": 16,
         "vocab_size": 256,
     },
+    # Text-only (no vision tower): the decoder Qwen3-VL shares with Qwen3, at the same tiny width.
+    "qwen3-vl-2b": {
+        "base_num_decoder_layers": 2,
+        "base_emb_dim": 64,
+        "base_mlp_dim": 128,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 2,
+        "head_dim": 16,
+        "vocab_size": 256,
+        "use_multimodal": False,
+    },
 }
 
 
