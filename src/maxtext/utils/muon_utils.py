@@ -94,6 +94,10 @@ MOE_BLOCK_NAMES = (
     "routed_moe",
 )
 
+# Logical axis name of the inner scan of a nested block scan (gemma4, qwen3-next). Its layers are stacked on the axis
+# right after the outer block scan's `param_scan_axis`.
+NESTED_SCAN_AXIS_NAME = "local_layers"
+
 
 def transform_logic(
     path: Tuple[str, ...],
@@ -106,13 +110,20 @@ def transform_logic(
   to its corresponding MuonDimensionNumbers (mdn) specifying the reduction
   and output axes for 2D matrix orthogonalization.
 
-  In MaxText, layer scanning places the layer scan axis at index 1
-  (`param_scan_axis = 1`), resulting in shapes:
-    - Standard weights / MLPs: [in_features, num_layers, out_features]
-    - Attention QKV: [in_features, num_layers, num_heads, head_dim]
-    - Attention Out: [num_heads, num_layers, head_dim, out_features]
-    - MoE routed experts: [num_experts, num_layers, in_features, out_features]
-    - Grouped linear (o_a_proj): [o_groups, num_layers, in_features_per_group, out_features_per_group]
+  The returned axes index the parameter's feature axes only: axis 0 is the
+  first feature axis and negative axes count back from the last, as if the
+  layer-scan axes were absent. Shapes are written below with the scanned layer
+  axis in parentheses, e.g. [in_features, (num_layers), out_features]; where
+  that axis really sits depends on `param_scan_axis`, and
+  `get_muon_weight_dimension_numbers` maps the axes onto it with
+  `to_stacked_layout`. Callers passing a bare shape must lay it out with the
+  layer axis right after the first feature axis (`param_scan_axis = 1`), where
+  the two views coincide:
+    - Standard weights / MLPs: [in_features, (num_layers), out_features]
+    - Attention QKV: [in_features, (num_layers), num_heads, head_dim]
+    - Attention Out: [num_heads, (num_layers), head_dim, out_features]
+    - MoE routed experts: [num_experts, (num_layers), in_features, out_features]
+    - Grouped linear (o_a_proj): [o_groups, (num_layers), in_features_per_group, out_features_per_group]
 
   Strategy:
     1. Exclusions: Non-matrix, 1D, scalar, embedding, or state-space parameters
@@ -182,6 +193,52 @@ def transform_logic(
   return mdn((0,), (-1,))
 
 
+def get_scan_axes(variable) -> Tuple[int, ...]:
+  """Returns the axes of a scanned NNX variable that stack layers rather than hold features.
+
+  A scanned stack records its layer axis in the variable metadata (`param_scan_axis`,
+  see `nnx_scan.create_scanned_layers`); a nested block scan stacks its local layers on
+  the axis right after it. Unscanned variables have no scan axes.
+  """
+  metadata = variable.get_metadata() if hasattr(variable, "get_metadata") else {}
+  if nnx.PARTITION_NAME not in metadata or "param_scan_axis" not in metadata:
+    return ()
+  ndim = getattr(variable.get_value(), "ndim", 0)
+  # Stacks too low-rank to hold param_scan_axis keep their layer axis in front.
+  scan_axis = metadata["param_scan_axis"] if ndim > metadata["param_scan_axis"] else 0
+  logical_axes = next(
+      (
+          axes
+          for key in ("sharding_names", "out_sharding", "sharding")
+          if isinstance(axes := metadata.get(key), (tuple, list))
+      ),
+      (),
+  )
+  # Each scan overwrites the partition name but adds its axis to the logical axes, so a `local_layers` axis
+  # under another partition name was stacked again by an outer scan. A leaf still named `local_layers` (e.g. in
+  # the unscanned remainder block) carries only the inner axis.
+  nested = metadata[nnx.PARTITION_NAME] != NESTED_SCAN_AXIS_NAME and NESTED_SCAN_AXIS_NAME in logical_axes
+  return (scan_axis, scan_axis + 1) if nested and ndim > scan_axis + 1 else (scan_axis,)
+
+
+def to_stacked_layout(dim_num: Optional[mdn], ndim: int, scan_axes: Tuple[int, ...]) -> Optional[mdn]:
+  """Maps dimension numbers over a parameter's feature axes onto its stacked layout.
+
+  `transform_logic` indexes the feature axes alone. With the layer-scan axes
+  `scan_axes` interleaved among them, feature axis `i` lives at the `i`-th
+  position that is not a scan axis; negative axes stay negative. A stack of
+  vectors has no matrix to map onto and is left as the stacked matrix it is.
+  """
+  feature_axes = [axis for axis in range(ndim) if axis not in scan_axes]
+  if dim_num is None or not scan_axes or len(feature_axes) < 2:
+    return dim_num
+
+  def remap(axes):
+    return tuple(feature_axes[axis] - (ndim if axis < 0 else 0) for axis in axes)
+
+  return mdn(remap(dim_num.reduction_axis), remap(dim_num.output_axis))
+
+
 def get_transform_tree(tree, path=(), include_routers: bool = True):
   """Recursively extracts `MuonDimensionNumbers` for Linen abstract parameters."""
   if isinstance(tree, (dict, collections.abc.Mapping)) or hasattr(tree, "items"):
@@ -197,17 +254,18 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
   include_routers = getattr(config, "muon_include_routers", True) if config is not None else True
   _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
-  def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
+  def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], variable):
     # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
-    val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
-    val_shape = getattr(val, "shape", None)
-    return transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+    val_shape = getattr(variable.get_value(), "shape", None)
+    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+    return to_stacked_layout(dim_num, len(val_shape or ()), get_scan_axes(variable))
 
-  # tree_map_with_path handles NNX's PyTree structure; result is an nnx.State with the
-  # same structure, where each Param's value holds the mdn result.
-  muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(apply_transform_nnx, nnx.to_pure_dict(abstract_param))
-  muon_weight_dimension_numbers = nnx.State(muon_weight_dimension_numbers)
+  # Map over whole variables so each one's scan metadata is at hand; the result is an nnx.State
+  # with the same structure, holding the mdn result in place of each Param.
+  muon_weight_dimension_numbers = jax.tree.map_with_path(
+      apply_transform_nnx, abstract_param, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
 
   if verbose:
     _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
@@ -228,7 +286,7 @@ def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   print("\nIs this reasonable?")
 
 
-def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=True):
+def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=True, param_scan_axis=None):
   """Initializes a model and retrieves its Muon dimension numbers.
 
   This function sets up the configuration for a given model, initializes the
@@ -241,6 +299,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=T
     verbose: If True, prints detailed debugging information about the model
       structure and Muon dimension numbers.
     include_routers: Whether to apply Muon updates to MoE router matrices.
+    param_scan_axis: The layer axis of scanned parameters; the config default if None.
 
   Returns:
     A tree structure containing the Muon dimension numbers for the model's
@@ -256,6 +315,8 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=T
       f"muon_include_routers={include_routers}",
       "skip_jax_distributed_system=True",
   ]
+  if param_scan_axis is not None:
+    argv.append(f"param_scan_axis={param_scan_axis}")
   config = pyconfig.initialize(argv)
   # Setup model
   devices_array = maxtext_utils.create_device_mesh(config)
