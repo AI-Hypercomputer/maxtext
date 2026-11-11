@@ -1293,10 +1293,22 @@ class MultipassQtProvider(qwix.QtProvider):
       preferred_element_type: jax.typing.DTypeLike | None = None,
       *,
       out_sharding=None,
+      **kwargs,
   ) -> jax.Array:
-    """Routes multi-pass rules to `dot_general_qt`; else matches `QtProvider`."""
+    """Routes weight-contraction multi-pass rules to `dot_general_qt`; else matches `QtProvider`.
+
+    Extra keyword arguments from newer JAX versions (e.g. `reduction_order`) are
+    forwarded on the unquantized path.
+    """
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
-    if self._is_passthrough(rule):
+    (lhs_contracting, _), _ = dimension_numbers
+    # Some blocks (e.g. linear attention) call `dot_general` on activation-only
+    # states inside a matched module; only multi-pass weight contractions.
+    if (
+        self._is_passthrough(rule)
+        or not lhs_contracting
+        or (flax_util.find_param(lhs) is not None) == (flax_util.find_param(rhs) is not None)
+    ):
       return jax.lax.dot_general(
           lhs,
           rhs,
@@ -1304,6 +1316,7 @@ class MultipassQtProvider(qwix.QtProvider):
           precision=precision,
           preferred_element_type=preferred_element_type,
           out_sharding=out_sharding,
+          **kwargs,
       )
     config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, config)
@@ -1360,17 +1373,26 @@ class MultipassQtProvider(qwix.QtProvider):
       )
 
 
+# Matches decoder layer stacks: legacy (`decoder/.*layers.*`), m3 unscanned
+# (`decoder/layers_<i>/...` or `decoder/layers/<i>/...`), and m3 cycle-scanned decoders
+# (`decoder/cycles/.*` plus top-level `decoder/ple/.*`). `MultipassQtProvider` skips
+# activation-only `dot_general` calls inside matched modules. `model.mtp` is not matched.
+_DECODER_LAYER_MODULE_PATH = r"decoder/(.*layers.*|cycles/.*|ple/.*)"
+
+
 def _get_router_proj_unquantized_rule() -> qwix.QtRule:
-  """Returns a Qwix rule that keeps the MoE router (gate) projection unquantized.
+  """Returns a Qwix rule that keeps MoE router and shared-expert gate projections unquantized.
 
   Setting all qtypes to None bypasses quantization, falling back to standard
-  unquantized jax.lax.dot_general for both forward and backward passes.
+  unquantized jax.lax.dot_general for both forward and backward passes. Covers
+  legacy `.../gate`, wrapped m3 routers (`.../gate/linear`), `.../router`, and
+  `.../shared_expert_gate`.
 
   Note: Because Qwix rules are evaluated in a first-match way, this rule must be
-  placed before broader layer catch-all rules (e.g., 'decoder/.*layers.*').
+  placed before broader layer catch-all rules (e.g., `_DECODER_LAYER_MODULE_PATH`).
   """
   return qwix.QtRule(
-      module_path=r".*/gate$",
+      module_path=r".*/(gate(/linear)?|shared_expert_gate|router)$",
       weight_qtype=None,
       act_qtype=None,
       bwd_qtype=None,
@@ -1422,7 +1444,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         )
     )
 
-  paths = ["decoder/.*layers.*"]  # Main transformer layers
+  paths = [_DECODER_LAYER_MODULE_PATH]  # Main transformer layers
   if config.quantize_mtp:
     paths.append("mtp_block/.*")  # Multi-token prediction block
   # Disjunct regex paths, e.g. "(path1|path2|...)"
@@ -1468,7 +1490,7 @@ def get_quantization_rule(config: Config):
       rules.append(_get_router_proj_unquantized_rule())
     rules.append(
         qwix.QtRule(
-            module_path="decoder/.*layers.*",
+            module_path=_DECODER_LAYER_MODULE_PATH,
             weight_qtype=dtype,
             act_qtype=dtype,
             bwd_qtype=dtype,

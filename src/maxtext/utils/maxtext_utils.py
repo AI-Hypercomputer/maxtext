@@ -2040,6 +2040,8 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
+    if getattr(config, "use_m3_model", False) and mesh is not None and getattr(mesh, "size", 1) > 1:
+      named_sharding_state = sharding.apply_m3_default_named_sharding(abs_var_state, named_sharding_state, mesh)
 
     def _to_abstract_var(a_var, s_var):
       a_val = a_var.get_value()
