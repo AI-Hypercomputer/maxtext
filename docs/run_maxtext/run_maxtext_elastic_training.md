@@ -213,5 +213,6 @@ normal GKE cluster administration workflow.
 
 ## More information
 
+- [In-memory snapshotting on GKE with Pathways](run_maxtext_snapshotting.md)
 - [Running MaxText via Pathways](run_maxtext_via_pathways.md)
 - [Pathways on Cloud documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro)
