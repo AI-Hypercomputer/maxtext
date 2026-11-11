@@ -1,3 +1,3 @@
-google-tunix @ https://github.com/google/tunix/archive/385551df4643ee3ac3205e813a93c2ff217dffa5.zip
+google-tunix @ https://github.com/google/tunix/archive/a51a3bd1547e3c06b243f294e1a213044ae63469.zip
 tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/73d7342da057ecc4d4f453df85cb036976701efd.zip
 vllm @ git+https://github.com/vllm-project/vllm@5df63a7203cdb9328d824a27b682e77c7b9928be
