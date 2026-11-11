@@ -1866,6 +1866,12 @@ mhc_pallas_kernel_bwd_feature_block_size: 1024
 # Whether to use Transformer Engine's fused Triton kernels for (Sinkhorn) mHC on NVIDIA GPUs.
 # Requires mhc_expansion_rate=4 and enable_mhc_lite=False.
 te_mhc: False
+# Whether to contract the mHC rate (k) and embed (d) axes separately so the
+# TP-sharded embed dim is never all-gathered. Not supported with
+# use_mhc_pallas_kernel or te_mhc. Changes the checkpoint layout: mhc_norm.scale
+# (k*d,) -> (k, d) and pre/post/res_alpha (k*d, n) -> (k, d, n), so flag-off
+# checkpoints must be converted (the HF converters handle both layouts).
+mhc_split_axis_contraction: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
