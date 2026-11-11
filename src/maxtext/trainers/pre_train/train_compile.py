@@ -382,43 +382,38 @@ def main(argv: Sequence[str]) -> None:
 
   # Compile
   print("Jitting and compiling train step...", flush=True)
-  compiled = jit_and_compile(
-      func_to_compile,
-      shaped_train_args,
-      shaped_train_kwargs,
-      topology_mesh,
-      in_shard,
-      out_shard,
-      static_argnums,
-      donate_argnums,
-      config,
-      axis_rules(config.logical_axis_rules),
-  )
-  print("Jitting and compilation complete!", flush=True)
-
-  # Serialize and save the compiled object
-  if config.compiled_trainstep_file != "":
-    print("Saving compiled object...")
-    save_compiled(compiled, config.compiled_trainstep_file)
-    print("Successfully saved compiled object as" f" {config.compiled_trainstep_file}")
-  print("Finished train_compile.py successfully!", flush=True)
-  print(f"Cost analysis: {compiled.cost_analysis()}")
-  memory_analysis = compiled.memory_analysis()
-  print(f"Memory analysis: {memory_analysis}")
-  # arg + out + temp - alias overstates HBM use; the compiler's peak is the number to compare against HBM capacity.
-  peak_bytes = getattr(memory_analysis, "peak_memory_in_bytes", None)
-  if peak_bytes:
-    print(f"Peak memory: {peak_bytes / 2**30:.2f} GiB")
-
-  # Dump HLO if requested
-  if config.dump_hlo:
-    gcs_utils.upload_dump(
-        config.dump_hlo_local_dir,
-        config.dump_hlo_gcs_dir,
-        module_name=config.dump_hlo_module_name,
-        delete_local_after=config.dump_hlo_delete_local_after,
-        all_host_upload=config.dump_hlo_upload_all,
+  try:
+    compiled = jit_and_compile(
+        func_to_compile,
+        shaped_train_args,
+        shaped_train_kwargs,
+        topology_mesh,
+        in_shard,
+        out_shard,
+        static_argnums,
+        donate_argnums,
+        config,
+        axis_rules(config.logical_axis_rules),
     )
+    print("Jitting and compilation complete!", flush=True)
+
+    # Serialize and save the compiled object
+    if config.compiled_trainstep_file != "":
+      print("Saving compiled object...")
+      save_compiled(compiled, config.compiled_trainstep_file)
+      print("Successfully saved compiled object as" f" {config.compiled_trainstep_file}")
+    print("Finished train_compile.py successfully!", flush=True)
+    print(f"Cost analysis: {compiled.cost_analysis()}")
+    memory_analysis = compiled.memory_analysis()
+    print(f"Memory analysis: {memory_analysis}")
+    # arg + out + temp - alias overstates HBM use; the compiler's peak is the number to compare against HBM capacity.
+    peak_bytes = getattr(memory_analysis, "peak_memory_in_bytes", None)
+    if peak_bytes:
+      print(f"Peak memory: {peak_bytes / 2**30:.2f} GiB")
+  finally:
+    # Dump HLO if requested (including partial dumps when compilation or analysis fails).
+    if config.dump_hlo:
+      gcs_utils.upload_hlo_dump(config)
 
 
 if __name__ == "__main__":

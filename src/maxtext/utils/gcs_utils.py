@@ -88,33 +88,108 @@ def upload_blob(destination_gcs_name, source_file_name):
 
 
 def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
-  """Uploads a directory to a GCS location, with an optional filter (no-op if not found and decoupled)."""
-  if not all_host_upload and jax.process_index() != 0:
+  """Uploads a directory to a GCS location cleanly, without raising on missing paths or IO errors."""
+  try:
+    process_index = jax.process_index()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"Failed to query jax.process_index() during upload_dump: {e}; assuming process 0.")
+    process_index = 0
+  if not all_host_upload and process_index != 0:
     return
   if not _gcs_guard("upload_dump"):
     return
-  storage_client = storage.Client()
-  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(target_dir)
-  bucket = storage_client.get_bucket(bucket_name)
+  if not local_dir or not os.path.isdir(local_dir):
+    max_logging.warning(f"Local dump directory '{local_dir}' does not exist; skipping upload to '{target_dir}'.")
+    return
+  if not target_dir or not str(target_dir).startswith("gs://"):
+    max_logging.warning(
+        f"Target directory '{target_dir}' is not a GCS path (gs://...); "
+        f"skipping GCS upload and keeping local dump at '{local_dir}'."
+    )
+    return
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(str(target_dir))
+  if not bucket_name:
+    max_logging.warning(
+        f"Target GCS directory '{target_dir}' is missing a bucket name; "
+        f"skipping GCS upload and keeping local dump at '{local_dir}'."
+    )
+    return
+
+  files_to_upload = []
+  try:
+    for root, _, files in os.walk(local_dir):
+      for file in files:
+        if module_name and module_name not in file:
+          continue
+        local_path = os.path.join(root, file)
+        if os.path.isfile(local_path):
+          files_to_upload.append((local_path, os.path.relpath(local_path, local_dir)))
+  except OSError as e:
+    max_logging.error(f"Failed to scan local dump directory '{local_dir}': {e}")
+    return
+
+  if not files_to_upload:
+    max_logging.warning(
+        f"No matching dump files found in '{local_dir}' (module_name={module_name!r}); "
+        f"skipping upload to '{target_dir}'."
+    )
+    return
+
+  try:
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.error(
+        f"Failed to access GCS destination '{target_dir}' for dump upload: {e}. Keeping local dump at '{local_dir}'."
+    )
+    return
+
   if all_host_upload:
     hostname = socket.gethostname()  # Alternatively can use jax.process_id()
     prefix_name = os.path.join(prefix_name, hostname)
-    target_dir = os.path.join(target_dir, hostname)
+    target_dir = os.path.join(str(target_dir), hostname)
+
   max_logging.log(f"Uploading Dump to {target_dir}...")
-  for root, _, files in os.walk(local_dir):
-    for file in files:
-      if module_name and module_name not in file:
-        continue
-      else:
-        max_logging.log(f"Uploading {file}")
-      local_path = os.path.join(root, file)
-      relative_path = os.path.relpath(local_path, local_dir)
-      blob_name = os.path.join(prefix_name, relative_path)
+  upload_failed = False
+  for local_path, relative_path in files_to_upload:
+    file_name = os.path.basename(local_path)
+    blob_name = os.path.join(prefix_name, relative_path)
+    try:
+      max_logging.log(f"Uploading {file_name}")
       blob = bucket.blob(blob_name)
       blob.upload_from_filename(local_path)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      upload_failed = True
+      max_logging.error(f"Failed to upload '{local_path}' to 'gs://{bucket_name}/{blob_name}': {e}")
+
+  if upload_failed:
+    max_logging.warning(f"One or more dump files failed to upload to {target_dir}; keeping local dump at '{local_dir}'.")
+    return
+
   max_logging.log(f"Dump Uploaded to {target_dir}!")
   if delete_local_after:
-    shutil.rmtree(local_dir)
+    try:
+      shutil.rmtree(local_dir)
+    except FileNotFoundError:
+      pass
+    except OSError as e:
+      max_logging.warning(f"Failed to remove local dump directory '{local_dir}': {e}")
+
+
+def upload_hlo_dump(config):
+  """Best-effort HLO dump upload from config without raising into caller cleanup."""
+  if not getattr(config, "dump_hlo", False):
+    return
+  try:
+    upload_dump(
+        config.dump_hlo_local_dir,
+        config.dump_hlo_gcs_dir,
+        module_name=config.dump_hlo_module_name,
+        delete_local_after=config.dump_hlo_delete_local_after,
+        all_host_upload=config.dump_hlo_upload_all,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.error(f"Unexpected error during HLO dump upload: {e}")
 
 
 def gcs_path_exists(file_path):

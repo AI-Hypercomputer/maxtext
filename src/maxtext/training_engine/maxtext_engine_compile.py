@@ -356,49 +356,46 @@ def main(argv: Sequence[str]) -> None:
         flush=True,
     )
   print("Jitting and compiling the engine's kernels...", flush=True)
-  compiled = engine.compile_kernels(micro_batch)
-  print("Jitting and compilation complete!", flush=True)
+  compile_succeeded = False
+  try:
+    compiled = engine.compile_kernels(micro_batch)
+    print("Jitting and compilation complete!", flush=True)
 
-  # Saved first, so the executables are kept even if the report below raises.
-  if config.compiled_trainstep_file != "":
+    # Saved first, so the executables are kept even if the report below raises.
+    if config.compiled_trainstep_file != "":
+      for name in KERNEL_NAMES:
+        save_path = kernel_save_path(config.compiled_trainstep_file, name)
+        pre_train_compile.save_compiled(compiled[name], save_path)
+        print(f"Successfully saved compiled {name} kernel as {save_path}")
+
     for name in KERNEL_NAMES:
-      save_path = kernel_save_path(config.compiled_trainstep_file, name)
-      pre_train_compile.save_compiled(compiled[name], save_path)
-      print(f"Successfully saved compiled {name} kernel as {save_path}")
+      print(f"--- {name} ---")
+      print(f"Cost analysis: {compiled[name].cost_analysis()}")
+      print(f"Memory analysis: {compiled[name].memory_analysis()}")
 
-  for name in KERNEL_NAMES:
-    print(f"--- {name} ---")
-    print(f"Cost analysis: {compiled[name].cost_analysis()}")
-    print(f"Memory analysis: {compiled[name].memory_analysis()}")
-
-  # The raw analyses above see only each kernel's arguments. The report adds what each kernel runs
-  # alongside without being passed, and names the peak.
-  state = engine.train_state_avals()
-  print(
-      memory_report.format_memory_report(memory_report.memory_report(compiled, state)),
-      flush=True,
-  )
-
-  print("Finished training_engine/maxtext_engine_compile.py successfully!", flush=True)
-
-  if config.dump_hlo:
-    # `upload_dump` deletes what it uploaded; say which filter was too narrow rather than raise
-    # from the rmtree of a directory XLA never wrote.
-    if not os.path.isdir(config.dump_hlo_local_dir):
-      modules = ", ".join(f"jit_{name}" for name in KERNEL_NAMES)
-      raise FileNotFoundError(
-          "dump_hlo is set but XLA wrote nothing to"
-          f" {config.dump_hlo_local_dir}:"
-          f" dump_hlo_local_module_name={config.dump_hlo_local_module_name!r}"
-          f" matched none of the engine's kernels ({modules})."
-      )
-    gcs_utils.upload_dump(
-        config.dump_hlo_local_dir,
-        config.dump_hlo_gcs_dir,
-        module_name=config.dump_hlo_module_name,
-        delete_local_after=config.dump_hlo_delete_local_after,
-        all_host_upload=config.dump_hlo_upload_all,
+    # The raw analyses above see only each kernel's arguments. The report adds what each kernel runs
+    # alongside without being passed, and names the peak.
+    state = engine.train_state_avals()
+    print(
+        memory_report.format_memory_report(memory_report.memory_report(compiled, state)),
+        flush=True,
     )
+
+    print("Finished training_engine/maxtext_engine_compile.py successfully!", flush=True)
+    compile_succeeded = True
+  finally:
+    if config.dump_hlo:
+      # `upload_dump` deletes what it uploaded; say which filter was too narrow rather than raise
+      # from the rmtree of a directory XLA never wrote.
+      if compile_succeeded and not os.path.isdir(config.dump_hlo_local_dir):
+        modules = ", ".join(f"jit_{name}" for name in KERNEL_NAMES)
+        raise FileNotFoundError(
+            "dump_hlo is set but XLA wrote nothing to"
+            f" {config.dump_hlo_local_dir}:"
+            f" dump_hlo_local_module_name={config.dump_hlo_local_module_name!r}"
+            f" matched none of the engine's kernels ({modules})."
+        )
+      gcs_utils.upload_hlo_dump(config)
 
 
 if __name__ == "__main__":
