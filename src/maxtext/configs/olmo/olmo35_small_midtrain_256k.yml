@@ -26,8 +26,8 @@
 #
 # Required environment variables for direct `train.py` launches (prevents legacy 2-stage RS at DP >= 8):
 #   export OLMOE3_ENABLE_2STAGE_RS=0 OLMOE3_FAST_HOST_LOOP=1 OLMOE3_FAST_SC_DEVICE_PUT=1
-# Recommended production flags (avoid ~20-80 min cold XLA recompiles, multi-GiB prefetch buffers & slow OCDBT merges):
-#   jax_compilation_cache_dir=gs://<bucket>/jax_cache batch_prefetch_depth=0 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
+# Recommended production flags (avoid ~20-80 min cold XLA recompiles & slow OCDBT merges):
+#   jax_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
 # Important checkpoint note: Always start Stage 3 from a Stage 2 aligned checkpoint (or run `--mode bridge_init` first);
 #   never restore a text-only checkpoint directly into `use_multimodal=true` with uninitialized vision/connector weights.
 #
@@ -45,7 +45,7 @@
 #   - 128 chips (`4x4x8` v4-256 @ 4.19M tok/step, zero optimizer offload):
 #       ici_data_parallelism=1  ici_context_parallelism=8  ici_expert_parallelism=16 per_device_batch_size=0.125  decoder_layer_input=offload context=remat num_vocab_tiling=16 moe_a2a_token_chunks=16 olmo_vit_crop_chunk_size=16
 #   - Mixed multimodal 256K (`dataset_type=olmo_mm` with seekable byte-range `.npz` slicing or live `olmo_mm_config_path`):
-#       dataset_type=olmo_mm olmo_mm_batches_dir=gs://<bucket>/batches/mt_lc_256k batch_prefetch_depth=0 use_multimodal=true olmo_max_crops_per_seq=1024 olmo_max_pooled_patches_per_seq=200704 olmo_vit_cp_shard_crops=true olmo_vit_remat_blocks=true olmo_vit_crop_chunk_size=16 olmo_use_loss_weights=true
+#       dataset_type=olmo_mm olmo_mm_batches_dir=gs://<bucket>/batches/mt_lc_256k use_multimodal=true olmo_max_crops_per_seq=1024 olmo_max_pooled_patches_per_seq=200704 olmo_vit_cp_shard_crops=true olmo_vit_remat_blocks=true olmo_vit_crop_chunk_size=16 olmo_use_loss_weights=true
 
 base_config: "base.yml"
 model_name: "olmo35-small-e256k8-sh2x"

@@ -35,7 +35,7 @@ All fixes below are integrated directly into this branch:
    * Implements per-component learning rate scales and schedules (`olmo_vision_lr_scale`, `olmo_connector_lr_scale`, `olmo_embedding_lr_scale`, `olmo_connector_warmup_steps`, `olmo_vision_lr_cosine_alpha_f`, `olmo_hold_final_lr`), per-component global gradient norm clipping (`olmo_per_component_grad_clip=true`), embedding row-range gradient masking (`olmo_trainable_embedding_row_range=[100278, 100284]`), and `load_balance_loss_weight=0.0` during Stage 1 Bridge (keeping router `expert_bias` identical to pretraining, matching `OLMo-core`'s `restore_pretraining_router_lb=True`).
 4. **Multimodal & 256K Chunked Text Data Pipelines (`src/maxtext/input_pipeline/olmo_mm_data_processing.py`, `tools/data_generation/export_olmo_mm_batches.py`, `src/maxtext/input_pipeline/olmo_data_grain.py`)**:
    * `dataset_type=olmo_mm` supports both pre-exported `.npz` global batches (`olmo_mm_batches_dir`, for validation and short runs on TPU pods without local media mounts) and live `OLMo-core` `MixtureDataLoader` configs (`olmo_mm_config_path`, including a built-in `merged_mt_lc` composable text-replay shim and `/weka` path remapping).
-   * For multi-GiB `.npz` archives (such as `~6.4 GiB` `256K` global batches on GCS), `load_maxtext_batch_npz` parses the uncompressed ZIP local file headers and `.npy` array headers directly over seekable file streams, issuing byte-range reads strictly for each host's local DP row slice (`6.59 s` per `6.37 GiB` batch on GCS vs. downloading the entire archive). Set `batch_prefetch_depth=0` at `256K` to avoid multi-GiB host prefetch buffers.
+   * For multi-GiB `.npz` archives (such as `~6.4 GiB` `256K` global batches on GCS), `load_maxtext_batch_npz` parses the uncompressed ZIP local file headers and `.npy` array headers directly over seekable file streams, issuing byte-range reads strictly for each host's local DP row slice (`6.59 s` per `6.37 GiB` batch on GCS vs. downloading the entire archive).
    * `dataset_type=olmo_grain` supports `256K` packed streams over `8K`-chunked Dolmino + `256K` Longmino `.npy` files with `olmo_segment_chunk_length=8192` and `olmo_mask_chunk_boundary_targets_only=true` (masking only synthetic `8K` chunk edges while keeping real intra-chunk `EOS` transitions supervised) plus `olmo_apply_ngram_filter=true`.
 
 > **Operational Guardrails for Production Launches:**
@@ -126,12 +126,11 @@ python tools/data_generation/export_olmo_mm_batches.py \
   --num_workers 4
 ```
 
-Then pass to `train.py` (with `batch_prefetch_depth=0` recommended at `256K` so hosts use seekable byte-range reads per step without multi-GiB prefetch queues):
+Then pass to `train.py` (each host issues byte-range reads for its own rows of the current batch; nothing is prefetched):
 
 ```text
 dataset_type=olmo_mm
 olmo_mm_batches_dir=gs://<BUCKET>/olmo35/batches/joint_8k
-batch_prefetch_depth=0
 ```
 
 > **Note on media coverage:** The batches exported for validation cover `16` of `28` vision sources and both text sources (`dolmino`, `longermino`). The `4` `pixmo_*` sources that read `torch_datasets/pixmo_images` and the `8` `cosyn_*` sources that read `torch_datasets/cosyn_images` need those two image directories under the remapped `/weka` root before a live 28-source run. Live loading also needs `pypdfium2` and `torchvision` on the workers.
@@ -191,6 +190,7 @@ python -m maxtext.trainers.pre_train.train \
   trainable_parameters_mask="['OLMo35VisionConnector','token_embedder']" \
   olmo_trainable_embedding_row_range="[100278,100284]" \
   frozen_parameters_mask="[]" \
+  override_model_config=true \
   load_balance_loss_weight=0.0 \
   olmo_text_loss_group_weight=0.0 \
   olmo_vision_loss_group_weight=0.0 \
@@ -243,7 +243,7 @@ python -m maxtext.trainers.pre_train.train \
   olmo_use_loss_weights=true \
   olmo_max_crops_per_seq=1024 \
   olmo_max_pooled_patches_per_seq=200704 \
-  jax_compilation_cache_dir=gs://<BUCKET>/jax_cache \
+  jax_cache_dir=gs://<BUCKET>/jax_cache \
   checkpoint_period=500 \
   checkpoint_storage_use_ocdbt=false \
   checkpoint_storage_use_zarr3=false

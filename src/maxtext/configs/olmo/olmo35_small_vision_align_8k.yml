@@ -21,14 +21,14 @@
 #   Required environment variables for direct `train.py` launches (prevents legacy 2-stage RS at DP >= 8):
 #     export OLMOE3_ENABLE_2STAGE_RS=0 OLMOE3_FAST_HOST_LOOP=1 OLMOE3_FAST_SC_DEVICE_PUT=1
 #   Recommended production flags (`dataset_type=olmo_mm` uses seekable byte-range `.npz` slicing across hosts):
-#     dataset_type=olmo_mm olmo_mm_batches_dir=gs://<bucket>/batches/joint_8k jax_compilation_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
+#     dataset_type=olmo_mm olmo_mm_batches_dir=gs://<bucket>/batches/joint_8k jax_cache_dir=gs://<bucket>/jax_cache checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false
 #   Important checkpoint note: Before Stage 1 Bridge, always initialize from a text checkpoint + HF SigLIP2 (`e8e4872`) via:
 #     python -m maxtext.checkpoint_conversion.convert_olmo35_multimodal_checkpoint --mode bridge_init ...
 #   For exact 128-seq (1.05M tok/step) Stage 1/2 batch on 128 chips (`v4-256`):
 #     ici_data_parallelism=2 ici_expert_parallelism=64 per_device_batch_size=1.0
 #   For Stage 1 Connector Bridge (freeze 25L SigLIP2 + 40L LM, train Connector + 6 special <im_*> rows; 500 steps, t_max=250):
 #     freeze_vision_encoder_params=true trainable_parameters_mask="['OLMo35VisionConnector','token_embedder']" \
-#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" load_balance_loss_weight=0.0 \
+#     olmo_trainable_embedding_row_range="[100278,100284]" frozen_parameters_mask="[]" override_model_config=true load_balance_loss_weight=0.0 \
 #     olmo_text_loss_group_weight=0.0 olmo_vision_loss_group_weight=0.0 \
 #     learning_rate=2.0e-4 lr_schedule_type=cosine learning_rate_schedule_steps=250 steps=500 warmup_steps_fraction=0.4 \
 #     learning_rate_final_fraction=0.1 olmo_hold_final_lr=true olmo_vision_lr_cosine_alpha_f=-1.0 olmo_connector_lr_scale=1.0 olmo_embedding_lr_scale=1.0
