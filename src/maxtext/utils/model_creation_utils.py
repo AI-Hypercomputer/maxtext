@@ -778,6 +778,12 @@ def create_nnx_abstract_model(
   """
 
   with logical_axis_rules(config.logical_axis_rules):
+    # m3 models need the mesh in scope while they are traced (see below). Build
+    # it here when the caller did not pass one: left to `from_config`, it would
+    # be built inside the `eval_shape` trace, and `m3_models.create_model`
+    # would then have to enter it there, which `jax.set_mesh` rejects.
+    if getattr(config, "use_m3_model", False) and mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
@@ -786,8 +792,15 @@ def create_nnx_abstract_model(
     # Wrapping in `jax.set_mesh(mesh)` trips Flax 0.12.6's `_to_variable` for
     # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
     # AbstractMesh). Sharding is resolved afterwards via the helper, so the
-    # wrap is unnecessary here.
-    abs_model = nnx.eval_shape(_create_model)
+    # wrap is unnecessary here for legacy models. m3 models are the exception:
+    # their parameters are placed from `out_sharding` metadata as they are
+    # created (`eager_sharding`), which needs the mesh in scope, and they carry
+    # no AQT variables.
+    if getattr(config, "use_m3_model", False) and mesh is not None:
+      with jax.set_mesh(mesh):
+        abs_model = nnx.eval_shape(_create_model)
+    else:
+      abs_model = nnx.eval_shape(_create_model)
     if mesh is None:
       mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
