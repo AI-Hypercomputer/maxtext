@@ -109,21 +109,26 @@ jobs:
             build_mode: stable
             workflow: pre-training
             image_name: maxtext_jax_stable
+            dependencies_image_name: maxtext_jax_stable_dependencies
           - name: "TPU Pre-Training Nightly"
             build_mode: nightly
             workflow: pre-training
             image_name: maxtext_jax_nightly
+            dependencies_image_name: maxtext_jax_nightly_dependencies
           - name: "TPU Post-Training Stable"
             build_mode: stable
             workflow: post-training
             image_name: maxtext_post_training_stable
+            dependencies_image_name: maxtext_post_training_stable_dependencies
           - name: "TPU Post-Training Nightly"
             build_mode: nightly
             workflow: post-training
             image_name: maxtext_post_training_nightly
+            dependencies_image_name: maxtext_post_training_nightly_dependencies
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
+      dependencies_image_name: ${{ matrix.dependencies_image_name }}
       repository_name: ${{ inputs.repository_name || 'maxtext-images' }}
       device: tpu
       build_mode: ${{ matrix.build_mode }}

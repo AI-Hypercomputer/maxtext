@@ -122,6 +122,14 @@ build_maxtext_docker_image DEVICE=gpu MODE=nightly JAX_VERSION=$JAX_VERSION
 build_maxtext_docker_image WORKFLOW=post-training
 ```
 
+### Dependencies-only Docker image (without MaxText code)
+
+To build a base image with only MaxText's dependencies installed (matching the daily `*_dependencies` images without MaxText source code baked in):
+
+```bash
+build_maxtext_docker_image INCLUDE_CODE=false
+```
+
 ## Upload MaxText Docker Image to Registry
 
 You can upload your built Docker image to either Google Artifact Registry (recommended) or Google Container Registry (GCR, legacy).

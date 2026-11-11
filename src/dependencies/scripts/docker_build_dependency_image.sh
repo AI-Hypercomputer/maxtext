@@ -66,6 +66,18 @@ fi
 if [[ -z ${INCLUDE_TEST_ASSETS} ]]; then
   export INCLUDE_TEST_ASSETS=false
 fi
+if [[ -z ${INCLUDE_CODE} ]]; then
+  export INCLUDE_CODE=true
+fi
+INCLUDE_CODE=$(echo "${INCLUDE_CODE}" | tr '[:upper:]' '[:lower:]')
+if [[ "${INCLUDE_CODE}" != "true" && "${INCLUDE_CODE}" != "false" ]]; then
+  echo "ERROR: Invalid INCLUDE_CODE='${INCLUDE_CODE}'. Expected 'true' or 'false'." >&2
+  exit 1
+fi
+if [[ "${INCLUDE_CODE}" == "false" && "${INCLUDE_TEST_ASSETS}" == "true" ]]; then
+  echo "ERROR: INCLUDE_TEST_ASSETS=true cannot be used when INCLUDE_CODE=false." >&2
+  exit 1
+fi
 if [[ -z ${TF} ]]; then
   export TF=false
 fi
@@ -84,7 +96,11 @@ docker_build_args=(
 run_docker_build() {
   local dockerfile_path="$1"
   shift 1 # Move past the first argument, the rest are build-args
-  docker build --network host $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
+  local target_args=()
+  if [[ "${INCLUDE_CODE}" == "false" ]]; then
+    target_args=(--target dependencies)
+  fi
+  docker build --network host "${target_args[@]}" $(printf -- '--build-arg %q ' "$@") -f "$dockerfile_path" -t "$LOCAL_IMAGE_NAME" .
 }
 
 # Function to build image for GPUs
@@ -125,9 +141,14 @@ echo ""
 echo "*************************"
 echo ""
 
-echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
-It only has the dependencies installed. Assuming you're on a TPUVM, to run the
-docker image locally and mirror your local working directory run:"
+if [[ "${INCLUDE_CODE}" == "false" ]]; then
+  echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
+It only has the dependencies installed. Assuming you're on a TPUVM, to run the"
+else
+  echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
+It has the dependencies and MaxText code installed. Assuming you're on a TPUVM, to run the"
+fi
+echo "docker image locally and mirror your local working directory run:"
 echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
