@@ -51,6 +51,15 @@ set -e
 # The latest value of each flag, for the heavy-test gate (GITHUB_OUTPUT keeps the last value written).
 declare -A FLAG_VALUES=()
 
+CORE_TEST_FLAGS=(
+  run_tests
+  run_pretrain_tests
+  run_posttrain_tests
+  run_pathways_tests
+  run_gpu_tests
+)
+TEST_FLAGS=("${CORE_TEST_FLAGS[@]}" run_notebooks)
+
 # Helper to output a key-value flag to GITHUB_OUTPUT (if set) and stdout
 emit_flag() {
   local key="$1"
@@ -70,7 +79,7 @@ emit_flag() {
 set_test_flags() {
   local enable_tests="$1"
   local enable_notebooks="$2"
-  for flag in run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+  for flag in "${CORE_TEST_FLAGS[@]}"; do
     emit_flag "$flag" "$enable_tests"
   done
   emit_flag "run_notebooks" "$enable_notebooks"
@@ -79,10 +88,42 @@ set_test_flags() {
 # Helper to enable specific flags and set all others to 'false'
 enable_flags() {
   local enabled=" $* "
-  for flag in run_tests run_notebooks run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+  for flag in "${TEST_FLAGS[@]}"; do
     if [[ "$enabled" == *" $flag "* ]]; then
       emit_flag "$flag" "true"
     fi
+  done
+}
+
+# Name each prebuilt CI dependency image for this commit
+emit_deps_tags() {
+  local reqs='src/dependencies/requirements/generated_requirements'
+  local extra='src/dependencies/extra_deps'
+  local scripts='src/dependencies/scripts'
+  local dockerfile='src/dependencies/dockerfiles/test_deps_env.Dockerfile'
+  local build_workflow='.github/workflows/build_deps_image.yml'
+  local image inputs input
+
+  for image in tpu_pre_train tpu_post_train gpu_pre_train; do
+    case "$image" in
+      tpu_pre_train)
+        inputs=("${reqs}/tpu-requirements.txt" "${extra}/pre_train_github_deps.txt" "${scripts}/install_pre_train_extra_deps.py")
+        ;;
+      tpu_post_train)
+        inputs=("${reqs}/tpu-post-train-requirements.txt" "${extra}/post_train_github_deps.txt" "${scripts}/install_post_train_extra_deps.py")
+        ;;
+      gpu_pre_train)
+        inputs=("${reqs}/cuda12-requirements.txt" "${extra}/pre_train_github_deps.txt" "${scripts}/install_pre_train_extra_deps.py")
+        ;;
+    esac
+    inputs+=("$dockerfile" "$build_workflow")
+    for input in "${inputs[@]}"; do
+      if [[ ! -e "$input" ]]; then
+        echo "::error::Dependency image input missing: ${input}"
+        exit 1
+      fi
+    done
+    emit_flag "${image}_deps_tag" "deps-$(sha256sum "${inputs[@]}" | sha256sum | cut -c1-16)"
   done
 }
 
@@ -173,6 +214,8 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 # Lowercased so that values such as "True" from manual runs are also honored.
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
+
+emit_deps_tags
 
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
   echo "FORCE_ALL_TESTS is set, running all tests and notebooks"
@@ -339,21 +382,21 @@ while IFS= read -r file; do
   fi
 
   # TPU pre-training dependencies changes
-  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-requirements.txt$"; then
+  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-requirements.txt$|src/dependencies/extra_deps/pre_train_github_deps\.txt$|src/dependencies/scripts/install_pre_train_extra_deps\.py$"; then
     echo "TPU pre-training dependencies changed, enabling TPU pre-training tests."
     enable_flags run_tests run_pretrain_tests run_pathways_tests
     matched=true
   fi
 
   # TPU post-training dependencies changes
-  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt$"; then
+  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt$|src/dependencies/extra_deps/post_train_github_deps\.txt$|src/dependencies/scripts/install_post_train_extra_deps\.py$"; then
     echo "TPU post-training dependencies changed, enabling TPU post-training tests."
     enable_flags run_tests run_posttrain_tests run_pathways_tests
     matched=true
   fi
 
   # GPU dependencies changes
-  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt$"; then
+  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt$|src/dependencies/extra_deps/pre_train_github_deps\.txt$|src/dependencies/scripts/install_pre_train_extra_deps\.py$"; then
     echo "GPU dependencies changed, enabling GPU tests."
     enable_flags run_tests run_gpu_tests
     matched=true
@@ -414,7 +457,7 @@ if [ ${#FINAL_UNMATCHED_FILES[@]} -gt 0 ]; then
   echo "The following changed files did not match any specific domain rules:"
   printf '  - %s\n' "${FINAL_UNMATCHED_FILES[@]}"
   echo "Enabling all test suites except notebook tests as a fallback."
-  enable_flags run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests
+  enable_flags "${CORE_TEST_FLAGS[@]}"
 fi
 
 if [[ "${RUN_TPU7X:-}" == "true" ]]; then

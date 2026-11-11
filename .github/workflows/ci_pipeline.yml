@@ -88,6 +88,9 @@ jobs:
       # Needed to list the PR's changed files via the GitHub REST API.
       pull-requests: read
     outputs:
+      tpu_pre_train_deps_tag: ${{ steps.check.outputs.tpu_pre_train_deps_tag }}
+      tpu_post_train_deps_tag: ${{ steps.check.outputs.tpu_post_train_deps_tag }}
+      gpu_pre_train_deps_tag: ${{ steps.check.outputs.gpu_pre_train_deps_tag }}
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
       run_pretrain_tests: ${{ steps.check.outputs.run_pretrain_tests }}
@@ -182,6 +185,141 @@ jobs:
           uv pip install --python .venv/bin/python pytest absl-py
           PYTHONPATH=. .venv/bin/python -m pytest -v --noconftest -o addopts="--import-mode=importlib --strict-markers" tests/dev
 
+  resolve_deps_images:
+    name: Resolve Dependency Images
+    needs: [analyze_code_changes]
+    if: |
+      !cancelled() &&
+      needs.analyze_code_changes.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_tests == 'true'
+    runs-on: linux-x86-n4-16-buildkit
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
+    timeout-minutes: 15
+    outputs:
+      tpu_pre_train_image: ${{ steps.resolve.outputs.tpu_pre_train_image }}
+      tpu_pre_train_tag: ${{ steps.resolve.outputs.tpu_pre_train_tag }}
+      tpu_pre_train_missing: ${{ steps.resolve.outputs.tpu_pre_train_missing }}
+      tpu_pre_train_base: ${{ steps.resolve.outputs.tpu_pre_train_base }}
+      tpu_post_train_image: ${{ steps.resolve.outputs.tpu_post_train_image }}
+      tpu_post_train_tag: ${{ steps.resolve.outputs.tpu_post_train_tag }}
+      tpu_post_train_missing: ${{ steps.resolve.outputs.tpu_post_train_missing }}
+      tpu_post_train_base: ${{ steps.resolve.outputs.tpu_post_train_base }}
+      gpu_pre_train_image: ${{ steps.resolve.outputs.gpu_pre_train_image }}
+      gpu_pre_train_tag: ${{ steps.resolve.outputs.gpu_pre_train_tag }}
+      gpu_pre_train_missing: ${{ steps.resolve.outputs.gpu_pre_train_missing }}
+      gpu_pre_train_base: ${{ steps.resolve.outputs.gpu_pre_train_base }}
+      # The fork and bot guard, in one place rather than on each build job.
+      can_build: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]') }}
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+      - name: Look up each dependency image
+        id: resolve
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}
+          TPU_PRE_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.tpu_pre_train_deps_tag }}
+          TPU_POST_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.tpu_post_train_deps_tag }}
+          GPU_PRE_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.gpu_pre_train_deps_tag }}
+        run: |
+          repo="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images"
+
+          resolve() {
+            local key="$1" image="$2" reqs_tag="$3" base="$4" digest err missing
+            if [ -z "${reqs_tag}" ]; then
+              echo "::warning::analyze_code_changes named no ${image}; tests will install dependencies in full."
+              return 0
+            fi
+            if [[ ! "${reqs_tag}" =~ ^deps-[0-9a-f]{16}$ ]]; then
+              echo "::error::analyze_code_changes produced a malformed tag for ${image}: ${reqs_tag}"
+              exit 1
+            fi
+            if ! digest=$(gcloud container images describe "${repo}/${base}" --format='value(image_summary.digest)' 2>/dev/null) ||
+              [ -z "${digest}" ]; then
+              echo "::error::Could not read the digest of ${repo}/${base}; the base image is missing."
+              exit 1
+            fi
+            digest="${digest#sha256:}"
+            local tag="${reqs_tag}-b${digest:0:12}"
+            if err=$(gcloud container images describe "${repo}/${image}:${tag}" 2>&1 >/dev/null); then
+              missing=false
+              echo "${image}:${tag} is present."
+            elif grep -qiE 'not found|NOT_FOUND|does not exist' <<< "${err}"; then
+              missing=true
+              echo "${image}:${tag} is missing and will be built."
+            else
+              echo "::error::Could not determine whether ${image}:${tag} exists: ${err}"
+              exit 1
+            fi
+
+            {
+              echo "${key}_image=${image}:${tag}"
+              echo "${key}_tag=${tag}"
+              echo "${key}_missing=${missing}"
+              echo "${key}_base=${base%%:*}@sha256:${digest}"
+            } >> "$GITHUB_OUTPUT"
+          }
+          resolve tpu_pre_train maxtext-deps-tpu-pre-train "${TPU_PRE_TRAIN_TAG}" maxtext-unit-test-tpu:py312-bookworm
+          resolve tpu_post_train maxtext-deps-tpu-post-train "${TPU_POST_TRAIN_TAG}" maxtext-unit-test-tpu:py312-bookworm
+          resolve gpu_pre_train maxtext-deps-gpu-pre-train "${GPU_PRE_TRAIN_TAG}" maxtext-unit-test-cuda12:py312
+
+  build_deps_tpu_pre_train:
+    name: Build TPU Pre-Training Dependency Image
+    needs: [analyze_code_changes, resolve_deps_images]
+    if: |
+      !cancelled() &&
+      needs.resolve_deps_images.outputs.tpu_pre_train_missing == 'true' &&
+      needs.resolve_deps_images.outputs.can_build == 'true' &&
+      (needs.analyze_code_changes.outputs.run_pretrain_tests == 'true' ||
+      (needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
+        (github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'scheduled-only') ||
+          needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')))
+    uses: ./.github/workflows/build_deps_image.yml
+    with:
+      base_image: ${{ needs.resolve_deps_images.outputs.tpu_pre_train_base }}
+      deps_image: maxtext-deps-tpu-pre-train
+      maxtext_extra: tpu
+      deps_tag: ${{ needs.resolve_deps_images.outputs.tpu_pre_train_tag }}
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
+  build_deps_tpu_post_train:
+    name: Build TPU Post-Training Dependency Image
+    needs: [analyze_code_changes, resolve_deps_images]
+    if: |
+      !cancelled() &&
+      needs.resolve_deps_images.outputs.tpu_post_train_missing == 'true' &&
+      needs.resolve_deps_images.outputs.can_build == 'true' &&
+      (needs.analyze_code_changes.outputs.run_posttrain_tests == 'true' ||
+      (needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
+        (github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'scheduled-only') ||
+          needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')))
+    uses: ./.github/workflows/build_deps_image.yml
+    with:
+      base_image: ${{ needs.resolve_deps_images.outputs.tpu_post_train_base }}
+      deps_image: maxtext-deps-tpu-post-train
+      maxtext_extra: tpu-post-train
+      deps_tag: ${{ needs.resolve_deps_images.outputs.tpu_post_train_tag }}
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
+  build_deps_gpu_pre_train:
+    name: Build GPU Pre-Training Dependency Image
+    needs: [analyze_code_changes, resolve_deps_images]
+    if: |
+      !cancelled() &&
+      needs.resolve_deps_images.outputs.gpu_pre_train_missing == 'true' &&
+      needs.resolve_deps_images.outputs.can_build == 'true' &&
+      needs.analyze_code_changes.outputs.run_gpu_tests == 'true' &&
+      needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
+    uses: ./.github/workflows/build_deps_image.yml
+    with:
+      base_image: ${{ needs.resolve_deps_images.outputs.gpu_pre_train_base }}
+      deps_image: maxtext-deps-gpu-pre-train
+      maxtext_extra: cuda12
+      deps_tag: ${{ needs.resolve_deps_images.outputs.gpu_pre_train_tag }}
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
   build_and_upload_maxtext_package:
     name: Build MaxText Package
     needs: [analyze_code_changes, code_quality_check, docs_build_check, dev_tests]
@@ -247,7 +385,7 @@ jobs:
   # flags a heavy job depends on, update the gate's "only a change that needs the heavy suites" rule too.
   tpu-pretrain-tests:
     name: TPU Pretrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [gate_test_run, analyze_code_changes, resolve_deps_images, build_deps_tpu_pre_train]
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
@@ -260,13 +398,17 @@ jobs:
         flavor: [tpu-unit, tpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312-bookworm
+      base_image: >-
+        ${{ (needs.resolve_deps_images.outputs.tpu_pre_train_missing == 'false'
+             || needs.build_deps_tpu_pre_train.result == 'success')
+            && needs.resolve_deps_images.outputs.tpu_pre_train_image
+            || 'maxtext-unit-test-tpu:py312-bookworm' }}
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
     name: TPU Posttrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [gate_test_run, analyze_code_changes, resolve_deps_images, build_deps_tpu_post_train]
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
@@ -279,14 +421,18 @@ jobs:
         flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312-bookworm
+      base_image: >-
+        ${{ (needs.resolve_deps_images.outputs.tpu_post_train_missing == 'false'
+             || needs.build_deps_tpu_post_train.result == 'success')
+            && needs.resolve_deps_images.outputs.tpu_post_train_image
+            || 'maxtext-unit-test-tpu:py312-bookworm' }}
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
 
   tpu7x-tests:
     name: TPU7X Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [gate_test_run, analyze_code_changes, resolve_deps_images, build_deps_tpu_pre_train, build_deps_tpu_post_train]
     # TPU7X runners are scarce. A pull request without the scheduled-only or run-tpu7x label runs only the flavors
     # that run a test it touched (tpu7x_flavors), each on one worker and with only those tests (newly_added_only),
     # and skips this job when there are none. Every other run gets all three flavors.
@@ -305,14 +451,23 @@ jobs:
         flavor: ${{ fromJSON(needs.analyze_code_changes.outputs.tpu7x_flavors || '["tpu7x-unit", "tpu7x-integration", "tpu7x-post-training-unit"]') }}
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312-bookworm
+      base_image: >-
+        ${{ contains(matrix.flavor, 'post-training')
+            && ((needs.resolve_deps_images.outputs.tpu_post_train_missing == 'false'
+                 || needs.build_deps_tpu_post_train.result == 'success')
+                && needs.resolve_deps_images.outputs.tpu_post_train_image
+                || 'maxtext-unit-test-tpu:py312-bookworm')
+            || ((needs.resolve_deps_images.outputs.tpu_pre_train_missing == 'false'
+                 || needs.build_deps_tpu_pre_train.result == 'success')
+                && needs.resolve_deps_images.outputs.tpu_pre_train_image
+                || 'maxtext-unit-test-tpu:py312-bookworm') }}
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       newly_added_only: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'run-tpu7x') && !contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
     name: GPU Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [gate_test_run, analyze_code_changes, resolve_deps_images, build_deps_gpu_pre_train]
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
@@ -325,13 +480,17 @@ jobs:
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-cuda12:py312
+      base_image: >-
+        ${{ (needs.resolve_deps_images.outputs.gpu_pre_train_missing == 'false'
+             || needs.build_deps_gpu_pre_train.result == 'success')
+            && needs.resolve_deps_images.outputs.gpu_pre_train_image
+            || 'maxtext-unit-test-cuda12:py312' }}
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
     name: CPU Pretrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [gate_test_run, analyze_code_changes, resolve_deps_images, build_deps_tpu_pre_train]
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
@@ -343,13 +502,17 @@ jobs:
         flavor: [cpu-unit, cpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312-bookworm
+      base_image: >-
+        ${{ (needs.resolve_deps_images.outputs.tpu_pre_train_missing == 'false'
+             || needs.build_deps_tpu_pre_train.result == 'success')
+            && needs.resolve_deps_images.outputs.tpu_pre_train_image
+            || 'maxtext-unit-test-tpu:py312-bookworm' }}
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
     name: CPU Posttrain Tests
-    needs: [gate_test_run, analyze_code_changes]
+    needs: [gate_test_run, analyze_code_changes, resolve_deps_images, build_deps_tpu_post_train]
     if: |
       !cancelled() &&
       needs.gate_test_run.result == 'success' &&
@@ -361,7 +524,11 @@ jobs:
         flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312-bookworm
+      base_image: >-
+        ${{ (needs.resolve_deps_images.outputs.tpu_post_train_missing == 'false'
+             || needs.build_deps_tpu_post_train.result == 'success')
+            && needs.resolve_deps_images.outputs.tpu_post_train_image
+            || 'maxtext-unit-test-tpu:py312-bookworm' }}
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
@@ -587,7 +754,8 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [all_tests_passed, all_notebooks_passed]
+    needs: [all_tests_passed, all_notebooks_passed, resolve_deps_images,
+            build_deps_tpu_pre_train, build_deps_tpu_post_train, build_deps_gpu_pre_train]
     if: ${{ !cancelled() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15

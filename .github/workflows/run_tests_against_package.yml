@@ -138,17 +138,71 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
+      - name: Configure install mode and uv cache
+        id: uv_cache
+        if: ${{ !inputs.maxtext_installed }}
+        shell: bash
+        env:
+          BASE_IMAGE: ${{ inputs.base_image }}
+          REQS_HASH: ${{ hashFiles('src/dependencies/requirements/generated_requirements/*.txt', 'src/dependencies/extra_deps/*.txt') }}
+          INPUTS_FLAVOR: ${{ inputs.flavor }}
+          INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
+        run: |
+          case "${BASE_IMAGE}" in
+            maxtext-deps-*) deps_preinstalled=true;  install_mode=wheelonly ;;
+            *)              deps_preinstalled=false; install_mode=full ;;
+          esac
+
+          echo "DEPS_PREINSTALLED=${deps_preinstalled}" >> "$GITHUB_ENV"
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "$GITHUB_ENV"
+
+          if [ "${install_mode}" = "full" ]; then
+            slug="${BASE_IMAGE//[^a-zA-Z0-9]/-}"
+          else
+            slug="${BASE_IMAGE%%:*}"
+          fi
+          prefix="uv-${slug}-${MAXTEXT_PACKAGE_EXTRA}-${install_mode}-lowest-"
+          echo "key=${prefix}${REQS_HASH}" >> "$GITHUB_OUTPUT"
+          echo "restore_key=${prefix}" >> "$GITHUB_OUTPUT"
+
+          if [ "${install_mode}" = "full" ] ||
+            { [ "${INPUTS_FLAVOR}" = "cpu-unit" ] && [ "${INPUTS_WORKER_GROUP}" = "1" ]; }; then
+            echo "use_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "use_cache=false" >> "$GITHUB_OUTPUT"
+            echo "No PyPI downloads expected in this job; skipping the uv cache."
+          fi
+      - name: Cache uv downloads
+        if: ${{ !inputs.maxtext_installed && steps.uv_cache.outputs.use_cache == 'true' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/uv-cache
+          key: ${{ steps.uv_cache.outputs.key }}
+          restore-keys: ${{ steps.uv_cache.outputs.restore_key }}
       - name: Install the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
         shell: bash
         run: |
-          python3 -m uv venv --seed
-          source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
-          uv pip install "${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}]" --resolution=lowest
+
+          # A maxtext-deps-* image already has every dependency in a venv.
+          if [ "${DEPS_PREINSTALLED}" == "true" ]; then
+            rm -rf .venv
+            ln -s /opt/maxtext-venv .venv
+          else
+            python3 -m uv venv --seed
+          fi
+          source .venv/bin/activate
+
+          if [ "${DEPS_PREINSTALLED}" == "true" ]; then
+            uv pip install --no-deps "${maxtext_wheel}"
+          else
+            uv pip install "${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}]" --resolution=lowest
+          fi
+
           if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
-            if command -v apt-get &> /dev/null; then
+            if ! command -v gcc-12 &> /dev/null && command -v apt-get &> /dev/null; then
               echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
               if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
                 echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
@@ -401,7 +455,7 @@ jobs:
         if: ${{ !inputs.maxtext_installed && inputs.flavor == 'cpu-unit' && inputs.worker_group == 1 }}
         shell: bash
         run: |
-          python3 -m uv venv --seed .venv_decoupled
+          uv venv --seed .venv_decoupled
           source .venv_decoupled/bin/activate
           uv pip install --resolution=lowest \
             -r src/dependencies/requirements/generated_requirements/decoupled-requirements.txt
