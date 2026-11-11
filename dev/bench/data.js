@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794358966737,
+  "lastUpdate": 1794374183225,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -67970,6 +67970,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3146.7960000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 341,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "f0a860d5214aa754fa0b66fcc09729d5b266e651",
+          "message": "Enable Qwix quantization and FSDP sharding support for M3 models.\n\n# Description\n\nEnable Qwix multi-pass quantization and default multi-device FSDP state sharding for M3 models:\n- Apply `maybe_quantize_model` during M3 model creation after scan wrapping.\n- Extend `MultipassQtProvider.dot_general`, decoder-layer module path matching, and router exclusion rules to support M3 decoder layers while keeping activation-only contractions in full precision.\n- Consolidate M3 default 1D FSDP `NamedSharding` in `apply_m3_default_named_sharding` and apply it in `get_abstract_state_nnx`, preserving leading scan and stack axes.\n\n# Tests\n\n- Unit tests covering M3 Qwix multi-pass quantization, activation-only passthrough, router exclusion, and M3 default FSDP sharding across scanned and stacked parameters.\n- Verified multi-device M3 training steps with Qwix multi-pass quantization enabled.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1018804548",
+          "timestamp": "2026-11-11T04:55:05Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/f0a860d5214aa754fa0b66fcc09729d5b266e651"
+        },
+        "date": 1794374182383,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 256.10499999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 60.525,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2152.5429999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 133.67299999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 587.048,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3095.5730000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 341,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1614.687,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 408.659,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3171.768,
             "unit": "sec"
           },
           {
