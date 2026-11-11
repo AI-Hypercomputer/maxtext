@@ -449,7 +449,7 @@ def apply_m3_default_named_sharding(
   Falls back to the largest non-data/non-stage mesh axis when
   fsdp/fsdp_transpose are absent.
   """
-  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
+  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose", "expert") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
   if not shard_axes:
     fallback_axes = [
         (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
@@ -469,9 +469,10 @@ def apply_m3_default_named_sharding(
     # is replicated on purpose; leave it. Larger leaves with an all-`None` spec still get the
     # fallback: `Glm5Sharding` with tensor parallelism off resolves some of its kernels to
     # all-`None` and relies on it for FSDP. Sharded specs are kept by `is_unsharded` below.
+    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
     metadata = a_var.get_metadata() if hasattr(a_var, "get_metadata") else {}
     rank = len(getattr(a_var.get_value() if hasattr(a_var, "get_value") else a_var, "shape", ()))
-    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and rank == 1:
+    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and (rank == 1 or "scale" in path_strs):
       return s_var
     cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
     is_unsharded = (
@@ -485,7 +486,6 @@ def apply_m3_default_named_sharding(
     if not hasattr(inner_a, "shape"):
       return s_var
     shape = inner_a.shape
-    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
     # Scanned `decoder.cycles.*` / `super_block.*` and axis-0 `vmap` stacks that prepend a leading `None`
     # (`P(None, None)` on stacked 1D norms) carry a leading layer axis at `d = 0`; never shard it.
     # (`ScannedLayers` under `decoder.layers.*` stacks at `param_scan_axis=1`, where `d = 0` is `emb_dim`.)

@@ -119,6 +119,15 @@ def get_first_step(model, state):
 
 def _one_hot_targets(targets, config, mesh):
   """Expand integer targets into the one-hot matrix cross entropy multiplies with the logits."""
+  shard_mode_val = getattr(getattr(config, "shard_mode", None), "value", getattr(config, "shard_mode", None))
+  if bool(getattr(config, "use_m3_model", False)) and shard_mode_val == "explicit" and mesh is not None:
+    return sharding.vocab_parallel_one_hot(
+        targets,
+        config.vocab_size,
+        mesh,
+        ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+        config.shard_mode,
+    )
   if not getattr(config, "lm_head_fsdp_as_vocab_tp", False):
     return jax.nn.one_hot(targets, config.vocab_size)
   # A vocab-parallel head leaves the logits sharded on vocab rather than on batch, so the
