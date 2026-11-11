@@ -17,8 +17,10 @@
 import dataclasses
 import functools
 from functools import partial
+import importlib
 import math
 from typing import Any, Callable, NamedTuple, Optional, Tuple
+import warnings
 
 from flax import linen as nn
 from flax import nnx
@@ -46,7 +48,6 @@ from maxtext.common.common_types import (
     CACHE_SCALE_SEQUENCE,
     CACHE_SEQUENCE,
     Config,
-    SEGMENT_ID_BATCH,
     DECODE_BATCH,
     DECODE_LENGTH,
     DECODING_ACTIVE_SEQUENCE_INDICATOR,
@@ -61,6 +62,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     PREFILL_LENGTH,
     Q_LENGTH,
+    SEGMENT_ID_BATCH,
 )
 from maxtext.inference.kvcache import KVQuant, KVTensor
 from maxtext.kernels.attention import jax_flash_attention
@@ -98,6 +100,42 @@ dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 
 # factor of `kv_steps / 3`. For the DeepSeek-V4 HCA shapes benchmarked here (kv_steps = 128)
 # that is ~42x; the ratio is shape dependent, not a fixed kernel property.
 _COMPRESSED_DQ_REDUCTION_STEPS = 3
+
+
+def _cudnn_supports_packed_layout() -> bool:
+  """Returns True when JAX's cuDNN backend reports Hopper+ (sm90+) support for packed SDPA."""
+  fused_attention_stablehlo = importlib.import_module("jax._src.cudnn.fused_attention_stablehlo")
+  check_fn = getattr(fused_attention_stablehlo, "check_compute_capability", None)
+  if check_fn is None:
+    return True
+  return bool(check_fn("9.0"))
+
+
+def _extract_cudnn_packed_seqlens_and_offsets(
+    segment_ids: Array,
+    max_segments_per_seq: int,
+) -> tuple[Array, Array]:
+  """Extracts cuDNN packed seqlens (B, M) and offsets (B, M + 1) from segment_ids (B, T).
+
+  Positive values (> 0) identify tokens belonging to a segment; values <= 0
+  denote padding and are skipped. Unused segment slots are padded with -1.
+  """
+  is_valid = segment_ids > 0
+  prev_seg = jnp.pad(segment_ids[:, :-1], ((0, 0), (1, 0)), constant_values=0)
+  next_seg = jnp.pad(segment_ids[:, 1:], ((0, 0), (0, 1)), constant_values=0)
+  prev_norm = jnp.where(prev_seg > 0, prev_seg, 0)
+  next_norm = jnp.where(next_seg > 0, next_seg, 0)
+  is_start = is_valid & (prev_norm != segment_ids)
+  is_end = is_valid & (next_norm != segment_ids)
+
+  def _row_seqlens_offsets(row_start: Array, row_end: Array) -> tuple[Array, Array]:
+    starts = jnp.nonzero(row_start, size=max_segments_per_seq, fill_value=-1)[0].astype(jnp.int32)
+    ends = jnp.nonzero(row_end, size=max_segments_per_seq, fill_value=-1)[0].astype(jnp.int32)
+    seqlens = jnp.where(starts >= 0, ends - starts + 1, -1).astype(jnp.int32)
+    offsets = jnp.pad(starts, (0, 1), constant_values=-1)
+    return seqlens, offsets
+
+  return jax.vmap(_row_seqlens_offsets)(is_start, is_end)
 
 
 class _SplashBlocks(NamedTuple):
@@ -2055,6 +2093,58 @@ class AttentionOp(nnx.Module):
           None,
       )
     elif self.attention_kernel == "cudnn_flash_jax":
+      if self.attention_type == AttentionType.BLOCK_DIFFUSION:
+        raise ValueError(
+            "Block-diffusion flash attention is supported only by TPU Splash; "
+            "use attention='dot_product' on other hardware."
+        )
+      fallback_reason = None
+      if self.attention_type not in (AttentionType.GLOBAL, AttentionType.FULL):
+        fallback_reason = f"attention_type={self.attention_type.value} is not supported"
+      elif cp_size > 1:
+        fallback_reason = f"context parallelism (cp_size={cp_size}) is not supported"
+      elif previous_chunk is not None:
+        fallback_reason = "chunked KV cache (previous_chunk) is not supported"
+      elif bidirectional_mask is not None:
+        fallback_reason = "bidirectional_mask is not supported"
+      elif decoder_segment_ids_kv is not None:
+        fallback_reason = "decoder_segment_ids_kv is not supported"
+      elif indexer_mask is not None or compressed_mask is not None:
+        fallback_reason = "indexer_mask/compressed_mask is not supported"
+      elif model_mode != MODEL_MODE_AUTOREGRESSIVE and query.shape[1] != key.shape[1]:
+        fallback_reason = f"mismatched query/key sequence lengths ({query.shape[1]} != {key.shape[1]}) are not supported"
+      elif (
+          model_mode != MODEL_MODE_AUTOREGRESSIVE
+          and decoder_segment_ids is not None
+          and not _cudnn_supports_packed_layout()
+          and self._resolve_cudnn_jax_max_segments(decoder_segment_ids.shape[1], strict=False) is not None
+      ):
+        fallback_reason = "packed sequence attention requires Hopper+ (sm90+) GPU architecture"
+
+      if fallback_reason is not None:
+        warnings.warn(
+            f"cudnn_flash_jax {fallback_reason}; falling back to dot_product attention.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return self.apply_attention_dot(
+            query,
+            key,
+            value,
+            decoder_segment_ids,
+            model_mode,
+            previous_chunk,
+            segment_positions=segment_positions,
+            bidirectional_mask=bidirectional_mask,
+            sinks=sinks,
+            indexer_mask=indexer_mask,
+            compressed_mask=compressed_mask,
+            record_max_logits=record_max_logits,
+            decoder_segment_ids_kv=decoder_segment_ids_kv,
+            kv_cache_part=kv_cache_part,
+            qk_product_einsum=qk_product_einsum,
+            wv_product_einsum=wv_product_einsum,
+        )
       return (
           *self.cudnn_jax_flash_attention(query, key, value, decoder_segment_ids, model_mode),
           None,
@@ -3282,6 +3372,31 @@ class AttentionOp(nnx.Module):
 
     return query, key, value
 
+  def _resolve_cudnn_jax_max_segments(self, seq_len: int, strict: bool = True) -> int | None:
+    """Returns M >= 2 for cuDNN packed layout, or None for non-packed rank-1 seqlen."""
+    max_segments = getattr(self.config, "max_segments_per_seq", None)
+    if max_segments is not None and max_segments > 1:
+      return int(max_segments)
+    if max_segments == 1:
+      return None
+
+    has_packing = hasattr(self.config, "packing")
+    packing = getattr(self.config, "packing", False)
+    dataset_type = getattr(self.config, "dataset_type", None)
+    if has_packing and not packing:
+      return None
+    if seq_len <= 256:
+      return max(2, seq_len)
+    if packing and dataset_type == "synthetic":
+      return None
+    if not strict:
+      return max(2, seq_len)
+
+    raise ValueError(
+        "max_segments_per_seq must be set (> 0) when using attention='cudnn_flash_jax' "
+        "with packed decoder_segment_ids; set max_segments_per_seq (e.g. 32) or packing=False."
+    )
+
   def cudnn_jax_flash_attention(
       self,
       query: Array,
@@ -3301,9 +3416,12 @@ class AttentionOp(nnx.Module):
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      lengths = jnp.sum(decoder_segment_ids, axis=-1)
-      if lengths.shape[0] == 1 and query.shape[0] > 1:
-        lengths = jnp.broadcast_to(lengths, (query.shape[0],))
+      if decoder_segment_ids is None:
+        lengths = jnp.full((query.shape[0],), key.shape[1], dtype=jnp.int32)
+      else:
+        lengths = jnp.sum(decoder_segment_ids > 0, axis=-1, dtype=jnp.int32)
+        if lengths.shape[0] == 1 and query.shape[0] > 1:
+          lengths = jnp.broadcast_to(lengths, (query.shape[0],))
 
       output, lse = dot_product_attention(
           query,
@@ -3318,11 +3436,43 @@ class AttentionOp(nnx.Module):
           return_residual=True,
       )
     else:
+      is_full = self.attention_type == AttentionType.FULL
+      if decoder_segment_ids is None:
+        mask_type = MaskType.NO_MASK if is_full else MaskType.CAUSAL
+        attn_kwargs: dict[str, Any] = {}
+      else:
+        if decoder_segment_ids.shape[0] == 1 and query.shape[0] > 1:
+          decoder_segment_ids = jnp.broadcast_to(decoder_segment_ids, (query.shape[0], decoder_segment_ids.shape[1]))
+        mask_type = MaskType.PADDING if is_full else MaskType.PADDING_CAUSAL
+        max_segments = self._resolve_cudnn_jax_max_segments(decoder_segment_ids.shape[1])
+        if max_segments is None:
+          seqlens = jnp.sum(decoder_segment_ids > 0, axis=-1, dtype=jnp.int32)
+          if isinstance(self.mesh, Mesh) and hasattr(self.config, "logical_axis_rules"):
+            seg_pspec = self._logical_to_mesh_axes((SEGMENT_ID_BATCH,))
+            seqlens = self._maybe_shard_with_pspec(seqlens, seg_pspec)
+          attn_kwargs = {
+              "q_seqlen": seqlens,
+              "kv_seqlen": seqlens,
+          }
+        else:
+          seqlens, offsets = _extract_cudnn_packed_seqlens_and_offsets(decoder_segment_ids, max_segments)
+          if isinstance(self.mesh, Mesh) and hasattr(self.config, "logical_axis_rules"):
+            seg_pspec = self._logical_to_mesh_axes((SEGMENT_ID_BATCH, None))
+            seqlens = self._maybe_shard_with_pspec(seqlens, seg_pspec)
+            offsets = self._maybe_shard_with_pspec(offsets, seg_pspec)
+          attn_kwargs = {
+              "q_seqlen": seqlens,
+              "kv_seqlen": seqlens,
+              "q_offsets": offsets,
+              "kv_offsets": offsets,
+          }
+
       output, lse = dot_product_attention(
           query,
           key,
           value,
-          mask_type=MaskType.CAUSAL,
+          **attn_kwargs,
+          mask_type=mask_type,
           scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",

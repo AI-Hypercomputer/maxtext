@@ -22,9 +22,11 @@ import random
 import sys
 import types
 import unittest
+import warnings
 import copy
 from unittest import mock
 
+from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -54,6 +56,7 @@ from maxtext.layers.attention_op import (
     AttentionOp,
     BlockCausalMask,
     ChunkedCausalMask,
+    _extract_cudnn_packed_seqlens_and_offsets,
     _generate_block_causal_attention_mask,
     _generate_chunk_attention_mask,
     _make_bidirectional_block_mask,
@@ -2163,6 +2166,502 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
           attention_type=AttentionType.CHUNK,
           chunk_attn_window_size=2,
       )
+
+
+class CudnnFlashJaxTrainingTest(unittest.TestCase):
+
+  def _make_attention_op(
+      self,
+      *,
+      attention_type=AttentionType.GLOBAL,
+      packing=True,
+      max_segments_per_seq=4,
+      dataset_type="grain",
+      mesh=None,
+  ):
+    """Builds a configured AttentionOp instance for cuDNN tests."""
+    config = types.SimpleNamespace(
+        ici_context_autoregressive_parallelism=0,
+        packing=packing,
+        max_segments_per_seq=max_segments_per_seq,
+        dataset_type=dataset_type,
+    )
+    return AttentionOp(
+        config=config,
+        mesh=types.SimpleNamespace() if mesh is None else mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=8,
+        num_query_heads=2,
+        num_kv_heads=2,
+        attention_type=attention_type,
+    )
+
+  _CUDNN_MOD = "jax._src.cudnn.fused_attention_stablehlo"
+
+  def _mock_fused_attention_module(self, captured, *, is_hopper=True):
+    """Creates a mocked cuDNN fused-attention module recording call kwargs."""
+    fused_attention_module = types.ModuleType(self._CUDNN_MOD)
+    fused_attention_module.MaskType = types.SimpleNamespace(
+        NO_MASK="no_mask",
+        PADDING="padding",
+        CAUSAL="causal",
+        PADDING_CAUSAL="padding_causal",
+    )
+    fused_attention_module.check_compute_capability = lambda _: is_hopper
+
+    def mock_dot_product_attention(query, key, value, **kwargs):
+      captured["query_shape"] = query.shape
+      captured["key_shape"] = key.shape
+      captured["value_shape"] = value.shape
+      captured["kwargs"] = kwargs
+      lse = jnp.zeros(
+          (query.shape[0], query.shape[2], query.shape[1]),
+          dtype=jnp.float32,
+      )
+      return jnp.zeros_like(query), lse
+
+    fused_attention_module.dot_product_attention = mock_dot_product_attention
+    return fused_attention_module
+
+  def test_packed_training_segments_and_padding(self):
+    query = jnp.ones((3, 8, 2, 4), dtype=jnp.bfloat16)
+    key = jnp.ones((3, 8, 2, 4), dtype=jnp.bfloat16)
+    value = jnp.ones((3, 8, 2, 4), dtype=jnp.bfloat16)
+    # Row 0: 2 segments + trailing 0s;
+    # row 1: leading/interior 0s + trailing -1; row 2: all padding.
+    decoder_segment_ids = jnp.array(
+        [
+            [1, 1, 1, 2, 2, 0, 0, 0],
+            [0, 1, 1, 0, 2, 2, 2, -1],
+            [0, 0, 0, 0, 0, 0, 0, 0],
+        ],
+        dtype=jnp.int32,
+    )
+
+    assert_eq = np.testing.assert_array_equal
+    for mode in (MODEL_MODE_TRAIN, MODEL_MODE_PREFILL):
+      with self.subTest(model_mode=mode):
+        captured = {}
+        attn = self._make_attention_op(packing=True, max_segments_per_seq=4)
+        fused_mod = self._mock_fused_attention_module(captured)
+
+        def _run(q, k, v, s, fn=attn.cudnn_jax_flash_attention, m=mode):
+          return fn(q, k, v, s, model_mode=m)
+
+        with mock.patch.dict(sys.modules, {self._CUDNN_MOD: fused_mod}):
+          out_eager, _ = _run(query, key, value, decoder_segment_ids)
+          kwargs = dict(captured["kwargs"])
+          out_jit, _ = jax.jit(_run)(query, key, value, decoder_segment_ids)
+
+        np.testing.assert_allclose(np.asarray(out_jit), np.asarray(out_eager))
+        self.assertEqual(kwargs["mask_type"], "padding_causal")
+        expected_seqlens = np.array(
+            [
+                [3, 2, -1, -1],
+                [2, 3, -1, -1],
+                [-1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        expected_offsets = np.array(
+            [
+                [0, 3, -1, -1, -1],
+                [1, 4, -1, -1, -1],
+                [-1, -1, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        jit_seqlens, jit_offsets = jax.jit(
+            _extract_cudnn_packed_seqlens_and_offsets,
+            static_argnums=(1,),
+        )(decoder_segment_ids, 4)
+        assert_eq(np.asarray(jit_seqlens), expected_seqlens)
+        assert_eq(np.asarray(jit_offsets), expected_offsets)
+
+        for key_name in ("q_seqlen", "kv_seqlen"):
+          self.assertEqual(kwargs[key_name].shape, (3, 4))
+          self.assertEqual(kwargs[key_name].dtype, jnp.int32)
+          assert_eq(np.asarray(kwargs[key_name]), expected_seqlens)
+        for key_name in ("q_offsets", "kv_offsets"):
+          self.assertEqual(kwargs[key_name].shape, (3, 5))
+          self.assertEqual(kwargs[key_name].dtype, jnp.int32)
+          assert_eq(np.asarray(kwargs[key_name]), expected_offsets)
+          # JAX's _fix_seqlen_offsets shifts non-negative entries across batch,
+          # so valid counts must match and trailing offset col must be -1.
+          np.testing.assert_array_equal(
+              np.sum(np.asarray(kwargs[key_name]) >= 0, axis=-1),
+              np.sum(np.asarray(kwargs["q_seqlen"]) >= 0, axis=-1),
+          )
+          np.testing.assert_array_equal(
+              np.asarray(kwargs[key_name])[:, -1],
+              np.full((3,), -1, dtype=np.int32),
+          )
+
+  def test_unpacked_and_single_segment_trailing_padding(self):
+    query = jnp.ones((2, 5, 2, 4), dtype=jnp.bfloat16)
+    key = jnp.ones((2, 5, 2, 4), dtype=jnp.bfloat16)
+    value = jnp.ones((2, 5, 2, 4), dtype=jnp.bfloat16)
+
+    train_kw = {"model_mode": MODEL_MODE_TRAIN}
+    for attn_type, expected_unpacked, expected_padded in (
+        (AttentionType.GLOBAL, "causal", "padding_causal"),
+        (AttentionType.FULL, "no_mask", "padding"),
+    ):
+      attn_kw = {
+          "attention_type": attn_type,
+          "packing": False,
+          "max_segments_per_seq": -1,
+      }
+      attn = self._make_attention_op(**attn_kw)
+      captured = {}
+      fused_mod = self._mock_fused_attention_module(captured)
+      with mock.patch.dict(sys.modules, {self._CUDNN_MOD: fused_mod}):
+        attn.cudnn_jax_flash_attention(query, key, value, None, **train_kw)
+        self.assertEqual(captured["kwargs"]["mask_type"], expected_unpacked)
+        self.assertNotIn("q_seqlen", captured["kwargs"])
+        self.assertNotIn("q_offsets", captured["kwargs"])
+
+        captured.clear()
+        seg_rows = [[1, 1, 1, 0, 0], [1, 1, -1, -1, -1]]
+        seg_ids = jnp.array(seg_rows, dtype=jnp.int32)
+        attn.cudnn_jax_flash_attention(query, key, value, seg_ids, **train_kw)
+        self.assertEqual(captured["kwargs"]["mask_type"], expected_padded)
+        self.assertNotIn("q_offsets", captured["kwargs"])
+        self.assertNotIn("kv_offsets", captured["kwargs"])
+        for key_name in ("q_seqlen", "kv_seqlen"):
+          self.assertEqual(captured["kwargs"][key_name].dtype, jnp.int32)
+          np.testing.assert_array_equal(
+              np.asarray(captured["kwargs"][key_name]),
+              np.array([3, 2], dtype=np.int32),
+          )
+
+    # Broadcasts (1, T) segment ids to query batch size.
+    captured = {}
+    fused_mod = self._mock_fused_attention_module(captured)
+    attention = self._make_attention_op(packing=False, max_segments_per_seq=1)
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: fused_mod}):
+      attention.cudnn_jax_flash_attention(
+          query,
+          key,
+          value,
+          jnp.array([[1, 1, 1, 1, 0]], dtype=jnp.int32),
+          model_mode=MODEL_MODE_TRAIN,
+      )
+    np.testing.assert_array_equal(
+        np.asarray(captured["kwargs"]["q_seqlen"]),
+        np.array([4, 4], dtype=np.int32),
+    )
+
+  def test_large_packed_training_requires_max_segments_unless_synthetic(self):
+    query = jnp.ones((1, 512, 2, 4), dtype=jnp.bfloat16)
+    seg_ids = jnp.ones((1, 512), dtype=jnp.int32)
+    qkv = (query, query, query)
+    train_kw = {"model_mode": MODEL_MODE_TRAIN}
+    grain_kw = {
+        "packing": True,
+        "max_segments_per_seq": -1,
+        "dataset_type": "grain",
+    }
+    grain_attn = self._make_attention_op(**grain_kw)
+    fused_mod = self._mock_fused_attention_module({})
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: fused_mod}):
+      with self.assertRaisesRegex(ValueError, "max_segments_per_seq"):
+        grain_attn.cudnn_jax_flash_attention(*qkv, seg_ids, **train_kw)
+
+    captured = {}
+    synth_kw = {
+        "packing": True,
+        "max_segments_per_seq": -1,
+        "dataset_type": "synthetic",
+    }
+    synthetic_attn = self._make_attention_op(**synth_kw)
+    fused_mod = self._mock_fused_attention_module(captured)
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: fused_mod}):
+      synthetic_attn.cudnn_jax_flash_attention(*qkv, seg_ids, **train_kw)
+    self.assertEqual(captured["kwargs"]["mask_type"], "padding_causal")
+    self.assertEqual(captured["kwargs"]["q_seqlen"].shape, (1,))
+    self.assertNotIn("q_offsets", captured["kwargs"])
+
+  def test_apply_attention_dispatch_and_pre_hopper_fallback_isolation(self):
+    cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        hardware="cpu",
+        per_device_batch_size=1,
+        ici_fsdp_parallelism=1,
+        max_target_length=8,
+        packing=True,
+        max_segments_per_seq=4,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        head_dim=4,
+        skip_jax_distributed_system=True,
+    )
+    mesh = Mesh(np.array(jax.devices()[:1]), ("data",))
+    cudnn_op = AttentionOp(
+        config=cfg,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=8,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+    dot_op = AttentionOp(
+        config=cfg,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        max_target_length=8,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+
+    k1, k2, k3 = jax.random.split(jax.random.key(0), 3)
+    query = jax.random.normal(k1, (1, 8, 2, 4), dtype=jnp.float32)
+    key = jax.random.normal(k2, (1, 8, 2, 4), dtype=jnp.float32)
+    value = jax.random.normal(k3, (1, 8, 2, 4), dtype=jnp.float32)
+    decoder_segment_ids = jnp.array([[1, 1, 1, 2, 2, 2, 0, 0]], dtype=jnp.int32)
+
+    # Hopper+: routes to cudnn_jax_flash_attention with packed offsets/seqlens.
+    captured = {}
+    hopper_mod = self._mock_fused_attention_module(captured, is_hopper=True)
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: hopper_mod}):
+      cudnn_op.apply_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids=decoder_segment_ids,
+          segment_positions=None,
+          lengths=None,
+          model_mode=MODEL_MODE_TRAIN,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+    self.assertIn("q_offsets", captured["kwargs"])
+    self.assertEqual(captured["kwargs"]["mask_type"], "padding_causal")
+
+    # Pre-Hopper (< sm90): warns and falls back to dot with no leak.
+    ampere_captured = {}
+    mock_mod = self._mock_fused_attention_module
+    ampere_mod = mock_mod(ampere_captured, is_hopper=False)
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: ampere_mod}):
+      with self.assertWarnsRegex(RuntimeWarning, "Hopper"):
+        out_cudnn, _, _ = cudnn_op.apply_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids=decoder_segment_ids,
+            segment_positions=None,
+            lengths=None,
+            model_mode=MODEL_MODE_TRAIN,
+            qk_product_einsum=jnp.einsum,
+            wv_product_einsum=jnp.einsum,
+        )
+      self.assertEqual(ampere_captured, {})
+
+      out_ref, _, _ = dot_op.apply_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids=decoder_segment_ids,
+          segment_positions=None,
+          lengths=None,
+          model_mode=MODEL_MODE_TRAIN,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+      tol = {"rtol": 1e-6, "atol": 1e-6}
+      assert_close = np.testing.assert_allclose
+      assert_close(np.asarray(out_cudnn), np.asarray(out_ref), **tol)
+
+      # Perturb seg 1 KV & padding KV; seg 2 outputs (3..5) stay identical.
+      key_perturbed = key.at[:, :3].add(10.0).at[:, 6:].add(10.0)
+      value_perturbed = value.at[:, :3].add(10.0).at[:, 6:].add(10.0)
+      with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out_perturbed, _, _ = cudnn_op.apply_attention(
+            query,
+            key_perturbed,
+            value_perturbed,
+            decoder_segment_ids=decoder_segment_ids,
+            segment_positions=None,
+            lengths=None,
+            model_mode=MODEL_MODE_TRAIN,
+            qk_product_einsum=jnp.einsum,
+            wv_product_einsum=jnp.einsum,
+        )
+      got_seg2 = np.asarray(out_cudnn[:, 3:6])
+      ref_seg2 = np.asarray(out_perturbed[:, 3:6])
+      np.testing.assert_array_equal(got_seg2, ref_seg2)
+
+      # Verify LOCAL_SLIDING fallback and BLOCK_DIFFUSION ValueError.
+      sliding_op = AttentionOp(
+          config=cfg,
+          mesh=mesh,
+          attention_kernel="cudnn_flash_jax",
+          max_target_length=8,
+          num_query_heads=2,
+          num_kv_heads=2,
+          attention_type=AttentionType.LOCAL_SLIDING,
+          sliding_window_size=2,
+      )
+      with self.assertWarnsRegex(RuntimeWarning, "local_sliding"):
+        sliding_op.apply_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids=decoder_segment_ids,
+            segment_positions=None,
+            lengths=None,
+            model_mode=MODEL_MODE_TRAIN,
+            qk_product_einsum=jnp.einsum,
+            wv_product_einsum=jnp.einsum,
+        )
+
+      block_err = "Block-diffusion attention is supported only"
+      with self.assertRaisesRegex(ValueError, block_err):
+        AttentionOp(
+            config=cfg,
+            mesh=mesh,
+            attention_kernel="cudnn_flash_jax",
+            max_target_length=8,
+            num_query_heads=2,
+            num_kv_heads=2,
+            attention_type=AttentionType.BLOCK_DIFFUSION,
+        )
+
+  def test_pre_hopper_large_packed_and_unpacked_dispatch(self):
+    base_cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        hardware="cpu",
+        per_device_batch_size=1,
+        ici_fsdp_parallelism=1,
+        max_target_length=512,
+        packing=True,
+        max_segments_per_seq=-1,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        head_dim=4,
+        skip_jax_distributed_system=True,
+    )
+    grain_cfg = base_cfg.replace(dataset_type="grain")
+    unpacked_cfg = base_cfg.replace(packing=False, dataset_type="grain")
+    mesh = Mesh(np.array(jax.devices()[:1]), ("data",))
+
+    k1, k2, k3 = jax.random.split(jax.random.key(1), 3)
+    query = jax.random.normal(k1, (1, 512, 2, 4), dtype=jnp.float32)
+    key = jax.random.normal(k2, (1, 512, 2, 4), dtype=jnp.float32)
+    value = jax.random.normal(k3, (1, 512, 2, 4), dtype=jnp.float32)
+    seg_ids = jnp.concatenate(
+        [
+            jnp.ones((1, 200), dtype=jnp.int32),
+            jnp.full((1, 200), 2, dtype=jnp.int32),
+            jnp.zeros((1, 112), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+
+    cudnn_op = AttentionOp(
+        config=grain_cfg,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=512,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+    dot_op = AttentionOp(
+        config=grain_cfg,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        max_target_length=512,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+
+    # Pre-Hopper with seq_len=512, packing=True, max_segments_per_seq=-1:
+    # falls back with RuntimeWarning instead of raising ValueError.
+    ampere_captured = {}
+    mock_mod = self._mock_fused_attention_module
+    ampere_mod = mock_mod(ampere_captured, is_hopper=False)
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: ampere_mod}):
+      with self.assertWarnsRegex(RuntimeWarning, "Hopper"):
+        out_cudnn, _, _ = cudnn_op.apply_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids=seg_ids,
+            segment_positions=None,
+            lengths=None,
+            model_mode=MODEL_MODE_TRAIN,
+            qk_product_einsum=jnp.einsum,
+            wv_product_einsum=jnp.einsum,
+        )
+      self.assertEqual(ampere_captured, {})
+      out_ref, _, _ = dot_op.apply_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids=seg_ids,
+          segment_positions=None,
+          lengths=None,
+          model_mode=MODEL_MODE_TRAIN,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+      tol = {"rtol": 1e-6, "atol": 1e-6}
+      assert_close = np.testing.assert_allclose
+      assert_close(np.asarray(out_cudnn), np.asarray(out_ref), **tol)
+
+    # Hopper+ with same unresolved packed config still raises ValueError.
+    hopper_mod = self._mock_fused_attention_module({}, is_hopper=True)
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: hopper_mod}):
+      with self.assertRaisesRegex(ValueError, "max_segments_per_seq"):
+        cudnn_op.apply_attention(
+            query,
+            key,
+            value,
+            decoder_segment_ids=seg_ids,
+            segment_positions=None,
+            lengths=None,
+            model_mode=MODEL_MODE_TRAIN,
+            qk_product_einsum=jnp.einsum,
+            wv_product_einsum=jnp.einsum,
+        )
+
+    # Pre-Hopper with packing=False stays on cuDNN using rank-1 seqlens.
+    unpacked_op = AttentionOp(
+        config=unpacked_cfg,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=512,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+    unpacked_captured = {}
+    ampere_mod = mock_mod(unpacked_captured, is_hopper=False)
+    single_seg = jnp.concatenate(
+        [
+            jnp.ones((1, 400), dtype=jnp.int32),
+            jnp.zeros((1, 112), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    with mock.patch.dict(sys.modules, {self._CUDNN_MOD: ampere_mod}):
+      unpacked_op.apply_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids=single_seg,
+          segment_positions=None,
+          lengths=None,
+          model_mode=MODEL_MODE_TRAIN,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+    self.assertEqual(unpacked_captured["kwargs"]["mask_type"], "padding_causal")
+    self.assertNotIn("q_offsets", unpacked_captured["kwargs"])
+    np.testing.assert_array_equal(
+        np.asarray(unpacked_captured["kwargs"]["q_seqlen"]),
+        np.array([400], dtype=np.int32),
+    )
 
 
 class CudnnFlashJaxInferenceTest(unittest.TestCase):
@@ -7566,4 +8065,4 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
