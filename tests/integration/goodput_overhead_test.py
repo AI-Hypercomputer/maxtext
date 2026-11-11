@@ -35,11 +35,13 @@ TOTAL_STEPS = 30
 # Sample unprofiled steady-state steps 18–29 (12 steps), excluding compile/warm-up (steps 0–4),
 # the XProf profiling window (steps 5–14), and post-profiler settling (steps 15–17).
 WARMUP_STEPS_TO_SKIP = 18
-# Single-run maximum empirical overhead (+0.163% on unprofiled steady-state steps 18–29).
-EMPIRICAL_OVERHEAD_RATIO = 0.00163
-# Soft warning multiplier (1.2x empirical max = ~0.196% overhead): emits non-blocking CI warning.
-WARNING_MULTIPLIER = 1.2
-SOFT_WARNING_OVERHEAD_RATIO = EMPIRICAL_OVERHEAD_RATIO * WARNING_MULTIPLIER
+# Soft non-blocking warning threshold (0.211%), derived via Tukey's upper outlier fence
+# (75th percentile + 1.5 * IQR) across the 5 Single-Host unprofiled steady-state overhead
+# ratios (steps 18–29) in the Goodput Overhead Analysis benchmark:
+#   Empirical deltas: [-0.045%, +0.011%, +0.047%, +0.091%, +0.163%]
+#   P25 (Q1) = 0.011%, P75 (Q3) = 0.091%, IQR = P75 - P25 = 0.080%
+#   Threshold = 0.091% + 1.5 * 0.080% = 0.211% (0.00211)
+SOFT_WARNING_OVERHEAD_RATIO = 0.00211
 # Hard blocking threshold: maximum allowed relative increase in mean steady-state step time (2.0%).
 MAX_ALLOWED_OVERHEAD_RATIO = 0.02
 
@@ -154,12 +156,12 @@ class GoodputOverheadTest(unittest.TestCase):
           ),
       )
 
-      # 2. Level 1 (Soft Non-Blocking Warning): overhead > 1.2x empirical max (~0.196%) and <= 2.0%.
+      # 2. Level 1 (Soft Non-Blocking Warning): overhead > P75 + 1.5 * IQR (0.211%) and <= 2.0%.
       if SOFT_WARNING_OVERHEAD_RATIO < overhead_ratio <= MAX_ALLOWED_OVERHEAD_RATIO:
         warn_msg = (
             f"Goodput ON steady-state overhead ({overhead_ratio * 100:.3f}%, "
             f"mean_on={mean_on:.4f}s vs mean_off={mean_off:.4f}s) exceeded the soft warning threshold "
-            f"of {SOFT_WARNING_OVERHEAD_RATIO * 100:.3f}% (1.2x empirical max {EMPIRICAL_OVERHEAD_RATIO * 100:.3f}%), "
+            f"of {SOFT_WARNING_OVERHEAD_RATIO * 100:.3f}% (P75 + 1.5 * IQR), "
             f"though it remains within the {MAX_ALLOWED_OVERHEAD_RATIO * 100:.1f}% blocking limit."
         )
         max_logging.log(f"WARNING: {warn_msg}")
