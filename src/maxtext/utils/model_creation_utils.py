@@ -738,10 +738,19 @@ def create_model(
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
-    model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
-    model = m3_scan.maybe_apply_scan(model, config)
-    model = quantizations.maybe_quantize_model(model, config)
-    model = add_named_scopes(model)
+    with m3_models.enter_mesh_scope(
+        mesh if jax.sharding.get_abstract_mesh().empty else None,
+        shard_mode=getattr(config, "shard_mode", "auto"),
+    ):
+      model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+      model = m3_scan.maybe_apply_scan(model, config)
+      if getattr(config, "quantization", "") and m3_models.ambient_mesh_is_explicit():
+        raise ValueError(
+            "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized "
+            "matmuls. Use shard_mode='auto'."
+        )
+      model = quantizations.maybe_quantize_model(model, config)
+      model = add_named_scopes(model)
     return model
 
   # Model definition
@@ -780,8 +789,8 @@ def create_nnx_abstract_model(
   """
 
   with logical_axis_rules(config.logical_axis_rules):
-    # m3 models do not store `self.mesh`, so resolve `mesh` up front when none
-    # was passed rather than reading `abs_model.mesh` below.
+    # Resolve `mesh` up front when none was passed so `m3.models.create_model`
+    # has a mesh to enter for parameter placement during `nnx.eval_shape`.
     if getattr(config, "use_m3_model", False) and mesh is None:
       mesh = maxtext_utils.get_mesh_from_config(config, devices)
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
