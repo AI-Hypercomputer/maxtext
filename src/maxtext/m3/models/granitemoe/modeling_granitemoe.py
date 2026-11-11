@@ -251,11 +251,11 @@ class GraniteMoeSharding(m3_sharding.Sharding):
       config: GraniteMoeConfig | None = None,
   ) -> GraniteMoeSharding:
     """Builds `GraniteMoeSharding` from a driver `Mesh` and optional `GraniteMoeConfig`."""
-    required = set(m3_sharding.MESH_AXIS_NAMES)
+    required = {"data", "fsdp", "tensor", "expert"}
     axis_names = set(mesh.axis_names)
     if not required.issubset(axis_names):
       raise ValueError(
-          f"Unsupported mesh axis_names {mesh.axis_names}; expected {m3_sharding.MESH_AXIS_NAMES}, "
+          f"Unsupported mesh axis_names {mesh.axis_names}; expected ('data', 'fsdp', 'tensor', 'expert'), "
           f"missing {required - axis_names}."
       )
     for ax in mesh.axis_names:

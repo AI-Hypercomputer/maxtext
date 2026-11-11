@@ -122,9 +122,9 @@ path regexes or heuristics, and nothing re-shards a parameter after it is create
 | Concern | Where | Config |
 | :---- | :---- | :---- |
 | Which logical axis each tensor dimension carries | the model, as `*_metadata={"out_sharding": s(name, axes)}` on every parameter and `s.constrain(x, name, axes)` on key activations | — |
-| Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (FSDP over `embed`; tensor over `heads`, `kv_heads`, `mlp`, `vocab`; batch over `data` × `fsdp` × `expert`) | — |
-| Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,fsdp,tensor,expert}_parallelism`, `dcn_*`; legacy's names and defaults |
-| Auto vs explicit sharding | `create_mesh(explicit=)`; `constrain` dispatches on the mesh in scope | `shard_mode`: `auto` (`explicit` is refused for now, below) |
+| Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (`fsdp` × `fsdp_transpose` × `context` × `expert` over `embed`, where `fsdp_transpose` is an extra FSDP factor; `tensor` and `tensor_sequence` over `heads`, `kv_heads`, `mlp`, `vocab`; `context` over `length`; `context` and `tensor_sequence` over `norm_length`, using `tensor_sequence` instead of `tensor` for Megatron SP; batch over `data` × `fsdp` × `fsdp_transpose` × `expert`) | — |
+| Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,fsdp,fsdp_transpose,context,tensor,tensor_sequence,expert}_parallelism`, `dcn_*`, `custom_mesh` (`hybrid_ring_64x4`, `hybrid_ring_32x8`), `allow_split_physical_axes`, `optimize_mesh_for_tpu_v6e` |
+| Auto vs explicit sharding | `create_mesh(explicit=)`; `constrain` and `out_sharding` dispatch on the mesh in scope | `shard_mode` (`auto`, the default, or `explicit` on models that wire `out_sharding` — `qwen3` today) |
 | Input batch layout | the driver asks the strategy (`train/loop.py::batch_spec`) | — |
 
 Parameters are placed by Flax from their metadata the moment they are created, under whatever mesh
@@ -138,23 +138,22 @@ one) and would otherwise re-run placement, which fails with no mesh in scope. Bo
 loop and the training engine) read placement off the arrays. The loop logs the fraction of
 parameters each device holds; `100%` means replicated, which is what an unannotated model gets.
 
-`shard_mode=explicit` is refused by `mesh_from_config` for now. Parameters do place under an
-Explicit-typed mesh (`create_mesh(explicit=True)`), but the forward pass does not run: under an
-explicit mesh, ops whose output sharding is ambiguous need it spelled out, and m3 does not do that
-yet. The first to fail is the embedding gather (a JAX `ShardingTypeError`; `nnx.Embed.__call__`
-takes an `out_sharding` that m3 does not pass). That work is on the m3 side. A strict `xfail` in
-`model_sharding_test.py` tracks it; until it lands, the training engine's Zero-1 and deferred
-all-reduce, which require explicit mode, are not available to m3 models.
+`shard_mode=explicit` builds an Explicit-typed mesh, passes explicit `out_sharding` specs to NNX
+embedding gathers and linear/einsum projections, and lowers the scalar loss reduction via
+`jax.sharding.auto_axes`, enabling `MaxTextTrainingEngine` ZeRO-1 optimizer state sharding on
+models that implement `out_sharding` (`qwen3` today; other registered models refuse
+`shard_mode=explicit` with a named error, `quantization` requires `shard_mode=auto` until upstream
+`qwix` forwards `out_sharding`, and pure-DP deferred gradient reductions remain disabled on m3
+because stock `nnx.RMSNorm` does not accept `reduced`-tagged scale operands).
 
 A model with a novel axis subclasses `DefaultSharding` and delegates the rest; a driver that wants
-another scheme for a model built on `DefaultSharding` (`qwen3`, Qwen3-VL) passes `sharding=` to
-`create_model`. m3 does not read `logical_axis_rules`: the strategy class is the rule table, typed
-and conflict-checked. Legacy parallelism axes the mesh does not carry (`sequence`, `context*`,
-`pipeline`, `autoregressive`, `fsdp_transpose`, `tensor_sequence`, `diloco`) and custom mesh layouts
-(`custom_mesh`, `custom_mesh_and_rule`, `allow_split_physical_axes`, `optimize_mesh_for_tpu_v6e`) are
-refused with the field named rather than ignored. `mesh_from_config` refuses the fields; a mesh some
-other driver builds is checked when the model meets it (`core.sharding.check_mesh`): it must carry
-`data`, `fsdp`, `tensor` and `expert`, and split no other axis.
+another scheme passes `sharding=` to `create_model` (or `sharding_from_config(config)`). m3 does not
+read `logical_axis_rules`: the strategy class is the rule table, typed and conflict-checked. Legacy
+parallelism settings m3 does not implement (`pipeline`, `sequence`, `context_usp_ulysses`,
+`context_autoregressive`, `autoregressive`, `diloco`, `custom_mesh_and_rule*`, non-`all_gather`
+`context_parallel_strategy`, and `context_parallel_load_balance=True` when `context > 1`) and mesh
+axes a selected model's `Sharding` does not partition are refused with the field named rather than
+ignored.
 
 Today `qwen3` is fully annotated; Qwen3-VL inherits the decoder, MLP and embedding annotations but
 its hand-rolled attention and vision tower are not yet sharded; GLM-5.3-Flash and Wan carry their
