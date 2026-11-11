@@ -12,7 +12,7 @@ Supports both:
 
 | Stage | Recipe / Config | Seq Len | Global Batch | Trainable Parameters | Learning Rate & Schedule |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. 8K Bridge** | `olmo35_small_vision_align_8k.yml` + Bridge overrides | `8,192` | `1.05M`–`4.19M` tok (`64` crops/seq) | Connector + `<im_*>` rows `[100278..100283]` (`ViT`, `LM`, `logits_dense`, `expert_bias` frozen) | `2.0e-4` cosine to `0.1x` over `250` steps, held flat steps `250..500` (`warmup_steps_fraction=0.4`) |
+| **1. 8K Bridge** | `olmo35_small_vision_align_8k.yml` + Bridge overrides | `8,192` | `1.05M`–`4.19M` tok (`64` crops/seq) | Connector + `<im_*>` rows `[100278..100283]` (`ViT`, `LM`, `logits_dense` frozen) | `2.0e-4` cosine to `0.1x` over `250` steps, held flat steps `250..500` (`warmup_steps_fraction=0.4`) |
 | **2. 8K Joint** | `src/maxtext/configs/olmo/olmo35_small_vision_align_8k.yml` | `8,192` | `1.05M`–`4.19M` tok (`64` crops/seq) | `LM` + `25L ViT` + `Connector` + `<im_*>` rows `[100278..100283]` (`logits_dense` frozen; `0.35` text / `0.65` vision loss group weights) | `LM` `1.0e-4` WSD linear to `0.0` (`3,500` steps); `Connector` `2.0e-5` (`w=50`), `ViT` `2.0e-6` (`w=100`), `<im_*>` `2.0e-5` (`w=50`, same schedule group as `Connector`) cosine to `0.1x` |
 | **3. 256K Unified MT+LC+MM** | `src/maxtext/configs/olmo/olmo35_small_midtrain_256k.yml` (`use_multimodal=true`) | `262,144` | `16.78M` or `25.17M` tok (`1,024`–`2,048` crops/seq) | All parameters unfrozen (`frozen_parameters_mask=[]`, `olmo_trainable_embedding_row_range=[]`) | `LM` `1.5e-4` (Hero) / `4.4e-4` (Tiny) WSD linear to `0.0` (`2,000`-step warmup); `Connector` `2.0x LM`, `ViT` `0.1x LM` |
 
@@ -32,7 +32,7 @@ All fixes below are integrated directly into this branch:
 3. **Loss, Router & Per-Component Optimizer Parity (`src/maxtext/trainers/pre_train/train.py`, `src/maxtext/optimizers/optimizers.py`)**:
    * Normalizes token CE + `z_loss_multiplier=1e-5` by the global `loss_weights` sum (`olmo_loss_denominator_counts_masked_instances=true`, `static_loss_cotangent=true`) and scales MoE auxiliary load-balance loss (`0.01`) by valid non-padding `router_token_mask` tokens.
    * Supports `8K Joint` domain loss-group normalization (`olmo_text_loss_group_weight=0.35`, `olmo_vision_loss_group_weight=0.65`).
-   * Implements per-component learning rate scales and schedules (`olmo_vision_lr_scale`, `olmo_connector_lr_scale`, `olmo_embedding_lr_scale`, `olmo_connector_warmup_steps`, `olmo_vision_lr_cosine_alpha_f`, `olmo_hold_final_lr`), per-component global gradient norm clipping (`olmo_per_component_grad_clip=true`), embedding row-range gradient masking (`olmo_trainable_embedding_row_range=[100278, 100284]`), and `load_balance_loss_weight=0.0` during Stage 1 Bridge (keeping router `expert_bias` identical to pretraining, matching `OLMo-core`'s `restore_pretraining_router_lb=True`).
+   * Implements per-component learning rate scales and schedules (`olmo_vision_lr_scale`, `olmo_connector_lr_scale`, `olmo_embedding_lr_scale`, `olmo_connector_warmup_steps`, `olmo_vision_lr_cosine_alpha_f`, `olmo_hold_final_lr`), per-component global gradient norm clipping (`olmo_per_component_grad_clip=true`), embedding row-range gradient masking (`olmo_trainable_embedding_row_range=[100278, 100284]`), and `load_balance_loss_weight=0.0` during Stage 1 Bridge, returning to the pretraining value `0.01` in Stage 2 Joint (`OLMo-core`'s `restore_pretraining_router_lb=True` restores the load-balance loss coefficients; the router has no separate bias state).
 4. **Multimodal & 256K Chunked Text Data Pipelines (`src/maxtext/input_pipeline/olmo_mm_data_processing.py`, `tools/data_generation/export_olmo_mm_batches.py`, `src/maxtext/input_pipeline/olmo_data_grain.py`)**:
    * `dataset_type=olmo_mm` supports both pre-exported `.npz` global batches (`olmo_mm_batches_dir`, for validation and short runs on TPU pods without local media mounts) and live `OLMo-core` `MixtureDataLoader` configs (`olmo_mm_config_path`, including a built-in `merged_mt_lc` composable text-replay shim and `/weka` path remapping).
    * For multi-GiB `.npz` archives (such as `~6.4 GiB` `256K` global batches on GCS), `load_maxtext_batch_npz` parses the uncompressed ZIP local file headers and `.npy` array headers directly over seekable file streams, issuing byte-range reads strictly for each host's local DP row slice (`6.59 s` per `6.37 GiB` batch on GCS vs. downloading the entire archive).
@@ -176,7 +176,7 @@ export OLMOE3_FAST_SC_DEVICE_PUT=1
 
 ### Stage 1: `8K` Vision Connector Bridge (`500` steps)
 
-Freezes `25L SigLIP2`, all `40L LM` blocks, `logits_dense`, and router `expert_bias` (`load_balance_loss_weight=0.0`), training only `OLMo35VisionConnector` and the `6` image token rows `[100278..100283]`:
+Freezes `25L SigLIP2`, all `40L LM` blocks (router weights included), and `logits_dense`, with `load_balance_loss_weight=0.0`, training only `OLMo35VisionConnector` and the `6` image token rows `[100278..100283]`:
 
 ```bash
 python -m maxtext.trainers.pre_train.train \
@@ -262,7 +262,7 @@ Verified so far:
 | Converter round trip | Tiny `step870229` (`bridge_init`), `step3500`, `step22320`; `829` tensors | `0.0` max abs diff |
 | Hero `162974` compatibility | Key and shape match on `1,113` LM keys; `bridge_init` not yet run on it | Matched |
 | Batch export | `8` `bridge_8k`, `8` `joint_8k`, `2` `mt_lc_256k` global batches | `16` of `28` vision sources; Bridge batches use synthetic images |
-| Stage 1 Bridge mechanics | Tiny, `64` TPU v5p chips, `500` steps cycling `8` batches | `0.0` change on `ViT`, `LM`, `logits_dense`, `expert_bias`, text embedding rows |
+| Stage 1 Bridge mechanics | Tiny, `64` TPU v5p chips, `500` steps cycling `8` batches | `0.0` change on `ViT`, `LM`, `logits_dense`, text embedding rows |
 | Stage 2 Joint mechanics | Tiny, `64` TPU v5p chips, `60` steps cycling `8` batches | `30+30` save/resume bit-exact |
 | Converted `step3500` eval | `4` `joint_8k` batches | `1.246` mean loss (no reference value to compare yet) |
 | Hero `256K` vision step time | `512` TPU v4 chips, synthetic data, `1,024` crops/seq | Measured `14.22 s/step`, `19.03 GiB` XLA peak |
