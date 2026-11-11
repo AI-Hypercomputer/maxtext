@@ -1055,5 +1055,54 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
         create_mesh(devices=self.devices)
 
 
+class DefaultShardingMoERulesTest(parameterized.TestCase):
+  """Verifies routed-expert logical axis rules and `param_metadata` eager sharding."""
+
+  def test_routed_expert_weight_and_activation_rules(self):
+    sharding = DefaultSharding()
+    self.assertEqual(
+        sharding("wi_0", ("experts", "expert_embed", "expert_mlp")),
+        P("expert", ("fsdp", "fsdp_transpose"), ("tensor", "tensor_sequence")),
+    )
+    self.assertEqual(
+        sharding("wo", ("experts", "expert_mlp", "expert_embed")),
+        P("expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose")),
+    )
+    self.assertEqual(
+        sharding("gate_up_3d", ("experts", "expert_embed", None)),
+        P("expert", ("fsdp", "fsdp_transpose"), None),
+    )
+    self.assertEqual(
+        sharding("gate_up_4d", ("experts", "expert_embed", None, "expert_mlp")),
+        P("expert", ("fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence")),
+    )
+    self.assertEqual(
+        sharding("act", ("experts", "expert_embed", "expert_mlp"), TensorType.ACTIVATION),
+        P("expert", None, ("tensor", "tensor_sequence")),
+    )
+    with self.assertRaisesRegex(ValueError, "expert"):
+      sharding("bad_routed", ("experts", "embed", "mlp"))
+
+    if len(jax.devices()) >= 4:
+      mesh_2d = create_mesh(ici={"fsdp": 2, "fsdp_transpose": 2}, devices=jax.devices()[:4])
+      with jax.set_mesh(mesh_2d):
+        self.assertEqual(
+            sharding("wi_0", ("experts", "expert_embed", "expert_mlp")),
+            P("expert", ("fsdp", "fsdp_transpose"), ("tensor", "tensor_sequence")),
+        )
+      mesh_1d = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=jax.devices()[:4])
+      with jax.set_mesh(mesh_1d):
+        self.assertEqual(
+            sharding("wi_0", ("experts", "expert_embed", "expert_mlp")),
+            P("expert", ("fsdp", "fsdp_transpose"), ("tensor", "tensor_sequence")),
+        )
+      mesh_1d_explicit = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=jax.devices()[:4], explicit=True)
+      with jax.set_mesh(mesh_1d_explicit):
+        self.assertEqual(
+            sharding("wi_0", ("experts", "expert_embed", "expert_mlp")),
+            P("expert", "fsdp", None),
+        )
+
+
 if __name__ == "__main__":
   absltest.main()

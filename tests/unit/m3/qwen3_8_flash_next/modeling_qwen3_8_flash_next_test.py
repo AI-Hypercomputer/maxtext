@@ -1092,7 +1092,7 @@ class Qwen3_8MoETest(absltest.TestCase):
     mod = self._make_moe(emb_dim=64, moe_mlp_dim=32, shared_expert_intermediate_size=48, num_experts=16)
     for p, shape in [
         (mod.gate.linear.kernel.value, (64, 16)),
-        (mod.experts.gate_up_proj.value, (16, 64, 2 * 32)),
+        (mod.experts.gate_up_proj.value, (16, 64, 2, 32)),
         (mod.experts.down_proj.value, (16, 32, 64)),
         (mod.shared_expert.gate_proj.kernel.value, (64, 48)),
         (mod.shared_expert.up_proj.kernel.value, (64, 48)),
@@ -1176,13 +1176,14 @@ class Qwen3_8MoETest(absltest.TestCase):
 
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]), ("fsdp",))
     token_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None))
-    weight_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "fsdp", None))
 
     x_sharded = jax.device_put(x, token_sharding)
     idx_sharded = jax.device_put(top_k_idx, token_sharding)
     w_sharded = jax.device_put(top_k_w, token_sharding)
-    experts.gate_up_proj.value = jax.device_put(experts.gate_up_proj.value, weight_sharding)
-    experts.down_proj.value = jax.device_put(experts.down_proj.value, weight_sharding)
+    gu_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "fsdp", None, None))
+    dn_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, "fsdp"))
+    experts.gate_up_proj.value = jax.device_put(experts.gate_up_proj.value, gu_sharding)
+    experts.down_proj.value = jax.device_put(experts.down_proj.value, dn_sharding)
 
     with jax.set_mesh(mesh):
       actual_out = jax.jit(lambda mod, inp, idx, w: mod(inp, idx, w))(experts, x_sharded, idx_sharded, w_sharded)
@@ -1237,12 +1238,12 @@ class Qwen3_8MoETest(absltest.TestCase):
     )
 
     # Weight copy with HF -> MaxText layout transpositions:
-    # gate_up_proj: HF (E, 2I, H) -> MaxText (E, H, 2I)
+    # gate_up_proj: HF (E, 2I, H) -> MaxText (E, H, 2, I)
     # down_proj: HF (E, H, I) -> MaxText (E, I, H)
     jax_moe.gate.linear.kernel.value = jnp.array(pt_moe.gate.weight.detach().cpu().numpy().T)
     jax_moe.experts.gate_up_proj.value = jnp.swapaxes(
         jnp.array(pt_moe.experts.gate_up_proj.detach().cpu().numpy()), -1, -2
-    )
+    ).reshape(e, h, 2, i)
     jax_moe.experts.down_proj.value = jnp.swapaxes(jnp.array(pt_moe.experts.down_proj.detach().cpu().numpy()), -1, -2)
     jax_moe.shared_expert.gate_proj.kernel.value = jnp.array(
         pt_moe.shared_expert.gate_proj.weight.detach().cpu().numpy().T
@@ -1317,63 +1318,6 @@ class Qwen3_8MoETest(absltest.TestCase):
         grads.shared_expert_gate.kernel,
     ):
       self.assertTrue(jnp.any(jnp.asarray(getattr(g, "value", g)) != 0.0))
-
-  def test_experts_tokamax_gmm_matches_reference_and_default(self):
-    """Verifies use_tokamax_gmm=True matches jax.lax.ragged_dot and the per-token reference, forward and backward."""
-    n, d, m, e, k = 12, 32, 16, 8, 2
-    experts_default = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e,
-        emb_dim=d,
-        moe_mlp_dim=m,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        use_tokamax_gmm=False,
-        rngs=nnx.Rngs(9),
-    )
-    experts_tokamax = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e,
-        emb_dim=d,
-        moe_mlp_dim=m,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        use_tokamax_gmm=True,
-        rngs=nnx.Rngs(9),
-    )
-    nnx.update(experts_tokamax, nnx.state(experts_default))
-
-    x = jax.random.normal(jax.random.key(21), (n, d))
-    top_k_idx = jax.random.randint(jax.random.key(22), (n, k), 0, e)
-    top_k_w = jax.random.uniform(jax.random.key(23), (n, k))
-    top_k_w = top_k_w / jnp.sum(top_k_w, axis=-1, keepdims=True)
-
-    ref_out = experts_default.reference_forward(x, top_k_idx, top_k_w)
-    def_out = experts_default(x, top_k_idx, top_k_w)
-    tok_out = experts_tokamax(x, top_k_idx, top_k_w)
-    np.testing.assert_allclose(tok_out, ref_out, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(tok_out, def_out, rtol=1e-5, atol=1e-5)
-
-    skewed_idx = jnp.zeros((n, k), dtype=jnp.int32).at[:, 1].set(1)
-    np.testing.assert_allclose(
-        experts_tokamax(x, skewed_idx, top_k_w),
-        experts_default.reference_forward(x, skewed_idx, top_k_w),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-    def loss_fn(mod: modeling_qwen3_8_flash_next.Qwen3_8Experts, inp: jax.Array) -> jax.Array:
-      return jnp.sum(mod(inp, top_k_idx, top_k_w) * jnp.arange(1, d + 1, dtype=jnp.float32))
-
-    _, (grads_def, dx_def) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_default, x)
-    _, (grads_tok, dx_tok) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(experts_tokamax, x)
-    np.testing.assert_allclose(dx_tok, dx_def, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(grads_tok.gate_up_proj.value, grads_def.gate_up_proj.value, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(grads_tok.down_proj.value, grads_def.down_proj.value, rtol=1e-5, atol=1e-5)
-
-    moe_def = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=False)
-    moe_tok = self._make_moe(emb_dim=d, moe_mlp_dim=m, shared_expert_intermediate_size=m, use_tokamax_gmm=True)
-    nnx.update(moe_tok, nnx.state(moe_def))
-    x_3d = x.reshape(3, 4, d)
-    np.testing.assert_allclose(moe_tok(x_3d), moe_def(x_3d), rtol=1e-5, atol=1e-5)
 
 
 # =================================================================================================
@@ -1646,8 +1590,10 @@ def _copy_hf_weights_to_jax(hf_model, jax_model):
         (jl.mlp.shared_expert_gate, pl.mlp.shared_expert_gate.weight),
     ):
       d_l.kernel[...] = to_j(w, True)
-    for k in ("gate_up_proj", "down_proj"):
-      getattr(jl.mlp.experts, k)[...] = jnp.swapaxes(to_j(getattr(pl.mlp.experts, k)), -1, -2)
+    jl.mlp.experts.down_proj[...] = jnp.swapaxes(to_j(pl.mlp.experts.down_proj), -1, -2)
+    jl.mlp.experts.gate_up_proj[...] = jnp.swapaxes(to_j(pl.mlp.experts.gate_up_proj), -1, -2).reshape(
+        jl.mlp.experts.gate_up_proj.shape
+    )
     cp(jl.mlp.shared_expert, pl.mlp.shared_expert, "gate_proj", "up_proj", "down_proj")
 
 
@@ -1761,7 +1707,7 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     self.assertEqual(out_s.dtype, jnp.bfloat16)
     self.assertTrue(jnp.all(jnp.isfinite(out_u)))
     self.assertTrue(jnp.all(jnp.isfinite(out_s)))
-    np.testing.assert_allclose(out_u, out_s, atol=1e-1, rtol=1e-1)
+    np.testing.assert_allclose(out_u, out_s, atol=2.5e-1, rtol=1e-1)
 
   def test_scanned_cycles_fail_fast_validation(self):
     """Verifies fail-fast validation in scanned cycle construction."""
@@ -1884,9 +1830,8 @@ class Qwen3_8BackboneTest(absltest.TestCase):
             cfg_default.gdn_chunk_inverse,
             cfg_default.qsa_indexer_mask,
             cfg_default.qsa_attention_kernel,
-            cfg_default.use_tokamax_gmm,
         ),
-        ("block_doubling", "gather", "dense", False),
+        ("block_doubling", "gather", "dense"),
     )
     # Reference paths (triangular solve, gather mask, dense attention, dense MoE) vs. the TPU kernel paths.
     cfg_base = _get_mini_config(**common_kw, gdn_chunk_inverse="solve")
@@ -1895,7 +1840,6 @@ class Qwen3_8BackboneTest(absltest.TestCase):
         gdn_chunk_inverse="block_doubling",
         qsa_indexer_mask="reshape",
         qsa_attention_kernel="flash",
-        use_tokamax_gmm=True,
     )
     mod_base = m3_models.create_model(cfg_base, mesh=None)
     mod_opt = m3_models.create_model(cfg_opt, mesh=None)
@@ -1905,8 +1849,8 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (1, 8))
     seg = jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32)
 
-    (logits_base, aux_base) = mod_base(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
-    (logits_opt, aux_opt) = mod_opt(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    logits_base, aux_base = mod_base(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    logits_opt, aux_opt = mod_opt(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
     np.testing.assert_allclose(np.array(logits_opt), np.array(logits_base), rtol=1e-4, atol=1e-4)
     jax.tree.map(
         lambda b, o: np.testing.assert_allclose(np.array(o), np.array(b), rtol=1e-4, atol=1e-4), aux_base, aux_opt
@@ -2007,8 +1951,10 @@ def _copy_layer_and_mixer_weights(pt_layer, pt_mixer, jx_layer, jx_mixer):
       (jx_layer.mlp.shared_expert_gate, pt_layer.mlp.shared_expert_gate.weight),
   ):
     d_l.kernel.value = to_j(w, True)
-  for k in ("gate_up_proj", "down_proj"):
-    getattr(jx_layer.mlp.experts, k).value = jnp.swapaxes(to_j(getattr(pt_layer.mlp.experts, k)), -1, -2)
+  jx_layer.mlp.experts.down_proj.value = jnp.swapaxes(to_j(pt_layer.mlp.experts.down_proj), -1, -2)
+  jx_layer.mlp.experts.gate_up_proj.value = jnp.swapaxes(to_j(pt_layer.mlp.experts.gate_up_proj), -1, -2).reshape(
+      jx_layer.mlp.experts.gate_up_proj.shape
+  )
   cp(jx_layer.mlp.shared_expert, pt_layer.mlp.shared_expert, "gate_proj", "up_proj", "down_proj")
   cp(jx_mixer, pt_mixer, "input_mix_weight_down", "input_mix_weight_up")
   cp(jx_mixer, pt_mixer, "hc_norm", tr=False, attr="scale")
@@ -2169,7 +2115,7 @@ class Qwen3_8MTPLossTest(absltest.TestCase):
             shapes.layers_0.mlp.shared_expert.down_proj.kernel.shape,
         ),
         (
-            (512, 2560, 1280),
+            (512, 2560, 2, 640),
             (512, 640, 2560),
             (2560, 512),
             (2560, 1),

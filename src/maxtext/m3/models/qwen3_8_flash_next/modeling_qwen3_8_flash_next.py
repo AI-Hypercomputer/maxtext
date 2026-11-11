@@ -33,6 +33,7 @@ Sections (in dependency order):
 
 from collections.abc import Callable
 from collections.abc import Sequence
+import dataclasses
 import math
 from typing import Any
 
@@ -41,8 +42,9 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
-import tokamax
-
+from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core import moe as m3_moe
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, param_metadata
 
 # =================================================================================================
 # Normalization layers and 4-stream gated residual (hyper-connection)
@@ -978,11 +980,11 @@ class Qwen3_8MLP(nnx.Module):
 
 
 class Qwen3_8Experts(nnx.Module):
-  """Collection of routed expert weights stored as 3D tensors.
+  """Collection of routed expert weights stored as 4D/3D tensors.
 
   Weight Layout Contract (for CL 9 checkpoint conversion):
-    - gate_up_proj: (num_experts, emb_dim, 2 * moe_mlp_dim) -> (E, H, 2I).
-      HuggingFace stores gate_up_proj as (E, 2I, H); transpose last two axes.
+    - gate_up_proj: (num_experts, emb_dim, 2, moe_mlp_dim) -> (E, H, 2, I), 0=gate, 1=up.
+      HuggingFace stores gate_up_proj as (E, 2I, H); transpose last two axes and reshape to (E, H, 2, I).
     - down_proj: (num_experts, moe_mlp_dim, emb_dim) -> (E, I, H).
       HuggingFace stores down_proj as (E, H, I); transpose last two axes.
   """
@@ -994,36 +996,41 @@ class Qwen3_8Experts(nnx.Module):
       moe_mlp_dim: int = 640,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
+      sharding: Sharding | None = None,
       *,
-      use_tokamax_gmm: bool = False,
+      executor: m3_moe.MoEExecutor | None = None,
       rngs: nnx.Rngs,
   ):
     self.num_experts = num_experts
     self.emb_dim = emb_dim
     self.moe_mlp_dim = moe_mlp_dim
     self.dtype = dtype
-    self.use_tokamax_gmm = use_tokamax_gmm
+    sharding_obj = sharding or DefaultSharding()
+    self.sharding = sharding_obj
 
+    if executor is not None:
+      self.executor = executor
+    elif sharding is not None:
+      tok_spec = sharding_obj("moe_tokens", ("batch", "length", "embed"), m3_moe.TensorType.ACTIVATION)
+      wi_spec = sharding_obj("wi_0", ("experts", "expert_embed", "expert_mlp"), m3_moe.TensorType.WEIGHT)
+      self.executor = m3_moe.MoEExecutor(
+          kind="gmm_v2",
+          batch=tok_spec[0],
+          experts=wi_spec[0],
+          mlp=wi_spec[2],
+      )
+    else:
+      self.executor = m3_moe.RAGGED_DOT
+
+    gu_shape = (num_experts, emb_dim, 2, moe_mlp_dim)
+    dn_shape = (num_experts, moe_mlp_dim, emb_dim)
     self.gate_up_proj = nnx.Param(
-        nnx.initializers.lecun_normal()(rngs.params(), (num_experts, emb_dim, 2 * moe_mlp_dim), weight_dtype)
+        nnx.initializers.lecun_normal()(rngs.params(), gu_shape, weight_dtype),
+        **param_metadata(sharding_obj, "gate_up_proj", ("experts", "expert_embed", None, "expert_mlp")),
     )
     self.down_proj = nnx.Param(
-        nnx.initializers.lecun_normal()(rngs.params(), (num_experts, moe_mlp_dim, emb_dim), weight_dtype)
-    )
-
-  def _ragged_dot(self, lhs: jax.Array, rhs: jax.Array, group_sizes: jax.Array) -> jax.Array:
-    """Executes ragged dot via jax.lax.ragged_dot or tokamax.ragged_dot."""
-    if not self.use_tokamax_gmm:
-      return jax.lax.ragged_dot(lhs, rhs, group_sizes)
-    impl = (
-        "mosaic" if jax.default_backend() == "tpu" and all(s >= 128 for s in lhs.shape[-2:] + rhs.shape[-2:]) else "xla"
-    )
-    return tokamax.ragged_dot(
-        lhs=lhs,
-        rhs=rhs,
-        group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, lhs.shape[0]),
-        preferred_element_type=self.dtype,
-        implementation=impl,
+        nnx.initializers.lecun_normal()(rngs.params(), dn_shape, weight_dtype),
+        **param_metadata(sharding_obj, "down_proj", ("experts", "expert_mlp", "expert_embed")),
     )
 
   def __call__(
@@ -1032,59 +1039,58 @@ class Qwen3_8Experts(nnx.Module):
       top_k_index: jax.Array,
       top_k_weights: jax.Array,
   ) -> jax.Array:
-    """Dispatches tokens via sorted token-expert grouping and ragged_dot."""
+    """Dispatches tokens through shared `MoEExecutor` (`ragged_all_to_all` EP + grouped matmul)."""
+    orig_dtype = hidden_states.dtype
     orig_shape = hidden_states.shape
-    if hidden_states.ndim == 3:
-      hidden_states = hidden_states.reshape(-1, orig_shape[-1])
-      top_k_index = top_k_index.reshape(-1, top_k_index.shape[-1])
-      top_k_weights = top_k_weights.reshape(-1, top_k_weights.shape[-1])
-
-    w_gate_up = jnp.asarray(self.gate_up_proj.value, dtype=self.dtype)
-    w_down = jnp.asarray(self.down_proj.value, dtype=self.dtype)
-
-    def _dispatch_2d(
-        x_2d: jax.Array,
-        idx_2d: jax.Array,
-        w_2d: jax.Array,
-        w_gu: jax.Array,
-        w_dn: jax.Array,
-    ) -> jax.Array:
-      num_tokens, top_k = idx_2d.shape
-      flat_expert_ids = idx_2d.reshape(-1)
-      perm = jnp.argsort(flat_expert_ids)
-      group_sizes = jnp.bincount(flat_expert_ids, length=self.num_experts).astype(jnp.int32)
-      flat_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
-      sorted_x = x_2d[flat_token_ids[perm]]
-
-      gate_up = self._ragged_dot(sorted_x.astype(self.dtype), w_gu, group_sizes)
-      gate, up = jnp.split(gate_up, 2, axis=-1)
-      act = jax.nn.silu(gate) * up
-      sorted_out = self._ragged_dot(act, w_dn, group_sizes)
-
-      inv_perm = jnp.argsort(perm)
-      expert_outs = sorted_out[inv_perm].reshape(num_tokens, top_k, self.emb_dim)
-      out_2d = jnp.sum(expert_outs * w_2d[:, :, None].astype(expert_outs.dtype), axis=1)
-      return out_2d.astype(x_2d.dtype)
-
-    mesh = jax.sharding.get_abstract_mesh()
-    batch_axes = get_batch_mesh_axes()
-    batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
-    if batch_axes and hidden_states.shape[0] % batch_shards == 0:
-      token_spec = jax.sharding.PartitionSpec(batch_axes, None)
-      weight_spec = jax.sharding.PartitionSpec()
-      out = jax.shard_map(
-          _dispatch_2d,
-          mesh=mesh,
-          in_specs=(token_spec, token_spec, token_spec, weight_spec, weight_spec),
-          out_specs=token_spec,
-          check_vma=False,
-      )(hidden_states, top_k_index, top_k_weights, w_gate_up, w_down)
+    if hidden_states.ndim == 2:
+      x_3d = hidden_states[:, None, :].astype(self.dtype)
+      w_3d = top_k_weights[:, None, :].astype(self.dtype)
+      idx_3d = top_k_index[:, None, :]
+    elif hidden_states.ndim == 3:
+      x_3d = hidden_states.astype(self.dtype)
+      w_3d = top_k_weights.astype(self.dtype)
+      idx_3d = top_k_index
     else:
-      out = _dispatch_2d(hidden_states, top_k_index, top_k_weights, w_gate_up, w_down)
+      raise ValueError(f"Expected 2D or 3D hidden_states; got {hidden_states.shape}.")
 
-    if len(orig_shape) == 3:
-      out = out.reshape(orig_shape)
-    return out
+    w_gate_up = jnp.asarray(self.gate_up_proj[...], dtype=self.dtype)
+    w_down = jnp.asarray(self.down_proj[...], dtype=self.dtype)
+
+    def _run_with_mesh(active_mesh: Any) -> jax.Array:
+      exec_cfg = self.executor
+      x_in, w_in, idx_in = x_3d, w_3d, idx_3d
+      reshaped_to_tokens = False
+      if exec_cfg.kind in m3_moe.SHARDED_EXECUTOR_KINDS:
+        batch_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.batch)
+        batch_shards = m3_kernels.mesh_axis_size(active_mesh, batch_ax)
+        ep_size = m3_kernels.mesh_axis_size(active_mesh, m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.experts))
+        tp_size = m3_kernels.mesh_axis_size(active_mesh, m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.mlp))
+        if x_in.shape[0] % batch_shards != 0:
+          total_tokens = x_in.shape[0] * x_in.shape[1]
+          if total_tokens % batch_shards == 0:
+            x_in = x_in.reshape(total_tokens, 1, x_in.shape[2])
+            w_in = w_in.reshape(total_tokens, 1, w_in.shape[2])
+            idx_in = idx_in.reshape(total_tokens, 1, idx_in.shape[2])
+            reshaped_to_tokens = True
+          elif ep_size == 1 and tp_size == 1:
+            exec_cfg = dataclasses.replace(exec_cfg, batch=None)
+      y = exec_cfg.fused(x_in, w_in, idx_in, w_gate_up, w_down)
+      if reshaped_to_tokens:
+        y = y.reshape(x_3d.shape)
+      return y
+
+    amb_mesh = jax.sharding.get_abstract_mesh()
+    if amb_mesh.empty:
+      fallback_exec = (
+          dataclasses.replace(self.executor, kind="ragged_dot")
+          if self.executor.kind in m3_moe.SHARDED_EXECUTOR_KINDS
+          else self.executor
+      )
+      out_3d = fallback_exec.fused(x_3d, w_3d, idx_3d, w_gate_up, w_down)
+    else:
+      out_3d = _run_with_mesh(amb_mesh)
+
+    return out_3d.reshape(orig_shape).astype(orig_dtype)
 
   def reference_forward(
       self,
@@ -1099,13 +1105,13 @@ class Qwen3_8Experts(nnx.Module):
       top_k_index = top_k_index.reshape(-1, top_k_index.shape[-1])
       top_k_weights = top_k_weights.reshape(-1, top_k_weights.shape[-1])
 
-    w_gate_up = jnp.asarray(self.gate_up_proj.value, dtype=self.dtype)[top_k_index]
-    gate_up = jnp.einsum("nd,nkdf->nkf", hidden_states.astype(self.dtype), w_gate_up)
-    gate, up = jnp.split(gate_up, 2, axis=-1)
+    w_gate_up = jnp.asarray(self.gate_up_proj[...], dtype=self.dtype)[top_k_index]
+    gate = jnp.einsum("td,tkdm->tkm", hidden_states.astype(self.dtype), w_gate_up[:, :, :, 0, :])
+    up = jnp.einsum("td,tkdm->tkm", hidden_states.astype(self.dtype), w_gate_up[:, :, :, 1, :])
     act = jax.nn.silu(gate) * up
-    w_down = jnp.asarray(self.down_proj.value, dtype=self.dtype)[top_k_index]
-    expert_out = jnp.einsum("nkm,nkmd->nkd", act, w_down)
-    out = jnp.einsum("nkd,nk->nd", expert_out, top_k_weights.astype(expert_out.dtype))
+    w_down = jnp.asarray(self.down_proj[...], dtype=self.dtype)[top_k_index]
+    expert_out = jnp.einsum("tkm,tkmd->tkd", act, w_down)
+    out = jnp.einsum("tkd,tk->td", expert_out, top_k_weights.astype(expert_out.dtype))
     out = out.astype(hidden_states.dtype)
 
     if len(orig_shape) == 3:
@@ -1166,13 +1172,12 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
       routed_scaling_factor: float = 1.0,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
-      sharding: Any | None = None,
+      sharding: Sharding | None = None,
       *,
       shared_expert_intermediate_size: int,
-      use_tokamax_gmm: bool = False,
+      executor: m3_moe.MoEExecutor | None = None,
       rngs: nnx.Rngs,
   ):
-    del sharding
     if shared_expert_intermediate_size <= 0:
       raise ValueError(f"shared_expert_intermediate_size must be > 0, got {shared_expert_intermediate_size}.")
     self.emb_dim = emb_dim
@@ -1200,7 +1205,8 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
         moe_mlp_dim=moe_mlp_dim,
         dtype=dtype,
         weight_dtype=weight_dtype,
-        use_tokamax_gmm=use_tokamax_gmm,
+        sharding=sharding,
+        executor=executor,
         rngs=rngs,
     )
     self.shared_expert = Qwen3_8MLP(
@@ -1581,7 +1587,15 @@ def build_ple_layer(config: Any, layer_idx: int = 1, *, rngs: nnx.Rngs) -> Qwen3
 class Qwen3_8DecoderLayer(nnx.Module):
   """Single decoder layer with Hyper-Connection residuals and MoE."""
 
-  def __init__(self, config: Any, layer_idx: int, *, include_ple: bool = True, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Any,
+      layer_idx: int,
+      *,
+      include_ple: bool = True,
+      sharding: Sharding | None = None,
+      rngs: nnx.Rngs,
+  ):
     c, emb, dt, wdt = config, int(config.emb_dim), jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
     ckw = {"eps": float(c.normalization_layer_epsilon), "dtype": dt, "weight_dtype": wdt, "rngs": rngs}
     hc_kw = {"emb_dim": emb, "hc_count": int(c.hc_count), "hc_lowrank": int(c.hc_lowrank), **ckw}
@@ -1620,19 +1634,21 @@ class Qwen3_8DecoderLayer(nnx.Module):
           attention_kernel=str(c.qsa_attention_kernel),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
-    use_tokamax_gmm = bool(getattr(c, "sparse_matmul", False) and getattr(c, "use_tokamax_gmm", False))
+    sharding_obj = sharding or DefaultSharding()
+    moe_executor = m3_moe.moe_from_config(c, sharding_obj)
     self.mlp = Qwen3_8SparseMoeBlock(
         emb_dim=emb,
         shared_expert_intermediate_size=int(c.mlp_dim),
         moe_mlp_dim=int(c.moe_mlp_dim),
         routed_scaling_factor=float(c.routed_scaling_factor),
         num_experts=int(c.num_experts),
+        sharding=sharding_obj,
         rngs=rngs,
         num_experts_per_tok=int(c.num_experts_per_tok),
         norm_topk_prob=bool(c.norm_topk_prob),
         dtype=dt,
         weight_dtype=wdt,
-        use_tokamax_gmm=use_tokamax_gmm,
+        executor=moe_executor,
     )
     self.ple = build_ple_layer(c, layer_idx, rngs=rngs) if include_ple else None
 
@@ -1672,13 +1688,50 @@ class Qwen3_8DecoderLayer(nnx.Module):
 class Qwen3_8CycleBlock(nnx.Module):
   """4-layer cycle block composed of 3 GDN layers and 1 QSA layer."""
 
-  def __init__(self, config: Any, *, rngs: nnx.Rngs):
+  def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
     self.gdn_0, self.gdn_1, self.gdn_2, self.qsa_3 = (
-        Qwen3_8DecoderLayer(config, i, include_ple=False, rngs=rngs) for i in range(4)
+        Qwen3_8DecoderLayer(config, i, include_ple=False, sharding=sharding, rngs=rngs) for i in range(4)
     )
 
 
-def create_scanned_cycles(config: Any, num_cycles: int, *, rngs: nnx.Rngs) -> Qwen3_8CycleBlock:
+def _is_nnx_var(node: Any) -> bool:
+  """Returns whether `node` is an `nnx.Variable` leaf for `jax.tree.map`."""
+  return isinstance(node, nnx.Variable)
+
+
+def _stack_cycle_vars(first: Any, *others: Any) -> Any:
+  """Stacks per-cycle `nnx.Variable` leaves along axis 0 while prepending `None` to `out_sharding`."""
+  if not isinstance(first, nnx.Variable):
+    return jnp.stack([first, *others], axis=0)
+  stacked = jnp.stack([first.get_value(), *(o.get_value() for o in others)], axis=0)
+  spec = first.get_metadata().get("out_sharding")
+  if isinstance(spec, jax.sharding.PartitionSpec):
+    new_spec = jax.sharding.PartitionSpec(None, *spec)
+    cur_sharding = getattr(first.get_value(), "sharding", None)
+    if isinstance(cur_sharding, jax.sharding.NamedSharding):
+      stacked = jax.device_put(stacked, jax.sharding.NamedSharding(cur_sharding.mesh, new_spec))
+    return first.replace(
+        stacked, out_sharding=new_spec, eager_sharding=bool(first.get_metadata().get("eager_sharding", False))
+    )
+  return first.replace(stacked)
+
+
+def _strip_cycle_axis(var: Any) -> Any:
+  """Drops the leading `None` scan axis from `out_sharding` metadata inside `apply_scanned_cycles`."""
+  if isinstance(var, nnx.Variable):
+    spec = var.get_metadata().get("out_sharding")
+    if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) > 0:
+      return var.replace(out_sharding=jax.sharding.PartitionSpec(*spec[1:]))
+  return var
+
+
+def create_scanned_cycles(
+    config: Any,
+    num_cycles: int,
+    *,
+    sharding: Sharding | None = None,
+    rngs: nnx.Rngs,
+) -> Qwen3_8CycleBlock:
   """Creates scanned cycle block with stacked parameters along cycle axis."""
   if int(config.inhomogeneous_layer_cycle_interval) != 4:
     raise ValueError(
@@ -1689,8 +1742,9 @@ def create_scanned_cycles(config: Any, num_cycles: int, *, rngs: nnx.Rngs) -> Qw
     raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {config.num_decoder_layers}.")
   if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
     raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
-  sp = [nnx.split(Qwen3_8CycleBlock(config, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
-  return nnx.merge(sp[0][0], *(jax.tree.map(lambda *x: jnp.stack(x, 0), *(s[i] for s in sp)) for i in (1, 2)))
+  sp = [nnx.split(Qwen3_8CycleBlock(config, sharding=sharding, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
+  stacked_trees = [jax.tree.map(_stack_cycle_vars, *(s[i] for s in sp), is_leaf=_is_nnx_var) for i in (1, 2)]
+  return nnx.merge(sp[0][0], *stacked_trees)
 
 
 def apply_scanned_cycles(
@@ -1719,7 +1773,10 @@ def apply_scanned_cycles(
 
   def scan_fn(carry, xs):
     carry = shard_batch(carry)
-    blk, kw = nnx.merge(c_def, xs[0], xs[1]), {"positions": positions, "conv_mask": conv_mask, "segment_ids": segment_ids}
+    p_slice = jax.tree.map(_strip_cycle_axis, xs[0], is_leaf=_is_nnx_var)
+    r_slice = jax.tree.map(_strip_cycle_axis, xs[1], is_leaf=_is_nnx_var)
+    blk = nnx.merge(c_def, p_slice, r_slice)
+    kw = {"positions": positions, "conv_mask": conv_mask, "segment_ids": segment_ids}
     if return_aux:
       h, a0 = blk.gdn_0(carry, return_aux=True, **kw)
       h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
@@ -1759,7 +1816,7 @@ def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> N
   for k, name in enumerate(["gdn_0", "gdn_1", "gdn_2", "qsa_3"]):
     a = "linear_attn" if k < 3 else "self_attn"
     st = [nnx.state(get_sub(getattr(u, f"layers_{4 * c + k}"), a)) for c in range(s.num_cycles)]
-    nnx.update(get_sub(getattr(s.cycles, name), a), jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *st))
+    nnx.update(get_sub(getattr(s.cycles, name), a), jax.tree.map(_stack_cycle_vars, *st, is_leaf=_is_nnx_var))
   for m in ("token_embedder", "hyper_connection_mixer"):
     nnx.update(getattr(s, m), nnx.state(getattr(u, m)))
   if u.ple_layer_id is not None:
@@ -1774,7 +1831,7 @@ def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> N
 class Qwen3_8MTPBlock(nnx.Module):
   """Single-layer MTP draft block fusing next-token embeddings and HC streams."""
 
-  def __init__(self, config: Any, *, rngs: nnx.Rngs):
+  def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
     self.config, self.emb_dim = config, int(config.emb_dim)
     self.hc_count, self.hc_lowrank = int(config.hc_count), int(config.hc_lowrank)
     dt, wdt, eps = jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype), float(config.normalization_layer_epsilon)
@@ -1784,7 +1841,7 @@ class Qwen3_8MTPBlock(nnx.Module):
     self.fc_embedding = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
     self.fc_hidden = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
     cyc = int(config.inhomogeneous_layer_cycle_interval)
-    self.layers_0 = Qwen3_8DecoderLayer(config, layer_idx=cyc - 1, include_ple=False, rngs=rngs)
+    self.layers_0 = Qwen3_8DecoderLayer(config, layer_idx=cyc - 1, include_ple=False, sharding=sharding, rngs=rngs)
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
@@ -1858,18 +1915,27 @@ def router_load_balancing_loss(
     num_experts: int,
     mask: jax.Array | None = None,
     mtp_mask: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
 ) -> jax.Array:
   """Computes MoE router load balancing auxiliary loss across decoder layers."""
   if aux_list is None:
     raise ValueError("aux_list cannot be None.")
+  eff_mask: jax.Array | None = None
+  if mask is not None:
+    eff_mask = mask != 0
+  if segment_ids is not None:
+    seg_valid = segment_ids != 0
+    eff_mask = seg_valid if eff_mask is None else (eff_mask & seg_valid)
+  eff_mtp_mask = (mtp_mask != 0) if mtp_mask is not None else eff_mask
+
   if isinstance(aux_list, dict):
     if "layer_aux" not in aux_list:
       raise ValueError("aux_list dict must contain 'layer_aux'.")
-    layer_items = [(layer, mask) for layer in aux_list["layer_aux"]]
+    layer_items = [(layer, eff_mask) for layer in aux_list["layer_aux"]]
     if aux_list.get("mtp_aux") is not None:
-      layer_items.append((aux_list["mtp_aux"], mtp_mask if mtp_mask is not None else mask))
+      layer_items.append((aux_list["mtp_aux"], eff_mtp_mask))
   elif isinstance(aux_list, (list, tuple)):
-    layer_items = [(layer, mask) for layer in aux_list]
+    layer_items = [(layer, eff_mask) for layer in aux_list]
   else:
     raise ValueError(f"Unsupported aux_list type: {type(aux_list)}.")
   if not layer_items:
@@ -1889,7 +1955,7 @@ def router_load_balancing_loss(
     oh_reduce_axes = tuple(range(oh.ndim - 1))
     prob_reduce_axes = tuple(range(r_probs.ndim - 1))
     if layer_mask is not None:
-      m = layer_mask.astype(jnp.float32)
+      m = (layer_mask != 0).astype(jnp.float32)
       tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh * jnp.expand_dims(m, (-1, -2)), axis=oh_reduce_axes)
       router_prob_sum = router_prob_sum + jnp.sum(r_probs * jnp.expand_dims(m, -1), axis=prob_reduce_axes)
       total_rows = total_rows + jnp.sum(m)
@@ -1930,7 +1996,11 @@ def compute_total_loss(
   aux = out[1] if (run_mtp or need_aux) else None
   mtp_logits = aux["mtp_logits"] if (run_mtp and need_aux) else (out[1] if run_mtp else None)
 
-  primary_loss = cross_entropy_loss(logits, target_tokens, mask=target_mask)
+  eff_target_mask = target_mask
+  if segment_ids is not None:
+    seg_valid = (segment_ids != 0).astype(jnp.float32)
+    eff_target_mask = seg_valid if eff_target_mask is None else (eff_target_mask.astype(jnp.float32) * seg_valid)
+  primary_loss = cross_entropy_loss(logits, target_tokens, mask=eff_target_mask)
 
   mtp_aux_mask = None
   mtp_loss = None
@@ -1955,6 +2025,7 @@ def compute_total_loss(
           int(model.config.num_experts),
           mask=target_mask,
           mtp_mask=mtp_aux_mask,
+          segment_ids=segment_ids,
       )
       if need_aux
       else jnp.array(0.0, dtype=jnp.float32)
@@ -1998,7 +2069,7 @@ def _positions_and_conv_mask(
 class Qwen3_8Decoder(nnx.Module):
   """Decoder stack with token embedding, 4-stream residual, and final mixer."""
 
-  def __init__(self, config: Any, *, rngs: nnx.Rngs):
+  def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
     c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
     self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
     self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
@@ -2021,11 +2092,11 @@ class Qwen3_8Decoder(nnx.Module):
       if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
         raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
       self.num_cycles = self.num_layers // 4
-      self.cycles = create_scanned_cycles(config, self.num_cycles, rngs=rngs)
+      self.cycles = create_scanned_cycles(config, self.num_cycles, sharding=sharding, rngs=rngs)
       self.ple = build_ple_layer(config, rngs=rngs)
     else:
       for i in range(self.num_layers):
-        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, rngs=rngs))
+        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, sharding=sharding, rngs=rngs))
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
@@ -2084,8 +2155,17 @@ class Qwen3_8Decoder(nnx.Module):
 class Qwen3_8FlashNextModel(nnx.Module):
   """Top-level Qwen3.8-Flash-Next model with decoder and lm_head."""
 
-  def __init__(self, config: Any, mesh: Any = None, *, quant_mode: str = "train", rngs: nnx.Rngs):
-    self.config, self.mesh, self.quant_mode, self.decoder = config, mesh, quant_mode, Qwen3_8Decoder(config, rngs=rngs)
+  def __init__(
+      self,
+      config: Any,
+      mesh: Any = None,
+      *,
+      quant_mode: str = "train",
+      sharding: Sharding | None = None,
+      rngs: nnx.Rngs,
+  ):
+    self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
+    self.decoder = Qwen3_8Decoder(config, sharding=sharding, rngs=rngs)
     self.lm_head = nnx.Linear(
         self.decoder.emb_dim,
         self.decoder.vocab_size,
@@ -2097,7 +2177,7 @@ class Qwen3_8FlashNextModel(nnx.Module):
     mtp_layers = int(getattr(config, "mtp_num_layers", 0))
     if mtp_layers not in (0, 1):
       raise ValueError(f"mtp_num_layers must be 0 or 1, got {mtp_layers}.")
-    self.mtp = Qwen3_8MTPBlock(config, rngs=rngs) if mtp_layers > 0 else None
+    self.mtp = Qwen3_8MTPBlock(config, sharding=sharding, rngs=rngs) if mtp_layers > 0 else None
 
   def __call__(
       self,
@@ -2163,7 +2243,19 @@ class Qwen3_8FlashNextModel(nnx.Module):
 
 
 def create_qwen3_8_flash_next_model(
-    config: Any, mesh: Any = None, *, rngs: nnx.Rngs | None = None, quant_mode_str: str = "train", **_: Any
+    config: Any,
+    mesh: Any = None,
+    *,
+    rngs: nnx.Rngs | None = None,
+    quant_mode_str: str = "train",
+    sharding: Sharding | None = None,
+    **_: Any,
 ) -> Qwen3_8FlashNextModel:
   """Factory function creating a Qwen3_8FlashNextModel instance."""
-  return Qwen3_8FlashNextModel(config=config, mesh=mesh, quant_mode=quant_mode_str, rngs=rngs or nnx.Rngs(params=0))
+  return Qwen3_8FlashNextModel(
+      config=config,
+      mesh=mesh,
+      quant_mode=quant_mode_str,
+      sharding=sharding,
+      rngs=rngs or nnx.Rngs(params=0),
+  )

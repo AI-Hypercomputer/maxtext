@@ -339,6 +339,8 @@ class DefaultSharding(Sharding):
 
   Weights shard `embed` across `("fsdp", "fsdp_transpose", "expert")` so dense
   parameters are never replicated when `fsdp_transpose > 1` or `expert > 1`;
+  routed-expert weights shard `experts` over `"expert"`, `expert_embed` over
+  `("fsdp", "fsdp_transpose")`, and `expert_mlp` over `("tensor", "tensor_sequence")`;
   `heads`, `kv_heads`, `mlp`, and `vocab` shard over `("tensor", "tensor_sequence")`;
   `stage`/`layers` shard over `stage`; `norm` and `head_dim` stay replicated.
 
@@ -365,7 +367,13 @@ class DefaultSharding(Sharding):
         return "stage"
       case "layers", TensorType.ACTIVATION:
         return None
-      case ("heads" | "kv_heads" | "mlp" | "vocab"), _:
+      case "experts", _:
+        return "expert"
+      case "expert_embed", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose")
+      case "expert_embed", TensorType.ACTIVATION:
+        return None
+      case ("heads" | "kv_heads" | "mlp" | "expert_mlp" | "vocab"), _:
         return ("tensor", "tensor_sequence")
       case ("length" | "norm_length" | "kv_length"), TensorType.WEIGHT:
         return None
