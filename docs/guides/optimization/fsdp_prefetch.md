@@ -150,7 +150,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 
 | Flag                                                                             | Applies to                                     | Purpose & notes                                                                                                                                                                                                                                                         |
 | -------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prefetch_fsdp_weights=True` + `scan_layers=True`                                | All models                                     | Enables cross-layer FSDP weight prefetching on scanned decoder layers, automatically registers the post-scheduler `max_async_overlap_transform` on TPU, and pins FSDP prefetch collectives to SparseCore 1 on dual-SparseCore chips (TPU7x).                            |
+| `prefetch_fsdp_weights=True` + `scan_layers=True`                                | All models                                     | Enables cross-layer FSDP weight prefetching on scanned decoder layers, automatically registers the post-scheduler `fsdp_prefetch_overlap_transform` on TPU, and pins FSDP prefetch collectives to SparseCore 1 on dual-SparseCore chips (TPU7x).                        |
 | `shard_mode=explicit`                                                            | All models *(required for deferred RS)*        | Preserves `NamedSharding` inside `custom_vjp` so gathers use `to="reduced"` and gradients reduce-scatter once on SparseCore.                                                                                                                                            |
 | `prefetch_fsdp_defer_grad_reduce_scatter=True`                                   | All models *(when HBM allows)*                 | Defers step *k*'s `reduce-scatter` to the start of step *k*−1, hiding exposed backward RS (+1 layer/sub-layer of unreduced dW in HBM).                                                                                                                                  |
 | `moe_flat_fsdp_weights=True`                                                     | MoE models                                     | Stores routed-expert weights as 2D `[E * rows, cols]` sharded `P(('expert', 'fsdp'), ...)` on major dim 0, eliminating multi-GiB SparseCore `{1,0,2} ↔ {2,1,0}` relayout transposes and TensorCore copies (requires `sparse_matmul=True`, `prefuse_moe_weights=False`). |
@@ -182,7 +182,7 @@ Each SparseCore executes its offloaded collectives in a single in-order FIFO que
    `moe_pin_sparse_core_ep_all_gathers=True` and `moe_ep_all_gather_sparse_core_id=0` so EP
    all-gathers stay on SparseCore 0.
 2. **Post-scheduler async overlap transform:** The prefetch pipeline automatically registers
-   `max_async_overlap_transform` (`maxtext.experimental.lineage.xla_transforms`), which runs after
+   `fsdp_prefetch_overlap_transform` (`maxtext.layers.fsdp_prefetch_overlap_transform`), which runs after
    XLA's scheduler to move every async collective `start` as early and every `done` as late as data
    dependencies and the per-SparseCore FIFO queues allow.
 

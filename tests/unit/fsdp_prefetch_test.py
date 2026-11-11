@@ -33,6 +33,7 @@ import numpy as np
 from maxtext.common.common_types import ShardMode
 from maxtext.layers import fsdp_prefetch
 from maxtext.layers import fsdp_prefetch_inhomogeneous
+from maxtext.layers import fsdp_prefetch_overlap_transform
 from maxtext.utils import sharding
 
 
@@ -193,13 +194,129 @@ class FsdpPrefetchSparseCoreTest(unittest.TestCase):
       dev = types.SimpleNamespace(platform=platform, device_kind="TPU7x" if platform == "tpu" else "cpu")
       return types.SimpleNamespace(devices=np.array([dev], dtype=object))
 
-    from maxtext.experimental.lineage.xla_transforms import max_async_overlap_transform  # pylint: disable=import-outside-toplevel
-
-    with mock.patch.object(max_async_overlap_transform, "register_transform") as register:
+    with mock.patch.object(fsdp_prefetch_overlap_transform, "register_transform") as register:
       fsdp_prefetch._register_overlap_transform(fake_mesh("cpu"))  # pylint: disable=protected-access
       register.assert_not_called()
       fsdp_prefetch._register_overlap_transform(fake_mesh("tpu"))  # pylint: disable=protected-access
       register.assert_called_once_with(platforms="tpu")
+
+  def test_reschedules_unrolled_two_layer_scan_body_starts_and_dones(self):
+    # Models an unroll=2 backward scan while body with two layers on SparseCore 1 ("sparse_core:1"):
+    #   Layer 1: RS(k+1) and AG(k-1) overlapped with Layer 1 compute (dot1_a -> dot1_b),
+    #   Midpoint optimization_barrier separating Layer 1 from Layer 2,
+    #   Layer 2: RS(k) and AG(k-2) overlapped with Layer 2 compute (dot2_a -> dot2_b).
+    # In the raw schedule, starts are delayed after compute begins and dones sit right after starts.
+    order = (
+        "param",
+        "dot1_a",
+        "rs1_start",
+        "rs1_done",
+        "rs1_dus",
+        "slice1",
+        "ag1_start",
+        "ag1_done",
+        "dot1_b",
+        "slice2",
+        "mid_barrier",
+        "gte_y2",
+        "gte_p2",
+        "dot2_a",
+        "rs2_start",
+        "rs2_done",
+        "rs2_dus",
+        "ag2_start",
+        "ag2_done",
+        "dot2_b",
+        "root",
+    )
+    opcodes = {
+        "param": "kParameter",
+        "dot1_a": "kDot",
+        "rs1_start": "kAsyncStart",
+        "rs1_done": "kAsyncDone",
+        "rs1_dus": "kDynamicUpdateSlice",
+        "slice1": "kDynamicSlice",
+        "ag1_start": "kAllGatherStart",
+        "ag1_done": "kAllGatherDone",
+        "dot1_b": "kDot",
+        "slice2": "kDynamicSlice",
+        "mid_barrier": "kOptimizationBarrier",
+        "gte_y2": "kGetTupleElement",
+        "gte_p2": "kGetTupleElement",
+        "dot2_a": "kDot",
+        "rs2_start": "kAsyncStart",
+        "rs2_done": "kAsyncDone",
+        "rs2_dus": "kDynamicUpdateSlice",
+        "ag2_start": "kAllGatherStart",
+        "ag2_done": "kAllGatherDone",
+        "dot2_b": "kDot",
+        "root": "kTuple",
+    }
+    operands = {
+        "param": (),
+        "dot1_a": ("param",),
+        "rs1_start": ("param",),
+        "rs1_done": ("rs1_start",),
+        "rs1_dus": ("param", "rs1_done"),
+        "slice1": ("param",),
+        "ag1_start": ("slice1",),
+        "ag1_done": ("ag1_start",),
+        "dot1_b": ("dot1_a",),
+        "slice2": ("param",),
+        "mid_barrier": ("dot1_b", "slice2"),
+        "gte_y2": ("mid_barrier",),
+        "gte_p2": ("mid_barrier",),
+        "dot2_a": ("gte_y2", "ag1_done"),
+        "rs2_start": ("dot1_b",),
+        "rs2_done": ("rs2_start",),
+        "rs2_dus": ("rs1_dus", "rs2_done"),
+        "ag2_start": ("gte_p2",),
+        "ag2_done": ("ag2_start",),
+        "dot2_b": ("dot2_a",),
+        "root": ("dot2_b", "ag2_done", "rs2_dus"),
+    }
+    data_formatting = {"rs1_dus", "slice1", "slice2", "mid_barrier", "gte_y2", "gte_p2", "rs2_dus"}
+    queues = {
+        "rs1_start": "sparse_core:1",
+        "ag1_start": "sparse_core:1",
+        "rs2_start": "sparse_core:1",
+        "ag2_start": "sparse_core:1",
+    }
+    graph = fsdp_prefetch_overlap_transform.make_schedule_graph(
+        order=order,
+        opcodes=opcodes,
+        operands=operands,
+        data_formatting=data_formatting,
+        queues=queues,
+    )
+    rescheduled = fsdp_prefetch_overlap_transform.reschedule(graph)
+    fsdp_prefetch_overlap_transform.validate_order(graph, rescheduled)
+    pos = {name: i for i, name in enumerate(rescheduled)}
+
+    # Layer 1 starts (rs1_start, ag1_start) hoist before Layer 1 compute (dot1_a, dot1_b).
+    self.assertLess(pos["rs1_start"], pos["dot1_a"])
+    self.assertLess(pos["ag1_start"], pos["dot1_a"])
+    # ag1_start has an earlier deadline (dot2_a) than rs1_start (root), so ag1_start issues first on
+    # SparseCore 1, ag1_done sinks to the end of Layer 1 (after dot1_b, before dot2_a), and rs1_done
+    # sinks past Layer 2 compute to the end of the while body ahead of ag2_done and rs2_done.
+    self.assertLess(pos["ag1_start"], pos["rs1_start"])
+    self.assertGreater(pos["ag1_done"], pos["dot1_b"])
+    self.assertLess(pos["ag1_done"], pos["dot2_a"])
+    self.assertGreater(pos["rs1_done"], pos["dot2_b"])
+    # Layer 2 starts (rs2_start, ag2_start) sit after Layer 1 compute (dot1_b) and before Layer 2 compute (dot2_a).
+    self.assertGreater(pos["rs2_start"], pos["dot1_b"])
+    self.assertGreater(pos["ag2_start"], pos["dot1_b"])
+    self.assertLess(pos["rs2_start"], pos["dot2_a"])
+    self.assertLess(pos["ag2_start"], pos["dot2_a"])
+    # Layer 2 dones (rs2_done, ag2_done) sink after Layer 2 compute (dot2_b) and immediately before root.
+    self.assertGreater(pos["rs2_done"], pos["dot2_b"])
+    self.assertGreater(pos["ag2_done"], pos["dot2_b"])
+    self.assertLess(pos["ag2_done"], pos["root"])
+    # SparseCore 1 FIFO order is preserved: start(A) < start(B) <=> done(A) < done(B).
+    sc_starts = sorted(queues, key=pos.__getitem__)
+    done_of = {"rs1_start": "rs1_done", "ag1_start": "ag1_done", "rs2_start": "rs2_done", "ag2_start": "ag2_done"}
+    sc_dones = [done_of[s] for s in sc_starts]
+    self.assertEqual(sc_dones, sorted(sc_dones, key=pos.__getitem__))
 
 
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
