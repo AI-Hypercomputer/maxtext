@@ -31,6 +31,7 @@ it is created; a few activations carry `constrain` calls at block boundaries.
 Nothing here names a mesh axis.
 """
 
+import inspect
 from typing import Any, Optional
 from flax import nnx
 import jax
@@ -38,6 +39,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
+from maxtext.m3.core import kernels
 from maxtext.m3.core.rope import apply_rope
 from maxtext.m3.core.sharding import Sharding, check_mesh, param_metadata, sharding_from_config
 
@@ -143,6 +145,7 @@ class Qwen3Attention(nnx.Module):
     self.config = config
     self.sharding = sharding or sharding_from_config(config)
     s = self.sharding
+    self.attention_kernel = kernels.attention_from_config(config, s, mesh=mesh)
 
     self.num_query_heads = config.num_query_heads
     self.num_kv_heads = config.num_kv_heads
@@ -184,64 +187,6 @@ class Qwen3Attention(nnx.Module):
     self.query_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "query_norm", rngs))
     self.key_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "key_norm", rngs))
 
-  def _compute_attention(
-      self,
-      query: jax.Array,
-      key: jax.Array,
-      value: jax.Array,
-      decoder_positions: Optional[jax.Array] = None,
-      decoder_segment_ids: Optional[jax.Array] = None,
-  ) -> jax.Array:
-    """Computes self-contained scaled dot-product attention with GQA and causal masking."""
-    b, t, n_q, d = query.shape
-    n_kv = key.shape[2]
-    g = n_q // n_kv
-    query_g = jnp.reshape(query, (b, t, n_kv, g, d))
-
-    def _compute_local_block(q_g, k, v, mask=None):
-      """Computes local attention output, max, and sum for scaled dot-product block."""
-      weights = jnp.einsum("btkgd,bskd->bkgts", q_g, k)
-      if mask is not None:
-        weights = jnp.where(mask, weights, -1e10)
-      if self.config.float32_logits:
-        weights = weights.astype(jnp.float32)
-      logits = jnp.reshape(weights, (b, n_q, t, -1))
-      local_max = jnp.max(logits, axis=-1, keepdims=True)
-      local_exp = jnp.exp(logits - local_max)
-      local_sum = jnp.sum(local_exp, axis=-1, keepdims=True)
-
-      local_exp = jnp.reshape(local_exp.astype(v.dtype), (b, n_kv, g, t, -1))
-      local_out = jnp.einsum("bkgts,bskd->btkgd", local_exp, v)
-      local_out = jnp.reshape(local_out, (b, t, n_q, d))
-
-      local_max = jnp.transpose(local_max, (0, 2, 1, 3))
-      local_sum = jnp.transpose(local_sum, (0, 2, 1, 3))
-      return local_out, local_max, local_sum
-
-    sharding = self.sharding
-    key = sharding.constrain(key, "attn_key", ("batch", "kv_length", "kv_heads", "head_dim"))
-    value = sharding.constrain(value, "attn_value", ("batch", "kv_length", "kv_heads", "head_dim"))
-    s = key.shape[1]
-    if decoder_positions is None:
-      q_pos = sharding.constrain(jnp.broadcast_to(jnp.arange(t, dtype=jnp.int32), (b, t)), "q_pos", ("batch", "length"))
-      k_pos = sharding.constrain(
-          jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s)), "k_pos", ("batch", "kv_length")
-      )
-    else:
-      q_pos = sharding.constrain(decoder_positions, "q_pos", ("batch", "length"))
-      k_pos = sharding.constrain(decoder_positions, "k_pos", ("batch", "kv_length"))
-    causal_mask = k_pos[..., None, :] <= q_pos[..., :, None]
-    if decoder_segment_ids is not None:
-      q_seg = sharding.constrain(decoder_segment_ids, "q_seg", ("batch", "length"))
-      k_seg = sharding.constrain(decoder_segment_ids, "k_seg", ("batch", "kv_length"))
-      seg_mask = q_seg[..., :, None] == k_seg[..., None, :]
-      mask = causal_mask & seg_mask
-    else:
-      mask = causal_mask
-    mask = mask[:, None, None, :, :]
-    out, _, lsum = _compute_local_block(query_g, key, value, mask)
-    return (out / lsum).astype(self.config.dtype)
-
   def __call__(
       self,
       inputs: jax.Array,
@@ -250,8 +195,9 @@ class Qwen3Attention(nnx.Module):
       deterministic: bool = False,
       **kwargs,
   ) -> jax.Array:
-    """Executes Qwen3 self-attention forward pass with RoPE."""
+    """Executes Qwen3 self-attention forward pass with RoPE and configured attention kernel."""
     s = self.sharding
+    is_default_positions = decoder_positions is None
     inputs = s.constrain(inputs, "attn_in", ("batch", "length", "embed"))
     query = s.constrain(
         self.query(inputs, out_sharding=s.out_sharding("query", ("batch", "length", "heads", "head_dim"))),
@@ -269,7 +215,6 @@ class Qwen3Attention(nnx.Module):
         ("batch", "length", "kv_heads", "head_dim"),
     )
 
-    # QK-Norm before RoPE
     if self.config.use_qk_norm:
       query = self.query_norm(query)
       key = self.key_norm(key)
@@ -285,18 +230,21 @@ class Qwen3Attention(nnx.Module):
     query = apply_rope(query, decoder_positions, max_timescale=self.config.rope_max_timescale)
     key = apply_rope(key, decoder_positions, max_timescale=self.config.rope_max_timescale)
 
-    # Scale query by 1/sqrt(head_dim)
     query_pre_attn_scalar = self.head_dim**-0.5
     query = query * query_pre_attn_scalar
 
-    attn_out = self._compute_attention(
-        query=query,
-        key=key,
-        value=value,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
+    attn_out = self.attention_kernel(
+        query,
+        key,
+        value,
+        segment_ids=decoder_segment_ids,
+        positions=None if is_default_positions else decoder_positions,
     )
-    attn_out = s.constrain(attn_out, "attention_out", ("batch", "length", "heads", "head_dim"))
+    attn_out = s.constrain(
+        attn_out.astype(self.config.dtype),
+        "attention_out",
+        ("batch", "length", "heads", "head_dim"),
+    )
     proj = self.out(attn_out, out_sharding=s.out_sharding("attn_proj", ("batch", "norm_length", "embed")))
     return s.constrain(proj, "attn_proj", ("batch", "norm_length", "embed"))
 
@@ -331,7 +279,7 @@ class Qwen3DecoderLayer(nnx.Module):
     self.pre_self_attention_layer_norm = nnx.RMSNorm(
         num_features=config.emb_dim, **norm_kwargs(config, s, "pre_self_attention_layer_norm", rngs)
     )
-    self.self_attention = Qwen3Attention(config=config, rngs=rngs, sharding=s)
+    self.self_attention = Qwen3Attention(config=config, mesh=mesh, rngs=rngs, sharding=s)
     self.post_self_attention_layer_norm = nnx.RMSNorm(
         num_features=config.emb_dim, **norm_kwargs(config, s, "post_self_attention_layer_norm", rngs)
     )
@@ -390,8 +338,12 @@ class Qwen3Decoder(nnx.Module):
     self.sharding = sharding or sharding_from_config(config)
     s = self.sharding
 
+    params = inspect.signature(layer_cls.__init__).parameters
+    takes_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    layer_kw = {name: val for name, val in (("mesh", mesh), ("sharding", s)) if name in params or takes_var_kw}
+
     self.layers = nnx.Sequential(
-        *(layer_cls(config=config, rngs=rngs, sharding=s) for _ in range(config.num_decoder_layers))
+        *(layer_cls(config=config, rngs=rngs, **layer_kw) for _ in range(config.num_decoder_layers))
     )
     self.decoder_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kwargs(config, s, "decoder_norm", rngs))
 
@@ -439,10 +391,8 @@ class Qwen3Decoder(nnx.Module):
     """Iterates through all decoder layers and projects to logits via tied embeddings."""
     s = self.sharding
     decoder_input_tokens = s.constrain(decoder_input_tokens, "decoder_input_tokens", ("batch", "length"))
-    if decoder_positions is None:
-      b, t = decoder_input_tokens.shape
-      decoder_positions = jnp.broadcast_to(jnp.arange(t, dtype=jnp.int32)[None, :], (b, t))
-    decoder_positions = s.constrain(decoder_positions, "decoder_positions", ("batch", "length"))
+    if decoder_positions is not None:
+      decoder_positions = s.constrain(decoder_positions, "decoder_positions", ("batch", "length"))
     if decoder_segment_ids is not None:
       decoder_segment_ids = s.constrain(decoder_segment_ids, "decoder_segment_ids", ("batch", "length"))
     y = shared_embedding(
@@ -510,6 +460,7 @@ class Qwen3Model(nnx.Module):
     )
     self.decoder = Qwen3Decoder(
         config=config,
+        mesh=mesh,
         rngs=rngs,
         sharding=self.sharding,
     )
@@ -557,6 +508,9 @@ def create_qwen3_model(
   if rngs is None:
     rngs = nnx.Rngs(0)
   if mesh is not None and jax.sharding.get_abstract_mesh().empty:
-    with jax.set_mesh(mesh):
+    try:
+      with jax.set_mesh(mesh):
+        return Qwen3Model(config, mesh, rngs=rngs, **kwargs)
+    except ValueError:
       return Qwen3Model(config, mesh, rngs=rngs, **kwargs)
   return Qwen3Model(config, mesh, rngs=rngs, **kwargs)

@@ -735,8 +735,10 @@ def create_model(
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
+    m3_kernels.validate_attention_config(config)
     if mesh is not None and jax.sharding.get_abstract_mesh().empty:
       try:
         with jax.set_mesh(mesh):
