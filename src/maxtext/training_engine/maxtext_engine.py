@@ -727,6 +727,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._mesh = mesh
     self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
     self._loss_fn: Callable[..., Any] | None = None
+    self._fwd_only_fn: Callable[..., Any] | None = None
     # Defaults to True so the built-in `maxtext_train.loss_fn` -- which returns
     # `(loss, aux)` with real aux and is used whenever `with_loss_fn` is never called --
     # keeps recording its aux metrics. `with_loss_fn` overrides this per its own default.
@@ -746,6 +747,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._jitted_kernels: dict[str, Any] = {}
     self._compiled_eval: Any = None
     self._compiled_eval_signature: Any = None
+    self._compiled_fwd_only: Any = None
+    self._compiled_fwd_only_signature: Any = None
     self._model_graphdef: Any = None
     self._state_graphdef: Any = None
     self._signature_compare_warned: bool = False
@@ -901,6 +904,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval = None
     self._compiled_eval_signature = None
     self._optimizer_device_shardings = None
+    self._compiled_fwd_only = None
+    self._compiled_fwd_only_signature = None
     if reset_model:
       self._model_graphdef = None
       self._freeze_mask = None
@@ -995,6 +1000,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled = False
     self._compiled_eval = None
     self._compiled_eval_signature = None
+    return self
+
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "MaxTextTrainingEngine":
+    """Sets the read-only callback `fwd_only` runs; the forward-only counterpart of `with_loss_fn`.
+
+    Invalidates any cached forward-only JIT executable.
+
+    Args:
+      fn: Called as `fn(model, payload)`, where `model` is a read-only copy of
+        the trainer model and `payload` is the sharded input payload.
+
+    Returns:
+      self, for chaining.
+    """
+
+    def _kernel(params: Any, rest: Any, payload: abstract_engine.TrainerPayload) -> Any:
+      mdl = nnx.merge(self._model_graphdef, params, rest, copy=True)
+      mdl.eval()
+      return fn(mdl, payload)
+
+    self._fwd_only_fn = _kernel
+    self._compiled_fwd_only = None
+    self._compiled_fwd_only_signature = None
     return self
 
   def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "MaxTextTrainingEngine":
@@ -1686,11 +1714,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     data_spec = self._input_data_spec()
     return jax.tree.map(lambda leaf: self._leaf_data_sharding(leaf, data_spec), dynamic_batch)
 
+  def _fwd_only_data_shardings(self, payload: Any) -> Any:
+    """Builds per-leaf input shardings for `fwd_only`."""
+    data_spec = self._input_data_spec()
+    replicated = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
+
+    def leaf_sharding(leaf: Any) -> jax.sharding.NamedSharding | None:
+      if leaf is None:
+        return None
+      if jnp.ndim(leaf) == 0 or 0 in leaf.shape:
+        return replicated
+      return self._leaf_data_sharding(leaf, data_spec)
+
+    return jax.tree.map(leaf_sharding, payload)
+
   def _compile_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
     """JIT-compiles the fwd_bwd, accumulate and update kernels for one batch structure.
 
     `static_batch` is closed over rather than passed, so non-array loss arguments (Tunix's
     `algo_config`, `pad_id`, `eos_id`) never reach the jit boundary.
+
+    Args:
+      dynamic_batch: Traced array subtree of the batch.
+      static_batch: Closed-over static metadata or constants for the batch.
     """
     # Place uncommitted leaves, shard Zero-1 moments, and offload optimizer state before reading
     # shardings off the state, then cache the pure state so the compiled step path never re-walks
@@ -2236,78 +2282,67 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         if value is not None:
           self.record_metrics(key, value, mode=metrics_module.Mode.EVAL)
 
-  def _place_read_only_inputs(self, inputs: Any) -> Any:
-    """Commits a read-only call's array inputs to the shardings a step would use.
+  def _live_model(self) -> nnx.Module:
+    """Returns the model a step reads from the train state.
 
-    The same placement `fwd_bwd` gets from `in_shardings`, done eagerly because
-    `fwd_only` does not own the jit -- `fn` does.
-    Leaving the arrays where they arrived would hand that jit a host array per
-    leaf and let XLA pick the partitioning, which is the same mis-sharding
-    `_sharding_ctx` exists to avoid.
-
-    Only arrays move. A read-only call carries Python scalars alongside them
-    (`pad_id`, `eos_id`, `chunk_size`, `temperature`), and those reach the
-    callee's `static_argnames`; `device_put` would turn them into arrays and
-    make the call untraceable.
-
-    Args:
-      inputs: An arbitrary pytree of the call's positional and keyword
-        arguments.
-
-    Returns:
-      The same pytree with its placeable array leaves committed to this engine's
-      mesh.
+    A restore or the `state` setter can rebind the model, and `fwd_bwd` reads it
+    from the state for the same reason. Creates the train state on first use.
     """
-    if self._mesh is None:
-      return inputs
-    data_spec = self._input_data_spec()
-
-    def place(leaf: Any) -> Any:
-      if not isinstance(leaf, (jax.Array, np.ndarray)):
-        return leaf
-      # A rank-0 leaf has no batch dim to place, and a zero-width one -- the empty prompt
-      # half of a sequence-packed row -- has no data to split.
-      if leaf.ndim == 0 or 0 in leaf.shape:
-        return leaf
-      # Already a global array spanning devices this process does not own: it was built
-      # by whoever produced it, and `device_put` cannot rebuild it from local data.
-      if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
-        return leaf
-      target = self._leaf_data_sharding(leaf, data_spec)
-      if target is None or getattr(leaf, "sharding", None) == target:
-        return leaf
-      return jax.device_put(leaf, target)
-
-    return jax.tree.map(place, inputs)
-
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Runs `fn(model, *args, **kwargs)` on the live model under the engine's placement.
-
-    The engine supplies the model and the placement, exactly as `fwd_bwd` does -- the
-    live model off the train state, the inputs on `_leaf_data_sharding`, and `fn`
-    executed under `_sharding_ctx` so MaxText's logical axis rules are active while `fn`
-    traces. `fn` owns the computation and its own `jax.jit`, so nothing here is compiled
-    or cached, and none of the engine's kernels, accumulators or metrics are touched.
-
-    Args:
-      fn: Callable invoked as `fn(model, *placed_args, **placed_kwargs)`.
-      *args: Positional inputs to shard before passing to `fn`.
-      **kwargs: Keyword inputs to shard before passing to `fn`.
-
-    Returns:
-      Whatever `fn` returns.
-
-    Raises:
-      TypeError: If the engine's model is not an NNX module.
-    """
-    # TODO: Enable precompile for fn.
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    # Off the train state, not `self._model`: a restore or the `state` setter can rebind
-    # the model, and `fwd_bwd`/`eval_step` read it from here for the same reason.
     model = getattr(self._state, _MODEL_STATE_KEY, self._model)
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+    return model
+
+  def _compile_fwd_only_for_batch(self, payload: abstract_engine.TrainerPayload, signature: Any) -> None:
+    """JIT-compiles the forward-only kernel for a single payload signature."""
+    assert self._fwd_only_fn is not None
+    model = self._live_model()
+    self._settle_state(shard_zero1=self._compiled)
+    if self._mesh is None:
+      compiled_fn = jax.jit(self._fwd_only_fn, donate_argnums=())
+    else:
+      params_pure, rest_pure = self._read_model_pure(model)
+      params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
+      rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
+      compiled_fn = jax.jit(
+          self._fwd_only_fn,
+          in_shardings=(
+              params_shardings,
+              rest_shardings,
+              self._fwd_only_data_shardings(payload),
+          ),
+          donate_argnums=(),
+      )
+    self._compiled_fwd_only = compiled_fn
+    self._compiled_fwd_only_signature = signature
+
+  def fwd_only(self, payload: abstract_engine.TrainerPayload) -> Any:
+    """Read-only: runs the registered `with_fwd_only_fn` callback on `payload`.
+
+    Strips host `metadata` from `payload`, shards array leaves onto the
+    engine's data axis (replicating rank-0 and empty arrays), and executes the
+    callback inside `jax.jit(..., donate_argnums=())` on a read-only
+    `eval()`-mode model copy (`nnx.merge(..., copy=True)` and `mdl.eval()`),
+    caching the compiled executable for the current payload signature without
+    touching gradients, accumulators, or metrics.
+
+    Args:
+      payload: Input payload to prepare and shard.
+
+    Returns:
+      Whatever the callback returns.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
+      TypeError: If the engine's model is not an NNX module.
+    """
+    if self._fwd_only_fn is None:
+      raise ValueError("MaxTextTrainingEngine.fwd_only needs a callback: call" " with_fwd_only_fn() first.")
+    if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
+      payload = dataclasses.replace(payload, metadata={})
+    signature = _batch_signature(payload, {})
 
     # Bound the dispatch queue as every other entry point does. Not a correctness
     # barrier -- JAX orders reads of the weights against the writes already queued --
@@ -2315,8 +2350,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._throttler.wait_for_next()
 
     with self._sharding_ctx():
-      args, kwargs = self._place_read_only_inputs((args, kwargs))
-      out = fn(model, *args, **kwargs)
+      if self._compiled_fwd_only is None or self._needs_recompile(signature, self._compiled_fwd_only_signature):
+        self._compile_fwd_only_for_batch(payload, signature)
+      assert self._compiled_fwd_only is not None
+      params, rest = self._read_model_pure(self._live_model())
+      out = self._compiled_fwd_only(params, rest, payload)
 
     self._throttler.add_computation(
         computation=[leaf for leaf in jax.tree.leaves(out) if isinstance(leaf, jax.Array)],
@@ -2416,6 +2454,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # rather than merely old. Re-settle the restored arrays onto the mesh (preserving Zero-1 when
     # compiled) and pinned host memory, and refresh the pure-state cache if the engine is compiled.
     self._invalidate_pure_state()
+    self._compiled_fwd_only = None
+    self._compiled_fwd_only_signature = None
     self._settle_state(shard_zero1=self._compiled)
     if self._compiled:
       self._refresh_pure_state()

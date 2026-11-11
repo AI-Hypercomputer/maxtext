@@ -256,7 +256,7 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
   def update(self) -> int:
     raise self._cannot_run("update")
 
-  def fwd_only(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+  def fwd_only(self, payload: Any) -> Any:
     raise self._cannot_run("fwd_only")
 
   def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:

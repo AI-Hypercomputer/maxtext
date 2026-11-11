@@ -502,6 +502,7 @@ class AbstractMaxTextEngineTest(absltest.TestCase):
     for operation, call in (
         ("fwd_bwd", lambda: engine.fwd_bwd(_batch(self.cfg, 0))),
         ("update", engine.update),
+        ("fwd_only", lambda: engine.fwd_only(_batch(self.cfg, 0))),
         ("save_checkpoint", lambda: engine.save_checkpoint({"step": 0})),
         ("restore_checkpoint", engine.restore_checkpoint),
     ):

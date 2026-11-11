@@ -17,6 +17,7 @@
 # pylint: disable=protected-access
 
 import dataclasses
+import functools
 import os
 import types
 from typing import Any
@@ -33,6 +34,7 @@ from maxtext.common import checkpoint_context
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.configs import types as config_types
+from maxtext.integration.tunix import tunix_adapter
 from maxtext.optimizers import optimizers
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import checkpointing
@@ -50,6 +52,7 @@ from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 from tunix.sft import utils as sft_utils
 
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
@@ -82,6 +85,8 @@ class DummyStatefulNNXModel(nnx.Module):
 class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
+  pad_id: int = struct.field(pytree_node=False, default=0)
+  temperature: float = struct.field(pytree_node=False, default=1.0)
   metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
 
 
@@ -850,6 +855,8 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
     t._accumulated_denominator = jnp.float32(4.0)
     t._cached_losses.append(jnp.array(1.5))
+    t._compiled_fwd_only = mock.MagicMock()
+    t._compiled_fwd_only_signature = ("sig",)
 
     t.restore_checkpoint(step=10)
 
@@ -857,6 +864,8 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertIsNone(t._accumulated_grads)
     self.assertIsNone(t._accumulated_denominator)
     self.assertEmpty(t._cached_losses)
+    self.assertIsNone(t._compiled_fwd_only)
+    self.assertIsNone(t._compiled_fwd_only_signature)
     self.assertEmpty(t._metrics_recorder.get_metrics_history(clear_cache=False))
 
   def test_save_restore_metadata_is_a_black_box(self):
@@ -2967,8 +2976,21 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertEqual(shardings["a"].spec[0], "data")
     self.assertFalse(t._replicated_batch_warned)  # pylint: disable=protected-access
 
-  def test_fwd_only_passes_the_live_model_and_mutates_no_training_state(self):
-    """A read-only pass gets the engine's live model and leaves the in-flight step alone."""
+  def test_fwd_only_requires_with_fwd_only_fn(self):
+    """Calling `fwd_only` before registering a callback raises ValueError."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    with self.assertRaisesRegex(ValueError, "with_fwd_only_fn"):
+      t.fwd_only(DummyPayload())
+
+  def test_fwd_only_passes_read_only_model_copy_and_mutates_no_training_state(
+      self,
+  ):
+    """A read-only pass gets a read-only model copy, strips metadata, and leaves state untouched."""
+    mesh = jax.sharding.Mesh(
+        maxtext_utils.create_device_mesh(self.mock_config),
+        self.mock_config.mesh_axes,
+    )
+    self.mock_from_pretrained.return_value = (DummyStatefulNNXModel(), mesh)
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     t.with_loss_fn(
         lambda *args, **kwargs: (
@@ -2981,60 +3003,251 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     micro_steps_before = t._micro_step_count  # pylint: disable=protected-access
     train_step_before = t.train_step
 
-    def fn(model, x, *, pad_id):
-      return model, pad_id, jnp.sum(x)
+    seen: dict[str, Any] = {}
 
-    model, pad_id, out = t.fwd_only(fn, np.ones((2, 4), np.int32), pad_id=0)
+    def fn(model, payload):
+      seen["model"] = model
+      seen["metadata"] = payload.metadata
+      seen["pad_id"] = payload.pad_id
+      model.calls.value = model.calls.value + 1.0
+      nnx.update(model, jax.tree.map(jnp.zeros_like, nnx.state(model, nnx.Param)))
+      return (
+          payload.pad_id,
+          jnp.sum(payload.token_ids) + model.calls.value,
+          jnp.sum(model.weights.value),
+      )
 
-    # The model comes off the train state, which is what `fwd_bwd` differentiates -- not
-    # `self._model`, which a restore or the `state` setter can leave behind.
-    self.assertIs(model, t.state.model)
-    # Python scalars must survive as scalars: callees take them as `static_argnames`, and
-    # a device array there is unhashable.
-    self.assertIsInstance(pad_id, int)
-    self.assertEqual(float(out), 8.0)
+    self.assertIs(t.with_fwd_only_fn(fn), t)
+    with mock.patch.object(nnx.Module, "eval", autospec=True, wraps=nnx.Module.eval) as spy_eval:
+      pad_id, out, weight_sum = t.fwd_only(
+          DummyPayload(
+              token_ids=np.ones((2, 4), np.int32),
+              pad_id=0,
+              metadata={"step": 7, "request_id": "req-1"},
+          )
+      )
 
-    # Nothing about the in-flight training step moved.
+    self.assertIsInstance(seen["model"], nnx.Module)
+    self.assertIsNot(seen["model"], t.state.model)
+    spy_eval.assert_called_once_with(seen["model"])
+    self.assertEqual(seen["metadata"], {})
+    self.assertIs(type(seen["pad_id"]), int)
+    self.assertEqual(int(pad_id), 0)
+    self.assertEqual(float(out), 9.0)
+    self.assertEqual(float(weight_sum), 0.0)
+
+    # Read-only copy isolation: mutations inside `fn` never leak back to state.
+    self.assertEqual(float(t.state.model.calls.value), 0.0)
+    np.testing.assert_allclose(np.asarray(t.state.model.weights.value), np.array([1.0, 2.0]))
+
+    # Nothing about the in-flight step moved, and the pure cache stays empty.
     self.assertEqual(t._micro_step_count, micro_steps_before)  # pylint: disable=protected-access
     self.assertEqual(t.train_step, train_step_before)
+    self.assertIsNone(t._params_pure)  # pylint: disable=protected-access
     jax.tree.map(np.testing.assert_array_equal, grads_before, t._accumulated_grads)  # pylint: disable=protected-access
 
   def test_fwd_only_places_arrays_where_a_compiled_step_would(self):
     """Inputs land on the engine's own batch shardings, per leaf rank."""
+
+    @struct.dataclass(frozen=True, kw_only=True)
+    class ScoringPayload(abstract_engine.TrainerPayload):
+      token_ids: Any
+      prompt: Any
+      mask: Any
+      scale: Any
+      pad_id: int = struct.field(pytree_node=False, default=0)
+      metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
+
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
-    # Zero-width: the empty prompt half of a sequence-packed row. There is nothing to
-    # split, so it must be passed through rather than made into a degenerate global array.
     empty_prompt = np.zeros((2, 0), np.int32)
+    seen_shardings: list[Any] = []
+    seen_statics: dict[str, Any] = {}
 
-    def fn(_, tokens, prompt, *, mask):
-      return tokens, prompt, mask
-
-    with mock.patch.object(
-        maxtext_engine.sharding,
-        "get_input_data_sharding",
-        return_value=self._sharded_batch_spec(t),
-    ):
-      tokens, prompt, mask = t.fwd_only(
-          fn,
-          np.ones((2, 4), np.int32),
-          empty_prompt,
-          mask=np.ones((2,), np.int32),
+    def fn(_, payload):
+      seen_statics["pad_id"] = payload.pad_id
+      seen_statics["pad_id_type"] = type(payload.pad_id)
+      return (
+          payload.token_ids,
+          payload.prompt,
+          payload.mask,
+          payload.scale + payload.pad_id,
       )
 
-    self.assertEqual(tokens.sharding.spec, jax.sharding.PartitionSpec("data", None))
-    # A rank-1 leaf absorbs only the leading entry of the `[batch, sequence]` spec.
-    self.assertEqual(mask.sharding.spec, jax.sharding.PartitionSpec("data"))
-    self.assertIs(prompt, empty_prompt)
+    t.with_fwd_only_fn(fn)
+    orig_fwd_only_shardings = t._fwd_only_data_shardings  # pylint: disable=protected-access
+
+    def recording_fwd_only_shardings(payload):
+      result = orig_fwd_only_shardings(payload)
+      seen_shardings.append(result)
+      return result
+
+    with (
+        mock.patch.object(
+            maxtext_engine.sharding,
+            "get_input_data_sharding",
+            return_value=self._sharded_batch_spec(t),
+        ),
+        mock.patch.object(
+            t,
+            "_fwd_only_data_shardings",
+            side_effect=recording_fwd_only_shardings,
+        ),
+    ):
+      tokens, prompt, mask, scaled = t.fwd_only(
+          ScoringPayload(
+              token_ids=np.ones((2, 4), np.int32),
+              prompt=empty_prompt,
+              mask=np.ones((2,), np.int32),
+              scale=jnp.float32(2.0),
+              pad_id=3,
+          )
+      )
+
+    self.assertLen(seen_shardings, 1)
+    batch_shardings = seen_shardings[0]
+    self.assertEqual(
+        batch_shardings.token_ids.spec,
+        jax.sharding.PartitionSpec("data", None),
+    )
+    # Rank-1 leaves absorb only the leading entry of `[batch, sequence]`.
+    self.assertEqual(
+        batch_shardings.mask.spec,
+        jax.sharding.PartitionSpec("data"),
+    )
+    # Zero-width and rank-0 array leaves stay replicated.
+    self.assertEqual(
+        batch_shardings.prompt.spec,
+        jax.sharding.PartitionSpec(),
+    )
+    self.assertEqual(
+        batch_shardings.scale.spec,
+        jax.sharding.PartitionSpec(),
+    )
+    self.assertIs(seen_statics["pad_id_type"], int)
+    self.assertEqual(seen_statics["pad_id"], 3)
+    self.assertEqual(tokens.shape, (2, 4))
+    self.assertEqual(prompt.shape, (2, 0))
+    self.assertEqual(mask.shape, (2,))
+    self.assertAlmostEqual(float(scaled), 5.0)
 
   def test_fwd_only_holds_the_logical_axis_rules_open_for_fn(self):
     """`fn` traces inside `fwd_only`, so the rules must still be in force there."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    seen_rules: list[Any] = []
 
-    inside = t.fwd_only(lambda _: maxtext_engine.sharding.get_logical_axis_rules())
+    def fn(model, unused_payload):
+      seen_rules.append(maxtext_engine.sharding.get_logical_axis_rules())
+      return jnp.sum(model.weights[...])
 
-    self.assertTrue(inside)
+    t.with_fwd_only_fn(fn)
+    t.fwd_only(DummyPayload())
+
+    self.assertLen(seen_rules, 1)
+    self.assertTrue(seen_rules[0])
     # And released on exit: the scope is a loan, not a global mode switch.
     self.assertFalse(maxtext_engine.sharding.get_logical_axis_rules())
+
+  def test_fwd_only_caches_compiled_executable_and_invalidates_on_rebind(self):
+    """Caches one compiled executable with donate_argnums=() and invalidates on fn/state/checkpoint reset."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    trace_calls = 0
+
+    def scorer(model, payload):
+      nonlocal trace_calls
+      trace_calls += 1
+      total = jnp.sum(model.weights[...]) + jnp.sum(payload.token_ids)
+      return total * payload.temperature
+
+    t.with_fwd_only_fn(scorer)
+
+    orig_jit = maxtext_engine.jax.jit
+    jit_kwargs_seen: list[dict[str, Any]] = []
+
+    def recording_jit(fn, **jit_kwargs):
+      jit_kwargs_seen.append(jit_kwargs)
+      return orig_jit(fn, **jit_kwargs)
+
+    with mock.patch.object(maxtext_engine.jax, "jit", side_effect=recording_jit):
+      out1 = t.fwd_only(DummyPayload(temperature=1.0, metadata={"req": 1}))
+      # Varying metadata or values with matching shapes/static fields hits the compiled executable.
+      out2 = t.fwd_only(
+          DummyPayload(
+              token_ids=np.full((2, 2), 2.0, dtype=np.float32),
+              temperature=1.0,
+              metadata={"req": 2},
+          )
+      )
+      self.assertEqual(trace_calls, 1)
+      self.assertIsNotNone(t._compiled_fwd_only)  # pylint: disable=protected-access
+      self.assertIsNotNone(t._compiled_fwd_only_signature)  # pylint: disable=protected-access
+      self.assertEqual(jit_kwargs_seen[-1]["donate_argnums"], ())
+      self.assertAlmostEqual(float(out1), 7.0)
+      self.assertAlmostEqual(float(out2), 11.0)
+
+      # New static field values replace the cached executable and reuse it on repeat calls.
+      out3 = t.fwd_only(DummyPayload(temperature=2.0))
+      out4 = t.fwd_only(DummyPayload(temperature=2.0))
+      self.assertEqual(trace_calls, 2)
+      self.assertAlmostEqual(float(out3), 14.0)
+      self.assertAlmostEqual(float(out4), 14.0)
+
+    # Re-registering with_fwd_only_fn clears cached executable/signature and runs the new callback.
+    t.with_fwd_only_fn(lambda model, payload: jnp.sum(model.weights[...]) * payload.temperature)
+    self.assertIsNone(t._compiled_fwd_only)  # pylint: disable=protected-access
+    self.assertIsNone(t._compiled_fwd_only_signature)  # pylint: disable=protected-access
+    self.assertAlmostEqual(float(t.fwd_only(DummyPayload(temperature=1.0))), 3.0)
+
+  def test_fwd_only_skips_zero1_when_uncompiled_and_preserves_when_compiled(self):
+    """`fwd_only` avoids Zero-1 sharding on eager engines and keeps it once compiled."""
+    data_parallelism = min(2, jax.device_count())
+    tensor_parallelism = jax.device_count() // data_parallelism
+    cfg = self.setup_config(
+        gradient_clipping_threshold=0.0,
+        shard_optimizer_over_data=True,
+        shard_mode="explicit",
+        ici_fsdp_parallelism=1,
+        ici_data_parallelism=data_parallelism,
+        ici_tensor_parallelism=tensor_parallelism,
+    )
+    mesh = jax.sharding.Mesh(
+        maxtext_utils.create_device_mesh(cfg),
+        cfg.mesh_axes,
+        axis_types=(jax.sharding.AxisType.Explicit,) * len(cfg.mesh_axes),
+    )
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+    with (
+        mock.patch.object(maxtext_engine, "_zero1_active", return_value=None),
+        mock.patch.object(
+            maxtext_engine.train_utils,
+            "create_training_optimizer",
+            return_value=(lambda step: jnp.array(0.1), optax.adam(0.1)),
+        ),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+      t.with_loss_fn(self._weighted_loss_fn)
+      t.with_fwd_only_fn(lambda model, payload: jnp.sum(model.weights[...]) + jnp.sum(payload.token_ids))
+
+      _ = t.fwd_only(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+      t.update()
+      self.assertFalse(t._compiled)  # pylint: disable=protected-access
+      eager_specs = [
+          leaf.sharding.spec
+          for leaf in jax.tree.leaves((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer)))
+          if isinstance(getattr(leaf, "sharding", None), jax.sharding.NamedSharding) and leaf.ndim > 0
+      ]
+      self.assertFalse(any("data" in jax.tree.leaves(tuple(spec)) for spec in eager_specs))
+
+      t.compile(DummyPayload())
+      self.assertTrue(t._compiled)  # pylint: disable=protected-access
+      t.with_fwd_only_fn(lambda model, payload: jnp.sum(model.weights[...]) * payload.temperature)
+      _ = t.fwd_only(DummyPayload())
+      compiled_opt_specs = [
+          leaf.sharding.spec
+          for leaf in jax.tree.leaves(nnx.state(t.state.optimizer))
+          if isinstance(getattr(leaf, "sharding", None), jax.sharding.NamedSharding) and leaf.ndim > 0
+      ]
+      self.assertTrue(any("data" in jax.tree.leaves(tuple(spec)) for spec in compiled_opt_specs))
 
   def test_fwd_only_throttles_consecutive_calls_and_flushes_pending_metrics(self):
     """Consecutive `fwd_only` calls stay bounded by the throttler and flush stashed metrics."""
@@ -3045,7 +3258,8 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
             {},
         )
     )
-    payload = DummyPayload()
+    t.with_fwd_only_fn(lambda _, p: jnp.sum(p.token_ids))
+    payload = DummyPayload(token_ids=np.ones((2, 4), np.int32))
     t.fwd_bwd(payload)
     t.update()
     # Queue now holds [fwd_bwd loss, update grad_norm + step 0 metrics] (qsize=2, full).
@@ -3056,7 +3270,7 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         mock.patch("jax.block_until_ready", wraps=jax.block_until_ready) as mock_block,
     ):
       for _ in range(4):
-        _ = t.fwd_only(lambda _, x: jnp.sum(x), np.ones((2, 4), np.int32))
+        _ = t.fwd_only(payload)
         self.assertTrue(t._throttler._inflight_queue.full())
 
       # Every iteration entered with a full queue, so all 4 popped and blocked.
@@ -3076,11 +3290,15 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         ),
         has_aux=True,
     )
+    t.with_fwd_only_fn(lambda m, _p: jnp.sum(m.weights[...]))
     t.compile()
     t.fwd_bwd(DummyPayload())
+    t.fwd_only(DummyPayload())
     self.assertTrue(t._compiled)
     self.assertIsNotNone(t._compiled_fwd_bwd)
     self.assertIsNotNone(t._compiled_update)
+    self.assertIsNotNone(t._compiled_fwd_only)  # pylint: disable=protected-access
+    self.assertIsNotNone(t._compiled_fwd_only_signature)  # pylint: disable=protected-access
 
     new_model = DummyNNXModel()
     new_model.weights.set_value(jnp.array([10.0, 20.0]))
@@ -3093,6 +3311,8 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertFalse(t._compiled)
     self.assertIsNone(t._compiled_fwd_bwd)
     self.assertIsNone(t._compiled_update)
+    self.assertIsNone(t._compiled_fwd_only)  # pylint: disable=protected-access
+    self.assertIsNone(t._compiled_fwd_only_signature)  # pylint: disable=protected-access
     self.assertIsNone(t._model_graphdef)
     self.assertIsNone(t._state_graphdef)
     self.assertFalse(t.has_accumulated_grads)
@@ -3610,6 +3830,118 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
             )
         )
     )
+
+  @parameterized.named_parameters(
+      ("padded_adapter_logps", "padded"),
+      ("packed_adapter_logps", "packed"),
+  )
+  def test_fwd_only_computes_per_token_logps_with_tunix_adapter(self, layout: str):
+    """`fwd_only` passes `TunixMaxTextAdapter` to `fn`, caches across weight updates, and matches eager logps."""
+    num_layers, top_k = 1, 2
+    engine, _ = self._build_moe_engine(num_layers=num_layers, top_k=top_k)
+    seen_model_types: list[type[Any]] = []
+
+    def logps_fn(
+        model: nnx.Module,
+        payload: datatypes.RLTrainerPayload,
+        *,
+        pad_id: int,
+        eos_id: int,
+        temperature: float,
+        chunk_size: int,
+    ) -> jax.Array:
+      seen_model_types.append(type(model))
+      graphdef, state = nnx.split(model)
+      return rl_common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens=jnp.asarray(payload.prompt_ids),
+          completion_tokens=jnp.asarray(payload.completion_ids),
+          pad_id=pad_id,
+          eos_id=eos_id,
+          stop_gradient=True,
+          return_entropy=False,
+          segment_ids=(None if payload.segment_ids is None else jnp.asarray(payload.segment_ids)),
+          segment_positions=(None if payload.segment_positions is None else jnp.asarray(payload.segment_positions)),
+          temperature=temperature,
+          chunk_size=chunk_size,
+          routed_experts=(None if payload.routed_experts is None else jnp.asarray(payload.routed_experts)),
+      )
+
+    if layout == "padded":
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[10, 11], [12, 0]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1], [1, 0]], dtype=np.int32),
+          completion_ids=np.array([[20, 21, 2], [22, 2, 0]], dtype=np.int32),
+          completion_mask=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+          advantages=np.array([1.0, -1.0], dtype=np.float32),
+          old_per_token_logps=np.full((2, 3), -0.5, dtype=np.float32),
+          routed_experts=np.zeros((2, 5, num_layers, top_k), dtype=np.int16),
+      )
+    else:
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((2, 0), dtype=np.int32),
+          prompt_mask=np.zeros((2, 0), dtype=np.int32),
+          completion_ids=np.array(
+              [[10, 11, 20, 21, 2, 0, 0, 0], [12, 22, 2, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          completion_mask=np.array(
+              [[0, 0, 1, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          advantages=np.array(
+              [
+                  [0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                  [0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+              ],
+              dtype=np.float32,
+          ),
+          old_per_token_logps=np.full((2, 8), -0.5, dtype=np.float32),
+          routed_experts=np.zeros((2, 8, num_layers, top_k), dtype=np.int16),
+          segment_ids=np.array(
+              [[1, 1, 1, 1, 1, 0, 0, 0], [1, 1, 1, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          segment_positions=np.array(
+              [[0, 1, 2, 3, 4, 0, 0, 0], [0, 1, 2, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          num_segments=9,
+      )
+
+    bound_logps_fn = functools.partial(logps_fn, pad_id=0, eos_id=2, temperature=1.0, chunk_size=0)
+    engine.with_fwd_only_fn(bound_logps_fn)
+    logps_before = engine.fwd_only(payload)
+    self.assertEqual(seen_model_types, [tunix_adapter.TunixMaxTextAdapter])
+    compiled_before = engine._compiled_fwd_only
+    self.assertIsNotNone(compiled_before)
+
+    with engine._sharding_ctx():
+      expected_before = bound_logps_fn(engine.model, payload)
+    np.testing.assert_allclose(
+        np.asarray(logps_before),
+        np.asarray(expected_before),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # A training update updates live weights without invalidating cache.
+    engine.fwd_bwd(payload)
+    engine.update()
+    logps_after = engine.fwd_only(payload)
+    self.assertIs(engine._compiled_fwd_only, compiled_before)
+    self.assertLen(seen_model_types, 2)
+
+    with engine._sharding_ctx():
+      expected_after = bound_logps_fn(engine.model, payload)
+    np.testing.assert_allclose(
+        np.asarray(logps_after),
+        np.asarray(expected_after),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    self.assertFalse(np.allclose(np.asarray(logps_before), np.asarray(logps_after)))
 
 
 if __name__ == "__main__":
