@@ -760,6 +760,23 @@ class TestCreateModel(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "Model 'default' does not support the m3 backend"):
       model_creation_utils.create_model(config, self.mesh)
 
+  def test_m3_model_carries_named_scopes(self):
+    from maxtext.m3.infra.named_scopes import scope_of  # pylint: disable=import-outside-toplevel
+
+    config = _make_config(
+        model_name="qwen3-0.6b",
+        use_m3_model=True,
+        override_model_config=True,
+        base_mlp_dim=64,
+        head_dim=16,
+        vocab_size=256,
+        scan_layers=False,
+    )
+    model = nnx.eval_shape(lambda: model_creation_utils.create_model(config, self.mesh, rngs=nnx.Rngs(0)))
+    self.assertIsNone(scope_of(model))
+    self.assertEqual(scope_of(model.decoder), "decoder")
+    self.assertEqual(scope_of(model.decoder.layers.layers[0].mlp.wi_0), "wi_0")
+
 
 class TestFromConfig(unittest.TestCase):
   """Tests for from_config()."""
