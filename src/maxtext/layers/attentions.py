@@ -860,6 +860,7 @@ class Attention(nnx.Module):
         extra_w_psum_axes=(),
         ctx_dtype=out.dtype,
         wo_dtype=wo.dtype,
+        early_dw_rs=bool(getattr(self.config, "fused_out_early_dw_rs", False)),
     )
 
     @quantizations.without_qwix_interception

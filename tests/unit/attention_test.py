@@ -23,6 +23,7 @@ import sys
 import types
 import unittest
 import copy
+import dataclasses
 from unittest import mock
 
 from absl.testing import parameterized
@@ -1032,8 +1033,9 @@ class BlockCausalMaskTest(unittest.TestCase):
       sa_qk_diag_skip=False,
       sa_sv_diag_skip=False,
       sa_qk_diag_grid=2,
+      **config_overrides,
   ):
-    """Builds a minimal flash-attention operator for dispatch tests."""
+    """Builds a minimal flash-attention operator for dispatch tests (`config_overrides` set extra config fields)."""
     config = types.SimpleNamespace(
         causal_block_size=4,
         context_parallel_strategy="all_gather",
@@ -1073,6 +1075,8 @@ class BlockCausalMaskTest(unittest.TestCase):
         dq_reduction_steps=-1,
         local_sliding_window_size=4,
     )
+    for name, value in config_overrides.items():
+      setattr(config, name, value)
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
         devices=np.asarray([device], dtype=object),
@@ -1362,6 +1366,96 @@ class BlockCausalMaskTest(unittest.TestCase):
         else:
           self.assertNotIn("qk_diag_skip", kw)
           self.assertNotIn("sv_diag_skip", kw)
+
+  def test_tpu_tokamax_splash_context_split_device_heads(self):
+    """`_create_sa_config` divides the query-head context split per Q-head shard and rejects invalid splits."""
+    query = jnp.zeros((2, 16, 1, 8))
+
+    def capture_splash_config(op):
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=RuntimeError("splash config captured")
+          ) as make_splash_config,
+          self.assertRaisesRegex(RuntimeError, "splash config captured"),
+      ):
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_splash_config.call_args.kwargs
+
+    # Ulysses splits the query heads over the context axis: the device heads are divided per shard, and
+    # non-divisible or negative splits are rejected. The strategy is switched after construction because
+    # `__init__` only admits Ulysses on TPU hardware, which this stub mesh is not.
+    def ulysses_op(device_heads):
+      op = self._make_flash_op(
+          attention_type=AttentionType.GLOBAL,
+          context_parallel_size=2,
+          use_tokamax_splash=True,
+          remat_policy="custom",
+          sa_context_split_device_heads=device_heads,
+      )
+      op.config.context_parallel_strategy = "ulysses"
+      return op
+
+    self.assertEqual(capture_splash_config(ulysses_op(4))["residual_checkpoint_device_heads"], 2)
+    for bad in (3, -1):
+      with self.assertRaisesRegex(ValueError, "sa_context_split_device_heads"):
+        capture_splash_config(ulysses_op(bad))
+
+  def test_tpu_tokamax_splash_forwards_context_fp8_options(self):
+    """The `sa_context_*` options reach `SplashConfig` only under the custom remat policy."""
+    query = jnp.zeros((2, 16, 1, 8))
+
+    def make_op(remat_policy):
+      return self._make_flash_op(
+          attention_type=AttentionType.GLOBAL,
+          use_tokamax_splash=True,
+          remat_policy=remat_policy,
+          sa_context_split_device_heads=1,
+          sa_context_offload_fp8=True,
+          sa_context_device_fp8=True,
+      )
+
+    def capture_splash_config(op):
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=RuntimeError("splash config captured")
+          ) as make_splash_config,
+          self.assertRaisesRegex(RuntimeError, "splash config captured"),
+      ):
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_splash_config.call_args.kwargs
+
+    options = ("residual_checkpoint_device_heads", "residual_checkpoint_offload_fp8", "residual_checkpoint_device_fp8")
+    kw = capture_splash_config(make_op("custom"))
+    self.assertEqual(tuple(kw[k] for k in options), (1, True, True))
+    kw = capture_splash_config(make_op("full"))
+    for k in options:
+      self.assertNotIn(k, kw)
+
+  def test_tpu_tokamax_splash_rejects_tokamax_without_requested_field(self):
+    """A Tokamax `SplashConfig` that predates an enabled option fails with a clear error, not a TypeError."""
+    query = jnp.zeros((2, 16, 1, 8))
+    op = self._make_flash_op(
+        attention_type=AttentionType.GLOBAL,
+        use_tokamax_splash=True,
+        remat_policy="custom",
+        sa_context_device_fp8=True,
+    )
+    old_splash_config = dataclasses.make_dataclass(
+        "SplashConfig",
+        [
+            (f.name, object, dataclasses.field(default=None))
+            for f in dataclasses.fields(attention_op.tokamax_splash_kernel.SplashConfig)
+            if f.name != "residual_checkpoint_device_fp8"
+        ],
+    )
+    with (
+        mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+        mock.patch.object(attention_op.tokamax_splash_kernel, "SplashConfig", old_splash_config),
+        self.assertRaisesRegex(ValueError, r"no field\(s\) \['residual_checkpoint_device_fp8'\]"),
+    ):
+      op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
 
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""
