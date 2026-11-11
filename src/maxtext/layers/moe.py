@@ -20,7 +20,6 @@ import enum
 import functools
 import inspect
 import math
-import random
 from typing import Any, Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
@@ -29,13 +28,12 @@ from flax import struct
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
-from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
-from maxtext.kernels import megablox as mblx
+from maxtext.kernels import gmm as gmm_lib
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -65,10 +63,6 @@ import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
-import tokamax
-
-set_xla_metadata = xla_metadata.set_xla_metadata
-
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
@@ -1385,15 +1379,31 @@ class RoutedMoE(nnx.Module):
     logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
-  def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None, logical_axes=None):
-    return maybe_shard_with_pspec(
+  def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | aqt.QTensor | None, logical_axes=None):
+    """Shards inputs with a PartitionSpec when applicable."""
+    if pspec is None or isinstance(pspec, jax.sharding.PartitionSpec):
+      return maybe_shard_with_pspec(
+          inputs,
+          pspec,
+          mesh=self.mesh,
+          shard_mode=self.config.shard_mode,
+          debug_sharding=self.config.debug_sharding,
+          extra_stack_level=1,
+          logical_axes=logical_axes,
+      )
+    return jax.tree.map(
+        lambda arr, leaf_pspec: maybe_shard_with_pspec(
+            arr,
+            leaf_pspec,
+            mesh=self.mesh,
+            shard_mode=self.config.shard_mode,
+            debug_sharding=self.config.debug_sharding,
+            extra_stack_level=2,
+            logical_axes=logical_axes,
+        ),
         inputs,
         pspec,
-        mesh=self.mesh,
-        shard_mode=self.config.shard_mode,
-        debug_sharding=self.config.debug_sharding,
-        extra_stack_level=1,
-        logical_axes=logical_axes,
+        is_leaf=lambda x: isinstance(x, jax.sharding.PartitionSpec),
     )
 
   def _maybe_shard_moe_dispatch(self, inputs, logical_axis, peel_expert):
@@ -2418,60 +2428,30 @@ class RoutedMoE(nnx.Module):
       """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
       return getattr(self.config, f"eval_{name}" if max_utils.is_eval(self.config) else name)
 
-    def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
-      """Execute jax.lax.ragged_dot, with potential quantization"""
-      m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
-      # Clamps the tile size using the minimum
-      tiling = (
-          min(tiling[0], m),
-          min(tiling[1], k),
-          min(tiling[2], n),
-      )
-      rhs_inputs = kernel
-      if isinstance(kernel, aqt.QTensor):
-        if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-          raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-        rhs_inputs = kernel.qvalue
-      if self.config.quantization and self.config.use_qwix_quantization:
-        # Use full contraction for QWIX quantization to allow quantization
-        # fusion (max reduce over contracting dimension).
-        tiling = (tiling[0], k, tiling[2])
-
-      is_tpu = self.mesh.devices.flat[0] == "tpu"
-      # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
-      mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
-      with set_xla_metadata(
-          ragged_dot_tiling=",".join([str(t) for t in tiling]),
-          mosaic_fusion_group=mosaic_group_id,
-      ):
-        output = jax.lax.ragged_dot(
-            lhs=inputs,
-            rhs=rhs_inputs,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-        )
-      if isinstance(kernel, aqt.QTensor):
-        # Multiply outputs by the kernely scale
-        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-        if padding_amount > 0:
-          scales = jax.lax.pad(
-              scales,
-              jnp.array(0.0, dtype=scales.dtype),
-              [(0, padding_amount, 0), (0, 0, 0)],
-          )
-        output *= scales
-      return output
-
-    def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
-      if self.config.quantization and self.config.use_qwix_quantization:
-        return group_sizes
-      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
-        return group_sizes
-      else:
-        return tokamax.RaggedDotGroupSizes(
-            group_sizes,
-            inputs.shape[0],
-        )
+    # Resolve the grouped-matmul kernel backend once from config, independent of quantization.
+    # Stub configs/meshes in unit tests (or JAX AbstractMesh) may omit or disallow `.devices`.
+    try:
+      mesh_devices = getattr(self.mesh, "devices", None)
+    except ValueError:
+      mesh_devices = None
+    first_device = mesh_devices.flat[0] if getattr(mesh_devices, "size", 0) else None
+    is_tpu = (
+        getattr(first_device, "platform", None) == "tpu"
+        if first_device is not None
+        else getattr(self.config, "hardware", None) == "tpu"
+    )
+    backend = gmm_lib.select_gmm_backend(
+        use_te_grouped_gemm=getattr(self.config, "use_te_grouped_gemm", False),
+        use_tokamax_gmm=getattr(self.config, "use_tokamax_gmm", False),
+        use_gmm_v2=getattr(self.config, "use_gmm_v2", False),
+        use_gmm_v2_heuristic_tiling=getattr(self.config, "use_gmm_v2_heuristic_tiling", False),
+        megablox=getattr(self.config, "megablox", False),
+        hardware=getattr(self.config, "hardware", "tpu"),
+        is_tpu=is_tpu,
+        use_dlhs_transpose_rhs=getattr(self.config, "moe_gmm_v2_dlhs_transpose_rhs", False),
+        fuse_dlhs_scale=getattr(self.config, "moe_accumulate_wi_dlhs", False),
+        fuse_3d_dlhs_ps=getattr(self.config, "moe_3d_dlhs_partial_sum", False),
+    )
 
     def get_quantization_dtypes():
       # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
@@ -2485,55 +2465,19 @@ class RoutedMoE(nnx.Module):
         return quantize_dtype, quantize_dtype
       return None, None
 
-    def te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias=None):
-      """Grouped GEMM via TransformerEngine `grouped_dense` (custom VJP).
-
-      Group sizes are passed as routed, so TE walks only the rows that actually
-      hold tokens and skips the ragged-buffer padding. Output rows past that
-      point are zeroed by the TE kernel (not GEMMed) so GLU / dgrad / dbias
-      cannot observe uninitialized leftover.
-
-      Note: v1 copies group_sizes D2H inside the FFI. That is safe with one
-      local device (including multi-process EP, one GPU per rank) but can
-      deadlock in single-process multi-device shard_map on ROCm.
-      """
-      # pylint: disable=import-outside-toplevel
-      from transformer_engine.jax.dense import grouped_dense
-
-      num_local_experts = kernel.shape[0]
-      start = 0 if group_offset is None else group_offset
-      te_group_sizes = jax.lax.dynamic_slice_in_dim(group_sizes, start, num_local_experts)
-      # With a group_offset the local groups' rows follow those of groups [0, group_offset), as in
-      # megablox. TE has no group offset and reads from row 0, so rotate those rows to the front.
-      row_start = None
-      if not (isinstance(start, int) and start == 0):
-        row_start = jnp.sum(jnp.where(jnp.arange(group_sizes.shape[0]) < start, group_sizes, 0))
-        inputs = jnp.roll(inputs, -row_start, axis=0)
-      # TE asserts lhs.dtype == rhs.dtype and reuses that dtype in its custom VJP,
-      # so a wider `preferred_element_type` also fails in the backward pass. The
-      # GPT-OSS GLU can hand `wo` f32 activations while the experts stay bf16;
-      # jax.lax.ragged_dot tolerates that mix, TE does not, so narrow everything
-      # to one dtype and restore self.dtype on the output.
-      out_dtype = jnp.dtype(self.dtype)
-      compute_dtype = min(
-          (jnp.dtype(kernel.dtype), jnp.dtype(inputs.dtype), out_dtype),
-          key=lambda dt: dt.itemsize,
-      )
-      inputs = jax.lax.convert_element_type(inputs, compute_dtype)
-      kernel = jax.lax.convert_element_type(kernel, compute_dtype)
-      if bias is not None:
-        bias = jax.lax.convert_element_type(bias, compute_dtype)
-      output = grouped_dense(
-          inputs,
-          kernel,
-          te_group_sizes.astype(jnp.int32),
-          contracting_dims=((1,), (1,)),
-          bias=bias,
-          preferred_element_type=compute_dtype,
-      )
-      if row_start is not None:
-        output = jnp.roll(output, row_start, axis=0)
-      return jax.lax.convert_element_type(output, out_dtype)
+    def unwrap_aqt_kernel(kernel, expert_assignments, padding_amount):
+      if not isinstance(kernel, aqt.QTensor):
+        return kernel, None
+      if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
+        raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
+      scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+      if padding_amount > 0:
+        scales = jax.lax.pad(
+            scales,
+            jnp.array(0.0, dtype=scales.dtype),
+            [(0, padding_amount, 0), (0, 0, 0)],
+        )
+      return kernel.qvalue, scales
 
     def gmm(
         inputs,
@@ -2567,7 +2511,9 @@ class RoutedMoE(nnx.Module):
         return tuple()
 
       is_native_kernel = isinstance(kernel, qpl.QArray)
-      if self.config.megablox and not self.config.use_tokamax_gmm and not self.config.moe_quantize_token_all_gather:
+      if isinstance(backend, gmm_lib.MegabloxBackend) and not getattr(
+          self.config, "moe_quantize_token_all_gather", False
+      ):
         lhs_vma_axes = extract_vma(inputs)
         rhs_vma_axes = extract_vma(kernel.qvalue if is_native_kernel else kernel)
       else:
@@ -2576,21 +2522,23 @@ class RoutedMoE(nnx.Module):
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
-      if self.config.use_te_grouped_gemm:
-        if return_lhs or return_rhs or out_is_3d or tc_unsort_cfg is not None:
-          raise NotImplementedError(
-              "use_te_grouped_gemm does not support return_lhs, return_rhs, out_is_3d or a fused TC unsort "
-              f"(got {return_lhs=}, {return_rhs=}, {out_is_3d=}, tc_unsort={tc_unsort_cfg is not None})."
-          )
-        # Highest priority when the flag is on. Skip megablox/tokamax tile padding:
-        # TE v1 walks only sum(group_sizes) rows and zeros the leftover.
-        # Dtype unification (f32 acts vs bf16 weights) happens inside te_grouped_dense_gmm.
-        output = te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias)
-        if partial_sum is not None:
-          output = output + partial_sum
-        return output
+      if isinstance(backend, gmm_lib.TeGroupedGemmBackend):
+        # TE handles padded/leftover rows directly inside its kernel and skips tile padding.
+        return gmm_lib.grouped_matmul(
+            inputs,
+            kernel,
+            group_sizes,
+            backend=backend,
+            preferred_element_type=self.dtype,
+            group_offset=group_offset,
+            partial_sum=partial_sum,
+            return_lhs=return_lhs,
+            return_rhs=return_rhs,
+            out_is_3d=out_is_3d,
+            tc_unsort_cfg=tc_unsort_cfg,
+            bias=bias,
+        )
 
-      tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
       # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
       if isinstance(inputs, qpl.QArray):
@@ -2610,94 +2558,66 @@ class RoutedMoE(nnx.Module):
       # e.g. equiv_chunk_test executing locally). During train_compile the local backend is
       # CPU (JAX_PLATFORMS=cpu) but self.mesh targets tpu7x -> compile natively; interpret
       # mode on a TPU target breaks check_vma and bloats HBM temporaries.
-      megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
+      megablox_interpret = not is_tpu
 
-      # We support various implementations for gmm - TE grouped_dense, tokamax gmm (v1, v2),
-      # older forked megablox, or jax.lax.ragged_dot.
-      # Determine whether we can use: tokamax gmm v1 (quantized)
-      # Pre-quantized QArray inputs must route through gmm_v2 custom VJP.
-      is_tokamax_v1_unquantized = (
-          self.config.use_tokamax_gmm
-          and not self.config.quantization
-          and not self.config.use_gmm_v2
-          and not isinstance(inputs, qpl.QArray)
-          and self.config.hardware != "cpu"
+      flat_fsdp_shard = None
+      if (
+          getattr(self.config, "moe_flat_fsdp_weights", False)
+          and not is_native_kernel
+          and not isinstance(kernel, aqt.QTensor)
+          and kernel.ndim == 2
+      ):
+        # `kernel` is the local [rows_local, cols] block of the flat (expert, fsdp)-sharded weight. After the
+        # dim-0 FSDP all-gather it holds this shard's E_local experts back to back: a free bitcast to
+        # [E_local, rows, cols]. With no FSDP gather axis the local block already is the whole expert group
+        # and can be reshaped directly for every backend; fused FSDP gather validation happens in grouped_matmul.
+        num_local_experts = self.num_experts // self.get_expert_parallelism_size()
+        gather_factor = 1
+        for axis_name, axis_idx in weight_gather_axes or ():
+          if axis_idx == 0:
+            gather_factor *= self.mesh.shape[axis_name]
+        gathered_rows = kernel.shape[0] * gather_factor
+        if gathered_rows % num_local_experts != 0:
+          raise ValueError(
+              f"moe_flat_fsdp_weights: {gathered_rows} gathered rows not divisible by {num_local_experts} experts"
+          )
+        gathered_shape = (num_local_experts, gathered_rows // num_local_experts, kernel.shape[1])
+        if weight_gather_axes:
+          flat_fsdp_shard = gathered_shape
+        else:
+          kernel = kernel.reshape(gathered_shape)
+
+      rhs_kernel, aqt_scales = unwrap_aqt_kernel(kernel, expert_assignments, padding_amount)
+      if aqt_scales is not None:
+        lhs_quantize_dtype = rhs_quantize_dtype = None
+      output = gmm_lib.grouped_matmul(
+          lhs=inputs,
+          rhs=rhs_kernel,
+          group_sizes=group_sizes,
+          backend=backend,
+          preferred_element_type=self.dtype,
+          tiling=tiling,
+          group_offset=group_offset,
+          interpret=megablox_interpret,
+          lhs_quantize_dtype=lhs_quantize_dtype,
+          rhs_quantize_dtype=rhs_quantize_dtype,
+          use_qwix_quantization=getattr(self.config, "use_qwix_quantization", False),
+          weight_gather_axes=weight_gather_axes,
+          lhs_vma_axes=lhs_vma_axes,
+          rhs_vma_axes=rhs_vma_axes,
+          partial_sum=partial_sum,
+          return_lhs=return_lhs,
+          return_rhs=return_rhs,
+          flat_fsdp_shard=flat_fsdp_shard,
+          out_is_3d=out_is_3d,
+          tc_routing=tc_routing,
+          tc_unsort_cfg=tc_unsort_cfg,
+          bias=bias,
+          use_rpa_group_sizes=getattr(self.config, "attention", "") in ("vllm_rpa", "vllm_batched_rpa"),
+          is_quantized_config=bool(getattr(self.config, "quantization", "")),
       )
-      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox.
-      # On CPU (hardware="cpu"), bypass TPU Pallas custom-VJP kernels and fall back to jax.lax.ragged_dot.
-      use_custom_vjp_gmm = (self.config.use_tokamax_gmm or self.config.megablox) and self.config.hardware != "cpu"
-
-      if is_tokamax_v1_unquantized:
-        # tokamax v1 (unquantized)
-        output = tokamax.ragged_dot(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=tokamax_group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
-            preferred_element_type=self.dtype,
-            implementation="mosaic",
-            # `group_offset` is not yet supported
-            group_offset=None,
-        )
-      elif use_custom_vjp_gmm:
-        # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
-        flat_fsdp_shard = None
-        if self.config.moe_flat_fsdp_weights and not is_native_kernel and kernel.ndim == 2:
-          # `kernel` is the local [rows_local, cols] block of the flat (expert, fsdp)-sharded weight. After the
-          # dim-0 FSDP all-gather it holds this shard's E_local experts back to back: a free bitcast to
-          # [E_local, rows, cols]. With no FSDP gather axis the local block already is the whole expert group.
-          num_local_experts = self.num_experts // self.get_expert_parallelism_size()
-          gather_factor = 1
-          for axis_name, axis_idx in weight_gather_axes:
-            if axis_idx == 0:
-              gather_factor *= self.mesh.shape[axis_name]
-          gathered_rows = kernel.shape[0] * gather_factor
-          if gathered_rows % num_local_experts != 0:
-            raise ValueError(
-                f"moe_flat_fsdp_weights: {gathered_rows} gathered rows not divisible by {num_local_experts} experts"
-            )
-          gathered_shape = (num_local_experts, gathered_rows // num_local_experts, kernel.shape[1])
-          if weight_gather_axes:
-            flat_fsdp_shard = gathered_shape
-          else:
-            kernel = kernel.reshape(gathered_shape)
-        output = mblx.gmm(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-            tiling=tiling,
-            group_offset=group_offset,
-            lhs_quantize_dtype=lhs_quantize_dtype,
-            rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
-            use_tokamax_backend=self.config.use_tokamax_gmm,
-            weight_gather_axes=weight_gather_axes,
-            lhs_vma_axes=lhs_vma_axes,
-            rhs_vma_axes=rhs_vma_axes,
-            use_gmm_v2=self.config.use_gmm_v2,
-            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
-            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
-            partial_sum=partial_sum,
-            interpret=megablox_interpret,
-            return_lhs=return_lhs,
-            fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
-            return_rhs=return_rhs,
-            flat_fsdp_shard=flat_fsdp_shard,
-            fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
-            **({"out_is_3d": True} if out_is_3d else {}),
-            **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
-        )
-      else:
-        # jax.lax.ragged_dot
-        output = jax_ragged_dot_gmm(
-            inputs,
-            kernel,
-            tiling,
-            group_sizes,
-            expert_assignments,
-            padding_amount,
-        )
+      if aqt_scales is not None:
+        output = output * aqt_scales
 
       def unpad(t):
         if padding_amount == 0:
@@ -2802,7 +2722,7 @@ class RoutedMoE(nnx.Module):
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
       elif self.config.shard_embed_moe_on_fsdp and explicitly_weight_ag():
         # Keep embed_moe sharded so we can manually QAG it over FSDP
-        if self.config.moe_flat_fsdp_weights:
+        if getattr(self.config, "moe_flat_fsdp_weights", False):
           # Flat [E * rows, cols] weights: keep the (expert, fsdp) row sharding; gmm QAGs dim 0 over FSDP.
           w0_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
@@ -2813,7 +2733,7 @@ class RoutedMoE(nnx.Module):
           wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
         # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
-        if self.config.moe_flat_fsdp_weights:
+        if getattr(self.config, "moe_flat_fsdp_weights", False):
           w0_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
           wo_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), None))
@@ -3769,7 +3689,7 @@ class RoutedMoE(nnx.Module):
       if use_fused_tc_unsort:
         tc_unsort_kwargs = {
             "tc_routing": routing.tc_routing,
-            "tc_unsort_cfg": mblx.TcUnsortCfg(
+            "tc_unsort_cfg": gmm_lib.TcUnsortCfg(
                 unpadded_cap=intermediate_layer.shape[0],
                 num_out_tokens=routing.tc_routing.num_out_tokens,
                 topk=self.num_experts_per_tok,
@@ -3957,9 +3877,8 @@ class RoutedMoE(nnx.Module):
     # Not every mesh axis: shard_map rejects axes an enclosing vmap mapped away ("stage", "diloco").
     input_mesh_axes = {
         axis
-        for spec in in_specs
-        if spec is not None
-        for dim in (spec.partitions if isinstance(spec, P) else spec)
+        for spec in jax.tree.leaves(in_specs)
+        for dim in (spec.partitions if isinstance(spec, P) else (spec,))
         for axis in mesh_axes_for_dim(dim)
     }
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)

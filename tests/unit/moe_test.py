@@ -4665,7 +4665,7 @@ class SparseMatmulQuantizationTest(parameterized.TestCase):
       return jnp.zeros((kwargs["lhs"].shape[0], kwargs["rhs"].shape[-1]), dtype=kwargs["preferred_element_type"])
 
     inputs = jax.random.normal(jax.random.PRNGKey(0), (1, 8, cfg.base_emb_dim), dtype=jnp.float32)
-    with mock.patch.object(moe.mblx, "gmm", record_gmm):
+    with mock.patch.object(moe.gmm_lib, "grouped_matmul", record_gmm):
       with nn_partitioning.axis_rules(cfg.logical_axis_rules):
         model(inputs)
 
