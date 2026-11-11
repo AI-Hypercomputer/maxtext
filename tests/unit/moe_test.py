@@ -214,6 +214,17 @@ class FixedRandomRouterTest(unittest.TestCase):
             moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
           setattr(te_moe, missing, saved)
 
+      # Without a TE `quantization` object (dense layers on XLA), te_gmm_quantization alone is enough.
+      layer.quant = None
+      te_quant_cls = quantizations.TransformerEngineQuantization
+      with mock.patch.object(te_quant_cls, "get_moe_block_quantizer_sets", return_value=(None, None)) as get_sets:
+        result = moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
+        np.testing.assert_array_equal(result[0], inputs)
+        self.assertEqual(get_sets.call_args.args[0], "te_no_quant")
+      cfg.te_gmm_quantization = ""
+      with self.assertRaisesRegex(ValueError, "requires te_gmm_quantization"):
+        moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
+
   def test_rejects_forced_expert_indices(self):
     layer = SimpleNamespace(config=SimpleNamespace(dtype=jnp.float32, te_moe_block=True, use_random_routing=True))
     with self.assertRaisesRegex(ValueError, "forced expert indices"):
