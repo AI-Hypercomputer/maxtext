@@ -995,6 +995,7 @@ def training_loop_iteration(
         delete_local_after=dump_hlo_delete_local_after,
         all_host_upload=dump_hlo_upload_all,
     )
+    python_vars["hlo_uploaded"] = True
 
   ran_eval = (
       eval_interval > 0
@@ -1253,6 +1254,28 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
   Returns:
     The final train state.
   """
+  python_vars: dict[str, Any] = {"hlo_uploaded": False}
+  try:
+    return _train_loop_body(
+        config,
+        recorder,
+        state=state,
+        elastic_retry_cache=elastic_retry_cache,
+        python_vars=python_vars,
+    )
+  finally:
+    if config.dump_hlo and not python_vars.get("hlo_uploaded"):
+      gcs_utils.upload_hlo_dump(config)
+
+
+def _train_loop_body(
+    config,
+    recorder,
+    state=None,
+    elastic_retry_cache=None,
+    python_vars: dict[str, Any] | None = None,
+):
+  """Executes training setup, AOT compilation, and the training step loop."""
   (
       init_rng,
       checkpoint_manager,
@@ -1432,18 +1455,22 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       "model": model,
   }
 
-  python_vars = {
-      "step": start_step,
-      "last_step_completion": datetime.datetime.now(),
-      "data_loader": data_loader,
-      "rampup_manager": rampup_manager,
-      "recorder": recorder,
-      "checkpoint_manager": checkpoint_manager,
-      "data_iterator": data_iterator,
-      "eval_data_iterator": eval_data_iterator,
-      "metric_logger_instance": metric_logger_instance,
-      "prof": prof,
-  }
+  if python_vars is None:
+    python_vars = {"hlo_uploaded": False}
+  python_vars.update(
+      {
+          "step": start_step,
+          "last_step_completion": datetime.datetime.now(),
+          "data_loader": data_loader,
+          "rampup_manager": rampup_manager,
+          "recorder": recorder,
+          "checkpoint_manager": checkpoint_manager,
+          "data_iterator": data_iterator,
+          "eval_data_iterator": eval_data_iterator,
+          "metric_logger_instance": metric_logger_instance,
+          "prof": prof,
+      }
+  )
 
   immutable_data = {
       "config": config,
