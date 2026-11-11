@@ -7,6 +7,8 @@ description: Brings up a new LLM or MoE model family end-to-end in MaxText m3 (`
 
 Onboards a HuggingFace model family as a self-contained pure-NNX vertical slice in `src/maxtext/m3/models/<family>/`, verified end-to-end on CPU and TPU via `pytest`.
 
+For the motivation and design rationale behind m3 (model garden layout, sharding as annotation, post-construction transforms, MoE runtime split), read `src/maxtext/m3/DESIGN.md`. Where it disagrees with the code or `src/maxtext/m3/README.md`, the code and README are the source of truth.
+
 ## 1. Vertical-Slice Isolation & M3 Architecture Rules
 
 **Allowed touch list:**

@@ -26,6 +26,9 @@ concerns are applied as post-construction transforms rather than branched on ins
 > Legacy `src/maxtext/layers/` remains the production path
 > until the migration milestones complete.
 
+For the motivation, design rationale, and alternatives considered, see the
+[m3 design doc](DESIGN.md).
+
 ## Layout
 
 ```text
