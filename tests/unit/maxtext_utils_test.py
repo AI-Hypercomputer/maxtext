@@ -1010,6 +1010,53 @@ class TestMeshUtils(unittest.TestCase):
     self.assertEqual(devices_array.shape, (1,) * len(mesh_axes))
 
 
+class TestCreateDeviceMeshRingAxis(unittest.TestCase):
+  """Tests how create_device_mesh routes `mesh_ring_axis`."""
+
+  _AXES = ["data", "fsdp", "tensor", "expert"]
+
+  def _devices(self, rows=4, cols=4):
+    return [SimpleNamespace(id=x * cols + y, coords=(x, y, 0)) for x in range(rows) for y in range(cols)]
+
+  def _config(self, **overrides):
+    """A config with only the fields create_device_mesh reads, for one 16-device slice."""
+    config = SimpleNamespace(
+        elastic_enabled=False,
+        num_slices=1,
+        subslice_shape="",
+        enable_single_controller=False,
+        inference_benchmark_test=False,
+        ici_parallelism=[1, 1, 4, 4],
+        dcn_parallelism=[-1, 1, 1, 1],
+        allow_split_physical_axes=False,
+        mesh_axes=self._AXES,
+        mesh_ring_axis="tensor",
+        use_lineage=False,
+    )
+    for key, value in overrides.items():
+      setattr(config, key, value)
+    return config
+
+  def test_ring_axis_builds_ring_layout(self):
+    devices = self._devices()
+    mesh = maxtext_utils.create_device_mesh(self._config(), devices=devices)
+    self.assertEqual(mesh.shape, (1, 1, 4, 4))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+    # Each tensor group is a 2x2 physical ring: every hop moves one step along one physical axis.
+    for ring in np.moveaxis(mesh, 2, -1).reshape(-1, 4):
+      for a, b in zip(ring, list(ring[1:]) + [ring[0]]):
+        self.assertEqual(sorted(abs(p - q) for p, q in zip(a.coords, b.coords)), [0, 0, 1])
+
+  def test_ring_axis_rejects_multi_slice(self):
+    config = self._config(num_slices=2, ici_parallelism=[1, 1, 4, 2])
+    with self.assertRaisesRegex(ValueError, "not implemented for multi-slice"):
+      maxtext_utils.create_device_mesh(config, devices=self._devices())
+
+  def test_ring_axis_rejects_lineage(self):
+    with self.assertRaisesRegex(ValueError, "not supported with use_lineage"):
+      maxtext_utils.create_device_mesh(self._config(use_lineage=True), devices=self._devices())
+
+
 class TestGetFunctionalTrainWithSignature(unittest.TestCase):
   """Tests for get_functional_train_with_signature."""
 

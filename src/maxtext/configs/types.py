@@ -2592,6 +2592,16 @@ class HardwareAndMesh(BaseModel):
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
+  mesh_ring_axis: str = Field(
+      "",
+      description=(
+          "Logical mesh axis to lay out as physical TPU rings of (size/2)x2 chips; empty disables. TPU only: a"
+          " single 2D slice with one device per chip and an even axis size whose blocks tile the slice."
+          " Ignores custom_mesh, allow_split_physical_axes and optimize_mesh_for_tpu_v6e. The other mesh axes"
+          " lose locality and any wraparound, so use it only when the ring axis would otherwise lack wraparound"
+          " (e.g. v6e-128); it is counterproductive on full-torus slices such as v6e-256."
+      ),
+  )
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
   prng_impl: Literal["unsafe_rbg", "rbg", "threefry2x32"] = Field(
       "unsafe_rbg", description="JAX default PRNG implementation used for training."
