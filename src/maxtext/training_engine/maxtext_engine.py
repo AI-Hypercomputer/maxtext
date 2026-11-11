@@ -245,7 +245,8 @@ def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any
   - the batch dimension is not sharded over "data" after all, leaving no cross-replica
     partial to defer and nothing for the tag to describe.
   """
-  if config.shard_mode != common_types.ShardMode.EXPLICIT:
+  if config.shard_mode != common_types.ShardMode.EXPLICIT or bool(getattr(config, "use_m3_model", False)):
+    # Stock `flax.nnx.RMSNorm` in m3 rejects `reduced={'data'}` scale operands on pure-DP explicit meshes.
     return None, None
   if mesh is None or mesh.shape.get(_DATA_AXIS, 1) <= 1:
     return None, None

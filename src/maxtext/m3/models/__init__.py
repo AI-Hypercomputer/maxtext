@@ -29,8 +29,7 @@ from collections.abc import Callable
 
 from flax import nnx
 import jax
-from jax._src import core as jax_core  # pylint: disable=protected-access
-
+from maxtext.m3.models.qwen3 import modeling_qwen3  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
@@ -69,24 +68,43 @@ MODEL_REGISTRY: dict[str, Callable] = {
     "qwen3.8-flash-next-mini": create_qwen3_8_flash_next_model,
 }
 
+_FOUR_AXIS_MESH = ("data", "fsdp", "tensor", "expert")
+MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
+    "glm5.3-flash": _FOUR_AXIS_MESH,
+    "granite-3.0-1b-a400m": _FOUR_AXIS_MESH,
+    "granitemoe": _FOUR_AXIS_MESH,
+    "qwen3-0.6b": modeling_qwen3.m3_sharding.DEFAULT_SHARDING_AXES,
+    "qwen3-vl-2b": _FOUR_AXIS_MESH,
+    "qwen3.8-flash-next": _FOUR_AXIS_MESH,
+    "qwen3.8-flash-next-mini": _FOUR_AXIS_MESH,
+}
+MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
 
-def _end_eager_placement(model):
-  """Turns `eager_sharding` off on every variable placed at construction; returns `model`.
 
-  The flag stays in a variable's metadata, and Flax rebuilds variables from
-  that metadata: `nnx.Optimizer` creates each moment as
-  `OptVariable(value, **param.get_metadata())`. With the flag on, each rebuild
-  re-runs placement and fails unless a mesh is in scope, which drivers that
-  build the optimizer later (the training engine's `__init__`, legacy
-  `create_train_state_fn`) do not have. The parameters are already placed;
-  `out_sharding` stays as the record of where.
-  """
-  for _, node in nnx.iter_graph(model):
-    if isinstance(node, nnx.Variable):
-      metadata = node.get_metadata()
-      if metadata.get("eager_sharding") and metadata.get("out_sharding") is not None:
-        node.set_metadata(eager_sharding=False)
-  return model
+def _unsupported_model_mesh_settings(config) -> dict[str, object]:
+  """Flags sharding modes or parallelism axes that `config.model_name` does not implement."""
+  model_name = getattr(config, "model_name", None)
+  if model_name not in MODEL_SUPPORTED_MESH_AXES:
+    return {}
+  unsupported: dict[str, object] = {}
+  allowed = set(MODEL_SUPPORTED_MESH_AXES[model_name])
+  for network in ("ici", "dcn"):
+    for axis in modeling_qwen3.m3_sharding.DEFAULT_SHARDING_AXES:
+      if axis in allowed:
+        continue
+      field = f"{network}_{axis}_parallelism"
+      val = getattr(config, field, 1)
+      if val != 1:
+        unsupported[field] = val
+  shard_mode = getattr(config, "shard_mode", "auto")
+  shard_mode_val = getattr(shard_mode, "value", shard_mode)
+  if shard_mode_val != "auto" and model_name not in MODEL_EXPLICIT_SHARDING_SUPPORT:
+    unsupported["shard_mode"] = shard_mode_val
+  return unsupported
+
+
+modeling_qwen3.m3_sharding.register_model_mesh_validator(_unsupported_model_mesh_settings)
+_end_eager_placement = modeling_qwen3.end_eager_placement
 
 
 def create_model(config, mesh, **kwargs):
@@ -105,22 +123,33 @@ def create_model(config, mesh, **kwargs):
         f"Model {config.model_name!r} does not support the m3 backend (use_m3_model=True). "
         f"Registered models: {', '.join(sorted(MODEL_REGISTRY))}."
     )
+  if mesh is not None:
+    if kwargs.get("sharding") is None:
+      modeling_qwen3.check_mesh(mesh, MODEL_SUPPORTED_MESH_AXES[config.model_name])
+    axis_types = tuple(getattr(mesh, "axis_types", ()))
+    if (
+        axis_types
+        and any(t == jax.sharding.AxisType.Explicit for t in axis_types)
+        and config.model_name not in MODEL_EXPLICIT_SHARDING_SUPPORT
+    ):
+      raise ValueError(
+          f"Model {config.model_name!r} does not implement shard_mode='explicit' yet "
+          f"(supported models: {sorted(MODEL_EXPLICIT_SHARDING_SUPPORT)}). Use shard_mode='auto'."
+      )
+    if dict(mesh.shape).get("context", 1) > 1:
+      cp_strategy = getattr(config, "context_parallel_strategy", "all_gather")
+      cp_strategy_val = str(getattr(cp_strategy, "value", cp_strategy)).lower()
+      if cp_strategy_val != "all_gather":
+        raise ValueError(
+            f"m3 context parallelism only implements context_parallel_strategy='all_gather', got {cp_strategy!r}."
+        )
+      if bool(getattr(config, "context_parallel_load_balance", False)):
+        raise ValueError(
+            "m3 context parallelism requires context_parallel_load_balance=False (natural contiguous token order)."
+        )
   constructor = MODEL_REGISTRY[config.model_name]
-  ambient = jax.sharding.get_abstract_mesh()
-  if mesh is None:
+  with modeling_qwen3.enter_mesh_scope(mesh):
     return _end_eager_placement(constructor(config, mesh, **kwargs))
-  if ambient.empty:
-    # `jax.set_mesh` is refused under a trace (e.g. `nnx.eval_shape`), where
-    # only the abstract mesh is needed.
-    if jax_core.trace_state_clean():
-      scope = jax.set_mesh(mesh)
-    else:
-      scope = jax.sharding.use_abstract_mesh(mesh.abstract_mesh)
-    with scope:
-      return _end_eager_placement(constructor(config, mesh, **kwargs))
-  if ambient != mesh.abstract_mesh:
-    raise ValueError(f"create_model was passed mesh {mesh} while a different mesh is in scope: {ambient}.")
-  return _end_eager_placement(constructor(config, mesh, **kwargs))
 
 
 def calculate_glm5_3_flash_tflops_per_device(config, log: bool = True):
