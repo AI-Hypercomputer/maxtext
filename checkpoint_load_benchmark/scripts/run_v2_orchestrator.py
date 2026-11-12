@@ -295,7 +295,7 @@ def manage_cpu_jobs(
             clean_target=True,
             cache_size=2,
             node_pool=prof.cpu_node_pool,
-            memory_request="210Gi",
+            memory_request="180Gi",
             cpu_request="48",
         )
         if apply_k8s_manifests(ctx, docs):
