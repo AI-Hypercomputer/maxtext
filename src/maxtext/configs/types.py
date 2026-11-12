@@ -902,6 +902,13 @@ class CompressedAttention(BaseModel):
       False,
       description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
   )
+  use_csa_vmap_selection_mask: bool = Field(
+      False,
+      description=(
+          "Build the CSA top-k selection mask with a vmapped scatter of the selected block ids instead of "
+          "a [batch, seq, k, compressed_len] broadcast-compare. Slower on TPU, where XLA fuses the compare."
+      ),
+  )
 
 
 class AttentionIndexer(BaseModel):
