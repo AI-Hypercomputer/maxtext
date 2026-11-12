@@ -1100,9 +1100,9 @@ def _register_overlap_transform(mesh):
   """
   if mesh.devices.size == 0 or getattr(mesh.devices.flat[0], "platform", None) != "tpu":
     return
-  from maxtext.experimental.lineage.xla_transforms import max_async_overlap_transform  # pylint: disable=import-outside-toplevel
+  from maxtext.layers import fsdp_prefetch_overlap_transform  # pylint: disable=import-outside-toplevel
 
-  max_async_overlap_transform.register_transform(platforms="tpu")
+  fsdp_prefetch_overlap_transform.register_transform(platforms="tpu")
 
 
 def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_policy, prevent_cse):
