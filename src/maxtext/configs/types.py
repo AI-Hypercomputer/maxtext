@@ -1088,6 +1088,16 @@ class SplashAttention(BaseModel):
       ),
   )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
+  sa_dkv_head_slots: bool = Field(
+      False,
+      description=(
+          "Experimental (SplashConfig.dkv_head_slots): with GQA and dq_reduction_steps=1 on the dynamic"
+          " grid, the splash dkv kernel runs a kv group's q heads as the innermost grid axis with per-head"
+          " VMEM dq/dk/dv slots, and writes dk/dv once per kv block instead of accumulating them across q"
+          " heads through aliased f32 HBM buffers. Used when the f32 dk/dv slots fit in 8 MiB."
+          " Bit-identical."
+      ),
+  )
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
   sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
