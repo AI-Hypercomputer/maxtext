@@ -322,7 +322,6 @@ STEP1_COLUMNS: tuple[ColumnSpec, ...] = (
 
 def _stage_identity_columns() -> tuple[ColumnSpec, ...]:
   return (
-      _c("Row ID", "row_id", "t", "identity", "Summary Row ID.", "Sync script"),
       _c("TPU platform", "tpu_platform", "c", "identity", "v5e, v6e or v7x.", "Platform profile"),
       _c("Model", "model_name", "t", "identity", "MaxText model name.", "Run config"),
       _c("Scan layers", "scan_layers_mode", "c", "identity", "scanned or unscanned.", "Run config"),
@@ -573,6 +572,7 @@ STAGES_SD_COLUMNS: tuple[ColumnSpec, ...] = (
     + _setup_columns("safetensors_dynamic")
     + _pipeline_columns("safetensors_dynamic")
     + _memory_columns("safetensors_dynamic")
+    + (_c("Row ID", "row_id", "t", "identity", "Summary Row ID.", "Sync script"),)
 )
 STAGES_TM_COLUMNS: tuple[ColumnSpec, ...] = (
     _stage_identity_columns()
@@ -580,19 +580,28 @@ STAGES_TM_COLUMNS: tuple[ColumnSpec, ...] = (
     + _pipeline_columns("to_maxtext")
     + _memory_columns("to_maxtext")
     + _totals_columns("to_maxtext")
+    + (_c("Row ID", "row_id", "t", "identity", "Summary Row ID.", "Sync script"),)
 )
 
 RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
-    _c("Row ID", "row_id", "t", "identity", "Summary Row ID.", "Sync script"),
+    _c("TPU platform", "tpu_platform", "c", "identity", "v5e, v6e or v7x.", "Env"),
+    _c("Model", "model_name", "t", "identity", "Model name.", "Run config"),
+    _c("Model tier", "model_test_tier", "c", "identity", "S, A, B or C.", "Models tab"),
+    _c("Pipeline (to_maxtext or safetensors_dynamic)", "pipeline_name", "t", "pipeline", "Pipeline.", "Run config"),
+    _c(
+        "Scan layers (scanned or unscanned)", "scan_layers_mode", "c", "identity", "scanned or unscanned.", "Run config"
+    ),
+    _c("Number of slices", "number_of_slices", "n", "identity", "Slices.", "Profile"),
+    _c("Slice topology", "slice_topology", "c", "identity", "Topology.", "Profile"),
     _c("Phase", "phase_name", "t", "identity", "Phase name.", "Result JSON"),
+    _c("Repetition index", "repetition_index", "n", "repetitions", "Repetition 1..N.", "Result JSON"),
+    _c("Run status (OK, FAILED, NOT_RUN or SKIPPED)", "run_status", "c", "status", "Run status.", "Result JSON"),
     _c("Run ID", "run_id", "t", "identity", "Run ID.", "Result JSON"),
     _c("Experiment name", "experiment_name", "t", "identity", "Experiment name.", "Result JSON"),
-    _c("Repetition index", "repetition_index", "n", "repetitions", "Repetition 1..N.", "Result JSON"),
     _c("Queue attempt number", "queue_attempt_number", "n", "identity", "Queue attempt.", "Result JSON"),
     _c("JobSet restart attempt", "jobset_restart_attempt", "n", "identity", "JobSet restart count.", "Downward API"),
     _c("Phase started (UTC)", "phase_started_at_utc", "ts", "identity", "Start timestamp UTC.", "Result JSON"),
     _c("Phase finished (UTC)", "phase_finished_at_utc", "ts", "identity", "Finish timestamp UTC.", "Result JSON"),
-    _c("TPU platform", "tpu_platform", "c", "identity", "v5e, v6e or v7x.", "Env"),
     _c("GKE cluster", "gke_cluster_name", "t", "identity", "GKE cluster.", "Env"),
     _c("GCP project", "gcp_project_id", "t", "identity", "GCP project.", "Env"),
     _c("GCP region", "gcp_region", "t", "identity", "GCP region.", "Env"),
@@ -603,8 +612,6 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("Kueue LocalQueue", "kueue_local_queue_name", "t", "identity", "LocalQueue.", "Env"),
     _c("Host machine type", "host_machine_type", "t", "identity", "Host machine type.", "Env"),
     _c("TPU accelerator type", "tpu_accelerator_type", "t", "identity", "TPU accelerator label.", "Env"),
-    _c("Number of slices", "number_of_slices", "n", "identity", "Slices.", "Profile"),
-    _c("Slice topology", "slice_topology", "c", "identity", "Topology.", "Profile"),
     _c("Hosts per slice", "hosts_per_slice", "n", "identity", "Hosts per slice.", "Profile"),
     _c("TPU chips per host", "tpu_chips_per_host", "n", "identity", "Chips per host.", "Profile"),
     _c(
@@ -663,16 +670,11 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     ),
     _c("Code tarball SHA-256", "code_tarball_sha256", "t", "setup", "Tarball SHA-256.", "CODE_VERSION.json"),
     _c("Active timing wrappers", "active_timing_wrappers", "t", "setup", "Active wrappers.", "Stage recorder"),
-    _c("Model", "model_name", "t", "identity", "Model name.", "Run config"),
     _c("HF repo", "hf_repo_id", "t", "identity", "HF repo.", "Run config"),
     _c(
         "Parameters (billions)", "model_parameter_count_billions", "gb", "identity", "Billions of params.", "Models tab"
     ),
     _c("Architecture (dense or moe)", "model_architecture", "c", "identity", "dense or moe.", "Models tab"),
-    _c("Model tier", "model_test_tier", "c", "identity", "S, A, B or C.", "Models tab"),
-    _c(
-        "Scan layers (scanned or unscanned)", "scan_layers_mode", "c", "identity", "scanned or unscanned.", "Run config"
-    ),
     _c("Parameter leaves (count)", "number_of_parameter_leaves", "n", "identity", "Leaf count.", "Result JSON"),
     _c("HF checkpoint dtype (as downloaded)", "hf_checkpoint_dtype", "c", "checkpoint", "HF dtype.", "Headers"),
     _c(
@@ -696,7 +698,6 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("Checkpoint size (GB)", "checkpoint_size_gb", "gb", "checkpoint", "Checkpoint GB.", "Headers"),
     _c("Checkpoint files (count)", "checkpoint_number_of_files", "n", "checkpoint", "File count.", "Headers"),
     _c("Checkpoint tensors (count)", "checkpoint_number_of_tensors", "n", "checkpoint", "Tensor count.", "Headers"),
-    _c("Pipeline (to_maxtext or safetensors_dynamic)", "pipeline_name", "t", "pipeline", "Pipeline.", "Run config"),
     _c("Device mesh shape", "device_mesh_shape", "t", "pipeline", "Mesh shape.", "Result JSON"),
     _c("ICI FSDP parallelism", "ici_fsdp_parallelism", "n", "pipeline", "ici_fsdp_parallelism.", "Result JSON"),
     _c("DCN parallelism axis", "dcn_parallelism_axis", "c", "pipeline", "DCN axis.", "Result JSON"),
@@ -726,7 +727,6 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
         "Result JSON",
     ),
     _c("Harness environment flags", "harness_environment_flags", "t", "pipeline", "Env flags.", "Result JSON"),
-    _c("Run status (OK, FAILED, NOT_RUN or SKIPPED)", "run_status", "c", "status", "Run status.", "Result JSON"),
     _c("Failure category (Legend code)", "failure_category", "c", "status", "Failure category.", "Result JSON"),
     _c("Failed stage", "failed_stage_name", "t", "status", "Failed stage.", "Result JSON"),
     _c("Process exit code", "process_exit_code", "n", "status", "Exit code.", "Result JSON"),
@@ -756,6 +756,7 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("Result JSON", "result_json_url", "url", "links", "Result JSON URL.", "Result JSON"),
     _c("Pod names", "pod_names", "t", "links", "Pod names.", "Downward API"),
     _c("Node names", "node_names", "t", "links", "Node names.", "Downward API"),
+    _c("Row ID", "row_id", "t", "identity", "Summary Row ID.", "Sync script"),
 )
 
 DATA_TABS: tuple[tuple[str, tuple[ColumnSpec, ...]], ...] = (
