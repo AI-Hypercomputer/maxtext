@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 11:49:34 UTC`
+- **Last Updated (UTC):** `2026-11-12 11:57:45 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -13,9 +13,9 @@
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **19 / 21** | **2 / 61** | `mesa-q-v7x-2x2x1-1s-w2`, `mesa-q-v7x-2x2x1-2s-w2` | `mesa-step1-v7x-qwen3-32b-v2-s1-v7x`, `mesa-step1b-deepseek4-1600b-v2-s1b-v7x`, `mesa-step1-v7x-mixtral-8x7b-v2-s1-v7x` |
-| `v6e` | `southamerica-west1` | **17 / 21** | **7 / 53** | `mesa-q-v6e-2x4-2s-w2` | `mesa-copy-v6e-deepseek3p2-671b-v2-cp-v6e`, `mesa-step1-v6e-deepseek2-16b-v2-s1-v6e`, `mesa-step1-v6e-deepseek4-1600b-v2-s1-v6e`, `mesa-step1-v6e-qwen3-32b-v2-s1-v6e`, `mesa-step1-v6e-mixtral-8x7b-v2-s1-v6e` |
-| `v5e` | `europe-west4` | **12 / 12** | **5 / 22** | `mesa-q-v5e-16x16-1s-w2` | _none_ |
+| `v7x` | `us-central1` | **21 / 21** | **2 / 61** | `mesa-q-v7x-2x2x1-1s-w2`, `mesa-q-v7x-2x2x1-2s-w2` | `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` |
+| `v6e` | `southamerica-west1` | **18 / 21** | **7 / 53** | `mesa-q-v6e-2x4-2s-w2` | `mesa-copy-v6e-deepseek3p2-671b-v2-cp-v6e`, `mesa-step1-v6e-deepseek4-1600b-v2-s1-v6e`, `mesa-step1-v6e-mixtral-8x7b-v2-s1-v6e`, `mesa-step1-v6e-qwen3-32b-v2-s1-v6e` |
+| `v5e` | `europe-west4` | **12 / 12** | **6 / 22** | `mesa-q-v5e-16x16-1s-w2` | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
 
@@ -90,3 +90,11 @@
 - [2026-11-12 11:49:13 UTC] Launched `v7x` Step 1 CPU job `mesa-step1-v7x-mixtral-8x7b-v2-s1-v7x` for `mixtral-8x7b`.
 - [2026-11-12 11:49:19 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 56/61 staged tasks.
 - [2026-11-12 11:49:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 190 mirrored JSONs.
+- [2026-11-12 11:53:05 UTC] `v6e` CPU job `mesa-step1-v6e-deepseek2-16b-v2-s1-v6e` Completed and cleaned up.
+- [2026-11-12 11:53:13 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 47/53 staged tasks.
+- [2026-11-12 11:53:17 UTC] `v7x` CPU job `mesa-step1-v7x-qwen3-32b-v2-s1-v7x` Completed and cleaned up.
+- [2026-11-12 11:53:23 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 58/61 staged tasks.
+- [2026-11-12 11:53:37 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 197 mirrored JSONs.
+- [2026-11-12 11:57:24 UTC] `v7x` CPU job `mesa-step1-v7x-mixtral-8x7b-v2-s1-v7x` Completed and cleaned up.
+- [2026-11-12 11:57:30 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 60/61 staged tasks.
+- [2026-11-12 11:57:45 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 204 mirrored JSONs.
