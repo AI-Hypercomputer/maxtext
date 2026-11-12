@@ -17,7 +17,9 @@
 import functools
 
 import jax
+from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+from maxtext.kernels import gather_reduce_pallas
 from maxtext.kernels import gather_reduce_sc
 
 
@@ -125,3 +127,59 @@ def _unroute_impl(
 
 def _sort_impl(tokens: jax.Array, inds: jax.Array, use_gather_mosaic_kernel: bool) -> jax.Array:
   return tokens[inds, ...]
+
+
+def _topk_sum(rows: jax.Array, inds: jax.Array, k: int) -> jax.Array:
+  """`rows[inds]` summed over each run of `k` indices, accumulated in f32.
+
+  Runs on the SparseCore gather-reduce kernel (split over every SparseCore) when the shapes fit it: bf16 rows, `2 * k`
+  dividing the SparseCore lane count (the kernel writes bf16 output rows in pairs), the indices dividing evenly over
+  its subcores, and a 32-aligned column chunk of at most 3584 dividing the width. Otherwise, and on chips without
+  SparseCore, the sum runs on the TensorCore.
+  """
+  try:
+    sc = pltpu.get_tpu_info().sparse_core
+  except (ValueError, RuntimeError):  # Not a TPU.
+    sc = None
+  width = rows.shape[1]
+  col_chunk = next((c for c in range(min(width, 3584) // 32 * 32, 0, -32) if width % c == 0), None)
+  row_chunk = 512  # The kernel's default rows per subcore step.
+  if (
+      sc is not None
+      and col_chunk is not None
+      and rows.dtype == jnp.bfloat16
+      and sc.num_lanes % (2 * k) == 0
+      and inds.shape[0] % (row_chunk * sc.num_cores * sc.num_subcores) == 0
+  ):
+    return gather_reduce_pallas.sc_gather_reduce(
+        rows, inds, reduce_group_size=k, col_chunk_size=col_chunk, row_chunk_size=row_chunk
+    )
+  return rows[inds].astype(jnp.float32).reshape(-1, k, width).sum(axis=1).astype(rows.dtype)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def gather_topk_rows(tokens: jax.Array, sort_indices: jax.Array, k: int) -> jax.Array:
+  """Top-k dispatch without the k-fold repeat: row j is token `sort_indices[j] // k`.
+
+  `sort_indices` sorts the flat (token, k) slots by expert. The VJP is `unsort_and_sum`.
+  """
+  return tokens[sort_indices // k]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def unsort_and_sum(rows: jax.Array, sort_indices: jax.Array, k: int) -> jax.Array:
+  """Top-k combine, the transpose of `gather_topk_rows`: unsort `rows` and sum each token's `k` rows.
+
+  The sum runs in `_topk_sum` (SparseCore when the shapes fit). The VJP is `gather_topk_rows`.
+  """
+  return _topk_sum(rows, jnp.argsort(sort_indices), k)
+
+
+gather_topk_rows.defvjp(
+    lambda tokens, sort_indices, k: (gather_topk_rows(tokens, sort_indices, k), sort_indices),
+    lambda k, sort_indices, grads: (unsort_and_sum(grads, sort_indices, k), None),
+)
+unsort_and_sum.defvjp(
+    lambda rows, sort_indices, k: (unsort_and_sum(rows, sort_indices, k), sort_indices),
+    lambda k, sort_indices, grads: (gather_topk_rows(grads, sort_indices, k), None),
+)

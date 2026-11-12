@@ -1149,8 +1149,8 @@ class RoutedMoeTest(parameterized.TestCase):
         delattr(cls, attr)
     super().tearDownClass()
 
-  @parameterized.parameters(False, True)
-  def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient):
+  @parameterized.product(compute_gradient=(False, True), flag=("moe_use_direct_token_gather", "moe_sc_gather_reduce"))
+  def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient, flag):
     inputs = jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4)
     selected_experts = jnp.array(
         [
@@ -1163,14 +1163,15 @@ class RoutedMoeTest(parameterized.TestCase):
     gate_logits = jnp.zeros((2, 3, 4), dtype=jnp.float32)
 
     def permute(x, use_direct_token_gather):
+      flags = {"moe_use_direct_token_gather": False, "moe_sc_gather_reduce": False, flag: use_direct_token_gather}
       routed_moe = SimpleNamespace(
           config=SimpleNamespace(
               decoder_block=None,
               load_balance_loss_weight=0.0,
-              moe_use_direct_token_gather=use_direct_token_gather,
               num_experts=4,
               use_ragged_sort=False,
               use_ring_of_experts=False,
+              **flags,
           ),
           dtype=jnp.float32,
           is_hash_routing=False,
@@ -1260,7 +1261,8 @@ class RoutedMoeTest(parameterized.TestCase):
     return output
 
   @pytest.mark.tpu_only
-  def test_megablox(self):
+  @parameterized.parameters(False, True)
+  def test_megablox(self, moe_sc_gather_reduce):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="moe_block_megablox_test",
@@ -1275,6 +1277,7 @@ class RoutedMoeTest(parameterized.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
+        moe_sc_gather_reduce=moe_sc_gather_reduce,
         per_device_batch_size=1,
         max_target_length=32,
         float32_gate_logits=True,

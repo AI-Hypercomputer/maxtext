@@ -2707,6 +2707,11 @@ class RoutedMoE(nnx.Module):
       if skip_token_gather:
         # moe_use_fused_gmm3d: the fused expert kernels DMA the routed rows straight from the token buffer.
         sorted_inputs = None
+      elif getattr(self.config, "moe_sc_gather_reduce", False) and not is_qarray:
+        # As moe_use_direct_token_gather, with the backward top-k sum on SparseCore.
+        sorted_inputs = sort_activations.gather_topk_rows(
+            inputs_2d.astype(self.dtype), sorted_selected_experts, self.num_experts_per_tok
+        )
       elif self.config.moe_use_direct_token_gather:
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
@@ -2801,11 +2806,15 @@ class RoutedMoE(nnx.Module):
       tc_routing=None,
       tc_prescaled=False,
       tc_out_3d=False,
+      sc_prescaled=False,
   ):
     """Unpermute tokens to original order and combine weights.
 
     With tc_out_3d (moe_tc_ragged_3d_dispatch), the TC combine stays in the (emb // 128, 128) layout and
     the result is (batch, seq, emb // 128, 128).
+
+    With sc_prescaled (moe_sc_gather_reduce), the routing weights were applied before wo, so the combine is a plain
+    top-k sum.
     """
 
     if tc_routing is not None:
@@ -2848,6 +2857,8 @@ class RoutedMoE(nnx.Module):
           index_math=self.config.moe_routing_index_math,
           spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
+    elif sc_prescaled:
+      output = sort_activations.unsort_and_sum(intermediate, sorted_selected_experts, self.num_experts_per_tok)
     else:
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok)).T
       revert_indices = jnp.reshape(jnp.argsort(sorted_selected_experts), (-1, self.num_experts_per_tok)).T.reshape(-1)
@@ -5005,8 +5016,21 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
+      # moe_sc_gather_reduce: weight the sorted (rows, mlp) activation instead of the (rows, emb) expert output, so the
+      # combine is a plain top-k sum; w * (h @ wo) = (w * h) @ wo without a wo bias. f32 weights keep the product and
+      # the routing-weight gradient (a reduction over mlp) in f32.
+      sc_prescaled = (
+          self.config.moe_sc_gather_reduce
+          and not self.config.use_ring_of_experts
+          and self.get_expert_parallelism_size() == 1
+          and not self.config.mlp_bias
+          and self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4
+      )
+      if sc_prescaled:
+        flat_weights = jnp.ravel(routing.weights).astype(jnp.float32)
+        w_rows = _sort_activations(flat_weights, routing.sorted_selected_experts, self.config.use_custom_sort_vjp)
       intermediate_layer = self.apply_ffn_activation(output0, output1)
-      if tc_prescaled:
+      if tc_prescaled or sc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       # Native TE bias is baked into the GEMM, which runs *before* the TP
@@ -5177,6 +5201,7 @@ class RoutedMoE(nnx.Module):
           sequence_length=sequence_length,
           use_custom_sort_vjp=self.config.use_custom_sort_vjp,
           group_sizes=routing.group_sizes,
+          sc_prescaled=sc_prescaled,
       )
 
       return (

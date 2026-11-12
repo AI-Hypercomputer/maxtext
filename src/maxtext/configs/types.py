@@ -1842,6 +1842,16 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
   )
+  moe_sc_gather_reduce: bool = Field(
+      False,
+      description=(
+          "Non-ring sparse_matmul: gather tokens straight into expert order (no top-k repeat) and run the top-k sums"
+          " (dispatch backward and combine) on the SparseCore gather-reduce kernel, with an f32 TensorCore sum for"
+          " shapes it cannot take and chips without SparseCore. With expert parallelism 1, no mlp_bias and a"
+          " non-Llama4 model, the routing weights are applied to the (rows, mlp) activation before wo, so the combine"
+          " is a plain sum."
+      ),
+  )
   ragged_gather_fallback: bool = Field(
       False,
       description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
