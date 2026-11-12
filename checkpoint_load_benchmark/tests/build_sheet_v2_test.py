@@ -248,8 +248,22 @@ class BuildSheetV2Test(unittest.TestCase):
 
     ds = build_sheet_v2.build_v2_dataset(v2_roots=[v2_root])
     self.assertEqual(ds.validate(), [])
-    # Full planned v2 matrix must stay exact at 352 rows.
+    # Full planned v2 matrix must stay exact at 352 rows and group by Model -> Pipeline -> Scan layers.
     self.assertEqual(len(ds.summary_rows), 352)
+    qwen06_v7x_1s = [
+        (r["pipeline_name"], r["scan_layers_mode"])
+        for r in ds.summary_rows
+        if r["model_name"] == "qwen3-0.6b" and r["tpu_platform"] == "v7x" and r["number_of_slices"] == 1
+    ]
+    self.assertEqual(
+        qwen06_v7x_1s,
+        [
+            ("to_maxtext", "scanned"),
+            ("to_maxtext", "unscanned"),
+            ("safetensors_dynamic", "scanned"),
+            ("safetensors_dynamic", "unscanned"),
+        ],
+    )
 
     by_id = {r["row_id"]: r for r in ds.summary_rows}
     tm_row = by_id["v2|v7x|llama3.1-8b|scanned|to_maxtext|1x2x2x1"]
