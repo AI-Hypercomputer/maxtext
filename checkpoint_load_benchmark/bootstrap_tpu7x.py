@@ -29,6 +29,7 @@ Responsibilities:
   `BENCH_CODE_DIR` overrides the GCS code directory (default: `gs://mesa-maxtext/mesakh_tpu7x_bench/code`).
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -110,11 +111,17 @@ def setup_environment() -> None:
   print(f"[Bootstrap] Added missing packages to {target_sp}: {sorted(copied_pkgs)}", flush=True)
 
   download_from_gcs(f"{GCS_CODE_DIR}/maxtext_lance_prs.tar.gz", "/tmp/maxtext_lance_prs.tar.gz")
+  with open("/tmp/maxtext_lance_prs.tar.gz", "rb") as tb_f:
+    tarball_sha256 = hashlib.file_digest(tb_f, "sha256").hexdigest()
   code_version = extract_and_verify_code_tarball("/tmp/maxtext_lance_prs.tar.gz", MAXTEXT_TREE_DIR)
+  code_version["code_tarball_sha256"] = tarball_sha256
+  with open(os.path.join(MAXTEXT_TREE_DIR, CODE_VERSION_FILENAME), "w", encoding="utf-8") as cv_f:
+    json.dump(code_version, cv_f, indent=2)
   os.environ["BENCH_GIT_COMMIT"] = code_version["git_commit"]
+  os.environ["BENCH_CODE_TARBALL_SHA256"] = tarball_sha256
   print(
       f"[Bootstrap] Code version: branch={code_version.get('git_branch_name', 'unknown')} "
-      f"commit={code_version['git_commit']} pushed={code_version.get('git_commit_pushed')}",
+      f"commit={code_version['git_commit']} sha256={tarball_sha256[:12]} pushed={code_version.get('git_commit_pushed')}",
       flush=True,
   )
 
