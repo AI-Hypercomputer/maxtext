@@ -1351,6 +1351,15 @@ class MoEGeneral(BaseModel):
           " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       ),
   )
+  moe_wi_dlhs_merged_k: bool = Field(
+      False,
+      description=(
+          "Routed-MoE backward: compute the input gradient of the wi_0 and wi_1 GMMs with one gmm_v2 DLHS over"
+          " concat([dout0, dout1]) and concat([wi_0, wi_1]) (contracting 2 * mlp) instead of two DLHS GMMs plus an"
+          " add of their outputs. The forward and weight-gradient GMMs are unchanged. Requires use_tokamax_gmm=True,"
+          " use_gmm_v2=True, no quantization, prefuse_moe_weights=False and moe_accumulate_wi_dlhs=False."
+      ),
+  )
   moe_flat_fsdp_weights: bool = Field(
       False,
       description=(
@@ -7335,6 +7344,18 @@ class MaxTextConfig(
     if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
       raise ValueError(
           "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      )
+
+    if self.moe_wi_dlhs_merged_k and not (
+        self.use_tokamax_gmm
+        and self.use_gmm_v2
+        and not self.quantization
+        and not self.prefuse_moe_weights
+        and not self.moe_accumulate_wi_dlhs
+    ):
+      raise ValueError(
+          "moe_wi_dlhs_merged_k=True requires use_tokamax_gmm=True, use_gmm_v2=True, no quantization,"
+          " prefuse_moe_weights=False and moe_accumulate_wi_dlhs=False."
       )
 
     if self.moe_bwd_prequant_before_unsort and not (
