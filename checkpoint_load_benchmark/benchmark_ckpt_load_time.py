@@ -2142,17 +2142,22 @@ def run_remote_slice_daemon(port: int) -> None:
 def _load_code_version() -> dict[str, Any]:
   """Returns the CODE_VERSION.json at the root of the code tree this harness runs from, the parent of its directory.
 
-  scripts/build_code_tarball.py writes it into the code tarball. Without it (e.g. in a git checkout) or when it is not
-  valid JSON, the result says so, with `git_commit` "unknown", instead of failing the phase.
+  scripts/build_code_tarball.py writes it into the code tarball. Without it (e.g. in a git checkout), or when it cannot
+  be read or is not a JSON object, the result says so, with `git_commit` "unknown", instead of failing the phase.
   """
   path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CODE_VERSION.json")
   try:
     with open(path, "r", encoding="utf-8") as f:
-      return json.load(f)
+      code_version = json.load(f)
   except FileNotFoundError:
     return {"git_commit": "unknown", "source": "CODE_VERSION.json not found"}
+  except OSError as e:
+    return {"git_commit": "unknown", "source": f"CODE_VERSION.json could not be read: {e}"}
   except ValueError as e:
     return {"git_commit": "unknown", "source": f"CODE_VERSION.json is not valid JSON: {e}"}
+  if not isinstance(code_version, dict):
+    return {"git_commit": "unknown", "source": "CODE_VERSION.json is not a JSON object"}
+  return code_version
 
 
 def _write_result_json(result_json: str, data: dict[str, Any]) -> None:

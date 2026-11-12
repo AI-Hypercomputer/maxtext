@@ -134,6 +134,22 @@ class CodeVersionTest(unittest.TestCase):
     self.assertEqual(code_version["git_commit"], "unknown")
     self.assertIn("CODE_VERSION.json is not valid JSON", code_version["source"])
 
+  def test_reports_an_unknown_commit_for_json_that_is_not_an_object(self):
+    self._write_code_version_json("[1, 2]")
+    self.assertEqual(
+        self.harness_copy._load_code_version(),
+        {"git_commit": "unknown", "source": "CODE_VERSION.json is not a JSON object"},
+    )
+
+  def test_writes_the_result_json_when_code_version_json_cannot_be_read(self):
+    os.mkdir(os.path.join(self.code_root, "CODE_VERSION.json"))  # Opening it raises IsADirectoryError.
+    result_json = os.path.join(self.code_root, "to_maxtext_step1_result.json")
+    self.harness_copy._write_result_json(result_json, {"status": "FAILED"})
+    with open(result_json, "r", encoding="utf-8") as f:
+      code_version = json.load(f)["code_version"]
+    self.assertEqual(code_version["git_commit"], "unknown")
+    self.assertIn("CODE_VERSION.json could not be read", code_version["source"])
+
   def test_writes_the_code_version_into_the_result_json(self):
     self._write_code_version_json(json.dumps(self.CODE_VERSION))
     result_json = os.path.join(self.code_root, "to_maxtext_step1_result.json")
