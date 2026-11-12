@@ -23,6 +23,8 @@ Modules:
     dumps read `decoder/layers/3/mlp/wi_0`.
   * `offload.py` — `to_memory`, `HostOffloadedOptimizer`, and
     `maybe_offload_parameters` for pinned-host optimizer/parameter offloading.
+  * `aot_estimator.py` — `compile_aot_hbm_estimate`, `trace_abstract_sharding`,
+    and `verify_sharding_golden` for virtual-topology CPU AOT HBM estimation.
 
 Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
 reference for it:
