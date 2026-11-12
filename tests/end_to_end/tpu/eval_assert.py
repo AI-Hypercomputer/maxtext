@@ -56,7 +56,7 @@ def test_final_loss(metrics_file, target_loss):
     print("Final loss test passed.")
 
 
-def test_checkpointing(metrics_file, target, dataset_type):
+def test_checkpointing(metrics_file, target, rel_tol=0.1):
   """Asserts over loss values from loaded checkpoint"""
   metrics_file_saved = "saved_" + metrics_file
   metrics_file_restored = "restored_" + metrics_file
@@ -71,12 +71,7 @@ def test_checkpointing(metrics_file, target, dataset_type):
     # step in saved checkpoint to loss of first step in restored checkpoint
     print("saved loss: ", saved_loss)
     print("restored loss: ", restored_loss)
-    if dataset_type == "tfds":
-      assert isclose(saved_loss, restored_loss, rel_tol=0.1)
-    elif dataset_type == "grain":
-      assert saved_loss == restored_loss
-    else:
-      raise ValueError(f"Unknown dataset_type {dataset_type}. dataset_type must be tfds or grain")
+    assert isclose(saved_loss, restored_loss, rel_tol=rel_tol)
     print("checkpointing test passed.")
 
 
@@ -112,15 +107,12 @@ def test_start_step(metrics_file, start_step_target):
 
 
 def main(argv: Sequence[str]) -> None:
-
   _, test_scenario, *test_vars = argv
 
   if test_scenario == "metrics_average":
     assert_metric_average(*test_vars)
-  elif test_scenario == "checkpoint_save_restore":
-    test_checkpointing(*test_vars, dataset_type="grain")
-  elif test_scenario == "grain_checkpoint_save_restore":
-    test_checkpointing(*test_vars, dataset_type="grain")
+  elif test_scenario in ("checkpoint_save_restore", "grain_checkpoint_save_restore"):
+    test_checkpointing(*test_vars)
   elif test_scenario == "determinism":
     test_determinism(*test_vars)
   elif test_scenario == "vocab_creation":
