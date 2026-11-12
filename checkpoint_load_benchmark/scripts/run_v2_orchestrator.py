@@ -47,15 +47,18 @@ def utc_now_str() -> str:
 def _run_cmd(
     cmd: Sequence[str], *, input_text: str | None = None, timeout: int = 180
 ) -> subprocess.CompletedProcess[str]:
-  """Runs a subprocess command without raising on non-zero exit."""
-  return subprocess.run(
-      list(cmd),
-      input=input_text,
-      text=True,
-      capture_output=True,
-      timeout=timeout,
-      check=False,
-  )
+  """Runs a subprocess command without raising on non-zero exit or timeout."""
+  try:
+    return subprocess.run(
+        list(cmd),
+        input=input_text,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+  except subprocess.TimeoutExpired:
+    return subprocess.CompletedProcess(list(cmd), 124, "", f"Timed out after {timeout}s")
 
 
 def apply_k8s_manifests(context: str, docs: Sequence[Mapping[str, Any]]) -> bool:
