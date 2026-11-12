@@ -1196,6 +1196,33 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  expert_replicas_per_device: int = Field(
+      0,
+      description="Online hot-expert replication on the ragged all-to-all path: replica slots per EP device (0=off).",
+  )
+  expert_replica_max_send: int = Field(4, description="Max replicas a home device sends per layer.")
+  expert_replica_board_size: int = Field(8, description="EP devices per board (the planner prefers same-board sources).")
+  expert_replica_plan: Literal["online", "lagged"] = Field(
+      "online",
+      description="online: place replicas from this step's counts; lagged: from the previous step's counts.",
+  )
+  expert_replica_planner: Literal["greedy", "rounds"] = Field(
+      "greedy", description="Replica planner: greedy (serial loop over EP*R candidates) | rounds (vectorized rounds)."
+  )
+  expert_replica_impl: Literal["auto", "concat", "split"] = Field(
+      "auto",
+      description="Replica GMM implementation: concat (copy local+replica weights) | split (two GMMs) | auto"
+      " (concat when a device holds <= 32 local experts).",
+  )
+  expert_replica_move: Literal["gather", "direct"] = Field(
+      "gather",
+      description="Replica weight move (concat impl): gather (send buffer + concat) | direct (send rows straight from"
+      " the weights, write replicas in place; same math).",
+  )
+  expert_replica_identity: bool = Field(False, description="Testing: replication machinery on with the identity plan.")
+  expert_replica_overhead_control: bool = Field(
+      False, description="Control arm: move replica weights per the plan but route no tokens to replicas."
+  )
   log_ra2a_required_rbf: bool = Field(
       False, description="Debug: print the per-layer ragged_buffer_factor needed to avoid drops (ragged a2a path)."
   )
