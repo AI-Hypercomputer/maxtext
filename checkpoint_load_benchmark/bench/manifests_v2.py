@@ -98,7 +98,9 @@ def _step1_cpu_tolerations(node_pool: str) -> list[dict[str, Any]]:
   if node_pool == "job-manager-np":
     tols.append({"key": "dedicated", "operator": "Equal", "value": "job-manager", "effect": "NoSchedule"})
   elif node_pool:
-    tols.append({"key": "cloud.google.com/gke-nodepool", "operator": "Equal", "value": node_pool, "effect": "NoSchedule"})
+    tols.append(
+        {"key": "cloud.google.com/gke-nodepool", "operator": "Equal", "value": node_pool, "effect": "NoSchedule"}
+    )
   return tols
 
 
@@ -237,7 +239,7 @@ def build_deepseek_step1b_manifests(
     pvc_size_gib: int | None = None,
     clean_target: bool = False,
     cache_size: int = 4,
-    storage_class: str = "hyperdisk-balanced",
+    storage_class: str = "standard-rwo",
     node_pool: str | None = None,
     memory_request: str = "400Gi",
     cpu_request: str = "64",
@@ -402,7 +404,9 @@ def build_tpu_jobset(
         }
     )
 
-  daemons = [f"{name}-slice{s}-0-{h}.{name}" for s in range(num_slices) for h in range(hosts) if not (s == 0 and h == 0)]
+  daemons = [
+      f"{name}-slice{s}-0-{h}.{name}" for s in range(num_slices) for h in range(hosts) if not (s == 0 and h == 0)
+  ]
   daemons_env = ",".join(f"{d}:55555" for d in daemons)
   # Wait host list carries hostnames without port so bootstrap_tpu7x.py exports REMOTE_SLICE1_ADDR="h:55555,...".
   wait_hosts = ",".join(daemons)
