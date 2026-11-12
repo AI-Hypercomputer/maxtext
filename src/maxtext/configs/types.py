@@ -6562,13 +6562,13 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
       if self.use_indexer:
         raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
-      if self.attention_type != "global":
-        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.attention_type not in ("global", "full"):
+        raise ValueError("TPU Ulysses attention supports only global causal or full attention.")
       if self.context_parallel_load_balance:
         raise ValueError(
             "TPU Ulysses attention requires context_parallel_load_balance=False: after the all-to-all every device "
             "attends over the full sequence in natural order, so the load-balancing reorder is unnecessary and "
-            "would corrupt the causal mask."
+            "would corrupt sequence ordering."
         )
       if self.use_ragged_attention:
         raise ValueError("TPU Ulysses attention does not support ragged attention.")

@@ -27,6 +27,7 @@ import subprocess
 import sys
 from functools import partial
 
+from absl import app
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P
@@ -46,8 +47,8 @@ def test_ulysses_collectives_match_dense_reference_on_cpu_mesh():
   assert "ULYSSES_COLLECTIVE_CHECKS_PASSED" in result.stdout
 
 
-def _dense_reference_attention(query, key, value, segment_ids):
-  """Causal segment-masked GQA attention computed on one device."""
+def _dense_reference_attention(query, key, value, segment_ids, *, causal=True):
+  """Causal or full bidirectional segment-masked GQA attention computed on one device."""
   _, num_query_heads, seq_len, _ = query.shape
   num_kv_heads = key.shape[1]
   group_size = num_query_heads // num_kv_heads
@@ -55,10 +56,12 @@ def _dense_reference_attention(query, key, value, segment_ids):
   value = jnp.repeat(value, group_size, axis=1)
 
   logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
-  causal = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
   same_segment = segment_ids[:, :, None] == segment_ids[:, None, :]
   not_padding = segment_ids != 0
-  mask = causal[None, None, :, :] & same_segment[:, None, :, :] & not_padding[:, None, None, :]
+  mask = same_segment[:, None, :, :] & not_padding[:, None, None, :]
+  if causal:
+    causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+    mask = mask & causal_mask[None, None, :, :]
   logits = jnp.where(mask, logits, -1e30)
   weights = jnp.exp(logits - jnp.max(logits, axis=-1, keepdims=True))
   weights = weights * mask
@@ -115,41 +118,52 @@ def _run_collective_checks(mesh, batch_axis):
 
   np.testing.assert_array_equal(jax.device_get(exchange(query)), jax.device_get(query))
 
-  @partial(
-      jax.shard_map,
-      mesh=mesh,
-      in_specs=(data_spec, data_spec, data_spec, segment_spec),
-      out_specs=data_spec,
-      check_vma=False,
-  )
-  def ulysses_attention_fn(query, key, value, segment_ids):
-    query = ulysses_attention.ulysses_all_to_all(query, ulysses_axis)
-    key = ulysses_attention.ulysses_all_to_all(key, ulysses_axis)
-    value = ulysses_attention.ulysses_all_to_all(value, ulysses_axis)
-    segment_ids = jax.lax.all_gather(segment_ids, ulysses_axis, axis=1, tiled=True)
-    output = _dense_reference_attention(query, key, value, segment_ids)
-    return ulysses_attention.inverse_ulysses_all_to_all(output, ulysses_axis)
+  for causal in (True, False):
 
-  def dense_loss(query, key, value):
-    output = _dense_reference_attention(query, key, value, segment_ids)
-    return jnp.sum(output * jnp.cos(output))
+    @partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(data_spec, data_spec, data_spec, segment_spec),
+        out_specs=data_spec,
+        check_vma=False,
+    )
+    def ulysses_attention_fn(query, key, value, segment_ids, is_causal=causal):
+      query = ulysses_attention.ulysses_all_to_all(query, ulysses_axis)
+      key = ulysses_attention.ulysses_all_to_all(key, ulysses_axis)
+      value = ulysses_attention.ulysses_all_to_all(value, ulysses_axis)
+      segment_ids = jax.lax.all_gather(segment_ids, ulysses_axis, axis=1, tiled=True)
+      output = _dense_reference_attention(query, key, value, segment_ids, causal=is_causal)
+      return ulysses_attention.inverse_ulysses_all_to_all(output, ulysses_axis)
 
-  def ulysses_loss(query, key, value):
-    output = ulysses_attention_fn(query, key, value, segment_ids)
-    return jnp.sum(output * jnp.cos(output))
+    def dense_loss(query, key, value, is_causal=causal):
+      output = _dense_reference_attention(query, key, value, segment_ids, causal=is_causal)
+      return jnp.sum(output * jnp.cos(output))
 
-  dense_output = _dense_reference_attention(query, key, value, segment_ids)
-  ulysses_output = ulysses_attention_fn(query, key, value, segment_ids)
-  np.testing.assert_allclose(jax.device_get(ulysses_output), jax.device_get(dense_output), atol=1e-5)
+    def ulysses_loss(query, key, value, attn_fn=ulysses_attention_fn):
+      output = attn_fn(query, key, value, segment_ids)
+      return jnp.sum(output * jnp.cos(output))
 
-  dense_grads = jax.grad(dense_loss, argnums=(0, 1, 2))(query, key, value)
-  ulysses_grads = jax.grad(ulysses_loss, argnums=(0, 1, 2))(query, key, value)
-  for name, dense_grad, ulysses_grad in zip(("dQ", "dK", "dV"), dense_grads, ulysses_grads):
-    np.testing.assert_allclose(jax.device_get(ulysses_grad), jax.device_get(dense_grad), atol=1e-5, err_msg=name)
+    dense_output = _dense_reference_attention(query, key, value, segment_ids, causal=causal)
+    ulysses_output = ulysses_attention_fn(query, key, value, segment_ids)
+    np.testing.assert_allclose(jax.device_get(ulysses_output), jax.device_get(dense_output), atol=1e-5)
+
+    dense_grads = jax.grad(dense_loss, argnums=(0, 1, 2))(query, key, value)
+    ulysses_grads = jax.grad(ulysses_loss, argnums=(0, 1, 2))(query, key, value)
+    for name, dense_grad, ulysses_grad in zip(("dQ", "dK", "dV"), dense_grads, ulysses_grads):
+      np.testing.assert_allclose(
+          jax.device_get(ulysses_grad),
+          jax.device_get(dense_grad),
+          atol=1e-5,
+          err_msg=f"{name} (causal={causal})",
+      )
+
+
+def _main(_):
+  devices = np.array(jax.devices())
+  _run_collective_checks(Mesh(devices, ("context",)), batch_axis=None)
+  _run_collective_checks(Mesh(devices.reshape(2, 2), ("fsdp", "context")), batch_axis="fsdp")
+  print("ULYSSES_COLLECTIVE_CHECKS_PASSED")
 
 
 if __name__ == "__main__":
-  _devices = np.array(jax.devices())
-  _run_collective_checks(Mesh(_devices, ("context",)), batch_axis=None)
-  _run_collective_checks(Mesh(_devices.reshape(2, 2), ("fsdp", "context")), batch_axis="fsdp")
-  print("ULYSSES_COLLECTIVE_CHECKS_PASSED")
+  app.run(_main)

@@ -117,11 +117,15 @@ class _SplashBlocks(NamedTuple):
 
 
 def _resolve_attention_type(config: Config, attention_type: AttentionType | str | None) -> AttentionType:
+  """Resolves effective layer `AttentionType` from `config.attention_type`."""
   configured_attention_type = AttentionType(getattr(config, "attention_type", AttentionType.GLOBAL.value))
   if attention_type is None:
     return configured_attention_type
   resolved_attention_type = AttentionType(attention_type)
-  if configured_attention_type == AttentionType.BLOCK_DIFFUSION and resolved_attention_type == AttentionType.GLOBAL:
+  if (
+      configured_attention_type in (AttentionType.BLOCK_DIFFUSION, AttentionType.FULL)
+      and resolved_attention_type == AttentionType.GLOBAL
+  ):
     return configured_attention_type
   return resolved_attention_type
 
@@ -853,8 +857,8 @@ class AttentionOp(nnx.Module):
         raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
       if self.config.use_jax_splash:
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
-      if self.attention_type != AttentionType.GLOBAL:
-        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.attention_type not in (AttentionType.GLOBAL, AttentionType.FULL):
+        raise ValueError("TPU Ulysses attention supports only global causal or full attention.")
       if self.config.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Ulysses attention does not support dropout yet.")
       if self.use_ragged_attention:
@@ -2344,7 +2348,10 @@ class AttentionOp(nnx.Module):
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
-      mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
+      if self.attention_type == AttentionType.FULL:
+        mask = tokamax_splash_mask.FullMask(mask_shape)
+      else:
+        mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
 
       @partial(
           jax.jit,
