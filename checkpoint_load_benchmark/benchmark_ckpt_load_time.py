@@ -63,6 +63,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import textwrap
 import time
 from typing import Any
 
@@ -1089,41 +1090,9 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   import jax.numpy as jnp
   import numpy as np
   from maxtext.checkpoint_conversion.utils import load_dynamic
-  from maxtext.checkpoint_conversion.utils import tensor_handling
   from maxtext.common import checkpointing
   from maxtext.configs import pyconfig
   from maxtext.utils import globals as maxtext_globals
-
-  enable_legacy_shims = os.environ.get("ENABLE_LEGACY_BENCHMARK_SHIMS", "0") == "1"
-  orig_apply_hook_fns = tensor_handling.apply_hook_fns
-
-  def multihost_safe_apply_hook_fns(weight, target_shape, hook_fns):
-    if hook_fns is None:
-      return weight
-    if not isinstance(hook_fns, list):
-      hook_fns = [hook_fns]
-    for hook_fn in hook_fns:
-      try:
-        weight = hook_fn(weight, target_shape)
-      except RuntimeError as e:
-        if isinstance(weight, jax.Array) and "non-addressable" in str(e):
-          probe = hook_fn(np.ones((1, 1), dtype=np.float32), (1, 1))
-          scale = np.dtype("float32").type(probe[0, 0])
-          slices = tuple(slice(0, min(s, t)) for s, t in zip(weight.shape, target_shape))
-          pad_width = tuple((0, max(0, t - s)) for s, t in zip(weight.shape, target_shape))
-          orig_dtype = weight.dtype
-          weight = jnp.pad(weight[slices], pad_width)
-          if float(scale) != 1.0:
-            weight = weight * scale
-          weight = weight.astype(orig_dtype)
-        else:
-          raise
-    if isinstance(weight, jax.Array) and jax.process_count() > 1:
-      weight.block_until_ready()
-    return weight
-
-  if enable_legacy_shims:
-    tensor_handling.apply_hook_fns = multihost_safe_apply_hook_fns
 
   import ctypes
   import gc
@@ -1134,47 +1103,6 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
       pass
-
-  def low_mem_binary_chunked_stack(tensors, axis: int, _top: bool = True):
-    if _top:
-      _trim_malloc()
-    if not tensors:
-      raise ValueError("Cannot stack empty list of tensors.")
-    if len(tensors) == 1:
-      t = tensors.pop()
-      res = jnp.expand_dims(t, axis=axis)
-      res.block_until_ready()
-      return res
-    if len(tensors) == 2:
-      t0, t1 = tensors[0], tensors[1]
-      tensors.clear()
-      res = jnp.stack([t0, t1], axis=axis)
-      res.block_until_ready()
-      if isinstance(t0, jax.Array) and not t0.is_deleted():
-        t0.delete()
-      if isinstance(t1, jax.Array) and not t1.is_deleted():
-        t1.delete()
-      del t0, t1
-      return res
-    mid = len(tensors) // 2
-    left_list = tensors[:mid]
-    right_list = tensors[mid:]
-    tensors.clear()
-    left = low_mem_binary_chunked_stack(left_list, axis=axis, _top=False)
-    right = low_mem_binary_chunked_stack(right_list, axis=axis, _top=False)
-    res = jnp.concatenate([left, right], axis=axis)
-    res.block_until_ready()
-    if isinstance(left, jax.Array) and not left.is_deleted():
-      left.delete()
-    if isinstance(right, jax.Array) and not right.is_deleted():
-      right.delete()
-    del left, right
-    if _top:
-      _trim_malloc()
-    return res
-
-  if enable_legacy_shims:
-    tensor_handling._binary_chunked_stack = low_mem_binary_chunked_stack
 
   try:
     from absl import logging as absl_logging
@@ -1299,24 +1227,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
   def timed_load_sharded(path, *a, **kw):
     t0 = time.perf_counter()
-    use_custom_byte_reader = enable_legacy_shims and (
-        not hasattr(load_dynamic, "_leading_axis_shardings")
-        and (
-            num_slices > 1
-            or args.model
-            in (
-                "mixtral-8x7b",
-                "llama3.1-70b",
-                "gpt-oss-120b",
-                "deepseek3-671b",
-                "deepseek3.2-671b",
-                "deepseek4-284b",
-                "deepseek4-1600b",
-            )
-        )
-    )
-    if os.environ.get("CUSTOM_BYTE_READER", "0") == "1":
-      use_custom_byte_reader = True
+    use_custom_byte_reader = os.environ.get("CUSTOM_BYTE_READER", "0") == "1"
     if use_custom_byte_reader:
       import collections
       import itertools
@@ -1572,57 +1483,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
   def timed_transform(*a, **kw):
     t0 = time.perf_counter()
-    _orig_dp = jax.device_put
-    _orig_get_load_fn = load_dynamic.get_hf_loading_function
-    _step_cnt = [0]
-
-    def _low_mem_get_load_fn(hf_source, tensor_getter, hook_fn, target_leaf, maxtext_config, mt_key):
-      popped = []
-
-      def _track_getter(key):
-        arr = tensor_getter(key)
-        if isinstance(arr, jax.Array):
-          popped.append(arr)
-        return arr
-
-      inner_fn = _orig_get_load_fn(hf_source, _track_getter, hook_fn, target_leaf, maxtext_config, mt_key)
-
-      def _wrapped_fn():
-        out = inner_fn()
-        out_id = id(out)
-        for p_arr in popped:
-          if id(p_arr) != out_id and isinstance(p_arr, jax.Array) and not p_arr.is_deleted():
-            try:
-              p_arr.delete()
-            except Exception:
-              pass
-        popped.clear()
-        _step_cnt[0] += 1
-        if _step_cnt[0] % 8 == 0:
-          _trim_malloc()
-        return out
-
-      return _wrapped_fn
-
-    if enable_legacy_shims:
-      load_dynamic.get_hf_loading_function = _low_mem_get_load_fn
-      if jax.process_count() > 1:
-
-        def _synced_dp(*da, **dkw):
-          r = _orig_dp(*da, **dkw)
-          try:
-            jax.block_until_ready(r)
-          except Exception:
-            pass
-          return r
-
-        jax.device_put = _synced_dp
-    try:
-      res = orig_transform(*a, **kw)
-    finally:
-      if enable_legacy_shims:
-        jax.device_put = _orig_dp
-        load_dynamic.get_hf_loading_function = _orig_get_load_fn
+    res = orig_transform(*a, **kw)
     _trim_malloc()
     timings["transform_hf_to_mt_s"] = time.perf_counter() - t0
     return res
@@ -1686,7 +1547,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   }
 
 
-SITE_CUSTOMIZE_CONTENT = """\
+_SITE_CUSTOMIZE_BODY = """\
 import dataclasses
 import resource
 import sys
@@ -2019,6 +1880,23 @@ except Exception:
   pass
 """
 
+# Each worker runs SITE_CUSTOMIZE_CONTENT twice: at interpreter start, from the generated `sitecustomize.py` on
+# PYTHONPATH, and again from `main` (for processes started without it). The sentinel makes the second run a no-op,
+# so the patches above wrap the original Orbax, mesh and HF functions only once.
+_SITE_CUSTOMIZE_SENTINEL = "_ckpt_load_benchmark_site_customize_applied"
+
+
+def _once_per_process(body: str, sentinel: str) -> str:
+  """Returns Python source that runs `body` only the first time it is executed in a process.
+
+  The first run sets the attribute `sentinel` on `sys`, and later runs see it and skip `body`.
+  """
+  guard = f"import sys\n\nif not getattr(sys, {sentinel!r}, False):\n  setattr(sys, {sentinel!r}, True)\n"
+  return guard + textwrap.indent(body, "  ")
+
+
+SITE_CUSTOMIZE_CONTENT = _once_per_process(_SITE_CUSTOMIZE_BODY, _SITE_CUSTOMIZE_SENTINEL)
+
 
 def _read_host_mem_gb() -> tuple[float, float, float]:
   """Returns (used_gb, avail_gb, total_gb) in decimal GB (10**9 bytes) from /proc/meminfo and cgroups."""
@@ -2259,6 +2137,21 @@ def run_remote_slice_daemon(port: int) -> None:
     while True:
       conn, addr = srv.accept()
       threading.Thread(target=_handle_client, args=(conn, addr), daemon=True).start()
+
+
+def _persist_worker_upload_max_s(result_json: str, worker_cached_times: list[float]) -> dict[str, Any]:
+  """Returns the phase result JSON, with the slowest worker upload written into it as `worker_upload_max_s`.
+
+  The worker writes the result JSON before the parent has parsed the upload times from the worker log, so the parent
+  adds their maximum before it mirrors the JSON to GCS. Without upload times, the JSON stays as the worker wrote it.
+  """
+  with open(result_json, "r", encoding="utf-8") as rf:
+    data = json.load(rf)
+  if worker_cached_times:
+    data["worker_upload_max_s"] = max(worker_cached_times)
+    with open(result_json, "w", encoding="utf-8") as wf:
+      json.dump(data, wf, indent=2)
+  return data
 
 
 def invoke_worker_subprocess(
@@ -2741,10 +2634,7 @@ def invoke_worker_subprocess(
             pass
     _mirror_logs_to_gcs()
 
-  with open(result_json, "r", encoding="utf-8") as rf:
-    data = json.load(rf)
-  if worker_cached_times:
-    data["worker_upload_max_s"] = max(worker_cached_times)
+  data = _persist_worker_upload_max_s(result_json, worker_cached_times)
   _mirror_logs_to_gcs()
   return data
 
@@ -2902,7 +2792,12 @@ def main() -> None:
       "--devices-per-slice",
       type=int,
       default=4,
-      help="Number of devices per slice when simulating CPU devices (default: 4, matching v5p-8).",
+      help=(
+          "Number of TPU devices in one slice, counted across all of its hosts (devices per host x "
+          "--num-hosts-per-slice, e.g. 8 for a tpu7x 2x2x1 and 16 for a tpu7x 2x2x2). Failed and skipped results "
+          "record num_slices x this as global_devices. Also the device count when simulating CPU devices "
+          "(default: 4, matching v5p-8)."
+      ),
   )
   parser.add_argument(
       "--remote-slice-addrs",
