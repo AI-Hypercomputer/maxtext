@@ -6,7 +6,9 @@ gcsfs==2026.6.0
 orbax-checkpoint>=0.12.8
 markdown>=3.10.2
 oauthlib>=4.0.1
+optax==0.2.8
 pillow>=13.0.0
+sentencepiece==0.2.2
 setuptools>=84.0.0
 urllib3>=2.8.0
 virtualenv>=21.15.1

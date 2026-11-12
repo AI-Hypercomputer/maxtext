@@ -20,7 +20,8 @@ pillow>=13.0.0
 pyasn1>=0.6.5
 pyjwt>=2.15.0
 python-multipart>=0.0.32
-qwix==0.1.8
+qwix==0.1.9
+sentencepiece==0.2.2
 setuptools==80.9.0
 tokamax==0.0.16
 torch==2.13.0

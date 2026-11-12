@@ -32,7 +32,7 @@ pyink
 pylint
 pytest
 pytype
-qwix>=0.1.6
+qwix>=0.1.9
 sentencepiece
 tensorboard-plugin-profile
 tensorboardx
