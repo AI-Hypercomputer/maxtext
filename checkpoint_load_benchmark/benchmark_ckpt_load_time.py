@@ -52,6 +52,7 @@ Usage Examples:
 
 import argparse
 import concurrent.futures
+import contextlib
 import csv
 import datetime
 import functools
@@ -1081,6 +1082,48 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   }
 
 
+_HF_DOWNLOAD_MAX_WORKERS = 16
+
+
+class _DelegatingProxy:
+  """Forwards attributes to a wrapped module while overriding specific names."""
+
+  def __init__(self, target: Any, **overrides: Any):
+    self._target = target
+    self._overrides = overrides
+
+  def __getattr__(self, name: str) -> Any:
+    if name in self._overrides:
+      return self._overrides[name]
+    return getattr(self._target, name)
+
+
+@contextlib.contextmanager
+def _cap_load_dynamic_download_workers(load_dynamic_mod: Any, max_workers: int = _HF_DOWNLOAD_MAX_WORKERS):
+  """Caps `load_dynamic.concurrent.futures.ProcessPoolExecutor` max_workers without modifying src/."""
+  orig_concurrent = load_dynamic_mod.concurrent
+  orig_futures = orig_concurrent.futures
+  orig_pool_cls = orig_futures.ProcessPoolExecutor
+
+  def _capped_pool(*args: Any, **kwargs: Any):
+    if "max_workers" in kwargs:
+      mw = kwargs["max_workers"]
+      kwargs["max_workers"] = max_workers if mw is None else min(mw, max_workers)
+    elif args:
+      mw = args[0]
+      args = (max_workers if mw is None else min(mw, max_workers), *args[1:])
+    else:
+      kwargs["max_workers"] = max_workers
+    return orig_pool_cls(*args, **kwargs)
+
+  capped_futures = _DelegatingProxy(orig_futures, ProcessPoolExecutor=_capped_pool)
+  load_dynamic_mod.concurrent = _DelegatingProxy(orig_concurrent, futures=capped_futures)
+  try:
+    yield
+  finally:
+    load_dynamic_mod.concurrent = orig_concurrent
+
+
 def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   """Runs `safetensors_dynamic` and records (1) HF -> GCS and (2) safetensors and convert to MaxText."""
   import jax
@@ -1494,7 +1537,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
   print(f"[safetensor] Running load_state_if_possible(source_checkpoint_layout='safetensors_dynamic') ...", flush=True)
   t_start = time.perf_counter()
-  with logical_axis_rules(config.logical_axis_rules):
+  with _cap_load_dynamic_download_workers(load_dynamic), logical_axis_rules(config.logical_axis_rules):
     _, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager=None,
         data_iterator=None,

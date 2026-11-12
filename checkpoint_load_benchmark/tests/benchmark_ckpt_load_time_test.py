@@ -158,5 +158,55 @@ class CodeVersionTest(unittest.TestCase):
       self.assertEqual(json.load(f), {"status": "FAILED", "hf_to_gcs_s": 0.0, "code_version": self.CODE_VERSION})
 
 
+class LoadDynamicDownloadCapTest(unittest.TestCase):
+  """load_dynamic's ProcessPoolExecutor(max_workers=32) is capped at 16 at runtime without touching src/."""
+
+  def _make_fake_load_dynamic(self, recorded_calls: list[tuple[tuple, dict]]):
+    """Returns a fake load_dynamic module whose ProcessPoolExecutor records call args."""
+
+    class _FakePool:
+
+      def __init__(self, *args, **kwargs):
+        recorded_calls.append((args, kwargs))
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *exc):
+        return False
+
+    fake_futures = types.SimpleNamespace(ProcessPoolExecutor=_FakePool, wait=lambda *a, **kw: (set(), set()))
+    fake_concurrent = types.SimpleNamespace(futures=fake_futures)
+    return types.SimpleNamespace(concurrent=fake_concurrent), _FakePool
+
+  def test_caps_keyword_positional_and_unspecified_max_workers_at_16(self):
+    recorded: list[tuple[tuple, dict]] = []
+    fake_ld, fake_pool = self._make_fake_load_dynamic(recorded)
+    with harness._cap_load_dynamic_download_workers(fake_ld):
+      fake_ld.concurrent.futures.ProcessPoolExecutor(max_workers=32, mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(32, mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(max_workers=4, mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(max_workers=None, mp_context="spawn")
+      # Other attributes of concurrent.futures remain reachable through the proxy.
+      self.assertEqual(fake_ld.concurrent.futures.wait(), (set(), set()))
+
+    self.assertEqual(recorded[0], ((), {"max_workers": 16, "mp_context": "spawn"}))
+    self.assertEqual(recorded[1], ((16,), {"mp_context": "spawn"}))
+    self.assertEqual(recorded[2], ((), {"max_workers": 4, "mp_context": "spawn"}))
+    self.assertEqual(recorded[3], ((), {"max_workers": 16, "mp_context": "spawn"}))
+    self.assertEqual(recorded[4], ((), {"max_workers": 16, "mp_context": "spawn"}))
+    # Restored outside the context manager.
+    self.assertIs(fake_ld.concurrent.futures.ProcessPoolExecutor, fake_pool)
+
+  def test_restores_on_exception(self):
+    recorded: list[tuple[tuple, dict]] = []
+    fake_ld, fake_pool = self._make_fake_load_dynamic(recorded)
+    with self.assertRaises(RuntimeError):
+      with harness._cap_load_dynamic_download_workers(fake_ld):
+        raise RuntimeError("boom")
+    self.assertIs(fake_ld.concurrent.futures.ProcessPoolExecutor, fake_pool)
+
+
 if __name__ == "__main__":
   unittest.main()
