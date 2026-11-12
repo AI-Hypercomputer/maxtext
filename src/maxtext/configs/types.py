@@ -1196,6 +1196,36 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  expert_replicas_per_device: int = Field(
+      0,
+      description="Online hot-expert replication on the ragged all-to-all path: replica slots per EP device (0=off).",
+  )
+  expert_replica_max_send: int = Field(4, description="Max replicas a home device sends per layer.")
+  expert_replica_board_size: int = Field(8, description="EP devices per board (the planner prefers same-board sources).")
+  expert_replica_plan: Literal["online", "lagged"] = Field(
+      "online",
+      description="online: place replicas from this step's counts; lagged: from the previous step's counts.",
+  )
+  expert_replica_planner: Literal["greedy", "rounds"] = Field(
+      "greedy", description="Replica planner: greedy (serial loop over EP*R candidates) | rounds (vectorized rounds)."
+  )
+  expert_replica_impl: Literal["auto", "concat", "split"] = Field(
+      "auto",
+      description="Replica GMM implementation: concat (copy local+replica weights) | split (two GMMs) | auto"
+      " (concat when a device holds <= 32 local experts).",
+  )
+  expert_replica_move: Literal["gather", "direct"] = Field(
+      "gather",
+      description="Replica weight move (concat impl): gather (send buffer + concat) | direct (send rows straight from"
+      " the weights, write replicas in place; same math).",
+  )
+  expert_replica_identity: bool = Field(False, description="Testing: replication machinery on with the identity plan.")
+  expert_replica_overhead_control: bool = Field(
+      False, description="Control arm: move replica weights per the plan but route no tokens to replicas."
+  )
+  log_ra2a_required_rbf: bool = Field(
+      False, description="Debug: print the per-layer ragged_buffer_factor needed to avoid drops (ragged a2a path)."
+  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(
@@ -2548,6 +2578,18 @@ class DatasetGeneral(BaseModel):
       0, description="Which of the `num_data_replicas_per_process` replicas this input pipeline feeds."
   )
   reuse_example_batch: int = Field(0, description="For performance testing, repeatedly uses the same batch.")
+  synthetic_routing: Literal["none", "lognormal", "balanced"] | None = Field(
+      "none",
+      description="Perf experiments: feed synthetic forced_routed_experts from the data loader.",
+  )
+  synthetic_routing_sigma: float = Field(0.25, description="Lognormal sigma of per-layer expert popularity.")
+  synthetic_routing_sigmas: str | float = Field("", description="Comma-separated per-layer sigmas (overrides sigma).")
+  synthetic_routing_pool_size: int = Field(4, description="Number of distinct synthetic routing batches to cycle.")
+  synthetic_routing_seed: int = Field(0, description="Seed for synthetic routing.")
+  synthetic_routing_row_tau: float = Field(0.0, description="Per-document log-popularity noise (sequence clustering).")
+  synthetic_routing_row_taus: str | float = Field("", description="Comma-separated per-layer row taus (overrides row_tau).")
+  synthetic_routing_row_len: int = Field(0, description="Document length in tokens for row noise (0 = whole row).")
+  synthetic_routing_profile: str = Field("", description="npz with per-layer expert popularity profile (local or gs://).")
   generate_padding_batch_train: bool = Field(
       False,
       description="Whether to generate a padding batch for training to ensure divisibility.",

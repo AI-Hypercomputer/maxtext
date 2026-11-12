@@ -94,7 +94,15 @@ class DataLoader:
     example_batch = self.load_next_batch_pre_sharding()
     if self.config.enable_diloco:
       example_batch = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
-    return jax.device_put(example_batch, self.input_data_shardings)
+    example_batch = jax.device_put(example_batch, self.input_data_shardings)
+    if getattr(self.config, "synthetic_routing", None) not in (None, "none", "off"):
+      if getattr(self, "_synthetic_routing", None) is None:
+        from maxtext.utils.synthetic_routing import SyntheticRouting  # pylint: disable=import-outside-toplevel
+
+        self._synthetic_routing = SyntheticRouting(self.config, self.input_data_shardings)
+      example_batch = dict(example_batch)
+      example_batch["forced_routed_experts"] = self._synthetic_routing.next()
+    return example_batch
 
   def check_example_batch(self):
     if self.config.max_checkify:

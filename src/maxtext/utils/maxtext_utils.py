@@ -187,6 +187,10 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
+  if getattr(config, "synthetic_routing", None) not in (None, "none", "off") and not is_eval:
+    # Synthetic routing feeds forced_routed_experts [batch, seq, num_layers, top_k] (see data_loader).
+    routing_shape = batch_shape + (config.num_decoder_layers, config.num_experts_per_tok)
+    shaped_batch["forced_routed_experts"] = jax.ShapeDtypeStruct(routing_shape, jnp.int32, sharding=batch_sharding)
   return shaped_batch
 
 
