@@ -1329,18 +1329,34 @@ def build_gsheets_batches(
   return raw_ops, formula_ops
 
 
+_FMT_TO_SHEETS_NUMBER_FORMAT: dict[str, dict[str, str]] = {
+    "s": {"type": "NUMBER", "pattern": "0.00"},
+    "gb": {"type": "NUMBER", "pattern": "0.00"},
+    "gbps": {"type": "NUMBER", "pattern": "0.00"},
+    "x": {"type": "NUMBER", "pattern": '0.00"x"'},
+    "ratio": {"type": "NUMBER", "pattern": "0.00"},
+    "pct": {"type": "NUMBER", "pattern": '0.0"%"'},
+    "n": {"type": "NUMBER", "pattern": "#,##0"},
+    "ts": {"type": "DATE_TIME", "pattern": "yyyy-mm-dd hh:mm:ss"},
+    "t": {"type": "TEXT"},
+    "c": {"type": "TEXT"},
+    "note": {"type": "TEXT"},
+}
+
+
 def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
     rows: Sequence[Mapping[str, Any]],
     *,
     sheet_id: int,
-    total_cols: int,
+    cols: Sequence[schema_v2.ColumnSpec],
     group_specs: Sequence[tuple[int, tuple[str, ...]]],
     bold_end_col: int = 2,
     thick_border_col: int = 0,
     medium_border_col: int | None = 1,
     thin_border_col: int | None = 3,
 ) -> list[dict[str, Any]]:
-  """Builds unmerge, vertical-alignment, merge, and group-border requests for one sheet tab."""
+  """Builds unmerge, number-format, vertical-alignment, merge, and group-border requests for one sheet tab."""
+  total_cols = len(cols)
   merge_end_col = max((c for c, _ in group_specs), default=0) + 1
   reqs: list[dict[str, Any]] = [
       {
@@ -1373,6 +1389,24 @@ def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
     return reqs
 
   end_row = 1 + len(rows)
+  for col_i, col_spec in enumerate(cols):
+    num_fmt = _FMT_TO_SHEETS_NUMBER_FORMAT.get(col_spec.fmt)
+    if num_fmt is not None:
+      reqs.append(
+          {
+              "repeatCell": {
+                  "range": {
+                      "sheetId": sheet_id,
+                      "startRowIndex": 1,
+                      "endRowIndex": end_row,
+                      "startColumnIndex": col_i,
+                      "endColumnIndex": col_i + 1,
+                  },
+                  "cell": {"userEnteredFormat": {"numberFormat": num_fmt}},
+                  "fields": "userEnteredFormat.numberFormat",
+              }
+          }
+      )
   reqs.extend(
       [
           {
@@ -1493,7 +1527,7 @@ def build_summary_format_requests(
   requests = _build_tab_merge_requests(
       summary_rows,
       sheet_id=sheet_id,
-      total_cols=len(schema_v2.SUMMARY_COLUMNS),
+      cols=schema_v2.SUMMARY_COLUMNS,
       group_specs=summary_specs,
   )
   if dataset is not None:
@@ -1505,7 +1539,7 @@ def build_summary_format_requests(
         _build_tab_merge_requests(
             dataset.step1_rows,
             sheet_id=400,
-            total_cols=len(schema_v2.STEP1_COLUMNS),
+            cols=schema_v2.STEP1_COLUMNS,
             group_specs=step1_specs,
             bold_end_col=1,
             medium_border_col=None,
@@ -1521,7 +1555,7 @@ def build_summary_format_requests(
         _build_tab_merge_requests(
             dataset.stages_sd_rows,
             sheet_id=500,
-            total_cols=len(schema_v2.STAGES_SD_COLUMNS),
+            cols=schema_v2.STAGES_SD_COLUMNS,
             group_specs=stage_specs,
             thin_border_col=None,
         )
@@ -1530,7 +1564,7 @@ def build_summary_format_requests(
         _build_tab_merge_requests(
             dataset.stages_tm_rows,
             sheet_id=600,
-            total_cols=len(schema_v2.STAGES_TM_COLUMNS),
+            cols=schema_v2.STAGES_TM_COLUMNS,
             group_specs=stage_specs,
             thin_border_col=None,
         )
@@ -1539,7 +1573,7 @@ def build_summary_format_requests(
         _build_tab_merge_requests(
             dataset.runs_rows,
             sheet_id=700,
-            total_cols=len(schema_v2.RUNS_COLUMNS),
+            cols=schema_v2.RUNS_COLUMNS,
             group_specs=summary_specs,
         )
     )
