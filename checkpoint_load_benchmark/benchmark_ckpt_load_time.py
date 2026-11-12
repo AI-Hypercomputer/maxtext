@@ -4136,6 +4136,7 @@ def main() -> None:
             scan_mode == "unscanned"
             and ("scanned", num_slices) in s_res_by_key
             and s_res_by_key[("scanned", num_slices)].get("status") == "FAILED"
+            and s_res_by_key[("scanned", num_slices)].get("failure_category") == "OOM-HBM"
             and s_res_by_key[("scanned", num_slices)].get("load_sharded_hf_s", 0.0) == 0.0
             and args.allow_step_failure
         ):
