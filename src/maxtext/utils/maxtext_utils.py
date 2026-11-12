@@ -1907,6 +1907,7 @@ def setup_initial_state(
     if raw_params and native:
       # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
       lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+      raw_params = None
     elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (

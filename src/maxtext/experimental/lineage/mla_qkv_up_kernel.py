@@ -61,9 +61,9 @@ def _rms_norm(x: jax.Array, scale: jax.Array, eps: float) -> jax.Array:
 
 
 def _static_quantize(x: jax.Array, qtype: Any, scale: float) -> jax.Array:
-  """`quantization.static_quantize`."""
+  """`quantization.static_quantize` of an f32 x."""
   fmax = float(jnp.finfo(qtype).max)
-  return jnp.clip(x.astype(jnp.float32) / scale, -fmax, fmax).astype(qtype)
+  return jnp.clip(x / scale, -fmax, fmax).astype(qtype)
 
 
 def _nt_dot(x: jax.Array, y: jax.Array) -> jax.Array:
@@ -118,10 +118,12 @@ def _qkv_up_kernel(
   `[block_n * (QK + R), Cq]`, wk_ref `[block_n * QK, Ckv]` and wv_ref
   `[Ckv, block_n * V]`, so that each dot covers `head_group` heads.
 
-  The grid is (batch, head tiles, token tiles). The first head tile normalizes
-  and quantizes each token tile, transposes its YaRN frequencies and applies
-  RoPE to its k_pe into the full-sequence scratch buffers, which the other
-  head tiles reuse instead of refetching and recomputing them.
+  The grid is (batch, seq chunks, head tiles, chunk token tiles). Within each
+  `scratch_t`-token chunk (up to 4096 tokens so scratch stays <= 10.5 MiB in
+  VMEM at arbitrary sequence length), the first head tile normalizes and
+  quantizes each token tile, transposes its YaRN frequencies and applies RoPE to
+  its k_pe into the chunk scratch buffers, which the other head tiles reuse
+  instead of refetching and recomputing them.
 
   Args:
     q_down_ref: `[1, block_t, Cq]` compressed query tile.
@@ -136,11 +138,11 @@ def _qkv_up_kernel(
     q_ref: `[1, block_n, QK + R, block_t]` output q tile.
     k_ref: `[1, block_n, QK + R, block_t]` output k tile.
     v_ref: `[1, block_n, block_t, V]` output v tile.
-    cq_q_scratch: `[T, Cq]` VMEM scratch for quantized cq.
-    ckv_q_scratch: `[T, Ckv]` VMEM scratch for quantized ckv.
-    cos_scratch: `[R, T]` VMEM scratch for scaled seq-minor cos.
-    sin_scratch: `[R, T]` VMEM scratch for scaled seq-minor sin.
-    k_pe_scratch: `[R, T]` VMEM scratch for RoPEd seq-minor k_pe.
+    cq_q_scratch: `[scratch_t, Cq]` VMEM scratch for quantized cq.
+    ckv_q_scratch: `[scratch_t, Ckv]` VMEM scratch for quantized ckv.
+    cos_scratch: `[R, scratch_t]` VMEM scratch for scaled seq-minor cos.
+    sin_scratch: `[R, scratch_t]` VMEM scratch for scaled seq-minor sin.
+    k_pe_scratch: `[R, scratch_t]` VMEM scratch for RoPEd seq-minor k_pe.
     eps: RMSNorm epsilon.
     act_qtype: fp8 dtype of quantized activations.
     act_scale: Static activation quantization scale.
@@ -154,9 +156,9 @@ def _qkv_up_kernel(
   v_head_dim = v_ref.shape[3]
   rope_head_dim = cos_ref.shape[2]
   half = rope_head_dim // 2
-  rows = pl.ds(pl.multiple_of(pl.program_id(2) * block_t, block_t), block_t)
+  rows = pl.ds(pl.multiple_of(pl.program_id(3) * block_t, block_t), block_t)
 
-  @pl.when(pl.program_id(1) == 0)
+  @pl.when(pl.program_id(2) == 0)
   def _():
     cq_q_scratch[rows, :] = _static_quantize(
         _rms_norm(q_down_ref[0], q_norm_scale_ref[...], eps),
@@ -223,6 +225,8 @@ def _qkv_up_kernel(
         "block_t",
         "block_n",
         "head_group",
+        "max_scratch_t",
+        "interpret",
     ),
 )
 def qkv_up_fwd(
@@ -245,6 +249,8 @@ def qkv_up_fwd(
     block_t: int = 1024,
     block_n: int = 8,
     head_group: int = 4,
+    max_scratch_t: int = 4096,
+    interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Local (per-device) fused fp8 q / kv up projections.
 
@@ -304,28 +310,36 @@ def qkv_up_fwd(
       kv_lora_rank=kv_lora_rank,
       head_group=head_group,
   )
-  num_t = seq_len // block_t
-  grid = (batch, num_heads // block_n, num_t)
-  # Only the first head tile reads q_down / kv_down; the others keep the last
-  # block index, so the pipeline does not refetch them.
-  tok = lambda b, n, t: (b, jnp.where(n == 0, t, num_t - 1), 0)
-  weight = lambda b, n, t: (n, 0)
+  scratch_t = seq_len
+  while scratch_t > max_scratch_t and scratch_t > block_t:
+    for d in range(2, scratch_t // block_t + 1):
+      if (scratch_t // block_t) % d == 0:
+        scratch_t //= d
+        break
+  num_s = seq_len // scratch_t
+  sub_t = scratch_t // block_t
+  grid = (batch, num_s, num_heads // block_n, sub_t)
+  # Within each sequence chunk `s`, only the first head tile reads q_down /
+  # kv_down; the others hold that chunk's last block index so the pipeline does
+  # not refetch them.
+  tok = lambda b, s, n, sub: (b, jnp.where(n == 0, s * sub_t + sub, s * sub_t + sub_t - 1), 0)
+  weight = lambda b, s, n, sub: (n, 0)
   in_specs = [
       pl.BlockSpec((1, block_t, q_lora_rank), tok),
       pl.BlockSpec((1, block_t, kv_dim), tok),
-      pl.BlockSpec((1, q_lora_rank), lambda b, n, t: (0, 0)),
-      pl.BlockSpec((1, kv_lora_rank), lambda b, n, t: (0, 0)),
+      pl.BlockSpec((1, q_lora_rank), lambda b, s, n, sub: (0, 0)),
+      pl.BlockSpec((1, kv_lora_rank), lambda b, s, n, sub: (0, 0)),
       pl.BlockSpec((1, block_t, rope_head_dim), tok),
       pl.BlockSpec((1, block_t, rope_head_dim), tok),
       pl.BlockSpec((block_n * qk_rope_dim, q_lora_rank), weight),
       pl.BlockSpec((block_n * qk_head_dim, kv_lora_rank), weight),
-      pl.BlockSpec((kv_lora_rank, block_n * v_head_dim), lambda b, n, t: (0, n)),
+      pl.BlockSpec((kv_lora_rank, block_n * v_head_dim), lambda b, s, n, sub: (0, n)),
   ]
-  seq_minor = lambda b, n, t: (b, n, 0, t)
+  seq_minor = lambda b, s, n, sub: (b, n, 0, s * sub_t + sub)
   out_specs = [
       pl.BlockSpec((1, block_n, qk_rope_dim, block_t), seq_minor),
       pl.BlockSpec((1, block_n, qk_rope_dim, block_t), seq_minor),
-      pl.BlockSpec((1, block_n, block_t, v_head_dim), lambda b, n, t: (b, n, t, 0)),
+      pl.BlockSpec((1, block_n, block_t, v_head_dim), lambda b, s, n, sub: (b, n, s * sub_t + sub, 0)),
   ]
   out_shape = [
       jax.ShapeDtypeStruct((batch, num_heads, qk_rope_dim, seq_len), jnp.bfloat16),
@@ -334,7 +348,7 @@ def qkv_up_fwd(
   ]
   flops = 2 * batch * seq_len * num_heads * (q_lora_rank * qk_rope_dim + kv_lora_rank * (qk_head_dim + v_head_dim))
   bytes_accessed = sum(x.size * x.dtype.itemsize for x in (q_down, kv_down, wq_up, wk_up, wv_up)) + sum(
-      s.size * 2 for s in out_shape
+      s.size * jnp.dtype(s.dtype).itemsize for s in out_shape
   )
   q, k, v = pl.pallas_call(
       kernel,
@@ -343,17 +357,18 @@ def qkv_up_fwd(
       out_specs=out_specs,
       out_shape=out_shape,
       scratch_shapes=[
-          pltpu.VMEM((seq_len, q_lora_rank), act_qtype),
-          pltpu.VMEM((seq_len, kv_lora_rank), act_qtype),
-          pltpu.VMEM((rope_head_dim, seq_len), jnp.float32),
-          pltpu.VMEM((rope_head_dim, seq_len), jnp.float32),
-          pltpu.VMEM((rope_head_dim, seq_len), jnp.bfloat16),
+          pltpu.VMEM((scratch_t, q_lora_rank), act_qtype),
+          pltpu.VMEM((scratch_t, kv_lora_rank), act_qtype),
+          pltpu.VMEM((rope_head_dim, scratch_t), jnp.float32),
+          pltpu.VMEM((rope_head_dim, scratch_t), jnp.float32),
+          pltpu.VMEM((rope_head_dim, scratch_t), jnp.bfloat16),
       ],
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=("arbitrary", "arbitrary", "arbitrary"),
+          dimension_semantics=("arbitrary", "arbitrary", "arbitrary", "arbitrary"),
           vmem_limit_bytes=63 * 1024 * 1024,
       ),
       cost_estimate=pl.CostEstimate(flops=flops, transcendentals=0, bytes_accessed=bytes_accessed),
+      interpret=interpret,
       name="mla_qkv_up_fwd",
   )(
       q_down,

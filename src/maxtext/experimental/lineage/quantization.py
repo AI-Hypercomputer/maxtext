@@ -131,6 +131,7 @@ class QuantConfig:
 
   routed_experts: GmmQuantRule | None = None
   mla: GmmQuantRule | None = None
+  shared_mlp: GmmQuantRule | None = None
   combine_qtype: Any | None = None
   combine_per_hop_scaling: bool = False
 
@@ -159,6 +160,10 @@ FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP = dataclasses.replace(
     FP8_FULL_SPLASH_QK_E3,
     combine_qtype=jnp.float8_e4m3fn,
     combine_per_hop_scaling=True,
+)
+FP8_FULL_ALL_SPLASH_QK_E3_COMBINE_PER_HOP = dataclasses.replace(
+    FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP,
+    shared_mlp=GmmQuantRule(),
 )
 
 

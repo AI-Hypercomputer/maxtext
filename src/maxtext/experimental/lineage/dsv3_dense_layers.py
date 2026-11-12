@@ -75,6 +75,8 @@ def dsv3_dense_layers(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     segment_ids: jt.Num[jax.Array, "B T"] | None = None,
     quant: quantization.QuantConfig | None = None,
+    remat_layers: bool = False,
+    compute_dtype: jax.typing.DTypeLike | None = None,
 ) -> jt.Num[jax.Array, "B T D"]:
   """Executes multiple DSv3 dense layers.
 
@@ -102,10 +104,16 @@ def dsv3_dense_layers(
   Returns:
     Output tokens with the same shape and sharding as the input tokens.
   """
-  _collect_w_dcn = functools.partial(
-      dsv3_dense_layer.collect_w_dcn,
-      axis_mapping=axis_mapping,
-  )
+
+  def _collect_w_dcn_layer(w_layer):
+    if compute_dtype is not None:
+      w_layer = jax.tree.map(
+          lambda a: a.astype(compute_dtype) if a is not None else None,
+          w_layer,
+          is_leaf=lambda a: a is None,
+      )
+    return dsv3_dense_layer.collect_w_dcn(w_layer, axis_mapping=axis_mapping)
+
   _collect_w_ici = functools.partial(
       dsv3_dense_layer.collect_w_ici,
       axis_mapping=axis_mapping,
@@ -135,8 +143,18 @@ def dsv3_dense_layers(
       quant=quant,
   )
 
+  if remat_layers:
+
+    @jax.checkpoint
+    def _remat_step(carry_x, w_layer_sharded):
+      w_layer = _collect_w_ici(_collect_w_dcn_layer(w_layer_sharded))
+      return _dsv3_dense_layer(carry_x, w_layer), None
+
+    x, _ = jax.lax.scan(_remat_step, x, w)
+    return x
+
   def _scan_fn(x, w):
     return _dsv3_dense_layer(x, w), ()
 
-  x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici, _reduce_w_ici)
+  x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn_layer, _collect_w_ici, _reduce_w_ici)
   return x

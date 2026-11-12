@@ -304,9 +304,120 @@ _SPARSE_4X8X8 = dsv3_types.DSv3SparseLayerWeightsPytree(
 _MLA_4X4X8 = dataclasses.replace(_MLA_4X8X8, q_up=P(None, None, "core", ("x", "y")))
 _SPARSE_4X4X8 = dataclasses.replace(_SPARSE_4X8X8, mla=_MLA_4X4X8)
 
+
+_DEFAULT_4X4X4 = TopologySharding(
+    axis_mapping={
+        "attention": "core",
+        "fsdp_attention": ("x", "y", "z"),
+        "expert": ("z", "core"),
+        "fsdp_moe": ("x", "y"),
+    },
+    weights=DSv3WeightShardings(
+        decoder=dsv3_types.DSv3WeightsPytree(
+            dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                pre_attn_norm_scale=P(None, None),
+                mla=_MLA_4X4X8,
+                post_attn_norm_scale=P(None, None),
+                mlp=dsv3_types.DSv3MLPWeightsPytree(
+                    gate_0=P(None, None, ("x", "y")),
+                    gate_1=P(None, None, ("x", "y")),
+                    linear=P(None, ("x", "y"), None),
+                ),
+            ),
+            sparse=_SPARSE_4X4X8,
+        ),
+        mtp=dsv3_types.DSv3MTPWeightsPytree(
+            ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                enorm_scale=P(None),
+                hnorm_scale=P(None),
+                eh_proj=P(("x", "y"), None),
+            ),
+            sparse=drop_layer_axis(_SPARSE_4X4X8),
+        ),
+        # 128 ways over (x, y, z, core) leave 7168 / 128 = 56 = 7 * 8-row
+        # tiles on the embedding dim.
+        embed_table=P(None, ("x", "y", "z", "core")),
+        final_norm_scale=P(None),
+        head_kernel=P(("x", "y", "z", "core"), None),
+    ),
+)
+
+# Full 64/128-way 2D sharding on 4x4x4 with EP=8 (`expert=(z, core),
+# fsdp_moe=(x, y)`): avoids minor-dim `mla.out` SparseCore all-gathers and
+# reduces steady weight and optimizer HBM by ~5.6 GiB per TensorCore.
+_MLA_4X4X4_FSDP64 = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, ("x", "y"), "z"),
+    q_up=P(None, "z", "core", ("x", "y")),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, ("x", "y"), None),
+    k_up=P(None, "z", "core", ("x", "y")),
+    v_up=P(None, "z", "core", ("x", "y")),
+    kv_norm_scale=P(None, None),
+    out=P(None, "core", ("x", "y"), "z"),
+)
+_SPARSE_4X4X4_FSDP64 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_4X4X4_FSDP64,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(
+            kernel=P(None, ("x", "y"), None),
+            bias=P(),
+        ),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("z", "core"), ("x", "y"), None),
+            linear=P(None, ("z", "core"), ("x", "y"), None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, ("z", "core"), ("x", "y")),
+            gate_1=P(None, ("z", "core"), ("x", "y")),
+            linear=P(None, ("x", "y"), ("z", "core")),
+        ),
+    ),
+)
+
+LAYOUT_4X4X4_VARIANTS: dict[str, TopologySharding] = {
+    "default": _DEFAULT_4X4X4,
+    "ep8_fsdp64": TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("z", "core"),
+            "fsdp_moe": ("x", "y"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_4X4X4_FSDP64,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, ("z", "core"), ("x", "y")),
+                        gate_1=P(None, ("z", "core"), ("x", "y")),
+                        linear=P(None, ("x", "y"), ("z", "core")),
+                    ),
+                ),
+                sparse=_SPARSE_4X4X4_FSDP64,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("x", "y"), ("z", "core")),
+                ),
+                sparse=drop_layer_axis(_SPARSE_4X4X4_FSDP64),
+            ),
+            embed_table=P(None, ("x", "y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("x", "y", "z", "core"), None),
+        ),
+    ),
+}
+
 # Per-slice `(x, y, z)` topology -> shardings. A multi-slice mesh uses the entry
 # of its slices; `sharding_config` adds data parallelism over `dcn`.
 TOPOLOGY_SHARDINGS: dict[tuple[int, int, int], TopologySharding] = {
+    (4, 4, 4): _DEFAULT_4X4X4,
     (4, 4, 8): TopologySharding(
         axis_mapping={
             "attention": "core",
@@ -585,12 +696,16 @@ def yarn_freqs_sharding(
 
 def sharding_config(
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    *,
+    layout_4x4x4: str = "default",
 ) -> DSv3ShardingConfig:
   """Looks up the `DSv3ShardingConfig` of `mesh`'s per-slice topology.
 
   Args:
     mesh: The device mesh: `x`, `y`, `z` and `core` axes, plus a leading `dcn`
       axis across slices if any.
+    layout_4x4x4: Variant name in `LAYOUT_4X4X4_VARIANTS` when `mesh` has
+      `(4, 4, 4)` per-slice topology (defaults to `"default"`).
 
   Returns:
     The sharding config of the `TOPOLOGY_SHARDINGS` entry for the mesh's
@@ -598,10 +713,18 @@ def sharding_config(
     to the empty tuple (a no-op) if the mesh has none.
 
   Raises:
-    ValueError: If `TOPOLOGY_SHARDINGS` has no entry for that shape.
+    ValueError: If `TOPOLOGY_SHARDINGS` has no entry for that shape or
+      `layout_4x4x4` is unknown.
   """
   topology = (mesh.shape["x"], mesh.shape["y"], mesh.shape["z"])
-  entry = TOPOLOGY_SHARDINGS.get(topology)
+  if topology == (4, 4, 4) and layout_4x4x4 != "default":
+    entry = LAYOUT_4X4X4_VARIANTS.get(layout_4x4x4)
+    if entry is None:
+      raise ValueError(f"Unknown layout_4x4x4={layout_4x4x4!r}; supported: {sorted(LAYOUT_4X4X4_VARIANTS)}.")
+  else:
+    if layout_4x4x4 != "default":
+      raise ValueError(f"layout_4x4x4={layout_4x4x4!r} requires a (4, 4, 4) topology, got {topology}.")
+    entry = TOPOLOGY_SHARDINGS.get(topology)
   if entry is None:
     raise ValueError(f"No DSv3 shardings for per-slice topology {topology}; supported:" f" {sorted(TOPOLOGY_SHARDINGS)}.")
   return DSv3ShardingConfig(
@@ -637,11 +760,17 @@ def _is_mla_or_spec(x: Any) -> bool:
   return isinstance(x, (dsv3_types.DSv3MLAWeightsPytree, P))
 
 
-def _reshard_mla_heads(node: Any, head_axis: str | tuple[str, ...]) -> Any:
+def _reshard_mla_heads(
+    node: Any,
+    head_axis: str | tuple[str, ...],
+    *,
+    strip_overlap: bool = False,
+) -> Any:
   """Replaces the head-dim entry of the head-sharded MLA specs with `head_axis`."""
   if not isinstance(node, dsv3_types.DSv3MLAWeightsPytree):
     return node
   head_axes = _axis_names(head_axis)
+  head_set = set(head_axes)
   updates = {}
   for field, dim in _MLA_HEAD_DIMS:
     spec = getattr(node, field)
@@ -651,8 +780,14 @@ def _reshard_mla_heads(node: Any, head_axis: str | tuple[str, ...]) -> Any:
     idx = len(entries) + dim
     other_axes = set()
     for i, entry in enumerate(entries):
-      if i != idx and entry is not None:
-        other_axes.update(_axis_names(entry))
+      if i == idx or entry is None:
+        continue
+      part_axes = _axis_names(entry)
+      if strip_overlap:
+        kept = tuple(ax for ax in part_axes if ax not in head_set)
+        entries[i] = _to_axis_tuple(kept) if kept else None
+      else:
+        other_axes.update(part_axes)
     overlap = [ax for ax in head_axes if ax in other_axes]
     if overlap:
       raise ValueError(
@@ -667,6 +802,8 @@ def _reshard_mla_heads(node: Any, head_axis: str | tuple[str, ...]) -> Any:
 def activation_resharded_config(
     base: DSv3ShardingConfig,
     activation_axis_mapping: AxisMapping,
+    *,
+    strip_mla_overlap: bool = False,
 ) -> DSv3ShardingConfig:
   """A sharding config with new activation axes and (almost) the same weights.
 
@@ -719,12 +856,12 @@ def activation_resharded_config(
   weights = dataclasses.replace(
       base.weights,
       decoder=jax.tree.map(
-          lambda node: _reshard_mla_heads(node, head_axis),
+          lambda node: _reshard_mla_heads(node, head_axis, strip_overlap=strip_mla_overlap),
           base.weights.decoder,
           is_leaf=_is_mla_or_spec,
       ),
       mtp=jax.tree.map(
-          lambda node: _reshard_mla_heads(node, head_axis),
+          lambda node: _reshard_mla_heads(node, head_axis, strip_overlap=strip_mla_overlap),
           base.weights.mtp,
           is_leaf=_is_mla_or_spec,
       ),
@@ -778,7 +915,11 @@ def expert_axes_as_cp_axis_mapping(axis_mapping: AxisMapping) -> AxisMapping:
   }
 
 
-def expert_axes_as_cp_config(base: DSv3ShardingConfig) -> DSv3ShardingConfig:
+def expert_axes_as_cp_config(
+    base: DSv3ShardingConfig,
+    *,
+    strip_mla_overlap: bool = False,
+) -> DSv3ShardingConfig:
   """`base` with the expert axes as context parallelism for the activations.
 
   The eval layout of a fractional eval batch: the activations follow
@@ -792,11 +933,16 @@ def expert_axes_as_cp_config(base: DSv3ShardingConfig) -> DSv3ShardingConfig:
 
   Args:
     base: The training sharding config.
+    strip_mla_overlap: Drop overlapping MLA FSDP axes when widening head shards.
 
   Returns:
     The eval sharding config.
   """
-  return activation_resharded_config(base, expert_axes_as_cp_axis_mapping(base.axis_mapping))
+  return activation_resharded_config(
+      base,
+      expert_axes_as_cp_axis_mapping(base.axis_mapping),
+      strip_mla_overlap=strip_mla_overlap,
+  )
 
 
 def named_shardings(

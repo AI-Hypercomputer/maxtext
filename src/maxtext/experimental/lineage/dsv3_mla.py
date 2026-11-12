@@ -194,6 +194,10 @@ def _ste(grad_x: jax.Array, x: jax.Array, quant_rule: quantization.GmmQuantRule)
   Returns:
     grad_x, zeroed where |x| exceeds the calibration range.
   """
+  if x.dtype == quant_rule.act_qtype:
+    fmax = float(jnp.finfo(quant_rule.act_qtype).max)
+    mask = jnp.abs(x.astype(jnp.float32)) < fmax
+    return jnp.where(mask, grad_x, 0).astype(grad_x.dtype)
   x_max = quant_rule.act_scale * float(jnp.finfo(quant_rule.act_qtype).max)
   # Compared in f32 (exactly): a bf16 compare can crash the TPU compiler.
   mask = jnp.abs(x.astype(jnp.float32)) <= x_max
@@ -290,6 +294,154 @@ def _qdot_bwd(
       _quantize_weight(w, quant_rule),
       ste_x,
   )
+
+
+_OUT_PROJ_2D: bool = False
+_FP8_SPLASH_OUT: bool = False
+
+
+def set_mla_kernel_options(
+    *,
+    out_proj_2d: bool = False,
+    fp8_splash_out: bool = False,
+) -> None:
+  """Configures 2D `out_projection` and FP8 `splash_out` residual."""
+  global _OUT_PROJ_2D, _FP8_SPLASH_OUT
+  _OUT_PROJ_2D = bool(out_proj_2d)
+  _FP8_SPLASH_OUT = bool(fp8_splash_out)
+
+
+def quantize_swiglu_weights(
+    w: Any,
+    quant_rule: quantization.GmmQuantRule,
+) -> Any:
+  """Quantizes `(gate_0, gate_1, linear)` SwiGLU weights before collection."""
+
+  def q(a: jax.Array | None) -> jax.Array | None:
+    return None if a is None else _quantize_weight(a, quant_rule)
+
+  return dataclasses.replace(w, gate_0=q(w.gate_0), gate_1=q(w.gate_1), linear=q(w.linear))
+
+
+def fp8_swiglu_fwd(
+    x: jax.Array,
+    gate_0: jax.Array,
+    gate_1: jax.Array,
+    linear: jax.Array,
+    quant_rule: quantization.GmmQuantRule,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
+  """FP8 SwiGLU forward pass returning `(out, (x_q, g0, g1))`."""
+  x_q = _quantize_act(x, quant_rule)
+  w_g0 = _quantize_weight(gate_0, quant_rule)
+  w_g1 = _quantize_weight(gate_1, quant_rule)
+  w_lin = _quantize_weight(linear, quant_rule)
+  scale = quant_rule.act_scale * quant_rule.weight_scale
+  with jax.named_scope("gate_0"):
+    g0 = (_fp8_dot(x_q, w_g0, 1) * scale).astype(jnp.bfloat16)
+  with jax.named_scope("gate_1"):
+    g1 = (_fp8_dot(x_q, w_g1, 1) * scale).astype(jnp.bfloat16)
+  with jax.named_scope("silu"):
+    act = jax.nn.silu(g0) * g1
+  with jax.named_scope("linear"):
+    out = (_fp8_dot(_quantize_act(act, quant_rule), w_lin, 1) * scale).astype(jnp.bfloat16)
+  return out, (x_q, g0, g1)
+
+
+def fp8_swiglu_bwd(
+    grad_out: jax.Array,
+    x: jax.Array,
+    x_q: jax.Array,
+    g0: jax.Array,
+    g1: jax.Array,
+    gate_0: jax.Array,
+    gate_1: jax.Array,
+    linear: jax.Array,
+    *,
+    quant_rule: quantization.GmmQuantRule,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+  """FP8 SwiGLU backward pass (supports pre-quantized fp8 or bf16 weights)."""
+  w_g0 = _quantize_weight(gate_0, quant_rule)
+  w_g1 = _quantize_weight(gate_1, quant_rule)
+  w_lin = _quantize_weight(linear, quant_rule)
+  batch_axes = tuple(range(x.ndim - 1))
+  dgrad_axes = ((x.ndim - 1,), (1,))
+  wgrad_axes = (batch_axes, batch_axes)
+  act, silu_vjp = jax.vjp(lambda a, b: jax.nn.silu(a) * b, g0, g1)
+  grad_act, grad_lin = _qdot_bwd(
+      grad_out,
+      act,
+      w_lin,
+      quant_rule=quant_rule,
+      dgrad_axes=dgrad_axes,
+      wgrad_axes=wgrad_axes,
+      dx_spec=_cotangent_sharding(act).spec,
+      dw_spec=_cotangent_sharding(w_lin).spec,
+      ste_x=act,
+  )
+  grad_g0, grad_g1 = silu_vjp(grad_act)
+  dx0, grad_w_g0 = _qdot_bwd(
+      grad_g0,
+      x_q,
+      w_g0,
+      quant_rule=quant_rule,
+      dgrad_axes=dgrad_axes,
+      wgrad_axes=wgrad_axes,
+      dx_spec=_cotangent_sharding(x).spec,
+      dw_spec=_cotangent_sharding(w_g0).spec,
+  )
+  dx1, grad_w_g1 = _qdot_bwd(
+      grad_g1,
+      x_q,
+      w_g1,
+      quant_rule=quant_rule,
+      dgrad_axes=dgrad_axes,
+      wgrad_axes=wgrad_axes,
+      dx_spec=_cotangent_sharding(x).spec,
+      dw_spec=_cotangent_sharding(w_g1).spec,
+  )
+  grad_x = _ste(dx0 + dx1, x, quant_rule)
+  return grad_x, grad_w_g0, grad_w_g1, grad_lin
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4,))
+def fp8_swiglu(
+    x: jax.Array,
+    gate_0: jax.Array,
+    gate_1: jax.Array,
+    linear: jax.Array,
+    quant_rule: quantization.GmmQuantRule,
+) -> jax.Array:
+  """FP8 SwiGLU MLP with custom VJP for unquantized (bf16/f32) weights."""
+  return fp8_swiglu_fwd(x, gate_0, gate_1, linear, quant_rule)[0]
+
+
+def _fp8_swiglu_vjp_fwd(x, gate_0, gate_1, linear, quant_rule):
+  out, (x_q, g0, g1) = fp8_swiglu_fwd(x, gate_0, gate_1, linear, quant_rule)
+  return out, (x, x_q, g0, g1, gate_0, gate_1, linear)
+
+
+def _fp8_swiglu_vjp_bwd(quant_rule, res, grad_out):
+  x, x_q, g0, g1, gate_0, gate_1, linear = res
+  dx, dg0, dg1, dlin = fp8_swiglu_bwd(
+      grad_out,
+      x,
+      x_q,
+      g0,
+      g1,
+      gate_0,
+      gate_1,
+      linear,
+      quant_rule=quant_rule,
+  )
+  return (
+      dx.astype(x.dtype),
+      dg0.astype(gate_0.dtype),
+      dg1.astype(gate_1.dtype),
+      dlin.astype(linear.dtype),
+  )
+
+
+fp8_swiglu.defvjp(_fp8_swiglu_vjp_fwd, _fp8_swiglu_vjp_bwd)
 
 
 @jax.named_call
@@ -1383,6 +1535,9 @@ def out_projection(
     with jax.named_scope("out_projection"):
       if quant_rule is None:
         out = dot(splash_out, w_out, axes=2)
+      elif _OUT_PROJ_2D:
+        b, t, n, v = splash_out.shape
+        out = _qdot(splash_out.reshape(b * t, n * v), w_out.reshape(n * v, -1), quant_rule, axes=1).reshape(b, t, -1)
       else:
         out = _qdot(splash_out, w_out, quant_rule, axes=2)
     return _out_reduce_scatter(out)
@@ -1439,6 +1594,34 @@ def out_projection_bwd(
           attn_sharding.update(spec=jax.sharding.PartitionSpec(attn_sharding.spec[0], head_axis, None)),
       )
   )
+  if _OUT_PROJ_2D:
+    dx_spec = _cotangent_sharding(splash_out).spec
+    dw_spec = _cotangent_sharding(w_out).spec
+
+    def _local_out_bwd_2d(g_out, s_out, w):
+      b, t, n, v = s_out.shape
+      d = w.shape[2]
+      g_q, s_g = quantization.absmax_quantize(g_out.reshape(b * t, d), quant_rule.bwd_qtype)
+      s_g = s_g.reshape(())
+      dx = _fp8_dot(g_q, w.reshape(n * v, d), ((1,), (1,))) * (s_g * quant_rule.weight_scale)
+      dw = _fp8_dot(s_out.reshape(b * t, n * v), g_q, ((0,), (0,))) * (s_g * quant_rule.act_scale)
+      return (
+          _match_spec(dx.reshape(b, t, n, v).astype(jnp.bfloat16), dx_spec),
+          _match_spec(dw.reshape(n, v, d).astype(quant_rule.grad_dtype), dw_spec),
+      )
+
+    grad_splash_out, grad_w_out = jax.shard_map(
+        _local_out_bwd_2d,
+        mesh=attn_sharding.mesh,
+        out_specs=(dx_spec, dw_spec),
+        check_vma=True,
+    )(
+        grad_out,
+        _quantize_act(splash_out, quant_rule),
+        _quantize_weight(w_out, quant_rule),
+    )
+    return _ste(grad_splash_out, splash_out, quant_rule), grad_w_out
+
   grad_splash_out, grad_w_out = _qdot_bwd(
       grad_out,
       splash_out,
@@ -1597,7 +1780,7 @@ def init_splash_kernel(
   effective_dq_reduction_steps = (
       None if dq_reduction_steps == 1 and q_seq_len_per_shard > 2 * block_q_dkv else dq_reduction_steps
   )
-  effective_diag_band_skip = diag_band_skip and effective_qk_diag_skip and effective_dq_reduction_steps == 1
+  effective_diag_band_skip = diag_band_skip and effective_qk_diag_skip and effective_dq_reduction_steps in (1, 3)
   sa_config = tokamax_splash_attention_kernel.SplashConfig(
       block_q=block_q,
       block_kv=block_kv,
@@ -1922,6 +2105,8 @@ def dsv3_mla_fwd(
       splash_kernel,
       segment_ids=segment_ids,
   )
+  if _FP8_SPLASH_OUT and quant_rule is not None:
+    splash_out = _quantize_act(splash_out, quant_rule)
   out = out_projection(
       splash_out,
       w.out,
@@ -2066,9 +2251,14 @@ def dsv3_mla_bwd(
     )
 
   # 4. Splash attention backward
+  splash_out_attn = (
+      splash_out.astype(jnp.bfloat16) * jnp.asarray(quant_rule.act_scale, jnp.bfloat16)
+      if quant_rule is not None and splash_out.dtype == quant_rule.act_qtype
+      else splash_out
+  )
   dq, dk, dv = splash_attention_bwd(
       grad_splash_out,
-      splash_out,
+      splash_out_attn,
       context,
       _quantize_splash_qk(q, quant_rule),
       _quantize_splash_qk(k, quant_rule),

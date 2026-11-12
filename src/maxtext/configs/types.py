@@ -1811,6 +1811,7 @@ class DeepSeekMoE(BaseModel):
       "fp8_full_splash_qk_e3",
       "fp8_full_combine_per_hop",
       "fp8_full_splash_qk_e3_combine_per_hop",
+      "fp8_full_all_splash_qk_e3_combine_per_hop",
   ] = Field(
       "none",
       description="Quantization of the Lineage sparse-layer routed experts and MLA. Only used if use_lineage is True.",
@@ -1838,7 +1839,88 @@ class DeepSeekMoE(BaseModel):
   )
   lineage_dq_reduction_steps: int = Field(
       1,
-      description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
+      description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 3 for 3-step reduction, 0 for None."),
+  )
+  lineage_qk_diag_grid: int = Field(
+      8,
+      description="Diagonal grid count for QK causal diagonal skip in Lineage Splash attention.",
+  )
+  lineage_layout_4x4x4: str = Field(
+      "default",
+      description="4x4x4 sharding topology variant (default, ep8_fsdp64).",
+  )
+  lineage_router_metadata_sc0: bool = Field(
+      False,
+      description="Pin MoE routing metadata collectives to SparseCore 0 instead of SC1 auto-offload.",
+  )
+  lineage_out_proj_2d: bool = Field(
+      False,
+      description="Use local 2D shard_map FP8 dots for MLA output projection forward and backward.",
+  )
+  lineage_bwd_fp8_combine: bool = Field(
+      False,
+      description="Quantize backward token-gradient MoE combine reduce-scatter to per-hop FP8 e4m3fn.",
+  )
+  lineage_norm_reduce_tc: bool = Field(
+      False,
+      description="Reduce 1D RMSNorm scale gradients on TensorCore instead of SparseCore.",
+  )
+  lineage_fp8_splash_out: bool = Field(
+      False,
+      description="Save MLA splash_out residual in static-scaled FP8 shared with out_projection.",
+  )
+  lineage_cp_expert_axes: bool = Field(
+      False,
+      description=(
+          "Move non-attention expert mesh axes from batch (fsdp_attention) to sequence/head (attention)"
+          " sharding during Lineage training."
+      ),
+  )
+  lineage_offload_mla_fields: str = Field(
+      "",
+      description=(
+          "Comma-separated DSv3MLAResiduals fields (orig_x,q_down,kv_down,context,splash_out) to offload"
+          " to pinned_host across scanned sparse layers."
+      ),
+  )
+  lineage_offload_moe_fields: str = Field(
+      "",
+      description=(
+          "Comma-separated DSv3MoEResiduals fields (out_proj_out,orig_x) to offload to pinned_host across"
+          " scanned sparse layers."
+      ),
+  )
+  lineage_offload_bank: bool = Field(
+      False,
+      description="Offload the cross-layer ragged MoE activation bank to pinned_host across scanned sparse layers.",
+  )
+  lineage_offload_w_grad: bool = Field(
+      False,
+      description="Stage per-layer reduced sparse weight gradients in host memory during backward scan.",
+  )
+  lineage_loss_chunk_tokens: int = Field(
+      0,
+      description="Max local tokens per chunked LM head + cross-entropy chunk in Lineage training (0 disables).",
+  )
+  lineage_remat_dense_layers: bool = Field(
+      False,
+      description="Wrap each initial dense layer in jax.checkpoint in Lineage training.",
+  )
+  lineage_stream_param_cast: bool = Field(
+      False,
+      description="Cast and quantize Lineage decoder weights per layer inside DCN collect instead of upfront.",
+  )
+  lineage_remat_mtp: bool = Field(
+      False,
+      description="Wrap each MTP depth layer in jax.checkpoint in Lineage training.",
+  )
+  lineage_max_async_overlap: bool = Field(
+      True,
+      description="Register Lineage max_async_overlap XLA transform.",
+  )
+  lineage_max_async_overlap_entry: bool = Field(
+      True,
+      description="Include the entry HLO computation in Lineage max_async_overlap_transform.",
   )
 
 

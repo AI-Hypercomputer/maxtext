@@ -2159,7 +2159,7 @@ def _flash_attention_dkv_kernel(
         dk_scratch_ref[kv_rows, :] += dk_b.astype(dk_scratch_ref.dtype)
         if dq_scratch_ref is not None:
           dq_b = lax.dot_general(
-              ds_b.T if _is_fp8(k) else ds_b.T.astype(k.dtype),
+              ds_b.T if _is_fp8(k_b) else ds_b.T.astype(k_b.dtype),
               k_b,
               NN_DIM_NUMBERS,
               preferred_element_type=jnp.float32,
@@ -2590,7 +2590,7 @@ def _splash_attention_bwd_dkv(
 
   in_specs += [dq_alias_spec]
 
-  if bkv == bkv_compute and not use_vmem_dq_reduction:
+  if bkv == bkv_compute and not use_vmem_dq_reduction and not (config.qk_diag_skip and config.diag_band_skip):
     dq_scratch = None
   else:
     dq_scratch = pltpu.VMEM((bq, head_dim_qk), jnp.float32)

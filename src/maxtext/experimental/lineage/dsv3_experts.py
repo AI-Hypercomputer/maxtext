@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
 
+from maxtext.experimental.lineage import dsv3_mla
 from maxtext.experimental.lineage import dsv3_types
 from maxtext.experimental.lineage import ops
 from maxtext.experimental.lineage import quantization
@@ -144,21 +145,45 @@ def bank_chunk_row(
 def dsv3_shared_expert(
     x: jt.Num[jax.Array, "*BT D"],
     w: dsv3_types.DSv3MoESharedExpertWeightsPytree,
+    *,
+    quant_rule: quantization.GmmQuantRule | None = None,
 ) -> jt.Num[jax.Array, "*BT D"]:
-  """Performs computation for a shared expert.
-
-  Args:
-    x: Input tokens with any number of leading dimensions.
-    w: Shared expert weights.
-
-  Returns:
-    Output tokens with the same shape as the input.
-  """
+  """Performs computation for a shared expert (in fp8 when `quant_rule` set)."""
   assert w.gate_0 is not None
   assert w.gate_1 is not None
   assert w.linear is not None
+  if quant_rule is not None:
+    return dsv3_mla.fp8_swiglu_fwd(x, w.gate_0, w.gate_1, w.linear, quant_rule)[0]
   dot = functools.partial(jnp.tensordot, axes=1)
   return dot(jax.nn.silu(dot(x, w.gate_0)) * dot(x, w.gate_1), w.linear)
+
+
+@jax.named_call
+def dsv3_shared_expert_bwd(
+    grad_out: jt.Num[jax.Array, "*BT D"],
+    x: jt.Num[jax.Array, "*BT D"],
+    w: dsv3_types.DSv3MoESharedExpertWeightsPytree,
+    *,
+    quant_rule: quantization.GmmQuantRule | None = None,
+) -> tuple[jt.Num[jax.Array, "*BT D"], dsv3_types.DSv3MoESharedExpertWeightsPytree]:
+  """Backward pass for `dsv3_shared_expert` (supports pre-quantized fp8 `w`)."""
+  if quant_rule is None:
+    _, vjp_fn = jax.vjp(dsv3_shared_expert, x, w)
+    return vjp_fn(grad_out)
+  assert w.gate_0 is not None and w.gate_1 is not None and w.linear is not None
+  _, (x_q, g0, g1) = dsv3_mla.fp8_swiglu_fwd(x, w.gate_0, w.gate_1, w.linear, quant_rule)
+  dx, dg0, dg1, dlin = dsv3_mla.fp8_swiglu_bwd(
+      grad_out,
+      x,
+      x_q,
+      g0,
+      g1,
+      w.gate_0,
+      w.gate_1,
+      w.linear,
+      quant_rule=quant_rule,
+  )
+  return dx, dsv3_types.DSv3MoESharedExpertWeightsPytree(gate_0=dg0, gate_1=dg1, linear=dlin)
 
 
 def _scale(value: float) -> jt.Float[jax.Array, "1 1"]:
@@ -391,6 +416,8 @@ def _retrieve_or_remat_gate_out(
       return gmm_fn.gate(routed, w_gate, group_sizes, bank, row, out_scale=out_scale)
 
   with jax.named_scope("retrieve_or_remat_gate_out"):
+    if bank.shape[0] <= bank_aligned(routed.shape[0]):
+      return _remat_gate_out(bank)
     return jax.lax.cond(is_overflow, _remat_gate_out, lambda b: b, bank)
 
 
