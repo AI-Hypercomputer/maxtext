@@ -320,6 +320,7 @@ def make_tgmm_configs(
 
 
 def tgmm_inner_kernel(
+    step: pltpu.PipelineStep,
     tiled_lhs_ref: jax.Array,
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
     tiled_rhs_ref: OperandRef,
@@ -331,6 +332,7 @@ def tgmm_inner_kernel(
     metadata_ref: gmm_v2.MetadataRef,
     *,
     cfgs: gmm_v2.GmmConfigs,
+    num_gm: jax.Array,
 ):
   """Inner kernel for TGMM computation.
 
@@ -339,13 +341,16 @@ def tgmm_inner_kernel(
   and accumulation across different group-major tiles.
 
   Args:
+    step: PipelineStep containing current iteration indices.
     tiled_lhs_ref: Reference to the tiled LHS data.
     tiled_rhs_ref: OperandRef bundling the tiled RHS data ('.value') and its
       optional per-N scale ('.scale', None when there is no scale).
+    tiled_ps_ref: Optional reference to the tiled partial sum buffer.
     tiled_out_ref: Reference to the tiled output buffer [None, tile_k, tile_n].
     acc_ref: Scratch memory for accumulation [tile_k, tile_n].
     metadata_ref: Contains metadata like group offsets and group IDs.
     cfgs: GmmConfigs object containing kernel configurations.
+    num_gm: Total number of group-major tiles along grid axis 2.
   """
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
@@ -358,7 +363,7 @@ def tgmm_inner_kernel(
     if _window(cfgs.tiles.tile_k, cfgs.dims.size_k):
       # Full-D0 slab block; relayout the K window k_id (grid axis 1) from VMEM.
       def load_lhs():
-        return relayout.load_3d_window_as_2d(lhs_3d_ref, tile_m, cfgs.tiles.tile_k // num_lanes, pl.program_id(1))
+        return relayout.load_3d_window_as_2d(lhs_3d_ref, tile_m, cfgs.tiles.tile_k // num_lanes, step.index[1])
 
     else:
 
@@ -378,7 +383,7 @@ def tgmm_inner_kernel(
     if _window(cfgs.tiles.tile_n, cfgs.dims.size_n):
       # Full-D0 slab block; relayout the N window n_id (grid axis 0) from VMEM.
       def load_rhs():
-        return relayout.load_3d_window_as_2d(rhs_3d_ref, tile_m, cfgs.tiles.tile_n // num_lanes, pl.program_id(0))
+        return relayout.load_3d_window_as_2d(rhs_3d_ref, tile_m, cfgs.tiles.tile_n // num_lanes, step.index[0])
 
     else:
 
@@ -393,7 +398,7 @@ def tgmm_inner_kernel(
       return tiled_rhs_ref[...]  # pyrefly: ignore[bad-index]
 
     rhs_shape = tiled_rhs_ref.shape  # pyrefly: ignore[missing-attribute]
-  gm_id = pl.program_id(2)
+  gm_id = step.index[2]
 
   def _matmul(is_new_group: bool, is_group_changing: bool):
 
@@ -456,7 +461,7 @@ def tgmm_inner_kernel(
   group_id_changed = metadata_ref.gm_id_to_group_id[gm_id] != metadata_ref.gm_id_to_group_id[prev_gm_id]
   new_group = jnp.logical_or(is_first_gm, group_id_changed)
 
-  is_last_gm = gm_id == (pl.num_programs(2) - 1)
+  is_last_gm = gm_id == (num_gm - 1)
   next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
   next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
   cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
@@ -683,10 +688,11 @@ def tgmm_kernel_main(
 
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(tgmm_inner_kernel, cfgs=cfgs),
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
+      _explicit_indices=True,
   )
   # [M, S] -> [M // sublane, sublane, S]; 3D [M, D0, 128] -> [M // sublane, sublane, D0, 128].
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, *lhs_ref.shape[1:])

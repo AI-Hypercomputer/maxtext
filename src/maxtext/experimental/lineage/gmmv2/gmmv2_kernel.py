@@ -410,10 +410,12 @@ class IndexMaps:
       self,
       metadata_ref: MetadataRef,
       cfgs: GmmConfigs,
+      num_gm: jax.Array,
       out_offset_ref: jax.Array | None = None,
   ):
     self.metadata_ref = metadata_ref
     self.cfgs = cfgs
+    self.num_gm = num_gm
     self.out_offset_ref = out_offset_ref
 
   def lhs_index_map(self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array):
@@ -473,7 +475,7 @@ class IndexMaps:
 
   def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
     """Computes block indices for the output tensor."""
-    is_last_gm = gm_id == (pl.num_programs(1) - 1)
+    is_last_gm = gm_id == (self.num_gm - 1)
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -492,7 +494,7 @@ class IndexMaps:
 
   def act_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
     """Computes block indices for the fused GLU activation output tensor."""
-    is_last_gm = gm_id == (pl.num_programs(1) - 1)
+    is_last_gm = gm_id == (self.num_gm - 1)
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -507,11 +509,12 @@ class IndexMaps:
 def generate_block_specs(
     metadata_ref: MetadataRef,
     cfgs: GmmConfigs,
+    num_gm: jax.Array,
     out_offset_ref: jax.Array | None = None,
 ) -> Tuple[Tuple[LhsRef, WeightsRef], OutRef]:
   """Generates block specs for the given lhs, rhs, and out refs."""
 
-  index_map = IndexMaps(metadata_ref, cfgs, out_offset_ref)
+  index_map = IndexMaps(metadata_ref, cfgs, num_gm, out_offset_ref)
   bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
 
   if cfgs.lhs_gather:
@@ -736,6 +739,7 @@ class GatherRefs:
 
 
 def inner_kernel(
+    step: pltpu.PipelineStep,
     # In
     tiled_lhs_ref: LhsRef,
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
@@ -749,6 +753,8 @@ def inner_kernel(
     gather_refs: GatherRefs | None = None,
     *,
     cfgs: GmmConfigs,
+    num_gm: jax.Array,
+    num_k: int,
     out_scale_ref: jax.Array | None = None,  # f32[1] in SMEM
     glu_out_scale_ref: jax.Array | None = None,  # f32[1] in SMEM
     partial_act_ref: jax.Array | None = None,  # [size_lhs_sublane, tile_n // 2]
@@ -762,6 +768,7 @@ def inner_kernel(
   invalid data and needs to be masked out.
 
   Args:
+    step: PipelineStep containing current iteration indices.
     tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
     tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
       g_id is the group associated with lhs[m_start:m_end, :]
@@ -773,6 +780,8 @@ def inner_kernel(
     gather_refs: With `cfgs.lhs_gather`, the in-kernel lhs row gather, which
       replaces `tiled_lhs_ref.value`.
     cfgs: GmmConfigs.
+    num_gm: Total number of group-major tiles along grid axis 1.
+    num_k: Total number of K tiles along grid axis 2.
     out_scale_ref: Optional per-tensor scale the accumulator is multiplied by on
       the last k step.
     glu_out_scale_ref: Optional per-tensor scale for quantizing the fused GLU
@@ -781,7 +790,7 @@ def inner_kernel(
       fused GLU activation output.
   """
 
-  gm_id = pl.program_id(1)
+  gm_id = step.index[1]
   m_start = metadata_ref.gm_id_to_m_offset[gm_id]
   m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
   m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
@@ -793,14 +802,13 @@ def inner_kernel(
   if gather_refs is not None:
     # The prologue in `kernel_main` started the rows of tile 0 and the indices
     # of tile 1. num_n == 1, so the gm tiles run in order.
-    k_id = pl.program_id(2)
+    k_id = step.index[2]
     slot = gm_id % 2
 
     @pl.when(k_id == 0)
     @jax.named_scope("lhs_gather")
     def _gather():
       gather_refs.wait_rows(m_end - m_start, slot)
-      num_gm = pl.num_programs(1)
       next_slot = 1 - slot
 
       @pl.when(gm_id + 1 < num_gm)
@@ -1115,8 +1123,7 @@ def inner_kernel(
     def matmul_last():
       _matmul(is_first_k_step=False, is_last_k_step=True, bucket_m=bucket_m)
 
-    num_k = pl.num_programs(2)
-    k_id = pl.program_id(2)
+    k_id = step.index[2]
     is_first_k_step = k_id == 0
     is_last_k_step = k_id == (num_k - 1)
 
@@ -1408,7 +1415,7 @@ def kernel_main(
         dims=cfgs.dims,
     )
 
-  (lhs_spec, rhs_spec), out_spec = generate_block_specs(metadata_ref, cfgs, out_offset_ref)
+  (lhs_spec, rhs_spec), out_spec = generate_block_specs(metadata_ref, cfgs, num_gm, out_offset_ref)
 
   if cfgs.fuse_act is not None:
     rhs_up_ref = jax.tree.map(lambda x: x.at[..., cfgs.out_size_n :], rhs_ref)
@@ -1430,6 +1437,8 @@ def kernel_main(
       functools.partial(
           inner_kernel,
           cfgs=cfgs,
+          num_gm=num_gm,
+          num_k=num_k,
           out_scale_ref=out_scale_ref,
           glu_out_scale_ref=glu_out_scale_ref,
           partial_act_ref=partial_act_ref,
@@ -1439,6 +1448,7 @@ def kernel_main(
       out_specs=out_spec,
       core_axis_name=core_axis_name,
       dimension_semantics=dimension_semantics,
+      _explicit_indices=True,
   )
 
   # Bounded slice requires second last dim to be aligned to the sublane size.
