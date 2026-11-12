@@ -1232,7 +1232,6 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   sampler = getattr(args, "_sampler", None)
   import jax
 
-  t_setup0 = time.perf_counter()
   hw = init_worker_runtime(args)
   with recorder.stage("setup_tpu_check_seconds", log_start=True) if recorder else contextlib.nullcontext():
     tpu_info = _verify_and_measure_jax_backend(args, jax)
@@ -1316,7 +1315,13 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
     ):
       multihost_utils.sync_global_devices("before_load")
   if recorder is not None:
-    recorder.record_value("setup_total_before_load_seconds", time.perf_counter() - t_setup0)
+    proc_start_s = (
+        recorder.snapshot()
+        .get("stages", {})
+        .get("setup_process_start_to_harness_code_seconds", {})
+        .get("inclusive_s", 0.0)
+    )
+    recorder.record_value("setup_total_before_load_seconds", proc_start_s + max(0.0, time.perf_counter() - _ENTER_MONO))
 
   print(f"[to_maxtext Step 3] Loading Orbax checkpoint from {orbax_items_path} ...", flush=True)
   t_load0 = time.perf_counter()
@@ -1450,7 +1455,6 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   sampler = getattr(args, "_sampler", None)
   import jax
 
-  t_setup0 = time.perf_counter()
   hw = init_worker_runtime(args)
   with recorder.stage("setup_tpu_check_seconds", log_start=True) if recorder else contextlib.nullcontext():
     tpu_info = _verify_and_measure_jax_backend(args, jax)
@@ -1518,13 +1522,14 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   else:
     base_out_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/{args.scan_mode}{slice_suffix}"
     should_clean_cache = os.environ.get("KEEP_HF_CACHE", "0") != "1"
-  if jax.process_index() == 0 and should_clean_cache:
+  if should_clean_cache or jax.process_count() > 1:
     with recorder.stage("setup_delete_old_gcs_cache_seconds", log_start=True) if recorder else contextlib.nullcontext():
-      epath.Path(f"{base_out_dir}/hf_cache").rmtree(missing_ok=True)
-  if jax.process_count() > 1:
-    from jax.experimental import multihost_utils
+      if jax.process_index() == 0 and should_clean_cache:
+        epath.Path(f"{base_out_dir}/hf_cache").rmtree(missing_ok=True)
+      if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
 
-    multihost_utils.sync_global_devices("safetensors_clean_cache_complete")
+        multihost_utils.sync_global_devices("safetensors_clean_cache_complete")
 
   concurrent_gb = get_concurrent_gb(args.model, args.scan_mode, num_slices)
   multi_slice_flags = _get_parallelism_flags(args, concurrent_gb)
@@ -1588,13 +1593,6 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   )
 
   header_info: dict[str, Any] = {}
-  if jax.process_index() == 0:
-    inspect_target = (
-        load_params_uri
-        if (load_params_uri.startswith("gs://") or os.path.isdir(load_params_uri))
-        else f"{base_out_dir}/hf_cache/{repo_id.replace('/', '_')}"
-    )
-    header_info = harness_v2.inspect_gcs_or_local_safetensors(inspect_target)
 
   if jax.process_count() > 1:
     from jax.experimental import multihost_utils
@@ -1606,7 +1604,13 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
     ):
       multihost_utils.sync_global_devices("before_load")
   if recorder is not None:
-    recorder.record_value("setup_total_before_load_seconds", time.perf_counter() - t_setup0)
+    proc_start_s = (
+        recorder.snapshot()
+        .get("stages", {})
+        .get("setup_process_start_to_harness_code_seconds", {})
+        .get("inclusive_s", 0.0)
+    )
+    recorder.record_value("setup_total_before_load_seconds", proc_start_s + max(0.0, time.perf_counter() - _ENTER_MONO))
 
   timings: dict[str, float] = {}
   slowest_param = (
@@ -3892,11 +3896,8 @@ def main() -> None:
         if res is not None:
           res["peak_host_ram_gb"] = round(self_wd["peak_ram_gb"], 2)
           res["total_host_ram_gb"] = round(self_wd.get("total_ram_gb", 251.69), 2)
-      if res is not None:
-        if args.slice_id == 0:
-          _write_result_json(args.result_json, res)
-        else:
-          time.sleep(2.0)
+      if res is not None and args.slice_id == 0:
+        _write_result_json(args.result_json, res)
       mon.unregister()
       recorder.restore_all()
       sampler.stop()
@@ -3919,6 +3920,8 @@ def main() -> None:
       stages.emit_host_stages_line(host_payload)
       sys.stdout.flush()
       sys.stderr.flush()
+      if args.slice_id != 0:
+        time.sleep(0.5)
       os._exit(worker_exit_code)  # pylint: disable=protected-access
 
   run_id = args.run_id or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
