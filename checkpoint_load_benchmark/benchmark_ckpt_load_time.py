@@ -152,6 +152,53 @@ def resolve_hardware(hw_arg: str) -> str:
   return "cpu"
 
 
+def check_tpu_backend(
+    hardware: str,
+    backend: str,
+    device_count: int,
+    expected_device_count: int,
+) -> tuple[bool, str]:
+  """Verifies that --hardware tpu initialized JAX on TPU with expected_device_count global devices."""
+  if hardware != "tpu":
+    return True, ""
+  if backend != "tpu":
+    return False, f"Expected JAX backend 'tpu' for --hardware tpu, got {backend!r} ({device_count} devices)"
+  if device_count != expected_device_count:
+    return (
+        False,
+        f"Expected {expected_device_count} TPU devices (num_slices * devices_per_slice), got {device_count}",
+    )
+  return True, ""
+
+
+def _verify_and_measure_jax_backend(args: argparse.Namespace, jax_mod: Any) -> dict[str, Any]:
+  """Runs the TPU check right after JAX init and returns measured backend/device metadata."""
+  backend = str(jax_mod.default_backend())
+  device_count = int(jax_mod.device_count())
+  local_device_count = int(jax_mod.local_device_count())
+  devices = jax_mod.devices()
+  device_kind = str(devices[0].device_kind) if devices else "unknown"
+  expected_devices = int(getattr(args, "num_slices", 1)) * int(getattr(args, "devices_per_slice", 4))
+  ok, reason = check_tpu_backend(getattr(args, "hardware", "auto"), backend, device_count, expected_devices)
+  if not ok:
+    print(
+        f"[NOT-TPU] backend={backend} device_count={device_count} expected={expected_devices}: {reason}",
+        flush=True,
+    )
+    raise RuntimeError(f"TPU check failed: {reason}")
+  print(
+      f"[TPU CHECK OK] backend={backend} device_kind={device_kind!r} "
+      f"global_devices={device_count} local_devices={local_device_count}",
+      flush=True,
+  )
+  return {
+      "jax_backend_platform": backend,
+      "tpu_device_kind": device_kind,
+      "total_tpu_devices_measured": device_count,
+      "tpu_devices_per_host_measured": local_device_count,
+  }
+
+
 def get_concurrent_gb(model_name: str, scan_mode: str = "scanned", num_slices: int = 1) -> int:
   """Returns checkpoint_storage_concurrent_gb sized to fit the largest single leaf while minimizing transient RAM."""
   if scan_mode == "unscanned":
@@ -975,6 +1022,7 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   import jax
 
   hw = init_worker_runtime(args)
+  tpu_info = _verify_and_measure_jax_backend(args, jax)
   from flax.core.spmd import logical_axis_rules
   from maxtext.common import checkpointing
   from maxtext.configs import pyconfig
@@ -1079,6 +1127,7 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
       "num_param_leaves": num_leaves,
       "num_slices": num_slices,
       "global_devices": jax.device_count(),
+      **tpu_info,
   }
 
 
@@ -1129,6 +1178,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   import jax
 
   hw = init_worker_runtime(args)
+  tpu_info = _verify_and_measure_jax_backend(args, jax)
   from flax.core.spmd import logical_axis_rules
   import jax.numpy as jnp
   import numpy as np
@@ -1587,6 +1637,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       "num_param_leaves": num_leaves,
       "num_slices": num_slices,
       "global_devices": jax.device_count(),
+      **tpu_info,
   }
 
 
@@ -2210,6 +2261,25 @@ def _write_result_json(result_json: str, data: dict[str, Any]) -> None:
     json.dump(data, f, indent=2)
 
 
+_NOT_TPU_MARKER_RE = re.compile(
+    r"\[NOT-TPU\]\s+backend=(\S+)\s+device_count=([0-9]+)\s+expected=([0-9]+):\s*(.*)"
+)
+
+
+def _parse_not_tpu_marker(log_texts: list[str]) -> dict[str, Any] | None:
+  """Returns parsed NOT-TPU details from worker logs, if the TPU verification check failed."""
+  for text in log_texts:
+    match = _NOT_TPU_MARKER_RE.search(text)
+    if match:
+      return {
+          "jax_backend_platform": match.group(1),
+          "total_tpu_devices_measured": int(match.group(2)),
+          "expected_tpu_devices": int(match.group(3)),
+          "reason": match.group(4).strip(),
+      }
+  return None
+
+
 def _persist_worker_upload_max_s(result_json: str, worker_cached_times: list[float]) -> dict[str, Any]:
   """Returns the phase result JSON, with the slowest worker upload written into it as `worker_upload_max_s`.
 
@@ -2337,6 +2407,8 @@ def invoke_worker_subprocess(
       str(num_slices if is_multislice_phase else 1),
       "--num-hosts-per-slice",
       str(num_hosts_per_slice if is_multislice_phase else 1),
+      "--devices-per-slice",
+      str(devices_per_slice),
       "--gcs-run-dir",
       gcs_run_dir,
       "--local-hf-dir",
@@ -2620,6 +2692,32 @@ def invoke_worker_subprocess(
     if not allow_step_failure:
       raise
     print(f"[STEP FAILED (continuing due to --allow-step-failure)]: {e}", flush=True)
+    log_texts: list[str] = []
+    for candidate_name in sorted(os.listdir(log_dir)):
+      if candidate_name == f"{phase}.log" or (
+          candidate_name.startswith(f"{phase}_slice") and candidate_name.endswith(".log")
+      ):
+        try:
+          with open(os.path.join(log_dir, candidate_name), "r", encoding="utf-8", errors="replace") as lf_err:
+            log_texts.append(lf_err.read())
+        except OSError:
+          pass
+    not_tpu = _parse_not_tpu_marker(log_texts)
+    if not_tpu is not None:
+      fail_data = {
+          "status": "FAILED",
+          "failure_category": "NOT-TPU",
+          "error": str(e),
+          "jax_backend_platform": not_tpu["jax_backend_platform"],
+          "total_tpu_devices_measured": not_tpu["total_tpu_devices_measured"],
+          "expected_tpu_devices": not_tpu["expected_tpu_devices"],
+          "num_slices": num_slices,
+          "num_hosts_per_slice": num_hosts_per_slice,
+          "global_devices": num_slices * devices_per_slice,
+      }
+      _write_result_json(result_json, fail_data)
+      _mirror_logs_to_gcs()
+      return fail_data
     parsed_step1_s = 0.0
     if os.path.exists(log_file):
       with open(log_file, "r", encoding="utf-8", errors="replace") as lf_err:
@@ -3183,30 +3281,34 @@ def main() -> None:
         s_res_by_key[(scan_mode, num_slices)] = s_res
 
         if s_res.get("worker_upload_max_s", 0.0) > 0.0:
-          cold_st_step1_s = s_res["hf_to_gcs_s"]
+          cold_st_step1_s = s_res.get("hf_to_gcs_s", 0.0)
           cold_st_worker_s = s_res.get("worker_upload_max_s", 0.0)
-          st_step1_s = s_res["hf_to_gcs_s"]
+          st_step1_s = s_res.get("hf_to_gcs_s", 0.0)
           st_worker_s = cold_st_worker_s
           st_warm_cache_s = 0.0
-        elif cold_st_step1_s is None and m_step1.get("hf_to_gcs_s", 0.0) > s_res["hf_to_gcs_s"]:
-          cold_st_step1_s = m_step1["hf_to_gcs_s"]
+        elif cold_st_step1_s is None and m_step1.get("hf_to_gcs_s", 0.0) > s_res.get("hf_to_gcs_s", 0.0):
+          cold_st_step1_s = m_step1.get("hf_to_gcs_s", 0.0)
           cold_st_worker_s = m_step1.get("worker_upload_max_s", 0.0)
           st_step1_s = cold_st_step1_s
           st_worker_s = cold_st_worker_s
-          st_warm_cache_s = s_res["hf_to_gcs_s"]
+          st_warm_cache_s = s_res.get("hf_to_gcs_s", 0.0)
         elif cold_st_step1_s is None:
-          cold_st_step1_s = s_res["hf_to_gcs_s"]
+          cold_st_step1_s = s_res.get("hf_to_gcs_s", 0.0)
           cold_st_worker_s = s_res.get("worker_upload_max_s", 0.0)
-          st_step1_s = s_res["hf_to_gcs_s"]
+          st_step1_s = s_res.get("hf_to_gcs_s", 0.0)
           st_worker_s = cold_st_worker_s
           st_warm_cache_s = 0.0
         else:
           st_step1_s = cold_st_step1_s
           st_worker_s = cold_st_worker_s
-          st_warm_cache_s = s_res["hf_to_gcs_s"]
+          st_warm_cache_s = s_res.get("hf_to_gcs_s", 0.0)
 
-        to_maxtext_total_s = m_step1["hf_to_gcs_s"] + m_step2["convert_to_orbax_s"] + m_step3["load_orbax_s"]
-        safetensor_total_s = st_step1_s + s_res["safetensors_and_convert_s"]
+        to_maxtext_total_s = (
+            m_step1.get("hf_to_gcs_s", 0.0)
+            + m_step2.get("convert_to_orbax_s", 0.0)
+            + m_step3.get("load_orbax_s", 0.0)
+        )
+        safetensor_total_s = st_step1_s + s_res.get("safetensors_and_convert_s", 0.0)
 
         row = {
             "model": model,
@@ -3214,26 +3316,26 @@ def main() -> None:
             "num_slices": num_slices,
             "num_hosts_per_slice": args.num_hosts_per_slice,
             "global_devices": s_res.get("global_devices", m_step3.get("global_devices", 1)),
-            "to_maxtext_1_hf_to_gcs_s": m_step1["hf_to_gcs_s"],
+            "to_maxtext_1_hf_to_gcs_s": m_step1.get("hf_to_gcs_s", 0.0),
             "to_maxtext_1_worker_upload_s": m_step1.get("worker_upload_max_s", 0.0),
-            "to_maxtext_1b_hf_to_local_s": m_step1["hf_to_local_s"],
-            "to_maxtext_2_convert_to_orbax_s": m_step2["convert_to_orbax_s"],
+            "to_maxtext_1b_hf_to_local_s": m_step1.get("hf_to_local_s", 0.0),
+            "to_maxtext_2_convert_to_orbax_s": m_step2.get("convert_to_orbax_s", 0.0),
             "to_maxtext_2a_init_abstract_model_s": m_step2.get("init_abstract_model_s", 0.0),
             "to_maxtext_2b_transform_and_shard_s": m_step2.get("transform_and_shard_s", 0.0),
             "to_maxtext_2c_orbax_save_to_gcs_s": m_step2.get("orbax_save_to_gcs_s", 0.0),
-            "to_maxtext_3_load_orbax_s": m_step3["load_orbax_s"],
+            "to_maxtext_3_load_orbax_s": m_step3.get("load_orbax_s", 0.0),
             "to_maxtext_total_s": to_maxtext_total_s,
             "safetensor_1_hf_to_gcs_s": st_step1_s,
             "safetensor_1_worker_upload_s": st_worker_s,
             "safetensor_1_warm_cache_s": st_warm_cache_s,
-            "safetensor_2_safetensors_and_convert_s": s_res["safetensors_and_convert_s"],
+            "safetensor_2_safetensors_and_convert_s": s_res.get("safetensors_and_convert_s", 0.0),
             "safetensor_2a_derive_mappings_s": s_res.get("derive_mappings_s", 0.0),
             "safetensor_2b_load_sharded_hf_s": s_res.get("load_sharded_hf_s", 0.0),
             "safetensor_2c_transform_hf_to_mt_s": s_res.get("transform_hf_to_mt_s", 0.0),
             "safetensor_total_s": safetensor_total_s,
             "speedup_total_vs_to_maxtext_x": (to_maxtext_total_s / safetensor_total_s if safetensor_total_s > 0 else 0.0),
             "load_time_diff_safetensor_step2_vs_orbax_step3_s": (
-                s_res["safetensors_and_convert_s"] - m_step3["load_orbax_s"]
+                s_res.get("safetensors_and_convert_s", 0.0) - m_step3.get("load_orbax_s", 0.0)
             ),
         }
         rows_by_key[(scan_mode, num_slices)] = row
