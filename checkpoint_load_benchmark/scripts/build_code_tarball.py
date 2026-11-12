@@ -16,7 +16,8 @@
 
 Every experiment must run exactly one committed version of this branch, so the tarball comes from `git archive` of
 HEAD, never from the working tree, and the builder refuses to build when:
-  * tracked files have uncommitted changes (untracked files are ignored, and never included), or
+  * tracked files have uncommitted changes (untracked files are ignored, and never included),
+  * HEAD is detached, or
   * HEAD is not in `origin/<current branch>` after `git fetch origin <branch>` (--no-fetch skips the fetch).
     --allow-unpushed builds anyway and records `git_commit_pushed: false`, for local dry runs only.
 
@@ -26,9 +27,10 @@ It writes to --out:
     commit it was built from, which the harness records in every phase result.
   * maxtext_lance_prs.tar.gz.sha256 and CODE_VERSION.json.
 
---upload GCS_CODE_DIR then copies GCS_CODE_DIR/maxtext_lance_prs.tar.gz (if any) to
-GCS_CODE_DIR/archive/maxtext_lance_prs.<UTC timestamp>.tar.gz, uploads these 3 files, and uploads bootstrap_tpu7x.py
-and tpu7x_task_queue.py as committed at HEAD.
+--upload GCS_CODE_DIR (a gs:// directory; not with --allow-unpushed) then copies GCS_CODE_DIR/maxtext_lance_prs.tar.gz
+(if any) to GCS_CODE_DIR/archive/maxtext_lance_prs.<UTC timestamp>.tar.gz, uploads these 3 files, and uploads
+bootstrap_tpu7x.py and tpu7x_task_queue.py as committed at HEAD. If gcloud cannot tell whether there is a tarball to
+archive, nothing is uploaded.
 
 Usage:
   python3 checkpoint_load_benchmark/scripts/build_code_tarball.py --out /tmp/code_tarball
@@ -54,15 +56,20 @@ TARBALL_NAME = f"{TARBALL_STEM}.tar.gz"
 TARBALL_PATHS = ("src/", "checkpoint_load_benchmark/", "pyproject.toml", "README.md")
 # The pods also download these from the code directory, so --upload uploads them next to the tarball.
 HEAD_FILES = ("checkpoint_load_benchmark/bootstrap_tpu7x.py", "checkpoint_load_benchmark/scripts/tpu7x_task_queue.py")
+# What `gcloud storage ls` says when no object matches its URL (its other failures are errors).
+GCLOUD_LS_NOT_FOUND = "matched no objects"
 
 
 class BuildError(Exception):
   """A reason not to build or not to upload the tarball."""
 
 
-def run_gcloud_storage(args: list[str]) -> int:
-  """Runs `gcloud storage <args>` and returns its exit code. Every gcloud call of this script goes through here."""
-  return subprocess.run(["gcloud", "storage", *args], check=False).returncode
+def run_gcloud_storage(args: list[str], capture_output: bool = False) -> subprocess.CompletedProcess:
+  """Runs `gcloud storage <args>`, capturing its output as text if asked to.
+
+  Every gcloud call of this script goes through here.
+  """
+  return subprocess.run(["gcloud", "storage", *args], capture_output=capture_output, text=True, check=False)
 
 
 def _git_output(repo: str, *args: str) -> bytes:
@@ -81,14 +88,26 @@ def _utc(timestamp: float) -> str:
   return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _is_pushed(repo: str, branch: str, commit: str, fetch: bool) -> bool:
-  """Returns whether `commit` is in origin/<branch>, after fetching that branch unless `fetch` is false."""
+def _check_pushed(repo: str, branch: str, commit: str, fetch: bool, allow_unpushed: bool) -> bool:
+  """Returns whether `commit` is in origin/<branch>, after fetching that branch unless `fetch` is false.
+
+  Raises BuildError if it is not, or if the fetch fails, unless `allow_unpushed`.
+  """
   if fetch:
     fetched = subprocess.run(
         ["git", "fetch", "--quiet", "origin", branch], cwd=repo, capture_output=True, text=True, check=False
     )
     if fetched.returncode:
-      print(f"warning: `git fetch origin {branch}` failed: {fetched.stderr.strip()}", file=sys.stderr)
+      problem = (
+          f"cannot check that HEAD ({commit}) is in origin/{branch}: "
+          f"`git fetch origin {branch}` failed: {fetched.stderr.strip()}"
+      )
+      if not allow_unpushed:
+        raise BuildError(
+            f"{problem}\nIf the branch is pushed, pass --no-fetch to check the local origin/{branch}; otherwise push it"
+            " first, or pass --allow-unpushed for a local dry run"
+        )
+      print(f"warning: {problem}", file=sys.stderr)
       return False
   is_ancestor = subprocess.run(
       ["git", "merge-base", "--is-ancestor", commit, f"refs/remotes/origin/{branch}"],
@@ -96,6 +115,10 @@ def _is_pushed(repo: str, branch: str, commit: str, fetch: bool) -> bool:
       capture_output=True,
       check=False,
   )
+  if is_ancestor.returncode and not allow_unpushed:
+    raise BuildError(
+        f"HEAD ({commit}) is not in origin/{branch}: push it first, or pass --allow-unpushed for a local dry run"
+    )
   return is_ancestor.returncode == 0
 
 
@@ -108,11 +131,7 @@ def build(repo: str, out_dir: str, fetch: bool = True, allow_unpushed: bool = Fa
   if not branch:
     raise BuildError("HEAD is detached: check out the branch to build")
   commit = _git(repo, "rev-parse", "HEAD")
-  pushed = _is_pushed(repo, branch, commit, fetch)
-  if not pushed and not allow_unpushed:
-    raise BuildError(
-        f"HEAD ({commit}) is not in origin/{branch}: push it first, or pass --allow-unpushed for a local dry run"
-    )
+  pushed = _check_pushed(repo, branch, commit, fetch, allow_unpushed)
   commit_time = int(_git(repo, "show", "--no-patch", "--format=%ct", commit))
   code_version = {
       "git_branch_name": branch,
@@ -157,24 +176,36 @@ def upload(repo: str, out_dir: str, gcs_code_dir: str, commit: str) -> None:
   """Uploads the build in `out_dir` to `gcs_code_dir`, after copying the tarball it replaces to `archive/`.
 
   The HEAD_FILES are uploaded as committed at `commit` (HEAD), never from the working tree. Every local file is written
-  before the first upload, and the uploads stop at the first failed copy.
+  before the first upload. Nothing is uploaded if gcloud cannot tell whether there is a tarball to archive, and the
+  uploads stop at the first failed copy.
   """
   for path in HEAD_FILES:
     with open(os.path.join(out_dir, os.path.basename(path)), "wb") as f:
       f.write(_git_output(repo, "show", f"{commit}:{path}"))
   copies = []  # (source, destination) of each `gcloud storage cp`, in order.
   remote_tarball = f"{gcs_code_dir}/{TARBALL_NAME}"
-  if run_gcloud_storage(["ls", remote_tarball]) == 0:
+  listed = run_gcloud_storage(["ls", remote_tarball], capture_output=True)
+  if listed.returncode == 0:
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     copies.append((remote_tarball, f"{gcs_code_dir}/archive/{TARBALL_STEM}.{timestamp}.tar.gz"))
-  else:
+  elif GCLOUD_LS_NOT_FOUND in listed.stderr:
     print(f"No {remote_tarball} to archive")
+  else:  # Uploading anyway could replace the tarball without archiving it.
+    raise BuildError(f"cannot tell whether there is a {remote_tarball} to archive: {listed.stderr.strip()}")
   for name in (TARBALL_NAME, f"{TARBALL_NAME}.sha256", "CODE_VERSION.json", *map(os.path.basename, HEAD_FILES)):
     copies.append((os.path.join(out_dir, name), f"{gcs_code_dir}/{name}"))
   for source, destination in copies:
-    if run_gcloud_storage(["cp", source, destination]) != 0:
+    if run_gcloud_storage(["cp", source, destination]).returncode != 0:
       raise BuildError(f"`gcloud storage cp {source} {destination}` failed")
   print(f"Uploaded the build of {commit} to {gcs_code_dir}")
+
+
+def _gcs_code_dir(value: str) -> str:
+  """Returns the --upload directory without trailing slashes, which would put `//` in every object name."""
+  code_dir = value.rstrip("/")
+  if not code_dir.startswith("gs://"):
+    raise argparse.ArgumentTypeError(f"not a gs:// directory: {value!r}")
+  return code_dir
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,8 +217,12 @@ def main(argv: list[str] | None = None) -> int:
       action="store_true",
       help="Build even if HEAD is not in origin/<branch>, recording git_commit_pushed: false (local dry runs only)",
   )
-  p.add_argument("--upload", metavar="GCS_CODE_DIR", help="Upload the build to this code directory (see above)")
+  p.add_argument(
+      "--upload", metavar="GCS_CODE_DIR", type=_gcs_code_dir, help="Upload the build to this code directory (see above)"
+  )
   args = p.parse_args(argv)
+  if args.upload and args.allow_unpushed:
+    p.error("--allow-unpushed is for local dry runs; it cannot be combined with --upload")
   try:
     # The repository that this script is in, whatever the working directory.
     repo = _git(os.path.dirname(os.path.realpath(__file__)), "rev-parse", "--show-toplevel")

@@ -54,11 +54,16 @@ TARBALL_FILES = {
 }
 # Committed files outside the tarball paths.
 OTHER_FILES = {"tests/unit/decoders_test.py": "DECODERS_TEST = 'committed'\n", "docs/guide.md": "# Guide\n"}
+# Keeps the git config of the machine (system hooks, global commit signing or hooks path) out of the test repositories.
+ISOLATED_GIT_CONFIG = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+# What `gcloud storage ls` prints when no object matches its URL, and what it prints for an error.
+LS_NOT_FOUND = "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.\n"
+LS_FORBIDDEN = "ERROR: (gcloud.storage.ls) HTTPError 403: test@example.com does not have storage.objects.list access.\n"
 
 
 def _git(repo: str, *args: str) -> str:
   """Runs git in `repo` as a test user, with COMMIT_DATE as the commit date, and returns its output."""
-  env = {**os.environ, "GIT_AUTHOR_DATE": COMMIT_DATE, "GIT_COMMITTER_DATE": COMMIT_DATE}
+  env = {**os.environ, **ISOLATED_GIT_CONFIG, "GIT_AUTHOR_DATE": COMMIT_DATE, "GIT_COMMITTER_DATE": COMMIT_DATE}
   cmd = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *args]
   return subprocess.run(cmd, cwd=repo, env=env, check=True, capture_output=True, text=True).stdout.strip()
 
@@ -74,6 +79,10 @@ class BuildCodeTarballTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # The git commands of the builder, and of its CLI subprocess, inherit the isolated config too.
+    env_patcher = mock.patch.dict(os.environ, ISOLATED_GIT_CONFIG)
+    env_patcher.start()
+    self.addCleanup(env_patcher.stop)
     tmp_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, tmp_dir)
     self.repo = os.path.join(tmp_dir, "repo")
@@ -96,27 +105,35 @@ class BuildCodeTarballTest(unittest.TestCase):
     # No test runs gcloud: the fake records every `gcloud storage` call and the content of each local file it copies.
     self.gcloud_calls: list[list[str]] = []
     self.uploaded: dict[str, bytes] = {}
-    self.remote_tarball_exists = True
+    self.ls_returncode, self.ls_stderr = 0, ""  # The remote tarball exists.
     self.failing_destination = None
     patcher = mock.patch.object(self.builder, "run_gcloud_storage", self._fake_gcloud_storage)
     patcher.start()
     self.addCleanup(patcher.stop)
 
-  def _fake_gcloud_storage(self, args: list[str]) -> int:
+  def _fake_gcloud_storage(self, args: list[str], capture_output: bool = False) -> subprocess.CompletedProcess:
+    """Records a `gcloud storage` call and returns its result: `ls` as the test sets it, `cp` fails only for one URL."""
     self.gcloud_calls.append(list(args))
     if args[0] == "ls":
-      return 0 if self.remote_tarball_exists else 1
-    source, destination = args[1:]
-    if not source.startswith("gs://"):
-      with open(source, "rb") as f:
-        self.uploaded[destination] = f.read()
-    return 1 if destination == self.failing_destination else 0
+      returncode, stdout, stderr = self.ls_returncode, "" if self.ls_returncode else f"{args[1]}\n", self.ls_stderr
+    else:
+      source, destination = args[1:]
+      if not source.startswith("gs://"):
+        with open(source, "rb") as f:
+          self.uploaded[destination] = f.read()
+      returncode, stdout, stderr = int(destination == self.failing_destination), "", ""
+    if not capture_output:  # Like subprocess.run, which captures nothing unless asked to.
+      stdout = stderr = None
+    return subprocess.CompletedProcess(["gcloud", "storage", *args], returncode, stdout, stderr)
 
   def _main(self, *args: str) -> tuple[int, str, str]:
     """Runs `build_code_tarball.py --out <out> <args>` and returns its exit code, stdout and stderr."""
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-      exit_code = self.builder.main(["--out", self.out, *args])
+      try:
+        exit_code = self.builder.main(["--out", self.out, *args])
+      except SystemExit as e:  # argparse rejects invalid arguments.
+        exit_code = e.code
     return exit_code, stdout.getvalue(), stderr.getvalue()
 
   def _commit_locally(self) -> None:
@@ -182,7 +199,18 @@ class BuildCodeTarballTest(unittest.TestCase):
     _git(self.repo, "checkout", "--quiet", "-b", "bench/never-pushed")
     exit_code, _, stderr = self._main()
     self.assertNotEqual(exit_code, 0)
-    self.assertIn("not in origin/bench/never-pushed", stderr)
+    # The fetch failed, so the error must not claim that HEAD is unpushed, and must offer --no-fetch.
+    self.assertIn("`git fetch origin bench/never-pushed` failed", stderr)
+    self.assertIn("--no-fetch", stderr)
+    self.assertNotIn("is not in origin", stderr)
+
+  def test_allow_unpushed_builds_after_a_failed_fetch_and_records_the_commit_as_not_pushed(self):
+    _git(self.repo, "checkout", "--quiet", "-b", "bench/never-pushed")
+    exit_code, _, stderr = self._main("--allow-unpushed")
+    self.assertEqual(exit_code, 0, stderr)
+    self.assertIn("warning: ", stderr)
+    self.assertIn("`git fetch origin bench/never-pushed` failed", stderr)
+    self.assertIs(self._code_version()["git_commit_pushed"], False)
 
   def test_refuses_a_detached_head(self):
     _git(self.repo, "checkout", "--quiet", "--detach")
@@ -268,11 +296,41 @@ class BuildCodeTarballTest(unittest.TestCase):
     self.assertEqual(self.uploaded[f"{GCS_CODE_DIR}/tpu7x_task_queue.py"], b"QUEUE = 'committed'\n")
 
   def test_upload_archives_nothing_without_a_remote_tarball(self):
-    self.remote_tarball_exists = False
+    self.ls_returncode, self.ls_stderr = 1, LS_NOT_FOUND
     exit_code, _, stderr = self._main("--upload", GCS_CODE_DIR)
     self.assertEqual(exit_code, 0, stderr)
     uploaded_names = (TARBALL, f"{TARBALL}.sha256", "CODE_VERSION.json", "bootstrap_tpu7x.py", "tpu7x_task_queue.py")
     self.assertEqual([call[-1] for call in self.gcloud_calls[1:]], [f"{GCS_CODE_DIR}/{name}" for name in uploaded_names])
+
+  def test_upload_stops_when_gcloud_cannot_tell_whether_there_is_a_remote_tarball(self):
+    self.ls_returncode, self.ls_stderr = 1, LS_FORBIDDEN
+    exit_code, _, stderr = self._main("--upload", GCS_CODE_DIR)
+    self.assertNotEqual(exit_code, 0)
+    self.assertIn("HTTPError 403", stderr)
+    self.assertEqual(self.gcloud_calls, [["ls", f"{GCS_CODE_DIR}/{TARBALL}"]])
+
+  def test_upload_strips_the_trailing_slash_of_the_code_dir(self):
+    exit_code, _, stderr = self._main("--upload", f"{GCS_CODE_DIR}/")
+    self.assertEqual(exit_code, 0, stderr)
+    gcs_urls = [arg for call in self.gcloud_calls for arg in call[1:] if arg.startswith("gs://")]
+    self.assertEqual(len(gcs_urls), 8)  # ls, then the archive copy (2 URLs) and the 5 uploads
+    for url in gcs_urls:
+      self.assertNotIn("//", url.removeprefix("gs://"))
+    self.assertIn(["cp", self.tarball, f"{GCS_CODE_DIR}/{TARBALL}"], self.gcloud_calls)
+
+  def test_upload_rejects_a_code_dir_that_is_not_on_gcs(self):
+    exit_code, _, stderr = self._main("--upload", "test-bucket/code")
+    self.assertEqual(exit_code, 2)
+    self.assertIn("gs://", stderr)
+    self.assertEqual(self.gcloud_calls, [])
+    self.assertFalse(os.path.exists(self.tarball))
+
+  def test_upload_cannot_be_combined_with_allow_unpushed(self):
+    exit_code, _, stderr = self._main("--allow-unpushed", "--upload", GCS_CODE_DIR)
+    self.assertEqual(exit_code, 2)
+    self.assertIn("--allow-unpushed is for local dry runs", stderr)
+    self.assertEqual(self.gcloud_calls, [])
+    self.assertFalse(os.path.exists(self.tarball))
 
   def test_upload_stops_at_the_first_failed_copy(self):
     self.failing_destination = f"{GCS_CODE_DIR}/{TARBALL}"
