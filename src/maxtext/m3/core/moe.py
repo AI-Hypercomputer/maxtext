@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared routed-expert execution, load-balancing statistics, and overlap hooks.
+"""Shared routed-expert execution, router replay, load-balancing stats, and overlap hooks.
 
 Model modules own router score computation (softmax, sigmoid, group-limited
 top-k, routing bias, shared experts) and pass selected `(weights, indices)` to
@@ -23,6 +23,12 @@ a frozen `MoEExecutor` resolved from `(config, sharding)` at construction:
     out = self.executor(x, weights, indices, wi_0, wi_1, wo)
     # or for fused (E, D, 2*M) / (E, D, 2, M) gate_up projections:
     out = self.executor.fused(x, weights, indices, gate_up_proj, down_proj)
+
+For RL router replay and teacher-forced routing verification, optional
+`forced_routed_experts` (integer shape `[..., num_experts_per_tok]`, where
+`UNSET_ROUTED_EXPERT = -1` marks a padded/inactive slot) can be passed to
+`route_top_k`, `apply_forced_routed_experts`, `MoEExecutor`, `routed_experts`,
+or `routed_experts_fused`.
 
 Resolving `PartitionSpec` axes from `Sharding` at construction avoids reading
 `jax.typeof(x).sharding` at trace time, which reports replicated `P(None, ...)`
@@ -50,6 +56,9 @@ from maxtext.m3.core.sharding import DefaultSharding, MeshAxes, Sharding, Tensor
 
 ExecutorKind = Literal["dense", "ragged_dot", "gmm_v2", "tokamax"]
 SHARDED_EXECUTOR_KINDS: tuple[str, ...] = ("gmm_v2", "tokamax")
+RouterScoring = Literal["softmax", "topk_softmax", "sigmoid"]
+
+UNSET_ROUTED_EXPERT = -1
 
 _COMBINE_DTYPE = jnp.float32
 _TOKAMAX_M_ALIGN = 256
@@ -59,6 +68,244 @@ _TOKAMAX_KN_ALIGN = 128
 def _align_up(value: int, multiple: int) -> int:
   """Rounds `value` up to a positive multiple of `multiple`."""
   return max(multiple, ((int(value) + multiple - 1) // multiple) * multiple)
+
+
+# ==============================================================================
+# Router replay & forced_routed_experts helpers
+# ==============================================================================
+
+
+def valid_expert_mask(indices: jax.Array, num_experts: int) -> jax.Array:
+  """Returns boolean mask where expert IDs are active (`0 <= id < num_experts`)."""
+  return (indices >= 0) & (indices < int(num_experts))
+
+
+def _validate_forced_routed_experts(
+    forced_routed_experts: jax.Array,
+    token_prefix: tuple[int, ...],
+    top_k: int,
+    num_experts: int,
+) -> None:
+  """Validates `forced_routed_experts` shape, integer dtype, and eager concrete ID range.
+
+  Concrete (untraced) arrays with entries outside `[-1, num_experts)` raise
+  `ValueError`; traced `jax.jit` arrays skip host value inspection and mask
+  out-of-range entries to `-1` (`0.0` weight) via `valid_expert_mask`.
+  """
+  if num_experts < 1:
+    raise ValueError(f"num_experts must be >= 1; got {num_experts}.")
+  if top_k < 1:
+    raise ValueError(f"top_k (num_experts_per_tok) must be >= 1; got {top_k}.")
+  expected_shape = (*token_prefix, int(top_k))
+  if forced_routed_experts.ndim != len(expected_shape) or tuple(forced_routed_experts.shape) != expected_shape:
+    raise ValueError(
+        f"forced_routed_experts shape {forced_routed_experts.shape} must match "
+        f"(*token_prefix, num_experts_per_tok)={expected_shape}."
+    )
+  if jnp.issubdtype(forced_routed_experts.dtype, jnp.bool_) or not jnp.issubdtype(
+      forced_routed_experts.dtype, jnp.integer
+  ):
+    raise ValueError(f"forced_routed_experts must have an integer dtype (not bool); got {forced_routed_experts.dtype}.")
+  if hasattr(forced_routed_experts, "min"):
+    try:
+      if forced_routed_experts.size > 0:
+        min_id = int(forced_routed_experts.min())
+        max_id = int(forced_routed_experts.max())
+        if min_id < UNSET_ROUTED_EXPERT or max_id >= int(num_experts):
+          raise ValueError(
+              f"forced_routed_experts entries must be in [-1, {num_experts}); got min={min_id}, max={max_id}."
+          )
+    except (jax.errors.ConcretizationTypeError, TypeError):
+      pass
+
+
+def apply_forced_routed_experts(
+    scores: jax.Array,
+    forced_routed_experts: jax.Array,
+    *,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    scores_are_logits: bool = False,
+    eps: float = 0.0,
+    dtype: Any | None = None,
+) -> tuple[jax.Array, jax.Array]:
+  """Gathers and normalizes routing weights at `forced_routed_experts` indices.
+
+  Args:
+    scores: Full router probabilities or pre-softmax router logits of shape
+      `[*token_prefix, num_experts]`.
+    forced_routed_experts: Integer tensor of shape
+      `[*token_prefix, num_experts_per_tok]` where `-1` (`UNSET_ROUTED_EXPERT`)
+      denotes a padded/inactive expert slot.
+    norm_topk_prob: Whether to normalize active slot weights by their sum.
+    routed_scaling_factor: Multiplicative scaling factor applied after normalization.
+    scores_are_logits: If True, applies masked `softmax` over gathered top-k
+      logits (excluding `-1` padded slots from the softmax denominator).
+    eps: Optional additive epsilon in the normalization denominator.
+    dtype: Output dtype for `routing_weights` (defaults to `scores.dtype`).
+
+  Returns:
+    Tuple `(routing_weights, effective_indices)` of shape
+    `[*token_prefix, num_experts_per_tok]`, where inactive slots have weight
+    `0.0` and index `-1` (concrete out-of-range IDs outside `[-1, num_experts)`
+    raise `ValueError`, whereas traced `jax.jit` arrays mask them to `-1` with
+    `0.0` weight).
+  """
+  if scores.ndim < 2:
+    raise ValueError(f"Expected scores with rank >= 2 ([..., num_experts]); got shape {scores.shape}.")
+  num_experts = int(scores.shape[-1])
+  token_prefix = tuple(scores.shape[:-1])
+  if forced_routed_experts.ndim != scores.ndim:
+    raise ValueError(
+        f"forced_routed_experts rank ({forced_routed_experts.ndim}, shape={forced_routed_experts.shape}) "
+        f"must match scores rank ({scores.ndim}, shape={scores.shape})."
+    )
+  top_k = int(forced_routed_experts.shape[-1])
+  _validate_forced_routed_experts(forced_routed_experts, token_prefix, top_k, num_experts)
+
+  forced_idx = forced_routed_experts.astype(jnp.int32)
+  valid_mask = valid_expert_mask(forced_idx, num_experts)
+  gather_idx = jnp.where(valid_mask, jnp.maximum(forced_idx, 0), 0)
+  scores_f32 = scores.astype(jnp.float32)
+
+  if scores_are_logits:
+    gathered_logits = jnp.take_along_axis(scores_f32, gather_idx, axis=-1)
+    neg_inf = jnp.asarray(jnp.finfo(jnp.float32).min / 2.0, dtype=jnp.float32)
+    masked_logits = jnp.where(valid_mask, gathered_logits, neg_inf)
+    weights = jax.nn.softmax(masked_logits, axis=-1)
+    weights = jnp.where(valid_mask, weights, jnp.zeros_like(weights))
+  else:
+    gathered_probs = jnp.take_along_axis(scores_f32, gather_idx, axis=-1)
+    weights = jnp.where(valid_mask, gathered_probs, jnp.zeros_like(gathered_probs))
+
+  if norm_topk_prob:
+    denom = jnp.sum(weights, axis=-1, keepdims=True)
+    denom_with_eps = denom + jnp.asarray(eps, dtype=denom.dtype) if eps > 0.0 else denom
+    safe_denom = jnp.where(denom > 0, denom_with_eps, jnp.ones_like(denom))
+    weights = weights / safe_denom
+
+  if routed_scaling_factor != 1.0:
+    weights = weights * jnp.asarray(routed_scaling_factor, dtype=weights.dtype)
+
+  out_dtype = scores.dtype if dtype is None else dtype
+  eff_indices = jnp.where(valid_mask, forced_idx, UNSET_ROUTED_EXPERT)
+  return weights.astype(out_dtype), eff_indices
+
+
+def route_top_k(
+    router_logits: jax.Array,
+    top_k: int,
+    *,
+    scoring: RouterScoring = "softmax",
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: jax.Array | None = None,
+    num_group: int = 1,
+    topk_group: int = 1,
+    eps: float = 0.0,
+    forced_routed_experts: jax.Array | None = None,
+    dtype: Any | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Computes `(routing_weights, router_indices, router_probs)` with optional router replay.
+
+  Supports `"softmax"` (post-softmax top-k, e.g. Qwen3.8 / Gemma4),
+  `"topk_softmax"` (pre-softmax top-k, e.g. GraniteMoE / Mixtral), and
+  `"sigmoid"` (sigmoid with optional `e_score_correction_bias` and group-limited
+  top-k, e.g. GLM-5 / DeepSeek-V4).
+  """
+  if router_logits.ndim < 2:
+    raise ValueError(f"Expected router_logits with rank >= 2 ([..., num_experts]); got {router_logits.shape}.")
+  num_experts = int(router_logits.shape[-1])
+  if top_k < 1 or top_k > num_experts:
+    raise ValueError(f"top_k ({top_k}) must be in [1, num_experts ({num_experts})].")
+  if forced_routed_experts is not None:
+    _validate_forced_routed_experts(
+        forced_routed_experts,
+        tuple(router_logits.shape[:-1]),
+        top_k,
+        num_experts,
+    )
+
+  out_dtype = router_logits.dtype if dtype is None else dtype
+  logits_f32 = router_logits.astype(jnp.float32)
+
+  if scoring == "softmax":
+    router_probs = jax.nn.softmax(logits_f32, axis=-1)
+    if forced_routed_experts is not None:
+      weights, indices = apply_forced_routed_experts(
+          router_probs,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=False,
+          eps=eps,
+          dtype=out_dtype,
+      )
+      return weights, indices, router_probs
+    top_vals, top_idx = jax.lax.top_k(router_probs, top_k)
+  elif scoring == "topk_softmax":
+    router_probs = jax.nn.softmax(logits_f32, axis=-1)
+    if forced_routed_experts is not None:
+      weights, indices = apply_forced_routed_experts(
+          logits_f32,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=True,
+          eps=eps,
+          dtype=out_dtype,
+      )
+      return weights, indices, router_probs
+    top_logits, top_idx = jax.lax.top_k(logits_f32, top_k)
+    top_vals = jax.nn.softmax(top_logits, axis=-1)
+  elif scoring == "sigmoid":
+    router_probs = jax.nn.sigmoid(logits_f32)
+    if forced_routed_experts is not None:
+      weights, indices = apply_forced_routed_experts(
+          router_probs,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=False,
+          eps=eps,
+          dtype=out_dtype,
+      )
+      return weights, indices, router_probs
+    if e_score_correction_bias is not None:
+      scores_for_choice = jax.lax.stop_gradient(router_probs + e_score_correction_bias.astype(jnp.float32))
+    else:
+      scores_for_choice = router_probs
+    if num_group > 1:
+      if num_experts % num_group != 0:
+        raise ValueError(f"num_experts ({num_experts}) must be divisible by num_group ({num_group}).")
+      if topk_group < 1 or topk_group > num_group:
+        raise ValueError(f"topk_group ({topk_group}) must be in [1, num_group ({num_group})].")
+      exp_per_group = num_experts // num_group
+      prefix_shape = scores_for_choice.shape[:-1]
+      grouped = jnp.reshape(scores_for_choice, (*prefix_shape, num_group, exp_per_group))
+      group_k = min(2, exp_per_group) if e_score_correction_bias is not None else 1
+      group_scores = jnp.sum(jax.lax.top_k(grouped, group_k)[0], axis=-1)
+      _, group_idx = jax.lax.top_k(group_scores, topk_group)
+      g_arange = jnp.arange(num_group, dtype=jnp.int32)
+      bcast_shape = (1,) * len(prefix_shape) + (num_group, 1)
+      group_mask = jnp.any(jnp.reshape(g_arange, bcast_shape) == group_idx[..., None, :], axis=-1)
+      score_mask = jnp.repeat(group_mask, exp_per_group, axis=-1)
+      masked_scores = jnp.where(score_mask, scores_for_choice, jnp.finfo(jnp.float32).min)
+    else:
+      masked_scores = scores_for_choice
+    _, top_idx = jax.lax.top_k(masked_scores, top_k)
+    top_vals = jnp.take_along_axis(router_probs, top_idx, axis=-1)
+  else:
+    raise ValueError(f"Unknown router scoring mode {scoring!r}; expected 'softmax', 'topk_softmax', or 'sigmoid'.")
+
+  if norm_topk_prob:
+    denom = jnp.sum(top_vals, axis=-1, keepdims=True)
+    denom_with_eps = denom + jnp.asarray(eps, dtype=denom.dtype) if eps > 0.0 else denom
+    safe_denom = jnp.where(denom > 0, denom_with_eps, jnp.ones_like(denom))
+    top_vals = top_vals / safe_denom
+  if routed_scaling_factor != 1.0:
+    top_vals = top_vals * jnp.asarray(routed_scaling_factor, dtype=top_vals.dtype)
+  return top_vals.astype(out_dtype), top_idx.astype(jnp.int32), router_probs
 
 
 # ==============================================================================
@@ -399,13 +646,19 @@ class MoEExecutor:
       self,
       x: jax.Array,
       weights: jax.Array,
-      indices: jax.Array,
+      indices: jax.Array | None,
       wi_0: jax.Array,
       wi_1: jax.Array,
       wo: jax.Array,
+      forced_routed_experts: jax.Array | None = None,
       *,
       activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
       swiglu_limit: float | None = None,
+      router_probs: jax.Array | None = None,
+      norm_topk_prob: bool = False,
+      routed_scaling_factor: float = 1.0,
+      scores_are_logits: bool = False,
+      eps: float = 0.0,
   ) -> jax.Array:
     """Executes routed experts with separate `(wi_0, wi_1, wo)` projections."""
     return routed_experts(
@@ -415,21 +668,33 @@ class MoEExecutor:
         wi_0,
         wi_1,
         wo,
+        forced_routed_experts=forced_routed_experts,
         executor=self,
         activation=activation,
         swiglu_limit=swiglu_limit,
+        router_probs=router_probs,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=routed_scaling_factor,
+        scores_are_logits=scores_are_logits,
+        eps=eps,
     )
 
   def fused(
       self,
       x: jax.Array,
       weights: jax.Array,
-      indices: jax.Array,
+      indices: jax.Array | None,
       gate_up_proj: jax.Array,
       down_proj: jax.Array,
+      forced_routed_experts: jax.Array | None = None,
       *,
       activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
       swiglu_limit: float | None = None,
+      router_probs: jax.Array | None = None,
+      norm_topk_prob: bool = False,
+      routed_scaling_factor: float = 1.0,
+      scores_are_logits: bool = False,
+      eps: float = 0.0,
   ) -> jax.Array:
     """Executes routed experts with 3D `(E, D, 2*M)` or 4D `(E, D, 2, M)` `gate_up_proj`."""
     return routed_experts_fused(
@@ -438,9 +703,15 @@ class MoEExecutor:
         indices,
         gate_up_proj,
         down_proj,
+        forced_routed_experts=forced_routed_experts,
         executor=self,
         activation=activation,
         swiglu_limit=swiglu_limit,
+        router_probs=router_probs,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=routed_scaling_factor,
+        scores_are_logits=scores_are_logits,
+        eps=eps,
     )
 
 
@@ -1036,6 +1307,8 @@ def _grouped_unsharded(
     activation: Callable[[jax.Array], jax.Array],
     swiglu_limit: float | None,
     executor: MoEExecutor,
+    backend: str = "ragged_dot",
+    is_tpu: bool = False,
 ) -> jax.Array:
   """Portable `ragged_dot` grouped execution without `shard_map`."""
   if executor.bwd_wgrad_overlap:
@@ -1075,7 +1348,7 @@ def _grouped_unsharded(
   sorted_x = _permute_rows(slot_rows, perm)
   sorted_x = jnp.where((jnp.arange(num_slots, dtype=jnp.int32) < valid_count)[:, None], sorted_x, 0)
 
-  matmul_fn = functools.partial(grouped_matmul, backend="ragged_dot", is_tpu=False)
+  matmul_fn = functools.partial(grouped_matmul, backend=backend, is_tpu=is_tpu)
   expert_out = _run_local_expert_mlp(
       sorted_x,
       projections,
@@ -1133,6 +1406,81 @@ def _can_use_sparsecore_ragged_sort(num_rows: int, hidden_size: int, dtype: Any)
   return (num_cores // num_col_parts) <= num_simd_lanes
 
 
+def _validate_forced_routed_inputs(
+    x: jax.Array,
+    weights: jax.Array,
+    indices: jax.Array | None,
+    forced_routed_experts: jax.Array,
+    num_experts: int,
+    *,
+    router_probs: jax.Array | None = None,
+) -> None:
+  """Validates 3D inputs when `forced_routed_experts` overrides routing indices."""
+  if x.ndim != 3:
+    raise ValueError(f"Expected 3D x (B, S, D); got x={x.shape}.")
+  if forced_routed_experts.ndim != 3:
+    raise ValueError(
+        f"Expected 3D forced_routed_experts (B, S, K); got forced_routed_experts={forced_routed_experts.shape}."
+    )
+  top_k = int(forced_routed_experts.shape[2])
+  _validate_forced_routed_experts(forced_routed_experts, (x.shape[0], x.shape[1]), top_k, num_experts)
+  if indices is not None and (indices.ndim != 3 or indices.shape != forced_routed_experts.shape):
+    raise ValueError(
+        f"indices shape {indices.shape} must match forced_routed_experts shape {forced_routed_experts.shape}."
+    )
+  if router_probs is not None:
+    if router_probs.ndim != 3 or router_probs.shape[:2] != x.shape[:2] or router_probs.shape[2] != num_experts:
+      raise ValueError(
+          f"router_probs shape {router_probs.shape} must match (B, S, num_experts)="
+          f"({x.shape[0]}, {x.shape[1]}, {num_experts})."
+      )
+  else:
+    if indices is not None:
+      raise ValueError(
+          "forced_routed_experts with indices provided requires full-expert router_probs "
+          "(or pass indices=None with full-expert scores in weights; if weights and indices "
+          "are already forced-gathered via route_top_k/apply_forced_routed_experts, pass "
+          "forced_routed_experts=None)."
+      )
+    if weights.ndim != 3 or weights.shape[:2] != x.shape[:2]:
+      raise ValueError(f"Expected 3D weights matching x batch/length {x.shape[:2]}; got weights={weights.shape}.")
+    if weights.shape[2] != num_experts:
+      raise ValueError(
+          f"When indices is None without router_probs, weights last dim ({weights.shape[2]}) must match "
+          f"num_experts ({num_experts}); got weights={weights.shape}."
+      )
+
+
+def _resolve_forced_weights_source(
+    weights: jax.Array,
+    *,
+    router_probs: jax.Array | None = None,
+) -> jax.Array:
+  """Returns full-expert routing scores (`router_probs` when provided, else `weights`)."""
+  return router_probs if router_probs is not None else weights
+
+
+def _apply_forced_routed_inputs(
+    weights_or_scores: jax.Array,
+    forced_routed_experts: jax.Array,
+    *,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    scores_are_logits: bool = False,
+    eps: float = 0.0,
+) -> tuple[jax.Array, jax.Array]:
+  """Resolves per-slot `(weights, indices)` from full-expert scores under `forced_routed_experts`."""
+  return apply_forced_routed_experts(
+      weights_or_scores,
+      forced_routed_experts,
+      norm_topk_prob=norm_topk_prob,
+      routed_scaling_factor=routed_scaling_factor,
+      scores_are_logits=scores_are_logits,
+      eps=eps,
+      dtype=_COMBINE_DTYPE,
+  )
+
+
 def _sharded_grouped(
     x: jax.Array,
     weights: jax.Array,
@@ -1144,6 +1492,11 @@ def _sharded_grouped(
     activation: Callable[[jax.Array], jax.Array],
     swiglu_limit: float | None,
     executor: MoEExecutor,
+    forced_routed_experts: jax.Array | None = None,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    scores_are_logits: bool = False,
+    eps: float = 0.0,
 ) -> jax.Array:
   """Distributed `shard_map` execution supporting `EP >= 1`, `TP >= 1`, and `FSDP >= 1`."""
   mesh = kernels.mesh_in_scope()
@@ -1509,18 +1862,46 @@ def _sharded_grouped(
       combined = jax.lax.psum(combined, tp_axes)
     return jnp.reshape(combined, (b_loc, seq_len, d_dim))
 
-  sharded_fn = jax.shard_map(
-      per_device,
+  x_in = kernels.ensure_explicit_spec(x, tokens_spec, mesh)
+  weights_in = kernels.ensure_explicit_spec(weights, tokens_spec, mesh)
+  proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
+
+  if forced_routed_experts is None:
+    sharded_fn = jax.shard_map(
+        per_device,
+        mesh=mesh,
+        in_specs=(tokens_spec, tokens_spec, tokens_spec, *proj_specs),
+        out_specs=tokens_spec,
+        check_vma=False,
+    )
+    indices_in = kernels.ensure_explicit_spec(indices, tokens_spec, mesh)
+    return sharded_fn(x_in, weights_in, indices_in, *proj_in)
+
+  def per_device_forced(
+      x_sh: jax.Array,
+      weights_sh: jax.Array,
+      forced_sh: jax.Array,
+      *proj_sh: jax.Array,
+  ) -> jax.Array:
+    eff_w_sh, eff_idx_sh = _apply_forced_routed_inputs(
+        weights_sh,
+        forced_sh,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=routed_scaling_factor,
+        scores_are_logits=scores_are_logits,
+        eps=eps,
+    )
+    return per_device(x_sh, eff_w_sh, eff_idx_sh, *proj_sh)
+
+  sharded_forced_fn = jax.shard_map(
+      per_device_forced,
       mesh=mesh,
       in_specs=(tokens_spec, tokens_spec, tokens_spec, *proj_specs),
       out_specs=tokens_spec,
       check_vma=False,
   )
-  x_in = kernels.ensure_explicit_spec(x, tokens_spec, mesh)
-  weights_in = kernels.ensure_explicit_spec(weights, tokens_spec, mesh)
-  indices_in = kernels.ensure_explicit_spec(indices, tokens_spec, mesh)
-  proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
-  return sharded_fn(x_in, weights_in, indices_in, *proj_in)
+  forced_in = kernels.ensure_explicit_spec(forced_routed_experts, tokens_spec, mesh)
+  return sharded_forced_fn(x_in, weights_in, forced_in, *proj_in)
 
 
 # ==============================================================================
@@ -1551,31 +1932,103 @@ def _validate_routed_inputs(
 def routed_experts(
     x: jax.Array,
     weights: jax.Array,
-    indices: jax.Array,
+    indices: jax.Array | None,
     wi_0: jax.Array,
     wi_1: jax.Array,
     wo: jax.Array,
+    forced_routed_experts: jax.Array | None = None,
     *,
     executor: MoEExecutor = DENSE,
     activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
     swiglu_limit: float | None = None,
+    router_probs: jax.Array | None = None,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    scores_are_logits: bool = False,
+    eps: float = 0.0,
 ) -> jax.Array:
   """Executes selected experts with separate `(wi_0, wi_1, wo)` projections."""
   if wi_0.ndim != 3 or wi_1.ndim != 3 or wo.ndim != 3:
     raise ValueError(f"Expected 3D wi_0, wi_1, wo; got {wi_0.shape}, {wi_1.shape}, {wo.shape}.")
   num_experts = wi_0.shape[0]
-  _validate_routed_inputs(x, weights, indices, num_experts)
+  if forced_routed_experts is None:
+    if indices is None:
+      raise ValueError("indices must be provided when forced_routed_experts is None.")
+    _validate_routed_inputs(x, weights, indices, num_experts)
+    if wi_0.shape[1] != x.shape[2] or wo.shape[0] != num_experts or wo.shape[2] != x.shape[2]:
+      raise ValueError(f"Incompatible expert weight shapes for x={x.shape}: wi_0={wi_0.shape}, wo={wo.shape}.")
+    weights = weights.astype(_COMBINE_DTYPE)
+    projections = (wi_0.astype(x.dtype), wi_1.astype(x.dtype), wo.astype(x.dtype))
+    match executor.kind:
+      case "dense":
+        out = _dense_separate(
+            x,
+            weights,
+            indices,
+            *projections,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            capacity_factor=executor.capacity_factor,
+        )
+      case "ragged_dot":
+        out = _grouped_unsharded(
+            x,
+            weights,
+            indices,
+            projections,
+            fused=False,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+        )
+      case "gmm_v2" | "tokamax":
+        out = _sharded_grouped(
+            x,
+            weights,
+            indices,
+            projections,
+            fused=False,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+        )
+      case other:
+        raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
+    return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+  _validate_forced_routed_inputs(
+      x,
+      weights,
+      indices,
+      forced_routed_experts,
+      num_experts,
+      router_probs=router_probs,
+  )
   if wi_0.shape[1] != x.shape[2] or wo.shape[0] != num_experts or wo.shape[2] != x.shape[2]:
     raise ValueError(f"Incompatible expert weight shapes for x={x.shape}: wi_0={wi_0.shape}, wo={wo.shape}.")
-
-  weights = weights.astype(_COMBINE_DTYPE)
   projections = (wi_0.astype(x.dtype), wi_1.astype(x.dtype), wo.astype(x.dtype))
+  weights_source = _resolve_forced_weights_source(
+      weights,
+      router_probs=router_probs,
+  )
+
   match executor.kind:
     case "dense":
+      eff_weights, eff_indices = _apply_forced_routed_inputs(
+          weights_source,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=scores_are_logits,
+          eps=eps,
+      )
       out = _dense_separate(
           x,
-          weights,
-          indices,
+          eff_weights,
+          eff_indices,
           *projections,
           num_experts=num_experts,
           activation=activation,
@@ -1583,10 +2036,18 @@ def routed_experts(
           capacity_factor=executor.capacity_factor,
       )
     case "ragged_dot":
+      eff_weights, eff_indices = _apply_forced_routed_inputs(
+          weights_source,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=scores_are_logits,
+          eps=eps,
+      )
       out = _grouped_unsharded(
           x,
-          weights,
-          indices,
+          eff_weights,
+          eff_indices,
           projections,
           fused=False,
           num_experts=num_experts,
@@ -1597,30 +2058,175 @@ def routed_experts(
     case "gmm_v2" | "tokamax":
       out = _sharded_grouped(
           x,
-          weights,
-          indices,
+          weights_source.astype(_COMBINE_DTYPE),
+          forced_routed_experts,
           projections,
           fused=False,
           num_experts=num_experts,
           activation=activation,
           swiglu_limit=swiglu_limit,
           executor=executor,
+          forced_routed_experts=forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=scores_are_logits,
+          eps=eps,
       )
     case other:
       raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
   return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
 
 
+def _device_is_tpu(dev: Any) -> bool:
+  """Returns True when `dev` is a TPU device."""
+  return getattr(dev, "platform", None) == "tpu"
+
+
+def grouped_unsharded_fused(
+    x: jax.Array,
+    weights: jax.Array,
+    indices: jax.Array | None,
+    gate_up_proj: jax.Array,
+    down_proj: jax.Array,
+    forced_routed_experts: jax.Array | None = None,
+    *,
+    executor: MoEExecutor = RAGGED_DOT,
+    activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
+    swiglu_limit: float | None = None,
+    is_tpu: bool = False,
+    router_probs: jax.Array | None = None,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    scores_are_logits: bool = False,
+    eps: float = 0.0,
+) -> jax.Array:
+  """Executes fused routed experts on a single device when no `Mesh` is in scope."""
+  if gate_up_proj.ndim not in (3, 4) or down_proj.ndim != 3:
+    raise ValueError(
+        f"Expected 3D or 4D gate_up_proj and 3D down_proj; got gate_up_proj={gate_up_proj.shape}, "
+        f"down_proj={down_proj.shape}."
+    )
+  if gate_up_proj.ndim == 3 and gate_up_proj.shape[2] % 2 != 0:
+    raise ValueError(f"3D gate_up_proj last dim must be even (2 * mlp_dim); got {gate_up_proj.shape}.")
+  if gate_up_proj.ndim == 4 and gate_up_proj.shape[2] != 2:
+    raise ValueError(f"4D gate_up_proj axis 2 must have size 2 (gate, up); got {gate_up_proj.shape}.")
+  mlp_dim = gate_up_proj.shape[2] // 2 if gate_up_proj.ndim == 3 else gate_up_proj.shape[3]
+  num_experts = gate_up_proj.shape[0]
+  if forced_routed_experts is None:
+    if indices is None:
+      raise ValueError("indices must be provided when forced_routed_experts is None.")
+    _validate_routed_inputs(x, weights, indices, num_experts)
+    eff_weights = weights.astype(_COMBINE_DTYPE)
+    eff_indices = indices
+  else:
+    _validate_forced_routed_inputs(
+        x,
+        weights,
+        indices,
+        forced_routed_experts,
+        num_experts,
+        router_probs=router_probs,
+    )
+    weights_source = _resolve_forced_weights_source(
+        weights,
+        router_probs=router_probs,
+    )
+    eff_weights, eff_indices = _apply_forced_routed_inputs(
+        weights_source,
+        forced_routed_experts,
+        norm_topk_prob=norm_topk_prob,
+        routed_scaling_factor=routed_scaling_factor,
+        scores_are_logits=scores_are_logits,
+        eps=eps,
+    )
+  if gate_up_proj.shape[1] != x.shape[2] or down_proj.shape != (num_experts, mlp_dim, x.shape[2]):
+    raise ValueError(
+        f"Incompatible fused expert weight shapes for x={x.shape}: "
+        f"gate_up_proj={gate_up_proj.shape}, down_proj={down_proj.shape}."
+    )
+
+  projections = (gate_up_proj.astype(x.dtype), down_proj.astype(x.dtype))
+  if executor.kind == "dense":
+    out = _dense_fused(
+        x,
+        eff_weights,
+        eff_indices,
+        *projections,
+        num_experts=num_experts,
+        activation=activation,
+        swiglu_limit=swiglu_limit,
+        capacity_factor=executor.capacity_factor,
+    )
+    return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+  devs_1d: list[Any] = []
+  for arr in (x, gate_up_proj):
+    arr_shd = jax.typeof(arr).sharding
+    if isinstance(arr_shd, jax.sharding.SingleDeviceSharding):
+      devs_1d = list(arr_shd.device_set)[:1]
+      break
+    if isinstance(arr_shd, jax.sharding.NamedSharding) and not arr_shd.mesh.empty:
+      devs_1d = list(arr_shd.mesh.devices.flat)[:1]
+      break
+  if not devs_1d:
+    devs_1d = list(jax.local_devices()[:1] or jax.devices()[:1])
+  tpu_1d = bool(is_tpu and devs_1d and _device_is_tpu(devs_1d[0]))
+  if tpu_1d and executor.kind in SHARDED_EXECUTOR_KINDS:
+    mesh_1d = jax.sharding.Mesh(devs_1d, ("_moe_1d",))
+    out = jax.shard_map(
+        lambda x_l, w_l, idx_l, gu_l, dn_l: _grouped_unsharded(
+            x_l,
+            w_l,
+            idx_l,
+            (gu_l, dn_l),
+            fused=True,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+            backend=executor.kind,
+            is_tpu=True,
+        ).astype(x_l.dtype),
+        mesh=mesh_1d,
+        in_specs=(P(), P(), P(), P(), P()),
+        out_specs=P(),
+        check_vma=False,
+    )(x, eff_weights, eff_indices, projections[0], projections[1])
+    return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+  backend = executor.kind if (tpu_1d and executor.kind in ("ragged_dot", *SHARDED_EXECUTOR_KINDS)) else "ragged_dot"
+  out = _grouped_unsharded(
+      x,
+      eff_weights,
+      eff_indices,
+      projections,
+      fused=True,
+      num_experts=num_experts,
+      activation=activation,
+      swiglu_limit=swiglu_limit,
+      executor=executor,
+      backend=backend,
+      is_tpu=tpu_1d,
+  )
+  return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+
 def routed_experts_fused(
     x: jax.Array,
     weights: jax.Array,
-    indices: jax.Array,
+    indices: jax.Array | None,
     gate_up_proj: jax.Array,
     down_proj: jax.Array,
+    forced_routed_experts: jax.Array | None = None,
     *,
     executor: MoEExecutor = DENSE,
     activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
     swiglu_limit: float | None = None,
+    router_probs: jax.Array | None = None,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
+    scores_are_logits: bool = False,
+    eps: float = 0.0,
 ) -> jax.Array:
   """Executes selected experts with fused 3D `(E, D, 2*M)` or 4D `(E, D, 2, M)` `gate_up_proj`."""
   if gate_up_proj.ndim not in (3, 4) or down_proj.ndim != 3:
@@ -1634,21 +2240,90 @@ def routed_experts_fused(
     raise ValueError(f"4D gate_up_proj axis 2 must have size 2 (gate, up); got {gate_up_proj.shape}.")
 
   num_experts = gate_up_proj.shape[0]
-  _validate_routed_inputs(x, weights, indices, num_experts)
+  if forced_routed_experts is None:
+    if indices is None:
+      raise ValueError("indices must be provided when forced_routed_experts is None.")
+    _validate_routed_inputs(x, weights, indices, num_experts)
+    if gate_up_proj.shape[1] != x.shape[2] or down_proj.shape[0] != num_experts or down_proj.shape[2] != x.shape[2]:
+      raise ValueError(
+          f"Incompatible fused expert weight shapes for x={x.shape}: "
+          f"gate_up_proj={gate_up_proj.shape}, down_proj={down_proj.shape}."
+      )
+    weights = weights.astype(_COMBINE_DTYPE)
+    projections = (gate_up_proj.astype(x.dtype), down_proj.astype(x.dtype))
+    match executor.kind:
+      case "dense":
+        out = _dense_fused(
+            x,
+            weights,
+            indices,
+            *projections,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            capacity_factor=executor.capacity_factor,
+        )
+      case "ragged_dot":
+        out = _grouped_unsharded(
+            x,
+            weights,
+            indices,
+            projections,
+            fused=True,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+        )
+      case "gmm_v2" | "tokamax":
+        out = _sharded_grouped(
+            x,
+            weights,
+            indices,
+            projections,
+            fused=True,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+        )
+      case other:
+        raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
+    return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+  _validate_forced_routed_inputs(
+      x,
+      weights,
+      indices,
+      forced_routed_experts,
+      num_experts,
+      router_probs=router_probs,
+  )
   if gate_up_proj.shape[1] != x.shape[2] or down_proj.shape[0] != num_experts or down_proj.shape[2] != x.shape[2]:
     raise ValueError(
         f"Incompatible fused expert weight shapes for x={x.shape}: "
         f"gate_up_proj={gate_up_proj.shape}, down_proj={down_proj.shape}."
     )
-
-  weights = weights.astype(_COMBINE_DTYPE)
   projections = (gate_up_proj.astype(x.dtype), down_proj.astype(x.dtype))
+  weights_source = _resolve_forced_weights_source(
+      weights,
+      router_probs=router_probs,
+  )
+
   match executor.kind:
     case "dense":
+      eff_weights, eff_indices = _apply_forced_routed_inputs(
+          weights_source,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=scores_are_logits,
+          eps=eps,
+      )
       out = _dense_fused(
           x,
-          weights,
-          indices,
+          eff_weights,
+          eff_indices,
           *projections,
           num_experts=num_experts,
           activation=activation,
@@ -1656,10 +2331,18 @@ def routed_experts_fused(
           capacity_factor=executor.capacity_factor,
       )
     case "ragged_dot":
+      eff_weights, eff_indices = _apply_forced_routed_inputs(
+          weights_source,
+          forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=scores_are_logits,
+          eps=eps,
+      )
       out = _grouped_unsharded(
           x,
-          weights,
-          indices,
+          eff_weights,
+          eff_indices,
           projections,
           fused=True,
           num_experts=num_experts,
@@ -1670,14 +2353,19 @@ def routed_experts_fused(
     case "gmm_v2" | "tokamax":
       out = _sharded_grouped(
           x,
-          weights,
-          indices,
+          weights_source.astype(_COMBINE_DTYPE),
+          forced_routed_experts,
           projections,
           fused=True,
           num_experts=num_experts,
           activation=activation,
           swiglu_limit=swiglu_limit,
           executor=executor,
+          forced_routed_experts=forced_routed_experts,
+          norm_topk_prob=norm_topk_prob,
+          routed_scaling_factor=routed_scaling_factor,
+          scores_are_logits=scores_are_logits,
+          eps=eps,
       )
     case other:
       raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
