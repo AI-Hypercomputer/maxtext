@@ -987,6 +987,20 @@ class TestCreateNnxModel(unittest.TestCase):
       expected = custom_init[jax.tree_util.keystr(path)] if is_custom(path) else np.full(leaf.shape, 0.5, leaf.dtype)
       np.testing.assert_array_equal(leaf, expected)
 
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic_unsupported_options_raise(self, mock_load):
+    """Options the HF streaming loader doesn't support yet raise before any weight is freed."""
+    model = model_creation_utils.from_pretrained(_make_config(), self.mesh)
+    initial = jax.tree.leaves(nnx.state(model, nnx.Param))
+    for option in ("use_m3_model", "prefuse_moe_weights"):
+      with self.subTest(option):
+        cfg = MagicMock(use_m3_model=False, prefuse_moe_weights=False)
+        setattr(cfg, option, True)
+        with self.assertRaisesRegex(NotImplementedError, "use_m3_model or prefuse_moe_weights"):
+          model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), cfg)  # pylint: disable=protected-access
+    mock_load.assert_not_called()
+    self.assertFalse(any(leaf.is_deleted() for leaf in initial))
+
   # ---- checkpoint loading: mocked paths ----
 
   def _make_linen_metadata_mock(self):

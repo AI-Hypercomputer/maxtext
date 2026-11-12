@@ -1088,6 +1088,11 @@ def _load_safetensors_dynamic(model, sharded_state, config):
   Uses the same loader as training (`checkpointing.load_state_if_possible`). The model's initial weights are
   freed first, as the Orbax path does, so only the loaded copy is held on device.
   """
+  if getattr(config, "use_m3_model", False) or getattr(config, "prefuse_moe_weights", False):
+    raise NotImplementedError(
+        "source_checkpoint_layout=safetensors_dynamic doesn't support use_m3_model or prefuse_moe_weights yet;"
+        " convert the checkpoint to Orbax, or turn these options off."
+    )
   param_state = sharded_state.filter(
       lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
   )
