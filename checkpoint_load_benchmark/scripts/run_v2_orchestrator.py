@@ -220,7 +220,10 @@ def manage_cpu_jobs(
         )
         events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` Completed and cleaned up.")
         continue
-      if failed >= 2:
+      is_suspended = bool(item.get("spec", {}).get("suspend")) and any(
+          c.get("type") == "Suspended" and c.get("status") == "True" for c in status.get("conditions", [])
+      )
+      if failed >= 2 or is_suspended:
         _run_cmd(
             [
                 "kubectl",
@@ -231,7 +234,8 @@ def manage_cpu_jobs(
                 "--ignore-not-found=true",
             ]
         )
-        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` Failed and cleaned up.")
+        reason = "Suspended/Deactivated by Kueue" if is_suspended else "Failed"
+        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` {reason} and cleaned up for resume.")
         continue
       active_job_names.append(jname)
       if matched_model:

@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 15:43:43 UTC`
+- **Last Updated (UTC):** `2026-11-12 15:55:48 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -13,8 +13,8 @@
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **21 / 21** | **10 / 61** | `mesa-q-v7x-2x2x1-1s-w2`, `mesa-q-v7x-2x2x1-2s-w3` | `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` |
-| `v6e` | `southamerica-west1` | **21 / 21** | **9 / 53** | `mesa-q-v6e-2x4-2s-w2` | _none_ |
+| `v7x` | `us-central1` | **21 / 21** | **12 / 61** | `mesa-q-v7x-2x2x1-1s-w2`, `mesa-q-v7x-2x2x1-2s-w3` | `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` |
+| `v6e` | `southamerica-west1` | **21 / 21** | **10 / 53** | `mesa-q-v6e-2x4-2s-w2` | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **21 / 22** | _none_ | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
@@ -52,3 +52,8 @@
 - [2026-11-12 15:39:04 UTC] `v5e` TPU JobSet `mesa-q-v5e-16x16-1s-w2` `Completed` and cleaned up.
 - [2026-11-12 15:39:56 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 443 mirrored JSONs.
 - [2026-11-12 15:43:43 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 444 mirrored JSONs.
+- [2026-11-12 15:47:37 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 448 mirrored JSONs.
+- [2026-11-12 15:51:09 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x1-1s-w2` `Failed` and cleaned up.
+- [2026-11-12 15:51:13 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-1s-w2` (`1x2x2x1`, min_slices=1) for 49 runnable tasks.
+- [2026-11-12 15:51:44 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 452 mirrored JSONs.
+- [2026-11-12 15:55:48 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 459 mirrored JSONs.
