@@ -1089,6 +1089,15 @@ class SplashAttention(BaseModel):
   )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
+  sa_local_band_skip: bool = Field(
+      False,
+      description=(
+          "Experimental (SplashConfig.local_band_skip): the splash forward of an aligned causal"
+          " sliding-window layer (window <= block_q == block_kv) skips the q rows and masked sub-tiles of"
+          " its two partial kv blocks per q block that see none of a kv compute tile. Ignored for other"
+          " masks. Bit-identical."
+      ),
+  )
   sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
   sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
   sa_qk_diag_grid: int = Field(2, description="Maps to qk_diag_grid in SplashConfig.")
