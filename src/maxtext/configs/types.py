@@ -893,6 +893,26 @@ class DeepSeek41(BaseModel):
   )
   ds41_hc_sinkhorn_iters: PositiveInt = Field(20, description="Sinkhorn iterations of the hyper-connection mixes.")
   ds41_hc_eps: float = Field(1e-6, description="Epsilon of the hyper-connection mixes.")
+  ds41_per_layer_remat: bool = Field(
+      True,
+      description="With scan_layers, rematerialize every layer of a scanned group on its own instead of the whole"
+      " group (a group holds up to six layers).",
+  )
+  ds41_attention_chunk: NonNegativeInt = Field(
+      512,
+      description="Query chunk of the DeepSeek-V4.1 attention: each chunk attends to its own sliding-window keys plus"
+      " the compressed KV, one chunk at a time (0: one dense [S, S + C] score matrix).",
+  )
+  ds41_engram_lookup: Literal["all_to_all", "psum_scatter", "gather"] = Field(
+      "all_to_all",
+      description="How the row-sharded engram tables are read: 'all_to_all' (each chip exchanges only its own rows,"
+      " as in the Engram paper's training setup), 'psum_scatter' (exact for any ids, ~group x more traffic) or"
+      " 'gather' (plain jnp.take left to the SPMD partitioner).",
+  )
+  ds41_engram_a2a_capacity_factor: float = Field(
+      2.0,
+      description="all_to_all engram lookup: rows exchanged per (chip, owner) pair as a multiple of the uniform share.",
+  )
   ds41_engram_layers: list[int] = Field(default_factory=list, description="Layers with an engram n-gram lookup.")
   ds41_engram_vocab_size: NonNegativeInt = Field(0, description="Base bucket size for the engram hash primes.")
   ds41_engram_max_ngram_size: PositiveInt = Field(1, description="Largest n-gram hashed by the engram.")

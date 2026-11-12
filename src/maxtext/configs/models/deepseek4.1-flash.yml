@@ -41,6 +41,12 @@ q_lora_rank: 1280
 o_groups: 8
 o_lora_rank: 1024
 sliding_window_size: 128
+# The grouped output projection `o_a_proj` [o_groups, heads * head_dim / o_groups, o_lora_rank] has no axis the base
+# rules shard ('o_groups', 'q_heads' -> tensor, 'o_lora_up_proj'), so its 1.34B parameters (40 layers) would be
+# replicated on every chip; shard its o_lora_rank axis like the other attention weights.
+logical_axis_rules: [
+  ['o_lora_up_proj', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'expert']],
+]
 # 0 = sliding window only; r = KV compressed r-to-1.
 compress_ratios: [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 kv_source_layers: [2, 8, 14, 20]
