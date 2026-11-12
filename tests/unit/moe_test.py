@@ -1153,8 +1153,8 @@ class RoutedMoeTest(parameterized.TestCase):
         delattr(cls, attr)
     super().tearDownClass()
 
-  @parameterized.parameters(False, True)
-  def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient):
+  @parameterized.product(compute_gradient=(False, True), flag=("moe_use_direct_token_gather", "moe_sc_gather_reduce"))
+  def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient, flag):
     inputs = jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4)
     selected_experts = jnp.array(
         [
@@ -1167,14 +1167,15 @@ class RoutedMoeTest(parameterized.TestCase):
     gate_logits = jnp.zeros((2, 3, 4), dtype=jnp.float32)
 
     def permute(x, use_direct_token_gather):
+      flags = {"moe_use_direct_token_gather": False, "moe_sc_gather_reduce": False, flag: use_direct_token_gather}
       routed_moe = SimpleNamespace(
           config=SimpleNamespace(
               decoder_block=None,
               load_balance_loss_weight=0.0,
-              moe_use_direct_token_gather=use_direct_token_gather,
               num_experts=4,
               use_ragged_sort=False,
               use_ring_of_experts=False,
+              **flags,
           ),
           dtype=jnp.float32,
           is_hash_routing=False,
@@ -1264,7 +1265,13 @@ class RoutedMoeTest(parameterized.TestCase):
     return output
 
   @pytest.mark.tpu_only
-  def test_megablox(self):
+  @parameterized.named_parameters(
+      ("default", False),
+      # 64 top-k indices per device are far below the SparseCore kernel's minimum (16384 on TPU7x), so this covers the
+      # layer with the TensorCore top-k sum, not the kernel.
+      ("sc_gather_reduce_tensorcore_fallback", True),
+  )
+  def test_megablox(self, moe_sc_gather_reduce):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="moe_block_megablox_test",
@@ -1279,6 +1286,7 @@ class RoutedMoeTest(parameterized.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
+        moe_sc_gather_reduce=moe_sc_gather_reduce,
         per_device_batch_size=1,
         max_target_length=32,
         float32_gate_logits=True,
@@ -1298,6 +1306,95 @@ class RoutedMoeTest(parameterized.TestCase):
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
     assert_moe_close(actual_output, expected_output, cfg.dtype)
+
+  @parameterized.named_parameters(
+      # Routing weights move before wo, so the combine is a plain sum on unsort_and_sum.
+      ("weights_before_wo", {}),
+      # With a wo bias the bias is weighted too (w * (h @ wo + b) = (w * h) @ wo + w * b), so still a plain sum.
+      ("mlp_bias", {"mlp_bias": True}),
+  )
+  def test_sc_gather_reduce_loss_and_grad(self, overrides):
+    """moe_sc_gather_reduce matches the flag-off layer in loss and every gradient, up to bf16 rounding."""
+
+    def _cfg(moe_sc_gather_reduce):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_sc_gather_reduce_{moe_sc_gather_reduce}",
+          enable_checkpointing=False,
+          model_name="qwen3-30b-a3b",
+          num_experts=8,
+          num_experts_per_tok=2,
+          override_model_config=True,
+          base_emb_dim=256,
+          base_mlp_dim=128,
+          base_moe_mlp_dim=128,
+          dtype="bfloat16",
+          megablox=False,
+          sparse_matmul=True,
+          moe_sc_gather_reduce=moe_sc_gather_reduce,
+          per_device_batch_size=1,
+          max_target_length=32,
+          float32_gate_logits=True,
+          **overrides,
+      )
+
+    def _loss_and_grad(cfg, variables, hidden_states):
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      model = linen_wrappers.to_linen(
+          moe.RoutedMoE,
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        return loss if lb_loss is None else loss + lb_loss.astype(jnp.float32)
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        if variables is None:
+          variables = model.init({"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(0)}, hidden_states)
+          # Biases are zero-initialized; make them nonzero so the mlp_bias path is checked.
+          leaves, treedef = jax.tree_util.tree_flatten_with_path(variables)
+          keys = jax.random.split(jax.random.PRNGKey(1), len(leaves))
+          variables = jax.tree_util.tree_unflatten(
+              treedef,
+              [
+                  0.1 * jax.random.normal(key, v.shape, v.dtype) if "bias" in jax.tree_util.keystr(path) else v
+                  for key, (path, v) in zip(keys, leaves)
+              ],
+          )
+        loss, grads = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1)))(variables["params"], hidden_states)
+      return variables, loss, grads
+
+    cfg_off = _cfg(False)
+    hidden_states = jax.random.uniform(
+        jax.random.PRNGKey(2345),
+        (int(cfg_off.per_device_batch_size) * jax.device_count(), cfg_off.max_target_length, cfg_off.base_emb_dim),
+        dtype=cfg_off.dtype,
+    )
+    variables, loss_off, grads_off = _loss_and_grad(cfg_off, None, hidden_states)
+    with mock.patch.object(moe.RoutedMoE, "unpermute", autospec=True, side_effect=moe.RoutedMoE.unpermute) as unpermute:
+      _, loss_on, grads_on = _loss_and_grad(_cfg(True), variables, hidden_states)
+    self.assertTrue(unpermute.call_args.kwargs["sc_prescaled"])  # The combine is the plain top-k sum.
+
+    np.testing.assert_allclose(loss_on, loss_off, rtol=1e-2)
+    leaves_off, _ = jax.tree_util.tree_flatten_with_path(grads_off)
+    leaves_on, treedef_on = jax.tree_util.tree_flatten(grads_on)
+    self.assertEqual(jax.tree_util.tree_structure(grads_off), treedef_on)
+    for (path, g_off), g_on in zip(leaves_off, leaves_on):
+      g_off, g_on = np.asarray(g_off, np.float32), np.asarray(g_on, np.float32)
+      # bf16 activations: compare relative to the gradient's scale.
+      np.testing.assert_allclose(
+          g_on, g_off, rtol=0, atol=3e-2 * np.max(np.abs(g_off)) + 1e-8, err_msg=jax.tree_util.keystr(path)
+      )
 
   @pytest.mark.tpu_only
   def test_ragged_dot(self):

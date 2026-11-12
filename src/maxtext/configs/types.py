@@ -2105,6 +2105,18 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
   )
+  moe_sc_gather_reduce: bool = Field(
+      False,
+      description=(
+          "sparse_matmul without the ring-of-experts ragged sort, moe_use_fused_gmm3d, moe_tc_permute or"
+          " moe_tc_combine: gather tokens straight into expert order (no top-k repeat) and run the top-k sums (dispatch"
+          " backward, and the combine when it is a plain sum) on the SparseCore gather-reduce kernel on TPU7x, with an"
+          " f32 TensorCore sum for shapes it cannot take and other chips. The kernel takes num_experts_per_tok 1, 2, 4"
+          " or 8; other top-k values always use the TensorCore sum. With expert parallelism 1 and a non-Llama4 model"
+          " (and no mlp_bias with use_te_grouped_gemm), the routing weights are applied to the (rows, mlp) activation"
+          " before wo, and to the wo bias, so the combine is a plain sum (not bit-identical)."
+      ),
+  )
   ragged_gather_fallback: bool = Field(
       False,
       description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
@@ -6740,6 +6752,27 @@ class MaxTextConfig(
             "use moe_x_sorted=remat."
         )
 
+  def validate_moe_sc_gather_reduce(self):
+    """Rejects moe_sc_gather_reduce on the MoE paths where it would have no effect."""
+    if self.moe_sc_gather_reduce:
+      if not self.sparse_matmul:
+        raise ValueError("moe_sc_gather_reduce=True requires sparse_matmul=True.")
+      if self.use_ring_of_experts and self.use_ragged_sort:
+        raise ValueError(
+            "moe_sc_gather_reduce=True has no effect with use_ring_of_experts=True and use_ragged_sort=True."
+        )
+      if self.moe_use_fused_gmm3d:
+        raise ValueError("moe_sc_gather_reduce=True has no effect with moe_use_fused_gmm3d=True.")
+      # moe.py takes the moe_sc_gather_reduce token gather and plain-sum combine before the TensorCore kernels.
+      if self.moe_tc_permute or self.moe_tc_combine:
+        raise ValueError("moe_sc_gather_reduce=True cannot be combined with moe_tc_permute or moe_tc_combine.")
+      # The kernel needs 2 * k to divide the SparseCore lane count (16 on TPU7x).
+      if self.num_experts_per_tok not in (1, 2, 4, 8):
+        max_logging.warning(
+            f"moe_sc_gather_reduce: num_experts_per_tok={self.num_experts_per_tok} is not supported by the SparseCore"
+            " gather-reduce kernel (top-k 1, 2, 4 or 8), so both top-k sums run on the TensorCore."
+        )
+
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
     if self.moe_quantize_token_all_gather:
@@ -8656,6 +8689,7 @@ class MaxTextConfig(
     _validate_moe_unsliced_prefused_wi(self)
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_sc_gather_reduce()
     self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_tc_routing_offload_free()
     self.validate_moe_quantize_combine_bwd_method()
