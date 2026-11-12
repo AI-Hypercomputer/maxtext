@@ -28,24 +28,23 @@
   - Persisted `worker_upload_max_s`, made `sitecustomize` once-per-process, removed broken legacy shims, fixed `global_devices` docs.
   - Added `scripts/build_code_tarball.py` (`CODE_VERSION.json`, dirty/unpushed guard, `code_version` written into every phase JSON).
   - Updated `bootstrap_tpu7x.py`, `scripts/tpu7x_task_queue.py`, `scripts/run_tpu7x_cluster.sh` so pods extract only `/tmp/maxtext` from the pushed tarball and keep the 16-worker download cap without editing `src/`.
-- **Smoke Prep (S0–S2)**:
+- **Smoke Tests & TPU Verification (S0–S4)**:
   - **S0 Preflight**: Verified Kueue, quotas, image pulls (`yaoyuchen-runner:ds41-2026-10-22-16-03-48`), HF reachability, and GCS access across all 3 clusters; created v5e KSA `mesa-bench` with `roles/storage.objectAdmin` + `roles/storage.legacyBucketReader` on `gs://mesa-maxtext`.
-  - **S1 Bundle Upload**: Uploaded pushed code bundle (`82cc1c701`) and `site_packages_overlay.tar.gz` to `gs://mesa-maxtext/mesa-bench-v2/code/`.
-  - **S2 Code**: Added `bench/platforms.py` (`v7x`, `v6e`, `v5e`), `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and TPU verification in `benchmark_ckpt_load_time.py` (`57` unit tests pass).
-- **Google Sheet v2**: Created spreadsheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I` with 11 formatted tabs (`README`, `Progress`, `Summary`, `Step 1 downloads`, `Stages: safetensors_dynamic`, `Stages: to_maxtext`, `Runs`, `Models`, `Platforms`, `Legend`, `Columns`).
-
-### Running Now (S3 Smoke Tests)
-Running `qwen3-0.6b` (`scanned` + `unscanned`, `to_maxtext` + `safetensors_dynamic`) at `82cc1c701`:
-- **v7x** (`2x2x1`, 1 host, 8 devices): JobSet `mesa-smoke-v7x-qwen3-0p6b-smoke-v7x` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/`
-- **v6e** (`2x4`, 1 host, 8 devices): JobSet `mesa-smoke-v6e-qwen3-0p6b-smoke-v6e` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/`
-- **v5e** (`16x16`, 64 hosts, 256 devices): JobSet `mesa-smoke-v5e-qwen3-0p6b-smoke-v5e` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e/`
+  - **S1 Bundle Upload**: Initial bundle pushed at `82cc1c701`, then rebuilt/uploaded from `c64b44244` (with multi-host gRPC fix) and `site_packages_overlay.tar.gz` to `gs://mesa-maxtext/mesa-bench-v2/code/`.
+  - **S2 Code**: Added `bench/platforms.py` (`v7x`, `v6e`, `v5e`), `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and mandatory TPU backend/device-count verification (`check_tpu_backend`) in `benchmark_ckpt_load_time.py`.
+  - **Multi-host `v5e` `SliceBuilder` gRPC fix (`c64b44244`)**: First `v5e` `16x16` smoke timed out in 64-host `SliceBuilder` ALTS gRPC handshake between GKE Workload Identity pods. Added `_ensure_tpu_insecure_grpc_init_args` in `init_worker_runtime` (appends `--slicebuilder_use_insecure_grpc=true` when `total_procs > 1` and `--megascale_use_insecure_grpc=true` when `num_slices > 1` if supported by `libtpu.so`; disable via `KEEP_ALTS_GRPC=1`), unbuffered worker streaming (`PYTHONUNBUFFERED=1`), and remote-abort error attribution (`62` unit tests pass).
+  - **S3/S4 Smoke Results (`qwen3-0.6b`, `scanned` & `unscanned`, both pipelines, 0 failures, all JobSets deleted)**:
+    - **v7x** (`2x2x1`, `1` host, `8` `TPU7x` devices @ `82cc1c701`, `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/`): cold Step 1 `17.64s` (`local 15.65s`); `scanned` Step 2 `17.16s`, Step 3 `2.53s`, `safetensors_dynamic` `15.34s` (Columns e2e `52.99s` vs `32.99s`, `1.61x`; CSV `37.34s` vs `32.99s`); `unscanned` Step 2 `63.06s`, Step 3 `3.14s`, `safetensors_dynamic` `7.04s` (Columns e2e `99.49s` vs `24.68s`, `4.03x`; CSV `83.84s` vs `24.68s`).
+    - **v6e** (`2x4`, `1` host, `8` `TPU v6 lite` devices @ `82cc1c701`, `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/`): cold Step 1 `102.24s` (`local 83.06s`); `scanned` Step 2 `79.13s`, Step 3 `23.66s`, `safetensors_dynamic` `30.00s` (Columns e2e `288.09s` vs `132.24s`, `2.18x`; CSV `205.03s` vs `132.24s`); `unscanned` Step 2 `237.41s`, Step 3 `33.49s`, `safetensors_dynamic` `23.19s` (Columns e2e `456.20s` vs `125.43s`, `3.64x`; CSV `373.13s` vs `125.43s`).
+    - **v5e** (`16x16`, `64` hosts, `256` `TPU v5 lite` devices @ `c64b44244`, `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e-r2/`): cold Step 1 `81.96s` (`local 67.32s`); `scanned` Step 2 `64.82s`, Step 3 `23.64s`, `safetensors_dynamic` `54.78s` (Columns e2e `237.74s` vs `136.74s`, `1.74x`; CSV `170.42s` vs `136.74s`); `unscanned` Step 2 `161.60s`, Step 3 `21.53s`, `safetensors_dynamic` `45.23s` (Columns e2e `332.40s` vs `127.18s`, `2.61x`; CSV `265.09s` vs `127.18s`). *(Note: remote host 1 raised `-6` during coordinator teardown after writing valid JSONs on `safetensors_dynamic`.)*
+- **Google Sheet v2**: Created `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I` (`11` tabs), marked `S3` & `S4` `Done`, and populated `Summary` with the `12` Tier S rows (`12/20` Tier S = `60.0%`; `12/352` overall = `3.4%`).
 
 ### Verified Cluster Facts (`bench/platforms.py`)
 
 | Platform | Cluster & Context | Region | Queue / TAS | Pod / Placement Specifics | Topologies |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **v7x** | `bodaborg-tpu7x-nap`<br>`gke_cloud-tpu-shared-capacity_us-central1_bodaborg-tpu7x-nap` | `us-central1` | `default` / TAS `True` (`podset-slice-size`) | Spot selectors + `reservation-name DoesNotExist` affinity, `gitimg` pull secret, 4 chips/host × 2 devices = 8/host, 960 GiB RAM, 180 min limit | `2x2x1`, `2x2x2`, `2x2x4`, `2x4x4` |
-| **v6e** | `bodaborg-v6e-nap`<br>`gke_cloud-tpu-shared-capacity_southamerica-west1_bodaborg-v6e-nap` | `southamerica-west1` | `default` / TAS `False` | `priorityClassName: medium`, NO spot selectors/affinity, NO TAS annotations, node SA pulls image, `2x4` = 8 chips (1,440 GiB) or 4 chips (720 GiB), 1 device/chip, 180 min limit | `2x4`, `2x2`, `4x4`, `8x8`, `16x16` |
+| **v6e** | `bodaborg-v6e-nap`<br>`gke_cloud-tpu-shared-capacity_southamerica-west1_bodaborg-v6e-nap` | `southamerica-west1` | `default` / TAS `False` | `priorityClassName: medium`, NO spot selectors/affinity, NO TAS annotations, node SA pulls image, `2x4` = 8 chips (`ct6e-standard-8t`, 1,440 GiB) or `2x2` = 4 chips (`ct6e-standard-4t`, 720 GiB), 1 device/chip, 180 min limit | `2x4`, `2x2`, `4x4`, `8x8`, `16x16` |
 | **v5e** | `v5e-256-bodaborg-europe-west4`<br>`gke_tpu-prod-env-multipod_europe-west4_v5e-256-bodaborg-europe-west4` | `europe-west4` | `None` (TAS `gke-v5e-tas-2` broken) | Omit `kueue.x-k8s.io/queue-name`, set `serviceAccountName: mesa-bench`, 4 chips/host × 1 device = 4/host, 192 GiB RAM, no time limit | `16x16` (64 hosts) |
 
 ---
@@ -63,11 +62,7 @@ Execution tier order per platform: **S** (smoke) -> **A** (core) -> **C** (>200B
 
 ## 4. Remaining Tasks (Backlog to Pick Up)
 
-### Immediate Next (After Smoke S3 Finishes)
-- **S4 Smoke verification & sheet update**:
-  - Verify `jax_backend_platform == "tpu"`, `tpu_device_kind`, `total_tpu_devices_measured` (v7x=8, v6e=8, v5e=256), and `code_version.git_commit == 82cc1c701` across all 3 GCS smoke runs (`gs://mesa-maxtext/mesa-bench-v2/smoke/`).
-  - Clean up finished `mesa-smoke-*` JobSets on all 3 clusters after collecting logs.
-  - Record S3/S4 results in the v2 spreadsheet and mark `S3` / `S4` Done.
+### Immediate Next (Start Here)
 - **T0.3–T0.6 Cluster & Storage Prereqs**:
   - **T0.3**: Create regional buckets `gs://mesa-maxtext-southamerica-west1` and `gs://mesa-maxtext-europe-west4` with Workload Identity permissions so v6e and v5e loads do not read across continents from the US multi-region bucket.
   - **T0.4**: Create `mesa-hf-token` secret on v7x/v6e/v5e for gated HuggingFace repos (`meta-llama/*`, `google/*`).
