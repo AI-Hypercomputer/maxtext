@@ -546,13 +546,12 @@ def _build_v2_matrix_rows(
   planned = list(schema_v2.iter_planned_matrix(models_cfg))
   planned.sort(
       key=lambda item: (
-          _TIER_SORT_ORDER.get(item["tier"], 99),
-          _PLAT_SORT_ORDER.get(item["platform"], 99),
           model_order.get(item["model_name"], 999),
+          _PLAT_SORT_ORDER.get(item["platform"], 99),
           item["slices"],
           item["topology"],
-          item["scan_mode"],
           _PIPE_SORT_ORDER.get(item["pipeline"], 99),
+          0 if item["scan_mode"] == "scanned" else 1,
       )
   )
 
@@ -962,8 +961,28 @@ def build_v2_dataset(
   summary_v2, stages_sd_v2, stages_tm_v2 = _build_v2_matrix_rows(v2_data, models_cfg)
   runs_rows = _build_runs_rows(v2_data, v1_ds.runs_rows, models_by_name)
 
+  def _summary_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    m_name = str(row.get("model_name") or "")
+    plat = str(row.get("tpu_platform") or "")
+    pipe = str(row.get("pipeline_name") or "")
+    scan = str(row.get("scan_layers_mode") or "")
+    slices = int(row.get("number_of_slices") or 0) if _is_number(row.get("number_of_slices")) else 0
+    topo = str(row.get("slice_topology") or "")
+    return (
+        model_order_idx := models_by_name.get(m_name, {}).get("_idx", 999),
+        m_name if model_order_idx == 999 else "",
+        _PLAT_SORT_ORDER.get(plat, 99),
+        slices,
+        topo,
+        _PIPE_SORT_ORDER.get(pipe, 99),
+        0 if scan == "scanned" else 1,
+        str(row.get("row_id") or ""),
+    )
+
+  sorted_legacy_summary = sorted(v1_ds.summary_rows, key=_summary_sort_key)
+
   return V2Dataset(
-      summary_rows=summary_v2 + list(v1_ds.summary_rows),
+      summary_rows=summary_v2 + sorted_legacy_summary,
       step1_rows=step1_rows,
       stages_sd_rows=stages_sd_v2 + list(v1_ds.stages_sd_rows),
       stages_tm_rows=stages_tm_v2 + list(v1_ds.stages_tm_rows),
