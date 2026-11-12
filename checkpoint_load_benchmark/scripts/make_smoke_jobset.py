@@ -78,11 +78,13 @@ def build_runner_script(
     scan_modes: list[str],
     pipelines: str,
     name: str,
+    regional: bool = False,
 ) -> str:
   """Returns the bash command executed on pod slice0-0-0 (ROLE=runner)."""
   hosts = profile.hosts_per_slice(topology)
   devices = profile.devices_per_slice(topology)
-  gcs_base = f"{profile.gcs_data_root.rstrip('/')}/smoke"
+  data_root = profile.regional_gcs_data_root if (regional and profile.regional_gcs_data_root) else profile.gcs_data_root
+  gcs_base = f"{data_root.rstrip('/')}/smoke"
   pipeline_flags = {
       "both": "",
       "safetensors_dynamic": "  --skip-to-maxtext \\\n",
@@ -106,6 +108,8 @@ python3 -u {_HARNESS_PATH} \\
   --num-hosts-per-slice {hosts} \\
   --devices-per-slice {devices} \\
   --hardware tpu \\
+  --platform {shlex.quote(profile.name)} \\
+  --slice-topology {shlex.quote(topology)} \\
   --gcs-base {shlex.quote(gcs_base)} \\
   --run-id {shlex.quote(run_id)} \\
   --local-work-dir {shlex.quote(work_dir)} \\
@@ -130,6 +134,7 @@ def build_smoke_jobset(
     run_id: str,
     scan_modes: list[str] | None = None,
     pipelines: str = "both",
+    regional: bool = False,
 ) -> dict[str, Any]:
   """Builds the Kubernetes JobSet manifest dict for one smoke test run."""
   profile = platforms.get_profile(platform)
@@ -168,6 +173,7 @@ def build_smoke_jobset(
       scan_modes=modes,
       pipelines=pipelines,
       name=name,
+      regional=regional,
   )
 
   env_list: list[dict[str, Any]] = [
@@ -278,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
   p.add_argument("--run-id", required=True)
   p.add_argument("--scan-modes", nargs="+", default=["scanned", "unscanned"], choices=["scanned", "unscanned"])
   p.add_argument("--pipelines", default="both", choices=["both", "to_maxtext", "safetensors_dynamic"])
+  p.add_argument("--regional", action="store_true", help="Write smoke outputs into regional_gcs_data_root")
   p.add_argument("--out", default=None, help="Output YAML path (prints to stdout if omitted)")
   args = p.parse_args(argv)
 
@@ -288,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
       run_id=args.run_id,
       scan_modes=args.scan_modes,
       pipelines=args.pipelines,
+      regional=args.regional,
   )
   rendered = yaml.safe_dump(doc, sort_keys=False)
   if args.out:

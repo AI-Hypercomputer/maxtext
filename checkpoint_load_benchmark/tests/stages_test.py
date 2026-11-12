@@ -182,6 +182,27 @@ class StagesRecorderTest(unittest.TestCase):
     self.assertEqual(merged["memory_summary"]["memory_peak_host_ram_host_name"], "host-1")
     self.assertAlmostEqual(merged["memory_summary"]["memory_tpu_hbm_peak_per_device_gb"], 14.0)
 
+  def test_monitoring_collector_ignores_epoch_duration_noise_but_keeps_scalars(self):
+    rec = stages.StageRecorder()
+    mon = stages.MonitoringCollector(rec)
+    dur = []
+    scl = []
+    fake_mod = types.SimpleNamespace(
+        register_event_duration_secs_listener=dur.append,
+        register_scalar_listener=scl.append,
+    )
+    mon.register(fake_mod)
+    dur_cb = dur[0]
+    scl_cb = scl[0]
+    with rec.stage("load"):
+      dur_cb("/jax/core/compile/jaxpr_trace_duration", 1794473596.75)
+      dur_cb("/jax/core/compile/jaxpr_trace_duration", 1.88)
+      scl_cb("/jax/orbax/read/safetensors/bytes_read", 2_000_000_000)
+    snap = mon.snapshot()
+    self.assertEqual(snap["events"]["/jax/core/compile/jaxpr_trace_duration"]["count"], 1)
+    self.assertAlmostEqual(snap["events"]["/jax/core/compile/jaxpr_trace_duration"]["sum"], 1.88)
+    self.assertEqual(snap["events"]["/jax/orbax/read/safetensors/bytes_read"]["sum"], 2_000_000_000.0)
+
 
 if __name__ == "__main__":
   unittest.main()

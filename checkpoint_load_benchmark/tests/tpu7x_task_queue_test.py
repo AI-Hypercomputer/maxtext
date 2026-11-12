@@ -82,6 +82,64 @@ class TaskQueueNoSyncTest(unittest.TestCase):
     self.assertTrue(os.path.isfile(self.marker))
     self.assertEqual(len(q.done), 1)
 
+  def test_hosts_per_slice_daemon_addressing_and_filtering(self):
+    q = _FakeQueue()
+    args = types.SimpleNamespace(
+        worker="w_v6e_4x4",
+        heartbeat_s=60,
+        max_attempts=3,
+        results="gs://unused/results",
+        remote_slice_addrs="h1:55555,h2:55555,h3:55555,h4:55555,h5:55555,h6:55555,h7:55555",
+        hosts_per_slice=4,
+        max_slices=2,
+        min_slices=1,
+        platform="v6e",
+        topology="4x4",
+    )
+    self.assertTrue(
+        task_queue._runnable_by_me(  # pylint: disable=protected-access
+            {"id": "ok", "slices": 1, "hosts_per_slice": 4, "platform": "v6e", "topology": "4x4", "tree": self.tree},
+            args,
+            max_slices=2,
+        )
+    )
+    self.assertFalse(
+        task_queue._runnable_by_me(  # pylint: disable=protected-access
+            {"id": "wrong_hosts", "slices": 1, "hosts_per_slice": 1, "tree": self.tree},
+            args,
+            max_slices=2,
+        )
+    )
+    self.assertFalse(
+        task_queue._runnable_by_me(  # pylint: disable=protected-access
+            {"id": "wrong_plat", "slices": 1, "hosts_per_slice": 4, "platform": "v7x", "tree": self.tree},
+            args,
+            max_slices=2,
+        )
+    )
+
+    task_4h = {
+        "id": "t_4h",
+        "slices": 1,
+        "hosts_per_slice": 4,
+        "tree": self.tree,
+        "args": ["--models", "qwen3-0.6b"],
+    }
+    orig_reach = task_queue._remote_reachable  # pylint: disable=protected-access
+    try:
+      task_queue._remote_reachable = lambda _a, needed=None: needed <= 3  # pylint: disable=protected-access
+      self.assertEqual(task_queue._usable_slices(args), 1)  # pylint: disable=protected-access
+      rc = task_queue.run_task(q, task_4h, gen=1, args=args)
+    finally:
+      task_queue._remote_reachable = orig_reach  # pylint: disable=protected-access
+    self.assertEqual(rc, 0)
+    import json  # pylint: disable=import-outside-toplevel
+
+    with open(self.marker, "r", encoding="utf-8") as f:
+      argv_seen = json.load(f)
+    idx = argv_seen.index("--remote-slice-addrs")
+    self.assertEqual(argv_seen[idx + 1 : idx + 4], ["h1:55555", "h2:55555", "h3:55555"])
+
 
 if __name__ == "__main__":
   unittest.main()

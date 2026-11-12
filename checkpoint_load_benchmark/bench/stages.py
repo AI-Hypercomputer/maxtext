@@ -262,11 +262,16 @@ class MonitoringCollector:
     self._registered_scalars: list[tuple[str, Any]] = []
     self._active_events: list[str] = []
     self._allowed_events: set[str] = set()
+    self._duration_event_set: set[str] = set()
 
   def _on_event(self, event_name: str, value: float, **_metadata: Any) -> None:
     if self._allowed_events and event_name not in self._allowed_events:
       return
-    self._record(event_name, value)
+    fval = float(value)
+    # Guard against JAX backends emitting an unsubtracted Unix epoch timestamp (~1.7e9) as a duration sample.
+    if event_name in self._duration_event_set and (fval < 0.0 or fval > 1e7):
+      return
+    self._record(event_name, fval)
 
   def _record(self, event_name: str, value: float) -> None:
     """Thread-safely records a monitoring duration/scalar sample for the active stage."""
@@ -293,6 +298,7 @@ class MonitoringCollector:
     if monitoring_mod is None:
       return []
     self._monitoring_mod = monitoring_mod
+    self._duration_event_set = set(duration_events)
     self._allowed_events = set(duration_events) | set(scalar_events)
     reg_dur = getattr(monitoring_mod, "register_event_duration_secs_listener", None)
     reg_scl = getattr(monitoring_mod, "register_scalar_listener", None)
@@ -320,7 +326,9 @@ class MonitoringCollector:
     if mod is None:
       return
     self._allowed_events = set()
-    unreg_dur = getattr(mod, "unregister_event_duration_secs_listener", None)
+    unreg_dur = getattr(mod, "unregister_event_duration_secs_listener", None) or getattr(
+        mod, "unregister_event_duration_listener", None
+    )
     if callable(unreg_dur):
       for _, cb in self._registered_durations:
         try:
