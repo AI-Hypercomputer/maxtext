@@ -20,15 +20,15 @@ checkpoint_load_benchmark/
 ├── README.md                                        # Complete documentation & reproduction guide
 ├── handoff.md                                       # Current progress, live cluster state, known issues & next steps
 ├── benchmark_ckpt_load_time.py                      # Unified benchmark harness, multi-slice coordinator & remote slice daemon
-├── bootstrap_tpu7x.py                               # Pod bootstrap: code trees (Lance's PRs, origin/main, hbmfix) & single-GET HF->GCS streamer
-├── generate_tpu7x_manifests.py                      # Kubernetes manifest generator for bodaborg-tpu7x-nap (P1, P2, P1-completion workers)
+├── bootstrap_tpu7x.py                               # Pod bootstrap: extracts committed code tarball to /tmp/maxtext & verifies CODE_VERSION.json
+├── generate_tpu7x_manifests.py                      # Legacy manifest generator for bodaborg-tpu7x-nap (to be replaced when v2 adds platform profiles)
 ├── configs/
 │   ├── model_tiers.env                              # Model tier definitions (v5p Tiers 0-3 + tpu7x Priority 1 & Priority 2) & cluster defaults
-│   └── p1_completion_tasks.json                     # Task list of the Priority 1 completion queue (one harness invocation per task)
+│   └── p1_completion_tasks.json                     # Legacy Priority 1 completion queue tasks (still references old pod trees; replaced in v2)
 ├── patches/
-│   ├── hbmfix.patch                                 # HBM-peak fix for composite keys (qwen3.5 wi_0/wi_1), as a diff against src/
-│   └── hbmfix/src/maxtext/checkpoint_conversion/utils/  # The patched load_dynamic.py & tensor_handling.py (staged as /tmp/maxtext_hbmfix)
+│   └── hbmfix/                                      # Archived patch snapshot from earlier P1 debugging (no longer staged by pods)
 ├── scripts/
+│   ├── build_code_tarball.py                        # Builds & uploads maxtext_lance_prs.tar.gz + CODE_VERSION.json from a pushed git commit
 │   ├── common.sh                                    # Shared environment setup, PYTHONPATH, HF token & Python interpreter resolution
 │   ├── run_single_slice.sh                          # Run Single-Slice (num_slices=1) benchmarks
 │   ├── run_multi_slice_local.sh                     # Run Multi-Slice (num_slices=2+) benchmarks on a single host
@@ -69,10 +69,12 @@ checkpoint_load_benchmark/
 | **`to_maxtext`**<br>*(3-Step Offline Orbax)* | **Step 1**: `HF -> GCS` *(+ local stage)*<br>**Step 2**: `Convert to Orbax checkpoint`<br>**Step 3**: `Load the Orbax checkpoint` | Downloads HuggingFace `.safetensors`, converts weights offline on a single CPU host via `to_maxtext.py` into a GCS Orbax checkpoint, then restores the Orbax checkpoint into the MaxText mesh via `checkpointing.load_state_if_possible(source_checkpoint_layout="orbax")`. |
 | **`safetensor`**<br>*(`safetensors_dynamic`, 2-Step Direct)* | **Step 1**: `HF -> GCS`<br>**Step 2**: `Safetensors & convert to MaxText`<br>*(sub-phases: `[1/3]` mappings, `[2/3]` sharded GCS load, `[3/3]` in-memory transform)* | Streams HuggingFace `.safetensors` shards to GCS `hf_cache`, reads byte-ranged shards directly into the distributed mesh across slices, and transforms/stacks parameters in memory via `checkpointing.load_state_if_possible(source_checkpoint_layout="safetensors_dynamic")`. |
 
-### 2.2 Priority 1 (`>200B`) Experiment Structure on `bodaborg-tpu7x-nap`
-Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py):
-1. **Step 1 — `safetensors_dynamic` WITH Lance's 3 PRs (`#5706 + #5828 + #5705`)**: Runs `scanned` and `unscanned` across `num_slices=1` (`8` TPU cores) and `num_slices=2` (`16` TPU cores) using `/tmp/maxtext` (`origin/docs/checkpoint-load-benchmark`).
-2. **Step 2 — `safetensors_dynamic` BEFORE Lance's 3 PRs (`origin/main`)**: Runs the same `>200B` models against `/tmp/maxtext_origin_main` (`f596f5369`) reusing the populated GCS `hf_cache` (`SHARED_HF_CACHE_BASE_DIR`) with a per-phase watchdog (`PHASE_TIMEOUT_S`: the original P1 pairs were deployed with `360`, the generator now uses `900`, and the completion queue re-runs BEFORE at `1800`) to capture `origin/main` failures (`KeyError` for models without a mapping, e.g. `qwen3-480b-a35b`; slow full-file multi-host reads that exceed the watchdog). A watchdog limit below the WITH-PRs load time is inconclusive (see [`handoff.md`](handoff.md)).
+### 2.2 Pod Code Bundle & Legacy Priority 1 (`>200B`) Experiment Structure on `bodaborg-tpu7x-nap`
+Every pod now runs one code tree at `/tmp/maxtext`, extracted from `<BENCH_CODE_DIR>/maxtext_lance_prs.tar.gz` and built from a single pushed git commit via [`scripts/build_code_tarball.py`](scripts/build_code_tarball.py) with `/tmp/maxtext/CODE_VERSION.json`. Both `bootstrap_tpu7x.py` and the harness read `CODE_VERSION.json`, and every phase result JSON records `code_version`. Single-GET HF→GCS streaming (`fast_build_gcs_cache_worker`) and the 16-worker download cap are applied at runtime by the harness without modifying or patching `src/` on the pod.
+
+The earlier Priority 1 comparison described below used a multi-tree layout (`/tmp/maxtext_origin_main`, `hbmfix`, `fix`, `stagefix`) recorded in legacy configs:
+1. **Step 1 — `safetensors_dynamic` WITH Lance's 3 PRs (`#5706 + #5828 + #5705`)**: Runs `scanned` and `unscanned` across `num_slices=1` (`8` TPU cores) and `num_slices=2` (`16` TPU cores) on `docs/checkpoint-load-benchmark`.
+2. **Step 2 — `safetensors_dynamic` BEFORE Lance's 3 PRs (`origin/main`, historical)**: Ran the same `>200B` models against `f596f5369` reusing the populated GCS `hf_cache` (`SHARED_HF_CACHE_BASE_DIR`) with a per-phase watchdog (`PHASE_TIMEOUT_S`). A watchdog limit below the WITH-PRs load time is inconclusive (see [`handoff.md`](handoff.md)).
 3. **Step 3 — Full `to_maxtext` vs. `safetensors_dynamic` Comparison**: Runs `to_maxtext` Steps 1, 2, and 3 alongside the completed `safetensors_dynamic` runs (`--skip-completed`) and writes consolidated CSV/JSON results to `gs://mesa-maxtext/mesakh_tpu7x_bench/results/`.
 
 ---
@@ -133,7 +135,9 @@ Each Priority 1 pod pair executes a 3-stage pipeline defined in [`generate_tpu7x
 ## 5. Quick Start & Reproduction Commands
 
 ### 5.1 Run Priority 1 (`>200B`) & Priority 2 (`16 Models`) on `bodaborg-tpu7x-nap` (`tpu7x`)
-Use [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) to sync [`benchmark_ckpt_load_time.py`](benchmark_ckpt_load_time.py) and [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py) to GCS, generate the Kubernetes manifests via [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py), and deploy the 2-slice pod pairs:
+Use [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) to build and upload the committed code tarball via [`scripts/build_code_tarball.py`](scripts/build_code_tarball.py) (`--upload "${GCS_CODE_DIR}"`), generate Kubernetes manifests via [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py), and deploy pods:
+
+> **Note:** The legacy queue task files ([`configs/p1_completion_tasks.json`](configs/p1_completion_tasks.json), [`configs/p3_tasks.json`](configs/p3_tasks.json)) and [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py) still reference the old multi-tree pod paths and will be replaced when v2 adds platform profiles.
 
 ```bash
 # Deploy both Priority 1 (>200B models: Pairs a, b, c, f) and Priority 2 (16-model suite: Pairs d, e):
@@ -159,14 +163,15 @@ Use [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) to sync [`ben
 Spot preemptions and Kueue reclamation evict pods mid-run (our queue has no nominal TPU quota and borrows everything),
 so the remaining Priority 1 work runs as a queue that any number of workers drain together:
 - **Tasks**: [`configs/p1_completion_tasks.json`](configs/p1_completion_tasks.json), uploaded to
-  `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/tasks.json`. Each task is one harness invocation with its code tree
-  (`/tmp/maxtext` = Lance's PRs, `/tmp/maxtext_origin_main`, `/tmp/maxtext_hbmfix`), env and slice count.
+  `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p1/tasks.json` (legacy file; still references old pod tree paths and will
+  be replaced when v2 adds platform profiles).
 - **Workers**: [`scripts/tpu7x_task_queue.py`](scripts/tpu7x_task_queue.py) claims a task with an atomic GCS lock
-  (`if_generation_match=0`), refreshes a heartbeat, and writes `queue/p1/done/<id>.json`. A lock without heartbeat for
-  20 min is taken over, and `--skip-completed` resumes the task from its last finished phase. Interrupted runs (non-zero
-  exit, or slice-1 daemon gone) are released for retry (3 attempts).
-- **Deploy**: `./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority p1-completion` uploads the code and
-  task list and deploys pair `g`. When a runner pod is evicted, its surviving daemon keeps working through
+  (`if_generation_match=0`), refreshes a heartbeat, runs the harness inside the pod's extracted tarball tree (no
+  per-task GCS harness sync), and writes `queue/p1/done/<id>.json`. A lock without heartbeat for 20 min is taken over,
+  and `--skip-completed` resumes the task from its last finished phase. Interrupted runs (non-zero exit, or slice-1
+  daemon gone) are released for retry (3 attempts).
+- **Deploy**: `./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority p1-completion` uploads the committed
+  code bundle and task list and deploys pair `g`. When a runner pod is evicted, its surviving daemon keeps working through
   [`scripts/tpu7x_daemon_controller.py`](scripts/tpu7x_daemon_controller.py) (a CPU pod sending one task per daemon
   command, as each command is capped at 4 h); `generate_tpu7x_manifests.py` writes such recovery manifests
   (`tpu7x_p1_completion_recovery.yaml`: daemon `h1` + controller `ctrl-g1` driving `g1`).
@@ -179,11 +184,8 @@ so the remaining Priority 1 work runs as a queue that any number of workers drai
   A worker uses as many slices as it has reachable daemons (`--max-slices`, `--min-slices`). A second wave
   (`tpu7x_p1_completion_scaleout2.yaml`: pair `k`, singles `s4`–`s8`) starts the remaining single-slice tasks at once.
   Workers exit when no task they can run is left, which frees their nodes.
-- **Code variants**: runs labeled `hbmfix` (`--run-id tpu7x_200b_hbmfix`) use [`patches/hbmfix`](patches/hbmfix.patch).
-  The other WITH-PRs runs use `src/` from this branch (Lance's 3 PRs) **plus the string patches applied by
-  [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py)**: single-GET HF→GCS streaming (Step 1 only), and, for the Step 2 HBM
-  peak, freeing reshard/stack intermediates and splitting composite leaves before the reshard. BEFORE runs
-  (`origin/main` `checkpoint_conversion`) get only the streaming patch.
+- **Code execution**: every pod extracts a single `/tmp/maxtext` tree from the committed `maxtext_lance_prs.tar.gz`
+  bundle (`CODE_VERSION.json`), instead of staging separate patched or `origin/main` trees at runtime.
 
 #### Multi-host slices (`--priority multihost`)
 The runs above use single-host `2x2x1` slices. A `2x2x2` slice has 2 hosts (16 cores, 1,627.6 GB HBM) and a `2x2x4`
@@ -195,16 +197,16 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
   `<owner>-mh-<run>` with one Indexed Job per slice. Pod `<owner>-mh-<run>-slice0-0-0` is the runner and every other
   pod is a daemon. The runs are listed in `MH_RUNS` in [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py).
 - **Isolation**: `<owner>` is `$BENCH_OWNER` (default `$USER`). Code, logs and CSVs go to
-  `gs://mesa-maxtext/<owner>_tpu7x_bench/`, so the `mesakh_tpu7x_bench` code dir that queue workers sync from is
-  never overwritten. The runs read the existing P1/P2 HF caches through `SHARED_HF_CACHE_BASE_DIR`.
+  `gs://mesa-maxtext/<owner>_tpu7x_bench/`, so the shared code dir is never overwritten. The runs read the existing
+  P1/P2 HF caches through `SHARED_HF_CACHE_BASE_DIR`.
 - **Results**: [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md).
   [`scripts/collect_multihost_results.py`](scripts/collect_multihost_results.py) appends the result JSONs of a
   multi-host run dir to [`reports/tpu7x_multihost_results.csv`](reports/tpu7x_multihost_results.csv) (one row per new
   model, scan mode, layout and `--source`; existing rows are never changed).
 - **`to_maxtext` on multi-host slices** (`MESAKH_MH_RUNS`, `BENCH_OWNER=mesakh`): a run can set `pipelines`
-  (`safetensors`, `to_maxtext` or `both`), `run_dir` (the P1/P2 run dir whose converted Orbax checkpoint Step 3
-  loads, with `--skip-completed`) and `tree` (e.g. `/tmp/maxtext_fix`). Step 3 results land in that run dir under
-  `<scan_mode>[_slices<N>]_hosts<H>`, where the sheet-table generator finds them.
+  (`safetensors`, `to_maxtext` or `both`) and `run_dir` (the P1/P2 run dir whose converted Orbax checkpoint Step 3
+  loads, with `--skip-completed`). Step 3 results land in that run dir under `<scan_mode>[_slices<N>]_hosts<H>`, where
+  the sheet-table generator finds them.
 - **v5p**: `--platform v5p` deploys `V5P_MH_RUNS` on `bodaborg-v5p-nap` (reservation capacity, 4 devices per host, no
   Kueue TAS). Their results go to the `v5p_multihost` run id, apart from the tpu7x results.
 
@@ -221,18 +223,13 @@ slice has 4 hosts (32 cores, 3,255.2 GB HBM), connected over ICI instead of DCN.
 BENCH_OWNER=mesakh ./checkpoint_load_benchmark/scripts/run_tpu7x_cluster.sh --priority multihost --run smoke-tm-2s
 ```
 
-#### Fix validation runs (queue `p3`)
+#### Legacy fix validation runs (queue `p3`)
 - **Tasks**: [`configs/p3_tasks.json`](configs/p3_tasks.json), uploaded to
-  `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p3/tasks.json`: BEFORE 397B scanned on 4 slices, the validations and
-  regression checks of the two HBM-peak fixes (issues U-1, U-6), and the `to_maxtext` conversions with the capped
-  Orbax save buffers (U-8: a `llama3.1-70b` check, then 397B unscanned and its Orbax loads).
-- **Fix tree** `/tmp/maxtext_fix`: [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py) (`stage_fix_tree`) copies
-  `/tmp/maxtext` and replaces `load_dynamic.py`, `tensor_handling.py` and `utils.py` with this branch's `src/`
-  versions, which `run_tpu7x_cluster.sh` uploads to `<code dir>/fix/`. The fix runs write to their own run ids
-  (`tpu7x_200b_fix`, `tpu7x_16m_fix`, `tpu7x_200b_tmfix`, `tpu7x_16m_tmfix`), so every other row keeps its code.
-- **Workers**: `generate_tpu7x_manifests.py` writes `tpu7x_p3_group_p.yaml` (4-slice group), `tpu7x_p3_pair_q.yaml`
-  (2-slice pair, `--min-slices 2`) and `tpu7x_p3_single_t{1,2,3}.yaml`. A preempted worker is re-created with
-  `kubectl apply -f`; its lock is taken over after 20 min.
+  `gs://mesa-maxtext/mesakh_tpu7x_bench/queue/p3/tasks.json` (legacy file; still references old pod tree paths and will
+  be replaced when v2 adds platform profiles). Recorded historical validations of BEFORE 397B scanned on 4 slices,
+  the HBM-peak fixes (issues U-1, U-6), and the `to_maxtext` conversions with capped Orbax save buffers (U-8).
+- **Branches**: those fixes are now committed on this branch (`src/`), so pods run them directly from the single
+  `/tmp/maxtext` tarball without staging separate overlay trees.
 - **Tables**: `build_tpu7x_sheet_table.py --variant "with fix=<local mirror of a fix run dir>"` adds a
   `safetensor (with fix)` row after each configuration that the fix run dir has a result for.
 

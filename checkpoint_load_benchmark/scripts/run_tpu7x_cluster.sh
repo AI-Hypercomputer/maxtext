@@ -160,33 +160,20 @@ echo " Priority Mode   : ${PRIORITY}"
 echo " Pair Filter     : ${PAIR_FILTER:-all}"
 echo "================================================================================"
 
-# 1. Sync benchmark harness, bootstrap script, task-queue worker and the HBM-fix utils to GCS code bucket
-echo "[1/3] Uploading harness, bootstrap, task queue and fixed utils to ${GCS_CODE_DIR}..."
-"${PYTHON_BIN}" -c "
-from etils import epath
-files = {
-    '${BENCHMARK_DIR}/benchmark_ckpt_load_time.py': 'benchmark_ckpt_load_time.py',
-    '${BENCHMARK_DIR}/bootstrap_tpu7x.py': 'bootstrap_tpu7x.py',
-    '${BENCHMARK_DIR}/scripts/tpu7x_task_queue.py': 'tpu7x_task_queue.py',
-    '${BENCHMARK_DIR}/patches/hbmfix/src/maxtext/checkpoint_conversion/utils/load_dynamic.py': 'load_dynamic.py',
-    '${BENCHMARK_DIR}/patches/hbmfix/src/maxtext/checkpoint_conversion/utils/tensor_handling.py': 'tensor_handling.py',
-    # This branch's fixed utils, staged on the pods as /tmp/maxtext_fix (bootstrap_tpu7x.stage_fix_tree).
-    '${REPO_ROOT}/src/maxtext/checkpoint_conversion/utils/load_dynamic.py': 'fix/load_dynamic.py',
-    '${REPO_ROOT}/src/maxtext/checkpoint_conversion/utils/tensor_handling.py': 'fix/tensor_handling.py',
-    '${REPO_ROOT}/src/maxtext/checkpoint_conversion/utils/utils.py': 'fix/utils.py',
-}
-for local_p, name in files.items():
-    gcs_p = '${GCS_CODE_DIR}/' + name
-    epath.Path(gcs_p).write_bytes(open(local_p, 'rb').read())
-    print(f'  Uploaded {local_p} -> {gcs_p}')
-"
+# 1. Build and upload the committed code tarball and bootstrap/queue helpers to GCS code bucket
+echo "[1/3] Building and uploading committed code bundle to ${GCS_CODE_DIR}..."
+TARBALL_OUT_DIR="$(mktemp -d)"
+trap 'rm -rf "${TARBALL_OUT_DIR}"' EXIT
+"${PYTHON_BIN}" "${BENCHMARK_DIR}/scripts/build_code_tarball.py" \
+  --out "${TARBALL_OUT_DIR}" \
+  --upload "${GCS_CODE_DIR}"
+rm -rf "${TARBALL_OUT_DIR}"
+trap - EXIT
 if [[ "${PRIORITY}" == "multihost" ]]; then
-  # The bootstrap also reads the code tarballs from its code dir; copy them once from the source code dir.
-  for tarball in maxtext_lance_prs.tar.gz checkpoint_conversion_origin_main.tar.gz site_packages_overlay.tar.gz; do
-    if ! gcloud storage ls "${GCS_CODE_DIR}/${tarball}" >/dev/null 2>&1; then
-      gcloud storage cp "${SOURCE_CODE_DIR}/${tarball}" "${GCS_CODE_DIR}/${tarball}"
-    fi
-  done
+  # The bootstrap also reads site_packages_overlay.tar.gz from its code dir; copy it once from the source code dir.
+  if ! gcloud storage ls "${GCS_CODE_DIR}/site_packages_overlay.tar.gz" >/dev/null 2>&1; then
+    gcloud storage cp "${SOURCE_CODE_DIR}/site_packages_overlay.tar.gz" "${GCS_CODE_DIR}/site_packages_overlay.tar.gz"
+  fi
 fi
 
 if [[ "${ACTION}" == "upload" ]]; then

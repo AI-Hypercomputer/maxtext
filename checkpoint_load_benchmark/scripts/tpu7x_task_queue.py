@@ -21,12 +21,9 @@ a heartbeat in it while the harness runs, and writes `<queue>/done/<id>.json` wh
 A lock whose heartbeat is older than `--stale-after-s` belongs to a preempted worker and is taken over; the
 harness's `--skip-completed` then resumes the task from its last finished phase.
 
-Workers run on pods built by `bootstrap_tpu7x.py`, so the code trees named by tasks (`/tmp/maxtext`,
-`/tmp/maxtext_origin_main`, `/tmp/maxtext_hbmfix`, `/tmp/maxtext_stagefix`) exist on both slices of a pair. A task
-is only claimed by a worker with enough slices (`--max-slices`) whose pod has the task's tree. Before each task, the
-worker copies the latest harness from `--code-dir` into the task's tree. Worker processes started before this sync
-existed keep the harness from pod start; tasks that need a newer harness name a tree only newer pods have
-(`/tmp/maxtext_stagefix`).
+Workers run inside pods whose `/tmp/maxtext` tree was extracted from `maxtext_lance_prs.tar.gz` at pod start.
+A task is only claimed by a worker with enough slices (`--max-slices`) whose pod has `task["tree"]`, and runs
+the harness inside that extracted tarball directly (no per-task download from GCS).
 
 Task fields: `id`, `slices` (1 or 2), `tree`, `args` (harness CLI args), optional `env`, `depends_on`
 (ids that must be done first) and `csv` (name of the CSV uploaded to `<results>/`).
@@ -59,7 +56,6 @@ from google.cloud import storage
 
 HARNESS_REL = "checkpoint_load_benchmark/benchmark_ckpt_load_time.py"
 DEFAULT_RESULTS = "gs://mesa-maxtext/mesakh_tpu7x_bench/results"
-DEFAULT_CODE_DIR = "gs://mesa-maxtext/mesakh_tpu7x_bench/code"
 
 
 def _now() -> str:
@@ -192,27 +188,9 @@ def _runnable_by_me(task: dict, args, max_slices: int) -> bool:
   return os.path.isfile(os.path.join(task["tree"], HARNESS_REL))
 
 
-def _sync_harness(tree: str, code_dir: str) -> None:
-  """Copies the latest harness from `code_dir` into `tree`, so harness fixes reach running workers on their next task.
-
-  A failed download keeps the copy from pod start. 2-slice runs ship this file to the daemons, so all slices match.
-  """
-  if not code_dir:
-    return
-  bucket, _, blob = f"{code_dir.rstrip('/')}/{os.path.basename(HARNESS_REL)}".removeprefix("gs://").partition("/")
-  try:
-    data = storage.Client().bucket(bucket).blob(blob).download_as_bytes()
-    with open(os.path.join(tree, HARNESS_REL), "wb") as f:
-      f.write(data)
-    _log(f"Synced the harness into {tree} from {code_dir}")
-  except Exception as ex:  # pylint: disable=broad-exception-caught
-    _log(f"WARN: harness sync from {code_dir} failed ({ex}); using the copy from pod start")
-
-
 def run_task(q: Queue, task: dict, gen: int, args) -> int:
   """Runs the harness for `task` while refreshing the lock heartbeat; returns the harness exit code."""
   tree = task["tree"]
-  _sync_harness(tree, args.code_dir)
   # sys.executable is empty when the interpreter cannot resolve its own path (e.g. under the slice daemon).
   python = sys.executable or shutil.which("python3") or "python3"
   cmd = [python, "-u", os.path.join(tree, HARNESS_REL), *task["args"]]
@@ -296,9 +274,8 @@ def main() -> int:
   p.add_argument("--results", default=DEFAULT_RESULTS, help="gs:// directory for per-task CSVs")
   p.add_argument(
       "--code-dir",
-      default=DEFAULT_CODE_DIR,
-      help="gs:// directory whose benchmark_ckpt_load_time.py is copied into the task's tree before each task "
-      "(empty: keep the copy from pod start)",
+      default="",
+      help="Deprecated no-op (kept for CLI compatibility); tasks run the harness inside the extracted tarball",
   )
   p.add_argument("--max-tasks", type=int, default=0, help="Exit with code 2 after this many tasks (0 = no limit)")
   p.add_argument("--no-wait", action="store_true", help="Exit with code 3 instead of polling when nothing is claimable")

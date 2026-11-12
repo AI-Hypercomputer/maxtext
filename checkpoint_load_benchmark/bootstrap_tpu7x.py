@@ -1,29 +1,31 @@
-"""Pod bootstrap and coordination script for `bodaborg-tpu7x-nap` (`tpu7x-standard-4t`, `2x2x1`) benchmark pods.
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Pod bootstrap and coordination script for TPU benchmark pods.
 
 Responsibilities:
   1. Environment Setup (`setup_environment`):
-     - Installs missing Python dependencies from `gs://mesa-maxtext/mesakh_tpu7x_bench/code/site_packages_overlay.tar.gz`
-       without shadowing the container's native TPU-matched `jax`, `jaxlib`, `flax`, or `orbax` packages.
-     - Stages MaxText worktrees on each pod:
-         * `/tmp/maxtext`: `origin/docs/checkpoint-load-benchmark` (includes Lance Wang's 3 PRs: `#5706`, `#5828`, `#5705`)
-         * `/tmp/maxtext_origin_main`: `origin/main` (`f596f5369`, before Lance Wang's 3 PRs) for Experiment 1A comparison.
-         * `/tmp/maxtext_hbmfix`: `/tmp/maxtext` with the HBM-peak fix for composite keys (`load_dynamic.py` and
-           `tensor_handling.py` from `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`), used only by runs labeled hbmfix.
-         * `/tmp/maxtext_fix`: `/tmp/maxtext` with this branch's fixed checkpoint-conversion utils (from
-           `<code dir>/fix/`), used only by the fix-validation runs (`stage_fix_tree`).
-         * `/tmp/maxtext_stagefix`: a symlink to `/tmp/maxtext` that marks pods started with the RAM-aware
-           `to_maxtext` staging, so queue tasks that need it are only claimed by those pods.
-       A run selects its tree by running `<tree>/checkpoint_load_benchmark/benchmark_ckpt_load_time.py`; the harness
-       copies itself to the same path on the slice-1 daemon, so both slices use the same tree.
-     - Patches `load_dynamic.py` to use single-GET streaming (`1` HTTP GET per `.safetensors` shard with 32 MB GCS upload chunks)
-       so `>200B` models (`94` to `241` shards, `470 GB` to `961 GB`) stream from HuggingFace Hub to GCS without HTTP 429 rate limits.
-  2. Multi-Slice Role Dispatch (`main`):
-     - `ROLE=daemon` (Slice 1 pod `mesakh-tpu7x-<id>1`): Starts `benchmark_ckpt_load_time.py --remote-slice-daemon --daemon-port 55555`.
-     - `ROLE=runner` (Slice 0 pod `mesakh-tpu7x-<id>0`): Waits for the Slice 1 daemon via headless Kubernetes Service DNS
-       (`WAIT_FOR_DAEMON_HOST=mesakh-w1-<id>`), exports `REMOTE_SLICE1_ADDR=<ip>:55555`, runs `RUNNER_SCRIPT`, and sends a clean
-       shutdown signal to Slice 1 upon completion.
-     - Multi-host slices (`2x2x2`, `2x2x4`) run as a JobSet (`generate_tpu7x_manifests.py`): host 0 of slice 0 is the
-       runner and every other host is a daemon. `WAIT_FOR_DAEMON_HOST` lists the daemons in JAX process order.
+     - Installs missing Python dependencies from `<BENCH_CODE_DIR>/site_packages_overlay.tar.gz` without shadowing the
+       container's native TPU-matched `jax`, `jaxlib`, `flax`, or `orbax` packages.
+     - Downloads and extracts `<BENCH_CODE_DIR>/maxtext_lance_prs.tar.gz` into `/tmp/maxtext`. Every pod runs the
+       committed code tree inside that tarball verbatim (including `checkpoint_load_benchmark/benchmark_ckpt_load_time.py`
+       and `src/`), verified via `/tmp/maxtext/CODE_VERSION.json` (`BENCH_GIT_COMMIT` exported to both runner and daemon).
+     - Installs `google-cloud-storage` if missing in the container environment.
+  2. Multi-Slice / Multi-Host Role Dispatch (`main`):
+     - `ROLE=daemon`: Starts `/tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py --remote-slice-daemon`.
+     - `ROLE=runner`: Waits for all daemon hosts listed in `WAIT_FOR_DAEMON_HOST` on `DAEMON_PORT` (default `55555`),
+       exports `REMOTE_SLICE1_ADDR`, runs `RUNNER_SCRIPT`, and sends shutdown signals to the daemons upon completion.
   `BENCH_CODE_DIR` overrides the GCS code directory (default: `gs://mesa-maxtext/mesakh_tpu7x_bench/code`).
 """
 
@@ -36,11 +38,12 @@ import subprocess
 import sys
 import tarfile
 import time
+from typing import Any
 from etils import epath
 
-# BENCH_CODE_DIR points a run at its own copy of the code, so it can test harness changes without touching the
-# copies that other running pods sync from.
-GCS_CODE_DIR = os.environ.get("BENCH_CODE_DIR", "gs://mesa-maxtext/mesakh_tpu7x_bench/code")
+GCS_CODE_DIR = os.environ.get("BENCH_CODE_DIR", "gs://mesa-maxtext/mesakh_tpu7x_bench/code").rstrip("/")
+CODE_VERSION_FILENAME = "CODE_VERSION.json"
+MAXTEXT_TREE_DIR = "/tmp/maxtext"
 
 
 def download_from_gcs(gcs_uri: str, local_path: str) -> None:
@@ -51,39 +54,43 @@ def download_from_gcs(gcs_uri: str, local_path: str) -> None:
   print(f"[Bootstrap] Downloaded {gcs_uri} -> {local_path} ({len(data)/1e6:.2f} MB)", flush=True)
 
 
-def _patch_single_get_streaming(ld_file: str) -> None:
-  """Makes `build_gcs_cache_worker` stream each shard from HF Hub with 1 GET (no HTTP 429s on 100+ shards)."""
-  with open(ld_file, "r", encoding="utf-8") as f:
-    ld_txt = f.read()
-  old_block = """      with fs.open(fpath, "rb") as remote_f:
-        blob.chunk_size = 1024 * 1024 * 32  # 32MB chunks
-        blob.upload_from_file(remote_f, client=storage_client)"""
-  new_block = """      import requests, shutil
-      _parts = fpath.strip("/").split("/")
-      _repo_id, _fname = "/".join(_parts[:2]), "/".join(_parts[2:])
-      _url = huggingface_hub.hf_hub_url(repo_id=_repo_id, filename=_fname)
-      _is_gated = _repo_id.startswith(("meta-llama/", "google/"))
-      _hdrs = {"Authorization": f"Bearer {hf_access_token}"} if (hf_access_token and (_is_gated or attempt % 2 == 1)) else {}
-      with requests.get(_url, headers=_hdrs, stream=True, timeout=(30, 300)) as _resp:
-        _resp.raise_for_status()
-        _resp.raw.decode_content = True
-        with blob.open("wb", chunk_size=32 * 1024 * 1024) as _gcs_out:
-          shutil.copyfileobj(_resp.raw, _gcs_out, length=16 * 1024 * 1024)"""
-  ld_txt = ld_txt.replace(old_block, new_block)
-  ld_txt = ld_txt.replace("max_workers=32", "max_workers=16")
-  with open(ld_file, "w", encoding="utf-8") as f:
-    f.write(ld_txt)
-  print(f"[Bootstrap] Patched single-GET HF->GCS streaming in {ld_file}", flush=True)
+def load_code_version(tree_dir: str = MAXTEXT_TREE_DIR) -> dict[str, Any]:
+  """Reads and validates CODE_VERSION.json from an extracted code tarball tree."""
+  version_path = os.path.join(tree_dir, CODE_VERSION_FILENAME)
+  try:
+    with open(version_path, "r", encoding="utf-8") as f:
+      version = json.load(f)
+  except (OSError, ValueError) as ex:
+    raise RuntimeError(
+        f"Missing or invalid {version_path} ({ex}); the code tarball was not built by build_code_tarball.py"
+    ) from ex
+  if not isinstance(version, dict) or not isinstance(version.get("git_commit"), str) or not version["git_commit"]:
+    raise RuntimeError(
+        f"Invalid {version_path}: expected a JSON object with a non-empty 'git_commit' "
+        f"(tarball was not built by build_code_tarball.py)"
+    )
+  return version
+
+
+def extract_and_verify_code_tarball(tarball_path: str, tree_dir: str = MAXTEXT_TREE_DIR) -> dict[str, Any]:
+  """Extracts `tarball_path` into `tree_dir`, validates CODE_VERSION.json, and returns its metadata."""
+  os.makedirs(tree_dir, exist_ok=True)
+  with tarfile.open(tarball_path, "r:gz") as tf:
+    tf.extractall(tree_dir, filter="tar")
+  return load_code_version(tree_dir)
 
 
 def setup_environment() -> None:
+  """Downloads the site-packages overlay and code tarball from GCS and sets BENCH_GIT_COMMIT."""
   t0 = time.time()
   os.makedirs("/tmp/site_packages_raw", exist_ok=True)
-  os.makedirs("/tmp/maxtext", exist_ok=True)
+  if os.path.exists(MAXTEXT_TREE_DIR):
+    shutil.rmtree(MAXTEXT_TREE_DIR)
+  os.makedirs(MAXTEXT_TREE_DIR, exist_ok=True)
 
   download_from_gcs(f"{GCS_CODE_DIR}/site_packages_overlay.tar.gz", "/tmp/site_packages_overlay.tar.gz")
   with tarfile.open("/tmp/site_packages_overlay.tar.gz", "r:gz") as tf:
-    tf.extractall("/tmp/site_packages_raw")
+    tf.extractall("/tmp/site_packages_raw", filter="tar")
 
   # Only install overlay packages that do not already exist in the container's native site-packages
   # so we never shadow the container's matched jax/jaxlib/flax/orbax installation.
@@ -103,138 +110,23 @@ def setup_environment() -> None:
   print(f"[Bootstrap] Added missing packages to {target_sp}: {sorted(copied_pkgs)}", flush=True)
 
   download_from_gcs(f"{GCS_CODE_DIR}/maxtext_lance_prs.tar.gz", "/tmp/maxtext_lance_prs.tar.gz")
-  with tarfile.open("/tmp/maxtext_lance_prs.tar.gz", "r:gz") as tf:
-    tf.extractall("/tmp/maxtext")
-
-  download_from_gcs(
-      f"{GCS_CODE_DIR}/benchmark_ckpt_load_time.py",
-      "/tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py",
+  code_version = extract_and_verify_code_tarball("/tmp/maxtext_lance_prs.tar.gz", MAXTEXT_TREE_DIR)
+  os.environ["BENCH_GIT_COMMIT"] = code_version["git_commit"]
+  print(
+      f"[Bootstrap] Code version: branch={code_version.get('git_branch_name', 'unknown')} "
+      f"commit={code_version['git_commit']} pushed={code_version.get('git_commit_pushed')}",
+      flush=True,
   )
 
-  # Also create /tmp/maxtext_origin_main with origin/main checkpoint_conversion code (Before Lance's 3 PRs)
-  if os.path.exists("/tmp/maxtext_origin_main"):
-    shutil.rmtree("/tmp/maxtext_origin_main")
-  shutil.copytree("/tmp/maxtext", "/tmp/maxtext_origin_main")
-  download_from_gcs(
-      f"{GCS_CODE_DIR}/checkpoint_conversion_origin_main.tar.gz",
-      "/tmp/checkpoint_conversion_origin_main.tar.gz",
-  )
-  with tarfile.open("/tmp/checkpoint_conversion_origin_main.tar.gz", "r:gz") as tf:
-    tf.extractall("/tmp/maxtext_origin_main")
   shutil.rmtree("/tmp/site_packages_raw", ignore_errors=True)
-  for _tar_f in (
-      "/tmp/site_packages_overlay.tar.gz",
-      "/tmp/maxtext_lance_prs.tar.gz",
-      "/tmp/checkpoint_conversion_origin_main.tar.gz",
-  ):
+  for tar_f in ("/tmp/site_packages_overlay.tar.gz", "/tmp/maxtext_lance_prs.tar.gz"):
     try:
-      os.remove(_tar_f)
+      os.remove(tar_f)
     except OSError:
       pass
 
-  for root_dir in ("/tmp/maxtext", "/tmp/maxtext_origin_main"):
-    ld_file = os.path.join(root_dir, "src/maxtext/checkpoint_conversion/utils/load_dynamic.py")
-    if os.path.exists(ld_file):
-      _patch_single_get_streaming(ld_file)
-
-  # Patch composite tuple (wi_0, wi_1) split-before-reshard and intermediate buffer deletion in /tmp/maxtext
-  th_file = "/tmp/maxtext/src/maxtext/checkpoint_conversion/utils/tensor_handling.py"
-  ld_main = "/tmp/maxtext/src/maxtext/checkpoint_conversion/utils/load_dynamic.py"
-  if os.path.exists(th_file) and os.path.exists(ld_main):
-    with open(th_file, "r", encoding="utf-8") as f:
-      th_txt = f.read()
-    old_reshard = """  pieces = [
-      jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
-      for start in range(0, size, step)
-  ]
-  return _concatenate_fn(axis, sharding)(*pieces)"""
-    new_reshard = """  pieces = [
-      jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
-      for start in range(0, size, step)
-  ]
-  jax.block_until_ready(pieces)
-  if isinstance(array, jax.Array) and not array.is_deleted():
-    array.delete()
-  res = _concatenate_fn(axis, sharding)(*pieces)
-  jax.block_until_ready(res)
-  for _p in pieces:
-    if isinstance(_p, jax.Array) and not _p.is_deleted():
-      _p.delete()
-  return res"""
-    th_txt = th_txt.replace(old_reshard, new_reshard)
-
-    old_bstack = """  mid = len(tensors) // 2
-  left = _binary_chunked_stack(tensors[:mid], axis=axis)
-  right = _binary_chunked_stack(tensors[mid:], axis=axis)
-  return np.concatenate([left, right], axis=axis)"""
-    new_bstack = """  mid = len(tensors) // 2
-  left = _binary_chunked_stack(tensors[:mid], axis=axis)
-  right = _binary_chunked_stack(tensors[mid:], axis=axis)
-  res = np.concatenate([left, right], axis=axis)
-  jax.block_until_ready(res)
-  for _side in (left, right):
-    if isinstance(_side, jax.Array) and not _side.is_deleted():
-      _side.delete()
-  return res"""
-    th_txt = th_txt.replace(old_bstack, new_bstack)
-    th_txt = th_txt.replace(
-        "  if target_sharding is not None:\n    stacked_array = _reshard(stacked_array, target_sharding)",
-        "  if target_sharding is not None and not isinstance(mt_key, tuple):\n    stacked_array = _reshard(stacked_array, target_sharding)",
-    )
-    with open(th_file, "w", encoding="utf-8") as f:
-      f.write(th_txt)
-
-    with open(ld_main, "r", encoding="utf-8") as f:
-      ld_m_txt = f.read()
-    old_comp = """    load_fn = get_hf_loading_function(
-        hf_source,
-        tensor_getter,
-        hook_fn,
-        target_leaf,
-        maxtext_config,
-        mt_keys[0],
-    )
-
-    # Execute transformation and assign to flat_restored
-    t_layer = time.time()
-    loaded = load_fn()
-    if isinstance(mt_key, tuple):
-      for i, (name, leaf) in enumerate(zip(check_names, leaves)):
-        part = loaded[..., i]
-        flat_restored[name] = jax.device_put(part, leaf.sharding) if hasattr(leaf, "sharding") else part
-    else:
-      flat_restored[check_names[0]] = loaded"""
-    new_comp = """    load_fn = get_hf_loading_function(
-        hf_source,
-        tensor_getter,
-        hook_fn,
-        target_leaf,
-        maxtext_config,
-        mt_key if isinstance(mt_key, tuple) else mt_keys[0],
-    )
-
-    # Execute transformation and assign to flat_restored
-    t_layer = time.time()
-    loaded = load_fn()
-    if isinstance(mt_key, tuple):
-      parts = [jax.lax.slice_in_dim(loaded, i, i + 1, axis=-1)[..., 0] for i in range(len(leaves))]
-      jax.block_until_ready(parts)
-      if isinstance(loaded, jax.Array) and not loaded.is_deleted():
-        loaded.delete()
-      del loaded
-      for i, (name, leaf) in enumerate(zip(check_names, leaves)):
-        part = parts[i]
-        parts[i] = None
-        flat_restored[name] = tensor_handling._reshard(part, leaf.sharding) if hasattr(leaf, "sharding") else part
-    else:
-      flat_restored[check_names[0]] = loaded"""
-    ld_m_txt = ld_m_txt.replace(old_comp, new_comp)
-    with open(ld_main, "w", encoding="utf-8") as f:
-      f.write(ld_m_txt)
-    print("[Bootstrap] Patched composite-leaf split-before-reshard HBM optimization in /tmp/maxtext", flush=True)
-
   try:
-    from google.cloud import storage  # noqa: F401
+    from google.cloud import storage  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
   except ImportError:
     print("[Bootstrap] Installing google-cloud-storage...", flush=True)
     subprocess.run(
@@ -242,78 +134,11 @@ def setup_environment() -> None:
         check=True,
     )
 
-  stage_hbmfix_tree()
-  stage_fix_tree()
-  stage_stagefix_alias()
   print(f"[Bootstrap] Environment ready in {time.time() - t0:.2f}s", flush=True)
 
 
-# Checkpoint-conversion utils of this branch's `src/` (uploaded to GCS_CODE_DIR/fix/) that `/tmp/maxtext_fix` uses.
-FIX_FILES = ("load_dynamic.py", "tensor_handling.py", "utils.py")
-
-
-def stage_fix_tree() -> None:
-  """Stages `/tmp/maxtext_fix`: `/tmp/maxtext` with this branch's fixed checkpoint-conversion utils.
-
-  `load_dynamic.py` and `tensor_handling.py` build the leaves of a stacked composite key one by one and join reshard
-  slices two at a time (the `qwen3.5-397b-a17b` and `gpt-oss-120b` scanned HBM OOMs), and `utils.py` caps the
-  `to_maxtext` Orbax save buffers with `checkpoint_storage_concurrent_gb`. Only runs that test these fixes select
-  this tree; the other trees stay as they were.
-  """
-  utils_rel = "src/maxtext/checkpoint_conversion/utils"
-  try:
-    fixed = {name: epath.Path(f"{GCS_CODE_DIR}/fix/{name}").read_bytes() for name in FIX_FILES}
-  except Exception as ex:  # pylint: disable=broad-exception-caught
-    print(f"[Bootstrap] Skipping /tmp/maxtext_fix ({ex})", flush=True)
-    return
-  if os.path.exists("/tmp/maxtext_fix"):
-    shutil.rmtree("/tmp/maxtext_fix")
-  shutil.copytree("/tmp/maxtext", "/tmp/maxtext_fix")
-  for name, data in fixed.items():
-    with open(os.path.join("/tmp/maxtext_fix", utils_rel, name), "wb") as f:
-      f.write(data)
-  _patch_single_get_streaming(os.path.join("/tmp/maxtext_fix", utils_rel, "load_dynamic.py"))
-  print(f"[Bootstrap] Staged /tmp/maxtext_fix with the fixed {', '.join(FIX_FILES)}", flush=True)
-
-
-def stage_stagefix_alias() -> None:
-  """Links `/tmp/maxtext_stagefix` to `/tmp/maxtext` on pods started with the RAM-aware `to_maxtext` staging.
-
-  Queue workers started before `tpu7x_task_queue.py` synced the harness per task keep the harness from pod start,
-  and only claim tasks whose tree exists on their pod. Tasks that need the RAM-aware staging (qwen3-235b-a22b:
-  470 GB staged in RAM plus the 470 GB converted state OOM-killed the pod) name this tree, so older pods skip them.
-  """
-  if not os.path.lexists("/tmp/maxtext_stagefix"):
-    os.symlink("/tmp/maxtext", "/tmp/maxtext_stagefix")
-  print("[Bootstrap] Linked /tmp/maxtext_stagefix -> /tmp/maxtext", flush=True)
-
-
-def stage_hbmfix_tree() -> None:
-  """Stages `/tmp/maxtext_hbmfix`: `/tmp/maxtext` with the HBM-peak fix for composite keys (e.g. qwen3.5 `wi_0/wi_1`).
-
-  The fixed `load_dynamic.py` and `tensor_handling.py` are read from GCS_CODE_DIR. The tree is separate so runs
-  that compare against `origin/main` keep using `/tmp/maxtext` (Lance's PRs plus the string patches above), and
-  runs that use the fix select it by running the harness from this tree.
-  """
-  utils_rel = "src/maxtext/checkpoint_conversion/utils"
-  try:
-    fixed = {
-        name: epath.Path(f"{GCS_CODE_DIR}/{name}").read_bytes() for name in ("load_dynamic.py", "tensor_handling.py")
-    }
-  except Exception as ex:  # pylint: disable=broad-exception-caught
-    print(f"[Bootstrap] Skipping /tmp/maxtext_hbmfix ({ex})", flush=True)
-    return
-  if os.path.exists("/tmp/maxtext_hbmfix"):
-    shutil.rmtree("/tmp/maxtext_hbmfix")
-  shutil.copytree("/tmp/maxtext", "/tmp/maxtext_hbmfix")
-  for name, data in fixed.items():
-    with open(os.path.join("/tmp/maxtext_hbmfix", utils_rel, name), "wb") as f:
-      f.write(data)
-  _patch_single_get_streaming(os.path.join("/tmp/maxtext_hbmfix", utils_rel, "load_dynamic.py"))
-  print("[Bootstrap] Staged /tmp/maxtext_hbmfix with the fixed load_dynamic.py and tensor_handling.py", flush=True)
-
-
 def wait_for_daemon(host: str, port: int = 55555, timeout_s: int = 7200) -> str:
+  """Blocks until a remote slice daemon accepts TCP connections on `host:port`."""
   print(f"[Bootstrap] Waiting for remote slice daemon at {host}:{port} ...", flush=True)
   t0 = time.time()
   while time.time() - t0 < timeout_s:
@@ -322,12 +147,13 @@ def wait_for_daemon(host: str, port: int = 55555, timeout_s: int = 7200) -> str:
       with socket.create_connection((ip, port), timeout=5):
         print(f"[Bootstrap] Connected to remote slice daemon at {host} ({ip}:{port})!", flush=True)
         return f"{ip}:{port}"
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
       time.sleep(2)
   raise TimeoutError(f"Timed out waiting for remote slice daemon {host}:{port}")
 
 
 def shutdown_daemons(addrs: list[str]) -> None:
+  """Sends shutdown signals to all remote slice daemons."""
   for addr in addrs:
     try:
       host, port_s = addr.split(":", 1)
@@ -348,7 +174,7 @@ def main() -> None:
     cmd = [
         sys.executable,
         "-u",
-        "/tmp/maxtext/checkpoint_load_benchmark/benchmark_ckpt_load_time.py",
+        f"{MAXTEXT_TREE_DIR}/checkpoint_load_benchmark/benchmark_ckpt_load_time.py",
         "--remote-slice-daemon",
         "--daemon-port",
         str(port),
