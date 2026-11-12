@@ -63,21 +63,16 @@ workflow, without building custom images from scratch.
 Following a new MaxText release on PyPI, pre-built Docker images undergo security vulnerability scanning and open-source license compliance reviews before being made public. As a result, newly versioned Docker images may take some time to become publicly accessible in Google Artifact Registry.
 ```
 
-### TPU Pre-Training images
+- **TPU Pre-Training:** `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:{{docker_tag}}`
+- **TPU Post-Training:** `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:{{docker_tag}}`
 
-| MaxText Version | Container Image                                                            |
-| :-------------- | :------------------------------------------------------------------------- |
-| `0.2.5`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.5` |
-| `0.2.4`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4` |
-| `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.3` |
+For other MaxText releases (`0.2.3` and later), switch documentation versions
+using the version selector or list all available tags in Artifact Registry:
 
-### TPU Post-Training images
-
-| MaxText Version | Container Image                                                             |
-| :-------------- | :-------------------------------------------------------------------------- |
-| `0.2.5`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.5` |
-| `0.2.4`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.4` |
-| `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.3` |
+```bash
+gcloud artifacts docker tags list us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training
+gcloud artifacts docker tags list us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training
+```
 
 If you need to customize dependencies or build from source, follow the
 instructions below to build your own MaxText Docker image.
