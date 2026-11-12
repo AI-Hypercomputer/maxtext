@@ -57,6 +57,9 @@ EXCLUDED_SUBSTRINGS = (
     "dt_bias",
     "conv1d",
     "shared_expert_gate",
+    "pos_embed",
+    "_ape",
+    "patch_embed",
 )
 
 EXCLUDED_EXACT_SEGMENTS = {
@@ -100,7 +103,19 @@ MOE_BLOCK_NAMES = (
     "routed_experts",
     "GptOssMlp",
     "routed_moe",
+    "experts",
+    "block_sparse_moe",
 )
+
+
+def _is_prestacked_m3_container_path(path: Tuple[str, ...]) -> bool:
+  """Returns True when `path` belongs to a pre-stacked m3 block without `ScannedLayers` metadata."""
+  if "cycles" in path or "super_block" in path:
+    return True
+  if "layers" in path and not any(seg.isdigit() for seg in path):
+    return True
+  return False
+
 
 # Logical axis name of the inner scan of a nested block scan (gemma4, qwen3-next). Its layers are stacked on the axis
 # right after the outer block scan's `param_scan_axis`.
@@ -166,14 +181,19 @@ def transform_logic(
   if any(
       segment in EXCLUDED_EXACT_SEGMENTS
       or (segment.endswith("bias") and segment != "position_bias")
+      or "norm" in segment.lower()
       or any(x in segment for x in EXCLUDED_SUBSTRINGS)
       for segment in path
   ):
     return None
 
-  # MoE routed expert weights: [num_experts, (num_layers), in_features, out_features]
+  # MoE routed expert weights: 3D [E, in, out] / 4D fused [E, D, 2, M] (plus optional scan axis).
   if _is_path_contain_any(MOE_BLOCK_NAMES, path) and not _is_path_contain_any(("shared_experts", "shared_expert"), path):
-    if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo", "gate_up_proj"), path):
+    if "gate_up_proj" in path:
+      if shape is not None and len(shape) >= 4 and shape[-2] == 2:
+        return mdn((-3,), (-1,))
+      return mdn((-2,), (-1,))
+    if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo", "down_proj"), path):
       return mdn((-2,), (-1,))
     # MoE router weights (e.g. gate.kernel): [in_features, (num_layers), num_experts]
     if _is_path_contain_any(("gate", "router"), path):
@@ -203,9 +223,12 @@ def transform_logic(
       # Note: Qwen3-Next flattens heads into a 2D projection (in_features = num_heads * head_dim),
       # so its out projection is a standard 2D matrix [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
       # Kimi-K3's scanned KDA `out` is a flat [in_features, num_layers, out_features] projection: standard mapping.
-      is_scanned_flat_3d = shape is not None and len(shape) == 3 and "scanned_blocks" in path
+      is_scanned_flat_3d = (
+          shape is not None and len(shape) == 3 and ("scanned_blocks" in path or _is_prestacked_m3_container_path(path))
+      )
       if not is_scanned_flat_3d and (
-          _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4)
+          _is_path_contain_any(("self_attention", "self_attn", "attn", "GptOssAttention"), path)
+          or (shape is not None and len(shape) == 4)
       ):
         return mdn((0, -2), (-1,))
 
@@ -214,17 +237,20 @@ def transform_logic(
   return mdn((0,), (-1,))
 
 
-def get_scan_axes(variable) -> Tuple[int, ...]:
+def get_scan_axes(variable, path: Tuple[str, ...] = ()) -> Tuple[int, ...]:
   """Returns the axes of a scanned NNX variable that stack layers rather than hold features.
 
   A scanned stack records its layer axis in the variable metadata (`param_scan_axis`,
   see `nnx_scan.create_scanned_layers`); a nested block scan stacks its local layers on
-  the axis right after it. Unscanned variables have no scan axes.
+  the axis right after it. Pre-stacked m3 containers (`cycles`, `super_block`, or
+  index-free `layers`) stack layers on leading axis `0`. Unscanned variables have no scan axes.
   """
+  ndim = getattr(variable.get_value(), "ndim", 0)
   metadata = variable.get_metadata() if hasattr(variable, "get_metadata") else {}
   if nnx.PARTITION_NAME not in metadata or "param_scan_axis" not in metadata:
+    if path and ndim >= 2 and _is_prestacked_m3_container_path(path):
+      return (0,)
     return ()
-  ndim = getattr(variable.get_value(), "ndim", 0)
   # Stacks too low-rank to hold param_scan_axis keep their layer axis in front.
   scan_axis = metadata["param_scan_axis"] if ndim > metadata["param_scan_axis"] else 0
   logical_axes = next(
@@ -277,10 +303,13 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
 
   def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], variable):
     # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
-    path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+    path_strings = tuple(str(p.key) for p in path if isinstance(p, jax.tree_util.DictKey))
     val_shape = getattr(variable.get_value(), "shape", None)
+    scan_axes = get_scan_axes(variable, path_strings)
+    if val_shape is not None and len(val_shape) - len(scan_axes) < 2:
+      return None
     dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
-    return to_stacked_layout(dim_num, len(val_shape or ()), get_scan_axes(variable))
+    return to_stacked_layout(dim_num, len(val_shape or ()), scan_axes)
 
   # Map over whole variables so each one's scan metadata is at hand; the result is an nnx.State
   # with the same structure, holding the mdn result in place of each Param.
