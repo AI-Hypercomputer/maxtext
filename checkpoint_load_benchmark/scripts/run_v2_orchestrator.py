@@ -265,6 +265,16 @@ def manage_cpu_jobs(
   return active_job_names
 
 
+def _match_worker_shape(prof: platforms.PlatformProfile, js_name: str) -> tuple[str, int] | None:
+  """Returns `(topology, num_slices)` encoded in a queue worker JobSet name `mesa-q-<plat>-<topo>-<s>s-*`."""
+  for topo_cand in prof.hosts_per_slice_by_topology:
+    tslug = manifests_v2.dns_slug(topo_cand)
+    for s_cand in (1, 2):
+      if f"-{tslug}-{s_cand}s-" in js_name:
+        return topo_cand, s_cand
+  return None
+
+
 def update_queue_and_tpu_workers(
     platform: str,
     done_s1: set[str],
@@ -328,7 +338,7 @@ def update_queue_and_tpu_workers(
 
   res = _run_cmd(["kubectl", f"--context={ctx}", "get", "jobsets", "-l", "app=mesa-bench-v2", "-o", "json"])
   active_jobsets: list[str] = []
-  has_queue_worker = False
+  covered_shapes: set[tuple[str, int]] = set()
   if res.returncode == 0 and res.stdout.strip():
     try:
       items = json.loads(res.stdout).get("items", [])
@@ -337,27 +347,41 @@ def update_queue_and_tpu_workers(
     for item in items:
       js_name = str(item.get("metadata", {}).get("name") or "")
       term_state = str(item.get("status", {}).get("terminalState") or "")
+      shape = _match_worker_shape(prof, js_name)
       if term_state in ("Completed", "Failed"):
         _run_cmd(["kubectl", f"--context={ctx}", "delete", "jobset", js_name, "--ignore-not-found=true"])
+        if shape is not None:
+          tslug = manifests_v2.dns_slug(shape[0])
+          _run_cmd(["gcloud", "storage", "rm", "-f", f"{queue_uri}/claims/*_{shape[1]}x{tslug}_*.json"], timeout=60)
         events.append(f"[{utc_now_str()}] `{platform}` TPU JobSet `{js_name}` `{term_state}` and cleaned up.")
         continue
       active_jobsets.append(js_name)
-      if js_name.startswith(f"mesa-q-{platform}-"):
-        has_queue_worker = True
+      if shape is not None:
+        covered_shapes.add(shape)
+        if platform == "v6e" and shape == ("2x4", 2):
+          covered_shapes.add(("2x4", 1))
 
-  if pending_ready_tasks and not has_queue_worker and not active_jobsets:
-    _run_cmd(["gcloud", "storage", "rm", "-f", f"{queue_uri}/claims/*.json"], timeout=60)
-    nxt = pending_ready_tasks[0]
+  max_js = 2 if platform == "v7x" else 1
+  for nxt in pending_ready_tasks:
+    if len(active_jobsets) >= max_js:
+      break
     topo = str(nxt["topology"])
     slices = int(nxt["slices"])
+    if (topo, slices) in covered_shapes:
+      continue
     min_slices = 1
     if platform == "v6e" and topo == "2x4":
       same_topo_slices = {int(t["slices"]) for t in pending_ready_tasks if str(t["topology"]) == topo}
       slices = max(same_topo_slices)
       min_slices = min(same_topo_slices)
+      covered_shapes.add((topo, 1))
+      covered_shapes.add((topo, 2))
     else:
       min_slices = slices
+      covered_shapes.add((topo, slices))
 
+    tslug = manifests_v2.dns_slug(topo)
+    _run_cmd(["gcloud", "storage", "rm", "-f", f"{queue_uri}/claims/*_{slices}x{tslug}_*.json"], timeout=60)
     seq = worker_seq.get(platform, 1) + 1
     worker_seq[platform] = seq
     wid = f"w{seq}"
