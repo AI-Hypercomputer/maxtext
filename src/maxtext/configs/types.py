@@ -5650,11 +5650,14 @@ class MaxTextConfig(
       else:
         return len(jax.devices())
 
-    self.num_target_devices = 1  # Default for validation when JAX is not initialized
     try:
       self.num_target_devices = get_num_target_devices()
-    except (RuntimeError, IndexError):
-      logger.warning("JAX device system not available for config validation. Assuming 1 device.")
+    except (RuntimeError, IndexError) as e:
+      # Global batch sizes are derived from this count, so don't guess it.
+      raise ValueError(
+          f"Could not determine the number of devices, which is needed to derive the global batch size: {e}. "
+          "On multi-host runs, this usually means the JAX distributed system isn't initialized yet."
+      ) from e
 
     # Automatically determine number of slices if not specified.
     raw_keys_for_num_slices = {
