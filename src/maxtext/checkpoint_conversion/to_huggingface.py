@@ -328,6 +328,12 @@ def _apply_yarn_rope_config(hf_config, max_config) -> None:
   else:
     rope_scaling = {}
 
+  # transformers 5 keys rope_parameters by layer type for models with sliding-window
+  # layers (e.g. Olmo 3); YaRN applies only to the full-attention layers.
+  per_layer_type = rope_scaling if isinstance(rope_scaling.get("full_attention"), dict) else None
+  if per_layer_type is not None:
+    rope_scaling = dict(per_layer_type["full_attention"])
+
   rope_type_key = "type" if "type" in rope_scaling and "rope_type" not in rope_scaling else "rope_type"
   rope_scaling.update(
       {
@@ -340,6 +346,9 @@ def _apply_yarn_rope_config(hf_config, max_config) -> None:
           "truncate": getattr(max_config, "rope_truncate", False),
       }
   )
+
+  if per_layer_type is not None:
+    rope_scaling = {**per_layer_type, "full_attention": rope_scaling}
 
   hf_config.rope_theta = getattr(max_config, "rope_max_timescale")
   hf_config.rope_scaling = rope_scaling
