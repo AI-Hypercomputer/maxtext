@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 19:59:56 UTC`
+- **Last Updated (UTC):** `2026-11-12 20:23:34 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -78,3 +78,5 @@
 - [2026-11-12 19:40:07 UTC] Launched `v7x` Step 1b conversion job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` for `deepseek4-1600b`.
 - [2026-11-12 19:40:11 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x1-1s-w2` `Failed` and cleaned up.
 - [2026-11-12 19:40:15 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-1s-w4` (`1x2x2x1`, min_slices=1) for 43 runnable tasks.
+- [2026-11-12 20:06:32 UTC] Launched `v6e` TPU queue worker `mesa-q-v6e-2x4-2s-w2` (`2x2x4`, min_slices=1) for 40 runnable tasks.
+- [2026-11-12 20:23:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 527 mirrored JSONs.
