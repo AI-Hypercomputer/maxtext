@@ -70,12 +70,12 @@ def apply_k8s_manifests(context: str, docs: Sequence[Mapping[str, Any]]) -> bool
 
 
 def sync_gcs_to_mirror(mirror_dir: str) -> int:
-  """Syncs regional GCS `step1`, `step1b`, `runs`, `queue/v2/done`, and `val` directories into `mirror_dir`."""
+  """Syncs regional GCS `runs`, `val`, `step1`, `step1b`, and `queue/v2/done` directories into `mirror_dir`."""
   for plat in ("v7x", "v6e", "v5e"):
     prof = platforms.get_profile(plat)
     region = prof.gcp_region
     gcs_root = (prof.regional_gcs_data_root or prof.gcs_data_root).rstrip("/")
-    for sub in ("step1", "step1b", "runs", "queue/v2/done", "val"):
+    for sub in ("runs", "val", "step1", "step1b", "queue/v2/done"):
       dst = os.path.join(mirror_dir, region, sub)
       os.makedirs(dst, exist_ok=True)
       _run_cmd(["gcloud", "storage", "rsync", "-r", f"{gcs_root}/{sub}", dst], timeout=180)
@@ -175,13 +175,18 @@ def manage_cpu_jobs(
         if f"-{m_slug}-" in jname:
           matched_model = m["model_name"]
           break
-      already_done = (jname.startswith("mesa-step1-") and matched_model in done_s1) or (
-          jname.startswith(("mesa-copy-", "mesa-step1b-")) and matched_model in done_s1b
-      )
-      if succeeded >= 1 or failed >= 1 or already_done:
+      if succeeded >= 1:
+        if matched_model:
+          if jname.startswith("mesa-step1-"):
+            done_s1.add(matched_model)
+          elif jname.startswith(("mesa-copy-", "mesa-step1b-")):
+            done_s1b.add(matched_model)
         _run_cmd(["kubectl", f"--context={ctx}", "delete", "job", jname, "--ignore-not-found=true"])
-        state_lbl = "Completed" if (succeeded >= 1 or already_done) else "Failed"
-        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` {state_lbl} and cleaned up.")
+        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` Completed and cleaned up.")
+        continue
+      if failed >= 2:
+        _run_cmd(["kubectl", f"--context={ctx}", "delete", "job", jname, "--ignore-not-found=true"])
+        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` Failed and cleaned up.")
         continue
       active_job_names.append(jname)
       if matched_model:
@@ -264,6 +269,7 @@ def update_queue_and_tpu_workers(
     done_s1: set[str],
     done_s1b: set[str],
     done_task_ids: set[str],
+    active_cpu_jobs: Sequence[str],
     last_uploaded_task_ids: dict[str, set[str]],
     worker_seq: dict[str, int],
     events: list[str],
@@ -274,8 +280,17 @@ def update_queue_and_tpu_workers(
   cfg = schema_v2.load_models_v2()
   models_by_name = {m["model_name"]: m for m in cfg["models"]}
 
+  busy_cpu_models: set[str] = set()
+  for jname in active_cpu_jobs:
+    for m_name in models_by_name:
+      m_slug = manifests_v2.dns_slug(m_name)
+      if f"-{m_slug}-" in jname:
+        busy_cpu_models.add(m_name)
+
   staged_ready: set[str] = set()
   for m_name, m_info in models_by_name.items():
+    if m_name in busy_cpu_models:
+      continue
     if m_name in done_s1 and (not m_info.get("needs_step1b") or m_name in done_s1b):
       staged_ready.add(m_name)
 
@@ -572,6 +587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
           done_s1_by_plat[plat],
           done_s1b_by_plat[plat],
           done_q_by_plat[plat],
+          active_cpu,
           last_uploaded_task_ids,
           worker_seq,
           events,
