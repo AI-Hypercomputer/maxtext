@@ -238,6 +238,9 @@ def build_deepseek_step1b_manifests(
     clean_target: bool = False,
     cache_size: int = 4,
     storage_class: str = "hyperdisk-balanced",
+    node_pool: str | None = None,
+    memory_request: str = "400Gi",
+    cpu_request: str = "64",
 ) -> list[dict[str, Any]]:
   """Builds `[PersistentVolumeClaim, Job]` for DeepSeek Step 1b (`FP8/FP4 -> BF16`) on `v7x` `job-manager-np`."""
   profile = platforms.get_profile("v7x")
@@ -284,18 +287,24 @@ def build_deepseek_step1b_manifests(
       "  --local-result-json /tmp/step1b_result.json \\\n"
       f"  --result-gcs-uri {shlex.quote(result_gcs_uri)}\n"
   )
+  target_pool = node_pool or profile.step1b_cpu_node_pool or profile.cpu_node_pool
+  target_machine = (
+      profile.cpu_machine_type
+      if target_pool == profile.cpu_node_pool
+      else (profile.step1b_cpu_machine_type or profile.cpu_machine_type)
+  )
   job = _build_cpu_job(
       name=job_name,
       profile=profile,
-      node_pool=profile.step1b_cpu_node_pool or profile.cpu_node_pool,
+      node_pool=target_pool,
       runner_script=script,
       labels=labels,
-      memory_request="400Gi",
-      cpu_request="64",
+      memory_request=memory_request,
+      cpu_request=cpu_request,
       extra_volumes=[{"name": "scratch", "persistentVolumeClaim": {"claimName": pvc_name}}],
       extra_mounts=[{"name": "scratch", "mountPath": "/scratch"}],
       extra_env=[
-          {"name": "BENCH_HOST_MACHINE_TYPE", "value": profile.step1b_cpu_machine_type or profile.cpu_machine_type},
+          {"name": "BENCH_HOST_MACHINE_TYPE", "value": target_machine},
           {"name": "BENCH_RUN_ID", "value": run_id},
       ],
   )
