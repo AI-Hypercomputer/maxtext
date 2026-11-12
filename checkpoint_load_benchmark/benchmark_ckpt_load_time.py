@@ -57,9 +57,11 @@ import csv
 import datetime
 import functools
 import json
+import mmap
 import multiprocessing
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -935,12 +937,76 @@ def find_free_port() -> int:
     return int(s.getsockname()[1])
 
 
+def _find_libtpu_path() -> str | None:
+  """Returns the path to `libtpu.so` if configured or installed, without importing JAX."""
+  env_path = os.environ.get("TPU_LIBRARY_PATH")
+  if env_path and os.path.isfile(env_path):
+    return env_path
+  try:
+    import libtpu  # pylint: disable=import-outside-toplevel
+
+    lib_path = libtpu.get_library_path()
+    if lib_path and os.path.isfile(lib_path):
+      return lib_path
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return None
+
+
+def _libtpu_supports_flag(libtpu_path: str, flag_name: str) -> bool:
+  """Checks via mmap whether `libtpu_path` contains gflag `flag_name`."""
+  if not libtpu_path or not os.path.isfile(libtpu_path) or os.path.getsize(libtpu_path) == 0:
+    return False
+  needle = flag_name.encode("ascii")
+  try:
+    with open(libtpu_path, "rb") as f:
+      with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        return mm.find(needle) != -1
+  except Exception:  # pylint: disable=broad-exception-caught
+    return False
+
+
+def _ensure_tpu_insecure_grpc_init_args(num_slices: int, total_procs: int) -> list[str]:
+  """Appends multi-host / multi-slice insecure gRPC flags to `LIBTPU_INIT_ARGS` when needed."""
+  # GKE Workload Identity pods lack GCE metadata ALTS credentials between SliceBuilder/MegaScale peers.
+  if total_procs <= 1 or os.environ.get("KEEP_ALTS_GRPC") == "1":
+    return []
+  libtpu_path = _find_libtpu_path()
+  if not libtpu_path:
+    return []
+  existing_raw = os.environ.get("LIBTPU_INIT_ARGS", "").strip()
+  try:
+    existing_tokens = shlex.split(existing_raw) if existing_raw else []
+  except ValueError:
+    existing_tokens = existing_raw.split()
+
+  desired_flags = ["slicebuilder_use_insecure_grpc"]
+  if num_slices > 1:
+    desired_flags.append("megascale_use_insecure_grpc")
+
+  added: list[str] = []
+  for flag_name in desired_flags:
+    if any(tok == f"--{flag_name}" or tok.startswith(f"--{flag_name}=") for tok in existing_tokens):
+      continue
+    if _libtpu_supports_flag(libtpu_path, flag_name):
+      added.append(f"--{flag_name}=true")
+
+  if added:
+    os.environ["LIBTPU_INIT_ARGS"] = " ".join([existing_raw, *added]).strip()
+  return added
+
+
 def init_worker_runtime(args: argparse.Namespace) -> str:
   """Initializes JAX platform and (when multi-slice or multi-host) JAX distributed runtime."""
   hw = resolve_hardware(args.hardware)
-  total_procs = getattr(args, "num_slices", 1) * getattr(args, "num_hosts_per_slice", 1)
+  num_slices = getattr(args, "num_slices", 1)
+  total_procs = num_slices * getattr(args, "num_hosts_per_slice", 1)
   if hw == "tpu":
-    if getattr(args, "num_slices", 1) > 1:
+    if total_procs > 1:
+      added_flags = _ensure_tpu_insecure_grpc_init_args(num_slices=num_slices, total_procs=total_procs)
+      if added_flags and getattr(args, "slice_id", 0) == 0:
+        print(f"[TPU runtime] Added LIBTPU_INIT_ARGS: {' '.join(added_flags)}", flush=True)
+    if num_slices > 1:
       coord_ip = args.coordinator_address.split(":")[0]
       slice_idx = args.slice_id // max(1, getattr(args, "num_hosts_per_slice", 1))
       os.environ["MEGASCALE_NUM_SLICES"] = str(args.num_slices)
@@ -2261,9 +2327,7 @@ def _write_result_json(result_json: str, data: dict[str, Any]) -> None:
     json.dump(data, f, indent=2)
 
 
-_NOT_TPU_MARKER_RE = re.compile(
-    r"\[NOT-TPU\]\s+backend=(\S+)\s+device_count=([0-9]+)\s+expected=([0-9]+):\s*(.*)"
-)
+_NOT_TPU_MARKER_RE = re.compile(r"\[NOT-TPU\]\s+backend=(\S+)\s+device_count=([0-9]+)\s+expected=([0-9]+):\s*(.*)")
 
 
 def _parse_not_tpu_marker(log_texts: list[str]) -> dict[str, Any] | None:
@@ -2421,6 +2485,7 @@ def invoke_worker_subprocess(
 
   env = os.environ.copy()
   env.setdefault("MALLOC_TRIM_THRESHOLD_", "65536")
+  env.setdefault("PYTHONUNBUFFERED", "1")
   site_dir = os.path.join(local_work_dir, "_sitecustomize")
   os.makedirs(site_dir, exist_ok=True)
   sitecustomize_path = os.path.join(site_dir, "sitecustomize.py")
@@ -2511,9 +2576,12 @@ def invoke_worker_subprocess(
         coord_addr = f"127.0.0.1:{coord_port}"
       if resolve_hardware(hardware) == "cpu" and "XLA_FLAGS" not in env:
         env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={devices_per_slice}"
+      import threading  # pylint: disable=import-outside-toplevel
+
       procs: list[subprocess.Popen] = []
       remote_threads: list[Any] = []
       remote_rc: dict[int, int] = {}
+      remote_killed_local = threading.Event()
       slice_log_files = []
       try:
         # `slice_id` is the JAX process id (one per host); the slice index is slice_id // num_hosts_per_slice.
@@ -2525,8 +2593,6 @@ def invoke_worker_subprocess(
             )
             procs.append(p)
           elif remote_endpoints and (slice_id - 1) < len(remote_endpoints):
-            import threading
-
             target_remote_addr = remote_endpoints[slice_id - 1]
             slf = open(os.path.join(log_dir, f"{phase}_slice{slice_id}.log"), "w", encoding="utf-8")
             slf.write(f"Remote Slice {slice_id} ({target_remote_addr}) Command: {' '.join(cmd_i)}\n\n")
@@ -2601,6 +2667,7 @@ def invoke_worker_subprocess(
                 log_f.flush()
               remote_rc[s_id] = rc
               if rc != 0:
+                remote_killed_local.set()
                 for lp in procs:
                   if lp.poll() is None:
                     try:
@@ -2650,6 +2717,15 @@ def invoke_worker_subprocess(
             sys.stdout.flush()
             lf.write(peak_msg)
           lf.flush()
+          if remote_killed_local.is_set():
+            failed_remote = [(s_id, rc) for s_id, rc in sorted(remote_rc.items()) if rc != 0]
+            if failed_remote:
+              s_id, rc = failed_remote[0]
+              r_ep = remote_endpoints[s_id - 1] if (s_id - 1) < len(remote_endpoints) else "remote"
+              raise RuntimeError(
+                  f"Multi-slice worker phase '{phase}' remote slice {s_id} ({r_ep}) failed with exit code {rc} "
+                  f"(aborted local slice 0). See logs in: {log_dir}"
+              )
           for idx, p in enumerate(procs):
             if p.returncode != 0:
               oom_tag = _failure_tag(p.returncode, watchdog_state)
@@ -3304,9 +3380,7 @@ def main() -> None:
           st_warm_cache_s = s_res.get("hf_to_gcs_s", 0.0)
 
         to_maxtext_total_s = (
-            m_step1.get("hf_to_gcs_s", 0.0)
-            + m_step2.get("convert_to_orbax_s", 0.0)
-            + m_step3.get("load_orbax_s", 0.0)
+            m_step1.get("hf_to_gcs_s", 0.0) + m_step2.get("convert_to_orbax_s", 0.0) + m_step3.get("load_orbax_s", 0.0)
         )
         safetensor_total_s = st_step1_s + s_res.get("safetensors_and_convert_s", 0.0)
 
