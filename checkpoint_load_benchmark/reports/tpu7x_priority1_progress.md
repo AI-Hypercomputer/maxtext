@@ -53,7 +53,7 @@ TPU v7x (bodaborg-tpu7x-nap), >200B models: to_maxtext vs safetensor (safetensor
 - safetensor (with fix): the same configuration re-run with this branch's MaxText fixes for two HBM peaks (composite leaves stacked one by one; reshard slices joined in pairs), from a separate code tree. The plain safetensor rows don't include these fixes.
 
 | Model | Scan Mode | Slices (Devices) | Pipeline | 1. HF -> GCS (s) | 2. Convert to Orbax (s) | 3. Load into MaxText (s) | Total (No Step 1) (s) | Total (End-to-End) (s) | Speedup (E2E / No Step 1) | log |
-| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | qwen3-235b-a22b (470.4 GB MoE) | scanned | 1 (8) | to_maxtext | 583.32 | Does not fit one host (the source must be staged in RAM next to the converted state) | — | N/A | N/A | N/A | https://paste.googleplex.com/6755399436565961 |
 | ↳ | scanned | 1 (8) | safetensor | 583.32 | — | 757.50 (Safetensors+Convert: load 674.81 + transform 82.66; peak host RAM 391.8 GB) | 757.50 | 1,340.81 | Only safetensor loads this config | — |
 | ↳ | scanned | 1 (8) | safetensor (with fix) | 583.32 | — | 818.66 (Safetensors+Convert: load 709.45 + transform 109.18; peak host RAM 390.7 GB) | 818.66 | 1,401.98 | Only safetensor loads this config | — |

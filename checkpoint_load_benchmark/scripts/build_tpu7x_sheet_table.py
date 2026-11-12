@@ -144,6 +144,8 @@ HEADER = [
     "Speedup (E2E / No Step 1)",
     "log",
 ]
+# The HEADER columns that the tabs left-align; the others are centered.
+LEFT_ALIGNED = {"Model", "Pipeline", "log"}
 
 # Running-log gpaste URLs and not-run explanations for failed, problematic, or skipped experiments,
 # keyed by (model, scan mode, slices, pipeline); a None entry matches any value of that field.
@@ -587,7 +589,7 @@ def markdown(suite: str, rows: list[list[str]]) -> str:
   lines = [title, ""] + [f"- {line}" for line in legend] + [""]
   lines.append("| " + " | ".join(HEADER) + " |")
   # Same alignment as the tabs: a rendered table's cell alignment carries over when it is pasted into Sheets.
-  lines.append("| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+  lines.append("| " + " | ".join(":---" if col in LEFT_ALIGNED else ":---:" for col in HEADER) + " |")
   lines += ["| " + " | ".join(r) + " |" for r in rows]
   tsv = [title, ""] + legend + ["", "\t".join(HEADER)] + ["\t".join(r) for r in rows]
   lines += [
