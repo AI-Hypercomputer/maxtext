@@ -1010,6 +1010,40 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     self.assertTrue(opt_state["is_skipped"])
     self.assertTrue(jnp.all(updates["x"] == 0.0))
 
+  def test_opt_state_has_no_bool_leaves_for_pathways_persistence(self):
+    """Optimizer state must avoid bool leaves for Pathways persistence."""
+    tx = optax.adamw(1e-3)
+    opt = optimizers.skip_step_on_spikes(tx, 4, 1.0)
+    params = {"x": jnp.array([1.0, 2.0], dtype=jnp.float32)}
+    grads = {"x": jnp.array([0.5, 0.5], dtype=jnp.float32)}
+    one = jnp.float32(1.0)
+    spike = jnp.float32(100.0)
+
+    def assert_no_bool_leaves(opt_state, expected_skipped: int):
+      self.assertEqual(opt_state["is_skipped"].dtype, jnp.int32)
+      self.assertEqual(opt_state["is_skipped"].shape, ())
+      self.assertEqual(int(opt_state["is_skipped"]), expected_skipped)
+      for leaf in jax.tree_util.tree_leaves(opt_state):
+        if hasattr(leaf, "dtype"):
+          self.assertNotEqual(leaf.dtype, jnp.bool_)
+
+    state = opt.init(params)
+    assert_no_bool_leaves(state, expected_skipped=0)
+
+    # Fallback branch without loss/grad_norm kwargs
+    _, state = opt.update(grads, state, params)
+    assert_no_bool_leaves(state, expected_skipped=0)
+
+    # Warmup / normal steps
+    for _ in range(2):
+      _, state = opt.update(grads, state, params, loss=one, grad_norm=one)
+      assert_no_bool_leaves(state, expected_skipped=0)
+
+    # Spike step
+    _, state = opt.update(grads, state, params, loss=spike, grad_norm=one)
+    assert_no_bool_leaves(state, expected_skipped=1)
+    self.assertEqual(float(state["is_skipped"].astype(jnp.float32)), 1.0)
+
 
 class TestMuonLogic(unittest.TestCase):
   """Tests the granular path transformation functions."""

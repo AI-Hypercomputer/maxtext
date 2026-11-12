@@ -96,7 +96,10 @@ def skip_step_on_spikes(
         "losses": jnp.zeros(interval, dtype=jnp.float32),
         "grad_norms": jnp.zeros(interval, dtype=jnp.float32),
         "count": jnp.zeros((), dtype=jnp.int32),
-        "is_skipped": jnp.array(False, dtype=jnp.bool_),
+        # Store 0/1 as int32 rather than bool so opt_state has no bool leaves,
+        # avoiding `ValueError: Unsupported dtype: bool` on checkpoint
+        # save/restore with `ENABLE_PATHWAYS_PERSISTENCE=1`.
+        "is_skipped": jnp.zeros((), dtype=jnp.int32),
     }
 
   def update_fn(updates, state, params=None, **extra_args):
@@ -114,7 +117,7 @@ def skip_step_on_spikes(
           "losses": state["losses"],
           "grad_norms": state["grad_norms"],
           "count": state["count"],
-          "is_skipped": jnp.array(False, dtype=jnp.bool_),
+          "is_skipped": jnp.zeros((), dtype=jnp.int32),
       }
 
     count = state["count"]
@@ -170,7 +173,7 @@ def skip_step_on_spikes(
         "losses": new_losses,
         "grad_norms": new_grad_norms,
         "count": new_count,
-        "is_skipped": jnp.logical_not(is_ok),
+        "is_skipped": jnp.logical_not(is_ok).astype(jnp.int32),
     }
     return inner_updates, new_state
 
