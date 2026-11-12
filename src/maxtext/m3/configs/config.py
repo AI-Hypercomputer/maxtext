@@ -22,7 +22,7 @@ from typing import Any, Optional, Sequence, Union
 import jax
 import jax.numpy as jnp
 from maxtext.utils import max_logging
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 
@@ -95,6 +95,47 @@ class DeviceConfig(BaseModel):
       ]
   )
   shard_mode: str = "auto"
+  sharding_preset: str = ""
+  compound_fsdp_ep: bool = False
+
+  @model_validator(mode="after")
+  def _validate_sharding_preset(self) -> "DeviceConfig":
+    """Validates sharding_preset names and compound_fsdp_ep compatibility."""
+    # Kept inline without importing maxtext.m3.core.sharding to satisfy downstream Bazel strict_deps.
+    valid_presets = {
+        "",
+        "default",
+        "default_sharding",
+        "ep_as_dp",
+        "epasdp",
+        "fsdp_x_ep",
+        "fsdpxep",
+        "expert_on_fsdp_ep",
+        "shard_exp_on_fsdp",
+        "ep_as_cp",
+        "epascp",
+        "cp_as_ep",
+        "cpasep",
+        "tp_as_ep",
+        "tpasep",
+        "tp_x_ep",
+        "tpxep",
+        "fsdp_as_dp_for_attn",
+        "fsdpasdpforattn",
+        "fsdp_as_dp_for_attn_rf",
+        "fsdp_as_dp_for_attn_no_rf",
+        "fsdp_as_dp_for_attn_replicated_router",
+    }
+    raw_preset = "" if self.sharding_preset is None else str(self.sharding_preset).strip().lower().replace("-", "_")
+    if raw_preset not in valid_presets:
+      raise ValueError(f"Unknown m3 sharding preset {self.sharding_preset!r}.")
+    if raw_preset in ("default", "default_sharding") and self.compound_fsdp_ep:
+      raise ValueError(
+          "compound_fsdp_ep=True cannot be combined with sharding_preset='default'; "
+          "use sharding_preset='' or 'ep_as_dp' / 'fsdp_x_ep'."
+      )
+    return self
+
   custom_mesh: str = ""
   optimize_mesh_for_tpu_v6e: bool = False
   logical_axis_rules: tuple = ()

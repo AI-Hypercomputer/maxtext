@@ -326,10 +326,17 @@ def param_metadata(sharding: Sharding, tensor_name: str, axes: Sequence[str | No
   re-run placement there, which fails with no mesh in scope.
   `m3.models.create_model` turns it off once the model is built.
   """
-  return {
+  meta: dict[str, Any] = {
       "out_sharding": sharding(tensor_name, axes),
       "eager_sharding": not _ALLOW_UNSHARDED_CONSTRUCTION.get(),
   }
+  if (
+      isinstance(sharding, FSDPasDPForAttn)
+      and not sharding.shard_router_on_fsdp
+      and ("embed_router" in axes or ("embed" in axes and tensor_name in _ROUTER_TENSOR_NAMES))
+  ):
+    meta["preserve_unsharded"] = True
+  return meta
 
 
 def end_eager_placement(model: nnx.Module) -> nnx.Module:
@@ -520,15 +527,440 @@ class DefaultSharding(Sharding):
         return ("context", "tensor_sequence")
       case "kv_length", TensorType.ACTIVATION:
         return None
-      case ("head_dim" | "norm"), _:
+      case ("q_lora" | "kv_lora" | "embed_attn"), TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose", "expert")
+      case ("q_lora" | "kv_lora" | "embed_attn"), TensorType.ACTIVATION:
+        return None
+      case "embed_router", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose")
+      case "embed_router", TensorType.ACTIVATION:
+        return None
+      case ("head_dim" | "norm" | "q_lora_up_proj" | "kv_lora_up_proj"), _:
         return None
       case _:
         raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
 
 
+# Compound MoE physical axis tuples.
+# `FSDPxEP` shards routed-expert `experts` across `("fsdp", "expert")` (or 2D
+# `("fsdp", "fsdp_transpose", "expert")` via `FSDPxEP_2D` / `fsdp_x_ep_axes`)
+# while keeping `expert_embed` unsharded (`None`) so non-elementwise optimizers
+# such as Muon retain complete `(expert_embed, expert_mlp)` matrices per shard.
+FSDPxEP: tuple[str, str] = ("fsdp", "expert")
+FSDPxEP_2D: tuple[str, str, str] = ("fsdp", "fsdp_transpose", "expert")
+TPxEP: tuple[str, str] = ("expert", "tensor")
+
+_MLA_ATTN_TENSOR_NAMES = frozenset(
+    {
+        "q_lora",
+        "kv_lora",
+        "wq_a",
+        "wkv_a",
+        "wk",
+        "q_a_proj",
+        "kv_a_proj",
+        "kv_a_proj_with_mqa",
+        "attn_q_lora",
+        "attn_kv_lora",
+    }
+)
+_ROUTER_TENSOR_NAMES = frozenset({"router", "router_weight", "gate_router", "moe_router"})
+
+
+def fsdp_x_ep_axes(*, two_d_fsdp: bool | None = None) -> tuple[str, ...]:
+  """Returns `("fsdp", "expert")` or `("fsdp", "fsdp_transpose", "expert")` for compound FSDP x EP."""
+  if two_d_fsdp is True:
+    return FSDPxEP_2D
+  if two_d_fsdp is False:
+    return FSDPxEP
+  ambient = jax.sharding.get_abstract_mesh()
+  if not ambient.empty and int(ambient.shape.get("fsdp_transpose", 1)) > 1:
+    return FSDPxEP_2D
+  return FSDPxEP
+
+
+def tp_x_ep_axes() -> tuple[str, str]:  # public-api
+  """Returns `("expert", "tensor")` for compound TP x EP expert sharding."""
+  return TPxEP
+
+
+def compound_moe_spec(  # public-api
+    sharding: Sharding | None,
+    tensor_name: str,
+    axes: Sequence[str | None],
+    *,
+    mode: str = "fsdp_x_ep",
+    two_d_fsdp: bool | None = None,
+    muon_friendly: bool = True,
+    tensor_type: TensorType = TensorType.WEIGHT,
+) -> P:
+  """Resolves `axes` for a routed-expert tensor under `FSDPxEP` or `TPxEP`.
+
+  Under `mode="fsdp_x_ep"`, `experts` shards across `("fsdp", "expert")` (or
+  `("fsdp", "fsdp_transpose", "expert")` when `two_d_fsdp=True`) while
+  `expert_embed` stays `None` (`muon_friendly=True`), keeping each expert's
+  non-contracting `(expert_embed, expert_mlp)` matrix whole on its device shard.
+  Under `mode="tp_x_ep"`, `experts` shards across `("expert", "tensor")` and
+  `expert_mlp` shards over `"tensor_sequence"` so `"tensor"` is not claimed twice.
+  When a preset `sharding` instance is supplied, its non-overridden axis rules
+  and `two_d_fsdp` setting are preserved.
+  """
+  mode_key = mode.strip().lower().replace("-", "_")
+  if mode_key in ("fsdp_x_ep", "fsdp_ep", "fsdpxep", "expert_on_fsdp_ep", "shard_exp_on_fsdp"):
+    if isinstance(sharding, TPasEP):
+      rep_kw: dict[str, Any] = {"compound_fsdp_ep": True, "compound_muon_friendly": muon_friendly}
+      if two_d_fsdp is not None:
+        rep_kw["two_d_fsdp"] = two_d_fsdp
+      strategy: Sharding = dataclasses.replace(sharding, **rep_kw)
+    elif isinstance(sharding, (EPasDP, EPasCP, CPasEP, FSDPasDPForAttn)):
+      rep_kw = {"compound_fsdp_ep": True, "muon_friendly": muon_friendly}
+      if two_d_fsdp is not None:
+        rep_kw["two_d_fsdp"] = two_d_fsdp
+      strategy = dataclasses.replace(sharding, **rep_kw)
+    else:
+      strategy = EPasDP(
+          compound_fsdp_ep=True,
+          muon_friendly=muon_friendly,
+          two_d_fsdp=two_d_fsdp,
+      )
+    return strategy(tensor_name, axes, tensor_type)
+  if mode_key in ("tp_x_ep", "tp_ep", "tpxep", "tp_as_ep", "tpasep"):
+    if isinstance(sharding, TPasEP):
+      rep_kw = {"muon_friendly": muon_friendly}
+      if two_d_fsdp is not None:
+        rep_kw["two_d_fsdp"] = two_d_fsdp
+      strategy = dataclasses.replace(sharding, **rep_kw)
+    else:
+      eff_two_d = two_d_fsdp
+      if eff_two_d is None and isinstance(sharding, DefaultSharding) and hasattr(sharding, "two_d_fsdp"):
+        eff_two_d = sharding.two_d_fsdp
+      strategy = TPasEP(
+          muon_friendly=muon_friendly,
+          two_d_fsdp=eff_two_d,
+      )
+    return strategy(tensor_name, axes, tensor_type)
+  raise ValueError(f"Unknown compound MoE mode {mode!r}; expected 'fsdp_x_ep' or 'tp_x_ep'.")
+
+
+def compound_moe_param_metadata(  # public-api
+    sharding: Sharding | None,
+    tensor_name: str,
+    axes: Sequence[str | None],
+    *,
+    mode: str = "fsdp_x_ep",
+    two_d_fsdp: bool | None = None,
+    muon_friendly: bool = True,
+) -> dict[str, Any]:
+  """Returns `*_metadata` with `eager_sharding=True` for compound `FSDPxEP` or `TPxEP` expert weights."""
+  return {
+      "out_sharding": compound_moe_spec(
+          sharding,
+          tensor_name,
+          axes,
+          mode=mode,
+          two_d_fsdp=two_d_fsdp,
+          muon_friendly=muon_friendly,
+          tensor_type=TensorType.WEIGHT,
+      ),
+      "eager_sharding": not _ALLOW_UNSHARDED_CONSTRUCTION.get(),
+  }
+
+
+@dataclasses.dataclass(frozen=True)
+class EPasDP(DefaultSharding):
+  """Expert axis acts as Data Parallelism outside core MoE (`ep-as-dp`).
+
+  When `compound_fsdp_ep=True` (`expert-on-fsdp-ep` / `shard-exp-on-fsdp`),
+  routed-expert `experts` shards across `FSDPxEP` (`("fsdp", "expert")` or
+  `("fsdp", "fsdp_transpose", "expert")`) and `expert_embed` stays `None` so
+  Muon-style non-elementwise optimizers avoid per-step FSDP all-gathers.
+  """
+
+  compound_fsdp_ep: bool = False
+  muon_friendly: bool = True
+  two_d_fsdp: bool | None = None
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    if self.compound_fsdp_ep:
+      if axis == "experts":
+        return fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp) if tensor_type == TensorType.WEIGHT else "expert"
+      if axis == "expert_embed":
+        if self.muon_friendly or tensor_type != TensorType.WEIGHT:
+          return None
+        claimed_fsdp = set(fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp))
+        rem = tuple(ax for ax in ("fsdp", "fsdp_transpose", "context") if ax not in claimed_fsdp)
+        return rem[0] if len(rem) == 1 else (rem if rem else None)
+    return super().map_axis(axis, tensor_name, tensor_type)
+
+
+@dataclasses.dataclass(frozen=True)
+class EPasCP(DefaultSharding):
+  """Expert axis acts as Context Parallelism outside core MoE (`ep-as-cp`).
+
+  Sequence activations (`length`, `norm_length`) shard over `("context", "expert")`
+  while `batch` shards over `("data", "fsdp", "fsdp_transpose")`, avoiding axis
+  collisions on `(batch, length, ...)` tensors while repurposing `expert` for
+  context parallelism in attention and dense blocks.
+  """
+
+  compound_fsdp_ep: bool = False
+  muon_friendly: bool = True
+  two_d_fsdp: bool | None = None
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    match axis, tensor_type:
+      case "batch", TensorType.ACTIVATION:
+        return ("data", "fsdp", "fsdp_transpose")
+      case "length", TensorType.ACTIVATION:
+        return ("context", "expert")
+      case "norm_length", TensorType.ACTIVATION:
+        return ("context", "expert", "tensor_sequence")
+      case "experts", TensorType.WEIGHT if self.compound_fsdp_ep:
+        return fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp)
+      case "expert_embed", _ if self.compound_fsdp_ep:
+        if self.muon_friendly or tensor_type != TensorType.WEIGHT:
+          return None
+        claimed_fsdp = set(fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp))
+        rem = tuple(ax for ax in ("fsdp", "fsdp_transpose", "context") if ax not in claimed_fsdp)
+        return rem[0] if len(rem) == 1 else (rem if rem else None)
+    return super().map_axis(axis, tensor_name, tensor_type)
+
+
+@dataclasses.dataclass(frozen=True)
+class CPasEP(DefaultSharding):
+  """Context axis acts as secondary Expert Parallelism in core MoE (`cp-as-ep`).
+
+  Routed-expert `experts` shards over `("context", "expert")` (or
+  `("fsdp", "context", "expert")` / `("fsdp", "fsdp_transpose", "context", "expert")`
+  when `compound_fsdp_ep=True`) while `expert_embed` weights shard over
+  `("fsdp", "fsdp_transpose")` (or `None` when `compound_fsdp_ep=True`) so
+  `"context"` is not claimed twice, and dense `embed` / MLA `q_lora` / `kv_lora`
+  weights shard over `("fsdp", "fsdp_transpose", "context", "expert")`.
+  """
+
+  compound_fsdp_ep: bool = False
+  muon_friendly: bool = True
+  two_d_fsdp: bool | None = None
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    match axis, tensor_type:
+      case "experts", TensorType.WEIGHT if self.compound_fsdp_ep:
+        base_fsdp = fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp)[:-1]
+        return (*base_fsdp, "context", "expert")
+      case "experts", _:
+        return ("context", "expert")
+      case "expert_embed", _ if self.compound_fsdp_ep:
+        if self.muon_friendly or tensor_type != TensorType.WEIGHT:
+          return None
+        base_fsdp_set = set(fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp)[:-1])
+        rem = tuple(ax for ax in ("fsdp", "fsdp_transpose") if ax not in base_fsdp_set)
+        return rem[0] if len(rem) == 1 else (rem if rem else None)
+      case "expert_embed", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose")
+      case ("embed" | "q_lora" | "kv_lora" | "embed_attn"), TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose", "context", "expert")
+    return super().map_axis(axis, tensor_name, tensor_type)
+
+
+@dataclasses.dataclass(frozen=True)
+class TPasEP(DefaultSharding):
+  """Tensor axis acts as secondary Expert Parallelism in core MoE (`TPxEP`).
+
+  Routed-expert `experts` shards over `TPxEP = ("expert", "tensor")` while
+  `expert_mlp` shards over `"tensor_sequence"` so `"tensor"` is not claimed twice
+  on 3D/4D expert weights while preserving sequence-tensor parallelism. When
+  `compound_fsdp_ep=True` or `muon_friendly=True`, `expert_embed` is also kept
+  unsharded (`None`).
+  """
+
+  compound_fsdp_ep: bool = False
+  muon_friendly: bool = False
+  compound_muon_friendly: bool = True
+  two_d_fsdp: bool | None = None
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    match axis, tensor_type:
+      case "experts", TensorType.WEIGHT if self.compound_fsdp_ep:
+        return (*fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp), "tensor")
+      case "experts", _:
+        return TPxEP
+      case "expert_mlp", _:
+        return "tensor_sequence"
+      case "expert_embed", _ if self.compound_fsdp_ep:
+        if self.compound_muon_friendly or tensor_type != TensorType.WEIGHT:
+          return None
+        claimed_fsdp = set(fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp))
+        rem = tuple(ax for ax in ("fsdp", "fsdp_transpose", "context") if ax not in claimed_fsdp)
+        return rem[0] if len(rem) == 1 else (rem if rem else None)
+      case "expert_embed", _ if self.muon_friendly:
+        return None
+    return super().map_axis(axis, tensor_name, tensor_type)
+
+
+@dataclasses.dataclass(frozen=True)
+class FSDPasDPForAttn(DefaultSharding):
+  """Scale-tuned MLA preset where FSDP acts as DP for attention and EP acts as FSDP for attention (`fsdp-as-dp-for-attn-rf`).
+
+  Small MLA compressed attention projections (`q_lora`, `kv_lora`, `embed_attn`)
+  shard over `"expert"` and replicate across `("fsdp", "fsdp_transpose")` to
+  avoid latency-bound tiny FSDP all-gathers at large scale (`>512` chips), while:
+    * Attention and model activations (`batch`) still shard across
+      `("data", "fsdp", "fsdp_transpose", "expert")` (never replicated on FSDP).
+    * Routed-expert weights keep scaling across `("fsdp", "expert")`:
+      `P(("fsdp", "expert"), None, ("tensor", "tensor_sequence"))` when
+      `compound_fsdp_ep=True` (Muon-friendly) or
+      `P("expert", ("fsdp", "fsdp_transpose", "context"), ("tensor", "tensor_sequence"))`
+      when `compound_fsdp_ep=False`.
+    * Router weights (`embed_router`) shard over `("fsdp", "fsdp_transpose")` when
+      `shard_router_on_fsdp=True` (the `-rf` default) and replicate when `False`.
+  """
+
+  compound_fsdp_ep: bool = False
+  muon_friendly: bool = True
+  shard_router_on_fsdp: bool = True
+  two_d_fsdp: bool | None = None
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    match axis, tensor_type:
+      case ("q_lora" | "kv_lora" | "embed_attn"), TensorType.WEIGHT:
+        return "expert"
+      case ("q_lora" | "kv_lora" | "embed_attn"), TensorType.ACTIVATION:
+        return None
+      case "embed", TensorType.WEIGHT if tensor_name in _MLA_ATTN_TENSOR_NAMES:
+        return "expert"
+      case "embed", TensorType.WEIGHT if tensor_name in _ROUTER_TENSOR_NAMES:
+        return ("fsdp", "fsdp_transpose") if self.shard_router_on_fsdp else None
+      case "embed_router", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose") if self.shard_router_on_fsdp else None
+      case "embed_router", TensorType.ACTIVATION:
+        return None
+      case "experts", TensorType.WEIGHT if self.compound_fsdp_ep:
+        return fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp)
+      case "expert_embed", _ if self.compound_fsdp_ep:
+        if self.muon_friendly or tensor_type != TensorType.WEIGHT:
+          return None
+        claimed_fsdp = set(fsdp_x_ep_axes(two_d_fsdp=self.two_d_fsdp))
+        rem = tuple(ax for ax in ("fsdp", "fsdp_transpose", "context") if ax not in claimed_fsdp)
+        return rem[0] if len(rem) == 1 else (rem if rem else None)
+    return super().map_axis(axis, tensor_name, tensor_type)
+
+
+SHARDING_PRESETS: dict[str, type[DefaultSharding]] = {
+    "default": DefaultSharding,
+    "ep_as_dp": EPasDP,
+    "ep_as_cp": EPasCP,
+    "cp_as_ep": CPasEP,
+    "tp_as_ep": TPasEP,
+    "fsdp_as_dp_for_attn": FSDPasDPForAttn,
+    "fsdp_x_ep": EPasDP,
+    "tp_x_ep": TPasEP,
+}
+
+
+def sharding_preset_from_name(
+    name: str | DefaultSharding | None = None,
+    **kwargs: Any,
+) -> DefaultSharding:
+  """Resolves a scale-tuned `DefaultSharding` preset by name or alias.
+
+  Supported preset names (case-insensitive, `-` or `_` separated):
+    * `"default"` / `""` / `None`: `DefaultSharding`
+    * `"ep_as_dp"` / `"ep-as-dp"`: `EPasDP`
+    * `"ep_as_cp"` / `"ep-as-cp"`: `EPasCP`
+    * `"cp_as_ep"` / `"cp-as-ep"`: `CPasEP`
+    * `"tp_as_ep"` / `"tp-as-ep"` / `"tp_x_ep"`: `TPasEP`
+    * `"fsdp_as_dp_for_attn"` / `"fsdp-as-dp-for-attn"` / `"fsdp-as-dp-for-attn-rf"`: `FSDPasDPForAttn`
+    * `"fsdp_x_ep"` / `"expert-on-fsdp-ep"` / `"shard-exp-on-fsdp"`: `EPasDP(compound_fsdp_ep=True)`
+  """
+  if isinstance(name, DefaultSharding):
+    if not kwargs:
+      return name
+    try:
+      return dataclasses.replace(name, **kwargs)
+    except TypeError as exc:
+      valid_fields = sorted(f.name for f in dataclasses.fields(name))
+      hint = (
+          "choose a preset subclass such as 'ep_as_dp' for compound MoE options."
+          if not valid_fields
+          else f"valid fields are {valid_fields}."
+      )
+      raise ValueError(
+          f"Sharding preset instance {type(name).__name__} does not accept options {sorted(kwargs)}; {hint}"
+      ) from exc
+  raw = getattr(name, "value", name)
+  if raw is None:
+    raw = "default"
+  if not isinstance(raw, str):
+    raise TypeError(f"Expected str or None for sharding preset name, got {type(name).__name__}.")
+  key = raw.strip().lower().replace("-", "_")
+  if not key or key in ("default", "default_sharding"):
+    if kwargs:
+      raise ValueError(
+          f"Sharding preset {name!r} (DefaultSharding) does not accept options {sorted(kwargs)}; "
+          "choose a preset such as 'ep_as_dp' or omit sharding_preset='default'."
+      )
+    return DefaultSharding()
+  if key in ("ep_as_dp", "epasdp"):
+    return EPasDP(**kwargs)
+  if key in ("fsdp_x_ep", "fsdpxep", "expert_on_fsdp_ep", "shard_exp_on_fsdp"):
+    kwargs.setdefault("compound_fsdp_ep", True)
+    return EPasDP(**kwargs)
+  if key in ("ep_as_cp", "epascp"):
+    return EPasCP(**kwargs)
+  if key in ("cp_as_ep", "cpasep"):
+    return CPasEP(**kwargs)
+  if key in ("tp_as_ep", "tpasep", "tp_x_ep", "tpxep"):
+    return TPasEP(**kwargs)
+  if key in ("fsdp_as_dp_for_attn", "fsdpasdpforattn", "fsdp_as_dp_for_attn_rf"):
+    return FSDPasDPForAttn(**kwargs)
+  if key in ("fsdp_as_dp_for_attn_no_rf", "fsdp_as_dp_for_attn_replicated_router"):
+    kwargs.setdefault("shard_router_on_fsdp", False)
+    return FSDPasDPForAttn(**kwargs)
+  raise ValueError(f"Unknown m3 sharding preset {name!r}; expected one of {sorted(SHARDING_PRESETS)}.")
+
+
+def _is_plain_default_preset(name: Any) -> bool:
+  """Returns True when `name` selects plain `DefaultSharding` rather than a preset subclass."""
+  if isinstance(name, DefaultSharding):
+    return not dataclasses.fields(name)
+  raw = getattr(name, "value", name)
+  if raw is None:
+    return True
+  if isinstance(raw, str):
+    return raw.strip().lower().replace("-", "_") in ("", "default", "default_sharding")
+  return False
+
+
 def sharding_from_config(config: Any) -> DefaultSharding:
-  """Builds `DefaultSharding` from `config`."""
-  del config
+  """Builds `DefaultSharding` (or the configured scale-tuned preset subclass) from `config`."""
+  preset_name = config.sharding_preset if hasattr(config, "sharding_preset") else None
+  compound_fsdp_ep = bool(config.compound_fsdp_ep) if hasattr(config, "compound_fsdp_ep") else False
+  ici_fsdp_t = (
+      int(config.ici_fsdp_transpose_parallelism)
+      if hasattr(config, "ici_fsdp_transpose_parallelism") and config.ici_fsdp_transpose_parallelism is not None
+      else 1
+  )
+  dcn_fsdp_t = (
+      int(config.dcn_fsdp_transpose_parallelism)
+      if hasattr(config, "dcn_fsdp_transpose_parallelism") and config.dcn_fsdp_transpose_parallelism is not None
+      else 1
+  )
+  two_d_fsdp = ici_fsdp_t > 1 or dcn_fsdp_t > 1
+  if preset_name is not None and preset_name != "":
+    kwargs: dict[str, Any] = {}
+    if compound_fsdp_ep:
+      kwargs["compound_fsdp_ep"] = True
+    if two_d_fsdp and not _is_plain_default_preset(preset_name):
+      has_explicit_two_d = (
+          isinstance(preset_name, DefaultSharding)
+          and hasattr(preset_name, "two_d_fsdp")
+          and preset_name.two_d_fsdp is not None
+      )
+      if not has_explicit_two_d:
+        kwargs["two_d_fsdp"] = True
+    return sharding_preset_from_name(preset_name, **kwargs)
+  if compound_fsdp_ep:
+    return EPasDP(compound_fsdp_ep=True, two_d_fsdp=True if two_d_fsdp else None)
   return DefaultSharding()
 
 

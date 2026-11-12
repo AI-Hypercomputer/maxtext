@@ -46,7 +46,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from maxtext.m3.core import kernels
-from maxtext.m3.core.sharding import DefaultSharding, MeshAxes, Sharding, TensorType
+from maxtext.m3.core.sharding import MeshAxes, Sharding, TensorType, ambient_mesh_is_explicit, sharding_from_config
 
 ExecutorKind = Literal["dense", "ragged_dot", "gmm_v2", "tokamax"]
 SHARDED_EXECUTOR_KINDS: tuple[str, ...] = ("gmm_v2", "tokamax")
@@ -729,7 +729,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
   """Resolves a static `MoEExecutor` from `config` and `sharding`."""
   active_mesh = _active_mesh_or_none()
   validate_moe_config(config, require_moe=True, mesh=active_mesh)
-  sharding = sharding or DefaultSharding()
+  sharding = sharding or sharding_from_config(config)
 
   capacity_factor = float(getattr(config, "capacity_factor", -1.0))
   ragged_buffer_factor = float(getattr(config, "ragged_buffer_factor", -1.0))
@@ -897,7 +897,7 @@ def _ep_ragged_exchange(
     out_len: int,
     counts_matrix: jax.Array,
     ep_id: jax.Array,
-    ep_axis: str,
+    ep_axis: str | tuple[str, ...],
     *,
     is_tpu: bool,
 ) -> jax.Array:
@@ -1206,13 +1206,60 @@ def _sharded_grouped(
   batch_shards = kernels.mesh_axis_size(mesh, batch_ax)
   ep_size = kernels.mesh_axis_size(mesh, experts_ax)
   tp_size = kernels.mesh_axis_size(mesh, mlp_ax)
+  batch_names = kernels.mesh_axis_names(batch_ax)
   ep_axes = kernels.mesh_axis_names(experts_ax)
   tp_axes = kernels.mesh_axis_names(mlp_ax)
+  extra_ep = tuple(ax for ax in ep_axes if ax not in batch_names)
+  extra_ep_size = kernels.mesh_axis_size(mesh, extra_ep) if extra_ep else 1
+  raw_length_ax = kernels.resolve_mesh_axes(mesh, executor.length)
+  non_ep_claimed_axes = set(batch_names) | set(tp_axes)
+  expected_length_axes = [
+      ax for ax in kernels.mesh_axis_names(raw_length_ax) if ax not in non_ep_claimed_axes and int(mesh.shape[ax]) > 1
+  ]
+  expected_cand_length_ax: MeshAxes = (
+      expected_length_axes[0]
+      if len(expected_length_axes) == 1
+      else (tuple(expected_length_axes) if expected_length_axes else None)
+  )
+  expected_length_shards = kernels.mesh_axis_size(mesh, expected_cand_length_ax)
+  expected_length_ax = (
+      expected_cand_length_ax
+      if (expected_length_shards > 1 and x.shape[1] > 1 and x.shape[1] % expected_length_shards == 0)
+      else None
+  )
 
-  if len(ep_axes) > 1:
-    raise NotImplementedError(f"Expert sharding supports at most one mesh axis; got {ep_axes}.")
-  if x.shape[0] % batch_shards != 0:
-    raise ValueError(f"Batch {x.shape[0]} does not divide over the {batch_shards} token shards of {batch_ax!r}.")
+  claimed_axes = non_ep_claimed_axes | set(ep_axes)
+  cand_length_axes = [
+      ax for ax in kernels.mesh_axis_names(raw_length_ax) if ax not in claimed_axes and int(mesh.shape[ax]) > 1
+  ]
+  cand_length_ax: MeshAxes = (
+      cand_length_axes[0] if len(cand_length_axes) == 1 else (tuple(cand_length_axes) if cand_length_axes else None)
+  )
+  length_shards = kernels.mesh_axis_size(mesh, cand_length_ax)
+  length_ax = cand_length_ax if (length_shards > 1 and x.shape[1] > 1 and x.shape[1] % length_shards == 0) else None
+
+  if not extra_ep:
+    if x.shape[0] % batch_shards != 0:
+      raise ValueError(f"Batch {x.shape[0]} does not divide over the {batch_shards} token shards of {batch_ax!r}.")
+    tokens_spec = P(batch_ax, length_ax, None)
+  elif cand_length_axes and x.shape[1] > 1 and x.shape[1] % (length_shards * extra_ep_size) == 0:
+    if x.shape[0] % batch_shards != 0:
+      raise ValueError(f"Batch {x.shape[0]} does not divide over the {batch_shards} token shards of {batch_ax!r}.")
+    seq_axes = (*cand_length_axes, *extra_ep)
+    tokens_spec = P(batch_ax, seq_axes[0] if len(seq_axes) == 1 else seq_axes, None)
+  elif length_ax is None and x.shape[1] > 1 and x.shape[1] % extra_ep_size == 0:
+    if x.shape[0] % batch_shards != 0:
+      raise ValueError(f"Batch {x.shape[0]} does not divide over the {batch_shards} token shards of {batch_ax!r}.")
+    extra_ax: MeshAxes = extra_ep[0] if len(extra_ep) == 1 else extra_ep
+    tokens_spec = P(batch_ax, extra_ax, None)
+  elif x.shape[0] % (batch_shards * extra_ep_size) == 0:
+    merged_batch = (*batch_names, *extra_ep)
+    tokens_spec = P(merged_batch[0] if len(merged_batch) == 1 else merged_batch, length_ax, None)
+  else:
+    raise ValueError(
+        f"Token shape {x.shape[:2]} cannot partition disjointly across batch={batch_ax!r} ({batch_shards}) "
+        f"and extra expert axes {extra_ep!r} ({extra_ep_size})."
+    )
   if num_experts % ep_size != 0:
     raise ValueError(
         f"num_experts ({num_experts}) must be divisible by expert parallelism size ({ep_size}) on {experts_ax!r}."
@@ -1247,17 +1294,6 @@ def _sharded_grouped(
   if mlp_dim % tp_size != 0:
     raise ValueError(f"Expert MLP dim ({mlp_dim}) must be divisible by tensor parallelism size ({tp_size}).")
 
-  raw_length_ax = kernels.resolve_mesh_axes(mesh, executor.length)
-  claimed_axes = set(kernels.mesh_axis_names(batch_ax)) | set(ep_axes) | set(tp_axes)
-  cand_length_axes = [
-      ax for ax in kernels.mesh_axis_names(raw_length_ax) if ax not in claimed_axes and int(mesh.shape[ax]) > 1
-  ]
-  cand_length_ax: MeshAxes = (
-      cand_length_axes[0] if len(cand_length_axes) == 1 else (tuple(cand_length_axes) if cand_length_axes else None)
-  )
-  length_shards = kernels.mesh_axis_size(mesh, cand_length_ax)
-  length_ax = cand_length_ax if (length_shards > 1 and x.shape[1] > 1 and x.shape[1] % length_shards == 0) else None
-  tokens_spec = P(batch_ax, length_ax, None)
   matmul_fn = functools.partial(grouped_matmul, backend=executor.kind, is_tpu=is_tpu)
   e_loc = num_experts // ep_size
   m_tp = mlp_dim // tp_size
@@ -1292,11 +1328,12 @@ def _sharded_grouped(
       expert_cap = max(1, int(math.ceil((num_slots / e_loc) * executor.capacity_factor)))
       prior_exp = None
       if ep_size > 1:
+        ep_axis_pre: str | tuple[str, ...] = ep_axes[0] if len(ep_axes) == 1 else ep_axes
         local_counts_pre = jnp.bincount(safe_idx, weights=slot_valid.astype(jnp.int32), length=num_experts).astype(
             jnp.int32
         )
-        all_counts_pre = jax.lax.all_gather(local_counts_pre, ep_axes[0], axis=0, tiled=False)
-        ep_id_pre = jax.lax.axis_index(ep_axes[0])
+        all_counts_pre = jax.lax.all_gather(local_counts_pre, ep_axis_pre, axis=0, tiled=False)
+        ep_id_pre = jax.lax.axis_index(ep_axis_pre)
         prior_exp = (jnp.cumsum(all_counts_pre, axis=0) - all_counts_pre)[ep_id_pre]
       slot_valid = _truncate_slots_by_capacity(
           safe_idx,
@@ -1352,7 +1389,7 @@ def _sharded_grouped(
       return jnp.reshape(combined, (b_loc, seq_len, d_dim))
 
     # Multi-device Expert Parallelism (EP > 1) via ragged_all_to_all.
-    ep_axis = ep_axes[0]
+    ep_axis: str | tuple[str, ...] = ep_axes[0] if len(ep_axes) == 1 else ep_axes
     ep_id = jax.lax.axis_index(ep_axis)
 
     recv_buf_len = ep_size * num_slots
@@ -1449,11 +1486,19 @@ def _sharded_grouped(
       out_specs=tokens_spec,
       check_vma=False,
   )
+  orig_x_spec = getattr(jax.typeof(x).sharding, "spec", None)
   x_in = kernels.ensure_explicit_spec(x, tokens_spec, mesh)
   weights_in = kernels.ensure_explicit_spec(weights, tokens_spec, mesh)
   indices_in = kernels.ensure_explicit_spec(indices, tokens_spec, mesh)
   proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
-  return sharded_fn(x_in, weights_in, indices_in, *proj_in)
+  out = sharded_fn(x_in, weights_in, indices_in, *proj_in)
+  if extra_ep:
+    expected_out_spec = P(batch_ax, expected_length_ax, None)
+    if orig_x_spec is not None and ambient_mesh_is_explicit():
+      out = kernels.ensure_explicit_spec(out, orig_x_spec, mesh)
+    elif tokens_spec != expected_out_spec:
+      out = jax.lax.with_sharding_constraint(out, jax.sharding.NamedSharding(mesh, expected_out_spec))
+  return out
 
 
 # ==============================================================================
