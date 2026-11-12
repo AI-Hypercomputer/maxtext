@@ -462,13 +462,23 @@ def test_is_changed_item_matches_pytest_parametrize_items_by_originalname():
 
 # --- analyze_code_changes.sh -------------------------------------------------
 
+# emit_deps_tags hashes these to name the prebuilt dependency images.
+_DEPS_IMAGE_INPUTS = {
+    "src/dependencies/requirements/generated_requirements/tpu-requirements.txt": "jax>=0.1\nlibtpu>=0.2\n",
+    "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt": "jax>=0.1\nvllm>=0.3\n",
+    "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt": "jax>=0.1\nnvidia-cublas-cu12>=0.4\n",
+    "src/dependencies/extra_deps/pre_train_github_deps.txt": "mlperf-logging @ https://example.invalid/pre.zip\n",
+    "src/dependencies/extra_deps/post_train_github_deps.txt": "vllm @ https://example.invalid/post.zip\n",
+    "src/dependencies/scripts/install_pre_train_extra_deps.py": "",
+    "src/dependencies/scripts/install_post_train_extra_deps.py": "",
+    "src/dependencies/dockerfiles/test_deps_env.Dockerfile": "FROM scratch\n",
+    ".github/workflows/build_deps_image.yml": "name: build\n",
+}
 
-def _run_analyze_script(tmp_path, env=None, detector_rc=0, detector_stdout=""):
-  """Run analyze_code_changes.sh on a PR that changes only README.md, with a fake ``python3`` as the detector.
 
-  Returns the GITHUB_OUTPUT writes as a dict (the last write of a key wins, as on GitHub) and the fake's calls.
-  """
-  repo = _make_pr_repo(tmp_path, {"README.md": "base\n"}, {"README.md": "changed\n"})
+def _run_analyze_script(tmp_path, env=None, detector_rc=0, detector_stdout="", change=None):
+  """Run analyze_code_changes.sh on a PR, with a fake ``python3`` as the detector."""
+  repo = _make_pr_repo(tmp_path, {"README.md": "base\n", **_DEPS_IMAGE_INPUTS}, change or {"README.md": "changed\n"})
   fake = tmp_path / "bin" / "python3"
   fake.parent.mkdir()
   (tmp_path / "stdout").write_text(detector_stdout, encoding="utf-8")
@@ -512,6 +522,38 @@ def test_analyze_code_changes_maps_the_detector_output_to_the_tpu7x_outputs(
   assert writes.get("tpu7x_flavors") == tpu7x_flavors
 
 
+_DEPS_IMAGE_TAGS = ("tpu_pre_train_deps_tag", "tpu_post_train_deps_tag", "gpu_pre_train_deps_tag")
+_DEPS_IMAGE_DOCKERFILE = "src/dependencies/dockerfiles/test_deps_env.Dockerfile"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({}, id="pull-request"),
+        pytest.param({"FORCE_ALL_TESTS": "true"}, id="scheduled-only-label"),
+        pytest.param({"EVENT_NAME": "schedule"}, id="scheduled-run"),
+    ],
+)
+def test_analyze_code_changes_names_every_dependency_image_on_every_path(tmp_path, env):
+  """An empty tag silently costs every test job a full dependency install, so no exit path may skip naming."""
+  writes, _ = _run_analyze_script(tmp_path, env=env)
+  tags = [writes.get(key, "") for key in _DEPS_IMAGE_TAGS]
+  assert all(tag.startswith("deps-") for tag in tags), writes
+  # Each image hashes only its own inputs, so a change to one must not rename the others.
+  assert len(set(tags)) == len(tags), tags
+
+
+def test_analyze_code_changes_dockerfile_change_rebuilds_every_image(tmp_path):
+  """The Dockerfile feeds every image, so changing it has to move all three tags or the stale ones get reused."""
+  unchanged_dir, changed_dir = tmp_path / "unchanged", tmp_path / "changed"
+  unchanged_dir.mkdir()
+  changed_dir.mkdir()
+  unchanged, _ = _run_analyze_script(unchanged_dir)
+  writes, _ = _run_analyze_script(changed_dir, change={_DEPS_IMAGE_DOCKERFILE: "FROM scratch\nRUN true\n"})
+  for key in _DEPS_IMAGE_TAGS:
+    assert writes[key] != unchanged[key], key
+
+
 def test_analyze_code_changes_run_tpu7x_selects_every_flavor_and_waits_for_skip_ci_tests(tmp_path):
   # run-tpu7x skips the detector and builds the package, but while the PR has skip-ci-tests the TPU7X tests are
   # gated like the other heavy suites, so All Required Tests Passed fails until the label is removed.
@@ -521,3 +563,65 @@ def test_analyze_code_changes_run_tpu7x_selects_every_flavor_and_waits_for_skip_
   assert writes["run_tpu7x_tests"] == "true" and "tpu7x_flavors" not in writes
   assert writes["run_tests"] == "true"
   assert writes["run_heavy_tests"] == "false" and writes["heavy_tests_gated"] == "true"
+
+
+@pytest.mark.parametrize(
+    "changed_file, moves",
+    [
+        pytest.param(
+            "src/dependencies/requirements/generated_requirements/tpu-requirements.txt",
+            {"tpu_pre_train_deps_tag"},
+            id="tpu-requirements",
+        ),
+        pytest.param(
+            "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt",
+            {"tpu_post_train_deps_tag"},
+            id="tpu-post-train-requirements",
+        ),
+        pytest.param(
+            "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt",
+            {"gpu_pre_train_deps_tag"},
+            id="cuda12-requirements",
+        ),
+        pytest.param(
+            "src/dependencies/extra_deps/pre_train_github_deps.txt",
+            {"tpu_pre_train_deps_tag", "gpu_pre_train_deps_tag"},
+            id="pre-train-github-deps",
+        ),
+        pytest.param(
+            "src/dependencies/scripts/install_post_train_extra_deps.py",
+            {"tpu_post_train_deps_tag"},
+            id="post-train-installer",
+        ),
+    ],
+)
+def test_analyze_code_changes_tags_move_only_for_the_images_that_use_the_file(tmp_path, changed_file, moves):
+  """Each image hashes only its own inputs, so a bump must rename those images and leave the rest alone."""
+  unchanged_dir, changed_dir = tmp_path / "unchanged", tmp_path / "changed"
+  unchanged_dir.mkdir()
+  changed_dir.mkdir()
+  unchanged, _ = _run_analyze_script(unchanged_dir)
+  writes, _ = _run_analyze_script(changed_dir, change={changed_file: "# changed\n"})
+  for key in _DEPS_IMAGE_TAGS:
+    if key in moves:
+      assert writes[key] != unchanged[key], f"{key} should have moved for {changed_file}"
+    else:
+      assert writes[key] == unchanged[key], f"{key} should not have moved for {changed_file}"
+
+
+def test_dependency_image_extras_match_the_generated_requirement_files():
+  """test_deps_env.Dockerfile installs the requirement file instead of the wheel's extra, so the two must agree.
+
+  The image installs `-r <extra>-requirements.txt` and the test job then installs the wheel with --no-deps. That is
+  only equivalent while maxtext declares no base dependencies and each extra is exactly one generated file; add a
+  base dependency and CI would silently run without it.
+  """
+  pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+  assert "\ndependencies = []\n" in pyproject, "maxtext gained base dependencies; --no-deps would now skip them"
+  generated = "src/dependencies/requirements/generated_requirements"
+  for extra, filename in [
+      ("tpu", "tpu-requirements.txt"),
+      ("tpu-post-train", "tpu-post-train-requirements.txt"),
+      ("cuda12", "cuda12-requirements.txt"),
+  ]:
+    assert f'{extra} = ["{generated}/{filename}"]' in pyproject, f"extra '{extra}' no longer maps to {filename}"

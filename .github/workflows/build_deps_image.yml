@@ -1,0 +1,111 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Ensures a CI test image with MaxText's dependencies pre-installed exists for a
+# given dependency-set hash, building and pushing it only when it does not.
+#
+# The tag is a content hash of the pinned requirements, so this is a no-op on
+# every run where no dependency changed.
+
+name: Build MaxText Test Dependency Image
+
+on:
+  workflow_call:
+    inputs:
+      base_image:
+        description: 'Clean-interpreter image to build on, e.g. maxtext-unit-test-tpu:py312-bookworm'
+        required: true
+        type: string
+      deps_image:
+        description: 'Name of the image to produce, e.g. maxtext-deps-tpu-pre-train'
+        required: true
+        type: string
+      maxtext_extra:
+        description: 'Optional-dependency group to install: tpu, cuda12 or tpu-post-train'
+        required: true
+        type: string
+      deps_tag:
+        description: 'Content hash of the dependency definitions, used as the image tag'
+        required: true
+        type: string
+      maxtext_sha:
+        description: 'Git SHA to check out for the dependency definitions'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: linux-x86-n4-16-buildkit
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
+    timeout-minutes: 90
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.maxtext_sha }}
+          persist-credentials: false
+
+      - name: Mark git repositories as safe
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+
+      - name: Check whether the dependency image already exists
+        id: check
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}
+          REPOSITORY_NAME: 'maxtext-images'
+          DEPS_IMAGE: ${{ inputs.deps_image }}
+          DEPS_TAG: ${{ inputs.deps_tag }}
+        run: |
+          if [ -z "${DEPS_TAG}" ]; then
+            echo "::error::deps_tag is empty; refusing to build an unnamed image."
+            exit 1
+          fi
+          TARGET="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${DEPS_IMAGE}:${DEPS_TAG}"
+          echo "target=${TARGET}" >> "$GITHUB_OUTPUT"
+          if err=$(gcloud container images describe "${TARGET}" 2>&1 >/dev/null); then
+            echo "Dependency image ${TARGET} already exists; nothing to build."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'not found|NOT_FOUND|does not exist' <<< "${err}"; then
+            echo "Dependency image ${TARGET} is missing; it will be built."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not determine whether ${TARGET} exists: ${err}"
+            exit 1
+          fi
+
+      - name: Set up Docker BuildX
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        with:
+          driver: remote
+          endpoint: tcp://localhost:1234
+
+      - name: Build and push the dependency image
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/dependencies/dockerfiles/test_deps_env.Dockerfile
+          tags: ${{ steps.check.outputs.target }}
+          outputs: type=image,push=true,compression=zstd,force-compression=true
+          build-args: |
+            BASE_IMAGE=us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/maxtext-images/${{ inputs.base_image }}
+            MAXTEXT_EXTRA=${{ inputs.maxtext_extra }}
