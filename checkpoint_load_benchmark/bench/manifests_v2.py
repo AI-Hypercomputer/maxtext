@@ -162,7 +162,13 @@ def _build_cpu_job(
       "metadata": {"name": name, "namespace": "default", "labels": dict(labels)},
       "spec": {
           "backoffLimit": 1,
-          "template": {"metadata": {"labels": dict(labels)}, "spec": pod_spec},
+          "template": {
+              "metadata": {
+                  "labels": dict(labels),
+                  "annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"},
+              },
+              "spec": pod_spec,
+          },
       },
   }
 
@@ -285,7 +291,7 @@ def build_deepseek_step1b_manifests(
       f"  --scratch-dir /scratch/{shlex.quote(model_name)} \\\n"
       f"  --run-id {shlex.quote(run_id)} \\\n"
       f"  --workers {profile.max_download_workers} \\\n"
-      f"  --cache-size {cache_size}{clean_flag} \\\n"
+      f"  --cache-size {cache_size}{clean_flag} --keep-scratch \\\n"
       "  --local-result-json /tmp/step1b_result.json \\\n"
       f"  --result-gcs-uri {shlex.quote(result_gcs_uri)}\n"
   )

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
 import dataclasses
 import datetime
@@ -475,14 +475,34 @@ def run_cold_hf_to_gcs_step1(
     raise
 
 
+def _download_single_blob_with_retry(blob: Any, dst: str) -> int:
+  """Downloads `blob` to `dst` with retries, reusing `dst` if its byte size already matches."""
+  expected = int(getattr(blob, "size", 0) or 0)
+  if expected > 0 and os.path.exists(dst) and os.path.getsize(dst) == expected:
+    return expected
+  tmp = f"{dst}.part"
+  for attempt in range(_MAX_RETRIES):
+    try:
+      with blob.open("rb") as src, open(tmp, "wb") as out:
+        shutil.copyfileobj(src, out, length=_CHUNK_BYTES)
+      os.replace(tmp, dst)
+      return expected or os.path.getsize(dst)
+    except Exception:  # pylint: disable=broad-exception-caught
+      if attempt == _MAX_RETRIES - 1:
+        raise
+      time.sleep(_retry_backoff(attempt))
+  return 0
+
+
 def _download_gcs_prefix_to_local(
     storage_client: Any,
     gcs_dir: str,
     local_dir: str,
     *,
     max_workers: int = _DEFAULT_MAX_WORKERS,
+    only_filenames: set[str] | None = None,
 ) -> int:
-  """Downloads all `.safetensors` and `.json` files from `gcs_dir` to `local_dir`; returns bytes copied."""
+  """Downloads `.safetensors` and `.json` files from `gcs_dir` to `local_dir`; returns bytes copied."""
   os.makedirs(local_dir, exist_ok=True)
   blobs = [
       b
@@ -491,21 +511,44 @@ def _download_gcs_prefix_to_local(
   ]
   if not blobs:
     raise RuntimeError(f"No .safetensors/.json objects found under {gcs_dir}")
+  selected = [b for b in blobs if only_filenames is None or b.name.rsplit("/", 1)[-1] in only_filenames]
+  if not selected:
+    return 0
 
   def _fetch_one(blob: Any) -> int:
     fname = blob.name.rsplit("/", 1)[-1]
     dst = os.path.join(local_dir, fname)
-    expected = int(getattr(blob, "size", 0) or 0)
-    if expected > 0 and os.path.exists(dst) and os.path.getsize(dst) == expected:
-      return expected
-    tmp = f"{dst}.part"
-    with blob.open("rb") as src, open(tmp, "wb") as out:
-      shutil.copyfileobj(src, out, length=_CHUNK_BYTES)
-    os.replace(tmp, dst)
-    return expected or os.path.getsize(dst)
+    return _download_single_blob_with_retry(blob, dst)
 
-  with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(blobs))) as pool:
-    return sum(pool.map(_fetch_one, blobs))
+  with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(selected))) as pool:
+    return sum(pool.map(_fetch_one, selected))
+
+
+def _upload_single_file_with_retry(
+    storage_client: Any,
+    bucket_name: str,
+    prefix: str,
+    src_path: str,
+    *,
+    existing_sizes: Mapping[str, int] | None = None,
+) -> int:
+  """Uploads `src_path` to `gs://<bucket_name>/<prefix>/<fname>` with retries."""
+  fname = os.path.basename(src_path)
+  local_sz = os.path.getsize(src_path)
+  if existing_sizes and local_sz > 0 and existing_sizes.get(fname) == local_sz:
+    return local_sz
+  blob_name = f"{prefix}/{fname}" if prefix else fname
+  for attempt in range(_MAX_RETRIES):
+    try:
+      blob = storage_client.bucket(bucket_name).blob(blob_name)
+      with open(src_path, "rb") as f_in, blob.open("wb", chunk_size=_UPLOAD_CHUNK_BYTES) as gcs_out:
+        shutil.copyfileobj(f_in, gcs_out, length=_CHUNK_BYTES)
+      return local_sz
+    except Exception:  # pylint: disable=broad-exception-caught
+      if attempt == _MAX_RETRIES - 1:
+        raise
+      time.sleep(_retry_backoff(attempt))
+  return local_sz
 
 
 def _upload_local_dir_to_gcs(
@@ -531,14 +574,7 @@ def _upload_local_dir_to_gcs(
 
   def _push_one(fname: str) -> int:
     src = os.path.join(local_dir, fname)
-    local_sz = os.path.getsize(src)
-    if local_sz > 0 and existing_sizes.get(fname) == local_sz:
-      return local_sz
-    blob_name = f"{prefix}/{fname}" if prefix else fname
-    blob = storage_client.bucket(bucket_name).blob(blob_name)
-    with open(src, "rb") as f_in, blob.open("wb", chunk_size=_UPLOAD_CHUNK_BYTES) as gcs_out:
-      shutil.copyfileobj(f_in, gcs_out, length=_CHUNK_BYTES)
-    return local_sz
+    return _upload_single_file_with_retry(storage_client, bucket_name, prefix, src, existing_sizes=existing_sizes)
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(names))) as pool:
     return sum(pool.map(_push_one, names))
@@ -721,6 +757,130 @@ def _default_dequantize_runner(input_dir: str, output_dir: str, cache_size: int 
     json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
 
 
+def _run_resumable_step1b_pipeline(
+    client: Any,
+    source_gcs_dir: str,
+    dest_gcs_dir: str,
+    *,
+    in_dir: str,
+    out_dir: str,
+    cache_size: int,
+    max_workers: int,
+) -> tuple[int, int, float, float, dict[str, Any]]:
+  """Runs shard-by-shard resumable Step 1b conversion + immediate GCS upload."""
+  src_blobs = [
+      b
+      for b in _list_blobs_under_prefix(client, source_gcs_dir)
+      if not b.name.endswith("/") and b.name.endswith((".safetensors", ".json"))
+  ]
+  if not src_blobs:
+    raise RuntimeError(f"No .safetensors/.json objects found under {source_gcs_dir}")
+  src_by_name = {b.name.rsplit("/", 1)[-1]: b for b in src_blobs}
+  in_bytes = sum(int(getattr(b, "size", 0) or 0) for b in src_blobs)
+
+  dst_bucket, dst_prefix = split_gcs_uri(dest_gcs_dir)
+  existing_dst_sizes: dict[str, int] = {}
+  try:
+    for b in _list_blobs_under_prefix(client, dest_gcs_dir):
+      if not b.name.endswith("/"):
+        existing_dst_sizes[b.name.rsplit("/", 1)[-1]] = int(getattr(b, "size", 0) or 0)
+  except Exception:  # pylint: disable=broad-exception-caught
+    existing_dst_sizes = {}
+
+  json_names = sorted(fn for fn in src_by_name if fn.endswith(".json"))
+  for jname in json_names:
+    _download_single_blob_with_retry(src_by_name[jname], os.path.join(in_dir, jname))
+
+  index_path = os.path.join(in_dir, "model.safetensors.index.json")
+  if not os.path.exists(index_path):
+    t_c0 = time.perf_counter()
+    _download_gcs_prefix_to_local(client, source_gcs_dir, in_dir, max_workers=max_workers)
+    _default_dequantize_runner(in_dir, out_dir, cache_size)
+    conv_s = time.perf_counter() - t_c0
+    out_st = [os.path.join(out_dir, f) for f in sorted(os.listdir(out_dir)) if f.endswith(".safetensors")]
+    hdr_info = metadata.inspect_safetensors_headers(out_st) if out_st else {}
+    t_u0 = time.perf_counter()
+    out_bytes = _upload_local_dir_to_gcs(client, out_dir, dest_gcs_dir, max_workers=max_workers)
+    up_s = time.perf_counter() - t_u0
+    return in_bytes, out_bytes, conv_s, up_s, hdr_info
+
+  for jname in json_names:
+    if jname != "model.safetensors.index.json":
+      shutil.copy2(os.path.join(in_dir, jname), os.path.join(out_dir, jname))
+  with open(index_path, "r", encoding="utf-8") as f:
+    raw_weight_map = json.load(f).get("weight_map") or {}
+  weight_map = {k: v for k, v in raw_weight_map.items() if not k.endswith(("_scale_inv", ".scale"))}
+  with open(os.path.join(out_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
+    json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
+
+  conv_s = 0.0
+  up_s = 0.0
+  t_u0 = time.perf_counter()
+  for jname in sorted(fn for fn in os.listdir(out_dir) if fn.endswith(".json")):
+    sz = _upload_single_file_with_retry(
+        client, dst_bucket, dst_prefix, os.path.join(out_dir, jname), existing_sizes=existing_dst_sizes
+    )
+    existing_dst_sizes[jname] = sz
+  up_s += time.perf_counter() - t_u0
+
+  all_shards = sorted(fn for fn in src_by_name if fn.endswith(".safetensors"))
+  already_in_gcs = {fn for fn in all_shards if existing_dst_sizes.get(fn, 0) > 1_000_000}
+  pending_shards = [fn for fn in all_shards if fn not in already_in_gcs]
+  print(
+      f"[step1b] Total shards={len(all_shards)}, already in GCS={len(already_in_gcs)}, "
+      f"remaining={len(pending_shards)}",
+      flush=True,
+  )
+
+  tensors_by_shard: dict[str, list[str]] = {}
+  for tname, sname in weight_map.items():
+    tensors_by_shard.setdefault(sname, []).append(tname)
+
+  for idx, fn in enumerate(pending_shards, start=1):
+    out_file = os.path.join(out_dir, fn)
+    t_c0 = time.perf_counter()
+    if not _is_valid_safetensors_file(out_file):
+      needed_inputs = {fn}
+      for tname in tensors_by_shard.get(fn, []):
+        s3 = f"{tname}_scale_inv"
+        s4 = f"{tname[:-len('.weight')]}.scale" if tname.endswith(".weight") else None
+        for sc in (s3, s4):
+          if sc and sc in raw_weight_map:
+            needed_inputs.add(raw_weight_map[sc])
+      for in_fn in sorted(needed_inputs):
+        if in_fn in src_by_name:
+          _download_single_blob_with_retry(src_by_name[in_fn], os.path.join(in_dir, in_fn))
+      _convert_shard_chunk_worker((in_dir, out_dir, [fn], 1))
+    conv_s += time.perf_counter() - t_c0
+
+    t_u0 = time.perf_counter()
+    sz = _upload_single_file_with_retry(client, dst_bucket, dst_prefix, out_file, existing_sizes=existing_dst_sizes)
+    existing_dst_sizes[fn] = sz
+    up_s += time.perf_counter() - t_u0
+    for rm_path in (out_file, os.path.join(in_dir, fn)):
+      try:
+        if os.path.exists(rm_path):
+          os.remove(rm_path)
+      except OSError:
+        pass
+    done_in_gcs = sum(1 for s in all_shards if existing_dst_sizes.get(s, 0) > 1_000_000)
+    print(
+        f"[step1b] Uploaded {fn} ({sz / 1e9:.2f} GB) to GCS "
+        f"[{idx}/{len(pending_shards)} pending, {done_in_gcs}/{len(all_shards)} total in GCS]",
+        flush=True,
+    )
+
+  st_bytes = sum(existing_dst_sizes.get(s, 0) for s in all_shards)
+  out_bytes = sum(existing_dst_sizes.values())
+  hdr_info = {
+      "hf_checkpoint_dtype": "BF16",
+      "checkpoint_number_of_files": len(all_shards),
+      "checkpoint_number_of_tensors": len(weight_map),
+      "checkpoint_size_gb": round(st_bytes / 1e9, 4),
+  }
+  return in_bytes, out_bytes, conv_s, up_s, hdr_info
+
+
 def run_deepseek_step1b_dequantize(
     *,
     platform: str,
@@ -798,17 +958,26 @@ def run_deepseek_step1b_dequantize(
       except OSError:
         pass
 
-    t_conv0 = time.perf_counter()
-    in_bytes = _download_gcs_prefix_to_local(client, source_gcs_dir, in_dir, max_workers=max_workers)
-    (dequantize_fn or _default_dequantize_runner)(in_dir, out_dir, cache_size)
-    conv_s = time.perf_counter() - t_conv0
-
-    out_st = [os.path.join(out_dir, f) for f in sorted(os.listdir(out_dir)) if f.endswith(".safetensors")]
-    hdr_info = metadata.inspect_safetensors_headers(out_st) if out_st else {}
-
-    t_up0 = time.perf_counter()
-    out_bytes = _upload_local_dir_to_gcs(client, out_dir, dest_gcs_dir, max_workers=max_workers)
-    up_s = time.perf_counter() - t_up0
+    if dequantize_fn is not None:
+      t_conv0 = time.perf_counter()
+      in_bytes = _download_gcs_prefix_to_local(client, source_gcs_dir, in_dir, max_workers=max_workers)
+      dequantize_fn(in_dir, out_dir, cache_size)
+      conv_s = time.perf_counter() - t_conv0
+      out_st = [os.path.join(out_dir, f) for f in sorted(os.listdir(out_dir)) if f.endswith(".safetensors")]
+      hdr_info = metadata.inspect_safetensors_headers(out_st) if out_st else {}
+      t_up0 = time.perf_counter()
+      out_bytes = _upload_local_dir_to_gcs(client, out_dir, dest_gcs_dir, max_workers=max_workers)
+      up_s = time.perf_counter() - t_up0
+    else:
+      in_bytes, out_bytes, conv_s, up_s, hdr_info = _run_resumable_step1b_pipeline(
+          client,
+          source_gcs_dir,
+          dest_gcs_dir,
+          in_dir=in_dir,
+          out_dir=out_dir,
+          cache_size=cache_size,
+          max_workers=max_workers,
+      )
 
     record.update(
         {
@@ -818,13 +987,16 @@ def run_deepseek_step1b_dequantize(
             "step1b_deepseek_upload_bf16_to_gcs_seconds": round(up_s, 4),
             "step1b_deepseek_total_seconds": round(time.perf_counter() - t0, 4),
             "loaded_checkpoint_dtype": hdr_info.get("hf_checkpoint_dtype", "BF16"),
-            "checkpoint_number_of_files": hdr_info.get("checkpoint_number_of_files", len(out_st)),
+            "checkpoint_number_of_files": hdr_info.get("checkpoint_number_of_files", 0),
             "checkpoint_number_of_tensors": hdr_info.get("checkpoint_number_of_tensors", 0),
             "checkpoint_size_gb": hdr_info.get("checkpoint_size_gb", round(out_bytes / 1e9, 4)),
         }
     )
     record["phase_finished_at_utc"] = _utc_now_iso()
     _write_json_local_and_gcs(record, local_path=local_result_path, gcs_uri=result_gcs_uri, storage_client=client)
+    if cleanup_scratch:
+      shutil.rmtree(in_dir, ignore_errors=True)
+      shutil.rmtree(out_dir, ignore_errors=True)
     return record
   except Exception as exc:
     record["run_status"] = "FAILED"
@@ -833,10 +1005,6 @@ def run_deepseek_step1b_dequantize(
     record["phase_finished_at_utc"] = _utc_now_iso()
     _write_json_local_and_gcs(record, local_path=local_result_path, gcs_uri=result_gcs_uri, storage_client=client)
     raise
-  finally:
-    if cleanup_scratch:
-      shutil.rmtree(in_dir, ignore_errors=True)
-      shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def copy_bf16_gcs_to_region(
