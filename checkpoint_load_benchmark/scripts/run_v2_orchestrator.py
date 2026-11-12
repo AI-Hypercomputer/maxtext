@@ -62,7 +62,11 @@ def apply_k8s_manifests(context: str, docs: Sequence[Mapping[str, Any]]) -> bool
   """Applies one or more Kubernetes JSON manifests to `context`."""
   for doc in docs:
     payload = json.dumps(doc, indent=2) + "\n"
-    res = _run_cmd(["kubectl", f"--context={context}", "apply", "-f", "-"], input_text=payload, timeout=30)
+    res = _run_cmd(
+        ["kubectl", f"--context={context}", "apply", "-f", "-"],
+        input_text=payload,
+        timeout=30,
+    )
     if res.returncode != 0:
       print(f"[WARN] kubectl apply failed on {context}: {res.stderr}", flush=True)
       return False
@@ -78,7 +82,15 @@ def sync_gcs_to_mirror(mirror_dir: str) -> int:
     for sub in ("runs", "val", "step1", "step1b", "queue/v2/done"):
       dst = os.path.join(mirror_dir, region, sub)
       os.makedirs(dst, exist_ok=True)
-      cmd = ["gcloud", "storage", "rsync", "-r", "--exclude=(^|.*/)to_maxtext/.*", f"{gcs_root}/{sub}", dst]
+      cmd = [
+          "gcloud",
+          "storage",
+          "rsync",
+          "-r",
+          "--exclude=(^|.*/)to_maxtext/.*",
+          f"{gcs_root}/{sub}",
+          dst,
+      ]
       _run_cmd(cmd, timeout=120)
 
   total_jsons = 0
@@ -152,7 +164,18 @@ def manage_cpu_jobs(
   cfg = schema_v2.load_models_v2()
   team_buckets: Mapping[str, str] = cfg.get("deepseek_bf16_team_buckets", {})
 
-  res = _run_cmd(["kubectl", f"--context={ctx}", "get", "jobs", "-l", "app=mesa-bench-v2", "-o", "json"])
+  res = _run_cmd(
+      [
+          "kubectl",
+          f"--context={ctx}",
+          "get",
+          "jobs",
+          "-l",
+          "app=mesa-bench-v2",
+          "-o",
+          "json",
+      ]
+  )
   active_job_names: list[str] = []
   active_models_s1: set[str] = set()
   active_models_s1b: set[str] = set()
@@ -182,11 +205,29 @@ def manage_cpu_jobs(
             done_s1.add(matched_model)
           elif jname.startswith(("mesa-copy-", "mesa-step1b-")):
             done_s1b.add(matched_model)
-        _run_cmd(["kubectl", f"--context={ctx}", "delete", "job", jname, "--ignore-not-found=true"])
+        _run_cmd(
+            [
+                "kubectl",
+                f"--context={ctx}",
+                "delete",
+                "job",
+                jname,
+                "--ignore-not-found=true",
+            ]
+        )
         events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` Completed and cleaned up.")
         continue
       if failed >= 2:
-        _run_cmd(["kubectl", f"--context={ctx}", "delete", "job", jname, "--ignore-not-found=true"])
+        _run_cmd(
+            [
+                "kubectl",
+                f"--context={ctx}",
+                "delete",
+                "job",
+                jname,
+                "--ignore-not-found=true",
+            ]
+        )
         events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` Failed and cleaned up.")
         continue
       active_job_names.append(jname)
@@ -198,7 +239,12 @@ def manage_cpu_jobs(
 
   max_cpu = MAX_CPU_JOBS_BY_PLATFORM.get(platform, 3)
   models_for_plat = [m for m in cfg["models"] if platform in m.get("topologies_by_platform", {})]
-  models_for_plat.sort(key=lambda m: (TIER_ORDER.get(m["tier"], 99), float(m.get("loaded_bf16_gb") or 0.0)))
+  models_for_plat.sort(
+      key=lambda m: (
+          TIER_ORDER.get(m["tier"], 99),
+          float(m.get("loaded_bf16_gb") or 0.0),
+      )
+  )
 
   for m in models_for_plat:
     if len(active_job_names) >= max_cpu:
@@ -279,7 +325,7 @@ def _match_worker_shape(prof: platforms.PlatformProfile, js_name: str) -> tuple[
   return None
 
 
-def update_queue_and_tpu_workers(
+def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-arguments
     platform: str,
     done_s1: set[str],
     done_s1b: set[str],
@@ -340,7 +386,18 @@ def update_queue_and_tpu_workers(
 
   pending_ready_tasks = [t for t in ready_tasks if str(t["id"]) not in done_task_ids]
 
-  res = _run_cmd(["kubectl", f"--context={ctx}", "get", "jobsets", "-l", "app=mesa-bench-v2", "-o", "json"])
+  res = _run_cmd(
+      [
+          "kubectl",
+          f"--context={ctx}",
+          "get",
+          "jobsets",
+          "-l",
+          "app=mesa-bench-v2",
+          "-o",
+          "json",
+      ]
+  )
   active_jobsets: list[str] = []
   covered_shapes: set[tuple[str, int]] = set()
   if res.returncode == 0 and res.stdout.strip():
@@ -353,10 +410,28 @@ def update_queue_and_tpu_workers(
       term_state = str(item.get("status", {}).get("terminalState") or "")
       shape = _match_worker_shape(prof, js_name)
       if term_state in ("Completed", "Failed"):
-        _run_cmd(["kubectl", f"--context={ctx}", "delete", "jobset", js_name, "--ignore-not-found=true"])
+        _run_cmd(
+            [
+                "kubectl",
+                f"--context={ctx}",
+                "delete",
+                "jobset",
+                js_name,
+                "--ignore-not-found=true",
+            ]
+        )
         if shape is not None:
           tslug = manifests_v2.dns_slug(shape[0])
-          _run_cmd(["gcloud", "storage", "rm", "-f", f"{queue_uri}/claims/*_{shape[1]}x{tslug}_*.json"], timeout=60)
+          _run_cmd(
+              [
+                  "gcloud",
+                  "storage",
+                  "rm",
+                  "-f",
+                  f"{queue_uri}/claims/*_{shape[1]}x{tslug}_*.json",
+              ],
+              timeout=60,
+          )
         events.append(f"[{utc_now_str()}] `{platform}` TPU JobSet `{js_name}` `{term_state}` and cleaned up.")
         continue
       active_jobsets.append(js_name)
@@ -385,7 +460,16 @@ def update_queue_and_tpu_workers(
       covered_shapes.add((topo, slices))
 
     tslug = manifests_v2.dns_slug(topo)
-    _run_cmd(["gcloud", "storage", "rm", "-f", f"{queue_uri}/claims/*_{slices}x{tslug}_*.json"], timeout=60)
+    _run_cmd(
+        [
+            "gcloud",
+            "storage",
+            "rm",
+            "-f",
+            f"{queue_uri}/claims/*_{slices}x{tslug}_*.json",
+        ],
+        timeout=60,
+    )
     seq = worker_seq.get(platform, 1) + 1
     worker_seq[platform] = seq
     wid = f"w{seq}"
@@ -427,6 +511,10 @@ def sync_sheet_v2(mirror_dir: str, v1_dir: str, sync_dir: str, spreadsheet_id: s
       os.path.join(v1_dir, "p2_lance_prs/run_tpu7x_16m_rerun/logs"),
       "--v1-p2-root",
       os.path.join(v1_dir, "p2_lance_prs/run_tpu7x_16m_tmfix/logs"),
+      "--v1-p2-root",
+      os.path.join(v1_dir, "lance_prs/run_tpu7x_multihost/logs"),
+      "--v1-p2-root",
+      os.path.join(v1_dir, "lance_prs/run_tpu7x_multihost_fix/logs"),
       "--v1-p1-root",
       os.path.join(v1_dir, "p1_lance_prs/run_tpu7x_200b/logs"),
       "--v1-p1-root",
@@ -453,7 +541,7 @@ def sync_sheet_v2(mirror_dir: str, v1_dir: str, sync_dir: str, spreadsheet_id: s
       spreadsheet_id,
       "--apply",
   ]
-  res = _run_cmd(cmd, timeout=300)
+  res = _run_cmd(cmd, timeout=900)
   return res.returncode == 0
 
 
@@ -574,12 +662,17 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--spreadsheet-id", default=DEFAULT_SPREADSHEET_ID)
   parser.add_argument("--interval-seconds", type=int, default=60)
   parser.add_argument("--once", action="store_true", help="Run a single orchestration pass and exit")
-  parser.add_argument("--skip-gcs-sync", action="store_true", help="Skip initial GCS rsync (use existing mirror)")
+  parser.add_argument(
+      "--skip-gcs-sync",
+      action="store_true",
+      help="Skip initial GCS rsync (use existing mirror)",
+  )
   args = parser.parse_args(argv)
 
   cfg = schema_v2.load_models_v2()
   expected_s1_by_plat = {
-      plat: sum(1 for m in cfg["models"] if plat in m.get("topologies_by_platform", {})) for plat in ("v7x", "v6e", "v5e")
+      plat: sum(1 for m in cfg["models"] if plat in m.get("topologies_by_platform", {}))
+      for plat in ("v7x", "v6e", "v5e")
   }
 
   events: list[str] = [f"[{utc_now_str()}] Background orchestrator started on branch `docs/checkpoint-load-benchmark`."]
