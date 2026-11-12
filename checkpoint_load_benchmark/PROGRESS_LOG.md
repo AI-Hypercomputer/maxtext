@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 10:41:02 UTC`
+- **Last Updated (UTC):** `2026-11-12 10:48:03 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -15,7 +15,7 @@
 |---|---|---:|---:|---|---|
 | `v7x` | `us-central1` | **7 / 21** | **1 / 61** | `mesa-q-v7x-2x2x1-1s-w1` | `mesa-copy-v7x-deepseek3-671b-v2-cp-v7x`, `mesa-step1-v7x-deepseek3-671b-v2-s1-v7x`, `mesa-step1-v7x-deepseek3p2-671b-v2-s1-v7x`, `mesa-step1-v7x-qwen3-480b-a35b-v2-s1-v7x`, `mesa-step1-v7x-qwen3p5-397b-a17b-v2-s1-v7x` |
 | `v6e` | `southamerica-west1` | **7 / 21** | **5 / 53** | `mesa-q-v6e-2x4-2s-w2` | `mesa-copy-v6e-deepseek3-671b-v2-cp-v6e`, `mesa-step1-v6e-deepseek3-671b-v2-s1-v6e`, `mesa-step1-v6e-deepseek3p2-671b-v2-s1-v6e`, `mesa-step1-v6e-qwen3-480b-a35b-v2-s1-v6e`, `mesa-step1-v6e-qwen3p5-397b-a17b-v2-s1-v6e` |
-| `v5e` | `europe-west4` | **8 / 12** | **4 / 22** | `mesa-q-v5e-16x16-1s-w2` | `mesa-copy-v5e-deepseek3-671b-v2-cp-v5e`, `mesa-step1-v5e-deepseek3-671b-v2-s1-v5e`, `mesa-step1-v5e-qwen3-480b-a35b-v2-s1-v5e` |
+| `v5e` | `europe-west4` | **9 / 12** | **4 / 22** | `mesa-q-v5e-16x16-1s-w2` | `mesa-copy-v5e-deepseek3-671b-v2-cp-v5e`, `mesa-step1-v5e-qwen3-480b-a35b-v2-s1-v5e`, `mesa-step1-v5e-deepseek3p2-671b-v2-s1-v5e` |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
 
@@ -67,3 +67,7 @@
 - [2026-11-12 10:37:15 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 34/61 staged tasks.
 - [2026-11-12 10:37:35 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 129 mirrored JSONs.
 - [2026-11-12 10:41:02 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 131 mirrored JSONs.
+- [2026-11-12 10:44:31 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 133 mirrored JSONs.
+- [2026-11-12 10:47:39 UTC] `v5e` CPU job `mesa-step1-v5e-deepseek3-671b-v2-s1-v5e` Completed and cleaned up.
+- [2026-11-12 10:47:42 UTC] Launched `v5e` Step 1 CPU job `mesa-step1-v5e-deepseek3p2-671b-v2-s1-v5e` for `deepseek3.2-671b`.
+- [2026-11-12 10:48:03 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 134 mirrored JSONs.
