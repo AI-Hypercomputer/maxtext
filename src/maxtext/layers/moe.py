@@ -1464,7 +1464,9 @@ class RoutedMoE(nnx.Module):
           # Padding must stay out of the softmax denominator or it rescales the
           # real slots. Large-negative, not -inf: a fully-padded token would be NaN.
           top_k_weights = jnp.where(valid_token_mask, top_k_weights, jnp.finfo(jnp.float32).min / 2)
-        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1)
+        if not self.config.norm_topk_prob:
+          top_k_weights = top_k_weights.astype(self.dtype)
 
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1475,7 +1477,7 @@ class RoutedMoE(nnx.Module):
         if valid_token_mask is not None:
           # A fully-padded token sums to zero; 0/0 would NaN the whole batch loss.
           weight_sum = jnp.where(weight_sum == 0, 1.0, weight_sum)
-        top_k_weights /= weight_sum
+        top_k_weights = (top_k_weights / weight_sum).astype(self.dtype)
 
       if per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales

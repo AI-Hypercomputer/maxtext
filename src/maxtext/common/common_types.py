@@ -40,11 +40,26 @@ def is_fp8_dtype(dtype: Any) -> bool:
   )
 
 
+DEFAULT_FP8_UNQUANTIZED_MODULES = (
+    "token_embedder",
+    "logits_dense",
+    "gate",
+    "shared_expert_gate",
+    "conv1d",
+    "in_proj_ba",
+    "A_log",
+    "dt_bias",
+    "norm",
+)
+
+
 def is_module_unquantized(config: Config, module_name: str) -> bool:
   """Checks whether module_name matches any pattern in config.unquantized_modules."""
   unquantized = getattr(config, "unquantized_modules", None) or ()
-  if isinstance(unquantized, str):
-    unquantized = (unquantized,)
+  if not unquantized and getattr(config, "fp8_dense_fake_quant", False):
+    unquantized = DEFAULT_FP8_UNQUANTIZED_MODULES
+  elif isinstance(unquantized, str):
+    unquantized = tuple(m.strip() for m in unquantized.split(",") if m.strip())
   leaf_name = module_name.rsplit(".", 1)[-1]
   return any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized)
 
