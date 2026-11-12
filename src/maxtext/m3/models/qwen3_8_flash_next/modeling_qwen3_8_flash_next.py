@@ -39,6 +39,9 @@ from typing import Any
 
 from flax import nnx
 import jax
+from jax import checkpoint_policies as cp
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -453,7 +456,8 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       hidden_states = (hidden_states * jnp.expand_dims(attention_mask, -1)).astype(hidden_states.dtype)
 
     b, s, _ = hidden_states.shape
-    mixed_qkv = jax.nn.silu(self.conv1d(self.in_proj_qkv(hidden_states)))
+    qkv = checkpoint_name(self.in_proj_qkv(hidden_states), "qkv_proj")
+    mixed_qkv = jax.nn.silu(self.conv1d(qkv))
     z = self.in_proj_z(hidden_states).reshape(b, s, self.num_v_heads, self.head_v_dim)
 
     beta = jax.nn.sigmoid(self.in_proj_b(hidden_states))
@@ -501,7 +505,7 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           chunk_inverse=self.chunk_inverse,
       )
     core_normed = self.norm(core_attn_out, z).reshape(b, s, self.value_dim)
-    out = self.out_proj(core_normed)
+    out = checkpoint_name(self.out_proj(core_normed), "out_proj")
     return (out, last_state) if output_final_state else out
 
 
@@ -918,11 +922,17 @@ class Qwen3_8SparseAttention(nnx.Module):
         return_token_mask=(self.attention_kernel == "dense"),
     )
 
-    q_and_gate = self.q_proj(hidden_states).reshape(b, s, self.num_query_heads, 2 * self.head_dim)
+    q_and_gate = checkpoint_name(self.q_proj(hidden_states), "query_proj").reshape(
+        b, s, self.num_query_heads, 2 * self.head_dim
+    )
     query_states = self.q_norm(q_and_gate[..., : self.head_dim])
     gate = q_and_gate[..., self.head_dim :].reshape(b, s, self.num_query_heads * self.head_dim)
-    key_states = self.k_norm(self.k_proj(hidden_states).reshape(b, s, self.num_kv_heads, self.head_dim))
-    value_states = self.v_proj(hidden_states).reshape(b, s, self.num_kv_heads, self.head_dim)
+    key_states = self.k_norm(
+        checkpoint_name(self.k_proj(hidden_states), "key_proj").reshape(b, s, self.num_kv_heads, self.head_dim)
+    )
+    value_states = checkpoint_name(self.v_proj(hidden_states), "value_proj").reshape(
+        b, s, self.num_kv_heads, self.head_dim
+    )
 
     res = apply_rotary_pos_emb(query_states, key_states, cos=cos, sin=sin, unsqueeze_dim=2)
     assert isinstance(res, tuple)
@@ -943,9 +953,10 @@ class Qwen3_8SparseAttention(nnx.Module):
 
       probs = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(value_states.dtype)
       attn_output = jnp.einsum("bhqk,bkhd->bqhd", probs, value_states).reshape(b, s, self.num_query_heads * self.head_dim)
+    attn_output = checkpoint_name(attn_output, "context")
     attn_output = (attn_output * jax.nn.sigmoid(gate.astype(jnp.float32))).astype(attn_output.dtype)
 
-    out = self.o_proj(attn_output)
+    out = checkpoint_name(self.o_proj(attn_output), "out_proj")
     return (out, selected_block_indices) if return_selected_blocks else out
 
 
@@ -976,7 +987,9 @@ class Qwen3_8MLP(nnx.Module):
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """Forward pass computing down_proj(silu(gate_proj(x)) * up_proj(x))."""
-    return self.down_proj(jax.nn.silu(self.gate_proj(x)) * self.up_proj(x))
+    gate = jax.nn.silu(checkpoint_name(self.gate_proj(x), "mlpwi_0"))
+    up = checkpoint_name(self.up_proj(x), "mlpwi_1")
+    return checkpoint_name(self.down_proj(gate * up), "mlpwo")
 
 
 class Qwen3_8Experts(nnx.Module):
@@ -1747,6 +1760,122 @@ def create_scanned_cycles(
   return nnx.merge(sp[0][0], *stacked_trees)
 
 
+_QWEN3_8_PROJECTIONS = ("query_proj", "value_proj", "key_proj", "kv_proj", "qkv_proj")
+_QWEN3_8_MINIMAL = _QWEN3_8_PROJECTIONS + ("out_proj", "mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo")
+
+
+def _coerce_remat_callable(remat: Any) -> Callable[..., Any] | None:
+  """Extracts a `jax.checkpoint` policy callable from `remat` (`Remat`, callable, or `None`)."""
+  if remat is None:
+    return None
+  if callable(remat):
+    return remat
+  pol = getattr(remat, "policy", None)
+  return cp.nothing_saveable if pol is None else pol
+
+
+def _resolve_qwen3_8_remat_policy(config: Any) -> Callable[..., Any] | None:
+  """Resolves `config.remat_policy` locally without importing `maxtext.m3.infra`."""
+  raw = getattr(config, "remat_policy", "none")
+  if raw is None or raw == "":
+    return None
+  if callable(raw):
+    return raw
+  key = str(raw).lower()
+  if key == "none":
+    return None
+  on_dev = list(getattr(config, "tensors_on_device", None) or getattr(config, "names_which_can_be_saved", None) or ())
+  to_off = list(
+      getattr(config, "tensors_to_offload", None) or getattr(config, "names_which_can_be_offloaded", None) or ()
+  )
+  match key:
+    case "full":
+      return cp.nothing_saveable
+    case "minimal" | "minimal_flash":
+      return cp.save_only_these_names(*_QWEN3_8_MINIMAL)
+    case "minimal_with_context":
+      return cp.save_only_these_names(*_QWEN3_8_MINIMAL, "context")
+    case "save_qkv_proj":
+      return cp.save_only_these_names(*_QWEN3_8_PROJECTIONS)
+    case "save_dot_except_mlp":
+      return cp.save_only_these_names(*_QWEN3_8_PROJECTIONS, "out_proj")
+    case "save_dot_except_mlpwi":
+      return cp.save_only_these_names(*_QWEN3_8_PROJECTIONS, "out_proj", "mlpwo")
+    case "save_out_proj":
+      return cp.save_only_these_names("out_proj")
+    case "qkv_proj_offloaded":
+      return cp.save_and_offload_only_these_names(
+          names_which_can_be_saved=[],
+          names_which_can_be_offloaded=list(_QWEN3_8_PROJECTIONS),
+          offload_src="device",
+          offload_dst="pinned_host",
+      )
+    case "minimal_offloaded":
+      return cp.save_and_offload_only_these_names(
+          names_which_can_be_saved=[],
+          names_which_can_be_offloaded=list(_QWEN3_8_MINIMAL),
+          offload_src="device",
+          offload_dst="pinned_host",
+      )
+    case "matmul_without_batch":
+      return cp.checkpoint_dots_with_no_batch_dims
+    case "offload_matmul_without_batch":
+      return cp.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+    case "custom":
+      return cp.save_and_offload_only_these_names(
+          names_which_can_be_saved=on_dev,
+          names_which_can_be_offloaded=to_off,
+          offload_src="device",
+          offload_dst="pinned_host",
+      )
+    case "hidden_state_with_offload":
+      return cp.save_and_offload_only_these_names(
+          names_which_can_be_saved=[],
+          names_which_can_be_offloaded=["hidden_states", "self_attn", "cross_attn"],
+          offload_src="device",
+          offload_dst="pinned_host",
+      )
+  raise ValueError(f"Unsupported remat_policy for Qwen3.8: {raw!r}.")
+
+
+def _run_qwen3_8_sublayer(
+    layer: Qwen3_8DecoderLayer,
+    hidden_states: jax.Array,
+    *,
+    eff_policy: Callable[..., Any] | None,
+    return_aux: bool,
+    positions: jax.Array | None = None,
+    conv_mask: jax.Array | None = None,
+    ple_input_ids: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+) -> Any:
+  """Executes one `Qwen3_8DecoderLayer`, wrapping in `jax.checkpoint(..., prevent_cse=False)` if active."""
+  dyn_kw = {
+      k: v
+      for k, v in (
+          ("positions", positions),
+          ("conv_mask", conv_mask),
+          ("ple_input_ids", ple_input_ids),
+          ("segment_ids", segment_ids),
+      )
+      if v is not None
+  }
+  if eff_policy is None:
+    return layer(hidden_states, return_aux=return_aux, **dyn_kw)
+  gd, lp, lr = nnx.split(layer, nnx.Param, ...)
+
+  def _eval_layer(h_in, p_in, r_in, kw_in):
+    mod = nnx.merge(gd, p_in, r_in)
+    out = mod(h_in, return_aux=return_aux, **kw_in)
+    _, _, updated_r = nnx.split(mod, nnx.Param, ...)
+    return out, updated_r
+
+  out, new_lr = jax.checkpoint(_eval_layer, policy=eff_policy, prevent_cse=False)(hidden_states, lp, lr, dyn_kw)
+  if jax.tree.leaves(new_lr):
+    nnx.update(layer, new_lr)
+  return out
+
+
 def apply_scanned_cycles(
     cycles: Qwen3_8CycleBlock,
     ple_layer: Qwen3_8PLELayer | None,
@@ -1759,35 +1888,88 @@ def apply_scanned_cycles(
     segment_ids: jax.Array | None = None,
     return_aux: bool = False,
     remat: bool = False,
+    remat_policy: Any = None,
 ) -> Any:
-  """Executes scan over stacked cycle weights with conditional PLE at cycle 0."""
-  c_def, c_params, c_rest = nnx.split(cycles, nnx.Param, ...)
-  p_def, p_state = nnx.split(ple_layer) if ple_layer is not None else (None, None)
+  """Executes scan over stacked cycle weights with per-sublayer checkpoint barriers."""
+  eff_policy = _coerce_remat_callable(remat_policy)
+  if eff_policy is None and remat:
+    eff_policy = cp.nothing_saveable
+  use_remat = eff_policy is not None
 
-  def ple_step(h, cyc_idx):
-    if p_def is not None and ple_input_ids is not None:
-      return jax.lax.cond(
-          cyc_idx == 0, lambda x: x + nnx.merge(p_def, p_state)(x, ple_input_ids, conv_mask=conv_mask), lambda x: x, h
-      )
-    return h
+  sub_names = ("gdn_0", "gdn_1", "gdn_2", "qsa_3")
+  sub_defs: dict[str, Any] = {}
+  sub_params: dict[str, Any] = {}
+  sub_rests: dict[str, Any] = {}
+  for name in sub_names:
+    gd, lp, lr = nnx.split(getattr(cycles, name), nnx.Param, ...)
+    sub_defs[name] = gd
+    sub_params[name] = lp
+    sub_rests[name] = lr
+
+  p_def, p_params, p_rest = nnx.split(ple_layer, nnx.Param, ...) if ple_layer is not None else (None, None, None)
+  dyn_kw = {
+      k: v for k, v in (("positions", positions), ("conv_mask", conv_mask), ("segment_ids", segment_ids)) if v is not None
+  }
+  ple_kw = {"conv_mask": conv_mask} if conv_mask is not None else {}
+
+  def _run_slot(name: str, h_in: jax.Array, p_slice: Any, r_slice: Any, cyc_idx: jax.Array) -> Any:
+    gd = sub_defs[name]
+    lp = jax.tree.map(_strip_cycle_axis, p_slice, is_leaf=_is_nnx_var)
+    lr = jax.tree.map(_strip_cycle_axis, r_slice, is_leaf=_is_nnx_var)
+    # Keep `jax.lax.cond` inside `gdn_1`'s outer `jax.checkpoint` (matching unscanned `layers_1`) so
+    # `cond` linearization never pads the false branch with `p_params`-shaped residuals across cycles.
+    with_ple = name == "gdn_1" and p_def is not None and ple_input_ids is not None
+
+    def _eval_slot(x_in, p_in, r_in, kw_in, cyc_in, pp_in, pr_in, pids_in, pkw_in):
+      if with_ple:
+        x_in = jax.lax.cond(
+            cyc_in == 0,
+            lambda z: z + nnx.merge(p_def, pp_in, pr_in)(z, pids_in, **pkw_in),
+            lambda z: z,
+            x_in,
+        )
+        x_in = shard_batch(x_in)
+      lyr = nnx.merge(gd, p_in, r_in)
+      return lyr(x_in, return_aux=return_aux, **kw_in)
+
+    args = (
+        h_in,
+        lp,
+        lr,
+        dyn_kw,
+        cyc_idx if with_ple else None,
+        p_params if with_ple else None,
+        p_rest if with_ple else None,
+        ple_input_ids if with_ple else None,
+        ple_kw if with_ple else None,
+    )
+    if use_remat:
+      return jax.checkpoint(_eval_slot, policy=eff_policy, prevent_cse=True)(*args)
+    return _eval_slot(*args)
 
   def scan_fn(carry, xs):
-    carry = shard_batch(carry)
-    p_slice = jax.tree.map(_strip_cycle_axis, xs[0], is_leaf=_is_nnx_var)
-    r_slice = jax.tree.map(_strip_cycle_axis, xs[1], is_leaf=_is_nnx_var)
-    blk = nnx.merge(c_def, p_slice, r_slice)
-    kw = {"positions": positions, "conv_mask": conv_mask, "segment_ids": segment_ids}
+    p_slices, r_slices, cyc_idx = xs
+    h = shard_batch(carry)
     if return_aux:
-      h, a0 = blk.gdn_0(carry, return_aux=True, **kw)
-      h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
-      h, a2 = blk.gdn_2(h, return_aux=True, **kw)
-      h, a3 = blk.qsa_3(h, return_aux=True, **kw)
+      h, a0 = _run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx)
+      h, a1 = _run_slot("gdn_1", shard_batch(h), p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx)
+      h, a2 = _run_slot("gdn_2", shard_batch(h), p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx)
+      h, a3 = _run_slot("qsa_3", shard_batch(h), p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx)
       return shard_batch(h), (a0, a1, a2, a3)
-    h = ple_step(blk.gdn_0(carry, **kw), xs[2])
-    return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw)), None
+    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx))
+    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx))
+    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx))
+    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx))
+    return h, None
 
-  step_fn = jax.checkpoint(scan_fn, prevent_cse=False) if remat else scan_fn
-  res = jax.lax.scan(step_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
+  if num_cycles == 1:
+    # Retain the trip-count-1 while loop as a memory barrier (see `ScannedLayers` in
+    # `maxtext.m3.infra.scan`): prevents XLA from inlining the single cycle and overlapping
+    # activation temporaries across the remat boundary.
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+      res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests, jnp.arange(num_cycles)))
+  else:
+    res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests, jnp.arange(num_cycles)))
   if return_aux:
     return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
   return res[0]
@@ -1834,6 +2016,8 @@ class Qwen3_8MTPBlock(nnx.Module):
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
     self.config, self.emb_dim = config, int(config.emb_dim)
     self.hc_count, self.hc_lowrank = int(config.hc_count), int(config.hc_lowrank)
+    self.remat_policy = _resolve_qwen3_8_remat_policy(config)
+    self.remat = self.remat_policy is not None
     dt, wdt, eps = jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype), float(config.normalization_layer_epsilon)
     self.pre_fc_norm_embedding = Qwen3_8RMSNorm(self.emb_dim, eps=eps, rngs=rngs)
     self.pre_fc_norm_hidden = Qwen3_8RMSNorm(self.hc_count * self.emb_dim, eps=eps, rngs=rngs)
@@ -1877,12 +2061,26 @@ class Qwen3_8MTPBlock(nnx.Module):
     h_norm = self.pre_fc_norm_hidden(hc_hidden_states).reshape(*hc_hidden_states.shape[:-1], self.hc_count, self.emb_dim)
     h_proj = self.fc_hidden(h_norm)
     h_mtp_in = (h_proj + jnp.expand_dims(e_proj, axis=-2)).reshape(hc_hidden_states.shape)
-    out = self.layers_0(
-        h_mtp_in, positions=positions, conv_mask=conv_mask, segment_ids=segment_ids, return_aux=return_aux
+    eff_policy = self.remat_policy if self.remat else None
+    if self.remat and eff_policy is None:
+      eff_policy = cp.nothing_saveable
+    out = _run_qwen3_8_sublayer(
+        self.layers_0,
+        h_mtp_in,
+        eff_policy=eff_policy,
+        return_aux=return_aux,
+        positions=positions,
+        conv_mask=conv_mask,
+        segment_ids=segment_ids,
     )
     h_layer, aux = out if return_aux else (out, None)
     h_out = self.hyper_connection_mixer.mix_input(h_layer)
     return (h_out, aux) if return_aux else h_out
+
+  def set_remat(self, remat: Any) -> None:
+    """Updates the MTP block's activation checkpointing policy in place."""
+    self.remat_policy = _coerce_remat_callable(remat)
+    self.remat = self.remat_policy is not None
 
 
 # =================================================================================================
@@ -2073,11 +2271,8 @@ class Qwen3_8Decoder(nnx.Module):
     c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
     self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
     self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
-    self.remat = str(getattr(c, "remat_policy", "none")) not in (
-        "none",
-        "",
-        "None",
-    )
+    self.remat_policy = _resolve_qwen3_8_remat_policy(c)
+    self.remat = self.remat_policy is not None
     self.dtype, self.weight_dtype = dt, wdt
     self.token_embedder = nnx.Embed(self.vocab_size, self.emb_dim, dtype=dt, param_dtype=wdt, rngs=rngs)
     self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
@@ -2126,6 +2321,9 @@ class Qwen3_8Decoder(nnx.Module):
         init_hyper_connection_streams(tok_emb, hc_count=self.hc_count),
         [],
     )
+    eff_policy = self.remat_policy if self.remat else None
+    if self.remat and eff_policy is None:
+      eff_policy = cp.nothing_saveable
     if self.scan_layers:
       res = apply_scanned_cycles(
           self.cycles,
@@ -2138,18 +2336,31 @@ class Qwen3_8Decoder(nnx.Module):
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
           remat=self.remat,
+          remat_policy=eff_policy,
       )
       h, aux_list = res if return_aux else (res, [])
     else:
       for i in range(self.num_layers):
-        out = getattr(self, f"layers_{i}")(
-            h, positions=pos, conv_mask=cmask, ple_input_ids=pids, segment_ids=decoder_segment_ids, return_aux=return_aux
+        out = _run_qwen3_8_sublayer(
+            getattr(self, f"layers_{i}"),
+            h,
+            eff_policy=eff_policy,
+            return_aux=return_aux,
+            positions=pos,
+            conv_mask=cmask,
+            ple_input_ids=pids,
+            segment_ids=decoder_segment_ids,
         )
         h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
     h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h))
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
     return (h_mixed, aux_list) if return_aux else h_mixed
+
+  def set_remat(self, remat: Any) -> None:
+    """Updates the decoder's per-sublayer activation checkpointing policy in place."""
+    self.remat_policy = _coerce_remat_callable(remat)
+    self.remat = self.remat_policy is not None
 
 
 class Qwen3_8FlashNextModel(nnx.Module):
