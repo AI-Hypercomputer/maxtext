@@ -1221,6 +1221,15 @@ class SplashAttention(BaseModel):
           " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
       ),
   )
+  sa_vmem_resident_dq: bool = Field(
+      False,
+      description=(
+          "Experimental (SplashConfig.vmem_resident_dq): with"
+          " dq_reduction_steps=1 on non-contiguous dkv grids, keeps each q"
+          " head's dq resident in VMEM and writes it back once per head instead"
+          " of an HBM read-modify-write per run. Bit-identical."
+      ),
+  )
   sa_ignore_segment_ids: bool = Field(
       False,
       description=(
