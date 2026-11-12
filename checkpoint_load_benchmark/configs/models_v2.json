@@ -1,0 +1,408 @@
+{
+  "schema_version": 2,
+  "repetitions_by_tier": {
+    "S": 1,
+    "A": 3,
+    "B": 1,
+    "C": 1
+  },
+  "scan_modes": ["scanned", "unscanned"],
+  "pipelines": ["to_maxtext", "safetensors_dynamic"],
+  "deepseek_bf16_team_buckets": {
+    "deepseek4-284b": "gs://maxtext-deepseek/deepseek4/hf-bf16/",
+    "deepseek3-671b": "gs://maxtext-deepseek/deepseek3-671b/hf/",
+    "deepseek3.2-671b": "gs://maxtext-deepseek/deepseek3.2/hf-bf16/"
+  },
+  "models": [
+    {
+      "model_name": "qwen3-0.6b",
+      "hf_repo_id": "Qwen/Qwen3-0.6B",
+      "params_billions": 0.6,
+      "architecture": "dense",
+      "tier": "S",
+      "hf_download_gb": 1.5,
+      "loaded_bf16_gb": 1.5,
+      "num_files": 1,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "default",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "gemma2-2b",
+      "hf_repo_id": "google/gemma-2-2b",
+      "params_billions": 2.6,
+      "architecture": "dense",
+      "tier": "B",
+      "hf_download_gb": 10.5,
+      "loaded_bf16_gb": 10.5,
+      "num_files": 3,
+      "hf_dtype": "F32",
+      "loaded_dtype": "F32",
+      "weight_dtype": "default",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "qwen3-4b",
+      "hf_repo_id": "Qwen/Qwen3-4B",
+      "params_billions": 4.0,
+      "architecture": "dense",
+      "tier": "B",
+      "hf_download_gb": 8.0,
+      "loaded_bf16_gb": 8.0,
+      "num_files": 3,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "gemma3-4b",
+      "hf_repo_id": "google/gemma-3-4b-it",
+      "params_billions": 4.0,
+      "architecture": "dense",
+      "tier": "B",
+      "hf_download_gb": 8.6,
+      "loaded_bf16_gb": 8.6,
+      "num_files": 2,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "llama3.1-8b",
+      "hf_repo_id": "meta-llama/Llama-3.1-8B",
+      "params_billions": 8.0,
+      "architecture": "dense",
+      "tier": "A",
+      "hf_download_gb": 16.1,
+      "loaded_bf16_gb": 16.1,
+      "num_files": 4,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "qwen3-8b",
+      "hf_repo_id": "Qwen/Qwen3-8B",
+      "params_billions": 8.0,
+      "architecture": "dense",
+      "tier": "B",
+      "hf_download_gb": 16.4,
+      "loaded_bf16_gb": 16.4,
+      "num_files": 5,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "qwen3-14b",
+      "hf_repo_id": "Qwen/Qwen3-14B",
+      "params_billions": 14.0,
+      "architecture": "dense",
+      "tier": "B",
+      "hf_download_gb": 29.5,
+      "loaded_bf16_gb": 29.5,
+      "num_files": 8,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "qwen3-32b",
+      "hf_repo_id": "Qwen/Qwen3-32B",
+      "params_billions": 32.0,
+      "architecture": "dense",
+      "tier": "B",
+      "hf_download_gb": 65.5,
+      "loaded_bf16_gb": 65.5,
+      "num_files": 17,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "deepseek2-16b",
+      "hf_repo_id": "deepseek-ai/DeepSeek-V2-Lite",
+      "params_billions": 16.0,
+      "architecture": "moe",
+      "tier": "B",
+      "hf_download_gb": 31.4,
+      "loaded_bf16_gb": 31.4,
+      "num_files": 4,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "gpt-oss-20b",
+      "hf_repo_id": "unsloth/gpt-oss-20b-BF16",
+      "params_billions": 20.0,
+      "architecture": "moe",
+      "tier": "B",
+      "hf_download_gb": 41.8,
+      "loaded_bf16_gb": 41.8,
+      "num_files": 9,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "qwen3-30b-a3b",
+      "hf_repo_id": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+      "params_billions": 30.0,
+      "architecture": "moe",
+      "tier": "A",
+      "hf_download_gb": 61.1,
+      "loaded_bf16_gb": 61.1,
+      "num_files": 16,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "mixtral-8x7b",
+      "hf_repo_id": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+      "params_billions": 47.0,
+      "architecture": "moe",
+      "tier": "B",
+      "hf_download_gb": 93.4,
+      "loaded_bf16_gb": 93.4,
+      "num_files": 19,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+      }
+    },
+    {
+      "model_name": "llama3.1-70b",
+      "hf_repo_id": "meta-llama/Llama-3.1-70B",
+      "params_billions": 70.0,
+      "architecture": "dense",
+      "tier": "A",
+      "hf_download_gb": 141.1,
+      "loaded_bf16_gb": 141.1,
+      "num_files": 30,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "gpt-oss-120b",
+      "hf_repo_id": "unsloth/gpt-oss-120b-BF16",
+      "params_billions": 120.0,
+      "architecture": "moe",
+      "tier": "A",
+      "hf_download_gb": 233.7,
+      "loaded_bf16_gb": 233.7,
+      "num_files": 73,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 2, "topology": "2x4"}, {"slices": 1, "topology": "4x4"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "qwen3-235b-a22b",
+      "hf_repo_id": "Qwen/Qwen3-235B-A22B-Thinking-2507",
+      "params_billions": 235.0,
+      "architecture": "moe",
+      "tier": "A",
+      "hf_download_gb": 470.4,
+      "loaded_bf16_gb": 470.4,
+      "num_files": 118,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "deepseek4-284b",
+      "hf_repo_id": "deepseek-ai/DeepSeek-V4-Flash",
+      "params_billions": 284.0,
+      "architecture": "moe",
+      "tier": "C",
+      "hf_download_gb": 159.6,
+      "loaded_bf16_gb": 581.9,
+      "num_files": 46,
+      "hf_dtype": "F8_E4M3+FP4+scales",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": true,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
+        "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "qwen3.5-397b-a17b",
+      "hf_repo_id": "Qwen/Qwen3.5-397B-A17B",
+      "params_billions": 397.0,
+      "architecture": "moe",
+      "tier": "C",
+      "hf_download_gb": 795.5,
+      "loaded_bf16_gb": 795.5,
+      "num_files": 94,
+      "hf_dtype": "BF16+F32",
+      "loaded_dtype": "BF16+F32",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 2, "topology": "2x2x1"}, {"slices": 1, "topology": "2x2x2"}],
+        "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "qwen3-480b-a35b",
+      "hf_repo_id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "params_billions": 480.0,
+      "architecture": "moe",
+      "tier": "C",
+      "hf_download_gb": 961.0,
+      "loaded_bf16_gb": 961.0,
+      "num_files": 241,
+      "hf_dtype": "BF16",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": false,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 2, "topology": "2x2x1"}, {"slices": 1, "topology": "2x2x2"}],
+        "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "deepseek3-671b",
+      "hf_repo_id": "deepseek-ai/DeepSeek-V3",
+      "params_billions": 671.0,
+      "architecture": "moe",
+      "tier": "C",
+      "hf_download_gb": 688.6,
+      "loaded_bf16_gb": 1369.0,
+      "num_files": 163,
+      "hf_dtype": "F8_E4M3+scales",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": true,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x4"}, {"slices": 2, "topology": "2x2x2"}],
+        "v6e": [{"slices": 1, "topology": "16x16"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "deepseek3.2-671b",
+      "hf_repo_id": "deepseek-ai/DeepSeek-V3.2",
+      "params_billions": 671.0,
+      "architecture": "moe",
+      "tier": "C",
+      "hf_download_gb": 689.5,
+      "loaded_bf16_gb": 1370.7,
+      "num_files": 163,
+      "hf_dtype": "F8_E4M3+scales",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": true,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x2x4"}, {"slices": 2, "topology": "2x2x2"}],
+        "v6e": [{"slices": 1, "topology": "16x16"}],
+        "v5e": [{"slices": 1, "topology": "16x16"}]
+      }
+    },
+    {
+      "model_name": "deepseek4-1600b",
+      "hf_repo_id": "deepseek-ai/DeepSeek-V4-Pro",
+      "params_billions": 1600.0,
+      "architecture": "moe",
+      "tier": "C",
+      "hf_download_gb": 864.7,
+      "loaded_bf16_gb": 3200.0,
+      "num_files": null,
+      "hf_dtype": "F8_E4M3+FP4+scales",
+      "loaded_dtype": "BF16",
+      "weight_dtype": "bfloat16",
+      "needs_step1b": true,
+      "topologies_by_platform": {
+        "v7x": [{"slices": 1, "topology": "2x4x4"}],
+        "v6e": [{"slices": 1, "topology": "16x16"}],
+        "v5e": [{"slices": 2, "topology": "16x16"}]
+      }
+    }
+  ]
+}
