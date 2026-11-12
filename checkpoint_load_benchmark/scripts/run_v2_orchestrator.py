@@ -70,7 +70,7 @@ def apply_k8s_manifests(context: str, docs: Sequence[Mapping[str, Any]]) -> bool
 
 
 def sync_gcs_to_mirror(mirror_dir: str) -> int:
-  """Syncs regional GCS `runs`, `val`, `step1`, `step1b`, and `queue/v2/done` directories into `mirror_dir`."""
+  """Syncs regional GCS `runs` (excluding `to_maxtext/` weights), `val`, `step1`, `step1b`, and `queue/v2/done`."""
   for plat in ("v7x", "v6e", "v5e"):
     prof = platforms.get_profile(plat)
     region = prof.gcp_region
@@ -78,7 +78,8 @@ def sync_gcs_to_mirror(mirror_dir: str) -> int:
     for sub in ("runs", "val", "step1", "step1b", "queue/v2/done"):
       dst = os.path.join(mirror_dir, region, sub)
       os.makedirs(dst, exist_ok=True)
-      _run_cmd(["gcloud", "storage", "rsync", "-r", f"{gcs_root}/{sub}", dst], timeout=180)
+      cmd = ["gcloud", "storage", "rsync", "-r", "--exclude=(^|.*/)to_maxtext/.*", f"{gcs_root}/{sub}", dst]
+      _run_cmd(cmd, timeout=120)
 
   total_jsons = 0
   for _, _, files in os.walk(mirror_dir):
