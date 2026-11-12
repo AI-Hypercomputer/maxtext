@@ -21,9 +21,9 @@ from collections.abc import Callable, Sequence
 import concurrent.futures
 import dataclasses
 import datetime
+import gc
 import glob
 import json
-import multiprocessing
 import os
 import random
 import shutil
@@ -569,9 +569,27 @@ def _is_valid_safetensors_file(path: str) -> bool:
     return False
 
 
+def _drop_page_cache(path: str) -> None:
+  """Advises the kernel to evict `path` from the container's cgroup page cache."""
+  try:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+      os.fsync(fd)
+    except OSError:
+      pass
+    try:
+      if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+      os.close(fd)
+  except OSError:
+    pass
+
+
 def _convert_shard_chunk_worker(args: tuple[str, str, list[str], int]) -> int:
-  """Worker process that converts a subset of safetensors shards, skipping already-valid outputs."""
+  """Converts a list of safetensors shards sequentially using all CPU threads while capping cgroup memory."""
   input_dir, output_dir, shard_names, cache_size = args
+  del cache_size
   repo_root = os.path.dirname(_BENCH_DIR)
   src_dir = os.path.join(repo_root, "src")
   if src_dir not in sys.path:
@@ -580,7 +598,7 @@ def _convert_shard_chunk_worker(args: tuple[str, str, list[str], int]) -> int:
   import torch  # pylint: disable=import-outside-toplevel
   from maxtext.checkpoint_conversion.standalone_scripts import deepseek_dequantize as dsd  # pylint: disable=import-outside-toplevel
 
-  torch.set_num_threads(max(1, min(12, (os.cpu_count() or 16) // 4)))
+  torch.set_num_threads(max(1, os.cpu_count() or 48))
   torch.set_default_dtype(torch.bfloat16)
   with open(os.path.join(input_dir, "model.safetensors.index.json"), "r", encoding="utf-8") as f:
     weight_map = json.load(f)["weight_map"]
@@ -608,7 +626,8 @@ def _convert_shard_chunk_worker(args: tuple[str, str, list[str], int]) -> int:
     current_state_dict = load_file(in_file, device="cpu")
     loaded_files[file_name] = current_state_dict
     new_state_dict: dict[str, Any] = {}
-    for name, tensor in current_state_dict.items():
+    for name in list(current_state_dict.keys()):
+      tensor = current_state_dict[name]
       if name.endswith(("_scale_inv", ".scale")):
         continue
       if tensor.dtype in (torch.int8, torch.float8_e4m3fn) or tensor.element_size() == 1:
@@ -627,25 +646,30 @@ def _convert_shard_chunk_worker(args: tuple[str, str, list[str], int]) -> int:
           else:
             raise ValueError(f"Unrecognized quantized dtype: {tensor.dtype}")
         else:
-          new_state_dict[name] = tensor
+          new_state_dict[name] = tensor.clone()
       elif name.endswith(("e_score_correction_bias", "gate.bias", "tid2eid")):
-        new_state_dict[name] = tensor
+        new_state_dict[name] = tensor.clone()
       else:
-        new_state_dict[name] = tensor.to(torch.bfloat16)
+        new_state_dict[name] = tensor.to(torch.bfloat16).clone()
+
+    loaded_files.clear()
+    del current_state_dict
+    gc.collect()
+    _drop_page_cache(in_file)
 
     tmp_out = f"{out_file}.part"
     save_file(new_state_dict, tmp_out)
+    del new_state_dict
+    gc.collect()
     os.replace(tmp_out, out_file)
+    _drop_page_cache(out_file)
     converted += 1
-    print(f"[step1b] Converted shard {file_name}", flush=True)
-    while len(loaded_files) > max(1, cache_size):
-      oldest = next(iter(loaded_files))
-      del loaded_files[oldest]
+    print(f"[step1b] Converted shard {file_name} ({converted}/{len(shard_names)})", flush=True)
   return converted
 
 
 def _default_dequantize_runner(input_dir: str, output_dir: str, cache_size: int = 8) -> None:
-  """Runs resumable, parallelized DeepSeek FP8/FP4 -> BF16 conversion."""
+  """Runs resumable, memory-bounded DeepSeek FP8/FP4 -> BF16 conversion."""
   repo_root = os.path.dirname(_BENCH_DIR)
   script = os.path.join(
       repo_root, "src", "maxtext", "checkpoint_conversion", "standalone_scripts", "deepseek_dequantize.py"
@@ -686,15 +710,7 @@ def _default_dequantize_runner(input_dir: str, output_dir: str, cache_size: int 
       flush=True,
   )
   if pending_shards:
-    num_procs = min(4, len(pending_shards))
-    chunks = [pending_shards[i::num_procs] for i in range(num_procs)]
-    worker_args = [(input_dir, output_dir, chunk, max(1, cache_size)) for chunk in chunks if chunk]
-    if len(worker_args) == 1:
-      _convert_shard_chunk_worker(worker_args[0])
-    else:
-      ctx = multiprocessing.get_context("spawn")
-      with ctx.Pool(processes=len(worker_args)) as pool:
-        pool.map(_convert_shard_chunk_worker, worker_args)
+    _convert_shard_chunk_worker((input_dir, output_dir, pending_shards, 1))
 
   with open(index_path, "r", encoding="utf-8") as f:
     model_index = json.load(f)

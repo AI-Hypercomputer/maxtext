@@ -232,6 +232,7 @@ def manage_cpu_jobs(
                 "job",
                 jname,
                 "--ignore-not-found=true",
+                "--wait=true",
             ]
         )
         reason = "Suspended/Deactivated by Kueue" if is_suspended else "Failed"
@@ -294,7 +295,7 @@ def manage_cpu_jobs(
             clean_target=True,
             cache_size=2,
             node_pool=prof.cpu_node_pool,
-            memory_request="180Gi",
+            memory_request="210Gi",
             cpu_request="48",
         )
         if apply_k8s_manifests(ctx, docs):
