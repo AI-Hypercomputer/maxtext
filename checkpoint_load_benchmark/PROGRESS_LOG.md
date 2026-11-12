@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 21:23:39 UTC`
+- **Last Updated (UTC):** `2026-11-12 21:37:42 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -43,51 +43,9 @@
 
 ## 3. Chronological Event Log (Newest Last)
 
-- [2026-11-12 16:35:56 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
-- [2026-11-12 16:38:20 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 21/22 staged tasks.
-- [2026-11-12 16:38:31 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 52/53 staged tasks.
-- [2026-11-12 16:38:39 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 60/61 staged tasks.
-- [2026-11-12 16:40:22 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 484 mirrored JSONs.
-- [2026-11-12 16:44:15 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 485 mirrored JSONs.
-- [2026-11-12 16:48:45 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 487 mirrored JSONs.
-- [2026-11-12 16:52:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 489 mirrored JSONs.
-- [2026-11-12 16:59:33 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 491 mirrored JSONs.
-- [2026-11-12 17:03:35 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 493 mirrored JSONs.
-- [2026-11-12 17:07:30 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 495 mirrored JSONs.
-- [2026-11-12 17:11:18 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 496 mirrored JSONs.
-- [2026-11-12 17:21:41 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 498 mirrored JSONs.
-- [2026-11-12 17:28:50 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 501 mirrored JSONs.
-- [2026-11-12 17:32:50 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 503 mirrored JSONs.
-- [2026-11-12 17:36:38 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 505 mirrored JSONs.
-- [2026-11-12 17:40:23 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 506 mirrored JSONs.
-- [2026-11-12 17:47:23 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 507 mirrored JSONs.
-- [2026-11-12 17:50:40 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x1-1s-w2` `Failed` and cleaned up.
-- [2026-11-12 17:50:43 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-1s-w2` (`1x2x2x1`, min_slices=1) for 45 runnable tasks.
-- [2026-11-12 17:54:31 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 508 mirrored JSONs.
-- [2026-11-12 17:58:19 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 510 mirrored JSONs.
-- [2026-11-12 18:02:09 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 514 mirrored JSONs.
-- [2026-11-12 18:09:07 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 517 mirrored JSONs.
-- [2026-11-12 18:19:23 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 518 mirrored JSONs.
-- [2026-11-12 18:23:09 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 520 mirrored JSONs.
-- [2026-11-12 18:26:59 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 522 mirrored JSONs.
-- [2026-11-12 18:34:09 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 525 mirrored JSONs.
-- [2026-11-12 18:43:57 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x1-2s-w3` `Failed` and cleaned up.
-- [2026-11-12 18:44:01 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-2s-w3` (`2x2x2x1`, min_slices=2) for 43 runnable tasks.
-- [2026-11-12 18:44:29 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 526 mirrored JSONs.
-- [2026-11-12 19:40:02 UTC] `v7x` CPU job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` Suspended/Deactivated by Kueue and cleaned up for resume.
-- [2026-11-12 19:40:07 UTC] Launched `v7x` Step 1b conversion job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` for `deepseek4-1600b`.
-- [2026-11-12 19:40:11 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x1-1s-w2` `Failed` and cleaned up.
-- [2026-11-12 19:40:15 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-1s-w4` (`1x2x2x1`, min_slices=1) for 43 runnable tasks.
-- [2026-11-12 20:06:32 UTC] Launched `v6e` TPU queue worker `mesa-q-v6e-2x4-2s-w2` (`2x2x4`, min_slices=1) for 40 runnable tasks.
-- [2026-11-12 20:23:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 527 mirrored JSONs.
-- [2026-11-12 20:30:41 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 528 mirrored JSONs.
-- [2026-11-12 20:37:55 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 531 mirrored JSONs.
-- [2026-11-12 20:41:43 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 532 mirrored JSONs.
-- [2026-11-12 20:45:36 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 534 mirrored JSONs.
-- [2026-11-12 20:49:25 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 535 mirrored JSONs.
-- [2026-11-12 20:56:04 UTC] `v7x` CPU job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` Failed and cleaned up for resume.
-- [2026-11-12 20:56:08 UTC] Launched `v7x` Step 1b conversion job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` for `deepseek4-1600b`.
-- [2026-11-12 20:56:35 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 536 mirrored JSONs.
-- [2026-11-12 21:03:14 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x1-1s-w4` `Failed` and cleaned up.
-- [2026-11-12 21:03:17 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-1s-w5` (`1x2x2x1`, min_slices=1) for 43 runnable tasks.
-- [2026-11-12 21:13:44 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 538 mirrored JSONs.
+- [2026-11-12 21:27:25 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
+- [2026-11-12 21:29:45 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 21/22 staged tasks.
+- [2026-11-12 21:29:55 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 52/53 staged tasks.
+- [2026-11-12 21:30:03 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 60/61 staged tasks.
+- [2026-11-12 21:30:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 539 mirrored JSONs.
+- [2026-11-12 21:37:42 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 540 mirrored JSONs.

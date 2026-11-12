@@ -532,17 +532,30 @@ def _upload_single_file_with_retry(
     *,
     existing_sizes: Mapping[str, int] | None = None,
 ) -> int:
-  """Uploads `src_path` to `gs://<bucket_name>/<prefix>/<fname>` with retries."""
+  """Uploads `src_path` to `gs://<bucket_name>/<prefix>/<fname>` with retries and parallel MPU for large files."""
   fname = os.path.basename(src_path)
   local_sz = os.path.getsize(src_path)
   if existing_sizes and local_sz > 0 and existing_sizes.get(fname) == local_sz:
     return local_sz
   blob_name = f"{prefix}/{fname}" if prefix else fname
+  use_mpu = local_sz >= 64 * 1024 * 1024 and hasattr(storage_client, "_connection")
   for attempt in range(_MAX_RETRIES):
     try:
       blob = storage_client.bucket(bucket_name).blob(blob_name)
-      with open(src_path, "rb") as f_in, blob.open("wb", chunk_size=_UPLOAD_CHUNK_BYTES) as gcs_out:
-        shutil.copyfileobj(f_in, gcs_out, length=_CHUNK_BYTES)
+      if use_mpu and attempt < _MAX_RETRIES - 2:
+        from google.cloud.storage import transfer_manager  # pylint: disable=import-outside-toplevel
+
+        transfer_manager.upload_chunks_concurrently(
+            src_path,
+            blob,
+            chunk_size=128 * 1024 * 1024,
+            worker_type=transfer_manager.THREAD,
+            max_workers=8,
+            checksum=None,
+        )
+      else:
+        with open(src_path, "rb") as f_in, blob.open("wb", chunk_size=_UPLOAD_CHUNK_BYTES) as gcs_out:
+          shutil.copyfileobj(f_in, gcs_out, length=_CHUNK_BYTES)
       return local_sz
     except Exception:  # pylint: disable=broad-exception-caught
       if attempt == _MAX_RETRIES - 1:
@@ -836,39 +849,54 @@ def _run_resumable_step1b_pipeline(
   for tname, sname in weight_map.items():
     tensors_by_shard.setdefault(sname, []).append(tname)
 
-  for idx, fn in enumerate(pending_shards, start=1):
-    out_file = os.path.join(out_dir, fn)
-    t_c0 = time.perf_counter()
-    if not _is_valid_safetensors_file(out_file):
-      needed_inputs = {fn}
-      for tname in tensors_by_shard.get(fn, []):
-        s3 = f"{tname}_scale_inv"
-        s4 = f"{tname[:-len('.weight')]}.scale" if tname.endswith(".weight") else None
-        for sc in (s3, s4):
-          if sc and sc in raw_weight_map:
-            needed_inputs.add(raw_weight_map[sc])
-      for in_fn in sorted(needed_inputs):
-        if in_fn in src_by_name:
-          _download_single_blob_with_retry(src_by_name[in_fn], os.path.join(in_dir, in_fn))
-      _convert_shard_chunk_worker((in_dir, out_dir, [fn], 1))
-    conv_s += time.perf_counter() - t_c0
-
-    t_u0 = time.perf_counter()
+  def _upload_and_cleanup(idx: int, fn: str, out_file: str) -> tuple[str, int, float]:
+    t_u = time.perf_counter()
     sz = _upload_single_file_with_retry(client, dst_bucket, dst_prefix, out_file, existing_sizes=existing_dst_sizes)
-    existing_dst_sizes[fn] = sz
-    up_s += time.perf_counter() - t_u0
+    elapsed_u = time.perf_counter() - t_u
+    _drop_page_cache(out_file)
     for rm_path in (out_file, os.path.join(in_dir, fn)):
       try:
         if os.path.exists(rm_path):
           os.remove(rm_path)
       except OSError:
         pass
-    done_in_gcs = sum(1 for s in all_shards if existing_dst_sizes.get(s, 0) > 1_000_000)
     print(
-        f"[step1b] Uploaded {fn} ({sz / 1e9:.2f} GB) to GCS "
-        f"[{idx}/{len(pending_shards)} pending, {done_in_gcs}/{len(all_shards)} total in GCS]",
+        f"[step1b] Uploaded {fn} ({sz / 1e9:.2f} GB in {elapsed_u:.1f}s) to GCS "
+        f"[{idx}/{len(pending_shards)} pending]",
         flush=True,
     )
+    return fn, sz, elapsed_u
+
+  in_flight: list[concurrent.futures.Future[tuple[str, int, float]]] = []
+  with concurrent.futures.ThreadPoolExecutor(max_workers=2) as upload_pool:
+    for idx, fn in enumerate(pending_shards, start=1):
+      while len(in_flight) >= 2:
+        done_f = in_flight.pop(0)
+        done_fn, done_sz, done_u = done_f.result()
+        existing_dst_sizes[done_fn] = done_sz
+        up_s += done_u
+
+      out_file = os.path.join(out_dir, fn)
+      t_c0 = time.perf_counter()
+      if not _is_valid_safetensors_file(out_file):
+        needed_inputs = {fn}
+        for tname in tensors_by_shard.get(fn, []):
+          s3 = f"{tname}_scale_inv"
+          s4 = f"{tname[:-len('.weight')]}.scale" if tname.endswith(".weight") else None
+          for sc in (s3, s4):
+            if sc and sc in raw_weight_map:
+              needed_inputs.add(raw_weight_map[sc])
+        for in_fn in sorted(needed_inputs):
+          if in_fn in src_by_name:
+            _download_single_blob_with_retry(src_by_name[in_fn], os.path.join(in_dir, in_fn))
+        _convert_shard_chunk_worker((in_dir, out_dir, [fn], 1))
+      conv_s += time.perf_counter() - t_c0
+      in_flight.append(upload_pool.submit(_upload_and_cleanup, idx, fn, out_file))
+
+    for done_f in in_flight:
+      done_fn, done_sz, done_u = done_f.result()
+      existing_dst_sizes[done_fn] = done_sz
+      up_s += done_u
 
   st_bytes = sum(existing_dst_sizes.get(s, 0) for s in all_shards)
   out_bytes = sum(existing_dst_sizes.values())
