@@ -255,6 +255,296 @@ def _psum_scatter_and_reduce_sc0(
   return _rs_then_reduce(operands, reduce_operand)
 
 
+# Whether the EP token reduce-scatters (the forward combine `dsv3_combine` and
+# the dispatch transpose `dsv3_combine_with_coeff_grads*`) are replaced by
+# `_a2a_reduce_scatter`. See `set_ep_combine_a2a`.
+_EP_COMBINE_A2A_FWD = False
+_EP_COMBINE_A2A_BWD = False
+# Whether `_a2a_reduce_scatter`'s all-to-all runs on SparseCore 0.
+_EP_COMBINE_A2A_SC = False
+# XLA flag that, when unset ("auto"), offloads exactly the `compute_on`
+# SparseCore-annotated dense all-to-alls to SparseCore.
+_SC_DENSE_A2A_FLAG = "xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all"
+_EP_COMBINE_HIER_ORDERS = (
+    None,
+    "",
+    "a2a_first",
+    "rs_first",
+    "rs_first_fused",
+    "rs_first_ppermute",
+)
+# Whether the EP combine uses the `ops.reduce_scatter_sc0` kernel.
+_EP_COMBINE_KERNEL = False
+_EP_COMBINE_KERNEL_MB = 16
+# Order of the hierarchical EP combine (`"a2a_first"` / `"rs_first"`), or None.
+_EP_COMBINE_HIER: str | None = None
+# Dtype of the partials `_a2a_reduce_scatter` sends.
+_EP_COMBINE_A2A_DTYPE = jnp.bfloat16
+
+
+def set_ep_combine_a2a(
+    fwd: bool,
+    bwd: bool | None = None,
+    *,
+    sparse_core: bool = False,
+    hierarchical: str | None = None,
+    kernel: bool = False,
+    kernel_microbatches: int = 16,
+) -> None:
+  """Whether to reduce-scatter EP tokens as a bf16 all-to-all and a local sum.
+
+  Takes effect for functions traced afterwards. Instead of a SparseCore 0
+  reduce-scatter of the (f32 with `QuantConfig.ep_reduce_dtype`) top-k reduced
+  partials, `_a2a_reduce_scatter` sends every expert device's partial of each
+  token block to the block's owner in bf16 (an all-to-all) and sums the
+  received partials locally in f32, which moves half the bytes of an f32
+  reduce-scatter. Only the token reduce-scatters change; the coefficient
+  gradients and `combine_qtype` combines keep their reduce-scatters. The
+  backward of either is unchanged: the transpose of the all-to-all and local
+  sum is a broadcast and the inverse all-to-all, i.e. the same all-gather as
+  the transpose of the reduce-scatter (`dsv3_aggregated_dispatches`).
+
+  Args:
+    fwd: Whether to use it for the forward combine (`dsv3_combine`).
+    bwd: Whether to use it for the dispatch transpose of the token gradients
+      (`dsv3_combine_with_coeff_grads*`); defaults to `fwd`.
+    sparse_core: Whether to run the all-to-all in a SparseCore 0 `compute_on`
+      block instead of on the TensorCore. The compile options must then leave
+      SparseCore dense all-to-all offload at "auto" (see
+      `adjust_compiler_options`).
+    hierarchical: If set, split the reduce-scatter over the expert axes
+      `(*outer, inner)` (e.g. `("z", "core")`) into an all-to-all over the
+      outer axes and an f32 reduce-scatter over the inner one, both on
+      SparseCore 0 (implies `sparse_core`), in the given order:
+      `"a2a_first"`: bf16 all-to-all over outer, local f32 sum, f32
+        reduce-scatter over inner;
+      `"rs_first"`: f32 reduce-scatter over inner, bf16 all-to-all over outer,
+        local f32 sum;
+      `"rs_first_fused"`: `"rs_first"` with the reduce-scatter, bf16 cast and
+        all-to-all in one SparseCore block (no TensorCore cast in between);
+      `"rs_first_ppermute"`: `"rs_first"` with the all-to-all done as
+        num_outer - 1 (TensorCore) collective permutes over outer.
+      See `_hier_reduce_scatter`.
+    kernel: Instead, reduce-scatter f32 partials with the SparseCore Pallas
+      kernel `ops.reduce_scatter_sc0` (f32 D2D and accumulation, bf16 ring
+      sends, one bf16 rounding per hop). Needs `(ring_axis, core_axis)` expert
+      axes and f32 partials (`QuantConfig.ep_reduce_dtype`); falls back to the
+      XLA reduce-scatter otherwise.
+    kernel_microbatches: `num_microbatches` of the kernel. On v7x, 16
+      microbatches came within 1% of the best time, about 2.3x faster than the
+      XLA SparseCore f32 reduce-scatter.
+  """
+  global _EP_COMBINE_A2A_FWD, _EP_COMBINE_A2A_BWD, _EP_COMBINE_A2A_SC
+  global _EP_COMBINE_HIER, _EP_COMBINE_KERNEL, _EP_COMBINE_KERNEL_MB
+  if hierarchical not in _EP_COMBINE_HIER_ORDERS:
+    raise ValueError(f"Unknown hierarchical EP combine {hierarchical!r}.")
+  _EP_COMBINE_A2A_FWD = fwd
+  _EP_COMBINE_A2A_BWD = fwd if bwd is None else bwd
+  _EP_COMBINE_HIER = hierarchical or None
+  _EP_COMBINE_KERNEL = kernel
+  _EP_COMBINE_KERNEL_MB = kernel_microbatches
+  _EP_COMBINE_A2A_SC = (
+      not kernel and (sparse_core or _EP_COMBINE_HIER is not None) and (_EP_COMBINE_A2A_FWD or _EP_COMBINE_A2A_BWD)
+  )
+
+
+# Whether another module (e.g. `dsv3_sparse_layer.set_fsdp_grad_a2a`) emits
+# SparseCore `compute_on` dense all-to-alls. See
+# `request_sparse_core_dense_a2a`.
+_SC_DENSE_A2A_REQUESTED = False
+
+
+def request_sparse_core_dense_a2a(enabled: bool) -> None:
+  """Whether `adjust_compiler_options` must allow SparseCore dense all-to-alls.
+
+  For all-to-alls in SparseCore `compute_on` blocks outside this module (e.g.
+  the routed expert weight-gradient all-to-all of
+  `dsv3_sparse_layer.set_fsdp_grad_a2a`).
+
+  Args:
+    enabled: Whether such all-to-alls are emitted.
+  """
+  global _SC_DENSE_A2A_REQUESTED
+  _SC_DENSE_A2A_REQUESTED = enabled
+
+
+def adjust_compiler_options(options: dict[str, Any]) -> dict[str, Any]:
+  """Returns XLA compile options adjusted for `set_ep_combine_a2a`.
+
+  Also for `request_sparse_core_dense_a2a`. With a SparseCore all-to-all, drops
+  a forced value of the SparseCore dense all-to-all offload flag (the lineage
+  config sets it to false), so it resolves to "auto": only the `compute_on`
+  SparseCore-annotated all-to-alls (e.g. the EP combine) are offloaded and
+  every other all-to-all stays on the TensorCore.
+
+  Args:
+    options: XLA compile options, e.g. parsed from `compile_xla_flags`.
+
+  Returns:
+    The adjusted options (a copy if changed).
+  """
+  if _EP_RAGGED_A2A_SC:
+    options = {**options, _SC_RAGGED_A2A_FLAG: True}
+  if not (_EP_COMBINE_A2A_SC or _SC_DENSE_A2A_REQUESTED) or _SC_DENSE_A2A_FLAG not in options:
+    return options
+  return {k: v for k, v in options.items() if k != _SC_DENSE_A2A_FLAG}
+
+
+def _a2a_reduce_scatter(
+    x: jax.Array,
+    *,
+    axis_name: str | tuple[str, ...],
+) -> jax.Array:
+  """Tiled psum_scatter of x along dim 0 as an all-to-all and a local sum.
+
+  Every device's partial of each 1/num_shards block of dim 0 is sent in
+  `_EP_COMBINE_A2A_DTYPE` to the device owning the block, which sums the
+  num_shards received partials in f32. The all-to-all runs on the TensorCore
+  or, with `set_ep_combine_a2a(sparse_core=True)`, on SparseCore 0.
+
+  Args:
+    x: Partials of shape (num_shards * M, ...).
+    axis_name: Mesh axis name(s) to reduce-scatter over.
+
+  Returns:
+    This device's reduced block of shape (M, ...), in x's dtype.
+  """
+  if _EP_COMBINE_KERNEL:
+    if isinstance(axis_name, (tuple, list)) and len(axis_name) == 2 and x.dtype == jnp.float32 and x.ndim == 3:
+      return ops.reduce_scatter_sc0(
+          x,
+          ring_axis=axis_name[0],
+          core_axis=axis_name[1],
+          num_microbatches=_EP_COMBINE_KERNEL_MB,
+      )
+    (out,) = _psum_scatter_sc0(x, axis_name=axis_name)
+    return out
+  if _EP_COMBINE_HIER is not None and not isinstance(axis_name, str):
+    if len(axis_name) > 1:
+      return _hier_reduce_scatter(x, axis_name=tuple(axis_name), order=_EP_COMBINE_HIER)
+  num_shards = _get_axis_size(axis_name)
+
+  def _a2a(y: jax.Array) -> jax.Array:
+    return jax.lax.all_to_all(y, axis_name, split_axis=0, concat_axis=0, tiled=True)
+
+  a2a_fn = _a2a
+  if _EP_COMBINE_A2A_SC:
+    a2a_fn = compute_on(
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [0]}},
+    )(_a2a)
+  parts = a2a_fn(x.astype(_EP_COMBINE_A2A_DTYPE))
+  parts = jnp.reshape(parts, (num_shards, x.shape[0] // num_shards, *x.shape[1:]))
+  return jnp.sum(parts.astype(jnp.float32), axis=0).astype(x.dtype)
+
+
+def _sc0(fn: Callable[..., Any]) -> Callable[..., Any]:
+  """Wraps fn in a SparseCore 0 `compute_on` block."""
+  return compute_on(
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [0]}},
+  )(fn)
+
+
+def _hier_reduce_scatter(
+    x: jax.Array,
+    *,
+    axis_name: tuple[str, ...],
+    order: str,
+) -> jax.Array:
+  """Tiled psum_scatter of x along dim 0 over `(*outer, inner)`, in two stages.
+
+  With `axis_name = (*outer, inner)`, the device with outer index o and inner
+  index i owns block `o * num_inner + i` of dim 0 (as `psum_scatter` over the
+  tuple). The two stages run on SparseCore 0 with the casts and local sums on
+  the TensorCore in between:
+
+  - `"a2a_first"`: each device sends, in `_EP_COMBINE_A2A_DTYPE`, its partials
+    of outer group o' (blocks `o' * num_inner + [0, num_inner)`) to the device
+    (o', i) (all-to-all over outer), sums the num_outer received partials in
+    f32 and reduce-scatters the result over inner in f32.
+  - `"rs_first"`: each device reduce-scatters, in f32 over inner, the blocks
+    with inner index i (`[0, num_outer) * num_inner + i`), then sends the
+    reduced block o' in `_EP_COMBINE_A2A_DTYPE` to (o', i) (all-to-all over
+    outer) and sums the num_outer received partials in f32.
+
+  Either is linear, so its transpose is the inverse all-to-all plus
+  all-gather, i.e. the all-gather the backward pass already uses.
+
+  Args:
+    x: Partials of shape (num_shards * M, ...).
+    axis_name: Mesh axes `(*outer, inner)` to reduce-scatter over.
+    order: `"a2a_first"` or `"rs_first"`.
+
+  Returns:
+    This device's reduced block of shape (M, ...), in x's dtype.
+  """
+  outer, inner = axis_name[:-1], axis_name[-1]
+  num_outer = _get_axis_size(outer)
+  num_inner = _get_axis_size(inner)
+  m = x.shape[0] // (num_outer * num_inner)
+  rest = x.shape[1:]
+  f32 = jnp.float32
+
+  def _a2a_outer(y: jax.Array) -> jax.Array:
+    return jax.lax.all_to_all(y, outer, split_axis=0, concat_axis=0, tiled=True)
+
+  def _rs_inner(y: jax.Array, dim: int) -> jax.Array:
+    return jax.lax.psum_scatter(y, axis_name=inner, scatter_dimension=dim, tiled=True)
+
+  if order == "a2a_first":
+    parts = _sc0(_a2a_outer)(x.astype(_EP_COMBINE_A2A_DTYPE))
+    parts = jnp.reshape(parts, (num_outer, num_inner * m, *rest))
+    summed = jnp.sum(parts.astype(f32), axis=0)
+    out = _sc0(functools.partial(_rs_inner, dim=0))(summed)
+  elif order in ("rs_first", "rs_first_fused", "rs_first_ppermute"):
+    # (outer block, inner block, M, ...): reduce-scatter the inner block dim.
+    blocks = jnp.reshape(x.astype(f32), (num_outer, num_inner, m, *rest))
+
+    # Shapes stay (num_outer, 1, M, ...) on SparseCore: reshaping there makes
+    # XLA insert relayout copies that SparseCore does not support.
+    a2a_dtype = _EP_COMBINE_A2A_DTYPE
+
+    def _rs(y: jax.Array) -> jax.Array:
+      return _rs_inner(y, dim=1)
+
+    if order == "rs_first":
+      reduced = _sc0(_rs)(blocks).astype(a2a_dtype)
+      parts = (_sc0(_a2a_outer)(reduced),)
+    elif order == "rs_first_ppermute":
+      outer_index = _get_axis_index(outer)
+
+      def _permute(reduced: jax.Array) -> tuple[jax.Array, ...]:
+        def _block(k):
+          return jax.lax.dynamic_slice_in_dim(reduced, k % num_outer, 1, axis=0)
+
+        # Shift s sends block o + s to device o + s, i.e. every device
+        # receives the partial of its own block from device o - s.
+        received = [_block(outer_index)]
+        for shift in range(1, num_outer):
+          received.append(
+              jax.lax.ppermute(
+                  _block(outer_index + shift),
+                  outer,
+                  perm=[(j, (j + shift) % num_outer) for j in range(num_outer)],
+              )
+          )
+        return tuple(received)
+
+      # Collective permutes in SparseCore blocks crash the TPU latency hiding
+      # scheduler; they run (asynchronously) on the TensorCore.
+      parts = _permute(_sc0(_rs)(blocks).astype(a2a_dtype))
+    else:
+      parts = (_sc0(lambda y: _a2a_outer(_rs(y).astype(a2a_dtype)))(blocks),)
+    parts = jnp.concatenate([jnp.reshape(p, (-1, m, *rest)) for p in parts], axis=0)
+    out = jnp.sum(parts.astype(f32), axis=0)
+  else:
+    raise ValueError(f"Unknown hierarchical EP combine order {order!r}.")
+  return out.astype(x.dtype)
+
+
 def _all_gather_routing_metadata(
     x: jax.Array,
     *,
@@ -371,6 +661,305 @@ def _scatter_sc0(
   return jnp.reshape(out, x.shape)
 
 
+# Whether the routing metadata includes a `RaggedExchange`, which switches the
+# EP dispatch and combine to ragged all-to-alls. See `set_ep_ragged_a2a`.
+_EP_RAGGED_A2A = False
+# Whether the EP ragged all-to-alls are offloaded to SparseCore.
+_EP_RAGGED_A2A_SC = False
+_SC_RAGGED_A2A_FLAG = "xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all"
+
+
+def set_ep_ragged_a2a(enabled: bool, *, sparse_core: bool = False) -> None:
+  """Whether to dispatch and combine EP tokens with ragged all-to-alls.
+
+  Takes effect for functions traced afterwards. `dsv3_routing_metadata` then
+  also returns a `RaggedExchange` (`RouterMetadata.ragged`), and the MoE layer
+  sends every (token, k) slot's row only to its expert's device with a
+  `jax.lax.ragged_all_to_all`, instead of all-gathering the tokens over the
+  expert axis, and sends the expert outputs back with the reverse ragged
+  all-to-all, instead of reduce-scattering expert-side top-k partial sums.
+
+  Args:
+    enabled: Whether to use the ragged all-to-alls.
+    sparse_core: Whether XLA offloads them to SparseCore instead of running
+      them on the TensorCore (`adjust_compiler_options` then sets the
+      SparseCore ragged all-to-all offload flag).
+  """
+  global _EP_RAGGED_A2A, _EP_RAGGED_A2A_SC
+  _EP_RAGGED_A2A = enabled
+  _EP_RAGGED_A2A_SC = enabled and sparse_core
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass
+class RaggedExchange(Generic[T]):
+  """Per-device routing of the EP ragged all-to-alls (`set_ep_ragged_a2a`).
+
+  Each device sorts its `kBT` (token, k) slots by (physical) expert, which
+  orders them by destination device and then by local expert, and sends one
+  slice per (destination, local expert) with `jax.lax.ragged_all_to_all`.
+  Receivers lay their slices out expert-major and then source-major, i.e.
+  exactly in the order of `RouterMetadata.sort_indices`, so the first
+  `capacity` rows of `RouterMetadata.sorted_coeffs` and the first chunk of
+  `RouterMetadata.group_sizes` describe the received buffer. Slots past a
+  receiver's `capacity` rows are dropped (not sent, and contribute zero).
+
+  The offsets and sizes are in `jax.lax.ragged_all_to_all`'s convention, with
+  `num_devices * local_num_experts` slices (destination-major); the `rev_*`
+  ones send the expert outputs back.
+  """
+
+  # (kBT,) sorted send position -> local slot (token * k + j).
+  send_order: T
+  # (kBT,) local slot -> sorted send position.
+  slot_pos: T
+  # (kBT,) whether the slot is sent, i.e. not dropped by the capacity.
+  slot_sent: T
+  input_offsets: T
+  send_sizes: T
+  output_offsets: T
+  recv_sizes: T
+  rev_input_offsets: T
+  rev_send_sizes: T
+  rev_output_offsets: T
+  rev_recv_sizes: T
+
+
+def _ragged_exchange_impl(
+    selected_experts_flat: jt.Int[jax.Array, "kBT"],
+    all_group_sizes: jt.Int[jax.Array, "num_devices E"],
+    *,
+    device_index: jax.Array,
+    num_devices: int,
+    local_num_experts: int,
+    capacity: int,
+) -> RaggedExchange[jax.Array]:
+  """Computes this device's `RaggedExchange` from the slot count matrix.
+
+  Args:
+    selected_experts_flat: Physical expert of each local slot.
+    all_group_sizes: Slot counts per (source device, physical expert).
+    device_index: This device's index along the expert axes.
+    num_devices: Number of devices along the expert axes.
+    local_num_experts: Number of experts per device.
+    capacity: Rows of each receiver's buffer.
+
+  Returns:
+    The ragged exchange routing.
+  """
+  n, el = num_devices, local_num_experts
+  counts = jnp.reshape(all_group_sizes, (n, n, el)).astype(jnp.int32)
+  # Receiver-side layout: expert-major, then source-major.
+  per_dst_expert = jnp.sum(counts, axis=0)
+  expert_base = jnp.cumsum(per_dst_expert, axis=1) - per_dst_expert
+  src_base = jnp.cumsum(counts, axis=0) - counts
+  start = expert_base[None] + src_base
+  # Rows past the receiver's capacity are dropped.
+  sizes = jnp.clip(capacity - start, 0, counts)
+  start = jnp.minimum(start, capacity)
+  # Sender-side layout: sorted by physical expert (destination-major).
+  flat_counts = jnp.reshape(counts, (n, n * el))
+  send_base = jnp.cumsum(flat_counts, axis=1) - flat_counts
+  me = device_index
+  input_offsets = send_base[me]
+  send_sizes = jnp.reshape(sizes[me], (-1,))
+  recv_sizes = jnp.reshape(sizes[:, me, :], (-1,))
+
+  num_slots = selected_experts_flat.shape[0]
+  send_order = _counting_argsort(selected_experts_flat, n * el)
+  slot_pos = _scatter_sc0(jnp.arange(num_slots, dtype=jnp.int32), send_order)
+  slot_sent = (slot_pos - input_offsets[selected_experts_flat]) < send_sizes[selected_experts_flat]
+  return RaggedExchange[jax.Array](
+      send_order=send_order,
+      slot_pos=slot_pos,
+      slot_sent=slot_sent,
+      input_offsets=input_offsets,
+      send_sizes=send_sizes,
+      output_offsets=jnp.reshape(start[me], (-1,)),
+      recv_sizes=recv_sizes,
+      rev_input_offsets=jnp.reshape(start[:, me, :], (-1,)),
+      rev_send_sizes=recv_sizes,
+      rev_output_offsets=jnp.reshape(jnp.reshape(send_base, (n, n, el))[:, me, :], (-1,)),
+      rev_recv_sizes=send_sizes,
+  )
+
+
+def _ragged_a2a(
+    rows: jax.Array,
+    num_out_rows: int,
+    ragged: RaggedExchange[jax.Array],
+    *,
+    axis_name: str | tuple[str, ...],
+    reverse: bool = False,
+    zero_init: bool = False,
+) -> jax.Array:
+  """Sends slot rows to the expert devices (or back, with `reverse`)."""
+  if reverse:
+    offsets = (
+        ragged.rev_input_offsets,
+        ragged.rev_send_sizes,
+        ragged.rev_output_offsets,
+        ragged.rev_recv_sizes,
+    )
+  else:
+    offsets = (
+        ragged.input_offsets,
+        ragged.send_sizes,
+        ragged.output_offsets,
+        ragged.recv_sizes,
+    )
+  shape = (num_out_rows, *rows.shape[1:])
+  out = jnp.zeros(shape, rows.dtype) if zero_init else jax.lax.empty(shape, rows.dtype)
+
+  # With `set_ep_ragged_a2a(sparse_core=True)`, XLA offloads it to SparseCore
+  # (see `adjust_compiler_options`); the SparseCore lowering rejects ragged
+  # all-to-alls in `compute_on` blocks.
+  return jax.lax.ragged_all_to_all(rows, out, *offsets, axis_name=axis_name)
+
+
+def _ragged_send_rows(x: jt.Num[jax.Array, "B T D"], ragged: RaggedExchange[jax.Array]) -> jt.Num[jax.Array, "kBT D0 D1"]:
+  """Gathers the local tokens' rows in sorted send order."""
+  x_flat = jnp.reshape(x, (-1, x.shape[-1] // 128, 128))
+  num_slots = ragged.send_order.shape[0]
+  k = num_slots // x_flat.shape[0]
+  # Clamped so that garbage routing (e.g. HybridSim's random inputs) cannot
+  # make the gather's DMAs go out of bounds; a no-op for valid routing.
+  token_indices = jnp.clip(ragged.send_order // k, 0, x_flat.shape[0] - 1)
+  return ops.ragged_gather_tc(x_flat, token_indices, 0, num_slots, num_slots)
+
+
+def _ragged_combine_local(
+    rows: jt.Num[jax.Array, "C D0 D1"],
+    ragged: RaggedExchange[jax.Array],
+    *,
+    num_experts_per_tok: int,
+    axis_name: str | tuple[str, ...],
+) -> jt.Float[jax.Array, "BT D0 D1"]:
+  """Sends expert-side rows back to their tokens and sums them over k in f32.
+
+  Dropped slots (`ragged.slot_sent` False) contribute zero.
+
+  Args:
+    rows: Expert-side rows, laid out like the received dispatch buffer.
+    ragged: Ragged exchange routing of this device.
+    num_experts_per_tok: Number of slots per token.
+    axis_name: Physical expert axes.
+
+  Returns:
+    Per-token sums over the token's k slots, in f32.
+  """
+  num_slots = ragged.send_order.shape[0]
+  back = _ragged_a2a(rows, num_slots, ragged, axis_name=axis_name, reverse=True)
+  gathered = jnp.take(back, ragged.slot_pos, axis=0)
+  gathered = jnp.where(ragged.slot_sent[:, None, None], gathered.astype(jnp.float32), 0.0)
+  return jnp.sum(
+      jnp.reshape(gathered, (-1, num_experts_per_tok, *rows.shape[1:])),
+      axis=1,
+  )
+
+
+@jax.named_call
+def dsv3_ragged_dispatch(
+    moe_in: jt.Num[jax.Array, "B T D"],
+    metadata: Any,
+    *,
+    expert_axis_name: str,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    mesh: jax.sharding.Mesh,
+    grad_out: jt.Num[jax.Array, "B T D"] | None = None,
+) -> Any:
+  """Sends every slot's token row to its expert's device (ragged all-to-all).
+
+  Args:
+    moe_in: Local tokens of shape (B, T, D).
+    metadata: `RouterMetadata` with a `RaggedExchange`.
+    expert_axis_name: Name of the logical expert axis.
+    axis_mapping: Mapping from logical to physical mesh axes.
+    mesh: JAX mesh over which the data and model are sharded.
+    grad_out: Optional output cotangent (B, T, D) to send the same way, e.g. to
+      transpose the combine in the backward pass.
+
+  Returns:
+    The received rows, (capacity, D0, D1) per device in the order of
+    `metadata.sort_indices`, or a tuple of them and the received `grad_out`
+    rows if `grad_out` is given.
+  """
+  physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
+  token_axis = dsv3_get_token_axis(jax.typeof(moe_in).sharding.spec, num_model_dims=1)
+  out_spec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
+  capacity = metadata.capacity
+
+  def _send(x, ragged):
+    return _ragged_a2a(
+        _ragged_send_rows(x, ragged),
+        capacity,
+        ragged,
+        axis_name=physical_expert_axis_name,
+    )
+
+  if grad_out is None:
+    return jax.shard_map(_send, mesh=mesh, out_specs=out_spec, check_vma=False)(moe_in, metadata.ragged)
+
+  def _send_both(x, g, ragged):
+    return _send(x, ragged), _send(g, ragged)
+
+  return jax.shard_map(
+      _send_both,
+      mesh=mesh,
+      out_specs=(out_spec, out_spec),
+      check_vma=False,
+  )(moe_in, grad_out, metadata.ragged)
+
+
+@jax.named_call
+def dsv3_ragged_combine(
+    y_rows: jt.Num[jax.Array, "C D0 D1"],
+    ragged: RaggedExchange[jax.Array],
+    *,
+    num_experts_per_tok: int,
+    local_seq_length: int,
+    expert_axis_name: str,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    mesh: jax.sharding.Mesh,
+    out_specs: jax.sharding.PartitionSpec,
+    out_dtype: jax.typing.DTypeLike | None = None,
+) -> jt.Num[jax.Array, "B T D"]:
+  """Sends expert outputs back to their tokens and sums them over k.
+
+  Args:
+    y_rows: Expert outputs, laid out like the `dsv3_ragged_dispatch` rows.
+    ragged: `RouterMetadata.ragged`.
+    num_experts_per_tok: Number of experts selected per token.
+    local_seq_length: Sequence length per shard.
+    expert_axis_name: Name of the logical expert axis.
+    axis_mapping: Mapping from logical to physical mesh axes.
+    mesh: JAX mesh over which the data and model are sharded.
+    out_specs: Output PartitionSpec for (B, T, D).
+    out_dtype: Dtype of the output; defaults to y_rows' dtype.
+
+  Returns:
+    Combined output tokens of shape (B, T, D).
+  """
+  physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
+  out_dtype = y_rows.dtype if out_dtype is None else out_dtype
+
+  def _impl(rows, rg):
+    y = _ragged_combine_local(
+        rows,
+        rg,
+        num_experts_per_tok=num_experts_per_tok,
+        axis_name=physical_expert_axis_name,
+    ).astype(out_dtype)
+    return jnp.reshape(y, (-1, local_seq_length, y.shape[-2] * y.shape[-1]))
+
+  return jax.shard_map(
+      _impl,
+      mesh=mesh,
+      out_specs=ops.physical_pspec(out_specs, axis_mapping),
+      check_vma=False,
+  )(y_rows, ragged)
+
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass
 class RouterMetadata(Generic[T]):
@@ -389,6 +978,9 @@ class RouterMetadata(Generic[T]):
   probs: T
   # Number of sorted local-expert slots processed per chunk on each device.
   capacity: int = jax.tree.static()
+  # Routing of the EP ragged all-to-alls, with `set_ep_ragged_a2a`. A single
+  # PartitionSpec (a pytree prefix) in the spec tree.
+  ragged: RaggedExchange[T] | T | None = None
 
 
 def chunk_num_tokens(
@@ -736,6 +1328,16 @@ def _routing_metadata_impl(
       selected_experts=selected_experts,
       probs=jax.lax.stop_gradient(probs),
       capacity=capacity,
+      ragged=_ragged_exchange_impl(
+          selected_experts_flat,
+          all_group_sizes,
+          device_index=device_index,
+          num_devices=num_devices,
+          local_num_experts=local_num_experts,
+          capacity=capacity,
+      )
+      if _EP_RAGGED_A2A
+      else None,
   )
 
   selected_experts = jnp.reshape(selected_experts, x.shape[:-1] + (num_experts_per_tok,))
@@ -849,6 +1451,7 @@ def dsv3_routing_metadata(
       selected_experts=coeffs_spec,
       probs=coeffs_spec,
       capacity=capacity,
+      ragged=token_spec_1d if _EP_RAGGED_A2A else None,
   )
   aux_out_spec = dsv3_types.DSv3RouterAux[jax.sharding.PartitionSpec](
       group_sizes=jax.sharding.PartitionSpec(token_axis, None),
@@ -1144,6 +1747,7 @@ def _reshape_combined_grads(
 def _combine_with_coeff_grads_impl(
     grad_x_ag: jt.Num[jax.Array, "NBT D0 D1"],
     grad_coeffs_ag: jt.Num[jax.Array, "R C"],
+    ragged: RaggedExchange[jax.Array] | None = None,
     *,
     local_seq_length: int,
     num_experts_per_tok: int,
@@ -1153,7 +1757,23 @@ def _combine_with_coeff_grads_impl(
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  grad_x_local, grad_coeffs_local = _psum_scatter_sc0(grad_x_ag, grad_coeffs_ag, axis_name=physical_expert_axis_name)
+  if ragged is not None:
+    # grad_x_ag holds the expert-side token gradient rows (see
+    # `set_ep_ragged_a2a`).
+    grad_x_local = _ragged_combine_local(
+        grad_x_ag,
+        ragged,
+        num_experts_per_tok=num_experts_per_tok,
+        axis_name=physical_expert_axis_name,
+    )
+    if out_dtype is None:
+      out_dtype = grad_x_ag.dtype
+    (grad_coeffs_local,) = _psum_scatter_sc0(grad_coeffs_ag, axis_name=physical_expert_axis_name)
+  elif _EP_COMBINE_A2A_BWD:
+    grad_x_local = _a2a_reduce_scatter(grad_x_ag, axis_name=physical_expert_axis_name)
+    (grad_coeffs_local,) = _psum_scatter_sc0(grad_coeffs_ag, axis_name=physical_expert_axis_name)
+  else:
+    grad_x_local, grad_coeffs_local = _psum_scatter_sc0(grad_x_ag, grad_coeffs_ag, axis_name=physical_expert_axis_name)
   return _reshape_combined_grads(
       grad_x_local,
       grad_coeffs_local,
@@ -1207,6 +1827,8 @@ def dsv3_combine_with_coeff_grads(
   """
   out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
   coeffs_spec = jax.typeof(metadata.selected_experts).sharding.spec
+  ragged = metadata.ragged
+  assert ragged is None or isinstance(ragged, RaggedExchange)
   return jax.shard_map(
       functools.partial(
           _combine_with_coeff_grads_impl,
@@ -1219,13 +1841,14 @@ def dsv3_combine_with_coeff_grads(
       mesh=mesh,
       out_specs=(out_specs_phys, coeffs_spec),
       check_vma=False,
-  )(grad_x_ag, grad_coeffs_ag)
+  )(grad_x_ag, grad_coeffs_ag, ragged)
 
 
 def _combine_with_coeff_grads_and_reduce_impl(
     grad_x_ag: jt.Num[jax.Array, "NBT D0 D1"],
     grad_coeffs_ag: jt.Num[jax.Array, "R C"],
     reduce_operand: list[jax.Array],
+    ragged: RaggedExchange[jax.Array] | None = None,
     *,
     local_seq_length: int,
     num_experts_per_tok: int,
@@ -1236,13 +1859,39 @@ def _combine_with_coeff_grads_and_reduce_impl(
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], list[jax.Array]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads_and_reduce`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  (grad_x_local, grad_coeffs_local), reduced = _psum_scatter_and_reduce_sc0(
-      grad_x_ag,
-      grad_coeffs_ag,
-      axis_name=physical_expert_axis_name,
-      reduce_fn=reduce_fn,
-      reduce_operand=reduce_operand,
-  )
+  if ragged is not None:
+    grad_x_local = _ragged_combine_local(
+        grad_x_ag,
+        ragged,
+        num_experts_per_tok=num_experts_per_tok,
+        axis_name=physical_expert_axis_name,
+    )
+    if out_dtype is None:
+      out_dtype = grad_x_ag.dtype
+    # The coefficient gradients (needed right away by the router backward) do
+    # not wait for the deferred reduction, which runs in its own block.
+    (grad_coeffs_local,) = _psum_scatter_sc0(grad_coeffs_ag, axis_name=physical_expert_axis_name)
+    _, reduced = _psum_scatter_and_reduce_sc0(
+        axis_name=physical_expert_axis_name,
+        reduce_fn=reduce_fn,
+        reduce_operand=reduce_operand,
+    )
+  elif _EP_COMBINE_A2A_BWD:
+    grad_x_local = _a2a_reduce_scatter(grad_x_ag, axis_name=physical_expert_axis_name)
+    (grad_coeffs_local,), reduced = _psum_scatter_and_reduce_sc0(
+        grad_coeffs_ag,
+        axis_name=physical_expert_axis_name,
+        reduce_fn=reduce_fn,
+        reduce_operand=reduce_operand,
+    )
+  else:
+    (grad_x_local, grad_coeffs_local), reduced = _psum_scatter_and_reduce_sc0(
+        grad_x_ag,
+        grad_coeffs_ag,
+        axis_name=physical_expert_axis_name,
+        reduce_fn=reduce_fn,
+        reduce_operand=reduce_operand,
+    )
   grad_x, grad_coeffs = _reshape_combined_grads(
       grad_x_local,
       grad_coeffs_local,
@@ -1310,6 +1959,8 @@ def dsv3_combine_with_coeff_grads_and_reduce(
     return grad_x, grad_coeffs, None
   out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
   coeffs_spec = jax.typeof(metadata.selected_experts).sharding.spec
+  ragged = metadata.ragged
+  assert ragged is None or isinstance(ragged, RaggedExchange)
   grad_x, grad_coeffs, reduced = jax.shard_map(
       functools.partial(
           _combine_with_coeff_grads_and_reduce_impl,
@@ -1323,7 +1974,7 @@ def dsv3_combine_with_coeff_grads_and_reduce(
       mesh=mesh,
       out_specs=(out_specs_phys, coeffs_spec, deferred_reduce.out_specs),
       check_vma=False,
-  )(grad_x_ag, grad_coeffs_ag, deferred_reduce.operand)
+  )(grad_x_ag, grad_coeffs_ag, deferred_reduce.operand, ragged)
   return grad_x, grad_coeffs, deferred_reduce.finish(reduced)
 
 
@@ -1698,6 +2349,8 @@ def dsv3_combine_impl(
         qtype=combine_qtype,
         per_hop_scaling=combine_per_hop_scaling,
     )
+  elif _EP_COMBINE_A2A_FWD:
+    y_local = _a2a_reduce_scatter(y_ag, axis_name=physical_expert_axis_name)
   else:
     (y_local,) = _psum_scatter_sc0(y_ag, axis_name=physical_expert_axis_name)
   if out_dtype is not None:
@@ -1759,7 +2412,7 @@ def dsv3_combine(
       out_specs=out_specs_phys,
       # The SparseCore Pallas lowering has no `pvary` rule, which VMA checking
       # inserts when resolving the kernel's remote DMA `device_id`s.
-      check_vma=combine_qtype is None,
+      check_vma=combine_qtype is None and not (_EP_COMBINE_KERNEL and _EP_COMBINE_A2A_FWD),
   )(y_ag)
 
 

@@ -1888,6 +1888,19 @@ def _ragged_silu_mul_fwd_pipeline(
     )(x_ref, x_ref, c_ref, out_ref)
 
 
+def _align_block_hidden(hidden_dim: int, block_size_hidden: int) -> int:
+  """Returns a divisor of `hidden_dim` <= `block_size_hidden` (128-aligned)."""
+  block = min(block_size_hidden, hidden_dim)
+  if hidden_dim % block == 0:
+    return block
+  for d in range(2, hidden_dim + 1):
+    if hidden_dim % d == 0:
+      cand = hidden_dim // d
+      if cand <= block and cand % 128 == 0:
+        return cand
+  return math.gcd(block, hidden_dim)
+
+
 def _pallas_ragged_silu_mul(
     x: jt.Num[jax.Array, "x_rows double_hidden_dim"],
     x_offset: jt.Int[jax.Array, ""] | int,
@@ -1901,8 +1914,8 @@ def _pallas_ragged_silu_mul(
   """Pallas call wrapper for ragged_silu_mul forward pass."""
   max_num_tokens = coeffs.shape[0]
   hidden_dim = x.shape[1] // 2
-  block_size_hidden = min(block_size_hidden, hidden_dim)
-  num_hidden_blocks = (hidden_dim + block_size_hidden - 1) // block_size_hidden
+  block_size_hidden = _align_block_hidden(hidden_dim, block_size_hidden)
+  num_hidden_blocks = hidden_dim // block_size_hidden
   hbm = pl.BlockSpec(memory_space=pltpu.HBM)
   smem = pl.BlockSpec(memory_space=pltpu.SMEM)
   target_dtype = jnp.dtype(out_dtype) if out_dtype is not None else x.dtype
@@ -2062,8 +2075,8 @@ def _pallas_ragged_silu_mul_bwd(
   max_num_tokens, hidden_dim = g.shape
   if (g_mask_max is not None or with_absmax) and block_size_tokens * block_size_hidden > 512 * 1024:
     block_size_tokens = min(block_size_tokens, 512)
-  block_size_hidden = min(block_size_hidden, hidden_dim)
-  num_hidden_blocks = (hidden_dim + block_size_hidden - 1) // block_size_hidden
+  block_size_hidden = _align_block_hidden(hidden_dim, block_size_hidden)
+  num_hidden_blocks = hidden_dim // block_size_hidden
   hbm = pl.BlockSpec(memory_space=pltpu.HBM)
   smem = pl.BlockSpec(memory_space=pltpu.SMEM)
   static_g_mask_max = None
@@ -2748,11 +2761,7 @@ def _pallas_ragged_write(
   )(dst_offset, src_offset, slice_size, dst, src, src)
 
 
-@functools.partial(
-    jax.jit,
-    donate_argnums=(0,),
-    static_argnames=("block_size_tokens",),
-)
+@jax.jit(donate_argnums=(0,), static_argnames=("block_size_tokens",))
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def ragged_write(
     dst: jt.Num[jax.Array, "dst_tokens embedding_dim"],
@@ -4148,6 +4157,10 @@ def reduce_scatter_sc0(
     too, halving the HBM and D2D traffic.
   * `jnp.bfloat16`: the input, D2D partner tokens and the output stay bf16, so
     only the running sums travelling along the ring are quantized.
+  * `jnp.float32`: the input, D2D partner tokens and the output stay f32 and
+    every sum is accumulated in f32; only the running sums travelling along the
+    ring are rounded, to `jnp.bfloat16` (not fp8), once per hop. This is the
+    f32 EP combine with half the ring bytes of an f32 reduce-scatter.
 
   Each step sums local tokens, partner-core D2D tokens, and (after the first
   hop) incoming ring C2C tokens in `jnp.bfloat16` on the 16 vector subcores of
@@ -4183,7 +4196,8 @@ def reduce_scatter_sc0(
 
   Args:
     x: Local input token buffer of shape `(num_tokens, d0, 128)` and dtype
-      `jnp.float8_e4m3fn` or `jnp.bfloat16`, with `d0` divisible by 8.
+      `jnp.float8_e4m3fn`, `jnp.bfloat16` or `jnp.float32`, with `d0`
+      divisible by 8.
     token_amax: Optional `float32` local per-token `max(|x|)` of shape
       `(num_tokens,)` (see `token_absmax`) enabling in-kernel per-token scaling.
       Requires a `jnp.bfloat16` `x`, `num_tokens` divisible by 256 and
@@ -4199,7 +4213,7 @@ def reduce_scatter_sc0(
     vmem_tile_rows: Number of 2D rows `(d0-folded)` per VMEM tile per vector
       subcore (must be divisible by 8). Defaults to the largest multiple of 8
       (and of `d0` with per-token scaling) that divides the rows per subcore and
-      microbatch, at most 448 for FP8 inputs and 224 for bf16 inputs.
+      microbatch, at most 448 for FP8, 224 for bf16 and 112 for f32 inputs.
     collective_id: Barrier semaphore collective ID for neighbor synchronization.
 
   Returns:
@@ -4209,12 +4223,15 @@ def reduce_scatter_sc0(
   Raises:
     ValueError: If `x` dtype, shape, or mesh axes violate kernel constraints.
   """
-  if x.dtype not in (jnp.float8_e4m3fn, jnp.bfloat16):
-    raise ValueError(f"x must have dtype float8_e4m3fn or bfloat16, got {x.dtype}.")
+  if x.dtype not in (jnp.float8_e4m3fn, jnp.bfloat16, jnp.float32):
+    raise ValueError("x must have dtype float8_e4m3fn, bfloat16 or float32, got" f" {x.dtype}.")
   quantized_input = x.dtype == jnp.float8_e4m3fn
+  f32_input = x.dtype == jnp.float32
+  # Dtype of the running sums sent along the ring.
+  wire_dtype = jnp.bfloat16 if f32_input else jnp.float8_e4m3fn
   has_amax_input = token_amax is not None
   scaled = has_amax_input or per_hop_scaling
-  if scaled and quantized_input:
+  if scaled and x.dtype != jnp.bfloat16:
     raise ValueError("token_amax or per_hop_scaling scaling requires a bfloat16 x.")
   global_scaling = has_amax_input and not per_hop_scaling
   fused_per_hop = per_hop_scaling and not has_amax_input
@@ -4249,7 +4266,7 @@ def reduce_scatter_sc0(
   tile_rows_unit = math.lcm(8, dim0) if scaled else 8
   if vmem_tile_rows is None:
     # Keeps the six double-buffered tiles within the per-subcore VMEM.
-    max_tile_rows = 448 if quantized_input else 224
+    max_tile_rows = 448 if quantized_input else 112 if f32_input else 224
     vmem_tile_rows = max(
         (r for r in range(tile_rows_unit, max_tile_rows + 1, tile_rows_unit) if subcore_rows % r == 0),
         default=tile_rows_unit,
@@ -4837,6 +4854,14 @@ def reduce_scatter_sc0(
           if three_way:
             acc = acc + _to_compressed_bf16(c_vmem[slot, r_slice, :])
           a_vmem[slot, r_slice, :] = _from_compressed_bf16(acc)
+        elif f32_input:
+          acc = a_vmem[slot, r_slice, :] + b_vmem[slot, r_slice, :]
+          if three_way:
+            acc = acc + c_vmem[slot, r_slice, :].astype(jnp.float32)
+          if to_final_out:
+            a_vmem[slot, r_slice, :] = acc
+          else:
+            c_vmem[slot, r_slice, :] = acc.astype(jnp.bfloat16)
         else:
           acc = a_vmem[slot, r_slice, :] + b_vmem[slot, r_slice, :]
           if three_way:
@@ -5113,7 +5138,7 @@ def reduce_scatter_sc0(
   c2c_buf_rows = (ring_size - 1) * num_microbatches * 2 * mb_rows
   running_sum_struct = jax.ShapeDtypeStruct(
       (c2c_buf_rows, dim1),
-      jnp.float8_e4m3fn,
+      wire_dtype,
       manual_axis_type=manual_axis_type,
   )
   d2d_recv_struct = jax.ShapeDtypeStruct(
@@ -5123,7 +5148,7 @@ def reduce_scatter_sc0(
   )
   c2c_recv_struct = jax.ShapeDtypeStruct(
       (c2c_buf_rows, dim1),
-      jnp.float8_e4m3fn,
+      wire_dtype,
       manual_axis_type=manual_axis_type,
   )
   vmem_shape = (2, vmem_tile_rows, dim1)
@@ -5136,7 +5161,7 @@ def reduce_scatter_sc0(
       c2c_recv_sem=pltpu.SemaphoreType.DMA((ring_size - 1, num_microbatches, 2)) @ scs_mesh,
       a_vmem=pltpu.VMEM(vmem_shape, x.dtype) @ tec_mesh,
       b_vmem=pltpu.VMEM(vmem_shape, x.dtype) @ tec_mesh,
-      c_vmem=pltpu.VMEM(vmem_shape, jnp.float8_e4m3fn) @ tec_mesh,
+      c_vmem=pltpu.VMEM(vmem_shape, wire_dtype) @ tec_mesh,
       tec_in_sem=pltpu.SemaphoreType.DMA((2,)) @ tec_mesh,
       tec_out_sem=pltpu.SemaphoreType.DMA((2,)) @ tec_mesh,
   )

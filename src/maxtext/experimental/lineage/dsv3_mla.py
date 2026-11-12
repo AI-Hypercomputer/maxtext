@@ -24,6 +24,7 @@ import jax
 import jax.experimental.compute_on
 import jax.numpy as jnp
 import jaxtyping as jt
+import numpy as np
 try:
   from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
 except ImportError:
@@ -1536,6 +1537,77 @@ def dot(x, y, axes=1, out_sharding=None):
   return jnp.tensordot(x, y, axes=axes, out_sharding=out_sharding)
 
 
+# SparseCore the Ulysses (CP) all-to-alls of the GQA attention run on, or None
+# for the TensorCore (see `set_ulysses_a2a_sparse_core`).
+_ULYSSES_A2A_SC_CORE: int | None = None
+
+
+def set_ulysses_a2a_sparse_core(core: int | None) -> None:
+  """Runs the GQA Ulysses all-to-alls (q and splash output) on a SparseCore.
+
+  By default they are synchronous TensorCore all-to-alls (plus layout copies).
+  With a SparseCore `core` id, they are async `compute_on` SparseCore
+  collectives (their transposes too), which can overlap the other microbatch's
+  compute.
+
+  Args:
+    core: SparseCore id (0 or 1), or None for the TensorCore.
+  """
+  global _ULYSSES_A2A_SC_CORE
+  _ULYSSES_A2A_SC_CORE = core
+
+
+def _ulysses_all_to_all(x: jax.Array, axis_name: Any, *, split_axis: int, concat_axis: int) -> jax.Array:
+  """`jax.lax.all_to_all(tiled=True)`, on SparseCore if configured."""
+
+  def _a2a(x):
+    return jax.lax.all_to_all(
+        x,
+        axis_name=axis_name,
+        split_axis=split_axis,
+        concat_axis=concat_axis,
+        tiled=True,
+    )
+
+  if _ULYSSES_A2A_SC_CORE is None:
+    return _a2a(x)
+  return jax.experimental.compute_on.compute_on(
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [_ULYSSES_A2A_SC_CORE]}},
+  )(_a2a)(x)
+
+
+_OFFSET_FWD_BLOCK_KV_COMPUTE: int | None = None
+_OFFSET_FWD_EXPERIMENTAL_SCHEDULER = False
+_OFFSET_DKV_BLOCK_KV_COMPUTE: int | None = None
+
+
+def set_offset_splash_fwd_tuning(
+    block_kv_compute: int | None,
+    experimental_scheduler: bool,
+    dkv_block_kv_compute: int | None = None,
+) -> None:
+  """Forward splash tuning of the offset-causal kernels (seq-split mb 1).
+
+  Takes effect for kernels initialized afterwards. Those kernels (queries of
+  the second half of the sequence over all keys up to them) are mostly fully
+  unmasked blocks and tune differently from the pure causal ones.
+
+  Args:
+    block_kv_compute: Forward kv compute block, or None for `sa_block_kv_compute`.
+    experimental_scheduler: Compile their forward kernel with the experimental
+      LLO scheduler.
+    dkv_block_kv_compute: Backward (fused dkv) kv compute block, or None for
+      `sa_block_kv_dkv_compute`.
+  """
+  global _OFFSET_FWD_BLOCK_KV_COMPUTE, _OFFSET_FWD_EXPERIMENTAL_SCHEDULER
+  global _OFFSET_DKV_BLOCK_KV_COMPUTE
+  _OFFSET_DKV_BLOCK_KV_COMPUTE = dkv_block_kv_compute
+  _OFFSET_FWD_BLOCK_KV_COMPUTE = block_kv_compute
+  _OFFSET_FWD_EXPERIMENTAL_SCHEDULER = experimental_scheduler
+
+
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def init_splash_kernel(
     sa_block_q: int,
@@ -1560,6 +1632,7 @@ def init_splash_kernel(
     q_prescaled_log2e: bool = False,
     kv_target_length: int | None = None,
     causal_offset: int = 0,
+    q_positions: np.ndarray | None = None,
 ) -> Any:
   """Initializes the Splash kernel with the given block sizes.
 
@@ -1567,13 +1640,21 @@ def init_splash_kernel(
   default) with query i attending to keys `<= i + causal_offset`. A nonzero
   offset (e.g. microbatch 1 of sequence-split microbatches, see
   `SeqSplitSplash`) disables the causal-diagonal block skips, which assume a
-  pure causal mask.
+  pure causal mask. `q_positions` gives the positions of the queries in a
+  permuted (e.g. zigzag KV all-gather CP) order, for a query-sequence-sharded
+  kernel (`q_seq_shards` from `kernel_out_spec`).
   """
   del num_query_heads
   if kv_target_length is None:
     kv_target_length = max_target_length
+  fwd_experimental_scheduler = False
   if causal_offset:
     qk_diag_skip = sv_diag_skip = diag_band_skip = False
+    if _OFFSET_FWD_BLOCK_KV_COMPUTE:
+      sa_block_kv_compute = _OFFSET_FWD_BLOCK_KV_COMPUTE
+    fwd_experimental_scheduler = _OFFSET_FWD_EXPERIMENTAL_SCHEDULER
+    if _OFFSET_DKV_BLOCK_KV_COMPUTE:
+      sa_block_kv_dkv_compute = _OFFSET_DKV_BLOCK_KV_COMPUTE
   physical_kernel_out_spec = ops.physical_pspec(kernel_out_spec, axis_mapping)
   kernel_out_sharding = jax.sharding.NamedSharding(mesh, physical_kernel_out_spec)
   seq_spec_dim = physical_kernel_out_spec[1]
@@ -1586,7 +1667,7 @@ def init_splash_kernel(
     return math.prod(mesh.shape[name] for name in spec_dim)
 
   q_seq_shards = _get_num_shards(seq_spec_dim, mesh)
-  if q_seq_shards > 1:
+  if q_seq_shards > 1 and q_positions is None:
     raise NotImplementedError(
         "Sequence sharding is not supported for" " tokamax_splash_attention_kernel. Only head sharding is supported."
     )
@@ -1612,6 +1693,10 @@ def init_splash_kernel(
   effective_dq_reduction_steps = (
       None if dq_reduction_steps == 1 and q_seq_len_per_shard > 2 * block_q_dkv else dq_reduction_steps
   )
+  if q_positions is not None and effective_dq_reduction_steps == 1:
+    # The permuted queries' dkv grid visits a q block in several runs, which
+    # the VMEM dq reduction does not support; accumulate dq in HBM instead.
+    effective_dq_reduction_steps = 3
   effective_diag_band_skip = diag_band_skip and effective_qk_diag_skip and effective_dq_reduction_steps == 1
   sa_config = tokamax_splash_attention_kernel.SplashConfig(
       block_q=block_q,
@@ -1632,8 +1717,19 @@ def init_splash_kernel(
       diag_band_skip=effective_diag_band_skip,
       dq_reduction_steps=effective_dq_reduction_steps,
       q_prescaled_log2e=q_prescaled_log2e,
+      fwd_use_experimental_scheduler=fwd_experimental_scheduler,
   )
   mask = tokamax_splash_mask.CausalMask(shape=(max_target_length, kv_target_length), offset=causal_offset)
+  if q_positions is not None:
+    # The queries (in the given, e.g. zigzag, order) carry their positions in
+    # the mask's q_sequence; the keys are in position order. With chunks
+    # aligned to the blocks, the partial blocks are aligned causal diagonals,
+    # so the diagonal skips stay valid.
+    if causal_offset:
+      raise ValueError("q_positions replaces causal_offset.")
+    if q_positions.shape != (max_target_length,):
+      raise ValueError(f"{q_positions.shape=} != ({max_target_length},)")
+    mask.q_sequence = np.asarray(q_positions, np.int32)
   splash_kernel = tokamax_splash_attention_kernel.make_splash_mha(
       mask=mask,
       q_seq_shards=q_seq_shards,
@@ -1656,12 +1752,24 @@ def init_splash_kernel(
   return splash_kernel
 
 
+def _to_head_major(a: jax.Array) -> jax.Array:
+  """Swaps the sequence and head dims (the last but one two) of K/V."""
+  axes = list(range(a.ndim))
+  axes[-3], axes[-2] = axes[-2], axes[-3]
+  return jnp.transpose(a, axes)
+
+
+def _unstack_local(a: jax.Array) -> jax.Array:
+  """The local copy of a per-CP-rank stacked K/V (`[1, B, ...]` locally)."""
+  return a[0] if a.ndim == 5 else a
+
+
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def splash_attention(
     q: jt.Num[jax.Array, "B T N QK_plus_R"],
-    k: jt.Num[jax.Array, "B S N QK_plus_R"],
-    v: jt.Num[jax.Array, "B S N V"],
+    k: jax.Array,  # [B, S, G, QK] or stacked [cp, B, S, G, QK]
+    v: jax.Array,  # [B, S, G, V] or stacked [cp, B, S, G, V]
     splash_kernel: Any,
     segment_ids: jt.Num[jax.Array, "B T"] | tokamax_splash_attention_kernel.SegmentIds | None = None,
 ) -> tuple[
@@ -1683,11 +1791,12 @@ def splash_attention(
     Tuple of (output, context).
   """
   query = jnp.transpose(q, axes=(0, 2, 1, 3))
-  key = jnp.transpose(k, axes=(0, 2, 1, 3))
-  value = jnp.transpose(v, axes=(0, 2, 1, 3))
+  key = _to_head_major(k)
+  value = _to_head_major(v)
 
   mesh = jax.typeof(query).sharding.mesh
   query_spec = jax.typeof(query).sharding.spec
+  key_spec = jax.typeof(key).sharding.spec
   context_spec = jax.sharding.PartitionSpec(*query_spec[:3])
 
   kernel_pspec = jax.tree.map(
@@ -1698,12 +1807,19 @@ def splash_attention(
 
   if segment_ids is not None:
     segment_spec = jax.sharding.PartitionSpec(query_spec[0], None)
+    # The query ids follow the queries' sequence sharding (KV all-gather CP).
+    q_segment_spec = jax.sharding.PartitionSpec(query_spec[0], query_spec[2])
     if isinstance(segment_ids, tokamax_splash_attention_kernel.SegmentIds):
       segment_ids_tuple = segment_ids
     else:
       segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(q=segment_ids, kv=segment_ids)
+    if query_spec[2] is not None:
+      segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(
+          q=jax.sharding.reshard(segment_ids_tuple.q, q_segment_spec),
+          kv=segment_ids_tuple.kv,
+      )
     segment_ids_in_spec = tokamax_splash_attention_kernel.SegmentIds(
-        q=segment_spec,  # pyrefly: ignore[bad-argument-type]
+        q=q_segment_spec,  # pyrefly: ignore[bad-argument-type]
         kv=segment_spec,  # pyrefly: ignore[bad-argument-type]
     )
   else:
@@ -1715,8 +1831,8 @@ def splash_attention(
       mesh=mesh,
       in_specs=(
           query_spec,
-          query_spec,
-          query_spec,
+          key_spec,
+          key_spec,
           kernel_pspec,
           segment_ids_in_spec,
       ),
@@ -1727,6 +1843,7 @@ def splash_attention(
       check_vma=False,
   )
   def wrap_splash_attention(query, key, value, splash_kernel, segment_ids):
+    key, value = _unstack_local(key), _unstack_local(value)
     attention_output, context = jax.vmap(
         splash_kernel.manual_fwd,
         in_axes=(0, 0, 0, 0 if segment_ids is not None else None),
@@ -1752,24 +1869,25 @@ def splash_attention_bwd(
     splash_out: jt.Num[jax.Array, "B T N V"],
     context: jt.Num[jax.Array, "B N T"],
     q: jt.Num[jax.Array, "B T N QK_plus_R"],
-    k: jt.Num[jax.Array, "B S N QK_plus_R"],
-    v: jt.Num[jax.Array, "B S N V"],
+    k: jax.Array,  # [B, S, G, QK] or stacked [cp, B, S, G, QK]
+    v: jax.Array,  # [B, S, G, V] or stacked [cp, B, S, G, V]
     splash_kernel: Any,
     segment_ids: jt.Num[jax.Array, "B T"] | tokamax_splash_attention_kernel.SegmentIds | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "B T N QK_plus_R"],
-    jt.Num[jax.Array, "B S N QK_plus_R"],
-    jt.Num[jax.Array, "B S N V"],
+    jax.Array,
+    jax.Array,
 ]:
   """Performs backward splash attention (see `splash_attention`)."""
   do = jnp.transpose(grad_splash_out, axes=(0, 2, 1, 3))
   o = jnp.transpose(splash_out, axes=(0, 2, 1, 3))
   query = jnp.transpose(q, axes=(0, 2, 1, 3))
-  key = jnp.transpose(k, axes=(0, 2, 1, 3))
-  value = jnp.transpose(v, axes=(0, 2, 1, 3))
+  key = _to_head_major(k)
+  value = _to_head_major(v)
 
   mesh = jax.typeof(query).sharding.mesh
   query_spec = jax.typeof(query).sharding.spec
+  key_spec = jax.typeof(key).sharding.spec
   context_spec = jax.sharding.PartitionSpec(*query_spec[:3])
 
   kernel_pspec = jax.tree.map(
@@ -1780,12 +1898,19 @@ def splash_attention_bwd(
 
   if segment_ids is not None:
     segment_spec = jax.sharding.PartitionSpec(query_spec[0], None)
+    # The query ids follow the queries' sequence sharding (KV all-gather CP).
+    q_segment_spec = jax.sharding.PartitionSpec(query_spec[0], query_spec[2])
     if isinstance(segment_ids, tokamax_splash_attention_kernel.SegmentIds):
       segment_ids_tuple = segment_ids
     else:
       segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(q=segment_ids, kv=segment_ids)
+    if query_spec[2] is not None:
+      segment_ids_tuple = tokamax_splash_attention_kernel.SegmentIds(
+          q=jax.sharding.reshard(segment_ids_tuple.q, q_segment_spec),
+          kv=segment_ids_tuple.kv,
+      )
     segment_ids_in_spec = tokamax_splash_attention_kernel.SegmentIds(
-        q=segment_spec,  # pyrefly: ignore[bad-argument-type]
+        q=q_segment_spec,  # pyrefly: ignore[bad-argument-type]
         kv=segment_spec,  # pyrefly: ignore[bad-argument-type]
     )
   else:
@@ -1800,24 +1925,28 @@ def splash_attention_bwd(
           query_spec,
           context_spec,
           query_spec,
-          query_spec,
-          query_spec,
+          key_spec,
+          key_spec,
           kernel_pspec,
           segment_ids_in_spec,
       ),
       out_specs=(
           query_spec,
-          query_spec,
-          query_spec,
+          key_spec,
+          key_spec,
       ),
       check_vma=False,
   )
   def wrap_splash_attention_bwd(do, o, context, query, key, value, splash_kernel, segment_ids):
+    stacked = key.ndim == 5
+    key, value = _unstack_local(key), _unstack_local(value)
     dq, dk, dv = jax.vmap(
         splash_kernel.manual_bwd,
         in_axes=(0, 0, 0, 0, 0, 0, 0 if segment_ids is not None else None),
         out_axes=(0, 0, 0),
     )(query, key, value, o, context, do, segment_ids)
+    if stacked:
+      dk, dv = dk[None], dv[None]
     return dq, dk, dv
 
   dq, dk, dv = wrap_splash_attention_bwd(
@@ -1832,8 +1961,8 @@ def splash_attention_bwd(
   )
 
   dq = jnp.transpose(dq, axes=(0, 2, 1, 3))
-  dk = jnp.transpose(dk, axes=(0, 2, 1, 3))
-  dv = jnp.transpose(dv, axes=(0, 2, 1, 3))
+  dk = _to_head_major(dk)
+  dv = _to_head_major(dv)
   return dq, dk, dv
 
 
@@ -1988,7 +2117,7 @@ def _gqa_qkv_a2a(
       q = jnp.einsum("btd,dnh->btnh", x, wq)
       q = yarn(q, (cos * scale, sin * scale)).astype(x.dtype)
       # [B, T/cp, N, H] -> [B, T, N/cp, H].
-      q = jax.lax.all_to_all(q, axis_name=seq_axis, split_axis=2, concat_axis=1, tiled=True)
+      q = _ulysses_all_to_all(q, seq_axis, split_axis=2, concat_axis=1)
       # [B, T/cp, KV, H] -> [B, T, KV, H]. The (default) varying result
       # makes the backward a reduce-scatter of dk / dv rather than an
       # all-reduce.
@@ -2030,6 +2159,21 @@ def _gqa_out_projection(
   head_axis = attn_spec[2]
   w_parts = tuple(jax.typeof(w_out).sharding.spec.partitions)
   w_head_axis = w_parts[0] if w_parts else None
+  if head_axis is None and attn_spec[1] is not None and w_head_axis is None:
+    # KV all-gather CP: the splash output is already sequence-sharded with
+    # all the heads, so every device projects its own tokens.
+    seq_out_spec = jax.sharding.PartitionSpec(attn_spec[0], attn_spec[1], None)
+
+    def _out_local(o: jax.Array, w: jax.Array) -> jax.Array:
+      with jax.named_scope("out_projection_local"):
+        return dot(o, w, axes=2)
+
+    return jax.shard_map(
+        _out_local,
+        mesh=jax.typeof(splash_out).sharding.mesh,
+        out_specs=seq_out_spec,
+        check_vma=True,
+    )(splash_out, w_out)
   if head_axis is None or w_head_axis is not None:
     return out_projection(splash_out, w_out)
   out_spec = jax.sharding.PartitionSpec(attn_spec[0], head_axis, None)
@@ -2037,7 +2181,7 @@ def _gqa_out_projection(
   def _out(o: jax.Array, w: jax.Array) -> jax.Array:
     with jax.named_scope("out_projection_a2a"):
       # [B, T, N/cp, V] -> [B, T/cp, N, V].
-      o = jax.lax.all_to_all(o, axis_name=head_axis, split_axis=1, concat_axis=2, tiled=True)
+      o = _ulysses_all_to_all(o, head_axis, split_axis=1, concat_axis=2)
       return dot(o, w, axes=2)
 
   return jax.shard_map(
@@ -2087,6 +2231,67 @@ def is_seq_split(splash_kernel: Any) -> bool:
   return isinstance(splash_kernel, SeqSplitSplash)
 
 
+# --- KV all-gather context parallelism (zigzag) ---
+#
+# With `set_seq_split_kv_gather`, sequence-split microbatches use KV all-gather
+# CP instead of Ulysses: every CP rank keeps its own query tokens with all the
+# query heads, all-gathers the (narrow, GQA) keys and values along the sequence
+# and runs splash on its query shard (`q_seq_shards`). Each half of the
+# sequence is cut into `2 * cp` chunks and CP rank r holds chunks r and
+# `2 * cp - 1 - r` of each half (`dsv3_model.seq_split_permutation(zigzag=
+# True)`), which balances the causal work. The gathered keys are put back in
+# the original order and the queries carry their original positions in the
+# mask's `q_sequence`, so both microbatches' masks are plain causal masks with
+# aligned diagonal blocks.
+
+_SEQ_SPLIT_KV_GATHER = False
+# CP size of the zigzag layout, set by `dsv3_model.init_kernels`.
+_SEQ_SPLIT_CP = 1
+# Whether the K/V all-gathers are pinned to SparseCore 0 (off in CPU tests).
+_KV_GATHER_ON_SC0 = True
+
+
+def set_seq_split_kv_gather(enabled: bool) -> None:
+  """Uses KV all-gather (zigzag) CP for sequence-split microbatches."""
+  global _SEQ_SPLIT_KV_GATHER
+  _SEQ_SPLIT_KV_GATHER = enabled
+
+
+def seq_split_kv_gather() -> bool:
+  """Whether sequence-split microbatches use KV all-gather CP."""
+  return _SEQ_SPLIT_KV_GATHER
+
+
+def set_seq_split_cp(cp: int) -> None:
+  """Records the CP size of the zigzag layout (see `init_kernels`)."""
+  global _SEQ_SPLIT_CP
+  _SEQ_SPLIT_CP = cp
+
+
+def zigzag_chunks(cp: int) -> np.ndarray:
+  """Chunk ids `[cp, 2]` of each half held by each CP rank (zigzag)."""
+  r = np.arange(cp)
+  return np.stack([r, 2 * cp - 1 - r], axis=1)
+
+
+def zigzag_half_order(half: int, cp: int) -> np.ndarray:
+  """Positions within a half of the rank-major (zigzag) token order."""
+  chunk = half // (2 * cp)
+  ids = zigzag_chunks(cp).reshape(-1)
+  return (ids[:, None] * chunk + np.arange(chunk)[None, :]).reshape(-1)
+
+
+def _unzigzag_seq(a: jax.Array, cp: int, axis: int) -> jax.Array:
+  """Reorders a rank-major zigzag half along `axis` into the original order."""
+  shape = a.shape
+  n = shape[axis]
+  chunk = n // (2 * cp)
+  a = a.reshape(*shape[:axis], 2 * cp, chunk, *shape[axis + 1 :])
+  inv = np.argsort(zigzag_chunks(cp).reshape(-1))
+  a = jnp.take(a, inv, axis=axis)
+  return a.reshape(shape)
+
+
 def microbatch_splash_kernel(splash_kernel: Any, microbatch: int) -> Any:
   """Returns microbatch `microbatch`'s splash kernel."""
   if not is_seq_split(splash_kernel):
@@ -2111,6 +2316,14 @@ def seq_split_segment_ids(
   if segment_ids is None:
     return None
   half = segment_ids.shape[1] // 2
+  if _SEQ_SPLIT_KV_GATHER:
+    # The queries are in the rank-major zigzag order; the keys are gathered
+    # back into the original order.
+    q_idx = microbatch * half + zigzag_half_order(half, _SEQ_SPLIT_CP)
+    return tokamax_splash_attention_kernel.SegmentIds(
+        q=segment_ids[:, q_idx],
+        kv=segment_ids[:, : (microbatch + 1) * half],
+    )
   return tokamax_splash_attention_kernel.SegmentIds(
       q=segment_ids[:, microbatch * half : (microbatch + 1) * half],
       kv=segment_ids[:, : (microbatch + 1) * half],
@@ -2143,9 +2356,10 @@ def _gqa_qkv_seq_split(
       microbatch, sharded like x.
 
   Returns:
-    q `[B, T_total_q, N, H]` (scaled), k and v `[B, T_total_kv, N, H]` with
+    q `[B, T_total_q, N, H]` (scaled), k and v `[B, T_total_kv, G, H]` with
     heads sharded over the CP axis, and this microbatch's local `(k, v)`
-    shards `[B, T, KV, H]`.
+    shards `[B, T, KV, H]`. Query head n uses K/V head `n // (N // G)` (GQA
+    with uniform groups, as splash expects).
   """
 
   def _parts(a: jax.Array) -> tuple[Any, ...]:
@@ -2171,6 +2385,22 @@ def _gqa_qkv_seq_split(
       return a
     return jax.lax.all_gather(a, axis_name=seq_axis, axis=1, tiled=True)
 
+  if _SEQ_SPLIT_KV_GATHER and seq_axis is not None:
+    return _gqa_qkv_seq_split_kv_gather(
+        x,
+        wq,
+        wkv,
+        cos,
+        sin,
+        kv_prefix,
+        mesh=mesh,
+        batch_axis=batch_axis,
+        seq_axis=seq_axis,
+        num_kv=num_kv,
+        head_dim=head_dim,
+        scale=scale,
+    )
+
   def _local(x, wq, wkv, cos, sin, kv_prefix):
     with jax.named_scope("gqa_qkv_projection_seq_split"):
       kv = jnp.einsum("btd,dk->btk", x, wkv)
@@ -2181,15 +2411,23 @@ def _gqa_qkv_seq_split(
       q = yarn(q, (cos * scale, sin * scale)).astype(x.dtype)
       if seq_axis is not None:
         # [B, T/cp, N, H] -> [B, T, N/cp, H].
-        q = jax.lax.all_to_all(q, axis_name=seq_axis, split_axis=2, concat_axis=1, tiled=True)
+        q = _ulysses_all_to_all(q, seq_axis, split_axis=2, concat_axis=1)
       num_local_q = q.shape[2]
       first = 0 if seq_axis is None else jax.lax.axis_index(seq_axis) * num_local_q
-      kv_head = (first + jnp.arange(num_local_q)) // group
+      # Splash runs GQA natively on uniform groups of consecutive query heads.
+      # The local query heads [first, first + num_local_q) split into uniform
+      # groups of `sub` heads sharing one KV head (`sub` divides both the GQA
+      # group and the local head count, so the groups are aligned on every CP
+      # rank), so K/V are only expanded to `num_local_q // sub` heads (a KV
+      # head straddling two CP ranks is duplicated) instead of to every query
+      # head.
+      sub = math.gcd(group, num_local_q)
+      kv_head = (first + sub * jnp.arange(num_local_q // sub)) // group
 
       def _expand(a):
         # Gathers the sequence and expands the KV heads to this device's query
-        # heads; the gradient's sums over both (the reduce-scatter and the
-        # query-head group sums) run in f32.
+        # head groups; the gradient's sums over both (the reduce-scatter and
+        # the duplicated-head sums) run in f32.
         return ops.f32_grad(
             lambda a, kv_head: jnp.take(_gather(a), kv_head, axis=2),
             a,
@@ -2207,6 +2445,102 @@ def _gqa_qkv_seq_split(
       _local,
       mesh=mesh,
       out_specs=(out_spec, out_spec, out_spec, (kv_spec, kv_spec)),
+      check_vma=True,
+  )(x, wq, wkv, cos, sin, kv_prefix)
+
+
+def _gqa_qkv_seq_split_kv_gather(
+    x: jax.Array,
+    wq: jax.Array,
+    wkv: jax.Array,
+    cos: jax.Array,
+    sin: jax.Array,
+    kv_prefix: tuple[jax.Array, jax.Array] | None,
+    *,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+    batch_axis: Any,
+    seq_axis: Any,
+    num_kv: int,
+    head_dim: int,
+    scale: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, tuple[jax.Array, jax.Array]]:
+  """`_gqa_qkv_seq_split` with KV all-gather (zigzag) CP.
+
+  Every CP rank keeps its query tokens (rank-major zigzag order) with all the
+  query heads. The keys and values are all-gathered along the sequence and put
+  back in the original order. Since every rank computes a different partial of
+  their gradient, they are returned as one copy per CP rank, stacked on a
+  leading dim sharded over the CP axis, so their cotangents are summed by the
+  all-gather's transpose (a reduce-scatter, in f32).
+
+  Args:
+    x: Normalized microbatch activations, sequence-sharded over `seq_axis`.
+    wq: Query projection weights, replicated over the CP axis.
+    wkv: Fused key/value projection weights.
+    cos: RoPE cos of the microbatch's tokens, sequence-sharded.
+    sin: RoPE sin of the microbatch's tokens, sequence-sharded.
+    kv_prefix: Optional local `(k, v)` shards of the previous microbatch.
+    mesh: The device mesh.
+    batch_axis: Mesh axes of the batch.
+    seq_axis: Mesh axes of the sequence (CP).
+    num_kv: Number of K/V heads.
+    head_dim: Head dim.
+    scale: Query scale.
+
+  Returns:
+    q `[B, T, N, H]` sharded `P(batch, seq)`, k and v `[cp, B, S, KV, H]`
+    sharded `P(seq, batch)`, and this microbatch's local `(k, v)` shards.
+  """
+  q_spec = jax.sharding.PartitionSpec(batch_axis, seq_axis, None, None)
+  kv_spec = q_spec
+  stacked_spec = jax.sharding.PartitionSpec(seq_axis, batch_axis, None, None, None)
+
+  def _local(x, wq, wkv, cos, sin, kv_prefix):
+    cp = jax.lax.axis_size(seq_axis)
+    with jax.named_scope("gqa_qkv_projection_kv_gather"):
+      kv = jnp.einsum("btd,dk->btk", x, wkv)
+      kv = kv.reshape(*kv.shape[:2], 2 * num_kv, head_dim)
+      k_local = yarn(kv[:, :, :num_kv], (cos, sin)).astype(x.dtype)
+      v_local = kv[:, :, num_kv:]
+      q = jnp.einsum("btd,dnh->btnh", x, wq)
+      q = yarn(q, (cos * scale, sin * scale)).astype(x.dtype)
+
+      def _all_gather(a):
+        return jax.lax.all_gather(a, axis_name=seq_axis, axis=1, tiled=True)
+
+      # Pinned to SparseCore 0 (as XLA places the Ulysses K/V gathers): on
+      # SparseCore 1, the short-lived gather / dk reduce-scatter would share a
+      # FIFO queue with the long routed weight-gradient reduce-scatters and
+      # force them to complete early.
+      _all_gather_sc0 = (
+          jax.experimental.compute_on.compute_on(
+              compute_type="tpu_sparsecore",
+              out_memory_spaces=jax.memory.Space.Device,
+              compiler_options={"sparse_core_config": {"core_ids": [0]}},
+          )(_all_gather)
+          if _KV_GATHER_ON_SC0
+          else _all_gather
+      )
+
+      def _gather_kv(a):
+        # The gradient's sum over the CP ranks (the all-gather's transpose,
+        # a reduce-scatter) runs in f32.
+        return ops.f32_grad(
+            lambda a: _unzigzag_seq(_all_gather_sc0(a), cp, axis=1)[None],
+            a,
+        )
+
+      k, v = _gather_kv(k_local), _gather_kv(v_local)
+      if kv_prefix is not None:
+        k_pre, v_pre = kv_prefix
+        k = jnp.concatenate([_gather_kv(k_pre), k], axis=2)
+        v = jnp.concatenate([_gather_kv(v_pre), v], axis=2)
+      return q, k, v, (k_local, v_local)
+
+  return jax.shard_map(
+      _local,
+      mesh=mesh,
+      out_specs=(q_spec, stacked_spec, stacked_spec, (kv_spec, kv_spec)),
       check_vma=True,
   )(x, wq, wkv, cos, sin, kv_prefix)
 
@@ -2263,6 +2597,7 @@ def gqa_microbatch_fwd(
     microbatch's local `(k, v)` shards).
   """
   _check_gqa_weights(w)
+  assert w.q_up is not None and w.kv_down is not None and w.out is not None
   q, k, v, kv_local = _gqa_qkv_seq_split(x, w.q_up, w.kv_down, yarn_freqs, mesh=mesh, kv_prefix=kv_prefix)
   splash_out, context = splash_attention(q, k, v, splash_kernel, segment_ids=segment_ids)
   out = _gqa_out_projection(splash_out, w.out)
@@ -2360,7 +2695,7 @@ def gqa_microbatch_bwd(
     grad_kv_local = jax.tree.map(jnp.zeros_like, kv_local)
   grad_norm_x, grad_wq, grad_wkv, grad_kv_prefix = qkv_vjp((grad_q, grad_k, grad_v, grad_kv_local))
   grad_w = _gqa_zero_grads(w, grad_wq, grad_wkv, grad_w_out)
-  grad_yarn_freqs = tuple(jnp.zeros_like(f) for f in yarn_freqs)
+  grad_yarn_freqs = (jnp.zeros_like(yarn_freqs[0]), jnp.zeros_like(yarn_freqs[1]))
   return grad_norm_x, grad_w, grad_yarn_freqs, grad_kv_prefix
 
 
@@ -2430,6 +2765,7 @@ def gqa_seq_split_bwd(
   grad_out0, grad_out1 = ops.split_microbatches(grad_out, mesh=mesh, axis=1)
   x0, x1 = ops.split_microbatches(norm_x, mesh=mesh, axis=1)
   yarn0, yarn1 = ops.split_microbatches(ops.seq_shard_like(yarn_freqs, norm_x), mesh=mesh, axis=1)
+  assert w.q_up is not None and w.kv_down is not None
   head_dim = w.q_up.shape[-1]
   kv0 = _gqa_kv_local(x0, w.kv_down, yarn0, head_dim=head_dim, mesh=mesh)
   grad_x1, grad_w1, _, grad_kv0 = gqa_microbatch_bwd(
@@ -2458,7 +2794,7 @@ def gqa_seq_split_bwd(
   )
   grad_x = ops.merge_microbatches(grad_x0, grad_x1, mesh=mesh, axis=1)
   grad_w = jax.tree.map(lambda a, b: a + b, grad_w0, grad_w1)
-  grad_yarn_freqs = tuple(jnp.zeros_like(f) for f in yarn_freqs)
+  grad_yarn_freqs = (jnp.zeros_like(yarn_freqs[0]), jnp.zeros_like(yarn_freqs[1]))
   return grad_x, grad_w, grad_yarn_freqs
 
 
@@ -2476,6 +2812,7 @@ def _gqa_fwd(
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array]]:
   """bf16 GQA forward with the `dsv3_mla_fwd` interface."""
   _check_gqa_weights(w)
+  assert w.q_up is not None and w.kv_down is not None and w.out is not None
   q, k, v = _gqa_qkv(x, w.q_up, w.kv_down, yarn_freqs, mesh=mesh)
   splash_out, context = splash_attention(q, k, v, splash_kernel, segment_ids=segment_ids)
   out = _gqa_out_projection(splash_out, w.out)
@@ -2542,7 +2879,7 @@ def _gqa_bwd(
       out=grad_w_out,
   )
   # The YaRN frequencies are constants of the step.
-  grad_yarn_freqs = tuple(jnp.zeros_like(f) for f in yarn_freqs)
+  grad_yarn_freqs = (jnp.zeros_like(yarn_freqs[0]), jnp.zeros_like(yarn_freqs[1]))
   return grad_norm_x, grad_w, grad_yarn_freqs
 
 

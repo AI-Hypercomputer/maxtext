@@ -959,6 +959,72 @@ for _topology in ((4, 4, 8), (4, 4, 4)):
 del _topology
 
 
+def _cp2_gqa_a2a_flat_routed(expert_axes: tuple[str, ...], fsdp_axes: tuple[str, ...]) -> TopologySharding:
+  """The "cp2_gqa_a2a" layout with flat 64-way-FSDP routed experts.
+
+  With 64-way FSDP the linear weight's rows can split into shards that
+  are not whole T(8, 128) tiles, so (as on 8x32x32) the routed weights
+  merge `(expert, rows) -> expert * rows` and shard all of the expert and FSDP
+  axes on that single row axis.
+
+  Args:
+    expert_axes: EP mesh axes (the routed experts' expert dim).
+    fsdp_axes: The routed experts' FSDP mesh axes.
+
+  Returns:
+    The topology sharding.
+  """
+  routed_axes = (*expert_axes, *fsdp_axes)
+
+  # The sparse layer's weights may only be sharded along `fsdp_moe` (see
+  # `dsv3_sparse_layer._sc1_reduce_axes`): move the 4x4x8 layout's (x, y)
+  # FSDP sharding to `fsdp_axes`.
+  def _to_fsdp_axes(spec: P) -> P:
+    return P(*(fsdp_axes if part == ("x", "y") else part for part in spec))
+
+  base = jax.tree.map(
+      _to_fsdp_axes,
+      _SPARSE_4X4X8_CP2_GQA_A2A,
+      is_leaf=lambda x: isinstance(x, P),
+  )
+  sparse = dataclasses.replace(
+      base,
+      moe=dataclasses.replace(
+          base.moe,
+          routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+              gate=P(None, routed_axes, None),
+              linear=P(None, routed_axes, None),
+          ),
+          # The MoE gradients reduce-scatter over `fsdp_moe`.
+          shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+              gate_0=P(None, fsdp_axes, None),
+              gate_1=P(None, fsdp_axes, None),
+              linear=P(None, None, fsdp_axes),
+          ),
+      ),
+  )
+  return TopologySharding(
+      axis_mapping={
+          **_CP2_4X4X8.axis_mapping,
+          "expert": expert_axes,
+          "fsdp_moe": fsdp_axes,
+      },
+      weights=dataclasses.replace(
+          _CP2_4X4X8.weights,
+          decoder=dataclasses.replace(_CP2_4X4X8.weights.decoder, sparse=sparse),
+          mtp=dataclasses.replace(_CP2_4X4X8.weights.mtp, sparse=drop_layer_axis(sparse)),
+      ),
+  )
+
+
+# 8x8x8 (512 chips) "cp2_gqa_a2a_fsdpxy": EP 16 over (z, core) (EP_ICI 8 x CP
+# 2) and the routed experts' FSDP 64 over (x, y).
+TOPOLOGY_SHARDING_VARIANTS[((8, 8, 8), "cp2_gqa_a2a_fsdpxy")] = _cp2_gqa_a2a_flat_routed(("z", "core"), ("x", "y"))
+# 4x8x8 (256 chips) "cp2_gqa_a2a_fsdpxy": EP 8 over the 4-chip x axis and the
+# cores (EP_ICI 4 x CP 2), and the routed experts' FSDP 64 over (y, z).
+TOPOLOGY_SHARDING_VARIANTS[((4, 8, 8), "cp2_gqa_a2a_fsdpxy")] = _cp2_gqa_a2a_flat_routed(("x", "core"), ("y", "z"))
+
+
 def dcn_batch_axis(
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
     axis: str | tuple[str, ...],

@@ -385,10 +385,7 @@ def init_dsv3_mla_weights(
         scale_init=scale_init,
     )
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 7)
@@ -478,10 +475,7 @@ def init_dsv3_moe_router_weights(
   """
   out_shardings = out_shardings if out_shardings else DSv3MoERouterWeightsPytree[ShardingType]()
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 2)
@@ -528,10 +522,7 @@ def init_dsv3_moe_shared_expert_weights(
   """
   out_shardings = out_shardings if out_shardings else DSv3MoESharedExpertWeightsPytree[ShardingType]()
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 3)
@@ -590,10 +581,7 @@ def init_dsv3_moe_routed_expert_weights(
   out_shardings = _resolve_shardings(out_shardings, mesh, axis_mapping)
   out_shardings = out_shardings if out_shardings else DSv3MoERoutedExpertWeightsPytree[ShardingType]()
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 3)
@@ -749,10 +737,7 @@ def init_dsv3_sparse_layer_weights(
   out_shardings = _resolve_shardings(out_shardings, mesh, axis_mapping)
   out_shardings = out_shardings if out_shardings else DSv3SparseLayerWeightsPytree[ShardingType]()
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 4)
@@ -829,10 +814,7 @@ def init_dsv3_mlp_weights(
   """
   out_shardings = out_shardings if out_shardings else DSv3MLPWeightsPytree[ShardingType]()
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 3)
@@ -905,10 +887,7 @@ def init_dsv3_dense_layer_weights(
   out_shardings = _resolve_shardings(out_shardings, mesh, axis_mapping)
   out_shardings = out_shardings if out_shardings else DSv3DenseLayerWeightsPytree[ShardingType]()
 
-  @functools.partial(
-      jax.jit,
-      out_shardings=out_shardings,
-  )
+  @jax.jit(out_shardings=out_shardings)
   def _init(rng):
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 4)

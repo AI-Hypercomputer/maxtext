@@ -210,8 +210,7 @@ def _qkv_up_kernel(
       v_ref[0, h] = (v[:, j * v_head_dim : (j + 1) * v_head_dim] * dequant_scale).astype(v_ref.dtype)
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=(
         "qk_head_dim",
         "kv_lora_rank",

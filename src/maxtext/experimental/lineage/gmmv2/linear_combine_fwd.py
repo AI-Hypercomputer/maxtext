@@ -47,6 +47,12 @@ rows straight to their tokens' rows of `y`:
   iterations: the per-row loops are branch-free and unrolled, and the rows of
   the next visit are classified in straight-line code between the matmuls,
   where it co-issues with the MXU.
+
+Weight-only fp8 (bf16 `act`, fp8 `w_q`): each expert's fp8 weight is dequantized
+once to bf16 in VMEM when it is first used, the GMM runs in bf16 with an f32
+accumulator scaled by `out_scale`, and `y` can be f32 (`out_dtype`), so the
+top-k sums accumulate in f32 like `ops.ragged_gather_reduce_tc` on an f32
+`routed_out`.
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ LANES = 128
 _SUBLANE = 32  # Sublane tiling of the fp8 act rows.
 _IDX_ALIGN = 128  # Alignment of the SMEM token windows.
 _MXU_COLS = 256  # TPU v7x MXU column size.
+_DEQUANT_ROWS = 128  # Weight rows dequantized per loop iteration.
 _ISSUE_UNROLL = 16  # Row DMAs issued per loop iteration.
 _SEEN_BITS = 32  # Tokens per word of the seen-token bitmap.
 # SMEM token windows: those of the visit, of the next visit (classified during
@@ -265,6 +272,10 @@ class _Config:
   zero_rows: int
   accumulate: bool
   bucket_m: int
+  dequant_w: bool
+  out_dtype: jnp.dtype
+  round_rows_to_bf16: bool
+  transpose_w: bool = False
 
 
 def _kernel(
@@ -290,7 +301,7 @@ def _kernel(
     scale_ref: GMM output scale (SMEM).
     zmeta_ref: Whether each zero window has a run longer than `zero_rows`
       (SMEM).
-    act_hbm: fp8 act `[C, F]`.
+    act_hbm: fp8 (or, with `cfg.dequant_w`, bf16) act `[C, F]`.
     w_hbm: fp8 weights `[E * F, D]`.
     tok_hbm: Output token of each sorted slot.
     *refs: Zero runs (or the aliased y input when accumulating), y, scratch.
@@ -324,7 +335,10 @@ def _kernel(
       rd_sem,
       zero_sem,
       zt_sem,
+      *wdq_bufs,
   ) = scratch
+  # bf16 copy of the current expert's weight (weight-only fp8).
+  wdq_buf = wdq_bufs[0] if cfg.dequant_w else None
   tile_m, size_f, size_d = cfg.tile_m, cfg.size_f, cfg.size_d
   nbt = cfg.num_out_tokens
   tw = cfg.tok_window
@@ -367,9 +381,12 @@ def _kernel(
         tok_sem.at[slot],
     )
 
+  # Rows of one expert's weight: `[F, D]`, or `[D, F]` with `transpose_w`.
+  w_rows = size_d if cfg.transpose_w else size_f
+
   def w_dma(wl, slot):
-    row = pl.multiple_of(w2e_ref[wl] * size_f, size_f)
-    return pltpu.make_async_copy(w_hbm.at[pl.ds(row, size_f)], w_buf.at[slot], w_sem.at[slot])
+    row = pl.multiple_of(w2e_ref[wl] * w_rows, w_rows)
+    return pltpu.make_async_copy(w_hbm.at[pl.ds(row, w_rows)], w_buf.at[slot], w_sem.at[slot])
 
   def zt_dma(win):
     assert zinfo_hbm is not None
@@ -532,7 +549,11 @@ def _kernel(
     nrows = m_e - m_s
     lo = m_s - a_s  # Tile row of slot m_s.
     wl = v2w_ref[v]
-    wslot = jnp.bitwise_and(wl, 1)
+    # With a bf16 copy of the expert's weight (`dequant_w`), one fp8 buffer
+    # suffices: the next expert's weight is prefetched into it once the
+    # current one is dequantized.
+    wslot = 0 if cfg.dequant_w else jnp.bitwise_and(wl, 1)
+    next_wslot = 0 if cfg.dequant_w else 1 - wslot
     is_new_expert = jnp.logical_or(v == 0, e != v2e_ref[jnp.maximum(v - 1, 0)])
     has_next = v + 1 < num_visits
 
@@ -542,6 +563,20 @@ def _kernel(
     @pl.when(is_new_expert)
     def _wait_w():
       w_dma(wl, wslot).wait()
+      if cfg.dequant_w:
+        # Dequantize the expert's weight once; its visits reuse it.
+        assert wdq_buf is not None
+        w_cols = size_f if cfg.transpose_w else size_d
+        rchunk = _DEQUANT_ROWS if w_rows % _DEQUANT_ROWS == 0 else _SUBLANE
+        cchunk = _MXU_COLS if w_cols % _MXU_COLS == 0 else LANES
+
+        @pl.loop(0, w_rows // rchunk)
+        def _dequant(r):
+          r0 = pl.multiple_of(r * rchunk, rchunk)
+          for c in range(0, w_cols, cchunk):
+            wdq_buf[pl.ds(r0, rchunk), pl.ds(c, cchunk)] = w_buf[wslot, pl.ds(r0, rchunk), pl.ds(c, cchunk)].astype(
+                jnp.bfloat16
+            )
 
     act_dma(v, slot).wait()
     if cfg.accumulate:
@@ -557,7 +592,7 @@ def _kernel(
 
     @pl.when(jnp.logical_and(is_new_expert, wl + 1 < num_wloads))
     def _prefetch_w():
-      w_dma(wl + 1, 1 - wslot).start()
+      w_dma(wl + 1, next_wslot).start()
 
     if not cfg.accumulate:
 
@@ -628,13 +663,20 @@ def _kernel(
         lhs = act_buf[slot, :bucket_m]
         parts = []
         for sub in range(0, cfg.tile_n, _MXU_COLS):
-          acc = lax.dot_general(
-              lhs,
-              w_buf[wslot, :, pl.ds(c0 + sub, _MXU_COLS)],
-              (((1,), (0,)), ((), ())),
-              preferred_element_type=jnp.float32,
-          )
-          parts.append((acc * scale).astype(jnp.bfloat16))
+          w_ref = wdq_buf if cfg.dequant_w else w_buf.at[wslot]
+          assert w_ref is not None
+          if cfg.transpose_w:
+            # `[D, F]` weight: contract the act columns with the weight's.
+            rhs = w_ref[pl.ds(c0 + sub, _MXU_COLS), :]
+            dims = (((1,), (1,)), ((), ()))
+          else:
+            rhs = w_ref[:, pl.ds(c0 + sub, _MXU_COLS)]
+            dims = (((1,), (0,)), ((), ()))
+          acc = lax.dot_general(lhs, rhs, dims, preferred_element_type=jnp.float32)
+          row = acc * scale
+          if cfg.round_rows_to_bf16:
+            row = row.astype(jnp.bfloat16)
+          parts.append(row.astype(cfg.out_dtype))
         # The strided relayout stores need static offsets: g is static.
         relayout.store_2d_into_3d(
             obuf.at[slot],
@@ -664,7 +706,7 @@ def _kernel(
     @pl.loop(0, num_rmw)
     def _add(j):
       r = lo + rmw_row(j)
-      obuf[slot, r] = (obuf[slot, r].astype(jnp.float32) + rbuf[j].astype(jnp.float32)).astype(jnp.bfloat16)
+      obuf[slot, r] = (obuf[slot, r].astype(jnp.float32) + rbuf[j].astype(jnp.float32)).astype(cfg.out_dtype)
 
     _unrolled_loop(nrows, _ISSUE_UNROLL, functools.partial(write_row, lo, tok_base, slot))
     meta_ref[wpending_i + slot] = nrows
@@ -698,17 +740,34 @@ def linear_combine_fwd(
     out: jax.Array | None = None,
     tiles: Tiles | None = None,
     vmem_limit_bytes: int | None = None,
+    out_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+    round_rows_to_bf16: bool = True,
+    transpose_w: bool = False,
 ) -> jax.Array:
   """Returns `out` plus the top-k combine of the linear GMM of `act`.
 
   `y[token_indices[start + m]] += (act[m] @ w_q[expert(m)]) * out_scale` for
   the `sum(group_sizes)` rows m of act, sorted by expert; rows of a token are
-  summed in f32 in row order. The GMM rows are rounded to bf16 before the sum,
-  like `gmm_v2` + `ops.ragged_gather_reduce_tc`.
+  summed in f32 in row order. With `round_rows_to_bf16` (the default), the GMM
+  rows are rounded to bf16 before the sum, like `gmm_v2` +
+  `ops.ragged_gather_reduce_tc`.
+
+  Two precisions are supported:
+
+  * fp8 `act` and `w_q`: fp8 GMM; `out_scale` is the product of their scales.
+  * bf16 `act` and fp8 `w_q` (weight-only fp8): each expert's weight is
+    dequantized to bf16 in VMEM and the GMM runs in bf16; `out_scale` is the
+    weight scale. With `out_dtype=jnp.float32`, the result and the top-k sums
+    stay in f32 (an f32 `ep_reduce_dtype`).
+
+  With `transpose_w`, w_q is `[E, D, F]` and the GMM is `act[m] @
+  w_q[expert(m)]^T`, e.g. the token gradient `dgate @ w_gate^T` of the gating
+  GMM in the backward pass.
 
   Args:
-    act: fp8 activations `[C, F]`; rows past sum(group_sizes) are ignored.
-    w_q: fp8 weights `[E, F, D]`.
+    act: fp8 or bf16 activations `[C, F]`; rows past sum(group_sizes) are
+      ignored.
+    w_q: fp8 weights `[E, F, D]` (`[E, D, F]` with `transpose_w`).
     group_sizes: Rows of act of each expert `int32[E]`; sum <= C.
     token_indices: Output token of each sorted slot, `int32[num_indices]` in [0,
       N) (e.g. `sort_indices // k`). Requires start + sum(group_sizes) <=
@@ -720,30 +779,45 @@ def linear_combine_fwd(
       the tokens without rows.
     out_scale: f32 `[1, 1]` scale of the GMM (act scale * w_q scale).
     num_out_tokens: N, the number of output tokens.
-    out: Optional bf16 `[N, D // 128, 128]` to accumulate into, donated. If
-      None, the result starts at zero.
+    out: Optional `[N, D // 128, 128]` of `out_dtype` to accumulate into,
+      donated. If None, the result starts at zero.
     tiles: Optional tile sizes.
     vmem_limit_bytes: Optional Pallas VMEM limit.
+    out_dtype: Dtype of the result and of the top-k sums: bf16 or f32.
+    round_rows_to_bf16: Whether to round the GMM rows to bf16 before summing
+      them (as a bf16 `routed_out` would be); otherwise they stay f32.
+    transpose_w: Whether w_q is `[E, D, F]` (multiply by its transpose).
 
   Returns:
-    The bf16 `[N, D // 128, 128]` result.
+    The `[N, D // 128, 128]` result in `out_dtype`.
   """
   if tiles is None:
     tiles = DEFAULT_TILES
   size_c, size_f = act.shape
-  num_experts, w_f, size_d = w_q.shape
-  if not (gmmv2_kernel.is_fp8(act.dtype) and gmmv2_kernel.is_fp8(w_q.dtype)):
-    raise ValueError(f"act and w_q must be fp8, got {act.dtype}, {w_q.dtype}.")
+  if transpose_w:
+    num_experts, size_d, w_f = w_q.shape
+  else:
+    num_experts, w_f, size_d = w_q.shape
+  if not gmmv2_kernel.is_fp8(w_q.dtype):
+    raise ValueError(f"w_q must be fp8, got {w_q.dtype}.")
+  dequant_w = act.dtype == jnp.bfloat16
+  if not (dequant_w or gmmv2_kernel.is_fp8(act.dtype)):
+    raise ValueError(f"act must be fp8 or bf16, got {act.dtype}.")
+  out_dtype = jnp.dtype(out_dtype)
+  if out_dtype not in (jnp.dtype(jnp.bfloat16), jnp.dtype(jnp.float32)):
+    raise ValueError(f"out_dtype must be bf16 or f32, got {out_dtype}.")
   if w_f != size_f or size_d % LANES or group_sizes.shape != (num_experts,):
     raise ValueError(f"Bad shapes: act {act.shape}, w_q {w_q.shape}, group_sizes" f" {group_sizes.shape}.")
+  if transpose_w and size_f % LANES:
+    raise ValueError(f"transpose_w needs F % {LANES} == 0, got {size_f}.")
   if token_indices.ndim != 1:
     raise ValueError(f"token_indices must be 1D, got {token_indices.shape}.")
   d0 = size_d // LANES
   out_shape = (num_out_tokens, d0, LANES)
   accumulate = out is not None
   if accumulate:
-    if out.shape != out_shape or out.dtype != jnp.bfloat16:
-      raise ValueError(f"out must be bf16 {out_shape}, got {out.shape}.")
+    if out.shape != out_shape or out.dtype != out_dtype:
+      raise ValueError(f"out must be {out_dtype} {out_shape}, got {out.dtype} {out.shape}.")
   elif sorted_tokens is None:
     raise ValueError("sorted_tokens is required without out.")
   tile_m = min(tiles.tile_m, pl.cdiv(size_c, _SUBLANE) * _SUBLANE)
@@ -772,7 +846,8 @@ def linear_combine_fwd(
   zero_window = tiles.zero_window
   zero_rows = tiles.zero_rows
   num_zero_windows = pl.cdiv(size_c + 1, zero_window)
-  inputs = [act, w_q.reshape(num_experts * size_f, size_d), token_indices]
+  w_rows, w_cols = (size_d, size_f) if transpose_w else (size_f, size_d)
+  inputs = [act, w_q.reshape(num_experts * w_rows, w_cols), token_indices]
   if accumulate:
     zmeta = jnp.zeros((num_zero_windows,), jnp.int32)
     inputs.append(out)
@@ -802,6 +877,10 @@ def linear_combine_fwd(
       zero_rows=zero_rows,
       accumulate=accumulate,
       bucket_m=bucket_m,
+      dequant_w=dequant_w,
+      out_dtype=out_dtype,
+      round_rows_to_bf16=round_rows_to_bf16,
+      transpose_w=transpose_w,
   )
   dma = pltpu.SemaphoreType.DMA
   scratch_shapes = [
@@ -816,10 +895,10 @@ def linear_combine_fwd(
       pltpu.SMEM((2 * zero_window,), jnp.int32),  # zwin_smem
       pltpu.SMEM((zero_window,), jnp.int32),  # zlist_smem
       pltpu.VMEM((2, tile_m, size_f), act.dtype),  # act_buf
-      pltpu.VMEM((2, size_f, size_d), w_q.dtype),  # w_buf
-      pltpu.VMEM((2, tile_m, d0, LANES), jnp.bfloat16),  # obuf
-      pltpu.VMEM((tile_m, d0, LANES), jnp.bfloat16),  # rbuf
-      pltpu.VMEM((zero_rows, d0, LANES), jnp.bfloat16),  # zbuf
+      pltpu.VMEM((1 if dequant_w else 2, w_rows, w_cols), w_q.dtype),  # w_buf
+      pltpu.VMEM((2, tile_m, d0, LANES), out_dtype),  # obuf
+      pltpu.VMEM((tile_m, d0, LANES), out_dtype),  # rbuf
+      pltpu.VMEM((zero_rows, d0, LANES), out_dtype),  # zbuf
       dma((2,)),  # act_sem
       dma((_TOK_SLOTS,)),  # tok_sem
       dma((2,)),  # w_sem
@@ -828,6 +907,8 @@ def linear_combine_fwd(
       dma((1,)),  # zero_sem
       dma((1,)),  # zt_sem
   ]
+  if dequant_w:
+    scratch_shapes.append(pltpu.VMEM((w_rows, w_cols), jnp.bfloat16))  # wdq
   if vmem_limit_bytes is None:
     vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.98)
   hbm = pl.BlockSpec(memory_space=pltpu.HBM)
@@ -839,12 +920,19 @@ def linear_combine_fwd(
   )
   manual_axis_type = (jax.typeof(out) if accumulate else jax.typeof(act)).manual_axis_type
   flops = 2 * size_c * size_f * size_d
-  bytes_accessed = num_experts * size_f * size_d + size_c * size_f + 2 * num_out_tokens * size_d * 2
+  bytes_accessed = (
+      num_experts * size_f * size_d + size_c * size_f * act.dtype.itemsize + 2 * num_out_tokens * size_d * out_dtype.itemsize
+  )
   acc_tag = "-acc" if accumulate else ""
-  name = f"linear_combine_fwd-g_{num_experts}-m_{size_c}-k_{size_f}-n_{size_d}" f"-tm_{tile_m}-tn_{tile_n}{acc_tag}"
+  prec_tag = f"-w8-{out_dtype.name}" if dequant_w else ""
+  if transpose_w:
+    prec_tag += "-wt"
+  name = (
+      f"linear_combine_fwd-g_{num_experts}-m_{size_c}-k_{size_f}-n_{size_d}" f"-tm_{tile_m}-tn_{tile_n}{acc_tag}{prec_tag}"
+  )
   return pl.pallas_call(
       functools.partial(_kernel, cfg=cfg),
-      out_shape=jax.ShapeDtypeStruct(out_shape, jnp.bfloat16, manual_axis_type=manual_axis_type),
+      out_shape=jax.ShapeDtypeStruct(out_shape, out_dtype, manual_axis_type=manual_axis_type),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=len(scalars),
           grid=(jnp.maximum(num_visits, 1),),

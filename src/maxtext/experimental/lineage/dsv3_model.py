@@ -239,7 +239,7 @@ def _grad_reduce_dtype(cfg: dsv3_config.DSv3Config) -> Any:
   return getattr(cfg.kernels.quant, "grad_reduce_dtype", None)
 
 
-def seq_split_permutation(seq_len: int, cp: int) -> np.ndarray:
+def seq_split_permutation(seq_len: int, cp: int, zigzag: bool = False) -> np.ndarray:
   """Token order of sequence-split microbatches (see `dsv3_mla.SeqSplitSplash`).
 
   The sequence's halves are each cut into `cp` chunks, and CP rank i's local
@@ -247,13 +247,25 @@ def seq_split_permutation(seq_len: int, cp: int) -> np.ndarray:
   local shard in two then gives microbatch 0 the first half of the sequence
   and microbatch 1 the second half, each in order across the CP ranks.
 
+  With `zigzag` (KV all-gather CP, `dsv3_mla.set_seq_split_kv_gather`), the
+  halves are each cut into `2 * cp` chunks, and CP rank i's local sequence
+  shard is [chunks i and 2 * cp - 1 - i of half 0, the same chunks of half 1],
+  which balances the causal attention work of the ranks.
+
   Args:
     seq_len: Sequence length.
     cp: Number of context-parallel (sequence) shards.
+    zigzag: Use the zigzag chunks of KV all-gather CP.
 
   Returns:
     `perm` such that the permuted sequence is `x[..., perm]`.
   """
+  if zigzag:
+    if seq_len % (4 * cp):
+      raise ValueError(f"seq_len {seq_len} must be divisible by 4 * cp.")
+    half = seq_len // 2
+    order = dsv3_mla.zigzag_half_order(half, cp).reshape(cp, half // cp)
+    return np.concatenate([np.concatenate([order[r], half + order[r]]) for r in range(cp)])
   if seq_len % (2 * cp):
     raise ValueError(f"seq_len {seq_len} must be divisible by 2 * cp = {2*cp}.")
   idx = np.arange(seq_len).reshape(2, cp, seq_len // (2 * cp))
@@ -284,7 +296,7 @@ def seq_split_permute_batch(
   if isinstance(attention_axes, str):
     attention_axes = (attention_axes,)
   cp = math.prod(mesh.shape[a] for a in attention_axes)
-  perm = seq_split_permutation(batch.inputs.shape[1], cp)
+  perm = seq_split_permutation(batch.inputs.shape[1], cp, zigzag=dsv3_mla.seq_split_kv_gather())
 
   def _permute(x):
     # The fields may already be sharded on the sequence; keep their sharding.
@@ -352,7 +364,40 @@ def init_kernels(
       dq_reduction_steps=k.dq_reduction_steps,
       q_prescaled_log2e=(bool(getattr(getattr(k.quant, "mla", None), "q_prescaled_log2e", False)) or k.q_prescaled_log2e),
   )
-  if k.microbatch_split == "seq":
+  if k.microbatch_split == "seq" and dsv3_mla.seq_split_kv_gather():
+    # KV all-gather CP: query-sequence-sharded kernels over the zigzag query
+    # order; both are plain causal masks over the original key order.
+    attention_axes = s.axis_mapping.get("attention", ())
+    if isinstance(attention_axes, str):
+      attention_axes = (attention_axes,)
+    cp = math.prod(mesh.shape[a] for a in attention_axes)
+    dsv3_mla.set_seq_split_cp(cp)
+    half = k.max_target_length // 2
+    q_order = dsv3_mla.zigzag_half_order(half, cp)
+    chunk = half // (2 * cp)
+    blocks = (
+        k.sa_block_q,
+        k.sa_block_kv,
+        k.sa_block_q_dkv,
+        k.sa_block_kv_dkv,
+    )
+    # The diagonal skips need the partial blocks to be aligned causal
+    # diagonals, i.e. chunks made of whole blocks.
+    diag_ok = all(chunk % min(b, chunk) == 0 and b <= chunk for b in blocks)
+    init_seq = functools.partial(
+        init_splash,
+        kernel_out_spec=P(None, "attention"),
+        **({} if diag_ok else dict(qk_diag_skip=False, sv_diag_skip=False, diag_band_skip=False)),
+    )
+    splash_kernel = dsv3_mla.SeqSplitSplash(
+        mb0=init_seq(max_target_length=half, q_positions=q_order),
+        mb1=init_seq(
+            max_target_length=half,
+            kv_target_length=k.max_target_length,
+            q_positions=half + q_order,
+        ),
+    )
+  elif k.microbatch_split == "seq":
     # Microbatch 0 attends causally within the first half of every sequence;
     # microbatch 1's queries (the second half) attend to all keys up to them.
     half = k.max_target_length // 2

@@ -34,7 +34,8 @@ For a bf16 VMEM tile ``[tm, d0, 128]``:
   instruction; two such loads (even/odd tokens) plus 3 bit ops give the
   ``[tm, 128]`` bf16 columns ``c`` and ``c + 1`` with tokens in sublanes.
 
-8-bit dtypes pack 4 rows per word instead of 2: four strided loads (tokens
+32-bit dtypes hold one row per word, so the strided accesses alone relayout
+them. 8-bit dtypes pack 4 rows per word instead of 2: four strided loads (tokens
 ``4j + r``) give a 4x4 block of bytes per lane, which a two-stage transpose
 network (16-bit halves, then bytes) turns into columns ``c .. c + 3``. The
 network is its own inverse, so stores reuse it.
@@ -53,10 +54,10 @@ _ODD_BYTES = 0xFF00FF00
 
 
 def packing(dtype: jax.typing.DTypeLike) -> int:
-  """Rows per 32-bit word for ``dtype`` (2 for bf16, 4 for 8-bit)."""
+  """Rows per 32-bit word for ``dtype`` (1 for f32, 2 for bf16, 4 for 8-bit)."""
   bits = jax.dtypes.itemsize_bits(jnp.dtype(dtype))
-  if bits not in (8, 16):
-    raise ValueError(f"3D relayout supports 16-bit and 8-bit dtypes; got {jnp.dtype(dtype)}.")
+  if bits not in (8, 16, 32):
+    raise ValueError("3D relayout supports 32-bit, 16-bit and 8-bit dtypes; got" f" {jnp.dtype(dtype)}.")
   return 32 // bits
 
 
@@ -123,6 +124,8 @@ def _transpose_words(words):
   Returns:
     The ``pack`` transposed uint32 arrays.
   """
+  if len(words) == 1:  # 32-bit: one row per word, nothing to transpose.
+    return list(words)
   if len(words) == 2:
     return list(_transpose_halves(*words))
   assert len(words) == 4, len(words)

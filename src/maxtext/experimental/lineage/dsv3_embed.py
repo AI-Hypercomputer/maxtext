@@ -22,9 +22,11 @@ over explicit weight pytrees.
 
 from collections.abc import Mapping
 import dataclasses
+import math
 from typing import Any, Generic, TypeVar
 
 import jax
+import jax.experimental.compute_on
 import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
@@ -42,6 +44,198 @@ default_embedding_init = jax.nn.initializers.normal(stddev=1.0)
 # MaxText's `DenseGeneral` default: `nd_dense_init(1.0, "fan_in",
 # "truncated_normal")`, which is `dsv3_types.default_kernel_init`.
 default_head_kernel_init = dsv3_types.default_kernel_init
+
+# Whether `embed_tokens_collected` / `collect_head_kernel` reduce their f32
+# weight gradients on SparseCore 1 (see `set_grad_sparse_core`).
+_EMBED_GRAD_SC = False
+_HEAD_GRAD_SC = False
+# Whether those reductions are `compute_on` SparseCore blocks (False runs the
+# same collectives on the default device, e.g. in CPU tests).
+_GRAD_SC_COMPUTE_ON = True
+# SparseCore of the all-reduce stage, or None for the TensorCore.
+_GRAD_SC_ALL_REDUCE_CORE: int | None = None
+# Reduce with `ops.reduce_along_axis` instead of the local shard_maps.
+_GRAD_SC_USE_OPS_REDUCE = True
+# Reduce-scatter stacked `[emb / n, vocab]` shards (see `_collect_with_sc_grad`).
+_GRAD_SC_STACKED = False
+
+
+def set_grad_sparse_core(embed: bool, head: bool, *, compute_on: bool = True) -> None:
+  """Reduces the f32 embedding table / LM head kernel gradients on SparseCore.
+
+  By default the cotangent of the all-gathered (`reduced`) table or kernel is
+  reduce-scattered (and all-reduced over the other mesh axes) by one
+  synchronous TensorCore `all-reduce-scatter` fusion, which XLA schedules at
+  the end of the step. With this, the reduction is an async SparseCore 1
+  collective (`compute_on`), so the LM head kernel's, ready at the start of the
+  backward pass, overlaps the decoder backward.
+
+  Args:
+    embed: Reduce the embedding table gradient on SparseCore.
+    head: Reduce the LM head kernel gradient on SparseCore.
+    compute_on: Place the reductions on SparseCore (False keeps the same
+      collectives on the default device, for tests off TPU).
+  """
+  global _EMBED_GRAD_SC, _HEAD_GRAD_SC, _GRAD_SC_COMPUTE_ON
+  _EMBED_GRAD_SC = embed
+  _HEAD_GRAD_SC = head
+  _GRAD_SC_COMPUTE_ON = compute_on
+
+
+def _collect_with_sc_grad(
+    weight: jax.Array,
+    *,
+    emb_dim: int,
+    dtype: jax.typing.DTypeLike,
+    grad_dtype: jax.typing.DTypeLike,
+) -> jax.Array:
+  """All-gathers `weight` along its embedding dim; reduces its grad on SC 1.
+
+  The forward pass casts the local shard to `dtype`, all-gathers whole
+  `[emb / shards, vocab]` shards and returns the full weight in `grad_dtype`
+  (holding `dtype` values), `reduced` over every mesh axis. The backward pass
+  reduce-scatters the (unreduced, full) `grad_dtype` cotangent onto the shards
+  and all-reduces it over the other mesh axes, in `grad_dtype`, on SparseCore 1.
+
+  Args:
+    weight: `[vocab, emb]` (emb_dim=1) or `[emb, vocab]` (emb_dim=0) weight,
+      sharded on its embedding dim only.
+    emb_dim: The embedding dim of `weight`.
+    dtype: Dtype of the gathered values.
+    grad_dtype: Dtype of the returned weight and of the gradient reduction.
+
+  Returns:
+    The full weight in `grad_dtype`, `reduced` over every mesh axis.
+  """
+  spec = tuple(jax.typeof(weight).sharding.spec)
+  spec += (None,) * (2 - len(spec))
+  if spec[1 - emb_dim] is not None:
+    raise ValueError(f"The vocab dim must be replicated: {weight}")
+  emb_axes = spec[emb_dim]
+  emb_axes = (emb_axes,) if isinstance(emb_axes, str) else tuple(emb_axes or ())
+  mesh = jax.typeof(weight).sharding.mesh
+  other_axes = tuple(ax for ax in mesh.axis_names if ax not in emb_axes)
+  all_axes = frozenset(emb_axes + other_axes)
+  full_spec = jax.sharding.PartitionSpec(None, None, reduced=all_axes)
+  grad_spec = jax.sharding.PartitionSpec(*spec)
+  num_shards = math.prod(mesh.shape[a] for a in emb_axes)
+
+  def _gather(w_local):
+    # [vocab, emb / n] -> [emb / n, vocab] -> [n, emb / n, vocab] -> [emb, vocab]
+    w_local = w_local.astype(dtype)
+    if emb_dim == 1:
+      w_local = w_local.T
+    for ax in other_axes:
+      w_local = jax.lax.pcast(w_local, ax, to="reduced")
+    if emb_axes:
+      w_local = jax.lax.all_gather(w_local, emb_axes, axis=0, to="reduced")
+      w_local = w_local.reshape(-1, w_local.shape[-1])
+    w_local = w_local.astype(grad_dtype)
+    return w_local.T if emb_dim == 1 else w_local
+
+  def _scatter(ct):
+    # [vocab, emb] / [emb, vocab] -> [n, emb / n, vocab] -> [emb / n, vocab]
+    ct = ct.astype(grad_dtype)
+    if emb_dim == 1:
+      ct = ct.T
+    if emb_axes:
+      ct = ct.reshape(num_shards, -1, ct.shape[-1])
+      ct = jax.lax.psum_scatter(ct, emb_axes, scatter_dimension=0, tiled=True)
+      ct = ct.reshape(-1, ct.shape[-1])
+    return ct.T if emb_dim == 1 else ct
+
+  def _all_reduce(ct):
+    for ax in reversed(other_axes):
+      ct = jax.lax.psum(ct, ax)
+    return ct
+
+  def _on_sc(fn, core):
+    if not _GRAD_SC_COMPUTE_ON or core is None:
+      return fn
+    return jax.experimental.compute_on.compute_on(
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [core]}},
+    )(fn)
+
+  def _fwd_impl(w):
+    return jax.shard_map(_gather, mesh=mesh, in_specs=(grad_spec,), out_specs=full_spec)(w)
+
+  @jax.custom_vjp
+  def _f(w):
+    return _fwd_impl(w)
+
+  def _f_fwd(w):
+    # `w` is only read for its sharding (the `like` of the reduction).
+    return _fwd_impl(w), w
+
+  def _f_bwd(w_res, ct):
+    if _GRAD_SC_USE_OPS_REDUCE:
+      # The layer weights' proven path (`ops.reduce_along_axis`): the
+      # reduce-scatter along the shard axes on SparseCore 1, then the
+      # all-reduce along the other axes.
+      axis_names = emb_axes + other_axes
+      sc_kwargs = (
+          dict(
+              compute_type="tpu_sparsecore",
+              compiler_options={"sparse_core_config": {"core_ids": [1]}},
+          )
+          if _GRAD_SC_COMPUTE_ON
+          else {}
+      )
+      # Reduce-scatter whole `[emb / n, vocab]` shards stacked on a new
+      # leading dim: scattering the (minor-laid-out) embedding dim in place is
+      # legalized into an all-reduce of the full cotangent.
+      g = ct.astype(grad_dtype)
+      if not _GRAD_SC_STACKED:
+        # TODO: the stacked reduce-scatter crashes the TPU latency hiding
+        # scheduler (`start != nullptr`); this is legalized into a SparseCore
+        # all-reduce of the full cotangent instead.
+        if emb_axes:
+          g = ops.reduce_along_axis(g, axis_names, {}, w_res, axes=frozenset(emb_axes), **sc_kwargs)
+        if other_axes:
+          g = ops.reduce_along_axis(g, axis_names, {}, w_res, axes=frozenset(other_axes))
+        return (g.astype(weight.dtype),)
+      like = w_res
+      if emb_dim == 1:
+        g, like = g.T, w_res.T
+      stacked = (num_shards, g.shape[0] // num_shards, g.shape[1])
+      g = g.reshape(stacked)
+      like = like.reshape(
+          stacked,
+          out_sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(emb_axes or None, None, None)),
+      )
+      if emb_axes:
+        g = ops.reduce_along_axis(g, axis_names, {}, like, axes=frozenset(emb_axes), **sc_kwargs)
+      if other_axes:
+        g = ops.reduce_along_axis(g, axis_names, {}, like, axes=frozenset(other_axes))
+      g = g.reshape(stacked[0] * stacked[1], stacked[2])
+      if emb_dim == 1:
+        g = g.T
+      return (jax.sharding.reshard(g, grad_spec).astype(weight.dtype),)
+    # Like `ops.reduce_along_axis` for the layer weights: the reduce-scatter
+    # along the shard axes on SparseCore 1, then the all-reduce along the other
+    # axes (on 1 / n of the data) on SparseCore 0, as separate blocks.
+    ct_spec = jax.sharding.PartitionSpec(None, None, unreduced=all_axes)
+    mid_parts = [None, None]
+    mid_parts[emb_dim] = emb_axes or None
+    mid_spec = jax.sharding.PartitionSpec(*mid_parts, unreduced=frozenset(other_axes))
+    g = ct
+    if emb_axes:
+      g = jax.shard_map(_on_sc(_scatter, 1), mesh=mesh, in_specs=(ct_spec,), out_specs=mid_spec)(g)
+    else:
+      mid_spec = ct_spec
+    if other_axes:
+      g = jax.shard_map(
+          _on_sc(_all_reduce, _GRAD_SC_ALL_REDUCE_CORE),
+          mesh=mesh,
+          in_specs=(mid_spec,),
+          out_specs=grad_spec,
+      )(g)
+    return (g.astype(weight.dtype),)
+
+  _f.defvjp(_f_fwd, _f_bwd)
+  return _f(weight)
 
 
 @jax.tree_util.register_dataclass
@@ -161,6 +355,21 @@ def embed_tokens_collected(
     )(table, tokens)
 
   if grad_dtype is not None:
+    if _EMBED_GRAD_SC:
+      # The full table in `grad_dtype`, so the lookup's transpose sums the
+      # token cotangents in it; its reduction runs on SparseCore 1.
+      full = _collect_with_sc_grad(table, emb_dim=1, dtype=dtype, grad_dtype=grad_dtype)
+      out_sharding = jax.sharding.NamedSharding(
+          jax.typeof(table).sharding.mesh,
+          jax.sharding.PartitionSpec(*tokens_spec, None),
+      )
+      return embed_tokens(
+          tokens,
+          full,
+          dtype=grad_dtype,
+          iota_embed=iota_embed,
+          out_sharding=out_sharding,
+      ).astype(dtype)
     # Outside the `shard_map`: a `custom_vjp` inside it would make the output
     # varying over the table's axes.
     return ops.f32_grad(_lookup, table, tokens, compute_dtype=dtype)
@@ -298,6 +507,11 @@ def _head_dot_with_wgrad_dtype(
         preferred_element_type=grad_dtype,
         out_sharding=_cotangent_sharding(kernel),
     ).astype(kernel.dtype)
+    if _HEAD_GRAD_SC:
+      # Computes the kernel gradient before the decoder backward pass (which
+      # needs grad_x), so its SparseCore reduction overlaps it instead of
+      # running after the step's last layer.
+      grad_x, grad_kernel = jax.lax.optimization_barrier((grad_x, grad_kernel))
     return grad_x, grad_kernel
 
   _f.defvjp(_fwd, _bwd)
@@ -427,6 +641,8 @@ def collect_head_kernel(
     return collected.reshape(kernel.shape)
 
   if grad_dtype is not None:
+    if _HEAD_GRAD_SC:
+      return _collect_with_sc_grad(kernel, emb_dim=0, dtype=dtype, grad_dtype=grad_dtype)
     return ops.f32_grad(lambda k: _collect(k).astype(grad_dtype), kernel, compute_dtype=dtype)
   return _collect(jnp.asarray(kernel, dtype))
 

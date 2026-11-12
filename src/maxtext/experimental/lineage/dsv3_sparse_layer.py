@@ -21,6 +21,7 @@ import math
 from typing import Any, Protocol, overload
 
 import jax
+from jax.experimental import compute_on
 from jax.experimental import layout as jax_layout
 from jax.experimental.overlap import program_order
 import jax.numpy as jnp
@@ -466,12 +467,25 @@ def _dispatch_bwd(
     mesh: jax.sharding.Mesh,
     gmm_fn: GmmFn,
     quant_rule: quantization.GmmQuantRule | None,
+    router_metadata: dsv3_router.RouterMetadata[jax.Array] | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "NBT D0 D1"],
     jt.Num[jax.Array, "NBT D0 D1"],
     jt.Num[jax.Array, "num_token_shards 1"] | None,
 ]:
   """Rematerializes dispatch of moe_in and transposes combine of grad_out."""
+  if router_metadata is not None and router_metadata.ragged is not None:
+    if quant_rule is not None:
+      raise NotImplementedError("ep_ragged_a2a needs bf16 routed experts.")
+    x_recv, grad_recv = dsv3_router.dsv3_ragged_dispatch(
+        moe_in,
+        router_metadata,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+        mesh=mesh,
+        grad_out=grad_out,
+    )
+    return x_recv, grad_recv, None
   moe_in_q = _quantize_act(moe_in, quant_rule)
   if quant_rule is None or not hasattr(gmm_fn, "linear_bwd_gather"):
     x_ag, grad_y_ag = dsv3_router.dsv3_aggregated_dispatches(
@@ -596,8 +610,22 @@ def ubatch_dispatch(
   """Token all-gather dispatch across devices.
 
   With `quant_rule`, the tokens are all-gathered as fp8, quantized with its
-  static activation scale; the returned moe_in is unchanged.
+  static activation scale; the returned moe_in is unchanged. With a
+  `router_metadata.ragged` exchange (`set_ep_ragged_a2a`), the tokens are
+  instead sent to their experts' devices with a ragged all-to-all, and the
+  first output holds the received (capacity, D0, D1) rows per device.
   """
+  if router_metadata.ragged is not None:
+    if quant_rule is not None:
+      raise NotImplementedError("ep_ragged_a2a needs bf16 routed experts.")
+    x_recv = dsv3_router.dsv3_ragged_dispatch(
+        moe_in,
+        router_metadata,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+        mesh=mesh,
+    )
+    return (x_recv, router_metadata, moe_in, mla_out), ()
   x_ag = dsv3_router.dsv3_dispatch(
       _quantize_act(moe_in, quant_rule),
       expert_axis_name=expert_axis_name,
@@ -823,8 +851,29 @@ def _routed_experts_chunked_impl(
       and hasattr(gmm_fn, "gather_gate")
       and hasattr(gmm_fn, "linear_combine")
   )
+  # With bf16 tokens, fp8 (weight-only) weights and an f32 EP reduction, the
+  # linear GMM is fused with unpermute_chunk (`set_fused_linear_combine`).
+  fused_w8_combine = (
+      _FUSED_LINEAR_COMBINE
+      and not gather_in_gate
+      and quant_rule is None
+      and getattr(gmm_fn, "supports_w8_linear_combine", False)
+      and w_routed.linear is not None
+      and jnp.dtype(w_routed.linear.dtype).itemsize == 1
+      and ep_reduce_dtype is not None
+      and jnp.dtype(ep_reduce_dtype) == jnp.float32
+  )
+  # Additionally fuse permute_chunk, the gate GMM and the SiLU into one kernel
+  # (`set_fused_gather_gate`).
+  fused_w8_gather = (
+      fused_w8_combine
+      and _FUSED_GATHER_GATE
+      and getattr(gmm_fn, "supports_w8_gather_gate", False)
+      and w_routed.gate is not None
+      and jnp.dtype(w_routed.gate.dtype).itemsize == 1
+  )
   token_indices = None
-  if gather_in_gate:
+  if gather_in_gate or fused_w8_combine:
     token_indices = metadata.sort_indices // num_experts_per_tok
 
   def _chunk(start, reduce_metadata, bank, bank_offset, y_ag_acc=None):
@@ -846,6 +895,48 @@ def _routed_experts_chunked_impl(
           y_ag_acc,
           gmm_fn=gmm_fn,
           quant_rule=quant_rule,
+      )
+    elif fused_w8_gather:
+      assert token_indices is not None and ep_reduce_dtype is not None
+      y_ag, bank = dsv3_experts.dsv3_routed_experts_gather_combine_w8_impl(
+          x_ag,
+          token_indices,
+          start,
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0],
+          reduce_metadata.tokens,
+          y_ag_acc,
+          gmm_fn=gmm_fn,
+          out_dtype=ep_reduce_dtype,
+          glu_f32_inputs=True,
+      )
+    elif fused_w8_combine:
+      assert token_indices is not None and ep_reduce_dtype is not None
+      routed = dsv3_router.permute_chunk(
+          x_ag,
+          metadata.sort_indices,
+          start,
+          num_tokens,
+          capacity=capacity,
+          num_experts_per_tok=num_experts_per_tok,
+      )
+      y_ag, bank = dsv3_experts.dsv3_routed_experts_combine_impl(
+          routed,
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0],
+          token_indices,
+          start,
+          reduce_metadata.tokens,
+          y_ag_acc,
+          num_out_tokens=x_ag.shape[0],
+          gmm_fn=gmm_fn,
+          out_dtype=ep_reduce_dtype,
       )
     else:
       routed = dsv3_router.permute_chunk(
@@ -915,6 +1006,126 @@ def _routed_experts_chunked_impl(
   return y_ag, bank, bank_offset
 
 
+def _routed_experts_ragged_impl(
+    x_recv: jt.Num[jax.Array, "C D0 D1"],
+    metadata: dsv3_router.RouterMetadata[jax.Array],
+    w_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    bank: jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
+    bank_offset: jt.Num[jax.Array, "1"],
+    *,
+    gmm_fn: GmmFn,
+) -> tuple[
+    jt.Num[jax.Array, "C D0 D1"],
+    jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
+    jt.Num[jax.Array, "1"],
+]:
+  """Runs the routed experts on the rows received by the ragged dispatch.
+
+  The received rows are the first `min(sum(group_sizes), capacity)` sorted
+  local-expert slots (see `dsv3_router.RaggedExchange`), i.e. chunk 0 of
+  `_routed_experts_chunked_impl`; slots past the capacity were dropped.
+
+  Args:
+    x_recv: Received expert-major rows on this device.
+    metadata: Router metadata on this device.
+    w_routed: Routed expert weights on this device, in the `routed_w_to_tiles`
+      view.
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Write offset into `bank`.
+    gmm_fn: Function to perform Grouped Matrix Multiplication.
+
+  Returns:
+    Tuple of (expert output rows, laid out like x_recv, bank, bank_offset).
+  """
+  capacity = metadata.capacity
+  num_tokens = dsv3_router.chunk_num_tokens(jnp.sum(metadata.group_sizes, dtype=jnp.int32), 0, capacity)
+  group_sizes = dsv3_router.chunk_group_sizes(metadata.group_sizes, 0, num_tokens)
+  y_rows, bank = dsv3_experts.dsv3_routed_experts_impl(
+      x_recv,
+      routed_w_from_tiles(w_routed),
+      group_sizes,
+      _chunk_rows(metadata.sorted_coeffs, 0, capacity),
+      _bank_from_carry(bank),
+      bank_offset[0],
+      gmm_fn=gmm_fn,
+  )
+  bank = constrain_activation_bank(bank)
+  return (
+      y_rows.astype(x_recv.dtype),
+      _bank_to_carry(bank),
+      bank_offset + dsv3_experts.bank_aligned(num_tokens),
+  )
+
+
+def _routed_experts_ragged_bwd_impl(
+    x_recv: jt.Num[jax.Array, "C D0 D1"],
+    grad_recv: jt.Num[jax.Array, "C D0 D1"],
+    metadata: dsv3_router.RouterMetadata[jax.Array],
+    w_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    bank: jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
+    bank_offset: jt.Num[jax.Array, "1"],
+    grad_w_acc: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None,
+    w_routed_q: None = None,
+    grad_y_scale: None = None,
+    *,
+    gmm_fn: GmmFn,
+) -> tuple[
+    jt.Num[jax.Array, "C D0 D1"],
+    jt.Num[jax.Array, "kNBT"],
+    dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
+    jt.Num[jax.Array, "1"],
+]:
+  """Backward pass of `_routed_experts_ragged_impl`.
+
+  Args:
+    x_recv: Received expert-major rows on this device (rematerialized).
+    grad_recv: Received output cotangent rows, laid out like x_recv.
+    metadata: Router metadata on this device.
+    w_routed: Routed expert weights on this device.
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Bank offset after the forward pass of this layer.
+    grad_w_acc: Optional routed expert weight gradients to accumulate into.
+    w_routed_q: Unused (bf16 routed experts only).
+    grad_y_scale: Unused (bf16 routed experts only).
+    gmm_fn: Function to perform Grouped Matrix Multiplication.
+
+  Returns:
+    Tuple of (token gradient rows laid out like x_recv, grad_sorted_coeffs
+    (flattened, zero for dropped slots), grad_w_routed, bank, bank_offset
+    before the forward pass of this layer).
+  """
+  del w_routed_q, grad_y_scale
+  capacity = metadata.capacity
+  num_slots = metadata.sort_indices.shape[0]
+  num_tokens = dsv3_router.chunk_num_tokens(jnp.sum(metadata.group_sizes, dtype=jnp.int32), 0, capacity)
+  bank_offset = bank_offset - dsv3_experts.bank_aligned(num_tokens)
+  group_sizes = dsv3_router.chunk_group_sizes(metadata.group_sizes, 0, num_tokens)
+  if grad_w_acc is not None:
+    grad_w_acc = routed_w_from_tiles(grad_w_acc)
+  grad_x_rows, grad_w_routed, grad_coeffs, bank = dsv3_experts.dsv3_routed_experts_bwd_impl(
+      grad_recv,
+      x_recv,
+      routed_w_from_tiles(w_routed),
+      group_sizes,
+      _chunk_rows(metadata.sorted_coeffs, 0, capacity),
+      _bank_from_carry(bank),
+      bank_offset[0],
+      grad_w_acc,
+      gmm_fn=gmm_fn,
+  )
+  grad_coeffs = jnp.reshape(grad_coeffs, (-1,))
+  grad_coeffs = jnp.where(jnp.arange(capacity) < num_tokens, grad_coeffs, 0).astype(grad_coeffs.dtype)
+  grad_sorted_coeffs = jnp.pad(grad_coeffs, (0, num_slots - capacity))
+  return (
+      grad_x_rows.astype(x_recv.dtype),
+      grad_sorted_coeffs,
+      routed_w_to_tiles(grad_w_routed),
+      _bank_to_carry(constrain_activation_bank(bank)),
+      bank_offset,
+  )
+
+
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def ubatch_expert(
@@ -938,6 +1149,12 @@ def ubatch_expert(
             jt.Num[jax.Array, "NBT D0 D1"],
             jt.Num[jax.Array, "B T D"],
             jt.Num[jax.Array, "B T D"],
+        ]
+        | tuple[
+            jt.Num[jax.Array, "NBT D0 D1"],
+            jt.Num[jax.Array, "B T D"],
+            jt.Num[jax.Array, "B T D"],
+            dsv3_router.RaggedExchange,
         ],
         tuple[
             jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
@@ -952,18 +1169,30 @@ def ubatch_expert(
   `dsv3_experts.dsv3_routed_experts_impl`). When `w_shared` is omitted, `moe_in`
   is forwarded so `ubatch_combine` can run `dsv3_shared_expert` in parallel with
   the combine `reduce-scatter`.
+
+  With a `router_metadata.ragged` exchange (`set_ep_ragged_a2a`), x_ag holds
+  the received expert-major rows of `ubatch_dispatch`, the first output holds
+  the (not top-k reduced) expert output rows, and the exchange is appended to
+  the outputs for `ubatch_combine`.
   """
   x_ag_pspec = jax.typeof(x_ag).sharding.spec
   bank_pspec = jax.typeof(bank).sharding.spec
   offset_pspec = jax.typeof(bank_offset).sharding.spec
+  ragged = router_metadata.ragged
+  if ragged is not None:
+    if quant_rule is not None:
+      raise NotImplementedError("ep_ragged_a2a needs bf16 routed experts.")
+    expert_fn = functools.partial(_routed_experts_ragged_impl, gmm_fn=gmm_fn)
+  else:
+    expert_fn = functools.partial(
+        _routed_experts_chunked_impl,
+        num_experts_per_tok=num_experts_per_tok,
+        gmm_fn=gmm_fn,
+        quant_rule=quant_rule,
+        ep_reduce_dtype=ep_reduce_dtype,
+    )
   y_ag, bank, bank_offset = jax.shard_map(
-      functools.partial(
-          _routed_experts_chunked_impl,
-          num_experts_per_tok=num_experts_per_tok,
-          gmm_fn=gmm_fn,
-          quant_rule=quant_rule,
-          ep_reduce_dtype=ep_reduce_dtype,
-      ),
+      expert_fn,
       mesh=mesh,
       out_specs=(x_ag_pspec, bank_pspec, offset_pspec),
   )(x_ag, router_metadata, w_routed, bank, bank_offset)
@@ -974,6 +1203,8 @@ def ubatch_expert(
       shared_or_moe_in,
       mla_out,
   )
+  if ragged is not None:
+    expert_out = (*expert_out, ragged)
   return (expert_out, (bank, bank_offset)), router_metadata
 
 
@@ -983,6 +1214,7 @@ def ubatch_combine(
     y_ag: jt.Num[jax.Array, "NBT D0 D1"],
     shared_or_moe_in: jt.Num[jax.Array, "B T D"],
     mla_out: jt.Num[jax.Array, "B T D"],
+    ragged: dsv3_router.RaggedExchange | None = None,
     *,
     w_shared: dsv3_types.DSv3MoESharedExpertWeightsPytree | None = None,
     local_seq_length: int,
@@ -1006,18 +1238,36 @@ def ubatch_combine(
   `quantization.QuantConfig.combine_qtype`), scaling every ring hop separately
   with `combine_per_hop_scaling` (see
   `quantization.QuantConfig.combine_per_hop_scaling`).
+
+  With `ragged` (`set_ep_ragged_a2a`), y_ag holds the expert output rows, which
+  are sent back to their tokens with a ragged all-to-all and summed over top-k
+  in f32.
   """
-  combined_x = dsv3_router.dsv3_combine(
-      y_ag,
-      local_seq_length=local_seq_length,
-      expert_axis_name=expert_axis_name,
-      axis_mapping=axis_mapping,
-      mesh=mesh,
-      out_specs=out_specs,
-      combine_qtype=combine_qtype,
-      combine_per_hop_scaling=combine_per_hop_scaling,
-      out_dtype=mla_out.dtype,
-  )
+  if ragged is not None:
+    num_tokens = math.prod(shared_or_moe_in.shape[:-1])
+    combined_x = dsv3_router.dsv3_ragged_combine(
+        y_ag,
+        ragged,
+        num_experts_per_tok=ragged.send_order.shape[0] // num_tokens,
+        local_seq_length=local_seq_length,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+        mesh=mesh,
+        out_specs=out_specs,
+        out_dtype=mla_out.dtype,
+    )
+  else:
+    combined_x = dsv3_router.dsv3_combine(
+        y_ag,
+        local_seq_length=local_seq_length,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+        mesh=mesh,
+        out_specs=out_specs,
+        combine_qtype=combine_qtype,
+        combine_per_hop_scaling=combine_per_hop_scaling,
+        out_dtype=mla_out.dtype,
+    )
   shared_x = shared_or_moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(shared_or_moe_in, w_shared)
   combine_out = (
       combined_x,
@@ -1081,14 +1331,20 @@ def ubatch_expert_bwd(
   # padded to 128 lanes, which makes every later pass over it 128x larger.
   coeffs_pspec = jax.sharding.PartitionSpec(jax.typeof(router_metadata.sorted_coeffs).sharding.spec[0])
   w_grad_pspecs = jax.tree.map(lambda g: jax.typeof(g).sharding.spec.to_ct_spec(), w_routed)
+  if router_metadata.ragged is not None:
+    if quant_rule is not None:
+      raise NotImplementedError("ep_ragged_a2a needs bf16 routed experts.")
+    bwd_fn = functools.partial(_routed_experts_ragged_bwd_impl, gmm_fn=gmm_fn)
+  else:
+    bwd_fn = functools.partial(
+        _routed_experts_chunked_bwd_impl,
+        num_experts_per_tok=num_experts_per_tok,
+        gmm_fn=gmm_fn,
+        quant_rule=quant_rule,
+        ep_reduce_dtype=ep_reduce_dtype,
+    )
   grad_x_ag, grad_coeffs, grad_w_routed, bank, bank_offset = jax.shard_map(
-      functools.partial(
-          _routed_experts_chunked_bwd_impl,
-          num_experts_per_tok=num_experts_per_tok,
-          gmm_fn=gmm_fn,
-          quant_rule=quant_rule,
-          ep_reduce_dtype=ep_reduce_dtype,
-      ),
+      bwd_fn,
       mesh=mesh,
       out_specs=(
           jax.typeof(x_ag).sharding.spec,
@@ -1181,11 +1437,28 @@ def _routed_experts_chunked_bwd_impl(
   # chunk's output gradient rows straight from grad_y_ag instead of a
   # permute_chunk copy.
   gather_in_linear_bwd = quant_rule is not None and hasattr(gmm_fn, "linear_bwd_gather")
+  # With bf16 tokens, fp8 (weight-only) weights and an f32 EP reduction, fuse
+  # the linear bwd gather + SiLU, the gate dw gather TGMM, and the gate dx GMM +
+  # f32 unpermute combine (`set_fused_moe_bwd`).
+  fused_w8_bwd = (
+      _FUSED_MOE_BWD
+      and not gather_in_linear_bwd
+      and quant_rule is None
+      and getattr(gmm_fn, "supports_w8_linear_bwd_gather", False)
+      and getattr(gmm_fn, "supports_w8_gate_dw_gather", False)
+      and getattr(gmm_fn, "supports_w8_gather_gate", False)
+      and w_routed.linear is not None
+      and jnp.dtype(w_routed.linear.dtype).itemsize == 1
+      and w_routed.gate is not None
+      and jnp.dtype(w_routed.gate.dtype).itemsize == 1
+      and ep_reduce_dtype is not None
+      and jnp.dtype(ep_reduce_dtype) == jnp.float32
+  )
   token_indices = None
-  if gather_in_linear_bwd:
-    assert quant_rule is not None
+  if gather_in_linear_bwd or fused_w8_bwd:
     token_indices = metadata.sort_indices // num_experts_per_tok
-    if grad_y_scale is None:
+    if gather_in_linear_bwd and grad_y_scale is None:
+      assert quant_rule is not None
       grad_y_ag, grad_y_scale = quantization.absmax_quantize(grad_y_ag, quant_rule.bwd_qtype)
 
   def _chunk(start, reduce_metadata, bank, grad_w_acc, grad_x_ag_acc=None):
@@ -1200,6 +1473,30 @@ def _routed_experts_chunked_bwd_impl(
     )
     group_sizes = dsv3_router.chunk_group_sizes(metadata.group_sizes, start, num_tokens)
     sorted_coeffs = _chunk_rows(metadata.sorted_coeffs, start, capacity)
+    if fused_w8_bwd:
+      assert token_indices is not None
+      grad_x_ag, grad_w_routed, grad_coeffs, bank = dsv3_experts.dsv3_routed_experts_gather_combine_bwd_w8_impl(
+          grad_y_ag,
+          token_indices,
+          start,
+          x_ag,
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0] + start,
+          reduce_metadata.tokens,
+          grad_x_ag_acc,
+          grad_w_acc,
+          gmm_fn=gmm_fn,
+          out_dtype=ep_reduce_dtype,
+      )
+      return (
+          grad_x_ag,
+          grad_w_routed,
+          jnp.reshape(grad_coeffs, (-1,)),
+          constrain_activation_bank(bank),
+      )
     if gather_in_linear_bwd:
       assert quant_rule is not None and token_indices is not None
       assert w_routed_q is not None
@@ -2016,6 +2313,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         mesh=mesh,
         gmm_fn=gmm_fn,
         quant_rule=quant_rule,
+        router_metadata=res.mb1.moe.router_metadata,
     )
     return (
         (
@@ -2054,6 +2352,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         mesh=mesh,
         gmm_fn=gmm_fn,
         quant_rule=quant_rule,
+        router_metadata=res.mb0.moe.router_metadata,
     )
 
     def _shared_expert_fwd_1(moe_in, w_shared):
@@ -3165,6 +3464,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         mesh=mesh,
         gmm_fn=gmm_fn,
         quant_rule=quant_rule,
+        router_metadata=res.mb1.moe.router_metadata,
     )
     return (
         (grad_x_next_0, w_next_grad_unreduced, grad_yarn_freqs_next_0),
@@ -3209,6 +3509,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         mesh=mesh,
         gmm_fn=gmm_fn,
         quant_rule=quant_rule,
+        router_metadata=res.mb0.moe.router_metadata,
     )
 
     def _shared_expert_fwd_1(moe_in, w_shared):
@@ -4425,6 +4726,215 @@ def _split_w_attention_moe(
 
 
 _SPLIT_SMALL_W_SCATTERS = True
+_FUSED_LINEAR_COMBINE = False
+_FUSED_GATHER_GATE = False
+_FUSED_MOE_BWD = False
+_FSDP_GRAD_A2A = False
+# Dtype of the partial gradients `_routed_grad_a2a_reduce_scatter` sends.
+_FSDP_GRAD_A2A_DTYPE = jnp.bfloat16
+
+
+def set_fsdp_grad_a2a(enabled: bool) -> None:
+  """Whether to reduce-scatter routed expert weight gradients via all-to-all.
+
+  Takes effect for functions traced afterwards. Instead of the SparseCore 1 FSDP
+  reduce-scatter of the (f32 with `QuantConfig.fsdp_weights`) routed expert
+  weight gradients in `reduce_w_ici_sc1`, every device sends each FSDP shard of
+  its local partial gradient in bf16 to the shard's owner in one SparseCore 1
+  all-to-all over the FSDP axes, and each owner sums its received partials in
+  f32 on the TensorCore (`_routed_grad_a2a_reduce_scatter`), which moves half
+  the bytes of an f32 reduce-scatter. The other weight gradients are unchanged.
+  Lets `dsv3_router.adjust_compiler_options` allow SparseCore dense all-to-alls.
+
+  Args:
+    enabled: Whether to use the all-to-all.
+  """
+  global _FSDP_GRAD_A2A
+  _FSDP_GRAD_A2A = enabled
+  dsv3_router.request_sparse_core_dense_a2a(enabled)
+
+
+def _routed_grad_a2a_reduce_scatter(
+    grad_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    like_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    *,
+    axes: frozenset[str],
+) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
+  """Reduce-scatters routed expert weight gradients as all-to-all and local sum.
+
+  Equivalent, up to the bf16 transport, to the `ops.reduce_along_axis`
+  reduce-scatter of `reduce_w_ici_sc1` along `axes`: each leaf must be
+  unreduced along exactly the `axes` sharding one dimension of its `like`
+  leaf. The shards are moved to a new leading dimension (in the shard order of
+  a tiled `psum_scatter` along the dimension's axes) and cast to
+  `_FSDP_GRAD_A2A_DTYPE` in one TensorCore fusion, all-to-all-ed along it on
+  SparseCore 1, and summed in f32 on the TensorCore.
+
+  Args:
+    grad_routed: Routed expert weight gradients, unreduced along `axes`.
+    like_routed: Routed expert weights with the shardings of the
+      `collect_w_ici` inputs.
+    axes: Physical mesh axes to reduce along.
+
+  Returns:
+    The reduced gradients, in their input dtype, with the cotangent shardings
+    of `like_routed`.
+  """
+  mesh = jax.typeof(jax.tree.leaves(like_routed)[0]).sharding.mesh
+
+  def _scatter_dim(grad: jax.Array, like: jax.Array) -> tuple[int, tuple[str, ...]]:
+    in_spec = jax.typeof(grad).sharding.spec
+    like_spec = jax.typeof(like).sharding.spec
+    if in_spec.unreduced & axes != axes:
+      raise ValueError(f"fsdp_grad_a2a needs gradients unreduced along {set(axes)}, got" f" {in_spec}.")
+    scatters = []
+    for dim_idx, part in enumerate(like_spec.partitions):
+      part_axes = (part,) if isinstance(part, str) else tuple(part or ())
+      dim_axes = tuple(ax for ax in part_axes if ax in axes)
+      if dim_axes:
+        scatters.append((dim_idx, dim_axes))
+    if len(scatters) != 1 or set(scatters[0][1]) != axes:
+      raise ValueError(f"fsdp_grad_a2a needs {set(axes)} to shard one dimension of the" f" routed weights, got {like_spec}.")
+    return scatters[0]
+
+  leaves, treedef = jax.tree.flatten(grad_routed)
+  like_leaves = treedef.flatten_up_to(like_routed)
+  plans = [_scatter_dim(g, w) for g, w in zip(leaves, like_leaves)]
+
+  def _a2a(xs: list[jax.Array]) -> list[jax.Array]:
+    return [jax.lax.all_to_all(x, dim_axes, split_axis=0, concat_axis=0, tiled=True) for x, (_, dim_axes) in zip(xs, plans)]
+
+  a2a_sc1 = compute_on.compute_on(
+      compute_type=_SC1_KWARGS["compute_type"],
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options=_SC1_KWARGS["compiler_options"],
+  )(_a2a)
+
+  def _local(xs: list[jax.Array]) -> list[jax.Array]:
+    parts = []
+    for x, (dim_idx, dim_axes) in zip(xs, plans):
+      n = math.prod(jax.lax.axis_size(ax) for ax in dim_axes)
+      shape = x.shape
+      x = x.reshape(*shape[:dim_idx], n, shape[dim_idx] // n, *shape[dim_idx + 1 :])
+      parts.append(jnp.moveaxis(x, dim_idx, 0).astype(_FSDP_GRAD_A2A_DTYPE))
+    received = a2a_sc1(parts)
+    return [jnp.sum(r.astype(jnp.float32), axis=0).astype(x.dtype) for r, x in zip(received, xs)]
+
+  # `check_vma=False`: the inputs are typed unreduced along `axes`, which
+  # `all_to_all` rejects; locally they are the per-device partials it needs.
+  out = jax.shard_map(
+      _local,
+      mesh=mesh,
+      in_specs=([jax.typeof(g).sharding.spec for g in leaves],),
+      out_specs=[jax.typeof(w).sharding.spec.to_ct_spec() for w in like_leaves],
+      check_vma=False,
+  )(leaves)
+  return treedef.unflatten(out)
+
+
+def set_fused_gather_gate(enabled: bool) -> None:
+  """Whether to fuse permute_chunk, the weight-only fp8 gate GMM and the SiLU.
+
+  Takes effect for functions traced afterwards, only together with
+  `set_fused_linear_combine`. Each MoE chunk then runs one gathering `gmm_v2`
+  (fused GLU epilogue on the f32 accumulator) instead of
+  `ops.ragged_gather_tc`, the gate `gmm_v2` and `ops.ragged_silu_mul_fwd`.
+
+  Args:
+    enabled: Whether to fuse.
+  """
+  global _FUSED_GATHER_GATE
+  _FUSED_GATHER_GATE = enabled
+
+
+def set_fused_linear_combine(enabled: bool) -> None:
+  """Whether to fuse the weight-only fp8 linear GMM with the f32 combine.
+
+  Takes effect for functions traced afterwards. With bf16 tokens, fp8 routed
+  weights (`QuantConfig.fsdp_weights`) and an f32 `ep_reduce_dtype`, each MoE
+  chunk then runs `gmmv2.linear_combine_fwd` instead of the linear `gmm_v2`, an
+  f32 cast of its output and `ops.ragged_gather_reduce_tc`.
+
+  Args:
+    enabled: Whether to fuse.
+  """
+  global _FUSED_LINEAR_COMBINE
+  _FUSED_LINEAR_COMBINE = enabled
+
+
+def set_fused_moe_bwd(enabled: bool) -> None:
+  """Whether to fuse the weight-only fp8 MoE backward gather/SiLU and combine.
+
+  Takes effect for functions traced afterwards. With bf16 tokens, fp8 routed
+  weights (`QuantConfig.fsdp_weights`) and an f32 `ep_reduce_dtype`, each MoE
+  backward chunk runs `gmm_fn.linear_bwd_gather_w8` (fusing `grad_y_ag` gather,
+  linear dact GMM, SiLU fwd rematerialization and SiLU bwd, followed by a 2D-RHS
+  linear dw TGMM) and `gmm_fn.gate_bwd_combine_w8` (fusing gate dx GMM, f32
+  cast and `unpermute_chunk`, plus gate dw TGMM).
+
+  Args:
+    enabled: Whether to fuse.
+  """
+  global _FUSED_MOE_BWD
+  _FUSED_MOE_BWD = enabled
+
+
+def set_ep_ragged_a2a(enabled: bool, *, sparse_core: bool = False) -> None:
+  """Whether to dispatch and combine EP tokens with ragged all-to-alls.
+
+  Takes effect for functions traced afterwards. The routing metadata then
+  carries a `dsv3_router.RaggedExchange` and, in the forward and backward
+  passes, each (token, k) slot's bf16 row is sent only to its expert's device
+  with a `jax.lax.ragged_all_to_all` (`ubatch_dispatch`, `_dispatch_bwd`),
+  landing expert-major in one capacity buffer that the (unfused) expert GMMs
+  consume directly (`_routed_experts_ragged_impl` and its backward), and the
+  bf16 expert output (or token gradient) rows are sent back with the reverse
+  ragged all-to-all and summed over top-k in f32 by each token's owner
+  (`ubatch_combine`, `dsv3_router.dsv3_combine_with_coeff_grads*`). This
+  replaces the token all-gathers, the expert-side top-k reductions and the
+  token reduce-scatters. The routing coefficients stay applied in the SiLU, and
+  their gradients take the existing path. Slots past a device's capacity are
+  dropped. Only bf16 routed expert compute (no `QuantConfig.routed_experts`)
+  is supported.
+
+  Args:
+    enabled: Whether to use the ragged all-to-alls.
+    sparse_core: Whether to run them on SparseCore 0 instead of the
+      TensorCore.
+  """
+  dsv3_router.set_ep_ragged_a2a(enabled, sparse_core=sparse_core)
+
+
+def set_ep_combine_a2a(
+    fwd: bool,
+    bwd: bool | None = None,
+    *,
+    sparse_core: bool = False,
+    hierarchical: str | None = None,
+    kernel: bool = False,
+    kernel_microbatches: int = 16,
+) -> None:
+  """Whether to reduce-scatter EP tokens as a bf16 all-to-all and a local sum.
+
+  See `dsv3_router.set_ep_combine_a2a`.
+
+  Args:
+    fwd: Whether to use it for the forward combine.
+    bwd: Whether to use it for the token gradients' dispatch transpose;
+      defaults to `fwd`.
+    sparse_core: Whether to run the all-to-all on SparseCore 0.
+    hierarchical: Optional two-stage order, `"a2a_first"` or `"rs_first"`.
+    kernel: Whether to use the `ops.reduce_scatter_sc0` kernel instead.
+    kernel_microbatches: `num_microbatches` of the kernel.
+  """
+  dsv3_router.set_ep_combine_a2a(
+      fwd,
+      bwd,
+      sparse_core=sparse_core,
+      hierarchical=hierarchical,
+      kernel=kernel,
+      kernel_microbatches=kernel_microbatches,
+  )
 
 
 def set_split_small_w_scatters(enabled: bool) -> None:
@@ -4514,6 +5024,21 @@ def reduce_w_ici_sc1(
       grad_w,
       moe=dataclasses.replace(grad_w.moe, routed=routed),
   )
+  if _FSDP_GRAD_A2A:
+    # The routed experts' reduce-scatter as a bf16 all-to-all and local f32
+    # sum; `ops.reduce_along_axis` reduces the other gradients.
+    reduced_routed = _routed_grad_a2a_reduce_scatter(routed, like.moe.routed, axes=_sc1_reduce_axes(axis_mapping))
+    no_routed = jax.tree.map(lambda _: None, routed)
+    reduced = ops.reduce_along_axis(
+        dataclasses.replace(grad_w, moe=dataclasses.replace(grad_w.moe, routed=no_routed)),
+        _w_ici_axes(),
+        axis_mapping,
+        dataclasses.replace(like, moe=dataclasses.replace(like.moe, routed=no_routed)),
+        axes=_sc1_reduce_axes(axis_mapping),
+        split_scatters=_w_ici_split_scatters(),
+        **_SC1_KWARGS,
+    )
+    return dataclasses.replace(reduced, moe=dataclasses.replace(reduced.moe, routed=reduced_routed))
   return ops.reduce_along_axis(
       grad_w,
       _w_ici_axes(),

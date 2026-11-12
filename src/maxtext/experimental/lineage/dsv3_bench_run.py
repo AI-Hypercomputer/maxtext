@@ -45,10 +45,123 @@ from flax.core import spmd
 import jax
 import jax.numpy as jnp
 from maxtext.experimental.lineage import dsv3_aot_compile
+from maxtext.experimental.lineage import dsv3_embed
 from maxtext.experimental.lineage import dsv3_router
 from maxtext.experimental.lineage import dsv3_sharding
+from maxtext.experimental.lineage import dsv3_mla
 from maxtext.experimental.lineage import dsv3_sparse_layer
 
+_FUSED_LINEAR_COMBINE = flags.DEFINE_bool(
+    "fused_linear_combine",
+    False,
+    "See `dsv3_sparse_layer.set_fused_linear_combine`.",
+)
+_EP_RAGGED_A2A = flags.DEFINE_bool(
+    "ep_ragged_a2a",
+    False,
+    "Dispatch and combine the EP tokens with ragged all-to-alls (forward and"
+    " backward). See `dsv3_sparse_layer.set_ep_ragged_a2a`.",
+)
+_EP_RAGGED_A2A_SC = flags.DEFINE_bool(
+    "ep_ragged_a2a_sc",
+    False,
+    "With --ep_ragged_a2a, run the ragged all-to-alls on SparseCore 0.",
+)
+_OFFSET_SPLASH_FWD_BKVC = flags.DEFINE_integer(
+    "offset_splash_fwd_block_kv_compute",
+    0,
+    "If > 0, forward kv compute block of the offset-causal splash kernels." " See `dsv3_mla.set_offset_splash_fwd_tuning`.",
+)
+_OFFSET_SPLASH_DKV_BKVC = flags.DEFINE_integer(
+    "offset_splash_dkv_block_kv_compute",
+    0,
+    "If > 0, backward kv compute block of the offset-causal splash kernels.",
+)
+_OFFSET_SPLASH_FWD_SCHED = flags.DEFINE_bool(
+    "offset_splash_fwd_experimental_scheduler",
+    False,
+    "See `dsv3_mla.set_offset_splash_fwd_tuning`.",
+)
+_FUSED_GATHER_GATE = flags.DEFINE_bool(
+    "fused_gather_gate",
+    False,
+    "With --fused_linear_combine, also fuse permute_chunk + gate GMM + SiLU."
+    " See `dsv3_sparse_layer.set_fused_gather_gate`.",
+)
+_FUSED_MOE_BWD = flags.DEFINE_bool(
+    "fused_moe_bwd",
+    False,
+    "Fuse weight-only fp8 MoE backward gather+SiLU and gate dx+combine." " See `dsv3_sparse_layer.set_fused_moe_bwd`.",
+)
+_EP_COMBINE_A2A = flags.DEFINE_bool(
+    "ep_combine_a2a",
+    False,
+    "Reduce-scatter the EP tokens (forward combine and token-gradient"
+    " dispatch transpose) as a bf16 all-to-all and a local f32 sum. See"
+    " `dsv3_router.set_ep_combine_a2a`.",
+)
+_EP_COMBINE_A2A_BWD = flags.DEFINE_bool(
+    "ep_combine_a2a_bwd",
+    True,
+    "With --ep_combine_a2a, also use it for the token-gradient dispatch" " transpose in the backward pass.",
+)
+_EP_COMBINE_A2A_SC = flags.DEFINE_bool(
+    "ep_combine_a2a_sc",
+    False,
+    "With --ep_combine_a2a, run the all-to-all on SparseCore 0 (dropping the"
+    " forced-false SparseCore dense all-to-all offload compile flag so it"
+    " resolves to auto) instead of on the TensorCore.",
+)
+_FSDP_GRAD_A2A = flags.DEFINE_bool(
+    "fsdp_grad_a2a",
+    False,
+    "Reduce-scatter the routed expert weight gradients as a bf16 SparseCore"
+    " all-to-all and a local f32 sum. See"
+    " `dsv3_sparse_layer.set_fsdp_grad_a2a`.",
+)
+_EP_COMBINE_HIER = flags.DEFINE_enum(
+    "ep_combine_hier",
+    "",
+    ["", "a2a_first", "rs_first", "rs_first_fused", "rs_first_ppermute"],
+    "With --ep_combine_a2a, reduce-scatter in two SparseCore stages: a bf16"
+    " all-to-all over the outer expert axis (z) and an f32 reduce-scatter over"
+    " the inner one (core), in this order. See"
+    " `dsv3_router.set_ep_combine_a2a`.",
+)
+_EP_COMBINE_KERNEL = flags.DEFINE_bool(
+    "ep_combine_kernel",
+    False,
+    "Reduce-scatter the f32 EP tokens with the SparseCore Pallas kernel"
+    " `ops.reduce_scatter_sc0` (f32 D2D/accumulation, bf16 ring sends). See"
+    " `dsv3_router.set_ep_combine_a2a(kernel=True)`.",
+)
+_EP_COMBINE_KERNEL_MB = flags.DEFINE_integer(
+    "ep_combine_kernel_microbatches",
+    16,
+    "num_microbatches of the --ep_combine_kernel kernel.",
+)
+_EMBED_GRAD_SC = flags.DEFINE_bool(
+    "embed_grad_sc",
+    False,
+    "Reduce the f32 embedding table gradient on SparseCore 1. See" " `dsv3_embed.set_grad_sparse_core`.",
+)
+_HEAD_GRAD_SC = flags.DEFINE_bool(
+    "head_grad_sc",
+    False,
+    "Reduce the f32 LM head kernel gradient on SparseCore 1 (overlapping the"
+    " decoder backward). See `dsv3_embed.set_grad_sparse_core`.",
+)
+_ULYSSES_A2A_SC = flags.DEFINE_integer(
+    "ulysses_a2a_sc",
+    -1,
+    "If >= 0, run the GQA Ulysses all-to-alls on this SparseCore. See" " `dsv3_mla.set_ulysses_a2a_sparse_core`.",
+)
+_SEQ_SPLIT_KV_GATHER = flags.DEFINE_bool(
+    "seq_split_kv_gather",
+    False,
+    "With lineage_microbatch_split=seq, use KV all-gather (zigzag) CP instead"
+    " of Ulysses. See `dsv3_mla.set_seq_split_kv_gather`.",
+)
 _SPLIT_SMALL_W_SCATTERS = flags.DEFINE_bool(
     "split_small_w_scatters",
     True,
@@ -228,6 +341,31 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError("dsv3_bench_run requires use_lineage=True.")
   dsv3_aot_compile.validate_supported(config)
   dsv3_sparse_layer.set_split_small_w_scatters(_SPLIT_SMALL_W_SCATTERS.value)
+  dsv3_sparse_layer.set_fused_linear_combine(_FUSED_LINEAR_COMBINE.value)
+  dsv3_embed.set_grad_sparse_core(_EMBED_GRAD_SC.value, _HEAD_GRAD_SC.value)
+  dsv3_mla.set_seq_split_kv_gather(_SEQ_SPLIT_KV_GATHER.value)
+  dsv3_mla.set_ulysses_a2a_sparse_core(_ULYSSES_A2A_SC.value if _ULYSSES_A2A_SC.value >= 0 else None)
+  dsv3_sparse_layer.set_ep_ragged_a2a(_EP_RAGGED_A2A.value, sparse_core=_EP_RAGGED_A2A_SC.value)
+  dsv3_sparse_layer.set_fused_gather_gate(_FUSED_GATHER_GATE.value)
+  dsv3_sparse_layer.set_fused_moe_bwd(_FUSED_MOE_BWD.value)
+  dsv3_sparse_layer.set_fsdp_grad_a2a(_FSDP_GRAD_A2A.value)
+  if _ULYSSES_A2A_SC.value >= 0:
+    # The SparseCore Ulysses all-to-alls need the dense a2a offload enabled.
+    dsv3_router.request_sparse_core_dense_a2a(True)
+  dsv3_mla.set_offset_splash_fwd_tuning(
+      _OFFSET_SPLASH_FWD_BKVC.value or None,
+      _OFFSET_SPLASH_FWD_SCHED.value,
+      _OFFSET_SPLASH_DKV_BKVC.value or None,
+  )
+  ep_combine = _EP_COMBINE_A2A.value or _EP_COMBINE_KERNEL.value
+  dsv3_sparse_layer.set_ep_combine_a2a(
+      ep_combine,
+      ep_combine and _EP_COMBINE_A2A_BWD.value,
+      sparse_core=_EP_COMBINE_A2A_SC.value,
+      hierarchical=_EP_COMBINE_HIER.value or None,
+      kernel=_EP_COMBINE_KERNEL.value,
+      kernel_microbatches=_EP_COMBINE_KERNEL_MB.value,
+  )
   dsv3_router.set_random_routing(bool(getattr(config, "use_random_routing", False)))
   # With `compile_topology`, only compile the programs for that topology (a
   # memory check of the initialization and step on CPU).
@@ -270,7 +408,9 @@ def main(argv: Sequence[str]) -> None:
     )
     t0 = time.perf_counter()
     compiled = jitted.lower(state, batch).compile(
-        compiler_options=dsv3_aot_compile.parse_libtpu_flags_to_dict(str(getattr(config, "compile_xla_flags", "") or ""))
+        compiler_options=dsv3_router.adjust_compiler_options(
+            dsv3_aot_compile.parse_libtpu_flags_to_dict(str(getattr(config, "compile_xla_flags", "") or ""))
+        )
     )
     if is_main:
       print(f"Compiled train step in {time.perf_counter() - t0:.1f} s")

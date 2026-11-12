@@ -256,6 +256,171 @@ def dsv3_routed_experts_impl(
 
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
+def dsv3_routed_experts_combine_impl(
+    x: jt.Num[jax.Array, "BT D0 D1"],
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    group_sizes: jt.Num[jax.Array, "E"],
+    sorted_coeffs: jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    bank: jt.Num[jax.Array, "bank_rows D_gate"],
+    bank_offset: jt.Int[jax.Array, ""],
+    token_indices: jt.Int[jax.Array, "num_indices"],
+    start: jt.Int[jax.Array, ""] | int,
+    sorted_tokens: jt.Int[jax.Array, "num_sorted"],
+    y_ag_acc: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
+    *,
+    num_out_tokens: int,
+    gmm_fn: GmmFn,
+    out_dtype: jax.typing.DTypeLike,
+) -> tuple[
+    jt.Num[jax.Array, "NBT D0 D1"],
+    jt.Num[jax.Array, "bank_rows D_gate"],
+]:
+  """`dsv3_routed_experts_impl` + `dsv3_router.unpermute_chunk`, fused.
+
+  For bf16 tokens and fp8 (weight-only) routed weights: the gate GMM and SiLU
+  run as in `dsv3_routed_experts_impl`, then the linear GMM is fused with the
+  top-k combine (`gmm_fn.linear_combine_w8`), which adds the GMM rows of each
+  token straight into `y_ag` in `out_dtype` instead of writing the linear
+  output and reducing it with `ops.ragged_gather_reduce_tc`. The GMM rows are
+  rounded to bf16 before the sum, like the unfused path's bf16 linear output.
+
+  Args:
+    x: Input tokens, sorted by expert.
+    w: Routed expert weights (fp8 `linear`).
+    group_sizes: Number of tokens assigned to each expert on the local device.
+    sorted_coeffs: Routing coefficients sorted like x.
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Bank offset at which gate_out is pushed.
+    token_indices: Output token of each sorted slot (`sort_indices // k`).
+    start: Sorted slot of row 0 of x (the chunk start).
+    sorted_tokens: The chunk's tokens in ascending order
+      (`RaggedGatherReduceMetadata.tokens`); only read without `y_ag_acc`.
+    y_ag_acc: Optional combined tokens of earlier chunks to accumulate into.
+    num_out_tokens: Number of combined tokens.
+    gmm_fn: GMMs; must provide `linear_combine_w8`.
+    out_dtype: Dtype of the combined tokens and of the top-k sums.
+
+  Returns:
+    Tuple of (combined tokens, updated bank).
+  """
+  assert w.gate is not None
+  assert w.linear is not None
+  if sorted_coeffs.ndim == 1:
+    sorted_coeffs = sorted_coeffs[:, None]
+  num_tokens = jnp.sum(group_sizes, dtype=jnp.int32)
+  row, _ = bank_chunk_row(bank, x.shape[0], bank_offset, num_tokens)
+  with jax.named_scope("gate"):
+    bank = gmm_fn.gate(x, w.gate, group_sizes, bank, row)
+  with jax.named_scope("silu"):
+    act = ops.ragged_silu_mul_fwd(
+        bank,
+        row,
+        sorted_coeffs,
+        num_tokens,
+        block_size_tokens=1024,
+        block_size_hidden=2048,
+    )
+  with jax.named_scope("linear_combine"):
+    y_ag = getattr(gmm_fn, "linear_combine_w8")(
+        act,
+        w.linear,
+        group_sizes,
+        token_indices,
+        start,
+        sorted_tokens,
+        num_out_tokens=num_out_tokens,
+        out=y_ag_acc,
+        out_dtype=out_dtype,
+    )
+  return y_ag, bank
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def dsv3_routed_experts_gather_combine_w8_impl(
+    x_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    token_indices: jt.Int[jax.Array, "num_indices"],
+    start: jt.Int[jax.Array, ""] | int,
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    group_sizes: jt.Num[jax.Array, "E"],
+    sorted_coeffs: jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    bank: jt.Num[jax.Array, "bank_rows D_gate"],
+    bank_offset: jt.Int[jax.Array, ""],
+    sorted_tokens: jt.Int[jax.Array, "num_sorted"],
+    y_ag_acc: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
+    *,
+    gmm_fn: GmmFn,
+    out_dtype: jax.typing.DTypeLike,
+    glu_f32_inputs: bool = True,
+) -> tuple[
+    jt.Num[jax.Array, "NBT D0 D1"],
+    jt.Num[jax.Array, "bank_rows D_gate"],
+]:
+  """Weight-only fp8 routed experts of one chunk, gathered and combined.
+
+  `dsv3_router.permute_chunk` + `dsv3_routed_experts_combine_impl` with the
+  permute, gate GMM and SiLU fused into one kernel (`gmm_fn.gather_gate_w8`):
+  the bf16 tokens are DMAed straight from x_ag, gate_out is pushed to the bank
+  in bf16 and the SiLU (on the f32 accumulator with `glu_f32_inputs`) writes
+  the bf16 activations read by `gmm_fn.linear_combine_w8`.
+
+  Args:
+    x_ag: bf16 tokens to gather from.
+    token_indices: Row of x_ag of each sorted slot (`sort_indices // k`).
+    start: Sorted slot of routed row 0 (the chunk start).
+    w: Routed expert weights (fp8 gate and linear).
+    group_sizes: Number of tokens assigned to each expert on the local device.
+      Requires start + sum(group_sizes) <= num_indices.
+    sorted_coeffs: Routing coefficients of the chunk; BT is the capacity.
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Bank offset at which gate_out is pushed.
+    sorted_tokens: The chunk's tokens in ascending order; only read without
+      `y_ag_acc`.
+    y_ag_acc: Optional combined tokens of earlier chunks to accumulate into.
+    gmm_fn: GMMs; must provide `gather_gate_w8` and `linear_combine_w8`.
+    out_dtype: Dtype of the combined tokens and of the top-k sums.
+    glu_f32_inputs: Computes the SiLU from the f32 gate accumulator.
+
+  Returns:
+    Tuple of (combined tokens, updated bank).
+  """
+  assert w.gate is not None
+  assert w.linear is not None
+  if sorted_coeffs.ndim == 1:
+    sorted_coeffs = sorted_coeffs[:, None]
+  capacity = sorted_coeffs.shape[0]
+  num_tokens = jnp.sum(group_sizes, dtype=jnp.int32)
+  row, _ = bank_chunk_row(bank, capacity, bank_offset, num_tokens)
+  with jax.named_scope("gate"):
+    bank, act = getattr(gmm_fn, "gather_gate_w8")(
+        x_ag,
+        token_indices,
+        start,
+        w.gate,
+        group_sizes,
+        bank,
+        row,
+        size_m=capacity,
+        glu_coeffs=sorted_coeffs,
+        glu_f32_inputs=glu_f32_inputs,
+    )
+  with jax.named_scope("linear_combine"):
+    y_ag = getattr(gmm_fn, "linear_combine_w8")(
+        act,
+        w.linear,
+        group_sizes,
+        token_indices,
+        start,
+        sorted_tokens,
+        num_out_tokens=x_ag.shape[0],
+        out=y_ag_acc,
+        out_dtype=out_dtype,
+    )
+  return y_ag, bank
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
 def dsv3_routed_experts_gather_impl(
     x_ag: jt.Num[jax.Array, "NBT D0 D1"],
     token_indices: jt.Int[jax.Array, "num_indices"],
@@ -771,6 +936,122 @@ def dsv3_routed_experts_gather_bwd_impl(
   grad_w_routed = dsv3_types.DSv3MoERoutedExpertWeightsPytree(gate=grad_w_gate, linear=grad_w_linear)
   grad_sorted_coeffs = jnp.reshape(grad_sorted_coeffs.astype(sorted_coeffs.dtype), orig_coeffs_shape)
   return grad_routed_in, grad_w_routed, grad_sorted_coeffs, bank
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def dsv3_routed_experts_gather_combine_bwd_w8_impl(
+    grad_y_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    token_indices: jt.Int[jax.Array, "num_indices"],
+    start: jt.Int[jax.Array, ""] | int,
+    x_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    w_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    group_sizes: jt.Num[jax.Array, "E"],
+    sorted_coeffs: jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    bank: jt.Num[jax.Array, "bank_rows D_gate"],
+    bank_offset: jt.Int[jax.Array, ""],
+    sorted_tokens: jt.Int[jax.Array, "num_sorted"],
+    grad_x_ag_acc: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
+    grad_w_acc: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None = None,
+    *,
+    gmm_fn: GmmFn,
+    out_dtype: jax.typing.DTypeLike = jnp.float32,
+) -> tuple[
+    jt.Num[jax.Array, "NBT D0 D1"],
+    dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    jt.Num[jax.Array, "bank_rows D_gate"],
+]:
+  """Weight-only fp8 routed experts backward, gathered and combined.
+
+  Replaces `permute_chunk(grad_y_ag)` + `permute_chunk(x_ag)` +
+  `dsv3_routed_experts_bwd_impl` + `unpermute_chunk(grad_x_sorted)` with:
+    1. optional bank-overflow remat via `gmm_fn.gather_gate_w8`;
+    2. `gmm_fn.linear_bwd_gather_w8` (fuses `grad_y_ag` gather, linear dact GMM,
+       SiLU fwd rematerialization and SiLU bwd, plus 2D-RHS linear dw TGMM);
+    3. `gmm_fn.gate_bwd_gather_combine_w8` (fuses `x_ag` gather + gate dw TGMM
+       and gate dx GMM + f32 top-k combine into `grad_x_ag`).
+
+  Args:
+    grad_y_ag: bf16 cotangent of the top-k reduced expert outputs.
+    token_indices: Row of `grad_y_ag` / `x_ag` / `grad_x_ag` of each sorted
+      slot.
+    start: Sorted slot of token 0 (the chunk start).
+    x_ag: bf16 unpermuted all-gathered input tokens.
+    w_routed: Routed expert weights (fp8 gate and linear).
+    group_sizes: Number of tokens assigned to each expert on the local device.
+    sorted_coeffs: Routing coefficients of the chunk (`BT` is the capacity).
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Bank offset at which `gate_out` was pushed.
+    sorted_tokens: The chunk's tokens in ascending order; only read without
+      `grad_x_ag_acc`.
+    grad_x_ag_acc: Optional combined token gradients of earlier chunks to
+      accumulate into, donated.
+    grad_w_acc: Optional routed expert weight gradients to accumulate into, in
+      place.
+    gmm_fn: GMMs; must provide `gather_gate_w8`, `linear_bwd_gather_w8`, and
+      `gate_bwd_gather_combine_w8`.
+    out_dtype: Dtype of `grad_x_ag` and of the top-k sums.
+
+  Returns:
+    Tuple of `(grad_x_ag, grad_w_routed, grad_sorted_coeffs, bank)`.
+  """
+  assert w_routed.gate is not None and w_routed.linear is not None
+  orig_coeffs_shape = sorted_coeffs.shape
+  if sorted_coeffs.ndim == 1:
+    sorted_coeffs = sorted_coeffs[:, None]
+  if grad_w_acc is None:
+    grad_w_acc = dsv3_types.DSv3MoERoutedExpertWeightsPytree()
+  capacity = sorted_coeffs.shape[0]
+  num_tokens = jnp.sum(group_sizes, dtype=jnp.int32)
+  row, is_overflow = bank_chunk_row(bank, capacity, bank_offset, num_tokens)
+
+  @jax.named_call
+  def _remat_gate_out(bank):
+    with jax.named_scope("gate"):
+      return getattr(gmm_fn, "gather_gate_w8")(
+          x_ag,
+          token_indices,
+          start,
+          w_routed.gate,
+          group_sizes,
+          bank,
+          row,
+          size_m=capacity,
+          glu_coeffs=None,
+      )
+
+  with jax.named_scope("retrieve_or_remat_gate_out"):
+    bank = jax.lax.cond(is_overflow, _remat_gate_out, lambda b: b, bank)
+  with jax.named_scope("linear_silu"):
+    grad_gate_out, grad_sorted_coeffs, grad_w_linear = getattr(gmm_fn, "linear_bwd_gather_w8")(
+        grad_y_ag,
+        token_indices,
+        start,
+        w_routed.linear,
+        group_sizes,
+        bank,
+        row,
+        sorted_coeffs,
+        grad_w_acc.linear,
+    )
+  with jax.named_scope("gate_combine"):
+    grad_x_ag, grad_w_gate = getattr(gmm_fn, "gate_bwd_gather_combine_w8")(
+        x_ag,
+        w_routed.gate,
+        group_sizes,
+        grad_gate_out,
+        grad_w_acc.gate,
+        token_indices,
+        start,
+        sorted_tokens,
+        num_out_tokens=grad_y_ag.shape[0],
+        out=grad_x_ag_acc,
+        out_dtype=out_dtype,
+    )
+  grad_w_routed = dsv3_types.DSv3MoERoutedExpertWeightsPytree(gate=grad_w_gate, linear=grad_w_linear)
+  grad_sorted_coeffs = jnp.reshape(grad_sorted_coeffs.astype(sorted_coeffs.dtype), orig_coeffs_shape)
+  return grad_x_ag, grad_w_routed, grad_sorted_coeffs, bank
 
 
 @jax.named_call

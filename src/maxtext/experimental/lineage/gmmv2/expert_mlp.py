@@ -61,13 +61,24 @@ import jax
 import jax.numpy as jnp
 
 from maxtext.experimental.lineage.gmmv2 import gate_bwd_fused
+from maxtext.experimental.lineage.gmmv2 import gate_dw_gather
 from maxtext.experimental.lineage.gmmv2 import gmmv2_kernel
 from maxtext.experimental.lineage.gmmv2 import linear_bwd_split
+from maxtext.experimental.lineage.gmmv2 import linear_bwd_w8
 from maxtext.experimental.lineage.gmmv2 import linear_combine_fwd
 from maxtext.experimental.lineage.gmmv2 import tgmm_kernel
 
 TileSizes = gmmv2_kernel.TileSizes
 LANES = 128
+# Tiles of the weight-only fp8 gate token gradient + top-k combine kernel
+# (`WeightOnlyFp8Gmm.gate_bwd_combine_w8`).
+GATE_DX_COMBINE_TILES = linear_combine_fwd.Tiles(tile_m=256, tile_n=512)
+# Tiles of the 2D-RHS `linear_dw` TGMM of `WeightOnlyFp8Gmm.linear_bwd_gather_w8`
+# for small F (the whole contraction in one tile) and half-D output tiles: 768-row
+# token tiles with 256-row buckets waste far fewer padded rows on ~1k-token experts
+# than the auto-tiler's 512-row tiles (about -15% TGMM time on v7x).
+def linear_dw_w8_tiles(f: int, d: int) -> TileSizes:
+  return TileSizes(tile_m=768, tile_k=f, tile_n=d // 2, bucket_base=256)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -274,6 +285,7 @@ def _gate_fwd_kwargs(
     glu_coeffs: jax.Array | None,
     glu_out_dtype: jnp.dtype | None,
     glu_out_scale: jax.Array | None,
+    glu_f32_inputs: bool = False,
 ) -> dict[str, Any]:
   """Returns the fp8 / fused GLU `gmm_v2` arguments of the gate GMM."""
   kwargs: dict[str, Any] = {}
@@ -287,6 +299,8 @@ def _gate_fwd_kwargs(
     kwargs["glu_coeffs"] = glu_coeffs
     kwargs["glu_out_dtype"] = glu_out_dtype
     kwargs["glu_out_scale"] = glu_out_scale
+    if glu_f32_inputs:
+      kwargs["glu_f32_inputs"] = True
   return kwargs
 
 
@@ -354,6 +368,8 @@ def gather_gate_gmm(
     glu_coeffs: jax.Array | None = None,  # [size_m, 1]
     glu_out_dtype: jnp.dtype | None = None,
     glu_out_scale: jax.Array | None = None,  # f32 [1, 1]
+    glu_f32_inputs: bool = False,
+    tiles: TileSizes | None = None,
 ) -> Any:  # [R, F_gate] (and [size_m, F_gate // 2] when glu_coeffs is set)
   """`gate_gmm` of the rows `x3d[indices[start + m]]`, m < size_m.
 
@@ -378,6 +394,9 @@ def gather_gate_gmm(
       `gate_gmm`).
     glu_out_dtype: Optional dtype for the fused GLU output `act`.
     glu_out_scale: Optional `[1, 1]` f32 quantization scale for `act`.
+    glu_f32_inputs: Computes `act` from the f32 accumulator rather than from
+      gate_out rounded to `out.dtype` (see `gmm_v2`).
+    tiles: Optional tiles overriding `cfg.gate_fwd`.
 
   Returns:
     The updated `out`, or `(out, act)` when `glu_coeffs` is provided.
@@ -385,7 +404,7 @@ def gather_gate_gmm(
   _check_3d("x3d", x3d)
   return _gmm(
       cfg,
-      cfg.gate_fwd,
+      cfg.gate_fwd if tiles is None else tiles,
       x3d,
       w_gate,
       group_sizes,
@@ -394,7 +413,14 @@ def gather_gate_gmm(
       lhs_gather_indices=indices,
       lhs_gather_start=start,
       lhs_gather_size_m=size_m,
-      **_gate_fwd_kwargs(out, out_scale, glu_coeffs, glu_out_dtype, glu_out_scale),
+      **_gate_fwd_kwargs(
+          out,
+          out_scale,
+          glu_coeffs,
+          glu_out_dtype,
+          glu_out_scale,
+          glu_f32_inputs,
+      ),
   )
 
 
@@ -519,6 +545,50 @@ def gate_gmm_bwd(
       **dw_kwargs,
   )
   return _match_vma(dx3d, x3d), dw_gate
+
+
+def gate_gmm_dx_w8(
+    cfg: ExpertMlpConfig,
+    dgate: jax.Array,  # bf16 [BT, F_gate]
+    w_q: jax.Array,  # fp8 [E, D, F_gate]
+    group_sizes: jax.Array,  # int32 [E]
+    *,
+    w_scale: jax.Array,  # f32 [1, 1]
+) -> jax.Array:  # bf16 [BT, D // 128, 128]
+  """The weight-only fp8 token gradient `dgate @ w_q^T` of `gate_gmm_bwd`."""
+  return _gmm(
+      cfg,
+      cfg.gate_dx,
+      dgate,
+      w_q,
+      group_sizes,
+      transpose_rhs=True,
+      out_is_3d=True,
+      **_w8_dx_kwargs(w_scale),
+  )
+
+
+def gate_gmm_dw(
+    cfg: ExpertMlpConfig,
+    x3d: jax.Array,  # bf16 [BT, D // 128, 128]
+    w_gate: jax.Array,  # [E, D, F_gate]
+    group_sizes: jax.Array,  # int32 [E]
+    dgate: jax.Array,  # bf16 [BT, F_gate]
+    dw_acc: jax.Array | None = None,  # [E, D, F_gate]
+    *,
+    dw_dtype: jnp.dtype | None = None,
+) -> jax.Array:  # [E, D, F_gate]
+  """The bf16 weight gradient of `gate_gmm_bwd` (without `w_q`)."""
+  return _tgmm_dw(
+      cfg,
+      cfg.gate_dw,
+      x3d,
+      dgate.astype(x3d.dtype),
+      group_sizes,
+      w_gate,
+      dw_acc,
+      dw_dtype,
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -1213,6 +1283,278 @@ class WeightOnlyFp8Gmm:
         w_scale=self._w_scale(w),
     )
 
+  supports_w8_gather_gate = True
+
+  def gather_gate_w8(
+      self,
+      x: jax.Array,
+      indices: jax.Array,
+      start: jax.Array | int,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      out: jax.Array,
+      out_offset: jax.Array | int,
+      *,
+      size_m: int,
+      glu_coeffs: jax.Array | None = None,
+      glu_f32_inputs: bool = True,
+      tiles: TileSizes | None = None,
+  ) -> Any:
+    """bf16 x fp8 gate GMM of gathered rows, optionally fused with the SiLU.
+
+    Like `dsv3_router.permute_chunk` + `gate` (+ `ops.ragged_silu_mul_fwd` when
+    `glu_coeffs` is given), in one `gmm_v2` kernel: the rows
+    `x[indices[start + m]]` are DMAed straight from x, the fp8 weight tiles are
+    dequantized to bf16 in VMEM, the f32 accumulator is scaled by the weight
+    scale, gate_out is written to `out[out_offset + m]` in bf16, and when
+    `glu_coeffs` is set `act = silu(g0) * g1 * c` is returned in bf16. With
+    `glu_f32_inputs`, `act` is computed from the f32 accumulator instead of the
+    bf16 gate_out.
+
+    Args:
+      x: bf16 tokens `[N, D // 128, 128]`.
+      indices: Row of x of each routed slot.
+      start: Index into `indices` of routed row 0.
+      w: fp8 gate weights `[E, D, 2 * F]`.
+      group_sizes: Routed rows of each expert.
+      out: bf16 buffer receiving gate_out (e.g. the bank), donated.
+      out_offset: Row of `out` receiving routed row 0.
+      size_m: Number of routed rows (capacity), static.
+      glu_coeffs: Optional routing coefficients `[size_m, 1]`.
+      glu_f32_inputs: SiLU on f32 inputs.
+      tiles: Optional tiles overriding the gate tiles of `base.cfg`.
+
+    Returns:
+      The updated `out`, or `(out, act)` when `glu_coeffs` is provided.
+    """
+    w_scale = self._w_scale(w)
+    assert w_scale is not None, "gather_gate_w8 needs fp8 weights."
+    return gather_gate_gmm(
+        self.base.cfg,
+        x,
+        indices,
+        start,
+        w,
+        group_sizes,
+        out,
+        out_offset,
+        out_scale=w_scale,
+        size_m=size_m,
+        glu_coeffs=glu_coeffs,
+        glu_out_dtype=jnp.dtype(jnp.bfloat16) if glu_coeffs is not None else None,
+        glu_f32_inputs=glu_f32_inputs,
+        tiles=tiles,
+    )
+
+  supports_w8_linear_combine = True
+
+  def linear_combine_w8(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      token_indices: jax.Array,
+      start: jax.Array | int,
+      sorted_tokens: jax.Array,
+      *,
+      num_out_tokens: int,
+      out: jax.Array | None = None,
+      out_dtype: jax.typing.DTypeLike = jnp.float32,
+  ) -> jax.Array:
+    """bf16 x fp8 `linear` fused with the top-k combine of its rows.
+
+    Like `linear` followed by `.astype(out_dtype)` and
+    `dsv3_router.unpermute_chunk`, in one kernel (weight-only fp8
+    `linear_combine_fwd.linear_combine_fwd`). Forward only.
+
+    Args:
+      x: bf16 activations `[BT, F]`.
+      w: fp8 linear weights `[E, F, D]`.
+      group_sizes: Rows of x of each expert.
+      token_indices: Output token of each sorted slot.
+      start: Sorted slot of row 0 of x.
+      sorted_tokens: The tokens of the rows in ascending order; only read
+        without `out`.
+      num_out_tokens: Number of output tokens.
+      out: Optional `[num_out_tokens, D // 128, 128]` tokens of `out_dtype` to
+        accumulate into, donated.
+      out_dtype: Dtype of the result and of the top-k sums.
+
+    Returns:
+      The combined tokens `[num_out_tokens, D // 128, 128]`.
+    """
+    w_scale = self._w_scale(w)
+    assert w_scale is not None, "linear_combine_w8 needs fp8 weights."
+    return linear_combine_fwd.linear_combine_fwd(
+        x,
+        w,
+        group_sizes,
+        token_indices,
+        start,
+        None if out is not None else sorted_tokens,
+        out_scale=w_scale,
+        num_out_tokens=num_out_tokens,
+        out=out,
+        out_dtype=out_dtype,
+    )
+
+  supports_w8_gate_bwd_combine = True
+
+  def gate_bwd_combine_w8(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      dgate: jax.Array,
+      dw_acc: jax.Array | None,
+      token_indices: jax.Array,
+      start: jax.Array | int,
+      sorted_tokens: jax.Array,
+      *,
+      num_out_tokens: int,
+      out: jax.Array | None = None,
+      out_dtype: jax.typing.DTypeLike = jnp.float32,
+      tiles: linear_combine_fwd.Tiles | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    """`gate_bwd` with the token gradient fused with its top-k combine.
+
+    Like `gate_bwd` followed by `.astype(out_dtype)` and
+    `dsv3_router.unpermute_chunk` of the token gradient: the token gradient
+    `dgate @ w^T` (fp8 w dequantized to bf16 in VMEM, f32 accumulator scaled by
+    the weight scale, rows rounded to bf16) of each row m < sum(group_sizes)
+    is added straight into row `token_indices[start + m]` of the result
+    (`linear_combine_fwd(transpose_w=True)`). The weight gradient is the bf16
+    TGMM of `gate_bwd`.
+
+    Args:
+      x: bf16 routed tokens `[BT, D // 128, 128]` (the TGMM lhs).
+      w: fp8 gate weights `[E, D, F_gate]`.
+      group_sizes: Rows of each expert.
+      dgate: bf16 cotangent of the gate GMM output `[BT, F_gate]`.
+      dw_acc: Optional weight gradient to accumulate into.
+      token_indices: Output token of each sorted slot.
+      start: Sorted slot of row 0.
+      sorted_tokens: The tokens of the rows in ascending order; only read
+        without `out`.
+      num_out_tokens: Number of output tokens.
+      out: Optional `[num_out_tokens, D // 128, 128]` tokens of `out_dtype` to
+        accumulate into, donated.
+      out_dtype: Dtype of the combined token gradients and of the top-k sums.
+      tiles: Optional tiles of the fused kernel.
+
+    Returns:
+      Tuple of (combined token gradients, weight gradient including dw_acc).
+    """
+    w_scale = self._w_scale(w)
+    assert w_scale is not None, "gate_bwd_combine_w8 needs fp8 weights."
+    dw = gate_gmm_dw(
+        self.base.cfg,
+        x,
+        w,
+        group_sizes,
+        dgate,
+        dw_acc,
+        dw_dtype=self.grad_dtype,
+    )
+    dx = linear_combine_fwd.linear_combine_fwd(
+        dgate.astype(jnp.bfloat16),
+        w,
+        group_sizes,
+        token_indices,
+        start,
+        None if out is not None else sorted_tokens,
+        out_scale=w_scale,
+        num_out_tokens=num_out_tokens,
+        out=out,
+        tiles=tiles if tiles is not None else GATE_DX_COMBINE_TILES,
+        out_dtype=out_dtype,
+        transpose_w=True,
+    )
+    return dx, dw
+
+  supports_w8_gate_dw_gather = True
+
+  def gate_bwd_gather_combine_w8(
+      self,
+      x_ag: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      dgate: jax.Array,
+      dw_acc: jax.Array | None,
+      token_indices: jax.Array,
+      start: jax.Array | int,
+      sorted_tokens: jax.Array,
+      *,
+      num_out_tokens: int,
+      out: jax.Array | None = None,
+      out_dtype: jax.typing.DTypeLike = jnp.float32,
+      dx_tiles: linear_combine_fwd.Tiles | None = None,
+      dw_tiles: gate_dw_gather.Tiles | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    """`gate_bwd` gathering `x_ag` in `gate_dw_gather` and combining `dx`.
+
+    Replaces `permute_chunk(x_ag)` + `gate_bwd` + `unpermute_chunk(dx)` with:
+      1. `gate_dw_gather.gate_dw_gather`: gathers rows from `x_ag` straight
+         into VMEM and computes `dw = dw_acc + x^T @ dgate` (in place when
+         `dw_acc` is given and no psum is needed);
+      2. `linear_combine_fwd.linear_combine_fwd(..., transpose_w=True)`: computes
+         `dgate @ w^T` (fp8 w dequantized in VMEM) and accumulates directly into
+         `dx` in `out_dtype`.
+
+    Args:
+      x_ag: bf16 unpermuted all-gathered tokens `[N, D // 128, 128]`.
+      w: fp8 gate weights `[E, D, F_gate]`.
+      group_sizes: Rows of each expert.
+      dgate: bf16 cotangent of the gate GMM output `[BT, F_gate]`.
+      dw_acc: Optional weight gradient to accumulate into.
+      token_indices: Row of `x_ag` / `dx` of each sorted slot.
+      start: Sorted slot of row 0.
+      sorted_tokens: The tokens of the rows in ascending order; only read
+        without `out`.
+      num_out_tokens: Number of output tokens.
+      out: Optional `[num_out_tokens, D // 128, 128]` tokens of `out_dtype` to
+        accumulate into, donated.
+      out_dtype: Dtype of the combined token gradients and of the top-k sums.
+      dx_tiles: Optional tiles of `linear_combine_fwd`.
+      dw_tiles: Optional tiles of `gate_dw_gather`.
+
+    Returns:
+      Tuple of (combined token gradients, weight gradient including dw_acc).
+    """
+    w_scale = self._w_scale(w)
+    assert w_scale is not None, "gate_bwd_gather_combine_w8 needs fp8 weights."
+    dgate_bf16 = dgate.astype(jnp.bfloat16)
+    can_alias_acc = dw_acc is not None and self.base.cfg.disable_multi_core_mode and not _psum_axes(x_ag, w)
+    dw = gate_dw_gather.gate_dw_gather(
+        x_ag,
+        token_indices,
+        start,
+        dgate_bf16,
+        group_sizes,
+        dw_acc=dw_acc if can_alias_acc else None,
+        dw_dtype=self.grad_dtype,
+        tiles=dw_tiles,
+    )
+    if not can_alias_acc:
+      dw = _match_vma(dw, w)
+      if dw_acc is not None:
+        dw = dw_acc + dw
+    dx = linear_combine_fwd.linear_combine_fwd(
+        dgate_bf16,
+        w,
+        group_sizes,
+        token_indices,
+        start,
+        None if out is not None else sorted_tokens,
+        out_scale=w_scale,
+        num_out_tokens=num_out_tokens,
+        out=out,
+        tiles=dx_tiles if dx_tiles is not None else GATE_DX_COMBINE_TILES,
+        out_dtype=out_dtype,
+        transpose_w=True,
+    )
+    return dx, dw
+
   def linear(
       self,
       x: jax.Array,
@@ -1255,6 +1597,86 @@ class WeightOnlyFp8Gmm:
         dw_acc,
         dw_dtype=self.grad_dtype if dw_dtype is None else dw_dtype,
         w_scale=self._w_scale(w),
+    )
+
+  supports_w8_linear_bwd_gather = True
+
+  def linear_bwd_gather_w8(
+      self,
+      dout_ag: jax.Array,
+      indices: jax.Array,
+      start: jax.Array | int,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      bank: jax.Array,
+      bank_row: jax.Array | int,
+      coeffs: jax.Array,
+      dw_acc: jax.Array | None = None,
+      *,
+      dw_dtype: jnp.dtype | None = None,
+      tiles: linear_bwd_w8.Tiles | None = None,
+      dw_tiles: TileSizes | None = None,
+  ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Gathered weight-only fp8 linear + SiLU backward.
+
+    Replaces `permute_chunk(grad_y_ag)` + `ragged_silu_mul_fwd` +
+    `linear_bwd` + `ragged_silu_mul_bwd` with `linear_bwd_w8.linear_bwd_dgrad_w8`
+    followed by a 2D-RHS `tgmm_v2` for `dw_linear`.
+
+    Args:
+      dout_ag: `[N, D // 128, 128]` bf16 cotangent of the top-k reduced output.
+      indices: `[num_indices]` int32 row of `dout_ag` of each sorted slot.
+      start: Sorted slot of chunk row 0.
+      w: `[E, F, D]` fp8 linear weights.
+      group_sizes: `[E]` int32 chunk rows per expert.
+      bank: `[R, 2F]` bf16 gating activations `(gate_0 | gate_1)`.
+      bank_row: Bank row of chunk row 0, a multiple of 32.
+      coeffs: `[M, 1]` routing coefficients of the chunk rows.
+      dw_acc: Optional `[E, F, D]` weight gradient to accumulate into.
+      dw_dtype: Optional dtype of `dw_linear` (defaults to `self.grad_dtype`).
+      tiles: Optional tiles of `linear_bwd_dgrad_w8`.
+      dw_tiles: Optional tiles of the `dw_linear` `tgmm_v2` call.
+
+    Returns:
+      Tuple of `(grad_gate, grad_coeffs, dw_linear)`.
+    """
+    w_scale = self._w_scale(w)
+    assert w_scale is not None, "linear_bwd_gather_w8 needs fp8 weights."
+    dgrad = linear_bwd_w8.linear_bwd_dgrad_w8(
+        dout_ag,
+        indices,
+        start,
+        w,
+        group_sizes,
+        bank,
+        bank_row,
+        coeffs,
+        w_scale=w_scale,
+        tiles=tiles,
+    )
+    if dw_tiles is None:
+      dw_tiles = self.base.cfg.linear_dw
+      if (
+          dw_tiles is None
+          and w.shape[1] <= 2048
+          and w.shape[2] == 4 * w.shape[1]
+          and dgrad.act.shape[0] >= 768
+      ):
+        dw_tiles = linear_dw_w8_tiles(w.shape[1], w.shape[2])
+    dw = _tgmm_dw(
+        self.base.cfg,
+        dw_tiles,
+        dgrad.act,
+        dgrad.grad_routed,
+        group_sizes,
+        w,
+        dw_acc,
+        self.grad_dtype if dw_dtype is None else dw_dtype,
+    )
+    return (
+        _match_vma(dgrad.grad_gate, bank),
+        _match_vma(dgrad.grad_coeffs, coeffs),
+        dw,
     )
 
 

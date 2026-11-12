@@ -54,6 +54,7 @@ import yaml
 from maxtext.experimental.lineage import dsv3_config
 from maxtext.experimental.lineage import dsv3_loss
 from maxtext.experimental.lineage import dsv3_model
+from maxtext.experimental.lineage import dsv3_router
 from maxtext.experimental.lineage import dsv3_sharding
 from maxtext.experimental.lineage import dsv3_types
 
@@ -1283,7 +1284,9 @@ def main(argv: Sequence[str]) -> None:
         donate_argnums=0,
     )
     lowered = jitted.lower(*shaped_train_args, **shaped_train_kwargs)
-  compiler_options = parse_libtpu_flags_to_dict(str(getattr(config, "compile_xla_flags", "") or ""))
+  compiler_options = dsv3_router.adjust_compiler_options(
+      parse_libtpu_flags_to_dict(str(getattr(config, "compile_xla_flags", "") or ""))
+  )
   compiled = lowered.compile(compiler_options=compiler_options)
   print("Jitting and compilation complete!", flush=True)
 

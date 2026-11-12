@@ -425,6 +425,30 @@ class SplashConfig:
   # The kernel skips its own q scaling and returns dq, dk w.r.t. the
   # pre-scaled input (both divided by LOG2E). Subsumes dkv_reuse_scaled_q.
   q_prescaled_log2e: bool = False
+  # [experimental] Forward: cast the softmax probabilities to the v dtype
+  # (bf16) before the SV matmul. Otherwise the f32 probabilities promote the SV
+  # matmul to f32 (multi-pass on the MXU).
+  fwd_bf16_probs: bool = False
+  # [experimental] Forward: compute the softmax row sums on the MXU by
+  # appending a lane-tile of ones to v (the SV matmul's N grows from
+  # head_dim_v to head_dim_v + 128), instead of a VPU/XLU reduction. The sums
+  # then use the same (bf16) probabilities as the numerator. Implies
+  # fwd_bf16_probs. Requires head_dim_v == 128, v_layout HEAD_DIM_MINOR and no
+  # dropout; partial-mask blocks fall back to the reduction.
+  fwd_sum_on_mxu: bool = False
+  # [experimental] Forward: exponentiate in bf16 (`qk - m` is computed in f32
+  # and rounded to bf16 first). Implies fwd_bf16_probs.
+  fwd_bf16_exp: bool = False
+  # [experimental] Forward: on fully unmasked compute tiles, write the QK tile
+  # to a VMEM scratch and run the online softmax as a loop over chunks of this
+  # many query rows, so each chunk's logits/probabilities stay in vregs (one
+  # pass over the tile instead of one pass per elementwise op). The bf16
+  # probabilities go to a second scratch read by the SV matmul. None disables
+  # it.
+  fwd_row_chunk: int | None = None
+  # Use the experimental LLO scheduler (see use_experimental_scheduler) for the
+  # forward kernel only.
+  fwd_use_experimental_scheduler: bool = False
 
   @property
   def qk_diag_grid_fwd(self) -> tuple[int, int]:
@@ -689,7 +713,7 @@ def flash_attention_kernel(
     m_scratch_ref,
     l_scratch_ref,
     o_scratch_ref,
-    *,
+    *chunk_scratch_refs,  # (qk, s, alpha) with config.fwd_row_chunk
     mask_value: float,
     q_steps: int,
     kv_steps: int,
@@ -828,21 +852,40 @@ def flash_attention_kernel(
 
     exp = jnp.exp2 if config.use_base2_exp else jnp.exp
     if max_logit_estimate is None:
-      s_curr = exp(qk - jnp.tile(m_next, (1, 1, bkv_repeats)))  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+      x_curr = qk - jnp.tile(m_next, (1, 1, bkv_repeats))  # pyrefly: ignore[bad-argument-type, unsupported-operation]
     else:
-      s_curr = exp(qk - max_logit_estimate)  # pyrefly: ignore[unsupported-operation]
+      x_curr = qk - max_logit_estimate  # pyrefly: ignore[unsupported-operation]
+    if config.fwd_bf16_exp:
+      s_curr = exp(x_curr.astype(jnp.bfloat16))
+    else:
+      s_curr = exp(x_curr)
     assert s_curr.shape == (num_stacked_q_heads, bq, bkv_compute)
-
-    l_curr = jax.lax.broadcast_in_dim(s_curr.sum(axis=-1), l_prev.shape, (0, 1))
-    assert l_curr.shape == (num_stacked_q_heads, bq, NUM_LANES)
+    sum_on_mxu = (
+        config.fwd_sum_on_mxu
+        and not has_partial_mask
+        and not dropout_rate
+        and head_dim_v == NUM_LANES
+        and config.v_layout == HEAD_DIM_MINOR
+        and not _is_fp8(v_ref)
+    )
+    if (config.fwd_bf16_probs or config.fwd_sum_on_mxu or config.fwd_bf16_exp) and not _is_fp8(v_ref):
+      s_curr = s_curr.astype(v_ref.dtype)
 
     if max_logit_estimate is None:
       alpha = exp(m_prev - m_next)
-      l_next = l_curr + alpha * l_prev
-      m_scratch_ref[...], l_scratch_ref[...] = m_next, l_next
     else:
       alpha = None
-      l_scratch_ref[...] = l_curr + l_prev
+
+    def _update_l(l_curr):
+      assert l_curr.shape == (num_stacked_q_heads, bq, NUM_LANES)
+      if max_logit_estimate is None:
+        m_scratch_ref[...] = m_next
+        l_scratch_ref[...] = l_curr + alpha * l_prev
+      else:
+        l_scratch_ref[...] = l_curr + l_prev
+
+    if not sum_on_mxu:
+      _update_l(jax.lax.broadcast_in_dim(s_curr.astype(float32).sum(axis=-1), l_prev.shape, (0, 1)))
 
     # Dropout is applied *after* the running softmax denominator has been
     # accumulated from the undropped weights, so it does not renormalize over
@@ -889,7 +932,12 @@ def flash_attention_kernel(
 
     _g, gk = config.qk_diag_grid_fwd
     gq = _g
-    if (
+    if sum_on_mxu:
+      v_ext = jnp.concatenate([v, jnp.ones_like(v)], axis=1)
+      o_ext = lax.dot_general(s_curr_flat, v_ext, sv_dims, preferred_element_type=jnp.float32)
+      o_curr_flat = o_ext[:, :head_dim_v]
+      _update_l(o_ext[:, head_dim_v:].reshape((num_stacked_q_heads, bq, NUM_LANES)))
+    elif (
         config.sv_diag_skip
         and has_partial_mask
         and num_stacked_q_heads == 1
@@ -925,6 +973,58 @@ def flash_attention_kernel(
       o_scratch_ref[...] = alpha_o * o_scratch_ref[...] + o_curr
     else:
       o_scratch_ref[...] = o_scratch_ref[...] + o_curr
+
+  def body_chunked(kv_compute_index, _):
+    """`body` on a fully unmasked tile, softmax in row chunks (see config)."""
+    qk_ref, s_ref, alpha_ref = chunk_scratch_refs
+    rc = config.fwd_row_chunk
+    slice_k = pl.ds(kv_compute_index * bkv_compute, bkv_compute)
+    q = q_ref[...] if config.q_layout == HEAD_DIM_MINOR else q_ref[...].mT
+    if config.use_base2_exp and not config.q_prescaled_log2e:
+      q *= LOG2E
+    q_flat = q.reshape((num_stacked_q_heads * bq, q.shape[-1]))
+    if config.k_layout == HEAD_DIM_MINOR:
+      k = k_ref[slice_k, :]
+      qk_dims = NT_DIM_NUMBERS
+    else:
+      k = k_ref[:, slice_k]
+      qk_dims = NN_DIM_NUMBERS
+    qk_ref[...] = lax.dot_general(q_flat, k, qk_dims, preferred_element_type=float32)
+    exp = jnp.exp2 if config.use_base2_exp else jnp.exp
+    bkv_repeats = bkv_compute // NUM_LANES
+    seg = q_segment_ids_ref is not None
+
+    def row_body(r, carry):
+      rows = pl.ds(pl.multiple_of(r * rc, rc), rc)
+      x = qk_ref[rows, :]
+      if seg:
+        kv_ids = kv_segment_ids_ref[:1, slice_k]
+        q_ids = jnp.tile(q_segment_ids_ref[rows, :], (1, bkv_repeats))
+        x = jnp.where(q_ids == kv_ids, x, mask_value)
+      m_p = m_scratch_ref[0, rows, :]
+      l_p = l_scratch_ref[0, rows, :]
+      m_c = x.max(axis=-1, keepdims=True)
+      m_n = jnp.maximum(m_p, m_c)
+      p = exp(x - jnp.tile(m_n, (1, bkv_repeats)))
+      l_c = jax.lax.broadcast_in_dim(p.sum(axis=-1), l_p.shape, (0,))
+      alpha = exp(m_p - m_n)
+      m_scratch_ref[0, rows, :] = m_n
+      l_scratch_ref[0, rows, :] = alpha * l_p + l_c
+      alpha_ref[rows, :] = alpha
+      s_ref[rows, :] = p.astype(s_ref.dtype)
+      return carry
+
+    lax.fori_loop(0, bq // rc, row_body, None, unroll=2)
+    if config.v_layout == HEAD_DIM_MINOR:
+      v = v_ref[slice_k, :]
+      sv_dims = NN_DIM_NUMBERS
+    else:
+      v = v_ref[:, slice_k]
+      sv_dims = NT_DIM_NUMBERS
+    o_curr = lax.dot_general(s_ref[...], v, sv_dims, preferred_element_type=jnp.float32)
+    alpha_o = jnp.tile(alpha_ref[...], (1, head_dim_v_repeats))
+    alpha_o = alpha_o[:, : o_scratch_ref.shape[-1]]
+    o_scratch_ref[0] = alpha_o * o_scratch_ref[0] + o_curr
 
   def body_diag(tile: int) -> None:
     """`qk_diag_skip` forward on a diagonal block, static compute tile `tile`.
@@ -1049,6 +1149,8 @@ def flash_attention_kernel(
     # the dense matmul. Bands are at least 256 rows: on TPU7x an M=128 dot
     # rounds differently from the dense one (o off by 1 bf16 ulp).
     s_flat = s_curr.reshape((nq, bkv_compute))
+    if (config.fwd_bf16_probs or config.fwd_sum_on_mxu or config.fwd_bf16_exp) and not _is_fp8(v_ref):
+      s_flat = s_flat.astype(v_ref.dtype)
     if config.v_layout == HEAD_DIM_MINOR:
       v = v_ref[slice_k, :]
       sv_dims = NN_DIM_NUMBERS
@@ -1099,9 +1201,20 @@ def flash_attention_kernel(
   # known: that needs the block mask (without it every block is "partial").
   use_body_diag = config.qk_diag_skip and block_mask_ref is not None and num_stacked_q_heads == 1 and bq == bkv
 
+  use_chunked = (
+      config.fwd_row_chunk is not None
+      and num_stacked_q_heads == 1
+      and max_logit_estimate is None
+      and not dropout_rate
+      and attn_logits_soft_cap is None
+      and q_ref.dtype != jnp.float8_e4m3fn
+      and not _is_fp8(v_ref)
+      and len(chunk_scratch_refs) == 3
+  )
+
   @pl.when(jnp.logical_and(should_not_mask, should_run))
   def _():
-    lax.fori_loop(0, num_iters, body, None, unroll=True)
+    lax.fori_loop(0, num_iters, body_chunked if use_chunked else body, None, unroll=True)
 
   @pl.when(jnp.logical_and(jnp.logical_not(should_not_mask), should_run))
   def _():
@@ -1624,11 +1737,24 @@ def _splash_attention_forward(
                 pltpu.VMEM((num_stacked_q_heads, bq, NUM_LANES), jnp.float32),  # m_scratch
                 pltpu.VMEM((num_stacked_q_heads, bq, NUM_LANES), jnp.float32),  # l_scratch
                 pltpu.VMEM((num_stacked_q_heads, bq, head_dim_v), jnp.float32),  # o_scratch
-            ],
+            ]
+            + (
+                [
+                    pltpu.VMEM((bq, bkv_compute), jnp.float32),  # qk
+                    pltpu.VMEM((bq, bkv_compute), v.dtype),  # s
+                    pltpu.VMEM((bq, NUM_LANES), jnp.float32),  # alpha
+                ]
+                if config.fwd_row_chunk is not None and num_stacked_q_heads == 1
+                else []
+            ),
         ),
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel", "arbitrary"),
-            flags={"XLA_TPU_FORCE_LP_LLO_SCHEDULER": (config.use_experimental_scheduler)},
+            flags={
+                "XLA_TPU_FORCE_LP_LLO_SCHEDULER": (
+                    config.use_experimental_scheduler or config.fwd_use_experimental_scheduler
+                )
+            },
         ),
         out_shape=out_shapes,
         name=kernel_name,
@@ -2865,8 +2991,7 @@ def _splash_attention_bwd(
 _splash_attention_custom.defvjp(_splash_attention_fwd, _splash_attention_bwd)
 
 
-@partial(
-    jax.jit,
+@jax.jit(
     static_argnames=[
         "is_mqa",
         "config",

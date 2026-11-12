@@ -90,8 +90,7 @@ def _splash_attention_manual_fwd(
   return out, logsumexp
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=[
         "is_mqa",
         "config",

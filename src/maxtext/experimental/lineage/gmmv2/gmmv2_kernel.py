@@ -357,6 +357,9 @@ class GmmConfigs:
   has_glu_coeffs: bool = False
   glu_out_dtype: jnp.dtype | None = None
   has_glu_out_scale: bool = False
+  # The fused GLU reads the (f32) accumulator instead of gate_out rounded to
+  # `out_dtype`, so silu(g0) * g1 * c is computed from unrounded f32 inputs.
+  glu_f32_inputs: bool = False
   # The 3D lhs rows are gathered from HBM inside the kernel (one DMA per row)
   # instead of being read from a pre-permuted lhs (see `gmm_v2`'s
   # `lhs_gather_indices`).
@@ -1079,7 +1082,21 @@ def inner_kernel(
             tiled_lhs_ref.get_glu_coeffs().reshape(-1, 1)[:acc_m],
             0.0,
         )
-        act_tile = ops.silu_mul_tile(acc_out[:, :half_n], acc_out[:, half_n:], c_tile, out_val_ref.dtype)
+        if cfgs.glu_f32_inputs:
+          glu_in = acc_masked.astype(jnp.float32)
+          act_tile = ops.silu_mul_tile(
+              glu_in[:, :half_n],
+              glu_in[:, half_n:],
+              c_tile.astype(jnp.float32),
+              jnp.float32,
+          )
+        else:
+          act_tile = ops.silu_mul_tile(
+              acc_out[:, :half_n],
+              acc_out[:, half_n:],
+              c_tile,
+              out_val_ref.dtype,
+          )
         if glu_out_scale_ref is not None:
           inv_scale = 1.0 / glu_out_scale_ref[0].astype(jnp.float32)
           act_out = ops.quantize_tile(act_tile, inv_scale, act_val_ref.dtype)
@@ -1904,6 +1921,8 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
   )
   if cfgs.has_glu_coeffs:
     name += "-glu"
+    if cfgs.glu_f32_inputs:
+      name += "f32"
   if cfgs.lhs_gather:
     name += "-gather"
   return name
@@ -2146,6 +2165,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "out_is_3d",
         "flat_rhs",
         "glu_out_dtype",
+        "glu_f32_inputs",
         "lhs_gather_size_m",
     ],
     donate_argnames=["out"],
@@ -2179,6 +2199,7 @@ def gmm_v2(
     glu_coeffs: jax.Array | None = None,  # [size_m, 1]
     glu_out_dtype: jnp.dtype | None = None,
     glu_out_scale: jax.Array | None = None,  # [1, 1]
+    glu_f32_inputs: bool = False,
     lhs_gather_indices: jax.Array | None = None,  # int32[num_indices]
     lhs_gather_start: jax.Array | int = 0,  # int32 scalar
     lhs_gather_size_m: int | None = None,
@@ -2251,6 +2272,9 @@ def gmm_v2(
       (e.g. `jnp.float8_e4m3fn`). Defaults to `out`'s dtype.
     glu_out_scale: Optional `[1, 1]` f32 static quantization scale for `act`
       when `glu_out_dtype` is fp8.
+    glu_f32_inputs: With `glu_coeffs` and an f32 accumulator, computes `act`
+      from the unrounded f32 accumulator instead of `out` (gate_out rounded to
+      its dtype). `out` is unchanged.
     lhs_gather_indices: Optional int32 `[num_indices]` row indices into `lhs`.
       When given, `lhs` is the gather source x `[x_rows, size_k // 128, 128]`
       and the kernel multiplies the gathered rows `x[lhs_gather_indices[
@@ -2351,6 +2375,12 @@ def gmm_v2(
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
+  if glu_f32_inputs:
+    if glu_coeffs is None or cfgs.acc_dtype != jnp.float32:
+      raise ValueError(
+          "glu_f32_inputs requires glu_coeffs and an f32 accumulator; got" f" {glu_coeffs is None=}, {cfgs.acc_dtype=}."
+      )
+    cfgs = dataclasses.replace(cfgs, glu_f32_inputs=True)
   if gather_src is not None:
     # The gather fills whole k-major slots per m tile and reuses them across
     # the k steps, so n tiles (which revisit every m tile) are not supported.
