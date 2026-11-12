@@ -21,10 +21,13 @@ from collections.abc import Callable, Sequence
 import concurrent.futures
 import dataclasses
 import datetime
+import glob
 import json
+import multiprocessing
 import os
 import random
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -492,9 +495,14 @@ def _download_gcs_prefix_to_local(
   def _fetch_one(blob: Any) -> int:
     fname = blob.name.rsplit("/", 1)[-1]
     dst = os.path.join(local_dir, fname)
-    with blob.open("rb") as src, open(dst, "wb") as out:
+    expected = int(getattr(blob, "size", 0) or 0)
+    if expected > 0 and os.path.exists(dst) and os.path.getsize(dst) == expected:
+      return expected
+    tmp = f"{dst}.part"
+    with blob.open("rb") as src, open(tmp, "wb") as out:
       shutil.copyfileobj(src, out, length=_CHUNK_BYTES)
-    return int(getattr(blob, "size", 0) or os.path.getsize(dst))
+    os.replace(tmp, dst)
+    return expected or os.path.getsize(dst)
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(blobs))) as pool:
     return sum(pool.map(_fetch_one, blobs))
@@ -513,43 +521,188 @@ def _upload_local_dir_to_gcs(
   if not names:
     raise RuntimeError(f"No converted .safetensors/.json files found in {local_dir}")
 
+  existing_sizes: dict[str, int] = {}
+  try:
+    for b in _list_blobs_under_prefix(storage_client, gcs_dir):
+      if not b.name.endswith("/"):
+        existing_sizes[b.name.rsplit("/", 1)[-1]] = int(getattr(b, "size", 0) or 0)
+  except Exception:  # pylint: disable=broad-exception-caught
+    existing_sizes = {}
+
   def _push_one(fname: str) -> int:
     src = os.path.join(local_dir, fname)
+    local_sz = os.path.getsize(src)
+    if local_sz > 0 and existing_sizes.get(fname) == local_sz:
+      return local_sz
     blob_name = f"{prefix}/{fname}" if prefix else fname
     blob = storage_client.bucket(bucket_name).blob(blob_name)
     with open(src, "rb") as f_in, blob.open("wb", chunk_size=_UPLOAD_CHUNK_BYTES) as gcs_out:
       shutil.copyfileobj(f_in, gcs_out, length=_CHUNK_BYTES)
-    return os.path.getsize(src)
+    return local_sz
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(names))) as pool:
     return sum(pool.map(_push_one, names))
 
 
+def _is_valid_safetensors_file(path: str) -> bool:
+  """Returns True if `path` exists and its byte length matches its safetensors header offsets."""
+  try:
+    if not os.path.exists(path):
+      return False
+    file_size = os.path.getsize(path)
+    if file_size <= 8:
+      return False
+    with open(path, "rb") as f:
+      hdr_len = struct.unpack("<Q", f.read(8))[0]
+      if hdr_len <= 0 or 8 + hdr_len > file_size:
+        return False
+      header = json.loads(f.read(hdr_len).decode("utf-8"))
+    max_end = 0
+    for key, meta in header.items():
+      if key == "__metadata__" or not isinstance(meta, dict):
+        continue
+      offsets = meta.get("data_offsets")
+      if isinstance(offsets, list) and len(offsets) == 2:
+        max_end = max(max_end, int(offsets[1]))
+    return file_size == 8 + hdr_len + max_end
+  except Exception:  # pylint: disable=broad-exception-caught
+    return False
+
+
+def _convert_shard_chunk_worker(args: tuple[str, str, list[str], int]) -> int:
+  """Worker process that converts a subset of safetensors shards, skipping already-valid outputs."""
+  input_dir, output_dir, shard_names, cache_size = args
+  repo_root = os.path.dirname(_BENCH_DIR)
+  src_dir = os.path.join(repo_root, "src")
+  if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+  from safetensors.torch import load_file, save_file  # pylint: disable=import-outside-toplevel
+  import torch  # pylint: disable=import-outside-toplevel
+  from maxtext.checkpoint_conversion.standalone_scripts import deepseek_dequantize as dsd  # pylint: disable=import-outside-toplevel
+
+  torch.set_num_threads(max(1, min(12, (os.cpu_count() or 16) // 4)))
+  torch.set_default_dtype(torch.bfloat16)
+  with open(os.path.join(input_dir, "model.safetensors.index.json"), "r", encoding="utf-8") as f:
+    weight_map = json.load(f)["weight_map"]
+
+  loaded_files: dict[str, dict[str, Any]] = {}
+
+  def get_tensor(tensor_name: str) -> Any:
+    fn = weight_map[tensor_name]
+    if fn not in loaded_files:
+      loaded_files[fn] = load_file(os.path.join(input_dir, fn), device="cpu")
+    return loaded_files[fn][tensor_name]
+
+  converted = 0
+  for file_name in shard_names:
+    out_file = os.path.join(output_dir, file_name)
+    if _is_valid_safetensors_file(out_file):
+      print(f"[step1b-resume] Reusing valid converted shard {file_name}", flush=True)
+      continue
+    if os.path.exists(out_file):
+      try:
+        os.remove(out_file)
+      except OSError:
+        pass
+    in_file = os.path.join(input_dir, file_name)
+    current_state_dict = load_file(in_file, device="cpu")
+    loaded_files[file_name] = current_state_dict
+    new_state_dict: dict[str, Any] = {}
+    for name, tensor in current_state_dict.items():
+      if name.endswith(("_scale_inv", ".scale")):
+        continue
+      if tensor.dtype in (torch.int8, torch.float8_e4m3fn) or tensor.element_size() == 1:
+        scale_v3 = f"{name}_scale_inv"
+        scale_v4 = f"{name[:-len('.weight')]}.scale" if name.endswith(".weight") else None
+        scale_inv = None
+        if scale_v3 in weight_map:
+          scale_inv = get_tensor(scale_v3)
+        elif scale_v4 and scale_v4 in weight_map:
+          scale_inv = get_tensor(scale_v4)
+        if scale_inv is not None:
+          if tensor.dtype == torch.int8:
+            new_state_dict[name] = dsd.dequantize_mxfp4(tensor, scale_inv)
+          elif tensor.dtype == torch.float8_e4m3fn:
+            new_state_dict[name] = dsd.dequantize_fp8(tensor, scale_inv, block_size=128)
+          else:
+            raise ValueError(f"Unrecognized quantized dtype: {tensor.dtype}")
+        else:
+          new_state_dict[name] = tensor
+      elif name.endswith(("e_score_correction_bias", "gate.bias", "tid2eid")):
+        new_state_dict[name] = tensor
+      else:
+        new_state_dict[name] = tensor.to(torch.bfloat16)
+
+    tmp_out = f"{out_file}.part"
+    save_file(new_state_dict, tmp_out)
+    os.replace(tmp_out, out_file)
+    converted += 1
+    print(f"[step1b] Converted shard {file_name}", flush=True)
+    while len(loaded_files) > max(1, cache_size):
+      oldest = next(iter(loaded_files))
+      del loaded_files[oldest]
+  return converted
+
+
 def _default_dequantize_runner(input_dir: str, output_dir: str, cache_size: int = 8) -> None:
-  """Runs MaxText's standalone DeepSeek FP8/FP4 -> BF16 conversion script."""
+  """Runs resumable, parallelized DeepSeek FP8/FP4 -> BF16 conversion."""
   repo_root = os.path.dirname(_BENCH_DIR)
   script = os.path.join(
       repo_root, "src", "maxtext", "checkpoint_conversion", "standalone_scripts", "deepseek_dequantize.py"
   )
   if not os.path.exists(script):
     raise FileNotFoundError(f"MaxText dequantize script not found at {script}")
-  env = dict(os.environ)
-  src_dir = os.path.join(repo_root, "src")
-  env["PYTHONPATH"] = f"{src_dir}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else src_dir
-  subprocess.run(
-      [
-          sys.executable,
-          script,
-          "--input-path",
-          input_dir,
-          "--output-path",
-          output_dir,
-          "--cache-size",
-          str(cache_size),
-      ],
-      env=env,
-      check=True,
+  os.makedirs(output_dir, exist_ok=True)
+  index_path = os.path.join(input_dir, "model.safetensors.index.json")
+  if not os.path.exists(index_path):
+    env = dict(os.environ)
+    src_dir = os.path.join(repo_root, "src")
+    env["PYTHONPATH"] = f"{src_dir}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else src_dir
+    subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--input-path",
+            input_dir,
+            "--output-path",
+            output_dir,
+            "--cache-size",
+            str(cache_size),
+        ],
+        env=env,
+        check=True,
+    )
+    return
+
+  for fname in sorted(os.listdir(input_dir)):
+    if fname.endswith(".json") and fname != "model.safetensors.index.json":
+      shutil.copy2(os.path.join(input_dir, fname), os.path.join(output_dir, fname))
+
+  shards = sorted(fn for fn in os.listdir(input_dir) if fn.endswith(".safetensors"))
+  pending_shards = [fn for fn in shards if not _is_valid_safetensors_file(os.path.join(output_dir, fn))]
+  print(
+      f"[step1b] Total shards={len(shards)}, already valid={len(shards) - len(pending_shards)}, "
+      f"remaining={len(pending_shards)}",
+      flush=True,
   )
+  if pending_shards:
+    num_procs = min(4, len(pending_shards))
+    chunks = [pending_shards[i::num_procs] for i in range(num_procs)]
+    worker_args = [(input_dir, output_dir, chunk, max(1, cache_size)) for chunk in chunks if chunk]
+    if len(worker_args) == 1:
+      _convert_shard_chunk_worker(worker_args[0])
+    else:
+      ctx = multiprocessing.get_context("spawn")
+      with ctx.Pool(processes=len(worker_args)) as pool:
+        pool.map(_convert_shard_chunk_worker, worker_args)
+
+  with open(index_path, "r", encoding="utf-8") as f:
+    model_index = json.load(f)
+  weight_map = {
+      k: v for k, v in (model_index.get("weight_map") or {}).items() if not k.endswith(("_scale_inv", ".scale"))
+  }
+  with open(os.path.join(output_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
+    json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
 
 
 def run_deepseek_step1b_dequantize(
@@ -577,7 +730,9 @@ def run_deepseek_step1b_dequantize(
   resolved_region = region or profile.gcp_region
   client = storage_client or _default_storage_client()
   env_meta = metadata.collect_env_cluster_metadata()
-  machine_type = str(env_meta.get("host_machine_type") or os.environ.get("STEP1B_HOST_MACHINE_TYPE", "") or "cpu-worker")
+  machine_type = str(
+      env_meta.get("host_machine_type") or os.environ.get("STEP1B_HOST_MACHINE_TYPE", "") or "cpu-worker"
+  )
   started_utc = _utc_now_iso()
   in_dir = os.path.join(scratch_dir, "input_fp8")
   out_dir = os.path.join(scratch_dir, "output_bf16")
@@ -615,10 +770,17 @@ def run_deepseek_step1b_dequantize(
 
   try:
     t0 = time.perf_counter()
-    ensure_empty_gcs_prefix(dest_gcs_dir, storage_client=client, clean_target=clean_target)
-    shutil.rmtree(in_dir, ignore_errors=True)
-    shutil.rmtree(out_dir, ignore_errors=True)
+    if dequantize_fn is not None:
+      ensure_empty_gcs_prefix(dest_gcs_dir, storage_client=client, clean_target=clean_target)
+      shutil.rmtree(in_dir, ignore_errors=True)
+      shutil.rmtree(out_dir, ignore_errors=True)
+    os.makedirs(in_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
+    for part_f in glob.glob(os.path.join(in_dir, "*.part")) + glob.glob(os.path.join(out_dir, "*.part")):
+      try:
+        os.remove(part_f)
+      except OSError:
+        pass
 
     t_conv0 = time.perf_counter()
     in_bytes = _download_gcs_prefix_to_local(client, source_gcs_dir, in_dir, max_workers=max_workers)
