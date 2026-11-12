@@ -98,5 +98,49 @@ class OncePerProcessTest(unittest.TestCase):
     self.assertEqual(set(namespace) - {"__builtins__", "sys"}, set())
 
 
+class CodeVersionTest(unittest.TestCase):
+  """Phase results record the CODE_VERSION.json at the root of the code tree that the harness runs from."""
+
+  CODE_VERSION = {"git_branch_name": "bench/branch", "git_commit": "0123456789abcdef0123456789abcdef01234567"}
+
+  def setUp(self):
+    super().setUp()
+    # A code tree laid out like the extracted code tarball, with a copy of the harness.
+    self.code_root = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, self.code_root)
+    harness_copy_path = os.path.join(self.code_root, "checkpoint_load_benchmark", "benchmark_ckpt_load_time.py")
+    os.makedirs(os.path.dirname(harness_copy_path))
+    shutil.copyfile(_HARNESS_PATH, harness_copy_path)
+    spec = importlib.util.spec_from_file_location("benchmark_ckpt_load_time_copy", harness_copy_path)
+    self.harness_copy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(self.harness_copy)
+
+  def _write_code_version_json(self, text: str) -> None:
+    with open(os.path.join(self.code_root, "CODE_VERSION.json"), "w", encoding="utf-8") as f:
+      f.write(text)
+
+  def test_loads_code_version_json_from_the_root_of_the_code_tree(self):
+    self._write_code_version_json(json.dumps(self.CODE_VERSION))
+    self.assertEqual(self.harness_copy._load_code_version(), self.CODE_VERSION)
+
+  def test_reports_an_unknown_commit_without_code_version_json(self):
+    self.assertEqual(
+        self.harness_copy._load_code_version(), {"git_commit": "unknown", "source": "CODE_VERSION.json not found"}
+    )
+
+  def test_reports_an_unknown_commit_for_invalid_json(self):
+    self._write_code_version_json('{"git_commit": ')
+    code_version = self.harness_copy._load_code_version()
+    self.assertEqual(code_version["git_commit"], "unknown")
+    self.assertIn("CODE_VERSION.json is not valid JSON", code_version["source"])
+
+  def test_writes_the_code_version_into_the_result_json(self):
+    self._write_code_version_json(json.dumps(self.CODE_VERSION))
+    result_json = os.path.join(self.code_root, "to_maxtext_step1_result.json")
+    self.harness_copy._write_result_json(result_json, {"status": "FAILED", "hf_to_gcs_s": 0.0})
+    with open(result_json, "r", encoding="utf-8") as f:
+      self.assertEqual(json.load(f), {"status": "FAILED", "hf_to_gcs_s": 0.0, "code_version": self.CODE_VERSION})
+
+
 if __name__ == "__main__":
   unittest.main()

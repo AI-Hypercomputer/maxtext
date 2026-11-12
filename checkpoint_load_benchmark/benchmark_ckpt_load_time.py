@@ -2139,6 +2139,29 @@ def run_remote_slice_daemon(port: int) -> None:
       threading.Thread(target=_handle_client, args=(conn, addr), daemon=True).start()
 
 
+def _load_code_version() -> dict[str, Any]:
+  """Returns the CODE_VERSION.json at the root of the code tree this harness runs from, the parent of its directory.
+
+  scripts/build_code_tarball.py writes it into the code tarball. Without it (e.g. in a git checkout) or when it is not
+  valid JSON, the result says so, with `git_commit` "unknown", instead of failing the phase.
+  """
+  path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CODE_VERSION.json")
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      return json.load(f)
+  except FileNotFoundError:
+    return {"git_commit": "unknown", "source": "CODE_VERSION.json not found"}
+  except ValueError as e:
+    return {"git_commit": "unknown", "source": f"CODE_VERSION.json is not valid JSON: {e}"}
+
+
+def _write_result_json(result_json: str, data: dict[str, Any]) -> None:
+  """Writes `data` as the phase result JSON, after adding to it the version of the code that ran (`code_version`)."""
+  data["code_version"] = _load_code_version()
+  with open(result_json, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+
+
 def _persist_worker_upload_max_s(result_json: str, worker_cached_times: list[float]) -> dict[str, Any]:
   """Returns the phase result JSON, with the slowest worker upload written into it as `worker_upload_max_s`.
 
@@ -2571,8 +2594,7 @@ def invoke_worker_subprocess(
               "peak_host_ram_gb": round(watchdog_state.get("peak_ram_gb", 0.0), 2),
               "total_host_ram_gb": round(watchdog_state.get("total_ram_gb", 251.69), 2),
           }
-          with open(result_json, "w", encoding="utf-8") as rf_rec:
-            json.dump(rec_orb, rf_rec, indent=2)
+          _write_result_json(result_json, rec_orb)
           _mirror_logs_to_gcs()
           return rec_orb
         m_st = re.search(
@@ -2598,8 +2620,7 @@ def invoke_worker_subprocess(
               "peak_host_ram_gb": round(watchdog_state.get("peak_ram_gb", 0.0), 2),
               "total_host_ram_gb": round(watchdog_state.get("total_ram_gb", 251.69), 2),
           }
-          with open(result_json, "w", encoding="utf-8") as rf_rec:
-            json.dump(rec_st, rf_rec, indent=2)
+          _write_result_json(result_json, rec_st)
           _mirror_logs_to_gcs()
           return rec_st
     fail_data: dict[str, Any] = {
@@ -2615,8 +2636,7 @@ def invoke_worker_subprocess(
         "num_hosts_per_slice": num_hosts_per_slice,
         "global_devices": num_slices * devices_per_slice,
     }
-    with open(result_json, "w", encoding="utf-8") as rf:
-      json.dump(fail_data, rf, indent=2)
+    _write_result_json(result_json, fail_data)
     _mirror_logs_to_gcs()
     return fail_data
   finally:
@@ -2897,8 +2917,7 @@ def main() -> None:
         res["total_host_ram_gb"] = round(self_wd.get("total_ram_gb", 251.69), 2)
 
       if args.slice_id == 0:
-        with open(args.result_json, "w", encoding="utf-8") as f:
-          json.dump(res, f, indent=2)
+        _write_result_json(args.result_json, res)
       else:
         time.sleep(2.0)
       sys.stdout.flush()
