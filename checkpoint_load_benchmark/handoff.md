@@ -1,9 +1,45 @@
-# Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
+# Handoff: Checkpoint Load-Time Benchmark (`v2` Multi-Platform + `tpu7x` Archive)
 
-> **Snapshot:** 2026-11-12 ~01:50 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark`, rebased on 11-12 onto `origin/main` `5b6773c9b` and force-pushed. Commit hashes changed; old ones are mapped in §2.1. The pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/` (pre-rebase code, §2.1).
->
-> All planned single-host and multi-host runs are finished and the cluster is cleaned up (§6). **Open item:** whether to re-run the DeepSeek models with real HuggingFace weights instead of synthetic files (§11, waiting for the owner's decision). The numbers below come from the per-phase result JSONs in GCS. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). **Google Sheet:** [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) (tabs `tpu-v7x(Large models > 200B)` [`gid=635831153`] and `tpu-v7x (Smaller models)` [`gid=1294150880`], 11 columns including the `log` column with `gpaste` URLs and not-run explanations). To refresh the status tables, run
-> [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py) (see §9).
+> **Snapshot:** 2026-11-12 ~06:28 UTC · **Branch:** `docs/checkpoint-load-benchmark` (rebased onto `origin/main` `5b6773c9b`, code bundle uploaded from `82cc1c701`) · **Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit)
+
+---
+
+## Quick-Pickup Guide (For Team Members & Jetski)
+
+1. **Plan & task list:** Read [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) for the full v2 design, 21-model × 3-platform matrix (`352` planned rows), and Phases 1–5 backlog.
+2. **Rules on this branch:**
+   - **Never edit `src/maxtext/`** unless explicitly reviewed/approved; keep benchmark & harness tooling self-contained under `checkpoint_load_benchmark/`.
+   - **Pods run only committed code:** Push `docs/checkpoint-load-benchmark`, then run `build_code_tarball.py --out /tmp/code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code` (refuses dirty tracked files or unpushed commits).
+   - **Resource prefix `mesa-`:** Name all new Kubernetes JobSets/pods/KSAs/secrets `mesa-*` with label `app: mesa-bench-v2`, and write all v2 GCS outputs under `gs://mesa-maxtext/mesa-bench-v2/`. Leave legacy `mesakh_tpu7x_bench/` untouched.
+   - **Never stage unrelated workspace files:** `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md`, and root `benchmark_v2_design_plan.md`.
+3. **Current status (2026-11-12):**
+   - **Done (Phase 0 + S0–S2):** Tarball reproducibility + `CODE_VERSION.json` (`scripts/build_code_tarball.py`), `bootstrap_tpu7x.py` cleanup (no runtime string patches or overlay trees; 16-worker download cap applied at runtime), preflight on v7x/v6e/v5e (created v5e KSA `mesa-bench` with GCS access), `bench/platforms.py` profiles, `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and mandatory TPU backend/device-count verification before every load (`check_tpu_backend`, failing with `failure_category: "NOT-TPU"` on mismatch). Local suite: `57` tests pass (`~/Documents/mesakh/py312/bin/python -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/`).
+   - **Running now (S3 smoke tests, `qwen3-0.6b` scanned & unscanned, both pipelines):**
+     - `v7x` (`2x2x1`, 8 devices): `mesa-smoke-v7x-qwen3-0p6b-smoke-v7x` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/`
+     - `v6e` (`2x4`, 8 devices): `mesa-smoke-v6e-qwen3-0p6b-smoke-v6e` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/`
+     - `v5e` (`16x16`, 64 hosts, 256 devices): `mesa-smoke-v5e-qwen3-0p6b-smoke-v5e` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e/`
+   - **Next tasks:** Verify S3 logs & TPU check JSON fields (`S4`), clean up finished `mesa-smoke-*` JobSets, set up regional buckets (`T0.3`) and `mesa-hf-token` secrets (`T0.4`), then implement Phases 1–4 in [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md).
+4. **Commands to monitor, upload, or launch smoke tests:**
+   ```bash
+   # Build & upload pushed branch bundle to v2 GCS code dir
+   ~/Documents/mesakh/py312/bin/python checkpoint_load_benchmark/scripts/build_code_tarball.py \
+     --out /tmp/mesa_code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code
+
+   # Dry-run or apply a smoke JobSet (--platform v7x|v6e|v5e)
+   ./checkpoint_load_benchmark/scripts/run_smoke.sh --platform v6e --topology 2x4 --run-id smoke-v6e [--apply]
+
+   # Monitor active smoke runs and inspect GCS results
+   kubectl --context=gke_cloud-tpu-shared-capacity_us-central1_bodaborg-tpu7x-nap get jobsets,pods -l app=mesa-bench-v2
+   kubectl --context=gke_cloud-tpu-shared-capacity_southamerica-west1_bodaborg-v6e-nap get jobsets,pods -l app=mesa-bench-v2
+   kubectl --context=gke_tpu-prod-env-multipod_europe-west4_v5e-256-bodaborg-europe-west4 get jobsets,pods -l app=mesa-bench-v2
+   gcloud storage ls -r gs://mesa-maxtext/mesa-bench-v2/smoke/
+   ```
+
+---
+
+# Legacy Archive: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
+
+> **Archive Snapshot:** 2026-11-12 ~01:50 UTC · **Legacy Google Sheet:** [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) (tabs `tpu-v7x(Large models > 200B)` [`gid=635831153`] and `tpu-v7x (Smaller models)` [`gid=1294150880`], 11 columns including `log`). Legacy P1/P2/P3 clusters below are cleaned up. To refresh legacy status tables, run [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py) (§9).
 
 ---
 

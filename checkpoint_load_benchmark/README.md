@@ -1,9 +1,13 @@
 # MaxText Checkpoint Load-Time Benchmark Suite (`to_maxtext` vs. `safetensors_dynamic`)
 
+> **Benchmark v2 (Active):** Multi-platform expansion across **TPU v5e**, **TPU v6e**, and **TPU v7x** is tracked in [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) and [`handoff.md`](handoff.md) (live Sheet v2: [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit)). Smoke tests (`qwen3-0.6b`) use `bench/platforms.py` + `scripts/run_smoke.sh`, and pods execute a single committed tarball built from `HEAD` via `scripts/build_code_tarball.py`.
+
 A self-contained, reproducible benchmark suite for comparing end-to-end and warm checkpoint load times, sub-phase breakdowns, and peak Host RAM / TPU HBM utilization between MaxText's offline Orbax conversion pipeline (**`to_maxtext`**) and on-the-fly distributed SafeTensors loading (**`safetensors_dynamic`**) across:
 - **Scan Modes**: `scanned` (`scan_layers=True`) and `unscanned` (`scan_layers=False`)
 - **Slice Topologies**: **Single-Slice (`num_slices=1`)** and **Multi-Slice (`num_slices=2+`)**
 - **Hardware Generations**:
+  - **TPU v5e (`v5e-256-bodaborg-europe-west4`, `ct5lp-hightpu-4t`, `16x16`)**: `4` chips/host (`256` TPU devices across `64` hosts/slice, `4,096 GB` HBM, `192 GiB` Host RAM per host)
+  - **TPU v6e (`bodaborg-v6e-nap`, `ct6e-standard-8t` / `-4t`, `2x4`..`16x16`)**: `8` devices (`256 GB` HBM, `1,440 GiB` Host RAM on `2x4` `8t`) up to `256` devices (`8,192 GB` HBM on `16x16` `4t`)
   - **TPU v5p (`bodaborg-v5p-nap`, `ct5p-hightpu-4t`, `2x2x1`)**: `4` TPU devices/slice (`368 GB` HBM, `~270 GB` Host RAM per slice; `8` devices / `736 GB` HBM / `~540 GB` Host RAM on 2 slices)
   - **TPU v7 / Ironwood (`bodaborg-tpu7x-nap`, `tpu7x-standard-4t`, `2x2x1`)**: `8` JAX TPU cores (`4` dual-core chips) per slice (`813.80 GB` HBM, `1,014.50 GB` Host RAM per slice; `16` TPU cores / `1,627.60 GB` HBM / `2,029.00 GB` Host RAM on 2 slices)
 - **Model Scales (`0.6B` to `1600B`)**:
@@ -18,10 +22,14 @@ A self-contained, reproducible benchmark suite for comparing end-to-end and warm
 ```text
 checkpoint_load_benchmark/
 ├── README.md                                        # Complete documentation & reproduction guide
-├── handoff.md                                       # Current progress, live cluster state, known issues & next steps
-├── benchmark_ckpt_load_time.py                      # Unified benchmark harness, multi-slice coordinator & remote slice daemon
+├── handoff.md                                       # Quick-pickup guide (v2 tasks & status) + legacy tpu7x archive
+├── plans/
+│   └── benchmark_v2_plan.md                         # v2 design & Phases 0–5 task backlog across v5e, v6e, and v7x
+├── bench/
+│   └── platforms.py                                 # Verified PlatformProfile definitions for v7x, v6e, and v5e
+├── benchmark_ckpt_load_time.py                      # Unified benchmark harness, TPU check, multi-slice coordinator & daemon
 ├── bootstrap_tpu7x.py                               # Pod bootstrap: extracts committed code tarball to /tmp/maxtext & verifies CODE_VERSION.json
-├── generate_tpu7x_manifests.py                      # Legacy manifest generator for bodaborg-tpu7x-nap (to be replaced when v2 adds platform profiles)
+├── generate_tpu7x_manifests.py                      # Legacy manifest generator for bodaborg-tpu7x-nap (to be replaced when v2 adds full matrix)
 ├── configs/
 │   ├── model_tiers.env                              # Model tier definitions (v5p Tiers 0-3 + tpu7x Priority 1 & Priority 2) & cluster defaults
 │   └── p1_completion_tasks.json                     # Legacy Priority 1 completion queue tasks (still references old pod trees; replaced in v2)
@@ -29,6 +37,8 @@ checkpoint_load_benchmark/
 │   └── hbmfix/                                      # Archived patch snapshot from earlier P1 debugging (no longer staged by pods)
 ├── scripts/
 │   ├── build_code_tarball.py                        # Builds & uploads maxtext_lance_prs.tar.gz + CODE_VERSION.json from a pushed git commit
+│   ├── make_smoke_jobset.py                         # Generates v2 smoke Indexed JobSets (mesa-smoke-*) from bench/platforms.py
+│   ├── run_smoke.sh                                 # Dry-run or --apply v2 smoke tests on v7x, v6e, or v5e
 │   ├── common.sh                                    # Shared environment setup, PYTHONPATH, HF token & Python interpreter resolution
 │   ├── run_single_slice.sh                          # Run Single-Slice (num_slices=1) benchmarks
 │   ├── run_multi_slice_local.sh                     # Run Multi-Slice (num_slices=2+) benchmarks on a single host
