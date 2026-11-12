@@ -83,7 +83,7 @@ TPU v7x (bodaborg-tpu7x-nap), models up to 120B: to_maxtext vs safetensor (safet
 - safetensor (with fix): the same configuration re-run with this branch's MaxText fixes for two HBM peaks (composite leaves stacked one by one; reshard slices joined in pairs), from a separate code tree. The plain safetensor rows don't include these fixes.
 
 | Model | Scan Mode | Slices (Devices) | Pipeline | 1. HF -> GCS (s) | 2. Convert to Orbax (s) | 3. Load into MaxText (s) | Total (No Step 1) (s) | Total (End-to-End) (s) | Speedup (E2E / No Step 1) | log |
-| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | qwen3-0.6b (1.5 GB Dense) | scanned | 1 (8) | to_maxtext | 15.98 | 19.40 | 2.54 (Load Orbax) | 21.94 | 37.92 | 1.00x (baseline) | — |
 | ↳ | scanned | 1 (8) | safetensor | 15.98 | — | 16.14 (Safetensors+Convert: load 4.47 + transform 11.67; peak host RAM 26.8 GB) | 16.14 | 32.12 | 1.18x / 1.36x | — |
 | qwen3-0.6b (1.5 GB Dense) | scanned | 1 (16) | to_maxtext | — | Not run on multi-host slices | — | N/A | N/A | N/A | Not run: 1x2x2x2 smoke test ran safetensors_dynamic only (multi-host to_maxtext verified on 2 (32)) |
