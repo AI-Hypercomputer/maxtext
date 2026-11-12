@@ -416,8 +416,11 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
     for item in items:
       js_name = str(item.get("metadata", {}).get("name") or "")
       term_state = str(item.get("status", {}).get("terminalState") or "")
+      is_deactivated = (
+          bool(item.get("spec", {}).get("suspend")) and int(item.get("status", {}).get("restarts") or 0) >= 1
+      )
       shape = _match_worker_shape(prof, js_name)
-      if term_state in ("Completed", "Failed"):
+      if term_state in ("Completed", "Failed") or is_deactivated:
         _run_cmd(
             [
                 "kubectl",
@@ -440,7 +443,8 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
               ],
               timeout=60,
           )
-        events.append(f"[{utc_now_str()}] `{platform}` TPU JobSet `{js_name}` `{term_state}` and cleaned up.")
+        reason = "Suspended/Deactivated by Kueue" if is_deactivated else term_state
+        events.append(f"[{utc_now_str()}] `{platform}` TPU JobSet `{js_name}` `{reason}` and cleaned up.")
         continue
       active_jobsets.append(js_name)
       if shape is not None:
