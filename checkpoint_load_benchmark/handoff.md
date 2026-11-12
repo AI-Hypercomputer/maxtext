@@ -1,8 +1,8 @@
 # Handoff: Checkpoint Load-Time Benchmark on TPU v7 (`bodaborg-tpu7x-nap`)
 
-> **Snapshot:** 2026-11-02 ~03:20 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark` (pushed; pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/`)
+> **Snapshot:** 2026-11-12 ~01:50 UTC · **Owner:** mesakh · **Branch:** `docs/checkpoint-load-benchmark`, rebased on 11-12 onto `origin/main` `5b6773c9b` and force-pushed. Commit hashes changed; old ones are mapped in §2.1. The pods run the copies in `gs://mesa-maxtext/mesakh_tpu7x_bench/code/` (pre-rebase code, §2.1).
 >
-> The numbers below come from the per-phase result JSONs in GCS. All planned single-host and multi-host runs are finished and the cluster is cleaned up (§6). **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). **Google Sheet:** [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) (tabs `tpu-v7x(Large models > 200B)` [`gid=635831153`] and `tpu-v7x (Smaller models)` [`gid=1294150880`], 11 columns including the `log` column with `gpaste` URLs and not-run explanations). To refresh the status tables, run
+> All planned single-host and multi-host runs are finished and the cluster is cleaned up (§6). **Open item:** whether to re-run the DeepSeek models with real HuggingFace weights instead of synthetic files (§11, waiting for the owner's decision). The numbers below come from the per-phase result JSONs in GCS. **Per-test progress table:** [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md). **Google Sheet:** [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) (tabs `tpu-v7x(Large models > 200B)` [`gid=635831153`] and `tpu-v7x (Smaller models)` [`gid=1294150880`], 11 columns including the `log` column with `gpaste` URLs and not-run explanations). To refresh the status tables, run
 > [`scripts/summarize_tpu7x_results.py`](scripts/summarize_tpu7x_results.py) (see §9).
 
 ---
@@ -11,19 +11,21 @@
 
 | Workstream | Status |
 | :--- | :--- |
-| **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit + `2 × 2x2x2` (757.7 s / 718.7 s), 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s), `deepseek3.2-671b` on `1 × 2x2x4` (**776.4 s / 654.2 s**), and `deepseek4-1600b` on `1 × 2x4x4` (**971.5 s / 874.3 s**). With commit `1dd7ba3a9` (`safetensor (with fix)`), 397B scanned also completes on `2 × 2x2x1` (**1,608.3 s**) and `1 × 2x2x2` (**1,475.2 s**) |
+| **P1 · Exp 1A WITH Lance's 3 PRs** (`safetensors_dynamic`) | ✅ Done. 235B 4/4, 284B 4/4, 480B 2/2 that fit + `2 × 2x2x2` (757.7 s / 718.7 s), 397B unscanned · 2 (1,311.9 s) and scanned · 4 (1,399.7 s), 671B on 4 slices (649.4 s / 531.0 s), `deepseek3.2-671b` on `1 × 2x2x4` (**776.4 s / 654.2 s**), and `deepseek4-1600b` on `1 × 2x4x4` (**971.5 s / 874.3 s**). With commit `207cabecc` (`safetensor (with fix)`), 397B scanned also completes on `2 × 2x2x1` (**1,608.3 s**) and `1 × 2x2x2` (**1,475.2 s**) |
 | **P1 · Exp 1A BEFORE** (`origin/main`) | ✅ Done. Every BEFORE run **timed out at 1800 s while still loading** (235B · 1 and · 2, 284B · 1 and · 2, 397B unscanned · 2, 397B scanned · 4, 671B · 4), except 480B, which hits `KeyError`. With the PRs, the same loads take 353–1,400 s |
-| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | ✅ Done. `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). **Unscanned 235B**: S2 2,625.5 s, S3 545.5 s (`1 × 2x2x1`), 659.1 s (`2 × 2x2x1`), 841.1 s (`1 × 2x2x2`), and 682.1 s (`2 × 2x2x2`). **Unscanned 397B** (with commit `27dec98be` save-buffer cap): S2 **8,096.5 s** (transform 6,642.8 s + save 1,432.0 s, peak 884.2 GB RAM), S3 **2,025.8 s** (`2 × 2x2x1`), **1,838.3 s** (`1 × 2x2x2`), **2,233.0 s** (`1 × 2x2x4`), and **2,157.9 s** (`2 × 2x2x2`) |
+| **P1 · Exp 1B** (`to_maxtext` vs `safetensors_dynamic`) | ✅ Done. `to_maxtext` S2 can't run on one tpu7x host for scanned 235B/397B/480B, unscanned 480B, and 284B (§7.16). **Unscanned 235B**: S2 2,625.5 s, S3 545.5 s (`1 × 2x2x1`), 659.1 s (`2 × 2x2x1`), 841.1 s (`1 × 2x2x2`), and 682.1 s (`2 × 2x2x2`). **Unscanned 397B** (with commit `96329637f` save-buffer cap): S2 **8,096.5 s** (transform 6,642.8 s + save 1,432.0 s, peak 884.2 GB RAM), S3 **2,025.8 s** (`2 × 2x2x1`), **1,838.3 s** (`1 × 2x2x2`), **2,233.0 s** (`1 × 2x2x4`), and **2,157.9 s** (`2 × 2x2x2`) |
 | **P1 completion & P3 fixes** | ✅ Queue `p1` (`configs/p1_completion_tasks.json`), queue `p3` (`configs/p3_tasks.json`, 10/10 tasks), and all multi-host JobSets (`smoke-tm-2s`, `480b-2s`, `235b-tm`, `235b-tm-2s`, `397b-fix`, `397b-tm`, `397b-tm-4h`, `397b-tm-2s`, `ds32-4h`, `1600b-8h`) are 100% completed and cleaned up |
-| **P2 · 16-model suite** | ✅ Done (`p2_leftovers`, re-runs, and `safetensor (with fix)`). With commit `1dd7ba3a9`, `gpt-oss-120b` scanned `safetensors_dynamic` now succeeds on 1 slice (**504.9 s**) and 2 slices (**430.0 s**) (U-6 resolved). `llama3.1-70b` unscanned `to_maxtext` S2 peak host RAM drops from 403.6 GB to **351.9 GB** with commit `27dec98be` (U-8) |
+| **P2 · 16-model suite** | ✅ Done (`p2_leftovers`, re-runs, and `safetensor (with fix)`). With commit `207cabecc`, `gpt-oss-120b` scanned `safetensors_dynamic` now succeeds on 1 slice (**504.9 s**) and 2 slices (**430.0 s**) (U-6 resolved). `llama3.1-70b` unscanned `to_maxtext` S2 peak host RAM drops from 403.6 GB to **351.9 GB** with commit `96329637f` (U-8) |
 | **Reports** | ✅ Written and current: `reports/tpu7x_large_model_200b_experiment_report.md`, `tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`, `tpu7x_priority1_progress.md`, `tpu7x_multihost_results.{csv,md}`. Regenerate the CSV with `scripts/build_tpu7x_tables.py` and the row-by-row tables with `scripts/build_tpu7x_sheet_table.py --md-into` (§8) |
+| **Branch (11-12)** | ✅ Rebased onto `origin/main` `5b6773c9b` (2026-11-11) and force-pushed with lease. Lance's PRs #5706, #5828, #5705 are merged into `main` now, so the branch only carries this suite, its fixes, and docs (§2) |
+| **DeepSeek with real HF weights** | ⏳ Investigated on 11-12, not run. Two options are waiting for a decision (§11) |
 
 ---
 
 ## 1. Goal & experiment design
 
 - **Priority 1 (>200B models)**: `qwen3-235b-a22b`, `deepseek4-284b`, `qwen3.5-397b-a17b`, `qwen3-480b-a35b`, `deepseek3-671b`.
-  - **Exp 1A**: `safetensors_dynamic` **BEFORE** (`origin/main`) vs **WITH** Lance Wang's 3 PRs (#5706, #5828, #5705).
+  - **Exp 1A**: `safetensors_dynamic` **BEFORE** (`origin/main`) vs **WITH** Lance Wang's 3 PRs (#5706, #5828, #5705; all merged into `main` by 11-10).
   - **Exp 1B**: `to_maxtext` (S1 HF→GCS, S2 CPU conversion to an Orbax checkpoint, S3 Orbax load into HBM) vs `safetensors_dynamic` (S1 HF→GCS, S2 sharded safetensors load and in-memory conversion).
 - **Priority 2**: rerun the earlier 16-model `to_maxtext` vs `safetensors_dynamic` benchmark on tpu7x (WITH the PRs).
 - Every model runs in 4 configs: {`scanned`, `unscanned`} × {1 slice, 2 slices}.
@@ -35,11 +37,30 @@
 
 | Ref | Commit | Contents |
 | :--- | :--- | :--- |
-| `origin/main` | `f596f5369` | Baseline for the BEFORE runs |
-| `origin/fix/safetensors-dynamic-lance-prs` | `335d5e880` | `origin/main` plus Lance's PRs: `df2eacf0d` (#5706: composite keys, multi-host hooks, legacy keys), `1a89e9dfc` (#5705: `safetensors_dynamic` outside the training restore), `1f06b304d` + `335d5e880` (#5828: leading-axis sharded reads, inner MoE stacks kept in the read layout) |
-| `origin/docs/checkpoint-load-benchmark` | `5581543f5` (HEAD) | The above plus this benchmark suite (`ef8488fec`), the `safetensors_dynamic` HBM-peak fixes (`1dd7ba3a9`: single-leaf composite build for U-1 + pairwise non-contiguous reshard slice concat for U-6), `to_maxtext` Orbax save-buffer cap (`27dec98be` for U-8), Orbax 1,800 s multi-host barrier timeout (`7f3394d94`), and the 11-column Google Sheet tables with `gpaste` URLs (`5581543f5`) |
+| `origin/main` | `5b6773c9b` (2026-11-11) | Current base of this branch. Contains Lance's `safetensors_dynamic` PRs: #5706 (`5651d7fe2`; its stacking-rule part landed as #6116 `ce608b918`), #5828 (`9ff34c443`), #5705 (`d92b24c64`), plus #5610 (`67a726321`) and #6113 (`e600234e6`) |
+| `f596f5369` | (old `origin/main`, 10-27) | Baseline for the BEFORE runs, and the base that all P1/P2/P3 runs were built on |
+| `origin/fix/safetensors-dynamic-lance-prs` | `335d5e880` | Historical: `f596f5369` plus Lance's PR commits as they ran in P1/P2: `df2eacf0d` (#5706: composite keys, multi-host hooks, legacy keys), `1a89e9dfc` (#5705: `safetensors_dynamic` outside the training restore), `1f06b304d` + `335d5e880` (#5828: leading-axis sharded reads, inner MoE stacks kept in the read layout) |
+| `origin/docs/checkpoint-load-benchmark` | rebased 11-12 | `origin/main` plus this benchmark suite (`fb7026e81`), the `safetensors_dynamic` HBM-peak fixes (`207cabecc`: single-leaf composite build for U-1 + pairwise non-contiguous reshard slice concat for U-6), the `to_maxtext` Orbax save-buffer cap (`96329637f`, U-8), the harness's 1,800 s Orbax multi-host barrier timeout (`06b04627b`), the 11-column Google Sheet tables with `gpaste` URLs (`fcf49887e`, `4cd977258`), and docs |
 
-**On this branch** (on top of `ef8488fec`; the pods run the GCS copies uploaded by `run_tpu7x_cluster.sh`):
+### 2.1 History rewrites (read before using an old hash)
+
+- **11-10:** Lance rebased the branch onto `origin/main` `e6ff867c0`. He dropped his 4 PR commits (merged into `main`) and adapted `1dd7ba3a9` to `main`'s newer `tensor_handling.py`: same U-1/U-6 logic, with `delete_input` now passed through `main`'s `_device_put`.
+- **11-12:** rebased again onto `5b6773c9b` with no conflicts (all 41 of Lance's commits patch-identical, plus a `handoff.md` path fix) and force-pushed with `--force-with-lease`. Unit tests were not run locally (no JAX environment on the workstation) and there is no PR for this branch, so CI has not run either.
+- **Old → current hashes** (older notes and chats cite the old ones):
+
+| Old | Current | Commit |
+| :--- | :--- | :--- |
+| `ef8488fec` | `fb7026e81` | Add reproducible checkpoint load-time benchmark suite and documentation |
+| `1dd7ba3a9` | `207cabecc` | Stack composite leaves one by one and join reshard slices in pairs (U-1, U-6) |
+| `27dec98be` | `96329637f` | Cap the to_maxtext Orbax save buffers with checkpoint_storage_concurrent_gb (U-8) |
+| `ded32aa7b` | `06b04627b` | Record the 397B 2x2x2x2 Orbax 300s barrier timeout and raise the harness barrier timeout (earlier versions of this handoff wrongly credited this change to `7f3394d94`) |
+| `7f3394d94` | `146ce9a5c` | Complete tpu7x multi-host DeepSeek (1x2x2x4, 1x2x4x4) and 397B Orbax load tables |
+| `2902000a2` / `5581543f5` | `fcf49887e` / `4cd977258` | Add the `log` column with `gpaste` URLs / fill it for all Not run and Skipped rows |
+
+- **Local-only branches on the workstation:** `backup/checkpoint-load-benchmark-pre-rebase-20261112` (the pre-rewrite branch; the only place the old hashes above still exist, apart from Lance's PR commits on `origin/fix/safetensors-dynamic-lance-prs`), `lance/docs-checkpoint-load-benchmark-20261110` (Lance's 11-10 rebase), and `lance/pr-{5610,5705,5706,5828,6113,6116}` (Lance's final PR heads, all verified to be in `main`).
+- **The pods still run pre-rewrite code.** `gs://mesa-maxtext/mesakh_tpu7x_bench/code/maxtext_lance_prs.tar.gz` was built from the old tree (`f596f5369` + Lance's PR commits). `scripts/run_tpu7x_cluster.sh --upload-only` uploads the harness, the bootstrap, and this branch's `src/maxtext/checkpoint_conversion/utils/{load_dynamic,tensor_handling,utils}.py` (as the `fix` tree), but **not** the tarball. The rebased `utils` files may depend on newer `main` code, so rebuild the tarball from the rebased tree (same layout as the current one, see `tar tzf`) before any new cluster run.
+
+**On this branch** (on top of the suite commit `fb7026e81`; the pods run the GCS copies uploaded by `run_tpu7x_cluster.sh`):
 
 | Path | Contents |
 | :--- | :--- |
@@ -48,11 +69,11 @@
 | `scripts/tpu7x_task_queue.py`, `scripts/tpu7x_daemon_controller.py`, `configs/p1_completion_tasks.json`, `configs/p3_tasks.json`, `scripts/run_tpu7x_multihost.sh` | P1 completion queue (`queue/p1/`), P3 fixes queue (`queue/p3/`), and multi-host JobSet launcher (`2x2x2`, `2x2x4`, `2x4x4`) |
 | `scripts/summarize_tpu7x_results.py` | Status matrix from per-phase result JSONs |
 | `scripts/build_tpu7x_tables.py`, `scripts/build_tpu7x_sheet_table.py` | Summary CSV; the 11-column row-by-row tables for the Google Sheet tabs (`--suite p1`: >200B models plus multi-host rows; `--suite p2`: models up to 120B; includes `LOG_URLS` mapping to `gpaste` URLs and not-run explanations) |
-| `src/maxtext/checkpoint_conversion/utils/{load_dynamic.py,tensor_handling.py,utils.py}` | Production fixes on this branch: single-leaf composite build (U-1, `1dd7ba3a9`), pairwise slice concatenation (U-6, `1dd7ba3a9`), and `MAXTEXT_ORBAX_SAVE_CONCURRENT_GB` cap + `hf_state` release before Orbax save (U-8, `27dec98be`) |
-| `patches/hbmfix.patch`, `patches/hbmfix/src/...` | Earlier intermediate HBM-peak patch (§7.6, superseded by `1dd7ba3a9` in `src/`) |
+| `src/maxtext/checkpoint_conversion/utils/{load_dynamic.py,tensor_handling.py,utils.py}` | Production fixes on this branch: single-leaf composite build (U-1, `207cabecc`), pairwise slice concatenation (U-6, `207cabecc`), and `MAXTEXT_ORBAX_SAVE_CONCURRENT_GB` cap + `hf_state` release before Orbax save (U-8, `96329637f`) |
+| `patches/hbmfix.patch`, `patches/hbmfix/src/...` | Earlier intermediate HBM-peak patch (§7.6, superseded by `207cabecc` in `src/`) |
 | Not committed: `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md` | Unrelated to this work (never stage) |
 
-Code bundles verified against git: `code/maxtext_lance_prs.tar.gz` `src/` = this branch's `src/` (`ef8488fec`); `code/checkpoint_conversion_origin_main.tar.gz` = `f596f5369:src/maxtext/checkpoint_conversion`.
+Code bundles verified against git (before the rewrite): `code/maxtext_lance_prs.tar.gz` `src/` = this branch's `src/` at `ef8488fec` (now `fb7026e81` on a newer base, §2.1); `code/checkpoint_conversion_origin_main.tar.gz` = `f596f5369:src/maxtext/checkpoint_conversion`.
 
 **What the BEFORE tree contains:** `/tmp/maxtext_origin_main` is the Lance-PRs tree with `src/maxtext/checkpoint_conversion` replaced by the `f596f5369` copy. Lance's PRs also touch 3 files outside that directory (`utils/globals.py`: extra `HF_IDS`; `utils/max_utils.py`: `_uses_checkpoints` for `jax.distributed` init; `utils/model_creation_utils.py`: `from_pretrained` support). None of them is on the measured path: the harness calls `jax.distributed.initialize` itself and calls `checkpointing.load_state_if_possible(source_checkpoint_layout="safetensors_dynamic")` directly (`checkpointing.py` is unchanged by the PRs).
 
@@ -134,14 +155,14 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
 ### 5.3 P2 · 16-model suite (WITH PRs + `safetensor (with fix)`)
 
 ✅ Complete. All configurations are in [`reports/tpu7x_benchmark_ckpt_load_time_summary.md`](reports/tpu7x_benchmark_ckpt_load_time_summary.md) (row by row, §3.1) and the summary CSV. Points to know:
-- `gpt-oss-120b` scanned `safetensors_dynamic` ran out of HBM on the initial Lance-PRs branch (U-6); with commit `1dd7ba3a9` (`safetensor (with fix)`, pairwise slice concatenation), it succeeds on 1 slice (**504.92 s**) and 2 slices (**429.98 s**).
-- The `llama3.1-70b` scanned 2-slice Orbax load needed `checkpoint_storage_concurrent_gb=38` (T-13); with commit `27dec98be` (`MAXTEXT_ORBAX_SAVE_CONCURRENT_GB=40`), `llama3.1-70b` unscanned S2 peak host RAM drops from 403.61 GB to **351.92 GB** (U-8).
+- `gpt-oss-120b` scanned `safetensors_dynamic` ran out of HBM on the initial Lance-PRs branch (U-6); with commit `207cabecc` (`safetensor (with fix)`, pairwise slice concatenation), it succeeds on 1 slice (**504.92 s**) and 2 slices (**429.98 s**).
+- The `llama3.1-70b` scanned 2-slice Orbax load needed `checkpoint_storage_concurrent_gb=38` (T-13); with commit `96329637f` (`MAXTEXT_ORBAX_SAVE_CONCURRENT_GB=40`), `llama3.1-70b` unscanned S2 peak host RAM drops from 403.61 GB to **351.92 GB** (U-8).
 - `qwen3-14b` and `qwen3-32b` scanned 1-slice outliers were re-run (U-7, `run_tpu7x_16m_rerun`).
 
 ### 5.4 Not run (and why)
 
-- `deepseek3-671b` (`1,342.4 GB`), `deepseek3.2-671b` (`1,357.8 GB`), and `deepseek4-1600b` (`3,200.0 GB`) `to_maxtext`: not run because `to_maxtext` Step 2 is a single-host CPU script and even the converted state alone (`1.34–3.20 TB`) exceeds the **1,014.5 GB** host RAM of one `tpu7x` node. All three are benchmarked with `safetensors_dynamic` across 4 or 8 hosts (`4 × 2x2x1`, `1 × 2x2x4`, `2 × 2x2x2`, `1 × 2x4x4`, `4 × 2x2x2`; [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md)).
-- `deepseek3-671b` unscanned on 1–2 slices (`1,342.4 GB` > 813.8 GB HBM on 1 slice and host-OOMs on 2 slices; scanned already failed on both), `qwen3.5-397b-a17b` unscanned `safetensors_dynamic` on 1 slice (scanned failed HBM OOM at 97.7% capacity), `qwen3-480b-a35b` unscanned `safetensors_dynamic` on 1 slice (961.0 GB > 813.8 GB HBM), and `qwen3-0.6b` `to_maxtext` (only in the `safetensors_dynamic` multi-host smoke suite on `2x2x2`). Every non-executed row has an explicit explanation in Column K (`log`) of the Google Sheet.
+- `deepseek3-671b` (`1,342.4 GB`), `deepseek3.2-671b` (`1,367.0 GB`), and `deepseek4-1600b` (`3,197.7 GB`) `to_maxtext`: not run because `to_maxtext` Step 2 is a single-host CPU script and even the converted state alone (`1.34–3.20 TB`) exceeds the **1,014.5 GB** host RAM of one `tpu7x` node. All three are benchmarked with `safetensors_dynamic` across 4 or 8 hosts (`4 × 2x2x1`, `1 × 2x2x4`, `2 × 2x2x2`, `1 × 2x4x4`, `4 × 2x2x2`; [`reports/tpu7x_multihost_results.md`](reports/tpu7x_multihost_results.md)). All DeepSeek runs use synthetic files; for real weights see §11.
+- `deepseek3-671b` unscanned on 1–2 slices (`1,342.4 GB` > 813.8 GB HBM on 1 slice and host-OOMs on 2 slices; scanned already failed on both), `qwen3.5-397b-a17b` unscanned `safetensors_dynamic` on 1 slice (scanned failed HBM OOM at 97.7% capacity), `qwen3-480b-a35b` unscanned `safetensors_dynamic` on 1 slice (961.0 GB > 813.8 GB HBM), and `qwen3-0.6b` `to_maxtext` on `1 × 2x2x2` (that smoke test ran `safetensors_dynamic` only; multi-host `to_maxtext` was verified on `2 × 2x2x2`). Every non-executed row has an explicit explanation in Column K (`log`) of the Google Sheet.
 
 ---
 
@@ -169,7 +190,7 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
 7. **`SKIP_FAILED_RESULTS` docs were inverted** (now fixed in the README and the harness docstring). In code, with `--skip-completed`, FAILED results are re-run by default, and `SKIP_FAILED_RESULTS=1` skips them. The P1 pair manifests and **pair `d`** set it to `1`.
 8. **`qwen3-30b-a3b` unscanned TM S2 failed with `HFValidationError`.** The local staging dir `/tmp/p2_lance_prs/hf_local/qwen3-30b-a3b` was missing (an older harness staging path), so `to_maxtext` treated the path as a repo id. The current harness re-stages into `/ramdisk/hf_local/`, so a plain retry should work.
 9. **`llama3.1-70b` unscanned TM S1 was killed (-9) at 21.6 GB RAM during the HF download** (07:45, an external kill). Pair `e` doesn't set `SKIP_FAILED_RESULTS`, so it will retry this automatically.
-10. **The DeepSeek P1 numbers use `STAGE_SPARSE_DEEPSEEK_OOM=1`**: synthetic sparse BF16 safetensors on local disk, with no HF→GCS step. They measure load/transform mechanics and capacity, not GCS read bandwidth, so don't compare them directly with the Qwen GCS loads.
+10. **The DeepSeek P1 numbers use `STAGE_SPARSE_DEEPSEEK_OOM=1`**: synthetic sparse BF16 safetensors on local disk, with no HF→GCS step. They measure load/transform mechanics and capacity, not GCS read bandwidth, so don't compare them directly with the Qwen GCS loads. This is why their `HF -> GCS` cells read `0.00 (local stage)`. Real-weights options: §11.
 11. **Pair `d` is inconsistent with the other pairs:**
     - It uses a different image and runs the pushed branch (`git clone`) without the bootstrap patches.
     - It sets `SKIP_FAILED_RESULTS=1`, so it would **not** retry `qwen3-30b-a3b` unscanned.
@@ -203,19 +224,23 @@ The per-test P1 tables (summary by model, the row-by-row `to_maxtext` vs `safete
     - **235B unscanned:** S2 2,625.5 s (569 GB downloaded in 1,538 s), S3 545.5 s / 659.1 s on 1 / 2 slices.
     - **397B unscanned:** the transform finished in 6,860 s, then the pod was OOM-killed when the Orbax save started. The ~807 GB converted state plus save buffers exceed the ~944 GB a pod can use. Its `to_maxtext_step2_result.json` in the pstream run dir was written from the pod log (`recorded_by`).
     - **Capacity:** spot capacity was scarce on 10-29 (3–16 single-host spot nodes, frequent taint evictions). Two 397B attempts and three pair pods were lost before the last attempt ran.
-22. **HBM-peak fixes (`1dd7ba3a9`), `to_maxtext` Orbax save-buffer cap (`27dec98be`), and Orbax 1,800 s barrier timeout (`7f3394d94`):**
+22. **HBM-peak fixes (`207cabecc`), `to_maxtext` Orbax save-buffer cap (`96329637f`), and Orbax 1,800 s barrier timeout (`06b04627b`):**
     - **U-1 (`qwen3.5-397b-a17b` scanned composite `(wi_0, wi_1)` HBM OOM):** `load_dynamic.py` now builds and reshards one composite target leaf at a time instead of stacking the `(wi_0, wi_1)` pair and slicing it in HBM. Validated on `2 × 2x2x1` (**1,608.32 s**) and `1 × 2x2x2` (**1,475.17 s**).
     - **U-6 (`gpt-oss-120b` scanned HLO temporaries HBM OOM):** `tensor_handling.py` now concatenates non-contiguous reshard slices pairwise instead of in a single N-way `jnp.concatenate` that materialized ~7× the leaf in XLA temporaries (200.32 GiB / 100.21 GiB per device). Validated on `1 × 2x2x1` (**504.92 s**) and `2 × 2x2x1` (**429.98 s**).
     - **U-8 (`to_maxtext` Step 2 Orbax save host OOM):** `checkpoint_conversion/utils/utils.py` caps Orbax save concurrency (`MAXTEXT_ORBAX_SAVE_CONCURRENT_GB`, default 40 GB) and drops `hf_state` before saving. Reduced `llama3.1-70b` unscanned S2 peak host RAM from 403.61 GB to **351.92 GB**, and enabled `qwen3.5-397b-a17b` unscanned S2 to complete on one host in **8,096.53 s** (peak **884.23 GB** RAM).
     - **Orbax v1 multi-host barrier timeout:** `orbax.checkpoint.experimental.v1._src.synchronization.multihost._DEFAULT_BARRIER_TIMEOUT` defaults to 300 s, which timed out during `qwen3.5-397b-a17b` unscanned S3 on `2 × 2x2x2` when one host finished reading GCS >5 min after the others. `benchmark_ckpt_load_time.py` raises `_DEFAULT_BARRIER_TIMEOUT` to 1,800 s, allowing all four multi-slice/multi-host 397B Orbax loads (`2 (16)` **2,025.76 s**, `1 (16)` **1,838.26 s**, `1 (32)` **2,233.01 s**, `2 (32)` **2,157.89 s**) to succeed.
-23. **Google Sheet 11th column (`log`) with `gpaste` URLs (`5581543f5`):**
+23. **Google Sheet 11th column (`log`) with `gpaste` URLs (`fcf49887e`, `4cd977258`):**
     - `scripts/build_tpu7x_sheet_table.py` outputs an 11th column (`log`) containing public `paste.googleplex.com` URLs for all 17 failed or slow-outlier experiments across both tabs (`tpu-v7x(Large models > 200B)` and `tpu-v7x (Smaller models)`) and explicit `Not run` / `Skipped` explanations for all 22 non-executed rows (`LOG_URLS`).
 
 ---
 
 ## 8. Next steps (in order)
 
-All planned runs, fixes, reports, and Google Sheet tables (with `gpaste` logs in Column K) are finished and pushed; the cluster is cleaned up. To rebuild the tables from local mirrors:
+1. **Decide the DeepSeek real-weights follow-up (§11):** option 1 (copy the existing BF16 copies; quick) or option 2 (download from HF and dequantize; the only way to get `deepseek4-1600b`). Nothing has been started.
+2. **Before any new cluster run,** rebuild `gs://mesa-maxtext/mesakh_tpu7x_bench/code/maxtext_lance_prs.tar.gz` from the rebased tree, then run `scripts/run_tpu7x_cluster.sh --upload-only` (§2.1).
+3. **Lance's local copy** of `docs/checkpoint-load-benchmark` predates the 11-12 force-push; he needs `git fetch origin && git reset --hard origin/docs/checkpoint-load-benchmark` before committing to it.
+
+Everything else (runs, fixes, reports, and the Google Sheet tables with `gpaste` logs in Column K) is finished and pushed; the cluster is cleaned up. To rebuild the tables from local mirrors:
 - **Summary CSV:** `scripts/build_tpu7x_tables.py <p2> <p2_rerun> <p1> <p1_pstream> <p1_tmfix> --cold-s1 qwen3.5-397b-a17b=814.53 --csv reports/tpu7x_benchmark_ckpt_load_time_summary.csv --md <scratch.md>`
 - **Sheet tables (11 columns with `log`):**
   - `scripts/build_tpu7x_sheet_table.py --suite p1 <p1> <p1_pstream> <p1_tmfix> --cold-s1 qwen3.5-397b-a17b=814.53 --multihost-csv reports/tpu7x_multihost_results.csv --variant "with fix=<p1_fix>" --md-into reports/tpu7x_priority1_progress.md`
@@ -265,3 +290,37 @@ python3 checkpoint_load_benchmark/scripts/summarize_tpu7x_results.py /tmp/tpu7x_
 | Google Sheet (synced from `build_tpu7x_sheet_table.py`) | [`11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y`](https://docs.google.com/spreadsheets/d/11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y/edit?usp=sharing) — tab `tpu-v7x(Large models > 200B)` (`sheetId=635831153`, `--suite p1`) and tab `tpu-v7x (Smaller models)` (`sheetId=1294150880`, `--suite p2`); `gpaste` URLs and not-run explanations in `LOG_URLS` inside [`scripts/build_tpu7x_sheet_table.py`](scripts/build_tpu7x_sheet_table.py) |
 | v5p reports (keep untouched) | [`reports/benchmark_ckpt_load_time_*`](reports/) |
 | tpu7x reports | [`reports/tpu7x_priority1_progress.md`](reports/tpu7x_priority1_progress.md), [`reports/tpu7x_large_model_200b_experiment_report.md`](reports/tpu7x_large_model_200b_experiment_report.md), [`reports/tpu7x_benchmark_ckpt_load_time_{summary.md,summary.csv,report.md,issues.md}`](reports/), [`reports/tpu7x_multihost_results.{csv,md}`](reports/) |
+| DeepSeek BF16 copies (MaxText team's bucket; we have read access) | `gs://maxtext-deepseek/deepseek4/hf-bf16/` (`deepseek4-284b`), `gs://maxtext-deepseek/deepseek3-671b/hf/` (`deepseek3-671b`), `gs://maxtext-deepseek/deepseek3.2/hf-bf16/` (`deepseek3.2-671b`); see §11 |
+| DeepSeek FP8/FP4 → BF16 tool | [`src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py`](../src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py); MaxText recipes in [`tests/end_to_end/tpu/deepseek/`](../tests/end_to_end/tpu/deepseek/) |
+
+---
+
+## 11. DeepSeek with real HuggingFace weights (investigated 11-12, not run)
+
+All DeepSeek numbers so far come from synthetic sparse BF16 files (§7.10). The HF repos exist and are public and ungated (V4-Flash and V4-Pro since 2026-04-22), but none of them is stored in BF16:
+
+| Model | HF repo (format) | HF download | BF16 size | Existing BF16 copy |
+| :--- | :--- | ---: | ---: | :--- |
+| `deepseek4-284b` | `deepseek-ai/DeepSeek-V4-Flash` (FP8 + FP4 routed experts) | 159.6 GB | 581.9 GB | `gs://maxtext-deepseek/deepseek4/hf-bf16/` (46 shards) |
+| `deepseek3-671b` | `deepseek-ai/DeepSeek-V3` (FP8, 128×128 block scales) | 688.6 GB | 1,369.0 GB | `gs://maxtext-deepseek/deepseek3-671b/hf/` (163 shards) |
+| `deepseek3.2-671b` | `deepseek-ai/DeepSeek-V3.2` (FP8) | 689.5 GB | 1,370.7 GB | `gs://maxtext-deepseek/deepseek3.2/hf-bf16/` |
+| `deepseek4-1600b` | `deepseek-ai/DeepSeek-V4-Pro` (FP8 + FP4) | 864.7 GB | ~3.2 TB | none |
+
+- HF download sizes are summed from the HF API (`?blobs=true`); BF16 sizes are measured with `gcloud storage du -s` (V4-Pro: `HF_SHAPE` estimate). They match our synthetic files within 0.3%, so real weights hit the same RAM/HBM limits.
+- **Neither loader can read the HF files directly** (checked on the rebased branch):
+  - `safetensors_dynamic` (`utils/load_dynamic.py`, `utils/tensor_handling.py`) has no FP8/FP4 dequantization.
+  - `to_maxtext.py` casts FP8 to BF16 without applying the `weight_scale_inv` block scales (wrong weights). V4's FP4 experts are packed 2 per byte (`I8 [2048, 2048]` for a `[2048, 4096]` weight, with `F8_E8M0` scales), so the shapes don't match either.
+- **MaxText's own recipe:** HF download → `deepseek_dequantize.py` (FP8/FP4 → BF16 on CPU) → `to_maxtext` on a large CPU machine (`tests/end_to_end/tpu/deepseek/{v3-671b,v3.2-671b,v4-284b,v4-1600b}/1_test_deepseek.sh`).
+
+**What real weights would allow:**
+- **`safetensors_dynamic`:** ✅ the same slice layouts as the synthetic runs, but reading real bytes from GCS, so the results become comparable with the Qwen rows. Needs a small harness change: let the DeepSeek models take a GCS BF16 source instead of `hf://<repo>` or the sparse files (`_should_stage_sparse_bf16`, `STAGE_SPARSE_DEEPSEEK_OOM`). Risk: 284B on 1 slice already peaked at 963–980 GB host RAM out of 1,014.5 GB.
+- **`to_maxtext`:**
+  - 671B, 3.2-671B, and 1600B: ❌ on a tpu7x host, since the converted state alone (1.37–3.2 TB) exceeds 1,014.5 GB RAM. Only possible on a multi-TB-RAM CPU VM, whose S2 time wouldn't be comparable with the other rows.
+  - 284B scanned: ❌ (582 GB staged source + 582 GB converted state).
+  - 284B unscanned: ⚠️ worth a retry. The old OOM at 989.6 GB predates the U-8 save-buffer cap (`96329637f`), with which 397B unscanned fit at 884 GB.
+
+**Options (waiting for the owner's decision):**
+1. **Quick:** copy the 3 existing BF16 copies (~3.3 TB, GCS → GCS) into our bucket, then re-run `safetensors_dynamic` (plus 284B unscanned `to_maxtext`). The `HF -> GCS` column would then show a GCS copy time, not an HF download.
+2. **Full HF path:** download FP8/FP4 from HF → dequantize → upload BF16. Required for 1600B, and gives a true download-plus-dequantize time. Needs a CPU VM with ~4 TB of disk for 1600B (FP8 input + BF16 output), because tpu7x nodes only have a 100 GB boot disk plus the RAM-backed `/ramdisk`.
+
+Either option costs cluster time and adds 3.3–6.5 TB of GCS storage.
