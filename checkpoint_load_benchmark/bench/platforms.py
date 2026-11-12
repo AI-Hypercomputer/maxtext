@@ -50,8 +50,22 @@ class PlatformProfile:
   hf_token_secret_optional: bool = True
   gcs_code_dir: str = DEFAULT_GCS_CODE_DIR
   gcs_data_root: str = DEFAULT_GCS_DATA_ROOT
+  regional_gcs_data_root: str = ""
   pod_labels: dict[str, str] = field(default_factory=lambda: {"app": "mesa-bench-v2"})
   workload_time_limit_minutes: int | None = None
+  capacity_type: str = "spot"
+  zone_hint: str = ""
+  cpu_node_pool: str = "cpu-np"
+  cpu_machine_type: str = ""
+  step1b_cpu_node_pool: str = ""
+  step1b_cpu_machine_type: str = ""
+  step2_ram_margin_ratio: float = 0.93
+  min_avail_host_ram_gb: float = 8.5
+  sparse_min_avail_host_ram_gb: float = 24.0
+  default_phase_timeout_s: int = 14400
+  default_barrier_timeout_s: int = 1800
+  max_download_workers: int = 16
+  max_concurrent_jobsets: int = 2
 
   def _require_topology(self, topology: str) -> None:
     if topology not in self.hosts_per_slice_by_topology:
@@ -108,7 +122,21 @@ PROFILES: dict[str, PlatformProfile] = {
         hosts_per_slice_by_topology={"2x2x1": 1, "2x2x2": 2, "2x2x4": 4, "2x4x4": 8},
         host_machine_type_by_topology={t: "tpu7x-standard-4t" for t in _V7X_TOPOLOGIES},
         host_ram_gib_by_topology={t: 960 for t in _V7X_TOPOLOGIES},
+        regional_gcs_data_root="gs://mesa-maxtext-us-central1/mesa-bench-v2",
         workload_time_limit_minutes=180,
+        capacity_type="spot",
+        zone_hint="us-central1-c",
+        cpu_node_pool="cpu-np",
+        cpu_machine_type="n2d-standard-64",
+        step1b_cpu_node_pool="job-manager-np",
+        step1b_cpu_machine_type="n2d-standard-224",
+        step2_ram_margin_ratio=0.93,
+        min_avail_host_ram_gb=8.5,
+        sparse_min_avail_host_ram_gb=24.0,
+        default_phase_timeout_s=3600,
+        default_barrier_timeout_s=1800,
+        max_download_workers=16,
+        max_concurrent_jobsets=2,
     ),
     "v6e": PlatformProfile(
         name="v6e",
@@ -136,7 +164,19 @@ PROFILES: dict[str, PlatformProfile] = {
             "16x16": "ct6e-standard-4t",
         },
         host_ram_gib_by_topology={"2x4": 1440, "2x2": 720, "4x4": 720, "8x8": 720, "16x16": 720},
+        regional_gcs_data_root="gs://mesa-maxtext-southamerica-west1/mesa-bench-v2",
         workload_time_limit_minutes=180,
+        capacity_type="on_demand",
+        zone_hint="southamerica-west1-a",
+        cpu_node_pool="cpu-np",
+        cpu_machine_type="n4-standard-64",
+        step2_ram_margin_ratio=0.93,
+        min_avail_host_ram_gb=8.5,
+        sparse_min_avail_host_ram_gb=24.0,
+        default_phase_timeout_s=3600,
+        default_barrier_timeout_s=1800,
+        max_download_workers=16,
+        max_concurrent_jobsets=2,
     ),
     "v5e": PlatformProfile(
         name="v5e",
@@ -158,7 +198,19 @@ PROFILES: dict[str, PlatformProfile] = {
         hosts_per_slice_by_topology={"16x16": 64},
         host_machine_type_by_topology={"16x16": "ct5lp-hightpu-4t"},
         host_ram_gib_by_topology={"16x16": 192},
+        regional_gcs_data_root="gs://mesa-maxtext-europe-west4/mesa-bench-v2",
         workload_time_limit_minutes=None,
+        capacity_type="reserved",
+        zone_hint="europe-west4-b",
+        cpu_node_pool="cpu-np",
+        cpu_machine_type="n2-standard-64",
+        step2_ram_margin_ratio=0.90,
+        min_avail_host_ram_gb=6.5,
+        sparse_min_avail_host_ram_gb=18.0,
+        default_phase_timeout_s=3600,
+        default_barrier_timeout_s=1800,
+        max_download_workers=16,
+        max_concurrent_jobsets=1,
     ),
 }
 

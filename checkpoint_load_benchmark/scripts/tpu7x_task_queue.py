@@ -172,18 +172,32 @@ def _remote_reachable(args, needed: int | None = None) -> bool:
 
 
 def _usable_slices(args) -> int:
-  """Largest slice count this worker can drive right now: 1 + the number of leading reachable daemons."""
-  usable = 1
-  for n in range(1, min(args.max_slices, len(_remote_addrs(args)) + 1)):
-    if not _remote_reachable(args, needed=n):
+  """Largest slice count this worker can drive right now given `--hosts-per-slice` and reachable daemons."""
+  hosts_per_slice = max(1, int(getattr(args, "hosts_per_slice", 1)))
+  addrs = _remote_addrs(args)
+  usable = 0
+  max_possible = min(args.max_slices, (len(addrs) + 1) // hosts_per_slice)
+  for n in range(1, max_possible + 1):
+    needed_daemons = n * hosts_per_slice - 1
+    if needed_daemons > 0 and not _remote_reachable(args, needed=needed_daemons):
       break
-    usable = n + 1
+    usable = n
   return usable
 
 
 def _runnable_by_me(task: dict, args, max_slices: int) -> bool:
+  """Returns whether `task` matches this worker's slices, hosts_per_slice, platform, topology, and tree."""
   slices = task.get("slices", 1)
+  hosts_per_slice = max(1, int(getattr(args, "hosts_per_slice", 1)))
   if slices > max_slices or slices < args.min_slices:
+    return False
+  if task.get("hosts_per_slice", hosts_per_slice) != hosts_per_slice:
+    return False
+  worker_platform = getattr(args, "platform", "") or ""
+  if worker_platform and task.get("platform") and task["platform"] != worker_platform:
+    return False
+  worker_topology = getattr(args, "topology", "") or ""
+  if worker_topology and task.get("topology") and task["topology"] != worker_topology:
     return False
   return os.path.isfile(os.path.join(task["tree"], HARNESS_REL))
 
@@ -196,16 +210,18 @@ def run_task(q: Queue, task: dict, gen: int, args) -> int:
   cmd = [python, "-u", os.path.join(tree, HARNESS_REL), *task["args"]]
   csv_local = f"/tmp/task_{task['id']}.csv"
   cmd += ["--csv-report", csv_local]
-  if task.get("slices", 1) > 1:
-    # One host:port per remote slice; the harness maps slice i to the (i-1)-th address.
-    cmd += ["--remote-slice-addrs", *_remote_addrs(args)[: task["slices"] - 1]]
+  hosts_per_slice = max(1, int(getattr(args, "hosts_per_slice", 1)))
+  needed_daemons = task.get("slices", 1) * hosts_per_slice - 1
+  if needed_daemons > 0:
+    # One host:port per remote daemon, host-by-host across slices; harness maps slice_id i to (i-1)-th addr.
+    cmd += ["--remote-slice-addrs", *_remote_addrs(args)[:needed_daemons]]
   env = os.environ.copy()
   env.update({k: str(v) for k, v in task.get("env", {}).items()})
   env["PYTHONPATH"] = f"{tree}/src:{tree}"
   _log(f"START {task['id']} on {args.worker}: {' '.join(cmd)}  env={task.get('env', {})}")
 
   try:
-    proc = subprocess.Popen(cmd, env=env, cwd=tree)
+    proc = subprocess.Popen(cmd, env=env, cwd=tree)  # pylint: disable=consider-using-with
   except Exception:
     q.release(task["id"], gen)
     raise
@@ -245,7 +261,7 @@ def run_task(q: Queue, task: dict, gen: int, args) -> int:
   # The harness exits 0 even when phases fail (--allow-step-failure records them per phase). A non-zero exit or a
   # slice-1 daemon that disappeared during the run means the run itself was interrupted (preemption, eviction), so
   # the task is released for another attempt instead of being marked done.
-  interrupted = rc != 0 or (task.get("slices", 1) > 1 and not _remote_reachable(args, needed=task["slices"] - 1))
+  interrupted = rc != 0 or (needed_daemons > 0 and not _remote_reachable(args, needed=needed_daemons))
   attempts = q.bump_attempts(task["id"]) if interrupted else 0
   if interrupted and attempts < args.max_attempts:
     q.release(task["id"], state["gen"])
@@ -264,8 +280,11 @@ def main() -> int:
   p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   p.add_argument("--queue", required=True, help="gs:// directory holding tasks.json, locks/ and done/")
   p.add_argument("--worker", required=True, help="Worker name recorded in locks and done markers")
-  p.add_argument("--max-slices", type=int, default=1, help="Slices this worker can drive (N needs N-1 remote daemons)")
+  p.add_argument("--max-slices", type=int, default=1, help="Slices this worker can drive (N needs N*hosts-1 daemons)")
   p.add_argument("--min-slices", type=int, default=1, help="Only claim tasks needing at least this many slices")
+  p.add_argument("--hosts-per-slice", type=int, default=1, help="Indexed worker hosts per TPU slice")
+  p.add_argument("--platform", default="", help="Optional platform filter (e.g. v7x, v6e, v5e)")
+  p.add_argument("--topology", default="", help="Optional slice topology filter (e.g. 2x2x1, 4x4, 16x16)")
   p.add_argument(
       "--remote-slice-addrs",
       default=None,
@@ -295,8 +314,8 @@ def main() -> int:
     if not [t for t in pending if _runnable_by_me(t, args, args.max_slices)]:
       _log(f"No remaining task that {args.worker} can run ({len(pending)} pending for other workers). Exiting.")
       return 0
-    # 2-slice tasks need a live slice-1 daemon right now; otherwise only single-slice tasks are candidates.
-    max_slices = _usable_slices(args) if args.max_slices > 1 else 1
+    # 2-slice or multi-host tasks need their remote daemons reachable right now; otherwise skip them until ready.
+    max_slices = _usable_slices(args) if (args.max_slices > 1 or args.hosts_per_slice > 1) else 1
     mine = [t for t in pending if _runnable_by_me(t, args, max_slices)]
     if args.prefer_max_slices:
       mine.sort(key=lambda t: 0 if t.get("slices", 1) == max_slices else 1)  # stable: keeps file order otherwise

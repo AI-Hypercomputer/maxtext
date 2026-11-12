@@ -91,6 +91,21 @@ def _import_bench_modules():
   return harness_v2, metadata, schema_v2, stages
 
 
+def _import_ocp_v1():
+  """Imports Orbax v1 checkpoint API (`from orbax.checkpoint import v1` or `experimental.v1`)."""
+  try:
+    from orbax.checkpoint import v1 as ocp_v1  # pylint: disable=import-outside-toplevel
+
+    return ocp_v1
+  except ImportError:
+    try:
+      from orbax.checkpoint.experimental import v1 as ocp_v1  # pylint: disable=import-outside-toplevel
+
+      return ocp_v1
+    except ImportError:
+      return None
+
+
 # Register OmegaConf resolver for HF_TOKEN if present in configs
 try:
   from omegaconf import OmegaConf
@@ -696,7 +711,8 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
   # conversion whose state alone does not fit in ~93% of host RAM cannot finish here. Record that instead of running
   # for hours (qwen3-480b-a35b: 960 GB).
   _, _, host_ram_gb = _read_host_mem_gb()
-  usable_ram_gb = 0.93 * host_ram_gb
+  ram_ratio, _, _, _ = _platform_runtime_limits(getattr(args, "platform", None))
+  usable_ram_gb = ram_ratio * host_ram_gb
   if total_gb + 40.0 > usable_ram_gb:
     raise RuntimeError(
         f"to_maxtext conversion of {args.model} holds the whole converted state (~{total_gb:.1f} GB) in host RAM "
@@ -1220,12 +1236,14 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   hw = init_worker_runtime(args)
   with recorder.stage("setup_tpu_check_seconds", log_start=True) if recorder else contextlib.nullcontext():
     tpu_info = _verify_and_measure_jax_backend(args, jax)
-  from flax.core.spmd import logical_axis_rules
-  from maxtext.common import checkpointing
-  from maxtext.configs import pyconfig
-  from maxtext.utils import globals as maxtext_globals
-  import orbax.checkpoint as ocp
-  import orbax.checkpoint.v1 as ocp_v1
+  with recorder.stage("setup_python_imports_seconds") if recorder else contextlib.nullcontext():
+    from flax.core.spmd import logical_axis_rules
+    from maxtext.common import checkpointing
+    from maxtext.configs import pyconfig
+    from maxtext.utils import globals as maxtext_globals
+    import orbax.checkpoint as ocp
+
+    ocp_v1 = _import_ocp_v1()
 
   if recorder is not None:
     harness_v2.install_to_maxtext_step3_hooks(recorder, checkpointing_mod=checkpointing, ocp_v1_mod=ocp_v1, ocp_mod=ocp)
@@ -1436,15 +1454,17 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   hw = init_worker_runtime(args)
   with recorder.stage("setup_tpu_check_seconds", log_start=True) if recorder else contextlib.nullcontext():
     tpu_info = _verify_and_measure_jax_backend(args, jax)
-  from flax.core.spmd import logical_axis_rules
-  import jax.numpy as jnp
-  import numpy as np
-  from maxtext.checkpoint_conversion.utils import load_dynamic
-  from maxtext.checkpoint_conversion.utils import tensor_handling
-  from maxtext.common import checkpointing
-  from maxtext.configs import pyconfig
-  from maxtext.utils import globals as maxtext_globals
-  import orbax.checkpoint.v1 as ocp_v1
+  with recorder.stage("setup_python_imports_seconds") if recorder else contextlib.nullcontext():
+    from flax.core.spmd import logical_axis_rules
+    import jax.numpy as jnp
+    import numpy as np
+    from maxtext.checkpoint_conversion.utils import load_dynamic
+    from maxtext.checkpoint_conversion.utils import tensor_handling
+    from maxtext.common import checkpointing
+    from maxtext.configs import pyconfig
+    from maxtext.utils import globals as maxtext_globals
+
+    ocp_v1 = _import_ocp_v1()
 
   import ctypes
   import gc
@@ -2381,6 +2401,23 @@ def _once_per_process(body: str, sentinel: str) -> str:
 SITE_CUSTOMIZE_CONTENT = _once_per_process(_SITE_CUSTOMIZE_BODY, _SITE_CUSTOMIZE_SENTINEL)
 
 
+def _platform_runtime_limits(platform_name: str | None = None) -> tuple[float, float, float, float]:
+  """Returns `(step2_ram_margin_ratio, min_avail_gb, sparse_min_avail_gb, default_phase_timeout_s)`."""
+  pname = platform_name or os.environ.get("BENCH_PLATFORM", "v7x")
+  _import_bench_modules()
+  from bench import platforms  # pylint: disable=import-outside-toplevel
+
+  profile = platforms.PROFILES.get(pname)
+  if profile is None:
+    return 0.93, 8.5, 24.0, 14400.0
+  return (
+      profile.step2_ram_margin_ratio,
+      profile.min_avail_host_ram_gb,
+      profile.sparse_min_avail_host_ram_gb,
+      float(profile.default_phase_timeout_s),
+  )
+
+
 def _read_host_mem_gb() -> tuple[float, float, float]:
   """Returns (used_gb, avail_gb, total_gb) in decimal GB (10**9 bytes) from /proc/meminfo and cgroups."""
   try:
@@ -2435,7 +2472,11 @@ def _failure_tag(returncode: int, watchdog_state: dict[str, Any]) -> str:
   return ""
 
 
-def _start_oom_watchdog(proc: subprocess.Popen, min_avail_gb: float = 8.5) -> dict[str, Any]:
+def _start_oom_watchdog(
+    proc: subprocess.Popen,
+    min_avail_gb: float | None = None,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
   """Monitors host RAM while `proc` runs and kills ONLY `proc` if MemAvailable drops below `min_avail_gb`.
 
   This prevents the Kubernetes container cgroup from hitting its hard memory limit and killing PID 1.
@@ -2443,9 +2484,12 @@ def _start_oom_watchdog(proc: subprocess.Popen, min_avail_gb: float = 8.5) -> di
   import signal
   import threading
 
+  _, default_min_avail, sparse_min_avail, default_timeout_s = _platform_runtime_limits(platform_name)
+  if min_avail_gb is None:
+    min_avail_gb = default_min_avail
   if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1":
-    min_avail_gb = max(min_avail_gb, 24.0)
-  max_wall_s = float(os.environ.get("PHASE_TIMEOUT_S", "14400"))
+    min_avail_gb = max(min_avail_gb, sparse_min_avail)
+  max_wall_s = float(os.environ.get("PHASE_TIMEOUT_S", str(int(default_timeout_s))))
   t_watch0 = time.time()
 
   state: dict[str, Any] = {
@@ -2503,7 +2547,10 @@ def _start_oom_watchdog(proc: subprocess.Popen, min_avail_gb: float = 8.5) -> di
   return state
 
 
-def _start_self_oom_watchdog(min_avail_gb: float = 9.0) -> dict[str, Any]:
+def _start_self_oom_watchdog(
+    min_avail_gb: float | None = None,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
   """In-process watchdog inside a worker subprocess so both local and remote slice workers self-terminate before container cgroup OOM."""
   import signal
   import threading
@@ -2514,9 +2561,12 @@ def _start_self_oom_watchdog(min_avail_gb: float = 9.0) -> dict[str, Any]:
   except Exception:  # pylint: disable=broad-exception-caught
     pass
 
+  _, default_min_avail, sparse_min_avail, default_timeout_s = _platform_runtime_limits(platform_name)
+  if min_avail_gb is None:
+    min_avail_gb = default_min_avail + 0.5
   if os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1":
-    min_avail_gb = max(min_avail_gb, 25.0)
-  max_wall_s = float(os.environ.get("PHASE_TIMEOUT_S", "14400"))
+    min_avail_gb = max(min_avail_gb, sparse_min_avail + 1.0)
+  max_wall_s = float(os.environ.get("PHASE_TIMEOUT_S", str(int(default_timeout_s))))
 
   state: dict[str, Any] = {"peak_ram_gb": 0.0, "total_ram_gb": 0.0, "stop": False}
 
@@ -2585,7 +2635,7 @@ def run_remote_slice_daemon(port: int) -> None:
         subprocess.run(["pkill", "-9", "-f", "--", "--worker-phase"], check=False)
         print(f"[RemoteDaemon] Starting command from {addr}: {' '.join(cmd)}", flush=True)
         with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=c_env, text=True) as proc:
-          r_wd = _start_oom_watchdog(proc)
+          r_wd = _start_oom_watchdog(proc, platform_name=c_env.get("BENCH_PLATFORM"))
           assert proc.stdout is not None
           for line in proc.stdout:
             sys.stdout.write(line)
@@ -3219,7 +3269,7 @@ def invoke_worker_subprocess(
         with subprocess.Popen(
             base_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=repo_root, text=True
         ) as proc:
-          watchdog_state = _start_oom_watchdog(proc)
+          watchdog_state = _start_oom_watchdog(proc, platform_name=resolved_platform)
           assert proc.stdout is not None
           for line in proc.stdout:
             sys.stdout.write(line)
@@ -3387,7 +3437,7 @@ def invoke_worker_subprocess(
               f"coord={coord_addr}): {' '.join(base_cmd)}\n\n"
           )
           lf.flush()
-          watchdog_state = _start_oom_watchdog(procs[0])
+          watchdog_state = _start_oom_watchdog(procs[0], platform_name=resolved_platform)
           assert procs[0].stdout is not None
           for line in procs[0].stdout:
             sys.stdout.write(line)
@@ -3812,7 +3862,7 @@ def main() -> None:
     args._monitoring = mon  # pylint: disable=protected-access
     args._sampler = sampler  # pylint: disable=protected-access
 
-    self_wd = _start_self_oom_watchdog()
+    self_wd = _start_self_oom_watchdog(platform_name=getattr(args, "platform", None))
     worker_exit_code = 0
     worker_failed_stage = ""
     res: dict[str, Any] | None = None

@@ -83,6 +83,20 @@ class PlatformProfilesTest(unittest.TestCase):
     self.assertEqual(v5e.service_account_name, "mesa-bench")
     self.assertIsNone(v5e.workload_time_limit_minutes)
 
+  def test_regional_roots_and_cpu_defaults(self):
+    expected_buckets = {
+        "v7x": "gs://mesa-maxtext-us-central1/mesa-bench-v2",
+        "v6e": "gs://mesa-maxtext-southamerica-west1/mesa-bench-v2",
+        "v5e": "gs://mesa-maxtext-europe-west4/mesa-bench-v2",
+    }
+    for name, bucket_root in expected_buckets.items():
+      p = platforms.get_profile(name)
+      self.assertEqual(p.regional_gcs_data_root, bucket_root)
+      self.assertTrue(p.cpu_node_pool)
+      self.assertTrue(p.cpu_machine_type)
+      self.assertGreater(p.step2_ram_margin_ratio, 0.8)
+      self.assertGreater(p.min_avail_host_ram_gb, 0.0)
+
 
 if __name__ == "__main__":
   unittest.main()
