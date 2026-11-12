@@ -84,6 +84,43 @@ class TrainLoopTest(absltest.TestCase):
     loss = loop.train_loop(_tiny_config(self.output_dir))
     self.assertTrue(math.isfinite(loss), f"loss={loss}")
 
+  def test_train_loop_with_host_offload_matches_baseline_and_avoids_per_step_traversal(self):
+    base_loss = loop.train_loop(_tiny_config(self.output_dir, dtype="float32", weight_dtype="float32", steps=3))
+    with (
+        mock.patch.object(nnx, "state", wraps=nnx.state) as state_spy,
+        mock.patch.object(nnx.graphlib, "flatten", wraps=nnx.graphlib.flatten) as flatten_spy,
+    ):
+      offload_loss_2 = loop.train_loop(
+          _tiny_config(
+              self.output_dir,
+              dtype="float32",
+              weight_dtype="float32",
+              steps=2,
+              optimizer_memory_host_offload="true",
+              parameter_memory_host_offload="true",
+          )
+      )
+      state_calls_2, flatten_calls_2 = state_spy.call_count, flatten_spy.call_count
+
+      state_spy.reset_mock()
+      flatten_spy.reset_mock()
+      offload_loss_3 = loop.train_loop(
+          _tiny_config(
+              self.output_dir,
+              dtype="float32",
+              weight_dtype="float32",
+              steps=3,
+              optimizer_memory_host_offload="true",
+              parameter_memory_host_offload="true",
+          )
+      )
+      state_calls_3, flatten_calls_3 = state_spy.call_count, flatten_spy.call_count
+
+    self.assertTrue(math.isfinite(offload_loss_2))
+    self.assertAlmostEqual(offload_loss_3, base_loss, places=5)
+    self.assertEqual(state_calls_2, state_calls_3)
+    self.assertEqual(flatten_calls_2, flatten_calls_3)
+
   def test_train_loop_writes_xplane_profile(self):
     config = _tiny_config(self.output_dir, profiler="xplane", skip_first_n_steps_for_profiler=1, profiler_steps=1)
     loop.train_loop(config)

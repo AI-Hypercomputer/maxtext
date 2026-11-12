@@ -43,6 +43,7 @@ from jax import checkpoint_policies as cp
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
+import numpy as np
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.m3.core import kernels as m3_kernels
@@ -559,11 +560,15 @@ class Qwen3_8RotaryEmbedding(nnx.Module):
       )
     self.rotary_dim = dim
     self.rope_theta = float(rope_theta)
+    inv_freq_np = 1.0 / (
+        np.float64(self.rope_theta) ** (np.arange(0, self.rotary_dim, 2, dtype=np.float64) / np.float64(self.rotary_dim))
+    )
+    self._inv_freq = tuple(np.asarray(inv_freq_np, dtype=np.float32).tolist())
 
   @property
   def inv_freq(self) -> jax.Array:
-    """Returns inverse frequencies for rotary position embedding."""
-    return 1.0 / (self.rope_theta ** (jnp.arange(0, self.rotary_dim, 2, dtype=jnp.float32) / self.rotary_dim))
+    """Returns inverse frequencies precomputed in host `float64` and cast once to `float32`."""
+    return jnp.asarray(self._inv_freq, dtype=jnp.float32)
 
   def apply_interleaved_mrope(self, freqs: jax.Array, mrope_section: Sequence[int]) -> jax.Array:
     """Interleaves multimodal frequency components."""

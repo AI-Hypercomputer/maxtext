@@ -27,6 +27,7 @@ from maxtext.m3.core import kernels
 from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, create_mesh, sharding_from_config
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3Model
+from maxtext.m3.models.qwen3_vl import qwen3_vl_flops
 from maxtext.utils import maxtext_utils
 
 
@@ -524,11 +525,25 @@ class TestLiveQwen3AdoptionAndScan:
         "enable_checkpointing": False,
         "skip_jax_distributed_system": True,
     }
-    cfg_m3 = pyconfig.initialize(["", "src/maxtext/configs/base.yml"], use_m3_model=True, **common_kw)
-    cfg_legacy = pyconfig.initialize(["", "src/maxtext/configs/base.yml"], use_m3_model=False, **common_kw)
-    m3_flops = maxtext_utils.calculate_tflops_training_per_device(cfg_m3, log=False)
-    legacy_flops = maxtext_utils.calculate_tflops_training_per_device(cfg_legacy, log=False)
-    np.testing.assert_allclose(m3_flops, legacy_flops, rtol=1e-12, atol=1e-12)
+    text_kw = {**common_kw, "override_model_config": True, "use_multimodal": False}
+    cfg_m3_text = pyconfig.initialize(["", "src/maxtext/configs/base.yml"], use_m3_model=True, **text_kw)
+    cfg_legacy_text = pyconfig.initialize(["", "src/maxtext/configs/base.yml"], use_m3_model=False, **text_kw)
+    m3_text_flops = maxtext_utils.calculate_tflops_training_per_device(cfg_m3_text, log=False)
+    legacy_text_flops = maxtext_utils.calculate_tflops_training_per_device(cfg_legacy_text, log=False)
+    np.testing.assert_allclose(m3_text_flops, legacy_text_flops, rtol=1e-12, atol=1e-12)
+
+    if model_name == "qwen3-vl-2b":
+      cfg_m3_mm = pyconfig.initialize(["", "src/maxtext/configs/base.yml"], use_m3_model=True, **common_kw)
+      cfg_legacy_mm = pyconfig.initialize(["", "src/maxtext/configs/base.yml"], use_m3_model=False, **common_kw)
+      m3_mm_flops = maxtext_utils.calculate_tflops_training_per_device(cfg_m3_mm, log=False)
+      legacy_mm_flops = maxtext_utils.calculate_tflops_training_per_device(cfg_legacy_mm, log=False)
+      enc_w_fwd, merger_w_fwd, vis_a_fwd = qwen3_vl_flops.calculate_qwen3_vl_vision_components_fwd_flops(cfg_m3_mm)
+      expected_mm_flops = (
+          legacy_mm_flops[0] + (enc_w_fwd + 3.0 * merger_w_fwd + vis_a_fwd) / 1e12,
+          legacy_mm_flops[1] + (3.0 * merger_w_fwd) / 1e12,
+          legacy_mm_flops[2] + vis_a_fwd / 1e12,
+      )
+      np.testing.assert_allclose(m3_mm_flops, expected_mm_flops, rtol=1e-12, atol=1e-12)
 
 
 class TestFailClosedValidation:
