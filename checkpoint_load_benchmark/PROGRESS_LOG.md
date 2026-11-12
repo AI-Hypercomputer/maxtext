@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 09:58:25 UTC`
+- **Last Updated (UTC):** `2026-11-12 10:07:54 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -13,9 +13,9 @@
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **4 / 21** | **0 / 61** | `mesa-q-v7x-2x2x1-1s-w1`, `mesa-t27-val-v7x` | `mesa-copy-v7x-deepseek4-284b-v2-cp-v7x`, `mesa-step1-v7x-deepseek4-284b-v2-s1-v7x`, `mesa-step1-v7x-llama3p1-70b-v2-s1-v7x`, `mesa-step1-v7x-qwen3-235b-a22b-v2-s1-v7x-a`, `mesa-step1-v7x-qwen3p5-397b-a17b-v2-s1-v7x` |
-| `v6e` | `southamerica-west1` | **2 / 21** | **1 / 53** | `mesa-q-v6e-2x4-2s-w2` | `mesa-step1-v6e-deepseek4-284b-v2-s1-v6e`, `mesa-step1-v6e-qwen3-235b-a22b-v2-s1-v6e-a`, `mesa-step1-v6e-qwen3-30b-a3b-v2-s1-v6e`, `mesa-step1-v6e-llama3p1-70b-v2-s1-v6e`, `mesa-step1-v6e-gpt-oss-120b-v2-s1-v6e` |
-| `v5e` | `europe-west4` | **5 / 12** | **1 / 22** | `mesa-q-v5e-16x16-1s-w2` | `mesa-step1-v5e-deepseek4-284b-v2-s1-v5e`, `mesa-step1-v5e-qwen3-235b-a22b-v2-s1-v5e`, `mesa-copy-v5e-deepseek4-284b-v2-cp-v5e` |
+| `v7x` | `us-central1` | **5 / 21** | **0 / 61** | `mesa-q-v7x-2x2x1-1s-w1`, `mesa-t27-val-v7x` | `mesa-step1-v7x-qwen3p5-397b-a17b-v2-s1-v7x`, `mesa-step1-v7x-llama3p1-70b-v2-s1-v7x`, `mesa-step1-v7x-deepseek4-284b-v2-s1-v7x`, `mesa-copy-v7x-deepseek4-284b-v2-cp-v7x`, `mesa-step1-v7x-qwen3-480b-a35b-v2-s1-v7x` |
+| `v6e` | `southamerica-west1` | **2 / 21** | **2 / 53** | `mesa-q-v6e-2x4-2s-w2` | `mesa-step1-v6e-deepseek4-284b-v2-s1-v6e`, `mesa-step1-v6e-qwen3-235b-a22b-v2-s1-v6e-a`, `mesa-step1-v6e-qwen3-30b-a3b-v2-s1-v6e`, `mesa-step1-v6e-llama3p1-70b-v2-s1-v6e`, `mesa-step1-v6e-gpt-oss-120b-v2-s1-v6e` |
+| `v5e` | `europe-west4` | **6 / 12** | **1 / 22** | `mesa-q-v5e-16x16-1s-w2` | `mesa-step1-v5e-qwen3-235b-a22b-v2-s1-v5e`, `mesa-copy-v5e-deepseek4-284b-v2-cp-v5e`, `mesa-step1-v5e-qwen3p5-397b-a17b-v2-s1-v5e` |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
 
@@ -43,17 +43,28 @@
 
 ## 3. Chronological Event Log (Newest Last)
 
-- [2026-11-12 09:57:32 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
-- [2026-11-12 09:57:36 UTC] `v5e` CPU job `mesa-copy-v5e-deepseek4-284b-v2-cp-v5e` Failed and cleaned up.
-- [2026-11-12 09:57:38 UTC] `v5e` CPU job `mesa-step1-v5e-qwen3-235b-a22b-v2-s1-v5e` Failed and cleaned up.
-- [2026-11-12 09:57:41 UTC] Launched `v5e` Step 1 CPU job `mesa-step1-v5e-qwen3-235b-a22b-v2-s1-v5e` for `qwen3-235b-a22b`.
-- [2026-11-12 09:57:44 UTC] Launched `v5e` BF16 regional copy job `mesa-copy-v5e-deepseek4-284b-v2-cp-v5e` for `deepseek4-284b`.
-- [2026-11-12 09:57:51 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 13/22 staged tasks.
-- [2026-11-12 09:57:56 UTC] `v6e` CPU job `mesa-step1-v6e-gpt-oss-120b-v2-s1-v6e` Failed and cleaned up.
-- [2026-11-12 09:57:58 UTC] `v6e` CPU job `mesa-step1-v6e-llama3p1-70b-v2-s1-v6e` Failed and cleaned up.
-- [2026-11-12 09:57:59 UTC] `v6e` CPU job `mesa-step1-v6e-qwen3-30b-a3b-v2-s1-v6e` Failed and cleaned up.
-- [2026-11-12 09:58:02 UTC] Launched `v6e` Step 1 CPU job `mesa-step1-v6e-qwen3-30b-a3b-v2-s1-v6e` for `qwen3-30b-a3b`.
-- [2026-11-12 09:58:04 UTC] Launched `v6e` Step 1 CPU job `mesa-step1-v6e-llama3p1-70b-v2-s1-v6e` for `llama3.1-70b`.
-- [2026-11-12 09:58:07 UTC] Launched `v6e` Step 1 CPU job `mesa-step1-v6e-gpt-oss-120b-v2-s1-v6e` for `gpt-oss-120b`.
-- [2026-11-12 09:58:14 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 8/53 staged tasks.
-- [2026-11-12 09:58:23 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 20/61 staged tasks.
+- [2026-11-12 10:03:01 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
+- [2026-11-12 10:06:31 UTC] `v5e` CPU job `mesa-copy-v5e-deepseek4-284b-v2-cp-v5e` Failed and cleaned up.
+- [2026-11-12 10:06:34 UTC] `v5e` CPU job `mesa-step1-v5e-deepseek4-284b-v2-s1-v5e` Completed and cleaned up.
+- [2026-11-12 10:06:36 UTC] `v5e` CPU job `mesa-step1-v5e-qwen3-235b-a22b-v2-s1-v5e` Failed and cleaned up.
+- [2026-11-12 10:06:39 UTC] Launched `v5e` Step 1 CPU job `mesa-step1-v5e-qwen3-235b-a22b-v2-s1-v5e` for `qwen3-235b-a22b`.
+- [2026-11-12 10:06:42 UTC] Launched `v5e` BF16 regional copy job `mesa-copy-v5e-deepseek4-284b-v2-cp-v5e` for `deepseek4-284b`.
+- [2026-11-12 10:06:47 UTC] Launched `v5e` Step 1 CPU job `mesa-step1-v5e-qwen3p5-397b-a17b-v2-s1-v5e` for `qwen3.5-397b-a17b`.
+- [2026-11-12 10:06:55 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 13/22 staged tasks.
+- [2026-11-12 10:07:00 UTC] `v6e` CPU job `mesa-step1-v6e-gpt-oss-120b-v2-s1-v6e` Failed and cleaned up.
+- [2026-11-12 10:07:01 UTC] `v6e` CPU job `mesa-step1-v6e-llama3p1-70b-v2-s1-v6e` Failed and cleaned up.
+- [2026-11-12 10:07:03 UTC] `v6e` CPU job `mesa-step1-v6e-qwen3-30b-a3b-v2-s1-v6e` Failed and cleaned up.
+- [2026-11-12 10:07:05 UTC] Launched `v6e` Step 1 CPU job `mesa-step1-v6e-qwen3-30b-a3b-v2-s1-v6e` for `qwen3-30b-a3b`.
+- [2026-11-12 10:07:08 UTC] Launched `v6e` Step 1 CPU job `mesa-step1-v6e-llama3p1-70b-v2-s1-v6e` for `llama3.1-70b`.
+- [2026-11-12 10:07:11 UTC] Launched `v6e` Step 1 CPU job `mesa-step1-v6e-gpt-oss-120b-v2-s1-v6e` for `gpt-oss-120b`.
+- [2026-11-12 10:07:17 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 8/53 staged tasks.
+- [2026-11-12 10:07:21 UTC] `v7x` CPU job `mesa-copy-v7x-deepseek4-284b-v2-cp-v7x` Failed and cleaned up.
+- [2026-11-12 10:07:23 UTC] `v7x` CPU job `mesa-step1-v7x-deepseek4-284b-v2-s1-v7x` Completed and cleaned up.
+- [2026-11-12 10:07:24 UTC] `v7x` CPU job `mesa-step1-v7x-llama3p1-70b-v2-s1-v7x` Failed and cleaned up.
+- [2026-11-12 10:07:25 UTC] `v7x` CPU job `mesa-step1-v7x-qwen3-235b-a22b-v2-s1-v7x-a` Completed and cleaned up.
+- [2026-11-12 10:07:27 UTC] Launched `v7x` Step 1 CPU job `mesa-step1-v7x-llama3p1-70b-v2-s1-v7x` for `llama3.1-70b`.
+- [2026-11-12 10:07:29 UTC] Launched `v7x` Step 1 CPU job `mesa-step1-v7x-deepseek4-284b-v2-s1-v7x` for `deepseek4-284b`.
+- [2026-11-12 10:07:31 UTC] Launched `v7x` BF16 regional copy job `mesa-copy-v7x-deepseek4-284b-v2-cp-v7x` for `deepseek4-284b`.
+- [2026-11-12 10:07:34 UTC] Launched `v7x` Step 1 CPU job `mesa-step1-v7x-qwen3-480b-a35b-v2-s1-v7x` for `qwen3-480b-a35b`.
+- [2026-11-12 10:07:39 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 26/61 staged tasks.
+- [2026-11-12 10:07:54 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 56 mirrored JSONs.
