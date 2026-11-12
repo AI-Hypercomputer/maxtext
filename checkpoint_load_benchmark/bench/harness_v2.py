@@ -145,10 +145,10 @@ class ResourceSampler:
         usable = hbm_snap.get("usable_per_device_gb")
         if usable and (self.hbm_usable_gb is None or usable > self.hbm_usable_gb):
           self.hbm_usable_gb = usable
-        self.hbm_peak_sampled_gb = max(self.hbm_peak_sampled_gb, float(hbm_snap.get("max_bytes_in_use_gb", 0.0) or 0.0))
-        self.hbm_peak_hardware_gb = max(
-            self.hbm_peak_hardware_gb, float(hbm_snap.get("max_peak_bytes_in_use_gb", 0.0) or 0.0)
-        )
+        used_gb = float(hbm_snap.get("used_per_device_gb", hbm_snap.get("max_bytes_in_use_gb", 0.0)) or 0.0)
+        peak_gb = float(hbm_snap.get("peak_per_device_gb", hbm_snap.get("max_peak_bytes_in_use_gb", 0.0)) or 0.0)
+        self.hbm_peak_sampled_gb = max(self.hbm_peak_sampled_gb, used_gb)
+        self.hbm_peak_hardware_gb = max(self.hbm_peak_hardware_gb, peak_gb)
 
   def _run(self) -> None:
     step = 0
@@ -183,8 +183,8 @@ class ResourceSampler:
     if not snap:
       return
     with self._lock:
-      used_now = float(snap.get("max_bytes_in_use_gb", 0.0) or 0.0)
-      peak_now = float(snap.get("max_peak_bytes_in_use_gb", 0.0) or 0.0)
+      used_now = float(snap.get("used_per_device_gb", snap.get("max_bytes_in_use_gb", 0.0)) or 0.0)
+      peak_now = float(snap.get("peak_per_device_gb", snap.get("max_peak_bytes_in_use_gb", 0.0)) or 0.0)
       usable = snap.get("usable_per_device_gb")
       if usable and self.hbm_usable_gb is None:
         self.hbm_usable_gb = usable
@@ -207,9 +207,10 @@ class ResourceSampler:
       }
       if self.hbm_usable_gb is not None:
         out["memory_tpu_hbm_usable_per_device_gb"] = round(self.hbm_usable_gb, 3)
-        if self.hbm_usable_gb > 0 and peak_hbm > 0:
+        out["memory_tpu_hbm_peak_per_device_gb"] = round(peak_hbm, 3)
+        if self.hbm_usable_gb > 0:
           out["memory_tpu_hbm_peak_percent_of_usable"] = round((peak_hbm / self.hbm_usable_gb) * 100.0, 2)
-      if peak_hbm > 0:
+      elif peak_hbm > 0:
         out["memory_tpu_hbm_peak_per_device_gb"] = round(peak_hbm, 3)
       if self.hbm_used_after_read_gb is not None:
         out["memory_tpu_hbm_used_after_read_per_device_gb"] = self.hbm_used_after_read_gb

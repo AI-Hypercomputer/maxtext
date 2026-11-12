@@ -51,20 +51,22 @@ class HarnessV2Test(unittest.TestCase):
   def test_resource_sampler_tracks_peak_ram_and_hbm_milestones(self):
     rec = stages.StageRecorder()
     ram_seq = iter([(10.0, 90.0, 100.0), (42.5, 57.5, 100.0), (30.0, 70.0, 100.0)])
-    hbm_seq = iter(
-        [
-            {"usable_per_device_gb": 32.0, "max_bytes_in_use_gb": 1.0, "max_peak_bytes_in_use_gb": 1.0},
-            {"usable_per_device_gb": 32.0, "max_bytes_in_use_gb": 18.0, "max_peak_bytes_in_use_gb": 22.5},
-            {"usable_per_device_gb": 32.0, "max_bytes_in_use_gb": 12.0, "max_peak_bytes_in_use_gb": 22.5},
-        ]
-    )
-    fake_jax = types.SimpleNamespace(local_devices=lambda: [])
+    fake_devs = [
+        types.SimpleNamespace(
+            memory_stats=lambda: {
+                "bytes_limit": 32_000_000_000,
+                "bytes_in_use": next(dev_used, 12_000_000_000),
+                "peak_bytes_in_use": 22_500_000_000,
+            }
+        )
+    ]
+    dev_used = iter([1_000_000_000, 18_000_000_000, 12_000_000_000])
+    fake_jax = types.SimpleNamespace(local_devices=lambda: fake_devs)
     sampler = harness_v2.ResourceSampler(
         rec,
         jax_mod=fake_jax,
         ram_reader=lambda: next(ram_seq, (30.0, 70.0, 100.0)),
         rss_reader=lambda: 15.25,
-        hbm_reader=lambda _j: next(hbm_seq),
     )
     with rec.stage("load"):
       sampler._sample_once()  # pylint: disable=protected-access
