@@ -27,6 +27,11 @@ on:
         description: 'MaxText Release tag to build and test (e.g., maxtext-v0.2.3).'
         required: true
         type: string
+      dry_run:
+        description: 'Set to true to only test SHA resolution and the Read the Docs default_version guard without running builds, tests, or publishing.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -42,7 +47,7 @@ jobs:
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
+          ref: ${{ (inputs.dry_run && github.ref_name) || inputs.release_tag || github.event.release.tag_name }}
           fetch-depth: 1
           persist-credentials: false
       - name: Resolve SHA
@@ -52,6 +57,76 @@ jobs:
           MAXTEXT_SHA=$(git rev-parse HEAD)
           echo "Using MaxText SHA: ${MAXTEXT_SHA}"
           echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Keep Read the Docs default version on latest published PyPI release
+        continue-on-error: true
+        shell: bash
+        env:
+          READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ -z "$READTHEDOCS_TOKEN" ] || [ -z "$RELEASE_TAG" ]; then
+            echo "READTHEDOCS_TOKEN or RELEASE_TAG is not set; skipping Read the Docs default_version guard."
+            exit 0
+          fi
+
+          VERSION="${RELEASE_TAG#maxtext-v}"
+          VERSION="${VERSION#v}"
+          HTTP_STATUS=$(curl -sS --retry 3 --retry-delay 5 -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/maxtext/${VERSION}/json")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "MaxText version '${VERSION}' is already published on PyPI; skipping Read the Docs default_version revert."
+            exit 0
+          fi
+
+          RTD_PROJECT="maxtext"
+          API_BASE="https://app.readthedocs.org/api/v3/projects/${RTD_PROJECT}"
+          LATEST_PYPI_VERSION=$(curl -sS --retry 3 --retry-delay 5 "https://pypi.org/pypi/maxtext/json" | python3 -c "import sys, json; print(json.load(sys.stdin)['info']['version'])")
+          if [ -z "$LATEST_PYPI_VERSION" ] || [ "$LATEST_PYPI_VERSION" = "null" ]; then
+            echo "Could not determine latest published PyPI version; skipping."
+            exit 0
+          fi
+          DEFAULT_RTD_VERSION="maxtext-v${LATEST_PYPI_VERSION}"
+
+          # Wait briefly for the Read the Docs tag webhook / Automation Rule to register the new tag version.
+          MAX_ATTEMPTS=12
+          if [ "$DRY_RUN" = "true" ]; then
+            MAX_ATTEMPTS=1
+          fi
+          TAG_EXISTS_ON_RTD=false
+          for ((i=1; i<=MAX_ATTEMPTS; i++)); do
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              "${API_BASE}/versions/${RELEASE_TAG}/")
+            if [ "$STATUS" = "200" ]; then
+              TAG_EXISTS_ON_RTD=true
+              break
+            fi
+            if [ "$i" -lt "$MAX_ATTEMPTS" ]; then
+              echo "Waiting for Read the Docs to register tag ${RELEASE_TAG} (attempt ${i}/${MAX_ATTEMPTS})..."
+              sleep 5
+            fi
+          done
+
+          echo "Ensuring Read the Docs default_version stays on '${DEFAULT_RTD_VERSION}' until '${RELEASE_TAG}' is published to PyPI..."
+          curl -f -sS -X PATCH \
+            -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"default_version\": \"${DEFAULT_RTD_VERSION}\"}" \
+            "${API_BASE}/"
+
+          CURRENT_DEFAULT=$(curl -f -sS \
+            -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+            "${API_BASE}/" | python3 -c "import sys, json; print(json.load(sys.stdin)['default_version'])")
+          echo "Verified Read the Docs default_version is '${CURRENT_DEFAULT}'."
+
+          if [ "$TAG_EXISTS_ON_RTD" = "true" ] && [ "$RELEASE_TAG" != "$DEFAULT_RTD_VERSION" ]; then
+            echo "Deactivating unbuilt tag '${RELEASE_TAG}' on Read the Docs until PyPI release completes..."
+            curl -f -sS -X PATCH \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d '{"active": false, "hidden": false}' \
+              "${API_BASE}/versions/${RELEASE_TAG}/" || true
+          fi
 
   release_approval:
     name: Approve Release Candidate
@@ -69,6 +144,7 @@ jobs:
     needs: [release_approval, get_maxtext_sha]
     if: |
       !cancelled() &&
+      !inputs.dry_run &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/build_package.yml
@@ -187,6 +263,7 @@ jobs:
     needs: [release_approval, get_maxtext_sha]
     if: |
       !cancelled() &&
+      !inputs.dry_run &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/check_docs_build.yml
@@ -198,6 +275,7 @@ jobs:
     needs: [release_approval, get_maxtext_sha]
     if: |
       !cancelled() &&
+      !inputs.dry_run &&
       needs.get_maxtext_sha.result == 'success' &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     permissions:
