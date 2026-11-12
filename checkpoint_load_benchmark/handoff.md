@@ -1,56 +1,45 @@
 # Handoff: Checkpoint Load-Time Benchmark (`v2` Multi-Platform + `tpu7x` Archive)
 
-> **Snapshot:** 2026-11-12 ~07:38 UTC · **Branch:** `docs/checkpoint-load-benchmark` (rebased onto `origin/main` `5b6773c9b`; code bundle on GCS built from `c64b44244`, docs updated through this snapshot) · **Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) (`12/352` rows = `3.4%`, Tier `S` `12/20` = `60.0%`)
+> **Snapshot:** 2026-11-12 ~09:48 UTC · **Branch:** `docs/checkpoint-load-benchmark` (pushed to `origin/docs/checkpoint-load-benchmark`; code bundle on `gs://mesa-maxtext/mesa-bench-v2/code` built from `960b6c493`) · **Live Progress & Chat Log:** [`PROGRESS_LOG.md`](PROGRESS_LOG.md) (`/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`) · **Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) (`Summary=555` [`352` v2 + `203` legacy v1], `Step1=29` [`10` v2 + `19` legacy v1])
 
 ---
 
 ## Quick-Pickup Guide (For Team Members & Jetski)
 
-1. **Plan & task list:** Read [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) for the full v2 design, 21-model × 3-platform matrix (`352` planned rows), and remaining Phases `T0.3–T0.6` + `1–5` backlog.
-2. **Rules on this branch:**
+1. **Live Progress & Chat Log (`PROGRESS_LOG.md`):**
+   - Read [`PROGRESS_LOG.md`](PROGRESS_LOG.md) (`/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md` on branch `docs/checkpoint-load-benchmark`) for the live cluster status table, chronological chat/event log, and background orchestrator status.
+   - Read [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) for the full v2 design and 21-model × 3-platform matrix (`352` planned v2 rows, `54` regional Step 1 downloads).
+2. **Rules on this branch (`docs/checkpoint-load-benchmark`):**
    - **Never edit `src/maxtext/`** unless explicitly reviewed/approved; keep benchmark & harness tooling self-contained under `checkpoint_load_benchmark/`.
    - **Pods run only committed code:** Push `docs/checkpoint-load-benchmark`, then run `build_code_tarball.py --out /tmp/code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code` (refuses dirty tracked files or unpushed commits).
-   - **Resource prefix `mesa-`:** Name all new Kubernetes JobSets/pods/KSAs/secrets `mesa-*` with label `app: mesa-bench-v2`, and write all v2 GCS outputs under `gs://mesa-maxtext/mesa-bench-v2/`. Leave legacy `mesakh_tpu7x_bench/` untouched.
+   - **Resource prefix `mesa-`:** Name all new Kubernetes JobSets/Jobs/pods/KSAs/secrets `mesa-*` with label `app: mesa-bench-v2`, and write all v2 GCS outputs under `gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/`. Leave legacy `mesakh_tpu7x_bench/` untouched.
    - **Never stage unrelated workspace files:** `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md`, and root `benchmark_v2_design_plan.md`.
-   - **Teammate setup on another Cloudtop:** Ask the sheet owner (`mesakh`) for Share access to Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I` (not shared yet), run `gcloud container clusters get-credentials` for the three clusters in `bench/platforms.py` (`bodaborg-tpu7x-nap` / `us-central1`, `bodaborg-v6e-nap` / `southamerica-west1`, `v5e-256-bodaborg-europe-west4` / `europe-west4`), and use a Python environment with `pytest`, `pyyaml`, `etils`, and `google-api-core` (`run_smoke.sh` uses `PYTHON_BIN` if set, falling back to `~/Documents/mesakh/py312/bin/python` or `python3`).
-3. **Current status (2026-11-12):**
-   - **Done (`Phase 0` + `S0–S4` Smoke Tests):**
-     - Tarball reproducibility + `CODE_VERSION.json` (`scripts/build_code_tarball.py`), `bootstrap_tpu7x.py` cleanup, `bench/platforms.py` profiles, `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and mandatory TPU backend/device-count verification (`check_tpu_backend`, fails with `failure_category: "NOT-TPU"` on mismatch).
-     - Multi-host TPU `SliceBuilder` gRPC fix (`c64b44244`): `init_worker_runtime` automatically sets `--slicebuilder_use_insecure_grpc=true` (`total_procs > 1`) and `--megascale_use_insecure_grpc=true` (`num_slices > 1`) in `LIBTPU_INIT_ARGS` when supported by `libtpu.so` (override with `KEEP_ALTS_GRPC=1`), sets `PYTHONUNBUFFERED=1`, and attributes remote slice aborts accurately. Local suite: `62` tests pass (`~/Documents/mesakh/py312/bin/python -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/`).
-     - **Smoke verification (`qwen3-0.6b` scanned & unscanned, both pipelines) PASSED across all 3 platforms** (all JobSets deleted, all 3 clusters empty, `0 FAILED`, TPU checks OK, 12 Tier S rows recorded in Sheet v2):
-
-       | Platform (`run_id` @ commit) | Verified TPU Check | Scan | Cold HF→GCS | GCS→Local | Step 2 CPU | HBM Load (`Step 3` / `ST`) | Columns E2E (`R+T+U+V`) | Speedup (`E2E`) | GCS Path |
-       | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-       | `v7x` `1×2x2x1` (`smoke-v7x` @ `82cc1c701`) | `tpu · TPU7x` (`8` / `8`) | `scanned` | `17.64s` | `15.65s` / `N/A` | `17.16s` / `N/A` | `2.53s` / `15.34s` | `52.99s` / `32.99s` | `1.61x` | `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/` |
-       | `v7x` `1×2x2x1` (`smoke-v7x` @ `82cc1c701`) | `tpu · TPU7x` (`8` / `8`) | `unscanned` | `17.64s` | `15.65s` / `N/A` | `63.06s` / `N/A` | `3.14s` / `7.04s` | `99.49s` / `24.68s` | `4.03x` | `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/` |
-       | `v6e` `1×2x4` (`smoke-v6e` @ `82cc1c701`) | `tpu · TPU v6 lite` (`8` / `8`) | `scanned` | `102.24s` | `83.06s` / `N/A` | `79.13s` / `N/A` | `23.66s` / `30.00s` | `288.09s` / `132.24s` | `2.18x` | `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/` |
-       | `v6e` `1×2x4` (`smoke-v6e` @ `82cc1c701`) | `tpu · TPU v6 lite` (`8` / `8`) | `unscanned` | `102.24s` | `83.06s` / `N/A` | `237.41s` / `N/A` | `33.49s` / `23.19s` | `456.20s` / `125.43s` | `3.64x` | `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/` |
-       | `v5e` `1×16x16` (`smoke-v5e-r2` @ `c64b44244`) | `tpu · TPU v5 lite` (`256` / `4`, `64` hosts) | `scanned` | `81.96s` | `67.32s` / `N/A` | `64.82s` / `N/A` | `23.64s` / `54.78s` | `237.74s` / `136.74s` | `1.74x` | `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e-r2/` |
-       | `v5e` `1×16x16` (`smoke-v5e-r2` @ `c64b44244`) | `tpu · TPU v5 lite` (`256` / `4`, `64` hosts) | `unscanned` | `81.96s` | `67.32s` / `N/A` | `161.60s` / `N/A` | `21.53s` / `45.23s` | `332.40s` / `127.18s` | `2.61x` | `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e-r2/` |
-
-       *(Caveats: harness CSV `to_maxtext_total_s` omits `hf_to_local_s`; `v5e` host RAM is host `0` watchdog `56.7–75.7 GB`; `v5e` remote host `1` exited `-6` in XLA teardown after `safetensors_dynamic` wrote valid JSONs; local scratch copies are saved under `~/.gemini/jetski/brain/f1a7974d-a23a-4dd5-b86c-79af1a906d19/scratch/smoke_logs/`.)*
-   - **Next tasks (Start Here):** Create regional buckets (`T0.3`), create `mesa-hf-token` secrets (`T0.4`), confirm `T0.5–T0.6`, and then implement `Phases 1–4` in [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) before launching Tiers `A -> C -> B`.
-4. **Commands to test, upload bundle, or launch smoke tests:**
+   - **Teammate setup on another Cloudtop:** Ask the sheet owner (`mesakh`) for Share access to Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`, run `gcloud container clusters get-credentials` for the three clusters in `bench/platforms.py` (`bodaborg-tpu7x-nap` / `us-central1`, `bodaborg-v6e-nap` / `southamerica-west1`, `v5e-256-bodaborg-europe-west4` / `europe-west4`), and use `~/Documents/mesakh/py312/bin/python` (or a Python 3.12 env with `pytest`, `pyyaml`, `etils`, `google-api-core`).
+3. **Current status (2026-11-12 ~09:48 UTC):**
+   - **Phases 0, 1, 2, 3, and 4 (`T0.1–T4.3`):** Completed, unit-tested (`94 passed`), linted (`pyink` + `pylint 10.00/10`), committed & pushed on `docs/checkpoint-load-benchmark`, and uploaded to `gs://mesa-maxtext/mesa-bench-v2/code`.
+   - **Phase 5 (`T5.1–T5.2`) Full Experiment Matrix Running in Background Orchestrator (`scripts/run_v2_orchestrator.py`):**
+     - Autonomous background daemon (`scripts/run_v2_orchestrator.py`, logging to `/tmp/mesa_v2_orchestrator.log` and updating `checkpoint_load_benchmark/PROGRESS_LOG.md` + Google Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I` every 60 seconds) is managing all 3 clusters (`v7x`, `v6e`, `v5e`) in the background so the interactive Jetski session is never blocked.
+     - Regional buckets (`gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/`) are active; Tier `S` (`qwen3-0.6b`) has completed on `v5e` (`16x16` 64 hosts) and is running on `v6e` (`2x4`) and `v7x` (`2x2x1`), while Tier `A -> C -> B` Step 1 downloads and TPU queue workers advance automatically.
+4. **Commands to inspect background orchestrator, test, upload bundle, or check cluster status:**
    ```bash
-   # Run local unit tests (on mesakh's Cloudtop use ~/Documents/mesakh/py312/bin/python)
-   python3 -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/
+   cd /usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3
+   git status  # branch: docs/checkpoint-load-benchmark
 
-   # Build & upload pushed branch bundle to v2 GCS code dir
-   python3 checkpoint_load_benchmark/scripts/build_code_tarball.py \
-     --out /tmp/mesa_code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code
+   # Check background experiment orchestrator process & live log
+   ps -ef | grep run_v2_orchestrator.py
+   tail -f /tmp/mesa_v2_orchestrator.log
+   cat checkpoint_load_benchmark/PROGRESS_LOG.md
 
-   # Dry-run or apply a smoke JobSet (--platform v7x|v6e|v5e)
-   PYTHON_BIN="$(command -v python3)" ./checkpoint_load_benchmark/scripts/run_smoke.sh \
-     --platform v6e --topology 2x4 --run-id smoke-v6e [--apply]
+   # Run local unit tests
+   ~/Documents/mesakh/py312/bin/python -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/
 
-   # Monitor active jobs and inspect GCS results
-   kubectl --context=gke_cloud-tpu-shared-capacity_us-central1_bodaborg-tpu7x-nap get jobsets,pods -l app=mesa-bench-v2
-   kubectl --context=gke_cloud-tpu-shared-capacity_southamerica-west1_bodaborg-v6e-nap get jobsets,pods -l app=mesa-bench-v2
-   kubectl --context=gke_tpu-prod-env-multipod_europe-west4_v5e-256-bodaborg-europe-west4 get jobsets,pods -l app=mesa-bench-v2
-   gcloud storage ls -r gs://mesa-maxtext/mesa-bench-v2/
+   # Check active K8s jobs/jobsets across all 3 clusters
+   ./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode status
+   ./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v6e --mode status
+   ./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v5e --mode status
    ```
-5. **Post-reboot / teammate Jetski pickup prompt:**
-   > Read `checkpoint_load_benchmark/handoff.md` and `checkpoint_load_benchmark/plans/benchmark_v2_plan.md` on `docs/checkpoint-load-benchmark`, verify the 3 clusters have no active `mesa-bench-v2` resources, then start from `T0.3–T0.6` and `Phase 1`.
+5. **Teammate Jetski pickup prompt:**
+   > Read `checkpoint_load_benchmark/PROGRESS_LOG.md`, `checkpoint_load_benchmark/handoff.md`, and `checkpoint_load_benchmark/plans/benchmark_v2_plan.md` on branch `docs/checkpoint-load-benchmark` in `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`, check `/tmp/mesa_v2_orchestrator.log`, and report current Phase 5 experiment progress across `v7x`, `v6e`, and `v5e`.
 
 ---
 
