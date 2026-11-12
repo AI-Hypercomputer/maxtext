@@ -1196,6 +1196,9 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  log_ra2a_required_rbf: bool = Field(
+      False, description="Debug: print the per-layer ragged_buffer_factor needed to avoid drops (ragged a2a path)."
+  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(

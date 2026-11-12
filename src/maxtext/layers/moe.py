@@ -3155,6 +3155,9 @@ class RoutedMoE(nnx.Module):
 
         if is_batch_sharded_by_expert:
           all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+          if self.config.log_ra2a_required_rbf:
+            _req = jnp.max(jnp.sum(all_shards_group_sizes, axis=0)) / jnp.shape(x)[0]
+            jax.debug.print("MOE_REQUIRED_RBF {r}", r=_req, ordered=False)
           buffer_size = self.get_ragged_buffer_size(
               jnp.shape(x)[0],
               num_ep,
