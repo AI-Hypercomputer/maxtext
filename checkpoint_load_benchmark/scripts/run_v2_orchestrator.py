@@ -323,6 +323,18 @@ def manage_cpu_jobs(
   return active_job_names
 
 
+def _k8s_item_age_seconds(item: dict[str, Any]) -> float:
+  """Returns age in seconds of a Kubernetes resource from `metadata.creationTimestamp`."""
+  ts = str(item.get("metadata", {}).get("creationTimestamp") or "")
+  if not ts:
+    return 0.0
+  try:
+    dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return max(0.0, (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+  except ValueError:
+    return 0.0
+
+
 def _match_worker_shape(prof: platforms.PlatformProfile, js_name: str) -> tuple[str, int] | None:
   """Returns `(topology, num_slices)` encoded in a queue worker JobSet name `mesa-q-<plat>-<topo>-<s>s-*`."""
   for topo_cand in prof.hosts_per_slice_by_topology:
@@ -417,7 +429,9 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
       js_name = str(item.get("metadata", {}).get("name") or "")
       term_state = str(item.get("status", {}).get("terminalState") or "")
       is_deactivated = (
-          bool(item.get("spec", {}).get("suspend")) and int(item.get("status", {}).get("restarts") or 0) >= 1
+          bool(item.get("spec", {}).get("suspend"))
+          and int(item.get("status", {}).get("restarts") or 0) >= 1
+          and _k8s_item_age_seconds(item) >= 10800.0
       )
       shape = _match_worker_shape(prof, js_name)
       if term_state in ("Completed", "Failed") or is_deactivated:
