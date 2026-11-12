@@ -704,7 +704,15 @@ def copy_bf16_gcs_to_region(
   def _copy_one(blob: Any) -> int:
     fname = blob.name.rsplit("/", 1)[-1]
     dst_blob_name = f"{dst_prefix}/{fname}" if dst_prefix else fname
-    src_bucket.copy_blob(blob, dst_bucket, dst_blob_name)
+    dst_blob = dst_bucket.blob(dst_blob_name)
+    if hasattr(dst_blob, "rewrite"):
+      token = None
+      while True:
+        token, _, _ = dst_blob.rewrite(blob, token=token)
+        if token is None:
+          break
+    else:
+      src_bucket.copy_blob(blob, dst_bucket, dst_blob_name)
     return int(getattr(blob, "size", 0) or 0)
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(src_blobs))) as pool:
