@@ -642,6 +642,20 @@ class NNXDecoder(nnx.Module):
     config = self.config
     specs = deepseek41.build_layer_specs(config)
     if config.scan_layers:
+      # Per-layer remat inside each scanned group (see DeepSeek41Block); the scan body is then not rematerialized.
+      # Offloaded (pinned-host) residuals cannot cross a trip-count-one scan boundary, so keep them on device.
+      per_layer_remat = (
+          self.model_mode == MODEL_MODE_TRAIN
+          and config.ds41_per_layer_remat
+          and bool(config.remat_policy)
+          and config.remat_policy != "none"
+      )
+      save_names, offload_names = maxtext_utils.get_save_and_offload_names(config)
+      remat_policy = (
+          jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
+          if (per_layer_remat and (save_names or offload_names))
+          else (self.get_remat_policy() if per_layer_remat else None)
+      )
       for k, segment in enumerate(deepseek41.build_segments(config)):
         stack = self._create_scanned_layers(
             deepseek41.DeepSeek41Block,
@@ -649,6 +663,9 @@ class NNXDecoder(nnx.Module):
             metadata_axis_name="layers",
             rngs=rngs,
             specs=tuple(specs[i] for i in segment.groups[0]),
+            remat_policy=remat_policy,
+            apply_internal_remat=per_layer_remat,
+            prevent_cse=maxtext_utils.should_prevent_cse_in_remat(config),
         )
         setattr(self, f"segments_{k}", stack)
     else:
@@ -672,12 +689,29 @@ class NNXDecoder(nnx.Module):
             decoder_input_tokens,
             length=segment.repeats,
             metadata_axis_name="layers",
+            skip_block_remat=stack.apply_internal_remat or self.model_mode != MODEL_MODE_TRAIN,
         )
         setattr(self, f"segments_{k}", stack)
         carry = {key: carry[key] for key in ("h", "pre_mix") + plan.keep_after}
     else:
+      # One remat boundary per layer in training (without it every layer's activations, including the [B, H, S, S + C]
+      # attention scores, would stay alive for the backward pass).
+      use_remat = self.model_mode == MODEL_MODE_TRAIN and bool(cfg.remat_policy) and cfg.remat_policy != "none"
+      policy = self.get_remat_policy() if use_remat else None
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
       for i in range(cfg.num_decoder_layers):
-        carry = getattr(self, f"layers_{i}")(carry, decoder_positions, decoder_input_tokens)
+        layer = getattr(self, f"layers_{i}")
+        if use_remat:
+          carry = self._apply_layer_with_remat(
+              layer,
+              carry,
+              policy,
+              prevent_cse,
+              decoder_positions=decoder_positions,
+              decoder_input_tokens=decoder_input_tokens,
+          )
+        else:
+          carry = layer(carry, decoder_positions, decoder_input_tokens)
     return deepseek41.DeepSeek41DecoderLayer.hc_pre(carry["h"], carry["pre_mix"])
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):

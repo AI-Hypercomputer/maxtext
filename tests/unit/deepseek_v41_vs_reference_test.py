@@ -21,6 +21,8 @@ tokenizer.json / tokenizer_config.json (defaults to the HuggingFace repo id).
   python -m pytest tests/unit/deepseek_v41_vs_reference_test.py
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import unittest
@@ -29,7 +31,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax import nnx
 
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
@@ -37,9 +38,17 @@ from maxtext.configs import pyconfig
 from maxtext.layers import attention_deepseek41
 from maxtext.layers import engram_deepseek41
 from maxtext.models import deepseek41
-from tests.utils.deepseek_v41_reference import model as ref_model
-from tests.utils.deepseek_v41_reference import engram as ref_engram
-from tests.utils.deepseek_v41_reference import runner as ref_runner
+
+try:
+  import torch
+  from tests.utils.deepseek_v41_reference import engram as ref_engram
+  from tests.utils.deepseek_v41_reference import model as ref_model
+  from tests.utils.deepseek_v41_reference import runner as ref_runner
+except ImportError:
+  torch = None
+  ref_engram = None
+  ref_model = None
+  ref_runner = None
 
 TOKENIZER = os.environ.get("DEEPSEEK_V41_TOKENIZER", "deepseek-ai/DeepSeek-V4.1-Flash")
 
@@ -55,60 +64,63 @@ INDEX_SOURCES = [2, 4, 6]
 CANDIDATE_SOURCE = 4
 ENGRAM_LAYERS = [1, 2]
 
-REF_ARGS = dict(
-    dtype="fp32",
-    max_batch_size=2,
-    max_seq_len=64,
-    vocab_size=129280,
-    dim=64,
-    moe_inter_dim=32,
-    n_layers=len(COMPRESS_RATIOS),
-    n_mtp_layers=0,
-    n_heads=4,
-    n_routed_experts=4,
-    n_shared_experts=1,
-    n_activated_experts=2,
-    score_func="sqrtsoftplus",
-    route_scale=1.5,
-    swiglu_limit=10.0,
-    q_lora_rank=16,
-    head_dim=32,
-    rope_head_dim=8,
-    norm_eps=1e-20,
-    o_groups=2,
-    o_lora_rank=8,
-    window_size=8,
-    compress_ratios=tuple(COMPRESS_RATIOS),
-    kv_source_layers=tuple(KV_SOURCES),
-    index_source_layers=tuple(INDEX_SOURCES),
-    compress_rope_theta=160000.0,
-    original_seq_len=65536,
-    rope_theta=10000.0,
-    rope_factor=16,
-    beta_fast=32,
-    beta_slow=1,
-    index_n_heads=16,
-    index_head_dim=16,
-    index_topk=3,
-    candidate_source_layer=CANDIDATE_SOURCE,
-    candidate_topk_blocks=2,
-    candidate_block_size=4,
-    hc_mult=4,
-    hc_sinkhorn_iters=20,
-    hc_eps=1e-6,
-    engram_layer_ids=tuple(ENGRAM_LAYERS),
-    engram_max_ngram_size=3,
-    engram_vocab_size=50,
-    engram_n_heads=2,
-    engram_head_dim=8,
-    engram_pad_id=2,
-    engram_compressed_vocab_size=99092,
-    dspark_block_size=0,
-)
+REF_ARGS = {
+    "dtype": "fp32",
+    "max_batch_size": 2,
+    "max_seq_len": 64,
+    "vocab_size": 129280,
+    "dim": 64,
+    "moe_inter_dim": 32,
+    "n_layers": len(COMPRESS_RATIOS),
+    "n_mtp_layers": 0,
+    "n_heads": 4,
+    "n_routed_experts": 4,
+    "n_shared_experts": 1,
+    "n_activated_experts": 2,
+    "score_func": "sqrtsoftplus",
+    "route_scale": 1.5,
+    "swiglu_limit": 10.0,
+    "q_lora_rank": 16,
+    "head_dim": 32,
+    "rope_head_dim": 8,
+    "norm_eps": 1e-20,
+    "o_groups": 2,
+    "o_lora_rank": 8,
+    "window_size": 8,
+    "compress_ratios": tuple(COMPRESS_RATIOS),
+    "kv_source_layers": tuple(KV_SOURCES),
+    "index_source_layers": tuple(INDEX_SOURCES),
+    "compress_rope_theta": 160000.0,
+    "original_seq_len": 65536,
+    "rope_theta": 10000.0,
+    "rope_factor": 16,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "index_n_heads": 16,
+    "index_head_dim": 16,
+    "index_topk": 3,
+    "candidate_source_layer": CANDIDATE_SOURCE,
+    "candidate_topk_blocks": 2,
+    "candidate_block_size": 4,
+    "hc_mult": 4,
+    "hc_sinkhorn_iters": 20,
+    "hc_eps": 1e-6,
+    "engram_layer_ids": tuple(ENGRAM_LAYERS),
+    "engram_max_ngram_size": 3,
+    "engram_vocab_size": 50,
+    "engram_n_heads": 2,
+    "engram_head_dim": 8,
+    "engram_pad_id": 2,
+    "engram_compressed_vocab_size": 99092,
+    "dspark_block_size": 0,
+}
 REF_ARGS["engram_num_embeddings"] = tuple(
     sum(sum(per_ngram) for per_ngram in layer)
     for layer in engram_deepseek41.engram_primes(
-        ENGRAM_LAYERS, REF_ARGS["engram_max_ngram_size"], REF_ARGS["engram_n_heads"], REF_ARGS["engram_vocab_size"]
+        ENGRAM_LAYERS,
+        REF_ARGS["engram_max_ngram_size"],
+        REF_ARGS["engram_n_heads"],
+        REF_ARGS["engram_vocab_size"],
     )
 )
 
@@ -118,48 +130,49 @@ def setUpModule():
 
 
 def _maxtext_config(**overrides):
-  args = dict(
-      run_name="deepseek41_test",
-      enable_checkpointing=False,
-      skip_jax_distributed_system=True,
-      model_name="deepseek4.1-flash-mini",
-      override_model_config=True,
-      per_device_batch_size=1.0,
-      max_target_length=SEQ,
-      dtype="float32",
-      weight_dtype="float32",
-      matmul_precision="highest",
-      base_emb_dim=REF_ARGS["dim"],
-      base_num_query_heads=REF_ARGS["n_heads"],
-      head_dim=REF_ARGS["head_dim"],
-      qk_rope_head_dim=REF_ARGS["rope_head_dim"],
-      q_lora_rank=REF_ARGS["q_lora_rank"],
-      o_groups=REF_ARGS["o_groups"],
-      o_lora_rank=REF_ARGS["o_lora_rank"],
-      base_mlp_dim=REF_ARGS["moe_inter_dim"],
-      base_moe_mlp_dim=REF_ARGS["moe_inter_dim"],
-      num_experts=REF_ARGS["n_routed_experts"],
-      num_experts_per_tok=REF_ARGS["n_activated_experts"],
-      sparse_matmul=False,
-      capacity_factor=-1,
-      sliding_window_size=REF_ARGS["window_size"],
-      base_num_decoder_layers=len(COMPRESS_RATIOS),
-      compress_ratios=COMPRESS_RATIOS,
-      kv_source_layers=KV_SOURCES,
-      index_source_layers=INDEX_SOURCES,
-      indexer_n_heads=REF_ARGS["index_n_heads"],
-      indexer_head_dim=REF_ARGS["index_head_dim"],
-      indexer_topk=REF_ARGS["index_topk"],
-      candidate_source_layer=CANDIDATE_SOURCE,
-      candidate_topk_blocks=REF_ARGS["candidate_topk_blocks"],
-      candidate_block_size=REF_ARGS["candidate_block_size"],
-      ds41_engram_layers=ENGRAM_LAYERS,
-      ds41_engram_vocab_size=REF_ARGS["engram_vocab_size"],
-      ds41_engram_max_ngram_size=REF_ARGS["engram_max_ngram_size"],
-      ds41_engram_n_heads=REF_ARGS["engram_n_heads"],
-      ds41_engram_head_dim=REF_ARGS["engram_head_dim"],
-      tokenizer_path=TOKENIZER,
-  )
+  """Builds a tiny DeepSeek-V4.1 MaxText config matching `REF_ARGS`."""
+  args = {
+      "run_name": "deepseek41_test",
+      "enable_checkpointing": False,
+      "skip_jax_distributed_system": True,
+      "model_name": "deepseek4.1-flash-mini",
+      "override_model_config": True,
+      "per_device_batch_size": 1.0,
+      "max_target_length": SEQ,
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "matmul_precision": "highest",
+      "base_emb_dim": REF_ARGS["dim"],
+      "base_num_query_heads": REF_ARGS["n_heads"],
+      "head_dim": REF_ARGS["head_dim"],
+      "qk_rope_head_dim": REF_ARGS["rope_head_dim"],
+      "q_lora_rank": REF_ARGS["q_lora_rank"],
+      "o_groups": REF_ARGS["o_groups"],
+      "o_lora_rank": REF_ARGS["o_lora_rank"],
+      "base_mlp_dim": REF_ARGS["moe_inter_dim"],
+      "base_moe_mlp_dim": REF_ARGS["moe_inter_dim"],
+      "num_experts": REF_ARGS["n_routed_experts"],
+      "num_experts_per_tok": REF_ARGS["n_activated_experts"],
+      "sparse_matmul": False,
+      "capacity_factor": -1,
+      "sliding_window_size": REF_ARGS["window_size"],
+      "base_num_decoder_layers": len(COMPRESS_RATIOS),
+      "compress_ratios": COMPRESS_RATIOS,
+      "kv_source_layers": KV_SOURCES,
+      "index_source_layers": INDEX_SOURCES,
+      "indexer_n_heads": REF_ARGS["index_n_heads"],
+      "indexer_head_dim": REF_ARGS["index_head_dim"],
+      "indexer_topk": REF_ARGS["index_topk"],
+      "candidate_source_layer": CANDIDATE_SOURCE,
+      "candidate_topk_blocks": REF_ARGS["candidate_topk_blocks"],
+      "candidate_block_size": REF_ARGS["candidate_block_size"],
+      "ds41_engram_layers": ENGRAM_LAYERS,
+      "ds41_engram_vocab_size": REF_ARGS["engram_vocab_size"],
+      "ds41_engram_max_ngram_size": REF_ARGS["engram_max_ngram_size"],
+      "ds41_engram_n_heads": REF_ARGS["engram_n_heads"],
+      "ds41_engram_head_dim": REF_ARGS["engram_head_dim"],
+      "tokenizer_path": TOKENIZER,
+  }
   args.update(overrides)
   return pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], **args)
 
@@ -205,7 +218,10 @@ def copy_layer(mt: deepseek41.DeepSeek41DecoderLayer, ref: ref_model.Block):
   _copy_linear(a.wkv, ra.wkv)
   _copy_norm(a.kv_norm, ra.kv_norm)
   g = ra.n_groups
-  _set(a.o_a_proj.kernel, _t2j(ra.wo_a.weight).reshape(g, ra.o_lora_rank, -1).transpose(0, 2, 1))
+  _set(
+      a.o_a_proj.kernel,
+      _t2j(ra.wo_a.weight).reshape(g, ra.o_lora_rank, -1).transpose(0, 2, 1),
+  )
   _copy_linear(a.o_b_proj, ra.wo_b)
   _set(a.sinks, _t2j(ra.attn_sink))
   if ra.compressor is not None:
@@ -214,7 +230,11 @@ def copy_layer(mt: deepseek41.DeepSeek41DecoderLayer, ref: ref_model.Block):
       _copy_linear(a.compressor.wgate, ra.compressor.wgate)
     _copy_norm(a.compressor.norm, ra.compressor.norm)
   if ra.indexer is not None:
-    _copy_linear(a.indexer.wq_b, ra.indexer.wq_b, (ra.indexer.n_heads, ra.indexer.index_head_dim))
+    _copy_linear(
+        a.indexer.wq_b,
+        ra.indexer.wq_b,
+        (ra.indexer.n_heads, ra.indexer.index_head_dim),
+    )
     _copy_linear(a.indexer.weights_proj, ra.indexer.weights_proj)
     if ra.indexer.owns_k:
       _copy_linear(a.indexer.wk, ra.indexer.wk)
@@ -262,10 +282,12 @@ def _init_reference(model: torch.nn.Module, seed: int = 0):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41RotaryTest(unittest.TestCase):
   """YaRN / plain interleaved partial RoPE against `precompute_freqs_cis` + `apply_rotary_emb`."""
 
   def _check(self, original_seq_len, theta):
+    """Checks forward and inverse partial RoPE parity against `apply_rotary_emb`."""
     head_dim, rd, seq = 32, 8, 50
     freqs_cis = ref_model.precompute_freqs_cis(rd, seq, original_seq_len, theta, 16, 32, 1)
     x = torch.randn(2, seq, 3, head_dim)
@@ -294,6 +316,7 @@ class DeepSeek41RotaryTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41CandidateBlocksTest(unittest.TestCase):
 
   def test_select_candidate_blocks(self):
@@ -308,6 +331,7 @@ class DeepSeek41CandidateBlocksTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41EngramHashTest(unittest.TestCase):
 
   def test_hash_ids_match_reference(self):
@@ -338,10 +362,12 @@ class DeepSeek41EngramHashTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41DequantTest(unittest.TestCase):
   """The MaxText loader hook and the reference loader dequantize the released FP8 / FP4 formats identically."""
 
   def _check(self, weight, scale, expected):
+    """Checks replicated and row-sharded `dequantize_block_scaled` parity against the reference."""
     from maxtext.checkpoint_conversion.utils import param_mapping  # pylint: disable=import-outside-toplevel
 
     out = torch.empty(expected.shape, dtype=torch.bfloat16)
@@ -358,7 +384,10 @@ class DeepSeek41DequantTest(unittest.TestCase):
     # pieces line up with the scale blocks), the scales either a full copy or split the same way.
     devices = jax.devices()
     for n in sorted({d for d in (2, len(devices) // 2, len(devices)) if d > 1 and w_j.shape[0] % d == 0}):
-      w_s = jax.device_put(w_j, hf_streaming_load.choose_load_sharding(w_j.shape, w_j.dtype, devices[:n], 0))
+      w_s = jax.device_put(
+          w_j,
+          hf_streaming_load.choose_load_sharding(w_j.shape, w_j.dtype, devices[:n], 0),
+      )
       for split_scale in (False, True):
         if split_scale and s_j.shape[0] != w_j.shape[0]:
           continue
@@ -368,7 +397,11 @@ class DeepSeek41DequantTest(unittest.TestCase):
         )
         got = param_mapping.dequantize_block_scaled((w_s, s_s))
         self.assertEqual(got.sharding, w_s.sharding)
-        np.testing.assert_array_equal(_j2np(got), expected.numpy(), err_msg=f"{n} chips, split scales {split_scale}")
+        np.testing.assert_array_equal(
+            _j2np(got),
+            expected.numpy(),
+            err_msg=f"{n} chips, split scales {split_scale}",
+        )
 
   def test_fp8_block_32x32(self):
     torch.manual_seed(0)
@@ -403,6 +436,7 @@ class DeepSeek41DequantTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41LayersTest(unittest.TestCase):
   """Runs every layer type of a tiny model, layer by layer, against the reference blocks."""
 
@@ -442,29 +476,39 @@ class DeepSeek41LayersTest(unittest.TestCase):
         carry = layer(carry, positions, tokens)
         ref_h, ref_pre = ref_outs[i]
         np.testing.assert_allclose(
-            _j2np(carry["h"]), ref_h.numpy(), rtol=2e-3, atol=2e-3, err_msg=f"hidden mismatch at layer {i}"
+            _j2np(carry["h"]),
+            ref_h.numpy(),
+            rtol=2e-3,
+            atol=2e-3,
+            err_msg=f"hidden mismatch at layer {i}",
         )
         np.testing.assert_allclose(
-            _j2np(carry["pre_mix"]), ref_pre.numpy(), rtol=2e-3, atol=2e-3, err_msg=f"pre_mix mismatch at layer {i}"
+            _j2np(carry["pre_mix"]),
+            ref_pre.numpy(),
+            rtol=2e-3,
+            atol=2e-3,
+            err_msg=f"pre_mix mismatch at layer {i}",
         )
 
 
 # The mini layout (14 layers, each repeating group twice) at tiny widths, so scanned stacks really stack.
 MINI_COMPRESS_RATIOS = [0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1]
-MINI_LAYOUT = dict(
-    n_layers=len(MINI_COMPRESS_RATIOS),
-    compress_ratios=tuple(MINI_COMPRESS_RATIOS),
-    kv_source_layers=(2, 4, 6, 8),
-    index_source_layers=(2, 4, 6, 8, 10, 12),
-    candidate_source_layer=8,
-    engram_layer_ids=(1, 6),
-)
+MINI_LAYOUT = {
+    "n_layers": len(MINI_COMPRESS_RATIOS),
+    "compress_ratios": tuple(MINI_COMPRESS_RATIOS),
+    "kv_source_layers": (2, 4, 6, 8),
+    "index_source_layers": (2, 4, 6, 8, 10, 12),
+    "candidate_source_layer": 8,
+    "engram_layer_ids": (1, 6),
+}
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41CheckpointTest(unittest.TestCase):
   """Saves a tiny random checkpoint in the upstream layout, streams it into MaxText through the param mapping
-  (`safetensors_dynamic`), and compares the logits with the reference for scanned and unscanned layers."""
+  (`safetensors_dynamic`), and compares the logits with the reference for scanned and unscanned layers.
+  """
 
   @classmethod
   def setUpClass(cls):
@@ -477,16 +521,24 @@ class DeepSeek41CheckpointTest(unittest.TestCase):
     args["engram_num_embeddings"] = tuple(
         sum(sum(per_ngram) for per_ngram in layer)
         for layer in engram_deepseek41.engram_primes(
-            args["engram_layer_ids"], args["engram_max_ngram_size"], args["engram_n_heads"], args["engram_vocab_size"]
+            args["engram_layer_ids"],
+            args["engram_max_ngram_size"],
+            args["engram_n_heads"],
+            args["engram_vocab_size"],
         )
     )
     cls.ref = ref_runner.build_model(ref_model.ModelArgs(**args), tokenizer)
     _init_reference(cls.ref, seed=1)
     cls.ckpt_dir = tempfile.mkdtemp(prefix="dsv41_tiny_")
     state = {k: v.contiguous() for k, v in cls.ref.state_dict().items()}
-    save_file(state, os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"), metadata={"format": "pt"})
+    save_file(
+        state,
+        os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"),
+        metadata={"format": "pt"},
+    )
 
   def _maxtext_logits(self, ids, scan_layers):
+    """Streams the temporary safetensors checkpoint into MaxText and returns forward logits."""
     from maxtext.common.common_types import MODEL_MODE_TRAIN  # pylint: disable=import-outside-toplevel
     from maxtext.utils import maxtext_utils, model_creation_utils  # pylint: disable=import-outside-toplevel
 
@@ -524,6 +576,52 @@ class DeepSeek41CheckpointTest(unittest.TestCase):
 
   def test_scanned(self):
     self._check(scan_layers=True)
+
+
+class TflopsCalculationTest(unittest.TestCase):
+  """Verifies peak-roofline training TFLOPs calculation for DeepSeek-V4.1-Flash."""
+
+  def test_deepseek41_tflops_training_per_device(self):
+    from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+
+    config = pyconfig.initialize(
+        [sys.argv[0], "src/maxtext/configs/base.yml"],
+        run_name="deepseek41_tflops_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        model_name="deepseek4.1-flash",
+        per_device_batch_size=1.0,
+        max_target_length=4096,
+    )
+    (
+        total_tflops,
+        weight_tflops,
+        attn_tflops,
+    ) = maxtext_utils.calculate_tflops_training_per_device(config, log=False)
+    self.assertAlmostEqual(total_tflops, weight_tflops + attn_tflops, places=5)
+    # Peak roofline for deepseek4.1-flash (pdb=1, seq=4096) is ~434.55 TFLOPs
+    # (learnable_weights ~396.63 TFLOPs, attention/indexer scoring ~37.92 TFLOPs),
+    # significantly lower than the unfactored dense MHA fallback (728.67 TFLOPs).
+    self.assertAlmostEqual(weight_tflops, 396.63, delta=0.1)
+    self.assertAlmostEqual(attn_tflops, 37.92, delta=0.1)
+    self.assertAlmostEqual(total_tflops, 434.55, delta=0.1)
+
+    # Shrinking num_decoder_layers to 4 leaves only layer 1 active from ds41_engram_layers=[1, 14].
+    shrunk_config = pyconfig.initialize(
+        [sys.argv[0], "src/maxtext/configs/base.yml"],
+        run_name="deepseek41_tflops_shrunk_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        model_name="deepseek4.1-flash",
+        override_model_config=True,
+        base_num_decoder_layers=4,
+        per_device_batch_size=1.0,
+        max_target_length=4096,
+    )
+    engram_full_w, engram_full_a = maxtext_utils.calculate_ds41_engram_tflops(config)
+    engram_shrunk_w, engram_shrunk_a = maxtext_utils.calculate_ds41_engram_tflops(shrunk_config)
+    self.assertAlmostEqual(engram_shrunk_w, 0.5 * engram_full_w, places=6)
+    self.assertAlmostEqual(engram_shrunk_a, 0.5 * engram_full_a, places=6)
 
 
 if __name__ == "__main__":
