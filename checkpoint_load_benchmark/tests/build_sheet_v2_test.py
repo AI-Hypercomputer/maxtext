@@ -248,22 +248,41 @@ class BuildSheetV2Test(unittest.TestCase):
 
     ds = build_sheet_v2.build_v2_dataset(v2_roots=[v2_root])
     self.assertEqual(ds.validate(), [])
-    # Full planned v2 matrix must stay exact at 352 rows and group by Model -> Pipeline -> Scan layers.
+    # Full planned v2 matrix must stay exact at 352 rows and group by Model -> Pipeline -> Scan layers -> Platform -> Slices.
     self.assertEqual(len(ds.summary_rows), 352)
-    qwen06_v7x_1s = [
-        (r["pipeline_name"], r["scan_layers_mode"])
+    qwen06_groups = [
+        (r["pipeline_name"], r["scan_layers_mode"], r["tpu_platform"], r["number_of_slices"])
         for r in ds.summary_rows
-        if r["model_name"] == "qwen3-0.6b" and r["tpu_platform"] == "v7x" and r["number_of_slices"] == 1
+        if r["model_name"] == "qwen3-0.6b"
     ]
     self.assertEqual(
-        qwen06_v7x_1s,
+        qwen06_groups,
         [
-            ("to_maxtext", "scanned"),
-            ("to_maxtext", "unscanned"),
-            ("safetensors_dynamic", "scanned"),
-            ("safetensors_dynamic", "unscanned"),
+            ("to_maxtext", "scanned", "v7x", 1),
+            ("to_maxtext", "scanned", "v7x", 2),
+            ("to_maxtext", "scanned", "v6e", 1),
+            ("to_maxtext", "scanned", "v6e", 2),
+            ("to_maxtext", "scanned", "v5e", 1),
+            ("to_maxtext", "unscanned", "v7x", 1),
+            ("to_maxtext", "unscanned", "v7x", 2),
+            ("to_maxtext", "unscanned", "v6e", 1),
+            ("to_maxtext", "unscanned", "v6e", 2),
+            ("to_maxtext", "unscanned", "v5e", 1),
+            ("safetensors_dynamic", "scanned", "v7x", 1),
+            ("safetensors_dynamic", "scanned", "v7x", 2),
+            ("safetensors_dynamic", "scanned", "v6e", 1),
+            ("safetensors_dynamic", "scanned", "v6e", 2),
+            ("safetensors_dynamic", "scanned", "v5e", 1),
+            ("safetensors_dynamic", "unscanned", "v7x", 1),
+            ("safetensors_dynamic", "unscanned", "v7x", 2),
+            ("safetensors_dynamic", "unscanned", "v6e", 1),
+            ("safetensors_dynamic", "unscanned", "v6e", 2),
+            ("safetensors_dynamic", "unscanned", "v5e", 1),
         ],
     )
+    fmt_reqs = build_sheet_v2.build_summary_format_requests(ds.summary_rows)["requests"]
+    merge_cols = {req["mergeCells"]["range"]["startColumnIndex"] for req in fmt_reqs if "mergeCells" in req}
+    self.assertEqual(merge_cols, {0, 1, 2, 3, 4})
 
     by_id = {r["row_id"]: r for r in ds.summary_rows}
     tm_row = by_id["v2|v7x|llama3.1-8b|scanned|to_maxtext|1x2x2x1"]
@@ -294,7 +313,9 @@ class BuildSheetV2Test(unittest.TestCase):
     self.assertEqual(ds_fail["load_into_tpu_hbm_total_seconds"], "BLOCKED")
     self.assertIn("storage.cloud.google.com", ds_fail["log_url"])
 
-    step1_run = next(r for r in ds.runs_rows if r["phase_name"] == "step1_hf_to_gcs" and r["model_name"] == "llama3.1-8b")
+    step1_run = next(
+        r for r in ds.runs_rows if r["phase_name"] == "step1_hf_to_gcs" and r["model_name"] == "llama3.1-8b"
+    )
     self.assertEqual(step1_run["git_commit"], "deadbeef1234")
     self.assertEqual(step1_run["code_tarball_sha256"], "abcd1234")
     self.assertEqual(step1_run["jax_version"], "0.11.1")

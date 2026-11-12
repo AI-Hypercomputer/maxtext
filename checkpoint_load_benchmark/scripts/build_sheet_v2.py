@@ -510,7 +510,9 @@ def _attach_v2_pair_speedups(summary_rows: Sequence[dict[str, Any]]) -> None:
     tm_e2e = tm.get("total_end_to_end_seconds")
     sd_e2e = sd.get("total_end_to_end_seconds")
     if _is_number(tm_nohf) and _is_number(sd_nohf) and float(sd_nohf) > 0:
-      sd["speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic"] = _round_num(float(tm_nohf) / float(sd_nohf), 4)
+      sd["speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic"] = _round_num(
+          float(tm_nohf) / float(sd_nohf), 4
+      )
     if _is_number(tm_load) and _is_number(sd_load) and float(sd_load) > 0:
       sd["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"] = _round_num(
           float(tm_load) / float(sd_load), 4
@@ -558,11 +560,11 @@ def _build_v2_matrix_rows(
   planned.sort(
       key=lambda item: (
           model_order.get(item["model_name"], 999),
+          _PIPE_SORT_ORDER.get(item["pipeline"], 99),
+          0 if item["scan_mode"] == "scanned" else 1,
           _PLAT_SORT_ORDER.get(item["platform"], 99),
           item["slices"],
           item["topology"],
-          _PIPE_SORT_ORDER.get(item["pipeline"], 99),
-          0 if item["scan_mode"] == "scanned" else 1,
       )
   )
 
@@ -881,7 +883,9 @@ def _build_runs_rows(
     pipe = str(rec.get("pipeline_name") or _PHASE_PIPELINE_MAP.get(phase, ""))
     slices = int(rec.get("number_of_slices") or 1)
     topo = str(rec.get("slice_topology") or "")
-    candidate_id = schema_v2.make_row_id("v2", plat, model, scan, pipe, slices, topo) if (pipe and topo and scan) else ""
+    candidate_id = (
+        schema_v2.make_row_id("v2", plat, model, scan, pipe, slices, topo) if (pipe and topo and scan) else ""
+    )
     row_id = candidate_id if candidate_id in planned_ids else f"{phase}|{plat}|{model}|{rec.get('run_id', '')}"
 
     for col in schema_v2.RUNS_COLUMNS:
@@ -934,6 +938,104 @@ def _build_runs_rows(
   return rows
 
 
+def _summary_cfg_key(row: Mapping[str, Any]) -> tuple[str, str, str, str, int, str]:
+  """Returns the canonical `(platform, model, pipeline, scan_mode, slices, topology)` key for a Summary row."""
+  slices = int(row.get("number_of_slices") or 0) if _is_number(row.get("number_of_slices")) else 0
+  return (
+      str(row.get("tpu_platform") or ""),
+      str(row.get("model_name") or ""),
+      str(row.get("pipeline_name") or ""),
+      str(row.get("scan_layers_mode") or ""),
+      slices,
+      str(row.get("slice_topology") or ""),
+  )
+
+
+def _merge_v2_and_legacy_summary_rows(
+    summary_v2: Sequence[Mapping[str, Any]],
+    legacy_summary: Sequence[Mapping[str, Any]],
+    models_by_name: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+  """Merges overlapping `v2` (`PENDING`) and `legacy` v1 rows and orders by `Model -> Pipeline -> Scan layers`."""
+  legacy_by_key: dict[tuple[str, str, str, str, int, str], dict[str, Any]] = {}
+  for leg in legacy_summary:
+    key = _summary_cfg_key(leg)
+    prev = legacy_by_key.get(key)
+    if prev is None or (leg.get("run_status") == "OK" and prev.get("run_status") != "OK"):
+      legacy_by_key[key] = dict(leg)
+
+  merged: list[dict[str, Any]] = []
+  seen_keys: set[tuple[str, str, str, str, int, str]] = set()
+  for raw_v2 in summary_v2:
+    row = dict(raw_v2)
+    key = _summary_cfg_key(row)
+    seen_keys.add(key)
+    row["_v2_run_status"] = str(row.get("run_status") or "PENDING")
+    leg = legacy_by_key.get(key)
+    if row["_v2_run_status"] == "PENDING" and leg and leg.get("run_status") not in ("", "PENDING"):
+      v2_s1 = row.get("step1_total_seconds")
+      v2_s1b = row.get("step1b_deepseek_total_seconds")
+      v2_tier = row.get("model_test_tier")
+      for col in schema_v2.SUMMARY_COLUMNS:
+        if leg.get(col.key) not in (None, ""):
+          row[col.key] = leg[col.key]
+      row["model_test_tier"] = v2_tier
+      if _is_number(v2_s1):
+        row["step1_total_seconds"] = _round_num(float(v2_s1), 4)
+      if _is_number(v2_s1b) or v2_s1b in ("N/A", "PENDING"):
+        row["step1b_deepseek_total_seconds"] = v2_s1b
+      if row.get("pipeline_name") == "safetensors_dynamic":
+        row["to_maxtext_step1_total_seconds"] = "N/A"
+        row["to_maxtext_step2_total_seconds"] = "N/A"
+      nohf = row.get("total_without_hf_download_seconds")
+      s1_val = row.get("step1_total_seconds")
+      m_info = models_by_name.get(str(row.get("model_name") or ""), {})
+      if _is_number(s1_val) and _is_number(nohf):
+        e2e = float(s1_val) + float(nohf)
+        if m_info.get("needs_step1b"):
+          s1b_val = row.get("step1b_deepseek_total_seconds")
+          row["total_end_to_end_seconds"] = _round_num(e2e + float(s1b_val), 4) if _is_number(s1b_val) else "—"
+        else:
+          row["total_end_to_end_seconds"] = _round_num(e2e, 4)
+      leg_note = str(leg.get("note") or "")
+      row["note"] = f"v1 baseline (v2 re-run queued); {leg_note}" if leg_note else "v1 baseline (v2 re-run queued)"
+    merged.append(row)
+
+  for key, leg in legacy_by_key.items():
+    if key in seen_keys:
+      continue
+    leg_row = dict(leg)
+    leg_row["_v2_run_status"] = "LEGACY_ONLY"
+    if leg_row.get("pipeline_name") == "safetensors_dynamic":
+      leg_row["to_maxtext_step1_total_seconds"] = "N/A"
+      leg_row["to_maxtext_step2_total_seconds"] = "N/A"
+    merged.append(leg_row)
+
+  _attach_v2_pair_speedups(merged)
+
+  def _summary_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    m_name = str(row.get("model_name") or "")
+    plat = str(row.get("tpu_platform") or "")
+    pipe = str(row.get("pipeline_name") or "")
+    scan = str(row.get("scan_layers_mode") or "")
+    slices = int(row.get("number_of_slices") or 0) if _is_number(row.get("number_of_slices")) else 0
+    topo = str(row.get("slice_topology") or "")
+    model_order_idx = models_by_name.get(m_name, {}).get("_idx", 999)
+    return (
+        model_order_idx,
+        m_name if model_order_idx == 999 else "",
+        _PIPE_SORT_ORDER.get(pipe, 99),
+        0 if scan == "scanned" else 1,
+        _PLAT_SORT_ORDER.get(plat, 99),
+        slices,
+        topo,
+        str(row.get("row_id") or ""),
+    )
+
+  merged.sort(key=_summary_sort_key)
+  return merged
+
+
 def build_v2_dataset(
     *,
     v2_roots: Sequence[str] = (),
@@ -971,29 +1073,10 @@ def build_v2_dataset(
   step1_rows = _build_step1_rows(v2_data, v1_ds.step1_rows, models_by_name)
   summary_v2, stages_sd_v2, stages_tm_v2 = _build_v2_matrix_rows(v2_data, models_cfg)
   runs_rows = _build_runs_rows(v2_data, v1_ds.runs_rows, models_by_name)
-
-  def _summary_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    m_name = str(row.get("model_name") or "")
-    plat = str(row.get("tpu_platform") or "")
-    pipe = str(row.get("pipeline_name") or "")
-    scan = str(row.get("scan_layers_mode") or "")
-    slices = int(row.get("number_of_slices") or 0) if _is_number(row.get("number_of_slices")) else 0
-    topo = str(row.get("slice_topology") or "")
-    return (
-        model_order_idx := models_by_name.get(m_name, {}).get("_idx", 999),
-        m_name if model_order_idx == 999 else "",
-        _PLAT_SORT_ORDER.get(plat, 99),
-        slices,
-        topo,
-        _PIPE_SORT_ORDER.get(pipe, 99),
-        0 if scan == "scanned" else 1,
-        str(row.get("row_id") or ""),
-    )
-
-  sorted_legacy_summary = sorted(v1_ds.summary_rows, key=_summary_sort_key)
+  merged_summary = _merge_v2_and_legacy_summary_rows(summary_v2, v1_ds.summary_rows, models_by_name)
 
   return V2Dataset(
-      summary_rows=summary_v2 + sorted_legacy_summary,
+      summary_rows=merged_summary,
       step1_rows=step1_rows,
       stages_sd_rows=stages_sd_v2 + list(v1_ds.stages_sd_rows),
       stages_tm_rows=stages_tm_v2 + list(v1_ds.stages_tm_rows),
@@ -1059,6 +1142,7 @@ def build_gsheets_batches(
   for tab_name, rows, cols in tabs:
     prefix = _tab_sheet_range_prefix(tab_name)
     end_col = col_letter(len(cols) - 1)
+    raw_ops.append({"op": "write", "range": f"{prefix}A1:{end_col}1", "data": [[c.header for c in cols]]})
     raw_ops.append({"op": "clear", "range": f"{prefix}A2:{end_col}2000"})
 
     if not rows:
@@ -1116,6 +1200,36 @@ def build_gsheets_batches(
         }
     )
 
+  planned_v2_rows = [
+      r for r in dataset.summary_rows if str(r.get("_v2_run_status") or r.get("run_status")) != "LEGACY_ONLY"
+  ]
+  for r_idx, plat in ((7, "v7x"), (8, "v6e"), (9, "v5e")):
+    p_rows = [r for r in planned_v2_rows if r.get("tpu_platform") == plat]
+    ok_cnt = sum(1 for r in p_rows if str(r.get("_v2_run_status") or r.get("run_status")) == "OK")
+    fail_cnt = sum(
+        1 for r in p_rows if str(r.get("_v2_run_status") or r.get("run_status")) in schema_v2.FAILURE_CATEGORY_CODES
+    )
+    skip_cnt = sum(
+        1
+        for r in p_rows
+        if str(r.get("_v2_run_status") or r.get("run_status")) in ("NOT RUN", "SKIPPED", "BLOCKED", "N/A")
+    )
+    pend_cnt = sum(1 for r in p_rows if str(r.get("_v2_run_status") or r.get("run_status")) == "PENDING")
+    raw_ops.append(
+        {"op": "write", "range": f"Progress!F{r_idx}:I{r_idx}", "data": [[ok_cnt, fail_cnt, skip_cnt, pend_cnt]]}
+    )
+
+  for r_idx, tier in ((14, "S"), (15, "A"), (16, "B"), (17, "C")):
+    for col_l, plat in (("C", "v7x"), ("E", "v6e"), ("G", "v5e")):
+      done_cnt = sum(
+          1
+          for r in planned_v2_rows
+          if r.get("tpu_platform") == plat
+          and r.get("model_test_tier") == tier
+          and str(r.get("_v2_run_status") or r.get("run_status")) not in ("", "PENDING", "LEGACY_ONLY")
+      )
+      raw_ops.append({"op": "write", "range": f"Progress!{col_l}{r_idx}", "data": [[done_cnt]]})
+
   for upd in impl_updates:
     task_id = str(upd.get("task") or "")
     row_num = _PROGRESS_IMPL_ROWS.get(task_id)
@@ -1127,14 +1241,173 @@ def build_gsheets_batches(
     commit = str(upd.get("commit") or "")
     notes = str(upd.get("notes") or "")
     raw_ops.append(
-        {"op": "write", "range": f"Progress!D{row_num}:H{row_num}", "data": [[status, started, finished, commit, notes]]}
+        {
+            "op": "write",
+            "range": f"Progress!D{row_num}:H{row_num}",
+            "data": [[status, started, finished, commit, notes]],
+        }
     )
 
   return raw_ops, formula_ops
 
 
-def apply_batches(spreadsheet_id: str, raw_path: str, formulas_path: str) -> None:
-  """Uploads RAW and USER_ENTERED batches via `gsheets mutate batch`."""
+def build_summary_format_requests(
+    summary_rows: Sequence[Mapping[str, Any]],
+    *,
+    sheet_id: int = 300,
+) -> dict[str, Any]:
+  """Builds a Google Sheets `BatchUpdateSpreadsheetRequest` merging hierarchical group cells in `Summary`."""
+  total_cols = len(schema_v2.SUMMARY_COLUMNS)
+  requests: list[dict[str, Any]] = [
+      {
+          "unmergeCells": {
+              "range": {
+                  "sheetId": sheet_id,
+                  "startRowIndex": 1,
+                  "endRowIndex": 2000,
+                  "startColumnIndex": 0,
+                  "endColumnIndex": 5,
+              }
+          }
+      },
+      {
+          "updateBorders": {
+              "range": {
+                  "sheetId": sheet_id,
+                  "startRowIndex": 1,
+                  "endRowIndex": 2000,
+                  "startColumnIndex": 0,
+                  "endColumnIndex": total_cols,
+              },
+              "top": {"style": "NONE"},
+              "bottom": {"style": "NONE"},
+              "innerHorizontal": {"style": "NONE"},
+          }
+      },
+  ]
+
+  if not summary_rows:
+    return {"requests": requests}
+
+  end_row = 1 + len(summary_rows)
+  requests.extend(
+      [
+          {
+              "repeatCell": {
+                  "range": {
+                      "sheetId": sheet_id,
+                      "startRowIndex": 1,
+                      "endRowIndex": end_row,
+                      "startColumnIndex": 0,
+                      "endColumnIndex": 5,
+                  },
+                  "cell": {
+                      "userEnteredFormat": {
+                          "verticalAlignment": "MIDDLE",
+                      }
+                  },
+                  "fields": "userEnteredFormat.verticalAlignment",
+              }
+          },
+          {
+              "repeatCell": {
+                  "range": {
+                      "sheetId": sheet_id,
+                      "startRowIndex": 1,
+                      "endRowIndex": end_row,
+                      "startColumnIndex": 0,
+                      "endColumnIndex": 1,
+                  },
+                  "cell": {
+                      "userEnteredFormat": {
+                          "verticalAlignment": "MIDDLE",
+                          "horizontalAlignment": "LEFT",
+                          "textFormat": {"bold": True},
+                      }
+                  },
+                  "fields": (
+                      "userEnteredFormat.verticalAlignment,"
+                      "userEnteredFormat.horizontalAlignment,"
+                      "userEnteredFormat.textFormat.bold"
+                  ),
+              }
+          },
+      ]
+  )
+
+  group_specs = (
+      (0, ("model_name",)),
+      (1, ("model_name", "model_test_tier")),
+      (2, ("model_name", "pipeline_name")),
+      (3, ("model_name", "pipeline_name", "scan_layers_mode")),
+      (4, ("model_name", "pipeline_name", "scan_layers_mode", "tpu_platform")),
+  )
+  for col_idx, key_fields in group_specs:
+    run_start = 0
+    prev_key = tuple(str(summary_rows[0].get(k) or "") for k in key_fields)
+    for idx in range(1, len(summary_rows) + 1):
+      cur_key = tuple(str(summary_rows[idx].get(k) or "") for k in key_fields) if idx < len(summary_rows) else None
+      if cur_key != prev_key:
+        if idx - run_start >= 2:
+          requests.append(
+              {
+                  "mergeCells": {
+                      "range": {
+                          "sheetId": sheet_id,
+                          "startRowIndex": 1 + run_start,
+                          "endRowIndex": 1 + idx,
+                          "startColumnIndex": col_idx,
+                          "endColumnIndex": col_idx + 1,
+                      },
+                      "mergeType": "MERGE_COLUMNS",
+                  }
+              }
+          )
+        if idx < len(summary_rows):
+          if col_idx == 0:
+            requests.append(
+                {
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1 + idx - 1,
+                            "endRowIndex": 1 + idx,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": total_cols,
+                        },
+                        "bottom": {
+                            "style": "SOLID_MEDIUM",
+                            "color": {"red": 0.45, "green": 0.45, "blue": 0.45},
+                        },
+                    }
+                }
+            )
+          elif col_idx == 2 and cur_key[0] == prev_key[0]:
+            requests.append(
+                {
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1 + idx - 1,
+                            "endRowIndex": 1 + idx,
+                            "startColumnIndex": 2,
+                            "endColumnIndex": total_cols,
+                        },
+                        "bottom": {
+                            "style": "SOLID",
+                            "color": {"red": 0.72, "green": 0.72, "blue": 0.72},
+                        },
+                    }
+                }
+            )
+        run_start = idx
+        prev_key = cur_key  # type: ignore[assignment]
+
+  return {"requests": requests}
+
+
+def apply_batches(spreadsheet_id: str, raw_path: str, formulas_path: str, format_path: str = "") -> None:
+  """Uploads RAW, USER_ENTERED, and raw-batch formatting updates via `gsheets mutate`."""
   subprocess.run(
       [GSHEETS_BIN, "mutate", "batch", spreadsheet_id, "-f", raw_path, "--value-input", "RAW"],
       check=True,
@@ -1146,6 +1419,14 @@ def apply_batches(spreadsheet_id: str, raw_path: str, formulas_path: str) -> Non
         [GSHEETS_BIN, "mutate", "batch", spreadsheet_id, "-f", formulas_path, "--value-input", "USER_ENTERED"],
         check=True,
     )
+  if format_path and os.path.exists(format_path):
+    with open(format_path, "r", encoding="utf-8") as f:
+      fmt_payload = json.load(f)
+    if fmt_payload.get("requests"):
+      subprocess.run(
+          [GSHEETS_BIN, "mutate", "raw-batch", spreadsheet_id, "-f", format_path],
+          check=True,
+      )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1208,19 +1489,23 @@ def main(argv: Sequence[str] | None = None) -> int:
   _write_csv(os.path.join(args.out_dir, "runs.csv"), ds.runs_rows, schema_v2.RUNS_COLUMNS)
 
   raw_ops, formula_ops = build_gsheets_batches(ds, impl_updates=impl_updates)
+  fmt_reqs = build_summary_format_requests(ds.summary_rows)
   raw_path = os.path.join(args.out_dir, "01_raw_batch.json")
   formulas_path = os.path.join(args.out_dir, "02_formulas_batch.json")
+  format_path = os.path.join(args.out_dir, "03_format_batch.json")
   with open(raw_path, "w", encoding="utf-8") as f:
     json.dump(raw_ops, f, indent=2)
   with open(formulas_path, "w", encoding="utf-8") as f:
     json.dump(formula_ops, f, indent=2)
+  with open(format_path, "w", encoding="utf-8") as f:
+    json.dump(fmt_reqs, f, indent=2)
 
   print(
       f"Built Sheet v2: Summary={len(ds.summary_rows)} Step1={len(ds.step1_rows)} "
       f"StagesSD={len(ds.stages_sd_rows)} StagesTM={len(ds.stages_tm_rows)} Runs={len(ds.runs_rows)}"
   )
   if args.apply:
-    apply_batches(args.spreadsheet_id, raw_path, formulas_path)
+    apply_batches(args.spreadsheet_id, raw_path, formulas_path, format_path)
     print(f"Synced Sheet v2 ({args.spreadsheet_id}).")
   return 0
 

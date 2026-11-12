@@ -69,16 +69,18 @@ class ColumnSpec:
   source: str
 
 
-def _c(header: str, key: str, fmt: str, group: str, definition: str, source: str) -> ColumnSpec:
+def _c(  # pylint: disable=too-many-positional-arguments
+    header: str, key: str, fmt: str, group: str, definition: str, source: str
+) -> ColumnSpec:
   return ColumnSpec(header=header, key=key, fmt=fmt, group=group, definition=definition, source=source)
 
 
 SUMMARY_COLUMNS: tuple[ColumnSpec, ...] = (
-    _c("TPU platform", "tpu_platform", "c", "identity", "TPU generation: v5e, v6e or v7x.", "Platform profile"),
-    _c("Model tier", "model_test_tier", "c", "identity", "Model tier: S, A, B or C.", "Models tab"),
     _c("Model", "model_name", "t", "identity", "MaxText model name.", "Run config"),
+    _c("Model tier", "model_test_tier", "c", "identity", "Model tier: S, A, B or C.", "Models tab"),
     _c("Pipeline (to_maxtext or safetensors_dynamic)", "pipeline_name", "t", "identity", "Pipeline.", "Run config"),
     _c("Scan layers (scanned or unscanned)", "scan_layers_mode", "c", "identity", "Scan mode.", "Run config"),
+    _c("TPU platform", "tpu_platform", "c", "identity", "TPU generation: v5e, v6e or v7x.", "Platform profile"),
     _c("Number of slices", "number_of_slices", "n", "identity", "TPU slices used.", "Run config"),
     _c("Slice topology", "slice_topology", "c", "identity", "Topology per slice.", "Run config"),
     _c("Hosts per slice", "hosts_per_slice", "n", "identity", "Hosts in each slice.", "Platform profile"),
@@ -94,7 +96,14 @@ SUMMARY_COLUMNS: tuple[ColumnSpec, ...] = (
         "Loaded dtype.",
         "Headers",
     ),
-    _c("MaxText weight dtype (weight_dtype)", "maxtext_load_weight_dtype", "c", "checkpoint", "MaxText dtype.", "Config"),
+    _c(
+        "MaxText weight dtype (weight_dtype)",
+        "maxtext_load_weight_dtype",
+        "c",
+        "checkpoint",
+        "MaxText dtype.",
+        "Config",
+    ),
     _c("Weights (real or synthetic)", "checkpoint_weights_kind", "c", "checkpoint", "real in v2.", "Run config"),
     _c("Loaded checkpoint size (GB)", "checkpoint_size_gb", "gb", "checkpoint", "Loaded size in GB.", "Headers"),
     _c(
@@ -207,7 +216,14 @@ STEP1_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("GCS bucket region", "step1_gcs_bucket_region", "c", "identity", "Target regional bucket region.", "Step 1"),
     _c("Model", "model_name", "t", "identity", "MaxText model name.", "Step 1"),
     _c("Step 1 · HF repo", "step1_hf_repo_id", "t", "step1", "HF repo downloaded.", "Step 1"),
-    _c("Step 1 · List HF repo files (seconds)", "step1_list_hf_repo_files_seconds", "s", "step1", "Repo list.", "Step 1"),
+    _c(
+        "Step 1 · List HF repo files (seconds)",
+        "step1_list_hf_repo_files_seconds",
+        "s",
+        "step1",
+        "Repo list.",
+        "Step 1",
+    ),
     _c(
         "Step 1 · Files already in GCS before the download (count)",
         "step1_files_already_in_gcs_count",
@@ -216,7 +232,14 @@ STEP1_COLUMNS: tuple[ColumnSpec, ...] = (
         "Pre-existing GCS file count (must be 0 for cold download).",
         "Step 1",
     ),
-    _c("Step 1 · Download HF → GCS (seconds)", "step1_download_hf_to_gcs_seconds", "s", "step1", "Download s.", "Step 1"),
+    _c(
+        "Step 1 · Download HF → GCS (seconds)",
+        "step1_download_hf_to_gcs_seconds",
+        "s",
+        "step1",
+        "Download s.",
+        "Step 1",
+    ),
     _c("Step 1 · Download HF → GCS (GB)", "step1_download_hf_to_gcs_gb", "gb", "step1", "Downloaded GB.", "Step 1"),
     _c(
         "Step 1 · Download HF → GCS (GB/s)",
@@ -237,7 +260,9 @@ STEP1_COLUMNS: tuple[ColumnSpec, ...] = (
     ),
     _c("Step 1 · Download workers (count)", "step1_download_workers_count", "n", "step1", "Workers.", "Step 1"),
     _c("Step 1 · Host machine type", "step1_host_machine_type", "t", "step1", "CPU machine type.", "Step 1"),
-    _c("Step 1 · Total: list + download (seconds)", "step1_total_seconds", "s", "step1", "List + download s.", "Step 1"),
+    _c(
+        "Step 1 · Total: list + download (seconds)", "step1_total_seconds", "s", "step1", "List + download s.", "Step 1"
+    ),
     _c("Step 1 · Value source", "step1_value_source", "t", "step1", "cold_download or legacy source.", "Step 1"),
     _c("Step 1 · Measured by run ID", "step1_measured_by_run_id", "t", "step1", "Download job run ID.", "Step 1"),
     _c(
@@ -289,7 +314,9 @@ STEP1_COLUMNS: tuple[ColumnSpec, ...] = (
         "Step 1b",
     ),
     _c("DeepSeek Step 1b · BF16 source", "step1b_deepseek_bf16_source", "t", "step1", "BF16 provenance.", "Step 1b"),
-    _c("DeepSeek Step 1b · Total (seconds)", "step1b_deepseek_total_seconds", "s", "step1", "Step 1b total.", "Step 1b"),
+    _c(
+        "DeepSeek Step 1b · Total (seconds)", "step1b_deepseek_total_seconds", "s", "step1", "Step 1b total.", "Step 1b"
+    ),
 )
 
 
@@ -580,7 +607,14 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("Slice topology", "slice_topology", "c", "identity", "Topology.", "Profile"),
     _c("Hosts per slice", "hosts_per_slice", "n", "identity", "Hosts per slice.", "Profile"),
     _c("TPU chips per host", "tpu_chips_per_host", "n", "identity", "Chips per host.", "Profile"),
-    _c("TPU devices per chip (TensorCores)", "tpu_devices_per_chip", "n", "identity", "TensorCores per chip.", "Profile"),
+    _c(
+        "TPU devices per chip (TensorCores)",
+        "tpu_devices_per_chip",
+        "n",
+        "identity",
+        "TensorCores per chip.",
+        "Profile",
+    ),
     _c("TPU devices per slice", "tpu_devices_per_slice", "n", "identity", "Devices per slice.", "Profile"),
     _c("Total hosts", "total_hosts", "n", "identity", "Total hosts.", "Profile"),
     _c("Total TPU devices", "total_tpu_devices", "n", "identity", "Total TPU devices.", "Profile"),
@@ -589,7 +623,14 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("JAX backend platform (measured)", "jax_backend_platform", "c", "identity", "Measured backend.", "TPU check"),
     _c("TPU device kind (as JAX reports it)", "tpu_device_kind", "c", "identity", "Measured device kind.", "TPU check"),
     _c("Total TPU devices (measured)", "total_tpu_devices_measured", "n", "identity", "Measured devices.", "TPU check"),
-    _c("TPU devices per host (measured)", "tpu_devices_per_host_measured", "n", "identity", "Devices/host.", "TPU check"),
+    _c(
+        "TPU devices per host (measured)",
+        "tpu_devices_per_host_measured",
+        "n",
+        "identity",
+        "Devices/host.",
+        "TPU check",
+    ),
     _c(
         "TPU HBM per device, measured (GB)",
         "tpu_hbm_per_device_gb_measured",
@@ -624,10 +665,14 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("Active timing wrappers", "active_timing_wrappers", "t", "setup", "Active wrappers.", "Stage recorder"),
     _c("Model", "model_name", "t", "identity", "Model name.", "Run config"),
     _c("HF repo", "hf_repo_id", "t", "identity", "HF repo.", "Run config"),
-    _c("Parameters (billions)", "model_parameter_count_billions", "gb", "identity", "Billions of params.", "Models tab"),
+    _c(
+        "Parameters (billions)", "model_parameter_count_billions", "gb", "identity", "Billions of params.", "Models tab"
+    ),
     _c("Architecture (dense or moe)", "model_architecture", "c", "identity", "dense or moe.", "Models tab"),
     _c("Model tier", "model_test_tier", "c", "identity", "S, A, B or C.", "Models tab"),
-    _c("Scan layers (scanned or unscanned)", "scan_layers_mode", "c", "identity", "scanned or unscanned.", "Run config"),
+    _c(
+        "Scan layers (scanned or unscanned)", "scan_layers_mode", "c", "identity", "scanned or unscanned.", "Run config"
+    ),
     _c("Parameter leaves (count)", "number_of_parameter_leaves", "n", "identity", "Leaf count.", "Result JSON"),
     _c("HF checkpoint dtype (as downloaded)", "hf_checkpoint_dtype", "c", "checkpoint", "HF dtype.", "Headers"),
     _c(
@@ -638,7 +683,14 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
         "Loaded dtype.",
         "Headers",
     ),
-    _c("MaxText weight dtype (weight_dtype)", "maxtext_load_weight_dtype", "c", "checkpoint", "MaxText dtype.", "Config"),
+    _c(
+        "MaxText weight dtype (weight_dtype)",
+        "maxtext_load_weight_dtype",
+        "c",
+        "checkpoint",
+        "MaxText dtype.",
+        "Config",
+    ),
     _c("to_maxtext Orbax save dtype", "to_maxtext_orbax_save_dtype", "c", "checkpoint", "Orbax save dtype.", "Step 2"),
     _c("Weights (real or synthetic)", "checkpoint_weights_kind", "c", "checkpoint", "real in v2.", "Run config"),
     _c("Checkpoint size (GB)", "checkpoint_size_gb", "gb", "checkpoint", "Checkpoint GB.", "Headers"),
@@ -679,7 +731,14 @@ RUNS_COLUMNS: tuple[ColumnSpec, ...] = (
     _c("Failed stage", "failed_stage_name", "t", "status", "Failed stage.", "Result JSON"),
     _c("Process exit code", "process_exit_code", "n", "status", "Exit code.", "Result JSON"),
     _c("Process signal", "process_signal", "c", "status", "Signal.", "Result JSON"),
-    _c("Error summary (exception class and first line)", "error_summary", "t", "status", "Error summary.", "Result JSON"),
+    _c(
+        "Error summary (exception class and first line)",
+        "error_summary",
+        "t",
+        "status",
+        "Error summary.",
+        "Result JSON",
+    ),
     _c("Preempted (TRUE or FALSE)", "was_preempted", "bool", "status", "Preemption flag.", "Result JSON"),
     _c("Step 1 download log", "step1_log_url", "url", "links", "Step 1 log.", "Result JSON"),
     _c("DeepSeek Step 1b log", "step1b_log_url", "url", "links", "Step 1b log.", "Result JSON"),
@@ -708,7 +767,7 @@ DATA_TABS: tuple[tuple[str, tuple[ColumnSpec, ...]], ...] = (
 )
 
 
-def make_row_id(
+def make_row_id(  # pylint: disable=too-many-positional-arguments
     source: str,
     platform: str,
     model_name: str,
