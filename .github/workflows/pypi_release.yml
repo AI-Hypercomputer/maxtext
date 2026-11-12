@@ -85,7 +85,7 @@ jobs:
     environment: release
     if: needs.build_maxtext_package.result == 'success' && inputs.publish
     permissions:
-      id-token: write # required for PyPI Trusted Publishing (OIDC) & Sigstore attestations
+      id-token: write # required for PyPI Trusted Publishing (OIDC)
       attestations: write
       contents: read
     steps:
@@ -110,7 +110,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
-          attestations: true
+          attestations: false
 
   get_latest_maxtext_pypi_version:
     name: Get latest MaxText PyPI version
