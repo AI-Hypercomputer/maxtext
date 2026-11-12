@@ -4977,6 +4977,73 @@ class SparseMatmulQuantizationTest(parameterized.TestCase):
       self.assertEqual(kwargs["rhs_quantize_dtype"], expected_dtype)
 
 
+class TgmmKMinorOutGateTest(parameterized.TestCase):
+  """RoutedMoE asks for tgmm_v2's k-minor output only when the expert weight gradients are not reduced."""
+
+  @parameterized.named_parameters(
+      # One device: nothing to reduce.
+      ("one_device", 1, {}, True, True),
+      ("one_device_flag_off", 1, {}, False, False),
+      # Experts sharded on FSDP and gathered for the gmm (gemma4-26b's recipe): the gradients are
+      # reduce-scattered over FSDP.
+      ("shard_exp_on_fsdp", 4, {"ici_fsdp_parallelism": 4, "shard_exp_on_fsdp": True}, True, False),
+      # Data parallel: the gradients are all-reduced.
+      ("data_parallel", 4, {"ici_data_parallelism": 4, "ici_fsdp_parallelism": 1}, True, False),
+  )
+  def test_k_minor_out_passed_to_gmm(self, num_devices, mesh_flags, flag, expected):
+    if jax.device_count() < num_devices:
+      self.skipTest(f"Needs {num_devices} devices.")
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="tgmm_k_minor_out_gate_test",
+        enable_checkpointing=False,
+        decoder_block="mixtral",
+        num_experts=4,
+        num_experts_per_tok=2,
+        base_emb_dim=64,
+        base_mlp_dim=32,
+        base_moe_mlp_dim=32,
+        dtype="float32",
+        weight_dtype="float32",
+        sparse_matmul=True,
+        megablox=True,
+        max_target_length=8,
+        per_device_batch_size=1,
+        moe_tgmm_v2_k_minor_out=flag,
+        **mesh_flags,
+    )
+    if num_devices == 1:
+      devices_array = np.array(jax.devices()[:1]).reshape([1] * len(cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+
+    calls = []
+
+    def record_gmm(**kwargs):
+      calls.append(kwargs["tgmm_v2_k_minor_out"])
+      return jnp.zeros((kwargs["lhs"].shape[0], kwargs["rhs"].shape[-1]), dtype=kwargs["preferred_element_type"])
+
+    batch = num_devices * cfg.per_device_batch_size
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (batch, 8, cfg.base_emb_dim), dtype=jnp.float32)
+    with mock.patch.object(moe.mblx, "gmm", record_gmm):
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        model(inputs)
+
+    self.assertNotEmpty(calls)
+    self.assertEqual(set(calls), {expected})
+
+
 def make_moe(cfg, mesh, intermediate_dim: int | None = None, weight_quant=None):
   if intermediate_dim is None:
     intermediate_dim = cfg.mlp_dim if cfg.override_model_config else 2048
