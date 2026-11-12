@@ -14,6 +14,7 @@
 
 """Tunix GRPO engine and synthetic micro-batch builders for `maxtext_engine_compile`."""
 
+import dataclasses
 import math
 from typing import Any
 
@@ -28,7 +29,7 @@ GRPO_EOS_ID = GRPO_PAD_ID
 
 
 def get_rl_micro_batch(
-    config: pyconfig.HyperParameters, algo: Any, mesh: jax.sharding.Mesh
+    config: pyconfig.HyperParameters, algo_cfg: Any, mesh: jax.sharding.Mesh
 ) -> abstract_engine.RLTrainerPayload:
   """Builds a synthetic `RLTrainerPayload` micro-batch matching Tunix's orchestrator layout.
 
@@ -36,7 +37,7 @@ def get_rl_micro_batch(
   and
   `max_target_length - max_prefill_predict_length` completion tokens, converts
   them
-  into payloads via `algo.create_trainer_payloads`, and assembles one
+  into payloads via `payload_builder.create_trainer_payloads`, and assembles one
   micro-batch
   using Tunix's `create_batch_assembler`:
   - When `config.max_seq_token_per_tpu > 0`, uses `SequencePackedBatchAssembler`
@@ -47,10 +48,11 @@ def get_rl_micro_batch(
     padded sequences.
 
   Populates `routed_experts` when `config.router_replay=True` and reference
-  log-probabilities when `algo.requires_reference_kl=True`.
+  log-probabilities when `algo_cfg.requires_reference_kl=True`.
   """
   from tunix.dist_rl.common import datatypes  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from tunix.dist_rl.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from tunix.dist_rl.orchestrator import payload_builder  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from tunix.rl import packing  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   prompt_length = config.max_prefill_predict_length
@@ -70,11 +72,11 @@ def get_rl_micro_batch(
     )
   num_data_shards = math.prod(mesh.shape.get(axis, 1) for axis in ("fsdp", "data", "fsdp_transpose", "expert"))
   assembler = batch_assembly.create_batch_assembler(
-      num_generations=algo.num_generations,
-      mini_batch_size=1,
-      train_micro_batch_size=int(config.micro_batch_size_to_train_on),
+      num_generations=algo_cfg.num_generations,
       batch_config=batch_assembly.BatchConfig(
           pad_id=GRPO_PAD_ID,
+          mini_batch_size=1,
+          train_micro_batch_size=int(config.micro_batch_size_to_train_on),
           max_prompt_length=prompt_length,
           max_response_length=completion_length,
           max_seq_token_per_tpu=config.max_seq_token_per_tpu or None,
@@ -102,7 +104,7 @@ def get_rl_micro_batch(
     experts = np.arange(top_k, dtype=np.int16)
     experts[-1] = config.num_experts - 1
     rollout["routed_experts"] = np.broadcast_to(experts, (rollout_length, config.num_decoder_layers, top_k))
-  group_size = algo.num_generations
+  group_size = algo_cfg.num_generations
   payloads = []
   for prompt_index in range(-(-num_rollouts // group_size)):
     group = [
@@ -113,7 +115,13 @@ def get_rl_micro_batch(
         )
         for index in range(group_size)
     ]
-    payloads.extend(algo.create_trainer_payloads(group, rewards=[float(index % 2) for index in range(group_size)]))
+    payloads.extend(
+        payload_builder.create_trainer_payloads(
+            group,
+            rewards=[float(index % 2) for index in range(group_size)],
+            algo_config=algo_cfg,
+        )
+    )
   batches = [*assembler.feed(payloads[:num_rollouts]), *assembler.flush()]
   if len(batches) != 1:
     raise RuntimeError(
@@ -121,7 +129,7 @@ def get_rl_micro_batch(
         f" into {len(batches)} micro-batches, not one."
     )
   micro_batch = batches[0].payload
-  if algo.requires_reference_kl:
+  if algo_cfg.requires_reference_kl:
     micro_batch = batch_assembly.with_ref_per_token_logps(
         micro_batch, np.zeros(np.shape(micro_batch.completion_ids), np.float32)
     )
@@ -129,13 +137,13 @@ def get_rl_micro_batch(
 
 
 def get_shaped_rl_micro_batch(
-    config: pyconfig.HyperParameters, algo: Any, mesh: jax.sharding.Mesh
+    config: pyconfig.HyperParameters, algo_cfg: Any, mesh: jax.sharding.Mesh
 ) -> abstract_engine.RLTrainerPayload:
   """Returns `get_rl_micro_batch` converted to `jax.ShapeDtypeStruct` leaves with empty metadata."""
-  micro_batch = get_rl_micro_batch(config, algo, mesh)
+  micro_batch = get_rl_micro_batch(config, algo_cfg, mesh)
   return jax.tree.map(
       lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype),
-      micro_batch.replace(metadata={}),
+      dataclasses.replace(micro_batch, metadata={}),
   )
 
 
@@ -187,27 +195,28 @@ def build_grpo_engine(
 
   Constructs `GRPOConfig` from `config.grpo_config` (defaulting `temperature` to
   `config.decode_sampling_temperature`), wraps the abstract model with
-  `TunixMaxTextAdapter`, and attaches `GRPOAdapter`'s loss and model input
-  mapping (including `compute_logps_chunk_size` when `config.logps_chunk_size >
-  0`).
+  `TunixMaxTextAdapter`, and attaches the policy loss and model input mapping
+  (including `compute_logps_chunk_size` when `config.logps_chunk_size > 0`).
   """
-  from tunix.dist_rl.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from tunix.rl import algo_core  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from tunix.rl import algorithm_config  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from tunix.rl import function_registry  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   grpo_kwargs = dict(config.grpo_config)
   temperature = grpo_kwargs.pop("temperature", config.decode_sampling_temperature)
   algo_cfg = algorithm_config.GRPOConfig(**grpo_kwargs)
   algo_cfg.temperature = temperature
-  algo = algorithm_adapter.GRPOAdapter(algo_cfg)
-  micro_batch = get_shaped_rl_micro_batch(config, algo, topology_mesh)
+  micro_batch = get_shaped_rl_micro_batch(config, algo_cfg, topology_mesh)
   engine = engine_cls(
       config,
       topology_mesh,
       wrap_with_tunix_adapter=True,
       tokenizer_pad_id=GRPO_PAD_ID,
   )
-  engine.with_loss_fn(algo.loss_fn(), has_aux=True)
-  gen_model_input_fn = algo.build_gen_model_input_fn(pad_id=GRPO_PAD_ID, eos_id=GRPO_EOS_ID)
+  loss_fn = function_registry.get_policy_loss_fn(algo_cfg.policy_loss_fn)
+  gen_model_input_fn = algo_core.build_gen_model_input_fn(algo_cfg, pad_id=GRPO_PAD_ID, eos_id=GRPO_EOS_ID)
+
+  engine.with_loss_fn(loss_fn, has_aux=True)
   chunk_size = config.logps_chunk_size
   if chunk_size > 0:
     base_fn = gen_model_input_fn

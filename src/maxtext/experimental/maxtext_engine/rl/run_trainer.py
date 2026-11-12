@@ -83,20 +83,11 @@ except ModuleNotFoundError:
   )
   from tunix.dist_rl.examples.deepswe_dist import run_deepswe_dist
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.worker import trainer_worker
+from tunix.rl import algo_core
+from tunix.rl import function_registry
 from tunix.rl import packing
-
-try:
-  from tunix.dist_rl.orchestrator import payload_builder
-  from tunix.rl import algo_core
-  from tunix.rl import function_registry
-
-  algorithm_adapter = None
-except ImportError:
-  payload_builder = None
-  algo_core = None
-  function_registry = None
-  from tunix.dist_rl.orchestrator import algorithm_adapter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -481,21 +472,13 @@ def build_warmup_payload(
         )
         for index in range(group_size)
     ]
-    if payload_builder is not None:
-      payloads.extend(
-          payload_builder.create_trainer_payloads(
-              group,
-              rewards=[float(index % 2) for index in range(group_size)],
-              algo_config=algo_config,
-          )
-      )
-    else:
-      payloads.extend(
-          algorithm_adapter.GRPOAdapter(algo_config).create_trainer_payloads(
-              group,
-              rewards=[float(index % 2) for index in range(group_size)],
-          )
-      )
+    payloads.extend(
+        payload_builder.create_trainer_payloads(
+            group,
+            rewards=[float(index % 2) for index in range(group_size)],
+            algo_config=algo_config,
+        )
+    )
   batches = [*assembler.feed(payloads[:num_rollouts]), *assembler.flush()]
   payload = batches[0].payload
   if algo_config.requires_reference_kl:
@@ -567,33 +550,22 @@ def main() -> int:
     algo_config.routed_experts_num_experts = int(cfg.num_experts)
 
   num_data_shards = o_args.num_data_shards or (t_args.mesh_fsdp * t_args.mesh_expert)
-  batch_cfg_fields = {f.name for f in dataclasses.fields(batch_assembly.BatchConfig)}
-  batch_cfg_kwargs = {
-      "pad_id": pad_id,
-      "eos_id": eos_id,
-      "max_prompt_length": o_args.max_prompt_length,
-      "max_response_length": o_args.max_response_length,
-      "max_seq_token_per_tpu": o_args.max_seq_token_per_tpu,
-      "max_segments_per_packed_row": o_args.max_segments_per_packed_row,
-      "segment_alignment_boundary": o_args.segment_alignment_boundary,
-      "num_data_shards": num_data_shards,
-  }
-  if "mini_batch_size" in batch_cfg_fields:
-    batch_cfg_kwargs["mini_batch_size"] = o_args.mini_batch_size
-    batch_cfg_kwargs["train_micro_batch_size"] = o_args.train_micro_batch_size
-    batch_config = batch_assembly.BatchConfig(**batch_cfg_kwargs)
-    assembler = batch_assembly.create_batch_assembler(
-        num_generations=o_args.num_generations,
-        batch_config=batch_config,
-    )
-  else:
-    batch_config = batch_assembly.BatchConfig(**batch_cfg_kwargs)
-    assembler = batch_assembly.create_batch_assembler(
-        num_generations=o_args.num_generations,
-        mini_batch_size=o_args.mini_batch_size,
-        train_micro_batch_size=o_args.train_micro_batch_size,
-        batch_config=batch_config,
-    )
+  batch_config = batch_assembly.BatchConfig(
+      pad_id=pad_id,
+      eos_id=eos_id,
+      mini_batch_size=o_args.mini_batch_size,
+      train_micro_batch_size=o_args.train_micro_batch_size,
+      max_prompt_length=o_args.max_prompt_length,
+      max_response_length=o_args.max_response_length,
+      max_seq_token_per_tpu=o_args.max_seq_token_per_tpu,
+      max_segments_per_packed_row=o_args.max_segments_per_packed_row,
+      segment_alignment_boundary=o_args.segment_alignment_boundary,
+      num_data_shards=num_data_shards,
+  )
+  assembler = batch_assembly.create_batch_assembler(
+      num_generations=o_args.num_generations,
+      batch_config=batch_config,
+  )
 
   # configure_worker (DistributedRLEngine.configure_worker, ACTOR role).
   a_pad = getattr(assembler, "pad_id", pad_id)
@@ -603,17 +575,12 @@ def main() -> int:
       a_pad,
       a_eos,
   )
-  if function_registry is not None and algo_core is not None:
-    loss_fn = function_registry.get_policy_loss_fn(algo_config.policy_loss_fn)
-    gen_fn = algo_core.build_gen_model_input_fn(
-        algo_config,
-        pad_id=a_pad,
-        eos_id=a_eos,
-    )
-  else:
-    adapter = algorithm_adapter.GRPOAdapter(algo_config)
-    loss_fn = adapter.loss_fn()
-    gen_fn = adapter.build_gen_model_input_fn(pad_id=a_pad, eos_id=a_eos)
+  loss_fn = function_registry.get_policy_loss_fn(algo_config.policy_loss_fn)
+  gen_fn = algo_core.build_gen_model_input_fn(
+      algo_config,
+      pad_id=a_pad,
+      eos_id=a_eos,
+  )
   worker.with_loss_fn(loss_fn, has_aux=True)
   worker.with_gen_model_input_fn(gen_fn)
 

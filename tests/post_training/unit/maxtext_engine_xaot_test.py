@@ -67,8 +67,8 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.orchestrator import algorithm_adapter
 from tunix.dist_rl.orchestrator import batch_assembly
+from tunix.dist_rl.orchestrator import payload_builder
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import packing
@@ -1364,13 +1364,14 @@ def _layout(payload) -> dict[str, Any]:
   return layout
 
 
-def _assembled_micro_batch(cfg: pyconfig.HyperParameters, algo) -> datatypes.RLTrainerPayload:
-  """One micro-batch as Tunix's orchestrator builds it for `algo`, from rollouts shorter than the padded lengths.
+def _assembled_micro_batch(
+    cfg: pyconfig.HyperParameters, algo_cfg: algorithm_config.AlgorithmConfig
+) -> datatypes.RLTrainerPayload:
+  """One micro-batch as Tunix's orchestrator builds it for `algo_cfg`, from rollouts shorter than the padded lengths.
 
   The rollouts report their log-probabilities and a status. They go through
-  `algo.create_trainer_payloads`
-  and `PaddedBatchAssembler`, and get the reference model's log-probabilities
-  when `algo` needs them.
+  `payload_builder.create_trainer_payloads` and `PaddedBatchAssembler`, and get
+  the reference model's log-probabilities when `algo_cfg` needs them.
   """
   micro_batch_size = cfg.micro_batch_size_to_train_on
   prompt_length = cfg.max_prefill_predict_length
@@ -1387,42 +1388,45 @@ def _assembled_micro_batch(cfg: pyconfig.HyperParameters, algo) -> datatypes.RLT
         "status": "SUCCEEDED",
     }
     items.append(datatypes.TrajectoryItem(prompt_id="prompt", group_index=index, traj=traj))
-  payloads = algo.create_trainer_payloads(items, rewards=[float(index % 2) for index in range(micro_batch_size)])
+  payloads = payload_builder.create_trainer_payloads(
+      items,
+      rewards=[float(index % 2) for index in range(micro_batch_size)],
+      algo_config=algo_cfg,
+  )
   assembler = batch_assembly.PaddedBatchAssembler(
       batch_size=micro_batch_size,
       max_prompt_length=prompt_length,
       max_response_length=completion_length,
       pad_id=grpo_engine_compile.GRPO_PAD_ID,
-      num_generations=algo.num_generations,
+      num_generations=algo_cfg.num_generations,
       mini_batch_size=1,
   )
   batch = assembler.pack(payloads)[0]
-  if algo.requires_reference_kl:
+  if algo_cfg.requires_reference_kl:
     batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
   return batch
 
 
 def _orchestrator_micro_batch(
     cfg: pyconfig.HyperParameters,
-    algo,
+    algo_cfg: algorithm_config.AlgorithmConfig,
     assembler,
     num_rollouts: int,
     routed: bool = False,
 ) -> datatypes.RLTrainerPayload:
   """The micro-batch Tunix's orchestrator hands the trainer from `num_rollouts` rollouts of the longest length allowed.
 
-  As `StandardRLProgram` handles them: `algo.create_trainer_payloads` a group at
-  a time, tagged with their
-  trajectory ids, fed to `assembler`, and given the reference model's
-  log-probabilities when `algo` needs them.
-  The rollouts are as long as `get_rl_micro_batch`'s, since lengths decide the
-  layout, but their tokens,
-  log-probabilities, rewards and, with `routed`, experts are random.
+  As `StandardRLProgram` handles them: `payload_builder.create_trainer_payloads`
+  a group at a time, tagged with their trajectory ids, fed to `assembler`, and
+  given the reference model's log-probabilities when `algo_cfg` needs them. The
+  rollouts are as long as `get_rl_micro_batch`'s, since lengths decide the
+  layout, but their tokens, log-probabilities, rewards and, with `routed`,
+  experts are random.
   """
   prompt_length = cfg.max_prefill_predict_length
   completion_length = cfg.max_target_length - prompt_length
   rng = np.random.default_rng(0)
-  group_size = algo.num_generations
+  group_size = algo_cfg.num_generations
   payloads = []
   for prompt_index in range(-(-num_rollouts // group_size)):
     items = []
@@ -1442,10 +1446,12 @@ def _orchestrator_micro_batch(
         )
         traj["routed_experts"] = rng.integers(0, cfg.num_experts, size=routing_shape, dtype=np.int16)
       items.append(datatypes.TrajectoryItem(prompt_id=f"prompt_{prompt_index}", group_index=index, traj=traj))
-    for item, payload in zip(
+    raw_payloads = payload_builder.create_trainer_payloads(
         items,
-        algo.create_trainer_payloads(items, rewards=rng.random(group_size).tolist()),
-    ):
+        rewards=rng.random(group_size).tolist(),
+        algo_config=algo_cfg,
+    )
+    for item, payload in zip(items, raw_payloads):
       payloads.append(
           dataclasses.replace(
               payload,
@@ -1455,7 +1461,7 @@ def _orchestrator_micro_batch(
   batches = [*assembler.feed(payloads[:num_rollouts]), *assembler.flush()]
   assert len(batches) == 1, f"the rollouts filled {len(batches)} micro-batches"
   batch = batches[0].payload
-  if algo.requires_reference_kl:
+  if algo_cfg.requires_reference_kl:
     batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
   return batch
 
@@ -1525,15 +1531,14 @@ class GrpoCompileTest(parameterized.TestCase):
     # algorithm.
     self.assertEqual(micro_batch.prompt_ids.shape, (2, 8))
     self.assertEqual(micro_batch.completion_ids.shape, (2, 24))
-    algo = algorithm_adapter.GRPOAdapter(inputs["algo_config"])
-    self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, algo)))
+    self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, inputs["algo_config"])))
 
     # `fwd_bwd` takes the payload and returns GRPO's metrics, not those of MaxText's loss.
     batch = compiled["fwd_bwd"].args_info[0][2]
     self.assertEqual(list(batch), ["train_example"])
     self.assertEqual(_layout(batch["train_example"]), _layout(micro_batch))
     aux = compiled["fwd_bwd"].out_info[1]
-    self.assertContainsSubset({"pg_clipfrac", "advantage/abs_mean", "kl"}, set(aux))
+    self.assertContainsSubset({"pg_clipfrac", "log_ratio/abs_mean", "kl"}, set(aux))
     self.assertNotIn("xent_sum", aux)
 
     # The payload is among `fwd_bwd`'s arguments, beside the model. `jax.jit` drops the arguments a program
@@ -1618,14 +1623,14 @@ class GrpoCompileTest(parameterized.TestCase):
   def test_rl_micro_batch_matches_tunix(self, grpo_config):
     """The payload has the fields Tunix gives such a micro-batch, with the same shapes and dtypes, and no others."""
     cfg = _grpo_config()
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0, **grpo_config))
+    algo_cfg = _grpo_config_obj(temperature=1.0, **grpo_config)
 
-    micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+    micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo_cfg, maxtext_utils.get_mesh_from_config(cfg))
 
-    self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, algo)))
+    self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, algo_cfg)))
 
   def test_rl_micro_batch_needs_prompt_and_completion(self):
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
     for prompt_length in (0, 32):
       with self.subTest(prompt_length=prompt_length):
         cfg = _grpo_config(f"max_prefill_predict_length={prompt_length}")
@@ -1633,14 +1638,14 @@ class GrpoCompileTest(parameterized.TestCase):
             ValueError,
             r"needs 0 < max_prefill_predict_length < max_target_length",
         ):
-          grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+          grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo_cfg, maxtext_utils.get_mesh_from_config(cfg))
 
   def test_micro_batch_is_padded_and_unrouted_by_default(self):
     """Packing and router replay are off unless asked for, which leaves the micro-batch above."""
     cfg = _grpo_config()
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
 
-    micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+    micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo_cfg, maxtext_utils.get_mesh_from_config(cfg))
 
     self.assertEqual(
         (
@@ -1693,22 +1698,22 @@ class GrpoPackingCompileTest(parameterized.TestCase):
         f"max_seq_token_per_tpu={tokens}",
         f"max_segments_per_packed_row={segments}",
     )
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0, **grpo_config))
+    algo_cfg = _grpo_config_obj(temperature=1.0, **grpo_config)
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=4,
-        num_generations=algo.num_generations,
+        num_generations=algo_cfg.num_generations,
         mini_batch_size=1,
         max_packed_len=tokens,
         pad_id=grpo_engine_compile.GRPO_PAD_ID,
         max_segments_per_packed_row=segments or None,
     )
 
-    micro_batch = grpo_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+    micro_batch = grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)
 
     _assert_same_layout(
         self,
         micro_batch,
-        _orchestrator_micro_batch(cfg, algo, assembler, num_rollouts=4 * per_row),
+        _orchestrator_micro_batch(cfg, algo_cfg, assembler, num_rollouts=4 * per_row),
     )
     # The layout, spelled out: in every row, `per_row` sequences of 8 prompt and 24 scored completion tokens,
     # numbered from 1, each with its own positions, then padding, which is segment 0.
@@ -1724,7 +1729,7 @@ class GrpoPackingCompileTest(parameterized.TestCase):
     self.assertEqual(micro_batch.num_segments, (segments or tokens) + 1)
     # And the shapes the kernels are compiled for.
     self.assertEqual(
-        _layout(grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)),
+        _layout(grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)),
         _layout(micro_batch),
     )
 
@@ -1742,9 +1747,9 @@ class GrpoPackingCompileTest(parameterized.TestCase):
   def test_packed_rows_follow_the_mesh(self, sizes, names, rows):
     """A packed micro-batch has a row per device of the axes the batch is split over, not a set number of sequences."""
     cfg = _grpo_config("max_seq_token_per_tpu=32")
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
 
-    micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo, AbstractMesh(sizes, names))
+    micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo_cfg, AbstractMesh(sizes, names))
 
     self.assertEqual(micro_batch.completion_ids.shape, (rows, 32))
     self.assertNotEqual(rows, cfg.micro_batch_size_to_train_on)
@@ -1800,13 +1805,13 @@ class GrpoPackingCompileTest(parameterized.TestCase):
   def test_rejects_a_row_shorter_than_a_rollout(self):
     """Tunix's own check: 31 tokens cannot hold a 32-token rollout."""
     cfg = _grpo_config("max_seq_token_per_tpu=31")
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
 
     with self.assertRaisesRegex(
         ValueError,
         r"max_seq_token_per_tpu=31 is smaller than the longest possible" r" sequence",
     ):
-      grpo_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+      grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)
 
   def test_rejects_options_that_would_be_ignored(self):
     for option, value in (
@@ -1833,22 +1838,22 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
   def test_padded_micro_batch_carries_routed_experts(self):
     """The routing is laid out as `PaddedBatchAssembler` lays it out, in the compact dtype the trainer receives."""
     cfg = _grpo_config(*_QWEN35_OVERRIDES, "router_replay=True")
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
     assembler = batch_assembly.PaddedBatchAssembler(
         batch_size=2,
         max_prompt_length=8,
         max_response_length=24,
         pad_id=grpo_engine_compile.GRPO_PAD_ID,
-        num_generations=algo.num_generations,
+        num_generations=algo_cfg.num_generations,
         mini_batch_size=1,
     )
 
-    micro_batch = grpo_engine_compile.get_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+    micro_batch = grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, maxtext_utils.get_mesh_from_config(cfg))
 
     _assert_same_layout(
         self,
         micro_batch,
-        _orchestrator_micro_batch(cfg, algo, assembler, num_rollouts=2, routed=True),
+        _orchestrator_micro_batch(cfg, algo_cfg, assembler, num_rollouts=2, routed=True),
     )
     # A row per sequence, a slot per prompt and completion token, and top 2 of 4 experts in each of 4 layers.
     self.assertEqual(
@@ -1863,17 +1868,17 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
         "router_replay=True",
         "max_seq_token_per_tpu=64",
     )
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=4,
-        num_generations=algo.num_generations,
+        num_generations=algo_cfg.num_generations,
         mini_batch_size=1,
         max_packed_len=64,
         pad_id=grpo_engine_compile.GRPO_PAD_ID,
     )
-    expected = _orchestrator_micro_batch(cfg, algo, assembler, num_rollouts=8, routed=True)
+    expected = _orchestrator_micro_batch(cfg, algo_cfg, assembler, num_rollouts=8, routed=True)
 
-    micro_batch = grpo_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+    micro_batch = grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)
 
     _assert_same_layout(self, micro_batch, expected)
 
@@ -1916,10 +1921,10 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
 
   def test_rejects_a_model_without_routed_experts(self):
     cfg = _grpo_config("router_replay=True")
-    algo = algorithm_adapter.GRPOAdapter(_grpo_config_obj(temperature=1.0))
+    algo_cfg = _grpo_config_obj(temperature=1.0)
 
     with self.assertRaisesRegex(ValueError, r"num_experts=1 leaves this model without routed experts"):
-      grpo_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+      grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)
 
 
 class Zero1MemoryReportTest(absltest.TestCase):
