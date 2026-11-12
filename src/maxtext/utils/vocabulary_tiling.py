@@ -34,7 +34,7 @@ from maxtext.utils import max_utils
 # Submodule names whose params are used by logits_from_hidden_states_for_vocab_tiling:
 # the final norm, the LM-head dense, and the embedding table when logits are tied.
 # vocab_tiling_nnx_loss splits these out as the only params the loss differentiates.
-_OUTPUT_HEAD_PATH_KEYS = ("token_embedder", "shared_embedding", "decoder_norm", "logits_dense")
+_OUTPUT_HEAD_PATH_KEYS = ("token_embedder", "shared_embedding", "decoder_norm", "logits_dense", "lm_head")
 
 
 def _is_output_head_param_path(path, _value):

@@ -60,6 +60,7 @@ from maxtext.m3.core.sharding import _count_slices
 from maxtext.m3.core.sharding import _resolve_axis_sizes
 from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.core.sharding import project_spec_to_mesh
+from maxtext.m3.core.sharding import sharding_from_config
 
 
 class _ExampleSharding(Sharding):
@@ -472,6 +473,8 @@ class DefaultShardingTest(parameterized.TestCase):
           P("stage", ("fsdp", "fsdp_transpose", "expert"), ("tensor", "tensor_sequence")),
       ),
       ("norm_scale", "attn_norm", ("norm",), P(None)),
+      ("depthwise_conv", "conv1d", (None, None, "conv_channels"), P(None, None, ("fsdp", "fsdp_transpose", "expert"))),
+      ("ngram_table", "ngram_embedding", ("ngram_vocab", None), P(("fsdp", "fsdp_transpose", "expert"), None)),
   )
   def test_weight_specs(self, tensor_name, axes, expected):
     self.assertEqual(self.sharding(tensor_name, axes), expected)
@@ -544,6 +547,46 @@ class DefaultShardingTest(parameterized.TestCase):
       self.assertEqual(mesh.shape["tensor_sequence"], 2)
       self.assertEqual(mesh.shape["fsdp"], 1)
 
+  def test_expert_context_parallel_activation_specs(self):
+    """EP = CP moves the `expert` axis from the batch to the sequence and leaves every weight where it was."""
+    ecp = DefaultSharding(expert_context_parallel=True)
+    self.assertEqual(
+        ecp("tokens", ("batch", "length", "embed"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose"), ("context", "expert"), None),
+    )
+    self.assertEqual(
+        ecp("norm_in", ("batch", "norm_length", "embed"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose"), ("context", "tensor_sequence", "expert"), None),
+    )
+    # Keys and values are still gathered along the sequence.
+    self.assertEqual(
+        ecp("kv", ("batch", "kv_length", "kv_heads", "head_dim"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence"), None),
+    )
+    self.assertEqual(
+        ecp("attn_in", ("batch", "length", "heads", "head_dim"), TensorType.ACTIVATION),
+        P(("data", "fsdp", "fsdp_transpose"), ("context", "expert"), ("tensor", "tensor_sequence"), None),
+    )
+    # Depthwise conv kernels leave `expert` so they do not compete with the sequence.
+    self.assertEqual(
+        ecp("conv", ("conv_channels",), TensorType.WEIGHT),
+        P(("fsdp", "fsdp_transpose")),
+    )
+    for tensor_name, axes in (
+        ("q_proj", ("embed", "heads", "head_dim")),
+        ("down", ("mlp", "embed")),
+        ("wi_0", ("experts", "expert_embed", "expert_mlp")),
+        ("ple_embed", ("ngram_vocab", "embed")),
+    ):
+      self.assertEqual(ecp(tensor_name, axes), self.sharding(tensor_name, axes))
+
+  def test_sharding_from_config_reads_the_strategy_flags(self):
+    self.assertEqual(sharding_from_config(SimpleNamespace()), DefaultSharding())
+    self.assertEqual(
+        sharding_from_config(SimpleNamespace(expert_context_parallel=True)),
+        DefaultSharding(expert_context_parallel=True),
+    )
+
   @parameterized.parameters(
       "embed",
       "heads",
@@ -557,6 +600,8 @@ class DefaultShardingTest(parameterized.TestCase):
       "kv_length",
       "stage",
       "layers",
+      "conv_channels",
+      "ngram_vocab",
   )
   def test_logical_axes_resolve_for_both_tensor_types(self, axis):
     """Each logical axis a model may pass has a rule for both tensor types.

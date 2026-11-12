@@ -95,6 +95,7 @@ class DeviceConfig(BaseModel):
       ]
   )
   shard_mode: str = "auto"
+  expert_context_parallel: bool = False
   custom_mesh: str = ""
   optimize_mesh_for_tpu_v6e: bool = False
   logical_axis_rules: tuple = ()

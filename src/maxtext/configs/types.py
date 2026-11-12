@@ -2118,6 +2118,10 @@ class HardwareAndMesh(BaseModel):
       description="The names of the axes in the logical device mesh.",
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
+  expert_context_parallel: bool = Field(
+      False,
+      description="Shard the m3 activation sequence axis, instead of the batch axis, across the expert mesh axis (EP = CP).",
+  )
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
   scan_layers: bool = Field(
       True,
@@ -5174,6 +5178,41 @@ class MaxTextConfig(
       cp_axes = infer_cp_axes(self.logical_axis_rules)
       if cp_axes:
         self.context_sharding = cp_axes[0]
+
+    if (
+        self.expert_context_parallel
+        and self.custom_mesh_and_rule is CustomRule.DEFAULT
+        and not self.override_logical_axis_rules
+    ):
+      for rule in self.logical_axis_rules:
+        if not rule or len(rule) < 2 or not isinstance(rule[1], list):
+          continue
+        logical_name, mesh_axes = rule[0], rule[1]
+        if logical_name in (
+            "activation_embed_and_logits_batch",
+            "activation_batch",
+            "activation_batch_attn",
+            "activation_kv_batch",
+            "activation_batch_moe",
+            "segment_ids_batch",
+            "activation_prefill_kv_batch",
+            "decode_batch",
+        ):
+          if "expert" in mesh_axes:
+            rule[1] = [a for a in mesh_axes if a != "expert"]
+        elif logical_name in (
+            "activation_length",
+            "activation_norm_length",
+            "activation_norm_length_routed",
+            "activation_length_attn",
+            "activation_q_length",
+            "activation_length_moe",
+            "activation_norm_length_moe",
+            "prefill_activation_length",
+            "prefill_activation_norm_length",
+        ):
+          if "expert" not in mesh_axes:
+            rule[1] = [*mesh_axes, "expert"]
 
     if self.custom_mesh_and_rule is CustomRule.TP_AS_EP:
       # tp-as-ep only rewires the sparse routed-MoE path; reject paths that ignore or override its shardings.
