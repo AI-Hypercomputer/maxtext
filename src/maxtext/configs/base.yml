@@ -368,6 +368,7 @@ moe_tc_ragged_gather_block_size: 1024 # moe_tc_ragged_sort: rows per grid step o
 moe_tc_ragged_reduce_block_size: 896 # moe_tc_ragged_sort: VMEM rows per block of the TC ragged gather-reduce.
 moe_tc_ragged_mask_padding: true # moe_tc_ragged_sort: zero the gather buffer rows past the valid count (left uninitialized otherwise).
 moe_tc_ragged_weights_on_activation: false # moe_tc_ragged_sort: apply routing weights on the (buffer, mlp) activation before wo instead of on the expert output before the unsort.
+moe_fold_expert_scale_into_wo: false # gemma4 sparse_matmul: multiply per_expert_scale into the sharded wo weight instead of gathering it per token into the top-k weights.
 moe_tc_ragged_flatten_block_size: 0 # moe_tc_ragged_sort: if > 0, Pallas (N, D/128, 128) <-> (N, D) relayout over the valid rows, this many rows per grid step; 0 uses XLA reshapes.
 moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the sorted buffer in the (buffer, emb // 128, 128) layout through the GMMs.
 moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.

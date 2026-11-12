@@ -1452,6 +1452,20 @@ class RoutedMoE(nnx.Module):
     ):
       self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
 
+  def _fold_expert_scale_into_wo(self) -> bool:
+    """moe_fold_expert_scale_into_wo: sparse_matmul scales wo by per_expert_scale instead of the top-k weights."""
+    cfg = self.config
+    return (
+        self.per_expert_scale is not None
+        and cfg.moe_fold_expert_scale_into_wo
+        and cfg.sparse_matmul
+        and not cfg.te_moe_block
+        and cfg.attention not in ("vllm_rpa", "vllm_batched_rpa")
+        and self.wo_scale is None
+        and not quantizations.in_serve_mode(self.quant)
+        and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales)
+    )
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -1532,7 +1546,7 @@ class RoutedMoE(nnx.Module):
     sparse path runs inside a `jax.shard_map` that cannot close over an array
     living on explicit mesh axes, so it hands the value in instead.
     """
-    if per_expert_scale is None and self.per_expert_scale is not None:
+    if per_expert_scale is None and self.per_expert_scale is not None and not self._fold_expert_scale_into_wo():
       per_expert_scale = self.per_expert_scale[...]
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
@@ -4098,7 +4112,10 @@ class RoutedMoE(nnx.Module):
     # Gemma 4's per-expert router scale is consumed by get_topk, deep inside the
     # shard_map below. A shard_map cannot close over an array that lives on explicit
     # mesh axes, so it is threaded down as an argument instead of read off the module.
-    per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+    # Under moe_fold_expert_scale_into_wo the caller already multiplied it into wo.
+    per_expert_scale = (
+        None if self.per_expert_scale is None or self._fold_expert_scale_into_wo() else self.per_expert_scale[...]
+    )
 
     def keep_reduced(pspec, w):
       # Weights all-gathered by fsdp_prefetch arrive typed `reduced` over the FSDP axes; shard_map requires
@@ -5604,6 +5621,12 @@ class RoutedMoE(nnx.Module):
     wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
     if is_fused_moe_path:
       wo_kernel, wo_native_scale = _maybe_native_fused_weight(self.wo[...], wo_scale)
+    elif self._fold_expert_scale_into_wo():
+      # Scale the sharded f32 weight (~1 expert per device under shard_exp_on_fsdp) before the cast, instead of a
+      # per-token gather of the scale in get_topk.
+      wo = self.wo[...]
+      wo = wo * self.per_expert_scale[...].astype(wo.dtype)[:, None, None]
+      wo_kernel, wo_native_scale = _maybe_native_gmm_weight(wo, None), None
     else:
       wo_kernel, wo_native_scale = _maybe_native_gmm_weight(self.wo[...], wo_scale), None
 
