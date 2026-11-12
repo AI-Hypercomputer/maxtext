@@ -68,10 +68,28 @@ import subprocess
 import sys
 import textwrap
 import time
+
+_ENTER_WALL_EPOCH = time.time()
+_ENTER_MONO = time.perf_counter()
+
 from typing import Any
 
 # Prevent PyTorch (if installed in container) from autoloading torch_xla and locking libtpu before JAX distributed init
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+
+
+def _import_bench_modules():
+  """Imports local `bench.*` instrumentation packages cleanly from `checkpoint_load_benchmark`."""
+  bench_root = os.path.dirname(os.path.abspath(__file__))
+  if bench_root not in sys.path:
+    sys.path.insert(0, bench_root)
+  from bench import harness_v2  # pylint: disable=import-outside-toplevel
+  from bench import metadata  # pylint: disable=import-outside-toplevel
+  from bench import schema_v2  # pylint: disable=import-outside-toplevel
+  from bench import stages  # pylint: disable=import-outside-toplevel
+
+  return harness_v2, metadata, schema_v2, stages
+
 
 # Register OmegaConf resolver for HF_TOKEN if present in configs
 try:
@@ -476,6 +494,7 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
   load_dynamic.build_gcs_cache_worker = fast_build_gcs_cache_worker
   repo_id = maxtext_globals.HF_IDS[args.model]
   token = get_hf_token() or None
+  recorder = getattr(args, "_recorder", None)
 
   if _should_stage_sparse_bf16(args.model):
     t_gcs_start = time.perf_counter()
@@ -551,14 +570,24 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
       f"{shared_cache_root or args.gcs_run_dir + '/safetensors_dynamic'}/{args.model}/shared/hf_cache/"
       f"{repo_id.replace('/', '_')}"
   )
+  pre_staged_gcs_dir = os.environ.get("BENCH_SAFETENSORS_GCS_DIR", "").strip().rstrip("/")
   log_roots = [f"{args.gcs_run_dir}/logs/{args.model}"]
   if shared_cache_root.endswith("/safetensors_dynamic"):
     log_roots.append(f"{shared_cache_root.removesuffix('/safetensors_dynamic')}/logs/{args.model}")
   reused_existing = False
-  if os.environ.get("REUSE_SHARED_ST_GCS_CACHE") == "1" or getattr(args, "reuse_model_hf_cache", False):
+  if pre_staged_gcs_dir:
+    gcs_cache_dir = pre_staged_gcs_dir
+    hf_to_gcs_s = 0.0
+    reused_existing = True
+    if recorder is not None:
+      with recorder.stage("to_maxtext_step1_verify_gcs_cache_seconds"):
+        pass
+    print(f"[to_maxtext Step 1] Using pre-staged GCS dir {gcs_cache_dir}", flush=True)
+  elif os.environ.get("REUSE_SHARED_ST_GCS_CACHE") == "1" or getattr(args, "reuse_model_hf_cache", False):
     # Reuse the shared cache when every shard is in it. Requiring a cold HF->GCS time in the scanned 1-slice
     # safetensors_dynamic record made two workers re-download qwen3.5-397b-a17b (795 GB) from HF Hub into the cache
     # that other runs were reading, because that record was an infra failure without a Step 1 time.
+    _t_ver0 = time.perf_counter()
     try:
       from google.cloud import storage as gcs_storage
 
@@ -589,6 +618,8 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
         )
     except Exception as ex:  # pylint: disable=broad-exception-caught
       print(f"[to_maxtext Step 1] Could not check the shared HF->GCS cache ({ex}); downloading from HF Hub", flush=True)
+    if recorder is not None:
+      recorder.record_value("to_maxtext_step1_verify_gcs_cache_seconds", time.perf_counter() - _t_ver0)
 
   if not reused_existing:
     gcs_cache_dir = (
@@ -681,13 +712,21 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
   else:
     stage_budget_gb = free_disk_gb - 20.0
   if total_gb <= stage_budget_gb:
+    local_copy_mode = "staged_all"
     print(
         f"[to_maxtext Step 1] Staging all {len(files)} shards ({total_gb:.1f} GB) from {gcs_cache_dir} "
         f"(staging budget {stage_budget_gb:.1f} GB)",
         flush=True,
     )
+    t_cp0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, max(1, len(files)))) as pool:
       list(pool.map(_copy_from_gcs_cache, files))
+    t_cp_s = time.perf_counter() - t_cp0
+    if recorder is not None:
+      recorder.record_value("to_maxtext_step1_copy_gcs_to_local_ramdisk_seconds", t_cp_s)
+      recorder.record_value("to_maxtext_step1_copy_gcs_to_local_ramdisk_gb", round(total_gb, 4))
+      if t_cp_s > 0:
+        recorder.record_value("to_maxtext_step1_copy_gcs_to_local_ramdisk_gb_per_second", round(total_gb / t_cp_s, 4))
   elif args.scan_mode == "scanned":
     # A scanned leaf stacks each MoE weight expert by expert across all layers, so every leaf reads every shard.
     # Streaming shards through a small LRU then downloads the checkpoint once per expert: on tpu7x, a scanned
@@ -699,6 +738,7 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
         f"{os.path.dirname(local_hf_dir)}). Convert on a host with more local storage or RAM."
     )
   else:
+    local_copy_mode = "json_only_lru_stream"
     # Unscanned leaves read one layer at a time (a few adjacent shards), so a small LRU of streamed shards works.
     print(
         f"[to_maxtext Step 1] Model {args.model} ({len(files)} shards, {total_gb:.1f} GB) exceeds the staging budget "
@@ -707,13 +747,19 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
         flush=True,
     )
   hf_to_local_s = time.perf_counter() - t_local_start
+  t_cln0 = time.perf_counter()
   shutil.rmtree(os.path.join(local_hf_dir, ".cache"), ignore_errors=True)
   shutil.rmtree(local_hf_cache, ignore_errors=True)
+  if recorder is not None:
+    recorder.record_value("to_maxtext_step1_cleanup_seconds", time.perf_counter() - t_cln0)
+    recorder.record_value("to_maxtext_step1_total_seconds", hf_to_local_s)
   print(f"[to_maxtext Step 1] Local staging completed in {hf_to_local_s:.2f}s", flush=True)
 
   return {
       "hf_to_gcs_s": hf_to_gcs_s,
       "hf_to_local_s": hf_to_local_s,
+      "to_maxtext_step1_local_copy_mode": local_copy_mode,
+      "to_maxtext_step1_copy_gcs_to_local_ramdisk_gb": round(total_gb if local_copy_mode == "staged_all" else 0.0, 4),
       "num_safetensors_files": len(files),
       "gcs_cache_dir": gcs_cache_dir,
       "local_hf_dir": local_hf_dir,
@@ -756,15 +802,26 @@ def _parallel_gcs_download(src_uri: str, dst: str, workers: int, chunk_bytes: in
 
 def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, Any]:
   """Step 2 for `to_maxtext`: Convert HF checkpoint to an Orbax checkpoint on GCS."""
-  import jax
+  harness_v2, _, _, _ = _import_bench_modules()
+  recorder = getattr(args, "_recorder", None)
+  mon = getattr(args, "_monitoring", None)
+  t_step2_entry = time.perf_counter()
 
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  jax.config.update("jax_platforms", "cpu")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  with recorder.stage("setup_python_imports_seconds") if recorder else contextlib.nullcontext():
+    import jax
 
-  from maxtext.checkpoint_conversion import to_maxtext
-  from maxtext.checkpoint_conversion.utils import utils as conv_utils
-  from maxtext.common import checkpointing
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+    jax.config.update("jax_platforms", "cpu")
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+    from maxtext.checkpoint_conversion import to_maxtext
+    from maxtext.checkpoint_conversion.utils import utils as conv_utils
+    from maxtext.common import checkpointing
+
+  if mon is not None:
+    mon.register(jax.monitoring)
+  if recorder is not None:
+    harness_v2.install_to_maxtext_step2_hooks(recorder, to_maxtext_mod=to_maxtext, conv_utils_mod=conv_utils, jax_mod=jax)
 
   sub_timings: dict[str, float] = {}
 
@@ -774,27 +831,45 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
   orig_wait_until_finished = checkpointing.wait_until_finished
 
   def timed_get_model_info(*a, **kw):
-    t0 = time.perf_counter()
-    res = orig_get_model_info(*a, **kw)
-    sub_timings["init_abstract_model_s"] = time.perf_counter() - t0
-    return res
+    with (
+        recorder.stage("to_maxtext_step2_build_abstract_model_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      t0 = time.perf_counter()
+      res = orig_get_model_info(*a, **kw)
+      sub_timings["init_abstract_model_s"] = time.perf_counter() - t0
+      return res
 
   def timed_shard_jax_weights(*a, **kw):
-    t0 = time.perf_counter()
-    res = orig_shard_jax_weights(*a, **kw)
-    sub_timings["transform_and_shard_s"] = time.perf_counter() - t0
-    return res
+    with (
+        recorder.stage("to_maxtext_step2_transform_total_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      t0 = time.perf_counter()
+      res = orig_shard_jax_weights(*a, **kw)
+      sub_timings["transform_and_shard_s"] = time.perf_counter() - t0
+      return res
 
   save_start_holder = {}
 
   def timed_save_checkpoint(*a, **kw):
     save_start_holder["t0"] = time.perf_counter()
-    return orig_save_checkpoint(*a, **kw)
+    with (
+        recorder.stage("to_maxtext_step2_orbax_save_total_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      return orig_save_checkpoint(*a, **kw)
 
   def timed_wait_until_finished(*a, **kw):
-    res = orig_wait_until_finished(*a, **kw)
+    with recorder.stage("to_maxtext_step2_orbax_save_total_seconds") if recorder else contextlib.nullcontext():
+      res = orig_wait_until_finished(*a, **kw)
     if "t0" in save_start_holder:
       sub_timings["orbax_save_to_gcs_s"] = time.perf_counter() - save_start_holder["t0"]
+      if recorder is not None:
+        recorder.record_value("to_maxtext_step2_orbax_save_total_seconds", sub_timings["orbax_save_to_gcs_s"])
     return res
 
   to_maxtext.get_maxtext_model_info = timed_get_model_info
@@ -844,48 +919,56 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
     sub_timings["stream_download_workers"] = stream_workers
 
     def _streaming_get_tensor(self, key: str, dtype: str | None = None):
-      if self.is_local:
-        resolved_key = to_maxtext.resolve_scale_key(key, self.shard_map)
-        shard_name = self.shard_map.get(resolved_key) or self.shard_map.get(None)
-        if shard_name:
-          local_shard = os.path.join(self.model_id, shard_name)
-          with _fetch_lock:
-            if not os.path.exists(local_shard):
-              while len(_lru_shards) >= 3:
-                _, old_path = _lru_shards.popitem(last=False)
-                try:
-                  os.remove(old_path)
-                except OSError:
-                  pass
-              t_fetch = time.perf_counter()
-              if stream_workers > 1:
-                for attempt in range(3):
+      with (
+          recorder.stage("to_maxtext_step2_read_hf_tensors_to_host_ram_seconds") if recorder else contextlib.nullcontext()
+      ):
+        if self.is_local:
+          resolved_key = to_maxtext.resolve_scale_key(key, self.shard_map)
+          shard_name = self.shard_map.get(resolved_key) or self.shard_map.get(None)
+          if shard_name:
+            local_shard = os.path.join(self.model_id, shard_name)
+            with _fetch_lock:
+              if not os.path.exists(local_shard):
+                while len(_lru_shards) >= 3:
+                  _, old_path = _lru_shards.popitem(last=False)
                   try:
-                    stream_stats["bytes"] += _parallel_gcs_download(
-                        f"{staged_gcs_cache_dir}/{shard_name}", local_shard, stream_workers
-                    )
-                    break
-                  except Exception:  # pylint: disable=broad-exception-caught
-                    # Never leave a partial shard behind: the next lookup would treat it as cached.
-                    try:
-                      os.remove(local_shard)
-                    except OSError:
-                      pass
-                    if attempt == 2:
-                      raise
-              else:
-                src_p = epath.Path(f"{staged_gcs_cache_dir}/{shard_name}")
-                with src_p.open("rb") as fsrc, open(local_shard, "wb") as fdst:
-                  shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
-                stream_stats["bytes"] += os.path.getsize(local_shard)
-              stream_stats["seconds"] += time.perf_counter() - t_fetch
-              stream_stats["shards"] += 1
-              sub_timings["stream_download_s"] = stream_stats["seconds"]
-              sub_timings["stream_download_gb"] = stream_stats["bytes"] / 1e9
-              sub_timings["stream_download_shards"] = stream_stats["shards"]
-            _lru_shards[shard_name] = local_shard
-            _lru_shards.move_to_end(shard_name)
-      return _orig_get_tensor(self, key, dtype=dtype)
+                    os.remove(old_path)
+                  except OSError:
+                    pass
+                with (
+                    recorder.stage("to_maxtext_step2_stream_files_from_gcs_seconds")
+                    if recorder
+                    else contextlib.nullcontext()
+                ):
+                  t_fetch = time.perf_counter()
+                  if stream_workers > 1:
+                    for attempt in range(3):
+                      try:
+                        stream_stats["bytes"] += _parallel_gcs_download(
+                            f"{staged_gcs_cache_dir}/{shard_name}", local_shard, stream_workers
+                        )
+                        break
+                      except Exception:  # pylint: disable=broad-exception-caught
+                        # Never leave a partial shard behind: the next lookup would treat it as cached.
+                        try:
+                          os.remove(local_shard)
+                        except OSError:
+                          pass
+                        if attempt == 2:
+                          raise
+                  else:
+                    src_p = epath.Path(f"{staged_gcs_cache_dir}/{shard_name}")
+                    with src_p.open("rb") as fsrc, open(local_shard, "wb") as fdst:
+                      shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
+                    stream_stats["bytes"] += os.path.getsize(local_shard)
+                  stream_stats["seconds"] += time.perf_counter() - t_fetch
+                  stream_stats["shards"] += 1
+                  sub_timings["stream_download_s"] = stream_stats["seconds"]
+                  sub_timings["stream_download_gb"] = stream_stats["bytes"] / 1e9
+                  sub_timings["stream_download_shards"] = stream_stats["shards"]
+              _lru_shards[shard_name] = local_shard
+              _lru_shards.move_to_end(shard_name)
+        return _orig_get_tensor(self, key, dtype=dtype)
 
     to_maxtext.LazyHFLoader.get_tensor = _streaming_get_tensor
 
@@ -912,21 +995,37 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
   sys.argv = list(model_args)
 
   print(f"[to_maxtext Step 2] Converting {args.model} ({args.scan_mode}) -> {orbax_output_dir} ...", flush=True)
+  if recorder is not None:
+    recorder.record_value("to_maxtext_step2_startup_and_config_seconds", time.perf_counter() - t_step2_entry)
+    if "hf_to_local_restage_s" in sub_timings:
+      recorder.record_value("to_maxtext_step2_recopy_local_files_seconds", sub_timings["hf_to_local_restage_s"])
   t0 = time.perf_counter()
-  to_maxtext.main(
-      args=model_args,
-      lazy_load_tensors=lazy_load,
-      eager_load_method=eager_method,
-      hf_model_path=args.local_hf_dir,
-      save_dtype="bfloat16",
-      simulated_cpu_devices_count=16,
-  )
+  with recorder.stage("to_maxtext_step2_total_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    to_maxtext.main(
+        args=model_args,
+        lazy_load_tensors=lazy_load,
+        eager_load_method=eager_method,
+        hf_model_path=args.local_hf_dir,
+        save_dtype="bfloat16",
+        simulated_cpu_devices_count=16,
+    )
   convert_to_orbax_s = time.perf_counter() - t0
+  if recorder is not None and sub_timings.get("stream_download_gb"):
+    recorder.record_value("to_maxtext_step2_stream_files_from_gcs_gb", round(sub_timings["stream_download_gb"], 4))
+  header_info = harness_v2.inspect_gcs_or_local_safetensors(args.local_hf_dir)
+  if not header_info and os.path.exists(gcs_marker):
+    with open(gcs_marker, "r", encoding="utf-8") as gf:
+      header_info = harness_v2.inspect_gcs_or_local_safetensors(gf.read().strip())
   print(f"[to_maxtext Step 2] Convert to Orbax checkpoint completed in {convert_to_orbax_s:.2f}s", flush=True)
 
   return {
       "convert_to_orbax_s": convert_to_orbax_s,
       "orbax_items_path": f"{orbax_output_dir}/0/items",
+      "header_info": header_info,
+      "pipeline_config": {
+          "to_maxtext_orbax_save_dtype": "bfloat16",
+          "checkpoint_storage_concurrent_gb": get_concurrent_gb(args.model, args.scan_mode, 1),
+      },
       **sub_timings,
   }
 
@@ -998,6 +1097,10 @@ def _ensure_tpu_insecure_grpc_init_args(num_slices: int, total_procs: int) -> li
 
 def init_worker_runtime(args: argparse.Namespace) -> str:
   """Initializes JAX platform and (when multi-slice or multi-host) JAX distributed runtime."""
+  harness_v2, _, _, _ = _import_bench_modules()
+  recorder = getattr(args, "_recorder", None)
+  sampler = getattr(args, "_sampler", None)
+  mon = getattr(args, "_monitoring", None)
   hw = resolve_hardware(args.hardware)
   num_slices = getattr(args, "num_slices", 1)
   total_procs = num_slices * getattr(args, "num_hosts_per_slice", 1)
@@ -1017,7 +1120,21 @@ def init_worker_runtime(args: argparse.Namespace) -> str:
       for _ms_key in ("MEGASCALE_NUM_SLICES", "MEGASCALE_SLICE_ID", "MEGASCALE_PORT", "MEGASCALE_COORDINATOR_ADDRESS"):
         os.environ.pop(_ms_key, None)
 
-  import jax
+  with recorder.stage("setup_python_imports_seconds") if recorder else contextlib.nullcontext():
+    import jax
+    from jax.experimental import multihost_utils
+    from maxtext.utils import maxtext_utils
+    from maxtext.utils import model_creation_utils
+
+  if recorder is not None:
+    from bench import stages as _stages
+
+    _stages.wrap_sync_global_devices(multihost_utils, recorder)
+    harness_v2.install_setup_hooks(recorder, maxtext_utils_mod=maxtext_utils, model_creation_mod=model_creation_utils)
+  if mon is not None:
+    mon.register(jax.monitoring)
+  if sampler is not None and hw == "tpu":
+    sampler._jax_mod = jax  # pylint: disable=protected-access
 
   try:
     from jax.experimental import hijax as _hjx
@@ -1030,17 +1147,26 @@ def init_worker_runtime(args: argparse.Namespace) -> str:
   if hw == "cpu":
     jax.config.update("jax_platforms", "cpu")
   if total_procs > 1:
-    jax.distributed.initialize(
-        coordinator_address=args.coordinator_address,
-        num_processes=total_procs,
-        process_id=args.slice_id,
-    )
+    with (
+        recorder.stage("setup_jax_distributed_initialize_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      jax.distributed.initialize(
+          coordinator_address=args.coordinator_address,
+          num_processes=total_procs,
+          process_id=args.slice_id,
+      )
     print(
         f"[Process {args.slice_id}/{total_procs} (num_slices={args.num_slices}, hosts_per_slice={getattr(args, 'num_hosts_per_slice', 1)})] "
         f"JAX distributed initialized: process_index={jax.process_index()}, process_count={jax.process_count()}, "
         f"local_devices={jax.local_device_count()}, global_devices={jax.device_count()}",
         flush=True,
     )
+  with recorder.stage("setup_tpu_backend_initialize_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    _ = jax.default_backend()
+    _ = jax.local_devices()
+    _ = jax.device_count()
   _register_transformers_fallbacks()
   return hw
 
@@ -1085,14 +1211,24 @@ def _get_parallelism_flags(args: argparse.Namespace, concurrent_gb: int) -> list
 
 def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str, Any]:
   """Step 3 for `to_maxtext`: Load the converted Orbax checkpoint from GCS into MaxText."""
+  harness_v2, _, schema_v2, _ = _import_bench_modules()
+  recorder = getattr(args, "_recorder", None)
+  sampler = getattr(args, "_sampler", None)
   import jax
 
+  t_setup0 = time.perf_counter()
   hw = init_worker_runtime(args)
-  tpu_info = _verify_and_measure_jax_backend(args, jax)
+  with recorder.stage("setup_tpu_check_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    tpu_info = _verify_and_measure_jax_backend(args, jax)
   from flax.core.spmd import logical_axis_rules
   from maxtext.common import checkpointing
   from maxtext.configs import pyconfig
   from maxtext.utils import globals as maxtext_globals
+  import orbax.checkpoint as ocp
+  import orbax.checkpoint.v1 as ocp_v1
+
+  if recorder is not None:
+    harness_v2.install_to_maxtext_step3_hooks(recorder, checkpointing_mod=checkpointing, ocp_v1_mod=ocp_v1, ocp_mod=ocp)
 
   scan_bool = "True" if args.scan_mode == "scanned" else "False"
   orbax_items_path = f"{args.gcs_run_dir}/to_maxtext/{args.model}/{args.scan_mode}/orbax_ckpt/0/items"
@@ -1133,7 +1269,8 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
   )
 
   t_init0 = time.perf_counter()
-  config = pyconfig.initialize(config_argv)
+  with recorder.stage("setup_maxtext_config_build_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    config = pyconfig.initialize(config_argv)
   mesh, unboxed_abstract_state = build_abstract_state_for_load(config)
   init_abstract_state_s = time.perf_counter() - t_init0
   print(
@@ -1151,37 +1288,83 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
     )
   except ImportError:
     pass
-  print(f"[to_maxtext Step 3] Loading Orbax checkpoint from {orbax_items_path} ...", flush=True)
-  t_load0 = time.perf_counter()
-  with logical_axis_rules(config.logical_axis_rules):
-    _, raw_params = checkpointing.load_state_if_possible(
-        checkpoint_manager=None,
-        data_iterator=None,
-        load_parameters_from_path=config.load_parameters_path,
-        load_full_state_from_path="",
-        checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
-        abstract_unboxed_pre_state=unboxed_abstract_state,
-        enable_single_replica_ckpt_restoring=False,
-        dataset_type=config.dataset_type,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
-        enable_orbax_v1=config.enable_orbax_v1,
-        checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-        source_checkpoint_layout="orbax",
-        expansion_factor_real_data=config.expansion_factor_real_data,
-        maxtext_config=config,
-    )
-    jax.block_until_ready(raw_params)
   if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
-    multihost_utils.sync_global_devices("orbax_step3_load_complete")
+    with (
+        recorder.stage("setup_wait_for_all_hosts_before_load_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      multihost_utils.sync_global_devices("before_load")
+  if recorder is not None:
+    recorder.record_value("setup_total_before_load_seconds", time.perf_counter() - t_setup0)
+
+  print(f"[to_maxtext Step 3] Loading Orbax checkpoint from {orbax_items_path} ...", flush=True)
+  t_load0 = time.perf_counter()
+  with recorder.stage("to_maxtext_step3_total_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    with logical_axis_rules(config.logical_axis_rules):
+      _, raw_params = checkpointing.load_state_if_possible(
+          checkpoint_manager=None,
+          data_iterator=None,
+          load_parameters_from_path=config.load_parameters_path,
+          load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+          abstract_unboxed_pre_state=unboxed_abstract_state,
+          enable_single_replica_ckpt_restoring=False,
+          dataset_type=config.dataset_type,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_orbax_v1=config.enable_orbax_v1,
+          checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+          source_checkpoint_layout="orbax",
+          expansion_factor_real_data=config.expansion_factor_real_data,
+          maxtext_config=config,
+      )
+      with recorder.stage("to_maxtext_step3_post_load_checks_seconds") if recorder else contextlib.nullcontext():
+        jax.block_until_ready(raw_params)
+    if jax.process_count() > 1:
+      from jax.experimental import multihost_utils
+
+      with recorder.stage("to_maxtext_step3_final_check_and_sync_seconds") if recorder else contextlib.nullcontext():
+        multihost_utils.sync_global_devices("orbax_step3_load_complete")
   load_orbax_s = time.perf_counter() - t_load0
 
   if raw_params is None:
     raise RuntimeError(f"Failed to restore parameters from Orbax checkpoint at {orbax_items_path}")
+  if sampler is not None:
+    sampler.record_hbm_milestone("after_load", jax)
 
   num_leaves = len(jax.tree_util.tree_leaves(raw_params))
+  bytes_read_gb = harness_v2.compute_local_shard_gb(raw_params)
+  model_tier = next(
+      (m.get("tier", "") for m in schema_v2.load_models_v2()["models"] if m["model_name"] == args.model), ""
+  )
+  want_cs = getattr(args, "verify_checksums", False) or (
+      os.environ.get("BENCH_CHECK_CHECKSUMS", "auto") == "1"
+      or (os.environ.get("BENCH_CHECK_CHECKSUMS", "auto") == "auto" and model_tier == "A")
+  )
+  checksums = None
+  if want_cs:
+    with recorder.stage("post_load_checksum_verify_seconds") if recorder else contextlib.nullcontext():
+      checksums = harness_v2.compute_parameter_checksums(raw_params, jax)
+
+  pipeline_config = {
+      "device_mesh_shape": str(mesh.shape),
+      "ici_fsdp_parallelism": getattr(config, "ici_fsdp_parallelism", -1),
+      "dcn_parallelism_axis": resolve_dcn_axis(args.model, getattr(args, "dcn_parallelism_axis", "auto")),
+      "dcn_parallelism_size": getattr(config, "dcn_fsdp_parallelism", 1)
+      if getattr(config, "dcn_fsdp_parallelism", 1) > 1
+      else getattr(config, "dcn_data_parallelism", 1),
+      "checkpoint_storage_concurrent_gb": concurrent_gb,
+      "maxtext_load_weight_dtype": str(getattr(config, "weight_dtype", "")),
+      "harness_environment_flags": ",".join(
+          f"{k}={os.environ[k]}"
+          for k in sorted(os.environ)
+          if k.startswith(("BENCH_", "ORBAX_", "PHASE_TIMEOUT", "SAFETENSORS_"))
+      ),
+  }
+
   print(
       f"[to_maxtext Step 3] Loaded Orbax checkpoint ({num_leaves} parameter leaves, "
       f"num_slices={num_slices}, global_devices={jax.device_count()}) in {load_orbax_s:.2f}s",
@@ -1191,8 +1374,11 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
       "load_orbax_s": load_orbax_s,
       "init_abstract_state_s": init_abstract_state_s,
       "num_param_leaves": num_leaves,
+      "bytes_read_gb": bytes_read_gb,
       "num_slices": num_slices,
       "global_devices": jax.device_count(),
+      "pipeline_config": pipeline_config,
+      "parameter_checksums": checksums,
       **tpu_info,
   }
 
@@ -1241,17 +1427,24 @@ def _cap_load_dynamic_download_workers(load_dynamic_mod: Any, max_workers: int =
 
 def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   """Runs `safetensors_dynamic` and records (1) HF -> GCS and (2) safetensors and convert to MaxText."""
+  harness_v2, _, schema_v2, _ = _import_bench_modules()
+  recorder = getattr(args, "_recorder", None)
+  sampler = getattr(args, "_sampler", None)
   import jax
 
+  t_setup0 = time.perf_counter()
   hw = init_worker_runtime(args)
-  tpu_info = _verify_and_measure_jax_backend(args, jax)
+  with recorder.stage("setup_tpu_check_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    tpu_info = _verify_and_measure_jax_backend(args, jax)
   from flax.core.spmd import logical_axis_rules
   import jax.numpy as jnp
   import numpy as np
   from maxtext.checkpoint_conversion.utils import load_dynamic
+  from maxtext.checkpoint_conversion.utils import tensor_handling
   from maxtext.common import checkpointing
   from maxtext.configs import pyconfig
   from maxtext.utils import globals as maxtext_globals
+  import orbax.checkpoint.v1 as ocp_v1
 
   import ctypes
   import gc
@@ -1306,7 +1499,8 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
     base_out_dir = f"{args.gcs_run_dir}/safetensors_dynamic/{args.model}/{args.scan_mode}{slice_suffix}"
     should_clean_cache = os.environ.get("KEEP_HF_CACHE", "0") != "1"
   if jax.process_index() == 0 and should_clean_cache:
-    epath.Path(f"{base_out_dir}/hf_cache").rmtree(missing_ok=True)
+    with recorder.stage("setup_delete_old_gcs_cache_seconds", log_start=True) if recorder else contextlib.nullcontext():
+      epath.Path(f"{base_out_dir}/hf_cache").rmtree(missing_ok=True)
   if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
@@ -1320,6 +1514,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       else ([] if args.model in ("qwen3-0.6b", "gemma2-2b") else ["weight_dtype=bfloat16"])
   )
 
+  pre_staged_gcs_dir = os.environ.get("BENCH_SAFETENSORS_GCS_DIR", "").strip()
   if _should_stage_sparse_bf16(args.model):
     local_sparse_dir = f"/tmp/hf_local_{args.model}"
     num_st, num_t, tot_gb = _stage_sparse_bf16_safetensors(args.model, local_sparse_dir)
@@ -1329,6 +1524,8 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
         flush=True,
     )
     load_params_uri = local_sparse_dir
+  elif pre_staged_gcs_dir:
+    load_params_uri = pre_staged_gcs_dir
   else:
     load_params_uri = (
         args.local_hf_dir
@@ -1360,7 +1557,8 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   )
 
   t_init0 = time.perf_counter()
-  config = pyconfig.initialize(config_argv)
+  with recorder.stage("setup_maxtext_config_build_seconds", log_start=True) if recorder else contextlib.nullcontext():
+    config = pyconfig.initialize(config_argv)
   mesh, unboxed_abstract_state = build_abstract_state_for_load(config)
   init_abstract_state_s = time.perf_counter() - t_init0
   print(
@@ -1369,7 +1567,39 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       flush=True,
   )
 
+  header_info: dict[str, Any] = {}
+  if jax.process_index() == 0:
+    inspect_target = (
+        load_params_uri
+        if (load_params_uri.startswith("gs://") or os.path.isdir(load_params_uri))
+        else f"{base_out_dir}/hf_cache/{repo_id.replace('/', '_')}"
+    )
+    header_info = harness_v2.inspect_gcs_or_local_safetensors(inspect_target)
+
+  if jax.process_count() > 1:
+    from jax.experimental import multihost_utils
+
+    with (
+        recorder.stage("setup_wait_for_all_hosts_before_load_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      multihost_utils.sync_global_devices("before_load")
+  if recorder is not None:
+    recorder.record_value("setup_total_before_load_seconds", time.perf_counter() - t_setup0)
+
   timings: dict[str, float] = {}
+  slowest_param = (
+      harness_v2.install_safetensors_dynamic_hooks(
+          recorder,
+          load_dynamic_mod=load_dynamic,
+          tensor_handling_mod=tensor_handling,
+          ocp_v1_mod=ocp_v1,
+          jax_mod=jax,
+      )
+      if recorder is not None
+      else {"slowest_s": 0.0, "slowest_name": ""}
+  )
 
   orig_get_mappings = load_dynamic.get_hf_config_and_mappings
   orig_load_sharded = load_dynamic.load_sharded_hf_state
@@ -1378,14 +1608,42 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   def timed_get_mappings(*a, **kw):
     # Called immediately after Step 1 (HF -> GCS caching + barrier) finishes in load_safetensors_dynamic_state
     timings["t_step1_end"] = time.perf_counter()
-    print(f"[safetensor] Step 1 (HF->GCS) completed in {timings['t_step1_end'] - t_start:.2f}s", flush=True)
+    step1_elapsed = timings["t_step1_end"] - t_start
+    print(f"[safetensor] Step 1 (HF->GCS) completed in {step1_elapsed:.2f}s", flush=True)
+    if recorder is not None:
+      recorder.record_value("safetensors_dynamic_step1_total_seconds", step1_elapsed)
+      wait_s = recorder.snapshot().get("barriers", {}).get("dynamic_hf_download_complete", {}).get("total_s", 0.0)
+      recorder.record_value("safetensors_dynamic_step1_other_hosts_wait_seconds", wait_s)
+      recorder.record_value("safetensors_dynamic_step1_verify_gcs_cache_seconds", max(0.0, step1_elapsed - wait_s))
     t0 = time.perf_counter()
-    res = orig_get_mappings(*a, **kw)
+    with (
+        recorder.stage("safetensors_dynamic_step2_build_hf_to_maxtext_mappings_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      res = orig_get_mappings(*a, **kw)
     timings["derive_mappings_s"] = time.perf_counter() - t0
     return res
 
   def timed_load_sharded(path, *a, **kw):
     t0 = time.perf_counter()
+    with (
+        recorder.stage("safetensors_dynamic_step2_load_total_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      res = _timed_load_sharded_inner(path, *a, **kw)
+    timings["load_sharded_hf_s"] = time.perf_counter() - t0
+    if recorder is not None:
+      needed_gb = harness_v2.compute_local_shard_gb(res)
+      recorder.add_metric("safetensors_dynamic_step2_load_total_seconds", "bytes_needed_by_this_host_gb", needed_gb)
+      timings["bytes_needed_by_this_host_gb"] = needed_gb
+    if sampler is not None:
+      sampler.record_hbm_milestone("after_read", jax)
+    print(f"[safetensor] load_sharded_hf_state completed in {timings['load_sharded_hf_s']:.2f}s", flush=True)
+    return res
+
+  def _timed_load_sharded_inner(path, *a, **kw):
     use_custom_byte_reader = os.environ.get("CUSTOM_BYTE_READER", "0") == "1"
     if use_custom_byte_reader:
       import collections
@@ -1428,6 +1686,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       fsdp_size = mesh.shape.get("fsdp", 1)
       this_process = jax.process_index()
       is_sparse_oom = os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1"
+      dcn_axis = resolve_dcn_axis(args.model, getattr(args, "dcn_parallelism_axis", "auto"))
 
       def _make_sharded_spec(k: str, shp: tuple[int, ...]) -> list[str | None]:
         spec: list[str | None] = [None] * len(shp)
@@ -1636,14 +1895,21 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       else:
         res = orig_load_sharded(path, *a, **kw)
     _trim_malloc()
-    timings["load_sharded_hf_s"] = time.perf_counter() - t0
-    print(f"[safetensor] load_sharded_hf_state completed in {timings['load_sharded_hf_s']:.2f}s", flush=True)
     return res
 
   def timed_transform(*a, **kw):
     t0 = time.perf_counter()
-    res = orig_transform(*a, **kw)
-    _trim_malloc()
+    with (
+        recorder.stage("safetensors_dynamic_step2_transform_total_seconds", log_start=True)
+        if recorder
+        else contextlib.nullcontext()
+    ):
+      res = orig_transform(*a, **kw)
+    if recorder is not None:
+      with recorder.stage("safetensors_dynamic_step2_harness_memory_cleanup_seconds"):
+        _trim_malloc()
+    else:
+      _trim_malloc()
     timings["transform_hf_to_mt_s"] = time.perf_counter() - t0
     return res
 
@@ -1653,38 +1919,89 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
   print(f"[safetensor] Running load_state_if_possible(source_checkpoint_layout='safetensors_dynamic') ...", flush=True)
   t_start = time.perf_counter()
-  with _cap_load_dynamic_download_workers(load_dynamic), logical_axis_rules(config.logical_axis_rules):
-    _, raw_params = checkpointing.load_state_if_possible(
-        checkpoint_manager=None,
-        data_iterator=None,
-        load_parameters_from_path=config.load_parameters_path,
-        load_full_state_from_path="",
-        checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
-        abstract_unboxed_pre_state=unboxed_abstract_state,
-        enable_single_replica_ckpt_restoring=False,
-        dataset_type=config.dataset_type,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
-        enable_orbax_v1=config.enable_orbax_v1,
-        checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-        source_checkpoint_layout="safetensors_dynamic",
-        expansion_factor_real_data=config.expansion_factor_real_data,
-        maxtext_config=config,
-    )
-    jax.block_until_ready(raw_params)
-  if jax.process_count() > 1:
-    from jax.experimental import multihost_utils
+  with (
+      recorder.stage("safetensors_dynamic_step2_total_seconds", log_start=True) if recorder else contextlib.nullcontext()
+  ):
+    with _cap_load_dynamic_download_workers(load_dynamic), logical_axis_rules(config.logical_axis_rules):
+      _, raw_params = checkpointing.load_state_if_possible(
+          checkpoint_manager=None,
+          data_iterator=None,
+          load_parameters_from_path=config.load_parameters_path,
+          load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+          abstract_unboxed_pre_state=unboxed_abstract_state,
+          enable_single_replica_ckpt_restoring=False,
+          dataset_type=config.dataset_type,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_orbax_v1=config.enable_orbax_v1,
+          checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+          source_checkpoint_layout="safetensors_dynamic",
+          expansion_factor_real_data=config.expansion_factor_real_data,
+          maxtext_config=config,
+      )
+      with (
+          recorder.stage("safetensors_dynamic_step2_final_weight_check_and_sync_seconds")
+          if recorder
+          else contextlib.nullcontext()
+      ):
+        jax.block_until_ready(raw_params)
+    if jax.process_count() > 1:
+      from jax.experimental import multihost_utils
 
-    multihost_utils.sync_global_devices("safetensors_dynamic_load_complete")
+      with (
+          recorder.stage("safetensors_dynamic_step2_final_weight_check_and_sync_seconds")
+          if recorder
+          else contextlib.nullcontext()
+      ):
+        multihost_utils.sync_global_devices("safetensors_dynamic_load_complete")
   t_end = time.perf_counter()
 
   if raw_params is None:
     raise RuntimeError(f"Failed to restore parameters via safetensors_dynamic for {args.model}")
+  if sampler is not None:
+    sampler.record_hbm_milestone("after_load", jax)
+
+  if recorder is not None and not header_info and jax.process_index() == 0:
+    header_info = harness_v2.inspect_gcs_or_local_safetensors(
+        load_params_uri
+        if (load_params_uri.startswith("gs://") or os.path.isdir(load_params_uri))
+        else f"{base_out_dir}/hf_cache/{repo_id.replace('/', '_')}"
+    )
 
   hf_to_gcs_s = timings["t_step1_end"] - t_start
   safetensors_and_convert_s = t_end - timings["t_step1_end"]
   total_s = t_end - t_start
   num_leaves = len(jax.tree_util.tree_leaves(raw_params))
+
+  model_tier = next(
+      (m.get("tier", "") for m in schema_v2.load_models_v2()["models"] if m["model_name"] == args.model), ""
+  )
+  want_cs = getattr(args, "verify_checksums", False) or (
+      os.environ.get("BENCH_CHECK_CHECKSUMS", "auto") == "1"
+      or (os.environ.get("BENCH_CHECK_CHECKSUMS", "auto") == "auto" and model_tier == "A")
+  )
+  checksums = None
+  if want_cs:
+    with recorder.stage("post_load_checksum_verify_seconds") if recorder else contextlib.nullcontext():
+      checksums = harness_v2.compute_parameter_checksums(raw_params, jax)
+
+  pipeline_config = {
+      "device_mesh_shape": str(mesh.shape),
+      "ici_fsdp_parallelism": getattr(config, "ici_fsdp_parallelism", -1),
+      "dcn_parallelism_axis": resolve_dcn_axis(args.model, getattr(args, "dcn_parallelism_axis", "auto")),
+      "dcn_parallelism_size": getattr(config, "dcn_fsdp_parallelism", 1)
+      if getattr(config, "dcn_fsdp_parallelism", 1) > 1
+      else getattr(config, "dcn_data_parallelism", 1),
+      "checkpoint_storage_concurrent_gb": concurrent_gb,
+      "safetensors_read_concurrent_bytes": int(os.environ.get("SAFETENSORS_READ_CONCURRENT_BYTES", "0") or 0) or "",
+      "maxtext_load_weight_dtype": str(getattr(config, "weight_dtype", "")),
+      "harness_environment_flags": ",".join(
+          f"{k}={os.environ[k]}"
+          for k in sorted(os.environ)
+          if k.startswith(("BENCH_", "ORBAX_", "PHASE_TIMEOUT", "SAFETENSORS_", "CUSTOM_BYTE_READER"))
+      ),
+  }
 
   print(
       f"[safetensor] Completed: (1) HF->GCS={hf_to_gcs_s:.2f}s, "
@@ -1700,9 +2017,15 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       "load_sharded_hf_s": timings.get("load_sharded_hf_s", 0.0),
       "transform_hf_to_mt_s": timings.get("transform_hf_to_mt_s", 0.0),
       "init_abstract_state_s": init_abstract_state_s,
+      "bytes_needed_by_this_host_gb": timings.get("bytes_needed_by_this_host_gb"),
+      "safetensors_dynamic_step2_slowest_parameter_seconds": round(slowest_param["slowest_s"], 4),
+      "safetensors_dynamic_step2_slowest_parameter_name": slowest_param["slowest_name"],
       "num_param_leaves": num_leaves,
       "num_slices": num_slices,
       "global_devices": jax.device_count(),
+      "header_info": header_info,
+      "pipeline_config": pipeline_config,
+      "parameter_checksums": checksums,
       **tpu_info,
   }
 
@@ -2270,7 +2593,7 @@ def run_remote_slice_daemon(port: int) -> None:
             conn.sendall(line.encode("utf-8", errors="replace"))
           proc.wait(timeout=14400)
           r_wd["stop"] = True
-          if r_wd.get("oom_triggered") and r_wd.get("oom_message"):
+          if (r_wd.get("oom_triggered") or r_wd.get("timeout_triggered")) and r_wd.get("oom_message"):
             conn.sendall(r_wd["oom_message"].encode("utf-8", errors="replace"))
           if r_wd.get("peak_ram_gb", 0.0) > 0:
             conn.sendall(
@@ -2359,6 +2682,317 @@ def _persist_worker_upload_max_s(result_json: str, worker_cached_times: list[flo
   return data
 
 
+def _phase_scan_dir_name(phase: str, scan_mode: str, num_slices: int, num_hosts_per_slice: int) -> str:
+  """Returns the log subdirectory name under `logs/<model>/` for a phase and slice layout."""
+  total_procs = num_slices * num_hosts_per_slice
+  is_multislice_phase = total_procs > 1 and phase in ("to_maxtext_step3", "safetensors_dynamic")
+  scan_dir_name = scan_mode
+  if is_multislice_phase and num_slices > 1:
+    scan_dir_name += f"_slices{num_slices}"
+  if is_multislice_phase and num_hosts_per_slice > 1:
+    scan_dir_name += f"_hosts{num_hosts_per_slice}"
+  return scan_dir_name
+
+
+def _resolve_slice_topology(
+    platform_name: str,
+    explicit_topology: str | None,
+    devices_per_slice: int,
+    num_hosts_per_slice: int,
+) -> str:
+  """Resolves a valid `PlatformProfile` slice topology string from explicit CLI arg or device/host counts."""
+  _import_bench_modules()
+  from bench import platforms  # pylint: disable=import-outside-toplevel
+
+  profile = platforms.PROFILES.get(platform_name)
+  if profile is None:
+    return explicit_topology or f"{devices_per_slice}dev"
+  if explicit_topology and explicit_topology in profile.hosts_per_slice_by_topology:
+    return explicit_topology
+  for topo in profile.hosts_per_slice_by_topology:
+    if profile.devices_per_slice(topo) == devices_per_slice and profile.hosts_per_slice(topo) == num_hosts_per_slice:
+      return topo
+  for topo in profile.hosts_per_slice_by_topology:
+    if profile.devices_per_slice(topo) == devices_per_slice:
+      return topo
+  return next(iter(profile.hosts_per_slice_by_topology))
+
+
+def _collect_phase_logs(log_dir: str, phase: str) -> list[str]:
+  """Reads local and remote slice log files belonging to `phase`."""
+  if not os.path.isdir(log_dir):
+    return []
+  log_texts: list[str] = []
+  for fname in sorted(os.listdir(log_dir)):
+    if fname == f"{phase}.log" or (fname.startswith(f"{phase}_slice") and fname.endswith(".log")):
+      try:
+        with open(os.path.join(log_dir, fname), "r", encoding="utf-8", errors="replace") as lf:
+          log_texts.append(lf.read())
+      except OSError:
+        pass
+  return log_texts
+
+
+def _extract_pod_and_node_names(
+    merged_stages: dict[str, Any],
+    env_meta: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+  """Collects ordered unique pod and node names from per-host stage payloads with env fallback."""
+  pods: list[str] = []
+  nodes: list[str] = []
+  for host in merged_stages.get("hosts", []):
+    pod = host.get("pod_name") or host.get("host_name") or ""
+    if pod and pod not in pods:
+      pods.append(str(pod))
+    node = host.get("node_name") or ""
+    if node and node not in nodes:
+      nodes.append(str(node))
+  if not pods and env_meta.get("pod_name"):
+    pods.append(str(env_meta["pod_name"]))
+  if not nodes and env_meta.get("node_name"):
+    nodes.append(str(env_meta["node_name"]))
+  return pods, nodes
+
+
+def _build_log_urls(gcs_run_dir: str, model: str, scan_dir_name: str, phase: str) -> dict[str, str]:
+  """Builds canonical GCS log URIs for a phase when `gcs_run_dir` is a `gs://` path."""
+  if not gcs_run_dir.startswith("gs://"):
+    return {}
+  prefix = f"{gcs_run_dir.rstrip('/')}/logs/{model}/{scan_dir_name}"
+  return {
+      "gcs_logs_prefix": prefix,
+      "gcs_result_json_uri": f"{prefix}/{phase}_result.json",
+      "gcs_main_log_uri": f"{prefix}/{phase}.log",
+  }
+
+
+def _finalize_v2_phase_result(
+    *,
+    phase: str,
+    model: str,
+    scan_mode: str,
+    platform_name: str,
+    slice_topology: str,
+    num_slices: int,
+    num_hosts_per_slice: int,
+    devices_per_slice: int,
+    raw_data: dict[str, Any],
+    run_status: str,
+    started_at_utc: str,
+    finished_at_utc: str,
+    wall_clock_s: float,
+    cache_state: str,
+    env: dict[str, str],
+    repo_root: str,
+    gcs_run_dir: str,
+    scan_dir_name: str,
+    log_dir: str,
+    worker_cached_times: list[float],
+    failure_err_text: str = "",
+    failure_exit_code: int | None = None,
+    watchdog_state: dict[str, Any] | None = None,
+    skip_reason: str = "",
+) -> dict[str, Any]:
+  """Merges worker/remote logs, metadata, and raw timings into a validated v2 phase record."""
+  harness_v2, metadata, schema_v2, _ = _import_bench_modules()
+  log_texts = _collect_phase_logs(log_dir, phase)
+  merged_stages = harness_v2.collect_merged_stages_from_logs(log_texts)
+  env_meta = metadata.collect_env_cluster_metadata(env)
+  code_ver = metadata.load_code_version_metadata(repo_root)
+  hw_info = metadata.collect_host_hardware_info()
+  pkg_versions = metadata.collect_package_versions()
+  pod_names, node_names = _extract_pod_and_node_names(merged_stages, env_meta)
+
+  raw = dict(raw_data)
+  header_info = raw.pop("header_info", None)
+  pipeline_config = raw.pop("pipeline_config", None)
+  parameter_checksums = raw.pop("parameter_checksums", None)
+
+  failure_info: dict[str, Any] | None = None
+  if run_status == "FAILED":
+    not_tpu_info = _parse_not_tpu_marker(log_texts)
+    fcat, fsig, pre, esum = harness_v2.classify_failure(
+        failure_err_text,
+        log_texts,
+        exit_code=failure_exit_code,
+        not_tpu_info=not_tpu_info,
+    )
+    failed_stage = harness_v2.infer_failed_stage(merged_stages, log_texts)
+    failure_info = {
+        "failure_category": fcat,
+        "failed_stage_name": failed_stage,
+        "process_exit_code": failure_exit_code if failure_exit_code is not None else "",
+        "process_signal": fsig,
+        "error_summary": esum,
+        "was_preempted": pre,
+    }
+    if not_tpu_info is not None:
+      raw.update(not_tpu_info)
+      for timing_key in (
+          "hf_to_gcs_s",
+          "hf_to_local_s",
+          "convert_to_orbax_s",
+          "load_orbax_s",
+          "safetensors_and_convert_s",
+          "worker_upload_max_s",
+      ):
+        raw.pop(timing_key, None)
+    elif watchdog_state and watchdog_state.get("peak_ram_gb", 0.0) > 0:
+      raw.setdefault("peak_host_ram_gb", round(watchdog_state["peak_ram_gb"], 2))
+      raw.setdefault("total_host_ram_gb", round(watchdog_state.get("total_ram_gb", 251.69), 2))
+    raw.setdefault("status", "FAILED")
+    raw.setdefault("error", failure_err_text)
+  elif run_status == "SKIPPED":
+    raw.setdefault("status", "SKIPPED")
+    if skip_reason:
+      failure_info = {"error_summary": skip_reason}
+  else:
+    raw.setdefault("status", "OK")
+    if worker_cached_times:
+      raw["worker_upload_max_s"] = max(worker_cached_times)
+
+  v2_rec = harness_v2.build_v2_phase_record(
+      phase=phase,
+      model_name=model,
+      scan_mode=scan_mode,
+      platform_name=platform_name,
+      num_slices=num_slices,
+      num_hosts_per_slice=num_hosts_per_slice,
+      topology=slice_topology,
+      raw_worker_data=raw,
+      merged_stages=merged_stages,
+      env_meta=env_meta,
+      code_ver=code_ver,
+      hw_info=hw_info,
+      pkg_versions=pkg_versions,
+      started_at_utc=started_at_utc,
+      finished_at_utc=finished_at_utc,
+      wall_clock_s=wall_clock_s,
+      run_status=run_status,
+      cache_state=cache_state,
+      pipeline_config=pipeline_config,
+      header_info=header_info,
+      failure_info=failure_info,
+      pod_names=pod_names,
+      node_names=node_names,
+      log_urls=_build_log_urls(gcs_run_dir, model, scan_dir_name, phase),
+      parameter_checksums=parameter_checksums,
+  )
+  val_errors = schema_v2.validate_v2_phase_record(v2_rec)
+  if val_errors:
+    print(f"[WARN v2 schema validation] {phase} ({model}/{scan_mode}): {val_errors}", flush=True)
+  v2_rec["status"] = raw.get("status", run_status)
+  return v2_rec
+
+
+def _write_skipped_v2_result(
+    *,
+    phase: str,
+    model: str,
+    scan_mode: str,
+    platform_name: str,
+    slice_topology: str,
+    num_slices: int,
+    num_hosts_per_slice: int,
+    devices_per_slice: int,
+    local_work_dir: str,
+    gcs_run_dir: str,
+    skip_reason: str,
+    raw_extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Writes and mirrors a valid v2 `SKIPPED` result JSON so skipped cells are preserved cleanly."""
+  repo_root = get_repo_root()
+  scan_dir_name = _phase_scan_dir_name(phase, scan_mode, num_slices, num_hosts_per_slice)
+  log_dir = os.path.join(local_work_dir, "logs", model, scan_dir_name)
+  os.makedirs(log_dir, exist_ok=True)
+  result_json = os.path.join(log_dir, f"{phase}_result.json")
+  now_utc = _import_bench_modules()[0].utc_now_iso()
+  raw_data = {
+      "status": "SKIPPED",
+      "num_slices": num_slices,
+      "num_hosts_per_slice": num_hosts_per_slice,
+      "global_devices": num_slices * devices_per_slice,
+  }
+  if raw_extra:
+    raw_data.update(raw_extra)
+  v2_rec = _finalize_v2_phase_result(
+      phase=phase,
+      model=model,
+      scan_mode=scan_mode,
+      platform_name=platform_name,
+      slice_topology=slice_topology,
+      num_slices=num_slices,
+      num_hosts_per_slice=num_hosts_per_slice,
+      devices_per_slice=devices_per_slice,
+      raw_data=raw_data,
+      run_status="SKIPPED",
+      started_at_utc=now_utc,
+      finished_at_utc=now_utc,
+      wall_clock_s=0.0,
+      cache_state=os.environ.get("BENCH_CACHE_STATE", "empty"),
+      env=dict(os.environ),
+      repo_root=repo_root,
+      gcs_run_dir=gcs_run_dir,
+      scan_dir_name=scan_dir_name,
+      log_dir=log_dir,
+      worker_cached_times=[],
+      skip_reason=skip_reason,
+  )
+  _write_result_json(result_json, v2_rec)
+  if gcs_run_dir.startswith("gs://"):
+    try:
+      from etils import epath  # pylint: disable=import-outside-toplevel
+
+      gcs_res = epath.Path(f"{gcs_run_dir.rstrip('/')}/logs/{model}/{scan_dir_name}/{phase}_result.json")
+      gcs_res.parent.mkdir(parents=True, exist_ok=True)
+      gcs_res.write_bytes(epath.Path(result_json).read_bytes())
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      print(f"[WARN] Failed to mirror SKIPPED JSON to GCS: {exc}", flush=True)
+  return v2_rec
+
+
+def _maybe_verify_and_persist_checksums(
+    *,
+    model: str,
+    scan_mode: str,
+    num_slices: int,
+    num_hosts_per_slice: int,
+    m_step3: dict[str, Any],
+    s_res: dict[str, Any],
+    local_work_dir: str,
+    gcs_run_dir: str,
+) -> None:
+  """Verifies parameter checksums across both pipelines and persists match/mismatch onto `s_res`."""
+  tm_cs = m_step3.get("parameter_checksums")
+  sd_cs = s_res.get("parameter_checksums")
+  if m_step3.get("status") != "OK" or s_res.get("status") != "OK" or not tm_cs or not sd_cs:
+    return
+  harness_v2 = _import_bench_modules()[0]
+  mismatches = harness_v2.compare_parameter_checksums(tm_cs, sd_cs)
+  cs_status = "MISMATCH" if mismatches else "MATCH"
+  print(f"[CHECKSUM VERIFY] {model} ({scan_mode}, slices={num_slices}): {cs_status}", flush=True)
+  for mm in mismatches:
+    print(f"  [CHECKSUM MISMATCH] {mm}", flush=True)
+  s_res["checksum_verification"] = cs_status
+  if mismatches:
+    s_res["checksum_mismatches"] = mismatches
+  sd_dir = _phase_scan_dir_name("safetensors_dynamic", scan_mode, num_slices, num_hosts_per_slice)
+  sd_json = os.path.join(local_work_dir, "logs", model, sd_dir, "safetensors_dynamic_result.json")
+  if not os.path.exists(sd_json):
+    return
+  _write_result_json(sd_json, s_res)
+  if not gcs_run_dir.startswith("gs://"):
+    return
+  try:
+    from etils import epath  # pylint: disable=import-outside-toplevel
+
+    epath.Path(f"{gcs_run_dir.rstrip('/')}/logs/{model}/{sd_dir}/safetensors_dynamic_result.json").write_bytes(
+        epath.Path(sd_json).read_bytes()
+    )
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+
 def invoke_worker_subprocess(
     phase: str,
     model: str,
@@ -2376,8 +3010,11 @@ def invoke_worker_subprocess(
     skip_completed: bool = False,
     reuse_model_hf_cache: bool = False,
     allow_step_failure: bool = False,
+    platform_name: str | None = None,
+    slice_topology: str | None = None,
+    verify_checksums: bool = False,
 ) -> dict[str, Any]:
-  """Runs a single benchmark phase in clean subprocess(es) and returns its JSON metrics.
+  """Runs a single benchmark phase in clean subprocess(es) and returns its v2 JSON metrics.
 
   Multi-process phases (to_maxtext Step 3 and safetensors_dynamic) run one JAX process per TPU host:
   num_slices * num_hosts_per_slice processes. Process 0 runs locally and process k > 0 runs on
@@ -2385,13 +3022,12 @@ def invoke_worker_subprocess(
   """
   repo_root = get_repo_root()
   os.makedirs(local_work_dir, exist_ok=True)
+  harness_v2, _, _, _ = _import_bench_modules()
+  resolved_platform = platform_name or os.environ.get("BENCH_PLATFORM") or "v7x"
+  resolved_topology = _resolve_slice_topology(resolved_platform, slice_topology, devices_per_slice, num_hosts_per_slice)
   total_procs = num_slices * num_hosts_per_slice
   is_multislice_phase = total_procs > 1 and phase in ("to_maxtext_step3", "safetensors_dynamic")
-  scan_dir_name = scan_mode
-  if is_multislice_phase and num_slices > 1:
-    scan_dir_name += f"_slices{num_slices}"
-  if is_multislice_phase and num_hosts_per_slice > 1:
-    scan_dir_name += f"_hosts{num_hosts_per_slice}"
+  scan_dir_name = _phase_scan_dir_name(phase, scan_mode, num_slices, num_hosts_per_slice)
   log_dir = os.path.join(local_work_dir, "logs", model, scan_dir_name)
   os.makedirs(log_dir, exist_ok=True)
 
@@ -2439,6 +3075,9 @@ def invoke_worker_subprocess(
         shutil.copyfile(scanned_json, result_json)
         if os.path.exists(scanned_log):
           shutil.copyfile(scanned_log, log_file)
+        if "scan_layers_mode" in data:
+          data["scan_layers_mode"] = scan_mode
+          _write_result_json(result_json, data)
         print(
             f"[REUSE MODEL HF STAGE]: {phase} | Model: {model} | Scan Mode: {scan_mode} -> {result_json}",
             flush=True,
@@ -2463,6 +3102,10 @@ def invoke_worker_subprocess(
       scan_mode,
       "--hardware",
       hardware,
+      "--platform",
+      resolved_platform,
+      "--slice-topology",
+      resolved_topology,
       "--weight-dtype",
       weight_dtype,
       "--dcn-parallelism-axis",
@@ -2482,10 +3125,16 @@ def invoke_worker_subprocess(
   ]
   if reuse_model_hf_cache:
     base_cmd.append("--reuse-model-hf-cache")
+  if verify_checksums:
+    base_cmd.append("--verify-checksums")
 
   env = os.environ.copy()
   env.setdefault("MALLOC_TRIM_THRESHOLD_", "65536")
   env.setdefault("PYTHONUNBUFFERED", "1")
+  cache_state = harness_v2.prepare_clean_jax_compilation_cache()
+  env["BENCH_CACHE_STATE"] = cache_state
+  env["BENCH_PLATFORM"] = resolved_platform
+  env["BENCH_SLICE_TOPOLOGY"] = resolved_topology
   site_dir = os.path.join(local_work_dir, "_sitecustomize")
   os.makedirs(site_dir, exist_ok=True)
   sitecustomize_path = os.path.join(site_dir, "sitecustomize.py")
@@ -2518,8 +3167,47 @@ def invoke_worker_subprocess(
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"[WARN] Failed to mirror logs to GCS: {e}", flush=True)
 
+  def _finalize_and_persist(
+      raw_payload: dict[str, Any],
+      *,
+      status_str: str,
+      err_str: str = "",
+      exit_code: int | None = None,
+  ) -> dict[str, Any]:
+    v2_data = _finalize_v2_phase_result(
+        phase=phase,
+        model=model,
+        scan_mode=scan_mode,
+        platform_name=resolved_platform,
+        slice_topology=resolved_topology,
+        num_slices=num_slices if is_multislice_phase else 1,
+        num_hosts_per_slice=num_hosts_per_slice if is_multislice_phase else 1,
+        devices_per_slice=devices_per_slice,
+        raw_data=raw_payload,
+        run_status=status_str,
+        started_at_utc=started_at_utc,
+        finished_at_utc=harness_v2.utc_now_iso(),
+        wall_clock_s=max(0.0, time.perf_counter() - t_phase_wall0),
+        cache_state=cache_state,
+        env=env,
+        repo_root=repo_root,
+        gcs_run_dir=gcs_run_dir,
+        scan_dir_name=scan_dir_name,
+        log_dir=log_dir,
+        worker_cached_times=worker_cached_times,
+        failure_err_text=err_str,
+        failure_exit_code=exit_code,
+        watchdog_state=watchdog_state,
+    )
+    _write_result_json(result_json, v2_data)
+    _mirror_logs_to_gcs()
+    return v2_data
+
   worker_cached_times: list[float] = []
   watchdog_state: dict[str, Any] = {}
+  failed_exit_code: int | None = None
+  started_at_utc = harness_v2.utc_now_iso()
+  t_phase_wall0 = time.perf_counter()
   try:
     if not is_multislice_phase:
       if resolve_hardware(hardware) == "cpu" and "XLA_FLAGS" not in env:
@@ -2527,6 +3215,7 @@ def invoke_worker_subprocess(
       with open(log_file, "w", encoding="utf-8") as lf:
         lf.write(f"Command: {' '.join(base_cmd)}\n\n")
         lf.flush()
+        env["BENCH_PROCESS_START_EPOCH"] = f"{time.time():.6f}"
         with subprocess.Popen(
             base_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=repo_root, text=True
         ) as proc:
@@ -2556,6 +3245,7 @@ def invoke_worker_subprocess(
           lf.flush()
 
       if proc.returncode != 0:
+        failed_exit_code = proc.returncode
         oom_tag = _failure_tag(proc.returncode, watchdog_state)
         raise RuntimeError(
             f"Worker phase '{phase}' failed with exit code {proc.returncode}{oom_tag} "
@@ -2585,6 +3275,7 @@ def invoke_worker_subprocess(
       slice_log_files = []
       try:
         # `slice_id` is the JAX process id (one per host); the slice index is slice_id // num_hosts_per_slice.
+        env["BENCH_PROCESS_START_EPOCH"] = f"{time.time():.6f}"
         for slice_id in range(total_procs):
           cmd_i = base_cmd + ["--slice-id", str(slice_id), "--coordinator-address", coord_addr]
           if slice_id == 0:
@@ -2619,6 +3310,8 @@ def invoke_worker_subprocess(
                       or k
                       in (
                           "HOSTNAME",
+                          "POD_NAME",
+                          "NODE_NAME",
                           "TPU_WORKER_ID",
                           "TPU_WORKER_HOSTNAMES",
                           "TPU_PROCESS_ADDRESSES",
@@ -2653,7 +3346,9 @@ def invoke_worker_subprocess(
                 pass
               try:
                 with socket.create_connection((host, int(port_s)), timeout=14400) as sock:
-                  payload = json.dumps({"cmd": c_list, "env": clean_env, "local_work_dir": local_work_dir}) + "\n"
+                  run_env = dict(clean_env)
+                  run_env["BENCH_PROCESS_START_EPOCH"] = f"{time.time():.6f}"
+                  payload = json.dumps({"cmd": c_list, "env": run_env, "local_work_dir": local_work_dir}) + "\n"
                   sock.sendall(payload.encode("utf-8"))
                   with sock.makefile("r", encoding="utf-8", errors="replace") as sf_in:
                     for rline in sf_in:
@@ -2721,6 +3416,7 @@ def invoke_worker_subprocess(
             failed_remote = [(s_id, rc) for s_id, rc in sorted(remote_rc.items()) if rc != 0]
             if failed_remote:
               s_id, rc = failed_remote[0]
+              failed_exit_code = rc
               r_ep = remote_endpoints[s_id - 1] if (s_id - 1) < len(remote_endpoints) else "remote"
               raise RuntimeError(
                   f"Multi-slice worker phase '{phase}' remote slice {s_id} ({r_ep}) failed with exit code {rc} "
@@ -2728,6 +3424,7 @@ def invoke_worker_subprocess(
               )
           for idx, p in enumerate(procs):
             if p.returncode != 0:
+              failed_exit_code = p.returncode
               oom_tag = _failure_tag(p.returncode, watchdog_state)
               raise RuntimeError(
                   f"Multi-slice worker phase '{phase}' local slice {idx} failed with exit code {p.returncode}{oom_tag} "
@@ -2738,6 +3435,7 @@ def invoke_worker_subprocess(
             t.join(timeout=14400)
             rc = remote_rc.get(s_id, 1)
             if rc != 0:
+              failed_exit_code = rc
               r_ep = remote_endpoints[s_id - 1] if (s_id - 1) < len(remote_endpoints) else "remote"
               raise RuntimeError(
                   f"Multi-slice worker phase '{phase}' remote slice {s_id} ({r_ep}) failed with exit code {rc}. "
@@ -2761,39 +3459,12 @@ def invoke_worker_subprocess(
               f"[WARN] Subprocess exited non-zero during teardown ({e}), but valid result JSON already written: {result_json}",
               flush=True,
           )
-          _mirror_logs_to_gcs()
-          return existing_ok
+          return _finalize_and_persist(existing_ok, status_str="OK")
       except Exception:  # pylint: disable=broad-exception-caught
         pass
     if not allow_step_failure:
       raise
     print(f"[STEP FAILED (continuing due to --allow-step-failure)]: {e}", flush=True)
-    log_texts: list[str] = []
-    for candidate_name in sorted(os.listdir(log_dir)):
-      if candidate_name == f"{phase}.log" or (
-          candidate_name.startswith(f"{phase}_slice") and candidate_name.endswith(".log")
-      ):
-        try:
-          with open(os.path.join(log_dir, candidate_name), "r", encoding="utf-8", errors="replace") as lf_err:
-            log_texts.append(lf_err.read())
-        except OSError:
-          pass
-    not_tpu = _parse_not_tpu_marker(log_texts)
-    if not_tpu is not None:
-      fail_data = {
-          "status": "FAILED",
-          "failure_category": "NOT-TPU",
-          "error": str(e),
-          "jax_backend_platform": not_tpu["jax_backend_platform"],
-          "total_tpu_devices_measured": not_tpu["total_tpu_devices_measured"],
-          "expected_tpu_devices": not_tpu["expected_tpu_devices"],
-          "num_slices": num_slices,
-          "num_hosts_per_slice": num_hosts_per_slice,
-          "global_devices": num_slices * devices_per_slice,
-      }
-      _write_result_json(result_json, fail_data)
-      _mirror_logs_to_gcs()
-      return fail_data
     parsed_step1_s = 0.0
     if os.path.exists(log_file):
       with open(log_file, "r", encoding="utf-8", errors="replace") as lf_err:
@@ -2816,9 +3487,7 @@ def invoke_worker_subprocess(
               "peak_host_ram_gb": round(watchdog_state.get("peak_ram_gb", 0.0), 2),
               "total_host_ram_gb": round(watchdog_state.get("total_ram_gb", 251.69), 2),
           }
-          _write_result_json(result_json, rec_orb)
-          _mirror_logs_to_gcs()
-          return rec_orb
+          return _finalize_and_persist(rec_orb, status_str="OK")
         m_st = re.search(
             r"\[safetensor\] Completed: \(1\) HF->GCS=([0-9.]+)s, \(2\) safetensors & convert to MaxText=([0-9.]+)s \(total=([0-9.]+)s, ([0-9]+) parameter leaves, num_slices=([0-9]+), global_devices=([0-9]+)\)",
             log_txt,
@@ -2842,25 +3511,17 @@ def invoke_worker_subprocess(
               "peak_host_ram_gb": round(watchdog_state.get("peak_ram_gb", 0.0), 2),
               "total_host_ram_gb": round(watchdog_state.get("total_ram_gb", 251.69), 2),
           }
-          _write_result_json(result_json, rec_st)
-          _mirror_logs_to_gcs()
-          return rec_st
-    fail_data: dict[str, Any] = {
+          return _finalize_and_persist(rec_st, status_str="OK")
+    fail_raw: dict[str, Any] = {
         "status": "FAILED",
         "error": str(e),
-        "hf_to_gcs_s": parsed_step1_s,
-        "hf_to_local_s": 0.0,
-        "convert_to_orbax_s": 0.0,
-        "load_orbax_s": 0.0,
-        "safetensors_and_convert_s": 0.0,
-        "worker_upload_max_s": max(worker_cached_times) if worker_cached_times else 0.0,
-        "num_slices": num_slices,
-        "num_hosts_per_slice": num_hosts_per_slice,
-        "global_devices": num_slices * devices_per_slice,
+        "num_slices": num_slices if is_multislice_phase else 1,
+        "num_hosts_per_slice": num_hosts_per_slice if is_multislice_phase else 1,
+        "global_devices": (num_slices if is_multislice_phase else 1) * devices_per_slice,
     }
-    _write_result_json(result_json, fail_data)
-    _mirror_logs_to_gcs()
-    return fail_data
+    if parsed_step1_s > 0.0:
+      fail_raw["hf_to_gcs_s"] = parsed_step1_s
+    return _finalize_and_persist(fail_raw, status_str="FAILED", err_str=str(e), exit_code=failed_exit_code)
   finally:
     if (
         os.environ.get("STAGE_SPARSE_DEEPSEEK_OOM") == "1"
@@ -2877,8 +3538,7 @@ def invoke_worker_subprocess(
     _mirror_logs_to_gcs()
 
   data = _persist_worker_upload_max_s(result_json, worker_cached_times)
-  _mirror_logs_to_gcs()
-  return data
+  return _finalize_and_persist(data, status_str="OK")
 
 
 def print_summary_table(results: list[dict[str, Any]], csv_path: str) -> None:
@@ -3090,6 +3750,22 @@ def main() -> None:
       default=1,
       help="Number of TPU hosts per slice (e.g., 1 for 2x2x1, 2 for 2x2x2).",
   )
+  parser.add_argument(
+      "--platform",
+      default=os.environ.get("BENCH_PLATFORM", "v7x"),
+      choices=["v5e", "v6e", "v7x"],
+      help="Target TPU platform profile (v5e, v6e, or v7x).",
+  )
+  parser.add_argument(
+      "--slice-topology",
+      default=os.environ.get("BENCH_SLICE_TOPOLOGY", ""),
+      help="Per-slice TPU topology label (e.g., 2x2x1, 2x4, 4x4, 16x16).",
+  )
+  parser.add_argument(
+      "--verify-checksums",
+      action="store_true",
+      help="Compute and compare post-load sample parameter checksums between to_maxtext and safetensors_dynamic.",
+  )
   # Internal worker arguments
   parser.add_argument("--worker-phase", default=None, help=argparse.SUPPRESS)
   parser.add_argument("--model", default=None, help=argparse.SUPPRESS)
@@ -3117,7 +3793,29 @@ def main() -> None:
 
     os.chdir(repo_root)
     exec(SITE_CUSTOMIZE_CONTENT, globals())  # pylint: disable=exec-used
+    harness_v2, _, _, stages = _import_bench_modules()
+    recorder = stages.StageRecorder()
+    start_epoch_s = os.environ.get("BENCH_PROCESS_START_EPOCH", "").strip()
+    if start_epoch_s:
+      try:
+        recorder.record_value(
+            "setup_process_start_to_harness_code_seconds",
+            max(0.0, _ENTER_WALL_EPOCH - float(start_epoch_s)),
+        )
+      except ValueError:
+        pass
+    recorder.record_value("setup_python_imports_seconds", max(0.0, time.perf_counter() - _ENTER_MONO))
+    mon = stages.MonitoringCollector(recorder)
+    sampler = harness_v2.ResourceSampler(recorder, interval_s=0.5)
+    sampler.start()
+    args._recorder = recorder  # pylint: disable=protected-access
+    args._monitoring = mon  # pylint: disable=protected-access
+    args._sampler = sampler  # pylint: disable=protected-access
+
     self_wd = _start_self_oom_watchdog()
+    worker_exit_code = 0
+    worker_failed_stage = ""
+    res: dict[str, Any] | None = None
     try:
       if args.worker_phase == "to_maxtext_step1":
         res = run_worker_to_maxtext_step1_hf_to_gcs(args)
@@ -3129,47 +3827,68 @@ def main() -> None:
         res = run_worker_safetensors_dynamic(args)
       else:
         raise ValueError(f"Unknown worker phase: {args.worker_phase}")
-      self_wd["stop"] = True
-      if self_wd.get("peak_ram_gb", 0.0) > 0:
-        print(
-            f"INFO:watchdog:Worker Peak Host RAM: {self_wd['peak_ram_gb']:.2f}/{self_wd.get('total_ram_gb', 251.69):.2f} GB",
-            flush=True,
-        )
-        res["peak_host_ram_gb"] = round(self_wd["peak_ram_gb"], 2)
-        res["total_host_ram_gb"] = round(self_wd.get("total_ram_gb", 251.69), 2)
-
-      if args.slice_id == 0:
-        _write_result_json(args.result_json, res)
-      else:
-        time.sleep(2.0)
-      sys.stdout.flush()
-      sys.stderr.flush()
-      os._exit(0)
     except Exception:  # pylint: disable=broad-exception-caught
-      self_wd["stop"] = True
+      worker_exit_code = 1
+      worker_failed_stage = recorder.current_stage() or ""
       traceback.print_exc()
+    finally:
+      t_td0 = time.perf_counter()
+      self_wd["stop"] = True
       if self_wd.get("peak_ram_gb", 0.0) > 0:
         print(
             f"INFO:watchdog:Worker Peak Host RAM: {self_wd['peak_ram_gb']:.2f}/{self_wd.get('total_ram_gb', 251.69):.2f} GB",
             flush=True,
         )
+        if res is not None:
+          res["peak_host_ram_gb"] = round(self_wd["peak_ram_gb"], 2)
+          res["total_host_ram_gb"] = round(self_wd.get("total_ram_gb", 251.69), 2)
+      if res is not None:
+        if args.slice_id == 0:
+          _write_result_json(args.result_json, res)
+        else:
+          time.sleep(2.0)
+      mon.unregister()
+      recorder.restore_all()
+      sampler.stop()
+      mem_payload = sampler.memory_payload()
+      mon_snapshot = mon.snapshot()
+      recorder.record_value("teardown_write_results_and_exit_seconds", max(0.0, time.perf_counter() - t_td0))
+      num_hosts_per_slice = max(1, int(getattr(args, "num_hosts_per_slice", 1)))
+      host_payload = {
+          "process_index": int(getattr(args, "slice_id", 0)),
+          "slice_id": int(getattr(args, "slice_id", 0)) // num_hosts_per_slice,
+          "host_name": stages.default_host_name(),
+          "pod_name": os.environ.get("POD_NAME") or os.environ.get("HOSTNAME") or "",
+          "node_name": os.environ.get("NODE_NAME") or "",
+          "failed_stage": worker_failed_stage,
+          "active_stage": "" if worker_exit_code == 0 else (recorder.current_stage() or ""),
+          "monitoring": mon_snapshot,
+          "memory": mem_payload,
+          **recorder.snapshot(),
+      }
+      stages.emit_host_stages_line(host_payload)
       sys.stdout.flush()
       sys.stderr.flush()
-      os._exit(1)
+      os._exit(worker_exit_code)  # pylint: disable=protected-access
 
   run_id = args.run_id or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
   gcs_run_dir = f"{args.gcs_base.rstrip('/')}/run_{run_id}"
   local_work_dir = args.local_work_dir or f"/tmp/benchmark_ckpt_load_time_{run_id}"
   csv_report_path = os.path.abspath(args.csv_report)
+  resolved_topology = _resolve_slice_topology(
+      args.platform, args.slice_topology, args.devices_per_slice, args.num_hosts_per_slice
+  )
 
   print(f"Starting checkpoint load time benchmark (run_id={run_id})")
   print(f"  Repo root    : {repo_root}")
+  print(f"  Platform     : {args.platform} (topology={resolved_topology})")
   print(f"  Models       : {args.models}")
   print(f"  Scan modes   : {args.scan_modes}")
   print(f"  Num slices   : {args.num_slices_list}")
   print(f"  DCN axis     : {args.dcn_parallelism_axis}")
   print(f"  Hardware     : {args.hardware} (resolved: {resolve_hardware(args.hardware)})")
   print(f"  Weight dtype : {args.weight_dtype}")
+  print(f"  Checksums    : {args.verify_checksums}")
   print(f"  GCS run dir  : {gcs_run_dir}")
   print(f"  Local workdir: {local_work_dir}")
   print(f"  CSV report   : {csv_report_path}")
@@ -3195,6 +3914,34 @@ def main() -> None:
 
   all_results: list[dict[str, Any]] = []
 
+  def _skip_result(
+      *,
+      phase_name: str,
+      model_name: str,
+      scan_mode_name: str,
+      slices_count: int,
+      hosts_count: int,
+      reason: str,
+  ) -> dict[str, Any]:
+    s_dir = _phase_scan_dir_name(phase_name, scan_mode_name, slices_count, hosts_count)
+    existing_path = os.path.join(local_work_dir, "logs", model_name, s_dir, f"{phase_name}_result.json")
+    if args.skip_completed and os.path.exists(existing_path):
+      with open(existing_path, "r", encoding="utf-8") as rf_ex:
+        return json.load(rf_ex)
+    return _write_skipped_v2_result(
+        phase=phase_name,
+        model=model_name,
+        scan_mode=scan_mode_name,
+        platform_name=args.platform,
+        slice_topology=resolved_topology,
+        num_slices=slices_count,
+        num_hosts_per_slice=hosts_count,
+        devices_per_slice=args.devices_per_slice,
+        local_work_dir=local_work_dir,
+        gcs_run_dir=gcs_run_dir,
+        skip_reason=reason,
+    )
+
   for model in args.models:
     cold_st_step1_s: float | None = None
     cold_st_worker_s: float = 0.0
@@ -3207,19 +3954,22 @@ def main() -> None:
     skip_to_maxtext = args.skip_to_maxtext or os.environ.get("SKIP_TO_MAXTEXT", "0") == "1"
     for scan_mode in args.scan_modes:
       if skip_to_maxtext:
-        m_step1_by_scan[scan_mode] = {
-            "status": "SKIPPED",
-            "hf_to_gcs_s": 0.0,
-            "hf_to_local_s": 0.0,
-            "worker_upload_max_s": 0.0,
-        }
-        m_step2_by_scan[scan_mode] = {
-            "status": "SKIPPED",
-            "convert_to_orbax_s": 0.0,
-            "init_abstract_model_s": 0.0,
-            "transform_and_shard_s": 0.0,
-            "orbax_save_to_gcs_s": 0.0,
-        }
+        m_step1_by_scan[scan_mode] = _skip_result(
+            phase_name="to_maxtext_step1",
+            model_name=model,
+            scan_mode_name=scan_mode,
+            slices_count=1,
+            hosts_count=1,
+            reason="--skip-to-maxtext",
+        )
+        m_step2_by_scan[scan_mode] = _skip_result(
+            phase_name="to_maxtext_step2",
+            model_name=model,
+            scan_mode_name=scan_mode,
+            slices_count=1,
+            hosts_count=1,
+            reason="--skip-to-maxtext",
+        )
         continue
       m_step1_by_scan[scan_mode] = invoke_worker_subprocess(
           phase="to_maxtext_step1",
@@ -3235,19 +3985,23 @@ def main() -> None:
           skip_completed=args.skip_completed,
           reuse_model_hf_cache=args.reuse_model_hf_cache,
           allow_step_failure=args.allow_step_failure,
+          platform_name=args.platform,
+          slice_topology=resolved_topology,
+          verify_checksums=args.verify_checksums,
       )
       if m_step1_by_scan[scan_mode].get("status") == "FAILED" and args.allow_step_failure:
         print(
             f"[SKIP to_maxtext_step2]: Step 1 failed for {model} ({scan_mode}); skipping Orbax conversion.",
             flush=True,
         )
-        m_step2_by_scan[scan_mode] = {
-            "status": "SKIPPED_DUE_TO_STEP1_FAILURE",
-            "convert_to_orbax_s": 0.0,
-            "init_abstract_model_s": 0.0,
-            "transform_and_shard_s": 0.0,
-            "orbax_save_to_gcs_s": 0.0,
-        }
+        m_step2_by_scan[scan_mode] = _skip_result(
+            phase_name="to_maxtext_step2",
+            model_name=model,
+            scan_mode_name=scan_mode,
+            slices_count=1,
+            hosts_count=1,
+            reason="SKIPPED_DUE_TO_STEP1_FAILURE",
+        )
         continue
       m_step2_by_scan[scan_mode] = invoke_worker_subprocess(
           phase="to_maxtext_step2",
@@ -3264,6 +4018,9 @@ def main() -> None:
           skip_completed=args.skip_completed,
           reuse_model_hf_cache=args.reuse_model_hf_cache,
           allow_step_failure=args.allow_step_failure,
+          platform_name=args.platform,
+          slice_topology=resolved_topology,
+          verify_checksums=args.verify_checksums,
       )
 
     # Clean up staged local HF weights once Step 2 conversions for this model are done
@@ -3282,17 +4039,24 @@ def main() -> None:
         m_step1 = m_step1_by_scan[scan_mode]
         m_step2 = m_step2_by_scan[scan_mode]
         if skip_to_maxtext or args.tm_convert_only or (m_step2.get("status") == "FAILED" and args.allow_step_failure):
+          skip_why = (
+              "--skip-to-maxtext"
+              if skip_to_maxtext
+              else ("--tm-convert-only" if args.tm_convert_only else "SKIPPED_DUE_TO_STEP2_FAILURE")
+          )
           if not skip_to_maxtext and not args.tm_convert_only:
             print(
                 f"[SKIP to_maxtext_step3]: Step 2 failed for {model} ({scan_mode}); skipping Orbax load.",
                 flush=True,
             )
-          m_step3 = {
-              "status": "SKIPPED" if (skip_to_maxtext or args.tm_convert_only) else "SKIPPED_DUE_TO_STEP2_FAILURE",
-              "load_orbax_s": 0.0,
-              "num_slices": num_slices,
-              "global_devices": num_slices * args.devices_per_slice,
-          }
+          m_step3 = _skip_result(
+              phase_name="to_maxtext_step3",
+              model_name=model,
+              scan_mode_name=scan_mode,
+              slices_count=num_slices,
+              hosts_count=args.num_hosts_per_slice,
+              reason=skip_why,
+          )
         else:
           m_step3 = invoke_worker_subprocess(
               phase="to_maxtext_step3",
@@ -3310,6 +4074,9 @@ def main() -> None:
               skip_completed=args.skip_completed,
               reuse_model_hf_cache=args.reuse_model_hf_cache,
               allow_step_failure=args.allow_step_failure,
+              platform_name=args.platform,
+              slice_topology=resolved_topology,
+              verify_checksums=args.verify_checksums,
           )
 
         if (
@@ -3324,18 +4091,23 @@ def main() -> None:
               f"scanned on num_slices={num_slices} already failed with OOM/timeout.",
               flush=True,
           )
-          s_res = dict(s_res_by_key[("scanned", num_slices)])
-          s_res["hf_to_gcs_s"] = 0.0
-          s_res["worker_upload_max_s"] = 0.0
+          s_res = _skip_result(
+              phase_name="safetensors_dynamic",
+              model_name=model,
+              scan_mode_name=scan_mode,
+              slices_count=num_slices,
+              hosts_count=args.num_hosts_per_slice,
+              reason=f"Skipped unscanned because scanned failed on num_slices={num_slices}",
+          )
         elif args.skip_safetensors or args.tm_convert_only:
-          s_res = {
-              "status": "SKIPPED",
-              "hf_to_gcs_s": 0.0,
-              "worker_upload_max_s": 0.0,
-              "safetensors_and_convert_s": 0.0,
-              "num_slices": num_slices,
-              "global_devices": num_slices * args.devices_per_slice,
-          }
+          s_res = _skip_result(
+              phase_name="safetensors_dynamic",
+              model_name=model,
+              scan_mode_name=scan_mode,
+              slices_count=num_slices,
+              hosts_count=args.num_hosts_per_slice,
+              reason="--tm-convert-only" if args.tm_convert_only else "--skip-safetensors",
+          )
         else:
           s_res = invoke_worker_subprocess(
               phase="safetensors_dynamic",
@@ -3353,8 +4125,21 @@ def main() -> None:
               skip_completed=args.skip_completed,
               reuse_model_hf_cache=args.reuse_model_hf_cache,
               allow_step_failure=args.allow_step_failure,
+              platform_name=args.platform,
+              slice_topology=resolved_topology,
+              verify_checksums=args.verify_checksums,
           )
         s_res_by_key[(scan_mode, num_slices)] = s_res
+        _maybe_verify_and_persist_checksums(
+            model=model,
+            scan_mode=scan_mode,
+            num_slices=num_slices,
+            num_hosts_per_slice=args.num_hosts_per_slice,
+            m_step3=m_step3,
+            s_res=s_res,
+            local_work_dir=local_work_dir,
+            gcs_run_dir=gcs_run_dir,
+        )
 
         if s_res.get("worker_upload_max_s", 0.0) > 0.0:
           cold_st_step1_s = s_res.get("hf_to_gcs_s", 0.0)
