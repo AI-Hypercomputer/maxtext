@@ -346,6 +346,7 @@ def update_queue_and_tpu_workers(
         has_queue_worker = True
 
   if pending_ready_tasks and not has_queue_worker and not active_jobsets:
+    _run_cmd(["gcloud", "storage", "rm", "-f", f"{queue_uri}/claims/*.json"], timeout=60)
     nxt = pending_ready_tasks[0]
     topo = str(nxt["topology"])
     slices = int(nxt["slices"])

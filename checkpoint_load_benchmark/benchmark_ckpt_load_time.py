@@ -710,21 +710,21 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
   # tpu7x (1,014.5 GB RAM, 986.7 GB allocatable), a conversion pod was evicted at 944 GB container memory, so a
   # conversion whose state alone does not fit in ~93% of host RAM cannot finish here. Record that instead of running
   # for hours (qwen3-480b-a35b: 960 GB).
-  _, _, host_ram_gb = _read_host_mem_gb()
+  _, avail_ram_gb, host_ram_gb = _read_host_mem_gb()
   ram_ratio, _, _, _ = _platform_runtime_limits(getattr(args, "platform", None))
-  usable_ram_gb = ram_ratio * host_ram_gb
+  usable_ram_gb = min(ram_ratio * host_ram_gb, avail_ram_gb + 20.0)
   if total_gb + 40.0 > usable_ram_gb:
     raise RuntimeError(
         f"to_maxtext conversion of {args.model} holds the whole converted state (~{total_gb:.1f} GB) in host RAM "
-        f"before the Orbax save, but this host has ~{usable_ram_gb:.1f} GB usable ({host_ram_gb:.1f} GB total). "
-        f"Convert on a host with more RAM."
+        f"before the Orbax save, but this host has ~{usable_ram_gb:.1f} GB usable ({host_ram_gb:.1f} GB total, "
+        f"{avail_ram_gb:.1f} GB currently available). Convert on a host with more RAM."
     )
   # Staged shards on /ramdisk live in host RAM. `to_maxtext` then holds the whole converted state in host RAM before
   # the Orbax save (about the checkpoint size again), so stage only when both fit, plus a margin for transients. On
   # tpu7x (944.8 GiB RAM, ~100 GB boot disk), a scanned qwen3-235b-a22b conversion (470 GB) with all shards staged
   # was OOM-killed at leaf 4 of 15.
   if local_hf_dir.startswith("/ramdisk"):
-    stage_budget_gb = free_disk_gb - total_gb - 60.0
+    stage_budget_gb = min(free_disk_gb, avail_ram_gb) - total_gb - 60.0
   else:
     stage_budget_gb = free_disk_gb - 20.0
   if total_gb <= stage_budget_gb:
