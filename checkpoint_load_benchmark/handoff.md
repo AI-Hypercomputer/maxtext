@@ -1,38 +1,45 @@
 # Handoff: Checkpoint Load-Time Benchmark (`v2` Multi-Platform + `tpu7x` Archive)
 
-> **Snapshot:** 2026-11-12 ~06:28 UTC · **Branch:** `docs/checkpoint-load-benchmark` (rebased onto `origin/main` `5b6773c9b`, code bundle uploaded from `82cc1c701`) · **Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit)
+> **Snapshot:** 2026-11-12 ~07:31 UTC · **Branch:** `docs/checkpoint-load-benchmark` (rebased onto `origin/main` `5b6773c9b`, code bundle uploaded from `c64b44244`) · **Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit)
 
 ---
 
 ## Quick-Pickup Guide (For Team Members & Jetski)
 
-1. **Plan & task list:** Read [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) for the full v2 design, 21-model × 3-platform matrix (`352` planned rows), and Phases 1–5 backlog.
+1. **Plan & task list:** Read [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) for the full v2 design, 21-model × 3-platform matrix (`352` planned rows), verified smoke numbers, and remaining Phases `T0.3–T0.6` + `1–5` backlog.
 2. **Rules on this branch:**
    - **Never edit `src/maxtext/`** unless explicitly reviewed/approved; keep benchmark & harness tooling self-contained under `checkpoint_load_benchmark/`.
    - **Pods run only committed code:** Push `docs/checkpoint-load-benchmark`, then run `build_code_tarball.py --out /tmp/code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code` (refuses dirty tracked files or unpushed commits).
    - **Resource prefix `mesa-`:** Name all new Kubernetes JobSets/pods/KSAs/secrets `mesa-*` with label `app: mesa-bench-v2`, and write all v2 GCS outputs under `gs://mesa-maxtext/mesa-bench-v2/`. Leave legacy `mesakh_tpu7x_bench/` untouched.
    - **Never stage unrelated workspace files:** `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md`, and root `benchmark_v2_design_plan.md`.
+   - **Teammate setup on another Cloudtop:** Ask the sheet owner (`mesakh`) for Share access to Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`, run `gcloud container clusters get-credentials` for the three clusters in `bench/platforms.py` (`bodaborg-tpu7x-nap` / `us-central1`, `bodaborg-v6e-nap` / `southamerica-west1`, `v5e-256-bodaborg-europe-west4` / `europe-west4`), and use a Python environment with `pytest`, `pyyaml`, `etils`, and `google-api-core` (`run_smoke.sh` uses `PYTHON_BIN` if set, falling back cleanly).
 3. **Current status (2026-11-12):**
-   - **Done (Phase 0 + S0–S2):** Tarball reproducibility + `CODE_VERSION.json` (`scripts/build_code_tarball.py`), `bootstrap_tpu7x.py` cleanup (no runtime string patches or overlay trees; 16-worker download cap applied at runtime), preflight on v7x/v6e/v5e (created v5e KSA `mesa-bench` with GCS access), `bench/platforms.py` profiles, `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and mandatory TPU backend/device-count verification before every load (`check_tpu_backend`, failing with `failure_category: "NOT-TPU"` on mismatch). Local suite: `57` tests pass (`~/Documents/mesakh/py312/bin/python -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/`).
-   - **Running now (S3 smoke tests, `qwen3-0.6b` scanned & unscanned, both pipelines):**
-     - `v7x` (`2x2x1`, 8 devices): `mesa-smoke-v7x-qwen3-0p6b-smoke-v7x` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/`
-     - `v6e` (`2x4`, 8 devices): `mesa-smoke-v6e-qwen3-0p6b-smoke-v6e` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/`
-     - `v5e` (`16x16`, 64 hosts, 256 devices): `mesa-smoke-v5e-qwen3-0p6b-smoke-v5e` -> `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e/`
-   - **Next tasks:** Verify S3 logs & TPU check JSON fields (`S4`), clean up finished `mesa-smoke-*` JobSets, set up regional buckets (`T0.3`) and `mesa-hf-token` secrets (`T0.4`), then implement Phases 1–4 in [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md).
-4. **Commands to monitor, upload, or launch smoke tests:**
+   - **Done (`Phase 0` + `S0–S4` Smoke Tests):**
+     - Tarball reproducibility + `CODE_VERSION.json` (`scripts/build_code_tarball.py`), `bootstrap_tpu7x.py` cleanup, `bench/platforms.py` profiles, `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and mandatory TPU backend/device-count verification (`check_tpu_backend`, fails with `failure_category: "NOT-TPU"` on mismatch).
+     - Multi-host TPU `SliceBuilder` gRPC fix (`c64b44244`): `init_worker_runtime` automatically sets `--slicebuilder_use_insecure_grpc=true` (`total_procs > 1`) and `--megascale_use_insecure_grpc=true` (`num_slices > 1`) in `LIBTPU_INIT_ARGS` when supported by `libtpu.so` (override with `KEEP_ALTS_GRPC=1`), sets `PYTHONUNBUFFERED=1`, and attributes remote slice aborts accurately. Local suite: `62` tests pass (`pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/`).
+     - **Smoke verification (`qwen3-0.6b` scanned & unscanned, both pipelines) PASSED across all 3 platforms** (all JobSets deleted, `0 FAILED`, TPU checks OK, 12 Tier S rows recorded in Sheet v2):
+       - `v7x` (`2x2x1`, `8` `TPU7x` @ `82cc1c701`): `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/`
+       - `v6e` (`2x4`, `8` `TPU v6 lite` @ `82cc1c701`): `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/`
+       - `v5e` (`16x16`, `64` hosts / `256` `TPU v5 lite` @ `c64b44244`): `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e-r2/`
+   - **Next tasks (Start Here):** Create regional buckets (`T0.3`), create `mesa-hf-token` secrets (`T0.4`), confirm `T0.5–T0.6`, and then implement `Phases 1–4` in [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) before launching Tiers `A -> C -> B`.
+4. **Commands to test, upload bundle, or launch smoke tests:**
    ```bash
+   # Run local unit tests
+   python3 -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/
+
    # Build & upload pushed branch bundle to v2 GCS code dir
-   ~/Documents/mesakh/py312/bin/python checkpoint_load_benchmark/scripts/build_code_tarball.py \
+   python3 checkpoint_load_benchmark/scripts/build_code_tarball.py \
      --out /tmp/mesa_code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code
 
    # Dry-run or apply a smoke JobSet (--platform v7x|v6e|v5e)
-   ./checkpoint_load_benchmark/scripts/run_smoke.sh --platform v6e --topology 2x4 --run-id smoke-v6e [--apply]
+   PYTHON_BIN="$(command -v python3)" ./checkpoint_load_benchmark/scripts/run_smoke.sh \
+     --platform v6e --topology 2x4 --run-id smoke-v6e [--apply]
 
-   # Monitor active smoke runs and inspect GCS results
+   # Monitor active jobs and inspect GCS results
    kubectl --context=gke_cloud-tpu-shared-capacity_us-central1_bodaborg-tpu7x-nap get jobsets,pods -l app=mesa-bench-v2
    kubectl --context=gke_cloud-tpu-shared-capacity_southamerica-west1_bodaborg-v6e-nap get jobsets,pods -l app=mesa-bench-v2
    kubectl --context=gke_tpu-prod-env-multipod_europe-west4_v5e-256-bodaborg-europe-west4 get jobsets,pods -l app=mesa-bench-v2
-   gcloud storage ls -r gs://mesa-maxtext/mesa-bench-v2/smoke/
+   gcloud storage ls -r gs://mesa-maxtext/mesa-bench-v2/
    ```
 
 ---
