@@ -269,8 +269,12 @@ def train_loop(config) -> float:
 
   # Same strings as legacy (`default` / `high` / `highest`); pyconfig hands over a `str` Enum.
   matmul_precision = getattr(config.matmul_precision, "value", config.matmul_precision)
+  raw_preset = str(getattr(config, "sharding_preset", "") or "").strip().lower().replace("-", "_")
+  preset_active = raw_preset not in ("", "default", "default_sharding") or bool(
+      getattr(config, "compound_fsdp_ep", False)
+  )
   with jax.set_mesh(mesh), jax.default_matmul_precision(matmul_precision):
-    model, optimizer = setup_model(config, mesh)
+    model, optimizer = setup_model(config, mesh, sharding=sharding if preset_active else None)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
     tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length

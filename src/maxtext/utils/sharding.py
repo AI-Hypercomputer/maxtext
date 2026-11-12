@@ -476,7 +476,9 @@ def apply_m3_default_named_sharding(
     scan_axis = metadata.get("param_scan_axis")
     rank = len(getattr(a_var.get_value() if hasattr(a_var, "get_value") else a_var, "shape", ()))
     unstacked_rank = rank - (1 if scan_axis is not None and rank >= 1 else 0)
-    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and unstacked_rank == 1:
+    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and (
+        unstacked_rank == 1 or bool(metadata.get("preserve_unsharded", False))
+    ):
       return s_var
     cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
     is_unsharded = (
