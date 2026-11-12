@@ -1361,6 +1361,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
+  moe_tgmm_v2_small_tail_contraction: bool = Field(
+      False,
+      description=(
+          "In the tgmm_v2 kernel (MoE drhs), contract a group's last tile over only "
+          "its rows, rounded up to a multiple of the MXU column size. Same result; "
+          "requires use_tokamax_gmm=true and use_gmm_v2=true (MoE layer gmm path)."
+      ),
+  )
   moe_bwd_prequant_before_unsort: bool = Field(
       False,
       description=(
