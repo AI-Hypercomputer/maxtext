@@ -1421,6 +1421,26 @@ def build_summary_format_requests(
 
 def apply_batches(spreadsheet_id: str, raw_path: str, formulas_path: str, format_path: str = "") -> None:
   """Uploads RAW, USER_ENTERED, and raw-batch formatting updates via `gsheets mutate`."""
+  if format_path and os.path.exists(format_path):
+    subprocess.run(
+        [
+            GSHEETS_BIN,
+            "mutate",
+            "unmerge",
+            spreadsheet_id,
+            "--sheet-id",
+            "300",
+            "--start-row",
+            "1",
+            "--end-row",
+            "2000",
+            "--start-col",
+            "0",
+            "--end-col",
+            "5",
+        ],
+        check=True,
+    )
   subprocess.run(
       [GSHEETS_BIN, "mutate", "batch", spreadsheet_id, "-f", raw_path, "--value-input", "RAW"],
       check=True,
