@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-12 21:37:42 UTC`
+- **Last Updated (UTC):** `2026-11-12 21:50:29 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -14,7 +14,7 @@
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
 | `v7x` | `us-central1` | **21 / 21** | **17 / 61** | `mesa-q-v7x-2x2x1-1s-w5`, `mesa-q-v7x-2x2x1-2s-w3` | `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` |
-| `v6e` | `southamerica-west1` | **21 / 21** | **13 / 53** | `mesa-q-v6e-2x4-2s-w2` | _none_ |
+| `v6e` | `southamerica-west1` | **21 / 21** | **14 / 53** | `mesa-q-v6e-2x4-2s-w2` | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **21 / 22** | _none_ | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
@@ -43,9 +43,11 @@
 
 ## 3. Chronological Event Log (Newest Last)
 
-- [2026-11-12 21:27:25 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
-- [2026-11-12 21:29:45 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 21/22 staged tasks.
-- [2026-11-12 21:29:55 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 52/53 staged tasks.
-- [2026-11-12 21:30:03 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 60/61 staged tasks.
-- [2026-11-12 21:30:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 539 mirrored JSONs.
-- [2026-11-12 21:37:42 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 540 mirrored JSONs.
+- [2026-11-12 21:39:38 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
+- [2026-11-12 21:41:55 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 21/22 staged tasks.
+- [2026-11-12 21:42:05 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 52/53 staged tasks.
+- [2026-11-12 21:42:12 UTC] Launched `v7x` Step 1b conversion job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` for `deepseek4-1600b`.
+- [2026-11-12 21:42:18 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 60/61 staged tasks.
+- [2026-11-12 21:42:46 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 541 mirrored JSONs.
+- [2026-11-12 21:46:42 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 544 mirrored JSONs.
+- [2026-11-12 21:50:29 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 545 mirrored JSONs.
