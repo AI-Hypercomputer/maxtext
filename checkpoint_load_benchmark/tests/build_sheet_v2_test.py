@@ -248,36 +248,29 @@ class BuildSheetV2Test(unittest.TestCase):
 
     ds = build_sheet_v2.build_v2_dataset(v2_roots=[v2_root])
     self.assertEqual(ds.validate(), [])
-    # Full planned v2 matrix must stay exact at 352 rows and group by Model -> Pipeline -> Scan layers -> Platform -> Slices.
+    # Full planned v2 matrix must stay exact at 352 rows and group by Platform -> Model -> Pipeline -> Scan layers -> Slices.
     self.assertEqual(len(ds.summary_rows), 352)
-    qwen06_groups = [
-        (r["pipeline_name"], r["scan_layers_mode"], r["tpu_platform"], r["number_of_slices"])
+    plat_blocks = []
+    for r in ds.summary_rows:
+      if not plat_blocks or plat_blocks[-1] != r["tpu_platform"]:
+        plat_blocks.append(r["tpu_platform"])
+    self.assertEqual(plat_blocks, ["v7x", "v6e", "v5e"])
+    qwen06_v7x_groups = [
+        (r["pipeline_name"], r["scan_layers_mode"], r["number_of_slices"])
         for r in ds.summary_rows
-        if r["model_name"] == "qwen3-0.6b"
+        if r["tpu_platform"] == "v7x" and r["model_name"] == "qwen3-0.6b"
     ]
     self.assertEqual(
-        qwen06_groups,
+        qwen06_v7x_groups,
         [
-            ("to_maxtext", "scanned", "v7x", 1),
-            ("to_maxtext", "scanned", "v7x", 2),
-            ("to_maxtext", "scanned", "v6e", 1),
-            ("to_maxtext", "scanned", "v6e", 2),
-            ("to_maxtext", "scanned", "v5e", 1),
-            ("to_maxtext", "unscanned", "v7x", 1),
-            ("to_maxtext", "unscanned", "v7x", 2),
-            ("to_maxtext", "unscanned", "v6e", 1),
-            ("to_maxtext", "unscanned", "v6e", 2),
-            ("to_maxtext", "unscanned", "v5e", 1),
-            ("safetensors_dynamic", "scanned", "v7x", 1),
-            ("safetensors_dynamic", "scanned", "v7x", 2),
-            ("safetensors_dynamic", "scanned", "v6e", 1),
-            ("safetensors_dynamic", "scanned", "v6e", 2),
-            ("safetensors_dynamic", "scanned", "v5e", 1),
-            ("safetensors_dynamic", "unscanned", "v7x", 1),
-            ("safetensors_dynamic", "unscanned", "v7x", 2),
-            ("safetensors_dynamic", "unscanned", "v6e", 1),
-            ("safetensors_dynamic", "unscanned", "v6e", 2),
-            ("safetensors_dynamic", "unscanned", "v5e", 1),
+            ("to_maxtext", "scanned", 1),
+            ("to_maxtext", "scanned", 2),
+            ("to_maxtext", "unscanned", 1),
+            ("to_maxtext", "unscanned", 2),
+            ("safetensors_dynamic", "scanned", 1),
+            ("safetensors_dynamic", "scanned", 2),
+            ("safetensors_dynamic", "unscanned", 1),
+            ("safetensors_dynamic", "unscanned", 2),
         ],
     )
     fmt_reqs = build_sheet_v2.build_summary_format_requests(ds.summary_rows)["requests"]

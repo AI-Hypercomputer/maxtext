@@ -76,11 +76,11 @@ def _c(  # pylint: disable=too-many-positional-arguments
 
 
 SUMMARY_COLUMNS: tuple[ColumnSpec, ...] = (
+    _c("TPU platform", "tpu_platform", "c", "identity", "TPU generation: v5e, v6e or v7x.", "Platform profile"),
     _c("Model", "model_name", "t", "identity", "MaxText model name.", "Run config"),
     _c("Model tier", "model_test_tier", "c", "identity", "Model tier: S, A, B or C.", "Models tab"),
     _c("Pipeline (to_maxtext or safetensors_dynamic)", "pipeline_name", "t", "identity", "Pipeline.", "Run config"),
     _c("Scan layers (scanned or unscanned)", "scan_layers_mode", "c", "identity", "Scan mode.", "Run config"),
-    _c("TPU platform", "tpu_platform", "c", "identity", "TPU generation: v5e, v6e or v7x.", "Platform profile"),
     _c("Number of slices", "number_of_slices", "n", "identity", "TPU slices used.", "Run config"),
     _c("Slice topology", "slice_topology", "c", "identity", "Topology per slice.", "Run config"),
     _c("Hosts per slice", "hosts_per_slice", "n", "identity", "Hosts in each slice.", "Platform profile"),

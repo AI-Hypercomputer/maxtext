@@ -559,10 +559,10 @@ def _build_v2_matrix_rows(
   planned = list(schema_v2.iter_planned_matrix(models_cfg))
   planned.sort(
       key=lambda item: (
+          _PLAT_SORT_ORDER.get(item["platform"], 99),
           model_order.get(item["model_name"], 999),
           _PIPE_SORT_ORDER.get(item["pipeline"], 99),
           0 if item["scan_mode"] == "scanned" else 1,
-          _PLAT_SORT_ORDER.get(item["platform"], 99),
           item["slices"],
           item["topology"],
       )
@@ -1022,11 +1022,11 @@ def _merge_v2_and_legacy_summary_rows(
     topo = str(row.get("slice_topology") or "")
     model_order_idx = models_by_name.get(m_name, {}).get("_idx", 999)
     return (
+        _PLAT_SORT_ORDER.get(plat, 99),
         model_order_idx,
         m_name if model_order_idx == 999 else "",
         _PIPE_SORT_ORDER.get(pipe, 99),
         0 if scan == "scanned" else 1,
-        _PLAT_SORT_ORDER.get(plat, 99),
         slices,
         topo,
         str(row.get("row_id") or ""),
@@ -1316,31 +1316,26 @@ def build_summary_format_requests(
                       "startRowIndex": 1,
                       "endRowIndex": end_row,
                       "startColumnIndex": 0,
-                      "endColumnIndex": 1,
+                      "endColumnIndex": 2,
                   },
                   "cell": {
                       "userEnteredFormat": {
                           "verticalAlignment": "MIDDLE",
-                          "horizontalAlignment": "LEFT",
                           "textFormat": {"bold": True},
                       }
                   },
-                  "fields": (
-                      "userEnteredFormat.verticalAlignment,"
-                      "userEnteredFormat.horizontalAlignment,"
-                      "userEnteredFormat.textFormat.bold"
-                  ),
+                  "fields": "userEnteredFormat.verticalAlignment,userEnteredFormat.textFormat.bold",
               }
           },
       ]
   )
 
   group_specs = (
-      (0, ("model_name",)),
-      (1, ("model_name", "model_test_tier")),
-      (2, ("model_name", "pipeline_name")),
-      (3, ("model_name", "pipeline_name", "scan_layers_mode")),
-      (4, ("model_name", "pipeline_name", "scan_layers_mode", "tpu_platform")),
+      (0, ("tpu_platform",)),
+      (1, ("tpu_platform", "model_name")),
+      (2, ("tpu_platform", "model_name", "model_test_tier")),
+      (3, ("tpu_platform", "model_name", "pipeline_name")),
+      (4, ("tpu_platform", "model_name", "pipeline_name", "scan_layers_mode")),
   )
   for col_idx, key_fields in group_specs:
     run_start = 0
@@ -1363,7 +1358,7 @@ def build_summary_format_requests(
                   }
               }
           )
-        if idx < len(summary_rows):
+        if idx < len(summary_rows) and cur_key is not None:
           if col_idx == 0:
             requests.append(
                 {
@@ -1376,13 +1371,13 @@ def build_summary_format_requests(
                             "endColumnIndex": total_cols,
                         },
                         "bottom": {
-                            "style": "SOLID_MEDIUM",
-                            "color": {"red": 0.45, "green": 0.45, "blue": 0.45},
+                            "style": "SOLID_THICK",
+                            "color": {"red": 0.25, "green": 0.25, "blue": 0.25},
                         },
                     }
                 }
             )
-          elif col_idx == 2 and cur_key[0] == prev_key[0]:
+          elif col_idx == 1 and cur_key[0] == prev_key[0]:
             requests.append(
                 {
                     "updateBorders": {
@@ -1390,7 +1385,25 @@ def build_summary_format_requests(
                             "sheetId": sheet_id,
                             "startRowIndex": 1 + idx - 1,
                             "endRowIndex": 1 + idx,
-                            "startColumnIndex": 2,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": total_cols,
+                        },
+                        "bottom": {
+                            "style": "SOLID_MEDIUM",
+                            "color": {"red": 0.45, "green": 0.45, "blue": 0.45},
+                        },
+                    }
+                }
+            )
+          elif col_idx == 3 and cur_key[:2] == prev_key[:2]:
+            requests.append(
+                {
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1 + idx - 1,
+                            "endRowIndex": 1 + idx,
+                            "startColumnIndex": 3,
                             "endColumnIndex": total_cols,
                         },
                         "bottom": {
