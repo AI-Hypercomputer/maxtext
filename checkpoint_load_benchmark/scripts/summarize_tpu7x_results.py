@@ -31,8 +31,9 @@ Columns: `TM` = to_maxtext (S1 HF->GCS, S2 CPU conversion to Orbax, S3 Orbax loa
 S1/S2 run once per scan mode on 1 slice and are shared by the 2-slice S3 load.
 
 Cell legend: a time = completed; `⏳` = no result yet; `❌ killed (-9)` = the worker got SIGKILL,
-which is either a host OOM kill or the PHASE_TIMEOUT_S watchdog (the harness labels both
-"OOMKilled", so check the log for `[TIMEOUT_WATCHDOG]`); `❌ HBM OOM` = RESOURCE_EXHAUSTED on TPU;
+which is either a host OOM kill or the PHASE_TIMEOUT_S watchdog (the harness records a watchdog
+kill as "TIMEOUT" in `error`; records written before that label existed say "OOMKilled" for both,
+so check their log for `[TIMEOUT_WATCHDOG]`); `❌ HBM OOM` = RESOURCE_EXHAUSTED on TPU;
 `❌ exit N` = any other failure.
 """
 

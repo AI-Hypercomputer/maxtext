@@ -30,7 +30,8 @@ Supported Environment Variables:
     `status == "FAILED"`; by default those are re-run
   - `SHARED_HF_CACHE_BASE_DIR`: Reuse an existing shared GCS `hf_cache` directory (e.g., when comparing `origin/main` vs. PRs)
   - `REUSE_SHARED_ST_GCS_CACHE=1`: Copy `.safetensors` shards directly from the `safetensors_dynamic` GCS cache in `to_maxtext` Step 1
-  - `PHASE_TIMEOUT_S`: Optional per-phase wall-clock timeout in seconds (e.g., `360` to capture multi-host hangs on `origin/main`)
+  - `PHASE_TIMEOUT_S`: Per-phase wall-clock timeout in seconds, default `14400` (e.g., `360` to capture multi-host
+    hangs on `origin/main`)
   - `STAGE_SPARSE_DEEPSEEK_OOM=1`: Stage sparse BF16 `.safetensors` headers on local disk for ultra-large DeepSeek models
 
 Usage Examples:
