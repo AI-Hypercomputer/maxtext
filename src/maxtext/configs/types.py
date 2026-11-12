@@ -3440,6 +3440,12 @@ class Optimizer(BaseModel):
       description="Tie the params to each micro-batch inside the gradient accumulation scan, so XLA can't hoist"
       " loop-invariant work on them (FSDP all-gathers, casts) out of the loop and keep it live across micro-batches.",
   )
+  ga_accumulate_fp32: bool = Field(
+      False,
+      description="Under gradient accumulation, cast each micro-batch's gradient to float32 before its sharding"
+      " constraint (the data-parallel reduction) and accumulate in float32, instead of in the parameters' compute"
+      " dtype (bf16 under Zero-1 + GA).",
+  )
   gradient_clipping_threshold: NonNegativeFloat = Field(
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
   )

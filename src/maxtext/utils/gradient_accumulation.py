@@ -151,6 +151,10 @@ def gradient_accumulation_loss_and_grad(
   # token capacity, so the cotangents carry the GA=1 magnitude, and fold S back into the final division below.
   # The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
   use_tunix_ga = getattr(config, "use_tunix_gradient_accumulation", False)
+  accumulate_fp32 = getattr(config, "ga_accumulate_fp32", False)
+
+  def _to_fp32(x):
+    return x.astype(jnp.float32) if jnp.issubdtype(x.dtype, jnp.floating) else x
   token_capacity = getattr(config, "global_batch_size_to_train_on", 0) * getattr(config, "max_target_length", 0)
   loss_scale = 1.0 / float(token_capacity) if (token_capacity > 0 and not use_tunix_ga) else 1.0
 
@@ -203,6 +207,12 @@ def gradient_accumulation_loss_and_grad(
       )
       with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
+    if accumulate_fp32:
+      # Cast before the sharding constraint, so the data-parallel reduction and the running sum are float32 (as the
+      # gradient of a float32 parameter is at GA 1), not the compute dtype of ga_params.
+      cur_batch_gradient = jax.tree.map(
+          _maybe_shard_with_name, jax.tree.map(_to_fp32, cur_batch_gradient), grad_shardings
+      )
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
@@ -222,6 +232,8 @@ def gradient_accumulation_loss_and_grad(
 
   data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
   init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
+  if accumulate_fp32:
+    init_grad = jax.tree.map(_to_fp32, init_grad)
   init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
       "loss": 0.0,  # accumulates xent_sum across microbatches

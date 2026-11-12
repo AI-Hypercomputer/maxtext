@@ -1295,6 +1295,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 ga_params_loop_barrier: false # stop XLA hoisting loop-invariant work on the params (all-gathers, casts) out of the GA loop
+ga_accumulate_fp32: false # reduce and accumulate the micro-batch gradients in float32 (Zero-1 + GA otherwise sums them in bf16)
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 
