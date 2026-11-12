@@ -4100,6 +4100,8 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             gmm_v2_tail_chunks=self.config.moe_gmm_v2_tail_chunks,
+            tgmm_v2_deep_buffering=self.config.moe_tgmm_v2_deep_buffering,
+            tgmm_v2_small_tail_contraction=self.config.moe_tgmm_v2_small_tail_contraction,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
             return_lhs=return_lhs,
