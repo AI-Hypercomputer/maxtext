@@ -8,12 +8,11 @@ global batch ≈4M tokens, peak LR 3e-4 cosine to 0.1×, 2k warmup, β=(0.9, 0.9
 
 ## Scripts
 
-| Script                   | Purpose                                                                                                                                                              |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `run_olmo3_7b_stage1.sh` | Direct host launcher. Used by the XPK wrapper inside the runner image; also usable standalone for single-host smoke tests.                                           |
-| `xpk_olmo3_7b_stage1.sh` | XPK wrapper for multi-host TPU clusters. Modes: `submit` / `monitor` / `resume_until_done` (deletes + resubmits on Kueue preemption until a target step is reached). |
+| Script                   | Purpose                                                                                                    |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `run_olmo3_7b_stage1.sh` | Direct host launcher for Cluster Toolkit (`gcluster job submit`) and standalone single-host smoke tests. |
 
-Both scripts are env-var driven. Header comments in each enumerate required vs. optional env.
+Header comments in `run_olmo3_7b_stage1.sh` enumerate required vs. optional env.
 
 ## Quick start (multi-host TPU via Cluster Toolkit)
 
@@ -82,39 +81,6 @@ STEPS=50 WARMUP_STEPS=10 CHECKPOINT_PERIOD=50 \
 bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh
 ```
 
-## Legacy quick start (multi-host TPU via XPK)
-
-> **Note:** XPK is deprecated. Use the [Cluster Toolkit quick start](#quick-start-multi-host-tpu-via-cluster-toolkit)
-> above for all new deployments. The XPK wrapper (`xpk_olmo3_7b_stage1.sh`) is kept only for
-> existing XPK environments and may be removed in a future release.
-
-```bash
-source ~/.hf_token.sh
-
-export XPK_CLUSTER=<CLUSTER_NAME>
-export XPK_PROJECT=<PROJECT_ID>
-export XPK_ZONE=<ZONE>
-export GCS_BUCKET=<GCS_BUCKET>
-export XPK_DEVICE_TYPE=tpu7x-4x8x8       # or tpu7x-4x4x4 for a smoke run
-export XPK_TOTAL_DEVICES=512             # set to match device-type * 2 (Ironwood has 2 JAX devices/chip)
-export XPK_BASE_OUTPUT_DIR=gs://${GCS_BUCKET?}/olmo/runs
-export XPK_RUN_NAME=olmo3_7b_stage1
-
-export OLMO_INDEX_PATH=/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json
-export OLMO_GCS_BASE=gs://${GCS_BUCKET?}/
-export LOAD_PARAMETERS_PATH=gs://${GCS_BUCKET?}/olmo/checkpoints/stage1-step0/0/items
-
-bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
-bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh monitor
-# Drive the full pretrain (auto-resubmits on preemption):
-STEPS_OVERRIDE=1414078 \
-  bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh resume_until_done
-```
-
-`STEPS=1414078` (= 5.928T tokens at 512 × 8192/step) matches AI2's stage-1
-horizon. The wrapper passes `LIBTPU_INIT_ARGS` (Ironwood XLA flags) and the
-full MaxText perf flag set automatically — no manual override needed.
-
 ## Prerequisites
 
 **Tokenized data corpus.** AI2 maintains the OLMo-mix manifests in
@@ -136,7 +102,7 @@ mirror them into your own GCS bucket with
 **Data index.** Once the corpus is mirrored, build the index with
 [`tools/data_generation/build_olmo_npy_index.py`](../../../../../../tools/data_generation/build_olmo_npy_index.py)
 against the same manifest + sequence length, then upload the resulting JSON
-to GCS. Mount your bucket read-only inside the pod using `--mount="gs://${GCS_BUCKET?};/tmp/olmo-data;ro"` with `MOUNT_GCSFUSE=0` when submitting via `gcluster job submit` (since non-Pathways `gcluster` containers run unprivileged and use the GKE GCS FUSE CSI driver), or via `MOUNT_GCSFUSE=1` in the legacy XPK wrapper.
+to GCS. Mount your bucket read-only inside the pod using `--mount="gs://${GCS_BUCKET?};/tmp/olmo-data;ro"` with `MOUNT_GCSFUSE=0` when submitting via `gcluster job submit` (since non-Pathways `gcluster` containers run unprivileged and use the GKE GCS FUSE CSI driver).
 
 See [`docs/guides/data_input_pipeline/olmo_grain.md`](../../../../../../docs/guides/data_input_pipeline/olmo_grain.md)
 for the full data-pipeline reference.
@@ -173,13 +139,11 @@ same procedure works for any of them — just swap the `--revision` flag.
    gcloud storage cp -r <OUTPUT>/0/items gs://${GCS_BUCKET?}/olmo/checkpoints/stage1-step0/0/items
    ```
 
-3. Point the launcher at it via `LOAD_PARAMETERS_PATH` when submitting with `gcluster job submit` (or `xpk_olmo3_7b_stage1.sh` for legacy XPK):
+3. Point the launcher at it via `LOAD_PARAMETERS_PATH` when submitting with `gcluster job submit`:
 
    ```bash
    export LOAD_PARAMETERS_PATH=gs://${GCS_BUCKET?}/olmo/checkpoints/stage1-step0/0/items
    # Then submit via Cluster Toolkit (see "Quick start (multi-host TPU via Cluster Toolkit)" above)
-   # Or for legacy XPK:
-   # bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
    ```
 
    AI2's published checkpoints are parameters only — Adam state is freshly
@@ -198,8 +162,7 @@ tracks the AI2-init curve within data-shuffle noise).
 
 ```bash
 unset LOAD_PARAMETERS_PATH
-# Submit via Cluster Toolkit without LOAD_PARAMETERS_PATH, or for legacy XPK:
-# bash src/maxtext/trainers/pre_train/scripts/olmo/xpk_olmo3_7b_stage1.sh submit
+# Submit via Cluster Toolkit without LOAD_PARAMETERS_PATH
 ```
 
 **Runner image** (multi-host GKE). Build + push once:
@@ -211,24 +174,15 @@ sudo bash src/dependencies/scripts/docker_upload_runner.sh \
   CLOUD_IMAGE_NAME=maxtext-olmo3 PROJECT=${PROJECT_ID?}
 ```
 
-Use `gcr.io/${PROJECT_ID?}/maxtext-olmo3:latest` as `DOCKER_IMAGE` for Cluster Toolkit (or override `XPK_DOCKER_IMAGE` for legacy XPK, which defaults to `gcr.io/${XPK_PROJECT?}/maxtext-olmo3:latest`).
+Use `gcr.io/${PROJECT_ID?}/maxtext-olmo3:latest` as `DOCKER_IMAGE` for Cluster Toolkit.
 
 ## Resume
 
-Keep `RUN_NAME` and `BASE_OUTPUT_DIRECTORY` (or `XPK_RUN_NAME` and `XPK_BASE_OUTPUT_DIR` for legacy XPK) stable across submissions.
+Keep `RUN_NAME` and `BASE_OUTPUT_DIRECTORY` stable across submissions.
 Orbax picks up the latest checkpoint under `${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/checkpoints/`;
 the OLMo grain sampler resumes its data position via stateless
 `initial_step = step × per-host-batch` (no Grain-iterator-state in the
 checkpoint).
-
-`resume_until_done` polls the latest checkpoint step, resubmits a fresh
-workload on preemption, and exits when checkpoint step ≥ `STEPS_OVERRIDE` or
-after `MAX_RETRIES` failed attempts. Tune for preemption-prone clusters:
-
-| Env var                 | Default | Use                                                       |
-| ----------------------- | ------- | --------------------------------------------------------- |
-| `MAX_RETRIES`           | 10      | Cap on resubmit attempts before giving up.                |
-| `RETRY_BACKOFF_SECONDS` | 300     | Sleep between resubmits. Bump if Kueue admission is slow. |
 
 ## Loss-overlay validation
 
