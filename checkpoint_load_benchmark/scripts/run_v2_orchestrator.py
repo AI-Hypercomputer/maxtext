@@ -169,19 +169,26 @@ def manage_cpu_jobs(
       status = item.get("status", {})
       succeeded = int(status.get("succeeded") or 0)
       failed = int(status.get("failed") or 0)
-      if succeeded >= 1 or failed >= 2:
-        _run_cmd(["kubectl", f"--context={ctx}", "delete", "job", jname, "--ignore-not-found=true"])
-        state_lbl = "Completed" if succeeded >= 1 else "Failed"
-        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` {state_lbl} and cleaned up.")
-        continue
-      active_job_names.append(jname)
+      matched_model = ""
       for m in cfg["models"]:
         m_slug = manifests_v2.dns_slug(m["model_name"])
         if f"-{m_slug}-" in jname:
-          if jname.startswith("mesa-step1-"):
-            active_models_s1.add(m["model_name"])
-          elif jname.startswith(("mesa-copy-", "mesa-step1b-")):
-            active_models_s1b.add(m["model_name"])
+          matched_model = m["model_name"]
+          break
+      already_done = (jname.startswith("mesa-step1-") and matched_model in done_s1) or (
+          jname.startswith(("mesa-copy-", "mesa-step1b-")) and matched_model in done_s1b
+      )
+      if succeeded >= 1 or failed >= 1 or already_done:
+        _run_cmd(["kubectl", f"--context={ctx}", "delete", "job", jname, "--ignore-not-found=true"])
+        state_lbl = "Completed" if (succeeded >= 1 or already_done) else "Failed"
+        events.append(f"[{utc_now_str()}] `{platform}` CPU job `{jname}` {state_lbl} and cleaned up.")
+        continue
+      active_job_names.append(jname)
+      if matched_model:
+        if jname.startswith("mesa-step1-"):
+          active_models_s1.add(matched_model)
+        elif jname.startswith(("mesa-copy-", "mesa-step1b-")):
+          active_models_s1b.add(matched_model)
 
   max_cpu = MAX_CPU_JOBS_BY_PLATFORM.get(platform, 3)
   models_for_plat = [m for m in cfg["models"] if platform in m.get("topologies_by_platform", {})]
@@ -196,6 +203,7 @@ def manage_cpu_jobs(
           platform=platform,
           model_name=m_name,
           run_id=f"v2-s1-{platform}",
+          clean_target=True,
       )
       if apply_k8s_manifests(ctx, [job]):
         jname = job["metadata"]["name"]
@@ -212,6 +220,7 @@ def manage_cpu_jobs(
             model_name=m_name,
             source_gcs_dir=team_buckets[m_name],
             run_id=f"v2-cp-{platform}",
+            clean_target=True,
             bf16_source="copied_from_maxtext_team_bucket",
         )
         if apply_k8s_manifests(ctx, [job]):
@@ -223,6 +232,7 @@ def manage_cpu_jobs(
         docs = manifests_v2.build_deepseek_step1b_manifests(
             model_name=m_name,
             run_id="v2-s1b-v7x",
+            clean_target=True,
         )
         if apply_k8s_manifests(ctx, docs):
           jname = docs[1]["metadata"]["name"]
@@ -237,6 +247,7 @@ def manage_cpu_jobs(
             model_name=m_name,
             source_gcs_dir=src_bf16,
             run_id=f"v2-cp-{platform}",
+            clean_target=True,
             bf16_source="converted_by_this_benchmark",
         )
         if apply_k8s_manifests(ctx, [job]):
