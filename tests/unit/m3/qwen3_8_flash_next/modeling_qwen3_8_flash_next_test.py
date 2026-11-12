@@ -37,6 +37,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
 from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
+from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=no-name-in-module
 from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
 import numpy as np
@@ -72,13 +73,21 @@ def _assert_allclose_to_scale(actual: Any, desired: Any, rtol: float = 1e-4, ato
   np.testing.assert_allclose(np.asarray(actual), desired, rtol=rtol, atol=atol_scale * float(np.abs(desired).max()))
 
 
+class _SingleDeviceMeshTestCase(absltest.TestCase):
+  """Enters a 1-device m3 mesh so `param_metadata`-annotated modules place parameters eagerly."""
+
+  def setUp(self):
+    super().setUp()
+    self.enter_context(jax.set_mesh(m3_sharding.create_mesh(devices=jax.devices()[:1])))
+
+
 # =================================================================================================
 # Hyper-connection and normalization layers
 # =================================================================================================
 
 
 @pytest.mark.cpu_only
-class Qwen3_8HyperConnectionTest(absltest.TestCase):
+class Qwen3_8HyperConnectionTest(_SingleDeviceMeshTestCase):
   """Validates Qwen3.8 hyper-connection primitives against PyTorch reference."""
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
@@ -253,7 +262,7 @@ class Qwen3_8HyperConnectionTest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8GDNTest(absltest.TestCase):
+class Qwen3_8GDNTest(_SingleDeviceMeshTestCase):
   """Tests Qwen3.8 GDN layer and recurrence kernels against PyTorch reference."""
 
   def test_qwen3_8_gdn_parameter_tree_contract(self):
@@ -537,7 +546,7 @@ class Qwen3_8GDNTest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8GDNNumericsTest(absltest.TestCase):
+class Qwen3_8GDNNumericsTest(_SingleDeviceMeshTestCase):
   """Validates numerical stability and PyTorch parity at long sequences."""
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
@@ -721,7 +730,7 @@ def _copy_weights(pt: Any, jx: modeling_qwen3_8_flash_next.Qwen3_8SparseAttentio
 
 
 @pytest.mark.cpu_only
-class Qwen3_8QSAAttentionTest(absltest.TestCase):
+class Qwen3_8QSAAttentionTest(_SingleDeviceMeshTestCase):
   """Tests QSA attention, indexer, and mRoPE against PyTorch reference."""
 
   def _make_jax_qsa(
@@ -1601,7 +1610,7 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8MoETest(absltest.TestCase):
+class Qwen3_8MoETest(_SingleDeviceMeshTestCase):
 
   def _make_moe(self, **kwargs) -> modeling_qwen3_8_flash_next.Qwen3_8SparseMoeBlock:
     """Helper to instantiate Qwen3_8SparseMoeBlock with test defaults."""
@@ -1709,18 +1718,20 @@ class Qwen3_8MoETest(absltest.TestCase):
       np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-4, atol=1e-4)
 
     # Outside a mesh, direct init without sharding/executor keeps the unsharded ragged_dot default.
-    unsharded = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(0)
-    )
-    self.assertEqual(unsharded.executor.kind, "ragged_dot")
+    with jax.sharding.set_mesh(None), m3_sharding.allow_unsharded_construction():
+      unsharded = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+          num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(0)
+      )
+      self.assertEqual(unsharded.executor.kind, "ragged_dot")
 
   def test_experts_shard_map_matches_reference_forward_on_cpu_mesh(self):
     if len(jax.devices()) < 4:
       self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
     n, d, m, e, k = 16, 32, 16, 12, 2
-    experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(7)
-    )
+    with jax.sharding.set_mesh(None), m3_sharding.allow_unsharded_construction():
+      experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+          num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(7)
+      )
     x = jax.random.normal(jax.random.key(11), (n, d))
     top_k_idx = jax.random.randint(jax.random.key(12), (n, k), 0, e)
     top_k_w = jax.random.uniform(jax.random.key(13), (n, k))
@@ -1884,7 +1895,7 @@ class Qwen3_8MoETest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8PLETest(absltest.TestCase):
+class Qwen3_8PLETest(_SingleDeviceMeshTestCase):
 
   def test_splitmix64_known_vectors(self):
     multipliers, moduli, table_offsets, padded_vocab_size = modeling_qwen3_8_flash_next.compute_ple_buffers(
@@ -2209,7 +2220,7 @@ def _make_matching_hf_config(c) -> Any:
 
 
 @pytest.mark.cpu_only
-class Qwen3_8BackboneTest(absltest.TestCase):
+class Qwen3_8BackboneTest(_SingleDeviceMeshTestCase):
   """Backbone tests for scanned/unscanned parity and PyTorch reference match."""
 
   def test_scanned_vs_unscanned_parity_2_cycles(self):
@@ -2529,7 +2540,7 @@ def _copy_layer_and_mixer_weights(pt_layer, pt_mixer, jx_layer, jx_mixer):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8MTPLossTest(absltest.TestCase):
+class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
 
   def test_mtp_block_shapes_and_parity(self):
     cfg = _create_mini_config()
