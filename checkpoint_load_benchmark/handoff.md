@@ -48,7 +48,7 @@
 | `scripts/tpu7x_task_queue.py`, `scripts/tpu7x_daemon_controller.py`, `configs/p1_completion_tasks.json`, `configs/p3_tasks.json`, `scripts/run_tpu7x_multihost.sh` | P1 completion queue (`queue/p1/`), P3 fixes queue (`queue/p3/`), and multi-host JobSet launcher (`2x2x2`, `2x2x4`, `2x4x4`) |
 | `scripts/summarize_tpu7x_results.py` | Status matrix from per-phase result JSONs |
 | `scripts/build_tpu7x_tables.py`, `scripts/build_tpu7x_sheet_table.py` | Summary CSV; the 11-column row-by-row tables for the Google Sheet tabs (`--suite p1`: >200B models plus multi-host rows; `--suite p2`: models up to 120B; includes `LOG_URLS` mapping to `gpaste` URLs and not-run explanations) |
-| `src/maxtext/checkpoint_conversion/{load_dynamic.py,utils/tensor_handling.py,utils/utils.py}` | Production fixes on this branch: single-leaf composite build (U-1, `1dd7ba3a9`), pairwise slice concatenation (U-6, `1dd7ba3a9`), and `MAXTEXT_ORBAX_SAVE_CONCURRENT_GB` cap + `hf_state` release before Orbax save (U-8, `27dec98be`) |
+| `src/maxtext/checkpoint_conversion/utils/{load_dynamic.py,tensor_handling.py,utils.py}` | Production fixes on this branch: single-leaf composite build (U-1, `1dd7ba3a9`), pairwise slice concatenation (U-6, `1dd7ba3a9`), and `MAXTEXT_ORBAX_SAVE_CONCURRENT_GB` cap + `hf_state` release before Orbax save (U-8, `27dec98be`) |
 | `patches/hbmfix.patch`, `patches/hbmfix/src/...` | Earlier intermediate HBM-peak patch (§7.6, superseded by `1dd7ba3a9` in `src/`) |
 | Not committed: `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md` | Unrelated to this work (never stage) |
 
