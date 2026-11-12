@@ -70,7 +70,11 @@ class LegacyV1Dataset:
     tab_pairs = (
         ("Summary", self.summary_rows, schema_v2.SUMMARY_COLUMNS),
         ("Step 1 downloads", self.step1_rows, schema_v2.STEP1_COLUMNS),
-        ("Stages: safetensors_dynamic", self.stages_sd_rows, schema_v2.STAGES_SD_COLUMNS),
+        (
+            "Stages: safetensors_dynamic",
+            self.stages_sd_rows,
+            schema_v2.STAGES_SD_COLUMNS,
+        ),
         ("Stages: to_maxtext", self.stages_tm_rows, schema_v2.STAGES_TM_COLUMNS),
         ("Runs", self.runs_rows, schema_v2.RUNS_COLUMNS),
     )
@@ -144,7 +148,13 @@ def classify_v1_failure(rec: Mapping[str, Any] | None, log_path: str = "") -> tu
       or exit_code in (-9, 137)
   ):
     return "OOM-HOST", "OOM-HOST", reason, exit_code, signal
-  return "ERROR", "ERROR", reason or (err.splitlines()[0] if err else "failed"), exit_code, signal
+  return (
+      "ERROR",
+      "ERROR",
+      reason or (err.splitlines()[0] if err else "failed"),
+      exit_code,
+      signal,
+  )
 
 
 def _empty_row(columns: Sequence[schema_v2.ColumnSpec]) -> dict[str, Any]:
@@ -193,7 +203,7 @@ def _checkpoint_fields(model_info: Mapping[str, Any] | None, is_synthetic: bool)
   }
 
 
-def _make_v1_row_id(
+def _make_v1_row_id(  # pylint: disable=too-many-positional-arguments
     model_name: str,
     scan_mode: str,
     pipeline: str,
@@ -215,6 +225,7 @@ def _v1_environment_common(
     experiment_name: str,
 ) -> dict[str, Any]:
   """Returns baseline v1 TPU v7x environment fields for `Runs` rows."""
+  del model_name
   devices_per_slice = 8 * hosts_per_slice
   total_hosts = num_slices * hosts_per_slice
   total_devices = num_slices * devices_per_slice
@@ -280,7 +291,12 @@ def adapt_single_v1_phase_json(
   row = _empty_row(schema_v2.RUNS_COLUMNS)
   row.update(
       _v1_environment_common(
-          model_name, num_slices, hosts_per_slice, topology, run_id=run_id, experiment_name=experiment_name
+          model_name,
+          num_slices,
+          hosts_per_slice,
+          topology,
+          run_id=run_id,
+          experiment_name=experiment_name,
       )
   )
   row.update(_checkpoint_fields(models.get(model_name), is_synthetic))
@@ -293,6 +309,8 @@ def adapt_single_v1_phase_json(
   row["result_json_url"] = result_path
   if os.path.exists(log_path):
     row["step3_or_load_log_url"] = log_path
+    row["_local_log_files"] = [log_path]
+  row["_local_json_path"] = result_path
 
   if rec.get("status") == "FAILED":
     sheet_status, fail_cat, err_sum, exit_code, sig = classify_v1_failure(rec, log_path)
@@ -449,7 +467,10 @@ def _make_tm_stage_row(
 def _lookup_log_url(model: str, scan: str, n: int, global_devices: int, pipeline_label: str) -> str:
   """Looks up known gpaste/log URL for a v1 configuration."""
   raw = bsh._log_url(model, scan, f"{n} ({global_devices})", pipeline_label)  # pylint: disable=protected-access
-  return "" if raw == "—" else raw
+  if raw == "—" or not raw:
+    return ""
+  m_url = re.search(r"https://paste\.googleplex\.com/\d+", str(raw))
+  return m_url.group(0) if m_url else ""
 
 
 def _build_single_host_pair(
@@ -539,6 +560,7 @@ def _build_single_host_pair(
             "speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic": 1.0,
             "speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2": 1.0,
             "memory_peak_host_ram_container_gb": _round_opt((tm3 or {}).get("peak_host_ram_gb")),
+            "log_url": _lookup_log_url(model, scan, n, int(summary_base["global_devices"]), "to_maxtext"),
             "note": _V1_CAVEAT_NOTE,
         }
     )
@@ -566,6 +588,7 @@ def _build_single_host_pair(
             "note": f"{err_sum}; {_V1_CAVEAT_NOTE}",
         }
     )
+  tm_row["_local_log_files"] = [p for p in (tm1_log, tm2_log, tm3_log) if p and os.path.exists(p)]
   summary_out.append(tm_row)
   stages_tm_out.append(
       _make_tm_stage_row(
@@ -607,6 +630,7 @@ def _build_single_host_pair(
             "total_without_hf_download_seconds": round(st_s2, 2),
             "total_end_to_end_seconds": "LOCAL" if is_synthetic else round(st_e2e, 2),
             "memory_peak_host_ram_container_gb": _round_opt((st or {}).get("peak_host_ram_gb")),
+            "log_url": _lookup_log_url(model, scan, n, int(summary_base["global_devices"]), "safetensor"),
             "note": _V1_CAVEAT_NOTE,
         }
     )
@@ -631,6 +655,7 @@ def _build_single_host_pair(
             "note": f"{err_sum}; {_V1_CAVEAT_NOTE}",
         }
     )
+  st_row["_local_log_files"] = [st_log] if st_log and os.path.exists(st_log) else []
   summary_out.append(st_row)
   stages_sd_out.append(
       _make_sd_stage_row(
@@ -682,7 +707,12 @@ def _build_single_host_pair(
       )
     else:
       v_code, _, v_err, _, _ = classify_v1_failure(v_rec, v_log)
-      v_row.update({"run_status": v_code, "note": f"variant={label}; {v_err}; {_V1_CAVEAT_NOTE}"})
+      v_row.update(
+          {
+              "run_status": v_code,
+              "note": f"variant={label}; {v_err}; {_V1_CAVEAT_NOTE}",
+          }
+      )
     summary_out.append(v_row)
     stages_sd_out.append(
         _make_sd_stage_row(
@@ -738,7 +768,14 @@ def _add_multihost_csv_rows(
       ckpt = _checkpoint_fields(models_by_name.get(model), is_synthetic)
       note_raw = (rec.get("note") or "").strip()
       variant_tag = "with_fix" if note_raw.startswith("with fix") else ""
-      row_id = _make_v1_row_id(model, scan, "safetensors_dynamic", num_slices, topo, variant_tag=variant_tag)
+      row_id = _make_v1_row_id(
+          model,
+          scan,
+          "safetensors_dynamic",
+          num_slices,
+          topo,
+          variant_tag=variant_tag,
+      )
       if row_id in seen_ids:
         continue
       seen_ids.add(row_id)
@@ -804,8 +841,7 @@ def _add_multihost_csv_rows(
                 "note": f"multihost source={rec.get('source', 'lance')}; {note_raw}; {_V1_CAVEAT_NOTE}",
             }
         )
-      summary_out.append(row)
-      stages_sd_out.append(sd_stage)
+      row["log_url"] = _lookup_log_url(model, scan, num_slices, int(rec["hosts"]) * 8, "safetensor")
 
       # Create corresponding Runs entry for completeness.
       run_row = _empty_row(schema_v2.RUNS_COLUMNS)
@@ -838,6 +874,13 @@ def _add_multihost_csv_rows(
         p = logs.path(model, cfg, "safetensors_dynamic")
         if os.path.exists(p):
           run_row["result_json_url"] = p
+          run_row["_local_json_path"] = p
+        p_log = os.path.join(os.path.dirname(p), "safetensors_dynamic.log") if p else ""
+        if p_log and os.path.exists(p_log):
+          row["_local_log_files"] = [p_log]
+          run_row["_local_log_files"] = [p_log]
+      summary_out.append(row)
+      stages_sd_out.append(sd_stage)
       runs_out.append(run_row)
 
 
@@ -869,8 +912,8 @@ def _add_multihost_to_maxtext_rows(
         continue
       seen_ids.add(row_id)
 
-      tm1, _ = logs.load(model, scan, "to_maxtext_step1")
-      tm2, _ = logs.load(model, scan, "to_maxtext_step2")
+      tm1, tm1_log = logs.load(model, scan, "to_maxtext_step1")
+      tm2, tm2_log = logs.load(model, scan, "to_maxtext_step2")
       runs_out.append(
           adapt_single_v1_phase_json(
               logs.path(model, cfg, "to_maxtext_step3"),
@@ -925,6 +968,7 @@ def _add_multihost_to_maxtext_rows(
                 "note": f"{err_sum}; {_V1_CAVEAT_NOTE}",
             }
         )
+      row["_local_log_files"] = [p for p in (tm1_log, tm2_log, tm3_log) if p and os.path.exists(p)]
       summary_out.append(row)
       stages_tm_out.append(
           _make_tm_stage_row(
@@ -949,7 +993,12 @@ def _attach_pair_speedups(summary_out: list[dict[str, Any]]) -> None:
     # Skip variant rows (e.g. `|with_fix`) when looking up canonical baseline speedups.
     if r["row_id"].count("|") > 5:
       continue
-    key = (r["model_name"], r["scan_layers_mode"], int(r["number_of_slices"]), r["slice_topology"])
+    key = (
+        r["model_name"],
+        r["scan_layers_mode"],
+        int(r["number_of_slices"]),
+        r["slice_topology"],
+    )
     by_config.setdefault(key, {})[r["pipeline_name"]] = r
 
   for pair in by_config.values():
@@ -1096,7 +1145,12 @@ def adapt_v1_dataset(
   )
 
 
-def _write_csv(path: str, rows: Iterable[Mapping[str, Any]], columns: Sequence[schema_v2.ColumnSpec]) -> None:
+def _write_csv(
+    path: str,
+    rows: Iterable[Mapping[str, Any]],
+    columns: Sequence[schema_v2.ColumnSpec],
+) -> None:
+  """Writes `rows` to `path` as a UTF-8 CSV using `columns` field order."""
   os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
   keys = [c.key for c in columns]
   with open(path, "w", newline="", encoding="utf-8") as f:
@@ -1133,15 +1187,34 @@ def main(argv: Sequence[str] | None = None) -> int:
   )
   errs = ds.validate()
   if errs:
-    print(f"Validation failed with {len(errs)} errors (showing first 10):", file=sys.stderr)
+    print(
+        f"Validation failed with {len(errs)} errors (showing first 10):",
+        file=sys.stderr,
+    )
     for err in errs[:10]:
       print(f"  - {err}", file=sys.stderr)
     return 1
 
-  _write_csv(os.path.join(args.out_dir, "summary_v1.csv"), ds.summary_rows, schema_v2.SUMMARY_COLUMNS)
-  _write_csv(os.path.join(args.out_dir, "step1_v1.csv"), ds.step1_rows, schema_v2.STEP1_COLUMNS)
-  _write_csv(os.path.join(args.out_dir, "stages_sd_v1.csv"), ds.stages_sd_rows, schema_v2.STAGES_SD_COLUMNS)
-  _write_csv(os.path.join(args.out_dir, "stages_tm_v1.csv"), ds.stages_tm_rows, schema_v2.STAGES_TM_COLUMNS)
+  _write_csv(
+      os.path.join(args.out_dir, "summary_v1.csv"),
+      ds.summary_rows,
+      schema_v2.SUMMARY_COLUMNS,
+  )
+  _write_csv(
+      os.path.join(args.out_dir, "step1_v1.csv"),
+      ds.step1_rows,
+      schema_v2.STEP1_COLUMNS,
+  )
+  _write_csv(
+      os.path.join(args.out_dir, "stages_sd_v1.csv"),
+      ds.stages_sd_rows,
+      schema_v2.STAGES_SD_COLUMNS,
+  )
+  _write_csv(
+      os.path.join(args.out_dir, "stages_tm_v1.csv"),
+      ds.stages_tm_rows,
+      schema_v2.STAGES_TM_COLUMNS,
+  )
   _write_csv(os.path.join(args.out_dir, "runs_v1.csv"), ds.runs_rows, schema_v2.RUNS_COLUMNS)
   print(
       f"Wrote validated v1 rows: Summary={len(ds.summary_rows)}, Step1={len(ds.step1_rows)}, "

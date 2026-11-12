@@ -18,15 +18,19 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable, Mapping, Sequence
+import concurrent.futures
 import csv
 import dataclasses
 import datetime
+import glob
 import json
 import os
 import re
 import statistics
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Any
 
 _BENCHMARK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,6 +43,8 @@ from bench import schema_v2  # pylint: disable=wrong-import-position
 
 DEFAULT_SPREADSHEET_ID = "1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I"
 GSHEETS_BIN = "/google/bin/releases/gemini-agents-gsheets/gsheets"
+GPASTE_BIN = "/google/bin/releases/gemini-agents-gpaste/gpaste"
+DEFAULT_GPASTE_CACHE_PATH = os.path.join(_BENCHMARK_DIR, "configs", "gpaste_log_urls.json")
 README_UPDATED_CELL = "README!B18"
 PROGRESS_UPDATED_CELL = "Progress!B2"
 _SHEETS_EPOCH = datetime.datetime(1899, 12, 30, tzinfo=datetime.timezone.utc)
@@ -116,7 +122,11 @@ class V2Dataset:
     tab_pairs = (
         ("Summary", self.summary_rows, schema_v2.SUMMARY_COLUMNS),
         ("Step 1 downloads", self.step1_rows, schema_v2.STEP1_COLUMNS),
-        ("Stages: safetensors_dynamic", self.stages_sd_rows, schema_v2.STAGES_SD_COLUMNS),
+        (
+            "Stages: safetensors_dynamic",
+            self.stages_sd_rows,
+            schema_v2.STAGES_SD_COLUMNS,
+        ),
         ("Stages: to_maxtext", self.stages_tm_rows, schema_v2.STAGES_TM_COLUMNS),
         ("Runs", self.runs_rows, schema_v2.RUNS_COLUMNS),
     )
@@ -159,7 +169,10 @@ def sheets_serial(ts: datetime.datetime | str | None) -> float | str:
     dt = ts
   if dt.tzinfo is None:
     dt = dt.replace(tzinfo=datetime.timezone.utc)
-  return round((dt.astimezone(datetime.timezone.utc) - _SHEETS_EPOCH).total_seconds() / 86400.0, 6)
+  return round(
+      (dt.astimezone(datetime.timezone.utc) - _SHEETS_EPOCH).total_seconds() / 86400.0,
+      6,
+  )
 
 
 def gcs_to_https(url: str | None, *, is_dir: bool = False) -> str:
@@ -257,6 +270,23 @@ def scan_v2_roots(
         platform = str(rec.get("tpu_platform") or "")
         model = str(rec.get("model_name") or "")
         run_id = str(rec.get("run_id") or "")
+        rec["_local_json_path"] = fpath
+        base_log = os.path.join(dirpath, f"{phase}.log")
+        slice_logs = sorted(glob.glob(os.path.join(dirpath, f"{phase}_slice*.log")))
+        rec["_local_log_files"] = ([base_log] if os.path.exists(base_log) else []) + slice_logs
+        if rec.get("gcs_result_json_uri") and not rec.get("result_json_url"):
+          rec["result_json_url"] = rec["gcs_result_json_uri"]
+        if rec.get("gcs_logs_prefix") and not rec.get("all_hosts_log_folder_url"):
+          rec["all_hosts_log_folder_url"] = rec["gcs_logs_prefix"]
+        if rec.get("gcs_main_log_uri"):
+          if phase == "step1_hf_to_gcs" and not rec.get("step1_download_log_url"):
+            rec["step1_download_log_url"] = rec["gcs_main_log_uri"]
+          elif phase == "to_maxtext_step1" and not rec.get("pipeline_step1_log_url"):
+            rec["pipeline_step1_log_url"] = rec["gcs_main_log_uri"]
+          elif phase == "to_maxtext_step2" and not rec.get("step2_log_url"):
+            rec["step2_log_url"] = rec["gcs_main_log_uri"]
+          elif not rec.get("step3_or_load_log_url"):
+            rec["step3_or_load_log_url"] = rec["gcs_main_log_uri"]
 
         if phase == "step1_hf_to_gcs" and platform and model:
           pm = (platform, model)
@@ -285,7 +315,16 @@ def scan_v2_roots(
           by_phase = by_rep.setdefault(rep, {})
           if phase not in by_phase or _record_priority(rec) > _record_priority(by_phase[phase]):
             by_phase[phase] = rec
-          run_key = (phase, platform, model, scan_mode, slices, topology, run_id, rep)
+          run_key = (
+              phase,
+              platform,
+              model,
+              scan_mode,
+              slices,
+              topology,
+              run_id,
+              rep,
+          )
           if run_key not in runs_map or _record_priority(rec) > _record_priority(runs_map[run_key]):
             runs_map[run_key] = rec
 
@@ -311,7 +350,11 @@ def _build_step1_rows(
 
   all_keys = sorted(
       set(step1_by_pm.keys()) | set(copy_by_pm.keys()) | {("v7x", m) for m in conv_by_m},
-      key=lambda pm: (_PLAT_SORT_ORDER.get(pm[0], 9), models_by_name.get(pm[1], {}).get("_idx", 999), pm[1]),
+      key=lambda pm: (
+          _PLAT_SORT_ORDER.get(pm[0], 9),
+          models_by_name.get(pm[1], {}).get("_idx", 999),
+          pm[1],
+      ),
   )
   for plat, model in all_keys:
     m_info = models_by_name.get(model, {})
@@ -390,7 +433,8 @@ def _effective_step1_seconds(
     if step1_rec.get("run_status") == "OK" and _is_number(step1_rec.get("step1_total_seconds")):
       return float(step1_rec["step1_total_seconds"])
     return schema_v2.normalize_sheet_status(
-        str(step1_rec.get("run_status") or "ERROR"), step1_rec.get("failure_category")
+        str(step1_rec.get("run_status") or "ERROR"),
+        step1_rec.get("failure_category"),
     )
   if phase_step1_rec and phase_step1_rec.get("run_status") == "OK":
     # Fallback only if standalone cold Step 1 record wasn't run separately (e.g. validation runs).
@@ -432,7 +476,11 @@ def _deciding_to_maxtext_phase(rep_phases: Mapping[str, Mapping[str, Any]]) -> t
       return code, rec, p_name
   if "to_maxtext_step3" in rep_phases:
     return "OK", rep_phases["to_maxtext_step3"], "to_maxtext_step3"
-  return "PENDING", next(reversed(rep_phases.values())), missing_phase or "to_maxtext_step1"
+  return (
+      "PENDING",
+      next(reversed(rep_phases.values())),
+      missing_phase or "to_maxtext_step1",
+  )
 
 
 def _median_numeric_keys(
@@ -545,15 +593,29 @@ def _format_failure_note(deciding_rec: Mapping[str, Any], deciding_phase: str) -
 
 
 def _decide_log_url(rec: Mapping[str, Any], phase_name: str, ok: bool) -> str:
+  """Selects the primary log or result URL from a phase record."""
   if ok:
-    return str(rec.get("step3_or_load_log_url") or "")
+    return str(
+        rec.get("step3_or_load_log_url")
+        or rec.get("gcs_main_log_uri")
+        or rec.get("gcs_result_json_uri")
+        or rec.get("result_json_url")
+        or ""
+    )
   key_map = {
       "to_maxtext_step1": "pipeline_step1_log_url",
       "to_maxtext_step2": "step2_log_url",
       "to_maxtext_step3": "step3_or_load_log_url",
       "safetensors_dynamic": "step3_or_load_log_url",
   }
-  return str(rec.get(key_map.get(phase_name, "step3_or_load_log_url"), "") or rec.get("step3_or_load_log_url") or "")
+  return str(
+      rec.get(key_map.get(phase_name, "step3_or_load_log_url"), "")
+      or rec.get("step3_or_load_log_url")
+      or rec.get("gcs_main_log_uri")
+      or rec.get("gcs_result_json_uri")
+      or rec.get("result_json_url")
+      or ""
+  )
 
 
 def _build_v2_matrix_rows(
@@ -649,11 +711,13 @@ def _build_v2_matrix_rows(
 
     ok_stage_rows: list[dict[str, Any]] = []
     ok_rep_records: list[Mapping[str, Any]] = []
+    ok_rep_log_files: list[list[str]] = []
     ok_tm_peak_rams: list[float] = []
     latest_status = "PENDING"
     latest_deciding_rec: Mapping[str, Any] = {}
     latest_deciding_phase = pipeline
     latest_stage_row: dict[str, Any] | None = None
+    latest_rep_log_files: list[str] = []
 
     for rep_idx in sorted(reps_map):
       rep_phases = reps_map[rep_idx]
@@ -664,14 +728,23 @@ def _build_v2_matrix_rows(
         rep_status = (
             "OK"
             if rec.get("run_status") == "OK"
-            else schema_v2.normalize_sheet_status(str(rec.get("run_status") or "ERROR"), rec.get("failure_category"))
+            else schema_v2.normalize_sheet_status(
+                str(rec.get("run_status") or "ERROR"),
+                rec.get("failure_category"),
+            )
         )
         rep_recs: list[Mapping[str, Any]] = [rec]
         deciding_rec, deciding_phase = rec, "safetensors_dynamic"
       else:
         rep_status, deciding_rec, deciding_phase = _deciding_to_maxtext_phase(rep_phases)
         rep_recs = [
-            rep_phases[p] for p in ("to_maxtext_step1", "to_maxtext_step2", "to_maxtext_step3") if p in rep_phases
+            rep_phases[p]
+            for p in (
+                "to_maxtext_step1",
+                "to_maxtext_step2",
+                "to_maxtext_step3",
+            )
+            if p in rep_phases
         ]
 
       s1_fallback = _effective_step1_seconds(step1_rec, rep_phases.get("to_maxtext_step1") or deciding_rec)
@@ -694,10 +767,12 @@ def _build_v2_matrix_rows(
       latest_status = rep_status
       latest_deciding_rec = deciding_rec
       latest_deciding_phase = deciding_phase
+      latest_rep_log_files = [p for r in rep_recs for p in r.get("_local_log_files", [])]
 
       if rep_status == "OK":
         ok_stage_rows.append(st_row)
         ok_rep_records.append(deciding_rec)
+        ok_rep_log_files.append(list(latest_rep_log_files))
         if pipeline == "to_maxtext":
           ram_candidates = [
               float(r["memory_peak_host_ram_container_gb"])
@@ -790,6 +865,7 @@ def _build_v2_matrix_rows(
         sum_row["total_end_to_end_seconds"] = "—"
 
       sum_row["log_url"] = gcs_to_https(_decide_log_url(dec_rec, pipeline, ok=True))
+      sum_row["_local_log_files"] = ok_rep_log_files[-1] if ok_rep_log_files else []
       if len(ok_stage_rows) != len(reps_map):
         sum_row["note"] = f"{len(ok_stage_rows)}/{len(reps_map)} repetitions OK; non-OK attempt excluded from median."
       del target_cols
@@ -803,6 +879,7 @@ def _build_v2_matrix_rows(
       sum_row["total_without_hf_download_seconds"] = "—"
       sum_row["total_end_to_end_seconds"] = "—"
       sum_row["log_url"] = gcs_to_https(_decide_log_url(latest_deciding_rec, latest_deciding_phase, ok=False))
+      sum_row["_local_log_files"] = list(latest_rep_log_files)
       sum_row["note"] = _format_failure_note(latest_deciding_rec, latest_deciding_phase)
       if pipeline == "safetensors_dynamic":
         sum_row["to_maxtext_step1_total_seconds"] = "N/A"
@@ -937,6 +1014,8 @@ def _build_runs_rows(
       row["gke_cluster_name"] = env_c["gke_cluster_name"]
 
     row["row_id"] = row_id
+    row["_local_log_files"] = list(rec.get("_local_log_files", []))
+    row["_local_json_path"] = str(rec.get("_local_json_path") or "")
     m_info = models_by_name.get(model, {})
     if not row.get("model_parameter_count_billions") and m_info.get("params_b"):
       row["model_parameter_count_billions"] = m_info["params_b"]
@@ -1082,6 +1161,8 @@ def _merge_v2_and_legacy_summary_rows(
           row["total_end_to_end_seconds"] = _round_num(e2e, 4)
       leg_note = str(leg.get("note") or "")
       row["note"] = f"v1 baseline (v2 re-run queued); {leg_note}" if leg_note else "v1 baseline (v2 re-run queued)"
+      if leg.get("_local_log_files"):
+        row["_local_log_files"] = list(leg["_local_log_files"])
     merged.append(row)
 
   for key, leg in legacy_by_key.items():
@@ -1170,7 +1251,10 @@ def build_v2_dataset(
 
 
 def _format_cell_for_raw(
-    val: Any, col: schema_v2.ColumnSpec, row_idx: int, links_out: list[tuple[str, int, str, str]]
+    val: Any,
+    col: schema_v2.ColumnSpec,
+    row_idx: int,
+    links_out: list[tuple[str, int, str, str]],
 ) -> Any:
   """Converts timestamps/booleans/URLs for `gsheets mutate batch --value-input RAW`."""
   if val is None or val == "":
@@ -1178,7 +1262,14 @@ def _format_cell_for_raw(
   if col.fmt == "url":
     url_str = str(val).strip()
     if url_str:
-      label = "dir" if col.key == "all_hosts_log_folder_url" else ("json" if col.key == "result_json_url" else "log")
+      if url_str.startswith("https://paste.googleplex.com/"):
+        label = "gpaste"
+      elif col.key == "all_hosts_log_folder_url":
+        label = "dir"
+      elif col.key == "result_json_url":
+        label = "json"
+      else:
+        label = "log"
       links_out.append((col.key, row_idx, url_str, label))
     return ""
   if col.fmt == "ts":
@@ -1190,11 +1281,226 @@ def _format_cell_for_raw(
   return val
 
 
+_MAX_GPASTE_BYTES = 200_000
+
+
+def _files_cache_sig(paths: Sequence[str]) -> str:
+  """Builds a stable relative signature for a sequence of local log files."""
+  parts: list[str] = []
+  for path in paths:
+    if not os.path.exists(path):
+      continue
+    parent = os.path.basename(os.path.dirname(path))
+    grandparent = os.path.basename(os.path.dirname(os.path.dirname(path)))
+    parts.append(f"{grandparent}/{parent}/{os.path.basename(path)}:{os.path.getsize(path)}")
+  return "|".join(parts)
+
+
+def _format_synthetic_row_log(row: Mapping[str, Any]) -> str:
+  """Formats a diagnostic execution summary when a legacy/pre-skip row has no standalone `.log` file."""
+  lines = [
+      "=== Checkpoint-Load Benchmark Execution / Diagnostic Record ===",
+      f"row_id: {row.get('row_id', '')}",
+      f"tpu_platform: {row.get('tpu_platform', '')}",
+      f"model_name: {row.get('model_name', '')}",
+      f"model_test_tier: {row.get('model_test_tier', '')}",
+      f"pipeline_name: {row.get('pipeline_name', '')}",
+      f"scan_layers_mode: {row.get('scan_layers_mode', '')}",
+      f"number_of_slices: {row.get('number_of_slices', '')}",
+      f"slice_topology: {row.get('slice_topology', '')}",
+      f"hosts_per_slice: {row.get('hosts_per_slice', '')}",
+      f"total_tpu_devices: {row.get('total_tpu_devices', '')}",
+      f"run_status: {row.get('run_status', '')}",
+      "",
+      "--- Timings & Metrics ---",
+  ]
+  for col in schema_v2.SUMMARY_COLUMNS:
+    val = row.get(col.key)
+    if val not in (None, "") and not col.key.startswith("_"):
+      lines.append(f"{col.header} ({col.key}): {val}")
+  return "\n".join(lines) + "\n"
+
+
+def _read_and_combine_logs(paths: Sequence[str], fallback_row: Mapping[str, Any]) -> str:
+  """Combines one or more local log files (truncating middle if oversized) or formats a diagnostic record."""
+  existing = [p for p in paths if p and os.path.exists(p)]
+  if not existing:
+    return _format_synthetic_row_log(fallback_row)
+  if len(existing) > 4:
+    main_logs = [p for p in existing if not re.search(r"_slice\d+\.log$", p)]
+    slice_logs = [p for p in existing if re.search(r"_slice\d+\.log$", p)]
+    selected = (main_logs + slice_logs[:2]) if main_logs else existing[:4]
+  else:
+    selected = existing
+  chunks: list[str] = []
+  per_file_budget = max(15_000, (_MAX_GPASTE_BYTES - 4_000) // len(selected))
+  for path in selected:
+    try:
+      with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    except OSError:
+      continue
+    if len(text) > per_file_budget:
+      half = per_file_budget // 2
+      text = f"{text[:half]}\n\n... [truncated {len(text) - per_file_budget} chars] ...\n\n{text[-half:]}"
+    if len(selected) > 1:
+      chunks.append(f"==================== {os.path.basename(path)} ====================\n{text}")
+    else:
+      chunks.append(text)
+  combined = "\n\n".join(chunks) if chunks else _format_synthetic_row_log(fallback_row)
+  if len(combined) > _MAX_GPASTE_BYTES:
+    half = _MAX_GPASTE_BYTES // 2
+    combined = f"{combined[:half]}\n\n... [truncated] ...\n\n{combined[-half:]}"
+  return combined
+
+
+def _upload_one_gpaste(title: str, content: str) -> str:
+  """Uploads `content` to `gpaste` and returns its `https://paste.googleplex.com/<id>` URL."""
+  if not os.path.exists(GPASTE_BIN):
+    return ""
+  with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".log", delete=False) as tf:
+    tf.write(content)
+    tmp_path = tf.name
+  try:
+    res = subprocess.run(
+        [
+            GPASTE_BIN,
+            "create",
+            "--title",
+            title[:120],
+            "--content_file",
+            tmp_path,
+            "--visibility",
+            "public",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if res.returncode == 0 and res.stdout.strip():
+      data = json.loads(res.stdout)
+      return str(data.get("url") or "")
+  except (OSError, subprocess.SubprocessError, ValueError):
+    return ""
+  finally:
+    try:
+      os.remove(tmp_path)
+    except OSError:
+      pass
+  return ""
+
+
+def populate_gpaste_urls(
+    dataset: V2Dataset,
+    *,
+    cache_path: str = DEFAULT_GPASTE_CACHE_PATH,
+    upload_missing: bool = True,
+    max_workers: int = 16,
+) -> int:
+  """Populates `https://paste.googleplex.com/<id>` URLs on all executed `Summary` and `Runs` rows."""
+  cache: dict[str, str] = {}
+  if cache_path and os.path.exists(cache_path):
+    try:
+      with open(cache_path, "r", encoding="utf-8") as f:
+        loaded = json.load(f)
+      if isinstance(loaded, dict):
+        cache = {str(k): str(v) for k, v in loaded.items() if str(v).startswith("https://paste.googleplex.com/")}
+    except (OSError, ValueError):
+      cache = {}
+
+  pending_uploads: dict[str, tuple[str, str]] = {}
+
+  # 1. Inspect executed Summary rows (both OK and failed/skipped).
+  summary_keys: list[tuple[dict[str, Any], str]] = []
+  for row in dataset.summary_rows:
+    status = str(row.get("run_status") or "")
+    if status in ("", "PENDING"):
+      continue
+    existing_url = str(row.get("log_url") or "")
+    local_files = [p for p in row.get("_local_log_files", []) if p and os.path.exists(p)]
+    sig = _files_cache_sig(local_files)
+    ckey = f"files::{sig}" if sig else f"summary::{row.get('row_id', '')}::{status}"
+    if existing_url.startswith("https://paste.googleplex.com/") and not sig:
+      cache.setdefault(ckey, existing_url)
+    summary_keys.append((row, ckey))
+    if ckey not in cache and upload_missing and ckey not in pending_uploads:
+      title = (
+          f"[{row.get('tpu_platform')}] {row.get('model_name')} | {row.get('pipeline_name')} | "
+          f"{row.get('scan_layers_mode')} | {row.get('number_of_slices')}x{row.get('slice_topology')} ({status})"
+      )
+      pending_uploads[ckey] = (title, _read_and_combine_logs(local_files, row))
+
+  # 2. Inspect Runs rows.
+  runs_targets: list[tuple[dict[str, Any], str, str]] = []
+  for row in dataset.runs_rows:
+    phase = str(row.get("phase_name") or "")
+    if phase == "step1_hf_to_gcs":
+      url_col = "step1_download_log_url"
+    elif phase == "to_maxtext_step1":
+      url_col = "pipeline_step1_log_url"
+    elif phase == "to_maxtext_step2":
+      url_col = "step2_log_url"
+    else:
+      url_col = "step3_or_load_log_url"
+    existing_url = str(row.get(url_col) or "")
+    local_files = [p for p in row.get("_local_log_files", []) if p and os.path.exists(p)]
+    sig = _files_cache_sig(local_files)
+    if existing_url.startswith("https://paste.googleplex.com/") and not sig:
+      continue
+    if not sig:
+      continue
+    ckey = f"files::{sig}"
+    runs_targets.append((row, url_col, ckey))
+    if ckey not in cache and upload_missing and ckey not in pending_uploads:
+      title = (
+          f"[{row.get('tpu_platform')}] {row.get('model_name')} | {phase} | "
+          f"{row.get('scan_layers_mode')} | {row.get('number_of_slices')}x{row.get('slice_topology')} "
+          f"({row.get('run_status')})"
+      )
+      pending_uploads[ckey] = (title, _read_and_combine_logs(local_files, row))
+
+  uploaded_count = 0
+  if pending_uploads and upload_missing:
+    if cache_path:
+      os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+      fut_to_key = {
+          pool.submit(_upload_one_gpaste, title, content): ckey for ckey, (title, content) in pending_uploads.items()
+      }
+      for fut in concurrent.futures.as_completed(fut_to_key):
+        ckey = fut_to_key[fut]
+        url = fut.result()
+        if url.startswith("https://paste.googleplex.com/"):
+          cache[ckey] = url
+          uploaded_count += 1
+          if cache_path and uploaded_count % 25 == 0:
+            with open(cache_path, "w", encoding="utf-8") as f:
+              json.dump(dict(sorted(cache.items())), f, indent=2)
+    if cache_path:
+      with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(dict(sorted(cache.items())), f, indent=2)
+
+  for row, ckey in summary_keys:
+    if ckey in cache:
+      row["log_url"] = cache[ckey]
+  for row, url_col, ckey in runs_targets:
+    if ckey in cache:
+      row[url_col] = cache[ckey]
+  return uploaded_count
+
+
 def _tab_sheet_range_prefix(tab_name: str) -> str:
   return f"'{tab_name}'!" if any(ch in tab_name for ch in " :") else f"{tab_name}!"
 
 
-def _write_csv(path: str, rows: Iterable[Mapping[str, Any]], columns: Sequence[schema_v2.ColumnSpec]) -> None:
+def _write_csv(
+    path: str,
+    rows: Iterable[Mapping[str, Any]],
+    columns: Sequence[schema_v2.ColumnSpec],
+) -> None:
+  """Writes `rows` to `path` as a UTF-8 CSV using `columns` field order."""
   os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
   keys = [c.key for c in columns]
   with open(path, "w", newline="", encoding="utf-8") as f:
@@ -1219,7 +1525,11 @@ def build_gsheets_batches(
   tabs = (
       ("Summary", dataset.summary_rows, schema_v2.SUMMARY_COLUMNS),
       ("Step 1 downloads", dataset.step1_rows, schema_v2.STEP1_COLUMNS),
-      ("Stages: safetensors_dynamic", dataset.stages_sd_rows, schema_v2.STAGES_SD_COLUMNS),
+      (
+          "Stages: safetensors_dynamic",
+          dataset.stages_sd_rows,
+          schema_v2.STAGES_SD_COLUMNS,
+      ),
       ("Stages: to_maxtext", dataset.stages_tm_rows, schema_v2.STAGES_TM_COLUMNS),
       ("Runs", dataset.runs_rows, schema_v2.RUNS_COLUMNS),
   )
@@ -1227,7 +1537,13 @@ def build_gsheets_batches(
   for tab_name, rows, cols in tabs:
     prefix = _tab_sheet_range_prefix(tab_name)
     end_col = col_letter(len(cols) - 1)
-    raw_ops.append({"op": "write", "range": f"{prefix}A1:{end_col}1", "data": [[c.header for c in cols]]})
+    raw_ops.append(
+        {
+            "op": "write",
+            "range": f"{prefix}A1:{end_col}1",
+            "data": [[c.header for c in cols]],
+        }
+    )
     raw_ops.append({"op": "clear", "range": f"{prefix}A2:{end_col}2000"})
 
     if not rows:
@@ -1261,11 +1577,23 @@ def build_gsheets_batches(
         if sr == prev + 1:
           run_vals.append([row_map[sr]])
         else:
-          formula_ops.append({"op": "write", "range": f"{prefix}{letter}{run_start}:{letter}{prev}", "data": run_vals})
+          formula_ops.append(
+              {
+                  "op": "write",
+                  "range": f"{prefix}{letter}{run_start}:{letter}{prev}",
+                  "data": run_vals,
+              }
+          )
           run_start = sr
           run_vals = [[row_map[sr]]]
         prev = sr
-      formula_ops.append({"op": "write", "range": f"{prefix}{letter}{run_start}:{letter}{prev}", "data": run_vals})
+      formula_ops.append(
+          {
+              "op": "write",
+              "range": f"{prefix}{letter}{run_start}:{letter}{prev}",
+              "data": run_vals,
+          }
+      )
 
   raw_ops.append({"op": "write", "range": PROGRESS_UPDATED_CELL, "data": [[ts_now]]})
   raw_ops.append({"op": "write", "range": README_UPDATED_CELL, "data": [[ts_now]]})
@@ -1294,7 +1622,11 @@ def build_gsheets_batches(
     )
     pend_cnt = sum(1 for r in p_rows if str(r.get("_v2_run_status") or r.get("run_status")) == "PENDING")
     raw_ops.append(
-        {"op": "write", "range": f"Progress!F{r_idx}:I{r_idx}", "data": [[ok_cnt, fail_cnt, skip_cnt, pend_cnt]]}
+        {
+            "op": "write",
+            "range": f"Progress!F{r_idx}:I{r_idx}",
+            "data": [[ok_cnt, fail_cnt, skip_cnt, pend_cnt]],
+        }
     )
 
   for r_idx, tier in ((14, "S"), (15, "A"), (16, "B"), (17, "C")):
@@ -1306,7 +1638,13 @@ def build_gsheets_batches(
           and r.get("model_test_tier") == tier
           and str(r.get("_v2_run_status") or r.get("run_status")) not in ("", "PENDING", "LEGACY_ONLY")
       )
-      raw_ops.append({"op": "write", "range": f"Progress!{col_l}{r_idx}", "data": [[done_cnt]]})
+      raw_ops.append(
+          {
+              "op": "write",
+              "range": f"Progress!{col_l}{r_idx}",
+              "data": [[done_cnt]],
+          }
+      )
 
   for upd in impl_updates:
     task_id = str(upd.get("task") or "")
@@ -1431,7 +1769,12 @@ def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
                       "startColumnIndex": 0,
                       "endColumnIndex": bold_end_col,
                   },
-                  "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE", "textFormat": {"bold": True}}},
+                  "cell": {
+                      "userEnteredFormat": {
+                          "verticalAlignment": "MIDDLE",
+                          "textFormat": {"bold": True},
+                      }
+                  },
                   "fields": "userEnteredFormat.verticalAlignment,userEnteredFormat.textFormat.bold",
               }
           },
@@ -1471,7 +1814,14 @@ def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
                             "startColumnIndex": 0,
                             "endColumnIndex": total_cols,
                         },
-                        "bottom": {"style": "SOLID_THICK", "color": {"red": 0.25, "green": 0.25, "blue": 0.25}},
+                        "bottom": {
+                            "style": "SOLID_THICK",
+                            "color": {
+                                "red": 0.25,
+                                "green": 0.25,
+                                "blue": 0.25,
+                            },
+                        },
                     }
                 }
             )
@@ -1486,7 +1836,14 @@ def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
                             "startColumnIndex": medium_border_col,
                             "endColumnIndex": total_cols,
                         },
-                        "bottom": {"style": "SOLID_MEDIUM", "color": {"red": 0.45, "green": 0.45, "blue": 0.45}},
+                        "bottom": {
+                            "style": "SOLID_MEDIUM",
+                            "color": {
+                                "red": 0.45,
+                                "green": 0.45,
+                                "blue": 0.45,
+                            },
+                        },
                     }
                 }
             )
@@ -1501,7 +1858,14 @@ def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
                             "startColumnIndex": thin_border_col,
                             "endColumnIndex": total_cols,
                         },
-                        "bottom": {"style": "SOLID", "color": {"red": 0.72, "green": 0.72, "blue": 0.72}},
+                        "bottom": {
+                            "style": "SOLID",
+                            "color": {
+                                "red": 0.72,
+                                "green": 0.72,
+                                "blue": 0.72,
+                            },
+                        },
                     }
                 }
             )
@@ -1580,54 +1944,89 @@ def build_summary_format_requests(
   return {"requests": requests}
 
 
+def _run_gsheets_cmd(cmd: Sequence[str], *, retries: int = 4) -> None:
+  """Runs a `gsheets` CLI command, retrying transient `blade:sso` / RPC deadline errors."""
+  for attempt in range(retries):
+    res = subprocess.run(cmd, check=False)
+    if res.returncode == 0:
+      return
+    if attempt + 1 < retries:
+      time.sleep(2.0 * (attempt + 1))
+  raise subprocess.CalledProcessError(res.returncode, cmd)
+
+
 def apply_batches(spreadsheet_id: str, raw_path: str, formulas_path: str, format_path: str = "") -> None:
   """Uploads RAW, USER_ENTERED, and raw-batch formatting updates via `gsheets mutate`."""
   if format_path and os.path.exists(format_path):
-    for sid, end_c in ((300, 5), (400, 2), (500, 3), (600, 3), (700, 5)):
-      subprocess.run(
-          [
-              GSHEETS_BIN,
-              "mutate",
-              "unmerge",
-              spreadsheet_id,
-              "--sheet-id",
-              str(sid),
-              "--start-row",
-              "1",
-              "--end-row",
-              "2000",
-              "--start-col",
-              "0",
-              "--end-col",
-              str(end_c),
-          ],
-          check=True,
-      )
-  subprocess.run(
-      [GSHEETS_BIN, "mutate", "batch", spreadsheet_id, "-f", raw_path, "--value-input", "RAW"],
-      check=True,
+    unmerge_reqs = {
+        "requests": [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sid,
+                        "startRowIndex": 1,
+                        "endRowIndex": 2000,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": end_c,
+                    }
+                }
+            }
+            for sid, end_c in ((300, 5), (400, 2), (500, 3), (600, 3), (700, 5))
+        ]
+    }
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tf:
+      json.dump(unmerge_reqs, tf)
+      unmerge_path = tf.name
+    try:
+      _run_gsheets_cmd([GSHEETS_BIN, "mutate", "raw-batch", spreadsheet_id, "-f", unmerge_path])
+    finally:
+      try:
+        os.remove(unmerge_path)
+      except OSError:
+        pass
+  _run_gsheets_cmd(
+      [
+          GSHEETS_BIN,
+          "mutate",
+          "batch",
+          spreadsheet_id,
+          "-f",
+          raw_path,
+          "--value-input",
+          "RAW",
+      ]
   )
   with open(formulas_path, "r", encoding="utf-8") as f:
     has_formulas = bool(json.load(f))
   if has_formulas:
-    subprocess.run(
-        [GSHEETS_BIN, "mutate", "batch", spreadsheet_id, "-f", formulas_path, "--value-input", "USER_ENTERED"],
-        check=True,
+    _run_gsheets_cmd(
+        [
+            GSHEETS_BIN,
+            "mutate",
+            "batch",
+            spreadsheet_id,
+            "-f",
+            formulas_path,
+            "--value-input",
+            "USER_ENTERED",
+        ]
     )
   if format_path and os.path.exists(format_path):
     with open(format_path, "r", encoding="utf-8") as f:
       fmt_payload = json.load(f)
     if fmt_payload.get("requests"):
-      subprocess.run(
-          [GSHEETS_BIN, "mutate", "raw-batch", spreadsheet_id, "-f", format_path],
-          check=True,
-      )
+      _run_gsheets_cmd([GSHEETS_BIN, "mutate", "raw-batch", spreadsheet_id, "-f", format_path])
 
 
 def main(argv: Sequence[str] | None = None) -> int:
   """Parses CLI args, builds CSVs + gsheets batch files, validates rows, and optionally pushes to Sheets."""
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--v2-root", action="append", default=[], help="Local mirrored GCS root for v2 result JSONs")
+  parser.add_argument(
+      "--v2-root",
+      action="append",
+      default=[],
+      help="Local mirrored GCS root for v2 result JSONs",
+  )
   parser.add_argument("--include-smoke", action="store_true")
   parser.add_argument("--include-val", action="store_true")
   parser.add_argument("--v1-p2-root", action="append", default=[])
@@ -1636,10 +2035,28 @@ def main(argv: Sequence[str] | None = None) -> int:
   parser.add_argument("--v1-before-root", action="append", default=[])
   parser.add_argument("--v1-multihost-csv", default="")
   parser.add_argument("--v1-cold-s1", action="append", default=[], help="MODEL=SECONDS")
-  parser.add_argument("--impl-json", default="", help="Optional JSON file listing Progress task updates")
+  parser.add_argument(
+      "--impl-json",
+      default="",
+      help="Optional JSON file listing Progress task updates",
+  )
+  parser.add_argument(
+      "--gpaste-cache",
+      default=DEFAULT_GPASTE_CACHE_PATH,
+      help="Persistent JSON cache for gpaste URLs",
+  )
+  parser.add_argument(
+      "--upload-gpastes",
+      action="store_true",
+      help="Upload missing gpaste log pastes even without --apply",
+  )
   parser.add_argument("--out-dir", required=True)
   parser.add_argument("--spreadsheet-id", default=DEFAULT_SPREADSHEET_ID)
-  parser.add_argument("--apply", action="store_true", help="Push generated batch files to Google Sheets")
+  parser.add_argument(
+      "--apply",
+      action="store_true",
+      help="Push generated batch files to Google Sheets",
+  )
   args = parser.parse_args(argv)
 
   variants: dict[str, list[str]] = {}
@@ -1665,22 +2082,42 @@ def main(argv: Sequence[str] | None = None) -> int:
       multihost_csv=args.v1_multihost_csv or None,
       cold_s1_overrides=overrides,
   )
+  populate_gpaste_urls(
+      ds,
+      cache_path=args.gpaste_cache,
+      upload_missing=bool(args.apply or args.upload_gpastes),
+  )
   errs = ds.validate()
   if errs:
-    print(f"Sheet v2 validation failed ({len(errs)} errors; first 10):", file=sys.stderr)
+    print(
+        f"Sheet v2 validation failed ({len(errs)} errors; first 10):",
+        file=sys.stderr,
+    )
     for err in errs[:10]:
       print(f"  - {err}", file=sys.stderr)
     return 1
 
   os.makedirs(args.out_dir, exist_ok=True)
-  _write_csv(os.path.join(args.out_dir, "summary.csv"), ds.summary_rows, schema_v2.SUMMARY_COLUMNS)
-  _write_csv(os.path.join(args.out_dir, "step1_downloads.csv"), ds.step1_rows, schema_v2.STEP1_COLUMNS)
+  _write_csv(
+      os.path.join(args.out_dir, "summary.csv"),
+      ds.summary_rows,
+      schema_v2.SUMMARY_COLUMNS,
+  )
+  _write_csv(
+      os.path.join(args.out_dir, "step1_downloads.csv"),
+      ds.step1_rows,
+      schema_v2.STEP1_COLUMNS,
+  )
   _write_csv(
       os.path.join(args.out_dir, "stages_safetensors_dynamic.csv"),
       ds.stages_sd_rows,
       schema_v2.STAGES_SD_COLUMNS,
   )
-  _write_csv(os.path.join(args.out_dir, "stages_to_maxtext.csv"), ds.stages_tm_rows, schema_v2.STAGES_TM_COLUMNS)
+  _write_csv(
+      os.path.join(args.out_dir, "stages_to_maxtext.csv"),
+      ds.stages_tm_rows,
+      schema_v2.STAGES_TM_COLUMNS,
+  )
   _write_csv(os.path.join(args.out_dir, "runs.csv"), ds.runs_rows, schema_v2.RUNS_COLUMNS)
 
   raw_ops, formula_ops = build_gsheets_batches(ds, impl_updates=impl_updates)
