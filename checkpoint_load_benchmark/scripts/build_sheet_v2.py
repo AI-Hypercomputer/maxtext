@@ -23,6 +23,7 @@ import dataclasses
 import datetime
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -217,6 +218,16 @@ def _should_skip_json(path: str, *, include_smoke: bool, include_val: bool) -> b
   return False
 
 
+def _effective_record_slices(rec: Mapping[str, Any], phase: str, run_id: str) -> int:
+  """Returns slice count for `rec`, inferring multi-slice `to_maxtext` Step 1/2 target slices from `run_id`."""
+  slices = int(rec.get("number_of_slices") or 1)
+  if phase in ("to_maxtext_step1", "to_maxtext_step2"):
+    m_slices = re.search(r"-(\d+)x[0-9x]+-r\d+$", run_id)
+    if m_slices:
+      return int(m_slices.group(1))
+  return slices
+
+
 def scan_v2_roots(
     roots: Sequence[str],
     *,
@@ -266,7 +277,7 @@ def scan_v2_roots(
         elif phase in _PHASE_PIPELINE_MAP and platform and model:
           pipeline = str(rec.get("pipeline_name") or _PHASE_PIPELINE_MAP[phase])
           scan_mode = str(rec.get("scan_layers_mode") or "scanned")
-          slices = int(rec.get("number_of_slices") or 1)
+          slices = _effective_record_slices(rec, phase, run_id)
           topology = str(rec.get("slice_topology") or "")
           rep = int(rec.get("repetition_index") or 1)
           cfg_key = (platform, model, scan_mode, slices, topology, pipeline)
