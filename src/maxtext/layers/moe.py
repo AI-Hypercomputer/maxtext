@@ -2435,6 +2435,29 @@ class RoutedMoE(nnx.Module):
     ):
       self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
 
+  def _fold_expert_scale_into_wo(self) -> bool:
+    """moe_fold_expert_scale_into_wo: sparse_matmul scales wo by per_expert_scale instead of the top-k weights.
+
+    Config and layer conditions only; `__call__` also requires `model_mode == MODEL_MODE_TRAIN` and threads the
+    result down to `get_topk` as `fold_expert_scale`, so get_topk never reads it.
+    """
+    cfg = self.config
+    return (
+        self.per_expert_scale is not None
+        and cfg.moe_fold_expert_scale_into_wo
+        and cfg.sparse_matmul
+        and not cfg.mlp_bias  # wo_bias is added after wo; the top-k path scales it, a scaled wo would not.
+        # fsdp_prefetch hands __call__ the all-gathered wo, so the multiply would cover every expert, not a shard.
+        and not cfg.prefetch_fsdp_weights
+        and not cfg.te_moe_block
+        and cfg.attention not in ("vllm_rpa", "vllm_batched_rpa")
+        and self.wo_scale is None
+        and not quantizations.in_serve_mode(self.quant)
+        and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales)
+        # fp8 weight all-gather (QWAG): wo's fixed or (by default) cross-expert scale would not follow a scaled wo.
+        and ctypes.moe_qwag_flag(cfg) is None
+    )
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -2524,12 +2547,16 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       per_expert_scale=None,
       token_mask=None,
+      fold_expert_scale=False,
   ):
     """get topk.
 
     `per_expert_scale` (Gemma 4 only) is normally read off the module, but the
     sparse path runs inside a `jax.shard_map` that cannot close over an array
     living on explicit mesh axes, so it hands the value in instead.
+
+    `fold_expert_scale` (moe_fold_expert_scale_into_wo): the caller already multiplied per_expert_scale into wo,
+    so it is not applied to the top-k weights here.
 
     `token_mask` (batch, sequence) bool, True for real tokens, marks padding rows (e.g. the all-zero rows of
     `elastic_global_batch_size_mode='constant_padded'`). It is applied after the router has run, so the real
@@ -2546,7 +2573,8 @@ class RoutedMoE(nnx.Module):
       top_k_weights = jnp.where(keep, top_k_weights, jnp.zeros((), top_k_weights.dtype))
       return top_k_weights, top_k_indices
 
-    if per_expert_scale is None and self.per_expert_scale is not None:
+    # fold_expert_scale (moe_fold_expert_scale_into_wo): the caller multiplied per_expert_scale into wo instead.
+    if per_expert_scale is None and self.per_expert_scale is not None and not fold_expert_scale:
       per_expert_scale = self.per_expert_scale[...]
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
@@ -2853,6 +2881,7 @@ class RoutedMoE(nnx.Module):
       physical_route_fn=None,
       has_invalid_slots=False,
       _return_sorted_weights=False,
+      fold_expert_scale=False,
   ):
     """Permute tokens to group by expert to fit gmm call.
 
@@ -2879,6 +2908,8 @@ class RoutedMoE(nnx.Module):
         home/replica slots after `-1` padding slots have been replaced with safe indices.
       has_invalid_slots: True when `precomputed_topk` may contain unused (-1) expert slots even if
         `forced_routed_experts` / `token_mask` were already consumed before the EP all-gather.
+      fold_expert_scale: moe_fold_expert_scale_into_wo is active, so get_topk leaves per_expert_scale out of the
+        top-k weights (the caller multiplied it into wo).
     """
     is_qarray = isinstance(inputs, qpl.QArray)
     has_per_token_scale = is_qarray and inputs.scale.size > 1
@@ -2902,6 +2933,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts,
           per_expert_scale=per_expert_scale,
           token_mask=token_mask,
+          fold_expert_scale=fold_expert_scale,
       )
     # Unused slots (expert id -1, from forced routing or token_mask padding) and physical_route_fn's replica bins are
     # counted by the bincount group sizes below but not by summed_expert_mask, so those calls keep that path.
@@ -3161,6 +3193,11 @@ class RoutedMoE(nnx.Module):
       if skip_token_gather:
         # moe_use_fused_gmm3d: the fused expert kernels DMA the routed rows straight from the token buffer.
         sorted_inputs = None
+      elif getattr(self.config, "moe_sc_gather_reduce", False) and not is_qarray:
+        # As moe_use_direct_token_gather, with the backward top-k sum on SparseCore.
+        sorted_inputs = sort_activations.gather_topk_rows(
+            inputs_2d.astype(self.dtype), sorted_selected_experts, self.num_experts_per_tok
+        )
       elif self.config.moe_use_direct_token_gather:
         if _use_moe_tc_kernel(self, "moe_tc_permute", is_qarray):
           # Gather tokens into expert-sorted order on the TensorCore (kernels/moe_combine_tc.py).
@@ -3267,11 +3304,15 @@ class RoutedMoE(nnx.Module):
       tc_routing=None,
       tc_prescaled=False,
       tc_out_3d=False,
+      sc_prescaled=False,
   ):
     """Unpermute tokens to original order and combine weights.
 
     With tc_out_3d (moe_tc_ragged_3d_dispatch), the TC combine stays in the (emb // 128, 128) layout and
     the result is (batch, seq, emb // 128, 128).
+
+    With sc_prescaled (moe_sc_gather_reduce), the routing weights were applied before wo, so the combine is a plain
+    top-k sum.
     """
 
     if tc_routing is not None:
@@ -3314,6 +3355,8 @@ class RoutedMoE(nnx.Module):
           index_math=self.config.moe_routing_index_math,
           spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
+    elif sc_prescaled:
+      output = sort_activations.unsort_and_sum(intermediate, sorted_selected_experts, self.num_experts_per_tok)
     elif _use_moe_tc_kernel(self, "moe_tc_combine"):
       # Fused TensorCore unpermute + top-k weighted sum (f32 accumulation; kernels/moe_combine_tc.py).
       combine_weights = (
@@ -3767,6 +3810,7 @@ class RoutedMoE(nnx.Module):
       n_chunks,
       per_expert_scale=None,
       token_mask=None,
+      fold_expert_scale=False,
   ):
     """Returns True if permute()'s ragged buffer would overflow for any chunk on any EP shard.
 
@@ -3782,6 +3826,7 @@ class RoutedMoE(nnx.Module):
         forced_routed_experts,
         per_expert_scale=per_expert_scale,
         token_mask=token_mask,
+        fold_expert_scale=fold_expert_scale,
     )
     batch, seq_len, top_k = selected_experts.shape
     # Forced-routing and token_mask padding (-1) maps to no shard, so one_hot gives it an all-zero row.
@@ -3811,6 +3856,7 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       token_mask=None,
       moe_qwag_weight_amax=None,
+      fold_expert_scale=False,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
@@ -4527,6 +4573,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts,
           per_expert_scale=per_expert_scale,
           token_mask=token_mask,
+          fold_expert_scale=fold_expert_scale,
       )
       packed = _ep_all_gather(pack_routing_for_all_gather(local_weights, local_ids))
       tag_fn = routing_tag_fn(self.config)
@@ -4609,6 +4656,7 @@ class RoutedMoE(nnx.Module):
             forced_routed_experts,
             per_expert_scale=per_expert_scale,
             token_mask=token_mask,
+            fold_expert_scale=fold_expert_scale,
         )
         precomputed_topk = (_ep_all_gather(weights), _ep_all_gather(selected_experts))
         has_invalid_slots_override = forced_routed_experts is not None or token_mask is not None
@@ -4664,6 +4712,7 @@ class RoutedMoE(nnx.Module):
           precomputed_topk=precomputed_topk,
           precomputed_density_prob=precomputed_density_prob,
           per_expert_scale=per_expert_scale,
+          fold_expert_scale=fold_expert_scale,
           token_mask=token_mask,
           has_invalid_slots=has_invalid_slots_override,
       )
@@ -4789,6 +4838,7 @@ class RoutedMoE(nnx.Module):
           compute_lb_loss=not use_megatron_seq_aux_loss,
           return_expert_counts=True,
           per_expert_scale=per_expert_scale,
+          fold_expert_scale=fold_expert_scale,
           skip_token_gather=skip_token_gather,
           token_mask=token_mask,
           physical_route_fn=physical_route_fn,
@@ -5552,8 +5602,22 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
+      # moe_sc_gather_reduce: weight the sorted (rows, mlp) activation instead of the (rows, emb) expert output, so the
+      # combine is a plain top-k sum; w * (h @ wo + b) = (w * h) @ wo + w * b, so the wo bias is weighted too where it
+      # is added after the GEMM (not with use_te_grouped_gemm, which can fuse it). f32 weights keep the product and the
+      # routing-weight gradient (a reduction over mlp) in f32.
+      sc_prescaled = (
+          self.config.moe_sc_gather_reduce
+          and not self.config.use_ring_of_experts
+          and self.get_expert_parallelism_size() == 1
+          and not (self.config.mlp_bias and self.config.use_te_grouped_gemm)
+          and self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4
+      )
+      if sc_prescaled:
+        flat_weights = jnp.ravel(routing.weights).astype(jnp.float32)
+        w_rows = _sort_activations(flat_weights, routing.sorted_selected_experts, self.config.use_custom_sort_vjp)
       intermediate_layer = self.apply_ffn_activation(output0, output1)
-      if tc_prescaled:
+      if tc_prescaled or sc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       # Native TE bias is baked into the GEMM, which runs *before* the TP
@@ -5622,13 +5686,21 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         mask = local_rows_mask(intermediate_output, routing, route_metadata)
         if not use_te_wo_bias:
-          if tc_prescaled:
+          if tc_prescaled or sc_prescaled:
             # The unsort skips the routing weights, so weight the bias too: w * (h @ wo + b) = (w * h) @ wo + w * b.
             wo_bias = (wo_bias * w_rows[:, None]).astype(wo_bias.dtype)
           intermediate_output = intermediate_output + wo_bias
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
-      return intermediate_output, wo, tc_prescaled, x_is_3d, use_fused_tc_unsort, use_fused_combine_bwd_qarray
+      return (
+          intermediate_output,
+          wo,
+          tc_prescaled,
+          sc_prescaled,
+          x_is_3d,
+          use_fused_tc_unsort,
+          use_fused_combine_bwd_qarray,
+      )
 
     def _ring_unpermute(intermediate_output, routing, batch_size, sequence_length, tc_prescaled=False, x_is_3d=False):
       """Ring of experts: unsort, weight and sum the outputs locally, as [expert shards x batch, seq, ...]."""
@@ -5818,7 +5890,7 @@ class RoutedMoE(nnx.Module):
             moe_qwag_weight_amax=moe_qwag_weight_amax,
         )
 
-      intermediate_output, wo, tc_prescaled, x_is_3d, use_fused_tc_unsort, use_fused_combine_bwd_qarray = (
+      intermediate_output, wo, tc_prescaled, sc_prescaled, x_is_3d, use_fused_tc_unsort, use_fused_combine_bwd_qarray = (
           _down_projection(
               x,
               output0,
@@ -5906,6 +5978,7 @@ class RoutedMoE(nnx.Module):
           sequence_length=sequence_length,
           use_custom_sort_vjp=self.config.use_custom_sort_vjp,
           group_sizes=routing.group_sizes,
+          sc_prescaled=sc_prescaled,
       )
 
       return (
@@ -5921,7 +5994,8 @@ class RoutedMoE(nnx.Module):
     # Gemma 4's per-expert router scale is consumed by get_topk, deep inside the
     # shard_map below. A shard_map cannot close over an array that lives on explicit
     # mesh axes, so it is threaded down as an argument instead of read off the module.
-    per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+    # With `fold_expert_scale` the caller already multiplied it into wo.
+    per_expert_scale = None if self.per_expert_scale is None or fold_expert_scale else self.per_expert_scale[...]
 
     def keep_reduced(pspec, w):
       # Weights all-gathered by fsdp_prefetch arrive typed `reduced` over the FSDP axes; shard_map requires
@@ -6119,7 +6193,7 @@ class RoutedMoE(nnx.Module):
             #    so the TensorCore runs that GEMM while the gather-reduce is on the SparseCore.
             unpermuted, output0 = barrier_tie(unpermuted, output0)
             outs.append(_ring_reduce_scatter(unpermuted))
-          intermediate_output, wo_c, tc_prescaled, x_is_3d, _, _ = _down_projection(
+          intermediate_output, wo_c, tc_prescaled, _, x_is_3d, _, _ = _down_projection(
               x_c,
               output0,
               output1,
@@ -6328,6 +6402,7 @@ class RoutedMoE(nnx.Module):
           n_chunks,
           per_expert_scale,
           token_mask=token_mask,
+          fold_expert_scale=fold_expert_scale,
       )
 
       # Both branches return required_rbf with the same structure: None when the
@@ -7621,6 +7696,7 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts: jax.Array | None = None,
       token_mask: jax.Array | None = None,
       moe_qwag_weight_amax: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+      model_mode: str | None = None,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Executes the routed MoE block.
 
@@ -7637,12 +7713,15 @@ class RoutedMoE(nnx.Module):
         load-balance loss and the routed-bias update, and get a zero output; real tokens are computed exactly
         as without the mask. Not supported with `te_moe_block` or the fused inference MoE kernel.
       moe_qwag_weight_amax: Optional precomputed (wi_0, wi_1, wo) amax for dynamic QWAG; computed here if None.
+      model_mode: One of the `common_types.MODEL_MODE_*` values, if the caller knows it. Only
+        `moe_fold_expert_scale_into_wo` reads it: the fold applies only for MODEL_MODE_TRAIN.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
       and any routed bias updates.
     """
     cfg = self.config
+    fold_expert_scale = model_mode == ctypes.MODEL_MODE_TRAIN and self._fold_expert_scale_into_wo()
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
     if cfg.te_moe_block and cfg.use_random_routing and forced_routed_experts is not None:
@@ -7736,6 +7815,18 @@ class RoutedMoE(nnx.Module):
     wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
     if is_fused_moe_path:
       wo_kernel, wo_native_scale = _maybe_native_fused_weight(self.wo[...], wo_scale)
+    elif fold_expert_scale:
+      # Scale the sharded f32 weight (~1 expert per device under shard_exp_on_fsdp) before the cast, instead of a
+      # per-token gather of the scale in get_topk.
+      wo = self.wo[...]
+      scale = self.per_expert_scale[...].astype(wo.dtype)
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        # Explicit mode does not reshard a broadcast operand. The scale is sharded on "exp", but wo's expert dim
+        # may be on other mesh axes (shard_exp_on_fsdp puts it on fsdp), so replicate the scale. Matching wo's
+        # `reduced` axes also covers a wo all-gathered by fsdp_prefetch, which the gate excludes today.
+        scale = jax.sharding.reshard(scale, NamedSharding(self.mesh, P(None, reduced=_reduced_axes(wo))))
+      wo = wo * scale[:, None, None]
+      wo_kernel, wo_native_scale = _maybe_native_gmm_weight(wo, None), None
     else:
       wo_kernel, wo_native_scale = _maybe_native_gmm_weight(self.wo[...], wo_scale), None
 
@@ -7792,7 +7883,8 @@ class RoutedMoE(nnx.Module):
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
     # fused_moe_func doesn't support them. Other paths (dense/sparse
-    # matmul) apply them to top_k_weights in get_topk.
+    # matmul) apply them to top_k_weights in get_topk, or to wo above
+    # under moe_fold_expert_scale_into_wo.
     if is_fused_moe_path:
       if self.per_expert_scale is not None and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales):
         if wo_native_scale is not None:
@@ -7860,6 +7952,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           token_mask=token_mask,
           moe_qwag_weight_amax=moe_qwag_weight_amax,
+          fold_expert_scale=fold_expert_scale,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -7876,6 +7969,11 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           token_mask=token_mask,
       )
+    # Remat tag for the routed output after unpermute and the top-k combine (custom policy, moe_routed_output).
+    # Saving it skips replaying the combine; with moe_sc_gather_reduce (weights applied before wo) also the wo matmul
+    # and unpermute, which the weighted combine still needs for the routing-weight gradient. te_moe_block returns
+    # above without it; config validation rejects moe_routed_output != remat there.
+    output = adc.checkpoint_name(output, "moe_routed_output")
     return output, lb_loss, bias_updates
 
 
