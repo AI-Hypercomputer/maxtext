@@ -402,13 +402,16 @@ def build_tpu_jobset(
 
   pod_annotations: dict[str, str] = {}
   if profile.kueue_topology_aware_scheduling:
-    pod_annotations.update(
-        {
-            "kueue.x-k8s.io/podset-slice-required-topology": "cloud.google.com/gke-nodepool",
-            "kueue.x-k8s.io/podset-slice-size": str(hosts),
-            "kueue.x-k8s.io/podset-unconstrained-topology": "true",
-        }
-    )
+    if hosts > 1:
+      pod_annotations.update(
+          {
+              "kueue.x-k8s.io/podset-slice-required-topology": "cloud.google.com/gke-nodepool",
+              "kueue.x-k8s.io/podset-slice-size": str(hosts),
+              "kueue.x-k8s.io/podset-unconstrained-topology": "true",
+          }
+      )
+    else:
+      pod_annotations["kueue.x-k8s.io/podset-unconstrained-topology"] = "true"
 
   daemons = [
       f"{name}-slice{s}-0-{h}.{name}" for s in range(num_slices) for h in range(hosts) if not (s == 0 and h == 0)
@@ -482,6 +485,11 @@ def build_tpu_jobset(
               }
           }
       }
+    job_meta_annotations: dict[str, str] = {}
+    if hosts > 1:
+      job_meta_annotations["alpha.jobset.sigs.k8s.io/exclusive-topology"] = "cloud.google.com/gke-nodepool"
+    elif num_slices > 1:
+      job_meta_annotations["alpha.jobset.sigs.k8s.io/exclusive-topology"] = "kubernetes.io/hostname"
     replicated_jobs.append(
         {
             "name": f"slice{s}",
@@ -489,7 +497,7 @@ def build_tpu_jobset(
             "template": {
                 "metadata": {
                     "labels": dict(base_labels),
-                    "annotations": {"alpha.jobset.sigs.k8s.io/exclusive-topology": "cloud.google.com/gke-nodepool"},
+                    "annotations": job_meta_annotations,
                 },
                 "spec": {
                     "parallelism": hosts,
