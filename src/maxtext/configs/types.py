@@ -1207,7 +1207,7 @@ class MoEGeneral(BaseModel):
       description="online: place replicas from this step's counts; lagged: from the previous step's counts.",
   )
   expert_replica_planner: Literal["greedy", "rounds"] = Field(
-      "greedy", description="Replica planner: greedy (serial loop over EP*R candidates) | rounds (vectorized rounds)."
+      "rounds", description="Replica planner: rounds (vectorized rounds) | greedy (serial loop over EP*R candidates)."
   )
   expert_replica_impl: Literal["auto", "concat", "split"] = Field(
       "auto",
@@ -1215,9 +1215,9 @@ class MoEGeneral(BaseModel):
       " (concat when a device holds <= 32 local experts).",
   )
   expert_replica_move: Literal["gather", "direct"] = Field(
-      "gather",
-      description="Replica weight move (concat impl): gather (send buffer + concat) | direct (send rows straight from"
-      " the weights, write replicas in place; same math).",
+      "direct",
+      description="Replica weight move (concat impl): direct (send rows straight from the weights, write replicas in"
+      " place) | gather (send buffer + concat; same math).",
   )
   expert_replica_identity: bool = Field(False, description="Testing: replication machinery on with the identity plan.")
   expert_replica_overhead_control: bool = Field(

@@ -319,9 +319,9 @@ expert_replicas_per_device: 0 # replica slots per expert-parallel device; 0 disa
 expert_replica_max_send: 4 # max replicas a home device sends per layer.
 expert_replica_board_size: 8 # EP devices per board (the planner prefers same-board sources).
 expert_replica_plan: online # online (this step's counts) | lagged (previous step's counts).
-expert_replica_planner: greedy # greedy (serial loop) | rounds (vectorized hot/cold matching rounds).
+expert_replica_planner: rounds # rounds (vectorized hot/cold matching rounds) | greedy (serial loop).
 expert_replica_impl: auto # auto | concat (copy local+replica weights) | split (two GMMs); auto = concat if <= 32 local experts.
-expert_replica_move: gather # gather (send buffer + concat) | direct (send from the weights, write replicas in place).
+expert_replica_move: direct # direct (send from the weights, write replicas in place) | gather (send buffer + concat).
 expert_replica_identity: false # testing: replication machinery on with the identity plan.
 expert_replica_overhead_control: false # control arm: move replicas per the plan but route no tokens to them.
 log_ra2a_required_rbf: false # debug: print the ragged_buffer_factor each layer needs to avoid drops (ragged a2a path).

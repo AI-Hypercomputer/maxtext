@@ -3165,6 +3165,10 @@ class RoutedMoE(nnx.Module):
       if use_replication:
         if self.config.num_moe_emb_chunks > 0:
           raise NotImplementedError("expert replication does not support num_moe_emb_chunks > 0 yet.")
+        if self.config.num_experts % num_ep != 0:
+          raise ValueError(
+              f"num_experts ({self.config.num_experts}) must be divisible by num_ep ({num_ep}) for expert replication."
+          )
         from maxtext.layers import moe_replica_planner as mrp  # pylint: disable=import-outside-toplevel
 
         def _physical_route_fn(flat_logical):
@@ -3185,7 +3189,7 @@ class RoutedMoE(nnx.Module):
                 int(self.config.expert_replica_board_size),
             )
           else:
-            planner = str(getattr(self.config, "expert_replica_planner", "greedy"))
+            planner = str(getattr(self.config, "expert_replica_planner", "rounds"))
             plan_fn = {
                 "greedy": mrp.compute_plan,
                 "rounds": functools.partial(mrp.compute_plan_iter, rounds=2 * num_replicas),
@@ -3335,6 +3339,10 @@ class RoutedMoE(nnx.Module):
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
 
       if self.config.use_ring_of_experts:
+        if int(getattr(self.config, "expert_replicas_per_device", 0) or 0) > 0:
+          raise NotImplementedError(
+              "expert replication is only supported on the ragged all-to-all path (use_ring_of_experts=False)."
+          )
         return roe_ag_and_route(
             x,
             logits,
@@ -3754,6 +3762,8 @@ class RoutedMoE(nnx.Module):
       batch_size, sequence_length, embed_dim = x.shape
       replica_weights = None
       if self.config.num_moe_emb_chunks > 0:
+        if int(getattr(self.config, "expert_replicas_per_device", 0) or 0) > 0:
+          raise NotImplementedError("expert replication does not support num_moe_emb_chunks > 0 yet.")
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
             x,
             logits,
@@ -3811,7 +3821,7 @@ class RoutedMoE(nnx.Module):
           if impl == "concat":
             extend = (
                 mrw.extend_with_replicas_direct
-                if str(getattr(self.config, "expert_replica_move", "gather")) == "direct"
+                if str(getattr(self.config, "expert_replica_move", "direct")) == "direct"
                 else mrw.extend_with_replicas
             )
             w0 = extend(w0, plan, ep_name, num_ep_, self.dtype)
