@@ -453,7 +453,9 @@ def _effective_step1b_seconds(
   if not model_info.get("needs_step1b"):
     return "N/A"
   if platform == "v7x":
-    rec = v2_data["step1b_convert_by_model"].get(model_info["model_name"])
+    rec = v2_data["step1b_convert_by_model"].get(model_info["model_name"]) or v2_data["step1b_copy_by_pm"].get(
+        (platform, model_info["model_name"])
+    )
   else:
     rec = v2_data["step1b_copy_by_pm"].get((platform, model_info["model_name"]))
   if not rec:
@@ -902,6 +904,7 @@ def _build_v2_matrix_rows(
           sum_row["to_maxtext_step2_total_seconds"] = "BLOCKED"
           sum_row["load_into_tpu_hbm_total_seconds"] = "BLOCKED"
           sum_row["setup_total_before_load_seconds"] = "BLOCKED"
+          sum_row["memory_peak_host_ram_container_gb"] = latest_status
           sum_row["memory_tpu_hbm_peak_per_device_gb"] = "BLOCKED"
         elif latest_deciding_phase == "to_maxtext_step2":
           sum_row["to_maxtext_step1_total_seconds"] = (

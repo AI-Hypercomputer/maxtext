@@ -339,7 +339,11 @@ def _stage_sparse_bf16_safetensors(model_name: str, target_dir: str) -> tuple[in
     return num_st, len(clean_shapes), total_gb
 
   for fn in os.listdir(target_dir):
-    if fn.endswith(".safetensors") or fn in ("model.safetensors.index.json", ".sparse_ready", ".sparse_sharded_v2_ready"):
+    if fn.endswith(".safetensors") or fn in (
+        "model.safetensors.index.json",
+        ".sparse_ready",
+        ".sparse_sharded_v2_ready",
+    ):
       try:
         os.remove(os.path.join(target_dir, fn))
       except OSError:
@@ -625,7 +629,9 @@ def run_worker_to_maxtext_step1_hf_to_gcs(args: argparse.Namespace) -> dict[str,
         gcs_cache_dir = shared_st_cache_dir
         hf_to_gcs_s = cold_s if cold_s >= 1.0 else 0.0
         reused_existing = True
-        cold_note = f"recorded cold HF->GCS={hf_to_gcs_s:.2f}s" if hf_to_gcs_s else "no cold HF->GCS time in this run dir"
+        cold_note = (
+            f"recorded cold HF->GCS={hf_to_gcs_s:.2f}s" if hf_to_gcs_s else "no cold HF->GCS time in this run dir"
+        )
         print(
             f"[to_maxtext Step 1] Reusing populated HF->GCS cache {gcs_cache_dir} ({cold_note}, "
             f"{len(files)} safetensors files)",
@@ -837,7 +843,9 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
   if mon is not None:
     mon.register(jax.monitoring)
   if recorder is not None:
-    harness_v2.install_to_maxtext_step2_hooks(recorder, to_maxtext_mod=to_maxtext, conv_utils_mod=conv_utils, jax_mod=jax)
+    harness_v2.install_to_maxtext_step2_hooks(
+        recorder, to_maxtext_mod=to_maxtext, conv_utils_mod=conv_utils, jax_mod=jax
+    )
 
   sub_timings: dict[str, float] = {}
 
@@ -936,7 +944,9 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
 
     def _streaming_get_tensor(self, key: str, dtype: str | None = None):
       with (
-          recorder.stage("to_maxtext_step2_read_hf_tensors_to_host_ram_seconds") if recorder else contextlib.nullcontext()
+          recorder.stage("to_maxtext_step2_read_hf_tensors_to_host_ram_seconds")
+          if recorder
+          else contextlib.nullcontext()
       ):
         if self.is_local:
           resolved_key = to_maxtext.resolve_scale_key(key, self.shard_map)
@@ -1200,6 +1210,12 @@ def _get_parallelism_flags(args: argparse.Namespace, concurrent_gb: int) -> list
     extra_ici.append(f"ici_expert_parallelism={ici_expert}")
   if ici_tensor > 1:
     extra_ici.append(f"ici_tensor_parallelism={ici_tensor}")
+  devices_per_slice = int(getattr(args, "devices_per_slice", 0) or 0)
+  if getattr(args, "model", "") in ("gpt-oss-20b", "gpt-oss-120b") and devices_per_slice > 64:
+    # gpt-oss has base_emb_dim=2880 (2^6 * 45), so ICI FSDP cannot exceed 64 without IndivisibleError.
+    eff_per_slice = devices_per_slice // max(1, ici_expert * ici_tensor)
+    if eff_per_slice > 64 and eff_per_slice % 64 == 0:
+      extra_ici.append(f"ici_data_parallelism={eff_per_slice // 64}")
   if num_slices > 1:
     return [
         "skip_jax_distributed_system=False",
@@ -1747,7 +1763,9 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
           ):
             chosen_ax = 1
           elif (
-              len(shp) == 2 and k.endswith(("o_proj.weight", "down_proj.weight", "w2.weight")) and shp[0] % fsdp_size == 0
+              len(shp) == 2
+              and k.endswith(("o_proj.weight", "down_proj.weight", "w2.weight"))
+              and shp[0] % fsdp_size == 0
           ):
             chosen_ax = 0
           else:
@@ -1944,7 +1962,9 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
   print(f"[safetensor] Running load_state_if_possible(source_checkpoint_layout='safetensors_dynamic') ...", flush=True)
   t_start = time.perf_counter()
   with (
-      recorder.stage("safetensors_dynamic_step2_total_seconds", log_start=True) if recorder else contextlib.nullcontext()
+      recorder.stage("safetensors_dynamic_step2_total_seconds", log_start=True)
+      if recorder
+      else contextlib.nullcontext()
   ):
     with _cap_load_dynamic_download_workers(load_dynamic), logical_axis_rules(config.logical_axis_rules):
       _, raw_params = checkpointing.load_state_if_possible(
@@ -3114,12 +3134,19 @@ def invoke_worker_subprocess(
       )
       if os.path.exists(log_file):
         with open(log_file, "r", encoding="utf-8") as lf:
-          worker_cached_times = [float(m.group(1)) for m in re.finditer(r"\[Worker\] Cached .* in ([0-9.]+)s", lf.read())]
+          worker_cached_times = [
+              float(m.group(1)) for m in re.finditer(r"\[Worker\] Cached .* in ([0-9.]+)s", lf.read())
+          ]
         if worker_cached_times:
           data["worker_upload_max_s"] = max(worker_cached_times)
       return data
 
-  if reuse_model_hf_cache and phase == "to_maxtext_step1" and scan_mode != "scanned" and not os.path.exists(result_json):
+  if (
+      reuse_model_hf_cache
+      and phase == "to_maxtext_step1"
+      and scan_mode != "scanned"
+      and not os.path.exists(result_json)
+  ):
     scanned_json = os.path.join(local_work_dir, "logs", model, "scanned", "to_maxtext_step1_result.json")
     scanned_log = os.path.join(local_work_dir, "logs", model, "scanned", "to_maxtext_step1.log")
     if os.path.exists(scanned_json):
@@ -3326,6 +3353,7 @@ def invoke_worker_subprocess(
       remote_threads: list[Any] = []
       remote_rc: dict[int, int] = {}
       remote_killed_local = threading.Event()
+      remote_socket_error = threading.Event()
       slice_log_files = []
       try:
         # `slice_id` is the JAX process id (one per host); the slice index is slice_id // num_hosts_per_slice.
@@ -3391,7 +3419,9 @@ def invoke_worker_subprocess(
                     ),
                 ]
                 with socket.create_connection((host, int(port_s)), timeout=60) as sync_sock:
-                  sync_payload = json.dumps({"cmd": sync_cmd, "env": clean_env, "local_work_dir": local_work_dir}) + "\n"
+                  sync_payload = (
+                      json.dumps({"cmd": sync_cmd, "env": clean_env, "local_work_dir": local_work_dir}) + "\n"
+                  )
                   sync_sock.sendall(sync_payload.encode("utf-8"))
                   with sync_sock.makefile("r", encoding="utf-8", errors="replace") as sf_sync:
                     for _ in sf_sync:
@@ -3412,6 +3442,7 @@ def invoke_worker_subprocess(
                         log_f.write(rline)
                         log_f.flush()
               except Exception as ex:  # pylint: disable=broad-exception-caught
+                remote_socket_error.set()
                 log_f.write(f"\n[REMOTE SLICE ERROR]: {ex}\n")
                 log_f.flush()
               remote_rc[s_id] = rc
@@ -3467,6 +3498,16 @@ def invoke_worker_subprocess(
             lf.write(peak_msg)
           lf.flush()
           if remote_killed_local.is_set():
+            if (
+                remote_socket_error.is_set()
+                and not watchdog_state.get("oom_triggered")
+                and not any(r in (-9, 137) for r in remote_rc.values())
+            ):
+              print(
+                  f"[INTERRUPTED] Remote slice daemon unreachable during '{phase}'; exiting 75 for queue retry.",
+                  flush=True,
+              )
+              raise SystemExit(75)
             failed_remote = [(s_id, rc) for s_id, rc in sorted(remote_rc.items()) if rc != 0]
             if failed_remote:
               s_id, rc = failed_remote[0]
@@ -4246,7 +4287,9 @@ def main() -> None:
             "safetensor_2b_load_sharded_hf_s": s_res.get("load_sharded_hf_s", 0.0),
             "safetensor_2c_transform_hf_to_mt_s": s_res.get("transform_hf_to_mt_s", 0.0),
             "safetensor_total_s": safetensor_total_s,
-            "speedup_total_vs_to_maxtext_x": (to_maxtext_total_s / safetensor_total_s if safetensor_total_s > 0 else 0.0),
+            "speedup_total_vs_to_maxtext_x": (
+                to_maxtext_total_s / safetensor_total_s if safetensor_total_s > 0 else 0.0
+            ),
             "load_time_diff_safetensor_step2_vs_orbax_step3_s": (
                 s_res.get("safetensors_and_convert_s", 0.0) - m_step3.get("load_orbax_s", 0.0)
             ),
