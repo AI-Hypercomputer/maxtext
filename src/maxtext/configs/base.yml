@@ -769,7 +769,8 @@ local_checkpoint_directory: ""
 # It should be a positive number when and only when `enable_emergency_checkpoint` or `enable_multi_tier_checkpointing` is true.
 local_checkpoint_period: 0
 
-# Jax cache directory
+# JAX compilation cache directory. Multi-process GPU runs ignore this per-host default and need a directory shared by
+# all processes (for example a gs:// path) to use the cache.
 jax_cache_dir: "~/jax_cache"
 
 # Hardware

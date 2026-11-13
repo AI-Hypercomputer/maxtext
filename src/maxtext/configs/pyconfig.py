@@ -496,6 +496,24 @@ def resolve_model_config_path(config_path: str, model_name: str, configs_dir: st
   return active_candidates[-1], False
 
 
+def skip_default_jax_cache_on_multiprocess_gpu(raw_keys: dict[str, Any], config_class: type[Any]) -> bool:
+  """Returns whether to leave the default JAX compilation cache off for this run.
+
+  JAX writes persistent cache entries only from process 0 and expects the cache directory to be shared by all
+  processes. The default `jax_cache_dir` (`~/jax_cache`) is local to each host, so in a multi-host GPU job only
+  process 0 ever has entries. When a later program on the same hosts (a second decode, for example) compiles a
+  program again, process 0 loads it from its cache while the other processes compile it, and XLA's sharded
+  autotuning (on by default) makes them wait for autotuning results that process 0 never produces. A directory
+  other than the default is used as given.
+  """
+  if raw_keys.get("hardware") not in ("gpu", "gpu_multiprocess"):
+    return False
+  default_field = config_class.model_fields.get("jax_cache_dir")
+  if default_field is None or raw_keys.get("jax_cache_dir") != default_field.default:
+    return False
+  return jax.process_count() > 1
+
+
 def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic config class whereas `initialize` returns the og `HyperParameters`
@@ -635,6 +653,13 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
     if pydantic_kwargs.get("dump_hlo"):
       max_logging.warning(
           "JAX compilation cache is disabled because dump_hlo is True. HLO dumping requires recompilation."
+      )
+    elif skip_default_jax_cache_on_multiprocess_gpu(pydantic_kwargs, config_class):
+      max_logging.warning(
+          "JAX compilation cache is off: this is a multi-process GPU run and jax_cache_dir is the default, which is"
+          " local to each host. JAX writes the cache only from process 0, so the other processes would compile alone"
+          " and can hang in XLA's sharded autotuning. To use the cache, set jax_cache_dir to a directory shared by all"
+          " processes (for example a gs:// path)."
       )
     else:
       from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
