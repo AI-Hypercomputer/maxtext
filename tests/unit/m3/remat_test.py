@@ -597,6 +597,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     with jax.set_mesh(mesh), nnx.use_eager_sharding(True):
       cfg_scan = _qwen3_8_mini_config(
           scan_layers=True,
+          base_num_decoder_layers=8,
           remat_policy="custom",
           tensors_on_device=["moe_routed_output"],
       )
@@ -620,19 +621,22 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
 
       gd, st = nnx.split(m_scan.decoder)
       dec_jaxpr = jax.make_jaxpr(lambda s, t: nnx.merge(gd, s)(t)[0])(st, toks).jaxpr
-      # Top-level decoder jaxpr must NOT wrap the `scan` primitive in a coarse outer `remat2`.
+      # Top-level decoder jaxpr has 4 per-sublayer `remat2` calls for `first_cycle` (`prevent_cse=True`)
+      # and 1 `scan` call for `cycles` whose body has 4 per-sublayer `remat2` calls (`prevent_cse=True`).
       top_remat = [eqn for eqn in dec_jaxpr.eqns if eqn.primitive.name == "remat2"]
-      self.assertEqual(len(top_remat), 0, "Cycle scan must not be wrapped in a single coarse outer remat2")
+      self.assertLen(top_remat, 4)
+      for eqn in top_remat:
+        self.assertTrue(eqn.params.get("prevent_cse", False))
       scan_eqns = [eqn for eqn in dec_jaxpr.eqns if eqn.primitive.name == "scan"]
       self.assertLen(scan_eqns, 1)
       scan_body_jaxpr = scan_eqns[0].params["jaxpr"].jaxpr
       inner_remat = [eqn for eqn in scan_body_jaxpr.eqns if eqn.primitive.name == "remat2"]
-      # 4 decoder sublayers (`gdn_0`, `gdn_1`, `gdn_2`, `qsa_3`) + optional `ple` -> >= 4 per-sublayer checkpoints.
+      # 4 decoder sublayers (`gdn_0`, `gdn_1`, `gdn_2`, `qsa_3`) inside `cycles`.
       self.assertGreaterEqual(len(inner_remat), 4)
       for eqn in inner_remat:
         self.assertTrue(eqn.params.get("prevent_cse", False))
 
-      # Single-cycle (`num_cycles == 1`) compiled HLO must preserve the `while` loop barrier.
+      # Single-stacked-cycle (`num_stacked_cycles == 1`, `base_num_decoder_layers == 8`) HLO preserves `while(`.
       toks_arr = jax.device_put(jnp.ones((1, 8), dtype=jnp.int32), rep)
       hlo_1cyc = jax.jit(lambda s, t: nnx.merge(gd, s)(t)[0]).lower(st, toks_arr).compile().as_text()
       self.assertIn("while(", hlo_1cyc)
@@ -859,9 +863,10 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
           weight_dtype="bfloat16",
       )
       model = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
-      ple_shape = model.decoder.ple.ple_embedding.ngram_embedding.embedding.shape
+      ple_shape = model.decoder.first_cycle.gdn_1.ple.ple_embedding.ngram_embedding.embedding.shape
       num_cycles = model.decoder.num_cycles
       stacked_sig = f"{num_cycles}x{ple_shape[0]}x{ple_shape[1]}"
+      stacked_rem_sig = f"{model.decoder.num_stacked_cycles}x{ple_shape[0]}x{ple_shape[1]}"
       gdef, params, rest = nnx.split(model, nnx.Param, ...)
 
       for pol_name in ("full", "minimal_with_context", "custom"):
@@ -876,6 +881,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
 
         mlir = jax.jit(jax.grad(loss_fn)).lower(params).as_text()
         self.assertNotIn(stacked_sig, mlir, f"PLE weights stacked across cycles under {pol_name}: {stacked_sig}")
+        self.assertNotIn(stacked_rem_sig, mlir, f"PLE weights stacked across cycles under {pol_name}: {stacked_rem_sig}")
 
   @parameterized.parameters(False, True)
   def test_glm5_3_set_remat_tags_eval_gate_and_grad_parity(self, scan_layers: bool):
@@ -958,7 +964,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     cfg = _qwen3_8_mini_config(scan_layers=False, remat_policy="full")
     with jax.set_mesh(mesh):
       decoder = modeling_qwen3_8_flash_next.Qwen3_8Decoder(cfg, rngs=nnx.Rngs(0))
-      layer0 = getattr(decoder, "layers_0")
+      layer0 = decoder.first_cycle.gdn_0
 
       class _CustomIntermediate(nnx.Intermediate):
         """Probe Intermediate variable."""
@@ -988,9 +994,9 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     """Verifies unscanned _run_qwen3_8_sublayer uses prevent_cse=True, cuts AOT HBM vs none, and keeps <1e-5 grad drift."""
     # pylint: disable=protected-access
     mesh = create_mesh(devices=jax.devices()[:1])
-    cfg_none = _qwen3_8_mini_config(scan_layers=False, remat_policy="none")
-    cfg_full = _qwen3_8_mini_config(scan_layers=False, remat_policy="full")
-    cfg_scan = _qwen3_8_mini_config(scan_layers=True, remat_policy="full")
+    cfg_none = _qwen3_8_mini_config(scan_layers=False, base_num_decoder_layers=8, remat_policy="none")
+    cfg_full = _qwen3_8_mini_config(scan_layers=False, base_num_decoder_layers=8, remat_policy="full")
+    cfg_scan = _qwen3_8_mini_config(scan_layers=True, base_num_decoder_layers=8, remat_policy="full")
     with jax.set_mesh(mesh):
       m_none = model_creation_utils.create_model(cfg_none, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
       m_full = model_creation_utils.create_model(cfg_full, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
@@ -1011,6 +1017,80 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       l_full, g_full = nnx.jit(nnx.value_and_grad(_loss))(m_full, toks)
       self.assertLess(abs(float(l_full - l_none)), 1e-5)
       _assert_grad_trees_close(nnx.state(g_full, nnx.Param), nnx.state(g_none, nnx.Param), atol=1e-5, rtol=1e-5)
+
+  @parameterized.parameters(False, True)
+  def test_qwen3_8_ple_ngram_lookup_hoisted_outside_remat_checkpoint(self, scan_layers: bool):
+    """Verifies PLE n-gram table gather is hoisted outside `prevent_cse=True` remat and matches `remat_policy=none`."""
+    mesh = create_mesh(devices=jax.devices()[:1])
+    toks = jax.random.randint(jax.random.PRNGKey(7), (1, 16), 0, 128)
+    with jax.set_mesh(mesh), nnx.use_eager_sharding(True), jax.default_matmul_precision("highest"):
+      cfg_none = _qwen3_8_mini_config(scan_layers=scan_layers, base_num_decoder_layers=8, remat_policy="none")
+      cfg_full = _qwen3_8_mini_config(scan_layers=scan_layers, base_num_decoder_layers=8, remat_policy="full")
+      m_none = model_creation_utils.create_model(cfg_none, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      m_full = model_creation_utils.create_model(cfg_full, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      nnx.update(m_full, nnx.state(m_none, nnx.Param))
+
+      ple_shape = m_full.decoder.first_cycle.gdn_1.ple.ple_embedding.ngram_embedding.embedding.shape
+      self.assertNotEqual(ple_shape, m_full.decoder.token_embedder.embedding.shape)
+      gdef, params, rest = nnx.split(m_full, nnx.Param, ...)
+
+      def _loss_from_params(p):
+        m = nnx.merge(gdef, p, rest)
+        logits = m(toks)
+        return jnp.mean(logits.astype(jnp.float32) ** 2)
+
+      fwd_jaxpr = jax.make_jaxpr(_loss_from_params)(params).jaxpr
+      ple_gathers_in_remat = 0
+      ple_gathers_outside_remat = 0
+      remat_seen = 0
+
+      def _walk(jaxpr, in_remat: bool):
+        nonlocal ple_gathers_in_remat, ple_gathers_outside_remat, remat_seen
+        for eqn in jaxpr.eqns:
+          is_remat = eqn.primitive.name == "remat2"
+          if is_remat:
+            remat_seen += 1
+          now_remat = in_remat or is_remat
+          if eqn.primitive.name == "gather" and tuple(eqn.invars[0].aval.shape) == ple_shape:
+            if now_remat:
+              ple_gathers_in_remat += 1
+            else:
+              ple_gathers_outside_remat += 1
+          for val in eqn.params.values():
+            for sub in m3_remat._jaxprs_in(val):  # pylint: disable=protected-access
+              _walk(sub, now_remat)
+
+      _walk(fwd_jaxpr, False)
+      self.assertGreater(remat_seen, 0)
+      self.assertEqual(ple_gathers_outside_remat, 1)
+      self.assertEqual(ple_gathers_in_remat, 0)
+
+      grad_jaxpr = jax.make_jaxpr(jax.grad(_loss_from_params))(params).jaxpr
+      grad_ple_gathers = sum(
+          1
+          for _, eqn in _iter_all_eqns(grad_jaxpr)
+          if eqn.primitive.name == "gather" and tuple(eqn.invars[0].aval.shape) == ple_shape
+      )
+      self.assertEqual(grad_ple_gathers, 1)
+
+      def _loss(m, x):
+        logits = m(x)
+        return jnp.mean(logits.astype(jnp.float32) ** 2)
+
+      l_none, g_none = nnx.jit(nnx.value_and_grad(_loss))(m_none, toks)
+      l_full, g_full = nnx.jit(nnx.value_and_grad(_loss))(m_full, toks)
+      np.testing.assert_allclose(l_full, l_none, atol=1e-5, rtol=1e-5)
+      _assert_grad_trees_close(nnx.state(g_full, nnx.Param), nnx.state(g_none, nnx.Param), atol=1e-5, rtol=1e-5)
+      ple_grad = np.asarray(g_full.decoder.first_cycle.gdn_1.ple.ple_embedding.ngram_embedding.embedding[...])
+      self.assertGreater(float(np.abs(ple_grad).max()), 0.0)
+
+      ple_layer = m_none.decoder.first_cycle.gdn_1.ple
+      h = jnp.ones((1, 16, int(cfg_none.emb_dim) * int(cfg_none.hc_count)), dtype=jnp.float32)
+      out_ids = ple_layer(h, toks)
+      out_pre = ple_layer(h, precomputed_embeds=ple_layer.ple_embedding(toks))
+      np.testing.assert_allclose(np.asarray(out_pre), np.asarray(out_ids), atol=1e-6, rtol=1e-6)
+      with self.assertRaises(ValueError):
+        ple_layer(h)
 
   def _compile_tpu7x8_memory(self, extra_argv: Sequence[str]):
     """Compiles one `train_step` AOT for `tpu7x-8` on a CPU host and returns `memory_analysis()`."""
@@ -1090,9 +1170,12 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     ma_full = self._compile_tpu7x8_memory((*q38_common, "scan_layers=false", "remat_policy=full"))
     self.assertLess(ma_full.peak_memory_in_bytes, int(0.75 * ma_none.peak_memory_in_bytes))
 
+    # Under always-stacked `first_cycle + cycles`, a 1-cycle (4-layer) model runs entirely in unstacked
+    # `first_cycle` (no trip-count-1 scan), so `minimal_offloaded` offloads directly to pinned host memory;
+    # 2-cycle (8-layer) exercises the trip-count-1 `cycles` `scan_safe_policy` barrier while offloading `first_cycle`.
     ma_1cyc_off = self._compile_tpu7x8_memory((*q38_common, "scan_layers=true", "remat_policy=minimal_offloaded"))
     self.assertGreater(ma_1cyc_off.peak_memory_in_bytes, 0)
-    self.assertEqual(ma_1cyc_off.host_temp_size_in_bytes, 0)
+    self.assertGreater(ma_1cyc_off.host_temp_size_in_bytes, 0)
 
     ma_2cyc_off = self._compile_tpu7x8_memory(
         (

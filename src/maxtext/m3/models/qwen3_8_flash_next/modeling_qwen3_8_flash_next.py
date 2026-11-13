@@ -2579,13 +2579,25 @@ class Qwen3_8PLELayer(nnx.Module):
     padded = jnp.pad(hidden_states, ((0, 0), (self.short_conv_state_len, 0), (0, 0)))
     return jax.nn.silu(self.conv1d(padded))
 
-  def __call__(self, hidden_states: jax.Array, input_ids: jax.Array, conv_mask: jax.Array | None = None) -> jax.Array:
+  def __call__(
+      self,
+      hidden_states: jax.Array,
+      input_ids: jax.Array | None = None,
+      conv_mask: jax.Array | None = None,
+      *,
+      precomputed_embeds: jax.Array | None = None,
+  ) -> jax.Array:
     """Forward pass injecting hashed n-gram features into hidden streams."""
     is_4d = hidden_states.ndim == 4
     b, s = hidden_states.shape[:2]
     hidden_flat = hidden_states.reshape(b, s, self.hc_hidden_size) if is_4d else hidden_states
 
-    embeds = self.ple_embedding(input_ids)
+    if precomputed_embeds is not None:
+      embeds = precomputed_embeds
+    elif input_ids is not None:
+      embeds = self.ple_embedding(input_ids)
+    else:
+      raise ValueError("Qwen3_8PLELayer requires either `input_ids` or `precomputed_embeds`.")
     key_normed = self.norm_key(self.key_proj(embeds)).reshape(b, s, self.hc_count, self.emb_dim)
     value = self.value_proj(embeds)
     query_normed = self.norm_query(hidden_flat).reshape(b, s, self.hc_count, self.emb_dim)
@@ -2727,13 +2739,16 @@ class Qwen3_8DecoderLayer(nnx.Module):
       positions: jax.Array | None = None,
       conv_mask: jax.Array | None = None,
       ple_input_ids: jax.Array | None = None,
+      ple_embeds: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_aux: bool = False,
   ) -> Any:
     """Executes single decoder layer forward pass."""
     hidden_states = checkpoint_name(hidden_states, "decoder_layer_input")
-    if self.ple is not None and ple_input_ids is not None:
-      hidden_states = hidden_states + self.ple(hidden_states, ple_input_ids, conv_mask=conv_mask)
+    if self.ple is not None and (ple_embeds is not None or ple_input_ids is not None):
+      hidden_states = hidden_states + self.ple(
+          hidden_states, ple_input_ids, conv_mask=conv_mask, precomputed_embeds=ple_embeds
+      )
     mixed, inject = self.attn_hyper_connection.before_block(hidden_states)
     if self.layer_type == "linear_attention":
       attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask), None
@@ -2757,10 +2772,17 @@ class Qwen3_8DecoderLayer(nnx.Module):
 class Qwen3_8CycleBlock(nnx.Module):
   """4-layer cycle block composed of 3 GDN layers and 1 QSA layer."""
 
-  def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Any,
+      *,
+      include_ple: bool = False,
+      sharding: Sharding | None = None,
+      rngs: nnx.Rngs,
+  ):
     sharding_obj = sharding or sharding_from_config(config)
     self.gdn_0, self.gdn_1, self.gdn_2, self.qsa_3 = (
-        Qwen3_8DecoderLayer(config, i, include_ple=False, sharding=sharding_obj, rngs=rngs) for i in range(4)
+        Qwen3_8DecoderLayer(config, i, include_ple=include_ple, sharding=sharding_obj, rngs=rngs) for i in range(4)
     )
 
 
@@ -2790,9 +2812,29 @@ def _strip_cycle_axis(var: Any) -> Any:
   """Drops the leading `None` scan axis from `out_sharding` metadata inside `apply_scanned_cycles`."""
   if isinstance(var, nnx.Variable):
     spec = var.get_metadata().get("out_sharding")
-    if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) > 0:
+    if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) == var.get_value().ndim + 1:
       return var.replace(out_sharding=jax.sharding.PartitionSpec(*spec[1:]))
   return var
+
+
+def _slice_cycle_var(var: Any, cycle_idx: int) -> Any:
+  """Slices cycle `cycle_idx` along axis 0 while dropping the leading `None` from `out_sharding`."""
+  if not isinstance(var, nnx.Variable):
+    return var[cycle_idx]
+  val = var.get_value()[cycle_idx]
+  spec = var.get_metadata().get("out_sharding")
+  if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) == var.get_value().ndim:
+    return var.replace(
+        val,
+        out_sharding=jax.sharding.PartitionSpec(*spec[1:]),
+        eager_sharding=bool(var.get_metadata().get("eager_sharding", False)),
+    )
+  return var.replace(val)
+
+
+def _slice_cycle_state(tree: Any, cycle_idx: int) -> Any:
+  """Slices an NNX state tree along axis 0 for unrolled cycle execution (`scan_layers=False`)."""
+  return jax.tree.map(lambda v: _slice_cycle_var(v, cycle_idx), tree, is_leaf=_is_nnx_var)
 
 
 def create_scanned_cycles(
@@ -2810,8 +2852,6 @@ def create_scanned_cycles(
     )
   if int(config.num_decoder_layers) % 4 != 0:
     raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {config.num_decoder_layers}.")
-  if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-    raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
   sharding_obj = sharding or sharding_from_config(config)
   sp = [nnx.split(Qwen3_8CycleBlock(config, sharding=sharding_obj, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
   stacked_trees = [jax.tree.map(_stack_cycle_vars, *(s[i] for s in sp), is_leaf=_is_nnx_var) for i in (1, 2)]
@@ -2840,12 +2880,23 @@ def _run_qwen3_8_sublayer(
     segment_ids: jax.Array | None = None,
 ) -> Any:
   """Executes one unscanned `Qwen3_8DecoderLayer`, wrapping in `jax.checkpoint(..., prevent_cse=True)` if active."""
+  # Hoist the single-layer PLE n-gram table lookup outside `jax.checkpoint(..., prevent_cse=True)`:
+  # it depends only on `ple_input_ids` and `ngram_embedding`, returns a batch+length-sharded
+  # `(B, S, ple_embed_dim)` tensor, and otherwise forces `prevent_cse=True` to recompute the
+  # SparseCore n-gram gather during Layer 1's backward pass.
+  ple = getattr(layer, "ple", None)
+  ple_embeds = (
+      ple.ple_embedding(ple_input_ids)
+      if (eff_policy is not None and ple is not None and ple_input_ids is not None)
+      else None
+  )
   dyn_kw = {
       k: v
       for k, v in (
           ("positions", positions),
           ("conv_mask", conv_mask),
-          ("ple_input_ids", ple_input_ids),
+          ("ple_input_ids", None if ple_embeds is not None else ple_input_ids),
+          ("ple_embeds", ple_embeds),
           ("segment_ids", segment_ids),
       )
       if v is not None
@@ -2866,26 +2917,60 @@ def _run_qwen3_8_sublayer(
   return out
 
 
-def apply_scanned_cycles(
-    cycles: Qwen3_8CycleBlock,
-    ple_layer: Qwen3_8PLELayer | None,
+def run_single_cycle(
+    cycle: Qwen3_8CycleBlock,
     hidden_states: jax.Array,
     *,
-    num_cycles: int,
+    eff_policy: Callable[..., Any] | None = None,
+    return_aux: bool = False,
     positions: jax.Array | None = None,
     conv_mask: jax.Array | None = None,
     ple_input_ids: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    sharding: Sharding | None = None,
+) -> Any:
+  """Executes one unstacked 4-layer `Qwen3_8CycleBlock` (`first_cycle`)."""
+  h = shard_batch(hidden_states, sharding)
+  aux_list = []
+  for name in ("gdn_0", "gdn_1", "gdn_2", "qsa_3"):
+    out = _run_qwen3_8_sublayer(
+        getattr(cycle, name),
+        h,
+        eff_policy=eff_policy,
+        return_aux=return_aux,
+        positions=positions,
+        conv_mask=conv_mask,
+        ple_input_ids=ple_input_ids,
+        segment_ids=segment_ids,
+    )
+    if return_aux:
+      h, a = out
+      aux_list.append(a)
+      h = shard_batch(h, sharding)
+    else:
+      h = shard_batch(out, sharding)
+  return (h, aux_list) if return_aux else h
+
+
+def apply_scanned_cycles(
+    cycles: Qwen3_8CycleBlock,
+    hidden_states: jax.Array,
+    *,
+    num_cycles: int,
+    scan_layers: bool = True,
+    positions: jax.Array | None = None,
+    conv_mask: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
     return_aux: bool = False,
     remat: bool = False,
     remat_policy: Any = None,
     sharding: Sharding | None = None,
 ) -> Any:
-  """Executes scan over stacked cycle weights with per-sublayer checkpoint barriers."""
+  """Executes `jax.lax.scan` (or unrolled Python loop when `scan_layers=False`) over stacked homogeneous cycles."""
   eff_policy = _coerce_remat_callable(remat_policy)
   if eff_policy is None and remat:
     eff_policy = cp.nothing_saveable
-  if num_cycles == 1 and eff_policy is not None:
+  if scan_layers and num_cycles == 1 and eff_policy is not None:
     eff_policy = m3_remat.scan_safe_policy(eff_policy)
   use_remat = eff_policy is not None
 
@@ -2899,77 +2984,65 @@ def apply_scanned_cycles(
     sub_params[name] = lp
     sub_rests[name] = lr
 
-  p_def, p_params, p_rest = nnx.split(ple_layer, nnx.Param, ...) if ple_layer is not None else (None, None, None)
   dyn_kw = {
       k: v for k, v in (("positions", positions), ("conv_mask", conv_mask), ("segment_ids", segment_ids)) if v is not None
   }
-  ple_kw = {"conv_mask": conv_mask} if conv_mask is not None else {}
 
-  def _run_slot(name: str, h_in: jax.Array, p_slice: Any, r_slice: Any, cyc_idx: jax.Array) -> Any:
+  def _run_slot(name: str, h_in: jax.Array, p_slice: Any, r_slice: Any) -> Any:
     gd = sub_defs[name]
     lp = jax.tree.map(_strip_cycle_axis, p_slice, is_leaf=_is_nnx_var)
     lr = jax.tree.map(_strip_cycle_axis, r_slice, is_leaf=_is_nnx_var)
-    # Keep `jax.lax.cond` inside `gdn_1`'s outer `jax.checkpoint` (matching unscanned `layers_1`) so
-    # `cond` linearization never pads the false branch with `p_params`-shaped residuals across cycles.
-    with_ple = name == "gdn_1" and p_def is not None and ple_input_ids is not None
 
-    def _eval_slot(x_in, p_in, r_in, kw_in, cyc_in, pp_in, pr_in, pids_in, pkw_in):
-      if with_ple:
-        x_in = jax.lax.cond(
-            cyc_in == 0,
-            lambda z: z + nnx.merge(p_def, pp_in, pr_in)(z, pids_in, **pkw_in),
-            lambda z: z,
-            x_in,
-        )
-        x_in = shard_batch(x_in, sharding)
+    def _eval_slot(x_in, p_in, r_in, kw_in):
       lyr = nnx.merge(gd, p_in, r_in)
       return lyr(x_in, return_aux=return_aux, **kw_in)
 
-    args = (
-        h_in,
-        lp,
-        lr,
-        dyn_kw,
-        cyc_idx if with_ple else None,
-        p_params if with_ple else None,
-        p_rest if with_ple else None,
-        ple_input_ids if with_ple else None,
-        ple_kw if with_ple else None,
-    )
+    args = (h_in, lp, lr, dyn_kw)
     if use_remat:
       return jax.checkpoint(_eval_slot, policy=eff_policy, prevent_cse=True)(*args)
     return _eval_slot(*args)
 
   def scan_fn(carry, xs):
-    p_slices, r_slices, cyc_idx = xs
+    p_slices, r_slices = xs
     h = shard_batch(carry, sharding)
     if return_aux:
-      h, a0 = _run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx)
-      h, a1 = _run_slot("gdn_1", shard_batch(h, sharding), p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx)
-      h, a2 = _run_slot("gdn_2", shard_batch(h, sharding), p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx)
-      h, a3 = _run_slot("qsa_3", shard_batch(h, sharding), p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx)
+      h, a0 = _run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"])
+      h, a1 = _run_slot("gdn_1", shard_batch(h, sharding), p_slices["gdn_1"], r_slices["gdn_1"])
+      h, a2 = _run_slot("gdn_2", shard_batch(h, sharding), p_slices["gdn_2"], r_slices["gdn_2"])
+      h, a3 = _run_slot("qsa_3", shard_batch(h, sharding), p_slices["qsa_3"], r_slices["qsa_3"])
       return shard_batch(h, sharding), (a0, a1, a2, a3)
-    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx), sharding)
-    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx), sharding)
-    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx), sharding)
-    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx), sharding)
+    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"]), sharding)
+    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"]), sharding)
+    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"]), sharding)
+    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"]), sharding)
     return h, None
+
+  if not scan_layers:
+    h = hidden_states
+    aux_out = []
+    for c in range(num_cycles):
+      p_c = _slice_cycle_state(sub_params, c)
+      r_c = _slice_cycle_state(sub_rests, c)
+      h, a_c = scan_fn(h, (p_c, r_c))
+      if return_aux:
+        aux_out.extend(a_c)
+    return (h, aux_out) if return_aux else h
 
   if num_cycles == 1:
     # Retain the trip-count-1 while loop as a memory barrier (see `ScannedLayers` in
     # `maxtext.m3.infra.scan`): prevents XLA from inlining the single cycle and overlapping
     # activation temporaries across the remat boundary.
     with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-      res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests, jnp.arange(num_cycles)))
+      res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests))
   else:
-    res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests, jnp.arange(num_cycles)))
+    res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests))
   if return_aux:
     return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
   return res[0]
 
 
 def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> None:
-  """Copies and stacks weights from unscanned decoder layers into scanned cycles."""
+  """Copies weights from an unscanned (`scan_layers=False`) model/decoder into a scanned (`scan_layers=True`) one."""
   u, s = getattr(unscanned_decoder, "decoder", unscanned_decoder), getattr(scanned_decoder, "decoder", scanned_decoder)
   if u.scan_layers or not s.scan_layers:
     raise ValueError(f"Expected an unscanned and a scanned decoder, got scan_layers={u.scan_layers}, {s.scan_layers}.")
@@ -2984,18 +3057,7 @@ def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> N
     raise ValueError(f"MTP presence mismatch: unscanned={u_mtp is not None}, scanned={s_mtp is not None}.")
   if u_mtp is not None:
     nnx.update(s_mtp, nnx.state(u_mtp))
-
-  def get_sub(l, a):
-    return (l.attn_hyper_connection, getattr(l, a), l.mlp_hyper_connection, l.mlp)
-
-  for k, name in enumerate(["gdn_0", "gdn_1", "gdn_2", "qsa_3"]):
-    a = "linear_attn" if k < 3 else "self_attn"
-    st = [nnx.state(get_sub(getattr(u, f"layers_{4 * c + k}"), a)) for c in range(s.num_cycles)]
-    nnx.update(get_sub(getattr(s.cycles, name), a), jax.tree.map(_stack_cycle_vars, *st, is_leaf=_is_nnx_var))
-  for m in ("token_embedder", "hyper_connection_mixer"):
-    nnx.update(getattr(s, m), nnx.state(getattr(u, m)))
-  if u.ple_layer_id is not None:
-    nnx.update(s.ple, nnx.state(getattr(u, f"layers_{u.ple_layer_id}").ple))
+  nnx.update(s, nnx.state(u))
 
 
 # =================================================================================================
@@ -3372,22 +3434,23 @@ class Qwen3_8Decoder(nnx.Module):
         rngs=rngs,
     )
     self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
-    if self.scan_layers:
-      if int(config.inhomogeneous_layer_cycle_interval) != 4:
-        raise ValueError(
-            f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
-            f"{config.inhomogeneous_layer_cycle_interval}."
-        )
-      if self.num_layers % 4 != 0:
-        raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
-      if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-        raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
-      self.num_cycles = self.num_layers // 4
-      self.cycles = create_scanned_cycles(config, self.num_cycles, sharding=self.sharding, rngs=rngs)
-      self.ple = build_ple_layer(config, sharding=self.sharding, rngs=rngs)
-    else:
-      for i in range(self.num_layers):
-        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, sharding=self.sharding, rngs=rngs))
+    if int(config.inhomogeneous_layer_cycle_interval) != 4:
+      raise ValueError(
+          f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
+          f"{config.inhomogeneous_layer_cycle_interval}."
+      )
+    if self.num_layers < 4 or self.num_layers % 4 != 0:
+      raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
+    if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
+      raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+    self.num_cycles = self.num_layers // 4
+    self.num_stacked_cycles = self.num_cycles - 1
+    self.first_cycle = Qwen3_8CycleBlock(config, include_ple=True, sharding=self.sharding, rngs=rngs)
+    self.cycles = (
+        create_scanned_cycles(config, self.num_stacked_cycles, sharding=self.sharding, rngs=rngs)
+        if self.num_stacked_cycles > 0
+        else None
+    )
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
@@ -3421,35 +3484,37 @@ class Qwen3_8Decoder(nnx.Module):
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
       eff_policy = cp.nothing_saveable
-    if self.scan_layers:
+    first_out = run_single_cycle(
+        self.first_cycle,
+        h,
+        eff_policy=eff_policy,
+        return_aux=return_aux,
+        positions=pos,
+        conv_mask=cmask,
+        ple_input_ids=pids,
+        segment_ids=decoder_segment_ids,
+        sharding=self.sharding,
+    )
+    h, aux_list = first_out if return_aux else (first_out, [])
+    if self.cycles is not None:
       res = apply_scanned_cycles(
           self.cycles,
-          self.ple,
           h,
-          num_cycles=self.num_cycles,
+          num_cycles=self.num_stacked_cycles,
+          scan_layers=self.scan_layers,
           positions=pos,
           conv_mask=cmask,
-          ple_input_ids=pids,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
           remat=self.remat,
           remat_policy=eff_policy,
           sharding=self.sharding,
       )
-      h, aux_list = res if return_aux else (res, [])
-    else:
-      for i in range(self.num_layers):
-        out = _run_qwen3_8_sublayer(
-            getattr(self, f"layers_{i}"),
-            h,
-            eff_policy=eff_policy,
-            return_aux=return_aux,
-            positions=pos,
-            conv_mask=cmask,
-            ple_input_ids=pids,
-            segment_ids=decoder_segment_ids,
-        )
-        h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
+      if return_aux:
+        h, cycle_aux = res
+        aux_list = aux_list + cycle_aux
+      else:
+        h = res
     h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), self.sharding, "mixed_streams")
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
