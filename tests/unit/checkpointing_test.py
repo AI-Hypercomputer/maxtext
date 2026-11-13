@@ -952,7 +952,6 @@ class SaveCheckpointBackupTest(parameterized.TestCase):
 
   def test_backup_forwarded_to_multi_tier_checkpointing_manager(self):
     manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
-    manager.all_steps.return_value = [0]  # step 5 not saved yet
     manager.save.return_value = True
 
     saved = checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
@@ -963,23 +962,14 @@ class SaveCheckpointBackupTest(parameterized.TestCase):
     self.assertTrue(kwargs["backup"])
     self.assertTrue(kwargs["force"])  # a step to back up is always saved locally
 
-  def test_backup_rejected_for_already_saved_step(self):
-    # The request rides on the save that writes the step; a second forced save of the
-    # same step would raise StepAlreadyExistsError without requesting the backup.
+  def test_backup_for_already_saved_step_surfaces_orbax_error(self):
+    # save_checkpoint is expected at most once per step; a second call with backup=True is not
+    # intercepted, so Orbax's StepAlreadyExistsError reaches the caller instead of being skipped.
     manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
-    manager.all_steps.return_value = [0, 5]
+    manager.save.side_effect = ocp.checkpoint_manager.StepAlreadyExistsError("step 5 already exists")
 
-    with self.assertRaisesRegex(ValueError, "step 5 is already saved"):
+    with self.assertRaises(ocp.checkpoint_manager.StepAlreadyExistsError):
       checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
-    manager.save.assert_not_called()
-
-  def test_backup_allowed_when_saved_steps_unknown(self):
-    # Pathways colocated mode cannot list saved steps on the host; the request still goes through.
-    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
-    manager.all_steps.side_effect = NotImplementedError("all_steps is not supported in colocated mode.")
-    manager.save.return_value = True
-
-    self.assertTrue(checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True))
     self.assertTrue(manager.save.call_args.kwargs["backup"])
 
   def test_no_backup_keeps_multi_tier_checkpointing_save_call_unchanged(self):
