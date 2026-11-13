@@ -68,11 +68,14 @@ Note:
 import collections
 import concurrent.futures
 import contextlib
+import importlib.util
 import multiprocessing
 import os
 import random
 import time
 
+from etils.epath import backend as epath_backend
+from etils.epath import gpath
 from flax import nnx
 import flax.traverse_util
 import huggingface_hub
@@ -209,7 +212,7 @@ def _leading_axis_shardings(abstract_state, devices, num_groups=None):
 def _no_gcs_read_ahead():
   """Makes gcsfs read only the requested bytes of a `gs://` file within this context.
 
-  Orbax reads each byte range through `epath`, whose `gs://` backend (gcsfs) also reads `default_block_size`
+  Orbax reads each byte range through `epath` with gcsfs (see `_GcsfsPath`), which also reads `default_block_size`
   (5 MiB) ahead. Each host reads one range per tensor, so a host of DeepSeek-V3 on 128 hosts needed about
   230 KB per tensor but downloaded 5.3 MB. The class attribute is set because gcsfs instances are cached per
   thread and Orbax opens files from worker threads. Writes still use blocks of at least 256 KiB.
@@ -225,6 +228,21 @@ def _no_gcs_read_ahead():
     yield
   finally:
     gcsfs.GCSFileSystem.default_block_size = block_size
+
+
+class _GcsfsPath(gpath.PosixGPath):
+  """A path whose `gs://` files etils opens with gcsfs, even if TensorFlow is installed.
+
+  If TensorFlow is installed, etils opens `gs://` files with `tf.io.gfile`. A read smaller than 64 MiB
+  (`GCS_READ_CACHE_BLOCK_SIZE_MB`) fills a 64 MiB buffer, which stays until the file is closed, and Orbax
+  opens the file again for each byte range. A host that needs one small range of each of thousands of tensors
+  (fine-grained MoE on many hosts) then downloads up to 64 MiB per range and holds many such buffers at once.
+  With gcsfs, `_no_gcs_read_ahead` reads only the requested bytes.
+  """
+
+  @property
+  def _backend(self):
+    return epath_backend.fsspec_backend
 
 
 def load_sharded_hf_state(path, num_groups=None):
@@ -251,8 +269,12 @@ def load_sharded_hf_state(path, num_groups=None):
   # Leading-axis shards are contiguous, so never read whole spans: with more than 1024 tensors in a file
   # (fine-grained MoE), Orbax's automatic choice would otherwise read whole spans again.
   safetensors_options = ocp_v1.options.SafetensorsOptions(max_over_read_ratio=1.0) if multi_process else None
+  use_gcsfs = str(path).startswith("gs://") and importlib.util.find_spec("gcsfs") is not None
+  file_options = ocp_v1.options.FileOptions(path_class=_GcsfsPath) if use_gcsfs else None
   context = ocp_v1.Context(
-      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS, safetensors_options=safetensors_options
+      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS,
+      safetensors_options=safetensors_options,
+      file_options=file_options,
   )
   with context:
     metadata = ocp_v1.pytree_metadata(path)
