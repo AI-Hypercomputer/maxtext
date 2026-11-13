@@ -98,7 +98,7 @@ jobs:
     needs: handle_result
     if: needs.handle_result.result == 'success'
     runs-on: linux-x86-n4-16-buildkit
-    container: google/cloud-sdk:524.0.0
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
     steps:
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev -q
@@ -146,6 +146,7 @@ jobs:
             success)
               tag_image "${IMAGE}" "verified-e2e-${IMAGE_TAG}"
               gcloud container images untag "${IMAGE}:failed-e2e-${IMAGE_TAG}" --quiet 2>/dev/null || true
+              gcloud container images untag "${IMAGE}:unknown-e2e-${IMAGE_TAG}" --quiet 2>/dev/null || true
               # Only daily-build images are promoted to latest. RC images already get latest-rc
               # when they are built.
               if [[ "$IMAGE" == *_stable ]]; then
