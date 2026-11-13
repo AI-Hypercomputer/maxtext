@@ -117,6 +117,30 @@ def _get_te_moe_weight_layout_kwargs(moe_fn) -> dict[str, bool]:
   return {}
 
 
+@jax.custom_vjp
+def _split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Split the fused [rows, 2N] gmm output into (gate, up) halves.
+
+  Plain slicing makes XLA assemble the cotangent with two dynamic-update-slices
+  (pad + add) in backward; the custom VJP concatenates the two half-gradients
+  once, which fuses into the following tgmm/gmm input.
+  """
+  n = out.shape[-1] // 2
+  return out[..., :n], out[..., n:]
+
+
+def _split_gate_up_fwd(out: jax.Array) -> tuple[tuple[jax.Array, jax.Array], None]:
+  return _split_gate_up(out), None
+
+
+def _split_gate_up_bwd(_residuals: None, grads: tuple[jax.Array, jax.Array]) -> tuple[jax.Array]:
+  grad_gate, grad_up = grads
+  return (jnp.concatenate([grad_gate, grad_up], axis=-1),)
+
+
+_split_gate_up.defvjp(_split_gate_up_fwd, _split_gate_up_bwd)
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -1530,6 +1554,23 @@ class RoutedMoE(nnx.Module):
     spec = [None if name is None else self._logical_to_mesh_axes((name,))[0] for name in logical_axis]
     pspec = remove_expert_from_partition_spec(jax.sharding.PartitionSpec(*spec), dims_to_peel=(1,))
     return self._maybe_shard_with_pspec(inputs, pspec)
+
+  def _prefused_wi_mlp_dim_is_replicated(self) -> bool:
+    """Whether the last ([gate | up]) dim of the fused wi stays unsharded inside sparse_matmul.
+
+    moe_unsliced_prefused_wi hands the fused wi [..., 2 * mlp] to shard_map as one operand. If a mesh axis (e.g.
+    tensor parallelism) shards that dim, a shard holds a contiguous piece of the concatenation (rank 0 all of
+    w0, rank 1 all of w1) instead of matching pieces of w0 and w1, so the fused path is only valid when every
+    mesh axis the dim can map to has size 1; the caller raises otherwise.
+    """
+    mesh_axes = set()
+    for logical_name in ("mlp_no_fsdp", self.wi_kernel_axes[-1]):
+      if logical_name is None:
+        continue
+      axes = self._logical_to_mesh_axes((logical_name,))[0]
+      if axes is not None:
+        mesh_axes.update((axes,) if isinstance(axes, str) else axes)
+    return all(self.mesh.shape.get(axis, 1) == 1 for axis in mesh_axes)
 
   def get_expert_parallelism_size(self):
     # When expert parallelism has more than one physical axes, take product of their shapes
@@ -3071,7 +3112,8 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
-
+    if w1_kernel is None:  # fused prefused wi travels as w0_kernel
+      w1_pspec = None
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -3650,14 +3692,14 @@ class RoutedMoE(nnx.Module):
         return (layer, *extras) if extras else layer
 
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        # w1 is None when the fused (G, K, 2N) wi was passed through as one operand; otherwise w0/w1 are
+        # adjacent slices of it, so XLA elides this concat.
+        w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
         fused_bias = None
         if use_te_bias and w0_bias is not None and w1_bias is not None:
           fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)
         out = _gmm_maybe_bias(x, w_fused, fused_bias)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        layer_w0, layer_w1 = _split_gate_up(out)
         if self.config.mlp_bias and not use_te_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
@@ -5853,9 +5895,34 @@ class RoutedMoE(nnx.Module):
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if cfg.moe_unsliced_prefused_wi:
+        # Fail fast rather than silently slicing: the fused operand is only wired through the plain sparse path.
+        unsupported = [
+            reason
+            for reason, hit in (
+                ("sparse_matmul=False", not cfg.sparse_matmul),
+                ("num_moe_emb_chunks != 0", cfg.num_moe_emb_chunks != 0),
+                ("moe_fsdp_use_two_stage_all_gather=True", cfg.moe_fsdp_use_two_stage_all_gather),
+                ("serve-mode quantization", quantizations.in_serve_mode(self.quant)),
+                ("weight sparsity", self.wi_0_sparsity_module is not None),
+                # A shard would hold a contiguous piece of [w0 | w1] instead of matching pieces of w0 and w1.
+                (
+                    "a sharded MLP dim of wi (e.g. ici_tensor_parallelism > 1)",
+                    not self._prefused_wi_mlp_dim_is_replicated(),
+                ),
+            )
+            if hit
+        ]
+        if unsupported:
+          raise ValueError(f"moe_unsliced_prefused_wi=True is not supported with: {', '.join(unsupported)}.")
+        # Keep the fused [E, emb, 2N] wi as a single operand: slicing it into w0 / w1
+        # here and re-concatenating inside gmm_up (and the mirror in backward) costs
+        # full-weight copies; gmm_up consumes the fused weight directly (w1 is None).
+        w0_kernel = wi
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     elif getattr(cfg, "moe_use_fused_gmm3d", False):
       # The flat fused gate weight [E * emb, 2 * mlp] goes to sparse_matmul whole as w0_kernel (w1_kernel is
       # None); the fused gate GMM consumes both halves in one pass.
