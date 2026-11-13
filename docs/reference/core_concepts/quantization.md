@@ -244,8 +244,8 @@ quantize token -> EP all-gather -> sort -> GMM
 ### Quantization Pipeline
 
 1. **Quantize Token**: Activations are quantized from the model dtype (e.g. BF16) to the quantized dtype (e.g. FP8).
-2. **EP All-Gather**: Gathers the quantized byte payloads across the EP mesh axis, shrinking inter-chip bandwidth by the compression ratio.
-3. **Sort**: Token sorting (default or ragged sort) operates directly on the raw quantized payloads without dequantizing to float.
+2. **EP All-Gather**: Gathers the quantized byte payloads across the EP mesh axis, shrinking inter-chip bandwidth by the compression ratio. With `absmax` calibration, the per-token scales are all-gathered alongside the payloads.
+3. **Sort**: Token sorting (default or ragged sort) operates directly on the raw quantized payloads without dequantizing to float. With `absmax` calibration, each per-token scale is permuted with its token.
 4. **GMM**: Tokamax GMM v2 computes directly on the quantized activations and weights, and scales accumulated outputs back to model dtype.
 5. **Backward TGMM**: Receives cached pre-quantized activations directly from the forward pass, avoiding re-quantization.
 
@@ -257,4 +257,4 @@ Requirements:
 
 - `use_ring_of_experts=True`: Inherent architectural requirements.
 - `use_gmm_v2=True`: Tokamax GMM v2 grouped GEMM backend.
-- Static calibration for activations: e.g. `act_quantization_calibration_method="fixed,-224,224"` (dynamic calibration is for future work).
+- Static or dynamic per-token calibration for activations: e.g. `act_quantization_calibration_method="fixed,-224,224"` or `act_quantization_calibration_method="absmax"`.

@@ -349,7 +349,7 @@ te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available option
 # Whether to quantize token activations before the All-Gather across EP shards in Ring-of-Experts forward pass
 # Reduces inter-chip token traffic proportionally to the quantized width (2x for FP8 vs BF16).
 # Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens stay quantized end to end.
-# Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed act calibration.
+# Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed or absmax act calibration.
 moe_quantize_token_all_gather: false
 # Quantization method for output gradients before the All-Gather across EP shards in Ring-of-Experts backward pass (Token Combine)
 # Value: "" = unquantized BF16; "rowwise" = dynamic token-wise FP8 E5M2; "fixed,<bound>" = static per-tensor FP8 E5M2

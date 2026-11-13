@@ -1489,7 +1489,7 @@ class MoEGeneral(BaseModel):
           " proportionally to the quantized width (2x for FP8 vs BF16)."
           " Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens"
           " stay quantized end to end. Requires use_ring_of_experts=True,"
-          " use_gmm_v2=True, and quantization with fixed act calibration."
+          " use_gmm_v2=True, and quantization with fixed or absmax act calibration."
       ),
   )
 
@@ -5186,13 +5186,21 @@ class MaxTextConfig(
       # routing collectives per chunk; not supported with token quantization.
       if self.num_moe_emb_chunks > 0:
         raise ValueError("moe_quantize_token_all_gather=True does not support num_moe_emb_chunks > 0.")
-      # Static/fixed scaling ensures uniform dequantization bounds across all
-      # gathered token slices without cross-shard dynamic scale synchronization.
-      if self.quantization == "" or not self.act_quantization_calibration_method.lower().startswith("fixed"):
+      # Both static (fixed) per-tensor scaling and dynamic (absmax) per-token
+      # scaling are supported: dynamic scales are gathered alongside token payloads.
+      act_cal_method, *act_cal_args = self.act_quantization_calibration_method.lower().split(",")
+      if self.quantization == "" or act_cal_method not in ("fixed", "absmax"):
         raise ValueError(
             "moe_quantize_token_all_gather=True requires quantization to be"
             " specified and act_quantization_calibration_method to be fixed"
-            " (static scaling mode)."
+            f" or absmax, got {self.act_quantization_calibration_method!r}."
+        )
+      # The absmax STE backward passes the gradient of every element through, which is exact only
+      # when nothing is clipped, i.e. the absmax scale factor is >= 1.
+      if act_cal_method == "absmax" and act_cal_args and float(act_cal_args[0]) < 1.0:
+        raise ValueError(
+            "moe_quantize_token_all_gather=True with absmax calibration requires a scale"
+            f" factor >= 1.0 (no clipping), got {self.act_quantization_calibration_method!r}."
         )
 
   def validate_moe_quantize_combine_bwd_method(self):

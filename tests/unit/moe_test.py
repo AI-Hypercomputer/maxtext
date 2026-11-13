@@ -4105,23 +4105,51 @@ class QuantizedMoeTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": (f"{'ragged_sort' if use_ragged_sort else 'default_sort'}"),
-          "use_ragged_sort": use_ragged_sort,
+          "testcase_name": f"{sort_name}_{cal_name}",
+          "sort_mode": sort_name,
+          "calibration_method": cal_val,
       }
-      for use_ragged_sort in [False, True]
+      for sort_name in [
+          "default_sort",
+          "ragged_sort_full",
+          "ragged_sort_truncated",
+          "tc_ragged_sort_3d",
+          "tc_ragged_sort_3d_unwindowed",
+      ]
+      for cal_name, cal_val in [("fixed", "fixed,-224,224"), ("absmax", "absmax")]
   )
   @pytest.mark.tpu_only
   def test_moe_quantize_token_all_gather(
       self,
-      use_ragged_sort: bool,
+      sort_mode: str,
+      calibration_method: str,
   ):
-    """Tests numerical equivalence of MoeBlock with moe_quantize_token_all_gather."""
+    """Tests numerical equivalence of MoeBlock with moe_quantize_token_all_gather (fixed & absmax)."""
+    if calibration_method.startswith("fixed") and pltpu.get_tpu_info().fp8_ops_per_second == 0:
+      self.skipTest("A fixed act scale in gmm_v2 needs fp8 matmul hardware.")
     ici_expert_parallelism = 4
-    calibration_method = "fixed,-224,224"
-    rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(42))
+    use_ragged_sort = sort_mode != "default_sort"
+    use_tc_3d = sort_mode.startswith("tc_ragged_sort_3d")
+    truncated = sort_mode == "ragged_sort_truncated" or use_tc_3d
+    ragged_buffer_factor = 0.75 if truncated else -1.0
+    seq_len = 256 if truncated else 64
     emb_dim = 2048 if use_ragged_sort else 512
+    rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(42))
 
     def _build_cfg(moe_quantize_token_all_gather: bool):
+      extra_kwargs = {}
+      if use_tc_3d:
+        extra_kwargs = {
+            "moe_tc_ragged_sort": True,
+            "moe_tc_ragged_3d_gmm": True,
+            "moe_tc_ragged_3d_dispatch": True,
+            # The unwindowed variant exercises the `start=tc_routing.start` scale-window branch.
+            "moe_tc_window_routing": sort_mode != "tc_ragged_sort_3d_unwindowed",
+            "moe_accumulate_wi_dlhs": True,
+            "moe_tc_ragged_gather_block_size": 128,
+            "moe_tc_ragged_reduce_block_size": 128,
+            "moe_pin_sparse_core_all_gathers": True,
+        }
       return pyconfig.initialize(
           [None, get_test_config_path()],
           run_name="moe_quantize_token_all_gather_test",
@@ -4134,7 +4162,7 @@ class QuantizedMoeTest(parameterized.TestCase):
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=1,
-          max_target_length=64,
+          max_target_length=seq_len,
           float32_gate_logits=True,
           quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
@@ -4144,7 +4172,8 @@ class QuantizedMoeTest(parameterized.TestCase):
           use_gmm_v2=True,
           use_ring_of_experts=True,
           use_ragged_sort=use_ragged_sort,
-          mlp_bias=True,
+          ragged_buffer_factor=ragged_buffer_factor,
+          mlp_bias=not use_tc_3d,
           moe_quantize_token_all_gather=moe_quantize_token_all_gather,
           quantization="fp8_full",
           use_qwix_quantization=True,
@@ -4160,6 +4189,7 @@ class QuantizedMoeTest(parameterized.TestCase):
           wo_tile_dlhs_batch_seq=128,
           wo_tile_dlhs_mlp_dim=256,
           wo_tile_drhs_batch_seq=128,
+          **extra_kwargs,
       )
 
     cfg_ref = _build_cfg(moe_quantize_token_all_gather=False)
@@ -4172,12 +4202,69 @@ class QuantizedMoeTest(parameterized.TestCase):
         ),
         dtype=cfg_ref.dtype,
     )
+    if calibration_method.startswith("absmax"):
+      # Spread per-token magnitudes over ~e^(+-4) so that pairing a row with another token's absmax scale
+      # gives an O(1) relative error; with uniform N(0, 1) tokens all absmax scales are within ~10%.
+      token_gain = jnp.exp(2.0 * jax.random.normal(jax.random.PRNGKey(7), (*hidden_states.shape[:2], 1)))
+      hidden_states = (hidden_states.astype(jnp.float32) * token_gain).astype(cfg_ref.dtype)
     tree_ref, variables_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states, return_variables=True)
 
     cfg_tgt = _build_cfg(moe_quantize_token_all_gather=True)
     tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states, variables=variables_ref)
 
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
+
+  def test_ste_quantize_tokens_absmax_grad(self):
+    """Verifies _ste_quantize_tokens recovers exact STE gradients on argmax, large-magnitude, tiny, and zero rows."""
+    x = jnp.array(
+        [
+            [[1.0, -4.0, 2.0, 0.5], [0.0, 0.0, 0.0, 0.0]],
+            [[600.0, -10.0, 3.0, 1.0], [0.25, -0.5, 1.0, -2.0]],
+        ],
+        dtype=jnp.bfloat16,
+    )
+    upstream = jnp.array(
+        [
+            [[2.0, 3.0, -1.5, 0.25], [1.0, -2.0, 0.5, 4.0]],
+            [[0.5, -1.0, 2.0, -0.25], [1e-4, -2e-4, 3e-4, -4e-4]],
+        ],
+        dtype=jnp.bfloat16,
+    )
+
+    @jax.custom_vjp
+    def mock_gmm_consumer(qa):
+      return jnp.sum(qa.qvalue.astype(jnp.float32) * qa.scale.astype(jnp.float32))
+
+    def mock_gmm_consumer_fwd(qa):
+      return mock_gmm_consumer(qa), qa
+
+    def mock_gmm_consumer_bwd(residual_qa, g):
+      # Mirrors ops.gmm backward: full-precision dlhs scaled by residual_lhs.scale, zero scale cotangent.
+      dlhs = (g * upstream.astype(jnp.float32) * residual_qa.scale.astype(jnp.float32)).astype(jnp.bfloat16)
+      return (
+          qpl.QArray(
+              qvalue=dlhs,
+              scale=jnp.zeros_like(residual_qa.scale),
+              zero_point=None,
+              qtype=residual_qa.qtype,
+          ),
+      )
+
+    mock_gmm_consumer.defvjp(mock_gmm_consumer_fwd, mock_gmm_consumer_bwd)
+
+    def loss_fn(inp):
+      qa = moe._ste_quantize_tokens(inp, jnp.float8_e4m3fn, (0, 1), "absmax")  # pylint: disable=protected-access
+      self.assertEqual(qa.scale.shape, (2, 2, 1))
+      return mock_gmm_consumer(qa)
+
+    grad_x = jax.grad(loss_fn)(x)
+    self.assertEqual(grad_x.dtype, x.dtype)
+    np.testing.assert_allclose(
+        np.asarray(grad_x, dtype=np.float32),
+        np.asarray(upstream, dtype=np.float32),
+        rtol=2e-2,
+        atol=1e-6,
+    )
 
   @parameterized.named_parameters(
       {"testcase_name": "rowwise", "bwd_method": "rowwise"},

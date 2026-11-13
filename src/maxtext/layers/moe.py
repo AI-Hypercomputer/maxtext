@@ -245,6 +245,87 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
+def _ste_quantize_tokens(
+    x: jax.Array,
+    qtype: jax.typing.DTypeLike,
+    channelwise_axes: Tuple[int, ...],
+    calibration_method: str,
+) -> qpl.QArray:
+  """Quantizes token activations to QArray with Straight-Through Estimator (STE) backward.
+
+  `qpl.quantize` computes `absmax` without `stop_gradient` and applies `jnp.clip` at the
+  quantized type bounds. Because `ops.gmm` backward scales incoming `dlhs` cotangents by
+  `residual_lhs.scale`, differentiating directly through `qpl.quantize` would differentiate
+  `1 / scale` (distorting the per-token argmax element's gradient) and zero clipped elements.
+  Dividing `g_qa.qvalue` by the forward `scale` (saved as the only residual) in float32 recovers
+  the exact STE gradient. This assumes nothing is clipped, i.e. an absmax scale factor >= 1.
+  """
+  return qpl.quantize(
+      x,
+      qtype=qtype,
+      channelwise_axes=channelwise_axes,
+      calibration_method=calibration_method,
+  )
+
+
+def _ste_quantize_tokens_fwd(
+    x: jax.Array,
+    qtype: jax.typing.DTypeLike,
+    channelwise_axes: Tuple[int, ...],
+    calibration_method: str,
+) -> Tuple[qpl.QArray, jax.Array]:
+  """Forward pass of _ste_quantize_tokens; saves only the JAX scale array as residual."""
+  qa = _ste_quantize_tokens(x, qtype, channelwise_axes, calibration_method)
+  return qa, qa.scale
+
+
+def _ste_quantize_tokens_bwd(
+    qtype: jax.typing.DTypeLike,
+    channelwise_axes: Tuple[int, ...],
+    calibration_method: str,
+    scale: jax.Array,
+    g_qa: qpl.QArray,
+) -> Tuple[jax.Array]:
+  """Backward pass of _ste_quantize_tokens; unscales incoming qvalue cotangent in float32."""
+  del qtype, channelwise_axes, calibration_method
+  g_x = (g_qa.qvalue.astype(jnp.float32) / scale.astype(jnp.float32)).astype(scale.dtype)
+  return (g_x,)
+
+
+_ste_quantize_tokens.defvjp(_ste_quantize_tokens_fwd, _ste_quantize_tokens_bwd)
+
+
+def _window_token_scale(
+    scale_1d: jax.Array,
+    token_ids_sorted: jax.Array,
+    count: jax.Array,
+    cap: int,
+    start: jax.Array | None = None,
+) -> jax.Array:
+  """Gathers per-token scales into a truncated ragged buffer of `cap` rows.
+
+  Mirrors the buffer windowing of `ring_ragged_sort` / `ring_ragged_sort_tc`
+  (kernels/ragged/ragged_sort.py): sorted rows [start, start + count) land in buffer rows
+  [0, count), and the remaining rows get scale 0. Keep in sync with those kernels.
+
+  Args:
+    scale_1d: (num_tokens,) per-token scale.
+    token_ids_sorted: token id of each sorted slot; already windowed to the buffer if `start` is None.
+    count: number of valid rows in the buffer.
+    cap: buffer size (rows).
+    start: offset of this shard's window in `token_ids_sorted`, or None if already windowed.
+
+  Returns:
+    (cap,) scale per buffer row.
+  """
+  if start is not None:
+    token_ids_sorted = jax.lax.dynamic_slice_in_dim(jnp.pad(token_ids_sorted, (0, cap)), start, cap, axis=0)
+  valid = jnp.arange(cap, dtype=jnp.int32) < count
+  safe_ids = jnp.where(valid, jnp.clip(token_ids_sorted, 0, scale_1d.shape[0] - 1), 0)
+  return jnp.where(valid, scale_1d[safe_ids], jnp.zeros((), scale_1d.dtype))
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
 def take_along_last_axis_dense_vjp(x: jax.Array, indices: jax.Array, num_classes: int) -> jax.Array:
   """`jnp.take_along_axis(x, indices, axis=-1)` whose backward is dense rather than a scatter-add.
@@ -1683,10 +1764,12 @@ class RoutedMoE(nnx.Module):
         used for the load-balance loss instead of recomputing them from the logits.
     """
     is_qarray = isinstance(inputs, qpl.QArray)
+    has_per_token_scale = is_qarray and inputs.scale.size > 1
     raw_inputs = inputs.qvalue if is_qarray else inputs
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
+    scale_1d = jax.lax.stop_gradient(jnp.reshape(inputs.scale, (bsz_times_seq_len,))) if has_per_token_scale else None
     # moe_tc_ragged_3d_dispatch: inputs arrive as (batch, seq, emb // 128, 128) and stay 3D for the TC sort.
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, *inputs_shape[2:]))
     if precomputed_topk is not None:
@@ -1788,6 +1871,7 @@ class RoutedMoE(nnx.Module):
     if inputs_2d.ndim == 3 and not use_tc_sort:
       # 3D dispatch layout but this call does not use the TC sort (e.g. dropless fallback): back to 2D.
       inputs_2d = jnp.reshape(inputs_2d, (bsz_times_seq_len, -1))
+    sorted_scale_1d = None
     if use_ragged_in_permute and use_tc_sort:
       sorted_inputs, group_size, sorted_selected_experts, tc_routing = ring_ragged_sort_tc(
           inputs_2d,
@@ -1805,6 +1889,14 @@ class RoutedMoE(nnx.Module):
           keep_3d=self.config.moe_tc_ragged_3d_gmm,
           window_routing=self.config.moe_tc_window_routing,
       )
+      if has_per_token_scale:
+        sorted_scale_1d = _window_token_scale(
+            scale_1d,
+            tc_routing.token_ids_sorted,
+            tc_routing.count,
+            sorted_inputs.shape[0],
+            start=None if tc_routing.windowed else tc_routing.start,
+        )
     elif use_ragged_in_permute:
       tag_routing_fn = routing_tag_fn(self.config)
       sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_ragged_sort(
@@ -1824,6 +1916,23 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           tag_routing_fn=tag_routing_fn,
       )
+      if has_per_token_scale:
+        cap = sorted_inputs.shape[0]
+        total_slots = bsz_times_seq_len * self.num_experts_per_tok
+        token_ids_sorted = topk_argsort_indices // self.num_experts_per_tok
+        shard_idx = jax.lax.axis_index(self._expert_parallelism_name) if num_expert_parallelism > 1 else 0
+        local_num_experts = self.config.num_experts // num_expert_parallelism
+        group_offsets = jnp.cumulative_sum(group_size, include_initial=True)
+        start = group_offsets[shard_idx * local_num_experts]
+        end = group_offsets[(shard_idx + 1) * local_num_experts]
+        if cap >= total_slots:
+          iota = jnp.arange(cap, dtype=jnp.int32)
+          valid = (iota >= start) & (iota < end)
+          sorted_scale_1d = jnp.where(valid, scale_1d[token_ids_sorted], jnp.zeros((), scale_1d.dtype))
+        else:
+          sorted_scale_1d = _window_token_scale(
+              scale_1d, token_ids_sorted, jnp.minimum(end - start, cap), cap, start=start
+          )
       if tag_routing_fn is None:
         # moe_routing_maps=remat: unpermute re-derives the permutation in its backward (existing behavior).
         topk_argsort_indices = None
@@ -1853,6 +1962,8 @@ class RoutedMoE(nnx.Module):
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
         sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+      if has_per_token_scale:
+        sorted_scale_1d = scale_1d[sorted_selected_experts // self.num_experts_per_tok]
 
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
@@ -1902,9 +2013,14 @@ class RoutedMoE(nnx.Module):
           total_repeat_length=math.prod(selected_experts.shape),
       )
 
-    # Reconstruct QArray with sorted qvalue payload and preserved global scale.
+    # Reconstruct QArray with sorted qvalue payload and rank-matched global or per-row scale.
     if is_qarray:
-      sorted_inputs = dataclasses.replace(inputs, qvalue=sorted_inputs)
+      if has_per_token_scale:
+        scale_shape = (sorted_inputs.shape[0],) + (1,) * (sorted_inputs.ndim - 1)
+        sorted_scale = jax.lax.stop_gradient(jnp.reshape(sorted_scale_1d, scale_shape))
+      else:
+        sorted_scale = jnp.reshape(inputs.scale, (1,) * sorted_inputs.ndim)
+      sorted_inputs = dataclasses.replace(inputs, qvalue=sorted_inputs, scale=sorted_scale)
 
     return (
         sorted_inputs,
@@ -2592,10 +2708,15 @@ class RoutedMoE(nnx.Module):
 
       tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
-      # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
+      # Pad underlying qvalue (and per-row scale, if dynamic) to tile size boundaries.
       if isinstance(inputs, qpl.QArray):
         padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, fwd_tile("wi_tile_fwd_batch_seq"))
-        inputs = dataclasses.replace(inputs, qvalue=padded_qval)
+        padded_scale = (
+            max_utils.maybe_pad(inputs.scale, fwd_tile("wi_tile_fwd_batch_seq"))[0]
+            if inputs.scale.size > 1
+            else inputs.scale
+        )
+        inputs = dataclasses.replace(inputs, qvalue=padded_qval, scale=padded_scale)
       else:
         inputs, padding_amount = max_utils.maybe_pad(inputs, fwd_tile("wi_tile_fwd_batch_seq"))
       if padding_amount > 0 and partial_sum is not None:
@@ -2702,9 +2823,10 @@ class RoutedMoE(nnx.Module):
       def unpad(t):
         if padding_amount == 0:
           return t
-        # Mirror the padding above: only the qvalue of a QArray was padded.
+        # Mirror the padding above for QArray qvalue and any per-row scale.
         if isinstance(t, qpl.QArray):
-          return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
+          unpadded_scale = t.scale[: orig_inputs_shape[0]] if t.scale.size > 1 else t.scale
+          return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]], scale=unpadded_scale)
         return t[: orig_inputs_shape[0]]
 
       # With tc_unsort_cfg the output is already reduced to token order, so it has no padding rows.
@@ -2929,37 +3051,72 @@ class RoutedMoE(nnx.Module):
         axis_name: str,
         calibration_method: str,
         all_gather_fn=jax.lax.all_gather,
+        scale_all_gather_fn=None,
     ) -> qpl.QArray:
       """Quantizes tokens to act_qtype (e.g., FP8) before All-Gather across EP shards in Ring of Experts."""
-      # Static calibration guarantees uniform dequantization bounds across all EP shards
-      # without cross-shard dynamic scale synchronization collectives.
-      if not calibration_method.lower().startswith("fixed"):
+      del axis_name  # Collectives route through all_gather_fn / scale_all_gather_fn.
+      cal_prefix = calibration_method.lower().split(",")[0]
+      if cal_prefix not in ("fixed", "absmax"):
         raise ValueError(
-            "moe_quantize_token_all_gather currently only supports static"
-            f" (fixed) calibration, got {calibration_method}."
+            "moe_quantize_token_all_gather currently only supports fixed or absmax"
+            f" calibration, got {calibration_method}."
         )
       quantization_rule = qpl.get_current_rule("gmm")
       if quantization_rule is None:
         raise ValueError("Quantization rule is None, cannot quantize activation.")
-      # The gmm backward (ops._lhs_rhs_share_fixed_scale) assumes this QArray's fixed scale is the rule's act
+      # The gmm backward (ops._lhs_rhs_share_fixed_scale) assumes a static QArray's fixed scale is the rule's act
       # scale, so it must be quantized with the rule's act calibration.
       if calibration_method != quantization_rule.act_calibration_method:
         raise ValueError(
             f"moe_quantize_token_all_gather calibration {calibration_method!r} must match the gmm rule's"
             f" act_calibration_method {quantization_rule.act_calibration_method!r}."
         )
+      is_static = quantizations.is_static_calibration(calibration_method)
+      if not is_static and quantization_rule.disable_channelwise_axes:
+        raise ValueError(
+            "moe_quantize_token_all_gather with dynamic (absmax) calibration requires"
+            " per-token channelwise_axes (disable_channelwise_axes=False)."
+        )
+      cal_args = calibration_method.split(",")[1:]
+      if not is_static and cal_args and float(cal_args[0]) < 1.0:
+        # _ste_quantize_tokens passes every element's gradient through; exact only without clipping.
+        raise ValueError(
+            "moe_quantize_token_all_gather with absmax calibration requires a scale factor >= 1.0"
+            f" (no clipping), got {calibration_method}."
+        )
       act_qtype = quantization_rule.act_qtype
 
-      # Quantize local token activations using the GMM activation quantization rule.
-      x_input = qpl.quantize(
-          x,
-          qtype=act_qtype,
-          channelwise_axes=(),
-          calibration_method=calibration_method,
-      )
+      if is_static:
+        # Constant scale: autodiff through qpl.quantize already yields the clipped STE gradient.
+        x_input = qpl.quantize(
+            x,
+            qtype=act_qtype,
+            channelwise_axes=(),
+            calibration_method=calibration_method,
+        )
+      else:
+        # Data-dependent per-token scale: use the STE custom VJP (see _ste_quantize_tokens).
+        # qwix gives the scale x's dtype, so casting here keeps the per-token scale and the STE
+        # cotangent in the activation dtype.
+        x_input = _ste_quantize_tokens(
+            x.astype(self.dtype),
+            act_qtype,
+            tuple(range(x.ndim - 1)),
+            calibration_method,
+        )
       # All-gather quantized byte payloads to reduce inter-chip communication volume.
       x_gathered_qval = all_gather_fn(x_input.qvalue)
-      return dataclasses.replace(x_input, qvalue=x_gathered_qval)
+      if is_static:
+        x_gathered_scale = jnp.reshape(x_input.scale, (1,) * x_gathered_qval.ndim)
+      else:
+        if scale_all_gather_fn is None:
+          scale_all_gather_fn = all_gather_fn
+        # Squeeze trailing singleton axis before all-gather to avoid 1 -> 128 lane padding on TPU,
+        # then restore trailing singleton axes matching x_gathered_qval's rank (3D or 4D).
+        scale_2d = scale_all_gather_fn(jnp.squeeze(x_input.scale, axis=-1))
+        scale_shape = scale_2d.shape + (1,) * (x_gathered_qval.ndim - scale_2d.ndim)
+        x_gathered_scale = jax.lax.stop_gradient(jnp.reshape(scale_2d, scale_shape))
+      return dataclasses.replace(x_input, qvalue=x_gathered_qval, scale=x_gathered_scale)
 
     def roe_ag_and_route(
         x,
@@ -3007,6 +3164,7 @@ class RoutedMoE(nnx.Module):
             axis_name=self._expert_parallelism_name,
             calibration_method=self.config.act_quantization_calibration_method,
             all_gather_fn=token_all_gather,
+            scale_all_gather_fn=_ep_all_gather,
         )
       else:
         x = token_all_gather(x)
