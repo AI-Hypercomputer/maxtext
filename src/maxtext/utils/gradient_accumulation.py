@@ -69,15 +69,44 @@ def gradient_accumulation_loss_and_grad(
 
   def _maybe_shard_with_name(inputs, sharding_names):
     """Wrapper of maybe_shard_with_name with fixed shard_mode"""
+    if sharding_names is jax.memory.Space.Device:
+      return inputs
     return maybe_shard_with_name(inputs, sharding_names, config.shard_mode, debug_sharding=config.debug_sharding)
 
   is_nnx = isinstance(model, nnx.Module)
+  enable_lora = bool(getattr(getattr(config, "lora", None), "enable_lora", False))  # jmp-waiver: SILENT_CONFIG_FALLBACK
+  train_param_type = getattr(nnx, "LoRAParam", nnx.Param) if enable_lora else nnx.Param
+
+  if is_nnx:
+    graphdef, params, rest = nnx.split(model, train_param_type, ...)
+  if config.parameter_memory_host_offload:
+    params_shardings = max_utils.with_memory_kind(params_shardings, "device")
+  if is_nnx and enable_lora and params_shardings is not None:
+    sh_lookup = {
+        p: (s.get_raw_value() if isinstance(s, nnx.Variable) else s)
+        for p, s in jax.tree_util.tree_leaves_with_path(
+            params_shardings,
+            is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.sharding.Sharding)) or x is jax.memory.Space.Device,
+        )
+    }
+    params_shardings = jax.tree_util.tree_map_with_path(
+        lambda p, leaf: (
+            leaf.replace(sh_lookup.get(p, jax.memory.Space.Device))
+            if isinstance(leaf, nnx.Variable)
+            else sh_lookup.get(p, jax.memory.Space.Device)
+        ),
+        params,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
 
   # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
   # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
   # FSDP already consumes every device — in which case data parallelism is not active.
-  param_mesh = jax.tree.leaves(params_shardings)[0].mesh
-  data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
+  mesh_leaves = [s.mesh for s in jax.tree.leaves(params_shardings) if hasattr(s, "mesh")]
+  param_mesh = mesh_leaves[0] if mesh_leaves else getattr(model, "mesh", None)
+  data_parallel_active = (
+      config.shard_mode == ShardMode.EXPLICIT and param_mesh is not None and param_mesh.shape.get("data", 1) > 1
+  )
   if data_parallel_active:
     # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
     # traces its body against an AbstractMesh whose axis types are all Auto, and the
@@ -88,8 +117,8 @@ def gradient_accumulation_loss_and_grad(
   else:
     ga_params_shardings = grad_shardings = params_shardings
 
-  if is_nnx:
-    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  if config.parameter_memory_host_offload:
+    params = jax.device_put(params, params_shardings)
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
@@ -126,7 +155,7 @@ def gradient_accumulation_loss_and_grad(
     return loss * loss_scale, aux
 
   if is_nnx:
-    grad_func = nnx.value_and_grad(_scaled_loss_fn, argnums=0, has_aux=True)
+    grad_func = nnx.value_and_grad(_scaled_loss_fn, argnums=nnx.DiffState(0, train_param_type), has_aux=True)
   else:
     grad_func = jax.value_and_grad(_scaled_loss_fn, argnums=4, has_aux=True)
 
@@ -139,7 +168,7 @@ def gradient_accumulation_loss_and_grad(
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
       with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
-      _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
+      _, _, next_rest_state = nnx.split(local_model, train_param_type, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
     else:
       rng = (
@@ -196,7 +225,9 @@ def gradient_accumulation_loss_and_grad(
     # Mark the gradients unreduced over the "data" axis now that we're outside the
     # scan; this triggers the cross-replica all-reduce. The annotation can't live in
     # the scan carry (see above), so it's applied here instead.
-    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
+    unreduced_shardings = jax.tree.map(
+        lambda s: s if s is jax.memory.Space.Device else update_sharding_for_unreduced(s), params_shardings
+    )
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   divisor = config.gradient_accumulation_steps if use_tunix_ga else denominator * loss_scale

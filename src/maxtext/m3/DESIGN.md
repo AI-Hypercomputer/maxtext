@@ -524,7 +524,7 @@ def train(cfg):
         transform_cfg = cfg["transforms"]
 
         # Infrastructure composition order:
-        # construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload
+        # construct -> scan -> remat -> quantize -> named scopes -> host offload -> optimizer
         model = maybe_apply_scan(model, cfg)
         model = maybe_apply_remat(model, cfg)
         model = maybe_quantize(model, transform_cfg["quantization"], *sample_inputs)
@@ -791,7 +791,7 @@ To streamline the loading and saving of checkpoints and address the complexity o
 ## Infrastructure Composition Order
 
 ```py
-construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload
+construct -> scan -> remat -> quantize -> named scopes -> host offload -> optimizer
 ```
 
 Each step is a one-liner in training setup. The model is pure architecture \+ sharding annotations at construction; everything else is layered on after using the `nnx.Optimizer` to manage state transitions.

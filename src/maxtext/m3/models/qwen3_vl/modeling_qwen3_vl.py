@@ -735,6 +735,9 @@ class Qwen3VLVisionTower(nnx.Module):
         video_mask=input_masks,
         video_grid_thw=video_grid_thw,
     )
+    if self.config.freeze_vision_encoder_params:
+      enc_out = jax.lax.stop_gradient(enc_out)
+      deep_feats = [jax.lax.stop_gradient(feat) for feat in deep_feats]
     proj_out = self.Qwen3VLVisionProjector_0(enc_out)
     return proj_out, deep_feats
 
@@ -937,7 +940,8 @@ class Qwen3VLDecoder(Qwen3Decoder):
       )
 
     call_layer = getattr(self.layers, "call_layer", None)
-    for lyr, layer in enumerate(self.layers):
+    layers_iter = self.layers if hasattr(self.layers, "__iter__") else self.layers.layers
+    for lyr, layer in enumerate(layers_iter):
       if call_layer is not None:
         y = call_layer(
             lyr,
