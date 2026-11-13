@@ -14,6 +14,7 @@
 
 """Unit tests for add_entropy_to_checkpoint on NNX state."""
 
+import os
 import unittest
 from unittest import mock
 
@@ -23,6 +24,7 @@ import optax
 from flax import nnx
 
 from maxtext.common import train_state_nnx
+from maxtext.utils import standalone_checkpointer
 from maxtext.utils.standalone_checkpointer import add_entropy_to_checkpoint, checkpoint_loop
 
 
@@ -264,6 +266,36 @@ class CheckpointLoopTest(unittest.TestCase):
 
     self.assertIs(returned_state, mock_state)
     mock_to_linen.assert_called_once()
+
+
+class MainTest(unittest.TestCase):
+  """Tests for main()."""
+
+  def test_main_uses_configured_prng_impl(self):
+    """main() restores with config.prng_impl, which train.py also uses, rather than JAX's default impl."""
+    seen = {}
+
+    def _record_prng_impl(_config):
+      seen["prng_impl"] = jax.config.jax_default_prng_impl
+
+    previous = jax.config.jax_default_prng_impl
+    jax.config.update("jax_default_prng_impl", "threefry2x32")
+    try:
+      with (
+          mock.patch.object(
+              standalone_checkpointer.pyconfig,
+              "initialize",
+              return_value=mock.MagicMock(prng_impl="rbg", dataset_path=""),
+          ),
+          mock.patch.object(standalone_checkpointer.train_utils, "validate_train_config"),
+          mock.patch.object(standalone_checkpointer, "checkpoint_loop", side_effect=_record_prng_impl),
+          mock.patch.dict(os.environ),
+      ):
+        standalone_checkpointer.main([None])
+    finally:
+      jax.config.update("jax_default_prng_impl", previous)
+
+    self.assertEqual(seen["prng_impl"], "rbg")
 
 
 if __name__ == "__main__":
