@@ -462,7 +462,7 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
     sh = (str(t["topology"]), int(t["slices"]))
     pending_by_shape[sh] = pending_by_shape.get(sh, 0) + 1
 
-  max_js = 10 if platform == "v7x" else (2 if platform == "v6e" else 1)
+  max_js = 10 if platform == "v7x" else (4 if platform == "v6e" else 1)
   for nxt in pending_ready_tasks:
     if len(active_jobsets) >= max_js:
       break
@@ -479,7 +479,8 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
     shape_key = (topo, slices)
     max_for_shape = 1
     if platform == "v7x" and topo == "2x2x1":
-      max_for_shape = min(3, pending_by_shape.get(shape_key, 0))
+      cap = 6 if (slices == 1 and pending_by_shape.get(("2x2x1", 2), 0) == 0) else 3
+      max_for_shape = min(cap, pending_by_shape.get(shape_key, 0))
     while shape_counts.get(shape_key, 0) < max_for_shape and len(active_jobsets) < max_js:
       shape_counts[shape_key] = shape_counts.get(shape_key, 0) + 1
       if platform == "v6e" and topo == "2x4":
