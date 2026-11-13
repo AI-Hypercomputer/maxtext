@@ -1062,5 +1062,34 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
         create_mesh(devices=self.devices)
 
 
+class DefaultShardingMoERulesTest(parameterized.TestCase):
+  """Verifies routed-expert logical axis rules and `param_metadata` eager sharding."""
+
+  def test_routed_expert_weight_and_activation_rules(self):
+    sharding = DefaultSharding()
+    exp_emb = ("fsdp", "fsdp_transpose", "context")
+    tp_sp = ("tensor", "tensor_sequence")
+    self.assertEqual(sharding("wi_0", ("experts", "expert_embed", "expert_mlp")), P("expert", exp_emb, tp_sp))
+    self.assertEqual(sharding("wo", ("experts", "expert_mlp", "expert_embed")), P("expert", tp_sp, exp_emb))
+    self.assertEqual(sharding("gate_up_3d", ("experts", "expert_embed", None)), P("expert", exp_emb, None))
+    self.assertEqual(
+        sharding("gate_up_4d", ("experts", "expert_embed", None, "expert_mlp")), P("expert", exp_emb, None, tp_sp)
+    )
+    self.assertEqual(
+        sharding("act", ("experts", "expert_embed", "expert_mlp"), TensorType.ACTIVATION), P("expert", None, tp_sp)
+    )
+    with self.assertRaisesRegex(ValueError, "expert"):
+      sharding("bad_routed", ("experts", "embed", "mlp"))
+
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest(f"Requires >= 4 devices, got {len(devices)}")
+    mesh_1d_explicit = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=devices[:4], explicit=True)
+    with jax.set_mesh(mesh_1d_explicit):
+      # Weight metadata stays identical across auto and explicit modes; explicit out_sharding drops unit axes.
+      self.assertEqual(sharding("wi_0", ("experts", "expert_embed", "expert_mlp")), P("expert", exp_emb, tp_sp))
+      self.assertEqual(sharding.out_sharding("act", ("experts", "expert_embed", "expert_mlp")), P("expert", None, None))
+
+
 if __name__ == "__main__":
   absltest.main()

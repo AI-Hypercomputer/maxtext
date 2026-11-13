@@ -4951,7 +4951,7 @@ def _qwen3_8_flash_next_layer_sub_specs(is_qsa: bool):
   """Returns (mt_suffix, hf_suffix, transform_kind) tuples for one Qwen3.8-Flash-Next layer."""
   specs = [
       ("mlp-gate-linear-kernel", "mlp.gate.weight", "transpose"),
-      ("mlp-experts-gate_up_proj", "mlp.experts.gate_up_proj", "experts"),
+      ("mlp-experts-gate_up_proj", "mlp.experts.gate_up_proj", "experts_gate_up"),
       ("mlp-experts-down_proj", "mlp.experts.down_proj", "experts"),
       ("mlp-shared_expert_gate-kernel", "mlp.shared_expert_gate.weight", "transpose"),
   ]
@@ -5143,6 +5143,14 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_
     del target_shape
     return input_tensor.transpose(0, 2, 1)
 
+  def reshape_experts_gate_up(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      n_exp, h_dim, two, i_dim = input_tensor.shape
+      return input_tensor.reshape(n_exp, h_dim, two * i_dim).transpose(0, 2, 1)
+    n_exp, two_i, h_dim = input_tensor.shape
+    return input_tensor.transpose(0, 2, 1).reshape(n_exp, h_dim, 2, two_i // 2)
+
   def reshape_ple_ngram_shards(weights, target_shape=None):
     del target_shape
     if saving_to_hf:
@@ -5156,6 +5164,7 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_
       "transpose": reshape_kernel,
       "conv1d": reshape_conv1d,
       "experts": reshape_experts,
+      "experts_gate_up": reshape_experts_gate_up,
   }
 
   hooks = {
