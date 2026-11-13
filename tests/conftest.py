@@ -43,9 +43,22 @@ from absl import flags as _absl_flags
 if not _absl_flags.FLAGS.is_parsed():
   _absl_flags.FLAGS(sys.argv[:1])
 
-import jax
 import os
 import importlib.util
+
+# Pre-load triton with RTLD_DEEPBIND before test collection imports TensorFlow so triton>=3.7's
+# internal LLVM symbols do not collide with TensorFlow's RTLD_GLOBAL symbols.
+_orig_dlopen_flags = sys.getdlopenflags()
+if hasattr(os, "RTLD_DEEPBIND"):
+  sys.setdlopenflags(_orig_dlopen_flags | os.RTLD_DEEPBIND)
+try:
+  import triton  # pylint: disable=unused-import
+except ImportError:
+  pass
+finally:
+  sys.setdlopenflags(_orig_dlopen_flags)
+
+import jax
 
 # Force early JAX initialization on GPU to prevent CUDA context conflicts with TensorFlow/PyTorch.
 # If JAX initialization is deferred, TensorFlow/PyTorch (imported during test collection)
