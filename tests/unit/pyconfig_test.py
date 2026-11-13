@@ -58,6 +58,55 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_moe_tc_combine_requires_sparse_matmul(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_combine=True` requires `sparse_matmul=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine=True,
+          sparse_matmul=False,
+      )
+
+  def test_moe_tc_combine_rejects_ring_of_experts(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_ring_of_experts=False`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine=True,
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+      )
+
+  def test_moe_tc_permute_requires_direct_token_gather(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute=True` requires `moe_use_direct_token_gather=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute=True,
+          moe_use_direct_token_gather=False,
+      )
+
+  def test_moe_tc_block_tokens_and_chunks_validation(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_combine_block_tokens` must be a power of two >= 128"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine_block_tokens=64,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute_block_tokens` must be a power of two >= 128"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute_block_tokens=192,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_combine_col_chunks` must be >= 1"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine_col_chunks=0,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute_expert_chunks` must be >= 1"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute_expert_chunks=0,
+      )
+
   def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
     def initialize(**kwargs):
       return pyconfig.initialize(

@@ -36,6 +36,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -1956,8 +1957,28 @@ class RoutedMoE(nnx.Module):
         flatten_selected_experts_safe = flatten_selected_experts
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        if self.config.moe_tc_permute:
+          if is_qarray or self.get_expert_parallelism_size() != 1:
+            raise ValueError(
+                "moe_tc_permute=True requires unquantized activations and expert parallelism = 1,"
+                f" got is_qarray={is_qarray}, expert_parallelism={self.get_expert_parallelism_size()}."
+            )
+          # Gather tokens into expert-sorted order on the TensorCore (kernels/moe_combine_tc.py).
+          with jax.named_scope("moe_permute"):
+            sorted_inputs = moe_combine_tc.permute(
+                inputs_2d.astype(self.dtype),
+                sorted_selected_experts,
+                group_size,
+                self.num_experts_per_tok,
+                block_tokens=self.config.moe_tc_permute_block_tokens,
+                expert_chunks=self.config.moe_tc_permute_expert_chunks,
+                col_chunks=self.config.moe_tc_permute_col_chunks,
+            )
+        else:
+          sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1968,8 +1989,6 @@ class RoutedMoE(nnx.Module):
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
-
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -2095,6 +2114,28 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
       )
+    elif self.config.moe_tc_combine:
+      if self.get_expert_parallelism_size() != 1:
+        raise ValueError(
+            f"moe_tc_combine=True requires expert parallelism = 1, got {self.get_expert_parallelism_size()}."
+        )
+      # Fused TensorCore unpermute + top-k weighted sum (f32 accumulation; kernels/moe_combine_tc.py).
+      combine_weights = (
+          None
+          if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
+          else jnp.reshape(weights, (-1, self.num_experts_per_tok))
+      )
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            combine_weights,
+            group_sizes,
+            num_experts_per_tok=self.num_experts_per_tok,
+            block_tokens=self.config.moe_tc_combine_block_tokens,
+            expert_chunks=self.config.moe_tc_combine_expert_chunks,
+            col_chunks=self.config.moe_tc_combine_col_chunks,
+        )
     else:
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok)).T
       revert_indices = jnp.reshape(jnp.argsort(sorted_selected_experts), (-1, self.num_experts_per_tok)).T.reshape(-1)
